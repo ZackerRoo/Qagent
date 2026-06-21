@@ -15,3 +15,20 @@ The current repository contains product and strategy research for building a qua
 ## Research Docs
 
 See `docs/research/` for the current market, product, strategy, data-source, GitHub, and compliance research.
+
+## Development
+
+Backend setup:
+
+```bash
+cd backend
+python -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pytest -v
+```
+
+Run the backend:
+
+```bash
+./scripts/dev_backend.sh
+```
