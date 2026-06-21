@@ -32,3 +32,13 @@ Run the backend:
 ```bash
 ./scripts/dev_backend.sh
 ```
+
+Frontend setup:
+
+```bash
+cd frontend
+npm install --registry=https://registry.npmjs.org
+npm run dev
+```
+
+See `docs/development.md` for the full local workflow.
