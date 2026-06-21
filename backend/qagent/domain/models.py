@@ -43,6 +43,14 @@ class Signal(BaseModel):
     provider: str = "computed"
 
 
+class SignalSnapshot(BaseModel):
+    signal_type: SignalType
+    direction: Direction
+    horizon: str
+    score: float = Field(ge=0.0, le=1.0)
+    evidence: dict[str, object] = Field(default_factory=dict)
+
+
 class EntryPlan(BaseModel):
     entry_type: str
     confirmation: str
@@ -79,4 +87,5 @@ class OpportunityCard(BaseModel):
     exit_plan: ExitPlan
     risk_reward: float | None = None
     scenario: TradeScenario
+    signals: list[SignalSnapshot] = Field(default_factory=list)
     data_caveats: list[str] = Field(default_factory=list)

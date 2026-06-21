@@ -35,3 +35,19 @@ def test_responder_explains_buy_scenario_from_structured_context():
     assert "-3.92%" in answer
     assert "+7.84%" in answer
     assert "not advice" in answer.lower()
+
+
+def test_responder_explains_why_from_signal_summary():
+    answer = answer_question(
+        "Why is this on the list?",
+        context={
+            "instrument_id": "US:TEST",
+            "status": "setup_ready",
+            "score": 0.91,
+            "signal_summary": "trend_strength bullish 0.75; breakout bullish 0.66",
+        },
+    )
+
+    assert "trend_strength" in answer
+    assert "breakout" in answer
+    assert "0.91" in answer

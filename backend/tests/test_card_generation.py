@@ -14,6 +14,9 @@ def test_card_generator_creates_setup_ready_card():
     assert card.entry_plan.confirmation
     assert card.exit_plan.invalidation
     assert card.data_caveats == ["fixture data"]
+    assert card.signals
+    assert card.signals[0].signal_type
+    assert card.signals[0].evidence
 
 
 def test_card_generator_reports_market_data_provider():

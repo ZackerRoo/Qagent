@@ -57,6 +57,22 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
       </div>
 
       <div className="detail-section">
+        <h3>Signal Stack</h3>
+        <div className="signal-stack">
+          {card.signals.map((signal) => (
+            <div key={`${signal.signal_type}-${signal.horizon}`}>
+              <span>{signal.signal_type}</span>
+              <strong>{Math.round(signal.score * 100)}</strong>
+              <small>
+                {signal.direction} · {signal.horizon}
+              </small>
+              <p>{formatEvidence(signal.evidence)}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="detail-section">
         <h3>Entry</h3>
         <p>{card.entry_plan.confirmation}</p>
       </div>
@@ -79,4 +95,10 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
       </div>
     </section>
   );
+}
+
+function formatEvidence(evidence: Record<string, unknown>) {
+  return Object.entries(evidence)
+    .map(([key, value]) => `${key}: ${String(value)}`)
+    .join(" · ");
 }

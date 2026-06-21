@@ -22,6 +22,13 @@ from qagent.storage.repository import (
 router = APIRouter()
 
 
+def _signal_summary(card) -> str:
+    return "; ".join(
+        f"{signal.signal_type.value} {signal.direction.value} {signal.score:.2f}"
+        for signal in card.signals[:4]
+    )
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -176,6 +183,7 @@ def agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
             "downside_pct": selected.scenario.downside_pct,
             "target_1_pct": selected.scenario.target_1_pct,
             "no_chase_above": str(selected.entry_plan.no_chase_above),
+            "signal_summary": _signal_summary(selected),
         },
     )
     return AgentQueryResponse(answer=answer)

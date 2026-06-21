@@ -13,6 +13,7 @@ def test_opportunities_endpoint_returns_cards():
     assert "data_health" in body
     assert len(body["cards"]) >= 1
     assert body["cards"][0]["scenario"]["downside_pct"] < 0
+    assert body["cards"][0]["signals"]
     assert body["items"][0]["instrument_id"]
 
 
@@ -30,7 +31,7 @@ def test_agent_endpoint_answers_from_card_context():
     client = TestClient(create_app())
     response = client.post("/api/agent/query", json={"question": "Why is US:TEST on the list?"})
     assert response.status_code == 200
-    assert response.json()["answer"]
+    assert "trend_strength" in response.json()["answer"]
 
 
 def test_agent_endpoint_answers_buy_scenario_from_card_context():

@@ -26,6 +26,17 @@ def answer_question(question: str, context: dict[str, object]) -> str:
                 f"(+{float(upside):.2f}% upside).{extra} This is a scenario, not advice."
             )
 
+    if "why" in lowered or "为什么" in question:
+        instrument_id = context.get("instrument_id", "this instrument")
+        score = context.get("score")
+        signal_summary = context.get("signal_summary")
+        if signal_summary:
+            return (
+                f"{instrument_id} is on the list because the signal stack includes "
+                f"{signal_summary}. Composite score is {score}. Review trigger, stop, "
+                "targets, and caveats before making any decision."
+            )
+
     if "stop" in lowered or "止损" in question:
         stop = context.get("initial_stop")
         if stop:

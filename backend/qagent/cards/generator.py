@@ -6,7 +6,7 @@ import pandas as pd
 from qagent.cards.entry_exit import build_breakout_plan
 from qagent.cards.scoring import aggregate_score
 from qagent.domain.enums import Market, OpportunityStatus
-from qagent.domain.models import OpportunityCard, Signal
+from qagent.domain.models import OpportunityCard, Signal, SignalSnapshot
 
 
 def _data_caveats(bars: pd.DataFrame) -> list[str]:
@@ -45,5 +45,19 @@ class OpportunityCardGenerator:
             exit_plan=plan.exit_plan,
             risk_reward=plan.risk_reward,
             scenario=plan.scenario,
+            signals=_signal_snapshots(signals),
             data_caveats=_data_caveats(bars),
         )
+
+
+def _signal_snapshots(signals: list[Signal]) -> list[SignalSnapshot]:
+    return [
+        SignalSnapshot(
+            signal_type=signal.signal_type,
+            direction=signal.direction,
+            horizon=signal.horizon,
+            score=signal.score,
+            evidence=signal.evidence,
+        )
+        for signal in signals
+    ]

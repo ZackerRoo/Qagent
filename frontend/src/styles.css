@@ -415,6 +415,37 @@ tbody tr.selected {
   font-size: 14px;
 }
 
+.signal-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.signal-stack div {
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 9px;
+}
+
+.signal-stack span,
+.signal-stack small {
+  display: block;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.signal-stack strong {
+  display: block;
+  margin-top: 2px;
+  color: #17202a;
+  font-size: 18px;
+}
+
+.signal-stack p {
+  margin: 5px 0 0;
+  color: #475569;
+  font-size: 12px;
+}
+
 .empty-state,
 .empty {
   color: #64748b;

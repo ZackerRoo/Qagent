@@ -47,6 +47,13 @@ export type OpportunityCard = {
     no_chase_pct: number;
     summary: string;
   };
+  signals: {
+    signal_type: string;
+    direction: string;
+    horizon: string;
+    score: number;
+    evidence: Record<string, unknown>;
+  }[];
   data_caveats: string[];
 };
 
