@@ -13,7 +13,9 @@ class DailyScanResult(BaseModel):
     data_health: dict[str, str]
 
 
-def run_daily_scan(instrument_ids: list[str], provider: MarketDataProvider) -> DailyScanResult:
+def run_daily_scan(
+    instrument_ids: list[str], provider: MarketDataProvider, mode: str = "development"
+) -> DailyScanResult:
     cards: list[OpportunityCard] = []
     signal_engine = SignalEngine()
     card_generator = OpportunityCardGenerator()
@@ -29,4 +31,13 @@ def run_daily_scan(instrument_ids: list[str], provider: MarketDataProvider) -> D
         if card:
             cards.append(card)
 
-    return DailyScanResult(cards=cards, data_health={"provider": provider.name, "mode": "development"})
+    data_health = {
+        "provider": provider.name,
+        "mode": mode,
+        "scanned": str(len(instrument_ids)),
+        "cards": str(len(cards)),
+    }
+    provider_errors = getattr(provider, "last_errors", [])
+    if provider_errors:
+        data_health["errors"] = " | ".join(provider_errors[:3])
+    return DailyScanResult(cards=cards, data_health=data_health)

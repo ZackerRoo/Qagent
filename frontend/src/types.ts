@@ -1,4 +1,5 @@
 export type Market = "US" | "CN";
+export type DataProviderMode = "fixture" | "free";
 
 export type OpportunityStatus =
   | "new_idea"

@@ -9,6 +9,17 @@ from qagent.domain.enums import Market, OpportunityStatus
 from qagent.domain.models import OpportunityCard, Signal
 
 
+def _data_caveats(bars: pd.DataFrame) -> list[str]:
+    if "provider" not in bars.columns:
+        return ["provider: unknown"]
+    providers = sorted({str(provider) for provider in bars["provider"].dropna().unique()})
+    if not providers:
+        return ["provider: unknown"]
+    if providers == ["fixture"]:
+        return ["fixture data"]
+    return [f"provider: {provider}" for provider in providers]
+
+
 class OpportunityCardGenerator:
     def generate(
         self, instrument_id: str, signals: list[Signal], bars: pd.DataFrame
@@ -33,5 +44,5 @@ class OpportunityCardGenerator:
             entry_plan=plan.entry_plan,
             exit_plan=plan.exit_plan,
             risk_reward=plan.risk_reward,
-            data_caveats=["fixture data"],
+            data_caveats=_data_caveats(bars),
         )

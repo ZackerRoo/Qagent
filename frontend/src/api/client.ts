@@ -3,6 +3,7 @@ import type {
   AlertEvaluationResponse,
   AlertRule,
   AlertRulesResponse,
+  DataProviderMode,
   OpportunitiesResponse,
   OverviewResponse,
   Position,
@@ -13,20 +14,40 @@ import type {
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000/api";
 
-export async function apiGet<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`);
+type ScanParams = {
+  provider?: DataProviderMode;
+  symbols?: string;
+};
+
+function queryString(params?: ScanParams): string {
+  if (!params) {
+    return "";
+  }
+  const search = new URLSearchParams();
+  if (params.provider) {
+    search.set("provider", params.provider);
+  }
+  if (params.symbols?.trim()) {
+    search.set("symbols", params.symbols);
+  }
+  const value = search.toString();
+  return value ? `?${value}` : "";
+}
+
+export async function apiGet<T>(path: string, params?: ScanParams): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}${queryString(params)}`);
   if (!response.ok) {
     throw new Error(`API request failed: ${response.status}`);
   }
   return response.json() as Promise<T>;
 }
 
-export async function fetchOverview(): Promise<OverviewResponse> {
-  return apiGet<OverviewResponse>("/overview");
+export async function fetchOverview(params?: ScanParams): Promise<OverviewResponse> {
+  return apiGet<OverviewResponse>("/overview", params);
 }
 
-export async function fetchOpportunities(): Promise<OpportunitiesResponse> {
-  return apiGet<OpportunitiesResponse>("/opportunities");
+export async function fetchOpportunities(params?: ScanParams): Promise<OpportunitiesResponse> {
+  return apiGet<OpportunitiesResponse>("/opportunities", params);
 }
 
 export async function askAgent(question: string, instrumentId?: string): Promise<AgentResponse> {

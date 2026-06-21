@@ -1,15 +1,15 @@
 from decimal import Decimal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from qagent.agent.responder import answer_question
 from qagent.api.schemas import AgentQueryRequest, AgentQueryResponse, AlertEvaluationRequest
 from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.jobs.intraday_check import evaluate_snapshot_alerts
-from qagent.market.universe import DEFAULT_DEV_UNIVERSE
+from qagent.market.universe import DEFAULT_DEV_UNIVERSE, DEFAULT_FREE_UNIVERSE
 from qagent.monitoring.alerts import AlertRule
-from qagent.providers.fixtures import FixtureMarketDataProvider
+from qagent.providers.factory import build_market_data_provider
 from qagent.storage.repository import (
     AlertRuleCreate,
     PositionCreate,
@@ -25,8 +25,21 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-def _scan():
-    return run_daily_scan(DEFAULT_DEV_UNIVERSE, FixtureMarketDataProvider())
+def _parse_symbols(symbols: str | None, default_universe: list[str]) -> list[str]:
+    if not symbols:
+        return default_universe
+    return [symbol.strip().upper() for symbol in symbols.split(",") if symbol.strip()]
+
+
+def _scan(provider_mode: str = "fixture", symbols: str | None = None):
+    mode = provider_mode.strip().lower()
+    default_universe = DEFAULT_FREE_UNIVERSE if mode == "free" else DEFAULT_DEV_UNIVERSE
+    instrument_ids = _parse_symbols(symbols, default_universe)
+    try:
+        provider = build_market_data_provider(mode)
+        return run_daily_scan(instrument_ids, provider, mode=mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _repo() -> QagentRepository:
@@ -35,8 +48,8 @@ def _repo() -> QagentRepository:
 
 
 @router.get("/opportunities")
-def opportunities() -> dict[str, object]:
-    result = _scan()
+def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict[str, object]:
+    result = _scan(provider, symbols)
     return {
         "cards": [card.model_dump(mode="json") for card in result.cards],
         "data_health": result.data_health,
@@ -44,8 +57,8 @@ def opportunities() -> dict[str, object]:
 
 
 @router.get("/overview")
-def overview() -> dict[str, object]:
-    result = _scan()
+def overview(provider: str = "fixture", symbols: str | None = None) -> dict[str, object]:
+    result = _scan(provider, symbols)
     return {
         "market_regime": {
             "US": "development_fixture",

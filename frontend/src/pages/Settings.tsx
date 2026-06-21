@@ -1,4 +1,11 @@
-export function Settings() {
+import type { DataProviderMode } from "../types";
+
+type Props = {
+  dataMode: DataProviderMode;
+  symbols: string;
+};
+
+export function Settings({ dataMode, symbols }: Props) {
   return (
     <section className="panel">
       <div className="panel-heading">
@@ -8,7 +15,11 @@ export function Settings() {
       <div className="settings-list">
         <div>
           <span>Data mode</span>
-          <strong>Fixture + free provider ready</strong>
+          <strong>{dataMode === "free" ? "Free provider" : "Fixture provider"}</strong>
+        </div>
+        <div>
+          <span>Universe</span>
+          <strong>{dataMode === "free" ? symbols : "US:TEST, CN:000001"}</strong>
         </div>
         <div>
           <span>Markets</span>

@@ -10,31 +10,59 @@ import { Portfolio } from "./pages/Portfolio";
 import { Review } from "./pages/Review";
 import { Settings } from "./pages/Settings";
 import { Watchlist } from "./pages/Watchlist";
-import type { OpportunitiesResponse, OpportunityCard, OverviewResponse } from "./types";
+import type {
+  DataProviderMode,
+  OpportunitiesResponse,
+  OpportunityCard,
+  OverviewResponse,
+} from "./types";
+
+const DEFAULT_SYMBOLS = "US:AAPL,US:NVDA,US:MSFT,CN:000001,CN:600519";
 
 export default function App() {
   const [page, setPage] = useState<PageId>("overview");
   const [overview, setOverview] = useState<OverviewResponse>();
   const [opportunities, setOpportunities] = useState<OpportunitiesResponse>();
   const [selectedCard, setSelectedCard] = useState<OpportunityCard>();
+  const [dataMode, setDataMode] = useState<DataProviderMode>("fixture");
+  const [symbols, setSymbols] = useState(DEFAULT_SYMBOLS);
+  const [isScanning, setIsScanning] = useState(false);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    async function load() {
-      try {
-        const [overviewResult, opportunitiesResult] = await Promise.all([
-          fetchOverview(),
-          fetchOpportunities(),
-        ]);
-        setOverview(overviewResult);
-        setOpportunities(opportunitiesResult);
-        setSelectedCard(opportunitiesResult.cards[0]);
-      } catch (caught) {
-        setError(caught instanceof Error ? caught.message : "Failed to load dashboard");
-      }
+  async function loadDashboard(mode: DataProviderMode, symbolText: string) {
+    setIsScanning(true);
+    setError("");
+    try {
+      const params = {
+        provider: mode,
+        symbols: mode === "free" ? symbolText : undefined,
+      };
+      const [overviewResult, opportunitiesResult] = await Promise.all([
+        fetchOverview(params),
+        fetchOpportunities(params),
+      ]);
+      setOverview(overviewResult);
+      setOpportunities(opportunitiesResult);
+      setSelectedCard(opportunitiesResult.cards[0]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to load dashboard");
+    } finally {
+      setIsScanning(false);
     }
-    void load();
+  }
+
+  useEffect(() => {
+    void loadDashboard("fixture", DEFAULT_SYMBOLS);
   }, []);
+
+  function handleDataModeChange(mode: DataProviderMode) {
+    setDataMode(mode);
+    void loadDashboard(mode, symbols);
+  }
+
+  function handleScan() {
+    void loadDashboard(dataMode, symbols);
+  }
 
   const content = useMemo(() => {
     if (error) {
@@ -67,14 +95,24 @@ export default function App() {
       case "review":
         return <Review />;
       case "settings":
-        return <Settings />;
+        return <Settings dataMode={dataMode} symbols={symbols} />;
       default:
         return null;
     }
-  }, [error, opportunities?.cards, overview, page, selectedCard]);
+  }, [dataMode, error, opportunities?.cards, overview, page, selectedCard, symbols]);
 
   return (
-    <Layout page={page} onPageChange={setPage} rightPanel={<AgentPanel selectedCard={selectedCard} />}>
+    <Layout
+      page={page}
+      onPageChange={setPage}
+      rightPanel={<AgentPanel selectedCard={selectedCard} />}
+      dataMode={dataMode}
+      isScanning={isScanning}
+      symbols={symbols}
+      onSymbolsChange={setSymbols}
+      onDataModeChange={handleDataModeChange}
+      onScan={handleScan}
+    >
       {content}
     </Layout>
   );

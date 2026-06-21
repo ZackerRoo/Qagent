@@ -26,7 +26,9 @@ class FixtureMarketDataProvider:
             & (frame["trade_date"] >= start)
             & (frame["trade_date"] <= end)
         )
-        return frame.loc[mask].sort_values(["instrument_id", "trade_date"]).reset_index(drop=True)
+        result = frame.loc[mask].sort_values(["instrument_id", "trade_date"]).reset_index(drop=True)
+        result["provider"] = "fixture"
+        return result
 
     def get_snapshot(self, instrument_ids: list[str]) -> pd.DataFrame:
         frame = self.get_daily_bars(instrument_ids, date(1900, 1, 1), date(2100, 1, 1))

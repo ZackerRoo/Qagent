@@ -7,24 +7,36 @@ import yfinance as yf
 class FreeUsMarketDataProvider:
     name = "free_us"
 
+    def __init__(self):
+        self.last_errors: list[str] = []
+
     def get_daily_bars(
         self, instrument_ids: list[str], start: date, end: date
     ) -> pd.DataFrame:
+        self.last_errors = []
         frames: list[pd.DataFrame] = []
         for instrument_id in instrument_ids:
             symbol = instrument_id.split(":", 1)[1]
-            raw = yf.download(
-                symbol,
-                start=start.isoformat(),
-                end=end.isoformat(),
-                progress=False,
-                auto_adjust=False,
-            )
+            try:
+                raw = yf.download(
+                    symbol,
+                    start=start.isoformat(),
+                    end=end.isoformat(),
+                    progress=False,
+                    auto_adjust=False,
+                )
+            except Exception as exc:
+                self.last_errors.append(f"{instrument_id}: {exc}")
+                continue
             if raw.empty:
                 continue
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw = raw.copy()
+                raw.columns = [column[0] for column in raw.columns]
             normalized = raw.reset_index().rename(
                 columns={
                     "Date": "trade_date",
+                    "index": "trade_date",
                     "Open": "open",
                     "High": "high",
                     "Low": "low",

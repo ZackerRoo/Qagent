@@ -5,9 +5,12 @@ import {
   Briefcase,
   ListFilter,
   Settings,
+  RefreshCw,
   Star,
 } from "lucide-react";
 import type { ReactNode } from "react";
+
+import type { DataProviderMode } from "../types";
 
 const nav = [
   { id: "overview", label: "Overview", icon: Activity },
@@ -25,10 +28,27 @@ type Props = {
   page: PageId;
   onPageChange(page: PageId): void;
   rightPanel: ReactNode;
+  dataMode: DataProviderMode;
+  isScanning: boolean;
+  symbols: string;
+  onSymbolsChange(value: string): void;
+  onDataModeChange(mode: DataProviderMode): void;
+  onScan(): void;
   children: ReactNode;
 };
 
-export function Layout({ page, onPageChange, rightPanel, children }: Props) {
+export function Layout({
+  page,
+  onPageChange,
+  rightPanel,
+  dataMode,
+  isScanning,
+  symbols,
+  onSymbolsChange,
+  onDataModeChange,
+  onScan,
+  children,
+}: Props) {
   return (
     <div className="app-shell">
       <nav className="side-nav">
@@ -61,7 +81,35 @@ export function Layout({ page, onPageChange, rightPanel, children }: Props) {
           <div className="session-strip">
             <span>Daily scan</span>
             <span>Key intraday alerts</span>
-            <span>Fixture mode</span>
+            <span>{dataMode === "free" ? "Free data" : "Fixture mode"}</span>
+          </div>
+          <div className="scan-controls">
+            <div className="segment" aria-label="Data source">
+              <button
+                type="button"
+                className={dataMode === "fixture" ? "active" : ""}
+                onClick={() => onDataModeChange("fixture")}
+              >
+                Fixture
+              </button>
+              <button
+                type="button"
+                className={dataMode === "free" ? "active" : ""}
+                onClick={() => onDataModeChange("free")}
+              >
+                Free
+              </button>
+            </div>
+            <input
+              aria-label="Scan symbols"
+              disabled={dataMode === "fixture"}
+              value={symbols}
+              onChange={(event) => onSymbolsChange(event.target.value)}
+            />
+            <button type="button" className="icon-action" onClick={onScan} disabled={isScanning}>
+              <RefreshCw size={16} />
+              <span>{isScanning ? "Scanning" : "Scan"}</span>
+            </button>
           </div>
         </header>
         {children}
