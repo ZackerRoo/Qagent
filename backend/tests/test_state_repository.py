@@ -48,3 +48,10 @@ def test_repository_adds_and_lists_positions(tmp_path):
     assert position.instrument_id == "US:TEST"
     assert position.entry_price == Decimal("82.00")
     assert repo.list_positions()[0].strategy_tag == "breakout"
+
+
+def test_create_db_engine_creates_sqlite_parent_directory(tmp_path):
+    db_path = tmp_path / "nested" / "qagent.db"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    assert db_path.exists()
