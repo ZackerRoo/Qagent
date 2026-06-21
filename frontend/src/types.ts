@@ -127,3 +127,29 @@ export type TriggeredAlert = {
 export type AlertEvaluationResponse = {
   alerts: TriggeredAlert[];
 };
+
+export type NewsItem = {
+  news_id: string;
+  instrument_id: string;
+  title: string;
+  publisher: string | null;
+  published_at: string | null;
+  url: string | null;
+  source: string;
+};
+
+export type CatalystHypothesis = {
+  instrument_id: string;
+  news_id: string;
+  title: string;
+  catalyst_type: string;
+  investment_hypothesis: string;
+  verification_path: string;
+  confidence: number;
+};
+
+export type CatalystsResponse = {
+  news: NewsItem[];
+  hypotheses: CatalystHypothesis[];
+  data_health: Record<string, string>;
+};

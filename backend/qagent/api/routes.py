@@ -4,6 +4,8 @@ from fastapi import APIRouter, HTTPException
 
 from qagent.agent.responder import answer_question
 from qagent.api.schemas import AgentQueryRequest, AgentQueryResponse, AlertEvaluationRequest
+from qagent.catalysts.hypotheses import build_catalyst_hypotheses
+from qagent.catalysts.providers import FreeCatalystProvider
 from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.jobs.intraday_check import evaluate_snapshot_alerts
@@ -73,6 +75,27 @@ def overview(provider: str = "fixture", symbols: str | None = None) -> dict[str,
 @router.get("/alerts")
 def alerts() -> dict[str, list[object]]:
     return {"alerts": []}
+
+
+@router.get("/catalysts")
+def catalysts(symbols: str | None = None, limit: int = 5) -> dict[str, object]:
+    instrument_ids = _parse_symbols(symbols, DEFAULT_FREE_UNIVERSE)
+    provider = FreeCatalystProvider()
+    news = provider.get_news(instrument_ids, limit=limit)
+    hypotheses = build_catalyst_hypotheses(news)
+    data_health = {
+        "provider": "free",
+        "scanned": str(len(instrument_ids)),
+        "news": str(len(news)),
+        "hypotheses": str(len(hypotheses)),
+    }
+    if provider.last_errors:
+        data_health["errors"] = " | ".join(provider.last_errors[:3])
+    return {
+        "news": [item.model_dump(mode="json") for item in news],
+        "hypotheses": [item.model_dump(mode="json") for item in hypotheses],
+        "data_health": data_health,
+    }
 
 
 @router.get("/alert-rules")

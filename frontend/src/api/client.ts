@@ -3,6 +3,7 @@ import type {
   AlertEvaluationResponse,
   AlertRule,
   AlertRulesResponse,
+  CatalystsResponse,
   DataProviderMode,
   OpportunitiesResponse,
   OverviewResponse,
@@ -17,6 +18,7 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000/api";
 type ScanParams = {
   provider?: DataProviderMode;
   symbols?: string;
+  limit?: number;
 };
 
 function queryString(params?: ScanParams): string {
@@ -29,6 +31,9 @@ function queryString(params?: ScanParams): string {
   }
   if (params.symbols?.trim()) {
     search.set("symbols", params.symbols);
+  }
+  if (params.limit) {
+    search.set("limit", String(params.limit));
   }
   const value = search.toString();
   return value ? `?${value}` : "";
@@ -100,4 +105,8 @@ export async function saveAlertRule(payload: AlertRule): Promise<AlertRule> {
 
 export async function evaluateAlerts(prices: Record<string, string>): Promise<AlertEvaluationResponse> {
   return apiPost<AlertEvaluationResponse>("/alerts/evaluate", { prices });
+}
+
+export async function fetchCatalysts(symbols: string): Promise<CatalystsResponse> {
+  return apiGet<CatalystsResponse>("/catalysts", { symbols, limit: 5 });
 }
