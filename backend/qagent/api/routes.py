@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from qagent.agent.responder import answer_question
 from qagent.api.schemas import AgentQueryRequest, AgentQueryResponse
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE
@@ -60,11 +61,15 @@ def agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
     if selected is None:
         return AgentQueryResponse(answer="No opportunity context is available yet.")
 
-    answer = (
-        f"{selected.instrument_id} is on the list because its signal stack produced "
-        f"a {selected.status.value} opportunity card with score {selected.score}. "
-        f"Review trigger {selected.entry_plan.trigger_price}, stop "
-        f"{selected.exit_plan.initial_stop}, target {selected.exit_plan.target_1}, "
-        "and data caveats before making any decision."
+    answer = answer_question(
+        request.question,
+        context={
+            "instrument_id": selected.instrument_id,
+            "status": selected.status.value,
+            "score": selected.score,
+            "initial_stop": str(selected.exit_plan.initial_stop),
+            "trigger_price": str(selected.entry_plan.trigger_price),
+            "target_1": str(selected.exit_plan.target_1),
+        },
     )
     return AgentQueryResponse(answer=answer)
