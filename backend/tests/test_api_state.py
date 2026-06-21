@@ -49,3 +49,30 @@ def test_positions_api_adds_and_lists_positions(tmp_path, monkeypatch):
     body = list_response.json()
     assert body["positions"][0]["instrument_id"] == "US:TEST"
     assert body["positions"][0]["strategy_tag"] == "breakout"
+
+
+def test_portfolio_api_returns_position_risk(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'api-portfolio.db'}")
+    client = TestClient(create_app())
+    client.post(
+        "/api/positions",
+        json={
+            "instrument_id": "US:TEST",
+            "shares": "10",
+            "entry_price": "82.00",
+            "entry_date": "2026-03-31",
+            "strategy_tag": "breakout",
+            "initial_stop": "78.72",
+            "target_1": "88.56",
+            "thesis": "Fixture breakout",
+        },
+    )
+
+    response = client.get("/api/portfolio?provider=fixture")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["positions"][0]["instrument_id"] == "US:TEST"
+    assert body["risk"][0]["instrument_id"] == "US:TEST"
+    assert body["risk"][0]["current_price"] == "82.00"
+    assert body["risk"][0]["status"] == "inside_plan"

@@ -10,6 +10,7 @@ from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.jobs.intraday_check import evaluate_snapshot_alerts
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE, DEFAULT_FREE_UNIVERSE
+from qagent.monitoring.portfolio import PositionInput, analyze_position_risk
 from qagent.monitoring.alerts import AlertRule
 from qagent.providers.factory import build_market_data_provider
 from qagent.storage.repository import (
@@ -134,8 +135,40 @@ def evaluate_alerts(request: AlertEvaluationRequest) -> dict[str, list[object]]:
 
 
 @router.get("/portfolio")
-def portfolio() -> dict[str, list[object]]:
-    return {"positions": [position.model_dump(mode="json") for position in _repo().list_positions()]}
+def portfolio(provider: str = "fixture") -> dict[str, object]:
+    positions = _repo().list_positions()
+    risks = []
+    data_health = {"provider": provider, "positions": str(len(positions)), "risk": "0"}
+    if positions:
+        try:
+            market_provider = build_market_data_provider(provider)
+            instrument_ids = [position.instrument_id for position in positions]
+            snapshot = market_provider.get_snapshot(instrument_ids)
+            latest_prices = {
+                row["instrument_id"]: Decimal(str(row["close"]))
+                for _, row in snapshot.iterrows()
+            }
+            for position in positions:
+                latest_price = latest_prices.get(position.instrument_id)
+                if latest_price is None:
+                    continue
+                risks.append(
+                    analyze_position_risk(
+                        PositionInput(**position.model_dump()),
+                        current_price=latest_price,
+                    )
+                )
+            data_health["risk"] = str(len(risks))
+            provider_errors = getattr(market_provider, "last_errors", [])
+            if provider_errors:
+                data_health["errors"] = " | ".join(provider_errors[:3])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "positions": [position.model_dump(mode="json") for position in positions],
+        "risk": [risk.model_dump(mode="json") for risk in risks],
+        "data_health": data_health,
+    }
 
 
 @router.get("/watchlist")

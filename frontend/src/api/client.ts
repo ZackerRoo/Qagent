@@ -7,6 +7,7 @@ import type {
   DataProviderMode,
   OpportunitiesResponse,
   OverviewResponse,
+  PortfolioResponse,
   Position,
   PositionsResponse,
   WatchlistItem,
@@ -89,6 +90,10 @@ export async function saveWatchlistItem(payload: WatchlistItem): Promise<Watchli
 
 export async function fetchPositions(): Promise<PositionsResponse> {
   return apiGet<PositionsResponse>("/positions");
+}
+
+export async function fetchPortfolio(params?: ScanParams): Promise<PortfolioResponse> {
+  return apiGet<PortfolioResponse>("/portfolio", params);
 }
 
 export async function savePosition(payload: Position): Promise<Position> {

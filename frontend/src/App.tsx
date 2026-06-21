@@ -90,7 +90,7 @@ export default function App() {
       case "watchlist":
         return <Watchlist />;
       case "portfolio":
-        return <Portfolio />;
+        return <Portfolio dataMode={dataMode} />;
       case "alerts":
         return <Alerts />;
       case "review":

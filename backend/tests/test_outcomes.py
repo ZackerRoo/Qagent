@@ -1,6 +1,7 @@
 from datetime import date
 
 from qagent.monitoring.outcomes import compute_forward_returns
+from qagent.monitoring.portfolio import PositionInput, analyze_position_risk
 from qagent.providers.fixtures import FixtureMarketDataProvider
 
 
@@ -18,3 +19,22 @@ def test_compute_forward_returns_uses_none_when_horizon_unavailable():
     bars = provider.get_daily_bars(["US:TEST"], date(2026, 1, 1), date(2026, 3, 31))
     result = compute_forward_returns(bars, signal_date=bars["trade_date"].iloc[-1], horizons=(1,))
     assert result["return_1d"] is None
+
+
+def test_analyze_position_risk_inside_plan():
+    position = PositionInput(
+        instrument_id="US:TEST",
+        shares="10",
+        entry_price="82.00",
+        entry_date="2026-03-31",
+        strategy_tag="breakout",
+        initial_stop="78.72",
+        target_1="88.56",
+    )
+
+    risk = analyze_position_risk(position, current_price="82.00")
+
+    assert risk.unrealized_return_pct == 0
+    assert risk.stop_distance_pct == 4.0
+    assert risk.target_1_distance_pct == 8.0
+    assert risk.status == "inside_plan"

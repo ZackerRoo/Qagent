@@ -110,6 +110,21 @@ export type PositionsResponse = {
   positions: Position[];
 };
 
+export type PositionRisk = {
+  instrument_id: string;
+  current_price: string;
+  unrealized_return_pct: number;
+  stop_distance_pct: number | null;
+  target_1_distance_pct: number | null;
+  status: string;
+};
+
+export type PortfolioResponse = {
+  positions: Position[];
+  risk: PositionRisk[];
+  data_health: Record<string, string>;
+};
+
 export type AlertRule = {
   rule_id: string;
   instrument_id: string;
