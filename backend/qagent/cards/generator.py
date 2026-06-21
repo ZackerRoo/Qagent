@@ -44,5 +44,6 @@ class OpportunityCardGenerator:
             entry_plan=plan.entry_plan,
             exit_plan=plan.exit_plan,
             risk_reward=plan.risk_reward,
+            scenario=plan.scenario,
             data_caveats=_data_caveats(bars),
         )

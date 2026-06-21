@@ -2,13 +2,14 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from pydantic import BaseModel
 
-from qagent.domain.models import EntryPlan, ExitPlan
+from qagent.domain.models import EntryPlan, ExitPlan, TradeScenario
 
 
 class TradePlan(BaseModel):
     entry_plan: EntryPlan
     exit_plan: ExitPlan
     risk_reward: float
+    scenario: TradeScenario
 
 
 def _money(value: Decimal) -> Decimal:
@@ -20,6 +21,24 @@ def _risk_reward(trigger: Decimal, stop: Decimal, target: Decimal) -> float:
     if risk <= 0:
         return 0.0
     return round(float((target - trigger) / risk), 4)
+
+
+def _pct(from_price: Decimal, to_price: Decimal) -> float:
+    if from_price <= 0:
+        return 0.0
+    return round(float((to_price - from_price) / from_price * Decimal("100")), 2)
+
+
+def _scenario(trigger: Decimal, stop: Decimal, target_1: Decimal, no_chase: Decimal) -> TradeScenario:
+    downside = _pct(trigger, stop)
+    target = _pct(trigger, target_1)
+    no_chase_pct = _pct(trigger, no_chase)
+    return TradeScenario(
+        downside_pct=downside,
+        target_1_pct=target,
+        no_chase_pct=no_chase_pct,
+        summary=f"At trigger, risk to stop is {downside:.2f}%; target 1 is +{target:.2f}%.",
+    )
 
 
 def build_breakout_plan(latest_close: Decimal, pivot: Decimal, atr: Decimal) -> TradePlan:
@@ -48,6 +67,7 @@ def build_breakout_plan(latest_close: Decimal, pivot: Decimal, atr: Decimal) -> 
             time_stop="Review if no follow-through within 20 trading days.",
         ),
         risk_reward=_risk_reward(trigger, stop, target_1),
+        scenario=_scenario(trigger, stop, target_1, no_chase),
     )
 
 
@@ -56,6 +76,7 @@ def build_pullback_plan(latest_close: Decimal, support: Decimal, atr: Decimal) -
     stop = _money(support - atr)
     target_1 = _money(trigger + atr * Decimal("2"))
     target_2 = _money(trigger + atr * Decimal("3"))
+    no_chase = _money(trigger + atr)
 
     return TradePlan(
         entry_plan=EntryPlan(
@@ -64,7 +85,7 @@ def build_pullback_plan(latest_close: Decimal, support: Decimal, atr: Decimal) -
             entry_zone_low=_money(support),
             entry_zone_high=trigger,
             confirmation="Price holds support and reclaims short-term strength.",
-            no_chase_above=_money(trigger + atr),
+            no_chase_above=no_chase,
         ),
         exit_plan=ExitPlan(
             initial_stop=stop,
@@ -75,4 +96,5 @@ def build_pullback_plan(latest_close: Decimal, support: Decimal, atr: Decimal) -
             time_stop="Review if setup stalls for 20 trading days.",
         ),
         risk_reward=_risk_reward(trigger, stop, target_1),
+        scenario=_scenario(trigger, stop, target_1, no_chase),
     )

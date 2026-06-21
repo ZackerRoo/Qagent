@@ -38,6 +38,25 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
       </div>
 
       <div className="detail-section">
+        <h3>Trade Scenario</h3>
+        <p>{card.scenario.summary}</p>
+        <div className="scenario-grid">
+          <div>
+            <span>Downside</span>
+            <strong>{card.scenario.downside_pct.toFixed(2)}%</strong>
+          </div>
+          <div>
+            <span>Target 1</span>
+            <strong>+{card.scenario.target_1_pct.toFixed(2)}%</strong>
+          </div>
+          <div>
+            <span>No Chase Gap</span>
+            <strong>+{card.scenario.no_chase_pct.toFixed(2)}%</strong>
+          </div>
+        </div>
+      </div>
+
+      <div className="detail-section">
         <h3>Entry</h3>
         <p>{card.entry_plan.confirmation}</p>
       </div>

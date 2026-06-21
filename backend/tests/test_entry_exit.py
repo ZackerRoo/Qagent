@@ -14,3 +14,7 @@ def test_breakout_plan_has_trigger_stop_target_and_no_chase():
     assert plan.exit_plan.initial_stop == Decimal("98")
     assert plan.exit_plan.target_1 == Decimal("110")
     assert plan.risk_reward >= 2
+    assert plan.scenario.downside_pct == -3.92
+    assert plan.scenario.target_1_pct == 7.84
+    assert plan.scenario.no_chase_pct == 3.92
+    assert plan.scenario.summary == "At trigger, risk to stop is -3.92%; target 1 is +7.84%."

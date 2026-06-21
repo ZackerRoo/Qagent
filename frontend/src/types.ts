@@ -41,6 +41,12 @@ export type OpportunityCard = {
   entry_plan: EntryPlan;
   exit_plan: ExitPlan;
   risk_reward: number | null;
+  scenario: {
+    downside_pct: number;
+    target_1_pct: number;
+    no_chase_pct: number;
+    summary: string;
+  };
   data_caveats: string[];
 };
 

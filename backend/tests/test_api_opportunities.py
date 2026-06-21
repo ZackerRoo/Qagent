@@ -12,6 +12,7 @@ def test_opportunities_endpoint_returns_cards():
     assert "items" in body
     assert "data_health" in body
     assert len(body["cards"]) >= 1
+    assert body["cards"][0]["scenario"]["downside_pct"] < 0
     assert body["items"][0]["instrument_id"]
 
 

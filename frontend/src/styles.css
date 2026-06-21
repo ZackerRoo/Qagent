@@ -390,6 +390,31 @@ tbody tr.selected {
   line-height: 1.5;
 }
 
+.scenario-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.scenario-grid div {
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.scenario-grid span {
+  display: block;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.scenario-grid strong {
+  display: block;
+  margin-top: 3px;
+  font-size: 14px;
+}
+
 .empty-state,
 .empty {
   color: #64748b;
@@ -526,6 +551,7 @@ tbody tr.selected {
 
   .split-grid,
   .metric-grid,
+  .scenario-grid,
   .form-row,
   .portfolio-form,
   .alert-form {

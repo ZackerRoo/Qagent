@@ -61,6 +61,13 @@ class ExitPlan(BaseModel):
     target_2: Decimal | None = None
 
 
+class TradeScenario(BaseModel):
+    downside_pct: float
+    target_1_pct: float
+    no_chase_pct: float
+    summary: str
+
+
 class OpportunityCard(BaseModel):
     card_id: str
     instrument_id: str
@@ -71,4 +78,5 @@ class OpportunityCard(BaseModel):
     entry_plan: EntryPlan
     exit_plan: ExitPlan
     risk_reward: float | None = None
+    scenario: TradeScenario
     data_caveats: list[str] = Field(default_factory=list)
