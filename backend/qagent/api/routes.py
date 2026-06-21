@@ -2,9 +2,15 @@ from fastapi import APIRouter
 
 from qagent.agent.responder import answer_question
 from qagent.api.schemas import AgentQueryRequest, AgentQueryResponse
+from qagent.db import Base, create_db_engine, create_session_factory
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE
 from qagent.providers.fixtures import FixtureMarketDataProvider
+from qagent.storage.repository import (
+    PositionCreate,
+    QagentRepository,
+    WatchlistCreate,
+)
 
 router = APIRouter()
 
@@ -16,6 +22,12 @@ def health() -> dict[str, str]:
 
 def _scan():
     return run_daily_scan(DEFAULT_DEV_UNIVERSE, FixtureMarketDataProvider())
+
+
+def _repo() -> QagentRepository:
+    engine = create_db_engine()
+    Base.metadata.create_all(engine)
+    return QagentRepository(create_session_factory())
 
 
 @router.get("/opportunities")
@@ -47,7 +59,29 @@ def alerts() -> dict[str, list[object]]:
 
 @router.get("/portfolio")
 def portfolio() -> dict[str, list[object]]:
-    return {"positions": []}
+    return {"positions": [position.model_dump(mode="json") for position in _repo().list_positions()]}
+
+
+@router.get("/watchlist")
+def watchlist() -> dict[str, list[object]]:
+    return {"items": [item.model_dump(mode="json") for item in _repo().list_watchlist_items()]}
+
+
+@router.post("/watchlist")
+def upsert_watchlist_item(item: WatchlistCreate) -> dict[str, object]:
+    saved = _repo().upsert_watchlist_item(item)
+    return saved.model_dump(mode="json")
+
+
+@router.get("/positions")
+def positions() -> dict[str, list[object]]:
+    return {"positions": [position.model_dump(mode="json") for position in _repo().list_positions()]}
+
+
+@router.post("/positions")
+def upsert_position(position: PositionCreate) -> dict[str, object]:
+    saved = _repo().upsert_position(position)
+    return saved.model_dump(mode="json")
 
 
 @router.post("/agent/query", response_model=AgentQueryResponse)
