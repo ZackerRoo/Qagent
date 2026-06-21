@@ -57,6 +57,8 @@ export type OpportunityCard = {
   strategy_evaluations: StrategyEvaluation[];
   primary_strategy_id: string | null;
   strategy_score: number;
+  rank_score: number;
+  rank_reasons: string[];
   data_caveats: string[];
 };
 

@@ -18,9 +18,25 @@ def test_opportunities_endpoint_returns_cards():
     assert body["cards"][0]["strategy_evaluations"]
     assert body["cards"][0]["primary_strategy_id"]
     assert body["cards"][0]["strategy_score"] >= 0
+    assert body["cards"][0]["rank_score"] >= body["cards"][0]["strategy_score"]
+    assert body["cards"][0]["rank_reasons"]
     assert body["items"][0]["instrument_id"]
     assert body["items"][0]["strategies_passed"] >= 1
     assert body["strategy_health"]
+
+
+def test_opportunities_endpoint_returns_pead_strategy_when_fixture_has_earnings():
+    client = TestClient(create_app())
+    response = client.get("/api/opportunities?provider=fixture&symbols=US:TEST")
+    assert response.status_code == 200
+
+    card = response.json()["cards"][0]
+    by_id = {strategy["strategy_id"]: strategy for strategy in card["strategy_evaluations"]}
+
+    assert card["primary_strategy_id"] == "pead_earnings_drift"
+    assert card["entry_plan"]["entry_type"] == "pead"
+    assert by_id["pead_earnings_drift"]["status"] == "passed"
+    assert by_id["pead_earnings_drift"]["missing_data"] == []
 
 
 def test_overview_endpoint_returns_markets_and_cards():

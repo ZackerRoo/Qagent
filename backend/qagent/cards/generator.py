@@ -3,7 +3,8 @@ from uuid import uuid4
 
 import pandas as pd
 
-from qagent.cards.entry_exit import build_breakout_plan
+from qagent.cards.entry_exit import build_breakout_plan, build_pead_plan, build_pullback_plan
+from qagent.cards.ranking import rank_opportunity
 from qagent.cards.scoring import aggregate_score
 from qagent.domain.enums import Market, OpportunityStatus
 from qagent.domain.models import OpportunityCard, Signal, SignalSnapshot
@@ -40,13 +41,14 @@ class OpportunityCardGenerator:
         latest = bars.sort_values("trade_date").iloc[-1]
         close = Decimal(str(round(float(latest["close"]), 2)))
         atr = Decimal(str(round(max(float(close) * 0.04, 0.01), 2)))
-        plan = build_breakout_plan(latest_close=close, pivot=close, atr=atr)
         score = aggregate_score(signals)
         evaluations = strategy_evaluations or self.strategy_evaluator.evaluate(
             instrument_id, signals, bars
         )
         primary = _primary_strategy(evaluations)
+        plan = _trade_plan(primary, close, atr)
         strategy_score = round(max([score, *[item.score for item in evaluations]]), 4)
+        rank = rank_opportunity(primary, evaluations, strategy_score, plan.risk_reward)
         market = Market.US if instrument_id.startswith("US:") else Market.CN
 
         return OpportunityCard(
@@ -64,6 +66,8 @@ class OpportunityCardGenerator:
             strategy_evaluations=evaluations,
             primary_strategy_id=primary.strategy_id if primary else None,
             strategy_score=strategy_score,
+            rank_score=rank.rank_score,
+            rank_reasons=rank.rank_reasons,
             data_caveats=_data_caveats(bars),
         )
 
@@ -90,7 +94,15 @@ def _primary_strategy(evaluations: list[StrategyEvaluation]) -> StrategyEvaluati
     if not active:
         return None
     role_rank = {"primary": 3, "risk_control": 2, "confirmation": 1, "valuation": 1, "context": 0}
-    return max(active, key=lambda item: (role_rank.get(item.role, 0), item.score))
+    family_rank = {"earnings_momentum": 3, "event_catalyst": 2, "technical_breakout": 1}
+    return max(
+        active,
+        key=lambda item: (
+            role_rank.get(item.role, 0),
+            family_rank.get(item.family, 0),
+            item.score,
+        ),
+    )
 
 
 def _thesis(primary: StrategyEvaluation | None) -> str:
@@ -100,3 +112,30 @@ def _thesis(primary: StrategyEvaluation | None) -> str:
         f"Primary strategy is {primary.name}: {', '.join(primary.triggers) or 'setup forming'}. "
         "Review entry, invalidation, and missing-data caveats before action."
     )
+
+
+def _trade_plan(primary: StrategyEvaluation | None, close: Decimal, atr: Decimal):
+    if primary and primary.strategy_id == "pead_earnings_drift":
+        low = _decimal_evidence(primary, "earnings_day_low", close - atr)
+        high = _decimal_evidence(primary, "earnings_day_high", close)
+        return build_pead_plan(
+            latest_close=close,
+            earnings_day_low=low,
+            earnings_day_high=high,
+            atr=atr,
+        )
+    if primary and primary.strategy_id == "healthy_pullback":
+        support = _decimal_evidence(primary, "ma_20", close - atr)
+        return build_pullback_plan(latest_close=close, support=support, atr=atr)
+    return build_breakout_plan(latest_close=close, pivot=close, atr=atr)
+
+
+def _decimal_evidence(
+    evaluation: StrategyEvaluation,
+    key: str,
+    default: Decimal,
+) -> Decimal:
+    value = evaluation.evidence.get(key)
+    if value is None:
+        return default
+    return Decimal(str(round(float(value), 2)))

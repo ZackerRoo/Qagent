@@ -2,6 +2,7 @@ import pandas as pd
 
 from qagent.domain.enums import SignalType
 from qagent.domain.models import Signal
+from qagent.strategy_data.models import EarningsEvent
 from qagent.strategies.models import StrategyDefinition, StrategyEvaluation
 from qagent.strategies.registry import StrategyRegistry, default_strategy_registry
 
@@ -34,6 +35,10 @@ class StrategyEvaluator:
                 evaluations.append(self._gf_dma_health(definition, signal_by_type))
             elif definition.strategy_id == "catalyst_financial_transmission":
                 evaluations.append(self._catalyst(definition, context, available_data))
+            elif definition.strategy_id == "pead_earnings_drift":
+                evaluations.append(
+                    self._pead_earnings_drift(definition, instrument_id, bars, context, available_data)
+                )
             elif definition.strategy_id == "short_squeeze_risk":
                 evaluations.append(self._short_squeeze(definition, signal_by_type, available_data))
             else:
@@ -184,6 +189,81 @@ class StrategyEvaluator:
             score_components={"catalyst_confidence": confidence},
         )
 
+    def _pead_earnings_drift(
+        self,
+        definition: StrategyDefinition,
+        instrument_id: str,
+        bars: pd.DataFrame,
+        context: dict[str, object] | None,
+        available_data: set[str],
+    ) -> StrategyEvaluation:
+        event = _latest_earnings_event(instrument_id, context)
+        missing = _pead_missing_data(definition, available_data, event)
+        if missing:
+            return self._evaluation(
+                definition,
+                status="missing_data",
+                score=0.0,
+                evidence={"reason": "earnings actuals, estimates, or announcement timing unavailable"},
+                missing_data=missing,
+            )
+
+        metrics = _pead_metrics(bars, event)
+        if metrics is None:
+            return self._evaluation(
+                definition,
+                status="missing_data",
+                score=0.0,
+                evidence={"reason": "earnings date is not present in the price history"},
+                missing_data=["announcement_price_reaction"],
+            )
+
+        earnings_surprise = min(
+            max(metrics["eps_surprise_pct"], 0) / 25 * 0.6
+            + max(metrics["revenue_surprise_pct"], 0) / 10 * 0.4,
+            1.0,
+        )
+        reaction = _reasonable_reaction_score(metrics["announcement_return_pct"])
+        volume = min(metrics["volume_ratio"] / 2.5, 1.0)
+        drift = 1.0 if metrics["latest_close"] >= metrics["earnings_day_close"] else 0.35
+        guidance = 1.0 if str(event.guidance).lower() == "raised" else 0.5
+        score = round(
+            min(
+                earnings_surprise * 0.35
+                + reaction * 0.2
+                + volume * 0.15
+                + drift * 0.2
+                + guidance * 0.1,
+                1.0,
+            ),
+            4,
+        )
+        confirmations = ["reasonable_initial_reaction", "volume_expansion"]
+        if guidance == 1.0:
+            confirmations.append("guidance_raised")
+        if drift == 1.0:
+            confirmations.append("post_earnings_hold")
+
+        return self._evaluation(
+            definition,
+            status="passed" if score >= 0.7 else "watch",
+            score=score,
+            triggers=["earnings_surprise"],
+            confirmations=confirmations,
+            evidence={
+                **metrics,
+                "guidance": event.guidance,
+                "announcement_date": event.announcement_date.isoformat(),
+            },
+            score_components={
+                "earnings_surprise": round(earnings_surprise, 4),
+                "initial_reaction": round(reaction, 4),
+                "volume_expansion": round(volume, 4),
+                "drift_confirmation": round(drift, 4),
+                "guidance": round(guidance, 4),
+            },
+        )
+
     def _short_squeeze(
         self,
         definition: StrategyDefinition,
@@ -257,3 +337,81 @@ def _pct_distance(numerator: float, denominator: float) -> float:
     if denominator <= 0:
         return 0.0
     return round((numerator / denominator - 1) * 100, 4)
+
+
+def _latest_earnings_event(
+    instrument_id: str,
+    context: dict[str, object] | None,
+) -> EarningsEvent | None:
+    if not context:
+        return None
+    events = [
+        event
+        for event in context.get("earnings_events", [])
+        if isinstance(event, EarningsEvent) and event.instrument_id == instrument_id
+    ]
+    if not events:
+        return None
+    return max(events, key=lambda item: item.announcement_date)
+
+
+def _pead_missing_data(
+    definition: StrategyDefinition,
+    available_data: set[str],
+    event: EarningsEvent | None,
+) -> list[str]:
+    missing = _missing_requirements(definition, available_data)
+    if event is None:
+        return missing
+    if event.actual_eps is None or event.actual_revenue is None:
+        missing.append("earnings_actuals")
+    if event.estimated_eps is None or event.estimated_revenue is None:
+        missing.append("earnings_estimates")
+    if event.announcement_time not in {"bmo", "amc", "intraday"}:
+        missing.append("announcement_timestamp")
+    return sorted(set(missing))
+
+
+def _pead_metrics(bars: pd.DataFrame, event: EarningsEvent) -> dict[str, float] | None:
+    ordered = bars.sort_values("trade_date").reset_index(drop=True)
+    matches = ordered.index[ordered["trade_date"] == event.announcement_date].tolist()
+    if not matches:
+        return None
+    event_index = matches[0]
+    if event_index == 0:
+        return None
+
+    event_row = ordered.loc[event_index]
+    prior_row = ordered.loc[event_index - 1]
+    latest_row = ordered.iloc[-1]
+    prior_volume_window = ordered.iloc[max(event_index - 20, 0) : event_index]["volume"]
+    average_volume = float(prior_volume_window.mean()) if not prior_volume_window.empty else 0.0
+    volume_ratio = float(event_row["volume"]) / average_volume if average_volume > 0 else 0.0
+
+    return {
+        "eps_surprise_pct": _surprise_pct(event.actual_eps, event.estimated_eps),
+        "revenue_surprise_pct": _surprise_pct(event.actual_revenue, event.estimated_revenue),
+        "announcement_return_pct": _pct_distance(float(event_row["close"]), float(prior_row["close"])),
+        "volume_ratio": round(volume_ratio, 4),
+        "earnings_day_low": float(event_row["low"]),
+        "earnings_day_high": float(event_row["high"]),
+        "earnings_day_close": float(event_row["close"]),
+        "latest_close": float(latest_row["close"]),
+        "days_since_earnings": float(len(ordered) - event_index - 1),
+    }
+
+
+def _surprise_pct(actual, estimate) -> float:
+    if actual is None or estimate is None or estimate == 0:
+        return 0.0
+    return round(float((actual - estimate) / abs(estimate) * 100), 4)
+
+
+def _reasonable_reaction_score(announcement_return_pct: float) -> float:
+    if announcement_return_pct < -2:
+        return 0.2
+    if announcement_return_pct <= 12:
+        return 0.9
+    if announcement_return_pct <= 20:
+        return 0.55
+    return 0.25

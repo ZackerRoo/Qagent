@@ -49,11 +49,11 @@ Free-data-ready strategies:
 - `breakout_volume_confirmation`
 - `healthy_pullback`
 - `gf_dma_health`
+- `pead_earnings_drift` when earnings actuals, estimates, announcement timing, and daily bars are available
 
 Registered but data-limited strategies:
 
 - `catalyst_financial_transmission`
-- `pead_earnings_drift`
 - `analyst_revision_momentum`
 - `tam_adj_peg_growth`
 - `bayesian_intrinsic_growth`
@@ -63,6 +63,15 @@ Registered but data-limited strategies:
 - `insider_institutional_confirmation`
 
 Data-limited strategies must appear as `missing_data` unless their required provider fields are available. This prevents the agent from inventing PEAD, analyst revision, valuation, options-flow, or ownership conclusions from price data alone.
+
+The fixture strategy-data provider reads `backend/tests/fixtures/earnings_events.csv`. In fixture mode, `US:TEST` has a complete earnings event and can score PEAD; `CN:000001` intentionally lacks estimates and remains missing-data for PEAD. Free mode currently uses an empty strategy-data provider until a stable earnings/fundamentals source is added.
+
+Opportunity cards now include:
+
+- `strategy_score`: max score from the strategy stack and signal stack.
+- `rank_score`: ranking score combining strategy strength, data completeness, risk/reward, and active strategy count.
+- `rank_reasons`: readable reasons behind the ranking.
+- Strategy-specific trade plans for breakout, healthy pullback, and PEAD.
 
 ## Useful API Checks
 
@@ -90,5 +99,5 @@ npm run build
 
 - No automated trading or broker execution.
 - Free data may be delayed or incomplete.
-- PEAD, analyst revisions, TAM-PEG, Bayesian valuation, options flow, 北向资金, 龙虎榜, and richer announcement parsing are registered but not production-grade without the required provider data.
+- PEAD is implemented when earnings actuals and estimates are available, but production free-data coverage is still limited. Analyst revisions, TAM-PEG, Bayesian valuation, options flow, 北向资金, 龙虎榜, and richer announcement parsing are registered but not production-grade without the required provider data.
 - Opportunity cards are research artifacts, not personalized investment advice.

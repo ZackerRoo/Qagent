@@ -92,4 +92,6 @@ class OpportunityCard(BaseModel):
     strategy_evaluations: list[StrategyEvaluation] = Field(default_factory=list)
     primary_strategy_id: str | None = None
     strategy_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    rank_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    rank_reasons: list[str] = Field(default_factory=list)
     data_caveats: list[str] = Field(default_factory=list)

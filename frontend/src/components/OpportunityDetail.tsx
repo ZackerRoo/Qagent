@@ -43,6 +43,10 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
           <span>Strategy Score</span>
           <strong>{Math.round(card.strategy_score * 100)}</strong>
         </div>
+        <div>
+          <span>Rank</span>
+          <strong>{Math.round(card.rank_score * 100)}</strong>
+        </div>
       </div>
 
       <div className="detail-section">
@@ -61,6 +65,15 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
             <span>No Chase Gap</span>
             <strong>+{card.scenario.no_chase_pct.toFixed(2)}%</strong>
           </div>
+        </div>
+      </div>
+
+      <div className="detail-section">
+        <h3>Ranking</h3>
+        <div className="rank-reasons">
+          {card.rank_reasons.map((reason) => (
+            <span key={reason}>{reason}</span>
+          ))}
         </div>
       </div>
 

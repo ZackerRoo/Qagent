@@ -18,6 +18,20 @@ def test_daily_scan_returns_cards_for_fixture_universe():
     assert any(item.strategy_id == "breakout_volume_confirmation" for item in result.strategy_health)
     assert result.items[0].strategies_passed >= 1
     assert result.items[0].strategies_missing_data >= 1
+    assert result.cards[0].rank_score >= result.cards[-1].rank_score
+    assert result.cards[0].rank_reasons
+
+
+def test_daily_scan_promotes_pead_when_earnings_fixture_is_available():
+    result = run_daily_scan(
+        instrument_ids=["US:TEST"],
+        provider=FixtureMarketDataProvider(),
+    )
+
+    assert len(result.cards) == 1
+    assert result.cards[0].primary_strategy_id == "pead_earnings_drift"
+    assert result.cards[0].entry_plan.entry_type == "pead"
+    assert result.data_health["strategy_data_provider"] == "fixture_strategy_data"
 
 
 class EmptyProviderWithErrors:

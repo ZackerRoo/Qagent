@@ -121,7 +121,8 @@ h3 {
 
 .session-strip,
 .data-health,
-.caveats {
+.caveats,
+.rank-reasons {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -203,6 +204,7 @@ h3 {
 .session-strip span,
 .data-health span,
 .caveats span,
+.rank-reasons span,
 .count {
   border: 1px solid #d8dee8;
   border-radius: 6px;

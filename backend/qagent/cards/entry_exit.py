@@ -98,3 +98,38 @@ def build_pullback_plan(latest_close: Decimal, support: Decimal, atr: Decimal) -
         risk_reward=_risk_reward(trigger, stop, target_1),
         scenario=_scenario(trigger, stop, target_1, no_chase),
     )
+
+
+def build_pead_plan(
+    latest_close: Decimal,
+    earnings_day_low: Decimal,
+    earnings_day_high: Decimal,
+    atr: Decimal,
+) -> TradePlan:
+    trigger = _money(max(latest_close, earnings_day_high))
+    stop = _money(earnings_day_low)
+    risk = max(trigger - stop, atr)
+    target_1 = _money(trigger + risk * Decimal("2"))
+    target_2 = _money(trigger + risk * Decimal("3"))
+    no_chase = _money(trigger + atr * Decimal("0.75"))
+
+    return TradePlan(
+        entry_plan=EntryPlan(
+            entry_type="pead",
+            trigger_price=trigger,
+            entry_zone_low=stop,
+            entry_zone_high=trigger,
+            confirmation="Post-earnings drift stays above the earnings-day low and clears the earnings-day high.",
+            no_chase_above=no_chase,
+        ),
+        exit_plan=ExitPlan(
+            initial_stop=stop,
+            invalidation="PEAD fails if price loses the earnings-day low or estimates reverse lower.",
+            target_1=target_1,
+            target_2=target_2,
+            trailing_rule="After target 1, trail below the post-earnings 10DMA or prior swing low.",
+            time_stop="Review if there is no drift follow-through within 20 trading days after earnings.",
+        ),
+        risk_reward=_risk_reward(trigger, stop, target_1),
+        scenario=_scenario(trigger, stop, target_1, no_chase),
+    )

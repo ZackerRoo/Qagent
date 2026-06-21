@@ -10,9 +10,11 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - US free market data via `yfinance`.
 - A-share free market data via `akshare`, with `baostock` fallback.
 - Strategy registry covering trend momentum, breakout + volume, healthy pullback, GF-DMA health, catalyst transmission, PEAD, analyst revisions, TAM-adjusted PEG, Bayesian growth valuation, sector regime, short squeeze risk, options flow, and insider/institutional confirmation.
-- Free-data strategy evaluator for trend momentum, breakout + volume, healthy pullback, GF-DMA health, and A-share limit-status confirmation.
+- Strategy-data provider contract for earnings events, with deterministic fixture earnings data and empty free-data fallback.
+- Free-data strategy evaluator for trend momentum, breakout + volume, healthy pullback, GF-DMA health, PEAD when earnings actuals/estimates exist, and A-share limit-status confirmation.
 - Missing-data handling for strategies that need earnings estimates, analyst revisions, fundamentals, TAM assumptions, options flow, insider transactions, institutional filings, sector breadth, or short-interest data.
-- Opportunity cards with primary strategy, strategy score, strategy stack, trigger, no-chase level, stop, targets, risk/reward, scenario percentages, and signal stack evidence.
+- Strategy-specific trade plans for breakout, healthy pullback, and PEAD earnings drift.
+- Opportunity cards with primary strategy, strategy score, rank score, ranking reasons, strategy stack, trigger, no-chase level, stop, targets, risk/reward, scenario percentages, and signal stack evidence.
 - Scan coverage table showing `setup_ready`, `no_setup`, or `no_data` per symbol plus passed/watch/missing strategy counts.
 - Strategy health summary with sample count, 10-day win rate, average 10/20-day forward return, max 10-day loss, and readiness labels.
 - Watchlist, positions, alert rules, alert evaluation, and portfolio risk view backed by SQLite.
@@ -62,7 +64,7 @@ curl 'http://127.0.0.1:8000/api/catalysts?symbols=US:AAPL&limit=5'
 curl 'http://127.0.0.1:8000/api/portfolio?provider=fixture'
 ```
 
-`/api/opportunities` returns `cards`, `items`, `strategy_health`, and `data_health`. Strategies that cannot be evaluated with the current free-data scan are returned with `status: "missing_data"` instead of fabricated scores.
+`/api/opportunities` returns `cards`, `items`, `strategy_health`, and `data_health`. Cards include `rank_score` and `rank_reasons`. Strategies that cannot be evaluated with the current free-data scan are returned with `status: "missing_data"` instead of fabricated scores.
 
 ## Research Docs
 
