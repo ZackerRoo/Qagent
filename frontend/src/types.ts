@@ -44,8 +44,19 @@ export type OpportunityCard = {
   data_caveats: string[];
 };
 
+export type ScanItem = {
+  instrument_id: string;
+  status: string;
+  reason: string;
+  bars: number;
+  signals: number;
+  latest_close: string | null;
+  provider: string | null;
+};
+
 export type OpportunitiesResponse = {
   cards: OpportunityCard[];
+  items: ScanItem[];
   data_health: Record<string, string>;
 };
 

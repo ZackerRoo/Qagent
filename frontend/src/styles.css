@@ -351,9 +351,21 @@ tbody tr.selected {
 }
 
 .status-invalidated,
-.status-closed {
+.status-closed,
+.status-no_data {
   background: #ffe7e7;
   color: #9f1f1f;
+}
+
+.status-no_setup {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.reason-cell {
+  max-width: 280px;
+  white-space: normal;
+  line-height: 1.35;
 }
 
 .detail-panel {

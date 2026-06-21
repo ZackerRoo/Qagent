@@ -9,8 +9,10 @@ def test_opportunities_endpoint_returns_cards():
     assert response.status_code == 200
     body = response.json()
     assert "cards" in body
+    assert "items" in body
     assert "data_health" in body
     assert len(body["cards"]) >= 1
+    assert body["items"][0]["instrument_id"]
 
 
 def test_overview_endpoint_returns_markets_and_cards():

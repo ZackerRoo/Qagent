@@ -82,6 +82,7 @@ export default function App() {
         return (
           <Opportunities
             cards={opportunities?.cards ?? []}
+            items={opportunities?.items ?? []}
             selectedCard={selectedCard}
             onSelect={setSelectedCard}
           />
@@ -99,7 +100,7 @@ export default function App() {
       default:
         return null;
     }
-  }, [dataMode, error, opportunities?.cards, overview, page, selectedCard, symbols]);
+  }, [dataMode, error, opportunities, overview, page, selectedCard, symbols]);
 
   return (
     <Layout

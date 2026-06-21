@@ -52,6 +52,7 @@ def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict
     result = _scan(provider, symbols)
     return {
         "cards": [card.model_dump(mode="json") for card in result.cards],
+        "items": [item.model_dump(mode="json") for item in result.items],
         "data_health": result.data_health,
     }
 
