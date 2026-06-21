@@ -12,7 +12,7 @@ python -m venv .venv
 Run the backend:
 
 ```bash
-./scripts/dev_backend.sh
+../scripts/dev_backend.sh
 ```
 
 The API runs at `http://127.0.0.1:8000/api`.
@@ -32,12 +32,34 @@ The dashboard runs at `http://127.0.0.1:5173`.
 
 ## Current Data Mode
 
-The default application uses deterministic fixture data for both markets:
+The system supports two market-data modes:
 
-- `US:TEST`
-- `CN:000001`
+- `fixture`: deterministic local bars for `US:TEST` and `CN:000001`.
+- `free`: `yfinance` for US stocks and `akshare` with `baostock` fallback for China A-shares.
 
-Fixture data keeps tests stable. Free providers are implemented behind adapter contracts and should not be used in tests without mocks.
+Fixture data keeps tests stable. Free providers are implemented behind adapter contracts and are mocked in unit tests.
+
+## Useful API Checks
+
+```bash
+curl 'http://127.0.0.1:8000/api/opportunities?provider=fixture'
+curl 'http://127.0.0.1:8000/api/opportunities?provider=free&symbols=US:AAPL,CN:000001'
+curl 'http://127.0.0.1:8000/api/catalysts?symbols=US:AAPL&limit=5'
+curl 'http://127.0.0.1:8000/api/portfolio?provider=fixture'
+```
+
+## Verification
+
+Run these before pushing:
+
+```bash
+cd backend
+.venv/bin/python -m pytest -v
+.venv/bin/python -m ruff check .
+
+cd ../frontend
+npm run build
+```
 
 ## Known Limitations
 
