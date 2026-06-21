@@ -14,6 +14,10 @@ def test_daily_scan_returns_cards_for_fixture_universe():
     assert len(result.items) == 2
     assert result.items[0].instrument_id in {"US:TEST", "CN:000001"}
     assert {item.status for item in result.items} == {"setup_ready"}
+    assert result.strategy_health
+    assert any(item.strategy_id == "breakout_volume_confirmation" for item in result.strategy_health)
+    assert result.items[0].strategies_passed >= 1
+    assert result.items[0].strategies_missing_data >= 1
 
 
 class EmptyProviderWithErrors:

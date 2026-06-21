@@ -1,19 +1,23 @@
 # Qagent
 
-Qagent is a research-first US + China A-share opportunity radar. It scans symbols, builds opportunity cards, explains signal evidence, tracks entry/exit scenarios, monitors positions, evaluates alerts, and turns news into catalyst hypotheses.
+Qagent is a research-first US + China A-share opportunity radar. It scans symbols, evaluates strategy stacks, builds opportunity cards, explains signal evidence, tracks entry/exit scenarios, monitors positions, evaluates alerts, and turns news into catalyst hypotheses.
 
-It is not an auto-trading or direct stock-picking system. The product is designed to make market research testable: every card should show data source, signal evidence, trigger, stop, target, risk scenario, and the verification path behind any news catalyst.
+It is not an auto-trading or direct stock-picking system. The product is designed to make market research testable: every card should show data source, primary strategy, missing-data strategies, signal evidence, trigger, stop, target, risk scenario, and the verification path behind any news catalyst.
 
 ## What Works Now
 
 - US + A-share scanning with fixture data and free providers.
 - US free market data via `yfinance`.
 - A-share free market data via `akshare`, with `baostock` fallback.
-- Opportunity cards with trigger, no-chase level, stop, targets, risk/reward, scenario percentages, and signal stack evidence.
-- Scan coverage table showing `setup_ready`, `no_setup`, or `no_data` per symbol.
+- Strategy registry covering trend momentum, breakout + volume, healthy pullback, GF-DMA health, catalyst transmission, PEAD, analyst revisions, TAM-adjusted PEG, Bayesian growth valuation, sector regime, short squeeze risk, options flow, and insider/institutional confirmation.
+- Free-data strategy evaluator for trend momentum, breakout + volume, healthy pullback, GF-DMA health, and A-share limit-status confirmation.
+- Missing-data handling for strategies that need earnings estimates, analyst revisions, fundamentals, TAM assumptions, options flow, insider transactions, institutional filings, sector breadth, or short-interest data.
+- Opportunity cards with primary strategy, strategy score, strategy stack, trigger, no-chase level, stop, targets, risk/reward, scenario percentages, and signal stack evidence.
+- Scan coverage table showing `setup_ready`, `no_setup`, or `no_data` per symbol plus passed/watch/missing strategy counts.
+- Strategy health summary with sample count, 10-day win rate, average 10/20-day forward return, max 10-day loss, and readiness labels.
 - Watchlist, positions, alert rules, alert evaluation, and portfolio risk view backed by SQLite.
 - Catalyst Review using free news sources plus deterministic catalyst hypotheses and verification paths.
-- Constrained Agent answers that refuse guaranteed returns and answer from structured card context.
+- Constrained Agent answers that refuse guaranteed returns and answer from structured strategy/card context.
 
 ## Run Locally
 
@@ -57,6 +61,8 @@ curl 'http://127.0.0.1:8000/api/opportunities?provider=free&symbols=US:AAPL,CN:0
 curl 'http://127.0.0.1:8000/api/catalysts?symbols=US:AAPL&limit=5'
 curl 'http://127.0.0.1:8000/api/portfolio?provider=fixture'
 ```
+
+`/api/opportunities` returns `cards`, `items`, `strategy_health`, and `data_health`. Strategies that cannot be evaluated with the current free-data scan are returned with `status: "missing_data"` instead of fabricated scores.
 
 ## Research Docs
 

@@ -362,6 +362,22 @@ tbody tr.selected {
   color: #475569;
 }
 
+.status-limited_sample,
+.status-insufficient_history {
+  background: #fff3d6;
+  color: #8a5b00;
+}
+
+.status-missing_data {
+  background: #ffe7e7;
+  color: #9f1f1f;
+}
+
+.status-validated {
+  background: #dff4e8;
+  color: #116b3c;
+}
+
 .reason-cell {
   max-width: 280px;
   white-space: normal;
@@ -370,6 +386,10 @@ tbody tr.selected {
 
 .detail-panel {
   align-self: start;
+}
+
+.detail-panel .metric-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .thesis {
@@ -420,27 +440,44 @@ tbody tr.selected {
   gap: 8px;
 }
 
-.signal-stack div {
+.signal-stack div,
+.strategy-stack div {
   border: 1px solid #e2e8f0;
   border-radius: 6px;
   padding: 9px;
 }
 
+.strategy-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.strategy-stack header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .signal-stack span,
-.signal-stack small {
+.signal-stack small,
+.strategy-stack span,
+.strategy-stack small {
   display: block;
   color: #64748b;
   font-size: 12px;
 }
 
-.signal-stack strong {
+.signal-stack strong,
+.strategy-stack strong {
   display: block;
   margin-top: 2px;
   color: #17202a;
   font-size: 18px;
 }
 
-.signal-stack p {
+.signal-stack p,
+.strategy-stack p {
   margin: 5px 0 0;
   color: #475569;
   font-size: 12px;

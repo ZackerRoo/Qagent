@@ -83,6 +83,7 @@ export default function App() {
           <Opportunities
             cards={opportunities?.cards ?? []}
             items={opportunities?.items ?? []}
+            strategyHealth={opportunities?.strategy_health ?? []}
             selectedCard={selectedCard}
             onSelect={setSelectedCard}
           />

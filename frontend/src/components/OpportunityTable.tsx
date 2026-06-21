@@ -17,6 +17,8 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
             <th>Market</th>
             <th>Status</th>
             <th>Score</th>
+            <th>Strategy</th>
+            <th>Strategy Score</th>
             <th>Trigger</th>
             <th>Stop</th>
             <th>Target</th>
@@ -37,6 +39,8 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
                 <StatusBadge status={card.status} />
               </td>
               <td>{Math.round(card.score * 100)}</td>
+              <td>{labelStrategy(card.primary_strategy_id)}</td>
+              <td>{Math.round(card.strategy_score * 100)}</td>
               <td>{card.entry_plan.trigger_price ?? "-"}</td>
               <td>{card.exit_plan.initial_stop ?? "-"}</td>
               <td>{card.exit_plan.target_1 ?? "-"}</td>
@@ -48,4 +52,11 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
       </table>
     </div>
   );
+}
+
+function labelStrategy(strategyId: string | null) {
+  if (!strategyId) {
+    return "-";
+  }
+  return strategyId.replace(/_/g, " ");
 }

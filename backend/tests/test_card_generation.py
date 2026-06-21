@@ -17,6 +17,14 @@ def test_card_generator_creates_setup_ready_card():
     assert card.signals
     assert card.signals[0].signal_type
     assert card.signals[0].evidence
+    assert card.strategy_evaluations
+    assert card.primary_strategy_id in {
+        "breakout_volume_confirmation",
+        "trend_momentum_stage2",
+        "gf_dma_health",
+    }
+    assert card.strategy_score >= card.score
+    assert any(strategy.status == "missing_data" for strategy in card.strategy_evaluations)
 
 
 def test_card_generator_reports_market_data_provider():

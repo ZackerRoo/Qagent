@@ -35,6 +35,14 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
           <span>Target 1</span>
           <strong>{card.exit_plan.target_1 ?? "-"}</strong>
         </div>
+        <div>
+          <span>Strategy</span>
+          <strong>{labelStrategy(card.primary_strategy_id)}</strong>
+        </div>
+        <div>
+          <span>Strategy Score</span>
+          <strong>{Math.round(card.strategy_score * 100)}</strong>
+        </div>
       </div>
 
       <div className="detail-section">
@@ -53,6 +61,27 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
             <span>No Chase Gap</span>
             <strong>+{card.scenario.no_chase_pct.toFixed(2)}%</strong>
           </div>
+        </div>
+      </div>
+
+      <div className="detail-section">
+        <h3>Strategy Stack</h3>
+        <div className="strategy-stack">
+          {card.strategy_evaluations.map((strategy) => (
+            <div key={strategy.strategy_id}>
+              <header>
+                <span>{strategy.name}</span>
+                <strong>{Math.round(strategy.score * 100)}</strong>
+              </header>
+              <small>
+                {strategy.family} · {strategy.role} · {strategy.status}
+              </small>
+              <p>Triggers: {formatList(strategy.triggers)}</p>
+              <p>Confirmations: {formatList(strategy.confirmations)}</p>
+              <p>Missing data: {formatList(strategy.missing_data)}</p>
+              <p>Invalidation: {strategy.invalidation}</p>
+            </div>
+          ))}
         </div>
       </div>
 
@@ -101,4 +130,15 @@ function formatEvidence(evidence: Record<string, unknown>) {
   return Object.entries(evidence)
     .map(([key, value]) => `${key}: ${String(value)}`)
     .join(" · ");
+}
+
+function formatList(items: string[]) {
+  return items.length ? items.join(", ") : "-";
+}
+
+function labelStrategy(strategyId: string | null) {
+  if (!strategyId) {
+    return "-";
+  }
+  return strategyId.replace(/_/g, " ");
 }

@@ -30,6 +30,16 @@ def answer_question(question: str, context: dict[str, object]) -> str:
         instrument_id = context.get("instrument_id", "this instrument")
         score = context.get("score")
         signal_summary = context.get("signal_summary")
+        primary_strategy_id = context.get("primary_strategy_id")
+        strategy_score = context.get("strategy_score")
+        strategy_summary = context.get("strategy_summary")
+        if strategy_summary:
+            return (
+                f"{instrument_id} is on the list because the strategy stack includes "
+                f"{strategy_summary}. Primary strategy is {primary_strategy_id}; strategy score is "
+                f"{strategy_score}. Signal evidence includes {signal_summary}. Review trigger, stop, "
+                "targets, missing data, and caveats before making any decision."
+            )
         if signal_summary:
             return (
                 f"{instrument_id} is on the list because the signal stack includes "

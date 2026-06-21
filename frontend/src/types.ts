@@ -54,7 +54,41 @@ export type OpportunityCard = {
     score: number;
     evidence: Record<string, unknown>;
   }[];
+  strategy_evaluations: StrategyEvaluation[];
+  primary_strategy_id: string | null;
+  strategy_score: number;
   data_caveats: string[];
+};
+
+export type StrategyEvaluation = {
+  strategy_id: string;
+  name: string;
+  family: string;
+  role: string;
+  status: string;
+  score: number;
+  horizon: string;
+  preconditions: string[];
+  triggers: string[];
+  confirmations: string[];
+  invalidation: string;
+  evidence: Record<string, unknown>;
+  score_components: Record<string, number>;
+  missing_data: string[];
+  data_requirements: string[];
+};
+
+export type StrategyHealth = {
+  strategy_id: string;
+  name: string;
+  family: string;
+  readiness: string;
+  sample_count: number;
+  win_rate_10d: number | null;
+  avg_return_10d: number | null;
+  avg_return_20d: number | null;
+  max_loss_10d: number | null;
+  missing_data: string[];
 };
 
 export type ScanItem = {
@@ -63,6 +97,9 @@ export type ScanItem = {
   reason: string;
   bars: number;
   signals: number;
+  strategies_passed: number;
+  strategies_watch: number;
+  strategies_missing_data: number;
   latest_close: string | null;
   provider: string | null;
 };
@@ -70,12 +107,14 @@ export type ScanItem = {
 export type OpportunitiesResponse = {
   cards: OpportunityCard[];
   items: ScanItem[];
+  strategy_health: StrategyHealth[];
   data_health: Record<string, string>;
 };
 
 export type OverviewResponse = {
   market_regime: Record<Market, string>;
   top_cards: OpportunityCard[];
+  strategy_health: StrategyHealth[];
   data_health: Record<string, string>;
 };
 

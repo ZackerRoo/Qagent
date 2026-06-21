@@ -11,10 +11,16 @@ def test_opportunities_endpoint_returns_cards():
     assert "cards" in body
     assert "items" in body
     assert "data_health" in body
+    assert "strategy_health" in body
     assert len(body["cards"]) >= 1
     assert body["cards"][0]["scenario"]["downside_pct"] < 0
     assert body["cards"][0]["signals"]
+    assert body["cards"][0]["strategy_evaluations"]
+    assert body["cards"][0]["primary_strategy_id"]
+    assert body["cards"][0]["strategy_score"] >= 0
     assert body["items"][0]["instrument_id"]
+    assert body["items"][0]["strategies_passed"] >= 1
+    assert body["strategy_health"]
 
 
 def test_overview_endpoint_returns_markets_and_cards():

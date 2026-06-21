@@ -4,6 +4,7 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 
 from qagent.domain.enums import Direction, Market, OpportunityStatus, SignalType
+from qagent.strategies.models import StrategyEvaluation
 
 
 class Instrument(BaseModel):
@@ -88,4 +89,7 @@ class OpportunityCard(BaseModel):
     risk_reward: float | None = None
     scenario: TradeScenario
     signals: list[SignalSnapshot] = Field(default_factory=list)
+    strategy_evaluations: list[StrategyEvaluation] = Field(default_factory=list)
+    primary_strategy_id: str | None = None
+    strategy_score: float = Field(default=0.0, ge=0.0, le=1.0)
     data_caveats: list[str] = Field(default_factory=list)

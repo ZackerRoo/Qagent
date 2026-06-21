@@ -30,6 +30,13 @@ def _signal_summary(card) -> str:
     )
 
 
+def _strategy_summary(card) -> str:
+    return "; ".join(
+        f"{strategy.strategy_id} {strategy.status} {strategy.score:.2f}"
+        for strategy in card.strategy_evaluations[:5]
+    )
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -63,6 +70,7 @@ def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict
     return {
         "cards": [card.model_dump(mode="json") for card in result.cards],
         "items": [item.model_dump(mode="json") for item in result.items],
+        "strategy_health": [item.model_dump(mode="json") for item in result.strategy_health],
         "data_health": result.data_health,
     }
 
@@ -76,6 +84,7 @@ def overview(provider: str = "fixture", symbols: str | None = None) -> dict[str,
             "CN": "development_fixture",
         },
         "top_cards": [card.model_dump(mode="json") for card in result.cards[:5]],
+        "strategy_health": [item.model_dump(mode="json") for item in result.strategy_health[:6]],
         "data_health": result.data_health,
     }
 
@@ -217,6 +226,9 @@ def agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
             "target_1_pct": selected.scenario.target_1_pct,
             "no_chase_above": str(selected.entry_plan.no_chase_above),
             "signal_summary": _signal_summary(selected),
+            "primary_strategy_id": selected.primary_strategy_id,
+            "strategy_score": selected.strategy_score,
+            "strategy_summary": _strategy_summary(selected),
         },
     )
     return AgentQueryResponse(answer=answer)

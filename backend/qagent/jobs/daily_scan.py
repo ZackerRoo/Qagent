@@ -6,6 +6,10 @@ from qagent.cards.generator import OpportunityCardGenerator
 from qagent.domain.models import OpportunityCard
 from qagent.providers.base import MarketDataProvider
 from qagent.signals.engine import SignalEngine
+from qagent.strategies.evaluator import StrategyEvaluator
+from qagent.strategies.health import build_strategy_health_from_bars
+from qagent.strategies.models import StrategyEvaluation, StrategyHealth
+from qagent.strategies.registry import default_strategy_registry
 
 
 class ScanItem(BaseModel):
@@ -14,6 +18,9 @@ class ScanItem(BaseModel):
     reason: str
     bars: int
     signals: int
+    strategies_passed: int = 0
+    strategies_watch: int = 0
+    strategies_missing_data: int = 0
     latest_close: str | None = None
     provider: str | None = None
 
@@ -21,6 +28,7 @@ class ScanItem(BaseModel):
 class DailyScanResult(BaseModel):
     cards: list[OpportunityCard]
     items: list[ScanItem]
+    strategy_health: list[StrategyHealth]
     data_health: dict[str, str]
 
 
@@ -29,8 +37,11 @@ def run_daily_scan(
 ) -> DailyScanResult:
     cards: list[OpportunityCard] = []
     items: list[ScanItem] = []
+    bars_by_instrument = {}
     signal_engine = SignalEngine()
-    card_generator = OpportunityCardGenerator()
+    registry = default_strategy_registry()
+    strategy_evaluator = StrategyEvaluator(registry)
+    card_generator = OpportunityCardGenerator(strategy_evaluator)
 
     for instrument_id in instrument_ids:
         bars = provider.get_daily_bars(
@@ -38,11 +49,15 @@ def run_daily_scan(
             start=date(2026, 1, 1),
             end=date(2026, 12, 31),
         )
+        bars_by_instrument[instrument_id] = bars
         signals = signal_engine.generate(instrument_id, bars)
-        card = card_generator.generate(instrument_id, signals, bars)
+        strategy_evaluations = strategy_evaluator.evaluate(instrument_id, signals, bars)
+        card = card_generator.generate(instrument_id, signals, bars, strategy_evaluations)
         if card:
             cards.append(card)
-        items.append(_scan_item(instrument_id, bars, signals, card))
+        items.append(_scan_item(instrument_id, bars, signals, strategy_evaluations, card))
+
+    strategy_health = build_strategy_health_from_bars(bars_by_instrument, registry)
 
     data_health = {
         "provider": provider.name,
@@ -53,15 +68,22 @@ def run_daily_scan(
     provider_errors = getattr(provider, "last_errors", [])
     if provider_errors:
         data_health["errors"] = " | ".join(provider_errors[:3])
-    return DailyScanResult(cards=cards, items=items, data_health=data_health)
+    return DailyScanResult(
+        cards=cards,
+        items=items,
+        strategy_health=strategy_health,
+        data_health=data_health,
+    )
 
 
 def _scan_item(
     instrument_id: str,
     bars,
     signals: list,
+    strategy_evaluations: list[StrategyEvaluation],
     card: OpportunityCard | None,
 ) -> ScanItem:
+    strategy_counts = _strategy_counts(strategy_evaluations)
     if bars.empty:
         return ScanItem(
             instrument_id=instrument_id,
@@ -69,6 +91,7 @@ def _scan_item(
             reason="No daily bars returned by provider.",
             bars=0,
             signals=0,
+            **strategy_counts,
         )
 
     latest = bars.sort_values("trade_date").iloc[-1]
@@ -81,6 +104,7 @@ def _scan_item(
             reason="Opportunity card generated.",
             bars=len(bars),
             signals=len(signals),
+            **strategy_counts,
             latest_close=latest_close,
             provider=provider,
         )
@@ -91,6 +115,15 @@ def _scan_item(
         reason="Signal stack did not meet opportunity-card threshold.",
         bars=len(bars),
         signals=len(signals),
+        **strategy_counts,
         latest_close=latest_close,
         provider=provider,
     )
+
+
+def _strategy_counts(evaluations: list[StrategyEvaluation]) -> dict[str, int]:
+    return {
+        "strategies_passed": sum(1 for item in evaluations if item.status == "passed"),
+        "strategies_watch": sum(1 for item in evaluations if item.status == "watch"),
+        "strategies_missing_data": sum(1 for item in evaluations if item.status == "missing_data"),
+    }
