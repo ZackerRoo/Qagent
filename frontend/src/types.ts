@@ -57,3 +57,30 @@ export type OverviewResponse = {
 export type AgentResponse = {
   answer: string;
 };
+
+export type WatchlistItem = {
+  instrument_id: string;
+  thesis: string | null;
+  status: string;
+  tags: string[];
+};
+
+export type WatchlistResponse = {
+  items: WatchlistItem[];
+};
+
+export type Position = {
+  instrument_id: string;
+  shares: string;
+  entry_price: string;
+  entry_date: string;
+  strategy_tag: string | null;
+  initial_stop: string | null;
+  target_1: string | null;
+  target_2: string | null;
+  thesis: string | null;
+};
+
+export type PositionsResponse = {
+  positions: Position[];
+};
