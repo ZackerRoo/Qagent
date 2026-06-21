@@ -372,6 +372,10 @@ tbody tr.selected {
   grid-template-columns: minmax(130px, 0.5fr) minmax(90px, 0.35fr) minmax(100px, 0.35fr) minmax(100px, 0.35fr) 80px;
 }
 
+.alert-form {
+  grid-template-columns: minmax(130px, 0.55fr) minmax(120px, 0.4fr) minmax(100px, 0.3fr) 84px;
+}
+
 .form-row input {
   min-width: 0;
   height: 36px;
@@ -387,6 +391,23 @@ tbody tr.selected {
   background: #1d4ed8;
   color: #ffffff;
   cursor: pointer;
+}
+
+.alert-results {
+  display: grid;
+  gap: 8px;
+}
+
+.alert-results div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #c7ead7;
+  border-radius: 6px;
+  background: #f1fbf5;
+  padding: 10px;
+  color: #116b3c;
+  font-size: 13px;
 }
 
 @media (max-width: 1100px) {
@@ -407,7 +428,8 @@ tbody tr.selected {
   .split-grid,
   .metric-grid,
   .form-row,
-  .portfolio-form {
+  .portfolio-form,
+  .alert-form {
     grid-template-columns: 1fr;
   }
 }

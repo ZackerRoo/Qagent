@@ -4,7 +4,7 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, sessionmaker
 
-from qagent.storage.tables import PositionRow, WatchlistItemRow
+from qagent.storage.tables import AlertRuleRow, PositionRow, WatchlistItemRow
 
 
 class WatchlistCreate(BaseModel):
@@ -43,6 +43,22 @@ class Position(BaseModel):
     target_1: Decimal | None
     target_2: Decimal | None
     thesis: str | None
+
+
+class AlertRuleCreate(BaseModel):
+    rule_id: str
+    instrument_id: str
+    kind: str
+    operator: str
+    threshold: Decimal
+
+
+class StoredAlertRule(BaseModel):
+    rule_id: str
+    instrument_id: str
+    kind: str
+    operator: str
+    threshold: Decimal
 
 
 def _serialize_tags(tags: list[str]) -> str:
@@ -100,6 +116,25 @@ class QagentRepository:
             rows = session.query(PositionRow).order_by(PositionRow.instrument_id).all()
             return [self._position_from_row(row) for row in rows]
 
+    def upsert_alert_rule(self, rule: AlertRuleCreate) -> StoredAlertRule:
+        with self.session_factory() as session:
+            row = session.get(AlertRuleRow, rule.rule_id)
+            if row is None:
+                row = AlertRuleRow(rule_id=rule.rule_id)
+                session.add(row)
+            row.instrument_id = rule.instrument_id
+            row.kind = rule.kind
+            row.operator = rule.operator
+            row.threshold = rule.threshold
+            session.commit()
+            session.refresh(row)
+            return self._alert_rule_from_row(row)
+
+    def list_alert_rules(self) -> list[StoredAlertRule]:
+        with self.session_factory() as session:
+            rows = session.query(AlertRuleRow).order_by(AlertRuleRow.rule_id).all()
+            return [self._alert_rule_from_row(row) for row in rows]
+
     @staticmethod
     def _watchlist_from_row(row: WatchlistItemRow) -> WatchlistItem:
         return WatchlistItem(
@@ -121,4 +156,14 @@ class QagentRepository:
             target_1=row.target_1,
             target_2=row.target_2,
             thesis=row.thesis,
+        )
+
+    @staticmethod
+    def _alert_rule_from_row(row: AlertRuleRow) -> StoredAlertRule:
+        return StoredAlertRule(
+            rule_id=row.rule_id,
+            instrument_id=row.instrument_id,
+            kind=row.kind,
+            operator=row.operator,
+            threshold=row.threshold,
         )

@@ -40,3 +40,17 @@ class PositionRow(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
+
+
+class AlertRuleRow(Base):
+    __tablename__ = "alert_rules"
+
+    rule_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), index=True)
+    kind: Mapped[str] = mapped_column(String(64))
+    operator: Mapped[str] = mapped_column(String(4))
+    threshold: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )

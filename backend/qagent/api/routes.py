@@ -1,12 +1,17 @@
+from decimal import Decimal
+
 from fastapi import APIRouter
 
 from qagent.agent.responder import answer_question
-from qagent.api.schemas import AgentQueryRequest, AgentQueryResponse
+from qagent.api.schemas import AgentQueryRequest, AgentQueryResponse, AlertEvaluationRequest
 from qagent.db import Base, create_db_engine, create_session_factory
 from qagent.jobs.daily_scan import run_daily_scan
+from qagent.jobs.intraday_check import evaluate_snapshot_alerts
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE
+from qagent.monitoring.alerts import AlertRule
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.storage.repository import (
+    AlertRuleCreate,
     PositionCreate,
     QagentRepository,
     WatchlistCreate,
@@ -55,6 +60,34 @@ def overview() -> dict[str, object]:
 @router.get("/alerts")
 def alerts() -> dict[str, list[object]]:
     return {"alerts": []}
+
+
+@router.get("/alert-rules")
+def alert_rules() -> dict[str, list[object]]:
+    return {"rules": [rule.model_dump(mode="json") for rule in _repo().list_alert_rules()]}
+
+
+@router.post("/alert-rules")
+def upsert_alert_rule(rule: AlertRuleCreate) -> dict[str, object]:
+    saved = _repo().upsert_alert_rule(rule)
+    return saved.model_dump(mode="json")
+
+
+@router.post("/alerts/evaluate")
+def evaluate_alerts(request: AlertEvaluationRequest) -> dict[str, list[object]]:
+    prices = {instrument_id: Decimal(price) for instrument_id, price in request.prices.items()}
+    rules = [
+        AlertRule(
+            rule_id=rule.rule_id,
+            instrument_id=rule.instrument_id,
+            kind=rule.kind,
+            operator=rule.operator,
+            threshold=rule.threshold,
+        )
+        for rule in _repo().list_alert_rules()
+    ]
+    alerts = evaluate_snapshot_alerts(prices, rules)
+    return {"alerts": [alert.model_dump(mode="json") for alert in alerts]}
 
 
 @router.get("/portfolio")

@@ -8,3 +8,7 @@ class AgentQueryRequest(BaseModel):
 
 class AgentQueryResponse(BaseModel):
     answer: str
+
+
+class AlertEvaluationRequest(BaseModel):
+    prices: dict[str, str]

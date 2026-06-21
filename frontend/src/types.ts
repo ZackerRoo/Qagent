@@ -84,3 +84,28 @@ export type Position = {
 export type PositionsResponse = {
   positions: Position[];
 };
+
+export type AlertRule = {
+  rule_id: string;
+  instrument_id: string;
+  kind: string;
+  operator: ">=" | "<=";
+  threshold: string;
+};
+
+export type AlertRulesResponse = {
+  rules: AlertRule[];
+};
+
+export type TriggeredAlert = {
+  rule_id: string;
+  instrument_id: string;
+  kind: string;
+  status: string;
+  triggered_at: string;
+  message: string;
+};
+
+export type AlertEvaluationResponse = {
+  alerts: TriggeredAlert[];
+};

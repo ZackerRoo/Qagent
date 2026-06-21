@@ -2,7 +2,12 @@ from datetime import date
 from decimal import Decimal
 
 from qagent.db import Base, create_db_engine, create_session_factory
-from qagent.storage.repository import QagentRepository, PositionCreate, WatchlistCreate
+from qagent.storage.repository import (
+    AlertRuleCreate,
+    PositionCreate,
+    QagentRepository,
+    WatchlistCreate,
+)
 
 
 def make_repo(tmp_path):
@@ -55,3 +60,20 @@ def test_create_db_engine_creates_sqlite_parent_directory(tmp_path):
     engine = create_db_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
     assert db_path.exists()
+
+
+def test_repository_adds_and_lists_alert_rules(tmp_path):
+    repo = make_repo(tmp_path)
+
+    rule = repo.upsert_alert_rule(
+        AlertRuleCreate(
+            rule_id="entry-US-TEST",
+            instrument_id="US:TEST",
+            kind="entry_trigger",
+            operator=">=",
+            threshold=Decimal("82.00"),
+        )
+    )
+
+    assert rule.rule_id == "entry-US-TEST"
+    assert repo.list_alert_rules()[0].threshold == Decimal("82.00")

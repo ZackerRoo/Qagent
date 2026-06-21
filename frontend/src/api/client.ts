@@ -1,5 +1,8 @@
 import type {
   AgentResponse,
+  AlertEvaluationResponse,
+  AlertRule,
+  AlertRulesResponse,
   OpportunitiesResponse,
   OverviewResponse,
   Position,
@@ -64,4 +67,16 @@ export async function fetchPositions(): Promise<PositionsResponse> {
 
 export async function savePosition(payload: Position): Promise<Position> {
   return apiPost<Position>("/positions", payload);
+}
+
+export async function fetchAlertRules(): Promise<AlertRulesResponse> {
+  return apiGet<AlertRulesResponse>("/alert-rules");
+}
+
+export async function saveAlertRule(payload: AlertRule): Promise<AlertRule> {
+  return apiPost<AlertRule>("/alert-rules", payload);
+}
+
+export async function evaluateAlerts(prices: Record<string, string>): Promise<AlertEvaluationResponse> {
+  return apiPost<AlertEvaluationResponse>("/alerts/evaluate", { prices });
 }
