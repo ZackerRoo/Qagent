@@ -150,6 +150,9 @@ def agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
             "initial_stop": str(selected.exit_plan.initial_stop),
             "trigger_price": str(selected.entry_plan.trigger_price),
             "target_1": str(selected.exit_plan.target_1),
+            "downside_pct": selected.scenario.downside_pct,
+            "target_1_pct": selected.scenario.target_1_pct,
+            "no_chase_above": str(selected.entry_plan.no_chase_above),
         },
     )
     return AgentQueryResponse(answer=answer)

@@ -31,3 +31,15 @@ def test_agent_endpoint_answers_from_card_context():
     response = client.post("/api/agent/query", json={"question": "Why is US:TEST on the list?"})
     assert response.status_code == 200
     assert response.json()["answer"]
+
+
+def test_agent_endpoint_answers_buy_scenario_from_card_context():
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/agent/query",
+        json={"question": "If I buy this, what happens?", "instrument_id": "US:TEST"},
+    )
+    assert response.status_code == 200
+    answer = response.json()["answer"]
+    assert "trigger" in answer
+    assert "not advice" in answer.lower()

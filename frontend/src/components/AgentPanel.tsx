@@ -5,7 +5,7 @@ import { askAgent } from "../api/client";
 import type { OpportunityCard } from "../types";
 
 export function AgentPanel({ selectedCard }: { selectedCard?: OpportunityCard }) {
-  const [question, setQuestion] = useState("Where is the stop?");
+  const [question, setQuestion] = useState("If I buy this, what happens?");
   const [answer, setAnswer] = useState("");
   const [loading, setLoading] = useState(false);
 
