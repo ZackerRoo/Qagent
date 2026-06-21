@@ -1,7 +1,8 @@
 from datetime import date
 from decimal import Decimal
+from concurrent.futures import ThreadPoolExecutor
 
-from qagent.db import Base, create_db_engine, create_session_factory
+from qagent.db import Base, create_db_engine, create_session_factory, initialize_database
 from qagent.storage.repository import (
     AlertRuleCreate,
     PositionCreate,
@@ -77,3 +78,12 @@ def test_repository_adds_and_lists_alert_rules(tmp_path):
 
     assert rule.rule_id == "entry-US-TEST"
     assert repo.list_alert_rules()[0].threshold == Decimal("82.00")
+
+
+def test_initialize_database_is_safe_for_parallel_calls(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'parallel' / 'qagent.db'}"
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(lambda _: initialize_database(database_url), range(8)))
+
+    assert len(results) == 8

@@ -4,7 +4,7 @@ from fastapi import APIRouter
 
 from qagent.agent.responder import answer_question
 from qagent.api.schemas import AgentQueryRequest, AgentQueryResponse, AlertEvaluationRequest
-from qagent.db import Base, create_db_engine, create_session_factory
+from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.jobs.intraday_check import evaluate_snapshot_alerts
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE
@@ -30,8 +30,7 @@ def _scan():
 
 
 def _repo() -> QagentRepository:
-    engine = create_db_engine()
-    Base.metadata.create_all(engine)
+    initialize_database()
     return QagentRepository(create_session_factory())
 
 
