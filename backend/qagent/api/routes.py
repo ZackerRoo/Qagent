@@ -6,7 +6,8 @@ from fastapi import APIRouter, HTTPException
 from qagent.agent.responder import answer_question
 from qagent.api.schemas import AgentQueryRequest, AgentQueryResponse, AlertEvaluationRequest
 from qagent.backtesting.engine import run_historical_backtest
-from qagent.briefing.daily import build_daily_brief
+from qagent.briefing.daily import DailyBrief, build_daily_brief
+from qagent.briefing.export import render_daily_brief_markdown
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
 from qagent.catalysts.providers import FreeCatalystProvider
 from qagent.db import create_session_factory, initialize_database
@@ -117,6 +118,50 @@ def daily_brief(
     limit: int = 5,
     include_news: bool = True,
 ) -> dict[str, object]:
+    brief = _build_daily_brief_response(provider, symbols, limit, include_news)
+    return brief.model_dump(mode="json")
+
+
+@router.post("/daily-brief/runs")
+def save_daily_brief_run(
+    provider: str = "fixture",
+    symbols: str | None = None,
+    limit: int = 5,
+    include_news: bool = True,
+) -> dict[str, object]:
+    brief = _build_daily_brief_response(provider, symbols, limit, include_news)
+    saved = _repo().save_brief_run(brief)
+    return saved.model_dump(mode="json")
+
+
+@router.get("/daily-brief/runs")
+def daily_brief_runs(limit: int = 20) -> dict[str, list[object]]:
+    return {"runs": [run.model_dump(mode="json") for run in _repo().list_brief_runs(limit=limit)]}
+
+
+@router.get("/daily-brief/runs/{brief_id}")
+def daily_brief_run(brief_id: str) -> dict[str, object]:
+    run = _repo().get_brief_run(brief_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="brief run not found")
+    return {"run": run.model_dump(mode="json"), "brief": run.payload}
+
+
+@router.get("/daily-brief/runs/{brief_id}/markdown")
+def daily_brief_run_markdown(brief_id: str) -> dict[str, str]:
+    run = _repo().get_brief_run(brief_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="brief run not found")
+    brief = DailyBrief.model_validate(run.payload)
+    return {"markdown": render_daily_brief_markdown(brief)}
+
+
+def _build_daily_brief_response(
+    provider: str,
+    symbols: str | None,
+    limit: int,
+    include_news: bool,
+):
     mode = provider.strip().lower()
     if limit <= 0 or limit > 20:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 20")
@@ -164,7 +209,7 @@ def daily_brief(
         limit=limit,
         data_health=brief_health,
     )
-    return brief.model_dump(mode="json")
+    return brief
 
 
 @router.get("/backtest")

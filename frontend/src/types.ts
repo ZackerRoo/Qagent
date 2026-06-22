@@ -437,3 +437,31 @@ export type DailyBriefResponse = {
   next_steps: string[];
   data_health: Record<string, string>;
 };
+
+export type BriefRun = {
+  brief_id: string;
+  provider: string;
+  symbols: string[];
+  headline: string;
+  opportunity_count: number;
+  entry_watch_count: number;
+  risk_alert_count: number;
+  catalyst_count: number;
+  validation_count: number;
+  data_health: Record<string, string>;
+  payload: DailyBriefResponse;
+  created_at: string;
+};
+
+export type BriefRunsResponse = {
+  runs: BriefRun[];
+};
+
+export type BriefRunDetailResponse = {
+  run: BriefRun;
+  brief: DailyBriefResponse;
+};
+
+export type BriefMarkdownResponse = {
+  markdown: string;
+};

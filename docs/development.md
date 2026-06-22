@@ -46,6 +46,8 @@ The Brief page and `/api/daily-brief` provide the main daily research readout:
 ```bash
 curl 'http://127.0.0.1:8000/api/daily-brief?provider=fixture&include_news=false'
 curl 'http://127.0.0.1:8000/api/daily-brief?provider=free&symbols=US:AAPL,US:NVDA,CN:000001'
+curl -X POST 'http://127.0.0.1:8000/api/daily-brief/runs?provider=fixture&include_news=false'
+curl 'http://127.0.0.1:8000/api/daily-brief/runs'
 ```
 
 The API composes existing Qagent capabilities instead of inventing a new ranking stack:
@@ -59,6 +61,17 @@ The API composes existing Qagent capabilities instead of inventing a new ranking
 The response contains `headline`, `top_opportunities`, `entry_watch`, `risk_alerts`, `catalyst_watch`, `strategy_validation`, `data_caveats`, `next_steps`, and `data_health`.
 
 `qagent.briefing.daily` is intentionally a pure service module: it accepts precomputed scan/backtest/catalyst/risk/provider objects and returns Pydantic models. Network access, SQLite reads, and provider construction stay in the API layer.
+
+Saved brief runs are stored in SQLite as `brief_runs` with summary columns and full brief JSON. Useful routes:
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/api/daily-brief/runs?provider=fixture&include_news=false'
+curl 'http://127.0.0.1:8000/api/daily-brief/runs'
+curl 'http://127.0.0.1:8000/api/daily-brief/runs/<brief_id>'
+curl 'http://127.0.0.1:8000/api/daily-brief/runs/<brief_id>/markdown'
+```
+
+`qagent.briefing.export.render_daily_brief_markdown` turns a saved brief into a compact Markdown research note. This is the intended handoff point for later email, Telegram, Feishu, or cron-based delivery.
 
 ## Strategy Engine
 
@@ -173,6 +186,7 @@ The response distinguishes built-in free providers from optional API-key-backed 
 curl 'http://127.0.0.1:8000/api/opportunities?provider=fixture'
 curl 'http://127.0.0.1:8000/api/opportunities?provider=free&symbols=US:AAPL,CN:000001'
 curl 'http://127.0.0.1:8000/api/daily-brief?provider=fixture&include_news=false'
+curl -X POST 'http://127.0.0.1:8000/api/daily-brief/runs?provider=fixture&include_news=false'
 curl 'http://127.0.0.1:8000/api/backtest?provider=fixture'
 curl 'http://127.0.0.1:8000/api/provider-status'
 curl 'http://127.0.0.1:8000/api/strategy-performance?provider=fixture'

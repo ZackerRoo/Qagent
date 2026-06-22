@@ -300,6 +300,14 @@ h3 {
   margin-top: 12px;
 }
 
+.brief-actions,
+.table-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
 .table-shell {
   width: 100%;
   overflow: auto;
@@ -689,6 +697,21 @@ tbody tr.selected {
   color: #475569;
   font-size: 13px;
   line-height: 1.45;
+}
+
+.markdown-export {
+  width: 100%;
+  min-height: 260px;
+  margin-top: 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 12px;
+  color: #17202a;
+  background: #fbfcfe;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
 }
 
 @media (max-width: 1100px) {

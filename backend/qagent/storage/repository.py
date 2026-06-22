@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from qagent.domain.models import OpportunityCard
 from qagent.storage.tables import (
     AlertRuleRow,
+    BriefRunRow,
     OpportunitySnapshotRow,
     PositionRow,
     ScanRunRow,
@@ -98,6 +99,21 @@ class OpportunitySnapshotRecord(BaseModel):
     initial_stop: Decimal | None
     target_1: Decimal | None
     card: dict[str, object]
+
+
+class BriefRunRecord(BaseModel):
+    brief_id: str
+    provider: str
+    symbols: list[str]
+    headline: str
+    opportunity_count: int
+    entry_watch_count: int
+    risk_alert_count: int
+    catalyst_count: int
+    validation_count: int
+    data_health: dict[str, str]
+    payload: dict[str, object]
+    created_at: datetime
 
 
 def _serialize_tags(tags: list[str]) -> str:
@@ -230,6 +246,45 @@ class QagentRepository:
             )
             return [self._opportunity_snapshot_from_row(row) for row in rows]
 
+    def save_brief_run(self, brief) -> BriefRunRecord:
+        brief_id = f"brief-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+        payload = brief.model_dump(mode="json")
+        with self.session_factory() as session:
+            row = BriefRunRow(
+                brief_id=brief_id,
+                provider=brief.provider,
+                symbols=json.dumps(brief.symbols),
+                headline=brief.headline,
+                opportunity_count=len(brief.top_opportunities),
+                entry_watch_count=len(brief.entry_watch),
+                risk_alert_count=len(brief.risk_alerts),
+                catalyst_count=len(brief.catalyst_watch),
+                validation_count=len(brief.strategy_validation),
+                data_health=json.dumps(brief.data_health, sort_keys=True),
+                brief_json=json.dumps(payload, sort_keys=True),
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return self._brief_run_from_row(row)
+
+    def list_brief_runs(self, limit: int = 20) -> list[BriefRunRecord]:
+        with self.session_factory() as session:
+            rows = (
+                session.query(BriefRunRow)
+                .order_by(BriefRunRow.created_at.desc(), BriefRunRow.brief_id.desc())
+                .limit(limit)
+                .all()
+            )
+            return [self._brief_run_from_row(row) for row in rows]
+
+    def get_brief_run(self, brief_id: str) -> BriefRunRecord | None:
+        with self.session_factory() as session:
+            row = session.get(BriefRunRow, brief_id)
+            if row is None:
+                return None
+            return self._brief_run_from_row(row)
+
     @staticmethod
     def _watchlist_from_row(row: WatchlistItemRow) -> WatchlistItem:
         return WatchlistItem(
@@ -322,6 +377,23 @@ class QagentRepository:
             initial_stop=row.initial_stop,
             target_1=row.target_1,
             card=json.loads(row.card_json),
+        )
+
+    @staticmethod
+    def _brief_run_from_row(row: BriefRunRow) -> BriefRunRecord:
+        return BriefRunRecord(
+            brief_id=row.brief_id,
+            provider=row.provider,
+            symbols=json.loads(row.symbols or "[]"),
+            headline=row.headline,
+            opportunity_count=row.opportunity_count,
+            entry_watch_count=row.entry_watch_count,
+            risk_alert_count=row.risk_alert_count,
+            catalyst_count=row.catalyst_count,
+            validation_count=row.validation_count,
+            data_health=json.loads(row.data_health or "{}"),
+            payload=json.loads(row.brief_json),
+            created_at=row.created_at,
         )
 
 

@@ -69,6 +69,23 @@ class ScanRunRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class BriefRunRow(Base):
+    __tablename__ = "brief_runs"
+
+    brief_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    symbols: Mapped[str] = mapped_column(Text, default="")
+    headline: Mapped[str] = mapped_column(Text)
+    opportunity_count: Mapped[int] = mapped_column(Integer, default=0)
+    entry_watch_count: Mapped[int] = mapped_column(Integer, default=0)
+    risk_alert_count: Mapped[int] = mapped_column(Integer, default=0)
+    catalyst_count: Mapped[int] = mapped_column(Integer, default=0)
+    validation_count: Mapped[int] = mapped_column(Integer, default=0)
+    data_health: Mapped[str] = mapped_column(Text, default="{}")
+    brief_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class OpportunitySnapshotRow(Base):
     __tablename__ = "opportunity_snapshots"
 

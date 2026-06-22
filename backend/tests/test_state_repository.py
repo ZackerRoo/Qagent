@@ -128,6 +128,36 @@ def test_repository_filters_opportunity_snapshots_by_instrument(tmp_path):
     assert {snapshot.instrument_id for snapshot in snapshots} == {"CN:000001"}
 
 
+def test_repository_saves_and_loads_brief_runs(tmp_path):
+    from qagent.briefing.daily import build_daily_brief
+    from qagent.jobs.daily_scan import run_daily_scan
+    from qagent.providers.fixtures import FixtureMarketDataProvider
+
+    repo = make_repo(tmp_path)
+    scan = run_daily_scan(["US:TEST"], FixtureMarketDataProvider())
+    brief = build_daily_brief(
+        provider="fixture",
+        symbols=["US:TEST"],
+        scan_result=scan,
+        limit=5,
+        data_health={"brief_news": "skipped"},
+    )
+
+    saved = repo.save_brief_run(brief)
+    runs = repo.list_brief_runs(limit=5)
+    loaded = repo.get_brief_run(saved.brief_id)
+
+    assert saved.brief_id.startswith("brief-")
+    assert saved.provider == "fixture"
+    assert saved.symbols == ["US:TEST"]
+    assert saved.headline == brief.headline
+    assert saved.opportunity_count == len(brief.top_opportunities)
+    assert saved.payload["headline"] == brief.headline
+    assert runs[0].brief_id == saved.brief_id
+    assert loaded is not None
+    assert loaded.payload["top_opportunities"][0]["instrument_id"] == "US:TEST"
+
+
 def test_initialize_database_is_safe_for_parallel_calls(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'parallel' / 'qagent.db'}"
 

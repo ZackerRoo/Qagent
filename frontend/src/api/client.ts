@@ -5,6 +5,10 @@ import type {
   AlertRulesResponse,
   AlertSuggestionsResponse,
   BacktestResponse,
+  BriefMarkdownResponse,
+  BriefRun,
+  BriefRunDetailResponse,
+  BriefRunsResponse,
   CatalystsResponse,
   DataProviderMode,
   DailyBriefResponse,
@@ -184,6 +188,33 @@ export async function fetchDailyBrief(
     limit: 5,
     include_news: provider === "free",
   });
+}
+
+export async function saveDailyBriefRun(
+  provider: DataProviderMode,
+  symbols?: string,
+): Promise<BriefRun> {
+  return apiPost<BriefRun>(
+    `/daily-brief/runs${queryString({
+      provider,
+      symbols,
+      limit: 5,
+      include_news: provider === "free",
+    })}`,
+    {},
+  );
+}
+
+export async function fetchDailyBriefRuns(): Promise<BriefRunsResponse> {
+  return apiGet<BriefRunsResponse>("/daily-brief/runs", { limit: 10 });
+}
+
+export async function fetchDailyBriefRun(briefId: string): Promise<BriefRunDetailResponse> {
+  return apiGet<BriefRunDetailResponse>(`/daily-brief/runs/${briefId}`);
+}
+
+export async function fetchDailyBriefMarkdown(briefId: string): Promise<BriefMarkdownResponse> {
+  return apiGet<BriefMarkdownResponse>(`/daily-brief/runs/${briefId}/markdown`);
 }
 
 export async function fetchProviderStatus(): Promise<ProviderStatusResponse> {

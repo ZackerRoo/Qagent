@@ -67,6 +67,36 @@ def test_daily_brief_endpoint_returns_research_digest():
     assert body["data_health"]["brief_opportunities"] == str(len(body["top_opportunities"]))
 
 
+def test_daily_brief_run_api_saves_lists_loads_and_exports_markdown(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'api-brief-runs.db'}")
+    client = TestClient(create_app())
+
+    save_response = client.post("/api/daily-brief/runs?provider=fixture&include_news=false")
+
+    assert save_response.status_code == 200
+    saved = save_response.json()
+    assert saved["brief_id"].startswith("brief-")
+    assert saved["headline"]
+
+    list_response = client.get("/api/daily-brief/runs")
+    assert list_response.status_code == 200
+    runs = list_response.json()["runs"]
+    assert runs[0]["brief_id"] == saved["brief_id"]
+    assert runs[0]["opportunity_count"] == saved["opportunity_count"]
+
+    detail_response = client.get(f"/api/daily-brief/runs/{saved['brief_id']}")
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    assert detail["brief"]["headline"] == saved["headline"]
+    assert detail["brief"]["top_opportunities"]
+
+    markdown_response = client.get(f"/api/daily-brief/runs/{saved['brief_id']}/markdown")
+    assert markdown_response.status_code == 200
+    markdown = markdown_response.json()["markdown"]
+    assert markdown.startswith("# Qagent Daily Brief")
+    assert "## Top Opportunities" in markdown
+
+
 def test_agent_endpoint_answers_from_card_context():
     client = TestClient(create_app())
     response = client.post("/api/agent/query", json={"question": "Why is US:TEST on the list?"})
