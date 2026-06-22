@@ -3,6 +3,7 @@ import {
   Bell,
   BookOpenCheck,
   Briefcase,
+  History,
   ListFilter,
   Settings,
   RefreshCw,
@@ -18,6 +19,7 @@ const nav = [
   { id: "watchlist", label: "Watchlist", icon: Star },
   { id: "portfolio", label: "Portfolio", icon: Briefcase },
   { id: "alerts", label: "Alerts", icon: Bell },
+  { id: "history", label: "History", icon: History },
   { id: "review", label: "Review", icon: BookOpenCheck },
   { id: "settings", label: "Settings", icon: Settings },
 ] as const;

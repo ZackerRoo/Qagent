@@ -24,6 +24,7 @@ class ScanItem(BaseModel):
     strategies_watch: int = 0
     strategies_missing_data: int = 0
     latest_close: str | None = None
+    latest_trade_date: date | None = None
     provider: str | None = None
 
 
@@ -160,6 +161,7 @@ def _scan_item(
 
     latest = bars.sort_values("trade_date").iloc[-1]
     latest_close = str(round(float(latest["close"]), 2))
+    latest_trade_date = latest["trade_date"]
     provider = str(latest["provider"]) if "provider" in bars.columns else None
     if card:
         return ScanItem(
@@ -170,6 +172,7 @@ def _scan_item(
             signals=len(signals),
             **strategy_counts,
             latest_close=latest_close,
+            latest_trade_date=latest_trade_date,
             provider=provider,
         )
 
@@ -181,6 +184,7 @@ def _scan_item(
         signals=len(signals),
         **strategy_counts,
         latest_close=latest_close,
+        latest_trade_date=latest_trade_date,
         provider=provider,
     )
 

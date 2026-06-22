@@ -95,6 +95,23 @@ Opportunity cards now include:
 - `rank_reasons`: readable reasons behind the ranking.
 - Strategy-specific trade plans for breakout, healthy pullback, and PEAD.
 
+## Scan History And Outcome Replay
+
+Dashboard scans through `/api/opportunities` are persisted to SQLite:
+
+- `scan_runs` records provider, mode, requested symbols, counts, data-health metadata, and created time.
+- `opportunity_snapshots` records one saved opportunity card per scan, including signal date, latest close, primary strategy, scores, trigger, stop, target, and full card JSON.
+
+Useful routes:
+
+```bash
+curl 'http://127.0.0.1:8000/api/scan-runs'
+curl 'http://127.0.0.1:8000/api/opportunity-history?instrument_id=US:TEST'
+curl 'http://127.0.0.1:8000/api/outcomes?provider=fixture'
+```
+
+Outcome replay uses daily OHLCV bars to calculate 5/10/20/60-day forward returns, max drawdown, max runup, and a status of `target_1_hit`, `stopped`, `working`, `lagging`, or `pending`.
+
 ## Useful API Checks
 
 ```bash
@@ -121,6 +138,7 @@ npm run build
 
 - No automated trading or broker execution.
 - Free data may be delayed or incomplete.
+- Outcome replay uses daily bars and cannot prove intraday ordering between a stop and target.
 - PEAD is implemented when earnings actuals and estimates are available, but production free-data coverage depends on FMP/Finnhub/Alpha Vantage or another earnings provider.
 - Analyst revision, TAM-PEG, and Bayesian valuation are implemented with normalized free-source fields, but results are only as good as the upstream fundamentals and estimates. Alpha Vantage ratings are current snapshots; FMP analyst-estimate history is needed for true revision scoring.
 - Options flow, 北向资金, 龙虎榜, short interest, and richer announcement parsing are registered but not production-grade without the required provider data.

@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException
@@ -10,6 +11,7 @@ from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.jobs.intraday_check import evaluate_snapshot_alerts
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE, DEFAULT_FREE_UNIVERSE
+from qagent.monitoring.outcomes import compute_opportunity_outcome
 from qagent.monitoring.portfolio import PositionInput, analyze_position_risk
 from qagent.monitoring.alerts import AlertRule
 from qagent.providers.factory import build_market_data_provider
@@ -54,7 +56,7 @@ def _scan(provider_mode: str = "fixture", symbols: str | None = None):
     instrument_ids = _parse_symbols(symbols, default_universe)
     try:
         provider = build_market_data_provider(mode)
-        return run_daily_scan(instrument_ids, provider, mode=mode)
+        return run_daily_scan(instrument_ids, provider, mode=mode), mode, instrument_ids
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -66,7 +68,8 @@ def _repo() -> QagentRepository:
 
 @router.get("/opportunities")
 def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict[str, object]:
-    result = _scan(provider, symbols)
+    result, mode, instrument_ids = _scan(provider, symbols)
+    _repo().save_scan_run(provider=mode, mode=mode, symbols=instrument_ids, result=result)
     return {
         "cards": [card.model_dump(mode="json") for card in result.cards],
         "items": [item.model_dump(mode="json") for item in result.items],
@@ -77,7 +80,7 @@ def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict
 
 @router.get("/overview")
 def overview(provider: str = "fixture", symbols: str | None = None) -> dict[str, object]:
-    result = _scan(provider, symbols)
+    result, _, _ = _scan(provider, symbols)
     return {
         "market_regime": {
             "US": "development_fixture",
@@ -143,6 +146,55 @@ def evaluate_alerts(request: AlertEvaluationRequest) -> dict[str, list[object]]:
     return {"alerts": [alert.model_dump(mode="json") for alert in alerts]}
 
 
+@router.get("/scan-runs")
+def scan_runs(limit: int = 20) -> dict[str, list[object]]:
+    return {"runs": [run.model_dump(mode="json") for run in _repo().list_scan_runs(limit=limit)]}
+
+
+@router.get("/opportunity-history")
+def opportunity_history(
+    instrument_id: str | None = None,
+    limit: int = 50,
+) -> dict[str, list[object]]:
+    snapshots = _repo().list_opportunity_snapshots(instrument_id=instrument_id, limit=limit)
+    return {"snapshots": [snapshot.model_dump(mode="json") for snapshot in snapshots]}
+
+
+@router.get("/outcomes")
+def outcomes(
+    provider: str = "fixture",
+    instrument_id: str | None = None,
+    limit: int = 50,
+) -> dict[str, object]:
+    repo = _repo()
+    snapshots = repo.list_opportunity_snapshots(instrument_id=instrument_id, limit=limit)
+    try:
+        market_provider = build_market_data_provider(provider)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    replayed = []
+    for snapshot in snapshots:
+        bars = market_provider.get_daily_bars(
+            [snapshot.instrument_id],
+            start=date(1900, 1, 1),
+            end=date(2100, 1, 1),
+        )
+        replayed.append(compute_opportunity_outcome(snapshot, bars))
+    data_health = {
+        "provider": provider,
+        "snapshots": str(len(snapshots)),
+        "outcomes": str(len(replayed)),
+    }
+    provider_errors = getattr(market_provider, "last_errors", [])
+    if provider_errors:
+        data_health["errors"] = " | ".join(provider_errors[:3])
+    return {
+        "outcomes": [outcome.model_dump(mode="json") for outcome in replayed],
+        "data_health": data_health,
+    }
+
+
 @router.get("/portfolio")
 def portfolio(provider: str = "fixture") -> dict[str, object]:
     positions = _repo().list_positions()
@@ -204,7 +256,7 @@ def upsert_position(position: PositionCreate) -> dict[str, object]:
 
 @router.post("/agent/query", response_model=AgentQueryResponse)
 def agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
-    result = _scan()
+    result, _, _ = _scan()
     selected = None
     if request.instrument_id:
         selected = next((card for card in result.cards if card.instrument_id == request.instrument_id), None)

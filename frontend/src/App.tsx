@@ -4,6 +4,7 @@ import { fetchOpportunities, fetchOverview } from "./api/client";
 import { AgentPanel } from "./components/AgentPanel";
 import { Layout, type PageId } from "./components/Layout";
 import { Alerts } from "./pages/Alerts";
+import { History } from "./pages/History";
 import { Opportunities } from "./pages/Opportunities";
 import { Overview } from "./pages/Overview";
 import { Portfolio } from "./pages/Portfolio";
@@ -94,6 +95,8 @@ export default function App() {
         return <Portfolio dataMode={dataMode} />;
       case "alerts":
         return <Alerts />;
+      case "history":
+        return <History dataMode={dataMode} />;
       case "review":
         return <Review symbols={symbols} />;
       case "settings":

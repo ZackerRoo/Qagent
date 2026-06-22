@@ -6,10 +6,13 @@ import type {
   CatalystsResponse,
   DataProviderMode,
   OpportunitiesResponse,
+  OpportunityHistoryResponse,
+  OutcomesResponse,
   OverviewResponse,
   PortfolioResponse,
   Position,
   PositionsResponse,
+  ScanRunsResponse,
   WatchlistItem,
   WatchlistResponse,
 } from "../types";
@@ -114,4 +117,16 @@ export async function evaluateAlerts(prices: Record<string, string>): Promise<Al
 
 export async function fetchCatalysts(symbols: string): Promise<CatalystsResponse> {
   return apiGet<CatalystsResponse>("/catalysts", { symbols, limit: 5 });
+}
+
+export async function fetchScanRuns(): Promise<ScanRunsResponse> {
+  return apiGet<ScanRunsResponse>("/scan-runs", { limit: 20 });
+}
+
+export async function fetchOpportunityHistory(): Promise<OpportunityHistoryResponse> {
+  return apiGet<OpportunityHistoryResponse>("/opportunity-history", { limit: 50 });
+}
+
+export async function fetchOutcomes(provider: DataProviderMode): Promise<OutcomesResponse> {
+  return apiGet<OutcomesResponse>("/outcomes", { provider, limit: 50 });
 }

@@ -18,6 +18,8 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - Opportunity cards with primary strategy, strategy score, rank score, ranking reasons, strategy stack, trigger, no-chase level, stop, targets, risk/reward, scenario percentages, and signal stack evidence.
 - Scan coverage table showing `setup_ready`, `no_setup`, or `no_data` per symbol plus passed/watch/missing strategy counts.
 - Strategy health summary with sample count, 10-day win rate, average 10/20-day forward return, max 10-day loss, and readiness labels.
+- Persistent scan history and opportunity snapshots saved from dashboard scans.
+- Outcome replay that computes forward returns, max drawdown, max runup, and target/stop/pending status from saved opportunity snapshots.
 - Watchlist, positions, alert rules, alert evaluation, and portfolio risk view backed by SQLite.
 - Catalyst Review using free news sources plus deterministic catalyst hypotheses and verification paths.
 - Constrained Agent answers that refuse guaranteed returns and answer from structured strategy/card context.
@@ -73,11 +75,15 @@ npm run build
 
 ```bash
 curl 'http://127.0.0.1:8000/api/opportunities?provider=free&symbols=US:AAPL,CN:000001'
+curl 'http://127.0.0.1:8000/api/scan-runs'
+curl 'http://127.0.0.1:8000/api/outcomes?provider=fixture'
 curl 'http://127.0.0.1:8000/api/catalysts?symbols=US:AAPL&limit=5'
 curl 'http://127.0.0.1:8000/api/portfolio?provider=fixture'
 ```
 
 `/api/opportunities` returns `cards`, `items`, `strategy_health`, and `data_health`. Cards include `rank_score` and `rank_reasons`. Strategies that cannot be evaluated with the current free-data scan are returned with `status: "missing_data"` instead of fabricated scores.
+
+`/api/opportunities` also records a scan run. `/api/scan-runs`, `/api/opportunity-history`, and `/api/outcomes` expose the saved research trail and daily-bar outcome replay.
 
 ## Research Docs
 

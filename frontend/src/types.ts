@@ -103,6 +103,7 @@ export type ScanItem = {
   strategies_watch: number;
   strategies_missing_data: number;
   latest_close: string | null;
+  latest_trade_date: string | null;
   provider: string | null;
 };
 
@@ -214,5 +215,66 @@ export type CatalystHypothesis = {
 export type CatalystsResponse = {
   news: NewsItem[];
   hypotheses: CatalystHypothesis[];
+  data_health: Record<string, string>;
+};
+
+export type ScanRun = {
+  run_id: string;
+  provider: string;
+  mode: string;
+  symbols: string[];
+  scanned: number;
+  cards: number;
+  data_health: Record<string, string>;
+  created_at: string;
+};
+
+export type ScanRunsResponse = {
+  runs: ScanRun[];
+};
+
+export type OpportunitySnapshot = {
+  snapshot_id: string;
+  run_id: string;
+  card_id: string;
+  instrument_id: string;
+  market: string;
+  status: string;
+  signal_date: string | null;
+  latest_close: string | null;
+  primary_strategy_id: string | null;
+  score: string;
+  strategy_score: string;
+  rank_score: string;
+  trigger_price: string | null;
+  initial_stop: string | null;
+  target_1: string | null;
+  card: OpportunityCard;
+};
+
+export type OpportunityHistoryResponse = {
+  snapshots: OpportunitySnapshot[];
+};
+
+export type OpportunityOutcome = {
+  snapshot_id: string;
+  run_id: string;
+  instrument_id: string;
+  primary_strategy_id: string | null;
+  signal_date: string | null;
+  outcome_status: string;
+  return_5d: number | null;
+  return_10d: number | null;
+  return_20d: number | null;
+  return_60d: number | null;
+  max_drawdown_pct: number | null;
+  max_runup_pct: number | null;
+  trigger_price: string | null;
+  initial_stop: string | null;
+  target_1: string | null;
+};
+
+export type OutcomesResponse = {
+  outcomes: OpportunityOutcome[];
   data_health: Record<string, string>;
 };

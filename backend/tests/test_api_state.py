@@ -76,3 +76,49 @@ def test_portfolio_api_returns_position_risk(tmp_path, monkeypatch):
     assert body["risk"][0]["instrument_id"] == "US:TEST"
     assert body["risk"][0]["current_price"] == "82.00"
     assert body["risk"][0]["status"] == "inside_plan"
+
+
+def test_opportunities_api_records_scan_history_and_outcomes(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'api-history.db'}")
+    client = TestClient(create_app())
+
+    scan_response = client.get("/api/opportunities?provider=fixture")
+
+    assert scan_response.status_code == 200
+    runs_response = client.get("/api/scan-runs")
+    history_response = client.get("/api/opportunity-history")
+    outcomes_response = client.get("/api/outcomes?provider=fixture")
+    assert runs_response.status_code == 200
+    assert history_response.status_code == 200
+    assert outcomes_response.status_code == 200
+    runs = runs_response.json()["runs"]
+    snapshots = history_response.json()["snapshots"]
+    outcomes = outcomes_response.json()["outcomes"]
+    assert len(runs) == 1
+    assert runs[0]["provider"] == "fixture"
+    assert runs[0]["cards"] == len(scan_response.json()["cards"])
+    assert snapshots
+    assert snapshots[0]["instrument_id"] in {"US:TEST", "CN:000001"}
+    assert snapshots[0]["card"]["instrument_id"] == snapshots[0]["instrument_id"]
+    assert outcomes
+    assert outcomes[0]["outcome_status"] in {
+        "pending",
+        "working",
+        "lagging",
+        "target_1_hit",
+        "stopped",
+    }
+    assert outcomes_response.json()["data_health"]["snapshots"] == str(len(snapshots))
+
+
+def test_opportunity_history_api_filters_by_instrument(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'api-history-filter.db'}")
+    client = TestClient(create_app())
+    client.get("/api/opportunities?provider=fixture")
+
+    response = client.get("/api/opportunity-history?instrument_id=US:TEST")
+
+    assert response.status_code == 200
+    snapshots = response.json()["snapshots"]
+    assert snapshots
+    assert {snapshot["instrument_id"] for snapshot in snapshots} == {"US:TEST"}

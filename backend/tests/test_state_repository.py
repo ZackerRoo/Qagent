@@ -80,6 +80,54 @@ def test_repository_adds_and_lists_alert_rules(tmp_path):
     assert repo.list_alert_rules()[0].threshold == Decimal("82.00")
 
 
+def test_repository_saves_scan_run_and_opportunity_snapshots(tmp_path):
+    from qagent.jobs.daily_scan import run_daily_scan
+    from qagent.providers.fixtures import FixtureMarketDataProvider
+
+    repo = make_repo(tmp_path)
+    result = run_daily_scan(["US:TEST"], FixtureMarketDataProvider())
+
+    run = repo.save_scan_run(
+        provider="fixture",
+        mode="fixture",
+        symbols=["US:TEST"],
+        result=result,
+    )
+
+    runs = repo.list_scan_runs(limit=5)
+    snapshots = repo.list_opportunity_snapshots(limit=5)
+    assert runs[0].run_id == run.run_id
+    assert runs[0].symbols == ["US:TEST"]
+    assert runs[0].cards == 1
+    assert runs[0].data_health["provider"] == "fixture"
+    assert len(snapshots) == 1
+    assert snapshots[0].run_id == run.run_id
+    assert snapshots[0].instrument_id == "US:TEST"
+    assert snapshots[0].primary_strategy_id
+    assert snapshots[0].signal_date is not None
+    assert snapshots[0].latest_close == Decimal("82.00")
+    assert snapshots[0].card["instrument_id"] == "US:TEST"
+
+
+def test_repository_filters_opportunity_snapshots_by_instrument(tmp_path):
+    from qagent.jobs.daily_scan import run_daily_scan
+    from qagent.providers.fixtures import FixtureMarketDataProvider
+
+    repo = make_repo(tmp_path)
+    result = run_daily_scan(["US:TEST", "CN:000001"], FixtureMarketDataProvider())
+    repo.save_scan_run(
+        provider="fixture",
+        mode="fixture",
+        symbols=["US:TEST", "CN:000001"],
+        result=result,
+    )
+
+    snapshots = repo.list_opportunity_snapshots(instrument_id="CN:000001", limit=5)
+
+    assert snapshots
+    assert {snapshot.instrument_id for snapshot in snapshots} == {"CN:000001"}
+
+
 def test_initialize_database_is_safe_for_parallel_calls(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'parallel' / 'qagent.db'}"
 
