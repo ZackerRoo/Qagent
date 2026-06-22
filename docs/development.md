@@ -116,6 +116,26 @@ Outcome replay uses daily OHLCV bars to calculate 5/10/20/60-day forward returns
 
 Strategy performance groups replayed outcomes by `primary_strategy_id` and reports sample count, pending/completed counts, target-hit rate, positive 10-day rate, average forward returns, max drawdown, and max runup. Alert suggestions derive draft entry, stop, and target rules from persisted opportunity snapshots.
 
+## Event-Level Backtesting
+
+The backtest engine reruns Qagent scans on historical trading dates and validates the generated opportunity cards with forward bars:
+
+```bash
+curl 'http://127.0.0.1:8000/api/backtest?provider=fixture&start=2026-01-30&end=2026-03-20&step_days=5'
+curl 'http://127.0.0.1:8000/api/backtest?provider=free&symbols=US:AAPL,US:NVDA,CN:000001&step_days=5'
+```
+
+Backtesting is event-level. It measures opportunity-card outcomes, not portfolio returns. Each scan date calls `run_daily_scan` with bars and strategy data capped at that date, then outcome replay uses future daily bars to calculate 5/10/20/60-day returns, target/stop status, max drawdown, and max runup.
+
+The response includes:
+
+- `summary`: scan count, evaluated signals, completed signals, target-hit rate, positive 10-day rate, average forward returns, max drawdown, and max runup.
+- `performance`: strategy-level replay metrics grouped by primary strategy.
+- `signals`: recent historical opportunity events and their forward outcomes.
+- `data_health`: provider, signal count, scan dates, and the `lookahead_guard` flag.
+
+The History page exposes this through the Backtest Validation panel. Fixture mode uses the deterministic fixture universe; free mode uses the current dashboard symbol input.
+
 ## Provider Readiness
 
 Provider status is available through the Settings page and `/api/provider-status`:
@@ -131,6 +151,7 @@ The response distinguishes built-in free providers from optional API-key-backed 
 ```bash
 curl 'http://127.0.0.1:8000/api/opportunities?provider=fixture'
 curl 'http://127.0.0.1:8000/api/opportunities?provider=free&symbols=US:AAPL,CN:000001'
+curl 'http://127.0.0.1:8000/api/backtest?provider=fixture'
 curl 'http://127.0.0.1:8000/api/provider-status'
 curl 'http://127.0.0.1:8000/api/strategy-performance?provider=fixture'
 curl 'http://127.0.0.1:8000/api/alert-suggestions'
@@ -155,6 +176,7 @@ npm run build
 
 - No automated trading or broker execution.
 - Free data may be delayed or incomplete.
+- Backtests are event-level opportunity validation, not broker-grade portfolio simulations with cash, sizing, commissions, slippage, tax, or intraday fills.
 - Outcome replay uses daily bars and cannot prove intraday ordering between a stop and target.
 - PEAD is implemented when earnings actuals and estimates are available, but production free-data coverage depends on FMP/Finnhub/Alpha Vantage or another earnings provider.
 - Analyst revision, TAM-PEG, and Bayesian valuation are implemented with normalized free-source fields, but results are only as good as the upstream fundamentals and estimates. Alpha Vantage ratings are current snapshots; FMP analyst-estimate history is needed for true revision scoring.

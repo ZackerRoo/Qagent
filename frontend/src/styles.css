@@ -381,14 +381,23 @@ tbody tr.selected {
 }
 
 .status-ready,
-.status-configured {
+.status-configured,
+.status-target_1_hit,
+.status-working {
   background: #dff4e8;
   color: #116b3c;
 }
 
-.status-missing_config {
+.status-missing_config,
+.status-pending {
   background: #fff3d6;
   color: #8a5b00;
+}
+
+.status-lagging,
+.status-stopped {
+  background: #ffe7e7;
+  color: #9f1f1f;
 }
 
 .reason-cell {

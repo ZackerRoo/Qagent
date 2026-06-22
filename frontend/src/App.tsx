@@ -96,7 +96,7 @@ export default function App() {
       case "alerts":
         return <Alerts />;
       case "history":
-        return <History dataMode={dataMode} />;
+        return <History dataMode={dataMode} symbols={symbols} />;
       case "review":
         return <Review symbols={symbols} />;
       case "settings":

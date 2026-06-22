@@ -1,10 +1,11 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException
 
 from qagent.agent.responder import answer_question
 from qagent.api.schemas import AgentQueryRequest, AgentQueryResponse, AlertEvaluationRequest
+from qagent.backtesting.engine import run_historical_backtest
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
 from qagent.catalysts.providers import FreeCatalystProvider
 from qagent.db import create_session_factory, initialize_database
@@ -67,6 +68,16 @@ def _scan(provider_mode: str = "fixture", symbols: str | None = None):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _backtest_dates(mode: str, start: date | None, end: date | None) -> tuple[date, date]:
+    end_date = end or (date(2026, 3, 20) if mode == "fixture" else date.today())
+    start_date = start or (
+        date(2026, 1, 15) if mode == "fixture" else end_date - timedelta(days=180)
+    )
+    if start_date > end_date:
+        raise HTTPException(status_code=400, detail="start must be on or before end")
+    return start_date, end_date
+
+
 def _repo() -> QagentRepository:
     initialize_database()
     return QagentRepository(create_session_factory())
@@ -94,6 +105,45 @@ def overview(provider: str = "fixture", symbols: str | None = None) -> dict[str,
         },
         "top_cards": [card.model_dump(mode="json") for card in result.cards[:5]],
         "strategy_health": [item.model_dump(mode="json") for item in result.strategy_health[:6]],
+        "data_health": result.data_health,
+    }
+
+
+@router.get("/backtest")
+def backtest(
+    provider: str = "fixture",
+    symbols: str | None = None,
+    start: date | None = None,
+    end: date | None = None,
+    step_days: int = 5,
+    limit: int = 100,
+) -> dict[str, object]:
+    mode = provider.strip().lower()
+    if step_days <= 0 or step_days > 60:
+        raise HTTPException(status_code=400, detail="step_days must be between 1 and 60")
+    if limit <= 0 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+
+    default_universe = DEFAULT_FREE_UNIVERSE if mode == "free" else DEFAULT_DEV_UNIVERSE
+    instrument_ids = _parse_symbols(symbols, default_universe)
+    start_date, end_date = _backtest_dates(mode, start, end)
+    try:
+        market_provider = build_market_data_provider(mode)
+        result = run_historical_backtest(
+            instrument_ids=instrument_ids,
+            provider=market_provider,
+            start=start_date,
+            end=end_date,
+            step_days=step_days,
+            max_signals=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "summary": result.summary.model_dump(mode="json"),
+        "performance": [item.model_dump(mode="json") for item in result.performance],
+        "signals": [item.model_dump(mode="json") for item in result.signals],
         "data_health": result.data_health,
     }
 

@@ -127,3 +127,32 @@ def test_opportunity_history_api_filters_by_instrument(tmp_path, monkeypatch):
     snapshots = response.json()["snapshots"]
     assert snapshots
     assert {snapshot["instrument_id"] for snapshot in snapshots} == {"US:TEST"}
+
+
+def test_backtest_api_returns_fixture_validation(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'api-backtest.db'}")
+    client = TestClient(create_app())
+
+    response = client.get(
+        "/api/backtest?provider=fixture&symbols=US:TEST,CN:000001"
+        "&start=2026-01-30&end=2026-03-20&step_days=5"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["provider"] == "fixture"
+    assert body["summary"]["scan_count"] > 0
+    assert body["summary"]["evaluated_signals"] > 0
+    assert body["performance"]
+    assert body["signals"]
+    assert body["data_health"]["lookahead_guard"] == "bars_limited_to_scan_date"
+
+
+def test_backtest_api_rejects_reversed_date_range(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'api-backtest-invalid.db'}")
+    client = TestClient(create_app())
+
+    response = client.get("/api/backtest?provider=fixture&start=2026-03-20&end=2026-01-30")
+
+    assert response.status_code == 400
+    assert "start" in response.json()["detail"]

@@ -325,3 +325,46 @@ export type StrategyPerformanceResponse = {
   performance: StrategyPerformance[];
   data_health: Record<string, string>;
 };
+
+export type BacktestSummary = {
+  provider: string;
+  symbols: string[];
+  start: string;
+  end: string;
+  scan_count: number;
+  evaluated_signals: number;
+  completed_signals: number;
+  target_hit_rate: number | null;
+  positive_rate_10d: number | null;
+  avg_return_5d: number | null;
+  avg_return_10d: number | null;
+  avg_return_20d: number | null;
+  max_drawdown_pct: number | null;
+  max_runup_pct: number | null;
+};
+
+export type BacktestSignal = {
+  snapshot_id: string;
+  instrument_id: string;
+  signal_date: string;
+  primary_strategy_id: string | null;
+  status: string;
+  rank_score: string;
+  trigger_price: string | null;
+  initial_stop: string | null;
+  target_1: string | null;
+  outcome_status: string;
+  return_5d: number | null;
+  return_10d: number | null;
+  return_20d: number | null;
+  return_60d: number | null;
+  max_drawdown_pct: number | null;
+  max_runup_pct: number | null;
+};
+
+export type BacktestResponse = {
+  summary: BacktestSummary;
+  performance: StrategyPerformance[];
+  signals: BacktestSignal[];
+  data_health: Record<string, string>;
+};

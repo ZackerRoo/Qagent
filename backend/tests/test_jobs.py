@@ -1,3 +1,5 @@
+from datetime import date
+
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.providers.fixtures import FixtureMarketDataProvider
 
@@ -32,6 +34,18 @@ def test_daily_scan_promotes_pead_when_earnings_fixture_is_available():
     assert result.cards[0].primary_strategy_id == "pead_earnings_drift"
     assert result.cards[0].entry_plan.entry_type == "pead"
     assert result.data_health["strategy_data_provider"] == "fixture_strategy_data"
+
+
+def test_daily_scan_respects_caller_date_window():
+    result = run_daily_scan(
+        instrument_ids=["US:TEST"],
+        provider=FixtureMarketDataProvider(),
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 30),
+    )
+
+    assert result.items[0].latest_trade_date == date(2026, 1, 30)
+    assert result.items[0].latest_close == "57.35"
 
 
 class EmptyProviderWithErrors:

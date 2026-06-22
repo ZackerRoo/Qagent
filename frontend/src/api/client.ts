@@ -4,6 +4,7 @@ import type {
   AlertRule,
   AlertRulesResponse,
   AlertSuggestionsResponse,
+  BacktestResponse,
   CatalystsResponse,
   DataProviderMode,
   OpportunitiesResponse,
@@ -26,6 +27,9 @@ type ScanParams = {
   provider?: DataProviderMode;
   symbols?: string;
   limit?: number;
+  start?: string;
+  end?: string;
+  step_days?: number;
 };
 
 function queryString(params?: ScanParams): string {
@@ -41,6 +45,15 @@ function queryString(params?: ScanParams): string {
   }
   if (params.limit) {
     search.set("limit", String(params.limit));
+  }
+  if (params.start) {
+    search.set("start", params.start);
+  }
+  if (params.end) {
+    search.set("end", params.end);
+  }
+  if (params.step_days) {
+    search.set("step_days", String(params.step_days));
   }
   const value = search.toString();
   return value ? `?${value}` : "";
@@ -142,6 +155,18 @@ export async function fetchStrategyPerformance(
   provider: DataProviderMode,
 ): Promise<StrategyPerformanceResponse> {
   return apiGet<StrategyPerformanceResponse>("/strategy-performance", { provider, limit: 100 });
+}
+
+export async function fetchBacktest(
+  provider: DataProviderMode,
+  symbols?: string,
+): Promise<BacktestResponse> {
+  return apiGet<BacktestResponse>("/backtest", {
+    provider,
+    symbols,
+    step_days: 5,
+    limit: 100,
+  });
 }
 
 export async function fetchProviderStatus(): Promise<ProviderStatusResponse> {

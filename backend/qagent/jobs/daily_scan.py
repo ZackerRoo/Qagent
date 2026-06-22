@@ -40,6 +40,8 @@ def run_daily_scan(
     provider: MarketDataProvider,
     mode: str = "development",
     strategy_data_provider: StrategyDataProvider | None = None,
+    start: date = date(2026, 1, 1),
+    end: date = date(2026, 12, 31),
 ) -> DailyScanResult:
     cards: list[OpportunityCard] = []
     items: list[ScanItem] = []
@@ -58,33 +60,33 @@ def run_daily_scan(
     for instrument_id in instrument_ids:
         bars = provider.get_daily_bars(
             instrument_ids=[instrument_id],
-            start=date(2026, 1, 1),
-            end=date(2026, 12, 31),
+            start=start,
+            end=end,
         )
         earnings_events = strategy_provider.get_earnings_events(
             instrument_ids=[instrument_id],
-            start=date(2026, 1, 1),
-            end=date(2026, 12, 31),
+            start=start,
+            end=end,
         )
         filings = strategy_provider.get_filings(
             instrument_ids=[instrument_id],
-            start=date(2026, 1, 1),
-            end=date(2026, 12, 31),
+            start=start,
+            end=end,
         )
         announcements = strategy_provider.get_announcements(
             instrument_ids=[instrument_id],
-            start=date(2026, 1, 1),
-            end=date(2026, 12, 31),
+            start=start,
+            end=end,
         )
         fundamentals = strategy_provider.get_fundamentals(
             instrument_ids=[instrument_id],
-            start=date(2026, 1, 1),
-            end=date(2026, 12, 31),
+            start=start,
+            end=end,
         )
         analyst_insights = strategy_provider.get_analyst_insights(
             instrument_ids=[instrument_id],
-            start=date(2026, 1, 1),
-            end=date(2026, 12, 31),
+            start=start,
+            end=end,
         )
         strategy_filings_count += len(filings)
         strategy_announcements_count += len(announcements)

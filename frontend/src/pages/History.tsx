@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import {
+  fetchBacktest,
   fetchOpportunityHistory,
   fetchOutcomes,
   fetchScanRuns,
@@ -8,6 +9,7 @@ import {
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
 import type {
+  BacktestResponse,
   DataProviderMode,
   OpportunityHistoryResponse,
   OutcomesResponse,
@@ -29,12 +31,15 @@ function formatRatio(value: number | null) {
   return `${(value * 100).toFixed(0)}%`;
 }
 
-export function History({ dataMode }: { dataMode: DataProviderMode }) {
+export function History({ dataMode, symbols }: { dataMode: DataProviderMode; symbols: string }) {
+  const [backtest, setBacktest] = useState<BacktestResponse>();
   const [runs, setRuns] = useState<ScanRunsResponse>();
   const [history, setHistory] = useState<OpportunityHistoryResponse>();
   const [outcomes, setOutcomes] = useState<OutcomesResponse>();
   const [performance, setPerformance] = useState<StrategyPerformanceResponse>();
   const [error, setError] = useState("");
+  const [backtestError, setBacktestError] = useState("");
+  const [isBacktesting, setIsBacktesting] = useState(false);
 
   useEffect(() => {
     async function load() {
@@ -57,8 +62,142 @@ export function History({ dataMode }: { dataMode: DataProviderMode }) {
     void load();
   }, [dataMode]);
 
+  async function runBacktest() {
+    try {
+      setIsBacktesting(true);
+      setBacktestError("");
+      const result = await fetchBacktest(dataMode, dataMode === "free" ? symbols : undefined);
+      setBacktest(result);
+    } catch (caught) {
+      setBacktestError(caught instanceof Error ? caught.message : "Failed to run backtest");
+    } finally {
+      setIsBacktesting(false);
+    }
+  }
+
   return (
     <div className="stack">
+      <section className="panel">
+        <div className="panel-heading">
+          <h2>Backtest Validation</h2>
+          <button className="icon-action" type="button" onClick={runBacktest} disabled={isBacktesting}>
+            {isBacktesting ? "Running" : "Run Backtest"}
+          </button>
+        </div>
+        {backtestError && <div className="empty-state error">{backtestError}</div>}
+        {backtest ? (
+          <div className="stack">
+            <DataHealth data={backtest.data_health} />
+            <div className="metric-grid">
+              <div>
+                <span>Scans</span>
+                <strong>{backtest.summary.scan_count}</strong>
+              </div>
+              <div>
+                <span>Signals</span>
+                <strong>{backtest.summary.evaluated_signals}</strong>
+              </div>
+              <div>
+                <span>Completed</span>
+                <strong>{backtest.summary.completed_signals}</strong>
+              </div>
+              <div>
+                <span>Target Hit</span>
+                <strong>{formatRatio(backtest.summary.target_hit_rate)}</strong>
+              </div>
+              <div>
+                <span>Positive 10D</span>
+                <strong>{formatRatio(backtest.summary.positive_rate_10d)}</strong>
+              </div>
+              <div>
+                <span>Avg 10D</span>
+                <strong>{formatNumber(backtest.summary.avg_return_10d, "%")}</strong>
+              </div>
+              <div>
+                <span>Max DD</span>
+                <strong>{formatNumber(backtest.summary.max_drawdown_pct, "%")}</strong>
+              </div>
+              <div>
+                <span>Max Runup</span>
+                <strong>{formatNumber(backtest.summary.max_runup_pct, "%")}</strong>
+              </div>
+            </div>
+            <div className="table-shell">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Strategy</th>
+                    <th>Samples</th>
+                    <th>Done</th>
+                    <th>Target Hit</th>
+                    <th>Positive 10D</th>
+                    <th>Avg 10D</th>
+                    <th>Max DD</th>
+                    <th>Max Runup</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {backtest.performance.map((item) => (
+                    <tr key={item.strategy_id}>
+                      <td className="reason-cell">{item.strategy_id}</td>
+                      <td>{item.sample_count}</td>
+                      <td>{item.completed_count}</td>
+                      <td>{formatRatio(item.target_hit_rate)}</td>
+                      <td>{formatRatio(item.positive_rate_10d)}</td>
+                      <td>{formatNumber(item.avg_return_10d, "%")}</td>
+                      <td>{formatNumber(item.max_drawdown_pct, "%")}</td>
+                      <td>{formatNumber(item.max_runup_pct, "%")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="table-shell">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Ticker</th>
+                    <th>Strategy</th>
+                    <th>Outcome</th>
+                    <th>5D</th>
+                    <th>10D</th>
+                    <th>20D</th>
+                    <th>Trigger</th>
+                    <th>Stop</th>
+                    <th>Target</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {backtest.signals.map((signal) => (
+                    <tr key={signal.snapshot_id}>
+                      <td>{signal.signal_date}</td>
+                      <td className="ticker">{signal.instrument_id}</td>
+                      <td className="reason-cell">{signal.primary_strategy_id ?? "None"}</td>
+                      <td>
+                        <span className={`status status-${signal.outcome_status}`}>
+                          {signal.outcome_status}
+                        </span>
+                      </td>
+                      <td>{formatNumber(signal.return_5d, "%")}</td>
+                      <td>{formatNumber(signal.return_10d, "%")}</td>
+                      <td>{formatNumber(signal.return_20d, "%")}</td>
+                      <td>{signal.trigger_price ?? "None"}</td>
+                      <td>{signal.initial_stop ?? "None"}</td>
+                      <td>{signal.target_1 ?? "None"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : (
+          <div className="empty-state">
+            Run an event-level backtest to validate historical opportunity cards.
+          </div>
+        )}
+      </section>
+
       <section className="panel">
         <div className="panel-heading">
           <h2>Scan Runs</h2>
