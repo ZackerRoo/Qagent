@@ -10,7 +10,8 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - US free market data via `yfinance`.
 - A-share free market data via `akshare`, with `baostock` fallback.
 - Strategy registry covering trend momentum, breakout + volume, healthy pullback, GF-DMA health, catalyst transmission, PEAD, analyst revisions, TAM-adjusted PEG, Bayesian growth valuation, sector regime, short squeeze risk, options flow, and insider/institutional confirmation.
-- Strategy-data provider contract for earnings events, with deterministic fixture earnings data and empty free-data fallback.
+- Strategy-data provider contract for earnings events, SEC filings, and A-share announcements.
+- Real-data strategy adapters for FMP earnings, Finnhub earnings, SEC EDGAR filings, CNINFO announcements, and Tushare configuration.
 - Free-data strategy evaluator for trend momentum, breakout + volume, healthy pullback, GF-DMA health, PEAD when earnings actuals/estimates exist, and A-share limit-status confirmation.
 - Missing-data handling for strategies that need earnings estimates, analyst revisions, fundamentals, TAM assumptions, options flow, insider transactions, institutional filings, sector breadth, or short-interest data.
 - Strategy-specific trade plans for breakout, healthy pullback, and PEAD earnings drift.
@@ -44,6 +45,17 @@ Open:
 
 - Dashboard: `http://127.0.0.1:5173`
 - API: `http://127.0.0.1:8000/api`
+
+Optional strategy-data keys:
+
+```bash
+export QAGENT_FMP_API_KEY="..."
+export QAGENT_FINNHUB_API_KEY="..."
+export QAGENT_TUSHARE_TOKEN="..."
+export QAGENT_SEC_USER_AGENT="Qagent research app you@example.com"
+```
+
+Without these keys, Qagent still runs. SEC EDGAR and CNINFO adapters remain available where possible, and unavailable vendor data is surfaced as missing data instead of inferred.
 
 ## Verify
 

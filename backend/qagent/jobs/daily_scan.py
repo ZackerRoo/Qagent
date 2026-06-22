@@ -43,6 +43,8 @@ def run_daily_scan(
     cards: list[OpportunityCard] = []
     items: list[ScanItem] = []
     bars_by_instrument = {}
+    strategy_filings_count = 0
+    strategy_announcements_count = 0
     signal_engine = SignalEngine()
     registry = default_strategy_registry()
     strategy_evaluator = StrategyEvaluator(registry)
@@ -61,6 +63,18 @@ def run_daily_scan(
             start=date(2026, 1, 1),
             end=date(2026, 12, 31),
         )
+        filings = strategy_provider.get_filings(
+            instrument_ids=[instrument_id],
+            start=date(2026, 1, 1),
+            end=date(2026, 12, 31),
+        )
+        announcements = strategy_provider.get_announcements(
+            instrument_ids=[instrument_id],
+            start=date(2026, 1, 1),
+            end=date(2026, 12, 31),
+        )
+        strategy_filings_count += len(filings)
+        strategy_announcements_count += len(announcements)
         bars_by_instrument[instrument_id] = bars
         signals = signal_engine.generate(instrument_id, bars)
         strategy_evaluations = strategy_evaluator.evaluate(
@@ -69,6 +83,8 @@ def run_daily_scan(
             bars,
             context={
                 "earnings_events": earnings_events,
+                "filings": filings,
+                "announcements": announcements,
                 "available_data": _available_strategy_data(earnings_events),
             },
         )
@@ -85,10 +101,15 @@ def run_daily_scan(
         "scanned": str(len(instrument_ids)),
         "cards": str(len(cards)),
         "strategy_data_provider": strategy_provider.name,
+        "strategy_filings": str(strategy_filings_count),
+        "strategy_announcements": str(strategy_announcements_count),
     }
     provider_errors = getattr(provider, "last_errors", [])
     if provider_errors:
         data_health["errors"] = " | ".join(provider_errors[:3])
+    strategy_provider_errors = getattr(strategy_provider, "last_errors", [])
+    if strategy_provider_errors:
+        data_health["strategy_data_errors"] = " | ".join(strategy_provider_errors[:3])
     return DailyScanResult(
         cards=cards,
         items=items,

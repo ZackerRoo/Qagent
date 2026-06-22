@@ -24,3 +24,23 @@ class EarningsEvent(BaseModel):
             and self.estimated_revenue is not None
             and self.announcement_time in {"bmo", "amc", "intraday"}
         )
+
+
+class FilingEvent(BaseModel):
+    instrument_id: str
+    form: str
+    filing_date: date
+    accession_number: str
+    report_date: date | None = None
+    primary_document: str | None = None
+    filing_url: str | None = None
+    provider: str = "unknown"
+
+
+class AnnouncementEvent(BaseModel):
+    instrument_id: str
+    title: str
+    published_at: date
+    url: str | None = None
+    category: str | None = None
+    provider: str = "unknown"

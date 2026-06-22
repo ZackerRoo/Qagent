@@ -64,7 +64,26 @@ Registered but data-limited strategies:
 
 Data-limited strategies must appear as `missing_data` unless their required provider fields are available. This prevents the agent from inventing PEAD, analyst revision, valuation, options-flow, or ownership conclusions from price data alone.
 
-The fixture strategy-data provider reads `backend/tests/fixtures/earnings_events.csv`. In fixture mode, `US:TEST` has a complete earnings event and can score PEAD; `CN:000001` intentionally lacks estimates and remains missing-data for PEAD. Free mode currently uses an empty strategy-data provider until a stable earnings/fundamentals source is added.
+The fixture strategy-data provider reads `backend/tests/fixtures/earnings_events.csv`. In fixture mode, `US:TEST` has a complete earnings event and can score PEAD; `CN:000001` intentionally lacks estimates and remains missing-data for PEAD.
+
+Free mode composes real-data adapters:
+
+- SEC EDGAR filings through `data.sec.gov` using `QAGENT_SEC_USER_AGENT`; the adapter resolves ticker to CIK through SEC's company ticker list.
+- CNINFO announcement search for A-share announcements.
+- FMP earnings calendar when `QAGENT_FMP_API_KEY` is set.
+- Finnhub earnings calendar when `QAGENT_FINNHUB_API_KEY` is set.
+- Tushare placeholder/config entry when `QAGENT_TUSHARE_TOKEN` is set.
+
+Optional environment variables:
+
+```bash
+export QAGENT_FMP_API_KEY="..."
+export QAGENT_FINNHUB_API_KEY="..."
+export QAGENT_TUSHARE_TOKEN="..."
+export QAGENT_SEC_USER_AGENT="Qagent research app you@example.com"
+```
+
+The scan response surfaces `strategy_data_provider`, `strategy_filings`, `strategy_announcements`, and `strategy_data_errors` in `data_health`.
 
 Opportunity cards now include:
 
@@ -99,5 +118,5 @@ npm run build
 
 - No automated trading or broker execution.
 - Free data may be delayed or incomplete.
-- PEAD is implemented when earnings actuals and estimates are available, but production free-data coverage is still limited. Analyst revisions, TAM-PEG, Bayesian valuation, options flow, 北向资金, 龙虎榜, and richer announcement parsing are registered but not production-grade without the required provider data.
+- PEAD is implemented when earnings actuals and estimates are available, but production free-data coverage depends on FMP/Finnhub or another earnings provider. Analyst revisions, TAM-PEG, Bayesian valuation, options flow, 北向资金, 龙虎榜, and richer announcement parsing are registered but not production-grade without the required provider data.
 - Opportunity cards are research artifacts, not personalized investment advice.

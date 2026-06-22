@@ -57,3 +57,52 @@ def test_daily_scan_surfaces_provider_errors():
     assert result.items[0].instrument_id == "US:MISS"
     assert result.items[0].status == "no_data"
     assert result.items[0].reason == "No daily bars returned by provider."
+
+
+class StrategyDataProviderWithRecords:
+    name = "strategy_records"
+    last_errors = ["fmp: rate limited"]
+
+    def get_earnings_events(self, instrument_ids, start, end):
+        return []
+
+    def get_filings(self, instrument_ids, start, end):
+        from datetime import date
+
+        from qagent.strategy_data.models import FilingEvent
+
+        return [
+            FilingEvent(
+                instrument_id=instrument_ids[0],
+                form="10-Q",
+                filing_date=date(2026, 1, 31),
+                accession_number="0001",
+                provider="sec_edgar",
+            )
+        ]
+
+    def get_announcements(self, instrument_ids, start, end):
+        from datetime import date
+
+        from qagent.strategy_data.models import AnnouncementEvent
+
+        return [
+            AnnouncementEvent(
+                instrument_id=instrument_ids[0],
+                title="2025年度报告",
+                published_at=date(2026, 1, 31),
+                provider="cninfo",
+            )
+        ]
+
+
+def test_daily_scan_surfaces_strategy_data_counts_and_errors():
+    result = run_daily_scan(
+        instrument_ids=["US:TEST"],
+        provider=FixtureMarketDataProvider(),
+        strategy_data_provider=StrategyDataProviderWithRecords(),
+    )
+
+    assert result.data_health["strategy_filings"] == "1"
+    assert result.data_health["strategy_announcements"] == "1"
+    assert result.data_health["strategy_data_errors"] == "fmp: rate limited"
