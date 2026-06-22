@@ -7,6 +7,7 @@ import type {
   BacktestResponse,
   CatalystsResponse,
   DataProviderMode,
+  DailyBriefResponse,
   OpportunitiesResponse,
   OpportunityHistoryResponse,
   OutcomesResponse,
@@ -30,6 +31,7 @@ type ScanParams = {
   start?: string;
   end?: string;
   step_days?: number;
+  include_news?: boolean;
 };
 
 function queryString(params?: ScanParams): string {
@@ -54,6 +56,9 @@ function queryString(params?: ScanParams): string {
   }
   if (params.step_days) {
     search.set("step_days", String(params.step_days));
+  }
+  if (params.include_news !== undefined) {
+    search.set("include_news", String(params.include_news));
   }
   const value = search.toString();
   return value ? `?${value}` : "";
@@ -166,6 +171,18 @@ export async function fetchBacktest(
     symbols,
     step_days: 5,
     limit: 100,
+  });
+}
+
+export async function fetchDailyBrief(
+  provider: DataProviderMode,
+  symbols?: string,
+): Promise<DailyBriefResponse> {
+  return apiGet<DailyBriefResponse>("/daily-brief", {
+    provider,
+    symbols,
+    limit: 5,
+    include_news: provider === "free",
   });
 }
 

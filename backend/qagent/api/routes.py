@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from qagent.agent.responder import answer_question
 from qagent.api.schemas import AgentQueryRequest, AgentQueryResponse, AlertEvaluationRequest
 from qagent.backtesting.engine import run_historical_backtest
+from qagent.briefing.daily import build_daily_brief
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
 from qagent.catalysts.providers import FreeCatalystProvider
 from qagent.db import create_session_factory, initialize_database
@@ -109,6 +110,63 @@ def overview(provider: str = "fixture", symbols: str | None = None) -> dict[str,
     }
 
 
+@router.get("/daily-brief")
+def daily_brief(
+    provider: str = "fixture",
+    symbols: str | None = None,
+    limit: int = 5,
+    include_news: bool = True,
+) -> dict[str, object]:
+    mode = provider.strip().lower()
+    if limit <= 0 or limit > 20:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 20")
+    default_universe = DEFAULT_FREE_UNIVERSE if mode == "free" else DEFAULT_DEV_UNIVERSE
+    instrument_ids = _parse_symbols(symbols, default_universe)
+    start_date, end_date = _backtest_dates(mode, None, None)
+    try:
+        market_provider = build_market_data_provider(mode)
+        scan_result = run_daily_scan(instrument_ids, market_provider, mode=mode)
+        backtest_result = run_historical_backtest(
+            instrument_ids=instrument_ids,
+            provider=market_provider,
+            start=start_date,
+            end=end_date,
+            step_days=5,
+            max_signals=100,
+        )
+        position_risks = _position_risks(mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    catalyst_hypotheses = []
+    brief_health = {
+        "brief_provider": mode,
+        "brief_symbols": str(len(instrument_ids)),
+        "brief_news": "skipped",
+    }
+    if include_news:
+        catalyst_provider = FreeCatalystProvider()
+        news = catalyst_provider.get_news(instrument_ids, limit=limit)
+        catalyst_hypotheses = build_catalyst_hypotheses(news)
+        brief_health["brief_news"] = str(len(news))
+        brief_health["brief_catalysts"] = str(len(catalyst_hypotheses))
+        if catalyst_provider.last_errors:
+            brief_health["brief_news_errors"] = " | ".join(catalyst_provider.last_errors[:3])
+
+    brief = build_daily_brief(
+        provider=mode,
+        symbols=instrument_ids,
+        scan_result=scan_result,
+        backtest_result=backtest_result,
+        catalyst_hypotheses=catalyst_hypotheses,
+        position_risks=position_risks,
+        provider_statuses=build_provider_status(),
+        limit=limit,
+        data_health=brief_health,
+    )
+    return brief.model_dump(mode="json")
+
+
 @router.get("/backtest")
 def backtest(
     provider: str = "fixture",
@@ -146,6 +204,30 @@ def backtest(
         "signals": [item.model_dump(mode="json") for item in result.signals],
         "data_health": result.data_health,
     }
+
+
+def _position_risks(provider: str):
+    positions = _repo().list_positions()
+    if not positions:
+        return []
+    market_provider = build_market_data_provider(provider)
+    snapshot = market_provider.get_snapshot([position.instrument_id for position in positions])
+    latest_prices = {
+        row["instrument_id"]: Decimal(str(row["close"]))
+        for _, row in snapshot.iterrows()
+    }
+    risks = []
+    for position in positions:
+        latest_price = latest_prices.get(position.instrument_id)
+        if latest_price is None:
+            continue
+        risks.append(
+            analyze_position_risk(
+                PositionInput(**position.model_dump()),
+                current_price=latest_price,
+            )
+        )
+    return risks
 
 
 @router.get("/alerts")

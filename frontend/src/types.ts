@@ -368,3 +368,72 @@ export type BacktestResponse = {
   signals: BacktestSignal[];
   data_health: Record<string, string>;
 };
+
+export type DailyBriefOpportunity = {
+  instrument_id: string;
+  status: string;
+  primary_strategy_id: string | null;
+  rank_score: number;
+  thesis: string;
+  trigger_price: string | null;
+  initial_stop: string | null;
+  target_1: string | null;
+  risk_reward: number | null;
+  scenario_summary: string;
+  rank_reasons: string[];
+  data_caveats: string[];
+};
+
+export type DailyBriefEntryWatch = {
+  instrument_id: string;
+  primary_strategy_id: string | null;
+  trigger_price: string;
+  initial_stop: string | null;
+  target_1: string | null;
+  risk_reward: number | null;
+  note: string;
+};
+
+export type DailyBriefRiskAlert = {
+  instrument_id: string;
+  status: string;
+  current_price: string;
+  stop_distance_pct: number | null;
+  target_1_distance_pct: number | null;
+  message: string;
+};
+
+export type DailyBriefCatalyst = {
+  instrument_id: string;
+  catalyst_type: string;
+  title: string;
+  investment_hypothesis: string;
+  verification_path: string;
+  confidence: number;
+};
+
+export type DailyBriefStrategyValidation = {
+  strategy_id: string;
+  sample_count: number;
+  completed_count: number;
+  target_hit_rate: number | null;
+  positive_rate_10d: number | null;
+  avg_return_10d: number | null;
+  max_drawdown_pct: number | null;
+  max_runup_pct: number | null;
+};
+
+export type DailyBriefResponse = {
+  generated_at: string;
+  provider: string;
+  symbols: string[];
+  headline: string;
+  top_opportunities: DailyBriefOpportunity[];
+  entry_watch: DailyBriefEntryWatch[];
+  risk_alerts: DailyBriefRiskAlert[];
+  catalyst_watch: DailyBriefCatalyst[];
+  strategy_validation: DailyBriefStrategyValidation[];
+  data_caveats: string[];
+  next_steps: string[];
+  data_health: Record<string, string>;
+};

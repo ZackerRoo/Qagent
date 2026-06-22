@@ -5,6 +5,7 @@ import {
   Briefcase,
   History,
   ListFilter,
+  Newspaper,
   Settings,
   RefreshCw,
   Star,
@@ -14,6 +15,7 @@ import type { ReactNode } from "react";
 import type { DataProviderMode } from "../types";
 
 const nav = [
+  { id: "brief", label: "Brief", icon: Newspaper },
   { id: "overview", label: "Overview", icon: Activity },
   { id: "opportunities", label: "Opportunities", icon: ListFilter },
   { id: "watchlist", label: "Watchlist", icon: Star },

@@ -49,6 +49,24 @@ def test_overview_endpoint_returns_markets_and_cards():
     assert body["top_cards"]
 
 
+def test_daily_brief_endpoint_returns_research_digest():
+    client = TestClient(create_app())
+
+    response = client.get("/api/daily-brief?provider=fixture&include_news=false")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["provider"] == "fixture"
+    assert body["symbols"]
+    assert body["headline"]
+    assert body["top_opportunities"]
+    assert body["entry_watch"]
+    assert body["strategy_validation"]
+    assert body["data_caveats"]
+    assert body["next_steps"]
+    assert body["data_health"]["brief_opportunities"] == str(len(body["top_opportunities"]))
+
+
 def test_agent_endpoint_answers_from_card_context():
     client = TestClient(create_app())
     response = client.post("/api/agent/query", json={"question": "Why is US:TEST on the list?"})

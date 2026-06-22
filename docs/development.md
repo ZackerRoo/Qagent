@@ -39,6 +39,27 @@ The system supports two market-data modes:
 
 Fixture data keeps tests stable. Free providers are implemented behind adapter contracts and are mocked in unit tests.
 
+## Daily Brief
+
+The Brief page and `/api/daily-brief` provide the main daily research readout:
+
+```bash
+curl 'http://127.0.0.1:8000/api/daily-brief?provider=fixture&include_news=false'
+curl 'http://127.0.0.1:8000/api/daily-brief?provider=free&symbols=US:AAPL,US:NVDA,CN:000001'
+```
+
+The API composes existing Qagent capabilities instead of inventing a new ranking stack:
+
+- `run_daily_scan` for current opportunity cards and entry/exit levels.
+- `run_historical_backtest` for strategy validation.
+- `FreeCatalystProvider` plus catalyst hypotheses when `include_news=true`.
+- Stored positions plus latest prices for risk alerts.
+- Provider readiness for missing optional data caveats.
+
+The response contains `headline`, `top_opportunities`, `entry_watch`, `risk_alerts`, `catalyst_watch`, `strategy_validation`, `data_caveats`, `next_steps`, and `data_health`.
+
+`qagent.briefing.daily` is intentionally a pure service module: it accepts precomputed scan/backtest/catalyst/risk/provider objects and returns Pydantic models. Network access, SQLite reads, and provider construction stay in the API layer.
+
 ## Strategy Engine
 
 The daily scan now evaluates a registered strategy stack before building opportunity cards.
@@ -151,6 +172,7 @@ The response distinguishes built-in free providers from optional API-key-backed 
 ```bash
 curl 'http://127.0.0.1:8000/api/opportunities?provider=fixture'
 curl 'http://127.0.0.1:8000/api/opportunities?provider=free&symbols=US:AAPL,CN:000001'
+curl 'http://127.0.0.1:8000/api/daily-brief?provider=fixture&include_news=false'
 curl 'http://127.0.0.1:8000/api/backtest?provider=fixture'
 curl 'http://127.0.0.1:8000/api/provider-status'
 curl 'http://127.0.0.1:8000/api/strategy-performance?provider=fixture'
@@ -175,6 +197,7 @@ npm run build
 ## Known Limitations
 
 - No automated trading or broker execution.
+- No scheduled delivery or external push channel yet; Daily Brief is generated on demand.
 - Free data may be delayed or incomplete.
 - Backtests are event-level opportunity validation, not broker-grade portfolio simulations with cash, sizing, commissions, slippage, tax, or intraday fills.
 - Outcome replay uses daily bars and cannot prove intraday ordering between a stop and target.

@@ -4,6 +4,7 @@ import { fetchOpportunities, fetchOverview } from "./api/client";
 import { AgentPanel } from "./components/AgentPanel";
 import { Layout, type PageId } from "./components/Layout";
 import { Alerts } from "./pages/Alerts";
+import { Brief } from "./pages/Brief";
 import { History } from "./pages/History";
 import { Opportunities } from "./pages/Opportunities";
 import { Overview } from "./pages/Overview";
@@ -21,7 +22,7 @@ import type {
 const DEFAULT_SYMBOLS = "US:AAPL,US:NVDA,US:MSFT,CN:000001,CN:600519";
 
 export default function App() {
-  const [page, setPage] = useState<PageId>("overview");
+  const [page, setPage] = useState<PageId>("brief");
   const [overview, setOverview] = useState<OverviewResponse>();
   const [opportunities, setOpportunities] = useState<OpportunitiesResponse>();
   const [selectedCard, setSelectedCard] = useState<OpportunityCard>();
@@ -71,6 +72,8 @@ export default function App() {
     }
 
     switch (page) {
+      case "brief":
+        return <Brief dataMode={dataMode} symbols={symbols} />;
       case "overview":
         return (
           <Overview

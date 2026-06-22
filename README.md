@@ -7,6 +7,7 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 ## What Works Now
 
 - US + A-share scanning with fixture data and free providers.
+- Daily Brief page and `/api/daily-brief` research digest combining opportunities, entry levels, catalysts, portfolio risk, data caveats, and strategy validation.
 - US free market data via `yfinance`.
 - A-share free market data via `akshare`, with `baostock` fallback.
 - Strategy registry covering trend momentum, breakout + volume, healthy pullback, GF-DMA health, catalyst transmission, PEAD, analyst revisions, TAM-adjusted PEG, Bayesian growth valuation, sector regime, short squeeze risk, options flow, and insider/institutional confirmation.
@@ -80,6 +81,7 @@ npm run build
 
 ```bash
 curl 'http://127.0.0.1:8000/api/opportunities?provider=free&symbols=US:AAPL,CN:000001'
+curl 'http://127.0.0.1:8000/api/daily-brief?provider=fixture&include_news=false'
 curl 'http://127.0.0.1:8000/api/scan-runs'
 curl 'http://127.0.0.1:8000/api/outcomes?provider=fixture'
 curl 'http://127.0.0.1:8000/api/strategy-performance?provider=fixture'
@@ -92,7 +94,7 @@ curl 'http://127.0.0.1:8000/api/portfolio?provider=fixture'
 
 `/api/opportunities` returns `cards`, `items`, `strategy_health`, and `data_health`. Cards include `rank_score` and `rank_reasons`. Strategies that cannot be evaluated with the current free-data scan are returned with `status: "missing_data"` instead of fabricated scores.
 
-`/api/opportunities` also records a scan run. `/api/scan-runs`, `/api/opportunity-history`, `/api/outcomes`, and `/api/strategy-performance` expose the saved research trail, daily-bar outcome replay, and strategy-level replay summary. `/api/backtest` runs event-level historical validation without saving records. `/api/alert-suggestions` turns saved opportunity trigger/stop/target levels into draft alert rules.
+`/api/daily-brief` is the daily readout. It composes the current scan, entry watch levels, optional news catalysts, position risk, provider caveats, and backtest validation. `/api/opportunities` also records a scan run. `/api/scan-runs`, `/api/opportunity-history`, `/api/outcomes`, and `/api/strategy-performance` expose the saved research trail, daily-bar outcome replay, and strategy-level replay summary. `/api/backtest` runs event-level historical validation without saving records. `/api/alert-suggestions` turns saved opportunity trigger/stop/target levels into draft alert rules.
 
 ## Research Docs
 
