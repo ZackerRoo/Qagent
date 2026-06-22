@@ -97,6 +97,32 @@ def test_daily_brief_run_api_saves_lists_loads_and_exports_markdown(tmp_path, mo
     assert "## Top Opportunities" in markdown
 
 
+def test_daily_brief_delivery_api_queues_lists_and_marks_sent(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'api-deliveries.db'}")
+    client = TestClient(create_app())
+    save_response = client.post("/api/daily-brief/runs?provider=fixture&include_news=false")
+    saved = save_response.json()
+
+    queue_response = client.post(
+        f"/api/daily-brief/runs/{saved['brief_id']}/deliveries"
+        "?channel=markdown&recipient=local"
+    )
+    list_response = client.get("/api/deliveries?status=queued")
+    sent_response = client.post(f"/api/deliveries/{queue_response.json()['delivery_id']}/mark-sent")
+
+    assert queue_response.status_code == 200
+    queued = queue_response.json()
+    assert queued["brief_id"] == saved["brief_id"]
+    assert queued["status"] == "queued"
+    assert queued["channel"] == "markdown"
+    assert queued["markdown"].startswith("# Qagent Daily Brief")
+    assert list_response.status_code == 200
+    assert list_response.json()["deliveries"][0]["delivery_id"] == queued["delivery_id"]
+    assert sent_response.status_code == 200
+    assert sent_response.json()["status"] == "sent"
+    assert sent_response.json()["sent_at"] is not None
+
+
 def test_agent_endpoint_answers_from_card_context():
     client = TestClient(create_app())
     response = client.post("/api/agent/query", json={"question": "Why is US:TEST on the list?"})

@@ -407,13 +407,16 @@ tbody tr.selected {
 .status-ready,
 .status-configured,
 .status-target_1_hit,
-.status-working {
+.status-working,
+.status-sent {
   background: #dff4e8;
   color: #116b3c;
 }
 
 .status-missing_config,
-.status-pending {
+.status-pending,
+.status-queued,
+.status-time_exit {
   background: #fff3d6;
   color: #8a5b00;
 }

@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from qagent.agent.responder import answer_question
 from qagent.api.schemas import AgentQueryRequest, AgentQueryResponse, AlertEvaluationRequest
 from qagent.backtesting.engine import run_historical_backtest
+from qagent.backtesting.portfolio import run_portfolio_backtest
 from qagent.briefing.daily import DailyBrief, build_daily_brief
 from qagent.briefing.export import render_daily_brief_markdown
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
@@ -156,6 +157,48 @@ def daily_brief_run_markdown(brief_id: str) -> dict[str, str]:
     return {"markdown": render_daily_brief_markdown(brief)}
 
 
+@router.post("/daily-brief/runs/{brief_id}/deliveries")
+def queue_daily_brief_delivery(
+    brief_id: str,
+    channel: str = "markdown",
+    recipient: str | None = None,
+) -> dict[str, object]:
+    repo = _repo()
+    run = repo.get_brief_run(brief_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="brief run not found")
+    if channel not in {"markdown", "email", "webhook"}:
+        raise HTTPException(status_code=400, detail="unsupported delivery channel")
+    brief = DailyBrief.model_validate(run.payload)
+    delivery = repo.enqueue_brief_delivery(
+        brief_run=run,
+        channel=channel,
+        recipient=recipient,
+        markdown=render_daily_brief_markdown(brief),
+    )
+    return delivery.model_dump(mode="json")
+
+
+@router.get("/deliveries")
+def deliveries(status: str | None = None, limit: int = 20) -> dict[str, list[object]]:
+    if limit <= 0 or limit > 100:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
+    return {
+        "deliveries": [
+            delivery.model_dump(mode="json")
+            for delivery in _repo().list_delivery_outbox(status=status, limit=limit)
+        ]
+    }
+
+
+@router.post("/deliveries/{delivery_id}/mark-sent")
+def mark_delivery_sent(delivery_id: str) -> dict[str, object]:
+    delivery = _repo().mark_delivery_sent(delivery_id)
+    if delivery is None:
+        raise HTTPException(status_code=404, detail="delivery not found")
+    return delivery.model_dump(mode="json")
+
+
 def _build_daily_brief_response(
     provider: str,
     symbols: str | None,
@@ -247,6 +290,57 @@ def backtest(
         "summary": result.summary.model_dump(mode="json"),
         "performance": [item.model_dump(mode="json") for item in result.performance],
         "signals": [item.model_dump(mode="json") for item in result.signals],
+        "data_health": result.data_health,
+    }
+
+
+@router.get("/portfolio-backtest")
+def portfolio_backtest(
+    provider: str = "fixture",
+    symbols: str | None = None,
+    start: date | None = None,
+    end: date | None = None,
+    step_days: int = 5,
+    initial_capital: Decimal = Decimal("100000"),
+    risk_per_trade_pct: Decimal = Decimal("1"),
+    max_positions: int = 5,
+    transaction_cost_bps: Decimal = Decimal("5"),
+    slippage_bps: Decimal = Decimal("5"),
+) -> dict[str, object]:
+    mode = provider.strip().lower()
+    if step_days <= 0 or step_days > 60:
+        raise HTTPException(status_code=400, detail="step_days must be between 1 and 60")
+    if initial_capital <= 0:
+        raise HTTPException(status_code=400, detail="initial_capital must be positive")
+    if risk_per_trade_pct <= 0 or risk_per_trade_pct > 10:
+        raise HTTPException(status_code=400, detail="risk_per_trade_pct must be between 0 and 10")
+    if max_positions <= 0 or max_positions > 20:
+        raise HTTPException(status_code=400, detail="max_positions must be between 1 and 20")
+
+    default_universe = DEFAULT_FREE_UNIVERSE if mode == "free" else DEFAULT_DEV_UNIVERSE
+    instrument_ids = _parse_symbols(symbols, default_universe)
+    start_date, end_date = _backtest_dates(mode, start, end)
+    try:
+        market_provider = build_market_data_provider(mode)
+        result = run_portfolio_backtest(
+            instrument_ids=instrument_ids,
+            provider=market_provider,
+            start=start_date,
+            end=end_date,
+            step_days=step_days,
+            initial_capital=initial_capital,
+            risk_per_trade_pct=risk_per_trade_pct,
+            max_positions=max_positions,
+            transaction_cost_bps=transaction_cost_bps,
+            slippage_bps=slippage_bps,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "summary": result.summary.model_dump(mode="json"),
+        "trades": [trade.model_dump(mode="json") for trade in result.trades],
+        "equity_curve": [point.model_dump(mode="json") for point in result.equity_curve],
         "data_health": result.data_health,
     }
 

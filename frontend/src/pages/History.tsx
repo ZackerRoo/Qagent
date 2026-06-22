@@ -4,6 +4,7 @@ import {
   fetchBacktest,
   fetchOpportunityHistory,
   fetchOutcomes,
+  fetchPortfolioBacktest,
   fetchScanRuns,
   fetchStrategyPerformance,
 } from "../api/client";
@@ -13,6 +14,7 @@ import type {
   DataProviderMode,
   OpportunityHistoryResponse,
   OutcomesResponse,
+  PortfolioBacktestResponse,
   ScanRunsResponse,
   StrategyPerformanceResponse,
 } from "../types";
@@ -33,13 +35,16 @@ function formatRatio(value: number | null) {
 
 export function History({ dataMode, symbols }: { dataMode: DataProviderMode; symbols: string }) {
   const [backtest, setBacktest] = useState<BacktestResponse>();
+  const [portfolioBacktest, setPortfolioBacktest] = useState<PortfolioBacktestResponse>();
   const [runs, setRuns] = useState<ScanRunsResponse>();
   const [history, setHistory] = useState<OpportunityHistoryResponse>();
   const [outcomes, setOutcomes] = useState<OutcomesResponse>();
   const [performance, setPerformance] = useState<StrategyPerformanceResponse>();
   const [error, setError] = useState("");
   const [backtestError, setBacktestError] = useState("");
+  const [portfolioBacktestError, setPortfolioBacktestError] = useState("");
   const [isBacktesting, setIsBacktesting] = useState(false);
+  const [isPortfolioBacktesting, setIsPortfolioBacktesting] = useState(false);
 
   useEffect(() => {
     async function load() {
@@ -72,6 +77,21 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
       setBacktestError(caught instanceof Error ? caught.message : "Failed to run backtest");
     } finally {
       setIsBacktesting(false);
+    }
+  }
+
+  async function runPortfolioBacktest() {
+    try {
+      setIsPortfolioBacktesting(true);
+      setPortfolioBacktestError("");
+      const result = await fetchPortfolioBacktest(dataMode, dataMode === "free" ? symbols : undefined);
+      setPortfolioBacktest(result);
+    } catch (caught) {
+      setPortfolioBacktestError(
+        caught instanceof Error ? caught.message : "Failed to run portfolio backtest",
+      );
+    } finally {
+      setIsPortfolioBacktesting(false);
     }
   }
 
@@ -194,6 +214,118 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
         ) : (
           <div className="empty-state">
             Run an event-level backtest to validate historical opportunity cards.
+          </div>
+        )}
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <h2>Portfolio Backtest</h2>
+          <button
+            className="icon-action"
+            type="button"
+            onClick={runPortfolioBacktest}
+            disabled={isPortfolioBacktesting}
+          >
+            {isPortfolioBacktesting ? "Running" : "Run Portfolio"}
+          </button>
+        </div>
+        {portfolioBacktestError && <div className="empty-state error">{portfolioBacktestError}</div>}
+        {portfolioBacktest ? (
+          <div className="stack">
+            <DataHealth data={portfolioBacktest.data_health} />
+            <div className="metric-grid">
+              <div>
+                <span>Initial</span>
+                <strong>{portfolioBacktest.summary.initial_capital}</strong>
+              </div>
+              <div>
+                <span>Final</span>
+                <strong>{portfolioBacktest.summary.final_equity}</strong>
+              </div>
+              <div>
+                <span>Total Return</span>
+                <strong>{formatNumber(portfolioBacktest.summary.total_return_pct, "%")}</strong>
+              </div>
+              <div>
+                <span>Max DD</span>
+                <strong>{formatNumber(portfolioBacktest.summary.max_drawdown_pct, "%")}</strong>
+              </div>
+              <div>
+                <span>Trades</span>
+                <strong>{portfolioBacktest.summary.trade_count}</strong>
+              </div>
+              <div>
+                <span>Win Rate</span>
+                <strong>{formatRatio(portfolioBacktest.summary.win_rate)}</strong>
+              </div>
+              <div>
+                <span>Profit Factor</span>
+                <strong>{formatNumber(portfolioBacktest.summary.profit_factor)}</strong>
+              </div>
+              <div>
+                <span>Exposure</span>
+                <strong>{formatNumber(portfolioBacktest.summary.exposure_pct, "%")}</strong>
+              </div>
+            </div>
+            <div className="brief-grid">
+              <div className="table-shell">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Equity</th>
+                      <th>Open</th>
+                      <th>Drawdown</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {portfolioBacktest.equity_curve.map((point) => (
+                      <tr key={`${point.date}-${point.equity}-${point.open_positions}`}>
+                        <td>{point.date}</td>
+                        <td>{point.equity}</td>
+                        <td>{point.open_positions}</td>
+                        <td>{formatNumber(point.drawdown_pct, "%")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="table-shell">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Ticker</th>
+                      <th>Entry</th>
+                      <th>Exit</th>
+                      <th>Reason</th>
+                      <th>Net P/L</th>
+                      <th>Return</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {portfolioBacktest.trades.map((trade) => (
+                      <tr key={`${trade.instrument_id}-${trade.entry_date}-${trade.exit_date}`}>
+                        <td className="ticker">{trade.instrument_id}</td>
+                        <td>{trade.entry_date}</td>
+                        <td>{trade.exit_date}</td>
+                        <td>
+                          <span className={`status status-${trade.exit_reason}`}>
+                            {trade.exit_reason}
+                          </span>
+                        </td>
+                        <td>{trade.net_pnl}</td>
+                        <td>{formatNumber(trade.return_pct, "%")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="empty-state">
+            Run a portfolio-level backtest to convert validated signals into account metrics.
           </div>
         )}
       </section>

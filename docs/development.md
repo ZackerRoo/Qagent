@@ -69,9 +69,19 @@ curl -X POST 'http://127.0.0.1:8000/api/daily-brief/runs?provider=fixture&includ
 curl 'http://127.0.0.1:8000/api/daily-brief/runs'
 curl 'http://127.0.0.1:8000/api/daily-brief/runs/<brief_id>'
 curl 'http://127.0.0.1:8000/api/daily-brief/runs/<brief_id>/markdown'
+curl -X POST 'http://127.0.0.1:8000/api/daily-brief/runs/<brief_id>/deliveries?channel=markdown&recipient=local'
+curl 'http://127.0.0.1:8000/api/deliveries?status=queued'
+curl -X POST 'http://127.0.0.1:8000/api/deliveries/<delivery_id>/mark-sent'
 ```
 
-`qagent.briefing.export.render_daily_brief_markdown` turns a saved brief into a compact Markdown research note. This is the intended handoff point for later email, Telegram, Feishu, or cron-based delivery.
+`qagent.briefing.export.render_daily_brief_markdown` turns a saved brief into a compact Markdown research note. `delivery_outbox` stores queued/sent delivery records with channel, recipient, subject, Markdown, payload metadata, and timestamps. This is the handoff point for later email, Telegram, Feishu, or webhook senders.
+
+The CLI can generate, save, queue, and print a brief for local schedulers:
+
+```bash
+cd backend
+.venv/bin/python -m qagent.cli daily-brief --provider fixture --no-news --save --queue --print-markdown
+```
 
 ## Strategy Engine
 
@@ -170,6 +180,24 @@ The response includes:
 
 The History page exposes this through the Backtest Validation panel. Fixture mode uses the deterministic fixture universe; free mode uses the current dashboard symbol input.
 
+## Portfolio-Level Backtesting
+
+Portfolio backtesting converts historical Qagent signals into account-level trades:
+
+```bash
+curl 'http://127.0.0.1:8000/api/portfolio-backtest?provider=fixture&start=2026-01-30&end=2026-03-20&step_days=5'
+curl 'http://127.0.0.1:8000/api/portfolio-backtest?provider=free&symbols=US:AAPL,US:NVDA,CN:000001&step_days=5&initial_capital=100000&risk_per_trade_pct=1&max_positions=5'
+```
+
+The engine first calls `run_historical_backtest`, so signal generation still uses bars capped at each scan date. It then waits for future daily bars to trigger entry, applies fixed-risk sizing, `max_positions`, transaction cost, slippage, stop/target/time exits, and reports:
+
+- `summary`: initial/final equity, total return, max drawdown, trade count, win rate, profit factor, average trade return, and exposure.
+- `trades`: entry/exit dates, stop/target/time exit reason, shares, costs, net P/L, and return.
+- `equity_curve`: realized-equity points and drawdown.
+- `data_health`: provider, source signal counts, portfolio model, and lookahead guard.
+
+This is a research-grade portfolio simulator, not broker-grade execution. It uses daily OHLCV bars and conservative same-day stop/target ordering.
+
 ## Provider Readiness
 
 Provider status is available through the Settings page and `/api/provider-status`:
@@ -188,6 +216,7 @@ curl 'http://127.0.0.1:8000/api/opportunities?provider=free&symbols=US:AAPL,CN:0
 curl 'http://127.0.0.1:8000/api/daily-brief?provider=fixture&include_news=false'
 curl -X POST 'http://127.0.0.1:8000/api/daily-brief/runs?provider=fixture&include_news=false'
 curl 'http://127.0.0.1:8000/api/backtest?provider=fixture'
+curl 'http://127.0.0.1:8000/api/portfolio-backtest?provider=fixture'
 curl 'http://127.0.0.1:8000/api/provider-status'
 curl 'http://127.0.0.1:8000/api/strategy-performance?provider=fixture'
 curl 'http://127.0.0.1:8000/api/alert-suggestions'
@@ -211,9 +240,9 @@ npm run build
 ## Known Limitations
 
 - No automated trading or broker execution.
-- No scheduled delivery or external push channel yet; Daily Brief is generated on demand.
+- No external push sender yet; the local delivery outbox is implemented for scheduled jobs and future senders.
 - Free data may be delayed or incomplete.
-- Backtests are event-level opportunity validation, not broker-grade portfolio simulations with cash, sizing, commissions, slippage, tax, or intraday fills.
+- Portfolio backtests include sizing, costs, slippage, stops, targets, time exits, and realized equity curves, but they are not broker-grade simulations with intraday fills, taxes, borrow fees, or live execution constraints.
 - Outcome replay uses daily bars and cannot prove intraday ordering between a stop and target.
 - PEAD is implemented when earnings actuals and estimates are available, but production free-data coverage depends on FMP/Finnhub/Alpha Vantage or another earnings provider.
 - Analyst revision, TAM-PEG, and Bayesian valuation are implemented with normalized free-source fields, but results are only as good as the upstream fundamentals and estimates. Alpha Vantage ratings are current snapshots; FMP analyst-estimate history is needed for true revision scoring.

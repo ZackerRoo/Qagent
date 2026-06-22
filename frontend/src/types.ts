@@ -465,3 +465,69 @@ export type BriefRunDetailResponse = {
 export type BriefMarkdownResponse = {
   markdown: string;
 };
+
+export type DeliveryOutboxRecord = {
+  delivery_id: string;
+  brief_id: string;
+  channel: string;
+  recipient: string | null;
+  subject: string;
+  markdown: string;
+  payload: Record<string, unknown>;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  sent_at: string | null;
+};
+
+export type DeliveriesResponse = {
+  deliveries: DeliveryOutboxRecord[];
+};
+
+export type PortfolioBacktestSummary = {
+  provider: string;
+  symbols: string[];
+  start: string;
+  end: string;
+  initial_capital: string;
+  final_equity: string;
+  total_return_pct: number;
+  max_drawdown_pct: number;
+  trade_count: number;
+  win_rate: number | null;
+  profit_factor: number | null;
+  avg_trade_return_pct: number | null;
+  exposure_pct: number | null;
+};
+
+export type PortfolioBacktestTrade = {
+  instrument_id: string;
+  strategy_id: string | null;
+  signal_date: string;
+  entry_date: string;
+  exit_date: string;
+  exit_reason: string;
+  entry_price: string;
+  exit_price: string;
+  shares: string;
+  gross_pnl: string;
+  costs: string;
+  net_pnl: string;
+  return_pct: number;
+  holding_days: number;
+};
+
+export type PortfolioEquityPoint = {
+  date: string;
+  equity: string;
+  cash: string;
+  open_positions: number;
+  drawdown_pct: number;
+};
+
+export type PortfolioBacktestResponse = {
+  summary: PortfolioBacktestSummary;
+  trades: PortfolioBacktestTrade[];
+  equity_curve: PortfolioEquityPoint[];
+  data_health: Record<string, string>;
+};

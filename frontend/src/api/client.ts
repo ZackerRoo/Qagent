@@ -12,9 +12,12 @@ import type {
   CatalystsResponse,
   DataProviderMode,
   DailyBriefResponse,
+  DeliveriesResponse,
+  DeliveryOutboxRecord,
   OpportunitiesResponse,
   OpportunityHistoryResponse,
   OutcomesResponse,
+  PortfolioBacktestResponse,
   OverviewResponse,
   PortfolioResponse,
   Position,
@@ -36,6 +39,12 @@ type ScanParams = {
   end?: string;
   step_days?: number;
   include_news?: boolean;
+  status?: string;
+  initial_capital?: string | number;
+  risk_per_trade_pct?: string | number;
+  max_positions?: number;
+  transaction_cost_bps?: string | number;
+  slippage_bps?: string | number;
 };
 
 function queryString(params?: ScanParams): string {
@@ -63,6 +72,24 @@ function queryString(params?: ScanParams): string {
   }
   if (params.include_news !== undefined) {
     search.set("include_news", String(params.include_news));
+  }
+  if (params.status) {
+    search.set("status", params.status);
+  }
+  if (params.initial_capital) {
+    search.set("initial_capital", String(params.initial_capital));
+  }
+  if (params.risk_per_trade_pct) {
+    search.set("risk_per_trade_pct", String(params.risk_per_trade_pct));
+  }
+  if (params.max_positions) {
+    search.set("max_positions", String(params.max_positions));
+  }
+  if (params.transaction_cost_bps) {
+    search.set("transaction_cost_bps", String(params.transaction_cost_bps));
+  }
+  if (params.slippage_bps) {
+    search.set("slippage_bps", String(params.slippage_bps));
   }
   const value = search.toString();
   return value ? `?${value}` : "";
@@ -178,6 +205,22 @@ export async function fetchBacktest(
   });
 }
 
+export async function fetchPortfolioBacktest(
+  provider: DataProviderMode,
+  symbols?: string,
+): Promise<PortfolioBacktestResponse> {
+  return apiGet<PortfolioBacktestResponse>("/portfolio-backtest", {
+    provider,
+    symbols,
+    step_days: 5,
+    initial_capital: 100000,
+    risk_per_trade_pct: 1,
+    max_positions: 5,
+    transaction_cost_bps: 5,
+    slippage_bps: 5,
+  });
+}
+
 export async function fetchDailyBrief(
   provider: DataProviderMode,
   symbols?: string,
@@ -215,6 +258,21 @@ export async function fetchDailyBriefRun(briefId: string): Promise<BriefRunDetai
 
 export async function fetchDailyBriefMarkdown(briefId: string): Promise<BriefMarkdownResponse> {
   return apiGet<BriefMarkdownResponse>(`/daily-brief/runs/${briefId}/markdown`);
+}
+
+export async function queueBriefDelivery(briefId: string): Promise<DeliveryOutboxRecord> {
+  return apiPost<DeliveryOutboxRecord>(
+    `/daily-brief/runs/${briefId}/deliveries?channel=markdown&recipient=local`,
+    {},
+  );
+}
+
+export async function fetchDeliveries(status?: string): Promise<DeliveriesResponse> {
+  return apiGet<DeliveriesResponse>("/deliveries", { status, limit: 20 });
+}
+
+export async function markDeliverySent(deliveryId: string): Promise<DeliveryOutboxRecord> {
+  return apiPost<DeliveryOutboxRecord>(`/deliveries/${deliveryId}/mark-sent`, {});
 }
 
 export async function fetchProviderStatus(): Promise<ProviderStatusResponse> {

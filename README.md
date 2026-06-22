@@ -9,6 +9,7 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - US + A-share scanning with fixture data and free providers.
 - Daily Brief page and `/api/daily-brief` research digest combining opportunities, entry levels, catalysts, portfolio risk, data caveats, and strategy validation.
 - Saved brief runs with history, detail retrieval, and Markdown export for push-ready workflows.
+- Delivery outbox for saved briefs, with queued/sent status and Markdown payloads for cron or future email/chat adapters.
 - US free market data via `yfinance`.
 - A-share free market data via `akshare`, with `baostock` fallback.
 - Strategy registry covering trend momentum, breakout + volume, healthy pullback, GF-DMA health, catalyst transmission, PEAD, analyst revisions, TAM-adjusted PEG, Bayesian growth valuation, sector regime, short squeeze risk, options flow, and insider/institutional confirmation.
@@ -24,6 +25,7 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - Outcome replay that computes forward returns, max drawdown, max runup, and target/stop/pending status from saved opportunity snapshots.
 - Strategy performance leaderboard summarizing replayed outcomes by primary strategy.
 - Event-level historical backtesting that reruns scans on prior dates and validates generated opportunity cards with forward outcomes.
+- Portfolio-level historical backtesting that converts validated signals into position-sized trades, stop/target/time exits, costs, slippage, an equity curve, and account-level metrics.
 - Provider readiness dashboard and API status for fixture, free market-data, SEC, CNINFO, and optional vendor feeds.
 - Alert suggestions generated from saved opportunity trigger, stop, and target levels.
 - Watchlist, positions, alert rules, alert evaluation, and portfolio risk view backed by SQLite.
@@ -85,10 +87,13 @@ curl 'http://127.0.0.1:8000/api/opportunities?provider=free&symbols=US:AAPL,CN:0
 curl 'http://127.0.0.1:8000/api/daily-brief?provider=fixture&include_news=false'
 curl -X POST 'http://127.0.0.1:8000/api/daily-brief/runs?provider=fixture&include_news=false'
 curl 'http://127.0.0.1:8000/api/daily-brief/runs'
+curl -X POST 'http://127.0.0.1:8000/api/daily-brief/runs/<brief_id>/deliveries?channel=markdown&recipient=local'
+curl 'http://127.0.0.1:8000/api/deliveries?status=queued'
 curl 'http://127.0.0.1:8000/api/scan-runs'
 curl 'http://127.0.0.1:8000/api/outcomes?provider=fixture'
 curl 'http://127.0.0.1:8000/api/strategy-performance?provider=fixture'
 curl 'http://127.0.0.1:8000/api/backtest?provider=fixture&start=2026-01-30&end=2026-03-20&step_days=5'
+curl 'http://127.0.0.1:8000/api/portfolio-backtest?provider=fixture&start=2026-01-30&end=2026-03-20&step_days=5'
 curl 'http://127.0.0.1:8000/api/alert-suggestions'
 curl 'http://127.0.0.1:8000/api/provider-status'
 curl 'http://127.0.0.1:8000/api/catalysts?symbols=US:AAPL&limit=5'
@@ -97,7 +102,14 @@ curl 'http://127.0.0.1:8000/api/portfolio?provider=fixture'
 
 `/api/opportunities` returns `cards`, `items`, `strategy_health`, and `data_health`. Cards include `rank_score` and `rank_reasons`. Strategies that cannot be evaluated with the current free-data scan are returned with `status: "missing_data"` instead of fabricated scores.
 
-`/api/daily-brief` is the daily readout. It composes the current scan, entry watch levels, optional news catalysts, position risk, provider caveats, and backtest validation. `/api/daily-brief/runs` saves and lists generated briefs; `/api/daily-brief/runs/{brief_id}/markdown` exports a saved brief as Markdown. `/api/opportunities` also records a scan run. `/api/scan-runs`, `/api/opportunity-history`, `/api/outcomes`, and `/api/strategy-performance` expose the saved research trail, daily-bar outcome replay, and strategy-level replay summary. `/api/backtest` runs event-level historical validation without saving records. `/api/alert-suggestions` turns saved opportunity trigger/stop/target levels into draft alert rules.
+`/api/daily-brief` is the daily readout. It composes the current scan, entry watch levels, optional news catalysts, position risk, provider caveats, and backtest validation. `/api/daily-brief/runs` saves and lists generated briefs; `/api/daily-brief/runs/{brief_id}/markdown` exports a saved brief as Markdown; `/api/daily-brief/runs/{brief_id}/deliveries` queues a saved brief in the local delivery outbox. `/api/opportunities` also records a scan run. `/api/scan-runs`, `/api/opportunity-history`, `/api/outcomes`, and `/api/strategy-performance` expose the saved research trail, daily-bar outcome replay, and strategy-level replay summary. `/api/backtest` runs event-level historical validation without saving records. `/api/portfolio-backtest` simulates account-level trades from historical signals. `/api/alert-suggestions` turns saved opportunity trigger/stop/target levels into draft alert rules.
+
+CLI daily brief handoff:
+
+```bash
+cd backend
+.venv/bin/python -m qagent.cli daily-brief --provider fixture --no-news --save --queue --print-markdown
+```
 
 ## Research Docs
 

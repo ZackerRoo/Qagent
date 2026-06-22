@@ -5,10 +5,13 @@ import {
   fetchDailyBriefMarkdown,
   fetchDailyBriefRun,
   fetchDailyBriefRuns,
+  fetchDeliveries,
+  markDeliverySent,
+  queueBriefDelivery,
   saveDailyBriefRun,
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
-import type { BriefRun, DailyBriefResponse, DataProviderMode } from "../types";
+import type { BriefRun, DailyBriefResponse, DataProviderMode, DeliveryOutboxRecord } from "../types";
 
 function formatNumber(value: number | null, suffix = "") {
   if (value === null || Number.isNaN(value)) {
@@ -27,6 +30,7 @@ function formatRatio(value: number | null) {
 export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbols: string }) {
   const [brief, setBrief] = useState<DailyBriefResponse>();
   const [runs, setRuns] = useState<BriefRun[]>([]);
+  const [deliveries, setDeliveries] = useState<DeliveryOutboxRecord[]>([]);
   const [markdown, setMarkdown] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -50,6 +54,11 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
     setRuns(result.runs);
   }
 
+  async function loadDeliveries() {
+    const result = await fetchDeliveries();
+    setDeliveries(result.deliveries);
+  }
+
   async function saveBrief() {
     try {
       setIsSaving(true);
@@ -58,6 +67,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
       setBrief(saved.payload);
       setMarkdown("");
       await loadRuns();
+      await loadDeliveries();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Failed to save brief");
     } finally {
@@ -86,9 +96,30 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
     }
   }
 
+  async function queueDelivery(briefId: string) {
+    try {
+      setError("");
+      await queueBriefDelivery(briefId);
+      await loadDeliveries();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to queue delivery");
+    }
+  }
+
+  async function markSent(deliveryId: string) {
+    try {
+      setError("");
+      await markDeliverySent(deliveryId);
+      await loadDeliveries();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to mark delivery sent");
+    }
+  }
+
   useEffect(() => {
     void loadBrief();
     void loadRuns();
+    void loadDeliveries();
   }, [dataMode, symbols]);
 
   return (
@@ -174,6 +205,13 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
                         >
                           Markdown
                         </button>
+                        <button
+                          className="table-action"
+                          type="button"
+                          onClick={() => queueDelivery(run.brief_id)}
+                        >
+                          Queue
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -184,6 +222,66 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
         )}
         {markdown && (
           <textarea className="markdown-export" readOnly value={markdown} aria-label="Markdown export" />
+        )}
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <h2>Delivery Outbox</h2>
+          <span className="count">{deliveries.length}</span>
+        </div>
+        {!deliveries.length ? (
+          <div className="empty-state">No queued brief deliveries yet.</div>
+        ) : (
+          <div className="table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th>Created</th>
+                  <th>Status</th>
+                  <th>Channel</th>
+                  <th>Recipient</th>
+                  <th>Subject</th>
+                  <th>Sent</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {deliveries.map((delivery) => (
+                  <tr key={delivery.delivery_id}>
+                    <td>{new Date(delivery.created_at).toLocaleString()}</td>
+                    <td>
+                      <span className={`status status-${delivery.status}`}>{delivery.status}</span>
+                    </td>
+                    <td>{delivery.channel}</td>
+                    <td>{delivery.recipient ?? "local"}</td>
+                    <td className="reason-cell">{delivery.subject}</td>
+                    <td>{delivery.sent_at ? new Date(delivery.sent_at).toLocaleString() : "-"}</td>
+                    <td>
+                      <div className="table-actions">
+                        <button
+                          className="table-action"
+                          type="button"
+                          onClick={() => setMarkdown(delivery.markdown)}
+                        >
+                          Markdown
+                        </button>
+                        {delivery.status === "queued" && (
+                          <button
+                            className="table-action"
+                            type="button"
+                            onClick={() => markSent(delivery.delivery_id)}
+                          >
+                            Mark Sent
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
 

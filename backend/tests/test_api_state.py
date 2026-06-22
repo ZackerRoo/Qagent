@@ -148,6 +148,28 @@ def test_backtest_api_returns_fixture_validation(tmp_path, monkeypatch):
     assert body["data_health"]["lookahead_guard"] == "bars_limited_to_scan_date"
 
 
+def test_portfolio_backtest_api_returns_account_level_validation(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'api-portfolio-backtest.db'}")
+    client = TestClient(create_app())
+
+    response = client.get(
+        "/api/portfolio-backtest?provider=fixture&symbols=US:TEST,CN:000001"
+        "&start=2026-01-30&end=2026-03-20&step_days=5"
+        "&initial_capital=100000&risk_per_trade_pct=1&max_positions=2"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["provider"] == "fixture"
+    assert body["summary"]["initial_capital"] == "100000"
+    assert body["summary"]["trade_count"] > 0
+    assert body["summary"]["final_equity"] != "100000"
+    assert body["summary"]["max_drawdown_pct"] is not None
+    assert body["trades"]
+    assert body["equity_curve"][0]["equity"] == "100000"
+    assert body["data_health"]["lookahead_guard"] == "signals_generated_before_exits"
+
+
 def test_backtest_api_rejects_reversed_date_range(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'api-backtest-invalid.db'}")
     client = TestClient(create_app())

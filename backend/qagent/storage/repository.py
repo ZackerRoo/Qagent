@@ -10,6 +10,7 @@ from qagent.domain.models import OpportunityCard
 from qagent.storage.tables import (
     AlertRuleRow,
     BriefRunRow,
+    DeliveryOutboxRow,
     OpportunitySnapshotRow,
     PositionRow,
     ScanRunRow,
@@ -114,6 +115,20 @@ class BriefRunRecord(BaseModel):
     data_health: dict[str, str]
     payload: dict[str, object]
     created_at: datetime
+
+
+class DeliveryOutboxRecord(BaseModel):
+    delivery_id: str
+    brief_id: str
+    channel: str
+    recipient: str | None
+    subject: str
+    markdown: str
+    payload: dict[str, object]
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    sent_at: datetime | None
 
 
 def _serialize_tags(tags: list[str]) -> str:
@@ -285,6 +300,72 @@ class QagentRepository:
                 return None
             return self._brief_run_from_row(row)
 
+    def enqueue_brief_delivery(
+        self,
+        brief_run: BriefRunRecord,
+        channel: str = "markdown",
+        recipient: str | None = None,
+        markdown: str = "",
+    ) -> DeliveryOutboxRecord:
+        delivery_id = (
+            f"delivery-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+        )
+        payload = {
+            "brief_id": brief_run.brief_id,
+            "provider": brief_run.provider,
+            "symbols": brief_run.symbols,
+            "opportunity_count": brief_run.opportunity_count,
+            "entry_watch_count": brief_run.entry_watch_count,
+            "risk_alert_count": brief_run.risk_alert_count,
+            "catalyst_count": brief_run.catalyst_count,
+            "validation_count": brief_run.validation_count,
+        }
+        with self.session_factory() as session:
+            row = DeliveryOutboxRow(
+                delivery_id=delivery_id,
+                brief_id=brief_run.brief_id,
+                channel=channel,
+                recipient=recipient,
+                subject=brief_run.headline,
+                markdown=markdown,
+                payload_json=json.dumps(payload, sort_keys=True),
+                status="queued",
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return self._delivery_outbox_from_row(row)
+
+    def list_delivery_outbox(
+        self,
+        status: str | None = None,
+        limit: int = 20,
+    ) -> list[DeliveryOutboxRecord]:
+        with self.session_factory() as session:
+            query = session.query(DeliveryOutboxRow)
+            if status:
+                query = query.filter(DeliveryOutboxRow.status == status)
+            rows = (
+                query.order_by(
+                    DeliveryOutboxRow.created_at.desc(),
+                    DeliveryOutboxRow.delivery_id.desc(),
+                )
+                .limit(limit)
+                .all()
+            )
+            return [self._delivery_outbox_from_row(row) for row in rows]
+
+    def mark_delivery_sent(self, delivery_id: str) -> DeliveryOutboxRecord | None:
+        with self.session_factory() as session:
+            row = session.get(DeliveryOutboxRow, delivery_id)
+            if row is None:
+                return None
+            row.status = "sent"
+            row.sent_at = datetime.now(timezone.utc)
+            session.commit()
+            session.refresh(row)
+            return self._delivery_outbox_from_row(row)
+
     @staticmethod
     def _watchlist_from_row(row: WatchlistItemRow) -> WatchlistItem:
         return WatchlistItem(
@@ -394,6 +475,22 @@ class QagentRepository:
             data_health=json.loads(row.data_health or "{}"),
             payload=json.loads(row.brief_json),
             created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _delivery_outbox_from_row(row: DeliveryOutboxRow) -> DeliveryOutboxRecord:
+        return DeliveryOutboxRecord(
+            delivery_id=row.delivery_id,
+            brief_id=row.brief_id,
+            channel=row.channel,
+            recipient=row.recipient,
+            subject=row.subject,
+            markdown=row.markdown,
+            payload=json.loads(row.payload_json or "{}"),
+            status=row.status,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            sent_at=row.sent_at,
         )
 
 

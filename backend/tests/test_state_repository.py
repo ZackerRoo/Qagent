@@ -158,6 +158,45 @@ def test_repository_saves_and_loads_brief_runs(tmp_path):
     assert loaded.payload["top_opportunities"][0]["instrument_id"] == "US:TEST"
 
 
+def test_repository_queues_and_marks_brief_delivery(tmp_path):
+    from qagent.briefing.daily import build_daily_brief
+    from qagent.jobs.daily_scan import run_daily_scan
+    from qagent.providers.fixtures import FixtureMarketDataProvider
+
+    repo = make_repo(tmp_path)
+    scan = run_daily_scan(["US:TEST"], FixtureMarketDataProvider())
+    brief = build_daily_brief(
+        provider="fixture",
+        symbols=["US:TEST"],
+        scan_result=scan,
+        limit=5,
+        data_health={"brief_news": "skipped"},
+    )
+    saved = repo.save_brief_run(brief)
+
+    delivery = repo.enqueue_brief_delivery(
+        brief_run=saved,
+        channel="markdown",
+        recipient="local",
+        markdown="# Qagent Daily Brief\n",
+    )
+    queued = repo.list_delivery_outbox(status="queued", limit=5)
+    sent = repo.mark_delivery_sent(delivery.delivery_id)
+
+    assert delivery.delivery_id.startswith("delivery-")
+    assert delivery.brief_id == saved.brief_id
+    assert delivery.status == "queued"
+    assert delivery.channel == "markdown"
+    assert delivery.recipient == "local"
+    assert delivery.subject == saved.headline
+    assert delivery.markdown.startswith("# Qagent Daily Brief")
+    assert queued[0].delivery_id == delivery.delivery_id
+    assert sent is not None
+    assert sent.status == "sent"
+    assert sent.sent_at is not None
+    assert repo.list_delivery_outbox(status="queued", limit=5) == []
+
+
 def test_initialize_database_is_safe_for_parallel_calls(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'parallel' / 'qagent.db'}"
 

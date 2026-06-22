@@ -86,6 +86,26 @@ class BriefRunRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class DeliveryOutboxRow(Base):
+    __tablename__ = "delivery_outbox"
+
+    delivery_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    brief_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("brief_runs.brief_id"), index=True
+    )
+    channel: Mapped[str] = mapped_column(String(32), index=True)
+    recipient: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    subject: Mapped[str] = mapped_column(Text)
+    markdown: Mapped[str] = mapped_column(Text)
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class OpportunitySnapshotRow(Base):
     __tablename__ = "opportunity_snapshots"
 
