@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///../data/qagent.db"
     data_dir: Path = Path("../data")
     environment: str = "development"
+    alpha_vantage_api_key: str | None = None
     fmp_api_key: str | None = None
     finnhub_api_key: str | None = None
     tushare_token: str | None = None

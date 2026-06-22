@@ -10,10 +10,10 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - US free market data via `yfinance`.
 - A-share free market data via `akshare`, with `baostock` fallback.
 - Strategy registry covering trend momentum, breakout + volume, healthy pullback, GF-DMA health, catalyst transmission, PEAD, analyst revisions, TAM-adjusted PEG, Bayesian growth valuation, sector regime, short squeeze risk, options flow, and insider/institutional confirmation.
-- Strategy-data provider contract for earnings events, SEC filings, and A-share announcements.
-- Real-data strategy adapters for FMP earnings, Finnhub earnings, SEC EDGAR filings, CNINFO announcements, and Tushare configuration.
-- Free-data strategy evaluator for trend momentum, breakout + volume, healthy pullback, GF-DMA health, PEAD when earnings actuals/estimates exist, and A-share limit-status confirmation.
-- Missing-data handling for strategies that need earnings estimates, analyst revisions, fundamentals, TAM assumptions, options flow, insider transactions, institutional filings, sector breadth, or short-interest data.
+- Strategy-data provider contract for earnings events, SEC filings, A-share announcements, fundamentals, valuation multiples, and analyst context.
+- Real-data strategy adapters for Alpha Vantage fundamentals/earnings/ratings, FMP earnings/fundamentals/analyst estimates, Finnhub earnings/fundamentals/recommendations, SEC EDGAR filings, CNINFO announcements, and Tushare configuration.
+- Free-data strategy evaluator for trend momentum, breakout + volume, healthy pullback, GF-DMA health, PEAD when earnings actuals/estimates exist, analyst revision when estimate revisions exist, TAM-adjusted PEG, Bayesian growth valuation, and A-share limit-status confirmation.
+- Missing-data handling for strategies that need unavailable estimates, options flow, insider transactions, institutional filings, sector breadth, or short-interest data.
 - Strategy-specific trade plans for breakout, healthy pullback, and PEAD earnings drift.
 - Opportunity cards with primary strategy, strategy score, rank score, ranking reasons, strategy stack, trigger, no-chase level, stop, targets, risk/reward, scenario percentages, and signal stack evidence.
 - Scan coverage table showing `setup_ready`, `no_setup`, or `no_data` per symbol plus passed/watch/missing strategy counts.
@@ -51,6 +51,7 @@ Optional strategy-data keys:
 ```bash
 export QAGENT_FMP_API_KEY="..."
 export QAGENT_FINNHUB_API_KEY="..."
+export QAGENT_ALPHA_VANTAGE_API_KEY="..."
 export QAGENT_TUSHARE_TOKEN="..."
 export QAGENT_SEC_USER_AGENT="Qagent research app you@example.com"
 ```

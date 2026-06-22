@@ -2,7 +2,7 @@ import pandas as pd
 
 from qagent.domain.enums import SignalType
 from qagent.domain.models import Signal
-from qagent.strategy_data.models import EarningsEvent
+from qagent.strategy_data.models import AnalystInsight, EarningsEvent, FundamentalSnapshot
 from qagent.strategies.models import StrategyDefinition, StrategyEvaluation
 from qagent.strategies.registry import StrategyRegistry, default_strategy_registry
 
@@ -38,6 +38,18 @@ class StrategyEvaluator:
             elif definition.strategy_id == "pead_earnings_drift":
                 evaluations.append(
                     self._pead_earnings_drift(definition, instrument_id, bars, context, available_data)
+                )
+            elif definition.strategy_id == "analyst_revision_momentum":
+                evaluations.append(
+                    self._analyst_revision_momentum(
+                        definition, instrument_id, bars, context, available_data
+                    )
+                )
+            elif definition.strategy_id == "tam_adj_peg_growth":
+                evaluations.append(self._tam_adj_peg(definition, instrument_id, context, available_data))
+            elif definition.strategy_id == "bayesian_intrinsic_growth":
+                evaluations.append(
+                    self._bayesian_intrinsic_growth(definition, instrument_id, context, available_data)
                 )
             elif definition.strategy_id == "short_squeeze_risk":
                 evaluations.append(self._short_squeeze(definition, signal_by_type, available_data))
@@ -264,6 +276,189 @@ class StrategyEvaluator:
             },
         )
 
+    def _analyst_revision_momentum(
+        self,
+        definition: StrategyDefinition,
+        instrument_id: str,
+        bars: pd.DataFrame,
+        context: dict[str, object] | None,
+        available_data: set[str],
+    ) -> StrategyEvaluation:
+        insight = _latest_analyst_insight(instrument_id, context)
+        missing = _missing_requirements(definition, available_data)
+        if insight is None or not insight.has_revision_inputs:
+            if insight is None:
+                missing.extend(["analyst_estimates", "revision_timestamps"])
+            else:
+                if insight.revision_date is None:
+                    missing.append("revision_timestamps")
+                if not any(
+                    value is not None
+                    for value in [
+                        insight.eps_revision_pct,
+                        insight.revenue_revision_pct,
+                        insight.target_revision_pct,
+                    ]
+                ):
+                    missing.append("analyst_estimates")
+            return self._evaluation(
+                definition,
+                status="missing_data",
+                score=0.0,
+                evidence={"reason": "analyst estimate or revision timestamp unavailable"},
+                missing_data=sorted(set(missing)),
+            )
+
+        eps_revision = _float_or_zero(insight.eps_revision_pct)
+        revenue_revision = _float_or_zero(insight.revenue_revision_pct)
+        target_revision = _float_or_zero(insight.target_revision_pct)
+        revision_strength = min(max(eps_revision, revenue_revision, target_revision, 0) / 25, 1.0)
+        rating_balance = _float_or_default(insight.bullish_rating_ratio, 0.5)
+        target_upside = _float_or_zero(insight.target_upside_pct)
+        target_upside_score = min(max(target_upside, 0) / 30, 1.0)
+        recency_score = _revision_recency_score(bars, insight)
+        score = round(
+            min(
+                revision_strength * 0.4
+                + rating_balance * 0.25
+                + target_upside_score * 0.2
+                + recency_score * 0.15,
+                1.0,
+            ),
+            4,
+        )
+        return self._evaluation(
+            definition,
+            status="passed" if score >= 0.7 else "watch",
+            score=score,
+            triggers=["estimate_revision"],
+            confirmations=["analyst_rating_balance", "target_price_context"],
+            evidence={
+                "revision_date": insight.revision_date.isoformat() if insight.revision_date else None,
+                "eps_revision_pct": round(eps_revision, 4),
+                "revenue_revision_pct": round(revenue_revision, 4),
+                "target_revision_pct": round(target_revision, 4),
+                "target_upside_pct": round(target_upside, 4),
+                "bullish_rating_ratio": round(rating_balance, 4),
+                "provider": insight.provider,
+            },
+            score_components={
+                "revision_strength": round(revision_strength, 4),
+                "rating_balance": round(rating_balance, 4),
+                "target_upside": round(target_upside_score, 4),
+                "revision_recency": round(recency_score, 4),
+            },
+        )
+
+    def _tam_adj_peg(
+        self,
+        definition: StrategyDefinition,
+        instrument_id: str,
+        context: dict[str, object] | None,
+        available_data: set[str],
+    ) -> StrategyEvaluation:
+        snapshot = _latest_fundamental(instrument_id, context)
+        missing = _fundamental_missing_data(definition, available_data, snapshot)
+        if missing:
+            return self._evaluation(
+                definition,
+                status="missing_data",
+                score=0.0,
+                evidence={"reason": "fundamental growth, valuation, or TAM proxy unavailable"},
+                missing_data=missing,
+            )
+
+        growth_pct = _max_metric(snapshot.revenue_growth_pct, snapshot.earnings_growth_pct)
+        margin_pct = _max_metric(snapshot.net_margin_pct, snapshot.operating_margin_pct)
+        growth_score = min(max(growth_pct, 0) / 40, 1.0)
+        margin_score = min(max(margin_pct, 0) / 20, 1.0)
+        valuation_score = _valuation_sanity_score(snapshot)
+        tam_score = _market_room_score(snapshot.market_cap)
+        score = round(
+            min(
+                growth_score * 0.3
+                + margin_score * 0.2
+                + valuation_score * 0.25
+                + tam_score * 0.25,
+                1.0,
+            ),
+            4,
+        )
+        return self._evaluation(
+            definition,
+            status="passed" if score >= 0.7 else "watch",
+            score=score,
+            triggers=["free_fundamental_growth"],
+            confirmations=["valuation_multiples", "tam_proxy"],
+            evidence={
+                "as_of_date": snapshot.as_of_date.isoformat(),
+                "growth_pct": round(growth_pct, 4),
+                "margin_pct": round(margin_pct, 4),
+                "market_cap": _float_or_zero(snapshot.market_cap),
+                "peg_ratio": _float_or_default(snapshot.peg_ratio, 0.0),
+                "tam_assumption_source": "free_fundamental_proxy",
+                "provider": snapshot.provider,
+            },
+            score_components={
+                "growth": round(growth_score, 4),
+                "margin_quality": round(margin_score, 4),
+                "valuation_sanity": round(valuation_score, 4),
+                "market_room": round(tam_score, 4),
+            },
+        )
+
+    def _bayesian_intrinsic_growth(
+        self,
+        definition: StrategyDefinition,
+        instrument_id: str,
+        context: dict[str, object] | None,
+        available_data: set[str],
+    ) -> StrategyEvaluation:
+        snapshot = _latest_fundamental(instrument_id, context)
+        missing = _fundamental_missing_data(definition, available_data, snapshot)
+        if missing:
+            return self._evaluation(
+                definition,
+                status="missing_data",
+                score=0.0,
+                evidence={"reason": "fundamental growth, valuation, or growth prior unavailable"},
+                missing_data=missing,
+            )
+
+        growth_pct = _max_metric(snapshot.revenue_growth_pct, snapshot.earnings_growth_pct)
+        margin_pct = _max_metric(snapshot.net_margin_pct, snapshot.operating_margin_pct)
+        growth_score = min(max(growth_pct, 0) / 35, 1.0)
+        margin_score = min(max(margin_pct, 0) / 22, 1.0)
+        valuation_score = _valuation_sanity_score(snapshot)
+        prior = _durable_growth_prior(growth_pct, snapshot.market_cap)
+        posterior = round(
+            min(prior * 0.35 + growth_score * 0.3 + margin_score * 0.25 + valuation_score * 0.1, 1.0),
+            4,
+        )
+        return self._evaluation(
+            definition,
+            status="passed" if posterior >= 0.65 else "watch",
+            score=posterior,
+            triggers=["growth_probability_update"],
+            confirmations=["fundamental_growth", "valuation_multiples"],
+            evidence={
+                "as_of_date": snapshot.as_of_date.isoformat(),
+                "prior_growth_probability": round(prior, 4),
+                "posterior_growth_probability": posterior,
+                "growth_pct": round(growth_pct, 4),
+                "margin_pct": round(margin_pct, 4),
+                "valuation_score": round(valuation_score, 4),
+                "growth_prior_source": "free_fundamental_proxy",
+                "provider": snapshot.provider,
+            },
+            score_components={
+                "growth_prior": round(prior, 4),
+                "growth_evidence": round(growth_score, 4),
+                "margin_support": round(margin_score, 4),
+                "valuation_pressure": round(valuation_score, 4),
+            },
+        )
+
     def _short_squeeze(
         self,
         definition: StrategyDefinition,
@@ -355,6 +550,54 @@ def _latest_earnings_event(
     return max(events, key=lambda item: item.announcement_date)
 
 
+def _latest_fundamental(
+    instrument_id: str,
+    context: dict[str, object] | None,
+) -> FundamentalSnapshot | None:
+    if not context:
+        return None
+    snapshots = [
+        item
+        for item in context.get("fundamentals", [])
+        if isinstance(item, FundamentalSnapshot) and item.instrument_id == instrument_id
+    ]
+    if not snapshots:
+        return None
+    return max(snapshots, key=lambda item: item.as_of_date)
+
+
+def _latest_analyst_insight(
+    instrument_id: str,
+    context: dict[str, object] | None,
+) -> AnalystInsight | None:
+    if not context:
+        return None
+    insights = [
+        item
+        for item in context.get("analyst_insights", [])
+        if isinstance(item, AnalystInsight) and item.instrument_id == instrument_id
+    ]
+    if not insights:
+        return None
+    return max(insights, key=lambda item: item.revision_date or item.as_of_date)
+
+
+def _fundamental_missing_data(
+    definition: StrategyDefinition,
+    available_data: set[str],
+    snapshot: FundamentalSnapshot | None,
+) -> list[str]:
+    missing = _missing_requirements(definition, available_data)
+    if snapshot is None:
+        missing.extend(["fundamentals", "valuation_multiples"])
+        return sorted(set(missing))
+    if not snapshot.has_growth_inputs:
+        missing.append("fundamentals")
+    if not snapshot.has_valuation_inputs:
+        missing.append("valuation_multiples")
+    return sorted(set(missing))
+
+
 def _pead_missing_data(
     definition: StrategyDefinition,
     available_data: set[str],
@@ -415,3 +658,78 @@ def _reasonable_reaction_score(announcement_return_pct: float) -> float:
     if announcement_return_pct <= 20:
         return 0.55
     return 0.25
+
+
+def _float_or_zero(value) -> float:
+    return _float_or_default(value, 0.0)
+
+
+def _float_or_default(value, default: float) -> float:
+    if value is None:
+        return default
+    return float(value)
+
+
+def _max_metric(*values) -> float:
+    numbers = [float(value) for value in values if value is not None]
+    return max(numbers) if numbers else 0.0
+
+
+def _valuation_sanity_score(snapshot: FundamentalSnapshot) -> float:
+    if snapshot.peg_ratio is not None:
+        peg = float(snapshot.peg_ratio)
+        if peg <= 1:
+            return 1.0
+        if peg <= 1.5:
+            return 0.8
+        if peg <= 2.5:
+            return 0.55
+        return 0.25
+    growth_pct = _max_metric(snapshot.revenue_growth_pct, snapshot.earnings_growth_pct)
+    forward_pe = _float_or_default(snapshot.forward_pe or snapshot.pe_ratio, 0.0)
+    if growth_pct <= 0 or forward_pe <= 0:
+        return 0.4
+    implied_peg = forward_pe / growth_pct
+    if implied_peg <= 1:
+        return 0.9
+    if implied_peg <= 1.5:
+        return 0.7
+    return 0.4
+
+
+def _market_room_score(market_cap) -> float:
+    market_cap_float = _float_or_default(market_cap, 0.0)
+    if market_cap_float <= 0:
+        return 0.45
+    if market_cap_float <= 10_000_000_000:
+        return 0.9
+    if market_cap_float <= 50_000_000_000:
+        return 0.72
+    if market_cap_float <= 200_000_000_000:
+        return 0.52
+    return 0.32
+
+
+def _durable_growth_prior(growth_pct: float, market_cap) -> float:
+    room_score = _market_room_score(market_cap)
+    if growth_pct >= 30:
+        base = 0.68
+    elif growth_pct >= 20:
+        base = 0.58
+    elif growth_pct >= 10:
+        base = 0.48
+    else:
+        base = 0.35
+    return min(base * 0.75 + room_score * 0.25, 0.85)
+
+
+def _revision_recency_score(bars: pd.DataFrame, insight: AnalystInsight) -> float:
+    if insight.revision_date is None or bars.empty:
+        return 0.5
+    latest_trade_date = bars.sort_values("trade_date").iloc[-1]["trade_date"]
+    days = (latest_trade_date - insight.revision_date).days
+    if days <= 30:
+        return 1.0
+    if days <= 90:
+        return 0.7
+    return 0.4

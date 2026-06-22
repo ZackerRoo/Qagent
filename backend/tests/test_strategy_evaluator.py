@@ -2,6 +2,7 @@ from datetime import date
 
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.signals.engine import SignalEngine
+from qagent.strategy_data.models import AnalystInsight, FundamentalSnapshot
 from qagent.strategy_data.providers import FixtureStrategyDataProvider
 from qagent.strategies.evaluator import StrategyEvaluator
 from qagent.strategies.registry import default_strategy_registry
@@ -110,3 +111,93 @@ def test_evaluator_marks_a_share_limit_as_risk_confirmation():
     assert by_id["breakout_volume_confirmation"].status == "passed"
     assert "limit_status" in by_id["breakout_volume_confirmation"].confirmations
     assert by_id["short_squeeze_risk"].status in {"watch", "missing_data"}
+
+
+def test_evaluator_scores_growth_valuation_when_free_fundamentals_are_available():
+    bars, signals = _fixture_inputs("US:TEST")
+    fundamentals = [
+        FundamentalSnapshot(
+            instrument_id="US:TEST",
+            as_of_date=date(2026, 3, 31),
+            revenue_growth_pct=32.5,
+            earnings_growth_pct=41.2,
+            gross_margin_pct=68,
+            operating_margin_pct=24.5,
+            net_margin_pct=18,
+            return_on_equity_pct=29,
+            market_cap=8_500_000_000,
+            pe_ratio=34,
+            forward_pe=28,
+            peg_ratio=0.95,
+            price_to_sales=7.5,
+            provider="fixture_strategy_data",
+        )
+    ]
+
+    evaluations = StrategyEvaluator(default_strategy_registry()).evaluate(
+        "US:TEST",
+        signals,
+        bars,
+        context={
+            "fundamentals": fundamentals,
+            "available_data": [
+                "fundamentals",
+                "valuation_multiples",
+                "tam_assumptions",
+                "growth_priors",
+            ],
+        },
+    )
+    by_id = {evaluation.strategy_id: evaluation for evaluation in evaluations}
+
+    assert by_id["tam_adj_peg_growth"].status == "passed"
+    assert by_id["tam_adj_peg_growth"].score >= 0.7
+    assert by_id["tam_adj_peg_growth"].missing_data == []
+    assert by_id["tam_adj_peg_growth"].evidence["tam_assumption_source"] == "free_fundamental_proxy"
+    assert by_id["bayesian_intrinsic_growth"].status == "passed"
+    assert by_id["bayesian_intrinsic_growth"].score >= 0.65
+    assert by_id["bayesian_intrinsic_growth"].evidence["posterior_growth_probability"] > 0.6
+
+
+def test_evaluator_scores_analyst_revision_when_revision_inputs_are_available():
+    bars, signals = _fixture_inputs("US:TEST")
+    analyst_insights = [
+        AnalystInsight(
+            instrument_id="US:TEST",
+            as_of_date=date(2026, 3, 31),
+            revision_date=date(2026, 3, 31),
+            current_eps_estimate=1.35,
+            prior_eps_estimate=1.1,
+            current_revenue_estimate=152_000_000,
+            prior_revenue_estimate=140_000_000,
+            target_price=64,
+            prior_target_price=54,
+            current_price=50,
+            strong_buy_count=6,
+            buy_count=14,
+            hold_count=4,
+            sell_count=1,
+            strong_sell_count=0,
+            provider="fixture_strategy_data",
+        )
+    ]
+
+    evaluations = StrategyEvaluator(default_strategy_registry()).evaluate(
+        "US:TEST",
+        signals,
+        bars,
+        context={
+            "analyst_insights": analyst_insights,
+            "available_data": ["analyst_estimates", "revision_timestamps"],
+        },
+    )
+    revision = {evaluation.strategy_id: evaluation for evaluation in evaluations}[
+        "analyst_revision_momentum"
+    ]
+
+    assert revision.status == "passed"
+    assert revision.score >= 0.7
+    assert revision.missing_data == []
+    assert "estimate_revision" in revision.triggers
+    assert revision.evidence["eps_revision_pct"] > 20
+    assert revision.evidence["target_revision_pct"] > 15

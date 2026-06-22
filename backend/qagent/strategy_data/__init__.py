@@ -1,5 +1,12 @@
-from qagent.strategy_data.models import AnnouncementEvent, EarningsEvent, FilingEvent
+from qagent.strategy_data.models import (
+    AnalystInsight,
+    AnnouncementEvent,
+    EarningsEvent,
+    FilingEvent,
+    FundamentalSnapshot,
+)
 from qagent.strategy_data.providers import (
+    AlphaVantageStrategyDataProvider,
     CninfoAnnouncementProvider,
     CompositeStrategyDataProvider,
     EmptyStrategyDataProvider,
@@ -13,8 +20,11 @@ from qagent.strategy_data.providers import (
 
 __all__ = [
     "AnnouncementEvent",
+    "AnalystInsight",
     "EarningsEvent",
     "FilingEvent",
+    "FundamentalSnapshot",
+    "AlphaVantageStrategyDataProvider",
     "CninfoAnnouncementProvider",
     "CompositeStrategyDataProvider",
     "EmptyStrategyDataProvider",

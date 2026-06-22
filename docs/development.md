@@ -50,13 +50,13 @@ Free-data-ready strategies:
 - `healthy_pullback`
 - `gf_dma_health`
 - `pead_earnings_drift` when earnings actuals, estimates, announcement timing, and daily bars are available
+- `analyst_revision_momentum` when current/prior EPS, revenue, or target-price estimates and revision dates are available
+- `tam_adj_peg_growth` when fundamentals, valuation multiples, and the free-data TAM proxy are available
+- `bayesian_intrinsic_growth` when fundamentals and valuation-derived growth priors are available
 
 Registered but data-limited strategies:
 
 - `catalyst_financial_transmission`
-- `analyst_revision_momentum`
-- `tam_adj_peg_growth`
-- `bayesian_intrinsic_growth`
 - `sector_rotation_regime`
 - `short_squeeze_risk`
 - `options_flow_confirmation`
@@ -64,14 +64,16 @@ Registered but data-limited strategies:
 
 Data-limited strategies must appear as `missing_data` unless their required provider fields are available. This prevents the agent from inventing PEAD, analyst revision, valuation, options-flow, or ownership conclusions from price data alone.
 
-The fixture strategy-data provider reads `backend/tests/fixtures/earnings_events.csv`. In fixture mode, `US:TEST` has a complete earnings event and can score PEAD; `CN:000001` intentionally lacks estimates and remains missing-data for PEAD.
+The fixture strategy-data provider reads `backend/tests/fixtures/earnings_events.csv`, `fundamental_snapshots.csv`, and `analyst_insights.csv`. In fixture mode, `US:TEST` has a complete earnings event, growth/valuation snapshot, and analyst revision record; `CN:000001` intentionally lacks estimates and remains missing-data for PEAD.
 
 Free mode composes real-data adapters:
 
 - SEC EDGAR filings through `data.sec.gov` using `QAGENT_SEC_USER_AGENT`; the adapter resolves ticker to CIK through SEC's company ticker list.
 - CNINFO announcement search for A-share announcements.
+- Alpha Vantage company overview and earnings history when `QAGENT_ALPHA_VANTAGE_API_KEY` is set.
 - FMP earnings calendar when `QAGENT_FMP_API_KEY` is set.
-- Finnhub earnings calendar when `QAGENT_FINNHUB_API_KEY` is set.
+- FMP key metrics, ratios, and analyst estimates when `QAGENT_FMP_API_KEY` is set.
+- Finnhub earnings calendar, basic financials, and recommendation trends when `QAGENT_FINNHUB_API_KEY` is set.
 - Tushare placeholder/config entry when `QAGENT_TUSHARE_TOKEN` is set.
 
 Optional environment variables:
@@ -79,11 +81,12 @@ Optional environment variables:
 ```bash
 export QAGENT_FMP_API_KEY="..."
 export QAGENT_FINNHUB_API_KEY="..."
+export QAGENT_ALPHA_VANTAGE_API_KEY="..."
 export QAGENT_TUSHARE_TOKEN="..."
 export QAGENT_SEC_USER_AGENT="Qagent research app you@example.com"
 ```
 
-The scan response surfaces `strategy_data_provider`, `strategy_filings`, `strategy_announcements`, and `strategy_data_errors` in `data_health`.
+The scan response surfaces `strategy_data_provider`, `strategy_filings`, `strategy_announcements`, `strategy_fundamentals`, `strategy_analyst_insights`, and `strategy_data_errors` in `data_health`.
 
 Opportunity cards now include:
 
@@ -118,5 +121,7 @@ npm run build
 
 - No automated trading or broker execution.
 - Free data may be delayed or incomplete.
-- PEAD is implemented when earnings actuals and estimates are available, but production free-data coverage depends on FMP/Finnhub or another earnings provider. Analyst revisions, TAM-PEG, Bayesian valuation, options flow, 北向资金, 龙虎榜, and richer announcement parsing are registered but not production-grade without the required provider data.
+- PEAD is implemented when earnings actuals and estimates are available, but production free-data coverage depends on FMP/Finnhub/Alpha Vantage or another earnings provider.
+- Analyst revision, TAM-PEG, and Bayesian valuation are implemented with normalized free-source fields, but results are only as good as the upstream fundamentals and estimates. Alpha Vantage ratings are current snapshots; FMP analyst-estimate history is needed for true revision scoring.
+- Options flow, 北向资金, 龙虎榜, short interest, and richer announcement parsing are registered but not production-grade without the required provider data.
 - Opportunity cards are research artifacts, not personalized investment advice.

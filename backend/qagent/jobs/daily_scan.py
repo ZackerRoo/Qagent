@@ -6,7 +6,7 @@ from qagent.cards.generator import OpportunityCardGenerator
 from qagent.domain.models import OpportunityCard
 from qagent.providers.base import MarketDataProvider
 from qagent.signals.engine import SignalEngine
-from qagent.strategy_data.models import EarningsEvent
+from qagent.strategy_data.models import AnalystInsight, EarningsEvent, FundamentalSnapshot
 from qagent.strategy_data.providers import StrategyDataProvider, build_strategy_data_provider
 from qagent.strategies.evaluator import StrategyEvaluator
 from qagent.strategies.health import build_strategy_health_from_bars
@@ -45,6 +45,8 @@ def run_daily_scan(
     bars_by_instrument = {}
     strategy_filings_count = 0
     strategy_announcements_count = 0
+    strategy_fundamentals_count = 0
+    strategy_analyst_insights_count = 0
     signal_engine = SignalEngine()
     registry = default_strategy_registry()
     strategy_evaluator = StrategyEvaluator(registry)
@@ -73,8 +75,20 @@ def run_daily_scan(
             start=date(2026, 1, 1),
             end=date(2026, 12, 31),
         )
+        fundamentals = strategy_provider.get_fundamentals(
+            instrument_ids=[instrument_id],
+            start=date(2026, 1, 1),
+            end=date(2026, 12, 31),
+        )
+        analyst_insights = strategy_provider.get_analyst_insights(
+            instrument_ids=[instrument_id],
+            start=date(2026, 1, 1),
+            end=date(2026, 12, 31),
+        )
         strategy_filings_count += len(filings)
         strategy_announcements_count += len(announcements)
+        strategy_fundamentals_count += len(fundamentals)
+        strategy_analyst_insights_count += len(analyst_insights)
         bars_by_instrument[instrument_id] = bars
         signals = signal_engine.generate(instrument_id, bars)
         strategy_evaluations = strategy_evaluator.evaluate(
@@ -85,7 +99,13 @@ def run_daily_scan(
                 "earnings_events": earnings_events,
                 "filings": filings,
                 "announcements": announcements,
-                "available_data": _available_strategy_data(earnings_events),
+                "fundamentals": fundamentals,
+                "analyst_insights": analyst_insights,
+                "available_data": _available_strategy_data(
+                    earnings_events,
+                    fundamentals,
+                    analyst_insights,
+                ),
             },
         )
         card = card_generator.generate(instrument_id, signals, bars, strategy_evaluations)
@@ -103,6 +123,8 @@ def run_daily_scan(
         "strategy_data_provider": strategy_provider.name,
         "strategy_filings": str(strategy_filings_count),
         "strategy_announcements": str(strategy_announcements_count),
+        "strategy_fundamentals": str(strategy_fundamentals_count),
+        "strategy_analyst_insights": str(strategy_analyst_insights_count),
     }
     provider_errors = getattr(provider, "last_errors", [])
     if provider_errors:
@@ -171,7 +193,11 @@ def _strategy_counts(evaluations: list[StrategyEvaluation]) -> dict[str, int]:
     }
 
 
-def _available_strategy_data(earnings_events: list[EarningsEvent]) -> list[str]:
+def _available_strategy_data(
+    earnings_events: list[EarningsEvent],
+    fundamentals: list[FundamentalSnapshot] | None = None,
+    analyst_insights: list[AnalystInsight] | None = None,
+) -> list[str]:
     available = []
     if any(
         event.actual_eps is not None and event.actual_revenue is not None
@@ -185,4 +211,20 @@ def _available_strategy_data(earnings_events: list[EarningsEvent]) -> list[str]:
         available.append("earnings_estimates")
     if any(event.announcement_time in {"bmo", "amc", "intraday"} for event in earnings_events):
         available.append("announcement_timestamp")
+    fundamentals = fundamentals or []
+    if any(snapshot.has_growth_inputs for snapshot in fundamentals):
+        available.append("fundamentals")
+        available.append("growth_priors")
+    if any(snapshot.has_valuation_inputs for snapshot in fundamentals):
+        available.append("valuation_multiples")
+    if any(
+        snapshot.market_cap is not None and snapshot.has_growth_inputs and snapshot.has_valuation_inputs
+        for snapshot in fundamentals
+    ):
+        available.append("tam_assumptions")
+    analyst_insights = analyst_insights or []
+    if analyst_insights:
+        available.append("analyst_estimates")
+    if any(insight.has_revision_inputs for insight in analyst_insights):
+        available.append("revision_timestamps")
     return available

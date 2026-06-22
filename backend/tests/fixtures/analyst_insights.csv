@@ -1,0 +1,2 @@
+instrument_id,as_of_date,revision_date,current_eps_estimate,prior_eps_estimate,current_revenue_estimate,prior_revenue_estimate,target_price,prior_target_price,current_price,buy_count,hold_count,sell_count,strong_buy_count,strong_sell_count,provider
+US:TEST,2026-03-31,2026-03-31,1.35,1.10,152000000,140000000,64.0,54.0,50.0,14,4,1,6,0,fixture_strategy_data
