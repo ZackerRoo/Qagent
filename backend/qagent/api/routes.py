@@ -11,10 +11,11 @@ from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.jobs.intraday_check import evaluate_snapshot_alerts
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE, DEFAULT_FREE_UNIVERSE
-from qagent.monitoring.outcomes import compute_opportunity_outcome
+from qagent.monitoring.outcomes import compute_opportunity_outcome, summarize_strategy_performance
 from qagent.monitoring.portfolio import PositionInput, analyze_position_risk
-from qagent.monitoring.alerts import AlertRule
+from qagent.monitoring.alerts import AlertRule, suggest_alert_rules
 from qagent.providers.factory import build_market_data_provider
+from qagent.providers.status import build_provider_status
 from qagent.storage.repository import (
     AlertRuleCreate,
     PositionCreate,
@@ -42,6 +43,11 @@ def _strategy_summary(card) -> str:
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/provider-status")
+def provider_status() -> dict[str, list[object]]:
+    return {"providers": [status.model_dump(mode="json") for status in build_provider_status()]}
 
 
 def _parse_symbols(symbols: str | None, default_universe: list[str]) -> list[str]:
@@ -146,6 +152,13 @@ def evaluate_alerts(request: AlertEvaluationRequest) -> dict[str, list[object]]:
     return {"alerts": [alert.model_dump(mode="json") for alert in alerts]}
 
 
+@router.get("/alert-suggestions")
+def alert_suggestions(limit: int = 50) -> dict[str, list[object]]:
+    snapshots = _repo().list_opportunity_snapshots(limit=limit)
+    suggestions = suggest_alert_rules(snapshots)
+    return {"suggestions": [item.model_dump(mode="json") for item in suggestions]}
+
+
 @router.get("/scan-runs")
 def scan_runs(limit: int = 20) -> dict[str, list[object]]:
     return {"runs": [run.model_dump(mode="json") for run in _repo().list_scan_runs(limit=limit)]}
@@ -166,6 +179,14 @@ def outcomes(
     instrument_id: str | None = None,
     limit: int = 50,
 ) -> dict[str, object]:
+    replayed, data_health = _replay_outcomes(provider, instrument_id, limit)
+    return {
+        "outcomes": [outcome.model_dump(mode="json") for outcome in replayed],
+        "data_health": data_health,
+    }
+
+
+def _replay_outcomes(provider: str, instrument_id: str | None, limit: int):
     repo = _repo()
     snapshots = repo.list_opportunity_snapshots(instrument_id=instrument_id, limit=limit)
     try:
@@ -189,8 +210,20 @@ def outcomes(
     provider_errors = getattr(market_provider, "last_errors", [])
     if provider_errors:
         data_health["errors"] = " | ".join(provider_errors[:3])
+    return replayed, data_health
+
+
+@router.get("/strategy-performance")
+def strategy_performance(
+    provider: str = "fixture",
+    instrument_id: str | None = None,
+    limit: int = 100,
+) -> dict[str, object]:
+    replayed, data_health = _replay_outcomes(provider, instrument_id, limit)
     return {
-        "outcomes": [outcome.model_dump(mode="json") for outcome in replayed],
+        "performance": [
+            item.model_dump(mode="json") for item in summarize_strategy_performance(replayed)
+        ],
         "data_health": data_health,
     }
 

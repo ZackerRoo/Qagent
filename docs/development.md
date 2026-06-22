@@ -53,6 +53,7 @@ Free-data-ready strategies:
 - `analyst_revision_momentum` when current/prior EPS, revenue, or target-price estimates and revision dates are available
 - `tam_adj_peg_growth` when fundamentals, valuation multiples, and the free-data TAM proxy are available
 - `bayesian_intrinsic_growth` when fundamentals and valuation-derived growth priors are available
+- `insider_institutional_confirmation` when SEC filing metadata includes Form 3/4/5, 13F, 13D, or 13G confirmation
 
 Registered but data-limited strategies:
 
@@ -60,7 +61,6 @@ Registered but data-limited strategies:
 - `sector_rotation_regime`
 - `short_squeeze_risk`
 - `options_flow_confirmation`
-- `insider_institutional_confirmation`
 
 Data-limited strategies must appear as `missing_data` unless their required provider fields are available. This prevents the agent from inventing PEAD, analyst revision, valuation, options-flow, or ownership conclusions from price data alone.
 
@@ -108,15 +108,32 @@ Useful routes:
 curl 'http://127.0.0.1:8000/api/scan-runs'
 curl 'http://127.0.0.1:8000/api/opportunity-history?instrument_id=US:TEST'
 curl 'http://127.0.0.1:8000/api/outcomes?provider=fixture'
+curl 'http://127.0.0.1:8000/api/strategy-performance?provider=fixture'
+curl 'http://127.0.0.1:8000/api/alert-suggestions'
 ```
 
 Outcome replay uses daily OHLCV bars to calculate 5/10/20/60-day forward returns, max drawdown, max runup, and a status of `target_1_hit`, `stopped`, `working`, `lagging`, or `pending`.
+
+Strategy performance groups replayed outcomes by `primary_strategy_id` and reports sample count, pending/completed counts, target-hit rate, positive 10-day rate, average forward returns, max drawdown, and max runup. Alert suggestions derive draft entry, stop, and target rules from persisted opportunity snapshots.
+
+## Provider Readiness
+
+Provider status is available through the Settings page and `/api/provider-status`:
+
+```bash
+curl 'http://127.0.0.1:8000/api/provider-status'
+```
+
+The response distinguishes built-in free providers from optional API-key-backed providers. Missing optional keys are reported as `missing_config`; they do not stop fixture/free scans, but strategies that require those fields remain `missing_data`.
 
 ## Useful API Checks
 
 ```bash
 curl 'http://127.0.0.1:8000/api/opportunities?provider=fixture'
 curl 'http://127.0.0.1:8000/api/opportunities?provider=free&symbols=US:AAPL,CN:000001'
+curl 'http://127.0.0.1:8000/api/provider-status'
+curl 'http://127.0.0.1:8000/api/strategy-performance?provider=fixture'
+curl 'http://127.0.0.1:8000/api/alert-suggestions'
 curl 'http://127.0.0.1:8000/api/catalysts?symbols=US:AAPL&limit=5'
 curl 'http://127.0.0.1:8000/api/portfolio?provider=fixture'
 ```
@@ -141,5 +158,5 @@ npm run build
 - Outcome replay uses daily bars and cannot prove intraday ordering between a stop and target.
 - PEAD is implemented when earnings actuals and estimates are available, but production free-data coverage depends on FMP/Finnhub/Alpha Vantage or another earnings provider.
 - Analyst revision, TAM-PEG, and Bayesian valuation are implemented with normalized free-source fields, but results are only as good as the upstream fundamentals and estimates. Alpha Vantage ratings are current snapshots; FMP analyst-estimate history is needed for true revision scoring.
-- Options flow, 北向资金, 龙虎榜, short interest, and richer announcement parsing are registered but not production-grade without the required provider data.
+- Options flow, 北向资金, 龙虎榜, live short interest, and richer announcement parsing are registered or modeled as missing-data edges, but they are not production-grade without reliable provider data.
 - Opportunity cards are research artifacts, not personalized investment advice.

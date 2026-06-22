@@ -380,6 +380,17 @@ tbody tr.selected {
   color: #116b3c;
 }
 
+.status-ready,
+.status-configured {
+  background: #dff4e8;
+  color: #116b3c;
+}
+
+.status-missing_config {
+  background: #fff3d6;
+  color: #8a5b00;
+}
+
 .reason-cell {
   max-width: 280px;
   white-space: normal;
@@ -554,24 +565,34 @@ tbody tr.selected {
 }
 
 .alert-form {
-  grid-template-columns: minmax(130px, 0.55fr) minmax(120px, 0.4fr) minmax(100px, 0.3fr) 84px;
+  grid-template-columns:
+    minmax(130px, 0.55fr) minmax(120px, 0.4fr) minmax(110px, 0.35fr)
+    minmax(72px, 0.2fr) minmax(100px, 0.3fr) 84px;
 }
 
-.form-row input {
+.form-row input,
+.form-row select {
   min-width: 0;
   height: 36px;
   border: 1px solid #cbd5e1;
   border-radius: 6px;
   padding: 0 10px;
   color: #17202a;
+  background: #ffffff;
 }
 
-.form-row button {
+.form-row button,
+.table-action {
   border: 0;
   border-radius: 6px;
   background: #1d4ed8;
   color: #ffffff;
   cursor: pointer;
+}
+
+.table-action {
+  height: 30px;
+  padding: 0 10px;
 }
 
 .alert-results {

@@ -6,7 +6,7 @@ from qagent.cards.generator import OpportunityCardGenerator
 from qagent.domain.models import OpportunityCard
 from qagent.providers.base import MarketDataProvider
 from qagent.signals.engine import SignalEngine
-from qagent.strategy_data.models import AnalystInsight, EarningsEvent, FundamentalSnapshot
+from qagent.strategy_data.models import AnalystInsight, EarningsEvent, FilingEvent, FundamentalSnapshot
 from qagent.strategy_data.providers import StrategyDataProvider, build_strategy_data_provider
 from qagent.strategies.evaluator import StrategyEvaluator
 from qagent.strategies.health import build_strategy_health_from_bars
@@ -106,6 +106,7 @@ def run_daily_scan(
                     earnings_events,
                     fundamentals,
                     analyst_insights,
+                    filings,
                 ),
             },
         )
@@ -201,6 +202,7 @@ def _available_strategy_data(
     earnings_events: list[EarningsEvent],
     fundamentals: list[FundamentalSnapshot] | None = None,
     analyst_insights: list[AnalystInsight] | None = None,
+    filings: list[FilingEvent] | None = None,
 ) -> list[str]:
     available = []
     if any(
@@ -231,4 +233,10 @@ def _available_strategy_data(
         available.append("analyst_estimates")
     if any(insight.has_revision_inputs for insight in analyst_insights):
         available.append("revision_timestamps")
+    filings = filings or []
+    forms = {filing.form.upper() for filing in filings}
+    if forms.intersection({"3", "4", "5"}):
+        available.append("insider_transactions")
+    if any(form.startswith("13F") or form in {"SC 13D", "SC 13G"} for form in forms):
+        available.append("institutional_filings")
     return available

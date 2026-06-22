@@ -1,7 +1,12 @@
 from datetime import date
 from decimal import Decimal
 
-from qagent.monitoring.outcomes import compute_forward_returns, compute_opportunity_outcome
+from qagent.monitoring.outcomes import (
+    OpportunityOutcome,
+    compute_forward_returns,
+    compute_opportunity_outcome,
+    summarize_strategy_performance,
+)
 from qagent.monitoring.portfolio import PositionInput, analyze_position_risk
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.storage.repository import OpportunitySnapshotRecord
@@ -98,3 +103,51 @@ def test_compute_opportunity_outcome_marks_pending_when_future_bars_are_unavaila
     assert outcome.return_10d is None
     assert outcome.max_drawdown_pct is None
     assert outcome.max_runup_pct is None
+
+
+def test_summarize_strategy_performance_groups_replayed_outcomes():
+    outcomes = [
+        OpportunityOutcome(
+            snapshot_id="snap-1",
+            run_id="run-1",
+            instrument_id="US:AAA",
+            primary_strategy_id="breakout_volume_confirmation",
+            signal_date=date(2026, 1, 10),
+            outcome_status="target_1_hit",
+            return_5d=4.0,
+            return_10d=6.0,
+            max_drawdown_pct=-1.0,
+            max_runup_pct=8.0,
+        ),
+        OpportunityOutcome(
+            snapshot_id="snap-2",
+            run_id="run-1",
+            instrument_id="US:BBB",
+            primary_strategy_id="breakout_volume_confirmation",
+            signal_date=date(2026, 1, 11),
+            outcome_status="lagging",
+            return_5d=-2.0,
+            return_10d=-3.0,
+            max_drawdown_pct=-5.0,
+            max_runup_pct=1.0,
+        ),
+        OpportunityOutcome(
+            snapshot_id="snap-3",
+            run_id="run-1",
+            instrument_id="US:CCC",
+            primary_strategy_id="pead_earnings_drift",
+            signal_date=date(2026, 1, 12),
+            outcome_status="pending",
+        ),
+    ]
+
+    performance = summarize_strategy_performance(outcomes)
+    by_strategy = {item.strategy_id: item for item in performance}
+
+    breakout = by_strategy["breakout_volume_confirmation"]
+    assert breakout.sample_count == 2
+    assert breakout.target_hit_rate == 0.5
+    assert breakout.positive_rate_10d == 0.5
+    assert breakout.avg_return_10d == 1.5
+    assert breakout.max_drawdown_pct == -5.0
+    assert by_strategy["pead_earnings_drift"].pending_count == 1

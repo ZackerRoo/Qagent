@@ -1,12 +1,18 @@
 import { useEffect, useState } from "react";
 
-import { fetchOpportunityHistory, fetchOutcomes, fetchScanRuns } from "../api/client";
+import {
+  fetchOpportunityHistory,
+  fetchOutcomes,
+  fetchScanRuns,
+  fetchStrategyPerformance,
+} from "../api/client";
 import { DataHealth } from "../components/DataHealth";
 import type {
   DataProviderMode,
   OpportunityHistoryResponse,
   OutcomesResponse,
   ScanRunsResponse,
+  StrategyPerformanceResponse,
 } from "../types";
 
 function formatNumber(value: number | null, suffix = "") {
@@ -16,24 +22,34 @@ function formatNumber(value: number | null, suffix = "") {
   return `${value.toFixed(2)}${suffix}`;
 }
 
+function formatRatio(value: number | null) {
+  if (value === null || Number.isNaN(value)) {
+    return "Pending";
+  }
+  return `${(value * 100).toFixed(0)}%`;
+}
+
 export function History({ dataMode }: { dataMode: DataProviderMode }) {
   const [runs, setRuns] = useState<ScanRunsResponse>();
   const [history, setHistory] = useState<OpportunityHistoryResponse>();
   const [outcomes, setOutcomes] = useState<OutcomesResponse>();
+  const [performance, setPerformance] = useState<StrategyPerformanceResponse>();
   const [error, setError] = useState("");
 
   useEffect(() => {
     async function load() {
       try {
         setError("");
-        const [runResult, historyResult, outcomeResult] = await Promise.all([
+        const [runResult, historyResult, outcomeResult, performanceResult] = await Promise.all([
           fetchScanRuns(),
           fetchOpportunityHistory(),
           fetchOutcomes(dataMode),
+          fetchStrategyPerformance(dataMode),
         ]);
         setRuns(runResult);
         setHistory(historyResult);
         setOutcomes(outcomeResult);
+        setPerformance(performanceResult);
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : "Failed to load history");
       }
@@ -112,6 +128,50 @@ export function History({ dataMode }: { dataMode: DataProviderMode }) {
                     <td>{snapshot.trigger_price ?? "None"}</td>
                     <td>{snapshot.initial_stop ?? "None"}</td>
                     <td>{snapshot.target_1 ?? "None"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <h2>Strategy Performance</h2>
+          <span className="count">{performance?.performance.length ?? 0}</span>
+        </div>
+        {performance && <DataHealth data={performance.data_health} />}
+        {!performance?.performance.length ? (
+          <div className="empty-state">No strategy replay summary yet.</div>
+        ) : (
+          <div className="table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th>Strategy</th>
+                  <th>Samples</th>
+                  <th>Done</th>
+                  <th>Pending</th>
+                  <th>Target Hit</th>
+                  <th>Positive 10D</th>
+                  <th>Avg 10D</th>
+                  <th>Max DD</th>
+                  <th>Max Runup</th>
+                </tr>
+              </thead>
+              <tbody>
+                {performance.performance.map((item) => (
+                  <tr key={item.strategy_id}>
+                    <td className="reason-cell">{item.strategy_id}</td>
+                    <td>{item.sample_count}</td>
+                    <td>{item.completed_count}</td>
+                    <td>{item.pending_count}</td>
+                    <td>{formatRatio(item.target_hit_rate)}</td>
+                    <td>{formatRatio(item.positive_rate_10d)}</td>
+                    <td>{formatNumber(item.avg_return_10d, "%")}</td>
+                    <td>{formatNumber(item.max_drawdown_pct, "%")}</td>
+                    <td>{formatNumber(item.max_runup_pct, "%")}</td>
                   </tr>
                 ))}
               </tbody>

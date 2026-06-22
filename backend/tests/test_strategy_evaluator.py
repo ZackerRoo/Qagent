@@ -2,7 +2,7 @@ from datetime import date
 
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.signals.engine import SignalEngine
-from qagent.strategy_data.models import AnalystInsight, FundamentalSnapshot
+from qagent.strategy_data.models import AnalystInsight, FilingEvent, FundamentalSnapshot
 from qagent.strategy_data.providers import FixtureStrategyDataProvider
 from qagent.strategies.evaluator import StrategyEvaluator
 from qagent.strategies.registry import default_strategy_registry
@@ -201,3 +201,43 @@ def test_evaluator_scores_analyst_revision_when_revision_inputs_are_available():
     assert "estimate_revision" in revision.triggers
     assert revision.evidence["eps_revision_pct"] > 20
     assert revision.evidence["target_revision_pct"] > 15
+
+
+def test_evaluator_scores_ownership_confirmation_from_sec_filings():
+    bars, signals = _fixture_inputs("US:TEST")
+    filings = [
+        FilingEvent(
+            instrument_id="US:TEST",
+            form="4",
+            filing_date=date(2026, 3, 20),
+            accession_number="0001",
+            provider="sec_edgar",
+        ),
+        FilingEvent(
+            instrument_id="US:TEST",
+            form="13F-HR",
+            filing_date=date(2026, 3, 21),
+            accession_number="0002",
+            provider="sec_edgar",
+        ),
+    ]
+
+    evaluations = StrategyEvaluator(default_strategy_registry()).evaluate(
+        "US:TEST",
+        signals,
+        bars,
+        context={
+            "filings": filings,
+            "available_data": ["insider_transactions", "institutional_filings"],
+        },
+    )
+    ownership = {evaluation.strategy_id: evaluation for evaluation in evaluations}[
+        "insider_institutional_confirmation"
+    ]
+
+    assert ownership.status == "passed"
+    assert ownership.score >= 0.7
+    assert ownership.missing_data == []
+    assert "sec_ownership_filing" in ownership.triggers
+    assert ownership.evidence["insider_forms"] == 1
+    assert ownership.evidence["institutional_filings"] == 1

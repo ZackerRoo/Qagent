@@ -114,6 +114,57 @@ def test_daily_scan_surfaces_strategy_data_counts_and_errors():
     assert result.data_health["strategy_data_errors"] == "fmp: rate limited"
 
 
+class StrategyDataProviderWithOwnershipFilings:
+    name = "ownership_records"
+    last_errors: list[str] = []
+
+    def get_earnings_events(self, instrument_ids, start, end):
+        return []
+
+    def get_filings(self, instrument_ids, start, end):
+        from datetime import date
+
+        from qagent.strategy_data.models import FilingEvent
+
+        return [
+            FilingEvent(
+                instrument_id=instrument_ids[0],
+                form="4",
+                filing_date=date(2026, 3, 20),
+                accession_number="0001",
+                provider="sec_edgar",
+            ),
+            FilingEvent(
+                instrument_id=instrument_ids[0],
+                form="13F-HR",
+                filing_date=date(2026, 3, 21),
+                accession_number="0002",
+                provider="sec_edgar",
+            ),
+        ]
+
+    def get_announcements(self, instrument_ids, start, end):
+        return []
+
+    def get_fundamentals(self, instrument_ids, start, end):
+        return []
+
+    def get_analyst_insights(self, instrument_ids, start, end):
+        return []
+
+
+def test_daily_scan_passes_ownership_filings_into_strategy_stack():
+    result = run_daily_scan(
+        instrument_ids=["US:TEST"],
+        provider=FixtureMarketDataProvider(),
+        strategy_data_provider=StrategyDataProviderWithOwnershipFilings(),
+    )
+
+    strategies = {item.strategy_id: item for item in result.cards[0].strategy_evaluations}
+    assert strategies["insider_institutional_confirmation"].status == "passed"
+    assert result.data_health["strategy_filings"] == "2"
+
+
 class StrategyDataProviderWithFreeFundamentals:
     name = "free_fundamental_records"
     last_errors: list[str] = []

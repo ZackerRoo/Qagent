@@ -88,9 +88,11 @@ def test_opportunities_api_records_scan_history_and_outcomes(tmp_path, monkeypat
     runs_response = client.get("/api/scan-runs")
     history_response = client.get("/api/opportunity-history")
     outcomes_response = client.get("/api/outcomes?provider=fixture")
+    performance_response = client.get("/api/strategy-performance?provider=fixture")
     assert runs_response.status_code == 200
     assert history_response.status_code == 200
     assert outcomes_response.status_code == 200
+    assert performance_response.status_code == 200
     runs = runs_response.json()["runs"]
     snapshots = history_response.json()["snapshots"]
     outcomes = outcomes_response.json()["outcomes"]
@@ -109,6 +111,9 @@ def test_opportunities_api_records_scan_history_and_outcomes(tmp_path, monkeypat
         "stopped",
     }
     assert outcomes_response.json()["data_health"]["snapshots"] == str(len(snapshots))
+    performance = performance_response.json()["performance"]
+    assert performance
+    assert all(item["strategy_id"] for item in performance)
 
 
 def test_opportunity_history_api_filters_by_instrument(tmp_path, monkeypatch):

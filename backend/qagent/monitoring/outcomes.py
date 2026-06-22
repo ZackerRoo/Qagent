@@ -51,6 +51,22 @@ class OpportunityOutcome(BaseModel):
     target_1: Decimal | None = None
 
 
+class StrategyPerformance(BaseModel):
+    strategy_id: str
+    sample_count: int
+    completed_count: int
+    pending_count: int
+    target_hit_count: int
+    stopped_count: int
+    target_hit_rate: float | None
+    positive_rate_10d: float | None
+    avg_return_5d: float | None
+    avg_return_10d: float | None
+    avg_return_20d: float | None
+    max_drawdown_pct: float | None
+    max_runup_pct: float | None
+
+
 def compute_opportunity_outcome(
     snapshot: OpportunitySnapshotRecord,
     bars: pd.DataFrame,
@@ -128,3 +144,54 @@ def _outcome_status(
     if not available_returns:
         return "pending"
     return "working" if available_returns[-1] >= 0 else "lagging"
+
+
+def summarize_strategy_performance(
+    outcomes: list[OpportunityOutcome],
+) -> list[StrategyPerformance]:
+    grouped: dict[str, list[OpportunityOutcome]] = {}
+    for outcome in outcomes:
+        strategy_id = outcome.primary_strategy_id or "unclassified"
+        grouped.setdefault(strategy_id, []).append(outcome)
+
+    rows = []
+    for strategy_id, items in grouped.items():
+        completed = [item for item in items if item.outcome_status != "pending"]
+        return_5d = [item.return_5d for item in completed if item.return_5d is not None]
+        return_10d = [item.return_10d for item in completed if item.return_10d is not None]
+        return_20d = [item.return_20d for item in completed if item.return_20d is not None]
+        drawdowns = [
+            item.max_drawdown_pct for item in completed if item.max_drawdown_pct is not None
+        ]
+        runups = [item.max_runup_pct for item in completed if item.max_runup_pct is not None]
+        target_hit_count = sum(1 for item in completed if item.outcome_status == "target_1_hit")
+        rows.append(
+            StrategyPerformance(
+                strategy_id=strategy_id,
+                sample_count=len(items),
+                completed_count=len(completed),
+                pending_count=len(items) - len(completed),
+                target_hit_count=target_hit_count,
+                stopped_count=sum(1 for item in completed if item.outcome_status == "stopped"),
+                target_hit_rate=_ratio(target_hit_count, len(completed)),
+                positive_rate_10d=_ratio(sum(1 for value in return_10d if value > 0), len(return_10d)),
+                avg_return_5d=_average(return_5d),
+                avg_return_10d=_average(return_10d),
+                avg_return_20d=_average(return_20d),
+                max_drawdown_pct=min(drawdowns) if drawdowns else None,
+                max_runup_pct=max(runups) if runups else None,
+            )
+        )
+    return sorted(rows, key=lambda item: (item.target_hit_rate or 0, item.sample_count), reverse=True)
+
+
+def _average(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return round(sum(values) / len(values), 4)
+
+
+def _ratio(numerator: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return round(numerator / denominator, 4)

@@ -3,6 +3,7 @@ import type {
   AlertEvaluationResponse,
   AlertRule,
   AlertRulesResponse,
+  AlertSuggestionsResponse,
   CatalystsResponse,
   DataProviderMode,
   OpportunitiesResponse,
@@ -12,7 +13,9 @@ import type {
   PortfolioResponse,
   Position,
   PositionsResponse,
+  ProviderStatusResponse,
   ScanRunsResponse,
+  StrategyPerformanceResponse,
   WatchlistItem,
   WatchlistResponse,
 } from "../types";
@@ -107,6 +110,10 @@ export async function fetchAlertRules(): Promise<AlertRulesResponse> {
   return apiGet<AlertRulesResponse>("/alert-rules");
 }
 
+export async function fetchAlertSuggestions(): Promise<AlertSuggestionsResponse> {
+  return apiGet<AlertSuggestionsResponse>("/alert-suggestions", { limit: 50 });
+}
+
 export async function saveAlertRule(payload: AlertRule): Promise<AlertRule> {
   return apiPost<AlertRule>("/alert-rules", payload);
 }
@@ -129,4 +136,14 @@ export async function fetchOpportunityHistory(): Promise<OpportunityHistoryRespo
 
 export async function fetchOutcomes(provider: DataProviderMode): Promise<OutcomesResponse> {
   return apiGet<OutcomesResponse>("/outcomes", { provider, limit: 50 });
+}
+
+export async function fetchStrategyPerformance(
+  provider: DataProviderMode,
+): Promise<StrategyPerformanceResponse> {
+  return apiGet<StrategyPerformanceResponse>("/strategy-performance", { provider, limit: 100 });
+}
+
+export async function fetchProviderStatus(): Promise<ProviderStatusResponse> {
+  return apiGet<ProviderStatusResponse>("/provider-status");
 }

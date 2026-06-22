@@ -31,3 +31,19 @@ def test_alert_rule_api_saves_and_evaluates_rules(tmp_path, monkeypatch):
     body = evaluate_response.json()
     assert body["alerts"][0]["kind"] == "entry_trigger"
     assert body["alerts"][0]["status"] == "triggered"
+
+
+def test_alert_suggestions_api_uses_recent_opportunities(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'alert-suggestions.db'}")
+    client = TestClient(create_app())
+    client.get("/api/opportunities?provider=fixture")
+
+    response = client.get("/api/alert-suggestions")
+
+    assert response.status_code == 200
+    suggestions = response.json()["suggestions"]
+    assert suggestions
+    assert {"entry_trigger", "stop_guard", "target_1_reached"}.issubset(
+        {item["kind"] for item in suggestions}
+    )
+    assert all(item["source_snapshot_id"] for item in suggestions)

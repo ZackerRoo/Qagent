@@ -20,8 +20,12 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - Strategy health summary with sample count, 10-day win rate, average 10/20-day forward return, max 10-day loss, and readiness labels.
 - Persistent scan history and opportunity snapshots saved from dashboard scans.
 - Outcome replay that computes forward returns, max drawdown, max runup, and target/stop/pending status from saved opportunity snapshots.
+- Strategy performance leaderboard summarizing replayed outcomes by primary strategy.
+- Provider readiness dashboard and API status for fixture, free market-data, SEC, CNINFO, and optional vendor feeds.
+- Alert suggestions generated from saved opportunity trigger, stop, and target levels.
 - Watchlist, positions, alert rules, alert evaluation, and portfolio risk view backed by SQLite.
 - Catalyst Review using free news sources plus deterministic catalyst hypotheses and verification paths.
+- SEC ownership confirmation strategy using available Form 3/4/5, 13F, 13D, and 13G filing metadata.
 - Constrained Agent answers that refuse guaranteed returns and answer from structured strategy/card context.
 
 ## Run Locally
@@ -77,13 +81,16 @@ npm run build
 curl 'http://127.0.0.1:8000/api/opportunities?provider=free&symbols=US:AAPL,CN:000001'
 curl 'http://127.0.0.1:8000/api/scan-runs'
 curl 'http://127.0.0.1:8000/api/outcomes?provider=fixture'
+curl 'http://127.0.0.1:8000/api/strategy-performance?provider=fixture'
+curl 'http://127.0.0.1:8000/api/alert-suggestions'
+curl 'http://127.0.0.1:8000/api/provider-status'
 curl 'http://127.0.0.1:8000/api/catalysts?symbols=US:AAPL&limit=5'
 curl 'http://127.0.0.1:8000/api/portfolio?provider=fixture'
 ```
 
 `/api/opportunities` returns `cards`, `items`, `strategy_health`, and `data_health`. Cards include `rank_score` and `rank_reasons`. Strategies that cannot be evaluated with the current free-data scan are returned with `status: "missing_data"` instead of fabricated scores.
 
-`/api/opportunities` also records a scan run. `/api/scan-runs`, `/api/opportunity-history`, and `/api/outcomes` expose the saved research trail and daily-bar outcome replay.
+`/api/opportunities` also records a scan run. `/api/scan-runs`, `/api/opportunity-history`, `/api/outcomes`, and `/api/strategy-performance` expose the saved research trail, daily-bar outcome replay, and strategy-level replay summary. `/api/alert-suggestions` turns saved opportunity trigger/stop/target levels into draft alert rules.
 
 ## Research Docs
 

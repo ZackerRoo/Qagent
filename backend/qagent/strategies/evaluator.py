@@ -2,7 +2,7 @@ import pandas as pd
 
 from qagent.domain.enums import SignalType
 from qagent.domain.models import Signal
-from qagent.strategy_data.models import AnalystInsight, EarningsEvent, FundamentalSnapshot
+from qagent.strategy_data.models import AnalystInsight, EarningsEvent, FilingEvent, FundamentalSnapshot
 from qagent.strategies.models import StrategyDefinition, StrategyEvaluation
 from qagent.strategies.registry import StrategyRegistry, default_strategy_registry
 
@@ -53,6 +53,10 @@ class StrategyEvaluator:
                 )
             elif definition.strategy_id == "short_squeeze_risk":
                 evaluations.append(self._short_squeeze(definition, signal_by_type, available_data))
+            elif definition.strategy_id == "insider_institutional_confirmation":
+                evaluations.append(
+                    self._ownership_confirmation(definition, instrument_id, context, available_data)
+                )
             else:
                 evaluations.append(self._missing_data(definition, available_data))
         return evaluations
@@ -480,6 +484,61 @@ class StrategyEvaluator:
             )
         return self._missing_data(definition, available_data)
 
+    def _ownership_confirmation(
+        self,
+        definition: StrategyDefinition,
+        instrument_id: str,
+        context: dict[str, object] | None,
+        available_data: set[str],
+    ) -> StrategyEvaluation:
+        filings = _ownership_filings(instrument_id, context)
+        missing = _missing_requirements(definition, available_data)
+        if not filings:
+            return self._evaluation(
+                definition,
+                status="missing_data",
+                score=0.0,
+                evidence={"reason": "SEC ownership filings unavailable"},
+                missing_data=missing,
+            )
+
+        insider_forms = [item for item in filings if _is_insider_form(item.form)]
+        institutional = [item for item in filings if _is_institutional_form(item.form)]
+        buyback = [item for item in filings if _is_buyback_related(item)]
+        score = min(
+            len(insider_forms) * 0.35 + len(institutional) * 0.35 + len(buyback) * 0.2,
+            1.0,
+        )
+        if score <= 0:
+            return self._evaluation(
+                definition,
+                status="missing_data",
+                score=0.0,
+                evidence={"reason": "ownership filings do not match insider or institutional forms"},
+                missing_data=missing,
+            )
+        return self._evaluation(
+            definition,
+            status="passed" if score >= 0.7 else "watch",
+            score=round(score, 4),
+            triggers=["sec_ownership_filing"],
+            confirmations=["insider_form" if insider_forms else "institutional_filing"],
+            evidence={
+                "filings": len(filings),
+                "insider_forms": len(insider_forms),
+                "institutional_filings": len(institutional),
+                "buyback_related_filings": len(buyback),
+                "latest_filing_date": max(item.filing_date for item in filings).isoformat(),
+                "providers": sorted({item.provider for item in filings}),
+            },
+            score_components={
+                "insider_forms": round(min(len(insider_forms) * 0.35, 0.7), 4),
+                "institutional_filings": round(min(len(institutional) * 0.35, 0.7), 4),
+                "buyback_activity": round(min(len(buyback) * 0.2, 0.4), 4),
+            },
+            missing_data=missing,
+        )
+
     def _missing_data(
         self, definition: StrategyDefinition, available_data: set[str]
     ) -> StrategyEvaluation:
@@ -580,6 +639,37 @@ def _latest_analyst_insight(
     if not insights:
         return None
     return max(insights, key=lambda item: item.revision_date or item.as_of_date)
+
+
+def _ownership_filings(
+    instrument_id: str,
+    context: dict[str, object] | None,
+) -> list[FilingEvent]:
+    if not context:
+        return []
+    return [
+        item
+        for item in context.get("filings", [])
+        if isinstance(item, FilingEvent) and item.instrument_id == instrument_id
+    ]
+
+
+def _is_insider_form(form: str) -> bool:
+    return form.upper() in {"3", "4", "5"}
+
+
+def _is_institutional_form(form: str) -> bool:
+    normalized = form.upper()
+    return normalized.startswith("13F") or normalized in {"SC 13D", "SC 13G"}
+
+
+def _is_buyback_related(filing: FilingEvent) -> bool:
+    text = " ".join(
+        item
+        for item in [filing.form, filing.primary_document or "", filing.filing_url or ""]
+        if item
+    ).lower()
+    return "buyback" in text or "repurchase" in text
 
 
 def _fundamental_missing_data(

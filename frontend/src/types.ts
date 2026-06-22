@@ -192,6 +192,20 @@ export type AlertEvaluationResponse = {
   alerts: TriggeredAlert[];
 };
 
+export type AlertSuggestion = {
+  rule_id: string;
+  instrument_id: string;
+  kind: string;
+  operator: ">=" | "<=";
+  threshold: string;
+  source_snapshot_id: string;
+  rationale: string;
+};
+
+export type AlertSuggestionsResponse = {
+  suggestions: AlertSuggestion[];
+};
+
 export type NewsItem = {
   news_id: string;
   instrument_id: string;
@@ -276,5 +290,38 @@ export type OpportunityOutcome = {
 
 export type OutcomesResponse = {
   outcomes: OpportunityOutcome[];
+  data_health: Record<string, string>;
+};
+
+export type ProviderStatus = {
+  provider_id: string;
+  name: string;
+  status: string;
+  capabilities: string[];
+  notes: string;
+};
+
+export type ProviderStatusResponse = {
+  providers: ProviderStatus[];
+};
+
+export type StrategyPerformance = {
+  strategy_id: string;
+  sample_count: number;
+  completed_count: number;
+  pending_count: number;
+  target_hit_count: number;
+  stopped_count: number;
+  target_hit_rate: number | null;
+  positive_rate_10d: number | null;
+  avg_return_5d: number | null;
+  avg_return_10d: number | null;
+  avg_return_20d: number | null;
+  max_drawdown_pct: number | null;
+  max_runup_pct: number | null;
+};
+
+export type StrategyPerformanceResponse = {
+  performance: StrategyPerformance[];
   data_health: Record<string, string>;
 };
