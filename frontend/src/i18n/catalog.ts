@@ -6,6 +6,10 @@ export const translations = {
   en: {
     "language.zh": "中",
     "language.en": "EN",
+    "market.us": "US Stocks",
+    "market.cn": "A-Shares",
+    "market.noOpportunities": "No opportunities in this market.",
+    "market.noScan": "No scan items in this market.",
     "nav.brief": "Brief",
     "nav.overview": "Overview",
     "nav.opportunities": "Opportunities",
@@ -281,6 +285,10 @@ export const translations = {
   zh: {
     "language.zh": "中",
     "language.en": "EN",
+    "market.us": "美股",
+    "market.cn": "A股",
+    "market.noOpportunities": "这个市场暂无机会。",
+    "market.noScan": "这个市场暂无扫描项。",
     "nav.brief": "简报",
     "nav.overview": "总览",
     "nav.opportunities": "机会",

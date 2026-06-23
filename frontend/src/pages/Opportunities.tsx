@@ -1,6 +1,8 @@
+import { MarketOpportunitySections } from "../components/MarketOpportunitySections";
 import { OpportunityDetail } from "../components/OpportunityDetail";
-import { OpportunityTable } from "../components/OpportunityTable";
 import { useI18n } from "../i18n";
+import type { TranslationKey } from "../i18n/catalog";
+import { createMarketSections } from "../lib/markets";
 import type { OpportunityCard, ScanItem, StrategyHealth } from "../types";
 
 type Props = {
@@ -22,7 +24,7 @@ export function Opportunities({ cards, items, strategyHealth, selectedCard, onSe
             <h2>{t("opportunities.title")}</h2>
             <span className="count">{cards.length}</span>
           </div>
-          <OpportunityTable
+          <MarketOpportunitySections
             cards={cards}
             selectedCardId={selectedCard?.card_id}
             onSelect={onSelect}
@@ -33,7 +35,7 @@ export function Opportunities({ cards, items, strategyHealth, selectedCard, onSe
             <h2>{t("opportunities.coverage")}</h2>
             <span className="count">{items.length}</span>
           </div>
-          <ScanCoverageTable items={items} />
+          <MarketScanCoverageSections items={items} />
         </section>
         <section className="panel">
           <div className="panel-heading">
@@ -44,6 +46,29 @@ export function Opportunities({ cards, items, strategyHealth, selectedCard, onSe
         </section>
       </div>
       <OpportunityDetail card={selectedCard} />
+    </div>
+  );
+}
+
+function MarketScanCoverageSections({ items }: { items: ScanItem[] }) {
+  const { t } = useI18n();
+  const sections = createMarketSections(items, (item) => item.instrument_id);
+
+  return (
+    <div className="market-sections">
+      {sections.map((section) => (
+        <div className="market-section" key={section.market}>
+          <div className="market-section-heading">
+            <h3>{t(section.labelKey as TranslationKey)}</h3>
+            <span className="count">{section.items.length}</span>
+          </div>
+          {section.items.length ? (
+            <ScanCoverageTable items={section.items} />
+          ) : (
+            <p className="empty">{t("market.noScan")}</p>
+          )}
+        </div>
+      ))}
     </div>
   );
 }

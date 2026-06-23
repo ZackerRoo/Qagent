@@ -1,5 +1,5 @@
 import { DataHealth } from "../components/DataHealth";
-import { OpportunityTable } from "../components/OpportunityTable";
+import { MarketOpportunitySections } from "../components/MarketOpportunitySections";
 import { useI18n } from "../i18n";
 import type { OpportunityCard, OverviewResponse } from "../types";
 
@@ -35,7 +35,7 @@ export function Overview({ overview, selectedCardId, onSelect }: Props) {
           <h2>{t("overview.top")}</h2>
           <span className="count">{overview?.top_cards.length ?? 0}</span>
         </div>
-        <OpportunityTable
+        <MarketOpportunitySections
           cards={overview?.top_cards ?? []}
           selectedCardId={selectedCardId}
           onSelect={onSelect}

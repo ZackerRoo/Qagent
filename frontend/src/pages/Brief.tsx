@@ -12,7 +12,16 @@ import {
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
 import { useI18n } from "../i18n";
-import type { BriefRun, DailyBriefResponse, DataProviderMode, DeliveryOutboxRecord } from "../types";
+import type { TranslationKey } from "../i18n/catalog";
+import { createMarketSections } from "../lib/markets";
+import type {
+  BriefRun,
+  DailyBriefEntryWatch,
+  DailyBriefOpportunity,
+  DailyBriefResponse,
+  DataProviderMode,
+  DeliveryOutboxRecord,
+} from "../types";
 
 function formatNumber(value: number | null, suffix = "") {
   if (value === null || Number.isNaN(value)) {
@@ -295,50 +304,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
         {!brief?.top_opportunities.length ? (
           <div className="empty-state">{t("brief.noRanked")}</div>
         ) : (
-          <div className="table-shell">
-            <table>
-              <thead>
-                <tr>
-                  <th>{t("common.ticker")}</th>
-                  <th>{t("common.status")}</th>
-                  <th>{t("brief.decision")}</th>
-                  <th>{t("brief.conviction")}</th>
-                  <th>{t("brief.risk")}</th>
-                  <th>{t("common.strategy")}</th>
-                  <th>{t("brief.rank")}</th>
-                  <th>{t("brief.trigger")}</th>
-                  <th>{t("brief.stop")}</th>
-                  <th>{t("brief.target")}</th>
-                  <th>{t("brief.riskReward")}</th>
-                  <th>{t("brief.why")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {brief.top_opportunities.map((item) => (
-                  <tr key={item.instrument_id}>
-                    <td className="ticker">{item.instrument_id}</td>
-                    <td>
-                      <span className={`status status-${item.status}`}>{item.status}</span>
-                    </td>
-                    <td>
-                      <span className={`status status-${item.decision_action ?? "pending"}`}>
-                        {item.decision_label ?? item.decision_action ?? "-"}
-                      </span>
-                    </td>
-                    <td>{formatRatio(item.conviction_score)}</td>
-                    <td>{formatNumber(item.suggested_risk_pct, "%")}</td>
-                    <td className="reason-cell">{item.primary_strategy_id ?? t("common.none")}</td>
-                    <td>{item.rank_score.toFixed(2)}</td>
-                    <td>{item.trigger_price ?? "-"}</td>
-                    <td>{item.initial_stop ?? "-"}</td>
-                    <td>{item.target_1 ?? "-"}</td>
-                    <td>{formatNumber(item.risk_reward)}</td>
-                    <td className="reason-cell">{item.rank_reasons.join("; ")}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <BriefOpportunityMarketSections items={brief.top_opportunities} />
         )}
       </section>
 
@@ -351,34 +317,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
           {!brief?.entry_watch.length ? (
             <div className="empty-state">{t("brief.noTrigger")}</div>
           ) : (
-            <div className="table-shell">
-              <table>
-                <thead>
-                  <tr>
-                    <th>{t("common.ticker")}</th>
-                    <th>{t("common.strategy")}</th>
-                    <th>{t("brief.trigger")}</th>
-                    <th>{t("brief.stop")}</th>
-                    <th>{t("brief.target")}</th>
-                    <th>{t("brief.decision")}</th>
-                    <th>{t("brief.risk")}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {brief.entry_watch.map((item) => (
-                    <tr key={`${item.instrument_id}-${item.trigger_price}`}>
-                      <td className="ticker">{item.instrument_id}</td>
-                      <td className="reason-cell">{item.primary_strategy_id ?? t("common.none")}</td>
-                      <td>{item.trigger_price}</td>
-                      <td>{item.initial_stop ?? "-"}</td>
-                      <td>{item.target_1 ?? "-"}</td>
-                      <td>{item.decision_action ?? "-"}</td>
-                      <td>{formatNumber(item.suggested_risk_pct, "%")}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <BriefEntryWatchMarketSections items={brief.entry_watch} />
           )}
         </section>
 
@@ -471,6 +410,138 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
           empty={t("brief.noNextSteps")}
         />
       </div>
+    </div>
+  );
+}
+
+function BriefOpportunityMarketSections({ items }: { items: DailyBriefOpportunity[] }) {
+  const { t } = useI18n();
+  const sections = createMarketSections(items, (item) => item.instrument_id);
+
+  return (
+    <div className="market-sections">
+      {sections.map((section) => (
+        <div className="market-section" key={section.market}>
+          <div className="market-section-heading">
+            <h3>{t(section.labelKey as TranslationKey)}</h3>
+            <span className="count">{section.items.length}</span>
+          </div>
+          {section.items.length ? (
+            <BriefOpportunityTable items={section.items} />
+          ) : (
+            <p className="empty">{t("market.noOpportunities")}</p>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function BriefOpportunityTable({ items }: { items: DailyBriefOpportunity[] }) {
+  const { t } = useI18n();
+
+  return (
+    <div className="table-shell">
+      <table>
+        <thead>
+          <tr>
+            <th>{t("common.ticker")}</th>
+            <th>{t("common.status")}</th>
+            <th>{t("brief.decision")}</th>
+            <th>{t("brief.conviction")}</th>
+            <th>{t("brief.risk")}</th>
+            <th>{t("common.strategy")}</th>
+            <th>{t("brief.rank")}</th>
+            <th>{t("brief.trigger")}</th>
+            <th>{t("brief.stop")}</th>
+            <th>{t("brief.target")}</th>
+            <th>{t("brief.riskReward")}</th>
+            <th>{t("brief.why")}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((item) => (
+            <tr key={item.instrument_id}>
+              <td className="ticker">{item.instrument_id}</td>
+              <td>
+                <span className={`status status-${item.status}`}>{item.status}</span>
+              </td>
+              <td>
+                <span className={`status status-${item.decision_action ?? "pending"}`}>
+                  {item.decision_label ?? item.decision_action ?? "-"}
+                </span>
+              </td>
+              <td>{formatRatio(item.conviction_score)}</td>
+              <td>{formatNumber(item.suggested_risk_pct, "%")}</td>
+              <td className="reason-cell">{item.primary_strategy_id ?? t("common.none")}</td>
+              <td>{item.rank_score.toFixed(2)}</td>
+              <td>{item.trigger_price ?? "-"}</td>
+              <td>{item.initial_stop ?? "-"}</td>
+              <td>{item.target_1 ?? "-"}</td>
+              <td>{formatNumber(item.risk_reward)}</td>
+              <td className="reason-cell">{item.rank_reasons.join("; ")}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function BriefEntryWatchMarketSections({ items }: { items: DailyBriefEntryWatch[] }) {
+  const { t } = useI18n();
+  const sections = createMarketSections(items, (item) => item.instrument_id);
+
+  return (
+    <div className="market-sections">
+      {sections.map((section) => (
+        <div className="market-section" key={section.market}>
+          <div className="market-section-heading">
+            <h3>{t(section.labelKey as TranslationKey)}</h3>
+            <span className="count">{section.items.length}</span>
+          </div>
+          {section.items.length ? (
+            <BriefEntryWatchTable items={section.items} />
+          ) : (
+            <p className="empty">{t("brief.noTrigger")}</p>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function BriefEntryWatchTable({ items }: { items: DailyBriefEntryWatch[] }) {
+  const { t } = useI18n();
+
+  return (
+    <div className="table-shell">
+      <table>
+        <thead>
+          <tr>
+            <th>{t("common.ticker")}</th>
+            <th>{t("common.strategy")}</th>
+            <th>{t("brief.trigger")}</th>
+            <th>{t("brief.stop")}</th>
+            <th>{t("brief.target")}</th>
+            <th>{t("brief.decision")}</th>
+            <th>{t("brief.risk")}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((item) => (
+            <tr key={`${item.instrument_id}-${item.trigger_price}`}>
+              <td className="ticker">{item.instrument_id}</td>
+              <td className="reason-cell">{item.primary_strategy_id ?? t("common.none")}</td>
+              <td>{item.trigger_price}</td>
+              <td>{item.initial_stop ?? "-"}</td>
+              <td>{item.target_1 ?? "-"}</td>
+              <td>{item.decision_action ?? "-"}</td>
+              <td>{formatNumber(item.suggested_risk_pct, "%")}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

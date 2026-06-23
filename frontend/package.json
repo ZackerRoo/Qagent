@@ -3,6 +3,7 @@
     "dev": "vite --host 127.0.0.1 --port 5173",
     "build": "tsc && vite build",
     "check:i18n": "node scripts/check-i18n.mjs",
+    "check:markets": "node scripts/check-market-sections.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
