@@ -389,6 +389,27 @@ export type ClearDataCacheResponse = {
   deleted: number;
 };
 
+export type AutomationSummary = {
+  provider: string;
+  symbols: number;
+  scanned: number;
+  cards: number;
+  brief_queued: boolean;
+  alerts_triggered: number;
+  backtest_signals: number;
+};
+
+export type AutomationRunResponse = {
+  summary: AutomationSummary;
+  scan_run_id: string;
+  brief_id: string;
+  brief_delivery_id: string | null;
+  alert_delivery_id: string | null;
+  backtest: BacktestResponse | null;
+  alert_run: AlertRunResponse | null;
+  data_health: Record<string, string>;
+};
+
 export type StrategyPerformance = {
   strategy_id: string;
   sample_count: number;

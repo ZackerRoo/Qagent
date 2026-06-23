@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 
-import { clearDataCache, fetchDataCache, fetchProviderStatus } from "../api/client";
+import {
+  clearDataCache,
+  fetchDataCache,
+  fetchProviderStatus,
+  runAutomation,
+} from "../api/client";
 import type {
+  AutomationRunResponse,
   DataProviderMode,
   MarketDataCacheResponse,
   ProviderStatusResponse,
@@ -28,6 +34,7 @@ const emptyUniverse: UniverseCreate = {
 export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props) {
   const [providerStatus, setProviderStatus] = useState<ProviderStatusResponse>();
   const [dataCache, setDataCache] = useState<MarketDataCacheResponse>();
+  const [automationResult, setAutomationResult] = useState<AutomationRunResponse>();
   const [universeForm, setUniverseForm] = useState<UniverseCreate>(emptyUniverse);
   const [saveMessage, setSaveMessage] = useState("");
   const [cacheMessage, setCacheMessage] = useState("");
@@ -71,6 +78,16 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
     }
   }
 
+  async function runAutomationNow() {
+    try {
+      setError("");
+      setAutomationResult(await runAutomation(dataMode, symbols));
+      setDataCache(await fetchDataCache(dataMode));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to run automation");
+    }
+  }
+
   return (
     <div className="stack">
       <section className="panel">
@@ -96,6 +113,42 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
             <strong>Research only</strong>
           </div>
         </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <h2>Automation</h2>
+          <span className="count">{automationResult ? "Ready" : "Idle"}</span>
+        </div>
+        <div className="form-row">
+          <button type="button" onClick={runAutomationNow}>
+            Run Automation
+          </button>
+        </div>
+        {automationResult ? (
+          <div className="settings-list">
+            <div>
+              <span>Scan</span>
+              <strong>
+                {automationResult.summary.cards} cards / {automationResult.summary.scanned} scanned
+              </strong>
+            </div>
+            <div>
+              <span>Brief</span>
+              <strong>{automationResult.brief_id}</strong>
+            </div>
+            <div>
+              <span>Delivery</span>
+              <strong>{automationResult.brief_delivery_id ?? "-"}</strong>
+            </div>
+            <div>
+              <span>Backtest</span>
+              <strong>{automationResult.summary.backtest_signals} signals</strong>
+            </div>
+          </div>
+        ) : (
+          <div className="empty-state">No automation run in this session.</div>
+        )}
       </section>
 
       <section className="panel stack">

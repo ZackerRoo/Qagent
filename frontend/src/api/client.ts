@@ -5,6 +5,7 @@ import type {
   AlertRule,
   AlertRulesResponse,
   AlertSuggestionsResponse,
+  AutomationRunResponse,
   BacktestResponse,
   BriefMarkdownResponse,
   BriefRun,
@@ -46,6 +47,10 @@ type ScanParams = {
   end?: string;
   step_days?: number;
   include_news?: boolean;
+  queue_brief?: boolean;
+  run_alerts?: boolean;
+  queue_alerts?: boolean;
+  run_backtest?: boolean;
   status?: string;
   initial_capital?: string | number;
   risk_per_trade_pct?: string | number;
@@ -82,6 +87,18 @@ function queryString(params?: ScanParams): string {
   }
   if (params.include_news !== undefined) {
     search.set("include_news", String(params.include_news));
+  }
+  if (params.queue_brief !== undefined) {
+    search.set("queue_brief", String(params.queue_brief));
+  }
+  if (params.run_alerts !== undefined) {
+    search.set("run_alerts", String(params.run_alerts));
+  }
+  if (params.queue_alerts !== undefined) {
+    search.set("queue_alerts", String(params.queue_alerts));
+  }
+  if (params.run_backtest !== undefined) {
+    search.set("run_backtest", String(params.run_backtest));
   }
   if (params.status) {
     search.set("status", params.status);
@@ -324,4 +341,23 @@ export async function clearDataCache(
   provider?: DataProviderMode,
 ): Promise<ClearDataCacheResponse> {
   return apiDelete<ClearDataCacheResponse>("/data-cache", provider ? { provider } : undefined);
+}
+
+export async function runAutomation(
+  provider: DataProviderMode,
+  symbols?: string,
+): Promise<AutomationRunResponse> {
+  return apiPost<AutomationRunResponse>(
+    `/automation/run${queryString({
+      provider,
+      symbols,
+      limit: 5,
+      include_news: provider === "free",
+      queue_brief: true,
+      run_alerts: true,
+      queue_alerts: true,
+      run_backtest: true,
+    })}`,
+    {},
+  );
 }

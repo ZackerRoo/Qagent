@@ -84,16 +84,21 @@ curl 'http://127.0.0.1:8000/api/daily-brief/runs/<brief_id>/markdown'
 curl -X POST 'http://127.0.0.1:8000/api/daily-brief/runs/<brief_id>/deliveries?channel=markdown&recipient=local'
 curl 'http://127.0.0.1:8000/api/deliveries?status=queued'
 curl -X POST 'http://127.0.0.1:8000/api/deliveries/<delivery_id>/mark-sent'
+curl -X POST 'http://127.0.0.1:8000/api/automation/run?provider=fixture&symbols=US:TEST&include_news=false&queue_brief=true&run_backtest=true'
 ```
 
-`qagent.briefing.export.render_daily_brief_markdown` turns a saved brief into a compact Markdown research note. `delivery_outbox` stores queued/sent delivery records with channel, recipient, subject, Markdown, payload metadata, and timestamps. This is the handoff point for later email, Telegram, Feishu, or webhook senders.
+`qagent.briefing.export.render_daily_brief_markdown` turns a saved brief into a compact Markdown research note. `delivery_outbox` stores queued/sent delivery records with channel, recipient, subject, Markdown, payload metadata, and timestamps. `qagent.delivery.senders.send_pending_deliveries` currently supports local Markdown-file delivery and webhook JSON POST delivery.
 
 The CLI can generate, save, queue, and print a brief for local schedulers:
 
 ```bash
 cd backend
 .venv/bin/python -m qagent.cli daily-brief --provider fixture --no-news --save --queue --print-markdown
+.venv/bin/python -m qagent.cli run-all --provider fixture --symbols US:TEST --no-news --queue-brief --run-backtest
+.venv/bin/python -m qagent.cli send-outbox --channel markdown --output-dir ../data/outbox
 ```
+
+`run-all` saves a scan run, saves a daily brief, can queue the brief, can evaluate alert rules, and can run event-level backtest validation in one command. `send-outbox` processes queued local deliveries. `markdown` and `file` deliveries are written to Markdown files; `webhook` deliveries require `--webhook-url`. The dashboard Settings page can trigger the same automation through `/api/automation/run`.
 
 ## Strategy Engine
 

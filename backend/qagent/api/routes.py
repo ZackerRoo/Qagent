@@ -12,6 +12,7 @@ from qagent.briefing.export import render_daily_brief_markdown
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
 from qagent.catalysts.providers import FreeCatalystProvider
 from qagent.db import create_session_factory, initialize_database
+from qagent.jobs.automation import run_research_automation
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.jobs.alert_runner import run_alert_rules
 from qagent.jobs.intraday_check import evaluate_snapshot_alerts
@@ -229,6 +230,42 @@ def mark_delivery_sent(delivery_id: str) -> dict[str, object]:
     if delivery is None:
         raise HTTPException(status_code=404, detail="delivery not found")
     return delivery.model_dump(mode="json")
+
+
+@router.post("/automation/run")
+def run_automation(
+    provider: str = "fixture",
+    symbols: str | None = None,
+    limit: int = 5,
+    include_news: bool = True,
+    queue_brief: bool = True,
+    run_alerts: bool = False,
+    queue_alerts: bool = True,
+    run_backtest: bool = True,
+    recipient: str | None = None,
+) -> dict[str, object]:
+    mode = provider.strip().lower()
+    if limit <= 0 or limit > 20:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 20")
+    default_universe = DEFAULT_FREE_UNIVERSE if mode == "free" else DEFAULT_DEV_UNIVERSE
+    instrument_ids = _parse_symbols(symbols, default_universe)
+    try:
+        result = run_research_automation(
+            repo=_repo(),
+            provider=build_market_data_provider(mode),
+            provider_mode=mode,
+            symbols=instrument_ids,
+            include_news=include_news,
+            queue_brief=queue_brief,
+            run_alerts=run_alerts,
+            queue_alerts=queue_alerts,
+            run_backtest=run_backtest,
+            recipient=recipient,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result.model_dump(mode="json")
 
 
 def _build_daily_brief_response(

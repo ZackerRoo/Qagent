@@ -10,7 +10,8 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - Persistent market-data cache for fixture/free providers, with cache hit/miss data-health fields and Settings-page cache inspection.
 - Daily Brief page and `/api/daily-brief` research digest combining opportunities, entry levels, catalysts, portfolio risk, data caveats, and strategy validation.
 - Saved brief runs with history, detail retrieval, and Markdown export for push-ready workflows.
-- Delivery outbox for saved briefs, with queued/sent status and Markdown payloads for cron or future email/chat adapters.
+- Delivery outbox for saved briefs and alert runs, with queued/sent status plus local Markdown-file and webhook sender adapters.
+- One-command automation runner for scan history, daily brief save/queue, optional alerts, optional backtest validation, and optional outbox sending.
 - US free market data via `yfinance`.
 - A-share free market data via `akshare`, with `baostock` fallback.
 - Strategy registry covering trend momentum, breakout + volume, healthy pullback, GF-DMA health, catalyst transmission, PEAD, analyst revisions, TAM-adjusted PEG, Bayesian growth valuation, sector regime, short squeeze risk, options flow, and insider/institutional confirmation.
@@ -93,6 +94,7 @@ curl -X POST 'http://127.0.0.1:8000/api/daily-brief/runs?provider=fixture&includ
 curl 'http://127.0.0.1:8000/api/daily-brief/runs'
 curl -X POST 'http://127.0.0.1:8000/api/daily-brief/runs/<brief_id>/deliveries?channel=markdown&recipient=local'
 curl 'http://127.0.0.1:8000/api/deliveries?status=queued'
+curl -X POST 'http://127.0.0.1:8000/api/automation/run?provider=fixture&include_news=false&queue_brief=true&run_backtest=true'
 curl 'http://127.0.0.1:8000/api/scan-runs'
 curl 'http://127.0.0.1:8000/api/outcomes?provider=fixture'
 curl 'http://127.0.0.1:8000/api/strategy-performance?provider=fixture'
@@ -119,6 +121,8 @@ CLI daily brief handoff:
 ```bash
 cd backend
 .venv/bin/python -m qagent.cli daily-brief --provider fixture --no-news --save --queue --print-markdown
+.venv/bin/python -m qagent.cli run-all --provider fixture --symbols US:TEST --no-news --queue-brief --run-backtest
+.venv/bin/python -m qagent.cli send-outbox --channel markdown --output-dir ../data/outbox
 ```
 
 ## Research Docs
