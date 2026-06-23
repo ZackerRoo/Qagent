@@ -77,6 +77,32 @@ class TradeScenario(BaseModel):
     summary: str
 
 
+class DecisionComponents(BaseModel):
+    strategy_quality: float = Field(ge=0.0, le=1.0)
+    risk_reward: float = Field(ge=0.0, le=1.0)
+    data_quality: float = Field(ge=0.0, le=1.0)
+    execution_quality: float = Field(ge=0.0, le=1.0)
+    catalyst_support: float = Field(ge=0.0, le=1.0)
+
+
+class OpportunityDecision(BaseModel):
+    action: str
+    action_label: str
+    conviction_score: float = Field(ge=0.0, le=1.0)
+    components: DecisionComponents
+    suggested_risk_pct: float = Field(ge=0.0)
+    max_position_pct: float = Field(ge=0.0)
+    trigger_price: Decimal | None = None
+    initial_stop: Decimal | None = None
+    target_1: Decimal | None = None
+    no_chase_above: Decimal | None = None
+    horizon: str = "swing"
+    rationale: list[str] = Field(default_factory=list)
+    failure_conditions: list[str] = Field(default_factory=list)
+    verification_checks: list[str] = Field(default_factory=list)
+    safety_note: str = "Research workflow only; not personalized investment advice."
+
+
 class OpportunityCard(BaseModel):
     card_id: str
     instrument_id: str
@@ -95,3 +121,4 @@ class OpportunityCard(BaseModel):
     rank_score: float = Field(default=0.0, ge=0.0, le=1.0)
     rank_reasons: list[str] = Field(default_factory=list)
     data_caveats: list[str] = Field(default_factory=list)
+    decision: OpportunityDecision | None = None

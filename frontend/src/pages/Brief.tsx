@@ -299,6 +299,9 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
                 <tr>
                   <th>Ticker</th>
                   <th>Status</th>
+                  <th>Decision</th>
+                  <th>Conviction</th>
+                  <th>Risk</th>
                   <th>Strategy</th>
                   <th>Rank</th>
                   <th>Trigger</th>
@@ -315,6 +318,13 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
                     <td>
                       <span className={`status status-${item.status}`}>{item.status}</span>
                     </td>
+                    <td>
+                      <span className={`status status-${item.decision_action ?? "pending"}`}>
+                        {item.decision_label ?? item.decision_action ?? "-"}
+                      </span>
+                    </td>
+                    <td>{formatRatio(item.conviction_score)}</td>
+                    <td>{formatNumber(item.suggested_risk_pct, "%")}</td>
                     <td className="reason-cell">{item.primary_strategy_id ?? "None"}</td>
                     <td>{item.rank_score.toFixed(2)}</td>
                     <td>{item.trigger_price ?? "-"}</td>
@@ -348,6 +358,8 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
                     <th>Trigger</th>
                     <th>Stop</th>
                     <th>Target</th>
+                    <th>Decision</th>
+                    <th>Risk</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -358,6 +370,8 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
                       <td>{item.trigger_price}</td>
                       <td>{item.initial_stop ?? "-"}</td>
                       <td>{item.target_1 ?? "-"}</td>
+                      <td>{item.decision_action ?? "-"}</td>
+                      <td>{formatNumber(item.suggested_risk_pct, "%")}</td>
                     </tr>
                   ))}
                 </tbody>

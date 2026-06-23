@@ -28,6 +28,15 @@ def test_card_generator_creates_setup_ready_card():
     }
     assert card.strategy_score >= card.score
     assert any(strategy.status == "missing_data" for strategy in card.strategy_evaluations)
+    assert card.decision.action in {"candidate_entry", "watch_trigger", "wait_pullback"}
+    assert card.decision.conviction_score >= 0.5
+    assert card.decision.suggested_risk_pct > 0
+    assert card.decision.trigger_price == card.entry_plan.trigger_price
+    assert card.decision.initial_stop == card.exit_plan.initial_stop
+    assert card.decision.target_1 == card.exit_plan.target_1
+    assert card.decision.failure_conditions
+    assert card.decision.verification_checks
+    assert "guarantee" not in card.decision.model_dump_json().lower()
 
 
 def test_card_generator_reports_market_data_provider():
@@ -70,3 +79,5 @@ def test_card_generator_uses_pead_trade_plan_when_pead_is_primary():
     assert "earnings-day low" in card.exit_plan.invalidation
     assert card.rank_score >= card.strategy_score
     assert any("PEAD" in reason for reason in card.rank_reasons)
+    assert card.decision.action in {"candidate_entry", "watch_trigger"}
+    assert card.decision.horizon == "swing"

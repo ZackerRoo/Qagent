@@ -60,6 +60,33 @@ export type OpportunityCard = {
   rank_score: number;
   rank_reasons: string[];
   data_caveats: string[];
+  decision: OpportunityDecision | null;
+};
+
+export type DecisionComponents = {
+  strategy_quality: number;
+  risk_reward: number;
+  data_quality: number;
+  execution_quality: number;
+  catalyst_support: number;
+};
+
+export type OpportunityDecision = {
+  action: string;
+  action_label: string;
+  conviction_score: number;
+  components: DecisionComponents;
+  suggested_risk_pct: number;
+  max_position_pct: number;
+  trigger_price: string | null;
+  initial_stop: string | null;
+  target_1: string | null;
+  no_chase_above: string | null;
+  horizon: string;
+  rationale: string[];
+  failure_conditions: string[];
+  verification_checks: string[];
+  safety_note: string;
 };
 
 export type StrategyEvaluation = {
@@ -380,7 +407,13 @@ export type DailyBriefOpportunity = {
   target_1: string | null;
   risk_reward: number | null;
   scenario_summary: string;
+  decision_action: string | null;
+  decision_label: string | null;
+  conviction_score: number | null;
+  suggested_risk_pct: number | null;
   rank_reasons: string[];
+  failure_conditions: string[];
+  verification_checks: string[];
   data_caveats: string[];
 };
 
@@ -391,6 +424,9 @@ export type DailyBriefEntryWatch = {
   initial_stop: string | null;
   target_1: string | null;
   risk_reward: number | null;
+  decision_action: string | null;
+  conviction_score: number | null;
+  suggested_risk_pct: number | null;
   note: string;
 };
 

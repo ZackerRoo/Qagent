@@ -20,6 +20,9 @@ def render_daily_brief_markdown(brief: DailyBrief) -> str:
                     f"- **{item.instrument_id}** `{item.status}`",
                     f"  - Strategy: {item.primary_strategy_id or 'None'}",
                     f"  - Rank: {item.rank_score:.2f}",
+                    f"  - Decision: {item.decision_label or item.decision_action or '-'}",
+                    f"  - Conviction: {_ratio(item.conviction_score)}; "
+                    f"risk budget {_pct(item.suggested_risk_pct)}",
                     f"  - Trigger / Stop / Target: {_level(item.trigger_price)} / "
                     f"{_level(item.initial_stop)} / {_level(item.target_1)}",
                     f"  - Risk/reward: {_number(item.risk_reward)}",

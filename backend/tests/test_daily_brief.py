@@ -45,7 +45,14 @@ def test_build_daily_brief_summarizes_opportunities_validation_and_caveats():
     assert brief.symbols == symbols
     assert brief.headline
     assert brief.top_opportunities
+    assert brief.top_opportunities[0].decision_action
+    assert brief.top_opportunities[0].conviction_score >= 0
+    assert brief.top_opportunities[0].suggested_risk_pct >= 0
+    assert brief.top_opportunities[0].failure_conditions
+    assert brief.top_opportunities[0].verification_checks
     assert brief.entry_watch
+    assert brief.entry_watch[0].decision_action
+    assert brief.entry_watch[0].suggested_risk_pct >= 0
     assert brief.strategy_validation
     assert brief.catalyst_watch[0].instrument_id == "US:TEST"
     assert brief.data_caveats
@@ -79,6 +86,8 @@ def test_render_daily_brief_markdown_contains_key_sections():
     assert markdown.startswith("# Qagent Daily Brief")
     assert "## Top Opportunities" in markdown
     assert "## Entry Watch" in markdown
+    assert "Decision:" in markdown
+    assert "Conviction:" in markdown
     assert "## Strategy Validation" in markdown
     assert "## Data Caveats" in markdown
     assert "## Next Steps" in markdown

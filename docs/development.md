@@ -137,7 +137,20 @@ Opportunity cards now include:
 - `strategy_score`: max score from the strategy stack and signal stack.
 - `rank_score`: ranking score combining strategy strength, data completeness, risk/reward, and active strategy count.
 - `rank_reasons`: readable reasons behind the ranking.
+- `decision`: research action, conviction score, component scores, suggested risk budget, failure conditions, and verification checks.
 - Strategy-specific trade plans for breakout, healthy pullback, and PEAD.
+
+## Research Decision Layer
+
+Every generated opportunity card includes a deterministic decision object:
+
+- `action`: `candidate_entry`, `watch_trigger`, `wait_pullback`, or `avoid`.
+- `conviction_score`: weighted score from strategy quality, risk/reward, data quality, execution quality, and catalyst support.
+- `suggested_risk_pct`: research risk budget percentage derived from conviction and data quality.
+- `failure_conditions`: stop/no-chase/time-stop conditions that invalidate the setup.
+- `verification_checks`: trigger, confirmation, missing-data, caveat, and sizing checks.
+
+The decision layer lives in `qagent.recommendations.decision`. It only uses structured Qagent evidence already present on the card. Missing optional data lowers data quality and sizing, but it does not automatically discard a setup when a core strategy, trigger, stop, and target are present.
 
 ## Scan History And Outcome Replay
 

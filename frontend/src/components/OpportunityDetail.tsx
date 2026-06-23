@@ -20,6 +20,18 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
 
       <div className="metric-grid">
         <div>
+          <span>Action</span>
+          <strong>{card.decision?.action_label ?? "-"}</strong>
+        </div>
+        <div>
+          <span>Conviction</span>
+          <strong>{formatDecisionPct(card.decision?.conviction_score)}</strong>
+        </div>
+        <div>
+          <span>Risk Budget</span>
+          <strong>{formatRiskBudget(card.decision?.suggested_risk_pct)}</strong>
+        </div>
+        <div>
           <span>Trigger</span>
           <strong>{card.entry_plan.trigger_price ?? "-"}</strong>
         </div>
@@ -48,6 +60,38 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
           <strong>{Math.round(card.rank_score * 100)}</strong>
         </div>
       </div>
+
+      {card.decision && (
+        <div className="detail-section">
+          <h3>Research Decision</h3>
+          <p>{card.decision.safety_note}</p>
+          <div className="decision-grid">
+            <div>
+              <span>Strategy</span>
+              <strong>{formatDecisionPct(card.decision.components.strategy_quality)}</strong>
+            </div>
+            <div>
+              <span>R/R</span>
+              <strong>{formatDecisionPct(card.decision.components.risk_reward)}</strong>
+            </div>
+            <div>
+              <span>Data</span>
+              <strong>{formatDecisionPct(card.decision.components.data_quality)}</strong>
+            </div>
+            <div>
+              <span>Execution</span>
+              <strong>{formatDecisionPct(card.decision.components.execution_quality)}</strong>
+            </div>
+            <div>
+              <span>Catalyst</span>
+              <strong>{formatDecisionPct(card.decision.components.catalyst_support)}</strong>
+            </div>
+          </div>
+          <DecisionList title="Why" items={card.decision.rationale} />
+          <DecisionList title="Failure Conditions" items={card.decision.failure_conditions} />
+          <DecisionList title="Verification Checks" items={card.decision.verification_checks} />
+        </div>
+      )}
 
       <div className="detail-section">
         <h3>Trade Scenario</h3>
@@ -154,4 +198,23 @@ function labelStrategy(strategyId: string | null) {
     return "-";
   }
   return strategyId.replace(/_/g, " ");
+}
+
+function formatDecisionPct(value: number | undefined) {
+  return value === undefined ? "-" : `${Math.round(value * 100)}`;
+}
+
+function formatRiskBudget(value: number | undefined) {
+  return value === undefined ? "-" : `${value.toFixed(2)}%`;
+}
+
+function DecisionList({ title, items }: { title: string; items: string[] }) {
+  return (
+    <div className="decision-list">
+      <h3>{title}</h3>
+      {items.map((item) => (
+        <p key={item}>{item}</p>
+      ))}
+    </div>
+  );
 }

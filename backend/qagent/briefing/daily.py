@@ -21,7 +21,13 @@ class BriefOpportunity(BaseModel):
     target_1: Decimal | None
     risk_reward: float | None
     scenario_summary: str
+    decision_action: str | None = None
+    decision_label: str | None = None
+    conviction_score: float | None = None
+    suggested_risk_pct: float | None = None
     rank_reasons: list[str] = Field(default_factory=list)
+    failure_conditions: list[str] = Field(default_factory=list)
+    verification_checks: list[str] = Field(default_factory=list)
     data_caveats: list[str] = Field(default_factory=list)
 
 
@@ -32,6 +38,9 @@ class EntryWatchItem(BaseModel):
     initial_stop: Decimal | None
     target_1: Decimal | None
     risk_reward: float | None
+    decision_action: str | None = None
+    conviction_score: float | None = None
+    suggested_risk_pct: float | None = None
     note: str
 
 
@@ -141,7 +150,13 @@ def _top_opportunities(scan_result: DailyScanResult, limit: int) -> list[BriefOp
             target_1=card.exit_plan.target_1,
             risk_reward=card.risk_reward,
             scenario_summary=card.scenario.summary,
+            decision_action=card.decision.action if card.decision else None,
+            decision_label=card.decision.action_label if card.decision else None,
+            conviction_score=card.decision.conviction_score if card.decision else None,
+            suggested_risk_pct=card.decision.suggested_risk_pct if card.decision else None,
             rank_reasons=card.rank_reasons,
+            failure_conditions=card.decision.failure_conditions if card.decision else [],
+            verification_checks=card.decision.verification_checks if card.decision else [],
             data_caveats=card.data_caveats,
         )
         for card in cards
@@ -161,6 +176,9 @@ def _entry_watch(opportunities: list[BriefOpportunity]) -> list[EntryWatchItem]:
                 initial_stop=opportunity.initial_stop,
                 target_1=opportunity.target_1,
                 risk_reward=opportunity.risk_reward,
+                decision_action=opportunity.decision_action,
+                conviction_score=opportunity.conviction_score,
+                suggested_risk_pct=opportunity.suggested_risk_pct,
                 note="Watch trigger, invalidation, target, and data caveats before action.",
             )
         )

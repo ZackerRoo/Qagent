@@ -408,7 +408,8 @@ tbody tr.selected {
 .status-configured,
 .status-target_1_hit,
 .status-working,
-.status-sent {
+.status-sent,
+.status-candidate_entry {
   background: #dff4e8;
   color: #116b3c;
 }
@@ -416,13 +417,16 @@ tbody tr.selected {
 .status-missing_config,
 .status-pending,
 .status-queued,
-.status-time_exit {
+.status-time_exit,
+.status-watch_trigger,
+.status-wait_pullback {
   background: #fff3d6;
   color: #8a5b00;
 }
 
 .status-lagging,
-.status-stopped {
+.status-stopped,
+.status-avoid {
   background: #ffe7e7;
   color: #9f1f1f;
 }
@@ -464,6 +468,35 @@ tbody tr.selected {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   margin-top: 8px;
+}
+
+.decision-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.decision-grid div {
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.decision-grid span {
+  display: block;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.decision-grid strong {
+  display: block;
+  margin-top: 3px;
+  font-size: 14px;
+}
+
+.decision-list {
+  margin-top: 10px;
 }
 
 .scenario-grid div {

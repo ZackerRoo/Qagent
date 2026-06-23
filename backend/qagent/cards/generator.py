@@ -8,6 +8,7 @@ from qagent.cards.ranking import rank_opportunity
 from qagent.cards.scoring import aggregate_score
 from qagent.domain.enums import Market, OpportunityStatus
 from qagent.domain.models import OpportunityCard, Signal, SignalSnapshot
+from qagent.recommendations.decision import build_research_decision
 from qagent.strategies.evaluator import StrategyEvaluator
 from qagent.strategies.models import StrategyEvaluation
 from qagent.strategies.registry import default_strategy_registry
@@ -51,7 +52,7 @@ class OpportunityCardGenerator:
         rank = rank_opportunity(primary, evaluations, strategy_score, plan.risk_reward)
         market = Market.US if instrument_id.startswith("US:") else Market.CN
 
-        return OpportunityCard(
+        card = OpportunityCard(
             card_id=f"card_{uuid4().hex[:12]}",
             instrument_id=instrument_id,
             market=market,
@@ -70,6 +71,8 @@ class OpportunityCardGenerator:
             rank_reasons=rank.rank_reasons,
             data_caveats=_data_caveats(bars),
         )
+        card.decision = build_research_decision(card)
+        return card
 
 
 def _signal_snapshots(signals: list[Signal]) -> list[SignalSnapshot]:

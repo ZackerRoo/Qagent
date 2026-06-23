@@ -20,6 +20,15 @@ def test_opportunities_endpoint_returns_cards():
     assert body["cards"][0]["strategy_score"] >= 0
     assert body["cards"][0]["rank_score"] >= body["cards"][0]["strategy_score"]
     assert body["cards"][0]["rank_reasons"]
+    assert body["cards"][0]["decision"]["action"] in {
+        "candidate_entry",
+        "watch_trigger",
+        "wait_pullback",
+        "avoid",
+    }
+    assert body["cards"][0]["decision"]["conviction_score"] >= 0
+    assert body["cards"][0]["decision"]["failure_conditions"]
+    assert body["cards"][0]["decision"]["verification_checks"]
     assert body["items"][0]["instrument_id"]
     assert body["items"][0]["strategies_passed"] >= 1
     assert body["strategy_health"]

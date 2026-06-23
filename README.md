@@ -19,6 +19,7 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - Missing-data handling for strategies that need unavailable estimates, options flow, insider transactions, institutional filings, sector breadth, or short-interest data.
 - Strategy-specific trade plans for breakout, healthy pullback, and PEAD earnings drift.
 - Opportunity cards with primary strategy, strategy score, rank score, ranking reasons, strategy stack, trigger, no-chase level, stop, targets, risk/reward, scenario percentages, and signal stack evidence.
+- Research decision layer on each card with action, conviction score, component scores, suggested risk budget, failure conditions, and verification checks.
 - Scan coverage table showing `setup_ready`, `no_setup`, or `no_data` per symbol plus passed/watch/missing strategy counts.
 - Strategy health summary with sample count, 10-day win rate, average 10/20-day forward return, max 10-day loss, and readiness labels.
 - Persistent scan history and opportunity snapshots saved from dashboard scans.
@@ -100,7 +101,7 @@ curl 'http://127.0.0.1:8000/api/catalysts?symbols=US:AAPL&limit=5'
 curl 'http://127.0.0.1:8000/api/portfolio?provider=fixture'
 ```
 
-`/api/opportunities` returns `cards`, `items`, `strategy_health`, and `data_health`. Cards include `rank_score` and `rank_reasons`. Strategies that cannot be evaluated with the current free-data scan are returned with `status: "missing_data"` instead of fabricated scores.
+`/api/opportunities` returns `cards`, `items`, `strategy_health`, and `data_health`. Cards include `rank_score`, `rank_reasons`, and `decision`. The decision object is a research workflow: action, conviction score, component scores, suggested risk budget, trigger/stop/target references, failure conditions, and verification checks. Strategies that cannot be evaluated with the current free-data scan are returned with `status: "missing_data"` instead of fabricated scores.
 
 `/api/daily-brief` is the daily readout. It composes the current scan, entry watch levels, optional news catalysts, position risk, provider caveats, and backtest validation. `/api/daily-brief/runs` saves and lists generated briefs; `/api/daily-brief/runs/{brief_id}/markdown` exports a saved brief as Markdown; `/api/daily-brief/runs/{brief_id}/deliveries` queues a saved brief in the local delivery outbox. `/api/opportunities` also records a scan run. `/api/scan-runs`, `/api/opportunity-history`, `/api/outcomes`, and `/api/strategy-performance` expose the saved research trail, daily-bar outcome replay, and strategy-level replay summary. `/api/backtest` runs event-level historical validation without saving records. `/api/portfolio-backtest` simulates account-level trades from historical signals. `/api/alert-suggestions` turns saved opportunity trigger/stop/target levels into draft alert rules.
 

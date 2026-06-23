@@ -16,6 +16,8 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
             <th>Ticker</th>
             <th>Market</th>
             <th>Status</th>
+            <th>Action</th>
+            <th>Conviction</th>
             <th>Score</th>
             <th>Rank</th>
             <th>Strategy</th>
@@ -39,6 +41,12 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
               <td>
                 <StatusBadge status={card.status} />
               </td>
+              <td>
+                <span className={`status status-${card.decision?.action ?? "pending"}`}>
+                  {card.decision?.action_label ?? "-"}
+                </span>
+              </td>
+              <td>{formatPct(card.decision?.conviction_score)}</td>
               <td>{Math.round(card.score * 100)}</td>
               <td>{Math.round(card.rank_score * 100)}</td>
               <td>{labelStrategy(card.primary_strategy_id)}</td>
@@ -54,6 +62,10 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
       </table>
     </div>
   );
+}
+
+function formatPct(value: number | undefined) {
+  return value === undefined ? "-" : `${Math.round(value * 100)}`;
 }
 
 function labelStrategy(strategyId: string | null) {
