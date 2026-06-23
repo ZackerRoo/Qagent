@@ -56,6 +56,22 @@ class AlertRuleRow(Base):
     )
 
 
+class UniverseRow(Base):
+    __tablename__ = "universes"
+
+    universe_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    description: Mapped[str] = mapped_column(Text, default="")
+    market_scope: Mapped[str] = mapped_column(String(16), default="mixed")
+    tags: Mapped[str] = mapped_column(Text, default="")
+    symbols: Mapped[str] = mapped_column(Text, default="[]")
+    source: Mapped[str] = mapped_column(String(32), default="custom")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
 class ScanRunRow(Base):
     __tablename__ = "scan_runs"
 
@@ -90,8 +106,8 @@ class DeliveryOutboxRow(Base):
     __tablename__ = "delivery_outbox"
 
     delivery_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    brief_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("brief_runs.brief_id"), index=True
+    brief_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("brief_runs.brief_id"), index=True, nullable=True
     )
     channel: Mapped[str] = mapped_column(String(32), index=True)
     recipient: Mapped[str | None] = mapped_column(String(255), nullable=True)

@@ -4,9 +4,10 @@ import {
   evaluateAlerts,
   fetchAlertRules,
   fetchAlertSuggestions,
+  runAlerts,
   saveAlertRule,
 } from "../api/client";
-import type { AlertRule, AlertSuggestion, TriggeredAlert } from "../types";
+import type { AlertRule, AlertRunResponse, AlertSuggestion, DataProviderMode, TriggeredAlert } from "../types";
 
 const emptyRule: AlertRule = {
   rule_id: "entry-US-TEST",
@@ -16,12 +17,14 @@ const emptyRule: AlertRule = {
   threshold: "82.00",
 };
 
-export function Alerts() {
+export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
   const [rules, setRules] = useState<AlertRule[]>([]);
   const [suggestions, setSuggestions] = useState<AlertSuggestion[]>([]);
   const [rule, setRule] = useState<AlertRule>(emptyRule);
   const [price, setPrice] = useState("83.00");
   const [triggered, setTriggered] = useState<TriggeredAlert[]>([]);
+  const [runResult, setRunResult] = useState<AlertRunResponse>();
+  const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState("");
 
   async function load() {
@@ -52,11 +55,30 @@ export function Alerts() {
     setTriggered(result.alerts);
   }
 
+  async function runProviderAlerts() {
+    try {
+      setIsRunning(true);
+      setError("");
+      const result = await runAlerts(dataMode);
+      setRunResult(result);
+      setTriggered(result.alerts);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to run alert scan");
+    } finally {
+      setIsRunning(false);
+    }
+  }
+
   return (
     <section className="panel stack">
       <div className="panel-heading">
         <h2>Alerts</h2>
-        <span className="count">{rules.length} rules</span>
+        <div className="brief-actions">
+          <span className="count">{rules.length} rules</span>
+          <button className="icon-action" type="button" onClick={runProviderAlerts} disabled={isRunning}>
+            {isRunning ? "Running" : "Run Alerts"}
+          </button>
+        </div>
       </div>
       {error && <div className="empty-state error">{error}</div>}
       <div className="form-row alert-form">
@@ -102,6 +124,26 @@ export function Alerts() {
           Evaluate
         </button>
       </div>
+      {runResult && (
+        <div className="metric-grid">
+          <div>
+            <span>Provider</span>
+            <strong>{runResult.summary.provider}</strong>
+          </div>
+          <div>
+            <span>Rules</span>
+            <strong>{runResult.summary.rules}</strong>
+          </div>
+          <div>
+            <span>Triggered</span>
+            <strong>{runResult.summary.triggered}</strong>
+          </div>
+          <div>
+            <span>Queued</span>
+            <strong>{runResult.delivery ? runResult.delivery.delivery_id.slice(-8) : "-"}</strong>
+          </div>
+        </div>
+      )}
       <div className="table-shell">
         <table>
           <thead>

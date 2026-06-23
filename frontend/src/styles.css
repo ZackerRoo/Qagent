@@ -137,7 +137,7 @@ h3 {
 
 .scan-controls {
   display: grid;
-  grid-template-columns: auto minmax(220px, 360px) auto;
+  grid-template-columns: auto minmax(170px, 260px) minmax(220px, 360px) auto;
   gap: 8px;
   align-items: center;
 }
@@ -169,7 +169,8 @@ h3 {
   color: #ffffff;
 }
 
-.scan-controls input {
+.scan-controls input,
+.scan-controls select {
   width: 100%;
   height: 32px;
   border: 1px solid #cbd5e1;
@@ -639,6 +640,12 @@ tbody tr.selected {
     minmax(72px, 0.2fr) minmax(100px, 0.3fr) 84px;
 }
 
+.universe-form {
+  grid-template-columns:
+    minmax(130px, 0.45fr) minmax(160px, 0.55fr) minmax(96px, 0.25fr)
+    minmax(260px, 1fr) 84px;
+}
+
 .form-row input,
 .form-row select {
   min-width: 0;
@@ -785,6 +792,10 @@ tbody tr.selected {
   .form-row,
   .portfolio-form,
   .alert-form {
+    grid-template-columns: 1fr;
+  }
+
+  .universe-form {
     grid-template-columns: 1fr;
   }
 }

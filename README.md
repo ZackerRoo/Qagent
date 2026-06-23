@@ -20,6 +20,7 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - Strategy-specific trade plans for breakout, healthy pullback, and PEAD earnings drift.
 - Opportunity cards with primary strategy, strategy score, rank score, ranking reasons, strategy stack, trigger, no-chase level, stop, targets, risk/reward, scenario percentages, and signal stack evidence.
 - Research decision layer on each card with action, conviction score, component scores, suggested risk budget, failure conditions, and verification checks.
+- Built-in and custom stock universes for starter theme pools and editable user pools.
 - Scan coverage table showing `setup_ready`, `no_setup`, or `no_data` per symbol plus passed/watch/missing strategy counts.
 - Strategy health summary with sample count, 10-day win rate, average 10/20-day forward return, max 10-day loss, and readiness labels.
 - Persistent scan history and opportunity snapshots saved from dashboard scans.
@@ -29,6 +30,7 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - Portfolio-level historical backtesting that converts validated signals into position-sized trades, stop/target/time exits, costs, slippage, an equity curve, and account-level metrics.
 - Provider readiness dashboard and API status for fixture, free market-data, SEC, CNINFO, and optional vendor feeds.
 - Alert suggestions generated from saved opportunity trigger, stop, and target levels.
+- Provider-backed alert runner that evaluates saved alert rules against latest snapshots and can queue Markdown notifications in the delivery outbox.
 - Watchlist, positions, alert rules, alert evaluation, and portfolio risk view backed by SQLite.
 - Catalyst Review using free news sources plus deterministic catalyst hypotheses and verification paths.
 - SEC ownership confirmation strategy using available Form 3/4/5, 13F, 13D, and 13G filing metadata.
@@ -96,6 +98,8 @@ curl 'http://127.0.0.1:8000/api/strategy-performance?provider=fixture'
 curl 'http://127.0.0.1:8000/api/backtest?provider=fixture&start=2026-01-30&end=2026-03-20&step_days=5'
 curl 'http://127.0.0.1:8000/api/portfolio-backtest?provider=fixture&start=2026-01-30&end=2026-03-20&step_days=5'
 curl 'http://127.0.0.1:8000/api/alert-suggestions'
+curl 'http://127.0.0.1:8000/api/universes'
+curl -X POST 'http://127.0.0.1:8000/api/alerts/run?provider=fixture&queue=true&recipient=local'
 curl 'http://127.0.0.1:8000/api/provider-status'
 curl 'http://127.0.0.1:8000/api/catalysts?symbols=US:AAPL&limit=5'
 curl 'http://127.0.0.1:8000/api/portfolio?provider=fixture'

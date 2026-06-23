@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 
-import type { DataProviderMode } from "../types";
+import type { DataProviderMode, UniverseRecord } from "../types";
 
 const nav = [
   { id: "brief", label: "Brief", icon: Newspaper },
@@ -35,7 +35,10 @@ type Props = {
   dataMode: DataProviderMode;
   isScanning: boolean;
   symbols: string;
+  universes: UniverseRecord[];
+  selectedUniverseId: string;
   onSymbolsChange(value: string): void;
+  onUniverseChange(value: string): void;
   onDataModeChange(mode: DataProviderMode): void;
   onScan(): void;
   children: ReactNode;
@@ -48,7 +51,10 @@ export function Layout({
   dataMode,
   isScanning,
   symbols,
+  universes,
+  selectedUniverseId,
   onSymbolsChange,
+  onUniverseChange,
   onDataModeChange,
   onScan,
   children,
@@ -104,6 +110,17 @@ export function Layout({
                 Free
               </button>
             </div>
+            <select
+              aria-label="Universe"
+              value={selectedUniverseId}
+              onChange={(event) => onUniverseChange(event.target.value)}
+            >
+              {universes.map((universe) => (
+                <option key={universe.universe_id} value={universe.universe_id}>
+                  {universe.name}
+                </option>
+              ))}
+            </select>
             <input
               aria-label="Scan symbols"
               disabled={dataMode === "fixture"}

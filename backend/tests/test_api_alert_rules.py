@@ -47,3 +47,29 @@ def test_alert_suggestions_api_uses_recent_opportunities(tmp_path, monkeypatch):
         {item["kind"] for item in suggestions}
     )
     assert all(item["source_snapshot_id"] for item in suggestions)
+
+
+def test_alert_run_api_uses_provider_snapshot_and_queues_delivery(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'alert-run.db'}")
+    client = TestClient(create_app())
+    client.post(
+        "/api/alert-rules",
+        json={
+            "rule_id": "entry-US-TEST",
+            "instrument_id": "US:TEST",
+            "kind": "entry_trigger",
+            "operator": ">=",
+            "threshold": "82.00",
+        },
+    )
+
+    response = client.post("/api/alerts/run?provider=fixture&queue=true&recipient=local")
+    deliveries = client.get("/api/deliveries?status=queued").json()["deliveries"]
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["rules"] == 1
+    assert body["summary"]["triggered"] == 1
+    assert body["alerts"][0]["rule_id"] == "entry-US-TEST"
+    assert body["delivery"]["status"] == "queued"
+    assert deliveries[0]["delivery_id"] == body["delivery"]["delivery_id"]

@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.domain.models import OpportunityCard
+from qagent.market.universes import UniverseCreate, UniverseRecord, normalize_symbols
 from qagent.storage.tables import (
     AlertRuleRow,
     BriefRunRow,
@@ -14,6 +15,7 @@ from qagent.storage.tables import (
     OpportunitySnapshotRow,
     PositionRow,
     ScanRunRow,
+    UniverseRow,
     WatchlistItemRow,
 )
 
@@ -119,7 +121,7 @@ class BriefRunRecord(BaseModel):
 
 class DeliveryOutboxRecord(BaseModel):
     delivery_id: str
-    brief_id: str
+    brief_id: str | None
     channel: str
     recipient: str | None
     subject: str
@@ -204,6 +206,34 @@ class QagentRepository:
         with self.session_factory() as session:
             rows = session.query(AlertRuleRow).order_by(AlertRuleRow.rule_id).all()
             return [self._alert_rule_from_row(row) for row in rows]
+
+    def upsert_universe(self, universe: UniverseCreate) -> UniverseRecord:
+        with self.session_factory() as session:
+            row = session.get(UniverseRow, universe.universe_id)
+            if row is None:
+                row = UniverseRow(universe_id=universe.universe_id)
+                session.add(row)
+            row.name = universe.name
+            row.description = universe.description
+            row.market_scope = universe.market_scope
+            row.tags = _serialize_tags(universe.tags)
+            row.symbols = json.dumps(normalize_symbols(universe.symbols))
+            row.source = "custom"
+            session.commit()
+            session.refresh(row)
+            return self._universe_from_row(row)
+
+    def list_custom_universes(self) -> list[UniverseRecord]:
+        with self.session_factory() as session:
+            rows = session.query(UniverseRow).order_by(UniverseRow.name).all()
+            return [self._universe_from_row(row) for row in rows]
+
+    def get_universe(self, universe_id: str) -> UniverseRecord | None:
+        with self.session_factory() as session:
+            row = session.get(UniverseRow, universe_id)
+            if row is None:
+                return None
+            return self._universe_from_row(row)
 
     def save_scan_run(
         self,
@@ -336,6 +366,34 @@ class QagentRepository:
             session.refresh(row)
             return self._delivery_outbox_from_row(row)
 
+    def enqueue_delivery(
+        self,
+        subject: str,
+        markdown: str,
+        channel: str = "markdown",
+        recipient: str | None = None,
+        payload: dict[str, object] | None = None,
+        brief_id: str | None = None,
+    ) -> DeliveryOutboxRecord:
+        delivery_id = (
+            f"delivery-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+        )
+        with self.session_factory() as session:
+            row = DeliveryOutboxRow(
+                delivery_id=delivery_id,
+                brief_id=brief_id or "",
+                channel=channel,
+                recipient=recipient,
+                subject=subject,
+                markdown=markdown,
+                payload_json=json.dumps(payload or {}, sort_keys=True),
+                status="queued",
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return self._delivery_outbox_from_row(row)
+
     def list_delivery_outbox(
         self,
         status: str | None = None,
@@ -397,6 +455,18 @@ class QagentRepository:
             kind=row.kind,
             operator=row.operator,
             threshold=row.threshold,
+        )
+
+    @staticmethod
+    def _universe_from_row(row: UniverseRow) -> UniverseRecord:
+        return UniverseRecord(
+            universe_id=row.universe_id,
+            name=row.name,
+            description=row.description,
+            market_scope=row.market_scope,
+            tags=_parse_tags(row.tags),
+            symbols=json.loads(row.symbols or "[]"),
+            source=row.source,
         )
 
     @staticmethod
@@ -481,7 +551,7 @@ class QagentRepository:
     def _delivery_outbox_from_row(row: DeliveryOutboxRow) -> DeliveryOutboxRecord:
         return DeliveryOutboxRecord(
             delivery_id=row.delivery_id,
-            brief_id=row.brief_id,
+            brief_id=row.brief_id or None,
             channel=row.channel,
             recipient=row.recipient,
             subject=row.subject,

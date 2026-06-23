@@ -13,8 +13,10 @@ from qagent.catalysts.hypotheses import build_catalyst_hypotheses
 from qagent.catalysts.providers import FreeCatalystProvider
 from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.daily_scan import run_daily_scan
+from qagent.jobs.alert_runner import run_alert_rules
 from qagent.jobs.intraday_check import evaluate_snapshot_alerts
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE, DEFAULT_FREE_UNIVERSE
+from qagent.market.universes import UniverseCreate, builtin_universes, merge_universes
 from qagent.monitoring.outcomes import compute_opportunity_outcome, summarize_strategy_performance
 from qagent.monitoring.portfolio import PositionInput, analyze_position_risk
 from qagent.monitoring.alerts import AlertRule, suggest_alert_rules
@@ -406,6 +408,38 @@ def upsert_alert_rule(rule: AlertRuleCreate) -> dict[str, object]:
     return saved.model_dump(mode="json")
 
 
+@router.get("/universes")
+def universes() -> dict[str, list[object]]:
+    repo = _repo()
+    return {
+        "universes": [
+            universe.model_dump(mode="json")
+            for universe in merge_universes(repo.list_custom_universes())
+        ]
+    }
+
+
+@router.post("/universes")
+def upsert_universe(universe: UniverseCreate) -> dict[str, object]:
+    saved = _repo().upsert_universe(universe)
+    return saved.model_dump(mode="json")
+
+
+@router.get("/universes/{universe_id}")
+def universe_detail(universe_id: str) -> dict[str, object]:
+    repo = _repo()
+    custom = repo.get_universe(universe_id)
+    if custom is not None:
+        return {"universe": custom.model_dump(mode="json")}
+    builtin = next(
+        (universe for universe in builtin_universes() if universe.universe_id == universe_id),
+        None,
+    )
+    if builtin is None:
+        raise HTTPException(status_code=404, detail="universe not found")
+    return {"universe": builtin.model_dump(mode="json")}
+
+
 @router.post("/alerts/evaluate")
 def evaluate_alerts(request: AlertEvaluationRequest) -> dict[str, list[object]]:
     prices = {instrument_id: Decimal(price) for instrument_id, price in request.prices.items()}
@@ -421,6 +455,32 @@ def evaluate_alerts(request: AlertEvaluationRequest) -> dict[str, list[object]]:
     ]
     alerts = evaluate_snapshot_alerts(prices, rules)
     return {"alerts": [alert.model_dump(mode="json") for alert in alerts]}
+
+
+@router.post("/alerts/run")
+def run_alerts(
+    provider: str = "fixture",
+    queue: bool = False,
+    recipient: str | None = None,
+) -> dict[str, object]:
+    mode = provider.strip().lower()
+    try:
+        market_provider = build_market_data_provider(mode)
+        result = run_alert_rules(
+            repo=_repo(),
+            provider=market_provider,
+            queue_delivery=queue,
+            recipient=recipient,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "summary": result.summary.model_dump(mode="json"),
+        "alerts": [alert.model_dump(mode="json") for alert in result.alerts],
+        "latest_prices": {key: str(value) for key, value in result.latest_prices.items()},
+        "delivery": result.delivery.model_dump(mode="json") if result.delivery else None,
+        "data_health": result.data_health,
+    }
 
 
 @router.get("/alert-suggestions")

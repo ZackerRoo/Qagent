@@ -1,6 +1,7 @@
 import type {
   AgentResponse,
   AlertEvaluationResponse,
+  AlertRunResponse,
   AlertRule,
   AlertRulesResponse,
   AlertSuggestionsResponse,
@@ -25,6 +26,9 @@ import type {
   ProviderStatusResponse,
   ScanRunsResponse,
   StrategyPerformanceResponse,
+  UniverseCreate,
+  UniverseRecord,
+  UniversesResponse,
   WatchlistItem,
   WatchlistResponse,
 } from "../types";
@@ -169,6 +173,21 @@ export async function saveAlertRule(payload: AlertRule): Promise<AlertRule> {
 
 export async function evaluateAlerts(prices: Record<string, string>): Promise<AlertEvaluationResponse> {
   return apiPost<AlertEvaluationResponse>("/alerts/evaluate", { prices });
+}
+
+export async function runAlerts(provider: DataProviderMode): Promise<AlertRunResponse> {
+  return apiPost<AlertRunResponse>(
+    `/alerts/run?provider=${provider}&queue=true&recipient=local`,
+    {},
+  );
+}
+
+export async function fetchUniverses(): Promise<UniversesResponse> {
+  return apiGet<UniversesResponse>("/universes");
+}
+
+export async function saveUniverse(payload: UniverseCreate): Promise<UniverseRecord> {
+  return apiPost<UniverseRecord>("/universes", payload);
 }
 
 export async function fetchCatalysts(symbols: string): Promise<CatalystsResponse> {

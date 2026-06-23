@@ -1,6 +1,29 @@
 export type Market = "US" | "CN";
 export type DataProviderMode = "fixture" | "free";
 
+export type UniverseRecord = {
+  universe_id: string;
+  name: string;
+  description: string;
+  market_scope: string;
+  tags: string[];
+  symbols: string[];
+  source: string;
+};
+
+export type UniverseCreate = {
+  universe_id: string;
+  name: string;
+  description: string;
+  market_scope: string;
+  tags: string[];
+  symbols: string[];
+};
+
+export type UniversesResponse = {
+  universes: UniverseRecord[];
+};
+
 export type OpportunityStatus =
   | "new_idea"
   | "watch"
@@ -217,6 +240,22 @@ export type TriggeredAlert = {
 
 export type AlertEvaluationResponse = {
   alerts: TriggeredAlert[];
+};
+
+export type AlertRunSummary = {
+  provider: string;
+  rules: number;
+  instruments: number;
+  triggered: number;
+  queued: boolean;
+};
+
+export type AlertRunResponse = {
+  summary: AlertRunSummary;
+  alerts: TriggeredAlert[];
+  latest_prices: Record<string, string>;
+  delivery: DeliveryOutboxRecord | null;
+  data_health: Record<string, string>;
 };
 
 export type AlertSuggestion = {

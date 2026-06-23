@@ -173,6 +173,29 @@ Outcome replay uses daily OHLCV bars to calculate 5/10/20/60-day forward returns
 
 Strategy performance groups replayed outcomes by `primary_strategy_id` and reports sample count, pending/completed counts, target-hit rate, positive 10-day rate, average forward returns, max drawdown, and max runup. Alert suggestions derive draft entry, stop, and target rules from persisted opportunity snapshots.
 
+## Universes And Alert Runner
+
+Universe APIs merge built-in starter pools with user-saved custom pools:
+
+```bash
+curl 'http://127.0.0.1:8000/api/universes'
+curl 'http://127.0.0.1:8000/api/universes/free_default'
+curl -X POST 'http://127.0.0.1:8000/api/universes' \
+  -H 'content-type: application/json' \
+  -d '{"universe_id":"custom_ai_pool","name":"Custom AI Pool","description":"Editable pool","market_scope":"mixed","tags":["custom"],"symbols":["US:NVDA","US:MSFT"]}'
+```
+
+Built-in universes are starter pools, not live index or ETF constituents. Users can edit and save their own pools from Settings. The top scan bar can load a selected universe into the symbol input.
+
+The alert runner evaluates stored alert rules against provider snapshots and can queue a Markdown outbox item:
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/api/alerts/run?provider=fixture&queue=true&recipient=local'
+curl 'http://127.0.0.1:8000/api/deliveries?status=queued'
+```
+
+This uses the same alert rules as `/api/alerts/evaluate`, but it fetches latest prices itself instead of requiring manual prices.
+
 ## Event-Level Backtesting
 
 The backtest engine reruns Qagent scans on historical trading dates and validates the generated opportunity cards with forward bars:
