@@ -7,6 +7,7 @@ import {
   runAlerts,
   saveAlertRule,
 } from "../api/client";
+import { useI18n } from "../i18n";
 import type { AlertRule, AlertRunResponse, AlertSuggestion, DataProviderMode, TriggeredAlert } from "../types";
 
 const emptyRule: AlertRule = {
@@ -18,6 +19,7 @@ const emptyRule: AlertRule = {
 };
 
 export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
+  const { t } = useI18n();
   const [rules, setRules] = useState<AlertRule[]>([]);
   const [suggestions, setSuggestions] = useState<AlertSuggestion[]>([]);
   const [rule, setRule] = useState<AlertRule>(emptyRule);
@@ -72,11 +74,13 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
   return (
     <section className="panel stack">
       <div className="panel-heading">
-        <h2>Alerts</h2>
+        <h2>{t("alerts.title")}</h2>
         <div className="brief-actions">
-          <span className="count">{rules.length} rules</span>
+          <span className="count">
+            {rules.length} {t("alerts.rules")}
+          </span>
           <button className="icon-action" type="button" onClick={runProviderAlerts} disabled={isRunning}>
-            {isRunning ? "Running" : "Run Alerts"}
+            {isRunning ? t("common.running") : t("alerts.runAlerts")}
           </button>
         </div>
       </div>
@@ -85,7 +89,7 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
         <input
           value={rule.rule_id}
           onChange={(event) => setRule({ ...rule, rule_id: event.target.value })}
-          placeholder="Rule id"
+          placeholder={t("alerts.ruleId")}
         />
         <input
           value={rule.instrument_id}
@@ -96,9 +100,9 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
           value={rule.kind}
           onChange={(event) => setRule({ ...rule, kind: event.target.value })}
         >
-          <option value="entry_trigger">Entry</option>
-          <option value="stop_guard">Stop</option>
-          <option value="target_1_reached">Target</option>
+          <option value="entry_trigger">{t("alerts.entry")}</option>
+          <option value="stop_guard">{t("alerts.stop")}</option>
+          <option value="target_1_reached">{t("alerts.target")}</option>
         </select>
         <select
           value={rule.operator}
@@ -112,34 +116,34 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
         <input
           value={rule.threshold}
           onChange={(event) => setRule({ ...rule, threshold: event.target.value })}
-          placeholder="Threshold"
+          placeholder={t("alerts.threshold")}
         />
         <button type="button" onClick={save}>
-          Save
+          {t("common.save")}
         </button>
       </div>
       <div className="form-row alert-form">
-        <input value={price} onChange={(event) => setPrice(event.target.value)} placeholder="Price" />
+        <input value={price} onChange={(event) => setPrice(event.target.value)} placeholder={t("alerts.price")} />
         <button type="button" onClick={evaluate}>
-          Evaluate
+          {t("alerts.evaluate")}
         </button>
       </div>
       {runResult && (
         <div className="metric-grid">
           <div>
-            <span>Provider</span>
+            <span>{t("common.provider")}</span>
             <strong>{runResult.summary.provider}</strong>
           </div>
           <div>
-            <span>Rules</span>
+            <span>{t("common.rules")}</span>
             <strong>{runResult.summary.rules}</strong>
           </div>
           <div>
-            <span>Triggered</span>
+            <span>{t("common.triggered")}</span>
             <strong>{runResult.summary.triggered}</strong>
           </div>
           <div>
-            <span>Queued</span>
+            <span>{t("common.queued")}</span>
             <strong>{runResult.delivery ? runResult.delivery.delivery_id.slice(-8) : "-"}</strong>
           </div>
         </div>
@@ -148,12 +152,12 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
         <table>
           <thead>
             <tr>
-              <th>Suggestion</th>
-              <th>Symbol</th>
-              <th>Kind</th>
-              <th>Condition</th>
-              <th>Rationale</th>
-              <th>Use</th>
+              <th>{t("alerts.suggestion")}</th>
+              <th>{t("common.symbol")}</th>
+              <th>{t("alerts.kind")}</th>
+              <th>{t("alerts.condition")}</th>
+              <th>{t("alerts.rationale")}</th>
+              <th>{t("alerts.use")}</th>
             </tr>
           </thead>
           <tbody>
@@ -180,7 +184,7 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
                       })
                     }
                   >
-                    Use
+                    {t("alerts.use")}
                   </button>
                 </td>
               </tr>
@@ -192,10 +196,10 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
         <table>
           <thead>
             <tr>
-              <th>Rule</th>
-              <th>Symbol</th>
-              <th>Kind</th>
-              <th>Condition</th>
+              <th>{t("alerts.rule")}</th>
+              <th>{t("common.symbol")}</th>
+              <th>{t("alerts.kind")}</th>
+              <th>{t("alerts.condition")}</th>
             </tr>
           </thead>
           <tbody>

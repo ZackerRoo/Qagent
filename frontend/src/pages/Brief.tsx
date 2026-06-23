@@ -11,6 +11,7 @@ import {
   saveDailyBriefRun,
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
+import { useI18n } from "../i18n";
 import type { BriefRun, DailyBriefResponse, DataProviderMode, DeliveryOutboxRecord } from "../types";
 
 function formatNumber(value: number | null, suffix = "") {
@@ -28,6 +29,7 @@ function formatRatio(value: number | null) {
 }
 
 export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbols: string }) {
+  const { t } = useI18n();
   const [brief, setBrief] = useState<DailyBriefResponse>();
   const [runs, setRuns] = useState<BriefRun[]>([]);
   const [deliveries, setDeliveries] = useState<DeliveryOutboxRecord[]>([]);
@@ -127,15 +129,15 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
       <section className="panel">
         <div className="panel-heading">
           <div>
-            <h2>Daily Brief</h2>
-            <p className="brief-headline">{brief?.headline ?? "Loading research brief"}</p>
+            <h2>{t("brief.title")}</h2>
+            <p className="brief-headline">{brief?.headline ?? t("brief.loading")}</p>
           </div>
           <div className="brief-actions">
             <button className="icon-action" type="button" onClick={loadBrief} disabled={isLoading}>
-              {isLoading ? "Refreshing" : "Refresh Brief"}
+              {isLoading ? t("common.refreshing") : t("brief.refresh")}
             </button>
             <button className="icon-action" type="button" onClick={saveBrief} disabled={isSaving}>
-              {isSaving ? "Saving" : "Save Brief"}
+              {isSaving ? t("common.saving") : t("brief.save")}
             </button>
           </div>
         </div>
@@ -144,19 +146,19 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
         {brief && (
           <div className="metric-grid brief-metrics">
             <div>
-              <span>Opportunities</span>
+              <span>{t("brief.opportunities")}</span>
               <strong>{brief.top_opportunities.length}</strong>
             </div>
             <div>
-              <span>Entry Watch</span>
+              <span>{t("brief.entryWatch")}</span>
               <strong>{brief.entry_watch.length}</strong>
             </div>
             <div>
-              <span>Risk Alerts</span>
+              <span>{t("brief.riskAlerts")}</span>
               <strong>{brief.risk_alerts.length}</strong>
             </div>
             <div>
-              <span>Catalysts</span>
+              <span>{t("brief.catalysts")}</span>
               <strong>{brief.catalyst_watch.length}</strong>
             </div>
           </div>
@@ -165,21 +167,21 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
 
       <section className="panel">
         <div className="panel-heading">
-          <h2>Saved Briefs</h2>
+          <h2>{t("brief.saved")}</h2>
           <span className="count">{runs.length}</span>
         </div>
         {!runs.length ? (
-          <div className="empty-state">No saved briefs yet.</div>
+          <div className="empty-state">{t("brief.noSaved")}</div>
         ) : (
           <div className="table-shell">
             <table>
               <thead>
                 <tr>
-                  <th>Created</th>
-                  <th>Provider</th>
-                  <th>Headline</th>
-                  <th>Opportunities</th>
-                  <th>Actions</th>
+                  <th>{t("common.created")}</th>
+                  <th>{t("common.provider")}</th>
+                  <th>{t("brief.headline")}</th>
+                  <th>{t("brief.opportunities")}</th>
+                  <th>{t("common.actions")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -196,21 +198,21 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
                           type="button"
                           onClick={() => loadSavedBrief(run.brief_id)}
                         >
-                          Load
+                          {t("common.load")}
                         </button>
                         <button
                           className="table-action"
                           type="button"
                           onClick={() => loadMarkdown(run.brief_id)}
                         >
-                          Markdown
+                          {t("common.markdown")}
                         </button>
                         <button
                           className="table-action"
                           type="button"
                           onClick={() => queueDelivery(run.brief_id)}
                         >
-                          Queue
+                          {t("common.queue")}
                         </button>
                       </div>
                     </td>
@@ -221,29 +223,29 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
           </div>
         )}
         {markdown && (
-          <textarea className="markdown-export" readOnly value={markdown} aria-label="Markdown export" />
+          <textarea className="markdown-export" readOnly value={markdown} aria-label={t("common.markdown")} />
         )}
       </section>
 
       <section className="panel">
         <div className="panel-heading">
-          <h2>Delivery Outbox</h2>
+          <h2>{t("brief.delivery")}</h2>
           <span className="count">{deliveries.length}</span>
         </div>
         {!deliveries.length ? (
-          <div className="empty-state">No queued brief deliveries yet.</div>
+          <div className="empty-state">{t("brief.noDeliveries")}</div>
         ) : (
           <div className="table-shell">
             <table>
               <thead>
                 <tr>
-                  <th>Created</th>
-                  <th>Status</th>
-                  <th>Channel</th>
-                  <th>Recipient</th>
-                  <th>Subject</th>
-                  <th>Sent</th>
-                  <th>Actions</th>
+                  <th>{t("common.created")}</th>
+                  <th>{t("common.status")}</th>
+                  <th>{t("brief.channel")}</th>
+                  <th>{t("brief.recipient")}</th>
+                  <th>{t("brief.subject")}</th>
+                  <th>{t("brief.sent")}</th>
+                  <th>{t("common.actions")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -254,7 +256,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
                       <span className={`status status-${delivery.status}`}>{delivery.status}</span>
                     </td>
                     <td>{delivery.channel}</td>
-                    <td>{delivery.recipient ?? "local"}</td>
+                    <td>{delivery.recipient ?? t("common.local")}</td>
                     <td className="reason-cell">{delivery.subject}</td>
                     <td>{delivery.sent_at ? new Date(delivery.sent_at).toLocaleString() : "-"}</td>
                     <td>
@@ -264,7 +266,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
                           type="button"
                           onClick={() => setMarkdown(delivery.markdown)}
                         >
-                          Markdown
+                          {t("common.markdown")}
                         </button>
                         {delivery.status === "queued" && (
                           <button
@@ -272,7 +274,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
                             type="button"
                             onClick={() => markSent(delivery.delivery_id)}
                           >
-                            Mark Sent
+                            {t("brief.markSent")}
                           </button>
                         )}
                       </div>
@@ -287,28 +289,28 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
 
       <section className="panel">
         <div className="panel-heading">
-          <h2>Top Opportunities</h2>
+          <h2>{t("brief.top")}</h2>
           <span className="count">{brief?.top_opportunities.length ?? 0}</span>
         </div>
         {!brief?.top_opportunities.length ? (
-          <div className="empty-state">No ranked opportunities in this brief.</div>
+          <div className="empty-state">{t("brief.noRanked")}</div>
         ) : (
           <div className="table-shell">
             <table>
               <thead>
                 <tr>
-                  <th>Ticker</th>
-                  <th>Status</th>
-                  <th>Decision</th>
-                  <th>Conviction</th>
-                  <th>Risk</th>
-                  <th>Strategy</th>
-                  <th>Rank</th>
-                  <th>Trigger</th>
-                  <th>Stop</th>
-                  <th>Target</th>
-                  <th>Risk/Reward</th>
-                  <th>Why</th>
+                  <th>{t("common.ticker")}</th>
+                  <th>{t("common.status")}</th>
+                  <th>{t("brief.decision")}</th>
+                  <th>{t("brief.conviction")}</th>
+                  <th>{t("brief.risk")}</th>
+                  <th>{t("common.strategy")}</th>
+                  <th>{t("brief.rank")}</th>
+                  <th>{t("brief.trigger")}</th>
+                  <th>{t("brief.stop")}</th>
+                  <th>{t("brief.target")}</th>
+                  <th>{t("brief.riskReward")}</th>
+                  <th>{t("brief.why")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -325,7 +327,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
                     </td>
                     <td>{formatRatio(item.conviction_score)}</td>
                     <td>{formatNumber(item.suggested_risk_pct, "%")}</td>
-                    <td className="reason-cell">{item.primary_strategy_id ?? "None"}</td>
+                    <td className="reason-cell">{item.primary_strategy_id ?? t("common.none")}</td>
                     <td>{item.rank_score.toFixed(2)}</td>
                     <td>{item.trigger_price ?? "-"}</td>
                     <td>{item.initial_stop ?? "-"}</td>
@@ -343,30 +345,30 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
       <div className="brief-grid">
         <section className="panel">
           <div className="panel-heading">
-            <h2>Entry Watch</h2>
+            <h2>{t("brief.entryWatch")}</h2>
             <span className="count">{brief?.entry_watch.length ?? 0}</span>
           </div>
           {!brief?.entry_watch.length ? (
-            <div className="empty-state">No trigger levels in the current brief.</div>
+            <div className="empty-state">{t("brief.noTrigger")}</div>
           ) : (
             <div className="table-shell">
               <table>
                 <thead>
                   <tr>
-                    <th>Ticker</th>
-                    <th>Strategy</th>
-                    <th>Trigger</th>
-                    <th>Stop</th>
-                    <th>Target</th>
-                    <th>Decision</th>
-                    <th>Risk</th>
+                    <th>{t("common.ticker")}</th>
+                    <th>{t("common.strategy")}</th>
+                    <th>{t("brief.trigger")}</th>
+                    <th>{t("brief.stop")}</th>
+                    <th>{t("brief.target")}</th>
+                    <th>{t("brief.decision")}</th>
+                    <th>{t("brief.risk")}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {brief.entry_watch.map((item) => (
                     <tr key={`${item.instrument_id}-${item.trigger_price}`}>
                       <td className="ticker">{item.instrument_id}</td>
-                      <td className="reason-cell">{item.primary_strategy_id ?? "None"}</td>
+                      <td className="reason-cell">{item.primary_strategy_id ?? t("common.none")}</td>
                       <td>{item.trigger_price}</td>
                       <td>{item.initial_stop ?? "-"}</td>
                       <td>{item.target_1 ?? "-"}</td>
@@ -382,21 +384,21 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
 
         <section className="panel">
           <div className="panel-heading">
-            <h2>Strategy Validation</h2>
+            <h2>{t("brief.validation")}</h2>
             <span className="count">{brief?.strategy_validation.length ?? 0}</span>
           </div>
           {!brief?.strategy_validation.length ? (
-            <div className="empty-state">No validation samples available.</div>
+            <div className="empty-state">{t("brief.noValidation")}</div>
           ) : (
             <div className="table-shell">
               <table>
                 <thead>
                   <tr>
-                    <th>Strategy</th>
-                    <th>Samples</th>
-                    <th>Target Hit</th>
-                    <th>Positive 10D</th>
-                    <th>Avg 10D</th>
+                    <th>{t("common.strategy")}</th>
+                    <th>{t("common.samples")}</th>
+                    <th>{t("brief.targetHit")}</th>
+                    <th>{t("brief.positive10d")}</th>
+                    <th>{t("brief.avg10d")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -418,7 +420,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
 
       <div className="brief-grid">
         <BriefList
-          title="Catalyst Watch"
+          title={t("brief.catalystWatch")}
           count={brief?.catalyst_watch.length ?? 0}
           items={
             brief?.catalyst_watch.map((item) => ({
@@ -427,10 +429,10 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
               body: `${item.investment_hypothesis} ${item.verification_path}`,
             })) ?? []
           }
-          empty="No catalyst hypotheses in this brief."
+          empty={t("brief.noCatalysts")}
         />
         <BriefList
-          title="Risk Alerts"
+          title={t("brief.riskAlerts")}
           count={brief?.risk_alerts.length ?? 0}
           items={
             brief?.risk_alerts.map((item) => ({
@@ -439,34 +441,34 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
               body: item.message,
             })) ?? []
           }
-          empty="No position risk alerts."
+          empty={t("brief.noRiskAlerts")}
         />
       </div>
 
       <div className="brief-grid">
         <BriefList
-          title="Data Caveats"
+          title={t("brief.dataCaveats")}
           count={brief?.data_caveats.length ?? 0}
           items={
             brief?.data_caveats.map((item) => ({
               key: item,
-              title: "Caveat",
+              title: t("brief.caveat"),
               body: item,
             })) ?? []
           }
-          empty="No data caveats."
+          empty={t("brief.noCaveats")}
         />
         <BriefList
-          title="Next Steps"
+          title={t("brief.nextSteps")}
           count={brief?.next_steps.length ?? 0}
           items={
             brief?.next_steps.map((item) => ({
               key: item,
-              title: "Check",
+              title: t("brief.check"),
               body: item,
             })) ?? []
           }
-          empty="No next steps."
+          empty={t("brief.noNextSteps")}
         />
       </div>
     </div>

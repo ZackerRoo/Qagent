@@ -8,6 +8,7 @@ import {
   updatePaperTrades,
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
+import { useI18n } from "../i18n";
 import type { DataProviderMode, PaperTradesResponse, PortfolioResponse, Position } from "../types";
 
 const emptyPosition: Position = {
@@ -23,6 +24,7 @@ const emptyPosition: Position = {
 };
 
 export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
+  const { t } = useI18n();
   const [positions, setPositions] = useState<Position[]>([]);
   const [portfolio, setPortfolio] = useState<PortfolioResponse>();
   const [paper, setPaper] = useState<PaperTradesResponse>();
@@ -66,7 +68,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     <div className="stack">
       <section className="panel stack">
         <div className="panel-heading">
-          <h2>Portfolio</h2>
+          <h2>{t("portfolio.title")}</h2>
           <span className="count">{positions.length}</span>
         </div>
         {portfolio && <DataHealth data={portfolio.data_health} />}
@@ -79,37 +81,37 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
           <input
             value={form.shares}
             onChange={(event) => setForm({ ...form, shares: event.target.value })}
-            placeholder="Shares"
+            placeholder={t("portfolio.shares")}
           />
           <input
             value={form.entry_price}
             onChange={(event) => setForm({ ...form, entry_price: event.target.value })}
-            placeholder="Entry"
+            placeholder={t("portfolio.entry")}
           />
           <input
             value={form.initial_stop ?? ""}
             onChange={(event) => setForm({ ...form, initial_stop: event.target.value })}
-            placeholder="Stop"
+            placeholder={t("brief.stop")}
           />
           <button type="button" onClick={submit}>
-            Save
+            {t("common.save")}
           </button>
         </div>
         <div className="table-shell">
           <table>
             <thead>
               <tr>
-                <th>Symbol</th>
-                <th>Shares</th>
-                <th>Entry</th>
-                <th>Current</th>
-                <th>P/L %</th>
-                <th>Stop</th>
-                <th>Stop Gap</th>
-                <th>Target</th>
-                <th>Target Gap</th>
-                <th>Status</th>
-                <th>Strategy</th>
+                <th>{t("common.symbol")}</th>
+                <th>{t("portfolio.shares")}</th>
+                <th>{t("portfolio.entry")}</th>
+                <th>{t("portfolio.current")}</th>
+                <th>{t("portfolio.pnl")}</th>
+                <th>{t("brief.stop")}</th>
+                <th>{t("portfolio.stopGap")}</th>
+                <th>{t("brief.target")}</th>
+                <th>{t("portfolio.targetGap")}</th>
+                <th>{t("common.status")}</th>
+                <th>{t("common.strategy")}</th>
               </tr>
             </thead>
             <tbody>
@@ -148,15 +150,15 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
 
       <section className="panel stack">
         <div className="panel-heading">
-          <h2>Paper Forward Test</h2>
+          <h2>{t("portfolio.paperTitle")}</h2>
           <span className="count">{paper?.summary.total ?? 0}</span>
         </div>
         <div className="metric-grid">
-          <Metric label="Open" value={paper?.summary.open ?? 0} />
-          <Metric label="Closed" value={paper?.summary.closed ?? 0} />
-          <Metric label="Targets" value={paper?.summary.target_hit_count ?? 0} />
+          <Metric label={t("portfolio.open")} value={paper?.summary.open ?? 0} />
+          <Metric label={t("portfolio.closed")} value={paper?.summary.closed ?? 0} />
+          <Metric label={t("portfolio.targets")} value={paper?.summary.target_hit_count ?? 0} />
           <Metric
-            label="Win Rate"
+            label={t("portfolio.winRate")}
             value={
               paper?.summary.win_rate != null
                 ? `${(paper.summary.win_rate * 100).toFixed(1)}%`
@@ -166,10 +168,10 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
         </div>
         <div className="form-row">
           <button type="button" onClick={seedPaper}>
-            Seed From Signals
+            {t("portfolio.seedPaper")}
           </button>
           <button type="button" onClick={updatePaper}>
-            Update Forward Test
+            {t("portfolio.updatePaper")}
           </button>
         </div>
         {paperMessage && <div className="empty-state">{paperMessage}</div>}
@@ -177,17 +179,17 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
           <table>
             <thead>
               <tr>
-                <th>Symbol</th>
-                <th>Status</th>
-                <th>Signal</th>
-                <th>Trigger</th>
-                <th>Stop</th>
-                <th>Target</th>
-                <th>Entry</th>
-                <th>Exit</th>
-                <th>Latest</th>
-                <th>P/L %</th>
-                <th>Strategy</th>
+                <th>{t("common.symbol")}</th>
+                <th>{t("common.status")}</th>
+                <th>{t("portfolio.signal")}</th>
+                <th>{t("brief.trigger")}</th>
+                <th>{t("brief.stop")}</th>
+                <th>{t("brief.target")}</th>
+                <th>{t("portfolio.entry")}</th>
+                <th>{t("portfolio.exit")}</th>
+                <th>{t("portfolio.latest")}</th>
+                <th>{t("portfolio.pnl")}</th>
+                <th>{t("common.strategy")}</th>
               </tr>
             </thead>
             <tbody>

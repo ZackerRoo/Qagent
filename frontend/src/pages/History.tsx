@@ -9,6 +9,7 @@ import {
   fetchStrategyPerformance,
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
+import { useI18n } from "../i18n";
 import type {
   BacktestResponse,
   DataProviderMode,
@@ -34,6 +35,7 @@ function formatRatio(value: number | null) {
 }
 
 export function History({ dataMode, symbols }: { dataMode: DataProviderMode; symbols: string }) {
+  const { t } = useI18n();
   const [backtest, setBacktest] = useState<BacktestResponse>();
   const [portfolioBacktest, setPortfolioBacktest] = useState<PortfolioBacktestResponse>();
   const [runs, setRuns] = useState<ScanRunsResponse>();
@@ -99,9 +101,9 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
     <div className="stack">
       <section className="panel">
         <div className="panel-heading">
-          <h2>Backtest Validation</h2>
+          <h2>{t("history.backtest")}</h2>
           <button className="icon-action" type="button" onClick={runBacktest} disabled={isBacktesting}>
-            {isBacktesting ? "Running" : "Run Backtest"}
+            {isBacktesting ? t("common.running") : t("history.runBacktest")}
           </button>
         </div>
         {backtestError && <div className="empty-state error">{backtestError}</div>}
@@ -110,35 +112,35 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
             <DataHealth data={backtest.data_health} />
             <div className="metric-grid">
               <div>
-                <span>Scans</span>
+                <span>{t("history.scans")}</span>
                 <strong>{backtest.summary.scan_count}</strong>
               </div>
               <div>
-                <span>Signals</span>
+                <span>{t("opportunities.signals")}</span>
                 <strong>{backtest.summary.evaluated_signals}</strong>
               </div>
               <div>
-                <span>Completed</span>
+                <span>{t("history.completed")}</span>
                 <strong>{backtest.summary.completed_signals}</strong>
               </div>
               <div>
-                <span>Target Hit</span>
+                <span>{t("brief.targetHit")}</span>
                 <strong>{formatRatio(backtest.summary.target_hit_rate)}</strong>
               </div>
               <div>
-                <span>Positive 10D</span>
+                <span>{t("brief.positive10d")}</span>
                 <strong>{formatRatio(backtest.summary.positive_rate_10d)}</strong>
               </div>
               <div>
-                <span>Avg 10D</span>
+                <span>{t("brief.avg10d")}</span>
                 <strong>{formatNumber(backtest.summary.avg_return_10d, "%")}</strong>
               </div>
               <div>
-                <span>Max DD</span>
+                <span>{t("history.maxDd")}</span>
                 <strong>{formatNumber(backtest.summary.max_drawdown_pct, "%")}</strong>
               </div>
               <div>
-                <span>Max Runup</span>
+                <span>{t("history.maxRunup")}</span>
                 <strong>{formatNumber(backtest.summary.max_runup_pct, "%")}</strong>
               </div>
             </div>
@@ -146,14 +148,14 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
               <table>
                 <thead>
                   <tr>
-                    <th>Strategy</th>
-                    <th>Samples</th>
-                    <th>Done</th>
-                    <th>Target Hit</th>
-                    <th>Positive 10D</th>
-                    <th>Avg 10D</th>
-                    <th>Max DD</th>
-                    <th>Max Runup</th>
+                    <th>{t("common.strategy")}</th>
+                    <th>{t("common.samples")}</th>
+                    <th>{t("common.done")}</th>
+                    <th>{t("brief.targetHit")}</th>
+                    <th>{t("brief.positive10d")}</th>
+                    <th>{t("brief.avg10d")}</th>
+                    <th>{t("history.maxDd")}</th>
+                    <th>{t("history.maxRunup")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -176,16 +178,16 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
               <table>
                 <thead>
                   <tr>
-                    <th>Date</th>
-                    <th>Ticker</th>
-                    <th>Strategy</th>
-                    <th>Outcome</th>
+                    <th>{t("common.date")}</th>
+                    <th>{t("common.ticker")}</th>
+                    <th>{t("common.strategy")}</th>
+                    <th>{t("common.outcome")}</th>
                     <th>5D</th>
                     <th>10D</th>
                     <th>20D</th>
-                    <th>Trigger</th>
-                    <th>Stop</th>
-                    <th>Target</th>
+                    <th>{t("brief.trigger")}</th>
+                    <th>{t("brief.stop")}</th>
+                    <th>{t("brief.target")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -193,7 +195,7 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
                     <tr key={signal.snapshot_id}>
                       <td>{signal.signal_date}</td>
                       <td className="ticker">{signal.instrument_id}</td>
-                      <td className="reason-cell">{signal.primary_strategy_id ?? "None"}</td>
+                      <td className="reason-cell">{signal.primary_strategy_id ?? t("common.none")}</td>
                       <td>
                         <span className={`status status-${signal.outcome_status}`}>
                           {signal.outcome_status}
@@ -202,9 +204,9 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
                       <td>{formatNumber(signal.return_5d, "%")}</td>
                       <td>{formatNumber(signal.return_10d, "%")}</td>
                       <td>{formatNumber(signal.return_20d, "%")}</td>
-                      <td>{signal.trigger_price ?? "None"}</td>
-                      <td>{signal.initial_stop ?? "None"}</td>
-                      <td>{signal.target_1 ?? "None"}</td>
+                      <td>{signal.trigger_price ?? t("common.none")}</td>
+                      <td>{signal.initial_stop ?? t("common.none")}</td>
+                      <td>{signal.target_1 ?? t("common.none")}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -212,22 +214,20 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
             </div>
           </div>
         ) : (
-          <div className="empty-state">
-            Run an event-level backtest to validate historical opportunity cards.
-          </div>
+          <div className="empty-state">{t("history.noBacktest")}</div>
         )}
       </section>
 
       <section className="panel">
         <div className="panel-heading">
-          <h2>Portfolio Backtest</h2>
+          <h2>{t("history.portfolioBacktest")}</h2>
           <button
             className="icon-action"
             type="button"
             onClick={runPortfolioBacktest}
             disabled={isPortfolioBacktesting}
           >
-            {isPortfolioBacktesting ? "Running" : "Run Portfolio"}
+            {isPortfolioBacktesting ? t("common.running") : t("history.runPortfolio")}
           </button>
         </div>
         {portfolioBacktestError && <div className="empty-state error">{portfolioBacktestError}</div>}
@@ -236,35 +236,35 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
             <DataHealth data={portfolioBacktest.data_health} />
             <div className="metric-grid">
               <div>
-                <span>Initial</span>
+                <span>{t("history.initial")}</span>
                 <strong>{portfolioBacktest.summary.initial_capital}</strong>
               </div>
               <div>
-                <span>Final</span>
+                <span>{t("history.final")}</span>
                 <strong>{portfolioBacktest.summary.final_equity}</strong>
               </div>
               <div>
-                <span>Total Return</span>
+                <span>{t("history.totalReturn")}</span>
                 <strong>{formatNumber(portfolioBacktest.summary.total_return_pct, "%")}</strong>
               </div>
               <div>
-                <span>Max DD</span>
+                <span>{t("history.maxDd")}</span>
                 <strong>{formatNumber(portfolioBacktest.summary.max_drawdown_pct, "%")}</strong>
               </div>
               <div>
-                <span>Trades</span>
+                <span>{t("history.trades")}</span>
                 <strong>{portfolioBacktest.summary.trade_count}</strong>
               </div>
               <div>
-                <span>Win Rate</span>
+                <span>{t("portfolio.winRate")}</span>
                 <strong>{formatRatio(portfolioBacktest.summary.win_rate)}</strong>
               </div>
               <div>
-                <span>Profit Factor</span>
+                <span>{t("history.profitFactor")}</span>
                 <strong>{formatNumber(portfolioBacktest.summary.profit_factor)}</strong>
               </div>
               <div>
-                <span>Exposure</span>
+                <span>{t("history.exposure")}</span>
                 <strong>{formatNumber(portfolioBacktest.summary.exposure_pct, "%")}</strong>
               </div>
             </div>
@@ -273,10 +273,10 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
                 <table>
                   <thead>
                     <tr>
-                      <th>Date</th>
-                      <th>Equity</th>
-                      <th>Open</th>
-                      <th>Drawdown</th>
+                      <th>{t("common.date")}</th>
+                      <th>{t("history.equity")}</th>
+                      <th>{t("common.open")}</th>
+                      <th>{t("history.drawdown")}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -295,12 +295,12 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
                 <table>
                   <thead>
                     <tr>
-                      <th>Ticker</th>
-                      <th>Entry</th>
-                      <th>Exit</th>
-                      <th>Reason</th>
-                      <th>Net P/L</th>
-                      <th>Return</th>
+                      <th>{t("common.ticker")}</th>
+                      <th>{t("portfolio.entry")}</th>
+                      <th>{t("portfolio.exit")}</th>
+                      <th>{t("common.reason")}</th>
+                      <th>{t("history.netPnl")}</th>
+                      <th>{t("common.return")}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -324,30 +324,28 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
             </div>
           </div>
         ) : (
-          <div className="empty-state">
-            Run a portfolio-level backtest to convert validated signals into account metrics.
-          </div>
+          <div className="empty-state">{t("history.noPortfolioBacktest")}</div>
         )}
       </section>
 
       <section className="panel">
         <div className="panel-heading">
-          <h2>Scan Runs</h2>
+          <h2>{t("history.scanRuns")}</h2>
           <span className="count">{runs?.runs.length ?? 0}</span>
         </div>
         {error && <div className="empty-state error">{error}</div>}
         {!runs?.runs.length ? (
-          <div className="empty-state">No scan history yet. Run a scan to create records.</div>
+          <div className="empty-state">{t("history.noScanHistory")}</div>
         ) : (
           <div className="table-shell">
             <table>
               <thead>
                 <tr>
-                  <th>Created</th>
-                  <th>Provider</th>
-                  <th>Symbols</th>
-                  <th>Scanned</th>
-                  <th>Cards</th>
+                  <th>{t("common.created")}</th>
+                  <th>{t("common.provider")}</th>
+                  <th>{t("common.symbols")}</th>
+                  <th>{t("common.scanned")}</th>
+                  <th>{t("common.cards")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -368,37 +366,37 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
 
       <section className="panel">
         <div className="panel-heading">
-          <h2>Opportunity Snapshots</h2>
+          <h2>{t("history.snapshots")}</h2>
           <span className="count">{history?.snapshots.length ?? 0}</span>
         </div>
         {!history?.snapshots.length ? (
-          <div className="empty-state">No opportunity snapshots saved.</div>
+          <div className="empty-state">{t("history.noSnapshots")}</div>
         ) : (
           <div className="table-shell">
             <table>
               <thead>
                 <tr>
-                  <th>Ticker</th>
-                  <th>Date</th>
-                  <th>Status</th>
-                  <th>Strategy</th>
-                  <th>Rank</th>
-                  <th>Trigger</th>
-                  <th>Stop</th>
-                  <th>Target</th>
+                  <th>{t("common.ticker")}</th>
+                  <th>{t("common.date")}</th>
+                  <th>{t("common.status")}</th>
+                  <th>{t("common.strategy")}</th>
+                  <th>{t("brief.rank")}</th>
+                  <th>{t("brief.trigger")}</th>
+                  <th>{t("brief.stop")}</th>
+                  <th>{t("brief.target")}</th>
                 </tr>
               </thead>
               <tbody>
                 {history.snapshots.map((snapshot) => (
                   <tr key={snapshot.snapshot_id}>
                     <td className="ticker">{snapshot.instrument_id}</td>
-                    <td>{snapshot.signal_date ?? "Pending"}</td>
+                    <td>{snapshot.signal_date ?? t("common.pending")}</td>
                     <td>{snapshot.status}</td>
-                    <td>{snapshot.primary_strategy_id ?? "None"}</td>
+                    <td>{snapshot.primary_strategy_id ?? t("common.none")}</td>
                     <td>{Number(snapshot.rank_score).toFixed(2)}</td>
-                    <td>{snapshot.trigger_price ?? "None"}</td>
-                    <td>{snapshot.initial_stop ?? "None"}</td>
-                    <td>{snapshot.target_1 ?? "None"}</td>
+                    <td>{snapshot.trigger_price ?? t("common.none")}</td>
+                    <td>{snapshot.initial_stop ?? t("common.none")}</td>
+                    <td>{snapshot.target_1 ?? t("common.none")}</td>
                   </tr>
                 ))}
               </tbody>
@@ -409,26 +407,26 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
 
       <section className="panel">
         <div className="panel-heading">
-          <h2>Strategy Performance</h2>
+          <h2>{t("history.strategyPerformance")}</h2>
           <span className="count">{performance?.performance.length ?? 0}</span>
         </div>
         {performance && <DataHealth data={performance.data_health} />}
         {!performance?.performance.length ? (
-          <div className="empty-state">No strategy replay summary yet.</div>
+          <div className="empty-state">{t("history.noPerformance")}</div>
         ) : (
           <div className="table-shell">
             <table>
               <thead>
                 <tr>
-                  <th>Strategy</th>
-                  <th>Samples</th>
-                  <th>Done</th>
-                  <th>Pending</th>
-                  <th>Target Hit</th>
-                  <th>Positive 10D</th>
-                  <th>Avg 10D</th>
-                  <th>Max DD</th>
-                  <th>Max Runup</th>
+                  <th>{t("common.strategy")}</th>
+                  <th>{t("common.samples")}</th>
+                  <th>{t("common.done")}</th>
+                  <th>{t("common.pending")}</th>
+                  <th>{t("brief.targetHit")}</th>
+                  <th>{t("brief.positive10d")}</th>
+                  <th>{t("brief.avg10d")}</th>
+                  <th>{t("history.maxDd")}</th>
+                  <th>{t("history.maxRunup")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -453,24 +451,24 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
 
       <section className="panel">
         <div className="panel-heading">
-          <h2>Outcome Replay</h2>
+          <h2>{t("history.outcomeReplay")}</h2>
           <span className="count">{outcomes?.outcomes.length ?? 0}</span>
         </div>
         {outcomes && <DataHealth data={outcomes.data_health} />}
         {!outcomes?.outcomes.length ? (
-          <div className="empty-state">No replayable outcomes yet.</div>
+          <div className="empty-state">{t("history.noOutcomes")}</div>
         ) : (
           <div className="table-shell">
             <table>
               <thead>
                 <tr>
-                  <th>Ticker</th>
-                  <th>Status</th>
+                  <th>{t("common.ticker")}</th>
+                  <th>{t("common.status")}</th>
                   <th>5D</th>
                   <th>10D</th>
                   <th>20D</th>
-                  <th>Max DD</th>
-                  <th>Max Runup</th>
+                  <th>{t("history.maxDd")}</th>
+                  <th>{t("history.maxRunup")}</th>
                 </tr>
               </thead>
               <tbody>

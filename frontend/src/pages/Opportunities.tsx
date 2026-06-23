@@ -1,5 +1,6 @@
 import { OpportunityDetail } from "../components/OpportunityDetail";
 import { OpportunityTable } from "../components/OpportunityTable";
+import { useI18n } from "../i18n";
 import type { OpportunityCard, ScanItem, StrategyHealth } from "../types";
 
 type Props = {
@@ -11,12 +12,14 @@ type Props = {
 };
 
 export function Opportunities({ cards, items, strategyHealth, selectedCard, onSelect }: Props) {
+  const { t } = useI18n();
+
   return (
     <div className="split-grid">
       <div className="stack">
         <section className="panel">
           <div className="panel-heading">
-            <h2>Opportunities</h2>
+            <h2>{t("opportunities.title")}</h2>
             <span className="count">{cards.length}</span>
           </div>
           <OpportunityTable
@@ -27,14 +30,14 @@ export function Opportunities({ cards, items, strategyHealth, selectedCard, onSe
         </section>
         <section className="panel">
           <div className="panel-heading">
-            <h2>Scan Coverage</h2>
+            <h2>{t("opportunities.coverage")}</h2>
             <span className="count">{items.length}</span>
           </div>
           <ScanCoverageTable items={items} />
         </section>
         <section className="panel">
           <div className="panel-heading">
-            <h2>Strategy Health</h2>
+            <h2>{t("opportunities.health")}</h2>
             <span className="count">{strategyHealth.length}</span>
           </div>
           <StrategyHealthTable items={strategyHealth} />
@@ -46,8 +49,10 @@ export function Opportunities({ cards, items, strategyHealth, selectedCard, onSe
 }
 
 function ScanCoverageTable({ items }: { items: ScanItem[] }) {
+  const { t } = useI18n();
+
   if (!items.length) {
-    return <p className="empty">No scan items yet.</p>;
+    return <p className="empty">{t("opportunities.noScan")}</p>;
   }
 
   return (
@@ -55,16 +60,16 @@ function ScanCoverageTable({ items }: { items: ScanItem[] }) {
       <table>
         <thead>
           <tr>
-            <th>Ticker</th>
-            <th>Status</th>
-            <th>Bars</th>
-            <th>Signals</th>
-            <th>Passed</th>
-            <th>Watch</th>
-            <th>Missing</th>
-            <th>Close</th>
-            <th>Provider</th>
-            <th>Reason</th>
+            <th>{t("common.ticker")}</th>
+            <th>{t("common.status")}</th>
+            <th>{t("opportunities.bars")}</th>
+            <th>{t("opportunities.signals")}</th>
+            <th>{t("opportunities.passed")}</th>
+            <th>{t("opportunities.watch")}</th>
+            <th>{t("opportunities.missing")}</th>
+            <th>{t("opportunities.close")}</th>
+            <th>{t("common.provider")}</th>
+            <th>{t("common.reason")}</th>
           </tr>
         </thead>
         <tbody>
@@ -91,8 +96,10 @@ function ScanCoverageTable({ items }: { items: ScanItem[] }) {
 }
 
 function StrategyHealthTable({ items }: { items: StrategyHealth[] }) {
+  const { t } = useI18n();
+
   if (!items.length) {
-    return <p className="empty">No strategy health yet.</p>;
+    return <p className="empty">{t("opportunities.noHealth")}</p>;
   }
 
   return (
@@ -100,14 +107,14 @@ function StrategyHealthTable({ items }: { items: StrategyHealth[] }) {
       <table>
         <thead>
           <tr>
-            <th>Strategy</th>
-            <th>Family</th>
-            <th>Ready</th>
-            <th>Samples</th>
+            <th>{t("common.strategy")}</th>
+            <th>{t("opportunities.family")}</th>
+            <th>{t("opportunities.ready")}</th>
+            <th>{t("common.samples")}</th>
             <th>Win 10D</th>
-            <th>Avg 10D</th>
+            <th>{t("brief.avg10d")}</th>
             <th>Avg 20D</th>
-            <th>Max Loss</th>
+            <th>{t("opportunities.maxLoss")}</th>
           </tr>
         </thead>
         <tbody>

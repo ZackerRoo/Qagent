@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import type { OpportunityCard } from "../types";
 import { StatusBadge } from "./StatusBadge";
 
@@ -8,25 +9,27 @@ type Props = {
 };
 
 export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
+  const { t } = useI18n();
+
   return (
     <div className="table-shell">
       <table>
         <thead>
           <tr>
-            <th>Ticker</th>
-            <th>Market</th>
-            <th>Status</th>
-            <th>Action</th>
-            <th>Conviction</th>
-            <th>Score</th>
-            <th>Rank</th>
-            <th>Strategy</th>
-            <th>Strategy Score</th>
-            <th>Trigger</th>
-            <th>Stop</th>
-            <th>Target</th>
-            <th>R/R</th>
-            <th>Caveat</th>
+            <th>{t("common.ticker")}</th>
+            <th>{t("table.market")}</th>
+            <th>{t("common.status")}</th>
+            <th>{t("detail.action")}</th>
+            <th>{t("brief.conviction")}</th>
+            <th>{t("table.score")}</th>
+            <th>{t("brief.rank")}</th>
+            <th>{t("common.strategy")}</th>
+            <th>{t("detail.strategyScore")}</th>
+            <th>{t("brief.trigger")}</th>
+            <th>{t("brief.stop")}</th>
+            <th>{t("brief.target")}</th>
+            <th>{t("detail.rr")}</th>
+            <th>{t("table.caveat")}</th>
           </tr>
         </thead>
         <tbody>

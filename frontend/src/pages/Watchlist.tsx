@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { fetchWatchlist, saveWatchlistItem } from "../api/client";
+import { useI18n } from "../i18n";
 import type { WatchlistItem } from "../types";
 
 const emptyItem: WatchlistItem = {
@@ -11,6 +12,7 @@ const emptyItem: WatchlistItem = {
 };
 
 export function Watchlist() {
+  const { t } = useI18n();
   const [items, setItems] = useState<WatchlistItem[]>([]);
   const [form, setForm] = useState<WatchlistItem>(emptyItem);
 
@@ -34,32 +36,32 @@ export function Watchlist() {
   return (
     <section className="panel stack">
       <div className="panel-heading">
-        <h2>Watchlist</h2>
+        <h2>{t("watchlist.title")}</h2>
         <span className="count">{items.length}</span>
       </div>
       <div className="form-row">
         <input
           value={form.instrument_id}
           onChange={(event) => setForm({ ...form, instrument_id: event.target.value })}
-          placeholder="US:AAPL or CN:000001"
+          placeholder={t("watchlist.instrumentPlaceholder")}
         />
         <input
           value={form.thesis ?? ""}
           onChange={(event) => setForm({ ...form, thesis: event.target.value })}
-          placeholder="Thesis"
+          placeholder={t("watchlist.thesis")}
         />
         <button type="button" onClick={submit}>
-          Add
+          {t("watchlist.add")}
         </button>
       </div>
       <div className="table-shell">
         <table>
           <thead>
             <tr>
-              <th>Symbol</th>
-              <th>Status</th>
-              <th>Thesis</th>
-              <th>Tags</th>
+              <th>{t("common.symbol")}</th>
+              <th>{t("common.status")}</th>
+              <th>{t("watchlist.thesis")}</th>
+              <th>{t("watchlist.tags")}</th>
             </tr>
           </thead>
           <tbody>

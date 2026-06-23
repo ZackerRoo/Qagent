@@ -6,6 +6,7 @@ import {
   fetchProviderStatus,
   runAutomation,
 } from "../api/client";
+import { useI18n } from "../i18n";
 import type {
   AutomationRunResponse,
   DataProviderMode,
@@ -32,6 +33,7 @@ const emptyUniverse: UniverseCreate = {
 };
 
 export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props) {
+  const { t } = useI18n();
   const [providerStatus, setProviderStatus] = useState<ProviderStatusResponse>();
   const [dataCache, setDataCache] = useState<MarketDataCacheResponse>();
   const [automationResult, setAutomationResult] = useState<AutomationRunResponse>();
@@ -92,61 +94,64 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
     <div className="stack">
       <section className="panel">
         <div className="panel-heading">
-          <h2>Settings</h2>
+          <h2>{t("settings.title")}</h2>
           <span className="count">Dev</span>
         </div>
         <div className="settings-list">
           <div>
-            <span>Data mode</span>
-            <strong>{dataMode === "free" ? "Free provider" : "Fixture provider"}</strong>
+            <span>{t("settings.dataMode")}</span>
+            <strong>{dataMode === "free" ? t("settings.freeProvider") : t("settings.fixtureProvider")}</strong>
           </div>
           <div>
-            <span>Universe</span>
+            <span>{t("top.universe")}</span>
             <strong>{dataMode === "free" ? symbols : "US:TEST, CN:000001"}</strong>
           </div>
           <div>
-            <span>Markets</span>
+            <span>{t("settings.markets")}</span>
             <strong>US, CN</strong>
           </div>
           <div>
-            <span>Execution</span>
-            <strong>Research only</strong>
+            <span>{t("settings.execution")}</span>
+            <strong>{t("settings.researchOnly")}</strong>
           </div>
         </div>
       </section>
 
       <section className="panel">
         <div className="panel-heading">
-          <h2>Automation</h2>
-          <span className="count">{automationResult ? "Ready" : "Idle"}</span>
+          <h2>{t("settings.automation")}</h2>
+          <span className="count">{automationResult ? t("settings.ready") : t("settings.idle")}</span>
         </div>
         <div className="form-row">
           <button type="button" onClick={runAutomationNow}>
-            Run Automation
+            {t("settings.runAutomation")}
           </button>
         </div>
         {automationResult ? (
           <div className="settings-list">
             <div>
-              <span>Scan</span>
+              <span>{t("settings.scan")}</span>
               <strong>
-                {automationResult.summary.cards} cards / {automationResult.summary.scanned} scanned
+                {automationResult.summary.cards} {t("common.cards")} /{" "}
+                {automationResult.summary.scanned} {t("common.scanned")}
               </strong>
             </div>
             <div>
-              <span>Brief</span>
+              <span>{t("settings.brief")}</span>
               <strong>{automationResult.brief_id}</strong>
             </div>
             <div>
-              <span>Delivery</span>
+              <span>{t("settings.delivery")}</span>
               <strong>{automationResult.brief_delivery_id ?? "-"}</strong>
             </div>
             <div>
-              <span>Backtest</span>
-              <strong>{automationResult.summary.backtest_signals} signals</strong>
+              <span>{t("settings.backtest")}</span>
+              <strong>
+                {automationResult.summary.backtest_signals} {t("opportunities.signals")}
+              </strong>
             </div>
             <div>
-              <span>Paper</span>
+              <span>{t("settings.paper")}</span>
               <strong>
                 {automationResult.summary.paper_created} new /{" "}
                 {automationResult.summary.paper_total} total
@@ -154,13 +159,13 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
             </div>
           </div>
         ) : (
-          <div className="empty-state">No automation run in this session.</div>
+          <div className="empty-state">{t("settings.noAutomation")}</div>
         )}
       </section>
 
       <section className="panel stack">
         <div className="panel-heading">
-          <h2>Universes</h2>
+          <h2>{t("settings.universes")}</h2>
           <span className="count">{universes.length}</span>
         </div>
         <div className="form-row universe-form">
@@ -174,7 +179,7 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
           <input
             value={universeForm.name}
             onChange={(event) => setUniverseForm({ ...universeForm, name: event.target.value })}
-            placeholder="Name"
+            placeholder={t("common.name")}
           />
           <select
             value={universeForm.market_scope}
@@ -194,7 +199,7 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
             placeholder="US:NVDA,US:MSFT"
           />
           <button type="button" onClick={saveUniverseForm}>
-            Save
+            {t("common.save")}
           </button>
         </div>
         {saveMessage && <div className="empty-state">{saveMessage}</div>}
@@ -202,11 +207,11 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
           <table>
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Scope</th>
-                <th>Source</th>
-                <th>Tags</th>
-                <th>Symbols</th>
+                <th>{t("common.name")}</th>
+                <th>{t("common.scope")}</th>
+                <th>{t("settings.source")}</th>
+                <th>{t("common.tags")}</th>
+                <th>{t("common.symbols")}</th>
               </tr>
             </thead>
             <tbody>
@@ -226,21 +231,21 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
 
       <section className="panel">
         <div className="panel-heading">
-          <h2>Provider Readiness</h2>
+          <h2>{t("settings.providerReadiness")}</h2>
           <span className="count">{providerStatus?.providers.length ?? 0}</span>
         </div>
         {error && <div className="empty-state error">{error}</div>}
         {!providerStatus?.providers.length ? (
-          <div className="empty-state">Provider status is loading.</div>
+          <div className="empty-state">{t("common.loading")}</div>
         ) : (
           <div className="table-shell">
             <table>
               <thead>
                 <tr>
-                  <th>Provider</th>
-                  <th>Status</th>
-                  <th>Capabilities</th>
-                  <th>Notes</th>
+                  <th>{t("common.provider")}</th>
+                  <th>{t("common.status")}</th>
+                  <th>{t("settings.capabilities")}</th>
+                  <th>{t("settings.notes")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -262,27 +267,27 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
 
       <section className="panel">
         <div className="panel-heading">
-          <h2>Market Data Cache</h2>
+          <h2>{t("settings.cache")}</h2>
           <span className="count">{dataCache?.summaries.length ?? 0}</span>
         </div>
         <div className="form-row">
           <button type="button" onClick={clearCurrentDataCache}>
-            Clear {dataMode} cache
+            {t("settings.clearCache")} {dataMode}
           </button>
         </div>
         {cacheMessage && <div className="empty-state">{cacheMessage}</div>}
         {!dataCache?.summaries.length ? (
-          <div className="empty-state">No cached market data for this mode.</div>
+          <div className="empty-state">{t("settings.noCache")}</div>
         ) : (
           <div className="table-shell">
             <table>
               <thead>
                 <tr>
-                  <th>Symbol</th>
-                  <th>Rows</th>
-                  <th>Date Range</th>
-                  <th>Source</th>
-                  <th>Cached</th>
+                  <th>{t("common.symbol")}</th>
+                  <th>{t("settings.rows")}</th>
+                  <th>{t("settings.dateRange")}</th>
+                  <th>{t("settings.source")}</th>
+                  <th>{t("settings.cached")}</th>
                 </tr>
               </thead>
               <tbody>

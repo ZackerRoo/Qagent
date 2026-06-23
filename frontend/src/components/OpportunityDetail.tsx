@@ -1,9 +1,12 @@
+import { useI18n } from "../i18n";
 import type { OpportunityCard } from "../types";
 import { StatusBadge } from "./StatusBadge";
 
 export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
+  const { t } = useI18n();
+
   if (!card) {
-    return <section className="panel empty">Select an opportunity</section>;
+    return <section className="panel empty">{t("detail.select")}</section>;
   }
 
   return (
@@ -20,100 +23,100 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
 
       <div className="metric-grid">
         <div>
-          <span>Action</span>
+          <span>{t("detail.action")}</span>
           <strong>{card.decision?.action_label ?? "-"}</strong>
         </div>
         <div>
-          <span>Conviction</span>
+          <span>{t("brief.conviction")}</span>
           <strong>{formatDecisionPct(card.decision?.conviction_score)}</strong>
         </div>
         <div>
-          <span>Risk Budget</span>
+          <span>{t("detail.riskBudget")}</span>
           <strong>{formatRiskBudget(card.decision?.suggested_risk_pct)}</strong>
         </div>
         <div>
-          <span>Trigger</span>
+          <span>{t("brief.trigger")}</span>
           <strong>{card.entry_plan.trigger_price ?? "-"}</strong>
         </div>
         <div>
-          <span>No Chase</span>
+          <span>{t("detail.noChase")}</span>
           <strong>{card.entry_plan.no_chase_above ?? "-"}</strong>
         </div>
         <div>
-          <span>Stop</span>
+          <span>{t("brief.stop")}</span>
           <strong>{card.exit_plan.initial_stop ?? "-"}</strong>
         </div>
         <div>
-          <span>Target 1</span>
+          <span>{t("common.target1")}</span>
           <strong>{card.exit_plan.target_1 ?? "-"}</strong>
         </div>
         <div>
-          <span>Strategy</span>
+          <span>{t("common.strategy")}</span>
           <strong>{labelStrategy(card.primary_strategy_id)}</strong>
         </div>
         <div>
-          <span>Strategy Score</span>
+          <span>{t("detail.strategyScore")}</span>
           <strong>{Math.round(card.strategy_score * 100)}</strong>
         </div>
         <div>
-          <span>Rank</span>
+          <span>{t("brief.rank")}</span>
           <strong>{Math.round(card.rank_score * 100)}</strong>
         </div>
       </div>
 
       {card.decision && (
         <div className="detail-section">
-          <h3>Research Decision</h3>
+          <h3>{t("detail.researchDecision")}</h3>
           <p>{card.decision.safety_note}</p>
           <div className="decision-grid">
             <div>
-              <span>Strategy</span>
+              <span>{t("common.strategy")}</span>
               <strong>{formatDecisionPct(card.decision.components.strategy_quality)}</strong>
             </div>
             <div>
-              <span>R/R</span>
+              <span>{t("detail.rr")}</span>
               <strong>{formatDecisionPct(card.decision.components.risk_reward)}</strong>
             </div>
             <div>
-              <span>Data</span>
+              <span>{t("detail.data")}</span>
               <strong>{formatDecisionPct(card.decision.components.data_quality)}</strong>
             </div>
             <div>
-              <span>Execution</span>
+              <span>{t("detail.execution")}</span>
               <strong>{formatDecisionPct(card.decision.components.execution_quality)}</strong>
             </div>
             <div>
-              <span>Catalyst</span>
+              <span>{t("detail.catalyst")}</span>
               <strong>{formatDecisionPct(card.decision.components.catalyst_support)}</strong>
             </div>
           </div>
-          <DecisionList title="Why" items={card.decision.rationale} />
-          <DecisionList title="Failure Conditions" items={card.decision.failure_conditions} />
-          <DecisionList title="Verification Checks" items={card.decision.verification_checks} />
+          <DecisionList title={t("brief.why")} items={card.decision.rationale} />
+          <DecisionList title={t("detail.failure")} items={card.decision.failure_conditions} />
+          <DecisionList title={t("detail.verification")} items={card.decision.verification_checks} />
         </div>
       )}
 
       <div className="detail-section">
-        <h3>Trade Scenario</h3>
+        <h3>{t("detail.tradeScenario")}</h3>
         <p>{card.scenario.summary}</p>
         <div className="scenario-grid">
           <div>
-            <span>Downside</span>
+            <span>{t("detail.downside")}</span>
             <strong>{card.scenario.downside_pct.toFixed(2)}%</strong>
           </div>
           <div>
-            <span>Target 1</span>
+            <span>{t("common.target1")}</span>
             <strong>+{card.scenario.target_1_pct.toFixed(2)}%</strong>
           </div>
           <div>
-            <span>No Chase Gap</span>
+            <span>{t("detail.noChaseGap")}</span>
             <strong>+{card.scenario.no_chase_pct.toFixed(2)}%</strong>
           </div>
         </div>
       </div>
 
       <div className="detail-section">
-        <h3>Ranking</h3>
+        <h3>{t("detail.ranking")}</h3>
         <div className="rank-reasons">
           {card.rank_reasons.map((reason) => (
             <span key={reason}>{reason}</span>
@@ -122,7 +125,7 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
       </div>
 
       <div className="detail-section">
-        <h3>Strategy Stack</h3>
+        <h3>{t("detail.strategyStack")}</h3>
         <div className="strategy-stack">
           {card.strategy_evaluations.map((strategy) => (
             <div key={strategy.strategy_id}>
@@ -133,17 +136,25 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
               <small>
                 {strategy.family} · {strategy.role} · {strategy.status}
               </small>
-              <p>Triggers: {formatList(strategy.triggers)}</p>
-              <p>Confirmations: {formatList(strategy.confirmations)}</p>
-              <p>Missing data: {formatList(strategy.missing_data)}</p>
-              <p>Invalidation: {strategy.invalidation}</p>
+              <p>
+                {t("detail.triggers")}: {formatList(strategy.triggers)}
+              </p>
+              <p>
+                {t("detail.confirmations")}: {formatList(strategy.confirmations)}
+              </p>
+              <p>
+                {t("detail.missingData")}: {formatList(strategy.missing_data)}
+              </p>
+              <p>
+                {t("detail.invalidation")}: {strategy.invalidation}
+              </p>
             </div>
           ))}
         </div>
       </div>
 
       <div className="detail-section">
-        <h3>Signal Stack</h3>
+        <h3>{t("detail.signalStack")}</h3>
         <div className="signal-stack">
           {card.signals.map((signal) => (
             <div key={`${signal.signal_type}-${signal.horizon}`}>
@@ -159,17 +170,17 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
       </div>
 
       <div className="detail-section">
-        <h3>Entry</h3>
+        <h3>{t("detail.entry")}</h3>
         <p>{card.entry_plan.confirmation}</p>
       </div>
 
       <div className="detail-section">
-        <h3>Invalidation</h3>
+        <h3>{t("detail.invalidation")}</h3>
         <p>{card.exit_plan.invalidation}</p>
       </div>
 
       <div className="detail-section">
-        <h3>Exit Plan</h3>
+        <h3>{t("detail.exitPlan")}</h3>
         <p>{card.exit_plan.trailing_rule}</p>
         <p>{card.exit_plan.time_stop}</p>
       </div>

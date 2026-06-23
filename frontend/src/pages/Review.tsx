@@ -2,9 +2,11 @@ import { useEffect, useState } from "react";
 
 import { fetchCatalysts } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
+import { useI18n } from "../i18n";
 import type { CatalystsResponse } from "../types";
 
 export function Review({ symbols }: { symbols: string }) {
+  const { t } = useI18n();
   const [data, setData] = useState<CatalystsResponse>();
   const [error, setError] = useState("");
 
@@ -24,7 +26,7 @@ export function Review({ symbols }: { symbols: string }) {
     <div className="stack">
       <section className="panel">
         <div className="panel-heading">
-          <h2>Catalyst Review</h2>
+          <h2>{t("review.title")}</h2>
           <span className="count">{data?.hypotheses.length ?? 0}</span>
         </div>
         {data && <DataHealth data={data.data_health} />}
@@ -33,21 +35,21 @@ export function Review({ symbols }: { symbols: string }) {
 
       <section className="panel">
         <div className="panel-heading">
-          <h2>Hypotheses</h2>
+          <h2>{t("review.hypotheses")}</h2>
           <span className="count">{data?.hypotheses.length ?? 0}</span>
         </div>
         {!data?.hypotheses.length ? (
-          <div className="empty-state">No catalyst hypotheses yet.</div>
+          <div className="empty-state">{t("review.noHypotheses")}</div>
         ) : (
           <div className="table-shell">
             <table>
               <thead>
                 <tr>
-                  <th>Ticker</th>
-                  <th>Type</th>
-                  <th>Confidence</th>
-                  <th>Hypothesis</th>
-                  <th>Verification</th>
+                  <th>{t("common.ticker")}</th>
+                  <th>{t("review.type")}</th>
+                  <th>{t("review.confidence")}</th>
+                  <th>{t("review.hypothesis")}</th>
+                  <th>{t("review.verification")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -68,11 +70,11 @@ export function Review({ symbols }: { symbols: string }) {
 
       <section className="panel">
         <div className="panel-heading">
-          <h2>News</h2>
+          <h2>{t("review.news")}</h2>
           <span className="count">{data?.news.length ?? 0}</span>
         </div>
         {!data?.news.length ? (
-          <div className="empty-state">No news returned by free providers.</div>
+          <div className="empty-state">{t("review.noNews")}</div>
         ) : (
           <div className="news-list">
             {data.news.map((item) => (
