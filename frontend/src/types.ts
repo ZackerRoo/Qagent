@@ -371,6 +371,24 @@ export type ProviderStatusResponse = {
   providers: ProviderStatus[];
 };
 
+export type MarketDataCacheSummary = {
+  provider_mode: string;
+  instrument_id: string;
+  rows: number;
+  first_trade_date: string | null;
+  last_trade_date: string | null;
+  last_cached_at: string | null;
+  source_providers: string[];
+};
+
+export type MarketDataCacheResponse = {
+  summaries: MarketDataCacheSummary[];
+};
+
+export type ClearDataCacheResponse = {
+  deleted: number;
+};
+
 export type StrategyPerformance = {
   strategy_id: string;
   sample_count: number;

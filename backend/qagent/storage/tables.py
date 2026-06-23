@@ -72,6 +72,38 @@ class UniverseRow(Base):
     )
 
 
+class MarketBarCacheRow(Base):
+    __tablename__ = "market_bar_cache"
+
+    provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    source_provider: Mapped[str] = mapped_column(String(64), default="")
+    open: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    high: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    low: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    close: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    volume: Mapped[Decimal] = mapped_column(Numeric(24, 4))
+    cached_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class MarketDataCacheSpanRow(Base):
+    __tablename__ = "market_data_cache_spans"
+
+    provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    start_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    end_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    cached_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
 class ScanRunRow(Base):
     __tablename__ = "scan_runs"
 

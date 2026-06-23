@@ -39,6 +39,18 @@ The system supports two market-data modes:
 
 Fixture data keeps tests stable. Free providers are implemented behind adapter contracts and are mocked in unit tests.
 
+Market-data providers are wrapped by `CachedMarketDataProvider` in `qagent.providers.factory`. The cache persists normalized daily OHLCV bars in SQLite through `MarketDataCacheRepository`, keyed by provider mode, symbol, and trade date. The wrapper records coverage spans for requested ranges, so repeated scans and backtests can reuse rows without hitting free upstream providers every time. It still filters returned bars by the caller's requested date window, which preserves the existing no-lookahead behavior.
+
+Useful cache routes:
+
+```bash
+curl 'http://127.0.0.1:8000/api/data-cache'
+curl 'http://127.0.0.1:8000/api/data-cache?provider=free'
+curl -X DELETE 'http://127.0.0.1:8000/api/data-cache?provider=free'
+```
+
+Scan `data_health` includes `market_cache`, `market_cache_hits`, `market_cache_misses`, and `market_cache_rows` when the provider is cache-backed. The Settings page also shows cache summaries for the selected data mode.
+
 ## Daily Brief
 
 The Brief page and `/api/daily-brief` provide the main daily research readout:
@@ -254,6 +266,7 @@ curl -X POST 'http://127.0.0.1:8000/api/daily-brief/runs?provider=fixture&includ
 curl 'http://127.0.0.1:8000/api/backtest?provider=fixture'
 curl 'http://127.0.0.1:8000/api/portfolio-backtest?provider=fixture'
 curl 'http://127.0.0.1:8000/api/provider-status'
+curl 'http://127.0.0.1:8000/api/data-cache?provider=fixture'
 curl 'http://127.0.0.1:8000/api/strategy-performance?provider=fixture'
 curl 'http://127.0.0.1:8000/api/alert-suggestions'
 curl 'http://127.0.0.1:8000/api/catalysts?symbols=US:AAPL&limit=5'
@@ -278,6 +291,7 @@ npm run build
 - No automated trading or broker execution.
 - No external push sender yet; the local delivery outbox is implemented for scheduled jobs and future senders.
 - Free data may be delayed or incomplete.
+- The market-data cache improves repeatability and reduces free-provider calls, but it is not a live market data entitlement or real-time quote store.
 - Portfolio backtests include sizing, costs, slippage, stops, targets, time exits, and realized equity curves, but they are not broker-grade simulations with intraday fills, taxes, borrow fees, or live execution constraints.
 - Outcome replay uses daily bars and cannot prove intraday ordering between a stop and target.
 - PEAD is implemented when earnings actuals and estimates are available, but production free-data coverage depends on FMP/Finnhub/Alpha Vantage or another earnings provider.

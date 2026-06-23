@@ -29,7 +29,8 @@ class RecordingProvider:
         return bars.groupby("instrument_id", as_index=False).tail(1).reset_index(drop=True)
 
 
-def test_opportunities_endpoint_can_scan_free_us_and_cn_providers(monkeypatch):
+def test_opportunities_endpoint_can_scan_free_us_and_cn_providers(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'provider-selection.db'}")
     us_provider = RecordingProvider("free_us", "US:TEST")
     cn_provider = RecordingProvider("free_cn", "CN:000001")
 

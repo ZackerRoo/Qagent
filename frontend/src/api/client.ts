@@ -12,9 +12,11 @@ import type {
   BriefRunsResponse,
   CatalystsResponse,
   DataProviderMode,
+  ClearDataCacheResponse,
   DailyBriefResponse,
   DeliveriesResponse,
   DeliveryOutboxRecord,
+  MarketDataCacheResponse,
   OpportunitiesResponse,
   OpportunityHistoryResponse,
   OutcomesResponse,
@@ -37,6 +39,7 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000/api";
 
 type ScanParams = {
   provider?: DataProviderMode;
+  instrument_id?: string;
   symbols?: string;
   limit?: number;
   start?: string;
@@ -58,6 +61,9 @@ function queryString(params?: ScanParams): string {
   const search = new URLSearchParams();
   if (params.provider) {
     search.set("provider", params.provider);
+  }
+  if (params.instrument_id) {
+    search.set("instrument_id", params.instrument_id);
   }
   if (params.symbols?.trim()) {
     search.set("symbols", params.symbols);
@@ -132,6 +138,16 @@ async function apiPost<T>(path: string, payload: object): Promise<T> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(`API request failed: ${response.status}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function apiDelete<T>(path: string, params?: ScanParams): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}${queryString(params)}`, {
+    method: "DELETE",
   });
   if (!response.ok) {
     throw new Error(`API request failed: ${response.status}`);
@@ -296,4 +312,16 @@ export async function markDeliverySent(deliveryId: string): Promise<DeliveryOutb
 
 export async function fetchProviderStatus(): Promise<ProviderStatusResponse> {
   return apiGet<ProviderStatusResponse>("/provider-status");
+}
+
+export async function fetchDataCache(
+  provider?: DataProviderMode,
+): Promise<MarketDataCacheResponse> {
+  return apiGet<MarketDataCacheResponse>("/data-cache", provider ? { provider } : undefined);
+}
+
+export async function clearDataCache(
+  provider?: DataProviderMode,
+): Promise<ClearDataCacheResponse> {
+  return apiDelete<ClearDataCacheResponse>("/data-cache", provider ? { provider } : undefined);
 }

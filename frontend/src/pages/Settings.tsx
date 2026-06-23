@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 
-import { fetchProviderStatus } from "../api/client";
+import { clearDataCache, fetchDataCache, fetchProviderStatus } from "../api/client";
 import type {
   DataProviderMode,
+  MarketDataCacheResponse,
   ProviderStatusResponse,
   UniverseCreate,
   UniverseRecord,
@@ -26,21 +27,28 @@ const emptyUniverse: UniverseCreate = {
 
 export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props) {
   const [providerStatus, setProviderStatus] = useState<ProviderStatusResponse>();
+  const [dataCache, setDataCache] = useState<MarketDataCacheResponse>();
   const [universeForm, setUniverseForm] = useState<UniverseCreate>(emptyUniverse);
   const [saveMessage, setSaveMessage] = useState("");
+  const [cacheMessage, setCacheMessage] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
     async function load() {
       try {
         setError("");
-        setProviderStatus(await fetchProviderStatus());
+        const [providers, cache] = await Promise.all([
+          fetchProviderStatus(),
+          fetchDataCache(dataMode),
+        ]);
+        setProviderStatus(providers);
+        setDataCache(cache);
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : "Failed to load provider status");
       }
     }
     void load();
-  }, []);
+  }, [dataMode]);
 
   async function saveUniverseForm() {
     try {
@@ -49,6 +57,17 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
       setSaveMessage(`Saved ${saved.name}`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Failed to save universe");
+    }
+  }
+
+  async function clearCurrentDataCache() {
+    try {
+      setError("");
+      const cleared = await clearDataCache(dataMode);
+      setCacheMessage(`Cleared ${cleared.deleted} cached rows`);
+      setDataCache(await fetchDataCache(dataMode));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to clear data cache");
     }
   }
 
@@ -180,6 +199,49 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
           </div>
         )}
       </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <h2>Market Data Cache</h2>
+          <span className="count">{dataCache?.summaries.length ?? 0}</span>
+        </div>
+        <div className="form-row">
+          <button type="button" onClick={clearCurrentDataCache}>
+            Clear {dataMode} cache
+          </button>
+        </div>
+        {cacheMessage && <div className="empty-state">{cacheMessage}</div>}
+        {!dataCache?.summaries.length ? (
+          <div className="empty-state">No cached market data for this mode.</div>
+        ) : (
+          <div className="table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th>Rows</th>
+                  <th>Date Range</th>
+                  <th>Source</th>
+                  <th>Cached</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dataCache.summaries.map((summary) => (
+                  <tr key={`${summary.provider_mode}-${summary.instrument_id}`}>
+                    <td>{summary.instrument_id}</td>
+                    <td>{summary.rows}</td>
+                    <td>
+                      {summary.first_trade_date} to {summary.last_trade_date}
+                    </td>
+                    <td className="reason-cell">{summary.source_providers.join(", ")}</td>
+                    <td>{formatTimestamp(summary.last_cached_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
     </div>
   );
 }
@@ -189,4 +251,11 @@ function splitList(value: string): string[] {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function formatTimestamp(value: string | null): string {
+  if (!value) {
+    return "-";
+  }
+  return new Date(value).toLocaleString();
 }

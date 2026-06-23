@@ -56,6 +56,9 @@ def run_daily_scan(
     card_generator = OpportunityCardGenerator(strategy_evaluator)
     strategy_mode = provider.name if mode == "development" else mode
     strategy_provider = strategy_data_provider or build_strategy_data_provider(strategy_mode)
+    reset_cache_stats = getattr(provider, "reset_cache_stats", None)
+    if callable(reset_cache_stats):
+        reset_cache_stats()
 
     for instrument_id in instrument_ids:
         bars = provider.get_daily_bars(
@@ -130,6 +133,13 @@ def run_daily_scan(
         "strategy_fundamentals": str(strategy_fundamentals_count),
         "strategy_analyst_insights": str(strategy_analyst_insights_count),
     }
+    cache_stats = getattr(provider, "cache_stats", None)
+    if callable(cache_stats):
+        stats = cache_stats()
+        data_health["market_cache"] = "enabled"
+        data_health["market_cache_hits"] = str(stats["hits"])
+        data_health["market_cache_misses"] = str(stats["misses"])
+        data_health["market_cache_rows"] = str(stats["rows"])
     provider_errors = getattr(provider, "last_errors", [])
     if provider_errors:
         data_health["errors"] = " | ".join(provider_errors[:3])

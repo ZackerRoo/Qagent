@@ -7,6 +7,7 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 ## What Works Now
 
 - US + A-share scanning with fixture data and free providers.
+- Persistent market-data cache for fixture/free providers, with cache hit/miss data-health fields and Settings-page cache inspection.
 - Daily Brief page and `/api/daily-brief` research digest combining opportunities, entry levels, catalysts, portfolio risk, data caveats, and strategy validation.
 - Saved brief runs with history, detail retrieval, and Markdown export for push-ready workflows.
 - Delivery outbox for saved briefs, with queued/sent status and Markdown payloads for cron or future email/chat adapters.
@@ -101,11 +102,15 @@ curl 'http://127.0.0.1:8000/api/alert-suggestions'
 curl 'http://127.0.0.1:8000/api/universes'
 curl -X POST 'http://127.0.0.1:8000/api/alerts/run?provider=fixture&queue=true&recipient=local'
 curl 'http://127.0.0.1:8000/api/provider-status'
+curl 'http://127.0.0.1:8000/api/data-cache?provider=free'
+curl -X DELETE 'http://127.0.0.1:8000/api/data-cache?provider=free'
 curl 'http://127.0.0.1:8000/api/catalysts?symbols=US:AAPL&limit=5'
 curl 'http://127.0.0.1:8000/api/portfolio?provider=fixture'
 ```
 
 `/api/opportunities` returns `cards`, `items`, `strategy_health`, and `data_health`. Cards include `rank_score`, `rank_reasons`, and `decision`. The decision object is a research workflow: action, conviction score, component scores, suggested risk budget, trigger/stop/target references, failure conditions, and verification checks. Strategies that cannot be evaluated with the current free-data scan are returned with `status: "missing_data"` instead of fabricated scores.
+
+Market-data provider calls are cached in SQLite by provider mode, symbol, and date. Scan `data_health` includes `market_cache`, hit/miss counts, and returned cache rows. `/api/data-cache` lists cached date ranges and source providers; `DELETE /api/data-cache` clears all or filtered cache rows.
 
 `/api/daily-brief` is the daily readout. It composes the current scan, entry watch levels, optional news catalysts, position risk, provider caveats, and backtest validation. `/api/daily-brief/runs` saves and lists generated briefs; `/api/daily-brief/runs/{brief_id}/markdown` exports a saved brief as Markdown; `/api/daily-brief/runs/{brief_id}/deliveries` queues a saved brief in the local delivery outbox. `/api/opportunities` also records a scan run. `/api/scan-runs`, `/api/opportunity-history`, `/api/outcomes`, and `/api/strategy-performance` expose the saved research trail, daily-bar outcome replay, and strategy-level replay summary. `/api/backtest` runs event-level historical validation without saving records. `/api/portfolio-backtest` simulates account-level trades from historical signals. `/api/alert-suggestions` turns saved opportunity trigger/stop/target levels into draft alert rules.
 

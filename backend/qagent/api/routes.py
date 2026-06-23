@@ -28,6 +28,7 @@ from qagent.storage.repository import (
     QagentRepository,
     WatchlistCreate,
 )
+from qagent.storage.market_cache import MarketDataCacheRepository
 
 router = APIRouter()
 
@@ -54,6 +55,30 @@ def health() -> dict[str, str]:
 @router.get("/provider-status")
 def provider_status() -> dict[str, list[object]]:
     return {"providers": [status.model_dump(mode="json") for status in build_provider_status()]}
+
+
+@router.get("/data-cache")
+def data_cache(
+    provider: str | None = None,
+    instrument_id: str | None = None,
+) -> dict[str, list[object]]:
+    summaries = _market_cache_repo().list_summaries(
+        provider_mode=provider.strip().lower() if provider else None,
+        instrument_id=instrument_id.strip().upper() if instrument_id else None,
+    )
+    return {"summaries": [summary.model_dump(mode="json") for summary in summaries]}
+
+
+@router.delete("/data-cache")
+def clear_data_cache(
+    provider: str | None = None,
+    instrument_id: str | None = None,
+) -> dict[str, int]:
+    deleted = _market_cache_repo().delete(
+        provider_mode=provider.strip().lower() if provider else None,
+        instrument_id=instrument_id.strip().upper() if instrument_id else None,
+    )
+    return {"deleted": deleted}
 
 
 def _parse_symbols(symbols: str | None, default_universe: list[str]) -> list[str]:
@@ -86,6 +111,11 @@ def _backtest_dates(mode: str, start: date | None, end: date | None) -> tuple[da
 def _repo() -> QagentRepository:
     initialize_database()
     return QagentRepository(create_session_factory())
+
+
+def _market_cache_repo() -> MarketDataCacheRepository:
+    initialize_database()
+    return MarketDataCacheRepository(create_session_factory())
 
 
 @router.get("/opportunities")
