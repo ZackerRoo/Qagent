@@ -176,3 +176,33 @@ class OpportunitySnapshotRow(Base):
     target_1: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
     card_json: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class PaperTradeRow(Base):
+    __tablename__ = "paper_trades"
+
+    trade_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    source_snapshot_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), index=True)
+    strategy_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    signal_date: Mapped[date] = mapped_column(Date)
+    trigger_price: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    initial_stop: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    target_1: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    rank_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    entry_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    entry_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    exit_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    exit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    latest_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    latest_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    unrealized_return_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    realized_return_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    holding_days: Mapped[int] = mapped_column(Integer, default=0)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )

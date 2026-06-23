@@ -190,6 +190,20 @@ Outcome replay uses daily OHLCV bars to calculate 5/10/20/60-day forward returns
 
 Strategy performance groups replayed outcomes by `primary_strategy_id` and reports sample count, pending/completed counts, target-hit rate, positive 10-day rate, average forward returns, max drawdown, and max runup. Alert suggestions derive draft entry, stop, and target rules from persisted opportunity snapshots.
 
+## Paper Forward Testing
+
+Paper trades are research-only simulated trades stored separately from manual portfolio positions:
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/api/paper-trades/seed?provider=fixture&limit=50'
+curl -X POST 'http://127.0.0.1:8000/api/paper-trades/update?provider=fixture'
+curl 'http://127.0.0.1:8000/api/paper-trades'
+```
+
+`seed` creates one paper trade per saved opportunity snapshot that has a signal date and trigger price. It de-duplicates by `source_snapshot_id`. `update` pulls provider OHLCV bars from the signal date forward, moves trades from `pending` to `open` when the trigger is crossed, and closes them as `target_1_hit`, `stopped`, or `time_exit`. Same-bar stop/target conflicts use conservative stop-first ordering. The Portfolio page shows the paper-forward table and summary metrics.
+
+`run-all` and `/api/automation/run` seed and update paper trades by default, so daily automation keeps the forward test current without manual clicks.
+
 ## Universes And Alert Runner
 
 Universe APIs merge built-in starter pools with user-saved custom pools:

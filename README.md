@@ -28,6 +28,7 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - Persistent scan history and opportunity snapshots saved from dashboard scans.
 - Outcome replay that computes forward returns, max drawdown, max runup, and target/stop/pending status from saved opportunity snapshots.
 - Strategy performance leaderboard summarizing replayed outcomes by primary strategy.
+- Research-only paper trading / forward testing that seeds simulated trades from opportunity snapshots, tracks pending/open/closed status, and reports forward win rate.
 - Event-level historical backtesting that reruns scans on prior dates and validates generated opportunity cards with forward outcomes.
 - Portfolio-level historical backtesting that converts validated signals into position-sized trades, stop/target/time exits, costs, slippage, an equity curve, and account-level metrics.
 - Provider readiness dashboard and API status for fixture, free market-data, SEC, CNINFO, and optional vendor feeds.
@@ -98,6 +99,9 @@ curl -X POST 'http://127.0.0.1:8000/api/automation/run?provider=fixture&include_
 curl 'http://127.0.0.1:8000/api/scan-runs'
 curl 'http://127.0.0.1:8000/api/outcomes?provider=fixture'
 curl 'http://127.0.0.1:8000/api/strategy-performance?provider=fixture'
+curl -X POST 'http://127.0.0.1:8000/api/paper-trades/seed?provider=fixture'
+curl -X POST 'http://127.0.0.1:8000/api/paper-trades/update?provider=fixture'
+curl 'http://127.0.0.1:8000/api/paper-trades'
 curl 'http://127.0.0.1:8000/api/backtest?provider=fixture&start=2026-01-30&end=2026-03-20&step_days=5'
 curl 'http://127.0.0.1:8000/api/portfolio-backtest?provider=fixture&start=2026-01-30&end=2026-03-20&step_days=5'
 curl 'http://127.0.0.1:8000/api/alert-suggestions'
@@ -115,6 +119,8 @@ curl 'http://127.0.0.1:8000/api/portfolio?provider=fixture'
 Market-data provider calls are cached in SQLite by provider mode, symbol, and date. Scan `data_health` includes `market_cache`, hit/miss counts, and returned cache rows. `/api/data-cache` lists cached date ranges and source providers; `DELETE /api/data-cache` clears all or filtered cache rows.
 
 `/api/daily-brief` is the daily readout. It composes the current scan, entry watch levels, optional news catalysts, position risk, provider caveats, and backtest validation. `/api/daily-brief/runs` saves and lists generated briefs; `/api/daily-brief/runs/{brief_id}/markdown` exports a saved brief as Markdown; `/api/daily-brief/runs/{brief_id}/deliveries` queues a saved brief in the local delivery outbox. `/api/opportunities` also records a scan run. `/api/scan-runs`, `/api/opportunity-history`, `/api/outcomes`, and `/api/strategy-performance` expose the saved research trail, daily-bar outcome replay, and strategy-level replay summary. `/api/backtest` runs event-level historical validation without saving records. `/api/portfolio-backtest` simulates account-level trades from historical signals. `/api/alert-suggestions` turns saved opportunity trigger/stop/target levels into draft alert rules.
+
+`/api/paper-trades/seed` turns saved opportunity snapshots into research-only paper trades. `/api/paper-trades/update` evaluates pending/open paper trades against provider OHLCV bars and updates target, stop, time-exit, realized, and unrealized status. Automation runs seed and update paper trades by default.
 
 CLI daily brief handoff:
 

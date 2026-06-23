@@ -21,6 +21,9 @@ import type {
   OpportunitiesResponse,
   OpportunityHistoryResponse,
   OutcomesResponse,
+  PaperSeedResponse,
+  PaperTradesResponse,
+  PaperUpdateResponse,
   PortfolioBacktestResponse,
   OverviewResponse,
   PortfolioResponse,
@@ -190,6 +193,20 @@ export async function fetchPortfolio(params?: ScanParams): Promise<PortfolioResp
 
 export async function savePosition(payload: Position): Promise<Position> {
   return apiPost<Position>("/positions", payload);
+}
+
+export async function fetchPaperTrades(): Promise<PaperTradesResponse> {
+  return apiGet<PaperTradesResponse>("/paper-trades", { limit: 100 });
+}
+
+export async function seedPaperTrades(provider: DataProviderMode): Promise<PaperSeedResponse> {
+  return apiPost<PaperSeedResponse>(`/paper-trades/seed?provider=${provider}&limit=50`, {});
+}
+
+export async function updatePaperTrades(
+  provider: DataProviderMode,
+): Promise<PaperUpdateResponse> {
+  return apiPost<PaperUpdateResponse>(`/paper-trades/update?provider=${provider}`, {});
 }
 
 export async function fetchAlertRules(): Promise<AlertRulesResponse> {

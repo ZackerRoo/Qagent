@@ -21,8 +21,14 @@ from qagent.market.universes import UniverseCreate, builtin_universes, merge_uni
 from qagent.monitoring.outcomes import compute_opportunity_outcome, summarize_strategy_performance
 from qagent.monitoring.portfolio import PositionInput, analyze_position_risk
 from qagent.monitoring.alerts import AlertRule, suggest_alert_rules
+from qagent.paper_trading.engine import (
+    seed_paper_trades_from_snapshots,
+    update_paper_trades,
+    summarize_paper_trades,
+)
 from qagent.providers.factory import build_market_data_provider
 from qagent.providers.status import build_provider_status
+from qagent.storage.paper import PaperTradingRepository
 from qagent.storage.repository import (
     AlertRuleCreate,
     PositionCreate,
@@ -117,6 +123,11 @@ def _repo() -> QagentRepository:
 def _market_cache_repo() -> MarketDataCacheRepository:
     initialize_database()
     return MarketDataCacheRepository(create_session_factory())
+
+
+def _paper_repo() -> PaperTradingRepository:
+    initialize_database()
+    return PaperTradingRepository(create_session_factory())
 
 
 @router.get("/opportunities")
@@ -262,6 +273,40 @@ def run_automation(
             run_backtest=run_backtest,
             recipient=recipient,
             limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result.model_dump(mode="json")
+
+
+@router.get("/paper-trades")
+def paper_trades(status: str | None = None, limit: int = 100) -> dict[str, object]:
+    if limit <= 0 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+    trades = _paper_repo().list_trades(status=status, limit=limit)
+    return {
+        "summary": summarize_paper_trades(trades).model_dump(mode="json"),
+        "trades": [trade.model_dump(mode="json") for trade in trades],
+    }
+
+
+@router.post("/paper-trades/seed")
+def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, object]:
+    if limit <= 0 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+    mode = provider.strip().lower()
+    snapshots = _repo().list_opportunity_snapshots(limit=limit)
+    result = seed_paper_trades_from_snapshots(_paper_repo(), snapshots, provider=mode)
+    return result.model_dump(mode="json")
+
+
+@router.post("/paper-trades/update")
+def update_paper_trade_status(provider: str = "fixture") -> dict[str, object]:
+    mode = provider.strip().lower()
+    try:
+        result = update_paper_trades(
+            _paper_repo(),
+            provider=build_market_data_provider(mode),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

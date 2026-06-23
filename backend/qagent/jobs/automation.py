@@ -9,8 +9,14 @@ from qagent.catalysts.hypotheses import build_catalyst_hypotheses
 from qagent.catalysts.providers import FreeCatalystProvider
 from qagent.jobs.alert_runner import AlertRunResult, run_alert_rules
 from qagent.jobs.daily_scan import run_daily_scan
+from qagent.paper_trading.engine import (
+    PaperUpdateResult,
+    seed_paper_trades_from_snapshots,
+    update_paper_trades,
+)
 from qagent.providers.base import MarketDataProvider
 from qagent.providers.status import build_provider_status
+from qagent.storage.paper import PaperTradingRepository
 from qagent.storage.repository import QagentRepository
 
 
@@ -22,6 +28,9 @@ class AutomationSummary(BaseModel):
     brief_queued: bool
     alerts_triggered: int
     backtest_signals: int
+    paper_created: int
+    paper_total: int
+    paper_closed: int
 
 
 class AutomationRunResult(BaseModel):
@@ -32,6 +41,7 @@ class AutomationRunResult(BaseModel):
     alert_delivery_id: str | None = None
     backtest: BacktestResult | None = None
     alert_run: AlertRunResult | None = None
+    paper_update: PaperUpdateResult | None = None
     data_health: dict[str, str]
 
 
@@ -45,12 +55,23 @@ def run_research_automation(
     run_alerts: bool = False,
     queue_alerts: bool = True,
     run_backtest: bool = True,
+    seed_paper: bool = True,
+    update_paper: bool = True,
     recipient: str | None = None,
     limit: int = 5,
 ) -> AutomationRunResult:
     mode = provider_mode.strip().lower()
     scan_result = run_daily_scan(symbols, provider, mode=mode)
     scan_run = repo.save_scan_run(provider=mode, mode=mode, symbols=symbols, result=scan_result)
+    paper_seed_created = 0
+    paper_update = None
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    if seed_paper and scan_result.cards:
+        snapshots = repo.list_opportunity_snapshots(limit=len(scan_result.cards))
+        seed_result = seed_paper_trades_from_snapshots(paper_repo, snapshots, provider=mode)
+        paper_seed_created = seed_result.created
+    if update_paper:
+        paper_update = update_paper_trades(paper_repo, provider=provider)
     start_date, end_date = _backtest_dates(mode)
     backtest_result = None
     if run_backtest:
@@ -114,6 +135,9 @@ def run_research_automation(
             brief_queued=brief_delivery is not None,
             alerts_triggered=alert_result.summary.triggered if alert_result else 0,
             backtest_signals=len(backtest_result.signals) if backtest_result else 0,
+            paper_created=paper_seed_created,
+            paper_total=paper_update.summary.total if paper_update else len(paper_repo.list_trades()),
+            paper_closed=paper_update.summary.closed if paper_update else 0,
         ),
         scan_run_id=scan_run.run_id,
         brief_id=saved_brief.brief_id,
@@ -123,6 +147,7 @@ def run_research_automation(
         else None,
         backtest=backtest_result,
         alert_run=alert_result,
+        paper_update=paper_update,
         data_health={**scan_result.data_health, **data_health},
     )
 

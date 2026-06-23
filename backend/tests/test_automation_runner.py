@@ -25,6 +25,8 @@ def test_research_automation_saves_scan_brief_delivery_and_backtest(tmp_path):
     assert result.brief_delivery_id is not None
     assert result.backtest is not None
     assert result.backtest.summary.evaluated_signals >= 1
+    assert result.summary.paper_created == 1
+    assert result.summary.paper_total == 1
     assert repo.list_scan_runs(limit=5)[0].run_id == result.scan_run_id
     assert repo.list_brief_runs(limit=5)[0].brief_id == result.brief_id
     assert repo.list_delivery_outbox(status="queued", limit=5)

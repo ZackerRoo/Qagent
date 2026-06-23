@@ -145,6 +145,13 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
               <span>Backtest</span>
               <strong>{automationResult.summary.backtest_signals} signals</strong>
             </div>
+            <div>
+              <span>Paper</span>
+              <strong>
+                {automationResult.summary.paper_created} new /{" "}
+                {automationResult.summary.paper_total} total
+              </strong>
+            </div>
           </div>
         ) : (
           <div className="empty-state">No automation run in this session.</div>

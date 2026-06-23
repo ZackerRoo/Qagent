@@ -217,6 +217,60 @@ export type PortfolioResponse = {
   data_health: Record<string, string>;
 };
 
+export type PaperTrade = {
+  trade_id: string;
+  source_snapshot_id: string;
+  provider: string;
+  instrument_id: string;
+  strategy_id: string | null;
+  status: string;
+  signal_date: string;
+  trigger_price: string;
+  initial_stop: string | null;
+  target_1: string | null;
+  rank_score: string | null;
+  entry_date: string | null;
+  entry_price: string | null;
+  exit_date: string | null;
+  exit_price: string | null;
+  latest_date: string | null;
+  latest_price: string | null;
+  unrealized_return_pct: number | null;
+  realized_return_pct: number | null;
+  holding_days: number;
+  notes: string;
+};
+
+export type PaperTradingSummary = {
+  total: number;
+  pending: number;
+  open: number;
+  closed: number;
+  target_hit_count: number;
+  stopped_count: number;
+  time_exit_count: number;
+  win_rate: number | null;
+  average_realized_return_pct: number | null;
+  average_unrealized_return_pct: number | null;
+};
+
+export type PaperTradesResponse = {
+  summary: PaperTradingSummary;
+  trades: PaperTrade[];
+};
+
+export type PaperSeedResponse = {
+  scanned: number;
+  created: number;
+  skipped: number;
+};
+
+export type PaperUpdateResponse = {
+  summary: PaperTradingSummary;
+  trades: PaperTrade[];
+  data_health: Record<string, string>;
+};
+
 export type AlertRule = {
   rule_id: string;
   instrument_id: string;
@@ -397,6 +451,9 @@ export type AutomationSummary = {
   brief_queued: boolean;
   alerts_triggered: number;
   backtest_signals: number;
+  paper_created: number;
+  paper_total: number;
+  paper_closed: number;
 };
 
 export type AutomationRunResponse = {
@@ -407,6 +464,7 @@ export type AutomationRunResponse = {
   alert_delivery_id: string | null;
   backtest: BacktestResponse | null;
   alert_run: AlertRunResponse | null;
+  paper_update: PaperUpdateResponse | null;
   data_health: Record<string, string>;
 };
 
