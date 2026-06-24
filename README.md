@@ -1,19 +1,19 @@
 # Qagent
 
-Qagent is a research-first US + China A-share opportunity radar. It scans symbols, evaluates strategy stacks, builds opportunity cards, explains signal evidence, tracks entry/exit scenarios, monitors positions, evaluates alerts, and turns news into catalyst hypotheses.
+Qagent is a research-first China A-share opportunity radar. It scans symbols, evaluates strategy stacks, builds opportunity cards, explains signal evidence, tracks entry/exit scenarios, monitors positions, evaluates alerts, and turns news into catalyst hypotheses. US-market adapters remain in the codebase, but the default product workflow is A-share first.
 
 It is not an auto-trading or direct stock-picking system. The product is designed to make market research testable: every card should show data source, primary strategy, missing-data strategies, signal evidence, trigger, stop, target, risk scenario, and the verification path behind any news catalyst.
 
 ## What Works Now
 
-- US + A-share scanning with fixture data and free providers.
+- A-share-first scanning with fixture data and free providers.
 - Persistent market-data cache for fixture/free providers, with cache hit/miss data-health fields and Settings-page cache inspection.
 - Daily Brief page and `/api/daily-brief` research digest combining opportunities, entry levels, catalysts, portfolio risk, data caveats, and strategy validation.
 - Saved brief runs with history, detail retrieval, and Markdown export for push-ready workflows.
 - Delivery outbox for saved briefs and alert runs, with queued/sent status plus local Markdown-file and webhook sender adapters.
 - One-command automation runner for scan history, daily brief save/queue, optional alerts, optional backtest validation, and optional outbox sending.
-- US free market data via `yfinance`.
 - A-share free market data via `akshare`, with `baostock` fallback.
+- US free market data via `yfinance` remains available for explicit symbols, but is not the default dashboard route.
 - Strategy registry covering trend momentum, breakout + volume, healthy pullback, GF-DMA health, catalyst transmission, PEAD, analyst revisions, TAM-adjusted PEG, Bayesian growth valuation, sector regime, short squeeze risk, options flow, and insider/institutional confirmation.
 - Strategy-data provider contract for earnings events, SEC filings, A-share announcements, fundamentals, valuation multiples, and analyst context.
 - Real-data strategy adapters for Alpha Vantage fundamentals/earnings/ratings, FMP earnings/fundamentals/analyst estimates, Finnhub earnings/fundamentals/recommendations, SEC EDGAR filings, CNINFO announcements, and Tushare configuration.
@@ -89,7 +89,7 @@ npm run build
 ## Key API Examples
 
 ```bash
-curl 'http://127.0.0.1:8000/api/opportunities?provider=free&symbols=US:AAPL,CN:000001'
+curl 'http://127.0.0.1:8000/api/opportunities?provider=free&symbols=CN:000001,CN:600519'
 curl 'http://127.0.0.1:8000/api/daily-brief?provider=fixture&include_news=false'
 curl -X POST 'http://127.0.0.1:8000/api/daily-brief/runs?provider=fixture&include_news=false'
 curl 'http://127.0.0.1:8000/api/daily-brief/runs'
@@ -110,7 +110,7 @@ curl -X POST 'http://127.0.0.1:8000/api/alerts/run?provider=fixture&queue=true&r
 curl 'http://127.0.0.1:8000/api/provider-status'
 curl 'http://127.0.0.1:8000/api/data-cache?provider=free'
 curl -X DELETE 'http://127.0.0.1:8000/api/data-cache?provider=free'
-curl 'http://127.0.0.1:8000/api/catalysts?symbols=US:AAPL&limit=5'
+curl 'http://127.0.0.1:8000/api/catalysts?symbols=CN:000001&limit=5'
 curl 'http://127.0.0.1:8000/api/portfolio?provider=fixture'
 ```
 
@@ -127,7 +127,7 @@ CLI daily brief handoff:
 ```bash
 cd backend
 .venv/bin/python -m qagent.cli daily-brief --provider fixture --no-news --save --queue --print-markdown
-.venv/bin/python -m qagent.cli run-all --provider fixture --symbols US:TEST --no-news --queue-brief --run-backtest
+.venv/bin/python -m qagent.cli run-all --provider free --symbols CN:000001,CN:600519 --no-news --queue-brief --run-backtest
 .venv/bin/python -m qagent.cli send-outbox --channel markdown --output-dir ../data/outbox
 ```
 

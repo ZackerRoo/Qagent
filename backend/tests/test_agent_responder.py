@@ -51,3 +51,48 @@ def test_responder_explains_why_from_signal_summary():
     assert "trend_strength" in answer
     assert "breakout" in answer
     assert "0.91" in answer
+
+
+def test_responder_recommends_ranked_cards_with_entry_and_exit_levels():
+    answer = answer_question(
+        "今天推荐什么股票，什么时候买什么时候卖？",
+        context={
+            "cards": [
+                {
+                    "instrument_id": "CN:000063",
+                    "action": "watch_trigger",
+                    "conviction_score": 0.63,
+                    "trigger_price": "38.01",
+                    "initial_stop": "35.82",
+                    "target_1": "41.05",
+                    "target_2": "42.57",
+                    "no_chase_above": "39.53",
+                    "risk_reward": 1.39,
+                    "primary_strategy_id": "healthy_pullback",
+                    "data_caveats": ["provider: baostock"],
+                },
+                {
+                    "instrument_id": "CN:600519",
+                    "action": "avoid",
+                    "conviction_score": 0.41,
+                    "trigger_price": None,
+                    "initial_stop": None,
+                    "target_1": None,
+                    "target_2": None,
+                    "no_chase_above": None,
+                    "risk_reward": None,
+                    "primary_strategy_id": None,
+                    "data_caveats": ["provider: baostock"],
+                },
+            ],
+            "provider": "free",
+        },
+    )
+
+    assert "CN:000063" in answer
+    assert "38.01" in answer
+    assert "35.82" in answer
+    assert "41.05" in answer
+    assert "39.53" in answer
+    assert "baostock" in answer
+    assert "不是投资建议" in answer

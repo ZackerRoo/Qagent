@@ -418,6 +418,10 @@ function BriefOpportunityMarketSections({ items }: { items: DailyBriefOpportunit
   const { t } = useI18n();
   const sections = createMarketSections(items, (item) => item.instrument_id);
 
+  if (!sections.length) {
+    return <p className="empty">{t("brief.noRanked")}</p>;
+  }
+
   return (
     <div className="market-sections">
       {sections.map((section) => (
@@ -491,6 +495,10 @@ function BriefOpportunityTable({ items }: { items: DailyBriefOpportunity[] }) {
 function BriefEntryWatchMarketSections({ items }: { items: DailyBriefEntryWatch[] }) {
   const { t } = useI18n();
   const sections = createMarketSections(items, (item) => item.instrument_id);
+
+  if (!sections.length) {
+    return <p className="empty">{t("brief.noTrigger")}</p>;
+  }
 
   return (
     <div className="market-sections">

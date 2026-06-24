@@ -3,9 +3,15 @@ import { useState } from "react";
 
 import { askAgent } from "../api/client";
 import { useI18n } from "../i18n";
-import type { OpportunityCard } from "../types";
+import type { DataProviderMode, OpportunityCard } from "../types";
 
-export function AgentPanel({ selectedCard }: { selectedCard?: OpportunityCard }) {
+type Props = {
+  selectedCard?: OpportunityCard;
+  dataMode: DataProviderMode;
+  symbols: string;
+};
+
+export function AgentPanel({ selectedCard, dataMode, symbols }: Props) {
   const { t } = useI18n();
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
@@ -14,7 +20,12 @@ export function AgentPanel({ selectedCard }: { selectedCard?: OpportunityCard })
   async function submit() {
     setLoading(true);
     try {
-      const result = await askAgent(question.trim() || t("agent.defaultQuestion"), selectedCard?.instrument_id);
+      const result = await askAgent(
+        question.trim() || t("agent.defaultQuestion"),
+        selectedCard?.instrument_id,
+        dataMode,
+        symbols,
+      );
       setAnswer(result.answer);
     } finally {
       setLoading(false);

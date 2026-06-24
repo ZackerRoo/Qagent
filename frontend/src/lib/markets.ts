@@ -10,8 +10,8 @@ export type MarketSectionResult<T> = MarketSection & {
 };
 
 export const MARKET_SECTIONS: MarketSection[] = [
-  { market: "US", labelKey: "market.us" },
   { market: "CN", labelKey: "market.cn" },
+  { market: "US", labelKey: "market.us" },
 ];
 
 export function getMarketFromInstrument(instrumentId: string): Market | null {
@@ -32,5 +32,5 @@ export function createMarketSections<T>(
   return MARKET_SECTIONS.map((section) => ({
     ...section,
     items: items.filter((item) => getMarketFromInstrument(getInstrumentId(item)) === section.market),
-  }));
+  })).filter((section) => section.items.length > 0);
 }

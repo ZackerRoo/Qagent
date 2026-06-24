@@ -14,6 +14,10 @@ export function MarketOpportunitySections({ cards, selectedCardId, onSelect }: P
   const { t } = useI18n();
   const sections = createMarketSections(cards, (card) => card.instrument_id);
 
+  if (!sections.length) {
+    return <p className="empty">{t("market.noOpportunities")}</p>;
+  }
+
   return (
     <div className="market-sections">
       {sections.map((section) => (

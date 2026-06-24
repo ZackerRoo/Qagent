@@ -52,3 +52,37 @@ def test_opportunities_endpoint_can_scan_free_us_and_cn_providers(tmp_path, monk
     assert {card["instrument_id"] for card in body["cards"]} == {"US:AAPL", "CN:000001"}
     assert us_provider.calls == [["US:AAPL"]]
     assert cn_provider.calls == [["CN:000001"]]
+
+
+def test_agent_endpoint_uses_requested_provider_and_symbols(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'agent-provider.db'}")
+    us_provider = RecordingProvider("free_us", "US:TEST")
+    cn_provider = RecordingProvider("free_cn", "CN:000001")
+
+    monkeypatch.setattr(
+        "qagent.providers.factory.FreeUsMarketDataProvider",
+        lambda: us_provider,
+    )
+    monkeypatch.setattr(
+        "qagent.providers.factory.FreeCnMarketDataProvider",
+        lambda: cn_provider,
+    )
+
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/agent/query",
+        json={
+            "question": "今天推荐什么股票，什么时候买什么时候卖？",
+            "provider": "free",
+            "symbols": "CN:000001",
+        },
+    )
+
+    assert response.status_code == 200
+    answer = response.json()["answer"]
+    assert "CN:000001" in answer
+    assert "US:TEST" not in answer
+    assert "触发" in answer or "买点" in answer
+    assert "止损" in answer
+    assert cn_provider.calls == [["CN:000001"]]
+    assert us_provider.calls == []

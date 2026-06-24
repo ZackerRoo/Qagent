@@ -27,8 +27,8 @@ function assert(condition, message) {
 
 assert(Array.isArray(mod.MARKET_SECTIONS), "MARKET_SECTIONS must be exported");
 assert(
-  mod.MARKET_SECTIONS.map((section) => section.market).join(",") === "US,CN",
-  "market section order must be US,CN",
+  mod.MARKET_SECTIONS.map((section) => section.market).join(",") === "CN,US",
+  "market section order must be CN,US",
 );
 assert(mod.getMarketFromInstrument("US:NVDA") === "US", "US symbols must map to US");
 assert(mod.getMarketFromInstrument("CN:600519") === "CN", "CN symbols must map to CN");
@@ -43,16 +43,22 @@ const sections = mod.createMarketSections(
   (item) => item.instrument_id,
 );
 
-assert(sections.length === 2, "createMarketSections must always return US and CN sections");
-assert(sections[0].labelKey === "market.us", "US label key must be market.us");
-assert(sections[1].labelKey === "market.cn", "CN label key must be market.cn");
+assert(sections.length === 2, "createMarketSections must return sections that have data");
+assert(sections[0].labelKey === "market.cn", "CN label key must be market.cn");
+assert(sections[1].labelKey === "market.us", "US label key must be market.us");
 assert(
-  sections[0].items.map((item) => item.instrument_id).join(",") === "US:NVDA,US:MSFT",
-  "US section must contain only US symbols in input order",
-);
-assert(
-  sections[1].items.map((item) => item.instrument_id).join(",") === "CN:600519",
+  sections[0].items.map((item) => item.instrument_id).join(",") === "CN:600519",
   "CN section must contain only CN symbols in input order",
 );
+assert(
+  sections[1].items.map((item) => item.instrument_id).join(",") === "US:NVDA,US:MSFT",
+  "US section must contain only US symbols in input order",
+);
 
-console.log("market sections ok: US and CN split deterministically");
+const cnOnlySections = mod.createMarketSections([{ instrument_id: "CN:000001" }], (item) => item.instrument_id);
+assert(
+  cnOnlySections.map((section) => section.market).join(",") === "CN",
+  "CN-only input must not render an empty US section",
+);
+
+console.log("market sections ok: CN-first split with empty sections hidden");

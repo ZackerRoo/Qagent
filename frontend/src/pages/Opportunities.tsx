@@ -54,6 +54,10 @@ function MarketScanCoverageSections({ items }: { items: ScanItem[] }) {
   const { t } = useI18n();
   const sections = createMarketSections(items, (item) => item.instrument_id);
 
+  if (!sections.length) {
+    return <p className="empty">{t("opportunities.noScan")}</p>;
+  }
+
   return (
     <div className="market-sections">
       {sections.map((section) => (

@@ -2,10 +2,13 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DATA_DIR = WORKSPACE_ROOT / "data"
+
 
 class Settings(BaseSettings):
-    database_url: str = "sqlite:///../data/qagent.db"
-    data_dir: Path = Path("../data")
+    database_url: str = f"sqlite:///{DEFAULT_DATA_DIR / 'qagent.db'}"
+    data_dir: Path = DEFAULT_DATA_DIR
     environment: str = "development"
     alpha_vantage_api_key: str | None = None
     fmp_api_key: str | None = None

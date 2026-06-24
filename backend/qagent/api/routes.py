@@ -732,7 +732,7 @@ def upsert_position(position: PositionCreate) -> dict[str, object]:
 
 @router.post("/agent/query", response_model=AgentQueryResponse)
 def agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
-    result, _, _ = _scan()
+    result, mode, _ = _scan(request.provider, request.symbols)
     selected = None
     if request.instrument_id:
         selected = next((card for card in result.cards if card.instrument_id == request.instrument_id), None)
@@ -757,6 +757,29 @@ def agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
             "primary_strategy_id": selected.primary_strategy_id,
             "strategy_score": selected.strategy_score,
             "strategy_summary": _strategy_summary(selected),
+            "cards": [_agent_card_summary(card) for card in result.cards],
+            "provider": mode,
+            "data_health": result.data_health,
         },
     )
     return AgentQueryResponse(answer=answer)
+
+
+def _agent_card_summary(card) -> dict[str, object]:
+    decision = card.decision
+    return {
+        "instrument_id": card.instrument_id,
+        "status": card.status.value,
+        "score": card.score,
+        "rank_score": card.rank_score,
+        "action": decision.action if decision else "watch",
+        "conviction_score": decision.conviction_score if decision else None,
+        "trigger_price": str(card.entry_plan.trigger_price) if card.entry_plan.trigger_price else None,
+        "initial_stop": str(card.exit_plan.initial_stop) if card.exit_plan.initial_stop else None,
+        "target_1": str(card.exit_plan.target_1) if card.exit_plan.target_1 else None,
+        "target_2": str(card.exit_plan.target_2) if card.exit_plan.target_2 else None,
+        "no_chase_above": str(card.entry_plan.no_chase_above) if card.entry_plan.no_chase_above else None,
+        "risk_reward": card.risk_reward,
+        "primary_strategy_id": card.primary_strategy_id,
+        "data_caveats": card.data_caveats,
+    }

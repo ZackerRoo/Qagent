@@ -141,11 +141,16 @@ export async function fetchOpportunities(params?: ScanParams): Promise<Opportuni
   return apiGet<OpportunitiesResponse>("/opportunities", params);
 }
 
-export async function askAgent(question: string, instrumentId?: string): Promise<AgentResponse> {
+export async function askAgent(
+  question: string,
+  instrumentId?: string,
+  provider?: DataProviderMode,
+  symbols?: string,
+): Promise<AgentResponse> {
   const response = await fetch(`${API_BASE}/agent/query`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, instrument_id: instrumentId }),
+    body: JSON.stringify({ question, instrument_id: instrumentId, provider, symbols }),
   });
   if (!response.ok) {
     throw new Error(`Agent request failed: ${response.status}`);

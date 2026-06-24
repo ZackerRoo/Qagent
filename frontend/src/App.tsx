@@ -21,17 +21,17 @@ import type {
   UniverseRecord,
 } from "./types";
 
-const DEFAULT_SYMBOLS = "US:AAPL,US:NVDA,US:MSFT,CN:000001,CN:600519";
+const DEFAULT_SYMBOLS = "CN:000001,CN:600519,CN:300750,CN:000063,CN:002415";
 
 export default function App() {
   const [page, setPage] = useState<PageId>("brief");
   const [overview, setOverview] = useState<OverviewResponse>();
   const [opportunities, setOpportunities] = useState<OpportunitiesResponse>();
   const [selectedCard, setSelectedCard] = useState<OpportunityCard>();
-  const [dataMode, setDataMode] = useState<DataProviderMode>("fixture");
+  const [dataMode, setDataMode] = useState<DataProviderMode>("free");
   const [symbols, setSymbols] = useState(DEFAULT_SYMBOLS);
   const [universes, setUniverses] = useState<UniverseRecord[]>([]);
-  const [selectedUniverseId, setSelectedUniverseId] = useState("fixture_dev");
+  const [selectedUniverseId, setSelectedUniverseId] = useState("free_default");
   const [isScanning, setIsScanning] = useState(false);
   const [error, setError] = useState("");
 
@@ -58,7 +58,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    void loadDashboard("fixture", DEFAULT_SYMBOLS);
+    void loadDashboard("free", DEFAULT_SYMBOLS);
     void refreshUniverses();
   }, []);
 
@@ -149,7 +149,7 @@ export default function App() {
     <Layout
       page={page}
       onPageChange={setPage}
-      rightPanel={<AgentPanel selectedCard={selectedCard} />}
+      rightPanel={<AgentPanel selectedCard={selectedCard} dataMode={dataMode} symbols={symbols} />}
       dataMode={dataMode}
       isScanning={isScanning}
       symbols={symbols}
