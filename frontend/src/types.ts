@@ -1,5 +1,6 @@
 export type Market = "US" | "CN";
 export type DataProviderMode = "fixture" | "free";
+export type ResearchProfile = "balanced" | "short_term" | "swing" | "growth" | "conservative";
 
 export type UniverseRecord = {
   universe_id: string;
@@ -91,6 +92,13 @@ export type OpportunityCard = {
   decision: OpportunityDecision | null;
 };
 
+export type RiskVeto = {
+  code: string;
+  severity: string;
+  title: string;
+  message: string;
+};
+
 export type FactorExposure = {
   factor_id: string;
   label: string;
@@ -130,6 +138,8 @@ export type OpportunityDecision = {
   action_label: string;
   conviction_score: number;
   components: DecisionComponents;
+  risk_status: string;
+  risk_vetoes: RiskVeto[];
   suggested_risk_pct: number;
   max_position_pct: number;
   trigger_price: string | null;
@@ -189,6 +199,14 @@ export type ScanItem = {
   factor_score: number | null;
   factor_rank: number | null;
   factor_flags: string[];
+  blockers: ScanBlocker[];
+};
+
+export type ScanBlocker = {
+  code: string;
+  severity: string;
+  title: string;
+  message: string;
 };
 
 export type OpportunitiesResponse = {
@@ -196,6 +214,56 @@ export type OpportunitiesResponse = {
   items: ScanItem[];
   strategy_health: StrategyHealth[];
   factor_rankings: FactorRanking[];
+  data_health: Record<string, string>;
+};
+
+export type MarketBarPoint = {
+  trade_date: string;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  volume: number;
+  ma20: number | null;
+  ma50: number | null;
+  ma100: number | null;
+  ma200: number | null;
+};
+
+export type MarketBarsResponse = {
+  instrument_id: string;
+  bars: MarketBarPoint[];
+  levels: {
+    trigger_price: string | null;
+    initial_stop: string | null;
+    target_1: string | null;
+    target_2: string | null;
+    no_chase_above: string | null;
+  };
+  data_health: Record<string, string>;
+};
+
+export type IntradayRadarItem = {
+  instrument_id: string;
+  latest_trade_date: string | null;
+  latest_close: string | null;
+  previous_close: string | null;
+  change_pct: number | null;
+  volume_ratio: number | null;
+  signal: string;
+  severity: string;
+  score: number;
+  message: string;
+  action: string;
+  distance_to_trigger_pct: number | null;
+  trigger_price: string | null;
+  initial_stop: string | null;
+  target_1: string | null;
+  no_chase_above: string | null;
+};
+
+export type IntradayRadarResponse = {
+  items: IntradayRadarItem[];
   data_health: Record<string, string>;
 };
 
@@ -522,6 +590,24 @@ export type StrategyPerformance = {
 
 export type StrategyPerformanceResponse = {
   performance: StrategyPerformance[];
+  data_health: Record<string, string>;
+};
+
+export type StrategyDiagnostic = {
+  strategy_id: string;
+  verdict: string;
+  sample_count: number;
+  completed_count: number;
+  target_hit_rate: number | null;
+  positive_rate_10d: number | null;
+  avg_return_10d: number | null;
+  max_drawdown_pct: number | null;
+  reason: string;
+  recommendation: string;
+};
+
+export type StrategyDiagnosticsResponse = {
+  diagnostics: StrategyDiagnostic[];
   data_health: Record<string, string>;
 };
 

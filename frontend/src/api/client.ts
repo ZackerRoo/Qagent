@@ -18,6 +18,8 @@ import type {
   DeliveriesResponse,
   DeliveryOutboxRecord,
   FactorBacktestResponse,
+  IntradayRadarResponse,
+  MarketBarsResponse,
   MarketDataCacheResponse,
   OpportunitiesResponse,
   OpportunityHistoryResponse,
@@ -32,6 +34,7 @@ import type {
   PositionsResponse,
   ProviderStatusResponse,
   ScanRunsResponse,
+  StrategyDiagnosticsResponse,
   StrategyPerformanceResponse,
   UniverseCreate,
   UniverseRecord,
@@ -61,6 +64,7 @@ type ScanParams = {
   max_positions?: number;
   transaction_cost_bps?: string | number;
   slippage_bps?: string | number;
+  days?: number;
 };
 
 function queryString(params?: ScanParams): string {
@@ -122,6 +126,9 @@ function queryString(params?: ScanParams): string {
   if (params.slippage_bps) {
     search.set("slippage_bps", String(params.slippage_bps));
   }
+  if (params.days) {
+    search.set("days", String(params.days));
+  }
   const value = search.toString();
   return value ? `?${value}` : "";
 }
@@ -140,6 +147,25 @@ export async function fetchOverview(params?: ScanParams): Promise<OverviewRespon
 
 export async function fetchOpportunities(params?: ScanParams): Promise<OpportunitiesResponse> {
   return apiGet<OpportunitiesResponse>("/opportunities", params);
+}
+
+export async function fetchMarketBars(
+  provider: DataProviderMode,
+  instrumentId: string,
+  days = 160,
+): Promise<MarketBarsResponse> {
+  return apiGet<MarketBarsResponse>("/market-bars", {
+    provider,
+    instrument_id: instrumentId,
+    days,
+  });
+}
+
+export async function fetchIntradayRadar(
+  provider: DataProviderMode,
+  symbols?: string,
+): Promise<IntradayRadarResponse> {
+  return apiGet<IntradayRadarResponse>("/intraday-radar", { provider, symbols });
 }
 
 export async function askAgent(
@@ -266,6 +292,12 @@ export async function fetchStrategyPerformance(
   provider: DataProviderMode,
 ): Promise<StrategyPerformanceResponse> {
   return apiGet<StrategyPerformanceResponse>("/strategy-performance", { provider, limit: 100 });
+}
+
+export async function fetchStrategyDiagnostics(
+  provider: DataProviderMode,
+): Promise<StrategyDiagnosticsResponse> {
+  return apiGet<StrategyDiagnosticsResponse>("/strategy-diagnostics", { provider, limit: 100 });
 }
 
 export async function fetchBacktest(

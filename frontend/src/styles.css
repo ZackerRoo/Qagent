@@ -144,7 +144,7 @@ h3 {
 
 .scan-controls {
   display: grid;
-  grid-template-columns: auto auto minmax(110px, 180px) minmax(130px, 1fr) auto;
+  grid-template-columns: auto auto minmax(110px, 170px) minmax(100px, 140px) minmax(130px, 1fr) auto;
   gap: 8px;
   align-items: center;
   width: 100%;
@@ -493,6 +493,31 @@ tbody tr.selected {
   color: #9f1f1f;
 }
 
+.status-danger,
+.status-blocked,
+.status-weak {
+  background: #ffe7e7;
+  color: #9f1f1f;
+}
+
+.status-success,
+.status-clear,
+.status-effective {
+  background: #dff4e8;
+  color: #116b3c;
+}
+
+.status-warning,
+.status-insufficient_sample {
+  background: #fff3d6;
+  color: #8a5b00;
+}
+
+.status-info {
+  background: #f1f5f9;
+  color: #475569;
+}
+
 .reason-cell {
   max-width: 280px;
   white-space: normal;
@@ -559,6 +584,177 @@ tbody tr.selected {
 
 .decision-list {
   margin-top: 10px;
+}
+
+.profile-note {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  border: 1px solid #d8dee8;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  padding: 9px 10px;
+  background: #f8fafc;
+}
+
+.profile-note span {
+  border-radius: 6px;
+  background: #0f4c81;
+  color: #ffffff;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.profile-note p {
+  margin: 0;
+  color: #475569;
+  font-size: 13px;
+}
+
+.risk-veto-summary {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.risk-veto-summary strong {
+  color: #475569;
+  font-size: 13px;
+}
+
+.risk-veto-list {
+  display: grid;
+  gap: 8px;
+}
+
+.risk-veto {
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 9px;
+}
+
+.risk-veto-block {
+  border-color: #fecaca;
+  background: #fff7f7;
+}
+
+.risk-veto-warning {
+  border-color: #fde68a;
+  background: #fffaf0;
+}
+
+.risk-veto strong {
+  display: block;
+  color: #17202a;
+  font-size: 13px;
+}
+
+.risk-veto p {
+  margin: 4px 0 0;
+}
+
+.chart-shell {
+  display: grid;
+  gap: 8px;
+}
+
+.chart-shell svg {
+  width: 100%;
+  min-height: 210px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.chart-shell rect {
+  fill: #ffffff;
+}
+
+.chart-grid line {
+  stroke: #e2e8f0;
+  stroke-width: 1;
+}
+
+.chart-grid text,
+.level-trigger text,
+.level-stop text,
+.level-target text,
+.level-no-chase text {
+  fill: #64748b;
+  font-size: 11px;
+}
+
+.series-close,
+.series-ma20,
+.series-ma50 {
+  fill: none;
+  stroke-width: 2;
+}
+
+.series-close {
+  stroke: #0f4c81;
+}
+
+.series-ma20 {
+  stroke: #16a34a;
+}
+
+.series-ma50 {
+  stroke: #d97706;
+}
+
+.level-trigger line,
+.level-stop line,
+.level-target line,
+.level-no-chase line {
+  stroke-width: 1.5;
+  stroke-dasharray: 4 4;
+}
+
+.level-trigger line {
+  stroke: #1d4ed8;
+}
+
+.level-stop line {
+  stroke: #dc2626;
+}
+
+.level-target line {
+  stroke: #16a34a;
+}
+
+.level-no-chase line {
+  stroke: #d97706;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: #475569;
+  font-size: 12px;
+}
+
+.chart-legend span::before {
+  content: "";
+  display: inline-block;
+  width: 14px;
+  height: 3px;
+  margin-right: 5px;
+  vertical-align: middle;
+  border-radius: 999px;
+  background: #0f4c81;
+}
+
+.chart-legend .legend-ma20::before {
+  background: #16a34a;
+}
+
+.chart-legend .legend-ma50::before {
+  background: #d97706;
 }
 
 .scenario-grid div {

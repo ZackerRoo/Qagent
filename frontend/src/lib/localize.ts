@@ -15,6 +15,25 @@ const ACTION_LABELS: LabelMap = {
   pending: { zh: "待定", en: "Pending" },
 };
 
+const PROFILE_LABELS: LabelMap = {
+  balanced: { zh: "均衡", en: "Balanced" },
+  swing: { zh: "波段", en: "Swing" },
+  short_term: { zh: "短线", en: "Short-term" },
+  growth: { zh: "成长", en: "Growth" },
+  conservative: { zh: "保守", en: "Conservative" },
+};
+
+const PROFILE_REASON_LABELS: LabelMap = {
+  profile_balanced_default: { zh: "综合排序：策略、因子、执行和风险共同评分。", en: "Balanced ranking from strategy, factors, execution, and risk." },
+  profile_swing_balanced: { zh: "波段模式更重视盈亏比和可执行价位。", en: "Swing mode emphasizes risk/reward and executable levels." },
+  profile_short_term_ready: { zh: "短线模式认为价格接近触发区，适合盯盘确认。", en: "Short-term mode sees price near the trigger zone." },
+  profile_short_term_wait: { zh: "短线模式仍需要触发价和量能确认。", en: "Short-term mode still needs trigger and volume confirmation." },
+  profile_growth_supported: { zh: "成长模式加权了业绩、上修、TAM 或内生成长策略。", en: "Growth mode boosts earnings, revisions, TAM, or intrinsic growth strategies." },
+  profile_growth_not_primary: { zh: "成长模式下不是最强成长主线，需更多基本面确认。", en: "Growth mode needs stronger fundamental confirmation here." },
+  profile_conservative_clean: { zh: "保守模式未发现硬性风险否决。", en: "Conservative mode finds no hard risk veto." },
+  profile_conservative_risk: { zh: "保守模式因风险否决或数据限制降低排序。", en: "Conservative mode penalizes risk vetoes or data caveats." },
+};
+
 const STATUS_LABELS: LabelMap = {
   new_idea: { zh: "新机会", en: "New idea" },
   watch: { zh: "观察", en: "Watch" },
@@ -42,6 +61,9 @@ const STATUS_LABELS: LabelMap = {
   time_exit: { zh: "时间退出", en: "Time exit" },
   stop_breached: { zh: "跌破止损", en: "Stop breached" },
   target_reached: { zh: "到达目标", en: "Target reached" },
+  clear: { zh: "通过", en: "Clear" },
+  warning: { zh: "需警惕", en: "Warning" },
+  blocked: { zh: "否决", en: "Blocked" },
   inside_plan: { zh: "计划内", en: "Inside plan" },
   no_price: { zh: "无价格", en: "No price" },
   ready: { zh: "可用", en: "Ready" },
@@ -51,6 +73,84 @@ const STATUS_LABELS: LabelMap = {
   sent: { zh: "已发送", en: "Sent" },
   acknowledged: { zh: "已确认", en: "Acknowledged" },
   expired: { zh: "已过期", en: "Expired" },
+};
+
+const RISK_VETO_LABELS: LabelMap = {
+  poor_risk_reward: { zh: "盈亏比不足", en: "Poor risk/reward" },
+  weak_data_quality: { zh: "数据质量不足", en: "Weak data quality" },
+  incomplete_trade_plan: { zh: "交易计划不完整", en: "Incomplete trade plan" },
+  too_close_to_no_chase: { zh: "接近不追高位", en: "Too close to no-chase level" },
+  tight_no_chase_gap: { zh: "追高空间过窄", en: "Tight no-chase gap" },
+  low_liquidity: { zh: "流动性偏弱", en: "Low liquidity" },
+  overextended: { zh: "短线过热", en: "Overextended" },
+  high_volatility: { zh: "波动偏高", en: "High volatility" },
+  insufficient_history: { zh: "历史不足", en: "Insufficient history" },
+  many_data_caveats: { zh: "数据限制较多", en: "Multiple data caveats" },
+};
+
+const RISK_VETO_MESSAGES: LabelMap = {
+  poor_risk_reward: { zh: "当前盈亏比不足，不适合作为新买点。", en: "Risk/reward is too low for a new entry." },
+  weak_data_quality: { zh: "关键策略数据缺失较多，不能放大仓位。", en: "Too much required strategy data is missing." },
+  incomplete_trade_plan: { zh: "触发、止损、目标或不追高价位不完整。", en: "Entry, stop, target, or no-chase level is incomplete." },
+  too_close_to_no_chase: { zh: "价格太接近不追高位，追入不划算。", en: "Price is too close to the no-chase level." },
+  tight_no_chase_gap: { zh: "入场窗口较窄，等待更清晰确认。", en: "The entry window is narrow; wait for cleaner confirmation." },
+  low_liquidity: { zh: "流动性弱，容易滑点或无法按计划退出。", en: "Liquidity is weak; sizing should be avoided or reduced." },
+  overextended: { zh: "价格相对趋势支撑偏离较大，不适合追高。", en: "Price is stretched versus trend support." },
+  high_volatility: { zh: "近期波动较高，止损可能更容易被噪音触发。", en: "Recent volatility is elevated." },
+  insufficient_history: { zh: "价格历史不足，均线结构验证不充分。", en: "Not enough price history to validate trend structure." },
+  many_data_caveats: { zh: "数据限制较多，行动前需要复核来源。", en: "Several data caveats are present; verify the source." },
+};
+
+const SCAN_BLOCKER_LABELS: LabelMap = {
+  no_daily_bars: { zh: "没有日线行情", en: "No daily bars" },
+  signal_threshold_not_met: { zh: "信号强度不足", en: "Signal threshold not met" },
+  no_active_signals: { zh: "没有活跃信号", en: "No active signals" },
+  no_strategy_passed: { zh: "没有策略通过", en: "No strategy passed" },
+  strategy_data_missing: { zh: "策略数据缺失", en: "Strategy data missing" },
+};
+
+const SCAN_BLOCKER_MESSAGES: LabelMap = {
+  no_daily_bars: { zh: "数据源没有返回日线行情，暂时无法判断。", en: "The provider did not return daily OHLCV bars." },
+  signal_threshold_not_met: { zh: "信号组合还没有达到机会卡阈值。", en: "The signal stack did not reach the opportunity-card threshold." },
+  no_active_signals: { zh: "趋势、回调、突破、量能或涨跌停信号都不活跃。", en: "No trend, pullback, breakout, volume, or limit-status signal is active." },
+  no_strategy_passed: { zh: "策略库里没有策略满足前置条件。", en: "No strategy passed its preconditions." },
+  strategy_data_missing: { zh: "部分策略输入缺失，需要补齐后再判断。", en: "Some strategy inputs are missing." },
+};
+
+const RADAR_SIGNAL_LABELS: LabelMap = {
+  approaching_trigger: { zh: "接近买点", en: "Approaching trigger" },
+  trigger_breakout: { zh: "突破触发", en: "Trigger breakout" },
+  near_stop: { zh: "接近止损", en: "Near stop" },
+  near_target: { zh: "接近目标", en: "Near target" },
+  volume_surge: { zh: "放量异动", en: "Volume surge" },
+  overextended: { zh: "短线过热", en: "Overextended" },
+  inside_plan: { zh: "计划内", en: "Inside plan" },
+  no_setup: { zh: "未形成机会", en: "No setup" },
+};
+
+const RADAR_ACTION_LABELS: LabelMap = {
+  approaching_trigger: { zh: "等待触发价和量能确认，不提前抢跑。", en: "Wait for trigger and volume confirmation." },
+  trigger_breakout: { zh: "检查不追高位和风险否决后，再按计划处理。", en: "Check no-chase level and risk vetoes before acting." },
+  near_stop: { zh: "不要加仓，先确认形态是否失效。", en: "Do not add exposure; verify invalidation." },
+  near_target: { zh: "按退出计划处理，可考虑分批或上移止损。", en: "Follow the exit plan; consider partial profit or tighter trailing stop." },
+  volume_surge: { zh: "核对是否同时突破触发价。", en: "Check whether price confirms the trigger." },
+  overextended: { zh: "避免追高，等待新形态或回调。", en: "Avoid chasing; wait for a new setup or pullback." },
+  inside_plan: { zh: "继续跟踪触发、止损、目标和不追高位。", en: "Track trigger, stop, target, and no-chase levels." },
+  no_setup: { zh: "先放入观察，查看未推荐原因。", en: "Keep on watchlist; review blockers." },
+};
+
+const DIAGNOSTIC_VERDICT_LABELS: LabelMap = {
+  effective: { zh: "有效", en: "Effective" },
+  watch: { zh: "观察", en: "Watch" },
+  weak: { zh: "偏弱", en: "Weak" },
+  insufficient_sample: { zh: "样本不足", en: "Insufficient sample" },
+};
+
+const DIAGNOSTIC_REASON_LABELS: LabelMap = {
+  effective: { zh: "历史复盘显示有正向延续或目标命中表现。", en: "Replay shows positive follow-through or target-hit behavior." },
+  watch: { zh: "复盘结果混合，需要当前价格行为和风险控制共同确认。", en: "Replay is mixed; use current price action and risk controls." },
+  weak: { zh: "复盘收益偏弱，止损表现没有被目标命中抵消。", en: "Replay is weak; stops are not outweighed by target hits." },
+  insufficient_sample: { zh: "样本太少，暂时不能判断策略是否可靠。", en: "Replay sample is too small to judge reliability." },
 };
 
 const STRATEGY_LABELS: LabelMap = {
@@ -251,6 +351,11 @@ const DATA_HEALTH_KEYS: LabelMap = {
   market_cache_hits: { zh: "缓存命中", en: "Cache hits" },
   market_cache_misses: { zh: "缓存未命中", en: "Cache misses" },
   market_cache_rows: { zh: "缓存行数", en: "Cache rows" },
+  instrument: { zh: "标的", en: "Instrument" },
+  symbols: { zh: "标的数", en: "Symbols" },
+  bars: { zh: "K线数", en: "Bars" },
+  radar_items: { zh: "雷达项", en: "Radar items" },
+  diagnostics: { zh: "诊断数", en: "Diagnostics" },
   errors: { zh: "错误", en: "Errors" },
   strategy_data_errors: { zh: "策略数据错误", en: "Strategy data errors" },
   brief_opportunities: { zh: "简报机会", en: "Brief opportunities" },
@@ -533,8 +638,70 @@ export function localizeAction(value: string | null | undefined, language: Langu
   return label(ACTION_LABELS, value, language);
 }
 
+export function localizeProfile(value: string | null | undefined, language: Language): string {
+  return label(PROFILE_LABELS, value, language);
+}
+
+export function localizeProfileReason(value: string | null | undefined, language: Language): string {
+  return label(PROFILE_REASON_LABELS, value, language);
+}
+
 export function localizeStatus(value: string | null | undefined, language: Language): string {
   return label(STATUS_LABELS, value, language);
+}
+
+export function localizeRiskStatus(value: string | null | undefined, language: Language): string {
+  return label(STATUS_LABELS, value, language);
+}
+
+export function localizeRiskVeto(value: string | null | undefined, language: Language): string {
+  return label(RISK_VETO_LABELS, value, language);
+}
+
+export function localizeRiskVetoMessage(
+  value: string | null | undefined,
+  fallback: string | null | undefined,
+  language: Language,
+): string {
+  const localized = label(RISK_VETO_MESSAGES, value, language);
+  return localized === humanize(value ?? "") ? localizeReason(fallback, language) : localized;
+}
+
+export function localizeScanBlocker(value: string | null | undefined, language: Language): string {
+  return label(SCAN_BLOCKER_LABELS, value, language);
+}
+
+export function localizeScanBlockerMessage(
+  value: string | null | undefined,
+  fallback: string | null | undefined,
+  language: Language,
+): string {
+  const localized = label(SCAN_BLOCKER_MESSAGES, value, language);
+  return localized === humanize(value ?? "") ? localizeReason(fallback, language) : localized;
+}
+
+export function localizeRadarSignal(value: string | null | undefined, language: Language): string {
+  return label(RADAR_SIGNAL_LABELS, value, language);
+}
+
+export function localizeRadarAction(value: string | null | undefined, language: Language): string {
+  return label(RADAR_ACTION_LABELS, value, language);
+}
+
+export function localizeDiagnosticVerdict(
+  value: string | null | undefined,
+  language: Language,
+): string {
+  return label(DIAGNOSTIC_VERDICT_LABELS, value, language);
+}
+
+export function localizeDiagnosticReason(
+  value: string | null | undefined,
+  fallback: string | null | undefined,
+  language: Language,
+): string {
+  const localized = label(DIAGNOSTIC_REASON_LABELS, value, language);
+  return localized === humanize(value ?? "") ? localizeReason(fallback, language) : localized;
 }
 
 export function localizeStrategy(value: string | null | undefined, language: Language): string {

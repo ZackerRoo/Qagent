@@ -67,6 +67,19 @@ class StrategyPerformance(BaseModel):
     max_runup_pct: float | None
 
 
+class StrategyDiagnostic(BaseModel):
+    strategy_id: str
+    verdict: str
+    sample_count: int
+    completed_count: int
+    target_hit_rate: float | None
+    positive_rate_10d: float | None
+    avg_return_10d: float | None
+    max_drawdown_pct: float | None
+    reason: str
+    recommendation: str
+
+
 def compute_opportunity_outcome(
     snapshot: OpportunitySnapshotRecord,
     bars: pd.DataFrame,
@@ -183,6 +196,87 @@ def summarize_strategy_performance(
             )
         )
     return sorted(rows, key=lambda item: (item.target_hit_rate or 0, item.sample_count), reverse=True)
+
+
+def diagnose_strategy_performance(
+    performance: list[StrategyPerformance],
+) -> list[StrategyDiagnostic]:
+    diagnostics = [_diagnose_strategy(item) for item in performance]
+    return sorted(
+        diagnostics,
+        key=lambda item: (
+            _verdict_rank(item.verdict),
+            item.completed_count,
+            item.target_hit_rate or 0,
+        ),
+        reverse=True,
+    )
+
+
+def _diagnose_strategy(item: StrategyPerformance) -> StrategyDiagnostic:
+    if item.sample_count < 3 or item.completed_count < 2:
+        return StrategyDiagnostic(
+            strategy_id=item.strategy_id,
+            verdict="insufficient_sample",
+            sample_count=item.sample_count,
+            completed_count=item.completed_count,
+            target_hit_rate=item.target_hit_rate,
+            positive_rate_10d=item.positive_rate_10d,
+            avg_return_10d=item.avg_return_10d,
+            max_drawdown_pct=item.max_drawdown_pct,
+            reason="Replay sample is too small to judge whether this strategy is reliable.",
+            recommendation="Use as context only; require fresh confirmation and conservative sizing.",
+        )
+    if (
+        (item.target_hit_rate is not None and item.target_hit_rate >= 0.5)
+        or (item.positive_rate_10d is not None and item.positive_rate_10d >= 0.55)
+    ) and (item.avg_return_10d is None or item.avg_return_10d >= 0):
+        return StrategyDiagnostic(
+            strategy_id=item.strategy_id,
+            verdict="effective",
+            sample_count=item.sample_count,
+            completed_count=item.completed_count,
+            target_hit_rate=item.target_hit_rate,
+            positive_rate_10d=item.positive_rate_10d,
+            avg_return_10d=item.avg_return_10d,
+            max_drawdown_pct=item.max_drawdown_pct,
+            reason="Replay shows positive follow-through or target-hit behavior on completed samples.",
+            recommendation="Can be ranked higher when current setup quality and risk vetoes are clean.",
+        )
+    if (
+        item.avg_return_10d is not None
+        and item.avg_return_10d < 0
+        and item.stopped_count >= item.target_hit_count
+    ):
+        return StrategyDiagnostic(
+            strategy_id=item.strategy_id,
+            verdict="weak",
+            sample_count=item.sample_count,
+            completed_count=item.completed_count,
+            target_hit_rate=item.target_hit_rate,
+            positive_rate_10d=item.positive_rate_10d,
+            avg_return_10d=item.avg_return_10d,
+            max_drawdown_pct=item.max_drawdown_pct,
+            reason="Replay has negative 10-day returns and stops are not outweighed by target hits.",
+            recommendation="Keep this strategy in review until new evidence improves the replay profile.",
+        )
+    return StrategyDiagnostic(
+        strategy_id=item.strategy_id,
+        verdict="watch",
+        sample_count=item.sample_count,
+        completed_count=item.completed_count,
+        target_hit_rate=item.target_hit_rate,
+        positive_rate_10d=item.positive_rate_10d,
+        avg_return_10d=item.avg_return_10d,
+        max_drawdown_pct=item.max_drawdown_pct,
+        reason="Replay is mixed; use current price action and risk controls to decide whether to follow.",
+        recommendation="Do not promote solely from this strategy; require another confirming factor.",
+    )
+
+
+def _verdict_rank(verdict: str) -> int:
+    ranks = {"effective": 3, "watch": 2, "weak": 1, "insufficient_sample": 0}
+    return ranks.get(verdict, 0)
 
 
 def _average(values: list[float]) -> float | None:

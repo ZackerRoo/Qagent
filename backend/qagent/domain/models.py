@@ -86,11 +86,20 @@ class DecisionComponents(BaseModel):
     catalyst_support: float = Field(ge=0.0, le=1.0)
 
 
+class RiskVeto(BaseModel):
+    code: str
+    severity: str
+    title: str
+    message: str
+
+
 class OpportunityDecision(BaseModel):
     action: str
     action_label: str
     conviction_score: float = Field(ge=0.0, le=1.0)
     components: DecisionComponents
+    risk_status: str = "clear"
+    risk_vetoes: list[RiskVeto] = Field(default_factory=list)
     suggested_risk_pct: float = Field(ge=0.0)
     max_position_pct: float = Field(ge=0.0)
     trigger_price: Decimal | None = None

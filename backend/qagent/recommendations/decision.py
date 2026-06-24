@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from qagent.domain.models import DecisionComponents, OpportunityCard, OpportunityDecision
+from qagent.domain.models import DecisionComponents, OpportunityCard, OpportunityDecision, RiskVeto
 
 
 ACTION_LABELS = {
@@ -20,13 +20,21 @@ def build_research_decision(card: OpportunityCard) -> OpportunityDecision:
         catalyst_support=_catalyst_support_component(card),
     )
     conviction = _conviction_score(components)
+    risk_vetoes = _risk_vetoes(card, components)
+    risk_status = _risk_status(risk_vetoes)
     action = _action(card, components, conviction)
+    if risk_status == "blocked":
+        action = "avoid"
+    elif risk_status == "warning" and action == "candidate_entry":
+        action = "watch_trigger"
     risk_pct = _suggested_risk_pct(action, conviction, components.data_quality)
     return OpportunityDecision(
         action=action,
         action_label=ACTION_LABELS[action],
         conviction_score=conviction,
         components=components,
+        risk_status=risk_status,
+        risk_vetoes=risk_vetoes,
         suggested_risk_pct=risk_pct,
         max_position_pct=round(risk_pct * 4, 2),
         trigger_price=card.entry_plan.trigger_price,
@@ -74,6 +82,108 @@ def _suggested_risk_pct(action: str, conviction: float, data_quality: float) -> 
     if action == "wait_pullback":
         base *= 0.45
     return round(min(base * data_quality, 1.5), 2)
+
+
+def _risk_vetoes(card: OpportunityCard, components: DecisionComponents) -> list[RiskVeto]:
+    vetoes: list[RiskVeto] = []
+    if components.risk_reward < 0.35:
+        vetoes.append(
+            RiskVeto(
+                code="poor_risk_reward",
+                severity="block",
+                title="Poor risk/reward",
+                message="Risk/reward is too low for a new entry; wait for a better price or skip.",
+            )
+        )
+    if components.data_quality < 0.35:
+        vetoes.append(
+            RiskVeto(
+                code="weak_data_quality",
+                severity="block",
+                title="Weak data quality",
+                message="Too much required strategy data is missing to size this setup.",
+            )
+        )
+    if components.execution_quality < 0.45:
+        vetoes.append(
+            RiskVeto(
+                code="incomplete_trade_plan",
+                severity="block",
+                title="Incomplete trade plan",
+                message="Entry, stop, target, or no-chase level is incomplete.",
+            )
+        )
+    if card.scenario.no_chase_pct < 1:
+        vetoes.append(
+            RiskVeto(
+                code="too_close_to_no_chase",
+                severity="block",
+                title="Too close to no-chase level",
+                message="The latest price is too close to the no-chase level; chasing has poor asymmetry.",
+            )
+        )
+    elif card.scenario.no_chase_pct < 2:
+        vetoes.append(
+            RiskVeto(
+                code="tight_no_chase_gap",
+                severity="warning",
+                title="Tight no-chase gap",
+                message="The entry window is narrow; wait for cleaner confirmation instead of chasing.",
+            )
+        )
+    flag_rules = {
+        "low_liquidity": (
+            "block",
+            "Low liquidity",
+            "Liquidity is weak in the scanned universe; position sizing should be avoided or reduced.",
+        ),
+        "overextended": (
+            "warning",
+            "Overextended",
+            "Price is stretched versus trend support; wait for pullback or consolidation.",
+        ),
+        "high_volatility": (
+            "warning",
+            "High volatility",
+            "Recent volatility is elevated; stops may be noisy and sizing should be conservative.",
+        ),
+        "insufficient_history": (
+            "warning",
+            "Insufficient history",
+            "There is not enough price history to validate the moving-average structure.",
+        ),
+    }
+    for flag in card.factor_flags:
+        rule = flag_rules.get(flag)
+        if rule is None:
+            continue
+        severity, title, message = rule
+        vetoes.append(
+            RiskVeto(
+                code=flag,
+                severity=severity,
+                title=title,
+                message=message,
+            )
+        )
+    if len(card.data_caveats) >= 3:
+        vetoes.append(
+            RiskVeto(
+                code="many_data_caveats",
+                severity="warning",
+                title="Multiple data caveats",
+                message="Several data caveats are present; verify the source before acting.",
+            )
+        )
+    return _dedupe_vetoes(vetoes)
+
+
+def _risk_status(vetoes: list[RiskVeto]) -> str:
+    if any(veto.severity == "block" for veto in vetoes):
+        return "blocked"
+    if vetoes:
+        return "warning"
+    return "clear"
 
 
 def _risk_reward_component(risk_reward: float | None) -> float:
@@ -190,6 +300,17 @@ def _dedupe(items: list[str]) -> list[str]:
             continue
         seen.add(cleaned)
         result.append(cleaned)
+    return result
+
+
+def _dedupe_vetoes(vetoes: list[RiskVeto]) -> list[RiskVeto]:
+    seen = set()
+    result = []
+    for veto in vetoes:
+        if veto.code in seen:
+            continue
+        seen.add(veto.code)
+        result.append(veto)
     return result
 
 

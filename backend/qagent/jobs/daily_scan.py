@@ -7,6 +7,7 @@ from qagent.domain.models import OpportunityCard
 from qagent.factors.engine import build_factor_rankings
 from qagent.factors.models import FactorRanking
 from qagent.providers.base import MarketDataProvider
+from qagent.recommendations.decision import build_research_decision
 from qagent.signals.engine import SignalEngine
 from qagent.strategy_data.models import AnalystInsight, EarningsEvent, FilingEvent, FundamentalSnapshot
 from qagent.strategy_data.providers import StrategyDataProvider, build_strategy_data_provider
@@ -14,6 +15,13 @@ from qagent.strategies.evaluator import StrategyEvaluator
 from qagent.strategies.health import build_strategy_health_from_bars
 from qagent.strategies.models import StrategyEvaluation, StrategyHealth
 from qagent.strategies.registry import default_strategy_registry
+
+
+class ScanBlocker(BaseModel):
+    code: str
+    severity: str
+    title: str
+    message: str
 
 
 class ScanItem(BaseModel):
@@ -31,6 +39,7 @@ class ScanItem(BaseModel):
     factor_score: float | None = None
     factor_rank: int | None = None
     factor_flags: list[str] = Field(default_factory=list)
+    blockers: list[ScanBlocker] = Field(default_factory=list)
 
 
 class DailyScanResult(BaseModel):
@@ -130,6 +139,7 @@ def run_daily_scan(
     factor_by_id = {ranking.instrument_id: ranking for ranking in factor_rankings}
     for card in cards:
         _apply_factor_to_card(card, factor_by_id.get(card.instrument_id))
+        card.decision = build_research_decision(card)
     cards.sort(key=_card_priority_score, reverse=True)
     for item in items:
         _apply_factor_to_item(item, factor_by_id.get(item.instrument_id))
@@ -218,6 +228,14 @@ def _scan_item(
             reason="No daily bars returned by provider.",
             bars=0,
             signals=0,
+            blockers=[
+                ScanBlocker(
+                    code="no_daily_bars",
+                    severity="block",
+                    title="No daily bars",
+                    message="The market data provider did not return daily OHLCV bars.",
+                )
+            ],
             **strategy_counts,
         )
 
@@ -244,6 +262,7 @@ def _scan_item(
         reason="Signal stack did not meet opportunity-card threshold.",
         bars=len(bars),
         signals=len(signals),
+        blockers=_setup_blockers(signals, strategy_evaluations, strategy_counts),
         **strategy_counts,
         latest_close=latest_close,
         latest_trade_date=latest_trade_date,
@@ -257,6 +276,56 @@ def _strategy_counts(evaluations: list[StrategyEvaluation]) -> dict[str, int]:
         "strategies_watch": sum(1 for item in evaluations if item.status == "watch"),
         "strategies_missing_data": sum(1 for item in evaluations if item.status == "missing_data"),
     }
+
+
+def _setup_blockers(
+    signals: list,
+    evaluations: list[StrategyEvaluation],
+    strategy_counts: dict[str, int],
+) -> list[ScanBlocker]:
+    blockers = [
+        ScanBlocker(
+            code="signal_threshold_not_met",
+            severity="watch",
+            title="Signal threshold not met",
+            message="The signal stack did not reach the opportunity-card threshold.",
+        )
+    ]
+    if not signals:
+        blockers.append(
+            ScanBlocker(
+                code="no_active_signals",
+                severity="watch",
+                title="No active signals",
+                message="No trend, pullback, breakout, volume, or limit-status signal is active.",
+            )
+        )
+    if strategy_counts["strategies_passed"] == 0:
+        blockers.append(
+            ScanBlocker(
+                code="no_strategy_passed",
+                severity="watch",
+                title="No strategy passed",
+                message="No strategy in the registry passed its preconditions.",
+            )
+        )
+    missing = sorted(
+        {
+            item
+            for evaluation in evaluations
+            for item in evaluation.missing_data
+        }
+    )
+    if missing:
+        blockers.append(
+            ScanBlocker(
+                code="strategy_data_missing",
+                severity="watch",
+                title="Strategy data missing",
+                message=f"Missing strategy inputs: {', '.join(missing[:5])}.",
+            )
+        )
+    return blockers
 
 
 def _available_strategy_data(

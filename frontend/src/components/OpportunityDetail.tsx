@@ -1,3 +1,6 @@
+import { useEffect, useState } from "react";
+
+import { fetchMarketBars } from "../api/client";
 import { useI18n } from "../i18n";
 import { formatInstrumentLabel } from "../lib/instruments";
 import {
@@ -13,16 +16,55 @@ import {
   localizeList,
   localizeReason,
   localizeRole,
+  localizeRiskStatus,
+  localizeRiskVeto,
+  localizeRiskVetoMessage,
   localizeSignal,
   localizeStatus,
   localizeStrategy,
   localizeStrategyFamily,
 } from "../lib/localize";
-import type { OpportunityCard } from "../types";
+import type { DataProviderMode, MarketBarsResponse, OpportunityCard } from "../types";
+import { OpportunityChart } from "./OpportunityChart";
 import { StatusBadge } from "./StatusBadge";
 
-export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
+export function OpportunityDetail({
+  card,
+  dataMode,
+}: {
+  card?: OpportunityCard;
+  dataMode: DataProviderMode;
+}) {
   const { language, t } = useI18n();
+  const [chart, setChart] = useState<MarketBarsResponse>();
+  const [chartError, setChartError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadChart() {
+      if (!card) {
+        setChart(undefined);
+        return;
+      }
+      try {
+        setChartError("");
+        setChart(undefined);
+        const result = await fetchMarketBars(dataMode, card.instrument_id, 160);
+        if (!cancelled) {
+          setChart(result);
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setChart(undefined);
+          setChartError(caught instanceof Error ? caught.message : "Failed to load chart");
+        }
+      }
+    }
+    void loadChart();
+    return () => {
+      cancelled = true;
+    };
+  }, [card, dataMode]);
 
   if (!card) {
     return <section className="panel empty">{t("detail.select")}</section>;
@@ -39,6 +81,11 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
       </div>
 
       <p className="thesis">{localizeReason(card.thesis, language)}</p>
+
+      <div className="detail-section">
+        <h3>{t("detail.chart")}</h3>
+        {chartError ? <p className="empty error">{chartError}</p> : <OpportunityChart data={chart} />}
+      </div>
 
       <div className="metric-grid">
         <div>
@@ -152,6 +199,30 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
             items={card.decision.verification_checks}
             language={language}
           />
+        </div>
+      )}
+
+      {card.decision && (
+        <div className="detail-section">
+          <h3>{t("detail.riskVeto")}</h3>
+          <div className="risk-veto-summary">
+            <span className={`status status-${card.decision.risk_status}`}>
+              {localizeRiskStatus(card.decision.risk_status, language)}
+            </span>
+            <strong>{card.decision.risk_vetoes.length}</strong>
+          </div>
+          {card.decision.risk_vetoes.length ? (
+            <div className="risk-veto-list">
+              {card.decision.risk_vetoes.map((veto) => (
+                <div key={veto.code} className={`risk-veto risk-veto-${veto.severity}`}>
+                  <strong>{localizeRiskVeto(veto.code, language)}</strong>
+                  <p>{localizeRiskVetoMessage(veto.code, veto.message, language)}</p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p>{t("detail.noRiskVeto")}</p>
+          )}
         </div>
       )}
 

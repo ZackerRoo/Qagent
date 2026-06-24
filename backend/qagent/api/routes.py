@@ -19,7 +19,12 @@ from qagent.jobs.alert_runner import run_alert_rules
 from qagent.jobs.intraday_check import evaluate_snapshot_alerts
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE, DEFAULT_FREE_UNIVERSE
 from qagent.market.universes import UniverseCreate, builtin_universes, merge_universes
-from qagent.monitoring.outcomes import compute_opportunity_outcome, summarize_strategy_performance
+from qagent.market.indicators import add_moving_averages, add_volume_ratio, percent_distance
+from qagent.monitoring.outcomes import (
+    compute_opportunity_outcome,
+    diagnose_strategy_performance,
+    summarize_strategy_performance,
+)
 from qagent.monitoring.portfolio import PositionInput, analyze_position_risk
 from qagent.monitoring.alerts import AlertRule, suggest_alert_rules
 from qagent.paper_trading.engine import (
@@ -125,6 +130,228 @@ def _factor_backtest_dates(mode: str, start: date | None, end: date | None) -> t
     return end_date - timedelta(days=365), end_date
 
 
+def _chart_dates(mode: str, days: int) -> tuple[date, date]:
+    if mode == "fixture":
+        return date(1900, 1, 1), date(2100, 1, 1)
+    end_date = date.today()
+    return end_date - timedelta(days=max(days * 3, 240)), end_date
+
+
+def _chart_bar(row) -> dict[str, object]:
+    return {
+        "trade_date": row["trade_date"].isoformat(),
+        "open": _clean_float(row["open"]),
+        "high": _clean_float(row["high"]),
+        "low": _clean_float(row["low"]),
+        "close": _clean_float(row["close"]),
+        "volume": int(row["volume"]),
+        "ma20": _clean_float(row.get("ma_20")),
+        "ma50": _clean_float(row.get("ma_50")),
+        "ma100": _clean_float(row.get("ma_100")),
+        "ma200": _clean_float(row.get("ma_200")),
+    }
+
+
+def _chart_levels(card) -> dict[str, str | None]:
+    if card is None:
+        return {
+            "trigger_price": None,
+            "initial_stop": None,
+            "target_1": None,
+            "target_2": None,
+            "no_chase_above": None,
+        }
+    return {
+        "trigger_price": _decimal_text(card.entry_plan.trigger_price),
+        "initial_stop": _decimal_text(card.exit_plan.initial_stop),
+        "target_1": _decimal_text(card.exit_plan.target_1),
+        "target_2": _decimal_text(card.exit_plan.target_2),
+        "no_chase_above": _decimal_text(card.entry_plan.no_chase_above),
+    }
+
+
+def _radar_item(instrument_id: str, bars, card, scan_item) -> dict[str, object]:
+    if bars.empty:
+        return {
+            "instrument_id": instrument_id,
+            "latest_trade_date": None,
+            "latest_close": None,
+            "previous_close": None,
+            "change_pct": None,
+            "volume_ratio": None,
+            "signal": "no_setup",
+            "severity": "info",
+            "score": 0.0,
+            "message": "No daily bars are available for the latest radar scan.",
+            "action": "Skip until market data is available.",
+            "distance_to_trigger_pct": None,
+            "trigger_price": None,
+            "initial_stop": None,
+            "target_1": None,
+            "no_chase_above": None,
+        }
+
+    enriched = add_volume_ratio(bars.sort_values("trade_date"), window=20)
+    latest = enriched.iloc[-1]
+    previous = enriched.iloc[-2] if len(enriched) >= 2 else None
+    latest_close = Decimal(str(round(float(latest["close"]), 2)))
+    previous_close = (
+        Decimal(str(round(float(previous["close"]), 2))) if previous is not None else None
+    )
+    change_pct = (
+        percent_distance(float(latest_close), float(previous_close))
+        if previous_close not in {None, Decimal("0")}
+        else None
+    )
+    volume_ratio = _clean_float(latest.get("volume_ratio"))
+
+    if card is None:
+        reason = scan_item.reason if scan_item is not None else "Signal stack did not meet threshold."
+        return _radar_payload(
+            instrument_id=instrument_id,
+            latest=latest,
+            latest_close=latest_close,
+            previous_close=previous_close,
+            change_pct=change_pct,
+            volume_ratio=volume_ratio,
+            signal="no_setup",
+            severity="info",
+            score=0.1,
+            message=f"No recommendation yet: {reason}",
+            action="Keep on watchlist; review blockers before considering entry.",
+            card=None,
+            distance_to_trigger_pct=None,
+        )
+
+    trigger = card.entry_plan.trigger_price
+    stop = card.exit_plan.initial_stop
+    target = card.exit_plan.target_1
+    no_chase = card.entry_plan.no_chase_above
+    distance_to_trigger_pct = (
+        percent_distance(float(trigger), float(latest_close)) if trigger is not None else None
+    )
+
+    signal = "inside_plan"
+    severity = "info"
+    score = card.rank_score
+    message = "Price remains inside the current research plan."
+    action = "Track trigger, stop, target, and no-chase levels."
+
+    if stop is not None and latest_close <= stop * Decimal("1.02"):
+        signal = "near_stop"
+        severity = "danger"
+        score = 0.98
+        message = "Latest price is close to or below the stop guard."
+        action = "Do not add exposure; verify whether the setup is invalidated."
+    elif target is not None and latest_close >= target * Decimal("0.98"):
+        signal = "near_target"
+        severity = "success"
+        score = 0.92
+        message = "Latest price is near the first target."
+        action = "Follow the exit plan; consider partial profit or tighter trailing stop."
+    elif no_chase is not None and latest_close > no_chase:
+        signal = "overextended"
+        severity = "warning"
+        score = 0.9
+        message = "Latest price is above the no-chase level."
+        action = "Avoid chasing; wait for a new setup or pullback."
+    elif trigger is not None and latest_close >= trigger and (volume_ratio or 0) >= 1.1:
+        signal = "trigger_breakout"
+        severity = "success"
+        score = 0.88
+        message = "Price has crossed the trigger with acceptable volume confirmation."
+        action = "Check no-chase level and risk vetoes before treating it as actionable."
+    elif distance_to_trigger_pct is not None and 0 <= distance_to_trigger_pct <= 3:
+        signal = "approaching_trigger"
+        severity = "watch"
+        score = 0.82
+        message = "Price is approaching the planned trigger."
+        action = "Wait for trigger and volume confirmation; avoid early entry."
+    elif volume_ratio is not None and volume_ratio >= 1.8:
+        signal = "volume_surge"
+        severity = "watch"
+        score = 0.75
+        message = "Volume is unusually high relative to recent history."
+        action = "Check whether price confirms the strategy trigger."
+    elif "overextended" in card.factor_flags:
+        signal = "overextended"
+        severity = "warning"
+        score = 0.7
+        message = "Factor model marks the setup as short-term overextended."
+        action = "Wait for consolidation or pullback before considering entry."
+
+    return _radar_payload(
+        instrument_id=instrument_id,
+        latest=latest,
+        latest_close=latest_close,
+        previous_close=previous_close,
+        change_pct=change_pct,
+        volume_ratio=volume_ratio,
+        signal=signal,
+        severity=severity,
+        score=score,
+        message=message,
+        action=action,
+        card=card,
+        distance_to_trigger_pct=distance_to_trigger_pct,
+    )
+
+
+def _radar_payload(
+    *,
+    instrument_id: str,
+    latest,
+    latest_close: Decimal,
+    previous_close: Decimal | None,
+    change_pct: float | None,
+    volume_ratio: float | None,
+    signal: str,
+    severity: str,
+    score: float,
+    message: str,
+    action: str,
+    card,
+    distance_to_trigger_pct: float | None,
+) -> dict[str, object]:
+    return {
+        "instrument_id": instrument_id,
+        "latest_trade_date": latest["trade_date"].isoformat(),
+        "latest_close": _decimal_text(latest_close),
+        "previous_close": _decimal_text(previous_close),
+        "change_pct": change_pct,
+        "volume_ratio": volume_ratio,
+        "signal": signal,
+        "severity": severity,
+        "score": round(float(score), 4),
+        "message": message,
+        "action": action,
+        "distance_to_trigger_pct": distance_to_trigger_pct,
+        "trigger_price": _decimal_text(card.entry_plan.trigger_price) if card else None,
+        "initial_stop": _decimal_text(card.exit_plan.initial_stop) if card else None,
+        "target_1": _decimal_text(card.exit_plan.target_1) if card else None,
+        "no_chase_above": _decimal_text(card.entry_plan.no_chase_above) if card else None,
+    }
+
+
+def _radar_severity_rank(severity: str) -> int:
+    return {"danger": 4, "success": 3, "warning": 2, "watch": 1, "info": 0}.get(severity, 0)
+
+
+def _clean_float(value) -> float | None:
+    try:
+        import pandas as pd
+
+        if pd.isna(value):
+            return None
+    except TypeError:
+        return None
+    return round(float(value), 4)
+
+
+def _decimal_text(value: Decimal | None) -> str | None:
+    return None if value is None else str(value)
+
+
 def _repo() -> QagentRepository:
     initialize_database()
     return QagentRepository(create_session_factory())
@@ -151,6 +378,76 @@ def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict
         "factor_rankings": [item.model_dump(mode="json") for item in result.factor_rankings],
         "data_health": result.data_health,
     }
+
+
+@router.get("/market-bars")
+def market_bars(
+    provider: str = "fixture",
+    instrument_id: str = "US:TEST",
+    days: int = 160,
+) -> dict[str, object]:
+    mode = provider.strip().lower()
+    instrument = instrument_id.strip().upper()
+    if days <= 0 or days > 500:
+        raise HTTPException(status_code=400, detail="days must be between 1 and 500")
+    try:
+        market_provider = build_market_data_provider(mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    start_date, end_date = _chart_dates(mode, days)
+    bars = market_provider.get_daily_bars([instrument], start=start_date, end=end_date)
+    if bars.empty:
+        raise HTTPException(status_code=404, detail="market bars not found")
+    enriched = add_moving_averages(bars.sort_values("trade_date"), windows=(20, 50, 100, 200))
+    visible = enriched.tail(days)
+    scan_result = run_daily_scan([instrument], market_provider, mode=mode)
+    card = next((item for item in scan_result.cards if item.instrument_id == instrument), None)
+    provider_errors = getattr(market_provider, "last_errors", [])
+    data_health = {
+        "provider": mode,
+        "instrument": instrument,
+        "bars": str(len(visible)),
+    }
+    if provider_errors:
+        data_health["errors"] = " | ".join(provider_errors[:3])
+    return {
+        "instrument_id": instrument,
+        "bars": [_chart_bar(row) for _, row in visible.iterrows()],
+        "levels": _chart_levels(card),
+        "data_health": data_health,
+    }
+
+
+@router.get("/intraday-radar")
+def intraday_radar(provider: str = "fixture", symbols: str | None = None) -> dict[str, object]:
+    mode = provider.strip().lower()
+    default_universe = DEFAULT_FREE_UNIVERSE if mode == "free" else DEFAULT_DEV_UNIVERSE
+    instrument_ids = _parse_symbols(symbols, default_universe)
+    try:
+        market_provider = build_market_data_provider(mode)
+        scan_result = run_daily_scan(instrument_ids, market_provider, mode=mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    start_date, end_date = _chart_dates(mode, 80)
+    cards_by_id = {card.instrument_id: card for card in scan_result.cards}
+    scan_items_by_id = {item.instrument_id: item for item in scan_result.items}
+    radar_items = []
+    for instrument in instrument_ids:
+        bars = market_provider.get_daily_bars([instrument], start=start_date, end=end_date)
+        radar_items.append(
+            _radar_item(instrument, bars, cards_by_id.get(instrument), scan_items_by_id.get(instrument))
+        )
+    radar_items.sort(key=lambda item: (_radar_severity_rank(item["severity"]), item["score"]), reverse=True)
+    provider_errors = getattr(market_provider, "last_errors", [])
+    data_health = {
+        "provider": mode,
+        "symbols": str(len(instrument_ids)),
+        "radar_items": str(len(radar_items)),
+    }
+    if provider_errors:
+        data_health["errors"] = " | ".join(provider_errors[:3])
+    return {"items": radar_items, "data_health": data_health}
 
 
 @router.get("/factors")
@@ -721,6 +1018,22 @@ def strategy_performance(
         "performance": [
             item.model_dump(mode="json") for item in summarize_strategy_performance(replayed)
         ],
+        "data_health": data_health,
+    }
+
+
+@router.get("/strategy-diagnostics")
+def strategy_diagnostics(
+    provider: str = "fixture",
+    instrument_id: str | None = None,
+    limit: int = 100,
+) -> dict[str, object]:
+    replayed, data_health = _replay_outcomes(provider, instrument_id, limit)
+    performance = summarize_strategy_performance(replayed)
+    diagnostics = diagnose_strategy_performance(performance)
+    data_health = {**data_health, "diagnostics": str(len(diagnostics))}
+    return {
+        "diagnostics": [item.model_dump(mode="json") for item in diagnostics],
         "data_health": data_health,
     }
 

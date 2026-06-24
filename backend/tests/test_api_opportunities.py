@@ -34,9 +34,12 @@ def test_opportunities_endpoint_returns_cards():
     assert body["cards"][0]["decision"]["conviction_score"] >= 0
     assert body["cards"][0]["decision"]["failure_conditions"]
     assert body["cards"][0]["decision"]["verification_checks"]
+    assert "risk_status" in body["cards"][0]["decision"]
+    assert "risk_vetoes" in body["cards"][0]["decision"]
     assert body["items"][0]["instrument_id"]
     assert body["items"][0]["factor_score"] is not None
     assert body["items"][0]["factor_rank"] is not None
+    assert "blockers" in body["items"][0]
     assert body["items"][0]["strategies_passed"] >= 1
     assert body["strategy_health"]
 
@@ -63,6 +66,57 @@ def test_overview_endpoint_returns_markets_and_cards():
     assert body["market_regime"]["US"]
     assert body["market_regime"]["CN"]
     assert body["top_cards"]
+
+
+def test_market_bars_endpoint_returns_chart_ready_series_and_trade_levels():
+    client = TestClient(create_app())
+
+    response = client.get("/api/market-bars?provider=fixture&instrument_id=US:TEST&days=80")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["instrument_id"] == "US:TEST"
+    assert body["bars"]
+    assert {"trade_date", "close", "ma20", "ma50"}.issubset(body["bars"][-1])
+    assert body["levels"]["trigger_price"] is not None
+    assert body["levels"]["initial_stop"] is not None
+    assert body["data_health"]["provider"] == "fixture"
+
+
+def test_intraday_radar_endpoint_returns_actionable_scan_items():
+    client = TestClient(create_app())
+
+    response = client.get("/api/intraday-radar?provider=fixture&symbols=US:TEST,CN:000001")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["items"]
+    first = body["items"][0]
+    assert first["instrument_id"] in {"US:TEST", "CN:000001"}
+    assert first["latest_close"] is not None
+    assert first["signal"] in {
+        "approaching_trigger",
+        "trigger_breakout",
+        "near_stop",
+        "near_target",
+        "volume_surge",
+        "overextended",
+        "inside_plan",
+        "no_setup",
+    }
+    assert first["message"]
+    assert body["data_health"]["radar_items"] == str(len(body["items"]))
+
+
+def test_opportunities_explains_unrecommended_symbols():
+    client = TestClient(create_app())
+
+    response = client.get("/api/opportunities?provider=fixture&symbols=US:TEST,US:UNKNOWN")
+
+    assert response.status_code == 200
+    items = {item["instrument_id"]: item for item in response.json()["items"]}
+    assert items["US:UNKNOWN"]["status"] == "no_data"
+    assert items["US:UNKNOWN"]["blockers"][0]["code"] == "no_daily_bars"
 
 
 def test_daily_brief_endpoint_returns_research_digest():

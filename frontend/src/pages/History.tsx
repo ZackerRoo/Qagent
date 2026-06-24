@@ -7,12 +7,19 @@ import {
   fetchOutcomes,
   fetchPortfolioBacktest,
   fetchScanRuns,
+  fetchStrategyDiagnostics,
   fetchStrategyPerformance,
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
 import { useI18n } from "../i18n";
 import { formatInstrumentLabel } from "../lib/instruments";
-import { localizeProvider, localizeStatus, localizeStrategy } from "../lib/localize";
+import {
+  localizeDiagnosticReason,
+  localizeDiagnosticVerdict,
+  localizeProvider,
+  localizeStatus,
+  localizeStrategy,
+} from "../lib/localize";
 import type {
   BacktestResponse,
   DataProviderMode,
@@ -21,6 +28,7 @@ import type {
   OutcomesResponse,
   PortfolioBacktestResponse,
   ScanRunsResponse,
+  StrategyDiagnosticsResponse,
   StrategyPerformanceResponse,
 } from "../types";
 
@@ -47,6 +55,7 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
   const [history, setHistory] = useState<OpportunityHistoryResponse>();
   const [outcomes, setOutcomes] = useState<OutcomesResponse>();
   const [performance, setPerformance] = useState<StrategyPerformanceResponse>();
+  const [diagnostics, setDiagnostics] = useState<StrategyDiagnosticsResponse>();
   const [error, setError] = useState("");
   const [backtestError, setBacktestError] = useState("");
   const [factorBacktestError, setFactorBacktestError] = useState("");
@@ -59,16 +68,24 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
     async function load() {
       try {
         setError("");
-        const [runResult, historyResult, outcomeResult, performanceResult] = await Promise.all([
+        const [
+          runResult,
+          historyResult,
+          outcomeResult,
+          performanceResult,
+          diagnosticsResult,
+        ] = await Promise.all([
           fetchScanRuns(),
           fetchOpportunityHistory(),
           fetchOutcomes(dataMode),
           fetchStrategyPerformance(dataMode),
+          fetchStrategyDiagnostics(dataMode),
         ]);
         setRuns(runResult);
         setHistory(historyResult);
         setOutcomes(outcomeResult);
         setPerformance(performanceResult);
+        setDiagnostics(diagnosticsResult);
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : "Failed to load history");
       }
@@ -551,6 +568,52 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
                     <td>{formatNumber(item.avg_return_10d, "%")}</td>
                     <td>{formatNumber(item.max_drawdown_pct, "%")}</td>
                     <td>{formatNumber(item.max_runup_pct, "%")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <h2>{t("history.strategyDiagnostics")}</h2>
+          <span className="count">{diagnostics?.diagnostics.length ?? 0}</span>
+        </div>
+        {diagnostics && <DataHealth data={diagnostics.data_health} language={language} />}
+        {!diagnostics?.diagnostics.length ? (
+          <div className="empty-state">{t("history.noDiagnostics")}</div>
+        ) : (
+          <div className="table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th>{t("common.strategy")}</th>
+                  <th>{t("common.status")}</th>
+                  <th>{t("common.samples")}</th>
+                  <th>{t("brief.targetHit")}</th>
+                  <th>{t("brief.positive10d")}</th>
+                  <th>{t("brief.avg10d")}</th>
+                  <th>{t("common.reason")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {diagnostics.diagnostics.map((item) => (
+                  <tr key={item.strategy_id}>
+                    <td className="reason-cell">{localizeStrategy(item.strategy_id, language)}</td>
+                    <td>
+                      <span className={`status status-${item.verdict}`}>
+                        {localizeDiagnosticVerdict(item.verdict, language)}
+                      </span>
+                    </td>
+                    <td>{item.completed_count}/{item.sample_count}</td>
+                    <td>{formatRatio(item.target_hit_rate)}</td>
+                    <td>{formatRatio(item.positive_rate_10d)}</td>
+                    <td>{formatNumber(item.avg_return_10d, "%")}</td>
+                    <td className="reason-cell">
+                      {localizeDiagnosticReason(item.verdict, item.reason, language)}
+                    </td>
                   </tr>
                 ))}
               </tbody>

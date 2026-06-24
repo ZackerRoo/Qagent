@@ -44,3 +44,23 @@ def test_research_decision_avoids_weak_or_data_limited_cards():
         "wait_pullback",
         "avoid",
     }
+
+
+def test_research_decision_blocks_when_risk_vetoes_are_material():
+    provider = FixtureMarketDataProvider()
+    bars = provider.get_daily_bars(["US:TEST"], date(2026, 1, 1), date(2026, 3, 31))
+    signals = SignalEngine().generate("US:TEST", bars)
+    card = OpportunityCardGenerator().generate("US:TEST", signals, bars)
+
+    assert card is not None
+    card.risk_reward = 0.75
+    card.factor_flags = ["overextended", "low_liquidity"]
+
+    decision = build_research_decision(card)
+
+    assert decision.risk_status == "blocked"
+    assert decision.action == "avoid"
+    assert decision.suggested_risk_pct == 0
+    assert {veto.code for veto in decision.risk_vetoes}.issuperset(
+        {"poor_risk_reward", "low_liquidity"}
+    )

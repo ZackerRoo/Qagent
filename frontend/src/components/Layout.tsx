@@ -14,7 +14,9 @@ import type { ReactNode } from "react";
 
 import { useI18n } from "../i18n";
 import type { TranslationKey } from "../i18n/catalog";
-import type { DataProviderMode, UniverseRecord } from "../types";
+import type { DataProviderMode, ResearchProfile, UniverseRecord } from "../types";
+import { localizeProfile } from "../lib/localize";
+import { researchProfiles } from "../lib/profiles";
 
 const nav = [
   { id: "brief", labelKey: "nav.brief", icon: Newspaper },
@@ -39,9 +41,11 @@ type Props = {
   symbols: string;
   universes: UniverseRecord[];
   selectedUniverseId: string;
+  profile: ResearchProfile;
   onSymbolsChange(value: string): void;
   onUniverseChange(value: string): void;
   onDataModeChange(mode: DataProviderMode): void;
+  onProfileChange(value: ResearchProfile): void;
   onScan(): void;
   children: ReactNode;
 };
@@ -55,9 +59,11 @@ export function Layout({
   symbols,
   universes,
   selectedUniverseId,
+  profile,
   onSymbolsChange,
   onUniverseChange,
   onDataModeChange,
+  onProfileChange,
   onScan,
   children,
 }: Props) {
@@ -98,6 +104,9 @@ export function Layout({
               <span>{t("top.dailyScan")}</span>
               <span>{t("top.alerts")}</span>
               <span>{dataMode === "free" ? t("top.freeData") : t("top.fixtureMode")}</span>
+              <span>
+                {t("top.profile")}: {localizeProfile(profile, language)}
+              </span>
             </div>
             <div className="scan-controls">
               <div className="segment language-toggle" aria-label="Language">
@@ -140,6 +149,17 @@ export function Layout({
                 {universes.map((universe) => (
                   <option key={universe.universe_id} value={universe.universe_id}>
                     {formatUniverseName(universe, language)}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label={t("top.profile")}
+                value={profile}
+                onChange={(event) => onProfileChange(event.target.value as ResearchProfile)}
+              >
+                {researchProfiles.map((item) => (
+                  <option key={item} value={item}>
+                    {localizeProfile(item, language)}
                   </option>
                 ))}
               </select>

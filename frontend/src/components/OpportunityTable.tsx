@@ -1,6 +1,6 @@
 import { useI18n } from "../i18n";
 import { formatInstrumentLabel } from "../lib/instruments";
-import { localizeAction, localizeCaveat, localizeStrategy } from "../lib/localize";
+import { localizeAction, localizeCaveat, localizeRiskStatus, localizeStrategy } from "../lib/localize";
 import type { OpportunityCard } from "../types";
 import { StatusBadge } from "./StatusBadge";
 
@@ -22,6 +22,7 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
             <th>{t("table.market")}</th>
             <th>{t("common.status")}</th>
             <th>{t("detail.action")}</th>
+            <th>{t("detail.riskVeto")}</th>
             <th>{t("brief.conviction")}</th>
             <th>{t("table.score")}</th>
             <th>{t("brief.rank")}</th>
@@ -53,6 +54,11 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
               <td>
                 <span className={`status status-${card.decision?.action ?? "pending"}`}>
                   {localizeAction(card.decision?.action ?? "pending", language)}
+                </span>
+              </td>
+              <td>
+                <span className={`status status-${card.decision?.risk_status ?? "pending"}`}>
+                  {localizeRiskStatus(card.decision?.risk_status ?? "pending", language)}
                 </span>
               </td>
               <td>{formatPct(card.decision?.conviction_score)}</td>

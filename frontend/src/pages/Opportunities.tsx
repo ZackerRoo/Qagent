@@ -5,14 +5,26 @@ import type { TranslationKey } from "../i18n/catalog";
 import { formatInstrumentLabel } from "../lib/instruments";
 import {
   localizeFactorFlag,
+  localizeProfile,
+  localizeProfileReason,
   localizeProvider,
   localizeReason,
+  localizeScanBlocker,
+  localizeScanBlockerMessage,
   localizeStatus,
   localizeStrategy,
   localizeStrategyFamily,
 } from "../lib/localize";
 import { createMarketSections } from "../lib/markets";
-import type { FactorRanking, OpportunityCard, ScanItem, StrategyHealth } from "../types";
+import { profileReason } from "../lib/profiles";
+import type {
+  DataProviderMode,
+  FactorRanking,
+  OpportunityCard,
+  ResearchProfile,
+  ScanItem,
+  StrategyHealth,
+} from "../types";
 
 type Props = {
   cards: OpportunityCard[];
@@ -20,6 +32,8 @@ type Props = {
   strategyHealth: StrategyHealth[];
   factorRankings: FactorRanking[];
   selectedCard?: OpportunityCard;
+  dataMode: DataProviderMode;
+  profile: ResearchProfile;
   onSelect(card: OpportunityCard): void;
 };
 
@@ -29,9 +43,11 @@ export function Opportunities({
   strategyHealth,
   factorRankings,
   selectedCard,
+  dataMode,
+  profile,
   onSelect,
 }: Props) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
 
   return (
     <div className="split-grid">
@@ -39,8 +55,11 @@ export function Opportunities({
         <section className="panel">
           <div className="panel-heading">
             <h2>{t("opportunities.title")}</h2>
-            <span className="count">{cards.length}</span>
+            <span className="count">
+              {t("top.profile")}: {localizeProfile(profile, language)} · {cards.length}
+            </span>
           </div>
+          <ProfileNote card={selectedCard} profile={profile} />
           <MarketOpportunitySections
             cards={cards}
             selectedCardId={selectedCard?.card_id}
@@ -63,15 +82,98 @@ export function Opportunities({
         </section>
         <section className="panel">
           <div className="panel-heading">
+            <h2>{t("opportunities.notRecommended")}</h2>
+            <span className="count">{items.filter(isUnrecommended).length}</span>
+          </div>
+          <UnrecommendedReasonsTable items={items} />
+        </section>
+        <section className="panel">
+          <div className="panel-heading">
             <h2>{t("opportunities.health")}</h2>
             <span className="count">{strategyHealth.length}</span>
           </div>
           <StrategyHealthTable items={strategyHealth} />
         </section>
       </div>
-      <OpportunityDetail card={selectedCard} />
+      <OpportunityDetail card={selectedCard} dataMode={dataMode} />
     </div>
   );
+}
+
+function ProfileNote({
+  card,
+  profile,
+}: {
+  card?: OpportunityCard;
+  profile: ResearchProfile;
+}) {
+  const { language } = useI18n();
+  if (!card) {
+    return null;
+  }
+  return (
+    <div className="profile-note">
+      <span>{localizeProfile(profile, language)}</span>
+      <p>{localizeProfileReason(profileReason(card, profile), language)}</p>
+    </div>
+  );
+}
+
+function UnrecommendedReasonsTable({ items }: { items: ScanItem[] }) {
+  const { language, t } = useI18n();
+  const rejected = items.filter(isUnrecommended);
+
+  if (!rejected.length) {
+    return <p className="empty">{t("opportunities.noRejected")}</p>;
+  }
+
+  return (
+    <div className="table-shell">
+      <table>
+        <thead>
+          <tr>
+            <th>{t("common.ticker")}</th>
+            <th>{t("common.status")}</th>
+            <th>{t("opportunities.close")}</th>
+            <th>{t("common.reason")}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rejected.map((item) => (
+            <tr key={item.instrument_id}>
+              <td className="ticker" title={item.instrument_id}>
+                {formatInstrumentLabel(item.instrument_id)}
+              </td>
+              <td>
+                <span className={`status status-${item.status}`}>
+                  {localizeStatus(item.status, language)}
+                </span>
+              </td>
+              <td>{item.latest_close ?? "-"}</td>
+              <td className="reason-cell">
+                {item.blockers.length
+                  ? item.blockers
+                      .map(
+                        (blocker) =>
+                          `${localizeScanBlocker(blocker.code, language)}：${localizeScanBlockerMessage(
+                            blocker.code,
+                            blocker.message,
+                            language,
+                          )}`,
+                      )
+                      .join(language === "zh" ? "；" : "; ")
+                  : localizeReason(item.reason, language)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function isUnrecommended(item: ScanItem): boolean {
+  return item.status === "no_setup" || item.status === "no_data";
 }
 
 function MarketScanCoverageSections({ items }: { items: ScanItem[] }) {
