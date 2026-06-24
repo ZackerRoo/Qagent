@@ -9,6 +9,7 @@ import {
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
 import { useI18n } from "../i18n";
+import { formatInstrumentLabel } from "../lib/instruments";
 import type { DataProviderMode, PaperTradesResponse, PortfolioResponse, Position } from "../types";
 
 const emptyPosition: Position = {
@@ -121,7 +122,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
                 );
                 return (
                   <tr key={position.instrument_id}>
-                    <td className="ticker">{position.instrument_id}</td>
+                    <td className="ticker" title={position.instrument_id}>
+                      {formatInstrumentLabel(position.instrument_id)}
+                    </td>
                     <td>{position.shares}</td>
                     <td>{position.entry_price}</td>
                     <td>{risk?.current_price ?? "-"}</td>
@@ -195,7 +198,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
             <tbody>
               {(paper?.trades ?? []).map((trade) => (
                 <tr key={trade.trade_id}>
-                  <td className="ticker">{trade.instrument_id}</td>
+                  <td className="ticker" title={trade.instrument_id}>
+                    {formatInstrumentLabel(trade.instrument_id)}
+                  </td>
                   <td>{trade.status}</td>
                   <td>{trade.signal_date}</td>
                   <td>{trade.trigger_price}</td>

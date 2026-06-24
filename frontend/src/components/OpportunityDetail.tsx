@@ -1,4 +1,5 @@
 import { useI18n } from "../i18n";
+import { formatInstrumentLabel } from "../lib/instruments";
 import type { OpportunityCard } from "../types";
 import { StatusBadge } from "./StatusBadge";
 
@@ -14,7 +15,7 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
       <div className="panel-heading">
         <div>
           <p className="eyebrow">{card.market}</p>
-          <h2>{card.instrument_id}</h2>
+          <h2 title={card.instrument_id}>{formatInstrumentLabel(card.instrument_id)}</h2>
         </div>
         <StatusBadge status={card.status} />
       </div>

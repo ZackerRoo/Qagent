@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { fetchWatchlist, saveWatchlistItem } from "../api/client";
 import { useI18n } from "../i18n";
+import { formatInstrumentLabel } from "../lib/instruments";
 import type { WatchlistItem } from "../types";
 
 const emptyItem: WatchlistItem = {
@@ -67,7 +68,9 @@ export function Watchlist() {
           <tbody>
             {items.map((item) => (
               <tr key={item.instrument_id}>
-                <td className="ticker">{item.instrument_id}</td>
+                <td className="ticker" title={item.instrument_id}>
+                  {formatInstrumentLabel(item.instrument_id)}
+                </td>
                 <td>{item.status}</td>
                 <td>{item.thesis ?? "-"}</td>
                 <td>{item.tags.join(", ") || "-"}</td>

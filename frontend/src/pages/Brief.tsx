@@ -13,6 +13,7 @@ import {
 import { DataHealth } from "../components/DataHealth";
 import { useI18n } from "../i18n";
 import type { TranslationKey } from "../i18n/catalog";
+import { formatInstrumentLabel } from "../lib/instruments";
 import { createMarketSections } from "../lib/markets";
 import type {
   BriefRun,
@@ -364,7 +365,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
           items={
             brief?.catalyst_watch.map((item) => ({
               key: `${item.instrument_id}-${item.title}`,
-              title: `${item.instrument_id} · ${item.catalyst_type}`,
+              title: `${formatInstrumentLabel(item.instrument_id)} · ${item.catalyst_type}`,
               body: `${item.investment_hypothesis} ${item.verification_path}`,
             })) ?? []
           }
@@ -376,7 +377,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
           items={
             brief?.risk_alerts.map((item) => ({
               key: `${item.instrument_id}-${item.status}`,
-              title: `${item.instrument_id} · ${item.status}`,
+              title: `${formatInstrumentLabel(item.instrument_id)} · ${item.status}`,
               body: item.message,
             })) ?? []
           }
@@ -468,7 +469,9 @@ function BriefOpportunityTable({ items }: { items: DailyBriefOpportunity[] }) {
         <tbody>
           {items.map((item) => (
             <tr key={item.instrument_id}>
-              <td className="ticker">{item.instrument_id}</td>
+              <td className="ticker" title={item.instrument_id}>
+                {formatInstrumentLabel(item.instrument_id)}
+              </td>
               <td>
                 <span className={`status status-${item.status}`}>{item.status}</span>
               </td>
@@ -543,7 +546,9 @@ function BriefEntryWatchTable({ items }: { items: DailyBriefEntryWatch[] }) {
         <tbody>
           {items.map((item) => (
             <tr key={`${item.instrument_id}-${item.trigger_price}`}>
-              <td className="ticker">{item.instrument_id}</td>
+              <td className="ticker" title={item.instrument_id}>
+                {formatInstrumentLabel(item.instrument_id)}
+              </td>
               <td className="reason-cell">{item.primary_strategy_id ?? t("common.none")}</td>
               <td>{item.trigger_price}</td>
               <td>{item.initial_stop ?? "-"}</td>

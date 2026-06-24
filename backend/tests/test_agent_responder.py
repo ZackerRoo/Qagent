@@ -95,7 +95,8 @@ def test_responder_recommends_ranked_cards_with_entry_and_exit_levels():
         },
     )
 
-    assert "CN:000063" in answer
+    assert "中兴通讯 000063.SZ" in answer
+    assert "CN:000063" not in answer
     assert "38.01" in answer
     assert "35.82" in answer
     assert "41.05" in answer

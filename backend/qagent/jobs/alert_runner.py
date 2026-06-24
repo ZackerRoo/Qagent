@@ -3,6 +3,7 @@ from decimal import Decimal
 from pydantic import BaseModel
 
 from qagent.jobs.intraday_check import evaluate_snapshot_alerts
+from qagent.market.instruments import format_instrument_label
 from qagent.monitoring.alerts import Alert, AlertRule
 from qagent.providers.base import MarketDataProvider
 from qagent.storage.repository import DeliveryOutboxRecord, QagentRepository
@@ -101,7 +102,7 @@ def render_alert_run_markdown(
     for alert in alerts:
         price = latest_prices.get(alert.instrument_id)
         lines.append(
-            f"- **{alert.instrument_id}** `{alert.kind}` {alert.rule_id}: "
+            f"- **{format_instrument_label(alert.instrument_id)}** `{alert.kind}` {alert.rule_id}: "
             f"{alert.message}; latest {price if price is not None else '-'}."
         )
     return "\n".join(lines).strip() + "\n"

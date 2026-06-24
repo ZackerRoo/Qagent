@@ -80,7 +80,8 @@ def test_agent_endpoint_uses_requested_provider_and_symbols(tmp_path, monkeypatc
 
     assert response.status_code == 200
     answer = response.json()["answer"]
-    assert "CN:000001" in answer
+    assert "平安银行 000001.SZ" in answer
+    assert "CN:000001" not in answer
     assert "US:TEST" not in answer
     assert "触发" in answer or "买点" in answer
     assert "止损" in answer

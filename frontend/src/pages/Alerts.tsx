@@ -8,6 +8,7 @@ import {
   saveAlertRule,
 } from "../api/client";
 import { useI18n } from "../i18n";
+import { formatInstrumentLabel } from "../lib/instruments";
 import type { AlertRule, AlertRunResponse, AlertSuggestion, DataProviderMode, TriggeredAlert } from "../types";
 
 const emptyRule: AlertRule = {
@@ -164,7 +165,9 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
             {suggestions.map((item) => (
               <tr key={item.rule_id}>
                 <td>{item.rule_id}</td>
-                <td className="ticker">{item.instrument_id}</td>
+                <td className="ticker" title={item.instrument_id}>
+                  {formatInstrumentLabel(item.instrument_id)}
+                </td>
                 <td>{item.kind}</td>
                 <td>
                   {item.operator} {item.threshold}
@@ -206,7 +209,9 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
             {rules.map((item) => (
               <tr key={item.rule_id}>
                 <td>{item.rule_id}</td>
-                <td className="ticker">{item.instrument_id}</td>
+                <td className="ticker" title={item.instrument_id}>
+                  {formatInstrumentLabel(item.instrument_id)}
+                </td>
                 <td>{item.kind}</td>
                 <td>
                   {item.operator} {item.threshold}
@@ -220,7 +225,7 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
         <div className="alert-results">
           {triggered.map((alert) => (
             <div key={`${alert.rule_id}-${alert.triggered_at}`}>
-              <strong>{alert.instrument_id}</strong>
+              <strong title={alert.instrument_id}>{formatInstrumentLabel(alert.instrument_id)}</strong>
               <span>{alert.message}</span>
             </div>
           ))}

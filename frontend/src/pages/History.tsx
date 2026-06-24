@@ -11,6 +11,7 @@ import {
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
 import { useI18n } from "../i18n";
+import { formatInstrumentLabel } from "../lib/instruments";
 import type {
   BacktestResponse,
   DataProviderMode,
@@ -214,7 +215,9 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
                   {backtest.signals.map((signal) => (
                     <tr key={signal.snapshot_id}>
                       <td>{signal.signal_date}</td>
-                      <td className="ticker">{signal.instrument_id}</td>
+                      <td className="ticker" title={signal.instrument_id}>
+                        {formatInstrumentLabel(signal.instrument_id)}
+                      </td>
                       <td className="reason-cell">{signal.primary_strategy_id ?? t("common.none")}</td>
                       <td>
                         <span className={`status status-${signal.outcome_status}`}>
@@ -297,7 +300,9 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
                   {factorBacktest.signals.map((signal) => (
                     <tr key={`${signal.signal_date}-${signal.instrument_id}-${signal.factor_rank}`}>
                       <td>{signal.signal_date}</td>
-                      <td className="ticker">{signal.instrument_id}</td>
+                      <td className="ticker" title={signal.instrument_id}>
+                        {formatInstrumentLabel(signal.instrument_id)}
+                      </td>
                       <td>{signal.factor_rank}</td>
                       <td>{Math.round(signal.factor_score * 100)}</td>
                       <td>{signal.entry_close.toFixed(2)}</td>
@@ -402,7 +407,9 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
                   <tbody>
                     {portfolioBacktest.trades.map((trade) => (
                       <tr key={`${trade.instrument_id}-${trade.entry_date}-${trade.exit_date}`}>
-                        <td className="ticker">{trade.instrument_id}</td>
+                        <td className="ticker" title={trade.instrument_id}>
+                          {formatInstrumentLabel(trade.instrument_id)}
+                        </td>
                         <td>{trade.entry_date}</td>
                         <td>{trade.exit_date}</td>
                         <td>
@@ -449,7 +456,9 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
                   <tr key={run.run_id}>
                     <td>{new Date(run.created_at).toLocaleString()}</td>
                     <td>{run.provider}</td>
-                    <td className="reason-cell">{run.symbols.join(", ")}</td>
+                    <td className="reason-cell" title={run.symbols.join(", ")}>
+                      {run.symbols.map((symbol) => formatInstrumentLabel(symbol)).join(", ")}
+                    </td>
                     <td>{run.scanned}</td>
                     <td>{run.cards}</td>
                   </tr>
@@ -485,7 +494,9 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
               <tbody>
                 {history.snapshots.map((snapshot) => (
                   <tr key={snapshot.snapshot_id}>
-                    <td className="ticker">{snapshot.instrument_id}</td>
+                    <td className="ticker" title={snapshot.instrument_id}>
+                      {formatInstrumentLabel(snapshot.instrument_id)}
+                    </td>
                     <td>{snapshot.signal_date ?? t("common.pending")}</td>
                     <td>{snapshot.status}</td>
                     <td>{snapshot.primary_strategy_id ?? t("common.none")}</td>
@@ -570,7 +581,9 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
               <tbody>
                 {outcomes.outcomes.map((outcome) => (
                   <tr key={outcome.snapshot_id}>
-                    <td className="ticker">{outcome.instrument_id}</td>
+                    <td className="ticker" title={outcome.instrument_id}>
+                      {formatInstrumentLabel(outcome.instrument_id)}
+                    </td>
                     <td>{outcome.outcome_status}</td>
                     <td>{formatNumber(outcome.return_5d, "%")}</td>
                     <td>{formatNumber(outcome.return_10d, "%")}</td>

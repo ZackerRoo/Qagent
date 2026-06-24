@@ -94,6 +94,6 @@ def test_render_daily_brief_markdown_contains_key_sections():
     assert "## Strategy Validation" in markdown
     assert "## Data Caveats" in markdown
     assert "## Next Steps" in markdown
-    assert "US:TEST" in markdown
+    assert "Fixture Test TEST" in markdown
     assert "guarantee" not in markdown.lower()
     assert "必涨" not in markdown

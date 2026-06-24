@@ -1,4 +1,5 @@
 import { useI18n } from "../i18n";
+import { formatInstrumentLabel } from "../lib/instruments";
 import type { OpportunityCard } from "../types";
 import { StatusBadge } from "./StatusBadge";
 
@@ -41,7 +42,9 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
               className={card.card_id === selectedCardId ? "selected" : ""}
               onClick={() => onSelect(card)}
             >
-              <td className="ticker">{card.instrument_id}</td>
+              <td className="ticker" title={card.instrument_id}>
+                {formatInstrumentLabel(card.instrument_id)}
+              </td>
               <td>{card.market}</td>
               <td>
                 <StatusBadge status={card.status} />

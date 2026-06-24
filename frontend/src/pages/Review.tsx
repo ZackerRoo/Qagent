@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { fetchCatalysts } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
 import { useI18n } from "../i18n";
+import { formatInstrumentLabel } from "../lib/instruments";
 import type { CatalystsResponse } from "../types";
 
 export function Review({ symbols }: { symbols: string }) {
@@ -55,7 +56,9 @@ export function Review({ symbols }: { symbols: string }) {
               <tbody>
                 {data.hypotheses.map((item) => (
                   <tr key={`${item.news_id}-${item.catalyst_type}`}>
-                    <td className="ticker">{item.instrument_id}</td>
+                    <td className="ticker" title={item.instrument_id}>
+                      {formatInstrumentLabel(item.instrument_id)}
+                    </td>
                     <td>{item.catalyst_type}</td>
                     <td>{Math.round(item.confidence * 100)}</td>
                     <td className="reason-cell">{item.investment_hypothesis}</td>
@@ -79,7 +82,7 @@ export function Review({ symbols }: { symbols: string }) {
           <div className="news-list">
             {data.news.map((item) => (
               <a key={item.news_id} href={item.url ?? "#"} target="_blank" rel="noreferrer">
-                <span>{item.instrument_id}</span>
+                <span title={item.instrument_id}>{formatInstrumentLabel(item.instrument_id)}</span>
                 <strong>{item.title}</strong>
                 <small>
                   {item.publisher ?? item.source}

@@ -2,6 +2,7 @@ import { MarketOpportunitySections } from "../components/MarketOpportunitySectio
 import { OpportunityDetail } from "../components/OpportunityDetail";
 import { useI18n } from "../i18n";
 import type { TranslationKey } from "../i18n/catalog";
+import { formatInstrumentLabel } from "../lib/instruments";
 import { createMarketSections } from "../lib/markets";
 import type { FactorRanking, OpportunityCard, ScanItem, StrategyHealth } from "../types";
 
@@ -121,7 +122,9 @@ function ScanCoverageTable({ items }: { items: ScanItem[] }) {
         <tbody>
           {items.map((item) => (
             <tr key={item.instrument_id}>
-              <td className="ticker">{item.instrument_id}</td>
+              <td className="ticker" title={item.instrument_id}>
+                {formatInstrumentLabel(item.instrument_id)}
+              </td>
               <td>
                 <span className={`status status-${item.status}`}>{labelStatus(item.status)}</span>
               </td>
@@ -171,7 +174,9 @@ function FactorRankingsTable({ items }: { items: FactorRanking[] }) {
           {items.map((item) => (
             <tr key={item.instrument_id}>
               <td>{item.factor_rank}</td>
-              <td className="ticker">{item.instrument_id}</td>
+              <td className="ticker" title={item.instrument_id}>
+                {formatInstrumentLabel(item.instrument_id)}
+              </td>
               <td>{formatScore(item.factor_score)}</td>
               <td>{formatScore(item.momentum_score)}</td>
               <td>{formatScore(item.trend_quality_score)}</td>

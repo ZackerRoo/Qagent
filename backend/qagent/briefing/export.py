@@ -1,4 +1,5 @@
 from qagent.briefing.daily import DailyBrief
+from qagent.market.instruments import format_instrument_label
 
 
 def render_daily_brief_markdown(brief: DailyBrief) -> str:
@@ -7,7 +8,7 @@ def render_daily_brief_markdown(brief: DailyBrief) -> str:
         "",
         f"Generated: {brief.generated_at.isoformat()}",
         f"Provider: {brief.provider}",
-        f"Symbols: {', '.join(brief.symbols)}",
+        f"Symbols: {', '.join(format_instrument_label(symbol) for symbol in brief.symbols)}",
         "",
         f"**Headline:** {brief.headline}",
         "",
@@ -17,7 +18,7 @@ def render_daily_brief_markdown(brief: DailyBrief) -> str:
         for item in brief.top_opportunities:
             lines.extend(
                 [
-                    f"- **{item.instrument_id}** `{item.status}`",
+                    f"- **{format_instrument_label(item.instrument_id)}** `{item.status}`",
                     f"  - Strategy: {item.primary_strategy_id or 'None'}",
                     f"  - Rank: {item.rank_score:.2f}",
                     f"  - Factor: {_number(item.factor_score)}; rank {_level(item.factor_rank)}; "
@@ -38,7 +39,7 @@ def render_daily_brief_markdown(brief: DailyBrief) -> str:
     if brief.entry_watch:
         for item in brief.entry_watch:
             lines.append(
-                f"- **{item.instrument_id}** trigger {_level(item.trigger_price)}, "
+                f"- **{format_instrument_label(item.instrument_id)}** trigger {_level(item.trigger_price)}, "
                 f"stop {_level(item.initial_stop)}, target {_level(item.target_1)}."
             )
     else:
@@ -60,7 +61,7 @@ def render_daily_brief_markdown(brief: DailyBrief) -> str:
     if brief.catalyst_watch:
         for item in brief.catalyst_watch:
             lines.append(
-                f"- **{item.instrument_id}** `{item.catalyst_type}`: "
+                f"- **{format_instrument_label(item.instrument_id)}** `{item.catalyst_type}`: "
                 f"{item.investment_hypothesis} Verify: {item.verification_path}"
             )
     else:
@@ -69,7 +70,9 @@ def render_daily_brief_markdown(brief: DailyBrief) -> str:
     lines.extend(["", "## Risk Alerts"])
     if brief.risk_alerts:
         for item in brief.risk_alerts:
-            lines.append(f"- **{item.instrument_id}** `{item.status}`: {item.message}")
+            lines.append(
+                f"- **{format_instrument_label(item.instrument_id)}** `{item.status}`: {item.message}"
+            )
     else:
         lines.append("- No position risk alerts.")
 

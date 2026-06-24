@@ -1,3 +1,5 @@
+from qagent.market.instruments import format_instrument_label
+
 RISK_TERMS = ["definitely", "guarantee", "sure win", "稳赚", "必涨"]
 
 
@@ -32,7 +34,7 @@ def answer_question(question: str, context: dict[str, object]) -> str:
             )
 
     if "why" in lowered or "为什么" in question:
-        instrument_id = context.get("instrument_id", "this instrument")
+        instrument_id = _instrument_label(context.get("instrument_id", "this instrument"))
         score = context.get("score")
         signal_summary = context.get("signal_summary")
         primary_strategy_id = context.get("primary_strategy_id")
@@ -57,7 +59,7 @@ def answer_question(question: str, context: dict[str, object]) -> str:
         if stop:
             return f"The current initial stop is {stop}. Treat it as an invalidation/risk level, not advice."
 
-    instrument_id = context.get("instrument_id", "this instrument")
+    instrument_id = _instrument_label(context.get("instrument_id", "this instrument"))
     status = context.get("status", "unknown")
     score = context.get("score")
     if score is not None:
@@ -98,7 +100,7 @@ def _answer_recommendations(question: str, cards: list[object]) -> str:
 
 
 def _format_cn_recommendation(card: dict[str, object]) -> str:
-    symbol = card.get("instrument_id", "-")
+    symbol = _instrument_label(card.get("instrument_id"))
     action = card.get("action", "watch")
     conviction = _format_float(card.get("conviction_score"))
     trigger = card.get("trigger_price") or "-"
@@ -121,7 +123,7 @@ def _format_cn_recommendation(card: dict[str, object]) -> str:
 
 
 def _format_en_recommendation(card: dict[str, object]) -> str:
-    symbol = card.get("instrument_id", "-")
+    symbol = _instrument_label(card.get("instrument_id"))
     action = card.get("action", "watch")
     conviction = _format_float(card.get("conviction_score"))
     trigger = card.get("trigger_price") or "-"
@@ -154,3 +156,10 @@ def _format_float(value: object) -> str:
 
 def _looks_chinese(value: str) -> bool:
     return any("\u4e00" <= char <= "\u9fff" for char in value)
+
+
+def _instrument_label(value: object) -> str:
+    if value is None:
+        return "-"
+    text = str(value)
+    return format_instrument_label(text) if ":" in text else text

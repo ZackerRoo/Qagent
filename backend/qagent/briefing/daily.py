@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from qagent.backtesting.engine import BacktestResult
 from qagent.catalysts.models import CatalystHypothesis
 from qagent.jobs.daily_scan import DailyScanResult
+from qagent.market.instruments import format_instrument_label
 from qagent.monitoring.portfolio import PositionRisk
 from qagent.providers.status import ProviderStatus
 
@@ -279,7 +280,7 @@ def _data_caveats(
     caveats: list[str] = []
     for card in scan_result.cards:
         for caveat in card.data_caveats:
-            caveats.append(f"{card.instrument_id}: {caveat}")
+            caveats.append(f"{format_instrument_label(card.instrument_id)}: {caveat}")
     for key in ("errors", "strategy_data_errors"):
         if key in scan_result.data_health:
             caveats.append(scan_result.data_health[key])

@@ -341,7 +341,7 @@ export const translations = {
     "common.strategy": "策略",
     "common.samples": "样本",
     "common.symbol": "标的",
-    "common.ticker": "代码",
+    "common.ticker": "标的",
     "common.reason": "原因",
     "common.save": "保存",
     "common.load": "载入",

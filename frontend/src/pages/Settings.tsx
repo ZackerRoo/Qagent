@@ -7,6 +7,7 @@ import {
   runAutomation,
 } from "../api/client";
 import { useI18n } from "../i18n";
+import { formatInstrumentLabel } from "../lib/instruments";
 import type {
   AutomationRunResponse,
   DataProviderMode,
@@ -104,7 +105,9 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
           </div>
           <div>
             <span>{t("top.universe")}</span>
-            <strong>{dataMode === "free" ? symbols : "US:TEST, CN:000001"}</strong>
+            <strong>
+              {formatInstrumentList(dataMode === "free" ? symbols : "US:TEST,CN:000001")}
+            </strong>
           </div>
           <div>
             <span>{t("settings.markets")}</span>
@@ -221,7 +224,9 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
                   <td>{universe.market_scope}</td>
                   <td>{universe.source}</td>
                   <td>{universe.tags.join(", ")}</td>
-                  <td className="reason-cell">{universe.symbols.join(", ")}</td>
+                  <td className="reason-cell" title={universe.symbols.join(", ")}>
+                    {universe.symbols.map((symbol) => formatInstrumentLabel(symbol)).join(", ")}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -293,7 +298,7 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
               <tbody>
                 {dataCache.summaries.map((summary) => (
                   <tr key={`${summary.provider_mode}-${summary.instrument_id}`}>
-                    <td>{summary.instrument_id}</td>
+                    <td title={summary.instrument_id}>{formatInstrumentLabel(summary.instrument_id)}</td>
                     <td>{summary.rows}</td>
                     <td>
                       {summary.first_trade_date} to {summary.last_trade_date}
@@ -316,6 +321,12 @@ function splitList(value: string): string[] {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function formatInstrumentList(value: string): string {
+  return splitList(value)
+    .map((symbol) => formatInstrumentLabel(symbol))
+    .join(", ");
 }
 
 function formatTimestamp(value: string | null): string {
