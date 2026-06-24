@@ -1,10 +1,28 @@
 import { useI18n } from "../i18n";
 import { formatInstrumentLabel } from "../lib/instruments";
+import {
+  localizeAction,
+  localizeCaveat,
+  localizeDataRequirement,
+  localizeDirection,
+  localizeEvidenceKey,
+  localizeEvidenceValue,
+  localizeFactor,
+  localizeFactorExplanation,
+  localizeFactorFlag,
+  localizeList,
+  localizeReason,
+  localizeRole,
+  localizeSignal,
+  localizeStatus,
+  localizeStrategy,
+  localizeStrategyFamily,
+} from "../lib/localize";
 import type { OpportunityCard } from "../types";
 import { StatusBadge } from "./StatusBadge";
 
 export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
 
   if (!card) {
     return <section className="panel empty">{t("detail.select")}</section>;
@@ -20,12 +38,12 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
         <StatusBadge status={card.status} />
       </div>
 
-      <p className="thesis">{card.thesis}</p>
+      <p className="thesis">{localizeReason(card.thesis, language)}</p>
 
       <div className="metric-grid">
         <div>
           <span>{t("detail.action")}</span>
-          <strong>{card.decision?.action_label ?? "-"}</strong>
+          <strong>{localizeAction(card.decision?.action, language)}</strong>
         </div>
         <div>
           <span>{t("brief.conviction")}</span>
@@ -53,7 +71,7 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
         </div>
         <div>
           <span>{t("common.strategy")}</span>
-          <strong>{labelStrategy(card.primary_strategy_id)}</strong>
+          <strong>{localizeStrategy(card.primary_strategy_id, language)}</strong>
         </div>
         <div>
           <span>{t("detail.strategyScore")}</span>
@@ -77,21 +95,21 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
         <h3>{t("factors.title")}</h3>
         <div className="rank-reasons">
           {(card.factor_flags.length ? card.factor_flags : [t("common.none")]).map((flag) => (
-            <span key={flag}>{flag}</span>
+            <span key={flag}>{localizeFactorFlag(flag, language)}</span>
           ))}
         </div>
         <div className="strategy-stack">
           {card.factor_exposures.map((factor) => (
             <div key={factor.factor_id}>
               <header>
-                <span>{factor.label}</span>
+                <span>{localizeFactor(factor.factor_id, language)}</span>
                 <strong>{Math.round(factor.score * 100)}</strong>
               </header>
               <small>
                 {t("factors.weight")}: {Math.round(factor.weight * 100)} · {t("factors.raw")}:{" "}
                 {formatRawFactor(factor.raw_value)}
               </small>
-              <p>{factor.explanation}</p>
+              <p>{localizeFactorExplanation(factor.factor_id, factor.explanation, language)}</p>
             </div>
           ))}
         </div>
@@ -100,7 +118,7 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
       {card.decision && (
         <div className="detail-section">
           <h3>{t("detail.researchDecision")}</h3>
-          <p>{card.decision.safety_note}</p>
+          <p>{localizeReason(card.decision.safety_note, language)}</p>
           <div className="decision-grid">
             <div>
               <span>{t("common.strategy")}</span>
@@ -123,15 +141,23 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
               <strong>{formatDecisionPct(card.decision.components.catalyst_support)}</strong>
             </div>
           </div>
-          <DecisionList title={t("brief.why")} items={card.decision.rationale} />
-          <DecisionList title={t("detail.failure")} items={card.decision.failure_conditions} />
-          <DecisionList title={t("detail.verification")} items={card.decision.verification_checks} />
+          <DecisionList title={t("brief.why")} items={card.decision.rationale} language={language} />
+          <DecisionList
+            title={t("detail.failure")}
+            items={card.decision.failure_conditions}
+            language={language}
+          />
+          <DecisionList
+            title={t("detail.verification")}
+            items={card.decision.verification_checks}
+            language={language}
+          />
         </div>
       )}
 
       <div className="detail-section">
         <h3>{t("detail.tradeScenario")}</h3>
-        <p>{card.scenario.summary}</p>
+        <p>{localizeReason(card.scenario.summary, language)}</p>
         <div className="scenario-grid">
           <div>
             <span>{t("detail.downside")}</span>
@@ -152,7 +178,7 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
         <h3>{t("detail.ranking")}</h3>
         <div className="rank-reasons">
           {card.rank_reasons.map((reason) => (
-            <span key={reason}>{reason}</span>
+            <span key={reason}>{localizeReason(reason, language)}</span>
           ))}
         </div>
       </div>
@@ -163,23 +189,27 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
           {card.strategy_evaluations.map((strategy) => (
             <div key={strategy.strategy_id}>
               <header>
-                <span>{strategy.name}</span>
+                <span>{localizeStrategy(strategy.strategy_id, language)}</span>
                 <strong>{Math.round(strategy.score * 100)}</strong>
               </header>
               <small>
-                {strategy.family} · {strategy.role} · {strategy.status}
+                {localizeStrategyFamily(strategy.family, language)} ·{" "}
+                {localizeRole(strategy.role, language)} · {localizeStatus(strategy.status, language)}
               </small>
               <p>
-                {t("detail.triggers")}: {formatList(strategy.triggers)}
+                {t("detail.triggers")}:{" "}
+                {localizeList(strategy.triggers, language, localizeSignal)}
               </p>
               <p>
-                {t("detail.confirmations")}: {formatList(strategy.confirmations)}
+                {t("detail.confirmations")}:{" "}
+                {localizeList(strategy.confirmations, language, localizeSignal)}
               </p>
               <p>
-                {t("detail.missingData")}: {formatList(strategy.missing_data)}
+                {t("detail.missingData")}:{" "}
+                {localizeList(strategy.missing_data, language, localizeDataRequirement)}
               </p>
               <p>
-                {t("detail.invalidation")}: {strategy.invalidation}
+                {t("detail.invalidation")}: {localizeReason(strategy.invalidation, language)}
               </p>
             </div>
           ))}
@@ -191,12 +221,12 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
         <div className="signal-stack">
           {card.signals.map((signal) => (
             <div key={`${signal.signal_type}-${signal.horizon}`}>
-              <span>{signal.signal_type}</span>
+              <span>{localizeSignal(signal.signal_type, language)}</span>
               <strong>{Math.round(signal.score * 100)}</strong>
               <small>
-                {signal.direction} · {signal.horizon}
+                {localizeDirection(signal.direction, language)} · {signal.horizon}
               </small>
-              <p>{formatEvidence(signal.evidence)}</p>
+              <p>{formatEvidence(signal.evidence, language)}</p>
             </div>
           ))}
         </div>
@@ -204,44 +234,36 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
 
       <div className="detail-section">
         <h3>{t("detail.entry")}</h3>
-        <p>{card.entry_plan.confirmation}</p>
+        <p>{localizeReason(card.entry_plan.confirmation, language)}</p>
       </div>
 
       <div className="detail-section">
         <h3>{t("detail.invalidation")}</h3>
-        <p>{card.exit_plan.invalidation}</p>
+        <p>{localizeReason(card.exit_plan.invalidation, language)}</p>
       </div>
 
       <div className="detail-section">
         <h3>{t("detail.exitPlan")}</h3>
-        <p>{card.exit_plan.trailing_rule}</p>
-        <p>{card.exit_plan.time_stop}</p>
+        <p>{localizeReason(card.exit_plan.trailing_rule, language)}</p>
+        <p>{localizeReason(card.exit_plan.time_stop, language)}</p>
       </div>
 
       <div className="caveats">
         {card.data_caveats.map((item) => (
-          <span key={item}>{item}</span>
+          <span key={item}>{localizeCaveat(item, language)}</span>
         ))}
       </div>
     </section>
   );
 }
 
-function formatEvidence(evidence: Record<string, unknown>) {
+function formatEvidence(evidence: Record<string, unknown>, language: "zh" | "en") {
   return Object.entries(evidence)
-    .map(([key, value]) => `${key}: ${String(value)}`)
+    .map(
+      ([key, value]) =>
+        `${localizeEvidenceKey(key, language)}: ${localizeEvidenceValue(value, language)}`,
+    )
     .join(" · ");
-}
-
-function formatList(items: string[]) {
-  return items.length ? items.join(", ") : "-";
-}
-
-function labelStrategy(strategyId: string | null) {
-  if (!strategyId) {
-    return "-";
-  }
-  return strategyId.replace(/_/g, " ");
 }
 
 function formatDecisionPct(value: number | undefined) {
@@ -259,12 +281,20 @@ function formatRawFactor(value: number | null) {
   return Math.abs(value) < 1 ? value.toFixed(4) : value.toFixed(2);
 }
 
-function DecisionList({ title, items }: { title: string; items: string[] }) {
+function DecisionList({
+  title,
+  items,
+  language,
+}: {
+  title: string;
+  items: string[];
+  language: "zh" | "en";
+}) {
   return (
     <div className="decision-list">
       <h3>{title}</h3>
       {items.map((item) => (
-        <p key={item}>{item}</p>
+        <p key={item}>{localizeReason(item, language)}</p>
       ))}
     </div>
   );

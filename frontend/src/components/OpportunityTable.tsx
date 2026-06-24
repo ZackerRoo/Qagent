@@ -1,5 +1,6 @@
 import { useI18n } from "../i18n";
 import { formatInstrumentLabel } from "../lib/instruments";
+import { localizeAction, localizeCaveat, localizeStrategy } from "../lib/localize";
 import type { OpportunityCard } from "../types";
 import { StatusBadge } from "./StatusBadge";
 
@@ -10,7 +11,7 @@ type Props = {
 };
 
 export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
 
   return (
     <div className="table-shell">
@@ -51,7 +52,7 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
               </td>
               <td>
                 <span className={`status status-${card.decision?.action ?? "pending"}`}>
-                  {card.decision?.action_label ?? "-"}
+                  {localizeAction(card.decision?.action ?? "pending", language)}
                 </span>
               </td>
               <td>{formatPct(card.decision?.conviction_score)}</td>
@@ -59,13 +60,13 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
               <td>{Math.round(card.rank_score * 100)}</td>
               <td>{Math.round(card.factor_score * 100)}</td>
               <td>{card.factor_rank ?? "-"}</td>
-              <td>{labelStrategy(card.primary_strategy_id)}</td>
+              <td>{localizeStrategy(card.primary_strategy_id, language)}</td>
               <td>{Math.round(card.strategy_score * 100)}</td>
               <td>{card.entry_plan.trigger_price ?? "-"}</td>
               <td>{card.exit_plan.initial_stop ?? "-"}</td>
               <td>{card.exit_plan.target_1 ?? "-"}</td>
               <td>{card.risk_reward?.toFixed(2) ?? "-"}</td>
-              <td>{card.data_caveats[0] ?? "-"}</td>
+              <td>{localizeCaveat(card.data_caveats[0], language)}</td>
             </tr>
           ))}
         </tbody>
@@ -76,11 +77,4 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
 
 function formatPct(value: number | undefined) {
   return value === undefined ? "-" : `${Math.round(value * 100)}`;
-}
-
-function labelStrategy(strategyId: string | null) {
-  if (!strategyId) {
-    return "-";
-  }
-  return strategyId.replace(/_/g, " ");
 }

@@ -1,4 +1,11 @@
 from qagent.market.instruments import format_instrument_label
+from qagent.market.localization import (
+    localize_action,
+    localize_caveat,
+    localize_factor_flag,
+    localize_status,
+    localize_strategy,
+)
 
 RISK_TERMS = ["definitely", "guarantee", "sure win", "稳赚", "必涨"]
 
@@ -6,6 +13,8 @@ RISK_TERMS = ["definitely", "guarantee", "sure win", "稳赚", "必涨"]
 def answer_question(question: str, context: dict[str, object]) -> str:
     lowered = question.lower()
     if any(term in lowered for term in RISK_TERMS):
+        if _looks_chinese(question):
+            return "我不能保证收益。可以帮你解释交易情景、触发价、失效条件和主要风险。"
         return (
             "I cannot guarantee returns. I can explain the setup, trigger, "
             "invalidation, and risks."
@@ -26,6 +35,13 @@ def answer_question(question: str, context: dict[str, object]) -> str:
         upside = context.get("target_1_pct")
         no_chase = context.get("no_chase_above")
         if all(value is not None for value in [trigger, stop, target, downside, upside]):
+            if _looks_chinese(question):
+                extra = f" 不建议追高到 {no_chase} 以上。" if no_chase else ""
+                return (
+                    f"如果按触发价 {trigger} 入场，初始失效/止损位是 {stop} "
+                    f"（下行 {float(downside):.2f}%），第一目标位是 {target} "
+                    f"（上行 +{float(upside):.2f}%）。{extra}这是交易情景推演，不是投资建议。"
+                )
             extra = f" Do not chase above {no_chase}." if no_chase else ""
             return (
                 f"If entered at trigger {trigger}, the initial invalidation is {stop} "
@@ -40,6 +56,22 @@ def answer_question(question: str, context: dict[str, object]) -> str:
         primary_strategy_id = context.get("primary_strategy_id")
         strategy_score = context.get("strategy_score")
         strategy_summary = context.get("strategy_summary")
+        if _looks_chinese(question):
+            status = localize_status(context.get("status"))
+            primary_strategy = localize_strategy(primary_strategy_id)
+            if strategy_summary:
+                return (
+                    f"{instrument_id} 进入列表，是因为策略栈出现了 {strategy_summary}。"
+                    f"主策略是 {primary_strategy}，策略分是 {strategy_score}。"
+                    f"信号证据包括 {signal_summary}。做决定前需要重新检查触发价、止损、目标位、"
+                    "缺失数据和数据限制。"
+                )
+            if signal_summary:
+                return (
+                    f"{instrument_id} 进入列表，是因为信号栈出现了 {signal_summary}。"
+                    f"综合分是 {score}，当前状态是 {status}。做决定前需要重新检查触发价、"
+                    "止损、目标位和数据限制。"
+                )
         if strategy_summary:
             return (
                 f"{instrument_id} is on the list because the strategy stack includes "
@@ -57,11 +89,21 @@ def answer_question(question: str, context: dict[str, object]) -> str:
     if "stop" in lowered or "止损" in question:
         stop = context.get("initial_stop")
         if stop:
+            if _looks_chinese(question):
+                return f"当前初始止损/失效位是 {stop}。它是风险控制位置，不是投资建议。"
             return f"The current initial stop is {stop}. Treat it as an invalidation/risk level, not advice."
 
     instrument_id = _instrument_label(context.get("instrument_id", "this instrument"))
     status = context.get("status", "unknown")
     score = context.get("score")
+    if _looks_chinese(question):
+        localized_status = localize_status(status)
+        if score is not None:
+            return (
+                f"{instrument_id} 当前状态是 {localized_status}，分数是 {score}。"
+                "请先检查触发价、止损、目标位和数据限制；这不是投资建议。"
+            )
+        return f"{instrument_id} 当前状态是 {localized_status}。请结合机会卡和数据限制继续判断。"
     if score is not None:
         return (
             f"{instrument_id} is currently in status {status} with score {score}. "
@@ -101,7 +143,7 @@ def _answer_recommendations(question: str, cards: list[object]) -> str:
 
 def _format_cn_recommendation(card: dict[str, object]) -> str:
     symbol = _instrument_label(card.get("instrument_id"))
-    action = card.get("action", "watch")
+    action = localize_action(card.get("action", "watch"))
     conviction = _format_float(card.get("conviction_score"))
     trigger = card.get("trigger_price") or "-"
     stop = card.get("initial_stop") or "-"
@@ -111,9 +153,11 @@ def _format_cn_recommendation(card: dict[str, object]) -> str:
     risk_reward = _format_float(card.get("risk_reward"))
     factor_score = _format_float(card.get("factor_score"))
     factor_rank = card.get("factor_rank") or "-"
-    factor_flags = ", ".join(str(item) for item in card.get("factor_flags") or []) or "-"
-    strategy = card.get("primary_strategy_id") or "-"
-    caveats = ", ".join(str(item) for item in card.get("data_caveats") or []) or "-"
+    factor_flags = "、".join(
+        localize_factor_flag(item) for item in card.get("factor_flags") or []
+    ) or "-"
+    strategy = localize_strategy(card.get("primary_strategy_id"))
+    caveats = "、".join(localize_caveat(item) for item in card.get("data_caveats") or []) or "-"
     return (
         f"{symbol}：动作 {action}，信心 {conviction}，策略 {strategy}。"
         f"因子分 {factor_score}，因子排名 {factor_rank}，因子标签 {factor_flags}。"

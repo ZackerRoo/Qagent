@@ -14,6 +14,15 @@ import { DataHealth } from "../components/DataHealth";
 import { useI18n } from "../i18n";
 import type { TranslationKey } from "../i18n/catalog";
 import { formatInstrumentLabel } from "../lib/instruments";
+import {
+  localizeAction,
+  localizeCatalyst,
+  localizeCaveat,
+  localizeProvider,
+  localizeReason,
+  localizeStatus,
+  localizeStrategy,
+} from "../lib/localize";
 import { createMarketSections } from "../lib/markets";
 import type {
   BriefRun,
@@ -39,7 +48,7 @@ function formatRatio(value: number | null) {
 }
 
 export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbols: string }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [brief, setBrief] = useState<DailyBriefResponse>();
   const [runs, setRuns] = useState<BriefRun[]>([]);
   const [deliveries, setDeliveries] = useState<DeliveryOutboxRecord[]>([]);
@@ -140,7 +149,9 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
         <div className="panel-heading">
           <div>
             <h2>{t("brief.title")}</h2>
-            <p className="brief-headline">{brief?.headline ?? t("brief.loading")}</p>
+            <p className="brief-headline">
+              {brief ? localizeReason(brief.headline, language) : t("brief.loading")}
+            </p>
           </div>
           <div className="brief-actions">
             <button className="icon-action" type="button" onClick={loadBrief} disabled={isLoading}>
@@ -152,7 +163,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
           </div>
         </div>
         {error && <div className="empty-state error">{error}</div>}
-        {brief && <DataHealth data={brief.data_health} />}
+        {brief && <DataHealth data={brief.data_health} language={language} />}
         {brief && (
           <div className="metric-grid brief-metrics">
             <div>
@@ -198,8 +209,8 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
                 {runs.map((run) => (
                   <tr key={run.brief_id}>
                     <td>{new Date(run.created_at).toLocaleString()}</td>
-                    <td>{run.provider}</td>
-                    <td className="reason-cell">{run.headline}</td>
+                    <td>{localizeProvider(run.provider, language)}</td>
+                    <td className="reason-cell">{localizeReason(run.headline, language)}</td>
                     <td>{run.opportunity_count}</td>
                     <td>
                       <div className="table-actions">
@@ -263,11 +274,13 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
                   <tr key={delivery.delivery_id}>
                     <td>{new Date(delivery.created_at).toLocaleString()}</td>
                     <td>
-                      <span className={`status status-${delivery.status}`}>{delivery.status}</span>
+                      <span className={`status status-${delivery.status}`}>
+                        {localizeStatus(delivery.status, language)}
+                      </span>
                     </td>
-                    <td>{delivery.channel}</td>
-                    <td>{delivery.recipient ?? t("common.local")}</td>
-                    <td className="reason-cell">{delivery.subject}</td>
+                    <td>{formatChannel(delivery.channel, language)}</td>
+                    <td>{formatRecipient(delivery.recipient, language)}</td>
+                    <td className="reason-cell">{localizeReason(delivery.subject, language)}</td>
                     <td>{delivery.sent_at ? new Date(delivery.sent_at).toLocaleString() : "-"}</td>
                     <td>
                       <div className="table-actions">
@@ -344,7 +357,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
                 <tbody>
                   {brief.strategy_validation.map((item) => (
                     <tr key={item.strategy_id}>
-                      <td className="reason-cell">{item.strategy_id}</td>
+                      <td className="reason-cell">{localizeStrategy(item.strategy_id, language)}</td>
                       <td>{item.sample_count}</td>
                       <td>{formatRatio(item.target_hit_rate)}</td>
                       <td>{formatRatio(item.positive_rate_10d)}</td>
@@ -365,8 +378,14 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
           items={
             brief?.catalyst_watch.map((item) => ({
               key: `${item.instrument_id}-${item.title}`,
-              title: `${formatInstrumentLabel(item.instrument_id)} · ${item.catalyst_type}`,
-              body: `${item.investment_hypothesis} ${item.verification_path}`,
+              title: `${formatInstrumentLabel(item.instrument_id)} · ${localizeCatalyst(
+                item.catalyst_type,
+                language,
+              )}`,
+              body: `${localizeReason(item.investment_hypothesis, language)} ${localizeReason(
+                item.verification_path,
+                language,
+              )}`,
             })) ?? []
           }
           empty={t("brief.noCatalysts")}
@@ -377,8 +396,11 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
           items={
             brief?.risk_alerts.map((item) => ({
               key: `${item.instrument_id}-${item.status}`,
-              title: `${formatInstrumentLabel(item.instrument_id)} · ${item.status}`,
-              body: item.message,
+              title: `${formatInstrumentLabel(item.instrument_id)} · ${localizeStatus(
+                item.status,
+                language,
+              )}`,
+              body: localizeReason(item.message, language),
             })) ?? []
           }
           empty={t("brief.noRiskAlerts")}
@@ -393,7 +415,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
             brief?.data_caveats.map((item) => ({
               key: item,
               title: t("brief.caveat"),
-              body: item,
+              body: localizeCaveat(item, language),
             })) ?? []
           }
           empty={t("brief.noCaveats")}
@@ -405,7 +427,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
             brief?.next_steps.map((item) => ({
               key: item,
               title: t("brief.check"),
-              body: item,
+              body: localizeReason(item, language),
             })) ?? []
           }
           empty={t("brief.noNextSteps")}
@@ -443,7 +465,7 @@ function BriefOpportunityMarketSections({ items }: { items: DailyBriefOpportunit
 }
 
 function BriefOpportunityTable({ items }: { items: DailyBriefOpportunity[] }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
 
   return (
     <div className="table-shell">
@@ -473,16 +495,20 @@ function BriefOpportunityTable({ items }: { items: DailyBriefOpportunity[] }) {
                 {formatInstrumentLabel(item.instrument_id)}
               </td>
               <td>
-                <span className={`status status-${item.status}`}>{item.status}</span>
+                <span className={`status status-${item.status}`}>
+                  {localizeStatus(item.status, language)}
+                </span>
               </td>
               <td>
                 <span className={`status status-${item.decision_action ?? "pending"}`}>
-                  {item.decision_label ?? item.decision_action ?? "-"}
+                  {localizeAction(item.decision_action, language)}
                 </span>
               </td>
               <td>{formatRatio(item.conviction_score)}</td>
               <td>{formatNumber(item.suggested_risk_pct, "%")}</td>
-              <td className="reason-cell">{item.primary_strategy_id ?? t("common.none")}</td>
+              <td className="reason-cell">
+                {localizeStrategy(item.primary_strategy_id, language)}
+              </td>
               <td>{item.rank_score.toFixed(2)}</td>
               <td>{formatRatio(item.factor_score)}</td>
               <td>{item.factor_rank ?? "-"}</td>
@@ -490,7 +516,9 @@ function BriefOpportunityTable({ items }: { items: DailyBriefOpportunity[] }) {
               <td>{item.initial_stop ?? "-"}</td>
               <td>{item.target_1 ?? "-"}</td>
               <td>{formatNumber(item.risk_reward)}</td>
-              <td className="reason-cell">{item.rank_reasons.join("; ")}</td>
+              <td className="reason-cell">
+                {item.rank_reasons.map((reason) => localizeReason(reason, language)).join("；")}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -527,7 +555,7 @@ function BriefEntryWatchMarketSections({ items }: { items: DailyBriefEntryWatch[
 }
 
 function BriefEntryWatchTable({ items }: { items: DailyBriefEntryWatch[] }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
 
   return (
     <div className="table-shell">
@@ -549,11 +577,13 @@ function BriefEntryWatchTable({ items }: { items: DailyBriefEntryWatch[] }) {
               <td className="ticker" title={item.instrument_id}>
                 {formatInstrumentLabel(item.instrument_id)}
               </td>
-              <td className="reason-cell">{item.primary_strategy_id ?? t("common.none")}</td>
+              <td className="reason-cell">
+                {localizeStrategy(item.primary_strategy_id, language)}
+              </td>
               <td>{item.trigger_price}</td>
               <td>{item.initial_stop ?? "-"}</td>
               <td>{item.target_1 ?? "-"}</td>
-              <td>{item.decision_action ?? "-"}</td>
+              <td>{localizeAction(item.decision_action, language)}</td>
               <td>{formatNumber(item.suggested_risk_pct, "%")}</td>
             </tr>
           ))}
@@ -594,4 +624,18 @@ function BriefList({
       )}
     </section>
   );
+}
+
+function formatChannel(value: string, language: "zh" | "en"): string {
+  if (value === "markdown") {
+    return language === "zh" ? "Markdown" : "Markdown";
+  }
+  return value;
+}
+
+function formatRecipient(value: string | null, language: "zh" | "en"): string {
+  if (!value || value === "local") {
+    return language === "zh" ? "本地" : "local";
+  }
+  return value;
 }

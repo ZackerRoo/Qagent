@@ -103,6 +103,12 @@ def test_responder_recommends_ranked_cards_with_entry_and_exit_levels():
     assert "39.53" in answer
     assert "因子" in answer
     assert "0.82" in answer
-    assert "overextended" in answer
+    assert "等待触发" in answer
+    assert "健康回调" in answer
+    assert "短线过热" in answer
     assert "baostock" in answer
+    assert "provider:" not in answer
+    assert "watch_trigger" not in answer
+    assert "healthy_pullback" not in answer
+    assert "overextended" not in answer
     assert "不是投资建议" in answer

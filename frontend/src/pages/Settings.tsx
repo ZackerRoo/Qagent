@@ -8,6 +8,13 @@ import {
 } from "../api/client";
 import { useI18n } from "../i18n";
 import { formatInstrumentLabel } from "../lib/instruments";
+import {
+  localizeCapability,
+  localizeProvider,
+  localizeProviderName,
+  localizeReason,
+  localizeStatus,
+} from "../lib/localize";
 import type {
   AutomationRunResponse,
   DataProviderMode,
@@ -26,15 +33,15 @@ type Props = {
 
 const emptyUniverse: UniverseCreate = {
   universe_id: "custom_ai_pool",
-  name: "Custom AI Pool",
-  description: "My editable AI research pool",
-  market_scope: "mixed",
+  name: "我的 A 股研究池",
+  description: "自定义 A 股研究池",
+  market_scope: "CN",
   tags: ["custom"],
-  symbols: ["US:NVDA", "US:MSFT"],
+  symbols: ["CN:000001", "CN:000063"],
 };
 
 export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [providerStatus, setProviderStatus] = useState<ProviderStatusResponse>();
   const [dataCache, setDataCache] = useState<MarketDataCacheResponse>();
   const [automationResult, setAutomationResult] = useState<AutomationRunResponse>();
@@ -64,7 +71,7 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
     try {
       setError("");
       const saved = await onSaveUniverse(universeForm);
-      setSaveMessage(`Saved ${saved.name}`);
+      setSaveMessage(language === "zh" ? `已保存 ${saved.name}` : `Saved ${saved.name}`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Failed to save universe");
     }
@@ -74,7 +81,11 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
     try {
       setError("");
       const cleared = await clearDataCache(dataMode);
-      setCacheMessage(`Cleared ${cleared.deleted} cached rows`);
+      setCacheMessage(
+        language === "zh"
+          ? `已清理 ${cleared.deleted} 行缓存`
+          : `Cleared ${cleared.deleted} cached rows`,
+      );
       setDataCache(await fetchDataCache(dataMode));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Failed to clear data cache");
@@ -96,7 +107,7 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
       <section className="panel">
         <div className="panel-heading">
           <h2>{t("settings.title")}</h2>
-          <span className="count">Dev</span>
+          <span className="count">{language === "zh" ? "开发" : "Dev"}</span>
         </div>
         <div className="settings-list">
           <div>
@@ -111,7 +122,7 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
           </div>
           <div>
             <span>{t("settings.markets")}</span>
-            <strong>US, CN</strong>
+            <strong>{language === "zh" ? "A股" : "A-Shares"}</strong>
           </div>
           <div>
             <span>{t("settings.execution")}</span>
@@ -156,8 +167,9 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
             <div>
               <span>{t("settings.paper")}</span>
               <strong>
-                {automationResult.summary.paper_created} new /{" "}
-                {automationResult.summary.paper_total} total
+                {language === "zh"
+                  ? `${automationResult.summary.paper_created} 新增 / ${automationResult.summary.paper_total} 合计`
+                  : `${automationResult.summary.paper_created} new / ${automationResult.summary.paper_total} total`}
               </strong>
             </div>
           </div>
@@ -190,16 +202,16 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
               setUniverseForm({ ...universeForm, market_scope: event.target.value })
             }
           >
-            <option value="mixed">Mixed</option>
-            <option value="US">US</option>
-            <option value="CN">CN</option>
+            <option value="mixed">{language === "zh" ? "混合" : "Mixed"}</option>
+            <option value="US">{language === "zh" ? "美股" : "US"}</option>
+            <option value="CN">{language === "zh" ? "A股" : "CN"}</option>
           </select>
           <input
             value={universeForm.symbols.join(",")}
             onChange={(event) =>
               setUniverseForm({ ...universeForm, symbols: splitList(event.target.value) })
             }
-            placeholder="US:NVDA,US:MSFT"
+            placeholder="CN:000001,CN:000063"
           />
           <button type="button" onClick={saveUniverseForm}>
             {t("common.save")}
@@ -220,10 +232,10 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
             <tbody>
               {universes.map((universe) => (
                 <tr key={universe.universe_id}>
-                  <td>{universe.name}</td>
-                  <td>{universe.market_scope}</td>
-                  <td>{universe.source}</td>
-                  <td>{universe.tags.join(", ")}</td>
+                  <td>{formatUniverseName(universe, language)}</td>
+                  <td>{formatScope(universe.market_scope, language)}</td>
+                  <td>{formatSource(universe.source, language)}</td>
+                  <td>{formatTags(universe.tags, language)}</td>
                   <td className="reason-cell" title={universe.symbols.join(", ")}>
                     {universe.symbols.map((symbol) => formatInstrumentLabel(symbol)).join(", ")}
                   </td>
@@ -256,12 +268,18 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
               <tbody>
                 {providerStatus.providers.map((provider) => (
                   <tr key={provider.provider_id}>
-                    <td>{provider.name}</td>
+                    <td>{localizeProviderName(provider.name, language)}</td>
                     <td>
-                      <span className={`status status-${provider.status}`}>{provider.status}</span>
+                      <span className={`status status-${provider.status}`}>
+                        {localizeStatus(provider.status, language)}
+                      </span>
                     </td>
-                    <td className="reason-cell">{provider.capabilities.join(", ")}</td>
-                    <td className="reason-cell">{provider.notes}</td>
+                    <td className="reason-cell">
+                      {provider.capabilities
+                        .map((item) => localizeCapability(item, language))
+                        .join(language === "zh" ? "、" : ", ")}
+                    </td>
+                    <td className="reason-cell">{localizeReason(provider.notes, language)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -277,7 +295,7 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
         </div>
         <div className="form-row">
           <button type="button" onClick={clearCurrentDataCache}>
-            {t("settings.clearCache")} {dataMode}
+            {t("settings.clearCache")} {localizeProvider(dataMode, language)}
           </button>
         </div>
         {cacheMessage && <div className="empty-state">{cacheMessage}</div>}
@@ -301,9 +319,14 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
                     <td title={summary.instrument_id}>{formatInstrumentLabel(summary.instrument_id)}</td>
                     <td>{summary.rows}</td>
                     <td>
-                      {summary.first_trade_date} to {summary.last_trade_date}
+                      {summary.first_trade_date} {language === "zh" ? "至" : "to"}{" "}
+                      {summary.last_trade_date}
                     </td>
-                    <td className="reason-cell">{summary.source_providers.join(", ")}</td>
+                    <td className="reason-cell">
+                      {summary.source_providers
+                        .map((provider) => localizeProvider(provider, language))
+                        .join(language === "zh" ? "、" : ", ")}
+                    </td>
                     <td>{formatTimestamp(summary.last_cached_at)}</td>
                   </tr>
                 ))}
@@ -334,4 +357,63 @@ function formatTimestamp(value: string | null): string {
     return "-";
   }
   return new Date(value).toLocaleString();
+}
+
+function formatScope(value: string, language: "zh" | "en"): string {
+  if (value === "CN") {
+    return language === "zh" ? "A股" : "A-Shares";
+  }
+  if (value === "US") {
+    return language === "zh" ? "美股" : "US Stocks";
+  }
+  if (value === "mixed") {
+    return language === "zh" ? "混合" : "Mixed";
+  }
+  return value;
+}
+
+function formatSource(value: string, language: "zh" | "en"): string {
+  if (value === "builtin_starter") {
+    return language === "zh" ? "内置模板" : "Built-in starter";
+  }
+  if (value === "custom") {
+    return language === "zh" ? "自定义" : "Custom";
+  }
+  return value;
+}
+
+function formatUniverseName(universe: UniverseRecord, language: "zh" | "en"): string {
+  if (language !== "zh") {
+    return universe.name;
+  }
+  const labels: Record<string, string> = {
+    fixture_dev: "样例开发池",
+    free_default: "A股免费默认池",
+    cn_tech_starter: "A股科技入门池",
+    cn_blue_chip_starter: "A股蓝筹入门池",
+    cn_growth_starter: "A股成长入门池",
+  };
+  return labels[universe.universe_id] ?? universe.name;
+}
+
+function formatTags(tags: string[], language: "zh" | "en"): string {
+  if (!tags.length) {
+    return "-";
+  }
+  const labels: Record<string, string> = {
+    cn: "A股",
+    free: "免费",
+    default: "默认",
+    growth: "成长",
+    technology: "科技",
+    starter: "入门",
+    blue_chip: "蓝筹",
+    liquid: "高流动性",
+    fixture: "样例",
+    dev: "开发",
+    custom: "自定义",
+  };
+  return tags
+    .map((tag) => (language === "zh" ? labels[tag] ?? tag.replace(/_/g, " ") : tag.replace(/_/g, " ")))
+    .join(language === "zh" ? "、" : ", ");
 }

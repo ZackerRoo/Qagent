@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { fetchWatchlist, saveWatchlistItem } from "../api/client";
 import { useI18n } from "../i18n";
 import { formatInstrumentLabel } from "../lib/instruments";
+import { localizeStatus } from "../lib/localize";
 import type { WatchlistItem } from "../types";
 
 const emptyItem: WatchlistItem = {
@@ -13,7 +14,7 @@ const emptyItem: WatchlistItem = {
 };
 
 export function Watchlist() {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [items, setItems] = useState<WatchlistItem[]>([]);
   const [form, setForm] = useState<WatchlistItem>(emptyItem);
 
@@ -71,7 +72,7 @@ export function Watchlist() {
                 <td className="ticker" title={item.instrument_id}>
                   {formatInstrumentLabel(item.instrument_id)}
                 </td>
-                <td>{item.status}</td>
+                <td>{localizeStatus(item.status, language)}</td>
                 <td>{item.thesis ?? "-"}</td>
                 <td>{item.tags.join(", ") || "-"}</td>
               </tr>

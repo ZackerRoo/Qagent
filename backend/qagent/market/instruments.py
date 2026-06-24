@@ -17,7 +17,7 @@ US_INSTRUMENT_NAMES = {
     "AAPL": "Apple",
     "MSFT": "Microsoft",
     "NVDA": "NVIDIA",
-    "TEST": "Fixture Test",
+    "TEST": "样例测试",
 }
 
 

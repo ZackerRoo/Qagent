@@ -10,22 +10,23 @@ import {
 import { DataHealth } from "../components/DataHealth";
 import { useI18n } from "../i18n";
 import { formatInstrumentLabel } from "../lib/instruments";
+import { localizeStatus, localizeStrategy } from "../lib/localize";
 import type { DataProviderMode, PaperTradesResponse, PortfolioResponse, Position } from "../types";
 
 const emptyPosition: Position = {
-  instrument_id: "US:TEST",
-  shares: "10",
-  entry_price: "82.00",
+  instrument_id: "CN:000001",
+  shares: "100",
+  entry_price: "12.00",
   entry_date: "2026-03-31",
-  strategy_tag: "breakout",
-  initial_stop: "78.72",
-  target_1: "88.56",
+  strategy_tag: "breakout_volume_confirmation",
+  initial_stop: "11.40",
+  target_1: "13.20",
   target_2: null,
   thesis: "",
 };
 
 export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [positions, setPositions] = useState<Position[]>([]);
   const [portfolio, setPortfolio] = useState<PortfolioResponse>();
   const [paper, setPaper] = useState<PaperTradesResponse>();
@@ -53,14 +54,20 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
 
   async function seedPaper() {
     const result = await seedPaperTrades(dataMode);
-    setPaperMessage(`Seeded ${result.created}, skipped ${result.skipped}`);
+    setPaperMessage(
+      language === "zh"
+        ? `已加入 ${result.created} 条，跳过 ${result.skipped} 条`
+        : `Seeded ${result.created}, skipped ${result.skipped}`,
+    );
     await load();
   }
 
   async function updatePaper() {
     const result = await updatePaperTrades(dataMode);
     setPaperMessage(
-      `Updated ${result.summary.total} trades, ${result.summary.closed} closed`,
+      language === "zh"
+        ? `已更新 ${result.summary.total} 笔交易，${result.summary.closed} 笔已结束`
+        : `Updated ${result.summary.total} trades, ${result.summary.closed} closed`,
     );
     setPaper({ summary: result.summary, trades: result.trades });
   }
@@ -72,12 +79,12 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
           <h2>{t("portfolio.title")}</h2>
           <span className="count">{positions.length}</span>
         </div>
-        {portfolio && <DataHealth data={portfolio.data_health} />}
+        {portfolio && <DataHealth data={portfolio.data_health} language={language} />}
         <div className="form-row portfolio-form">
           <input
             value={form.instrument_id}
             onChange={(event) => setForm({ ...form, instrument_id: event.target.value })}
-            placeholder="US:TEST"
+            placeholder="CN:000001"
           />
           <input
             value={form.shares}
@@ -141,8 +148,8 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
                         ? `${risk.target_1_distance_pct.toFixed(2)}%`
                         : "-"}
                     </td>
-                    <td>{risk?.status ?? "no_price"}</td>
-                    <td>{position.strategy_tag ?? "-"}</td>
+                    <td>{localizeStatus(risk?.status ?? "no_price", language)}</td>
+                    <td>{localizeStrategy(position.strategy_tag, language)}</td>
                   </tr>
                 );
               })}
@@ -201,7 +208,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
                   <td className="ticker" title={trade.instrument_id}>
                     {formatInstrumentLabel(trade.instrument_id)}
                   </td>
-                  <td>{trade.status}</td>
+                  <td>{localizeStatus(trade.status, language)}</td>
                   <td>{trade.signal_date}</td>
                   <td>{trade.trigger_price}</td>
                   <td>{trade.initial_stop ?? "-"}</td>
@@ -210,7 +217,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
                   <td>{trade.exit_price ?? "-"}</td>
                   <td>{trade.latest_price ?? "-"}</td>
                   <td>{formatPct(trade.realized_return_pct ?? trade.unrealized_return_pct)}</td>
-                  <td className="reason-cell">{trade.strategy_id ?? "-"}</td>
+                  <td className="reason-cell">{localizeStrategy(trade.strategy_id, language)}</td>
                 </tr>
               ))}
             </tbody>

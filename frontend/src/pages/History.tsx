@@ -12,6 +12,7 @@ import {
 import { DataHealth } from "../components/DataHealth";
 import { useI18n } from "../i18n";
 import { formatInstrumentLabel } from "../lib/instruments";
+import { localizeProvider, localizeStatus, localizeStrategy } from "../lib/localize";
 import type {
   BacktestResponse,
   DataProviderMode,
@@ -25,20 +26,20 @@ import type {
 
 function formatNumber(value: number | null, suffix = "") {
   if (value === null || Number.isNaN(value)) {
-    return "Pending";
+    return "-";
   }
   return `${value.toFixed(2)}${suffix}`;
 }
 
 function formatRatio(value: number | null) {
   if (value === null || Number.isNaN(value)) {
-    return "Pending";
+    return "-";
   }
   return `${(value * 100).toFixed(0)}%`;
 }
 
 export function History({ dataMode, symbols }: { dataMode: DataProviderMode; symbols: string }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [backtest, setBacktest] = useState<BacktestResponse>();
   const [factorBacktest, setFactorBacktest] = useState<FactorBacktestResponse>();
   const [portfolioBacktest, setPortfolioBacktest] = useState<PortfolioBacktestResponse>();
@@ -130,7 +131,7 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
         {backtestError && <div className="empty-state error">{backtestError}</div>}
         {backtest ? (
           <div className="stack">
-            <DataHealth data={backtest.data_health} />
+            <DataHealth data={backtest.data_health} language={language} />
             <div className="metric-grid">
               <div>
                 <span>{t("history.scans")}</span>
@@ -182,7 +183,7 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
                 <tbody>
                   {backtest.performance.map((item) => (
                     <tr key={item.strategy_id}>
-                      <td className="reason-cell">{item.strategy_id}</td>
+                      <td className="reason-cell">{localizeStrategy(item.strategy_id, language)}</td>
                       <td>{item.sample_count}</td>
                       <td>{item.completed_count}</td>
                       <td>{formatRatio(item.target_hit_rate)}</td>
@@ -218,10 +219,12 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
                       <td className="ticker" title={signal.instrument_id}>
                         {formatInstrumentLabel(signal.instrument_id)}
                       </td>
-                      <td className="reason-cell">{signal.primary_strategy_id ?? t("common.none")}</td>
+                      <td className="reason-cell">
+                        {localizeStrategy(signal.primary_strategy_id, language)}
+                      </td>
                       <td>
                         <span className={`status status-${signal.outcome_status}`}>
-                          {signal.outcome_status}
+                          {localizeStatus(signal.outcome_status, language)}
                         </span>
                       </td>
                       <td>{formatNumber(signal.return_5d, "%")}</td>
@@ -256,7 +259,7 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
         {factorBacktestError && <div className="empty-state error">{factorBacktestError}</div>}
         {factorBacktest ? (
           <div className="stack">
-            <DataHealth data={factorBacktest.data_health} />
+            <DataHealth data={factorBacktest.data_health} language={language} />
             <div className="metric-grid">
               <div>
                 <span>{t("common.samples")}</span>
@@ -334,7 +337,7 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
         {portfolioBacktestError && <div className="empty-state error">{portfolioBacktestError}</div>}
         {portfolioBacktest ? (
           <div className="stack">
-            <DataHealth data={portfolioBacktest.data_health} />
+            <DataHealth data={portfolioBacktest.data_health} language={language} />
             <div className="metric-grid">
               <div>
                 <span>{t("history.initial")}</span>
@@ -414,7 +417,7 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
                         <td>{trade.exit_date}</td>
                         <td>
                           <span className={`status status-${trade.exit_reason}`}>
-                            {trade.exit_reason}
+                            {localizeStatus(trade.exit_reason, language)}
                           </span>
                         </td>
                         <td>{trade.net_pnl}</td>
@@ -455,7 +458,7 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
                 {runs.runs.map((run) => (
                   <tr key={run.run_id}>
                     <td>{new Date(run.created_at).toLocaleString()}</td>
-                    <td>{run.provider}</td>
+                    <td>{localizeProvider(run.provider, language)}</td>
                     <td className="reason-cell" title={run.symbols.join(", ")}>
                       {run.symbols.map((symbol) => formatInstrumentLabel(symbol)).join(", ")}
                     </td>
@@ -498,8 +501,8 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
                       {formatInstrumentLabel(snapshot.instrument_id)}
                     </td>
                     <td>{snapshot.signal_date ?? t("common.pending")}</td>
-                    <td>{snapshot.status}</td>
-                    <td>{snapshot.primary_strategy_id ?? t("common.none")}</td>
+                    <td>{localizeStatus(snapshot.status, language)}</td>
+                    <td>{localizeStrategy(snapshot.primary_strategy_id, language)}</td>
                     <td>{Number(snapshot.rank_score).toFixed(2)}</td>
                     <td>{snapshot.trigger_price ?? t("common.none")}</td>
                     <td>{snapshot.initial_stop ?? t("common.none")}</td>
@@ -517,7 +520,7 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
           <h2>{t("history.strategyPerformance")}</h2>
           <span className="count">{performance?.performance.length ?? 0}</span>
         </div>
-        {performance && <DataHealth data={performance.data_health} />}
+        {performance && <DataHealth data={performance.data_health} language={language} />}
         {!performance?.performance.length ? (
           <div className="empty-state">{t("history.noPerformance")}</div>
         ) : (
@@ -539,7 +542,7 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
               <tbody>
                 {performance.performance.map((item) => (
                   <tr key={item.strategy_id}>
-                    <td className="reason-cell">{item.strategy_id}</td>
+                    <td className="reason-cell">{localizeStrategy(item.strategy_id, language)}</td>
                     <td>{item.sample_count}</td>
                     <td>{item.completed_count}</td>
                     <td>{item.pending_count}</td>
@@ -561,7 +564,7 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
           <h2>{t("history.outcomeReplay")}</h2>
           <span className="count">{outcomes?.outcomes.length ?? 0}</span>
         </div>
-        {outcomes && <DataHealth data={outcomes.data_health} />}
+        {outcomes && <DataHealth data={outcomes.data_health} language={language} />}
         {!outcomes?.outcomes.length ? (
           <div className="empty-state">{t("history.noOutcomes")}</div>
         ) : (
@@ -584,7 +587,7 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
                     <td className="ticker" title={outcome.instrument_id}>
                       {formatInstrumentLabel(outcome.instrument_id)}
                     </td>
-                    <td>{outcome.outcome_status}</td>
+                    <td>{localizeStatus(outcome.outcome_status, language)}</td>
                     <td>{formatNumber(outcome.return_5d, "%")}</td>
                     <td>{formatNumber(outcome.return_10d, "%")}</td>
                     <td>{formatNumber(outcome.return_20d, "%")}</td>

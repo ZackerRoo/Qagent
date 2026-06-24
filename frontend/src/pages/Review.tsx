@@ -4,10 +4,11 @@ import { fetchCatalysts } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
 import { useI18n } from "../i18n";
 import { formatInstrumentLabel } from "../lib/instruments";
+import { localizeCatalyst, localizeReason } from "../lib/localize";
 import type { CatalystsResponse } from "../types";
 
 export function Review({ symbols }: { symbols: string }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [data, setData] = useState<CatalystsResponse>();
   const [error, setError] = useState("");
 
@@ -30,7 +31,7 @@ export function Review({ symbols }: { symbols: string }) {
           <h2>{t("review.title")}</h2>
           <span className="count">{data?.hypotheses.length ?? 0}</span>
         </div>
-        {data && <DataHealth data={data.data_health} />}
+        {data && <DataHealth data={data.data_health} language={language} />}
         {error && <div className="empty-state error">{error}</div>}
       </section>
 
@@ -59,10 +60,12 @@ export function Review({ symbols }: { symbols: string }) {
                     <td className="ticker" title={item.instrument_id}>
                       {formatInstrumentLabel(item.instrument_id)}
                     </td>
-                    <td>{item.catalyst_type}</td>
+                    <td>{localizeCatalyst(item.catalyst_type, language)}</td>
                     <td>{Math.round(item.confidence * 100)}</td>
-                    <td className="reason-cell">{item.investment_hypothesis}</td>
-                    <td className="reason-cell">{item.verification_path}</td>
+                    <td className="reason-cell">
+                      {localizeReason(item.investment_hypothesis, language)}
+                    </td>
+                    <td className="reason-cell">{localizeReason(item.verification_path, language)}</td>
                   </tr>
                 ))}
               </tbody>

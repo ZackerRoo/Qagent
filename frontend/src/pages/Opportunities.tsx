@@ -3,6 +3,14 @@ import { OpportunityDetail } from "../components/OpportunityDetail";
 import { useI18n } from "../i18n";
 import type { TranslationKey } from "../i18n/catalog";
 import { formatInstrumentLabel } from "../lib/instruments";
+import {
+  localizeFactorFlag,
+  localizeProvider,
+  localizeReason,
+  localizeStatus,
+  localizeStrategy,
+  localizeStrategyFamily,
+} from "../lib/localize";
 import { createMarketSections } from "../lib/markets";
 import type { FactorRanking, OpportunityCard, ScanItem, StrategyHealth } from "../types";
 
@@ -94,7 +102,7 @@ function MarketScanCoverageSections({ items }: { items: ScanItem[] }) {
 }
 
 function ScanCoverageTable({ items }: { items: ScanItem[] }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
 
   if (!items.length) {
     return <p className="empty">{t("opportunities.noScan")}</p>;
@@ -126,7 +134,9 @@ function ScanCoverageTable({ items }: { items: ScanItem[] }) {
                 {formatInstrumentLabel(item.instrument_id)}
               </td>
               <td>
-                <span className={`status status-${item.status}`}>{labelStatus(item.status)}</span>
+                <span className={`status status-${item.status}`}>
+                  {localizeStatus(item.status, language)}
+                </span>
               </td>
               <td>{item.bars}</td>
               <td>{item.signals}</td>
@@ -136,8 +146,8 @@ function ScanCoverageTable({ items }: { items: ScanItem[] }) {
               <td>{item.latest_close ?? "-"}</td>
               <td>{formatScore(item.factor_score)}</td>
               <td>{item.factor_rank ?? "-"}</td>
-              <td>{item.provider ?? "-"}</td>
-              <td className="reason-cell">{item.reason}</td>
+              <td>{localizeProvider(item.provider, language)}</td>
+              <td className="reason-cell">{localizeReason(item.reason, language)}</td>
             </tr>
           ))}
         </tbody>
@@ -147,7 +157,7 @@ function ScanCoverageTable({ items }: { items: ScanItem[] }) {
 }
 
 function FactorRankingsTable({ items }: { items: FactorRanking[] }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
 
   if (!items.length) {
     return <p className="empty">{t("factors.noData")}</p>;
@@ -184,7 +194,13 @@ function FactorRankingsTable({ items }: { items: FactorRanking[] }) {
               <td>{formatScore(item.low_risk_score)}</td>
               <td>{formatScore(item.reversal_score)}</td>
               <td>{formatScore(item.execution_penalty)}</td>
-              <td className="reason-cell">{item.flags.length ? item.flags.join(", ") : "-"}</td>
+              <td className="reason-cell">
+                {item.flags.length
+                  ? item.flags
+                      .map((flag) => localizeFactorFlag(flag, language))
+                      .join(language === "zh" ? "、" : ", ")
+                  : "-"}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -194,7 +210,7 @@ function FactorRankingsTable({ items }: { items: FactorRanking[] }) {
 }
 
 function StrategyHealthTable({ items }: { items: StrategyHealth[] }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
 
   if (!items.length) {
     return <p className="empty">{t("opportunities.noHealth")}</p>;
@@ -209,20 +225,20 @@ function StrategyHealthTable({ items }: { items: StrategyHealth[] }) {
             <th>{t("opportunities.family")}</th>
             <th>{t("opportunities.ready")}</th>
             <th>{t("common.samples")}</th>
-            <th>Win 10D</th>
+            <th>{language === "zh" ? "10日胜率" : "Win 10D"}</th>
             <th>{t("brief.avg10d")}</th>
-            <th>Avg 20D</th>
+            <th>{language === "zh" ? "20日均值" : "Avg 20D"}</th>
             <th>{t("opportunities.maxLoss")}</th>
           </tr>
         </thead>
         <tbody>
           {items.map((item) => (
             <tr key={item.strategy_id}>
-              <td className="ticker">{item.name}</td>
-              <td>{item.family}</td>
+              <td className="ticker">{localizeStrategy(item.strategy_id, language)}</td>
+              <td>{localizeStrategyFamily(item.family, language)}</td>
               <td>
                 <span className={`status status-${item.readiness}`}>
-                  {labelStatus(item.readiness)}
+                  {localizeStatus(item.readiness, language)}
                 </span>
               </td>
               <td>{item.sample_count}</td>
@@ -236,19 +252,6 @@ function StrategyHealthTable({ items }: { items: StrategyHealth[] }) {
       </table>
     </div>
   );
-}
-
-function labelStatus(status: string) {
-  if (status === "no_data") {
-    return "No data";
-  }
-  if (status === "no_setup") {
-    return "No setup";
-  }
-  if (status === "setup_ready") {
-    return "Setup";
-  }
-  return status.replace(/_/g, " ");
 }
 
 function formatPct(value: number | null) {

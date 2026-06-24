@@ -17,7 +17,7 @@ const US_INSTRUMENT_NAMES: Record<string, string> = {
   AAPL: "Apple",
   MSFT: "Microsoft",
   NVDA: "NVIDIA",
-  TEST: "Fixture Test",
+  TEST: "样例测试",
 };
 
 export function formatInstrumentLabel(instrumentId: string | null | undefined): string {

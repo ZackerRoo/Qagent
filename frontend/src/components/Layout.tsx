@@ -139,7 +139,7 @@ export function Layout({
               >
                 {universes.map((universe) => (
                   <option key={universe.universe_id} value={universe.universe_id}>
-                    {universe.name}
+                    {formatUniverseName(universe, language)}
                   </option>
                 ))}
               </select>
@@ -161,4 +161,18 @@ export function Layout({
       {rightPanel}
     </div>
   );
+}
+
+function formatUniverseName(universe: UniverseRecord, language: "zh" | "en"): string {
+  if (language !== "zh") {
+    return universe.name;
+  }
+  const labels: Record<string, string> = {
+    fixture_dev: "样例开发池",
+    free_default: "A股免费默认池",
+    cn_tech_starter: "A股科技入门池",
+    cn_blue_chip_starter: "A股蓝筹入门池",
+    cn_growth_starter: "A股成长入门池",
+  };
+  return labels[universe.universe_id] ?? universe.name;
 }

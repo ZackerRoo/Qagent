@@ -9,18 +9,19 @@ import {
 } from "../api/client";
 import { useI18n } from "../i18n";
 import { formatInstrumentLabel } from "../lib/instruments";
+import { localizeAlertKind, localizeProvider, localizeReason } from "../lib/localize";
 import type { AlertRule, AlertRunResponse, AlertSuggestion, DataProviderMode, TriggeredAlert } from "../types";
 
 const emptyRule: AlertRule = {
-  rule_id: "entry-US-TEST",
-  instrument_id: "US:TEST",
+  rule_id: "entry-CN-000001",
+  instrument_id: "CN:000001",
   kind: "entry_trigger",
   operator: ">=",
   threshold: "82.00",
 };
 
 export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [rules, setRules] = useState<AlertRule[]>([]);
   const [suggestions, setSuggestions] = useState<AlertSuggestion[]>([]);
   const [rule, setRule] = useState<AlertRule>(emptyRule);
@@ -95,7 +96,7 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
         <input
           value={rule.instrument_id}
           onChange={(event) => setRule({ ...rule, instrument_id: event.target.value })}
-          placeholder="US:TEST"
+          placeholder="CN:000001"
         />
         <select
           value={rule.kind}
@@ -133,7 +134,7 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
         <div className="metric-grid">
           <div>
             <span>{t("common.provider")}</span>
-            <strong>{runResult.summary.provider}</strong>
+            <strong>{localizeProvider(runResult.summary.provider, language)}</strong>
           </div>
           <div>
             <span>{t("common.rules")}</span>
@@ -164,15 +165,15 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
           <tbody>
             {suggestions.map((item) => (
               <tr key={item.rule_id}>
-                <td>{item.rule_id}</td>
+                <td>{formatRuleLabel(item.rule_id, item.kind, language)}</td>
                 <td className="ticker" title={item.instrument_id}>
                   {formatInstrumentLabel(item.instrument_id)}
                 </td>
-                <td>{item.kind}</td>
+                <td>{localizeAlertKind(item.kind, language)}</td>
                 <td>
                   {item.operator} {item.threshold}
                 </td>
-                <td className="reason-cell">{item.rationale}</td>
+                <td className="reason-cell">{localizeReason(item.rationale, language)}</td>
                 <td>
                   <button
                     className="table-action"
@@ -208,11 +209,11 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
           <tbody>
             {rules.map((item) => (
               <tr key={item.rule_id}>
-                <td>{item.rule_id}</td>
+                <td>{formatRuleLabel(item.rule_id, item.kind, language)}</td>
                 <td className="ticker" title={item.instrument_id}>
                   {formatInstrumentLabel(item.instrument_id)}
                 </td>
-                <td>{item.kind}</td>
+                <td>{localizeAlertKind(item.kind, language)}</td>
                 <td>
                   {item.operator} {item.threshold}
                 </td>
@@ -226,11 +227,17 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
           {triggered.map((alert) => (
             <div key={`${alert.rule_id}-${alert.triggered_at}`}>
               <strong title={alert.instrument_id}>{formatInstrumentLabel(alert.instrument_id)}</strong>
-              <span>{alert.message}</span>
+              <span>{localizeReason(alert.message, language)}</span>
             </div>
           ))}
         </div>
       )}
     </section>
   );
+}
+
+function formatRuleLabel(ruleId: string, kind: string, language: "zh" | "en"): string {
+  const suffix = ruleId.slice(-8);
+  const kindLabel = localizeAlertKind(kind, language);
+  return language === "zh" ? `${kindLabel} ${suffix}` : `${kindLabel} ${suffix}`;
 }
