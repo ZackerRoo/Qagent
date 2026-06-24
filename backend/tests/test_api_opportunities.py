@@ -12,6 +12,8 @@ def test_opportunities_endpoint_returns_cards():
     assert "items" in body
     assert "data_health" in body
     assert "strategy_health" in body
+    assert "factor_rankings" in body
+    assert body["factor_rankings"]
     assert len(body["cards"]) >= 1
     assert body["cards"][0]["scenario"]["downside_pct"] < 0
     assert body["cards"][0]["signals"]
@@ -20,6 +22,9 @@ def test_opportunities_endpoint_returns_cards():
     assert body["cards"][0]["strategy_score"] >= 0
     assert body["cards"][0]["rank_score"] >= body["cards"][0]["strategy_score"]
     assert body["cards"][0]["rank_reasons"]
+    assert body["cards"][0]["factor_score"] >= 0
+    assert body["cards"][0]["factor_rank"] >= 1
+    assert body["cards"][0]["factor_exposures"]
     assert body["cards"][0]["decision"]["action"] in {
         "candidate_entry",
         "watch_trigger",
@@ -30,6 +35,8 @@ def test_opportunities_endpoint_returns_cards():
     assert body["cards"][0]["decision"]["failure_conditions"]
     assert body["cards"][0]["decision"]["verification_checks"]
     assert body["items"][0]["instrument_id"]
+    assert body["items"][0]["factor_score"] is not None
+    assert body["items"][0]["factor_rank"] is not None
     assert body["items"][0]["strategies_passed"] >= 1
     assert body["strategy_health"]
 

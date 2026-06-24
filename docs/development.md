@@ -153,9 +153,32 @@ Opportunity cards now include:
 
 - `strategy_score`: max score from the strategy stack and signal stack.
 - `rank_score`: ranking score combining strategy strength, data completeness, risk/reward, and active strategy count.
+- `factor_score`, `factor_rank`, `factor_flags`, and `factor_exposures`: cross-sectional factor quality, ranking, caveats, and attribution.
 - `rank_reasons`: readable reasons behind the ranking.
 - `decision`: research action, conviction score, component scores, suggested risk budget, failure conditions, and verification checks.
 - Strategy-specific trade plans for breakout, healthy pullback, and PEAD.
+
+## Multifactor Ranking
+
+The factor layer lives in `qagent.factors`. It ranks the scanned universe using only fields available from daily OHLCV bars:
+
+- Momentum: 20/60/120-day price strength.
+- Trend quality: moving-average alignment and distance control.
+- Liquidity: recent traded value and volume stability.
+- Low risk: lower realized volatility and drawdown pressure.
+- Reversal: avoids chasing names with very stretched short-term moves.
+
+`run_daily_scan` computes factor rankings once across the scan universe and attaches the matching factor record to each card and scan item. Final opportunity ordering uses a combined score: strategy/card ranking plus factor ranking. This is intentionally different from a black-box “AI prediction”: the UI can show each factor score, weight, raw value, warning flags, and missing-data notes.
+
+Useful routes:
+
+```bash
+curl 'http://127.0.0.1:8000/api/factors?provider=fixture'
+curl 'http://127.0.0.1:8000/api/factors?provider=free&symbols=CN:000001,CN:600519'
+curl 'http://127.0.0.1:8000/api/factors/backtest?provider=fixture&forward_days=20&step_days=20&top_n=3'
+```
+
+The factor backtest freezes historical factor rankings at each sampled scan date, selects the top-ranked names, and measures forward returns after the configured horizon. It is a factor validation study, not a portfolio simulator.
 
 ## Research Decision Layer
 

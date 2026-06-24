@@ -82,8 +82,39 @@ export type OpportunityCard = {
   strategy_score: number;
   rank_score: number;
   rank_reasons: string[];
+  factor_score: number;
+  factor_rank: number | null;
+  factor_percentile: number;
+  factor_flags: string[];
+  factor_exposures: FactorExposure[];
   data_caveats: string[];
   decision: OpportunityDecision | null;
+};
+
+export type FactorExposure = {
+  factor_id: string;
+  label: string;
+  raw_value: number | null;
+  score: number;
+  weight: number;
+  explanation: string;
+};
+
+export type FactorRanking = {
+  instrument_id: string;
+  factor_score: number;
+  factor_rank: number;
+  percentile: number;
+  momentum_score: number;
+  trend_quality_score: number;
+  liquidity_score: number;
+  low_risk_score: number;
+  reversal_score: number;
+  execution_penalty: number;
+  data_completeness: number;
+  factor_exposures: FactorExposure[];
+  flags: string[];
+  missing_data: string[];
 };
 
 export type DecisionComponents = {
@@ -155,12 +186,16 @@ export type ScanItem = {
   latest_close: string | null;
   latest_trade_date: string | null;
   provider: string | null;
+  factor_score: number | null;
+  factor_rank: number | null;
+  factor_flags: string[];
 };
 
 export type OpportunitiesResponse = {
   cards: OpportunityCard[];
   items: ScanItem[];
   strategy_health: StrategyHealth[];
+  factor_rankings: FactorRanking[];
   data_health: Record<string, string>;
 };
 
@@ -168,6 +203,7 @@ export type OverviewResponse = {
   market_regime: Record<Market, string>;
   top_cards: OpportunityCard[];
   strategy_health: StrategyHealth[];
+  factor_rankings: FactorRanking[];
   data_health: Record<string, string>;
 };
 
@@ -532,11 +568,39 @@ export type BacktestResponse = {
   data_health: Record<string, string>;
 };
 
+export type FactorBacktestSummary = {
+  sample_count: number;
+  completed_count: number;
+  positive_rate: number | null;
+  avg_forward_return_pct: number | null;
+  best_forward_return_pct: number | null;
+  worst_forward_return_pct: number | null;
+};
+
+export type FactorBacktestSignal = {
+  signal_date: string;
+  instrument_id: string;
+  factor_rank: number;
+  factor_score: number;
+  entry_close: number;
+  exit_close: number | null;
+  forward_return_pct: number | null;
+};
+
+export type FactorBacktestResponse = {
+  summary: FactorBacktestSummary;
+  signals: FactorBacktestSignal[];
+  data_health: Record<string, string>;
+};
+
 export type DailyBriefOpportunity = {
   instrument_id: string;
   status: string;
   primary_strategy_id: string | null;
   rank_score: number;
+  factor_score: number;
+  factor_rank: number | null;
+  factor_flags: string[];
   thesis: string;
   trigger_price: string | null;
   initial_stop: string | null;

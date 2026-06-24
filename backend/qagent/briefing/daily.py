@@ -15,6 +15,9 @@ class BriefOpportunity(BaseModel):
     status: str
     primary_strategy_id: str | None
     rank_score: float
+    factor_score: float = 0.0
+    factor_rank: int | None = None
+    factor_flags: list[str] = Field(default_factory=list)
     thesis: str
     trigger_price: Decimal | None
     initial_stop: Decimal | None
@@ -137,13 +140,20 @@ def build_daily_brief(
 
 
 def _top_opportunities(scan_result: DailyScanResult, limit: int) -> list[BriefOpportunity]:
-    cards = sorted(scan_result.cards, key=lambda card: card.rank_score, reverse=True)[:limit]
+    cards = sorted(
+        scan_result.cards,
+        key=lambda card: card.rank_score * 0.55 + card.factor_score * 0.45,
+        reverse=True,
+    )[:limit]
     return [
         BriefOpportunity(
             instrument_id=card.instrument_id,
             status=card.status.value,
             primary_strategy_id=card.primary_strategy_id,
             rank_score=card.rank_score,
+            factor_score=card.factor_score,
+            factor_rank=card.factor_rank,
+            factor_flags=card.factor_flags,
             thesis=card.thesis,
             trigger_price=card.entry_plan.trigger_price,
             initial_stop=card.exit_plan.initial_stop,

@@ -17,6 +17,7 @@ import type {
   DailyBriefResponse,
   DeliveriesResponse,
   DeliveryOutboxRecord,
+  FactorBacktestResponse,
   MarketDataCacheResponse,
   OpportunitiesResponse,
   OpportunityHistoryResponse,
@@ -276,6 +277,16 @@ export async function fetchBacktest(
     symbols,
     step_days: 5,
     limit: 100,
+  });
+}
+
+export async function fetchFactorBacktest(
+  provider: DataProviderMode,
+  symbols?: string,
+): Promise<FactorBacktestResponse> {
+  return apiGet<FactorBacktestResponse>("/factors/backtest", {
+    provider,
+    symbols,
   });
 }
 

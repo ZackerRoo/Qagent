@@ -3,17 +3,25 @@ import { OpportunityDetail } from "../components/OpportunityDetail";
 import { useI18n } from "../i18n";
 import type { TranslationKey } from "../i18n/catalog";
 import { createMarketSections } from "../lib/markets";
-import type { OpportunityCard, ScanItem, StrategyHealth } from "../types";
+import type { FactorRanking, OpportunityCard, ScanItem, StrategyHealth } from "../types";
 
 type Props = {
   cards: OpportunityCard[];
   items: ScanItem[];
   strategyHealth: StrategyHealth[];
+  factorRankings: FactorRanking[];
   selectedCard?: OpportunityCard;
   onSelect(card: OpportunityCard): void;
 };
 
-export function Opportunities({ cards, items, strategyHealth, selectedCard, onSelect }: Props) {
+export function Opportunities({
+  cards,
+  items,
+  strategyHealth,
+  factorRankings,
+  selectedCard,
+  onSelect,
+}: Props) {
   const { t } = useI18n();
 
   return (
@@ -29,6 +37,13 @@ export function Opportunities({ cards, items, strategyHealth, selectedCard, onSe
             selectedCardId={selectedCard?.card_id}
             onSelect={onSelect}
           />
+        </section>
+        <section className="panel">
+          <div className="panel-heading">
+            <h2>{t("factors.title")}</h2>
+            <span className="count">{factorRankings.length}</span>
+          </div>
+          <FactorRankingsTable items={factorRankings} />
         </section>
         <section className="panel">
           <div className="panel-heading">
@@ -97,6 +112,8 @@ function ScanCoverageTable({ items }: { items: ScanItem[] }) {
             <th>{t("opportunities.watch")}</th>
             <th>{t("opportunities.missing")}</th>
             <th>{t("opportunities.close")}</th>
+            <th>{t("factors.score")}</th>
+            <th>{t("factors.rank")}</th>
             <th>{t("common.provider")}</th>
             <th>{t("common.reason")}</th>
           </tr>
@@ -114,8 +131,55 @@ function ScanCoverageTable({ items }: { items: ScanItem[] }) {
               <td>{item.strategies_watch}</td>
               <td>{item.strategies_missing_data}</td>
               <td>{item.latest_close ?? "-"}</td>
+              <td>{formatScore(item.factor_score)}</td>
+              <td>{item.factor_rank ?? "-"}</td>
               <td>{item.provider ?? "-"}</td>
               <td className="reason-cell">{item.reason}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function FactorRankingsTable({ items }: { items: FactorRanking[] }) {
+  const { t } = useI18n();
+
+  if (!items.length) {
+    return <p className="empty">{t("factors.noData")}</p>;
+  }
+
+  return (
+    <div className="table-shell">
+      <table>
+        <thead>
+          <tr>
+            <th>{t("factors.rank")}</th>
+            <th>{t("common.ticker")}</th>
+            <th>{t("factors.score")}</th>
+            <th>{t("factors.momentum")}</th>
+            <th>{t("factors.trend")}</th>
+            <th>{t("factors.liquidity")}</th>
+            <th>{t("factors.lowRisk")}</th>
+            <th>{t("factors.reversal")}</th>
+            <th>{t("factors.penalty")}</th>
+            <th>{t("factors.flags")}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((item) => (
+            <tr key={item.instrument_id}>
+              <td>{item.factor_rank}</td>
+              <td className="ticker">{item.instrument_id}</td>
+              <td>{formatScore(item.factor_score)}</td>
+              <td>{formatScore(item.momentum_score)}</td>
+              <td>{formatScore(item.trend_quality_score)}</td>
+              <td>{formatScore(item.liquidity_score)}</td>
+              <td>{formatScore(item.low_risk_score)}</td>
+              <td>{formatScore(item.reversal_score)}</td>
+              <td>{formatScore(item.execution_penalty)}</td>
+              <td className="reason-cell">{item.flags.length ? item.flags.join(", ") : "-"}</td>
             </tr>
           ))}
         </tbody>
@@ -184,6 +248,10 @@ function labelStatus(status: string) {
 
 function formatPct(value: number | null) {
   return value === null ? "-" : `${value.toFixed(2)}%`;
+}
+
+function formatScore(value: number | null | undefined) {
+  return value === null || value === undefined ? "-" : `${Math.round(value * 100)}`;
 }
 
 function formatSignedPct(value: number | null) {

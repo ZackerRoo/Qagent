@@ -4,6 +4,7 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 
 from qagent.domain.enums import Direction, Market, OpportunityStatus, SignalType
+from qagent.factors.models import FactorExposure
 from qagent.strategies.models import StrategyEvaluation
 
 
@@ -120,5 +121,10 @@ class OpportunityCard(BaseModel):
     strategy_score: float = Field(default=0.0, ge=0.0, le=1.0)
     rank_score: float = Field(default=0.0, ge=0.0, le=1.0)
     rank_reasons: list[str] = Field(default_factory=list)
+    factor_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    factor_rank: int | None = None
+    factor_percentile: float = Field(default=0.0, ge=0.0, le=1.0)
+    factor_flags: list[str] = Field(default_factory=list)
+    factor_exposures: list[FactorExposure] = Field(default_factory=list)
     data_caveats: list[str] = Field(default_factory=list)
     decision: OpportunityDecision | None = None

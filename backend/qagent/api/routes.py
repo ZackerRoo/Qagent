@@ -12,6 +12,7 @@ from qagent.briefing.export import render_daily_brief_markdown
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
 from qagent.catalysts.providers import FreeCatalystProvider
 from qagent.db import create_session_factory, initialize_database
+from qagent.factors.backtest import run_factor_backtest
 from qagent.jobs.automation import run_research_automation
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.jobs.alert_runner import run_alert_rules
@@ -115,6 +116,15 @@ def _backtest_dates(mode: str, start: date | None, end: date | None) -> tuple[da
     return start_date, end_date
 
 
+def _factor_backtest_dates(mode: str, start: date | None, end: date | None) -> tuple[date, date]:
+    if start or end:
+        return _backtest_dates(mode, start, end)
+    if mode == "fixture":
+        return date(1900, 1, 1), date(2100, 1, 1)
+    end_date = date.today()
+    return end_date - timedelta(days=365), end_date
+
+
 def _repo() -> QagentRepository:
     initialize_database()
     return QagentRepository(create_session_factory())
@@ -138,8 +148,51 @@ def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict
         "cards": [card.model_dump(mode="json") for card in result.cards],
         "items": [item.model_dump(mode="json") for item in result.items],
         "strategy_health": [item.model_dump(mode="json") for item in result.strategy_health],
+        "factor_rankings": [item.model_dump(mode="json") for item in result.factor_rankings],
         "data_health": result.data_health,
     }
+
+
+@router.get("/factors")
+def factors(provider: str = "fixture", symbols: str | None = None) -> dict[str, object]:
+    result, mode, instrument_ids = _scan(provider, symbols)
+    return {
+        "provider": mode,
+        "symbols": instrument_ids,
+        "rankings": [item.model_dump(mode="json") for item in result.factor_rankings],
+        "data_health": result.data_health,
+    }
+
+
+@router.get("/factors/backtest")
+def factor_backtest(
+    provider: str = "fixture",
+    symbols: str | None = None,
+    start: date | None = None,
+    end: date | None = None,
+    forward_days: int = 20,
+    step_days: int = 20,
+    top_n: int = 3,
+) -> dict[str, object]:
+    mode = provider.strip().lower()
+    if forward_days <= 0 or forward_days > 120:
+        raise HTTPException(status_code=400, detail="forward_days must be between 1 and 120")
+    if step_days <= 0 or step_days > 120:
+        raise HTTPException(status_code=400, detail="step_days must be between 1 and 120")
+    if top_n <= 0 or top_n > 50:
+        raise HTTPException(status_code=400, detail="top_n must be between 1 and 50")
+    default_universe = DEFAULT_FREE_UNIVERSE if mode == "free" else DEFAULT_DEV_UNIVERSE
+    instrument_ids = _parse_symbols(symbols, default_universe)
+    start_date, end_date = _factor_backtest_dates(mode, start, end)
+    market_provider = build_market_data_provider(mode)
+    bars = market_provider.get_daily_bars(instrument_ids, start_date, end_date)
+    result = run_factor_backtest(
+        bars,
+        forward_days=forward_days,
+        step_days=step_days,
+        top_n=top_n,
+    )
+    return result.model_dump(mode="json")
 
 
 @router.get("/overview")
@@ -152,6 +205,7 @@ def overview(provider: str = "fixture", symbols: str | None = None) -> dict[str,
         },
         "top_cards": [card.model_dump(mode="json") for card in result.cards[:5]],
         "strategy_health": [item.model_dump(mode="json") for item in result.strategy_health[:6]],
+        "factor_rankings": [item.model_dump(mode="json") for item in result.factor_rankings[:10]],
         "data_health": result.data_health,
     }
 
@@ -772,6 +826,9 @@ def _agent_card_summary(card) -> dict[str, object]:
         "status": card.status.value,
         "score": card.score,
         "rank_score": card.rank_score,
+        "factor_score": card.factor_score,
+        "factor_rank": card.factor_rank,
+        "factor_flags": card.factor_flags,
         "action": decision.action if decision else "watch",
         "conviction_score": decision.conviction_score if decision else None,
         "trigger_price": str(card.entry_plan.trigger_price) if card.entry_plan.trigger_price else None,

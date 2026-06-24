@@ -47,6 +47,8 @@ def test_build_daily_brief_summarizes_opportunities_validation_and_caveats():
     assert brief.top_opportunities
     assert brief.top_opportunities[0].decision_action
     assert brief.top_opportunities[0].conviction_score >= 0
+    assert brief.top_opportunities[0].factor_score >= 0
+    assert brief.top_opportunities[0].factor_rank >= 1
     assert brief.top_opportunities[0].suggested_risk_pct >= 0
     assert brief.top_opportunities[0].failure_conditions
     assert brief.top_opportunities[0].verification_checks
@@ -88,6 +90,7 @@ def test_render_daily_brief_markdown_contains_key_sections():
     assert "## Entry Watch" in markdown
     assert "Decision:" in markdown
     assert "Conviction:" in markdown
+    assert "Factor:" in markdown
     assert "## Strategy Validation" in markdown
     assert "## Data Caveats" in markdown
     assert "## Next Steps" in markdown

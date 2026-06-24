@@ -62,6 +62,38 @@ export function OpportunityDetail({ card }: { card?: OpportunityCard }) {
           <span>{t("brief.rank")}</span>
           <strong>{Math.round(card.rank_score * 100)}</strong>
         </div>
+        <div>
+          <span>{t("factors.score")}</span>
+          <strong>{Math.round(card.factor_score * 100)}</strong>
+        </div>
+        <div>
+          <span>{t("factors.rank")}</span>
+          <strong>{card.factor_rank ?? "-"}</strong>
+        </div>
+      </div>
+
+      <div className="detail-section">
+        <h3>{t("factors.title")}</h3>
+        <div className="rank-reasons">
+          {(card.factor_flags.length ? card.factor_flags : [t("common.none")]).map((flag) => (
+            <span key={flag}>{flag}</span>
+          ))}
+        </div>
+        <div className="strategy-stack">
+          {card.factor_exposures.map((factor) => (
+            <div key={factor.factor_id}>
+              <header>
+                <span>{factor.label}</span>
+                <strong>{Math.round(factor.score * 100)}</strong>
+              </header>
+              <small>
+                {t("factors.weight")}: {Math.round(factor.weight * 100)} · {t("factors.raw")}:{" "}
+                {formatRawFactor(factor.raw_value)}
+              </small>
+              <p>{factor.explanation}</p>
+            </div>
+          ))}
+        </div>
       </div>
 
       {card.decision && (
@@ -217,6 +249,13 @@ function formatDecisionPct(value: number | undefined) {
 
 function formatRiskBudget(value: number | undefined) {
   return value === undefined ? "-" : `${value.toFixed(2)}%`;
+}
+
+function formatRawFactor(value: number | null) {
+  if (value === null) {
+    return "-";
+  }
+  return Math.abs(value) < 1 ? value.toFixed(4) : value.toFixed(2);
 }
 
 function DecisionList({ title, items }: { title: string; items: string[] }) {

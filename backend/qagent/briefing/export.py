@@ -20,6 +20,8 @@ def render_daily_brief_markdown(brief: DailyBrief) -> str:
                     f"- **{item.instrument_id}** `{item.status}`",
                     f"  - Strategy: {item.primary_strategy_id or 'None'}",
                     f"  - Rank: {item.rank_score:.2f}",
+                    f"  - Factor: {_number(item.factor_score)}; rank {_level(item.factor_rank)}; "
+                    f"flags {_list(item.factor_flags)}",
                     f"  - Decision: {item.decision_label or item.decision_action or '-'}",
                     f"  - Conviction: {_ratio(item.conviction_score)}; "
                     f"risk budget {_pct(item.suggested_risk_pct)}",
@@ -88,6 +90,10 @@ def _level(value) -> str:
 
 def _number(value: float | None) -> str:
     return "-" if value is None else f"{value:.2f}"
+
+
+def _list(value: list[str]) -> str:
+    return ", ".join(value) if value else "-"
 
 
 def _pct(value: float | None) -> str:

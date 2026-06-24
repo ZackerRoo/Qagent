@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import {
   fetchBacktest,
+  fetchFactorBacktest,
   fetchOpportunityHistory,
   fetchOutcomes,
   fetchPortfolioBacktest,
@@ -13,6 +14,7 @@ import { useI18n } from "../i18n";
 import type {
   BacktestResponse,
   DataProviderMode,
+  FactorBacktestResponse,
   OpportunityHistoryResponse,
   OutcomesResponse,
   PortfolioBacktestResponse,
@@ -37,6 +39,7 @@ function formatRatio(value: number | null) {
 export function History({ dataMode, symbols }: { dataMode: DataProviderMode; symbols: string }) {
   const { t } = useI18n();
   const [backtest, setBacktest] = useState<BacktestResponse>();
+  const [factorBacktest, setFactorBacktest] = useState<FactorBacktestResponse>();
   const [portfolioBacktest, setPortfolioBacktest] = useState<PortfolioBacktestResponse>();
   const [runs, setRuns] = useState<ScanRunsResponse>();
   const [history, setHistory] = useState<OpportunityHistoryResponse>();
@@ -44,8 +47,10 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
   const [performance, setPerformance] = useState<StrategyPerformanceResponse>();
   const [error, setError] = useState("");
   const [backtestError, setBacktestError] = useState("");
+  const [factorBacktestError, setFactorBacktestError] = useState("");
   const [portfolioBacktestError, setPortfolioBacktestError] = useState("");
   const [isBacktesting, setIsBacktesting] = useState(false);
+  const [isFactorBacktesting, setIsFactorBacktesting] = useState(false);
   const [isPortfolioBacktesting, setIsPortfolioBacktesting] = useState(false);
 
   useEffect(() => {
@@ -94,6 +99,21 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
       );
     } finally {
       setIsPortfolioBacktesting(false);
+    }
+  }
+
+  async function runFactorBacktest() {
+    try {
+      setIsFactorBacktesting(true);
+      setFactorBacktestError("");
+      const result = await fetchFactorBacktest(dataMode, dataMode === "free" ? symbols : undefined);
+      setFactorBacktest(result);
+    } catch (caught) {
+      setFactorBacktestError(
+        caught instanceof Error ? caught.message : "Failed to run factor backtest",
+      );
+    } finally {
+      setIsFactorBacktesting(false);
     }
   }
 
@@ -215,6 +235,82 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
           </div>
         ) : (
           <div className="empty-state">{t("history.noBacktest")}</div>
+        )}
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
+          <h2>{t("history.factorBacktest")}</h2>
+          <button
+            className="icon-action"
+            type="button"
+            onClick={runFactorBacktest}
+            disabled={isFactorBacktesting}
+          >
+            {isFactorBacktesting ? t("common.running") : t("history.runFactor")}
+          </button>
+        </div>
+        {factorBacktestError && <div className="empty-state error">{factorBacktestError}</div>}
+        {factorBacktest ? (
+          <div className="stack">
+            <DataHealth data={factorBacktest.data_health} />
+            <div className="metric-grid">
+              <div>
+                <span>{t("common.samples")}</span>
+                <strong>{factorBacktest.summary.sample_count}</strong>
+              </div>
+              <div>
+                <span>{t("common.done")}</span>
+                <strong>{factorBacktest.summary.completed_count}</strong>
+              </div>
+              <div>
+                <span>{t("brief.positive10d")}</span>
+                <strong>{formatRatio(factorBacktest.summary.positive_rate)}</strong>
+              </div>
+              <div>
+                <span>{t("history.avgForward")}</span>
+                <strong>{formatNumber(factorBacktest.summary.avg_forward_return_pct, "%")}</strong>
+              </div>
+              <div>
+                <span>{t("history.bestForward")}</span>
+                <strong>{formatNumber(factorBacktest.summary.best_forward_return_pct, "%")}</strong>
+              </div>
+              <div>
+                <span>{t("history.worstForward")}</span>
+                <strong>{formatNumber(factorBacktest.summary.worst_forward_return_pct, "%")}</strong>
+              </div>
+            </div>
+            <div className="table-shell">
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t("common.date")}</th>
+                    <th>{t("common.ticker")}</th>
+                    <th>{t("factors.rank")}</th>
+                    <th>{t("factors.score")}</th>
+                    <th>{t("portfolio.entry")}</th>
+                    <th>{t("portfolio.exit")}</th>
+                    <th>{t("common.return")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {factorBacktest.signals.map((signal) => (
+                    <tr key={`${signal.signal_date}-${signal.instrument_id}-${signal.factor_rank}`}>
+                      <td>{signal.signal_date}</td>
+                      <td className="ticker">{signal.instrument_id}</td>
+                      <td>{signal.factor_rank}</td>
+                      <td>{Math.round(signal.factor_score * 100)}</td>
+                      <td>{signal.entry_close.toFixed(2)}</td>
+                      <td>{signal.exit_close?.toFixed(2) ?? t("common.pending")}</td>
+                      <td>{formatNumber(signal.forward_return_pct, "%")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : (
+          <div className="empty-state">{t("history.noFactorBacktest")}</div>
         )}
       </section>
 

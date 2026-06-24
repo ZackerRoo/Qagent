@@ -117,6 +117,7 @@ export default function App() {
             cards={opportunities?.cards ?? []}
             items={opportunities?.items ?? []}
             strategyHealth={opportunities?.strategy_health ?? []}
+            factorRankings={opportunities?.factor_rankings ?? []}
             selectedCard={selectedCard}
             onSelect={setSelectedCard}
           />

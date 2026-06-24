@@ -456,6 +456,8 @@ function BriefOpportunityTable({ items }: { items: DailyBriefOpportunity[] }) {
             <th>{t("brief.risk")}</th>
             <th>{t("common.strategy")}</th>
             <th>{t("brief.rank")}</th>
+            <th>{t("factors.score")}</th>
+            <th>{t("factors.rank")}</th>
             <th>{t("brief.trigger")}</th>
             <th>{t("brief.stop")}</th>
             <th>{t("brief.target")}</th>
@@ -479,6 +481,8 @@ function BriefOpportunityTable({ items }: { items: DailyBriefOpportunity[] }) {
               <td>{formatNumber(item.suggested_risk_pct, "%")}</td>
               <td className="reason-cell">{item.primary_strategy_id ?? t("common.none")}</td>
               <td>{item.rank_score.toFixed(2)}</td>
+              <td>{formatRatio(item.factor_score)}</td>
+              <td>{item.factor_rank ?? "-"}</td>
               <td>{item.trigger_price ?? "-"}</td>
               <td>{item.initial_stop ?? "-"}</td>
               <td>{item.target_1 ?? "-"}</td>

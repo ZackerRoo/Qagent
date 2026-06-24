@@ -68,6 +68,9 @@ def test_responder_recommends_ranked_cards_with_entry_and_exit_levels():
                     "target_2": "42.57",
                     "no_chase_above": "39.53",
                     "risk_reward": 1.39,
+                    "factor_score": 0.82,
+                    "factor_rank": 1,
+                    "factor_flags": ["overextended"],
                     "primary_strategy_id": "healthy_pullback",
                     "data_caveats": ["provider: baostock"],
                 },
@@ -81,6 +84,9 @@ def test_responder_recommends_ranked_cards_with_entry_and_exit_levels():
                     "target_2": None,
                     "no_chase_above": None,
                     "risk_reward": None,
+                    "factor_score": 0.21,
+                    "factor_rank": 2,
+                    "factor_flags": [],
                     "primary_strategy_id": None,
                     "data_caveats": ["provider: baostock"],
                 },
@@ -94,5 +100,8 @@ def test_responder_recommends_ranked_cards_with_entry_and_exit_levels():
     assert "35.82" in answer
     assert "41.05" in answer
     assert "39.53" in answer
+    assert "因子" in answer
+    assert "0.82" in answer
+    assert "overextended" in answer
     assert "baostock" in answer
     assert "不是投资建议" in answer

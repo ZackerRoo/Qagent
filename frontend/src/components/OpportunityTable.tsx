@@ -23,6 +23,8 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
             <th>{t("brief.conviction")}</th>
             <th>{t("table.score")}</th>
             <th>{t("brief.rank")}</th>
+            <th>{t("factors.score")}</th>
+            <th>{t("factors.rank")}</th>
             <th>{t("common.strategy")}</th>
             <th>{t("detail.strategyScore")}</th>
             <th>{t("brief.trigger")}</th>
@@ -52,6 +54,8 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
               <td>{formatPct(card.decision?.conviction_score)}</td>
               <td>{Math.round(card.score * 100)}</td>
               <td>{Math.round(card.rank_score * 100)}</td>
+              <td>{Math.round(card.factor_score * 100)}</td>
+              <td>{card.factor_rank ?? "-"}</td>
               <td>{labelStrategy(card.primary_strategy_id)}</td>
               <td>{Math.round(card.strategy_score * 100)}</td>
               <td>{card.entry_plan.trigger_price ?? "-"}</td>

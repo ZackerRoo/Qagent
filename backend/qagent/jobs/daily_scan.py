@@ -1,9 +1,11 @@
 from datetime import date
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from qagent.cards.generator import OpportunityCardGenerator
 from qagent.domain.models import OpportunityCard
+from qagent.factors.engine import build_factor_rankings
+from qagent.factors.models import FactorRanking
 from qagent.providers.base import MarketDataProvider
 from qagent.signals.engine import SignalEngine
 from qagent.strategy_data.models import AnalystInsight, EarningsEvent, FilingEvent, FundamentalSnapshot
@@ -26,12 +28,16 @@ class ScanItem(BaseModel):
     latest_close: str | None = None
     latest_trade_date: date | None = None
     provider: str | None = None
+    factor_score: float | None = None
+    factor_rank: int | None = None
+    factor_flags: list[str] = Field(default_factory=list)
 
 
 class DailyScanResult(BaseModel):
     cards: list[OpportunityCard]
     items: list[ScanItem]
     strategy_health: list[StrategyHealth]
+    factor_rankings: list[FactorRanking]
     data_health: dict[str, str]
 
 
@@ -120,6 +126,14 @@ def run_daily_scan(
             cards.append(card)
         items.append(_scan_item(instrument_id, bars, signals, strategy_evaluations, card))
 
+    factor_rankings = _factor_rankings_from_bars(bars_by_instrument)
+    factor_by_id = {ranking.instrument_id: ranking for ranking in factor_rankings}
+    for card in cards:
+        _apply_factor_to_card(card, factor_by_id.get(card.instrument_id))
+    cards.sort(key=_card_priority_score, reverse=True)
+    for item in items:
+        _apply_factor_to_item(item, factor_by_id.get(item.instrument_id))
+
     strategy_health = build_strategy_health_from_bars(bars_by_instrument, registry)
 
     data_health = {
@@ -127,6 +141,7 @@ def run_daily_scan(
         "mode": mode,
         "scanned": str(len(instrument_ids)),
         "cards": str(len(cards)),
+        "factor_rankings": str(len(factor_rankings)),
         "strategy_data_provider": strategy_provider.name,
         "strategy_filings": str(strategy_filings_count),
         "strategy_announcements": str(strategy_announcements_count),
@@ -150,8 +165,42 @@ def run_daily_scan(
         cards=cards,
         items=items,
         strategy_health=strategy_health,
+        factor_rankings=factor_rankings,
         data_health=data_health,
     )
+
+
+def _factor_rankings_from_bars(bars_by_instrument: dict[str, object]) -> list[FactorRanking]:
+    frames = [bars for bars in bars_by_instrument.values() if not bars.empty]
+    if not frames:
+        return []
+    import pandas as pd
+
+    return build_factor_rankings(pd.concat(frames, ignore_index=True))
+
+
+def _apply_factor_to_card(card: OpportunityCard, ranking: FactorRanking | None) -> None:
+    if ranking is None:
+        return
+    card.factor_score = ranking.factor_score
+    card.factor_rank = ranking.factor_rank
+    card.factor_percentile = ranking.percentile
+    card.factor_flags = ranking.flags
+    card.factor_exposures = ranking.factor_exposures
+    if ranking.flags:
+        card.rank_reasons.extend([f"factor flag: {flag}" for flag in ranking.flags])
+
+
+def _apply_factor_to_item(item: ScanItem, ranking: FactorRanking | None) -> None:
+    if ranking is None:
+        return
+    item.factor_score = ranking.factor_score
+    item.factor_rank = ranking.factor_rank
+    item.factor_flags = ranking.flags
+
+
+def _card_priority_score(card: OpportunityCard) -> float:
+    return round(card.rank_score * 0.55 + card.factor_score * 0.45, 4)
 
 
 def _scan_item(

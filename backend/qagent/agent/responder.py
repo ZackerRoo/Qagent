@@ -107,10 +107,14 @@ def _format_cn_recommendation(card: dict[str, object]) -> str:
     target_2 = card.get("target_2") or "-"
     no_chase = card.get("no_chase_above") or "-"
     risk_reward = _format_float(card.get("risk_reward"))
+    factor_score = _format_float(card.get("factor_score"))
+    factor_rank = card.get("factor_rank") or "-"
+    factor_flags = ", ".join(str(item) for item in card.get("factor_flags") or []) or "-"
     strategy = card.get("primary_strategy_id") or "-"
     caveats = ", ".join(str(item) for item in card.get("data_caveats") or []) or "-"
     return (
         f"{symbol}：动作 {action}，信心 {conviction}，策略 {strategy}。"
+        f"因子分 {factor_score}，因子排名 {factor_rank}，因子标签 {factor_flags}。"
         f"买点/触发 {trigger}；不追高 {no_chase}；止损 {stop}；"
         f"目标 {target_1}/{target_2}；盈亏比 {risk_reward}；数据 {caveats}。"
     )
@@ -126,10 +130,14 @@ def _format_en_recommendation(card: dict[str, object]) -> str:
     target_2 = card.get("target_2") or "-"
     no_chase = card.get("no_chase_above") or "-"
     risk_reward = _format_float(card.get("risk_reward"))
+    factor_score = _format_float(card.get("factor_score"))
+    factor_rank = card.get("factor_rank") or "-"
+    factor_flags = ", ".join(str(item) for item in card.get("factor_flags") or []) or "-"
     strategy = card.get("primary_strategy_id") or "-"
     caveats = ", ".join(str(item) for item in card.get("data_caveats") or []) or "-"
     return (
         f"{symbol}: action {action}, conviction {conviction}, strategy {strategy}. "
+        f"Factor score {factor_score}, factor rank {factor_rank}, factor flags {factor_flags}. "
         f"Trigger {trigger}; no chase above {no_chase}; stop {stop}; "
         f"targets {target_1}/{target_2}; risk/reward {risk_reward}; data {caveats}."
     )
