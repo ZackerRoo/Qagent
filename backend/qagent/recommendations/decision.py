@@ -141,6 +141,15 @@ def _risk_vetoes(card: OpportunityCard, components: DecisionComponents) -> list[
                 message=" ".join(card.trading_status.notes),
             )
         )
+    if card.tradability is not None and not card.tradability.can_open:
+        vetoes.append(
+            RiskVeto(
+                code=f"tradability_{card.tradability.status}",
+                severity="block",
+                title=card.tradability.label,
+                message=card.tradability.summary,
+            )
+        )
     flag_rules = {
         "low_liquidity": (
             "block",

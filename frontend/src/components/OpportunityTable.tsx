@@ -23,6 +23,7 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
             <th>{t("detail.marketContext")}</th>
             <th>{t("detail.tradingConstraints")}</th>
             <th>{t("detail.tradingStatus")}</th>
+            <th>{t("detail.tradability")}</th>
             <th>{t("common.status")}</th>
             <th>{t("detail.action")}</th>
             <th>{t("detail.riskVeto")}</th>
@@ -55,6 +56,7 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
               <td>{formatContext(card)}</td>
               <td>{formatConstraint(card)}</td>
               <td>{formatTradingStatus(card)}</td>
+              <td>{formatTradability(card)}</td>
               <td>
                 <StatusBadge status={card.status} />
               </td>
@@ -102,6 +104,13 @@ function formatTradingStatus(card: OpportunityCard) {
       ? ""
       : ` · ${card.trading_status.change_pct >= 0 ? "+" : ""}${card.trading_status.change_pct.toFixed(2)}%`;
   return `${card.trading_status.label}${change}`;
+}
+
+function formatTradability(card: OpportunityCard) {
+  if (!card.tradability) {
+    return "-";
+  }
+  return `${card.tradability.label} · ${Math.round(card.tradability.score * 100)}`;
 }
 
 function formatCalibration(card: OpportunityCard) {

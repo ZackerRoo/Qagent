@@ -162,6 +162,49 @@ class StrategyCalibration(BaseModel):
     message: str
 
 
+class TradabilityCheck(BaseModel):
+    code: str
+    severity: str
+    title: str
+    message: str
+
+
+class TradabilityAssessment(BaseModel):
+    status: str
+    label: str
+    score: float = Field(ge=0.0, le=1.0)
+    can_open: bool
+    can_hold: bool = True
+    avg_volume_20d: int | None = None
+    avg_amount_20d: str | None = None
+    checks: list[TradabilityCheck] = Field(default_factory=list)
+    summary: str
+
+
+class PortfolioAllocation(BaseModel):
+    instrument_id: str
+    instrument_label: str | None = None
+    action: str
+    weight_pct: float
+    risk_budget_pct: float
+    max_position_pct: float
+    industry: str | None = None
+    rationale: str
+
+
+class PortfolioPlan(BaseModel):
+    profile: str = "balanced"
+    max_positions: int
+    total_risk_budget_pct: float
+    allocated_weight_pct: float
+    eligible_count: int
+    blocked_count: int
+    allocations: list[PortfolioAllocation] = Field(default_factory=list)
+    watchlist: list[PortfolioAllocation] = Field(default_factory=list)
+    rules: list[str] = Field(default_factory=list)
+    summary: str
+
+
 class RecommendationSummary(BaseModel):
     headline: str
     stance: str
@@ -221,5 +264,6 @@ class OpportunityCard(BaseModel):
     trading_constraints: TradingConstraintProfile | None = None
     market_context: MarketContext | None = None
     trading_status: TradingStatus | None = None
+    tradability: TradabilityAssessment | None = None
     strategy_calibration: StrategyCalibration | None = None
     recommendation_summary: RecommendationSummary | None = None

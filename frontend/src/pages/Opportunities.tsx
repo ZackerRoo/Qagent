@@ -4,6 +4,7 @@ import { useI18n } from "../i18n";
 import type { TranslationKey } from "../i18n/catalog";
 import { formatInstrumentDisplay } from "../lib/instruments";
 import {
+  localizeAction,
   localizeFactorFlag,
   localizeProfile,
   localizeProfileReason,
@@ -21,6 +22,7 @@ import type {
   DataProviderMode,
   FactorRanking,
   OpportunityCard,
+  PortfolioPlan,
   ResearchProfile,
   ScanItem,
   SectorStrength,
@@ -33,6 +35,7 @@ type Props = {
   strategyHealth: StrategyHealth[];
   factorRankings: FactorRanking[];
   sectorStrength: SectorStrength[];
+  portfolioPlan?: PortfolioPlan;
   selectedCard?: OpportunityCard;
   dataMode: DataProviderMode;
   profile: ResearchProfile;
@@ -45,6 +48,7 @@ export function Opportunities({
   strategyHealth,
   factorRankings,
   sectorStrength,
+  portfolioPlan,
   selectedCard,
   dataMode,
   profile,
@@ -64,6 +68,7 @@ export function Opportunities({
           </div>
           <ProfileNote card={selectedCard} profile={profile} />
           <OpportunitySummary cards={cards} items={items} />
+          <PortfolioPlanPanel plan={portfolioPlan} />
           <SectorStrengthPanel items={sectorStrength} />
           <MarketOpportunitySections
             cards={cards}
@@ -101,6 +106,73 @@ export function Opportunities({
         </section>
       </div>
       <OpportunityDetail card={selectedCard} dataMode={dataMode} />
+    </div>
+  );
+}
+
+function PortfolioPlanPanel({ plan }: { plan?: PortfolioPlan }) {
+  const { language, t } = useI18n();
+  if (!plan) {
+    return <p className="empty">{t("opportunities.noPortfolioPlan")}</p>;
+  }
+  return (
+    <div className="portfolio-plan-card">
+      <div className="sector-strength-heading">
+        <h3>{t("opportunities.portfolioPlan")}</h3>
+        <span>
+          {plan.eligible_count}/{plan.max_positions}
+        </span>
+      </div>
+      <p>{plan.summary}</p>
+      <div className="opportunity-summary compact">
+        <div>
+          <span>{t("opportunities.eligible")}</span>
+          <strong>{plan.eligible_count}</strong>
+        </div>
+        <div>
+          <span>{t("opportunities.blocked")}</span>
+          <strong>{plan.blocked_count}</strong>
+        </div>
+        <div>
+          <span>{t("opportunities.allocatedWeight")}</span>
+          <strong>{plan.allocated_weight_pct.toFixed(2)}%</strong>
+        </div>
+      </div>
+      {plan.allocations.length ? (
+        <div className="table-shell compact-table">
+          <table>
+            <thead>
+              <tr>
+                <th>{t("common.ticker")}</th>
+                <th>{t("detail.action")}</th>
+                <th>{t("opportunities.weight")}</th>
+                <th>{t("detail.riskBudget")}</th>
+                <th>{t("detail.marketContext")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {plan.allocations.map((item) => (
+                <tr key={item.instrument_id}>
+                  <td className="ticker" title={item.instrument_id}>
+                    {formatInstrumentDisplay(item.instrument_id, item.instrument_label)}
+                  </td>
+                  <td>{localizeAction(item.action, language)}</td>
+                  <td>{item.weight_pct.toFixed(2)}%</td>
+                  <td>{item.risk_budget_pct.toFixed(2)}%</td>
+                  <td>{item.industry ?? "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="empty">{t("opportunities.noPortfolioAllocations")}</p>
+      )}
+      <div className="rank-reasons">
+        {plan.rules.map((rule) => (
+          <span key={rule}>{rule}</span>
+        ))}
+      </div>
     </div>
   );
 }
@@ -296,6 +368,7 @@ function ScanCoverageTable({ items }: { items: ScanItem[] }) {
             <th>{t("opportunities.missing")}</th>
             <th>{t("opportunities.close")}</th>
             <th>{t("detail.tradingStatus")}</th>
+            <th>{t("detail.tradability")}</th>
             <th>{t("factors.score")}</th>
             <th>{t("factors.rank")}</th>
             <th>{t("common.provider")}</th>
@@ -320,6 +393,7 @@ function ScanCoverageTable({ items }: { items: ScanItem[] }) {
               <td>{item.strategies_missing_data}</td>
               <td>{item.latest_close ?? "-"}</td>
               <td>{item.trading_status?.label ?? "-"}</td>
+              <td>{item.tradability?.label ?? "-"}</td>
               <td>{formatScore(item.factor_score)}</td>
               <td>{item.factor_rank ?? "-"}</td>
               <td>{localizeProvider(item.provider, language)}</td>

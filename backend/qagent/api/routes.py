@@ -402,6 +402,7 @@ def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict
         "strategy_health": [item.model_dump(mode="json") for item in result.strategy_health],
         "factor_rankings": [item.model_dump(mode="json") for item in result.factor_rankings],
         "sector_strength": [item.model_dump(mode="json") for item in result.sector_strength],
+        "portfolio_plan": result.portfolio_plan.model_dump(mode="json"),
         "data_health": result.data_health,
     }
 
@@ -538,6 +539,7 @@ def overview(provider: str = "fixture", symbols: str | None = None) -> dict[str,
         "strategy_health": [item.model_dump(mode="json") for item in result.strategy_health[:6]],
         "factor_rankings": [item.model_dump(mode="json") for item in result.factor_rankings[:10]],
         "sector_strength": [item.model_dump(mode="json") for item in result.sector_strength[:6]],
+        "portfolio_plan": result.portfolio_plan.model_dump(mode="json"),
         "data_health": result.data_health,
     }
 
@@ -1220,4 +1222,6 @@ def _agent_card_summary(card) -> dict[str, object]:
         "risk_reward": card.risk_reward,
         "primary_strategy_id": card.primary_strategy_id,
         "data_caveats": card.data_caveats,
+        "tradability_label": card.tradability.label if card.tradability else None,
+        "tradability_summary": card.tradability.summary if card.tradability else None,
     }

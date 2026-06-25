@@ -120,7 +120,7 @@ def _is_recommendation_question(question: str, lowered: str) -> bool:
 
 def _answer_recommendations(question: str, cards: list[object]) -> str:
     actionable = [card for card in cards if isinstance(card, dict) and card.get("action") != "avoid"]
-    ranked = actionable[:3]
+    ranked = actionable[:3] or [card for card in cards if isinstance(card, dict)][:3]
     if not ranked:
         return (
             "当前扫描没有可执行机会。可以继续观察触发价、数据缺失和策略健康度；这不是投资建议。"
@@ -128,7 +128,8 @@ def _answer_recommendations(question: str, cards: list[object]) -> str:
             else "The current scan has no actionable opportunity. Keep watching triggers, data gaps, and strategy health; this is not advice."
         )
     if _looks_chinese(question):
-        lines = ["当前扫描里优先看这些候选机会："]
+        heading = "当前扫描里优先看这些候选机会：" if actionable else "当前没有可直接开仓标的，优先观察这些候选："
+        lines = [heading]
         for index, card in enumerate(ranked, start=1):
             lines.append(f"{index}. {_format_cn_recommendation(card)}")
         lines.append("这些是研究型候选买卖计划，不是投资建议；真正执行前要重新确认成交量、触发价和止损。")
@@ -158,11 +159,13 @@ def _format_cn_recommendation(card: dict[str, object]) -> str:
     ) or "-"
     strategy = localize_strategy(card.get("primary_strategy_id"))
     caveats = "、".join(localize_caveat(item) for item in card.get("data_caveats") or []) or "-"
+    tradability = str(card.get("tradability_summary") or card.get("tradability_label") or "-")
     return (
         f"{symbol}：动作 {action}，信心 {conviction}，策略 {strategy}。"
         f"因子分 {factor_score}，因子排名 {factor_rank}，因子标签 {factor_flags}。"
         f"买点/触发 {trigger}；不追高 {no_chase}；止损 {stop}；"
-        f"目标 {target_1}/{target_2}；盈亏比 {risk_reward}；数据 {caveats}。"
+        f"目标 {target_1}/{target_2}；盈亏比 {risk_reward}；"
+        f"可交易性 {tradability}；数据 {caveats}。"
     )
 
 

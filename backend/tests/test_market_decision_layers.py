@@ -5,6 +5,7 @@ import pandas as pd
 from qagent.domain.models import OpportunityCard, StrategyCalibration
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.market.sector_strength import build_sector_strength
+from qagent.market.tradability import evaluate_tradability
 from qagent.market.trading_status import evaluate_trading_status
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.recommendations.cn_execution import build_trading_constraints
@@ -92,3 +93,54 @@ def test_strategy_calibration_model_is_card_serializable():
 
     assert payload["strategy_calibration"]["strategy_id"] == "pead_earnings_drift"
     assert payload["strategy_calibration"]["message"].startswith("策略校准")
+
+
+def test_tradability_blocks_low_liquidity_and_risk_warning_names():
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "CN:000001",
+                "trade_date": date(2026, 3, 30),
+                "close": 10.0,
+                "volume": 100,
+            },
+            {
+                "instrument_id": "CN:000001",
+                "trade_date": date(2026, 3, 31),
+                "close": 10.1,
+                "volume": 100,
+            },
+        ]
+    )
+    constraints = build_trading_constraints("CN:000001", "*ST测试 000001")
+    trading_status = evaluate_trading_status("CN:000001", bars, constraints)
+
+    assessment = evaluate_tradability(
+        "CN:000001",
+        "*ST测试 000001",
+        bars,
+        trading_status,
+        constraints,
+    )
+
+    assert assessment.can_open is False
+    assert assessment.status == "blocked"
+    assert {check.code for check in assessment.checks}.issuperset(
+        {"risk_warning_name", "low_liquidity"}
+    )
+
+
+def test_daily_scan_returns_portfolio_plan_and_tradability():
+    result = run_daily_scan(
+        instrument_ids=["CN:000001"],
+        provider=FixtureMarketDataProvider(),
+        end=date(2026, 3, 20),
+    )
+
+    assert result.portfolio_plan.eligible_count >= 1
+    assert result.portfolio_plan.allocations
+    assert result.portfolio_plan.allocations[0].instrument_id == "CN:000001"
+    assert result.portfolio_plan.allocations[0].weight_pct > 0
+    assert result.cards[0].tradability is not None
+    assert result.cards[0].tradability.can_open is True
+    assert result.items[0].tradability is not None

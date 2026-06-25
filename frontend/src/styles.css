@@ -785,6 +785,31 @@ tbody tr.selected {
   margin-bottom: 12px;
 }
 
+.portfolio-plan-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #bfd7ea;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  padding: 10px;
+  background: #f7fbff;
+}
+
+.portfolio-plan-card p {
+  margin: 0;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.opportunity-summary.compact {
+  margin-bottom: 0;
+}
+
+.compact-table {
+  max-height: 260px;
+}
+
 .sector-strength-heading {
   display: flex;
   align-items: center;

@@ -92,6 +92,7 @@ const RISK_VETO_LABELS: LabelMap = {
   many_data_caveats: { zh: "数据限制较多", en: "Multiple data caveats" },
   trading_status_limit_up: { zh: "接近涨停", en: "Near limit up" },
   trading_status_limit_down: { zh: "接近跌停", en: "Near limit down" },
+  tradability_blocked: { zh: "可交易性阻断", en: "Tradability blocked" },
 };
 
 const RISK_VETO_MESSAGES: LabelMap = {
@@ -107,6 +108,7 @@ const RISK_VETO_MESSAGES: LabelMap = {
   many_data_caveats: { zh: "数据限制较多，行动前需要复核来源。", en: "Several data caveats are present; verify the source." },
   trading_status_limit_up: { zh: "接近或触及涨停，不建议追买。", en: "Near or at limit up; avoid chasing." },
   trading_status_limit_down: { zh: "接近或触及跌停，流动性和退出风险较高。", en: "Near or at limit down; liquidity and exit risk are elevated." },
+  tradability_blocked: { zh: "可交易性过滤未通过，暂不纳入新开仓。", en: "Tradability filters did not pass; exclude from new entries." },
 };
 
 const SCAN_BLOCKER_LABELS: LabelMap = {

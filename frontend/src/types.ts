@@ -109,6 +109,7 @@ export type OpportunityCard = {
   trading_constraints: TradingConstraintProfile | null;
   market_context: MarketContext | null;
   trading_status: TradingStatus | null;
+  tradability: TradabilityAssessment | null;
   strategy_calibration: StrategyCalibration | null;
   recommendation_summary: RecommendationSummary | null;
 };
@@ -191,6 +192,49 @@ export type StrategyCalibration = {
   avg_return_20d: number | null;
   max_loss_10d: number | null;
   message: string;
+};
+
+export type TradabilityCheck = {
+  code: string;
+  severity: string;
+  title: string;
+  message: string;
+};
+
+export type TradabilityAssessment = {
+  status: string;
+  label: string;
+  score: number;
+  can_open: boolean;
+  can_hold: boolean;
+  avg_volume_20d: number | null;
+  avg_amount_20d: string | null;
+  checks: TradabilityCheck[];
+  summary: string;
+};
+
+export type PortfolioAllocation = {
+  instrument_id: string;
+  instrument_label: string | null;
+  action: string;
+  weight_pct: number;
+  risk_budget_pct: number;
+  max_position_pct: number;
+  industry: string | null;
+  rationale: string;
+};
+
+export type PortfolioPlan = {
+  profile: string;
+  max_positions: number;
+  total_risk_budget_pct: number;
+  allocated_weight_pct: number;
+  eligible_count: number;
+  blocked_count: number;
+  allocations: PortfolioAllocation[];
+  watchlist: PortfolioAllocation[];
+  rules: string[];
+  summary: string;
 };
 
 export type RiskVeto = {
@@ -303,6 +347,7 @@ export type ScanItem = {
   factor_rank: number | null;
   factor_flags: string[];
   trading_status: TradingStatus | null;
+  tradability: TradabilityAssessment | null;
   blockers: ScanBlocker[];
 };
 
@@ -319,6 +364,7 @@ export type OpportunitiesResponse = {
   strategy_health: StrategyHealth[];
   factor_rankings: FactorRanking[];
   sector_strength: SectorStrength[];
+  portfolio_plan: PortfolioPlan;
   data_health: Record<string, string>;
 };
 
@@ -379,6 +425,7 @@ export type OverviewResponse = {
   strategy_health: StrategyHealth[];
   factor_rankings: FactorRanking[];
   sector_strength: SectorStrength[];
+  portfolio_plan: PortfolioPlan;
   data_health: Record<string, string>;
 };
 

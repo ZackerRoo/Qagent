@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 
 import pandas as pd
 from pydantic import BaseModel
@@ -141,6 +141,8 @@ def run_portfolio_backtest(
         "trades": str(len(trades)),
         "lookahead_guard": "signals_generated_before_exits",
         "portfolio_model": "fixed_risk_stop_target_time_exit",
+        "execution_rules": "fees_slippage,t_plus_one,limit_price_guard,round_lot_100",
+        "cn_execution_rules": "enabled",
         "max_positions": str(max_positions),
         "risk_per_trade_pct": str(risk_per_trade_pct),
     }
@@ -206,12 +208,16 @@ def _candidate_from_signal(
     if trigger <= 0 or stop <= 0:
         return None
 
-    future = bars.loc[bars["trade_date"] > signal.signal_date].reset_index(drop=True)
+    ordered = bars.sort_values("trade_date").reset_index(drop=True)
+    future = ordered.loc[ordered["trade_date"] > signal.signal_date]
     if future.empty:
         return None
 
     entry_index = None
     for index, row in future.head(max_entry_wait_days).iterrows():
+        previous = ordered.iloc[index - 1] if index > 0 else None
+        if _is_cn(signal.instrument_id) and _is_limit_up_day(row, previous, signal.instrument_id):
+            continue
         if Decimal(str(row["high"])) >= trigger:
             entry_index = index
             break
@@ -223,13 +229,19 @@ def _candidate_from_signal(
     exit_price = None
     exit_date = None
     exit_reason = "time_exit"
-    exit_window = future.loc[entry_index : entry_index + max_holding_days - 1].reset_index(drop=True)
+    exit_window = ordered.iloc[entry_index : entry_index + max_holding_days].reset_index(drop=True)
+    entry_date = exit_window.iloc[0]["trade_date"]
 
     for _, row in exit_window.iterrows():
         trade_date = row["trade_date"]
+        if _is_cn(signal.instrument_id) and trade_date == entry_date:
+            continue
         low = Decimal(str(row["low"]))
         high = Decimal(str(row["high"]))
+        previous = _previous_row(ordered, row)
         if low <= stop:
+            if _is_cn(signal.instrument_id) and _is_limit_down_day(row, previous, signal.instrument_id):
+                continue
             exit_date = trade_date
             exit_price = _money(stop * (Decimal("1") - slip))
             exit_reason = "stopped"
@@ -245,7 +257,6 @@ def _candidate_from_signal(
         exit_date = final_row["trade_date"]
         exit_price = _money(Decimal(str(final_row["close"])) * (Decimal("1") - slip))
 
-    entry_date = exit_window.iloc[0]["trade_date"]
     return _TradeCandidate(
         signal=signal,
         entry_date=entry_date,
@@ -377,7 +388,7 @@ def _size_trade(
     capital_budget = equity / Decimal(max_positions)
     shares_by_risk = risk_budget / per_share_risk
     shares_by_capital = capital_budget / candidate.entry_price
-    shares = _shares(min(shares_by_risk, shares_by_capital))
+    shares = _shares(min(shares_by_risk, shares_by_capital), candidate.signal.instrument_id)
     if shares <= 0:
         return None
 
@@ -464,5 +475,54 @@ def _money(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def _shares(value: Decimal) -> Decimal:
+def _shares(value: Decimal, instrument_id: str | None = None) -> Decimal:
+    if instrument_id and _is_cn(instrument_id):
+        lots = (value / Decimal("100")).to_integral_value(rounding=ROUND_DOWN)
+        return lots * Decimal("100")
     return value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+
+
+def _previous_row(ordered: pd.DataFrame, row) -> object | None:
+    matches = ordered.index[ordered["trade_date"] == row["trade_date"]].tolist()
+    if not matches:
+        return None
+    index = matches[0]
+    return ordered.iloc[index - 1] if index > 0 else None
+
+
+def _is_cn(instrument_id: str) -> bool:
+    return instrument_id.startswith("CN:")
+
+
+def _is_limit_up_day(row, previous, instrument_id: str) -> bool:
+    limit_pct = _limit_pct(instrument_id)
+    return _is_limit_day(row, previous, limit_pct, up=True)
+
+
+def _is_limit_down_day(row, previous, instrument_id: str) -> bool:
+    limit_pct = _limit_pct(instrument_id)
+    return _is_limit_day(row, previous, limit_pct, up=False)
+
+
+def _is_limit_day(row, previous, limit_pct: Decimal, *, up: bool) -> bool:
+    if previous is None:
+        return False
+    previous_close = Decimal(str(previous["close"]))
+    if previous_close <= 0:
+        return False
+    close = Decimal(str(row["close"]))
+    change_pct = (close / previous_close - Decimal("1")) * Decimal("100")
+    if up:
+        limit_price = previous_close * (Decimal("1") + limit_pct / Decimal("100"))
+        return change_pct >= limit_pct - Decimal("0.2") or close >= limit_price * Decimal("0.995")
+    limit_price = previous_close * (Decimal("1") - limit_pct / Decimal("100"))
+    return change_pct <= -limit_pct + Decimal("0.2") or close <= limit_price * Decimal("1.005")
+
+
+def _limit_pct(instrument_id: str) -> Decimal:
+    symbol = instrument_id.split(":", 1)[1]
+    if symbol.startswith(("688", "300", "301")):
+        return Decimal("20")
+    if symbol.startswith(("4", "8", "920")):
+        return Decimal("30")
+    return Decimal("10")

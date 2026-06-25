@@ -129,6 +129,32 @@ export function OpportunityDetail({
             </div>
           </div>
         )}
+        {card.tradability && (
+          <div className="context-panel">
+            <h3>{t("detail.tradability")}</h3>
+            <div className="context-metrics">
+              <span className={`status status-${card.tradability.status}`}>
+                {card.tradability.label}
+              </span>
+              <span>{Math.round(card.tradability.score * 100)}</span>
+              <span>{card.tradability.can_open ? t("detail.canOpen") : t("detail.cannotOpen")}</span>
+              {card.tradability.avg_amount_20d && (
+                <span>{t("detail.avgAmount")} {card.tradability.avg_amount_20d}</span>
+              )}
+            </div>
+            <p className="context-note">{card.tradability.summary}</p>
+            {card.tradability.checks.length > 0 && (
+              <div className="risk-veto-list compact">
+                {card.tradability.checks.map((check) => (
+                  <div key={check.code} className={`risk-veto risk-veto-${check.severity}`}>
+                    <strong>{check.title}</strong>
+                    <p>{check.message}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         {card.market_context && (
           <div className="context-panel">
             <h3>{t("detail.marketContext")}</h3>
