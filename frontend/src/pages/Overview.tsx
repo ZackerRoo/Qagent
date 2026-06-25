@@ -1,7 +1,7 @@
 import { DataHealth } from "../components/DataHealth";
 import { MarketOpportunitySections } from "../components/MarketOpportunitySections";
 import { useI18n } from "../i18n";
-import { formatInstrumentLabel } from "../lib/instruments";
+import { formatInstrumentDisplay } from "../lib/instruments";
 import { localizeDataHealthValue, localizeRadarAction, localizeRadarSignal } from "../lib/localize";
 import type { IntradayRadarResponse, OpportunityCard, OverviewResponse } from "../types";
 
@@ -85,7 +85,7 @@ function IntradayRadarTable({ radar }: { radar?: IntradayRadarResponse }) {
           {radar.items.map((item) => (
             <tr key={item.instrument_id}>
               <td className="ticker" title={item.instrument_id}>
-                {formatInstrumentLabel(item.instrument_id)}
+                {formatInstrumentDisplay(item.instrument_id, item.instrument_label)}
               </td>
               <td>
                 <span className={`status status-${item.severity}`}>

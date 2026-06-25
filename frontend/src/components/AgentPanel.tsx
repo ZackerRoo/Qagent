@@ -3,7 +3,7 @@ import { useState } from "react";
 
 import { askAgent } from "../api/client";
 import { useI18n } from "../i18n";
-import { formatInstrumentLabel } from "../lib/instruments";
+import { formatInstrumentDisplay } from "../lib/instruments";
 import type { DataProviderMode, OpportunityCard } from "../types";
 
 type Props = {
@@ -38,7 +38,9 @@ export function AgentPanel({ selectedCard, dataMode, symbols }: Props) {
       <div className="panel-heading">
         <h2>{t("agent.title")}</h2>
         <span className="count" title={selectedCard?.instrument_id}>
-          {selectedCard ? formatInstrumentLabel(selectedCard.instrument_id) : t("agent.context")}
+          {selectedCard
+            ? formatInstrumentDisplay(selectedCard.instrument_id, selectedCard.instrument_label)
+            : t("agent.context")}
         </span>
       </div>
       <textarea

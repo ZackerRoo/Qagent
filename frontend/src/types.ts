@@ -58,6 +58,7 @@ export type ExitPlan = {
 export type OpportunityCard = {
   card_id: string;
   instrument_id: string;
+  instrument_label: string | null;
   market: Market;
   status: OpportunityStatus;
   thesis: string;
@@ -110,6 +111,7 @@ export type FactorExposure = {
 
 export type FactorRanking = {
   instrument_id: string;
+  instrument_label: string | null;
   factor_score: number;
   factor_rank: number;
   percentile: number;
@@ -186,6 +188,7 @@ export type StrategyHealth = {
 
 export type ScanItem = {
   instrument_id: string;
+  instrument_label: string | null;
   status: string;
   reason: string;
   bars: number;
@@ -245,6 +248,7 @@ export type MarketBarsResponse = {
 
 export type IntradayRadarItem = {
   instrument_id: string;
+  instrument_label: string | null;
   latest_trade_date: string | null;
   latest_close: string | null;
   previous_close: string | null;
@@ -681,6 +685,7 @@ export type FactorBacktestResponse = {
 
 export type DailyBriefOpportunity = {
   instrument_id: string;
+  instrument_label: string | null;
   status: string;
   primary_strategy_id: string | null;
   rank_score: number;
@@ -705,6 +710,7 @@ export type DailyBriefOpportunity = {
 
 export type DailyBriefEntryWatch = {
   instrument_id: string;
+  instrument_label: string | null;
   primary_strategy_id: string | null;
   trigger_price: string;
   initial_stop: string | null;
@@ -718,6 +724,7 @@ export type DailyBriefEntryWatch = {
 
 export type DailyBriefRiskAlert = {
   instrument_id: string;
+  instrument_label: string | null;
   status: string;
   current_price: string;
   stop_distance_pct: number | null;
@@ -727,6 +734,7 @@ export type DailyBriefRiskAlert = {
 
 export type DailyBriefCatalyst = {
   instrument_id: string;
+  instrument_label: string | null;
   catalyst_type: string;
   title: string;
   investment_hypothesis: string;

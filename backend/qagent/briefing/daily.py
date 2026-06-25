@@ -13,6 +13,7 @@ from qagent.providers.status import ProviderStatus
 
 class BriefOpportunity(BaseModel):
     instrument_id: str
+    instrument_label: str | None = None
     status: str
     primary_strategy_id: str | None
     rank_score: float
@@ -37,6 +38,7 @@ class BriefOpportunity(BaseModel):
 
 class EntryWatchItem(BaseModel):
     instrument_id: str
+    instrument_label: str | None = None
     primary_strategy_id: str | None
     trigger_price: Decimal
     initial_stop: Decimal | None
@@ -50,6 +52,7 @@ class EntryWatchItem(BaseModel):
 
 class BriefRiskAlert(BaseModel):
     instrument_id: str
+    instrument_label: str | None = None
     status: str
     current_price: Decimal
     stop_distance_pct: float | None
@@ -59,6 +62,7 @@ class BriefRiskAlert(BaseModel):
 
 class BriefCatalyst(BaseModel):
     instrument_id: str
+    instrument_label: str | None = None
     catalyst_type: str
     title: str
     investment_hypothesis: str
@@ -149,6 +153,7 @@ def _top_opportunities(scan_result: DailyScanResult, limit: int) -> list[BriefOp
     return [
         BriefOpportunity(
             instrument_id=card.instrument_id,
+            instrument_label=card.instrument_label or format_instrument_label(card.instrument_id),
             status=card.status.value,
             primary_strategy_id=card.primary_strategy_id,
             rank_score=card.rank_score,
@@ -182,6 +187,7 @@ def _entry_watch(opportunities: list[BriefOpportunity]) -> list[EntryWatchItem]:
         items.append(
             EntryWatchItem(
                 instrument_id=opportunity.instrument_id,
+                instrument_label=opportunity.instrument_label,
                 primary_strategy_id=opportunity.primary_strategy_id,
                 trigger_price=opportunity.trigger_price,
                 initial_stop=opportunity.initial_stop,
@@ -207,6 +213,7 @@ def _risk_alerts(position_risks: list[PositionRisk]) -> list[BriefRiskAlert]:
         alerts.append(
             BriefRiskAlert(
                 instrument_id=risk.instrument_id,
+                instrument_label=format_instrument_label(risk.instrument_id),
                 status=risk.status,
                 current_price=risk.current_price,
                 stop_distance_pct=risk.stop_distance_pct,
@@ -235,6 +242,7 @@ def _catalyst_watch(
     return [
         BriefCatalyst(
             instrument_id=item.instrument_id,
+            instrument_label=format_instrument_label(item.instrument_id),
             catalyst_type=item.catalyst_type,
             title=item.title,
             investment_hypothesis=item.investment_hypothesis,

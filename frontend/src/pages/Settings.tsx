@@ -388,7 +388,8 @@ function formatUniverseName(universe: UniverseRecord, language: "zh" | "en"): st
   }
   const labels: Record<string, string> = {
     fixture_dev: "样例开发池",
-    free_default: "A股免费默认池",
+    free_default: "全A股筛选池",
+    cn_liquid_starter: "A股30只流动性样本池",
     cn_tech_starter: "A股科技入门池",
     cn_blue_chip_starter: "A股蓝筹入门池",
     cn_growth_starter: "A股成长入门池",

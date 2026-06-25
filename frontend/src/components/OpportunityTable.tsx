@@ -1,5 +1,5 @@
 import { useI18n } from "../i18n";
-import { formatInstrumentLabel } from "../lib/instruments";
+import { formatInstrumentDisplay } from "../lib/instruments";
 import { localizeAction, localizeCaveat, localizeRiskStatus, localizeStrategy } from "../lib/localize";
 import type { OpportunityCard } from "../types";
 import { StatusBadge } from "./StatusBadge";
@@ -45,7 +45,7 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
               onClick={() => onSelect(card)}
             >
               <td className="ticker" title={card.instrument_id}>
-                {formatInstrumentLabel(card.instrument_id)}
+                {formatInstrumentDisplay(card.instrument_id, card.instrument_label)}
               </td>
               <td>{card.market}</td>
               <td>

@@ -11,10 +11,12 @@ from qagent.delivery.senders import send_pending_deliveries
 from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.automation import run_research_automation
 from qagent.jobs.daily_scan import run_daily_scan
+from qagent.market.a_share_universe import ResolvedSymbols, resolve_symbol_tokens
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE, DEFAULT_FREE_UNIVERSE
 from qagent.providers.factory import build_market_data_provider
 from qagent.providers.status import build_provider_status
 from qagent.storage.repository import QagentRepository
+from qagent.strategy_data.providers import EmptyStrategyDataProvider
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -90,8 +92,8 @@ def _send_outbox_command(args: argparse.Namespace) -> int:
 
 def _run_all_command(args: argparse.Namespace) -> int:
     mode = args.provider.strip().lower()
-    default_universe = DEFAULT_FREE_UNIVERSE if mode == "free" else DEFAULT_DEV_UNIVERSE
-    symbols = _parse_symbols(args.symbols, default_universe)
+    resolved = _resolve_symbols(mode, args.symbols)
+    symbols = resolved.symbols
     initialize_database()
     repo = QagentRepository(create_session_factory())
     result = run_research_automation(
@@ -99,14 +101,16 @@ def _run_all_command(args: argparse.Namespace) -> int:
         provider=build_market_data_provider(mode),
         provider_mode=mode,
         symbols=symbols,
-        include_news=not args.no_news,
+        include_news=False if resolved.is_dynamic else not args.no_news,
         queue_brief=args.queue_brief,
         run_alerts=args.run_alerts,
         queue_alerts=args.queue_alerts,
         run_backtest=args.run_backtest,
         recipient=args.recipient,
         limit=args.limit,
+        strategy_data_provider=EmptyStrategyDataProvider() if resolved.is_dynamic else None,
     )
+    result.data_health.update(resolved.data_health)
     print(
         f"automation provider={result.summary.provider} symbols={result.summary.symbols} "
         f"cards={result.summary.cards} scan={result.scan_run_id} brief={result.brief_id}"
@@ -130,10 +134,15 @@ def _run_all_command(args: argparse.Namespace) -> int:
 
 def _daily_brief_command(args: argparse.Namespace) -> int:
     mode = args.provider.strip().lower()
-    default_universe = DEFAULT_FREE_UNIVERSE if mode == "free" else DEFAULT_DEV_UNIVERSE
-    symbols = _parse_symbols(args.symbols, default_universe)
+    resolved = _resolve_symbols(mode, args.symbols)
+    symbols = resolved.symbols
     provider = build_market_data_provider(mode)
-    scan_result = run_daily_scan(symbols, provider, mode=mode)
+    scan_result = run_daily_scan(
+        symbols,
+        provider,
+        mode=mode,
+        strategy_data_provider=EmptyStrategyDataProvider() if resolved.is_dynamic else None,
+    )
     end_date = date(2026, 3, 20) if mode == "fixture" else date.today()
     start_date = date(2026, 1, 15) if mode == "fixture" else end_date - timedelta(days=180)
     backtest_result = run_historical_backtest(
@@ -150,11 +159,16 @@ def _daily_brief_command(args: argparse.Namespace) -> int:
         "brief_symbols": str(len(symbols)),
         "brief_news": "skipped",
     }
+    data_health.update(resolved.data_health)
+    if resolved.is_dynamic:
+        data_health["strategy_data_skipped"] = "true"
     if not args.no_news:
         catalyst_provider = FreeCatalystProvider()
-        news = catalyst_provider.get_news(symbols, limit=args.limit)
+        news_symbols = [card.instrument_id for card in scan_result.cards[: args.limit]] or symbols[: args.limit]
+        news = catalyst_provider.get_news(news_symbols, limit=args.limit)
         catalysts = build_catalyst_hypotheses(news)
         data_health["brief_news"] = str(len(news))
+        data_health["brief_news_symbols"] = str(len(news_symbols))
         if catalyst_provider.last_errors:
             data_health["brief_news_errors"] = " | ".join(catalyst_provider.last_errors[:3])
 
@@ -196,6 +210,14 @@ def _parse_symbols(symbols: str | None, default_universe: list[str]) -> list[str
     if not symbols:
         return default_universe
     return [symbol.strip().upper() for symbol in symbols.split(",") if symbol.strip()]
+
+
+def _resolve_symbols(mode: str, symbols: str | None) -> ResolvedSymbols:
+    default_universe = DEFAULT_FREE_UNIVERSE if mode == "free" else DEFAULT_DEV_UNIVERSE
+    parsed = _parse_symbols(symbols, default_universe)
+    if mode == "free":
+        return resolve_symbol_tokens(parsed)
+    return ResolvedSymbols(symbols=parsed)
 
 
 if __name__ == "__main__":

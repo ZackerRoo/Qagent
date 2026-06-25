@@ -1,14 +1,32 @@
 CN_INSTRUMENT_NAMES = {
     "000001": "平安银行",
     "000063": "中兴通讯",
+    "000333": "美的集团",
+    "000651": "格力电器",
+    "000725": "京东方A",
+    "000858": "五粮液",
     "002230": "科大讯飞",
+    "002241": "歌尔股份",
     "002415": "海康威视",
     "002475": "立讯精密",
+    "002594": "比亚迪",
+    "300033": "同花顺",
+    "300059": "东方财富",
     "300124": "汇川技术",
+    "300274": "阳光电源",
+    "300308": "中际旭创",
     "300750": "宁德时代",
     "300760": "迈瑞医疗",
+    "600030": "中信证券",
     "600036": "招商银行",
+    "600276": "恒瑞医药",
+    "600309": "万华化学",
     "600519": "贵州茅台",
+    "600570": "恒生电子",
+    "600690": "海尔智家",
+    "600887": "伊利股份",
+    "601012": "隆基绿能",
+    "601166": "兴业银行",
     "601318": "中国平安",
     "601398": "工商银行",
 }
@@ -21,11 +39,21 @@ US_INSTRUMENT_NAMES = {
 }
 
 
+def register_cn_instrument_names(names: dict[str, str]) -> None:
+    for symbol, name in names.items():
+        normalized_symbol = symbol.strip().upper()
+        normalized_name = name.strip()
+        if len(normalized_symbol) == 6 and normalized_symbol.isdigit() and normalized_name:
+            CN_INSTRUMENT_NAMES[normalized_symbol] = normalized_name
+
+
 def format_instrument_label(instrument_id: str | None) -> str:
     symbol = market_symbol(instrument_id)
     if not symbol:
         return "-"
     market = _market(instrument_id)
+    if market == "CN" and symbol == "ALL":
+        return "全A股候选池"
     if market == "CN":
         name = CN_INSTRUMENT_NAMES.get(symbol)
         exchange_symbol = f"{symbol}.{_cn_exchange_suffix(symbol)}"

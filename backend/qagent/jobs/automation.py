@@ -18,6 +18,7 @@ from qagent.providers.base import MarketDataProvider
 from qagent.providers.status import build_provider_status
 from qagent.storage.paper import PaperTradingRepository
 from qagent.storage.repository import QagentRepository
+from qagent.strategy_data.providers import StrategyDataProvider
 
 
 class AutomationSummary(BaseModel):
@@ -59,9 +60,15 @@ def run_research_automation(
     update_paper: bool = True,
     recipient: str | None = None,
     limit: int = 5,
+    strategy_data_provider: StrategyDataProvider | None = None,
 ) -> AutomationRunResult:
     mode = provider_mode.strip().lower()
-    scan_result = run_daily_scan(symbols, provider, mode=mode)
+    scan_result = run_daily_scan(
+        symbols,
+        provider,
+        mode=mode,
+        strategy_data_provider=strategy_data_provider,
+    )
     scan_run = repo.save_scan_run(provider=mode, mode=mode, symbols=symbols, result=scan_result)
     paper_seed_created = 0
     paper_update = None

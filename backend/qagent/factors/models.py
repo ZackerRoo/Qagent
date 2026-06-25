@@ -12,6 +12,7 @@ class FactorExposure(BaseModel):
 
 class FactorRanking(BaseModel):
     instrument_id: str
+    instrument_label: str | None = None
     factor_score: float = Field(ge=0.0, le=1.0)
     factor_rank: int
     percentile: float = Field(ge=0.0, le=1.0)

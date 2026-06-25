@@ -17,6 +17,8 @@ from qagent.jobs.automation import run_research_automation
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.jobs.alert_runner import run_alert_rules
 from qagent.jobs.intraday_check import evaluate_snapshot_alerts
+from qagent.market.a_share_universe import ResolvedSymbols, resolve_symbol_tokens
+from qagent.market.instruments import format_instrument_label
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE, DEFAULT_FREE_UNIVERSE
 from qagent.market.universes import UniverseCreate, builtin_universes, merge_universes
 from qagent.market.indicators import add_moving_averages, add_volume_ratio, percent_distance
@@ -42,6 +44,7 @@ from qagent.storage.repository import (
     WatchlistCreate,
 )
 from qagent.storage.market_cache import MarketDataCacheRepository
+from qagent.strategy_data.providers import EmptyStrategyDataProvider
 
 router = APIRouter()
 
@@ -100,13 +103,32 @@ def _parse_symbols(symbols: str | None, default_universe: list[str]) -> list[str
     return [symbol.strip().upper() for symbol in symbols.split(",") if symbol.strip()]
 
 
-def _scan(provider_mode: str = "fixture", symbols: str | None = None):
+def _resolve_symbols(provider_mode: str, symbols: str | None) -> ResolvedSymbols:
     mode = provider_mode.strip().lower()
     default_universe = DEFAULT_FREE_UNIVERSE if mode == "free" else DEFAULT_DEV_UNIVERSE
-    instrument_ids = _parse_symbols(symbols, default_universe)
+    parsed = _parse_symbols(symbols, default_universe)
+    if mode == "free":
+        return resolve_symbol_tokens(parsed)
+    return ResolvedSymbols(symbols=parsed)
+
+
+def _scan(provider_mode: str = "fixture", symbols: str | None = None):
+    mode = provider_mode.strip().lower()
+    resolved = _resolve_symbols(mode, symbols)
+    instrument_ids = resolved.symbols
     try:
         provider = build_market_data_provider(mode)
-        return run_daily_scan(instrument_ids, provider, mode=mode), mode, instrument_ids
+        strategy_data_provider = EmptyStrategyDataProvider() if resolved.is_dynamic else None
+        result = run_daily_scan(
+            instrument_ids,
+            provider,
+            mode=mode,
+            strategy_data_provider=strategy_data_provider,
+        )
+        result.data_health.update(resolved.data_health)
+        if resolved.is_dynamic:
+            result.data_health["strategy_data_skipped"] = "true"
+        return result, mode, instrument_ids
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -174,6 +196,7 @@ def _radar_item(instrument_id: str, bars, card, scan_item) -> dict[str, object]:
     if bars.empty:
         return {
             "instrument_id": instrument_id,
+            "instrument_label": format_instrument_label(instrument_id),
             "latest_trade_date": None,
             "latest_close": None,
             "previous_close": None,
@@ -315,6 +338,7 @@ def _radar_payload(
 ) -> dict[str, object]:
     return {
         "instrument_id": instrument_id,
+        "instrument_label": format_instrument_label(instrument_id),
         "latest_trade_date": latest["trade_date"].isoformat(),
         "latest_close": _decimal_text(latest_close),
         "previous_close": _decimal_text(previous_close),
@@ -421,11 +445,16 @@ def market_bars(
 @router.get("/intraday-radar")
 def intraday_radar(provider: str = "fixture", symbols: str | None = None) -> dict[str, object]:
     mode = provider.strip().lower()
-    default_universe = DEFAULT_FREE_UNIVERSE if mode == "free" else DEFAULT_DEV_UNIVERSE
-    instrument_ids = _parse_symbols(symbols, default_universe)
+    resolved = _resolve_symbols(mode, symbols)
+    instrument_ids = resolved.symbols
     try:
         market_provider = build_market_data_provider(mode)
-        scan_result = run_daily_scan(instrument_ids, market_provider, mode=mode)
+        scan_result = run_daily_scan(
+            instrument_ids,
+            market_provider,
+            mode=mode,
+            strategy_data_provider=EmptyStrategyDataProvider() if resolved.is_dynamic else None,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -445,6 +474,7 @@ def intraday_radar(provider: str = "fixture", symbols: str | None = None) -> dic
         "symbols": str(len(instrument_ids)),
         "radar_items": str(len(radar_items)),
     }
+    data_health.update(resolved.data_health)
     if provider_errors:
         data_health["errors"] = " | ".join(provider_errors[:3])
     return {"items": radar_items, "data_health": data_health}
@@ -478,8 +508,8 @@ def factor_backtest(
         raise HTTPException(status_code=400, detail="step_days must be between 1 and 120")
     if top_n <= 0 or top_n > 50:
         raise HTTPException(status_code=400, detail="top_n must be between 1 and 50")
-    default_universe = DEFAULT_FREE_UNIVERSE if mode == "free" else DEFAULT_DEV_UNIVERSE
-    instrument_ids = _parse_symbols(symbols, default_universe)
+    resolved = _resolve_symbols(mode, symbols)
+    instrument_ids = resolved.symbols
     start_date, end_date = _factor_backtest_dates(mode, start, end)
     market_provider = build_market_data_provider(mode)
     bars = market_provider.get_daily_bars(instrument_ids, start_date, end_date)
@@ -489,7 +519,9 @@ def factor_backtest(
         step_days=step_days,
         top_n=top_n,
     )
-    return result.model_dump(mode="json")
+    payload = result.model_dump(mode="json")
+    payload["data_health"].update(resolved.data_health)
+    return payload
 
 
 @router.get("/overview")
@@ -609,22 +641,26 @@ def run_automation(
     mode = provider.strip().lower()
     if limit <= 0 or limit > 20:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 20")
-    default_universe = DEFAULT_FREE_UNIVERSE if mode == "free" else DEFAULT_DEV_UNIVERSE
-    instrument_ids = _parse_symbols(symbols, default_universe)
+    resolved = _resolve_symbols(mode, symbols)
+    instrument_ids = resolved.symbols
     try:
         result = run_research_automation(
             repo=_repo(),
             provider=build_market_data_provider(mode),
             provider_mode=mode,
             symbols=instrument_ids,
-            include_news=include_news,
+            include_news=False if resolved.is_dynamic else include_news,
             queue_brief=queue_brief,
             run_alerts=run_alerts,
             queue_alerts=queue_alerts,
             run_backtest=run_backtest,
             recipient=recipient,
             limit=limit,
+            strategy_data_provider=EmptyStrategyDataProvider() if resolved.is_dynamic else None,
         )
+        result.data_health.update(resolved.data_health)
+        if resolved.is_dynamic:
+            result.data_health["automation_news_scope"] = "skipped_for_dynamic_universe"
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return result.model_dump(mode="json")
@@ -673,12 +709,17 @@ def _build_daily_brief_response(
     mode = provider.strip().lower()
     if limit <= 0 or limit > 20:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 20")
-    default_universe = DEFAULT_FREE_UNIVERSE if mode == "free" else DEFAULT_DEV_UNIVERSE
-    instrument_ids = _parse_symbols(symbols, default_universe)
+    resolved = _resolve_symbols(mode, symbols)
+    instrument_ids = resolved.symbols
     start_date, end_date = _backtest_dates(mode, None, None)
     try:
         market_provider = build_market_data_provider(mode)
-        scan_result = run_daily_scan(instrument_ids, market_provider, mode=mode)
+        scan_result = run_daily_scan(
+            instrument_ids,
+            market_provider,
+            mode=mode,
+            strategy_data_provider=EmptyStrategyDataProvider() if resolved.is_dynamic else None,
+        )
         backtest_result = run_historical_backtest(
             instrument_ids=instrument_ids,
             provider=market_provider,
@@ -697,11 +738,16 @@ def _build_daily_brief_response(
         "brief_symbols": str(len(instrument_ids)),
         "brief_news": "skipped",
     }
+    brief_health.update(resolved.data_health)
+    if resolved.is_dynamic:
+        brief_health["strategy_data_skipped"] = "true"
     if include_news:
+        news_symbols = [card.instrument_id for card in scan_result.cards[:limit]] or instrument_ids[:limit]
         catalyst_provider = FreeCatalystProvider()
-        news = catalyst_provider.get_news(instrument_ids, limit=limit)
+        news = catalyst_provider.get_news(news_symbols, limit=limit)
         catalyst_hypotheses = build_catalyst_hypotheses(news)
         brief_health["brief_news"] = str(len(news))
+        brief_health["brief_news_symbols"] = str(len(news_symbols))
         brief_health["brief_catalysts"] = str(len(catalyst_hypotheses))
         if catalyst_provider.last_errors:
             brief_health["brief_news_errors"] = " | ".join(catalyst_provider.last_errors[:3])
@@ -735,8 +781,8 @@ def backtest(
     if limit <= 0 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
 
-    default_universe = DEFAULT_FREE_UNIVERSE if mode == "free" else DEFAULT_DEV_UNIVERSE
-    instrument_ids = _parse_symbols(symbols, default_universe)
+    resolved = _resolve_symbols(mode, symbols)
+    instrument_ids = resolved.symbols
     start_date, end_date = _backtest_dates(mode, start, end)
     try:
         market_provider = build_market_data_provider(mode)
@@ -755,7 +801,7 @@ def backtest(
         "summary": result.summary.model_dump(mode="json"),
         "performance": [item.model_dump(mode="json") for item in result.performance],
         "signals": [item.model_dump(mode="json") for item in result.signals],
-        "data_health": result.data_health,
+        "data_health": {**result.data_health, **resolved.data_health},
     }
 
 
@@ -782,8 +828,8 @@ def portfolio_backtest(
     if max_positions <= 0 or max_positions > 20:
         raise HTTPException(status_code=400, detail="max_positions must be between 1 and 20")
 
-    default_universe = DEFAULT_FREE_UNIVERSE if mode == "free" else DEFAULT_DEV_UNIVERSE
-    instrument_ids = _parse_symbols(symbols, default_universe)
+    resolved = _resolve_symbols(mode, symbols)
+    instrument_ids = resolved.symbols
     start_date, end_date = _backtest_dates(mode, start, end)
     try:
         market_provider = build_market_data_provider(mode)
@@ -806,7 +852,7 @@ def portfolio_backtest(
         "summary": result.summary.model_dump(mode="json"),
         "trades": [trade.model_dump(mode="json") for trade in result.trades],
         "equity_curve": [point.model_dump(mode="json") for point in result.equity_curve],
-        "data_health": result.data_health,
+        "data_health": {**result.data_health, **resolved.data_health},
     }
 
 
@@ -841,7 +887,8 @@ def alerts() -> dict[str, list[object]]:
 
 @router.get("/catalysts")
 def catalysts(symbols: str | None = None, limit: int = 5) -> dict[str, object]:
-    instrument_ids = _parse_symbols(symbols, DEFAULT_FREE_UNIVERSE)
+    resolved = _resolve_symbols("free", symbols)
+    instrument_ids = resolved.symbols[: max(limit, 1)]
     provider = FreeCatalystProvider()
     news = provider.get_news(instrument_ids, limit=limit)
     hypotheses = build_catalyst_hypotheses(news)
@@ -851,6 +898,7 @@ def catalysts(symbols: str | None = None, limit: int = 5) -> dict[str, object]:
         "news": str(len(news)),
         "hypotheses": str(len(hypotheses)),
     }
+    data_health.update(resolved.data_health)
     if provider.last_errors:
         data_health["errors"] = " | ".join(provider.last_errors[:3])
     return {
@@ -1136,6 +1184,7 @@ def _agent_card_summary(card) -> dict[str, object]:
     decision = card.decision
     return {
         "instrument_id": card.instrument_id,
+        "instrument_label": card.instrument_label or format_instrument_label(card.instrument_id),
         "status": card.status.value,
         "score": card.score,
         "rank_score": card.rank_score,

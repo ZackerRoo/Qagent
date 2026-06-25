@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { fetchMarketBars } from "../api/client";
 import { useI18n } from "../i18n";
-import { formatInstrumentLabel } from "../lib/instruments";
+import { formatInstrumentDisplay } from "../lib/instruments";
 import {
   localizeAction,
   localizeCaveat,
@@ -75,7 +75,9 @@ export function OpportunityDetail({
       <div className="panel-heading">
         <div>
           <p className="eyebrow">{card.market}</p>
-          <h2 title={card.instrument_id}>{formatInstrumentLabel(card.instrument_id)}</h2>
+          <h2 title={card.instrument_id}>
+            {formatInstrumentDisplay(card.instrument_id, card.instrument_label)}
+          </h2>
         </div>
         <StatusBadge status={card.status} />
       </div>

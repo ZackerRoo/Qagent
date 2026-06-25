@@ -1,6 +1,10 @@
 from pydantic import BaseModel, Field
 
-from qagent.market.universe import DEFAULT_DEV_UNIVERSE, DEFAULT_FREE_UNIVERSE
+from qagent.market.universe import (
+    DEFAULT_A_SHARE_STARTER_UNIVERSE,
+    DEFAULT_DEV_UNIVERSE,
+    DEFAULT_FREE_UNIVERSE,
+)
 
 
 class UniverseCreate(BaseModel):
@@ -29,11 +33,20 @@ def builtin_universes() -> list[UniverseRecord]:
         ),
         UniverseRecord(
             universe_id="free_default",
-            name="A-Share Free Default",
-            description="Default A-share free-data universe used by the dashboard.",
+            name="A-Share Full Market",
+            description="Full A-share free-data universe token. The scanner expands it into filtered liquid candidates.",
             market_scope="CN",
-            tags=["free", "default", "cn"],
+            tags=["free", "default", "cn", "full_market"],
             symbols=DEFAULT_FREE_UNIVERSE,
+            source="builtin_starter",
+        ),
+        UniverseRecord(
+            universe_id="cn_liquid_starter",
+            name="A-Share Liquid Starter",
+            description="Fast 30-name A-share pool for development and smoke checks.",
+            market_scope="CN",
+            tags=["cn", "liquid", "starter"],
+            symbols=DEFAULT_A_SHARE_STARTER_UNIVERSE,
             source="builtin_starter",
         ),
         UniverseRecord(

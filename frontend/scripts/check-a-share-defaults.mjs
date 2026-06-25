@@ -26,11 +26,7 @@ const defaultSymbolsMatch = app.match(/const DEFAULT_SYMBOLS\s*=\s*"([^"]+)"/s);
 assert(defaultSymbolsMatch, "App.tsx must define DEFAULT_SYMBOLS");
 
 const defaultSymbols = defaultSymbolsMatch[1].split(",");
-assert(defaultSymbols.length >= 20, "A-share default universe should have at least 20 symbols");
-assert(
-  defaultSymbols.every((symbol) => symbol.startsWith("CN:")),
-  `DEFAULT_SYMBOLS must be CN-only, got ${defaultSymbols.join(",")}`,
-);
+assert(defaultSymbols.join(",") === "CN:ALL", "A-share default universe should use CN:ALL");
 assert(app.includes('useState<DataProviderMode>("free")'), "App must default to free data mode");
 assert(app.includes('useState("free_default")'), "App must default to free_default universe");
 assert(
@@ -40,4 +36,4 @@ assert(
 assert(catalog.includes('"top.eyebrow": "A 股"'), "Chinese eyebrow must present A-share focus");
 assert(catalog.includes('"top.eyebrow": "A-Shares"'), "English eyebrow must present A-share focus");
 
-console.log("A-share defaults ok: free CN-only universe is the primary route");
+console.log("A-share defaults ok: CN:ALL free universe is the primary route");

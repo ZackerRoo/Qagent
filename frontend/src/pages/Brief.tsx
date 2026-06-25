@@ -13,7 +13,7 @@ import {
 import { DataHealth } from "../components/DataHealth";
 import { useI18n } from "../i18n";
 import type { TranslationKey } from "../i18n/catalog";
-import { formatInstrumentLabel } from "../lib/instruments";
+import { formatInstrumentDisplay } from "../lib/instruments";
 import {
   localizeAction,
   localizeCatalyst,
@@ -378,7 +378,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
           items={
             brief?.catalyst_watch.map((item) => ({
               key: `${item.instrument_id}-${item.title}`,
-              title: `${formatInstrumentLabel(item.instrument_id)} · ${localizeCatalyst(
+              title: `${formatInstrumentDisplay(item.instrument_id, item.instrument_label)} · ${localizeCatalyst(
                 item.catalyst_type,
                 language,
               )}`,
@@ -396,7 +396,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
           items={
             brief?.risk_alerts.map((item) => ({
               key: `${item.instrument_id}-${item.status}`,
-              title: `${formatInstrumentLabel(item.instrument_id)} · ${localizeStatus(
+              title: `${formatInstrumentDisplay(item.instrument_id, item.instrument_label)} · ${localizeStatus(
                 item.status,
                 language,
               )}`,
@@ -492,7 +492,7 @@ function BriefOpportunityTable({ items }: { items: DailyBriefOpportunity[] }) {
           {items.map((item) => (
             <tr key={item.instrument_id}>
               <td className="ticker" title={item.instrument_id}>
-                {formatInstrumentLabel(item.instrument_id)}
+                {formatInstrumentDisplay(item.instrument_id, item.instrument_label)}
               </td>
               <td>
                 <span className={`status status-${item.status}`}>
@@ -575,7 +575,7 @@ function BriefEntryWatchTable({ items }: { items: DailyBriefEntryWatch[] }) {
           {items.map((item) => (
             <tr key={`${item.instrument_id}-${item.trigger_price}`}>
               <td className="ticker" title={item.instrument_id}>
-                {formatInstrumentLabel(item.instrument_id)}
+                {formatInstrumentDisplay(item.instrument_id, item.instrument_label)}
               </td>
               <td className="reason-cell">
                 {localizeStrategy(item.primary_strategy_id, language)}

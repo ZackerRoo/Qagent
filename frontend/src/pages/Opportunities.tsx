@@ -2,7 +2,7 @@ import { MarketOpportunitySections } from "../components/MarketOpportunitySectio
 import { OpportunityDetail } from "../components/OpportunityDetail";
 import { useI18n } from "../i18n";
 import type { TranslationKey } from "../i18n/catalog";
-import { formatInstrumentLabel } from "../lib/instruments";
+import { formatInstrumentDisplay } from "../lib/instruments";
 import {
   localizeFactorFlag,
   localizeProfile,
@@ -167,7 +167,7 @@ function UnrecommendedReasonsTable({ items }: { items: ScanItem[] }) {
           {rejected.map((item) => (
             <tr key={item.instrument_id}>
               <td className="ticker" title={item.instrument_id}>
-                {formatInstrumentLabel(item.instrument_id)}
+                {formatInstrumentDisplay(item.instrument_id, item.instrument_label)}
               </td>
               <td>
                 <span className={`status status-${item.status}`}>
@@ -258,7 +258,7 @@ function ScanCoverageTable({ items }: { items: ScanItem[] }) {
           {items.map((item) => (
             <tr key={item.instrument_id}>
               <td className="ticker" title={item.instrument_id}>
-                {formatInstrumentLabel(item.instrument_id)}
+                {formatInstrumentDisplay(item.instrument_id, item.instrument_label)}
               </td>
               <td>
                 <span className={`status status-${item.status}`}>
@@ -312,7 +312,7 @@ function FactorRankingsTable({ items }: { items: FactorRanking[] }) {
             <tr key={item.instrument_id}>
               <td>{item.factor_rank}</td>
               <td className="ticker" title={item.instrument_id}>
-                {formatInstrumentLabel(item.instrument_id)}
+                {formatInstrumentDisplay(item.instrument_id, item.instrument_label)}
               </td>
               <td>{formatScore(item.factor_score)}</td>
               <td>{formatScore(item.momentum_score)}</td>

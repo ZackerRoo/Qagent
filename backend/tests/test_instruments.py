@@ -6,7 +6,7 @@ def test_formats_known_a_share_with_company_name_and_exchange_suffix():
 
 
 def test_formats_unknown_a_share_without_internal_prefix():
-    assert format_instrument_label("CN:688001") == "688001.SH"
+    assert format_instrument_label("CN:688999") == "688999.SH"
 
 
 def test_formats_us_symbol_without_internal_prefix():

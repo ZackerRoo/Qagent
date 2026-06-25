@@ -44,6 +44,9 @@ export function formatInstrumentLabel(instrumentId: string | null | undefined): 
     return "-";
   }
   const market = marketPrefix(instrumentId);
+  if (market === "CN" && symbol === "ALL") {
+    return "全A股候选池";
+  }
   if (market === "CN") {
     const exchangeSymbol = `${symbol}.${cnExchangeSuffix(symbol)}`;
     const name = CN_INSTRUMENT_NAMES[symbol];
@@ -54,6 +57,13 @@ export function formatInstrumentLabel(instrumentId: string | null | undefined): 
     return name ? `${name} ${symbol}` : symbol;
   }
   return symbol;
+}
+
+export function formatInstrumentDisplay(
+  instrumentId: string | null | undefined,
+  instrumentLabel?: string | null,
+): string {
+  return instrumentLabel?.trim() || formatInstrumentLabel(instrumentId);
 }
 
 export function marketSymbol(instrumentId: string | null | undefined): string {

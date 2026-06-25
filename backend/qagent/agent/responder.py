@@ -142,7 +142,7 @@ def _answer_recommendations(question: str, cards: list[object]) -> str:
 
 
 def _format_cn_recommendation(card: dict[str, object]) -> str:
-    symbol = _instrument_label(card.get("instrument_id"))
+    symbol = str(card.get("instrument_label") or _instrument_label(card.get("instrument_id")))
     action = localize_action(card.get("action", "watch"))
     conviction = _format_float(card.get("conviction_score"))
     trigger = card.get("trigger_price") or "-"
@@ -167,7 +167,7 @@ def _format_cn_recommendation(card: dict[str, object]) -> str:
 
 
 def _format_en_recommendation(card: dict[str, object]) -> str:
-    symbol = _instrument_label(card.get("instrument_id"))
+    symbol = str(card.get("instrument_label") or _instrument_label(card.get("instrument_id")))
     action = card.get("action", "watch")
     conviction = _format_float(card.get("conviction_score"))
     trigger = card.get("trigger_price") or "-"

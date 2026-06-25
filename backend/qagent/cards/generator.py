@@ -8,6 +8,7 @@ from qagent.cards.ranking import rank_opportunity
 from qagent.cards.scoring import aggregate_score
 from qagent.domain.enums import Market, OpportunityStatus
 from qagent.domain.models import OpportunityCard, Signal, SignalSnapshot
+from qagent.market.instruments import format_instrument_label
 from qagent.recommendations.decision import build_research_decision
 from qagent.strategies.evaluator import StrategyEvaluator
 from qagent.strategies.models import StrategyEvaluation
@@ -55,6 +56,7 @@ class OpportunityCardGenerator:
         card = OpportunityCard(
             card_id=f"card_{uuid4().hex[:12]}",
             instrument_id=instrument_id,
+            instrument_label=format_instrument_label(instrument_id),
             market=market,
             status=OpportunityStatus.SETUP_READY if strategy_score >= 0.5 else OpportunityStatus.WATCH,
             thesis=_thesis(primary),

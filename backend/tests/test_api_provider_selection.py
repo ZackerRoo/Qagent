@@ -87,3 +87,50 @@ def test_agent_endpoint_uses_requested_provider_and_symbols(tmp_path, monkeypatc
     assert "止损" in answer
     assert cn_provider.calls == [["CN:000001"]]
     assert us_provider.calls == []
+
+
+def test_opportunities_endpoint_expands_cn_all_with_universe_metadata(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'cn-all.db'}")
+    cn_provider = RecordingProvider("free_cn", "CN:000001")
+
+    monkeypatch.setattr(
+        "qagent.providers.factory.FreeCnMarketDataProvider",
+        lambda: cn_provider,
+    )
+    monkeypatch.setattr(
+        "qagent.providers.factory.FreeUsMarketDataProvider",
+        lambda: RecordingProvider("free_us", "US:TEST"),
+    )
+
+    def fake_resolve_symbol_tokens(symbols, **kwargs):
+        assert symbols == ["CN:ALL"]
+        return type(
+            "Resolved",
+            (),
+            {
+                "symbols": ["CN:000001", "CN:600000"],
+                "data_health": {
+                    "universe_total": "2",
+                    "universe_eligible": "2",
+                    "universe_selected": "2",
+                    "universe_source": "akshare_spot_em",
+                },
+                "is_dynamic": True,
+            },
+        )()
+
+    monkeypatch.setattr("qagent.api.routes.resolve_symbol_tokens", fake_resolve_symbol_tokens)
+
+    client = TestClient(create_app())
+    response = client.get("/api/opportunities?provider=free&symbols=CN:ALL")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data_health"]["universe_total"] == "2"
+    assert body["data_health"]["universe_selected"] == "2"
+    assert body["data_health"]["strategy_data_skipped"] == "true"
+    assert body["data_health"]["scanned"] == "2"
+    assert cn_provider.calls == [["CN:000001"], ["CN:600000"]]

@@ -116,6 +116,7 @@ class OpportunityDecision(BaseModel):
 class OpportunityCard(BaseModel):
     card_id: str
     instrument_id: str
+    instrument_label: str | None = None
     market: Market
     status: OpportunityStatus
     thesis: str

@@ -6,6 +6,7 @@ from qagent.cards.generator import OpportunityCardGenerator
 from qagent.domain.models import OpportunityCard
 from qagent.factors.engine import build_factor_rankings
 from qagent.factors.models import FactorRanking
+from qagent.market.instruments import format_instrument_label
 from qagent.providers.base import MarketDataProvider
 from qagent.recommendations.decision import build_research_decision
 from qagent.signals.engine import SignalEngine
@@ -26,6 +27,7 @@ class ScanBlocker(BaseModel):
 
 class ScanItem(BaseModel):
     instrument_id: str
+    instrument_label: str | None = None
     status: str
     reason: str
     bars: int
@@ -136,6 +138,8 @@ def run_daily_scan(
         items.append(_scan_item(instrument_id, bars, signals, strategy_evaluations, card))
 
     factor_rankings = _factor_rankings_from_bars(bars_by_instrument)
+    for ranking in factor_rankings:
+        ranking.instrument_label = format_instrument_label(ranking.instrument_id)
     factor_by_id = {ranking.instrument_id: ranking for ranking in factor_rankings}
     for card in cards:
         _apply_factor_to_card(card, factor_by_id.get(card.instrument_id))
@@ -224,6 +228,7 @@ def _scan_item(
     if bars.empty:
         return ScanItem(
             instrument_id=instrument_id,
+            instrument_label=format_instrument_label(instrument_id),
             status="no_data",
             reason="No daily bars returned by provider.",
             bars=0,
@@ -246,6 +251,7 @@ def _scan_item(
     if card:
         return ScanItem(
             instrument_id=instrument_id,
+            instrument_label=format_instrument_label(instrument_id),
             status=card.status.value,
             reason="Opportunity card generated.",
             bars=len(bars),
@@ -258,6 +264,7 @@ def _scan_item(
 
     return ScanItem(
         instrument_id=instrument_id,
+        instrument_label=format_instrument_label(instrument_id),
         status="no_setup",
         reason="Signal stack did not meet opportunity-card threshold.",
         bars=len(bars),

@@ -16,10 +16,11 @@ def test_builtin_universes_include_fixture_and_free_starters():
     assert by_id["fixture_dev"].symbols == ["US:TEST", "CN:000001"]
     assert "free_default" in by_id
     assert by_id["free_default"].market_scope == "CN"
-    assert len(by_id["free_default"].symbols) >= 20
-    assert all(symbol.startswith("CN:") for symbol in by_id["free_default"].symbols)
-    assert "CN:600519" in by_id["free_default"].symbols
+    assert by_id["free_default"].symbols == ["CN:ALL"]
     assert "US:NVDA" not in by_id["free_default"].symbols
+    assert len(by_id["cn_liquid_starter"].symbols) >= 20
+    assert all(symbol.startswith("CN:") for symbol in by_id["cn_liquid_starter"].symbols)
+    assert "CN:600519" in by_id["cn_liquid_starter"].symbols
     assert all(universe.source == "builtin_starter" for universe in universes)
 
 
