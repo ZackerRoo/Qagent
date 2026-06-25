@@ -467,6 +467,14 @@ export type PositionRisk = {
   stop_distance_pct: number | null;
   target_1_distance_pct: number | null;
   status: string;
+  action: string;
+  action_label: string;
+  severity: string;
+  should_exit: boolean;
+  holding_days: number | null;
+  management_note: string;
+  next_check: string;
+  flags: string[];
 };
 
 export type PortfolioResponse = {

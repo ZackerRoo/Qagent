@@ -10,8 +10,14 @@ import {
 import { DataHealth } from "../components/DataHealth";
 import { useI18n } from "../i18n";
 import { formatInstrumentLabel } from "../lib/instruments";
-import { localizeStatus, localizeStrategy } from "../lib/localize";
-import type { DataProviderMode, PaperTradesResponse, PortfolioResponse, Position } from "../types";
+import { localizeAction, localizeStatus, localizeStrategy } from "../lib/localize";
+import type {
+  DataProviderMode,
+  PaperTradesResponse,
+  PortfolioResponse,
+  Position,
+  PositionRisk,
+} from "../types";
 
 const emptyPosition: Position = {
   instrument_id: "CN:000001",
@@ -119,6 +125,8 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
                 <th>{t("brief.target")}</th>
                 <th>{t("portfolio.targetGap")}</th>
                 <th>{t("common.status")}</th>
+                <th>{t("portfolio.action")}</th>
+                <th>{t("portfolio.management")}</th>
                 <th>{t("common.strategy")}</th>
               </tr>
             </thead>
@@ -149,6 +157,17 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
                         : "-"}
                     </td>
                     <td>{localizeStatus(risk?.status ?? "no_price", language)}</td>
+                    <td>
+                      <span
+                        className={`status status-${risk?.severity ?? "pending"}`}
+                        title={risk?.action ?? "pending"}
+                      >
+                        {risk ? localizeAction(risk.action, language) : "-"}
+                      </span>
+                    </td>
+                    <td className="reason-cell" title={risk?.next_check ?? ""}>
+                      {risk ? formatManagement(risk, language, t("portfolio.holdingDays")) : "-"}
+                    </td>
                     <td>{localizeStrategy(position.strategy_tag, language)}</td>
                   </tr>
                 );
@@ -242,4 +261,22 @@ function formatPct(value: number | null): string {
     return "-";
   }
   return `${value.toFixed(2)}%`;
+}
+
+function formatManagement(risk: PositionRisk, language: string, holdingDaysLabel: string): string {
+  const holdingDays = risk.holding_days != null ? ` · ${holdingDaysLabel} ${risk.holding_days}` : "";
+  if (language === "zh") {
+    return `${risk.management_note}${holdingDays}`;
+  }
+  const stopGap = formatPct(risk.stop_distance_pct);
+  const targetGap = formatPct(risk.target_1_distance_pct);
+  const messages: Record<string, string> = {
+    hold: `Inside plan. Track stop gap ${stopGap} and target gap ${targetGap}.`,
+    stop_loss: "Stop level is breached. Prioritize the saved risk plan and avoid adding exposure.",
+    take_profit: "Target 1 is reached. Consider partial profit or raising the stop.",
+    trim_or_raise_stop: "Near target. Prepare to trim or raise the stop to protect profit.",
+    reduce_risk: "Near stop. Do not add exposure; prepare invalidation handling.",
+    time_exit: "Trade has stalled. Recheck the thesis and opportunity cost.",
+  };
+  return `${messages[risk.action] ?? risk.management_note}${holdingDays}`;
 }

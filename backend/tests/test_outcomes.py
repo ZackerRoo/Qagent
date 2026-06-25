@@ -45,6 +45,71 @@ def test_analyze_position_risk_inside_plan():
     assert risk.stop_distance_pct == 4.0
     assert risk.target_1_distance_pct == 8.0
     assert risk.status == "inside_plan"
+    assert risk.action == "hold"
+    assert "继续持有" in risk.management_note
+
+
+def test_analyze_position_risk_triggers_stop_loss_action():
+    position = PositionInput(
+        instrument_id="CN:000001",
+        shares="100",
+        entry_price="10.00",
+        entry_date="2026-03-01",
+        strategy_tag="breakout",
+        initial_stop="9.50",
+        target_1="11.00",
+    )
+
+    risk = analyze_position_risk(position, current_price="9.45", current_date=date(2026, 3, 10))
+
+    assert risk.status == "stop_breached"
+    assert risk.action == "stop_loss"
+    assert risk.severity == "block"
+    assert risk.should_exit is True
+    assert "止损" in risk.management_note
+
+
+def test_analyze_position_risk_flags_near_target_trim_action():
+    position = PositionInput(
+        instrument_id="CN:000001",
+        shares="100",
+        entry_price="10.00",
+        entry_date="2026-03-01",
+        strategy_tag="breakout",
+        initial_stop="9.50",
+        target_1="11.00",
+    )
+
+    risk = analyze_position_risk(position, current_price="10.9", current_date=date(2026, 3, 8))
+
+    assert risk.status == "near_target"
+    assert risk.action == "trim_or_raise_stop"
+    assert risk.severity == "warning"
+    assert "接近目标" in risk.management_note
+
+
+def test_analyze_position_risk_flags_time_exit_when_trade_stalls():
+    position = PositionInput(
+        instrument_id="CN:000001",
+        shares="100",
+        entry_price="10.00",
+        entry_date="2026-03-01",
+        strategy_tag="breakout",
+        initial_stop="9.50",
+        target_1="11.00",
+    )
+
+    risk = analyze_position_risk(
+        position,
+        current_price="10.05",
+        current_date=date(2026, 4, 10),
+        max_holding_days=20,
+    )
+
+    assert risk.status == "time_exit_watch"
+    assert risk.action == "time_exit"
+    assert risk.holding_days == 40
+    assert "时间退出" in risk.management_note
 
 
 def _snapshot(signal_date: date, target_1: Decimal | None = Decimal("60.20")):

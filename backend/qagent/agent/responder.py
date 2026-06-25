@@ -25,6 +25,22 @@ def answer_question(question: str, context: dict[str, object]) -> str:
         if isinstance(cards, list):
             return _answer_recommendations(question, cards)
 
+    if _is_position_management_question(question, lowered):
+        risk = context.get("position_risk")
+        if isinstance(risk, dict):
+            return _answer_position_management(question, context, risk)
+        if _looks_chinese(question):
+            instrument_id = _instrument_label(context.get("instrument_id", "这个标的"))
+            return (
+                f"我还没有找到 {instrument_id} 的已保存持仓，不能判断现在该不该卖。"
+                "请先保存买入价、买入日期、止损位和目标位，再用持仓管理检查。"
+            )
+        instrument_id = _instrument_label(context.get("instrument_id", "this instrument"))
+        return (
+            f"I do not see a saved position for {instrument_id}, so I cannot judge the sell/hold plan. "
+            "Save entry price, entry date, stop, and target first."
+        )
+
     if any(term in lowered for term in ["buy", "entry", "scenario", "risk"]) or any(
         term in question for term in ["买", "买入", "风险", "情况"]
     ):
@@ -118,6 +134,93 @@ def _is_recommendation_question(question: str, lowered: str) -> bool:
     return any(term in lowered for term in english_terms) or any(term in question for term in chinese_terms)
 
 
+def _is_position_management_question(question: str, lowered: str) -> bool:
+    english_core_terms = [
+        "should i sell",
+        "sell",
+        "hold",
+        "position",
+        "trim",
+        "take profit",
+        "stop loss",
+        "exit",
+    ]
+    chinese_core_terms = [
+        "要不要卖",
+        "该不该卖",
+        "卖不卖",
+        "卖",
+        "持有",
+        "拿着",
+        "减仓",
+        "加仓",
+        "止盈",
+        "止损",
+        "退出",
+        "持仓",
+        "仓位",
+    ]
+    chinese_ownership_terms = [
+        "买了",
+        "已经买",
+        "已买",
+    ]
+    chinese_management_terms = [
+        "怎么办",
+        "怎么处理",
+        "要不要",
+        "该不该",
+        "卖",
+        "减仓",
+        "加仓",
+        "止盈",
+        "止损",
+    ]
+    return (
+        any(term in lowered for term in english_core_terms)
+        or any(term in question for term in chinese_core_terms)
+        or (
+            any(term in question for term in chinese_ownership_terms)
+            and any(term in question for term in chinese_management_terms)
+        )
+    )
+
+
+def _answer_position_management(
+    question: str,
+    context: dict[str, object],
+    risk: dict[str, object],
+) -> str:
+    instrument_id = str(context.get("instrument_id") or risk.get("instrument_id") or "")
+    label = str(context.get("instrument_label") or _instrument_label(instrument_id))
+    if instrument_id and instrument_id not in label:
+        label = f"{label}（{instrument_id}）"
+    action_label = str(risk.get("action_label") or localize_status(risk.get("action")))
+    current_price = risk.get("current_price") or "-"
+    pnl = _format_float(risk.get("unrealized_return_pct"))
+    stop_gap = _format_pct_text(risk.get("stop_distance_pct"))
+    target_gap = _format_pct_text(risk.get("target_1_distance_pct"))
+    management_note = str(risk.get("management_note") or "")
+    next_check = str(risk.get("next_check") or "")
+
+    if _looks_chinese(question):
+        return (
+            f"{label} 当前持仓动作是：{action_label}。"
+            f"当前价 {current_price}，浮动盈亏 {pnl}%。"
+            f"止损距离 {stop_gap}，目标距离 {target_gap}。"
+            f"判断：{management_note}"
+            f"下一步：{next_check}"
+            "这是持仓管理情景，不是个性化投资建议。"
+        )
+
+    action = risk.get("action") or "hold"
+    return (
+        f"{label} position action: {action}. Current price {current_price}, unrealized P/L {pnl}%. "
+        f"Stop gap {stop_gap}; target gap {target_gap}. {management_note} Next check: {next_check}. "
+        "This is position-management context, not personalized investment advice."
+    )
+
+
 def _answer_recommendations(question: str, cards: list[object]) -> str:
     actionable = [card for card in cards if isinstance(card, dict) and card.get("action") != "avoid"]
     ranked = actionable[:3] or [card for card in cards if isinstance(card, dict)][:3]
@@ -197,6 +300,15 @@ def _format_float(value: object) -> str:
         return "-"
     try:
         return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _format_pct_text(value: object) -> str:
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value):.2f}%"
     except (TypeError, ValueError):
         return str(value)
 

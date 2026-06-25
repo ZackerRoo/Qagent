@@ -1176,11 +1176,17 @@ def agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
         selected = result.cards[0]
     if selected is None:
         return AgentQueryResponse(answer="No opportunity context is available yet.")
+    position_risks = _position_risks(mode)
+    selected_position_risk = next(
+        (risk for risk in position_risks if risk.instrument_id == selected.instrument_id),
+        None,
+    )
 
     answer = answer_question(
         request.question,
         context={
             "instrument_id": selected.instrument_id,
+            "instrument_label": selected.instrument_label or format_instrument_label(selected.instrument_id),
             "status": selected.status.value,
             "score": selected.score,
             "initial_stop": str(selected.exit_plan.initial_stop),
@@ -1194,6 +1200,10 @@ def agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
             "strategy_score": selected.strategy_score,
             "strategy_summary": _strategy_summary(selected),
             "cards": [_agent_card_summary(card) for card in result.cards],
+            "position_risk": (
+                selected_position_risk.model_dump(mode="json") if selected_position_risk else None
+            ),
+            "position_risks": [risk.model_dump(mode="json") for risk in position_risks],
             "provider": mode,
             "data_health": result.data_health,
         },

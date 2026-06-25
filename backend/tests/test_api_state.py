@@ -76,6 +76,41 @@ def test_portfolio_api_returns_position_risk(tmp_path, monkeypatch):
     assert body["risk"][0]["instrument_id"] == "US:TEST"
     assert body["risk"][0]["current_price"] == "82.00"
     assert body["risk"][0]["status"] == "inside_plan"
+    assert body["risk"][0]["action"] == "hold"
+    assert body["risk"][0]["management_note"]
+
+
+def test_agent_answers_position_management_question(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'api-position-agent.db'}")
+    client = TestClient(create_app())
+    client.post(
+        "/api/positions",
+        json={
+            "instrument_id": "US:TEST",
+            "shares": "10",
+            "entry_price": "82.00",
+            "entry_date": "2026-03-31",
+            "strategy_tag": "breakout",
+            "initial_stop": "78.72",
+            "target_1": "88.56",
+            "thesis": "Fixture breakout",
+        },
+    )
+
+    response = client.post(
+        "/api/agent/query",
+        json={
+            "question": "我买了这个现在要不要卖？",
+            "provider": "fixture",
+            "symbols": "US:TEST",
+            "instrument_id": "US:TEST",
+        },
+    )
+
+    assert response.status_code == 200
+    answer = response.json()["answer"]
+    assert "US:TEST" in answer or "Test Growth" in answer
+    assert "持有" in answer or "止损" in answer or "目标" in answer
 
 
 def test_opportunities_api_records_scan_history_and_outcomes(tmp_path, monkeypatch):

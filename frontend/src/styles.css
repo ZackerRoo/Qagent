@@ -535,6 +535,7 @@ tbody tr.selected {
 }
 
 .status-danger,
+.status-block,
 .status-blocked,
 .status-weak {
   background: #ffe7e7;

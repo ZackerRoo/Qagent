@@ -37,6 +37,26 @@ def test_responder_explains_buy_scenario_from_structured_context():
     assert "not advice" in answer.lower()
 
 
+def test_responder_keeps_hypothetical_buy_question_on_entry_scenario():
+    answer = answer_question(
+        "如果买了这个会有什么风险？",
+        context={
+            "instrument_id": "CN:000001",
+            "status": "setup_ready",
+            "trigger_price": "12.00",
+            "initial_stop": "11.40",
+            "target_1": "13.20",
+            "downside_pct": -5.0,
+            "target_1_pct": 10.0,
+            "no_chase_above": "12.40",
+        },
+    )
+
+    assert "触发价 12.00" in answer
+    assert "止损位是 11.40" in answer
+    assert "我还没有找到" not in answer
+
+
 def test_responder_explains_why_from_signal_summary():
     answer = answer_question(
         "Why is this on the list?",
