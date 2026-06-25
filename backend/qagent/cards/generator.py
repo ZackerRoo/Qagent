@@ -10,6 +10,7 @@ from qagent.domain.enums import Market, OpportunityStatus
 from qagent.domain.models import OpportunityCard, Signal, SignalSnapshot
 from qagent.market.instruments import format_instrument_label
 from qagent.recommendations.decision import build_research_decision
+from qagent.recommendations.enrichment import enrich_opportunity_card
 from qagent.strategies.evaluator import StrategyEvaluator
 from qagent.strategies.models import StrategyEvaluation
 from qagent.strategies.registry import default_strategy_registry
@@ -74,6 +75,7 @@ class OpportunityCardGenerator:
             data_caveats=_data_caveats(bars),
         )
         card.decision = build_research_decision(card)
+        enrich_opportunity_card(card)
         return card
 
 

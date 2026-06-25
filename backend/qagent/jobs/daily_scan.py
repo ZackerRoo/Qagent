@@ -9,6 +9,7 @@ from qagent.factors.models import FactorRanking
 from qagent.market.instruments import format_instrument_label
 from qagent.providers.base import MarketDataProvider
 from qagent.recommendations.decision import build_research_decision
+from qagent.recommendations.enrichment import enrich_opportunity_card
 from qagent.signals.engine import SignalEngine
 from qagent.strategy_data.models import AnalystInsight, EarningsEvent, FilingEvent, FundamentalSnapshot
 from qagent.strategy_data.providers import StrategyDataProvider, build_strategy_data_provider
@@ -144,6 +145,7 @@ def run_daily_scan(
     for card in cards:
         _apply_factor_to_card(card, factor_by_id.get(card.instrument_id))
         card.decision = build_research_decision(card)
+        enrich_opportunity_card(card)
     cards.sort(key=_card_priority_score, reverse=True)
     for item in items:
         _apply_factor_to_item(item, factor_by_id.get(item.instrument_id))

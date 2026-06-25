@@ -575,6 +575,97 @@ tbody tr.selected {
   line-height: 1.55;
 }
 
+.recommendation-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #bfd7ea;
+  border-radius: 8px;
+  margin-top: 12px;
+  padding: 12px;
+  background: #f7fbff;
+}
+
+.recommendation-card header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.recommendation-card header span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.recommendation-card header strong {
+  border-radius: 6px;
+  background: #0f4c81;
+  color: #ffffff;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.recommendation-card h3 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.recommendation-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.recommendation-grid p,
+.recommendation-card .context-note {
+  margin: 0;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.recommendation-grid p {
+  border: 1px solid #dbeafe;
+  border-radius: 6px;
+  padding: 8px;
+  background: #ffffff;
+}
+
+.context-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.context-panel {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px;
+  background: #ffffff;
+}
+
+.context-panel h3 {
+  margin-bottom: 8px;
+  font-size: 14px;
+}
+
+.context-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.context-metrics span {
+  border: 1px solid #d8dee8;
+  border-radius: 6px;
+  padding: 4px 7px;
+  color: #475569;
+  font-size: 12px;
+}
+
 .detail-section {
   border-top: 1px solid #e2e8f0;
   margin-top: 12px;
@@ -1114,6 +1205,8 @@ tbody tr.selected {
   .split-grid,
   .brief-grid,
   .metric-grid,
+  .recommendation-grid,
+  .context-grid,
   .scenario-grid,
   .form-row,
   .portfolio-form,

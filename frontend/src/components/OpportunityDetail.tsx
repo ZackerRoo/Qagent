@@ -84,6 +84,67 @@ export function OpportunityDetail({
 
       <p className="thesis">{localizeReason(card.thesis, language)}</p>
 
+      {card.recommendation_summary && (
+        <div className="recommendation-card">
+          <header>
+            <span>{t("detail.recommendation")}</span>
+            <strong>{card.recommendation_summary.stance}</strong>
+          </header>
+          <h3>{card.recommendation_summary.headline}</h3>
+          <div className="recommendation-grid">
+            <p>{card.recommendation_summary.buy_timing}</p>
+            <p>{card.recommendation_summary.sell_timing}</p>
+            <p>{card.recommendation_summary.position_note}</p>
+            <p>{card.recommendation_summary.risk_note}</p>
+          </div>
+          <p className="context-note">{card.recommendation_summary.context_note}</p>
+        </div>
+      )}
+
+      <div className="context-grid">
+        {card.market_context && (
+          <div className="context-panel">
+            <h3>{t("detail.marketContext")}</h3>
+            <div className="context-metrics">
+              <span>{card.market_context.board}</span>
+              <span>{card.market_context.industry}</span>
+              {card.market_context.index_memberships.map((item) => (
+                <span key={item}>{item}</span>
+              ))}
+            </div>
+            <div className="rank-reasons">
+              {card.market_context.themes.map((theme) => (
+                <span key={theme}>{theme}</span>
+              ))}
+            </div>
+          </div>
+        )}
+        {card.trading_constraints && (
+          <div className="context-panel">
+            <h3>{t("detail.tradingConstraints")}</h3>
+            <div className="context-metrics">
+              <span>{card.trading_constraints.board}</span>
+              {card.trading_constraints.price_limit_pct !== null && (
+                <span>{t("detail.priceLimit")} {card.trading_constraints.price_limit_pct}%</span>
+              )}
+              <span>
+                {card.trading_constraints.permission_required
+                  ? t("detail.permissionRequired")
+                  : t("detail.permissionNormal")}
+              </span>
+            </div>
+            <div className="risk-veto-list compact">
+              {card.trading_constraints.constraints.map((item) => (
+                <div key={item.code} className={`risk-veto risk-veto-${item.severity}`}>
+                  <strong>{item.title}</strong>
+                  <p>{item.message}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
       <div className="detail-section">
         <h3>{t("detail.chart")}</h3>
         {chartError ? <p className="empty error">{chartError}</p> : <OpportunityChart data={chart} />}

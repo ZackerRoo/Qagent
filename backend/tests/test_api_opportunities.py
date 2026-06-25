@@ -36,12 +36,27 @@ def test_opportunities_endpoint_returns_cards():
     assert body["cards"][0]["decision"]["verification_checks"]
     assert "risk_status" in body["cards"][0]["decision"]
     assert "risk_vetoes" in body["cards"][0]["decision"]
+    assert body["cards"][0]["recommendation_summary"]["headline"]
     assert body["items"][0]["instrument_id"]
     assert body["items"][0]["factor_score"] is not None
     assert body["items"][0]["factor_rank"] is not None
     assert "blockers" in body["items"][0]
     assert body["items"][0]["strategies_passed"] >= 1
     assert body["strategy_health"]
+
+
+def test_opportunities_endpoint_returns_cn_execution_context():
+    client = TestClient(create_app())
+    response = client.get("/api/opportunities?provider=fixture&symbols=CN:000001")
+
+    assert response.status_code == 200
+    card = response.json()["cards"][0]
+
+    assert card["trading_constraints"]["board"] == "深市主板"
+    assert card["trading_constraints"]["t_plus_one"] is True
+    assert card["market_context"]["industry"] == "银行"
+    assert "买点" in card["recommendation_summary"]["buy_timing"]
+    assert "卖出" in card["recommendation_summary"]["sell_timing"]
 
 
 def test_opportunities_endpoint_returns_pead_strategy_when_fixture_has_earnings():

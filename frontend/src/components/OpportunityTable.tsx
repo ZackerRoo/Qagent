@@ -20,6 +20,8 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
           <tr>
             <th>{t("common.ticker")}</th>
             <th>{t("table.market")}</th>
+            <th>{t("detail.marketContext")}</th>
+            <th>{t("detail.tradingConstraints")}</th>
             <th>{t("common.status")}</th>
             <th>{t("detail.action")}</th>
             <th>{t("detail.riskVeto")}</th>
@@ -48,6 +50,8 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
                 {formatInstrumentDisplay(card.instrument_id, card.instrument_label)}
               </td>
               <td>{card.market}</td>
+              <td>{formatContext(card)}</td>
+              <td>{formatConstraint(card)}</td>
               <td>
                 <StatusBadge status={card.status} />
               </td>
@@ -83,4 +87,23 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
 
 function formatPct(value: number | undefined) {
   return value === undefined ? "-" : `${Math.round(value * 100)}`;
+}
+
+function formatContext(card: OpportunityCard) {
+  if (!card.market_context) {
+    return "-";
+  }
+  return `${card.market_context.industry} · ${card.market_context.themes[0] ?? card.market_context.board}`;
+}
+
+function formatConstraint(card: OpportunityCard) {
+  if (!card.trading_constraints) {
+    return "-";
+  }
+  const permission = card.trading_constraints.permission_required ? "需权限" : "普通";
+  const limit =
+    card.trading_constraints.price_limit_pct === null
+      ? ""
+      : ` · ${card.trading_constraints.price_limit_pct}%`;
+  return `${card.trading_constraints.board} · ${permission}${limit}`;
 }

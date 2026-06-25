@@ -93,6 +93,41 @@ class RiskVeto(BaseModel):
     message: str
 
 
+class TradingConstraint(BaseModel):
+    code: str
+    severity: str
+    title: str
+    message: str
+
+
+class TradingConstraintProfile(BaseModel):
+    board: str
+    price_limit_pct: int | None = None
+    permission_required: bool = False
+    t_plus_one: bool = True
+    min_lot: int | None = 100
+    constraints: list[TradingConstraint] = Field(default_factory=list)
+
+
+class MarketContext(BaseModel):
+    board: str
+    industry: str
+    themes: list[str] = Field(default_factory=list)
+    index_memberships: list[str] = Field(default_factory=list)
+    summary: str
+
+
+class RecommendationSummary(BaseModel):
+    headline: str
+    stance: str
+    buy_timing: str
+    sell_timing: str
+    position_note: str
+    risk_note: str
+    context_note: str
+    checklist: list[str] = Field(default_factory=list)
+
+
 class OpportunityDecision(BaseModel):
     action: str
     action_label: str
@@ -138,3 +173,6 @@ class OpportunityCard(BaseModel):
     factor_exposures: list[FactorExposure] = Field(default_factory=list)
     data_caveats: list[str] = Field(default_factory=list)
     decision: OpportunityDecision | None = None
+    trading_constraints: TradingConstraintProfile | None = None
+    market_context: MarketContext | None = None
+    recommendation_summary: RecommendationSummary | None = None

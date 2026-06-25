@@ -106,6 +106,44 @@ export type OpportunityCard = {
   factor_exposures: FactorExposure[];
   data_caveats: string[];
   decision: OpportunityDecision | null;
+  trading_constraints: TradingConstraintProfile | null;
+  market_context: MarketContext | null;
+  recommendation_summary: RecommendationSummary | null;
+};
+
+export type TradingConstraint = {
+  code: string;
+  severity: string;
+  title: string;
+  message: string;
+};
+
+export type TradingConstraintProfile = {
+  board: string;
+  price_limit_pct: number | null;
+  permission_required: boolean;
+  t_plus_one: boolean;
+  min_lot: number | null;
+  constraints: TradingConstraint[];
+};
+
+export type MarketContext = {
+  board: string;
+  industry: string;
+  themes: string[];
+  index_memberships: string[];
+  summary: string;
+};
+
+export type RecommendationSummary = {
+  headline: string;
+  stance: string;
+  buy_timing: string;
+  sell_timing: string;
+  position_note: string;
+  risk_note: string;
+  context_note: string;
+  checklist: string[];
 };
 
 export type RiskVeto = {
