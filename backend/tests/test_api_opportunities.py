@@ -13,7 +13,9 @@ def test_opportunities_endpoint_returns_cards():
     assert "data_health" in body
     assert "strategy_health" in body
     assert "factor_rankings" in body
+    assert "sector_strength" in body
     assert body["factor_rankings"]
+    assert body["sector_strength"]
     assert len(body["cards"]) >= 1
     assert body["cards"][0]["scenario"]["downside_pct"] < 0
     assert body["cards"][0]["signals"]
@@ -37,9 +39,11 @@ def test_opportunities_endpoint_returns_cards():
     assert "risk_status" in body["cards"][0]["decision"]
     assert "risk_vetoes" in body["cards"][0]["decision"]
     assert body["cards"][0]["recommendation_summary"]["headline"]
+    assert body["cards"][0]["strategy_calibration"]["strategy_id"]
     assert body["items"][0]["instrument_id"]
     assert body["items"][0]["factor_score"] is not None
     assert body["items"][0]["factor_rank"] is not None
+    assert "trading_status" in body["items"][0]
     assert "blockers" in body["items"][0]
     assert body["items"][0]["strategies_passed"] >= 1
     assert body["strategy_health"]
@@ -55,6 +59,10 @@ def test_opportunities_endpoint_returns_cn_execution_context():
     assert card["trading_constraints"]["board"] == "深市主板"
     assert card["trading_constraints"]["t_plus_one"] is True
     assert card["market_context"]["industry"] == "银行"
+    assert card["trading_status"]["status"] == "limit_up"
+    assert card["trading_status"]["can_buy"] is False
+    assert "不建议追买" in card["trading_status"]["notes"][0]
+    assert card["strategy_calibration"]["readiness"]
     assert "买点" in card["recommendation_summary"]["buy_timing"]
     assert "卖出" in card["recommendation_summary"]["sell_timing"]
 

@@ -23,6 +23,7 @@ import type {
   OpportunityCard,
   ResearchProfile,
   ScanItem,
+  SectorStrength,
   StrategyHealth,
 } from "../types";
 
@@ -31,6 +32,7 @@ type Props = {
   items: ScanItem[];
   strategyHealth: StrategyHealth[];
   factorRankings: FactorRanking[];
+  sectorStrength: SectorStrength[];
   selectedCard?: OpportunityCard;
   dataMode: DataProviderMode;
   profile: ResearchProfile;
@@ -42,6 +44,7 @@ export function Opportunities({
   items,
   strategyHealth,
   factorRankings,
+  sectorStrength,
   selectedCard,
   dataMode,
   profile,
@@ -61,6 +64,7 @@ export function Opportunities({
           </div>
           <ProfileNote card={selectedCard} profile={profile} />
           <OpportunitySummary cards={cards} items={items} />
+          <SectorStrengthPanel items={sectorStrength} />
           <MarketOpportunitySections
             cards={cards}
             selectedCardId={selectedCard?.card_id}
@@ -97,6 +101,49 @@ export function Opportunities({
         </section>
       </div>
       <OpportunityDetail card={selectedCard} dataMode={dataMode} />
+    </div>
+  );
+}
+
+function SectorStrengthPanel({ items }: { items: SectorStrength[] }) {
+  const { t } = useI18n();
+  const visible = items.slice(0, 6);
+
+  if (!visible.length) {
+    return <p className="empty">{t("opportunities.noSectorStrength")}</p>;
+  }
+
+  return (
+    <div className="sector-strength">
+      <div className="sector-strength-heading">
+        <h3>{t("opportunities.sectorStrength")}</h3>
+        <span>{visible.length}</span>
+      </div>
+      <div className="sector-strength-grid">
+        {visible.map((item) => (
+          <div key={item.industry} className="sector-card">
+            <header>
+              <strong>{item.industry}</strong>
+              <span>{formatScore(item.score)}</span>
+            </header>
+            <div className="sector-metrics">
+              <span>{formatSignedPct(item.avg_change_pct)}</span>
+              <span>{item.advance_ratio.toFixed(0)}%</span>
+            </div>
+            <p>{item.summary}</p>
+            <small>
+              {t("opportunities.leaders")}:{" "}
+              {item.leaders
+                .map((leader) =>
+                  `${formatInstrumentDisplay(leader.instrument_id, leader.instrument_label)} ${formatSignedPct(
+                    leader.change_pct,
+                  )}`,
+                )
+                .join(" / ")}
+            </small>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -248,6 +295,7 @@ function ScanCoverageTable({ items }: { items: ScanItem[] }) {
             <th>{t("opportunities.watch")}</th>
             <th>{t("opportunities.missing")}</th>
             <th>{t("opportunities.close")}</th>
+            <th>{t("detail.tradingStatus")}</th>
             <th>{t("factors.score")}</th>
             <th>{t("factors.rank")}</th>
             <th>{t("common.provider")}</th>
@@ -271,6 +319,7 @@ function ScanCoverageTable({ items }: { items: ScanItem[] }) {
               <td>{item.strategies_watch}</td>
               <td>{item.strategies_missing_data}</td>
               <td>{item.latest_close ?? "-"}</td>
+              <td>{item.trading_status?.label ?? "-"}</td>
               <td>{formatScore(item.factor_score)}</td>
               <td>{item.factor_rank ?? "-"}</td>
               <td>{localizeProvider(item.provider, language)}</td>

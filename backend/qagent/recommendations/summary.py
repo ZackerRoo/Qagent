@@ -65,6 +65,8 @@ def _position_note(card: OpportunityCard) -> str:
 
 def _risk_note(card: OpportunityCard) -> str:
     notes = []
+    if card.trading_status and card.trading_status.notes:
+        notes.extend(card.trading_status.notes[:1])
     constraints = card.trading_constraints
     if constraints:
         if constraints.permission_required:
@@ -82,6 +84,8 @@ def _checklist(card: OpportunityCard) -> list[str]:
     checks = []
     if card.decision:
         checks.extend(card.decision.verification_checks[:2])
+    if card.trading_status and not card.trading_status.can_buy:
+        checks.append("先确认交易状态恢复正常，再考虑是否执行买入计划。")
     if card.trading_constraints:
         checks.extend(item.message for item in card.trading_constraints.constraints[:2])
     if card.market_context:

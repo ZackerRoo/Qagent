@@ -22,6 +22,7 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
             <th>{t("table.market")}</th>
             <th>{t("detail.marketContext")}</th>
             <th>{t("detail.tradingConstraints")}</th>
+            <th>{t("detail.tradingStatus")}</th>
             <th>{t("common.status")}</th>
             <th>{t("detail.action")}</th>
             <th>{t("detail.riskVeto")}</th>
@@ -32,6 +33,7 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
             <th>{t("factors.rank")}</th>
             <th>{t("common.strategy")}</th>
             <th>{t("detail.strategyScore")}</th>
+            <th>{t("detail.strategyCalibration")}</th>
             <th>{t("brief.trigger")}</th>
             <th>{t("brief.stop")}</th>
             <th>{t("brief.target")}</th>
@@ -52,6 +54,7 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
               <td>{card.market}</td>
               <td>{formatContext(card)}</td>
               <td>{formatConstraint(card)}</td>
+              <td>{formatTradingStatus(card)}</td>
               <td>
                 <StatusBadge status={card.status} />
               </td>
@@ -72,6 +75,7 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
               <td>{card.factor_rank ?? "-"}</td>
               <td>{localizeStrategy(card.primary_strategy_id, language)}</td>
               <td>{Math.round(card.strategy_score * 100)}</td>
+              <td>{formatCalibration(card)}</td>
               <td>{card.entry_plan.trigger_price ?? "-"}</td>
               <td>{card.exit_plan.initial_stop ?? "-"}</td>
               <td>{card.exit_plan.target_1 ?? "-"}</td>
@@ -87,6 +91,28 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
 
 function formatPct(value: number | undefined) {
   return value === undefined ? "-" : `${Math.round(value * 100)}`;
+}
+
+function formatTradingStatus(card: OpportunityCard) {
+  if (!card.trading_status) {
+    return "-";
+  }
+  const change =
+    card.trading_status.change_pct === null
+      ? ""
+      : ` · ${card.trading_status.change_pct >= 0 ? "+" : ""}${card.trading_status.change_pct.toFixed(2)}%`;
+  return `${card.trading_status.label}${change}`;
+}
+
+function formatCalibration(card: OpportunityCard) {
+  if (!card.strategy_calibration) {
+    return "-";
+  }
+  const winRate =
+    card.strategy_calibration.win_rate_10d === null
+      ? "-"
+      : `${card.strategy_calibration.win_rate_10d.toFixed(0)}%`;
+  return `${winRate} · ${card.strategy_calibration.sample_count}`;
 }
 
 function formatContext(card: OpportunityCard) {

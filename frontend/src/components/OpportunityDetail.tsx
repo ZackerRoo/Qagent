@@ -102,6 +102,33 @@ export function OpportunityDetail({
       )}
 
       <div className="context-grid">
+        {card.trading_status && (
+          <div className="context-panel">
+            <h3>{t("detail.tradingStatus")}</h3>
+            <div className="context-metrics">
+              <span className={`status status-${card.trading_status.status}`}>
+                {card.trading_status.label}
+              </span>
+              <span>{formatSignedPct(card.trading_status.change_pct)}</span>
+              <span>
+                {card.trading_status.can_buy ? t("detail.canBuy") : t("detail.cannotBuy")}
+              </span>
+              <span>
+                {card.trading_status.can_sell ? t("detail.canSell") : t("detail.cannotSell")}
+              </span>
+            </div>
+            <div className="risk-veto-list compact">
+              {card.trading_status.notes.map((note) => (
+                <div
+                  key={note}
+                  className={`risk-veto risk-veto-${card.trading_status?.severity ?? "info"}`}
+                >
+                  <p>{note}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         {card.market_context && (
           <div className="context-panel">
             <h3>{t("detail.marketContext")}</h3>
@@ -141,6 +168,34 @@ export function OpportunityDetail({
                 </div>
               ))}
             </div>
+          </div>
+        )}
+        {card.strategy_calibration && (
+          <div className="context-panel">
+            <h3>{t("detail.strategyCalibration")}</h3>
+            <div className="context-metrics">
+              <span>{localizeStrategy(card.strategy_calibration.strategy_id, language)}</span>
+              <span className={`status status-${card.strategy_calibration.readiness}`}>
+                {localizeStatus(card.strategy_calibration.readiness, language)}
+              </span>
+              <span>
+                {t("common.samples")} {card.strategy_calibration.sample_count}
+              </span>
+            </div>
+            <div className="context-metrics">
+              <span>
+                {language === "zh" ? "10日胜率" : "Win 10D"}{" "}
+                {formatNullablePct(card.strategy_calibration.win_rate_10d)}
+              </span>
+              <span>
+                {t("brief.avg10d")} {formatSignedPct(card.strategy_calibration.avg_return_10d)}
+              </span>
+              <span>
+                {language === "zh" ? "20日均值" : "Avg 20D"}{" "}
+                {formatSignedPct(card.strategy_calibration.avg_return_20d)}
+              </span>
+            </div>
+            <p className="context-note">{card.strategy_calibration.message}</p>
           </div>
         )}
       </div>
@@ -413,6 +468,17 @@ function formatRawFactor(value: number | null) {
     return "-";
   }
   return Math.abs(value) < 1 ? value.toFixed(4) : value.toFixed(2);
+}
+
+function formatNullablePct(value: number | null) {
+  return value === null ? "-" : `${value.toFixed(2)}%`;
+}
+
+function formatSignedPct(value: number | null) {
+  if (value === null) {
+    return "-";
+  }
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
 }
 
 function DecisionList({

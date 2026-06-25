@@ -117,6 +117,51 @@ class MarketContext(BaseModel):
     summary: str
 
 
+class TradingStatus(BaseModel):
+    status: str
+    label: str
+    severity: str
+    latest_close: str | None = None
+    previous_close: str | None = None
+    change_pct: float | None = None
+    limit_up_price: str | None = None
+    limit_down_price: str | None = None
+    can_buy: bool = True
+    can_sell: bool = True
+    notes: list[str] = Field(default_factory=list)
+
+
+class SectorMove(BaseModel):
+    instrument_id: str
+    instrument_label: str | None = None
+    change_pct: float
+    latest_close: str | None = None
+
+
+class SectorStrength(BaseModel):
+    industry: str
+    themes: list[str] = Field(default_factory=list)
+    symbols: list[str] = Field(default_factory=list)
+    avg_change_pct: float
+    advance_ratio: float
+    total_volume: int
+    score: float
+    leaders: list[SectorMove] = Field(default_factory=list)
+    laggards: list[SectorMove] = Field(default_factory=list)
+    summary: str
+
+
+class StrategyCalibration(BaseModel):
+    strategy_id: str
+    readiness: str
+    sample_count: int
+    win_rate_10d: float | None = None
+    avg_return_10d: float | None = None
+    avg_return_20d: float | None = None
+    max_loss_10d: float | None = None
+    message: str
+
+
 class RecommendationSummary(BaseModel):
     headline: str
     stance: str
@@ -175,4 +220,6 @@ class OpportunityCard(BaseModel):
     decision: OpportunityDecision | None = None
     trading_constraints: TradingConstraintProfile | None = None
     market_context: MarketContext | None = None
+    trading_status: TradingStatus | None = None
+    strategy_calibration: StrategyCalibration | None = None
     recommendation_summary: RecommendationSummary | None = None

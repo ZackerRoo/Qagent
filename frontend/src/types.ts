@@ -108,6 +108,8 @@ export type OpportunityCard = {
   decision: OpportunityDecision | null;
   trading_constraints: TradingConstraintProfile | null;
   market_context: MarketContext | null;
+  trading_status: TradingStatus | null;
+  strategy_calibration: StrategyCalibration | null;
   recommendation_summary: RecommendationSummary | null;
 };
 
@@ -144,6 +146,51 @@ export type RecommendationSummary = {
   risk_note: string;
   context_note: string;
   checklist: string[];
+};
+
+export type TradingStatus = {
+  status: string;
+  label: string;
+  severity: string;
+  latest_close: string | null;
+  previous_close: string | null;
+  change_pct: number | null;
+  limit_up_price: string | null;
+  limit_down_price: string | null;
+  can_buy: boolean;
+  can_sell: boolean;
+  notes: string[];
+};
+
+export type SectorMove = {
+  instrument_id: string;
+  instrument_label: string | null;
+  change_pct: number;
+  latest_close: string | null;
+};
+
+export type SectorStrength = {
+  industry: string;
+  themes: string[];
+  symbols: string[];
+  avg_change_pct: number;
+  advance_ratio: number;
+  total_volume: number;
+  score: number;
+  leaders: SectorMove[];
+  laggards: SectorMove[];
+  summary: string;
+};
+
+export type StrategyCalibration = {
+  strategy_id: string;
+  readiness: string;
+  sample_count: number;
+  win_rate_10d: number | null;
+  avg_return_10d: number | null;
+  avg_return_20d: number | null;
+  max_loss_10d: number | null;
+  message: string;
 };
 
 export type RiskVeto = {
@@ -255,6 +302,7 @@ export type ScanItem = {
   factor_score: number | null;
   factor_rank: number | null;
   factor_flags: string[];
+  trading_status: TradingStatus | null;
   blockers: ScanBlocker[];
 };
 
@@ -270,6 +318,7 @@ export type OpportunitiesResponse = {
   items: ScanItem[];
   strategy_health: StrategyHealth[];
   factor_rankings: FactorRanking[];
+  sector_strength: SectorStrength[];
   data_health: Record<string, string>;
 };
 
@@ -329,6 +378,7 @@ export type OverviewResponse = {
   top_cards: OpportunityCard[];
   strategy_health: StrategyHealth[];
   factor_rankings: FactorRanking[];
+  sector_strength: SectorStrength[];
   data_health: Record<string, string>;
 };
 

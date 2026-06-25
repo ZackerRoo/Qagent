@@ -401,6 +401,7 @@ def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict
         "items": [item.model_dump(mode="json") for item in result.items],
         "strategy_health": [item.model_dump(mode="json") for item in result.strategy_health],
         "factor_rankings": [item.model_dump(mode="json") for item in result.factor_rankings],
+        "sector_strength": [item.model_dump(mode="json") for item in result.sector_strength],
         "data_health": result.data_health,
     }
 
@@ -536,6 +537,7 @@ def overview(provider: str = "fixture", symbols: str | None = None) -> dict[str,
         "top_cards": [card.model_dump(mode="json") for card in result.cards[:5]],
         "strategy_health": [item.model_dump(mode="json") for item in result.strategy_health[:6]],
         "factor_rankings": [item.model_dump(mode="json") for item in result.factor_rankings[:10]],
+        "sector_strength": [item.model_dump(mode="json") for item in result.sector_strength[:6]],
         "data_health": result.data_health,
     }
 

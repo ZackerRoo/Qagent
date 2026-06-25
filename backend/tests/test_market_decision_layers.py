@@ -1,0 +1,94 @@
+from datetime import date
+
+import pandas as pd
+
+from qagent.domain.models import OpportunityCard, StrategyCalibration
+from qagent.jobs.daily_scan import run_daily_scan
+from qagent.market.sector_strength import build_sector_strength
+from qagent.market.trading_status import evaluate_trading_status
+from qagent.providers.fixtures import FixtureMarketDataProvider
+from qagent.recommendations.cn_execution import build_trading_constraints
+
+
+def test_trading_status_marks_limit_up_as_not_buyable():
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "CN:000001",
+                "trade_date": date(2026, 3, 30),
+                "close": 10.0,
+                "volume": 1_000_000,
+            },
+            {
+                "instrument_id": "CN:000001",
+                "trade_date": date(2026, 3, 31),
+                "close": 11.0,
+                "volume": 2_000_000,
+            },
+        ]
+    )
+
+    status = evaluate_trading_status(
+        "CN:000001",
+        bars,
+        build_trading_constraints("CN:000001", "平安银行 000001"),
+    )
+
+    assert status.status == "limit_up"
+    assert status.can_buy is False
+    assert status.can_sell is True
+    assert status.change_pct == 10.0
+    assert status.limit_up_price == "11.00"
+
+
+def test_daily_scan_adds_sector_strength_and_strategy_calibration():
+    result = run_daily_scan(
+        instrument_ids=["US:TEST", "CN:000001"],
+        provider=FixtureMarketDataProvider(),
+    )
+
+    assert result.sector_strength
+    assert any(item.industry == "银行" for item in result.sector_strength)
+    assert all(card.strategy_calibration for card in result.cards)
+    assert any("策略校准" in reason for card in result.cards for reason in card.rank_reasons)
+
+
+def test_sector_strength_groups_cards_by_cn_industry():
+    result = run_daily_scan(
+        instrument_ids=["CN:000001"],
+        provider=FixtureMarketDataProvider(),
+    )
+
+    bars = FixtureMarketDataProvider().get_daily_bars(
+        ["CN:000001"],
+        date(2026, 1, 1),
+        date(2026, 12, 31),
+    )
+    sectors = build_sector_strength(result.cards, {"CN:000001": bars})
+
+    assert sectors[0].industry == "银行"
+    assert sectors[0].leaders[0].instrument_id == "CN:000001"
+    assert "银行" in sectors[0].summary
+
+
+def test_strategy_calibration_model_is_card_serializable():
+    result = run_daily_scan(
+        instrument_ids=["US:TEST"],
+        provider=FixtureMarketDataProvider(),
+    )
+    card = OpportunityCard.model_validate(result.cards[0].model_dump())
+    card.strategy_calibration = StrategyCalibration(
+        strategy_id="pead_earnings_drift",
+        readiness="validated",
+        sample_count=5,
+        win_rate_10d=60.0,
+        avg_return_10d=2.4,
+        avg_return_20d=4.1,
+        max_loss_10d=-3.0,
+        message="策略校准：样本5个，10日胜率60.00%。",
+    )
+
+    payload = card.model_dump(mode="json")
+
+    assert payload["strategy_calibration"]["strategy_id"] == "pead_earnings_drift"
+    assert payload["strategy_calibration"]["message"].startswith("策略校准")

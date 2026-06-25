@@ -3,11 +3,15 @@ from datetime import date
 from pydantic import BaseModel, Field
 
 from qagent.cards.generator import OpportunityCardGenerator
-from qagent.domain.models import OpportunityCard
+from qagent.domain.models import OpportunityCard, SectorStrength, TradingStatus
 from qagent.factors.engine import build_factor_rankings
 from qagent.factors.models import FactorRanking
 from qagent.market.instruments import format_instrument_label
+from qagent.market.sector_strength import build_sector_strength
+from qagent.market.trading_status import evaluate_trading_status
 from qagent.providers.base import MarketDataProvider
+from qagent.recommendations.calibration import apply_strategy_calibration
+from qagent.recommendations.cn_execution import build_trading_constraints
 from qagent.recommendations.decision import build_research_decision
 from qagent.recommendations.enrichment import enrich_opportunity_card
 from qagent.signals.engine import SignalEngine
@@ -42,6 +46,7 @@ class ScanItem(BaseModel):
     factor_score: float | None = None
     factor_rank: int | None = None
     factor_flags: list[str] = Field(default_factory=list)
+    trading_status: TradingStatus | None = None
     blockers: list[ScanBlocker] = Field(default_factory=list)
 
 
@@ -50,6 +55,7 @@ class DailyScanResult(BaseModel):
     items: list[ScanItem]
     strategy_health: list[StrategyHealth]
     factor_rankings: list[FactorRanking]
+    sector_strength: list[SectorStrength]
     data_health: dict[str, str]
 
 
@@ -134,14 +140,24 @@ def run_daily_scan(
             },
         )
         card = card_generator.generate(instrument_id, signals, bars, strategy_evaluations)
+        trading_status = evaluate_trading_status(
+            instrument_id,
+            bars,
+            build_trading_constraints(instrument_id, format_instrument_label(instrument_id)),
+        )
         if card:
+            card.trading_status = trading_status
             cards.append(card)
-        items.append(_scan_item(instrument_id, bars, signals, strategy_evaluations, card))
+        items.append(
+            _scan_item(instrument_id, bars, signals, strategy_evaluations, card, trading_status)
+        )
 
     factor_rankings = _factor_rankings_from_bars(bars_by_instrument)
     for ranking in factor_rankings:
         ranking.instrument_label = format_instrument_label(ranking.instrument_id)
     factor_by_id = {ranking.instrument_id: ranking for ranking in factor_rankings}
+    strategy_health = build_strategy_health_from_bars(bars_by_instrument, registry)
+    apply_strategy_calibration(cards, strategy_health)
     for card in cards:
         _apply_factor_to_card(card, factor_by_id.get(card.instrument_id))
         card.decision = build_research_decision(card)
@@ -150,7 +166,7 @@ def run_daily_scan(
     for item in items:
         _apply_factor_to_item(item, factor_by_id.get(item.instrument_id))
 
-    strategy_health = build_strategy_health_from_bars(bars_by_instrument, registry)
+    sector_strength = build_sector_strength(cards, bars_by_instrument)
 
     data_health = {
         "provider": provider.name,
@@ -158,6 +174,7 @@ def run_daily_scan(
         "scanned": str(len(instrument_ids)),
         "cards": str(len(cards)),
         "factor_rankings": str(len(factor_rankings)),
+        "sector_strength": str(len(sector_strength)),
         "strategy_data_provider": strategy_provider.name,
         "strategy_filings": str(strategy_filings_count),
         "strategy_announcements": str(strategy_announcements_count),
@@ -182,6 +199,7 @@ def run_daily_scan(
         items=items,
         strategy_health=strategy_health,
         factor_rankings=factor_rankings,
+        sector_strength=sector_strength,
         data_health=data_health,
     )
 
@@ -225,6 +243,7 @@ def _scan_item(
     signals: list,
     strategy_evaluations: list[StrategyEvaluation],
     card: OpportunityCard | None,
+    trading_status: TradingStatus | None,
 ) -> ScanItem:
     strategy_counts = _strategy_counts(strategy_evaluations)
     if bars.empty:
@@ -235,6 +254,7 @@ def _scan_item(
             reason="No daily bars returned by provider.",
             bars=0,
             signals=0,
+            trading_status=trading_status,
             blockers=[
                 ScanBlocker(
                     code="no_daily_bars",
@@ -262,6 +282,18 @@ def _scan_item(
             latest_close=latest_close,
             latest_trade_date=latest_trade_date,
             provider=provider,
+            trading_status=trading_status,
+        )
+
+    blockers = _setup_blockers(signals, strategy_evaluations, strategy_counts)
+    if trading_status and not trading_status.can_buy:
+        blockers.append(
+            ScanBlocker(
+                code=f"trading_status_{trading_status.status}",
+                severity=trading_status.severity,
+                title=trading_status.label,
+                message=" ".join(trading_status.notes),
+            )
         )
 
     return ScanItem(
@@ -271,11 +303,12 @@ def _scan_item(
         reason="Signal stack did not meet opportunity-card threshold.",
         bars=len(bars),
         signals=len(signals),
-        blockers=_setup_blockers(signals, strategy_evaluations, strategy_counts),
+        blockers=blockers,
         **strategy_counts,
         latest_close=latest_close,
         latest_trade_date=latest_trade_date,
         provider=provider,
+        trading_status=trading_status,
     )
 
 

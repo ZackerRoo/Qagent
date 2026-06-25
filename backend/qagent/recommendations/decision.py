@@ -131,6 +131,16 @@ def _risk_vetoes(card: OpportunityCard, components: DecisionComponents) -> list[
                 message="The entry window is narrow; wait for cleaner confirmation instead of chasing.",
             )
         )
+    if card.trading_status is not None and not card.trading_status.can_buy:
+        severity = "warning" if card.trading_status.can_sell else "block"
+        vetoes.append(
+            RiskVeto(
+                code=f"trading_status_{card.trading_status.status}",
+                severity=severity,
+                title=card.trading_status.label,
+                message=" ".join(card.trading_status.notes),
+            )
+        )
     flag_rules = {
         "low_liquidity": (
             "block",

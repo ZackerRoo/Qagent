@@ -52,7 +52,11 @@ const STATUS_LABELS: LabelMap = {
   inactive: { zh: "未触发", en: "Inactive" },
   limited_sample: { zh: "样本有限", en: "Limited sample" },
   insufficient_history: { zh: "历史不足", en: "Insufficient history" },
+  validated: { zh: "已验证", en: "Validated" },
   pending: { zh: "待定", en: "Pending" },
+  normal: { zh: "正常交易", en: "Normal" },
+  limit_up: { zh: "接近涨停", en: "Near limit up" },
+  limit_down: { zh: "接近跌停", en: "Near limit down" },
   working: { zh: "跟踪中", en: "Working" },
   lagging: { zh: "走弱", en: "Lagging" },
   open: { zh: "持仓中", en: "Open" },
@@ -86,6 +90,8 @@ const RISK_VETO_LABELS: LabelMap = {
   high_volatility: { zh: "波动偏高", en: "High volatility" },
   insufficient_history: { zh: "历史不足", en: "Insufficient history" },
   many_data_caveats: { zh: "数据限制较多", en: "Multiple data caveats" },
+  trading_status_limit_up: { zh: "接近涨停", en: "Near limit up" },
+  trading_status_limit_down: { zh: "接近跌停", en: "Near limit down" },
 };
 
 const RISK_VETO_MESSAGES: LabelMap = {
@@ -99,6 +105,8 @@ const RISK_VETO_MESSAGES: LabelMap = {
   high_volatility: { zh: "近期波动较高，止损可能更容易被噪音触发。", en: "Recent volatility is elevated." },
   insufficient_history: { zh: "价格历史不足，均线结构验证不充分。", en: "Not enough price history to validate trend structure." },
   many_data_caveats: { zh: "数据限制较多，行动前需要复核来源。", en: "Several data caveats are present; verify the source." },
+  trading_status_limit_up: { zh: "接近或触及涨停，不建议追买。", en: "Near or at limit up; avoid chasing." },
+  trading_status_limit_down: { zh: "接近或触及跌停，流动性和退出风险较高。", en: "Near or at limit down; liquidity and exit risk are elevated." },
 };
 
 const SCAN_BLOCKER_LABELS: LabelMap = {
@@ -107,6 +115,8 @@ const SCAN_BLOCKER_LABELS: LabelMap = {
   no_active_signals: { zh: "没有活跃信号", en: "No active signals" },
   no_strategy_passed: { zh: "没有策略通过", en: "No strategy passed" },
   strategy_data_missing: { zh: "策略数据缺失", en: "Strategy data missing" },
+  trading_status_limit_up: { zh: "接近涨停", en: "Near limit up" },
+  trading_status_limit_down: { zh: "接近跌停", en: "Near limit down" },
 };
 
 const SCAN_BLOCKER_MESSAGES: LabelMap = {
@@ -115,6 +125,8 @@ const SCAN_BLOCKER_MESSAGES: LabelMap = {
   no_active_signals: { zh: "趋势、回调、突破、量能或涨跌停信号都不活跃。", en: "No trend, pullback, breakout, volume, or limit-status signal is active." },
   no_strategy_passed: { zh: "策略库里没有策略满足前置条件。", en: "No strategy passed its preconditions." },
   strategy_data_missing: { zh: "部分策略输入缺失，需要补齐后再判断。", en: "Some strategy inputs are missing." },
+  trading_status_limit_up: { zh: "接近或触及涨停，不建议追买。", en: "Near or at limit up; avoid chasing." },
+  trading_status_limit_down: { zh: "接近或触及跌停，流动性和退出风险较高。", en: "Near or at limit down; liquidity and exit risk are elevated." },
 };
 
 const RADAR_SIGNAL_LABELS: LabelMap = {

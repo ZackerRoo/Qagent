@@ -459,7 +459,8 @@ tbody tr.selected {
 
 .status-setup_ready,
 .status-triggered,
-.status-active {
+.status-active,
+.status-normal {
   background: #dff4e8;
   color: #116b3c;
 }
@@ -471,14 +472,16 @@ tbody tr.selected {
 }
 
 .status-extended,
-.status-risk_elevated {
+.status-risk_elevated,
+.status-limit_up {
   background: #fff3d6;
   color: #8a5b00;
 }
 
 .status-invalidated,
 .status-closed,
-.status-no_data {
+.status-no_data,
+.status-limit_down {
   background: #ffe7e7;
   color: #9f1f1f;
 }
@@ -651,6 +654,13 @@ tbody tr.selected {
   font-size: 14px;
 }
 
+.context-panel .context-note {
+  margin: 0;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .context-metrics {
   display: flex;
   flex-wrap: wrap;
@@ -767,6 +777,76 @@ tbody tr.selected {
   margin-top: 2px;
   color: #17202a;
   font-size: 18px;
+}
+
+.sector-strength {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.sector-strength-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sector-strength-heading h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.sector-strength-heading span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.sector-strength-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.sector-card {
+  display: grid;
+  gap: 7px;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  padding: 9px;
+  background: #ffffff;
+}
+
+.sector-card header,
+.sector-metrics {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sector-card strong {
+  color: #17202a;
+  font-size: 14px;
+}
+
+.sector-card header span {
+  color: #0f4c81;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.sector-metrics span {
+  color: #475569;
+  font-size: 12px;
+}
+
+.sector-card p,
+.sector-card small {
+  margin: 0;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .risk-veto-summary {
@@ -1207,6 +1287,7 @@ tbody tr.selected {
   .metric-grid,
   .recommendation-grid,
   .context-grid,
+  .sector-strength-grid,
   .scenario-grid,
   .form-row,
   .portfolio-form,

@@ -155,6 +155,7 @@ export default function App() {
             items={opportunities?.items ?? []}
             strategyHealth={opportunities?.strategy_health ?? []}
             factorRankings={opportunities?.factor_rankings ?? []}
+            sectorStrength={opportunities?.sector_strength ?? []}
             selectedCard={selectedCard}
             dataMode={dataMode}
             profile={profile}
