@@ -104,6 +104,38 @@ def test_free_cn_provider_normalizes_akshare_daily(monkeypatch):
     assert bars["volume"].tolist() == [800_000, 820_000]
 
 
+def test_free_cn_provider_uses_etf_history_for_etf_symbols(monkeypatch):
+    def fake_stock_hist(*args, **kwargs):
+        raise AssertionError("ETF symbols must not use stock_zh_a_hist")
+
+    def fake_fund_etf_hist(symbol, period, start_date, end_date, adjust):
+        assert symbol == "588000"
+        assert period == "daily"
+        return pd.DataFrame(
+            {
+                "日期": ["2026-01-02", "2026-01-05"],
+                "开盘": [1.0, 1.02],
+                "最高": [1.03, 1.05],
+                "最低": [0.99, 1.01],
+                "收盘": [1.02, 1.04],
+                "成交量": [8_000_000, 8_200_000],
+            }
+        )
+
+    fake_ak = SimpleNamespace(
+        stock_zh_a_hist=fake_stock_hist,
+        fund_etf_hist_em=fake_fund_etf_hist,
+    )
+    monkeypatch.setattr("qagent.providers.free_cn.ak", fake_ak)
+
+    provider = FreeCnMarketDataProvider()
+    bars = provider.get_daily_bars(["CN:588000"], date(2026, 1, 1), date(2026, 1, 31))
+
+    assert bars["instrument_id"].tolist() == ["CN:588000", "CN:588000"]
+    assert bars["provider"].eq("akshare_etf").all()
+    assert bars["close"].tolist() == [1.02, 1.04]
+
+
 def test_free_cn_provider_records_source_errors(monkeypatch):
     def fake_zh_a_hist(symbol, period, start_date, end_date, adjust):
         raise ConnectionError("source closed connection")

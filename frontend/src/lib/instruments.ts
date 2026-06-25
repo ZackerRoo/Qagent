@@ -29,6 +29,25 @@ const CN_INSTRUMENT_NAMES: Record<string, string> = {
   "601166": "兴业银行",
   "601318": "中国平安",
   "601398": "工商银行",
+  "510300": "沪深300ETF",
+  "510500": "中证500ETF",
+  "512100": "中证1000ETF",
+  "588000": "科创50ETF",
+  "159949": "创业板50ETF",
+};
+
+const CN_TOKEN_LABELS: Record<string, string> = {
+  ALL: "全A股候选池",
+  "INDEX:KCB50": "科创50成分股",
+  "INDEX:CSI300": "沪深300成分股",
+  "INDEX:CSI500": "中证500成分股",
+  "INDEX:CSI1000": "中证1000成分股",
+  "INDEX:CHINEXT50": "创业板50成分股",
+  "ETF:KCB50": "科创50ETF",
+  "ETF:CSI300": "沪深300ETF",
+  "ETF:CSI500": "中证500ETF",
+  "ETF:CSI1000": "中证1000ETF",
+  "ETF:CHINEXT50": "创业板50ETF",
 };
 
 const US_INSTRUMENT_NAMES: Record<string, string> = {
@@ -44,8 +63,8 @@ export function formatInstrumentLabel(instrumentId: string | null | undefined): 
     return "-";
   }
   const market = marketPrefix(instrumentId);
-  if (market === "CN" && symbol === "ALL") {
-    return "全A股候选池";
+  if (market === "CN" && CN_TOKEN_LABELS[symbol]) {
+    return CN_TOKEN_LABELS[symbol];
   }
   if (market === "CN") {
     const exchangeSymbol = `${symbol}.${cnExchangeSuffix(symbol)}`;
@@ -71,7 +90,8 @@ export function marketSymbol(instrumentId: string | null | undefined): string {
     return "";
   }
   const normalized = instrumentId.trim().toUpperCase();
-  return normalized.includes(":") ? normalized.split(":", 2)[1] : normalized;
+  const separator = normalized.indexOf(":");
+  return separator >= 0 ? normalized.slice(separator + 1) : normalized;
 }
 
 function marketPrefix(instrumentId: string | null | undefined): string {
@@ -79,14 +99,15 @@ function marketPrefix(instrumentId: string | null | undefined): string {
     return "";
   }
   const normalized = instrumentId.trim().toUpperCase();
-  return normalized.includes(":") ? normalized.split(":", 2)[0] : "";
+  const separator = normalized.indexOf(":");
+  return separator >= 0 ? normalized.slice(0, separator) : "";
 }
 
 function cnExchangeSuffix(symbol: string): string {
   if (symbol.startsWith("4") || symbol.startsWith("8")) {
     return "BJ";
   }
-  if (symbol.startsWith("6")) {
+  if (symbol.startsWith("5") || symbol.startsWith("6")) {
     return "SH";
   }
   return "SZ";

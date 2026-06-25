@@ -6,6 +6,7 @@ import akshare as ak
 import pandas as pd
 from pydantic import BaseModel, Field
 
+from qagent.market.cn_universe_tokens import is_cn_universe_token, resolve_cn_universe_token
 from qagent.market.instruments import register_cn_instrument_names
 from qagent.market.universe import DEFAULT_A_SHARE_STARTER_UNIVERSE
 
@@ -83,10 +84,42 @@ def resolve_symbol_tokens(
     min_turnover: Decimal | int | str = DEFAULT_A_SHARE_MIN_TURNOVER,
 ) -> ResolvedSymbols:
     normalized = _dedupe_symbols(symbols)
-    if CN_ALL_TOKEN not in normalized:
+    token_symbols = [
+        symbol for symbol in normalized if symbol == CN_ALL_TOKEN or is_cn_universe_token(symbol)
+    ]
+    if not token_symbols:
         return ResolvedSymbols(symbols=normalized)
 
-    manual = [symbol for symbol in normalized if symbol != CN_ALL_TOKEN]
+    manual = [
+        symbol
+        for symbol in normalized
+        if symbol != CN_ALL_TOKEN and not is_cn_universe_token(symbol)
+    ]
+    resolved = list(manual)
+    health_items: list[dict[str, str]] = []
+    is_dynamic = False
+    for token in token_symbols:
+        token_resolution = (
+            _resolve_all_a_share_token(limit, min_price, min_turnover)
+            if token == CN_ALL_TOKEN
+            else resolve_cn_universe_token(token, limit=limit)
+        )
+        resolved.extend(token_resolution.symbols)
+        health_items.append(token_resolution.data_health)
+        is_dynamic = is_dynamic or token_resolution.is_dynamic
+
+    return ResolvedSymbols(
+        symbols=_dedupe_symbols(resolved),
+        data_health=_merge_universe_health(health_items),
+        is_dynamic=is_dynamic,
+    )
+
+
+def _resolve_all_a_share_token(
+    limit: int,
+    min_price: Decimal | int | str,
+    min_turnover: Decimal | int | str,
+) -> ResolvedSymbols:
     try:
         selection = build_a_share_universe(
             limit=limit,
@@ -96,7 +129,7 @@ def resolve_symbol_tokens(
     except Exception as exc:
         fallback = DEFAULT_A_SHARE_STARTER_UNIVERSE[: max(limit, 0)]
         return ResolvedSymbols(
-            symbols=_dedupe_symbols([*manual, *fallback]),
+            symbols=fallback,
             data_health={
                 "universe": CN_ALL_TOKEN,
                 "universe_source": "fallback",
@@ -107,7 +140,6 @@ def resolve_symbol_tokens(
             },
             is_dynamic=True,
         )
-    resolved = _dedupe_symbols([*manual, *selection.symbols])
     data_health = {
         "universe": CN_ALL_TOKEN,
         "universe_source": selection.source,
@@ -123,7 +155,37 @@ def resolve_symbol_tokens(
         )
     if selection.warnings:
         data_health["universe_warnings"] = " | ".join(selection.warnings[:3])
-    return ResolvedSymbols(symbols=resolved, data_health=data_health, is_dynamic=True)
+    return ResolvedSymbols(symbols=selection.symbols, data_health=data_health, is_dynamic=True)
+
+
+def _merge_universe_health(items: list[dict[str, str]]) -> dict[str, str]:
+    if not items:
+        return {}
+    if len(items) == 1:
+        return items[0]
+    selected = 0
+    for item in items:
+        try:
+            selected += int(item.get("universe_selected", "0"))
+        except ValueError:
+            pass
+    merged = {
+        "universe": ",".join(item.get("universe", "") for item in items if item.get("universe")),
+        "universe_label": "、".join(
+            item.get("universe_label", item.get("universe", "")) for item in items
+        ),
+        "universe_source": ",".join(
+            item.get("universe_source", "") for item in items if item.get("universe_source")
+        ),
+        "universe_selected": str(selected),
+    }
+    errors = [item["universe_error"] for item in items if item.get("universe_error")]
+    fallbacks = [item["universe_fallback"] for item in items if item.get("universe_fallback")]
+    if errors:
+        merged["universe_error"] = " | ".join(errors)
+    if fallbacks:
+        merged["universe_fallback"] = ",".join(fallbacks)
+    return merged
 
 
 def _normalize_spot_frame(raw: pd.DataFrame) -> list[dict[str, Any]]:

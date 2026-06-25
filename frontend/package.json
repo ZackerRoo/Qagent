@@ -4,6 +4,7 @@
     "build": "tsc && vite build",
     "check:i18n": "node scripts/check-i18n.mjs",
     "check:defaults": "node scripts/check-a-share-defaults.mjs",
+    "check:instruments": "node scripts/check-instruments.mjs",
     "check:markets": "node scripts/check-market-sections.mjs",
     "preview": "vite preview"
   },

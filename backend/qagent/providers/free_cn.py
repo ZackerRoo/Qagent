@@ -48,13 +48,24 @@ class FreeCnMarketDataProvider:
 
     @staticmethod
     def _load_akshare(symbol: str, start: date, end: date) -> pd.DataFrame:
-        raw = ak.stock_zh_a_hist(
-            symbol=symbol,
-            period="daily",
-            start_date=start.strftime("%Y%m%d"),
-            end_date=end.strftime("%Y%m%d"),
-            adjust="",
-        )
+        if _is_etf_symbol(symbol):
+            raw = ak.fund_etf_hist_em(
+                symbol=symbol,
+                period="daily",
+                start_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"),
+                adjust="",
+            )
+            provider_name = "akshare_etf"
+        else:
+            raw = ak.stock_zh_a_hist(
+                symbol=symbol,
+                period="daily",
+                start_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"),
+                adjust="",
+            )
+            provider_name = "akshare"
         if raw.empty:
             return pd.DataFrame(columns=BAR_COLUMNS)
         normalized = raw.rename(
@@ -67,7 +78,7 @@ class FreeCnMarketDataProvider:
                 "成交量": "volume",
             }
         ).copy()
-        normalized["provider"] = "akshare"
+        normalized["provider"] = provider_name
         return _coerce_bar_types(normalized)
 
     @staticmethod
@@ -102,6 +113,10 @@ class FreeCnMarketDataProvider:
 def _to_baostock_symbol(symbol: str) -> str:
     prefix = "sh" if symbol.startswith(("5", "6", "9")) else "sz"
     return f"{prefix}.{symbol}"
+
+
+def _is_etf_symbol(symbol: str) -> bool:
+    return symbol.startswith(("15", "16", "51", "52", "56", "58"))
 
 
 def _coerce_bar_types(frame: pd.DataFrame) -> pd.DataFrame:

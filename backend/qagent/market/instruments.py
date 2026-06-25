@@ -29,6 +29,11 @@ CN_INSTRUMENT_NAMES = {
     "601166": "兴业银行",
     "601318": "中国平安",
     "601398": "工商银行",
+    "510300": "沪深300ETF",
+    "510500": "中证500ETF",
+    "512100": "中证1000ETF",
+    "588000": "科创50ETF",
+    "159949": "创业板50ETF",
 }
 
 US_INSTRUMENT_NAMES = {
@@ -36,6 +41,20 @@ US_INSTRUMENT_NAMES = {
     "MSFT": "Microsoft",
     "NVDA": "NVIDIA",
     "TEST": "样例测试",
+}
+
+CN_TOKEN_LABELS = {
+    "ALL": "全A股候选池",
+    "INDEX:KCB50": "科创50成分股",
+    "INDEX:CSI300": "沪深300成分股",
+    "INDEX:CSI500": "中证500成分股",
+    "INDEX:CSI1000": "中证1000成分股",
+    "INDEX:CHINEXT50": "创业板50成分股",
+    "ETF:KCB50": "科创50ETF",
+    "ETF:CSI300": "沪深300ETF",
+    "ETF:CSI500": "中证500ETF",
+    "ETF:CSI1000": "中证1000ETF",
+    "ETF:CHINEXT50": "创业板50ETF",
 }
 
 
@@ -52,8 +71,8 @@ def format_instrument_label(instrument_id: str | None) -> str:
     if not symbol:
         return "-"
     market = _market(instrument_id)
-    if market == "CN" and symbol == "ALL":
-        return "全A股候选池"
+    if market == "CN" and symbol in CN_TOKEN_LABELS:
+        return CN_TOKEN_LABELS[symbol]
     if market == "CN":
         name = CN_INSTRUMENT_NAMES.get(symbol)
         exchange_symbol = f"{symbol}.{_cn_exchange_suffix(symbol)}"
@@ -83,6 +102,6 @@ def _market(instrument_id: str | None) -> str:
 def _cn_exchange_suffix(symbol: str) -> str:
     if symbol.startswith(("4", "8")):
         return "BJ"
-    if symbol.startswith("6"):
+    if symbol.startswith(("5", "6")):
         return "SH"
     return "SZ"
