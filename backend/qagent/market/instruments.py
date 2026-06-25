@@ -100,7 +100,7 @@ def _market(instrument_id: str | None) -> str:
 
 
 def _cn_exchange_suffix(symbol: str) -> str:
-    if symbol.startswith(("4", "8")):
+    if symbol.startswith(("4", "8", "920")):
         return "BJ"
     if symbol.startswith(("5", "6")):
         return "SH"

@@ -12,4 +12,5 @@ data/*.db
 data/*.db-*
 data/*.log
 data/outbox*/
+backend/.qagent-cache/
 .env

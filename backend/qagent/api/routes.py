@@ -19,6 +19,7 @@ from qagent.jobs.alert_runner import run_alert_rules
 from qagent.jobs.intraday_check import evaluate_snapshot_alerts
 from qagent.market.a_share_universe import ResolvedSymbols, resolve_symbol_tokens
 from qagent.market.instruments import format_instrument_label
+from qagent.market.tradable import search_cn_tradable_instruments
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE, DEFAULT_FREE_UNIVERSE
 from qagent.market.universes import UniverseCreate, builtin_universes, merge_universes
 from qagent.market.indicators import add_moving_averages, add_volume_ratio, percent_distance
@@ -949,6 +950,22 @@ def universe_detail(universe_id: str) -> dict[str, object]:
     if builtin is None:
         raise HTTPException(status_code=404, detail="universe not found")
     return {"universe": builtin.model_dump(mode="json")}
+
+
+@router.get("/instruments/search")
+def instrument_search(q: str = "", limit: int = 50) -> dict[str, object]:
+    if limit <= 0 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+    catalog = search_cn_tradable_instruments(
+        q,
+        limit=limit,
+        include_full_etfs=False,
+        use_cache=True,
+    )
+    return {
+        "items": [item.model_dump(mode="json") for item in catalog.items],
+        "data_health": catalog.data_health,
+    }
 
 
 @router.post("/alerts/evaluate")

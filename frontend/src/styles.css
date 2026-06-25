@@ -144,7 +144,14 @@ h3 {
 
 .scan-controls {
   display: grid;
-  grid-template-columns: auto auto minmax(110px, 170px) minmax(100px, 140px) minmax(130px, 1fr) auto;
+  grid-template-columns:
+    auto
+    auto
+    minmax(110px, 170px)
+    minmax(100px, 140px)
+    minmax(180px, 0.8fr)
+    minmax(150px, 1fr)
+    auto;
   gap: 8px;
   align-items: center;
   width: 100%;
@@ -200,6 +207,37 @@ h3 {
 .scan-controls input:disabled {
   background: #f1f5f9;
   color: #94a3b8;
+}
+
+.scan-controls .selected-symbols-field {
+  background: #fbfcfe;
+  color: #334155;
+  cursor: default;
+}
+
+.instrument-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  gap: 6px;
+  min-width: 0;
+}
+
+.square-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 6px;
+  background: #0f4c81;
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.square-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .icon-action {

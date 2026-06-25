@@ -30,5 +30,6 @@ assert(mod.formatInstrumentLabel("CN:INDEX:KCB50") === "科创50成分股", "STA
 assert(mod.formatInstrumentLabel("CN:ETF:KCB50") === "科创50ETF", "STAR 50 ETF token must be readable");
 assert(mod.formatInstrumentLabel("CN:588000") === "科创50ETF 588000.SH", "SSE ETF suffix must be SH");
 assert(mod.formatInstrumentLabel("CN:159949") === "创业板50ETF 159949.SZ", "SZSE ETF suffix must be SZ");
+assert(mod.formatInstrumentLabel("CN:920580") === "920580.BJ", "BSE 920xxx suffix must be BJ");
 
 console.log("instrument labels ok: index tokens and ETFs are readable");

@@ -104,7 +104,7 @@ function marketPrefix(instrumentId: string | null | undefined): string {
 }
 
 function cnExchangeSuffix(symbol: string): string {
-  if (symbol.startsWith("4") || symbol.startsWith("8")) {
+  if (symbol.startsWith("4") || symbol.startsWith("8") || symbol.startsWith("920")) {
     return "BJ";
   }
   if (symbol.startsWith("5") || symbol.startsWith("6")) {

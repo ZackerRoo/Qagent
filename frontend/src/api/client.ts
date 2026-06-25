@@ -18,6 +18,7 @@ import type {
   DeliveriesResponse,
   DeliveryOutboxRecord,
   FactorBacktestResponse,
+  InstrumentSearchResponse,
   IntradayRadarResponse,
   MarketBarsResponse,
   MarketDataCacheResponse,
@@ -49,6 +50,7 @@ type ScanParams = {
   provider?: DataProviderMode;
   instrument_id?: string;
   symbols?: string;
+  q?: string;
   limit?: number;
   start?: string;
   end?: string;
@@ -80,6 +82,9 @@ function queryString(params?: ScanParams): string {
   }
   if (params.symbols?.trim()) {
     search.set("symbols", params.symbols);
+  }
+  if (params.q?.trim()) {
+    search.set("q", params.q);
   }
   if (params.limit) {
     search.set("limit", String(params.limit));
@@ -270,6 +275,13 @@ export async function fetchUniverses(): Promise<UniversesResponse> {
 
 export async function saveUniverse(payload: UniverseCreate): Promise<UniverseRecord> {
   return apiPost<UniverseRecord>("/universes", payload);
+}
+
+export async function fetchInstrumentSearch(
+  q: string,
+  limit = 20,
+): Promise<InstrumentSearchResponse> {
+  return apiGet<InstrumentSearchResponse>("/instruments/search", { q, limit });
 }
 
 export async function fetchCatalysts(symbols: string): Promise<CatalystsResponse> {

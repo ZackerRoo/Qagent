@@ -25,6 +25,21 @@ export type UniversesResponse = {
   universes: UniverseRecord[];
 };
 
+export type TradableInstrument = {
+  instrument_id: string;
+  symbol: string;
+  name: string;
+  label: string;
+  asset_type: string;
+  exchange: string;
+  source: string;
+};
+
+export type InstrumentSearchResponse = {
+  items: TradableInstrument[];
+  data_health: Record<string, string>;
+};
+
 export type OpportunityStatus =
   | "new_idea"
   | "watch"
