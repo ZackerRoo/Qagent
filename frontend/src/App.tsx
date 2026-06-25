@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   fetchIntradayRadar,
@@ -45,8 +45,15 @@ export default function App() {
   const [selectedUniverseId, setSelectedUniverseId] = useState("free_default");
   const [isScanning, setIsScanning] = useState(false);
   const [error, setError] = useState("");
+  const scanRequestRef = useRef(0);
+  const scanAbortRef = useRef<AbortController | null>(null);
 
   async function loadDashboard(mode: DataProviderMode, symbolText: string) {
+    const requestId = scanRequestRef.current + 1;
+    scanRequestRef.current = requestId;
+    scanAbortRef.current?.abort();
+    const controller = new AbortController();
+    scanAbortRef.current = controller;
     setIsScanning(true);
     setError("");
     try {
@@ -55,18 +62,31 @@ export default function App() {
         symbols: mode === "free" ? symbolText : undefined,
       };
       const [overviewResult, opportunitiesResult, radarResult] = await Promise.all([
-        fetchOverview(params),
-        fetchOpportunities(params),
-        fetchIntradayRadar(mode, mode === "free" ? symbolText : undefined),
+        fetchOverview(params, { signal: controller.signal }),
+        fetchOpportunities(params, { signal: controller.signal }),
+        fetchIntradayRadar(mode, mode === "free" ? symbolText : undefined, {
+          signal: controller.signal,
+        }),
       ]);
+      if (requestId !== scanRequestRef.current) {
+        return;
+      }
       setOverview(overviewResult);
       setOpportunities(opportunitiesResult);
       setRadar(radarResult);
       setSelectedCard(applyResearchProfile(opportunitiesResult.cards, profile)[0]);
     } catch (caught) {
+      if (requestId !== scanRequestRef.current) {
+        return;
+      }
+      if (caught instanceof DOMException && caught.name === "AbortError") {
+        return;
+      }
       setError(caught instanceof Error ? caught.message : "Failed to load dashboard");
     } finally {
-      setIsScanning(false);
+      if (requestId === scanRequestRef.current) {
+        setIsScanning(false);
+      }
     }
   }
 
@@ -103,8 +123,11 @@ export default function App() {
     if (!universe) {
       return;
     }
-    setSymbols(universe.symbols.join(","));
-    setDataMode(universe.universe_id === "fixture_dev" ? "fixture" : "free");
+    const nextSymbols = universe.symbols.join(",");
+    const nextMode = universe.universe_id === "fixture_dev" ? "fixture" : "free";
+    setSymbols(nextSymbols);
+    setDataMode(nextMode);
+    void loadDashboard(nextMode, nextSymbols);
   }
 
   async function handleSaveUniverse(payload: UniverseCreate) {

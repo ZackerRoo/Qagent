@@ -3,7 +3,8 @@ from pathlib import Path
 from threading import Lock
 
 from sqlalchemy import create_engine
-from sqlalchemy.engine import make_url
+from sqlalchemy import event
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from qagent.config import get_settings
@@ -21,9 +22,26 @@ def create_db_engine(database_url: str | None = None):
     settings = get_settings()
     url = database_url or settings.database_url
     parsed = make_url(url)
-    if parsed.drivername.startswith("sqlite") and parsed.database not in (None, "", ":memory:"):
+    is_file_sqlite = parsed.drivername.startswith("sqlite") and parsed.database not in (None, "", ":memory:")
+    engine_kwargs = {}
+    if is_file_sqlite:
         Path(parsed.database).expanduser().parent.mkdir(parents=True, exist_ok=True)
-    return create_engine(url, future=True)
+        engine_kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
+    engine = create_engine(url, future=True, **engine_kwargs)
+    if is_file_sqlite:
+        _configure_sqlite_pragmas(engine)
+    return engine
+
+
+def _configure_sqlite_pragmas(engine: Engine) -> None:
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
+        finally:
+            cursor.close()
 
 
 def initialize_database(database_url: str | None = None):

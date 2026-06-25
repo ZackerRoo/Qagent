@@ -32,6 +32,14 @@ def test_market_context_adds_industry_theme_and_index_labels():
     assert context.summary.startswith("半导体")
 
 
+def test_market_context_adds_storage_chip_theme_labels():
+    context = build_market_context("CN:688525", instrument_label="佰维存储 688525.SH")
+
+    assert context.industry == "存储芯片"
+    assert "存储芯片" in context.themes
+    assert "国产替代" in context.themes
+
+
 def test_daily_scan_cards_include_cn_constraints_context_and_chinese_summary():
     result = run_daily_scan(
         instrument_ids=["CN:000001"],

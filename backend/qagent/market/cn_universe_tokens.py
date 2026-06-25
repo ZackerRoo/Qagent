@@ -29,6 +29,15 @@ class EtfUniverseDefinition:
     names: dict[str, str]
 
 
+@dataclass(frozen=True)
+class ThemeUniverseDefinition:
+    token: str
+    label: str
+    concept_names: list[str]
+    fallback_symbols: list[str]
+    fallback_names: dict[str, str]
+
+
 class CnUniverseTokenResolution(BaseModel):
     symbols: list[str]
     names: dict[str, str] = Field(default_factory=dict)
@@ -149,15 +158,108 @@ ETF_UNIVERSES: dict[str, EtfUniverseDefinition] = {
 }
 
 
+THEME_UNIVERSES: dict[str, ThemeUniverseDefinition] = {
+    "CN:THEME:SEMICONDUCTOR": ThemeUniverseDefinition(
+        token="CN:THEME:SEMICONDUCTOR",
+        label="半导体芯片主题",
+        concept_names=["半导体", "芯片概念"],
+        fallback_symbols=[
+            "688981",
+            "688012",
+            "688126",
+            "688008",
+            "688041",
+            "688256",
+            "603986",
+            "002371",
+            "002156",
+            "300223",
+        ],
+        fallback_names={
+            "688981": "中芯国际",
+            "688012": "中微公司",
+            "688126": "沪硅产业",
+            "688008": "澜起科技",
+            "688041": "海光信息",
+            "688256": "寒武纪",
+            "603986": "兆易创新",
+            "002371": "北方华创",
+            "002156": "通富微电",
+            "300223": "北京君正",
+        },
+    ),
+    "CN:THEME:MEMORY": ThemeUniverseDefinition(
+        token="CN:THEME:MEMORY",
+        label="存储芯片主题",
+        concept_names=["存储芯片", "HBM"],
+        fallback_symbols=[
+            "688008",
+            "603986",
+            "688525",
+            "301308",
+            "300223",
+            "000021",
+            "001309",
+            "300475",
+            "002156",
+            "688347",
+        ],
+        fallback_names={
+            "688008": "澜起科技",
+            "603986": "兆易创新",
+            "688525": "佰维存储",
+            "301308": "江波龙",
+            "300223": "北京君正",
+            "000021": "深科技",
+            "001309": "德明利",
+            "300475": "香农芯创",
+            "002156": "通富微电",
+            "688347": "华虹公司",
+        },
+    ),
+    "CN:THEME:AI_COMPUTE": ThemeUniverseDefinition(
+        token="CN:THEME:AI_COMPUTE",
+        label="AI算力供应链主题",
+        concept_names=["CPO概念", "算力概念", "人工智能"],
+        fallback_symbols=[
+            "300308",
+            "000063",
+            "002281",
+            "300502",
+            "300394",
+            "688041",
+            "688256",
+            "603019",
+            "002415",
+            "300124",
+        ],
+        fallback_names={
+            "300308": "中际旭创",
+            "000063": "中兴通讯",
+            "002281": "光迅科技",
+            "300502": "新易盛",
+            "300394": "天孚通信",
+            "688041": "海光信息",
+            "688256": "寒武纪",
+            "603019": "中科曙光",
+            "002415": "海康威视",
+            "300124": "汇川技术",
+        },
+    ),
+}
+
+
 def is_cn_universe_token(symbol: str) -> bool:
     token = symbol.strip().upper()
-    return token in INDEX_UNIVERSES or token in ETF_UNIVERSES
+    return token in INDEX_UNIVERSES or token in ETF_UNIVERSES or token in THEME_UNIVERSES
 
 
 def resolve_cn_universe_token(token: str, limit: int) -> CnUniverseTokenResolution:
     normalized = token.strip().upper()
     if normalized in ETF_UNIVERSES:
         return _resolve_etf_token(ETF_UNIVERSES[normalized])
+    if normalized in THEME_UNIVERSES:
+        return _resolve_theme_token(THEME_UNIVERSES[normalized], limit=limit)
     if normalized not in INDEX_UNIVERSES:
         raise ValueError(f"unsupported China universe token: {token}")
     return _resolve_index_token(INDEX_UNIVERSES[normalized], limit=limit)
@@ -221,6 +323,61 @@ def _resolve_etf_token(definition: EtfUniverseDefinition) -> CnUniverseTokenReso
     )
 
 
+def _resolve_theme_token(
+    definition: ThemeUniverseDefinition,
+    limit: int,
+) -> CnUniverseTokenResolution:
+    errors: list[str] = []
+    records: list[dict[str, str]] = []
+    for concept_name in definition.concept_names:
+        try:
+            raw = ak.stock_board_concept_cons_em(symbol=concept_name)
+            records.extend(_normalize_constituents(raw))
+            if records:
+                break
+        except Exception as exc:
+            errors.append(str(exc))
+    if records:
+        limited = _dedupe_records(records)[: max(limit, 0)]
+        names = {record["symbol"]: record["name"] for record in records if record["name"]}
+        register_cn_instrument_names(names)
+        data_health = {
+            "universe": definition.token,
+            "universe_label": definition.label,
+            "universe_source": "akshare_stock_board_concept_cons_em",
+            "universe_theme": ",".join(definition.concept_names),
+            "universe_selected": str(len(limited)),
+            "universe_limit": str(limit),
+        }
+        if errors:
+            data_health["universe_warnings"] = " | ".join(errors[:3])
+        return CnUniverseTokenResolution(
+            symbols=[f"CN:{record['symbol']}" for record in limited],
+            names=names,
+            data_health=data_health,
+            is_dynamic=True,
+        )
+
+    fallback = definition.fallback_symbols[: max(limit, 0)]
+    register_cn_instrument_names(definition.fallback_names)
+    data_health = {
+        "universe": definition.token,
+        "universe_label": definition.label,
+        "universe_source": "fallback",
+        "universe_selected": str(len(fallback)),
+        "universe_limit": str(limit),
+        "universe_fallback": "builtin_theme_representative",
+    }
+    if errors:
+        data_health["universe_error"] = " | ".join(errors[:3])
+    return CnUniverseTokenResolution(
+        symbols=[f"CN:{symbol}" for symbol in fallback],
+        names=definition.fallback_names,
+        data_health=data_health,
+        is_dynamic=True,
+    )
+
+
 def _load_index_constituents(definition: IndexUniverseDefinition) -> pd.DataFrame:
     if definition.provider == "csindex":
         return ak.index_stock_cons_csindex(symbol=definition.index_code)
@@ -252,6 +409,18 @@ def _normalize_constituents(raw: pd.DataFrame) -> list[dict[str, str]]:
             }
         )
     return records
+
+
+def _dedupe_records(records: list[dict[str, str]]) -> list[dict[str, str]]:
+    result = []
+    seen = set()
+    for record in records:
+        symbol = record["symbol"]
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        result.append(record)
+    return result
 
 
 def _column(frame: pd.DataFrame, candidates: list[str]) -> str:

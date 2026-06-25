@@ -4,6 +4,7 @@ from decimal import Decimal
 import pandas as pd
 from pydantic import BaseModel, Field
 from sqlalchemy import delete
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.storage.tables import MarketBarCacheRow, MarketDataCacheSpanRow
@@ -68,26 +69,31 @@ class MarketDataCacheRepository:
         end: date,
         row_count: int,
     ) -> None:
+        cached_at = datetime.now(timezone.utc)
         with self.session_factory() as session:
-            span = session.get(
-                MarketDataCacheSpanRow,
-                {
-                    "provider_mode": provider_mode,
-                    "instrument_id": instrument_id,
-                    "start_date": start,
-                    "end_date": end,
+            statement = sqlite_insert(MarketDataCacheSpanRow).values(
+                provider_mode=provider_mode,
+                instrument_id=instrument_id,
+                start_date=start,
+                end_date=end,
+                row_count=row_count,
+                cached_at=cached_at,
+                updated_at=cached_at,
+            )
+            statement = statement.on_conflict_do_update(
+                index_elements=[
+                    MarketDataCacheSpanRow.provider_mode,
+                    MarketDataCacheSpanRow.instrument_id,
+                    MarketDataCacheSpanRow.start_date,
+                    MarketDataCacheSpanRow.end_date,
+                ],
+                set_={
+                    "row_count": row_count,
+                    "cached_at": cached_at,
+                    "updated_at": cached_at,
                 },
             )
-            if span is None:
-                span = MarketDataCacheSpanRow(
-                    provider_mode=provider_mode,
-                    instrument_id=instrument_id,
-                    start_date=start,
-                    end_date=end,
-                )
-                session.add(span)
-            span.row_count = row_count
-            span.cached_at = datetime.now(timezone.utc)
+            session.execute(statement)
             session.commit()
 
     def has_coverage(self, provider_mode: str, instrument_id: str, start: date, end: date) -> bool:
@@ -203,7 +209,10 @@ def _normalize_bars(bars: pd.DataFrame) -> pd.DataFrame:
     normalized["trade_date"] = pd.to_datetime(normalized["trade_date"]).dt.date
     for column in ["open", "high", "low", "close"]:
         normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
+    if "volume" not in normalized.columns:
+        normalized["volume"] = 0
     volume = pd.to_numeric(normalized["volume"], errors="coerce")
+    volume = volume.replace([float("inf"), float("-inf")], 0).fillna(0)
     if not volume.isna().any() and volume.mod(1).eq(0).all():
         normalized["volume"] = volume.astype("int64")
     else:

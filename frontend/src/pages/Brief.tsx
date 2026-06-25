@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   fetchDailyBrief,
@@ -56,17 +56,37 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState("");
+  const briefRequestRef = useRef(0);
+  const briefAbortRef = useRef<AbortController | null>(null);
 
   async function loadBrief() {
+    const requestId = briefRequestRef.current + 1;
+    briefRequestRef.current = requestId;
+    briefAbortRef.current?.abort();
+    const controller = new AbortController();
+    briefAbortRef.current = controller;
     try {
       setIsLoading(true);
       setError("");
-      const result = await fetchDailyBrief(dataMode, dataMode === "free" ? symbols : undefined);
+      const result = await fetchDailyBrief(dataMode, dataMode === "free" ? symbols : undefined, {
+        signal: controller.signal,
+      });
+      if (requestId !== briefRequestRef.current) {
+        return;
+      }
       setBrief(result);
     } catch (caught) {
+      if (requestId !== briefRequestRef.current) {
+        return;
+      }
+      if (caught instanceof DOMException && caught.name === "AbortError") {
+        return;
+      }
       setError(caught instanceof Error ? caught.message : "Failed to load daily brief");
     } finally {
-      setIsLoading(false);
+      if (requestId === briefRequestRef.current) {
+        setIsLoading(false);
+      }
     }
   }
 

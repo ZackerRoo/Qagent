@@ -1,4 +1,5 @@
 from datetime import date
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 
@@ -35,6 +36,42 @@ def test_market_data_cache_saves_and_loads_daily_bars(tmp_path):
     assert summaries[0].instrument_id == "US:TEST"
     assert summaries[0].rows == saved
     assert summaries[0].source_providers == ["fixture"]
+
+
+def test_market_data_cache_coerces_missing_volume_to_zero(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "CN:688347",
+                "trade_date": date(2025, 8, 18),
+                "open": 78.5,
+                "high": 78.5,
+                "low": 78.5,
+                "close": 78.5,
+                "volume": float("nan"),
+                "provider": "baostock",
+            }
+        ]
+    )
+
+    saved = repo.save_daily_bars("free", bars)
+    loaded = repo.load_daily_bars("free", ["CN:688347"], date(2025, 8, 18), date(2025, 8, 18))
+
+    assert saved == 1
+    assert float(loaded.iloc[0]["volume"]) == 0.0
+
+
+def test_market_data_cache_records_coverage_idempotently_under_concurrency(tmp_path):
+    repo = make_cache_repo(tmp_path)
+
+    def record_once(_index: int) -> None:
+        repo.record_coverage("free", "CN:000021", date(1900, 1, 1), date(2100, 1, 1), 0)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        list(executor.map(record_once, range(12)))
+
+    assert repo.has_coverage("free", "CN:000021", date(2026, 1, 1), date(2026, 12, 31))
 
 
 class CountingProvider:

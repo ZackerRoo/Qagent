@@ -2,6 +2,8 @@ from datetime import date
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
 
+from sqlalchemy import text
+
 from qagent.db import Base, create_db_engine, create_session_factory, initialize_database
 from qagent.storage.repository import (
     AlertRuleCreate,
@@ -61,6 +63,18 @@ def test_create_db_engine_creates_sqlite_parent_directory(tmp_path):
     engine = create_db_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
     assert db_path.exists()
+
+
+def test_create_db_engine_configures_sqlite_for_local_concurrency(tmp_path):
+    db_path = tmp_path / "qagent-concurrency.db"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+
+    with engine.connect() as connection:
+        journal_mode = connection.execute(text("PRAGMA journal_mode")).scalar_one()
+        busy_timeout = connection.execute(text("PRAGMA busy_timeout")).scalar_one()
+
+    assert str(journal_mode).lower() == "wal"
+    assert busy_timeout >= 30000
 
 
 def test_repository_adds_and_lists_alert_rules(tmp_path):

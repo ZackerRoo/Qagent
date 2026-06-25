@@ -38,6 +38,51 @@ KNOWN_CONTEXT: dict[str, dict[str, list[str] | str]] = {
         "themes": ["AI算力供应链", "国产替代", "晶圆代工"],
         "index_memberships": ["科创50"],
     },
+    "688012": {
+        "industry": "半导体设备",
+        "themes": ["国产替代", "先进制程", "芯片设备"],
+        "index_memberships": ["科创50"],
+    },
+    "688126": {
+        "industry": "半导体材料",
+        "themes": ["国产替代", "大硅片", "芯片材料"],
+        "index_memberships": ["科创50"],
+    },
+    "688008": {
+        "industry": "存储芯片",
+        "themes": ["存储芯片", "HBM", "国产替代"],
+        "index_memberships": ["科创50"],
+    },
+    "603986": {
+        "industry": "存储芯片",
+        "themes": ["存储芯片", "MCU", "国产替代"],
+        "index_memberships": ["沪深300"],
+    },
+    "688525": {
+        "industry": "存储芯片",
+        "themes": ["存储芯片", "HBM", "国产替代"],
+        "index_memberships": ["科创板"],
+    },
+    "301308": {
+        "industry": "存储芯片",
+        "themes": ["存储芯片", "企业级存储", "国产替代"],
+        "index_memberships": ["创业板"],
+    },
+    "688041": {
+        "industry": "AI芯片",
+        "themes": ["AI算力供应链", "国产替代", "CPU/GPU"],
+        "index_memberships": ["科创50"],
+    },
+    "688256": {
+        "industry": "AI芯片",
+        "themes": ["AI算力供应链", "国产替代", "AI加速器"],
+        "index_memberships": ["科创50"],
+    },
+    "300308": {
+        "industry": "光模块",
+        "themes": ["AI算力供应链", "CPO", "光通信"],
+        "index_memberships": ["中证1000"],
+    },
     "588000": {
         "industry": "指数ETF",
         "themes": ["科创板", "硬科技"],

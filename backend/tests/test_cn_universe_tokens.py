@@ -73,6 +73,48 @@ def test_resolve_symbol_tokens_expands_index_and_etf_tokens(monkeypatch):
     assert format_instrument_label("CN:588000") == "科创50ETF 588000.SH"
 
 
+def test_resolves_theme_universe_from_concept_board(monkeypatch):
+    def fake_stock_board_concept_cons_em(symbol):
+        assert symbol == "半导体"
+        return pd.DataFrame(
+            {
+                "代码": ["688981", "688012", "603986"],
+                "名称": ["中芯国际", "中微公司", "兆易创新"],
+            }
+        )
+
+    monkeypatch.setattr(
+        "qagent.market.cn_universe_tokens.ak",
+        SimpleNamespace(stock_board_concept_cons_em=fake_stock_board_concept_cons_em),
+    )
+
+    result = resolve_cn_universe_token("CN:THEME:SEMICONDUCTOR", limit=2)
+
+    assert result.symbols == ["CN:688981", "CN:688012"]
+    assert result.names["688981"] == "中芯国际"
+    assert result.data_health["universe"] == "CN:THEME:SEMICONDUCTOR"
+    assert result.data_health["universe_label"] == "半导体芯片主题"
+    assert result.data_health["universe_source"] == "akshare_stock_board_concept_cons_em"
+    assert format_instrument_label("CN:603986") == "兆易创新 603986.SH"
+
+
+def test_theme_token_falls_back_to_representative_constituents(monkeypatch):
+    def fake_stock_board_concept_cons_em(symbol):
+        raise ConnectionError("concept source down")
+
+    monkeypatch.setattr(
+        "qagent.market.cn_universe_tokens.ak",
+        SimpleNamespace(stock_board_concept_cons_em=fake_stock_board_concept_cons_em),
+    )
+
+    result = resolve_cn_universe_token("CN:THEME:MEMORY", limit=3)
+
+    assert result.symbols == ["CN:688008", "CN:603986", "CN:688525"]
+    assert result.data_health["universe_label"] == "存储芯片主题"
+    assert result.data_health["universe_fallback"] == "builtin_theme_representative"
+    assert "concept source down" in result.data_health["universe_error"]
+
+
 def test_builtin_universes_include_index_and_etf_entries():
     by_id = {universe.universe_id: universe for universe in builtin_universes()}
 
@@ -80,3 +122,6 @@ def test_builtin_universes_include_index_and_etf_entries():
     assert by_id["cn_index_csi300"].symbols == ["CN:INDEX:CSI300"]
     assert "CN:ETF:KCB50" in by_id["cn_etf_core"].symbols
     assert by_id["cn_etf_core"].market_scope == "CN"
+    assert by_id["cn_theme_semiconductor"].symbols == ["CN:THEME:SEMICONDUCTOR"]
+    assert by_id["cn_theme_memory"].symbols == ["CN:THEME:MEMORY"]
+    assert by_id["cn_theme_ai_compute"].symbols == ["CN:THEME:AI_COMPUTE"]

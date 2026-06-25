@@ -48,6 +48,9 @@ const CN_TOKEN_LABELS: Record<string, string> = {
   "ETF:CSI500": "中证500ETF",
   "ETF:CSI1000": "中证1000ETF",
   "ETF:CHINEXT50": "创业板50ETF",
+  "THEME:SEMICONDUCTOR": "半导体芯片主题",
+  "THEME:MEMORY": "存储芯片主题",
+  "THEME:AI_COMPUTE": "AI算力供应链主题",
 };
 
 const US_INSTRUMENT_NAMES: Record<string, string> = {

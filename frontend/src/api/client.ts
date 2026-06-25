@@ -69,6 +69,10 @@ type ScanParams = {
   days?: number;
 };
 
+type RequestOptions = {
+  signal?: AbortSignal;
+};
+
 function queryString(params?: ScanParams): string {
   if (!params) {
     return "";
@@ -138,20 +142,32 @@ function queryString(params?: ScanParams): string {
   return value ? `?${value}` : "";
 }
 
-export async function apiGet<T>(path: string, params?: ScanParams): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}${queryString(params)}`);
+export async function apiGet<T>(
+  path: string,
+  params?: ScanParams,
+  options?: RequestOptions,
+): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}${queryString(params)}`, {
+    signal: options?.signal,
+  });
   if (!response.ok) {
     throw new Error(`API request failed: ${response.status}`);
   }
   return response.json() as Promise<T>;
 }
 
-export async function fetchOverview(params?: ScanParams): Promise<OverviewResponse> {
-  return apiGet<OverviewResponse>("/overview", params);
+export async function fetchOverview(
+  params?: ScanParams,
+  options?: RequestOptions,
+): Promise<OverviewResponse> {
+  return apiGet<OverviewResponse>("/overview", params, options);
 }
 
-export async function fetchOpportunities(params?: ScanParams): Promise<OpportunitiesResponse> {
-  return apiGet<OpportunitiesResponse>("/opportunities", params);
+export async function fetchOpportunities(
+  params?: ScanParams,
+  options?: RequestOptions,
+): Promise<OpportunitiesResponse> {
+  return apiGet<OpportunitiesResponse>("/opportunities", params, options);
 }
 
 export async function fetchMarketBars(
@@ -169,8 +185,9 @@ export async function fetchMarketBars(
 export async function fetchIntradayRadar(
   provider: DataProviderMode,
   symbols?: string,
+  options?: RequestOptions,
 ): Promise<IntradayRadarResponse> {
-  return apiGet<IntradayRadarResponse>("/intraday-radar", { provider, symbols });
+  return apiGet<IntradayRadarResponse>("/intraday-radar", { provider, symbols }, options);
 }
 
 export async function askAgent(
@@ -353,13 +370,18 @@ export async function fetchPortfolioBacktest(
 export async function fetchDailyBrief(
   provider: DataProviderMode,
   symbols?: string,
+  options?: RequestOptions,
 ): Promise<DailyBriefResponse> {
-  return apiGet<DailyBriefResponse>("/daily-brief", {
-    provider,
-    symbols,
-    limit: 5,
-    include_news: provider === "free",
-  });
+  return apiGet<DailyBriefResponse>(
+    "/daily-brief",
+    {
+      provider,
+      symbols,
+      limit: 5,
+      include_news: provider === "free",
+    },
+    options,
+  );
 }
 
 export async function saveDailyBriefRun(

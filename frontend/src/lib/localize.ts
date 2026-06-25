@@ -437,6 +437,10 @@ const DATA_HEALTH_VALUES: LabelMap = {
   CN_ALL: { zh: "全A股候选池", en: "All A-share candidates" },
   "CN:ALL": { zh: "全A股候选池", en: "All A-share candidates" },
   akshare_spot_em: { zh: "AKShare 东方财富实时行情", en: "AKShare Eastmoney spot" },
+  akshare_stock_board_concept_cons_em: {
+    zh: "AKShare 东方财富概念板块",
+    en: "AKShare Eastmoney concept board",
+  },
   akshare_index_stock_cons_csindex: {
     zh: "AKShare 中证指数成分股",
     en: "AKShare CSIndex constituents",
@@ -447,6 +451,7 @@ const DATA_HEALTH_VALUES: LabelMap = {
   },
   builtin_etf: { zh: "内置ETF映射", en: "Built-in ETF map" },
   fallback: { zh: "降级", en: "Fallback" },
+  builtin_theme_representative: { zh: "内置主题代表池", en: "Built-in theme representatives" },
   cn_liquid_starter: { zh: "A股30只流动性样本池", en: "A-share liquid starter" },
   skipped_for_dynamic_universe: { zh: "全市场动态池已跳过", en: "Skipped for dynamic universe" },
   ready: { zh: "可用", en: "Ready" },
