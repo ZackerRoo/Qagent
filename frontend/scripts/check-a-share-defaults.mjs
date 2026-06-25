@@ -22,11 +22,11 @@ function assert(condition, message) {
   }
 }
 
-const defaultSymbolsMatch = app.match(/const DEFAULT_SYMBOLS = "([^"]+)"/);
+const defaultSymbolsMatch = app.match(/const DEFAULT_SYMBOLS\s*=\s*"([^"]+)"/s);
 assert(defaultSymbolsMatch, "App.tsx must define DEFAULT_SYMBOLS");
 
 const defaultSymbols = defaultSymbolsMatch[1].split(",");
-assert(defaultSymbols.length >= 3, "A-share default universe should have at least 3 symbols");
+assert(defaultSymbols.length >= 20, "A-share default universe should have at least 20 symbols");
 assert(
   defaultSymbols.every((symbol) => symbol.startsWith("CN:")),
   `DEFAULT_SYMBOLS must be CN-only, got ${defaultSymbols.join(",")}`,

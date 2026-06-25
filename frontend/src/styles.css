@@ -613,6 +613,33 @@ tbody tr.selected {
   font-size: 13px;
 }
 
+.opportunity-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.opportunity-summary div {
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 9px;
+  background: #ffffff;
+}
+
+.opportunity-summary span {
+  display: block;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.opportunity-summary strong {
+  display: block;
+  margin-top: 2px;
+  color: #17202a;
+  font-size: 18px;
+}
+
 .risk-veto-summary {
   display: flex;
   gap: 8px;

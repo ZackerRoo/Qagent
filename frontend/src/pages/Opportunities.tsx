@@ -60,6 +60,7 @@ export function Opportunities({
             </span>
           </div>
           <ProfileNote card={selectedCard} profile={profile} />
+          <OpportunitySummary cards={cards} items={items} />
           <MarketOpportunitySections
             cards={cards}
             selectedCardId={selectedCard?.card_id}
@@ -96,6 +97,30 @@ export function Opportunities({
         </section>
       </div>
       <OpportunityDetail card={selectedCard} dataMode={dataMode} />
+    </div>
+  );
+}
+
+function OpportunitySummary({ cards, items }: { cards: OpportunityCard[]; items: ScanItem[] }) {
+  const { t } = useI18n();
+  const vetoed = cards.filter((card) => card.decision?.risk_status === "blocked").length;
+  const actionable = cards.length - vetoed;
+  const rejected = items.filter(isUnrecommended).length;
+
+  return (
+    <div className="opportunity-summary">
+      <div>
+        <span>{t("opportunities.actionable")}</span>
+        <strong>{actionable}</strong>
+      </div>
+      <div>
+        <span>{t("opportunities.vetoed")}</span>
+        <strong>{vetoed}</strong>
+      </div>
+      <div>
+        <span>{t("opportunities.rejected")}</span>
+        <strong>{rejected}</strong>
+      </div>
     </div>
   );
 }
