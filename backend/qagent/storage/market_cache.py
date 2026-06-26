@@ -32,34 +32,48 @@ class MarketDataCacheRepository:
             return 0
         normalized = _normalize_bars(bars)
         cached_at = datetime.now(timezone.utc)
-        saved = 0
+        records = []
+        for _, row in normalized.iterrows():
+            records.append(
+                {
+                    "provider_mode": provider_mode,
+                    "instrument_id": row["instrument_id"],
+                    "trade_date": row["trade_date"],
+                    "source_provider": str(row.get("provider") or provider_mode),
+                    "open": Decimal(str(row["open"])),
+                    "high": Decimal(str(row["high"])),
+                    "low": Decimal(str(row["low"])),
+                    "close": Decimal(str(row["close"])),
+                    "volume": Decimal(str(row["volume"])),
+                    "cached_at": cached_at,
+                    "updated_at": cached_at,
+                }
+            )
+        if not records:
+            return 0
         with self.session_factory() as session:
-            for _, row in normalized.iterrows():
-                cache_row = session.get(
-                    MarketBarCacheRow,
-                    {
-                        "provider_mode": provider_mode,
-                        "instrument_id": row["instrument_id"],
-                        "trade_date": row["trade_date"],
-                    },
-                )
-                if cache_row is None:
-                    cache_row = MarketBarCacheRow(
-                        provider_mode=provider_mode,
-                        instrument_id=row["instrument_id"],
-                        trade_date=row["trade_date"],
-                    )
-                    session.add(cache_row)
-                cache_row.source_provider = str(row.get("provider") or provider_mode)
-                cache_row.open = Decimal(str(row["open"]))
-                cache_row.high = Decimal(str(row["high"]))
-                cache_row.low = Decimal(str(row["low"]))
-                cache_row.close = Decimal(str(row["close"]))
-                cache_row.volume = Decimal(str(row["volume"]))
-                cache_row.cached_at = cached_at
-                saved += 1
+            statement = sqlite_insert(MarketBarCacheRow).values(records)
+            excluded = statement.excluded
+            statement = statement.on_conflict_do_update(
+                index_elements=[
+                    MarketBarCacheRow.provider_mode,
+                    MarketBarCacheRow.instrument_id,
+                    MarketBarCacheRow.trade_date,
+                ],
+                set_={
+                    "source_provider": excluded.source_provider,
+                    "open": excluded.open,
+                    "high": excluded.high,
+                    "low": excluded.low,
+                    "close": excluded.close,
+                    "volume": excluded.volume,
+                    "cached_at": excluded.cached_at,
+                    "updated_at": excluded.updated_at,
+                },
+            )
+            session.execute(statement)
             session.commit()
-        return saved
+        return len(records)
 
     def record_coverage(
         self,

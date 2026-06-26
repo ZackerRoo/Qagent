@@ -4,7 +4,10 @@ import {
   clearDataCache,
   fetchDataCache,
   fetchProviderStatus,
+  fetchTradableCatalog,
+  runFullMarketScan,
   runAutomation,
+  syncTradableCatalog,
 } from "../api/client";
 import { useI18n } from "../i18n";
 import { formatInstrumentLabel } from "../lib/instruments";
@@ -20,6 +23,7 @@ import type {
   DataProviderMode,
   MarketDataCacheResponse,
   ProviderStatusResponse,
+  TradableCatalogResponse,
   UniverseCreate,
   UniverseRecord,
 } from "../types";
@@ -45,6 +49,13 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
   const [providerStatus, setProviderStatus] = useState<ProviderStatusResponse>();
   const [dataCache, setDataCache] = useState<MarketDataCacheResponse>();
   const [automationResult, setAutomationResult] = useState<AutomationRunResponse>();
+  const [tradableCatalog, setTradableCatalog] = useState<TradableCatalogResponse>();
+  const [catalogQuery, setCatalogQuery] = useState("");
+  const [catalogAssetType, setCatalogAssetType] = useState("");
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogSyncing, setCatalogSyncing] = useState(false);
+  const [fullMarketScanning, setFullMarketScanning] = useState(false);
+  const [catalogMessage, setCatalogMessage] = useState("");
   const [universeForm, setUniverseForm] = useState<UniverseCreate>(emptyUniverse);
   const [saveMessage, setSaveMessage] = useState("");
   const [cacheMessage, setCacheMessage] = useState("");
@@ -54,12 +65,14 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
     async function load() {
       try {
         setError("");
-        const [providers, cache] = await Promise.all([
+        const [providers, cache, catalog] = await Promise.all([
           fetchProviderStatus(),
           fetchDataCache(dataMode),
+          fetchTradableCatalog("", 12),
         ]);
         setProviderStatus(providers);
         setDataCache(cache);
+        setTradableCatalog(catalog);
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : "Failed to load provider status");
       }
@@ -99,6 +112,60 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
       setDataCache(await fetchDataCache(dataMode));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Failed to run automation");
+    }
+  }
+
+  async function searchTradableCatalog() {
+    try {
+      setError("");
+      setCatalogLoading(true);
+      setTradableCatalog(
+        await fetchTradableCatalog(catalogQuery, 30, catalogAssetType || undefined),
+      );
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to search tradable catalog");
+    } finally {
+      setCatalogLoading(false);
+    }
+  }
+
+  async function syncTradableCatalogNow() {
+    try {
+      setError("");
+      setCatalogMessage("");
+      setCatalogSyncing(true);
+      const result = await syncTradableCatalog(true);
+      setCatalogMessage(
+        language === "zh"
+          ? `已同步 ${formatNumber(result.summary.total_count, language)} 个可交易标的`
+          : `Synced ${formatNumber(result.summary.total_count, language)} tradable instruments`,
+      );
+      setTradableCatalog(
+        await fetchTradableCatalog(catalogQuery, 30, catalogAssetType || undefined),
+      );
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to sync tradable catalog");
+    } finally {
+      setCatalogSyncing(false);
+    }
+  }
+
+  async function runFullMarketScanNow() {
+    try {
+      setError("");
+      setCatalogMessage("");
+      setFullMarketScanning(true);
+      const result = await runFullMarketScan(dataMode, 300, true);
+      setCatalogMessage(
+        language === "zh"
+          ? `已扫描 ${result.items.length} 个标的，生成 ${result.cards.length} 张机会卡`
+          : `Scanned ${result.items.length} instruments, created ${result.cards.length} cards`,
+      );
+      setDataCache(await fetchDataCache(dataMode));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to run full-market scan");
+    } finally {
+      setFullMarketScanning(false);
     }
   }
 
@@ -246,6 +313,103 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
         </div>
       </section>
 
+      <section className="panel stack">
+        <div className="panel-heading">
+          <h2>{t("settings.tradableCatalog")}</h2>
+          <span className="count">
+            {formatNumber(tradableCatalog?.summary.total_count ?? 0, language)}
+          </span>
+        </div>
+        <div className="metric-grid catalog-metrics">
+          <div>
+            <span>{t("settings.catalogTotal")}</span>
+            <strong>{formatNumber(tradableCatalog?.summary.total_count ?? 0, language)}</strong>
+          </div>
+          <div>
+            <span>{t("settings.catalogStocks")}</span>
+            <strong>{formatNumber(tradableCatalog?.summary.stock_count ?? 0, language)}</strong>
+          </div>
+          <div>
+            <span>{t("settings.catalogEtfs")}</span>
+            <strong>{formatNumber(tradableCatalog?.summary.etf_count ?? 0, language)}</strong>
+          </div>
+          <div>
+            <span>{t("settings.catalogSynced")}</span>
+            <strong>{formatTimestamp(tradableCatalog?.summary.last_synced_at ?? null)}</strong>
+          </div>
+        </div>
+        <div className="catalog-toolbar">
+          <input
+            value={catalogQuery}
+            onChange={(event) => setCatalogQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                void searchTradableCatalog();
+              }
+            }}
+            placeholder={t("settings.catalogSearchPlaceholder")}
+          />
+          <select
+            value={catalogAssetType}
+            onChange={(event) => setCatalogAssetType(event.target.value)}
+          >
+            <option value="">{t("settings.catalogAllTypes")}</option>
+            <option value="stock">{t("settings.catalogStock")}</option>
+            <option value="etf">{t("settings.catalogEtf")}</option>
+          </select>
+          <button type="button" onClick={searchTradableCatalog} disabled={catalogLoading}>
+            {catalogLoading ? t("common.refreshing") : t("common.load")}
+          </button>
+          <button type="button" onClick={syncTradableCatalogNow} disabled={catalogSyncing}>
+            {catalogSyncing ? t("common.refreshing") : t("settings.syncCatalog")}
+          </button>
+          <button type="button" onClick={runFullMarketScanNow} disabled={fullMarketScanning}>
+            {fullMarketScanning ? t("common.running") : t("settings.runFullMarketScan")}
+          </button>
+        </div>
+        {catalogMessage && <div className="empty-state">{catalogMessage}</div>}
+        <div className="settings-list">
+          <div>
+            <span>{t("settings.catalogExchange")}</span>
+            <strong>{formatExchangeSummary(tradableCatalog?.summary.exchanges ?? {}, language)}</strong>
+          </div>
+          <div>
+            <span>{t("settings.catalogCoverage")}</span>
+            <strong>{t("settings.catalogCoverageValue")}</strong>
+          </div>
+        </div>
+        {!tradableCatalog?.items.length ? (
+          <div className="empty-state">{t("settings.catalogEmpty")}</div>
+        ) : (
+          <div className="table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th>{t("common.name")}</th>
+                  <th>{t("common.symbol")}</th>
+                  <th>{t("settings.catalogType")}</th>
+                  <th>{t("settings.catalogExchange")}</th>
+                  <th>{t("settings.source")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tradableCatalog.items.map((item) => (
+                  <tr key={item.instrument_id}>
+                    <td className="ticker" title={item.instrument_id}>
+                      {item.label || formatInstrumentLabel(item.instrument_id)}
+                    </td>
+                    <td>{item.symbol}</td>
+                    <td>{formatAssetType(item.asset_type, language)}</td>
+                    <td>{formatExchange(item.exchange)}</td>
+                    <td className="reason-cell">{formatSource(item.source, language)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
       <section className="panel">
         <div className="panel-heading">
           <h2>{t("settings.providerReadiness")}</h2>
@@ -359,6 +523,47 @@ function formatTimestamp(value: string | null): string {
   return new Date(value).toLocaleString();
 }
 
+function formatNumber(value: number, language: "zh" | "en"): string {
+  return new Intl.NumberFormat(language === "zh" ? "zh-CN" : "en-US").format(value);
+}
+
+function formatAssetType(value: string, language: "zh" | "en"): string {
+  if (value === "stock") {
+    return language === "zh" ? "股票" : "Stock";
+  }
+  if (value === "etf") {
+    return "ETF";
+  }
+  return value;
+}
+
+function formatExchange(value: string): string {
+  if (value === "SZ") {
+    return "深交所";
+  }
+  if (value === "SH") {
+    return "上交所";
+  }
+  if (value === "BJ") {
+    return "北交所";
+  }
+  return value || "-";
+}
+
+function formatExchangeSummary(exchanges: Record<string, number>, language: "zh" | "en"): string {
+  const entries = Object.entries(exchanges).sort(([left], [right]) => left.localeCompare(right));
+  if (!entries.length) {
+    return "-";
+  }
+  return entries
+    .map(([exchange, count]) =>
+      language === "zh"
+        ? `${formatExchange(exchange)} ${formatNumber(count, language)}`
+        : `${exchange} ${formatNumber(count, language)}`,
+    )
+    .join(language === "zh" ? "、" : ", ");
+}
+
 function formatScope(value: string, language: "zh" | "en"): string {
   if (value === "CN") {
     return language === "zh" ? "A股" : "A-Shares";
@@ -378,6 +583,9 @@ function formatSource(value: string, language: "zh" | "en"): string {
   }
   if (value === "custom") {
     return language === "zh" ? "自定义" : "Custom";
+  }
+  if (value.includes("akshare_stock_info_a_code_name") || value.includes("akshare_fund_etf_spot_em")) {
+    return language === "zh" ? "免费行情目录" : "Free market catalog";
   }
   return value;
 }

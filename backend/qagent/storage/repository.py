@@ -15,6 +15,7 @@ from qagent.storage.tables import (
     OpportunitySnapshotRow,
     PositionRow,
     ScanRunRow,
+    TradableInstrumentRow,
     UniverseRow,
     WatchlistItemRow,
 )
@@ -133,6 +134,33 @@ class DeliveryOutboxRecord(BaseModel):
     sent_at: datetime | None
 
 
+class StoredTradableInstrument(BaseModel):
+    instrument_id: str
+    symbol: str
+    name: str
+    label: str
+    asset_type: str
+    exchange: str
+    source: str
+    tags: list[str] = Field(default_factory=list)
+    synced_at: datetime | None = None
+
+
+class TradableCatalogSummary(BaseModel):
+    total_count: int
+    stock_count: int
+    etf_count: int
+    other_count: int
+    exchanges: dict[str, int] = Field(default_factory=dict)
+    last_synced_at: datetime | None = None
+
+
+class TradableCatalogSearchResult(BaseModel):
+    items: list[StoredTradableInstrument]
+    summary: TradableCatalogSummary
+    data_health: dict[str, str] = Field(default_factory=dict)
+
+
 def _serialize_tags(tags: list[str]) -> str:
     return ",".join(tag.strip() for tag in tags if tag.strip())
 
@@ -234,6 +262,82 @@ class QagentRepository:
             if row is None:
                 return None
             return self._universe_from_row(row)
+
+    def replace_tradable_instruments(
+        self,
+        instruments: list,
+        data_health: dict[str, str] | None = None,
+    ) -> TradableCatalogSummary:
+        now = datetime.now(timezone.utc)
+        with self.session_factory() as session:
+            session.query(TradableInstrumentRow).delete()
+            for instrument in instruments:
+                tags = _instrument_tags(instrument)
+                session.add(
+                    TradableInstrumentRow(
+                        instrument_id=instrument.instrument_id,
+                        symbol=instrument.symbol,
+                        name=instrument.name,
+                        label=instrument.label,
+                        asset_type=instrument.asset_type,
+                        exchange=instrument.exchange,
+                        source=instrument.source,
+                        tags=_serialize_tags(tags),
+                        synced_at=now,
+                    )
+                )
+            session.commit()
+        return self.tradable_catalog_summary()
+
+    def tradable_catalog_summary(self) -> TradableCatalogSummary:
+        with self.session_factory() as session:
+            rows = session.query(TradableInstrumentRow).all()
+            return _tradable_summary(rows)
+
+    def search_tradable_instruments(
+        self,
+        query: str = "",
+        asset_type: str | None = None,
+        limit: int = 50,
+    ) -> TradableCatalogSearchResult:
+        normalized_query = query.strip().upper()
+        normalized_asset = asset_type.strip().lower() if asset_type else None
+        with self.session_factory() as session:
+            rows = session.query(TradableInstrumentRow).all()
+        filtered = []
+        for row in rows:
+            if normalized_asset and row.asset_type.lower() != normalized_asset:
+                continue
+            if normalized_query and not _matches_tradable_row(row, normalized_query):
+                continue
+            filtered.append(row)
+        if normalized_query:
+            filtered.sort(key=lambda row: _tradable_match_rank(row, normalized_query))
+        else:
+            filtered.sort(key=lambda row: (_asset_browse_rank(row.asset_type), row.symbol))
+        capped = filtered[: max(limit, 0)]
+        return TradableCatalogSearchResult(
+            items=[self._tradable_instrument_from_row(row) for row in capped],
+            summary=_tradable_summary(rows),
+            data_health={
+                "tradable_catalog": "sqlite",
+                "tradable_matched": str(len(filtered)),
+                "tradable_returned": str(len(capped)),
+            },
+        )
+
+    def list_tradable_instruments(
+        self,
+        asset_types: set[str] | None = None,
+        limit: int = 500,
+    ) -> list[StoredTradableInstrument]:
+        normalized_types = {item.lower() for item in asset_types or set()}
+        with self.session_factory() as session:
+            rows = session.query(TradableInstrumentRow).all()
+        if normalized_types:
+            rows = [row for row in rows if row.asset_type.lower() in normalized_types]
+        rows.sort(key=lambda row: (_asset_browse_rank(row.asset_type), row.symbol))
+        return [self._tradable_instrument_from_row(row) for row in rows[: max(limit, 0)]]
 
     def save_scan_run(
         self,
@@ -470,6 +574,20 @@ class QagentRepository:
         )
 
     @staticmethod
+    def _tradable_instrument_from_row(row: TradableInstrumentRow) -> StoredTradableInstrument:
+        return StoredTradableInstrument(
+            instrument_id=row.instrument_id,
+            symbol=row.symbol,
+            name=row.name,
+            label=row.label,
+            asset_type=row.asset_type,
+            exchange=row.exchange,
+            source=row.source,
+            tags=_parse_tags(row.tags),
+            synced_at=row.synced_at,
+        )
+
+    @staticmethod
     def _snapshot_row_from_card(
         run_id: str,
         card: OpportunityCard,
@@ -568,3 +686,82 @@ def _decimal_or_none(value: object) -> Decimal | None:
     if value is None:
         return None
     return Decimal(str(value))
+
+
+def _instrument_tags(instrument) -> list[str]:
+    tags = [instrument.asset_type, instrument.exchange]
+    name = instrument.name
+    if "ETF" in name.upper():
+        tags.extend(["etf", "index_tool"])
+    if "半导体" in name or "芯片" in name:
+        tags.extend(["semiconductor", "chip"])
+    if "科创" in name:
+        tags.append("star_market")
+    return tags
+
+
+def _tradable_summary(rows: list[TradableInstrumentRow]) -> TradableCatalogSummary:
+    exchanges: dict[str, int] = {}
+    last_synced_at = None
+    for row in rows:
+        exchanges[row.exchange] = exchanges.get(row.exchange, 0) + 1
+        if row.synced_at and (last_synced_at is None or row.synced_at > last_synced_at):
+            last_synced_at = row.synced_at
+    stock_count = sum(1 for row in rows if row.asset_type == "stock")
+    etf_count = sum(1 for row in rows if row.asset_type == "etf")
+    return TradableCatalogSummary(
+        total_count=len(rows),
+        stock_count=stock_count,
+        etf_count=etf_count,
+        other_count=len(rows) - stock_count - etf_count,
+        exchanges=exchanges,
+        last_synced_at=last_synced_at,
+    )
+
+
+def _matches_tradable_row(row: TradableInstrumentRow, query: str) -> bool:
+    haystack = " ".join(
+        [
+            row.instrument_id,
+            row.symbol,
+            row.name,
+            row.label,
+            row.asset_type,
+            row.exchange,
+            row.tags,
+            f"{row.symbol}.{row.exchange}",
+        ]
+    ).upper()
+    return query in haystack
+
+
+def _tradable_match_rank(row: TradableInstrumentRow, query: str) -> tuple[int, int, int, str]:
+    symbol = row.symbol.upper()
+    name = row.name.upper()
+    label = row.label.upper()
+    token = row.instrument_id.upper()
+    exchange_label = f"{symbol}.{row.exchange}".upper()
+    asset_rank = _asset_sort_rank(row.asset_type)
+    if query in {symbol, exchange_label, token}:
+        return (0, asset_rank, 0, symbol)
+    if query in {name, label}:
+        return (1, asset_rank, len(name), symbol)
+    if symbol.startswith(query):
+        return (2, asset_rank, len(symbol), symbol)
+    if name.startswith(query):
+        return (3, asset_rank, len(name), symbol)
+    if label.startswith(query):
+        return (4, asset_rank, len(label), symbol)
+    if query in name:
+        return (5, asset_rank, name.index(query), symbol)
+    if query in label:
+        return (6, asset_rank, label.index(query), symbol)
+    return (9, asset_rank, len(label), symbol)
+
+
+def _asset_sort_rank(asset_type: str) -> int:
+    return {"etf": 0, "stock": 1}.get(asset_type, 2)
+
+
+def _asset_browse_rank(asset_type: str) -> int:
+    return {"stock": 0, "etf": 1}.get(asset_type, 2)

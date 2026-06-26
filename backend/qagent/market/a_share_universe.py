@@ -14,6 +14,7 @@ from qagent.market.cn_universe_tokens import (
     resolve_cn_universe_token,
 )
 from qagent.market.instruments import register_cn_instrument_names
+from qagent.market.tradable import load_cn_tradable_instruments
 from qagent.market.universe import DEFAULT_A_SHARE_STARTER_UNIVERSE
 
 
@@ -164,7 +165,7 @@ def _resolve_all_a_share_token(
         "universe_limit": str(limit),
         "universe_supplements": "included",
         "universe_supplemental_selected": str(supplemental_selected),
-        "universe_components": "流动性动态样本,核心ETF,主要指数代表,主题代表",
+        "universe_components": "流动性动态样本,核心ETF,全市场ETF,主要指数代表,主题代表",
         "universe_filters": "; ".join(selection.filters),
     }
     if selection.excluded_counts:
@@ -182,6 +183,14 @@ def _build_all_a_share_supplements() -> list[str]:
     for definition in ETF_UNIVERSES.values():
         symbols.extend(definition.symbols)
         names.update(definition.names)
+    try:
+        catalog = load_cn_tradable_instruments(include_full_etfs=True, use_cache=True)
+        for item in catalog.items:
+            if item.asset_type == "etf":
+                symbols.append(item.symbol)
+                names.setdefault(item.symbol, item.name)
+    except Exception:
+        pass
     for definition in INDEX_UNIVERSES.values():
         symbols.extend(definition.fallback_symbols)
         names.update(definition.fallback_names)

@@ -13,6 +13,7 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - Delivery outbox for saved briefs and alert runs, with queued/sent status plus local Markdown-file and webhook sender adapters.
 - One-command automation runner for scan history, daily brief save/queue, optional alerts, optional backtest validation, and optional outbox sending.
 - A-share free market data via `akshare`, with `baostock` fallback.
+- Local A-share tradable catalog sync backed by free `akshare` stock and ETF directories; current free sync covers A-share stocks plus listed ETFs and stores them in SQLite for search and scan sampling.
 - US free market data via `yfinance` remains available for explicit symbols, but is not the default dashboard route.
 - Strategy registry covering trend momentum, breakout + volume, healthy pullback, GF-DMA health, catalyst transmission, PEAD, analyst revisions, TAM-adjusted PEG, Bayesian growth valuation, sector regime, short squeeze risk, options flow, and insider/institutional confirmation.
 - Strategy-data provider contract for earnings events, SEC filings, A-share announcements, fundamentals, valuation multiples, and analyst context.
@@ -23,6 +24,7 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - Opportunity cards with primary strategy, strategy score, rank score, ranking reasons, strategy stack, trigger, no-chase level, stop, targets, risk/reward, scenario percentages, signal stack evidence, opportunity bucket, and asset/theme tags.
 - Research decision layer on each card with action, conviction score, component scores, suggested risk budget, failure conditions, and verification checks.
 - Built-in and custom stock universes for starter theme pools and editable user pools.
+- Full-market A-share browsing/search in Settings, including stock/ETF counts, exchange coverage, sync timestamp, Chinese labels, and manual resync.
 - Scan coverage table showing `setup_ready`, `no_setup`, or `no_data` per symbol plus passed/watch/missing strategy counts.
 - Strategy health summary with sample count, 10-day win rate, average 10/20-day forward return, max 10-day loss, and readiness labels.
 - A-share multifactor ranking layer using momentum, trend quality, liquidity, low-risk, and reversal constraints, with per-factor attribution, flags, and combined opportunity scoring.
@@ -112,6 +114,9 @@ curl 'http://127.0.0.1:8000/api/backtest?provider=fixture&start=2026-01-30&end=2
 curl 'http://127.0.0.1:8000/api/portfolio-backtest?provider=fixture&start=2026-01-30&end=2026-03-20&step_days=5'
 curl 'http://127.0.0.1:8000/api/alert-suggestions'
 curl 'http://127.0.0.1:8000/api/universes'
+curl -X POST 'http://127.0.0.1:8000/api/tradable-catalog/sync?include_full_etfs=true'
+curl 'http://127.0.0.1:8000/api/tradable-catalog?q=科创&limit=20'
+curl -X POST 'http://127.0.0.1:8000/api/full-market/scan?provider=free&max_symbols=300&include_etfs=true'
 curl -X POST 'http://127.0.0.1:8000/api/alerts/run?provider=fixture&queue=true&recipient=local'
 curl 'http://127.0.0.1:8000/api/provider-status'
 curl 'http://127.0.0.1:8000/api/data-cache?provider=free'

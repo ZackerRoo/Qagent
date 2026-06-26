@@ -40,6 +40,26 @@ export type InstrumentSearchResponse = {
   data_health: Record<string, string>;
 };
 
+export type TradableCatalogSummary = {
+  total_count: number;
+  stock_count: number;
+  etf_count: number;
+  other_count: number;
+  exchanges: Record<string, number>;
+  last_synced_at: string | null;
+};
+
+export type TradableCatalogResponse = {
+  items: TradableInstrument[];
+  summary: TradableCatalogSummary;
+  data_health: Record<string, string>;
+};
+
+export type TradableCatalogSyncResponse = {
+  summary: TradableCatalogSummary;
+  data_health: Record<string, string>;
+};
+
 export type OpportunityStatus =
   | "new_idea"
   | "watch"
@@ -370,6 +390,10 @@ export type OpportunitiesResponse = {
   sector_strength: SectorStrength[];
   portfolio_plan: PortfolioPlan;
   data_health: Record<string, string>;
+};
+
+export type FullMarketScanResponse = OpportunitiesResponse & {
+  symbols: string[];
 };
 
 export type MarketBarPoint = {

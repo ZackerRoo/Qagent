@@ -74,6 +74,24 @@ def test_market_data_cache_records_coverage_idempotently_under_concurrency(tmp_p
     assert repo.has_coverage("free", "CN:000021", date(2026, 1, 1), date(2026, 12, 31))
 
 
+def test_market_data_cache_upserts_daily_bars_under_concurrency(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    bars = FixtureMarketDataProvider().get_daily_bars(
+        ["US:TEST"], date(2026, 1, 1), date(2026, 1, 20)
+    )
+
+    def save_once(_index: int) -> int:
+        return repo.save_daily_bars("fixture", bars)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        saved_counts = list(executor.map(save_once, range(12)))
+
+    loaded = repo.load_daily_bars("fixture", ["US:TEST"], date(2026, 1, 1), date(2026, 1, 20))
+
+    assert all(saved == len(bars) for saved in saved_counts)
+    assert len(loaded) == len(bars)
+
+
 class CountingProvider:
     name = "fixture"
 

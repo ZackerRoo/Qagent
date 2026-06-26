@@ -10,6 +10,10 @@ from qagent.market.a_share_universe import (
 from qagent.market.instruments import format_instrument_label
 
 
+class EmptyCatalog:
+    items = []
+
+
 def test_build_a_share_universe_filters_and_ranks_candidates(monkeypatch):
     def fake_spot():
         return pd.DataFrame(
@@ -47,6 +51,10 @@ def test_resolve_symbol_tokens_expands_cn_all_and_registers_names(monkeypatch):
         )
 
     monkeypatch.setattr("qagent.market.a_share_universe.ak", SimpleNamespace(stock_zh_a_spot_em=fake_spot))
+    monkeypatch.setattr(
+        "qagent.market.a_share_universe.load_cn_tradable_instruments",
+        lambda include_full_etfs=True, use_cache=True: EmptyCatalog(),
+    )
 
     resolved = resolve_symbol_tokens([CN_ALL_TOKEN], limit=2, min_turnover=100_000_000)
 
@@ -63,6 +71,35 @@ def test_resolve_symbol_tokens_expands_cn_all_and_registers_names(monkeypatch):
     assert format_instrument_label("CN:588000") == "科创50ETF 588000.SH"
 
 
+def test_resolve_symbol_tokens_adds_full_etf_catalog_to_cn_all(monkeypatch):
+    def fake_spot():
+        return pd.DataFrame(
+            {
+                "代码": ["000001"],
+                "名称": ["平安银行"],
+                "最新价": [10.2],
+                "成交额": [900_000_000],
+            }
+        )
+
+    class FakeCatalog:
+        items = [
+            SimpleNamespace(symbol="512480", name="半导体ETF", asset_type="etf"),
+            SimpleNamespace(symbol="000001", name="平安银行", asset_type="stock"),
+        ]
+
+    monkeypatch.setattr("qagent.market.a_share_universe.ak", SimpleNamespace(stock_zh_a_spot_em=fake_spot))
+    monkeypatch.setattr(
+        "qagent.market.a_share_universe.load_cn_tradable_instruments",
+        lambda include_full_etfs=True, use_cache=True: FakeCatalog(),
+    )
+
+    resolved = resolve_symbol_tokens([CN_ALL_TOKEN], limit=1, min_turnover=100_000_000)
+
+    assert "CN:512480" in resolved.symbols
+    assert resolved.data_health["universe_components"] == "流动性动态样本,核心ETF,全市场ETF,主要指数代表,主题代表"
+
+
 def test_resolve_symbol_tokens_keeps_manual_symbols_without_dynamic_metadata():
     resolved = resolve_symbol_tokens(["CN:000001", "CN:000001", "CN:600519"])
 
@@ -75,6 +112,10 @@ def test_resolve_symbol_tokens_falls_back_to_starter_when_full_universe_fails(mo
         raise ConnectionError("rate limited")
 
     monkeypatch.setattr("qagent.market.a_share_universe.ak", SimpleNamespace(stock_zh_a_spot_em=fake_spot))
+    monkeypatch.setattr(
+        "qagent.market.a_share_universe.load_cn_tradable_instruments",
+        lambda include_full_etfs=True, use_cache=True: EmptyCatalog(),
+    )
 
     resolved = resolve_symbol_tokens([CN_ALL_TOKEN], limit=3)
 

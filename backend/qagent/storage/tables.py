@@ -72,6 +72,23 @@ class UniverseRow(Base):
     )
 
 
+class TradableInstrumentRow(Base):
+    __tablename__ = "tradable_instruments"
+
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str] = mapped_column(String(128), index=True)
+    label: Mapped[str] = mapped_column(String(160))
+    asset_type: Mapped[str] = mapped_column(String(32), index=True)
+    exchange: Mapped[str] = mapped_column(String(16), index=True)
+    source: Mapped[str] = mapped_column(String(96), default="")
+    tags: Mapped[str] = mapped_column(Text, default="")
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
 class MarketBarCacheRow(Base):
     __tablename__ = "market_bar_cache"
 

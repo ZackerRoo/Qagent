@@ -11,6 +11,8 @@ dist/
 data/*.db
 data/*.db-*
 data/*.log
+data/*.pid
 data/outbox*/
+.qagent-cache/
 backend/.qagent-cache/
 .env

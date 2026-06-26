@@ -15,6 +15,7 @@ from qagent.db import create_session_factory, initialize_database
 from qagent.factors.backtest import run_factor_backtest
 from qagent.jobs.automation import run_research_automation
 from qagent.jobs.daily_scan import run_daily_scan
+from qagent.jobs.full_market import run_full_market_scan, sync_cn_tradable_catalog
 from qagent.jobs.alert_runner import run_alert_rules
 from qagent.jobs.intraday_check import evaluate_snapshot_alerts
 from qagent.market.a_share_universe import ResolvedSymbols, resolve_symbol_tokens
@@ -969,6 +970,54 @@ def instrument_search(q: str = "", limit: int = 50) -> dict[str, object]:
     return {
         "items": [item.model_dump(mode="json") for item in catalog.items],
         "data_health": catalog.data_health,
+    }
+
+
+@router.post("/tradable-catalog/sync")
+def sync_tradable_catalog(include_full_etfs: bool = True) -> dict[str, object]:
+    result = sync_cn_tradable_catalog(repo=_repo(), include_full_etfs=include_full_etfs)
+    return result.model_dump(mode="json")
+
+
+@router.get("/tradable-catalog")
+def tradable_catalog(
+    q: str = "",
+    asset_type: str | None = None,
+    limit: int = 50,
+) -> dict[str, object]:
+    if limit <= 0 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+    result = _repo().search_tradable_instruments(q, asset_type=asset_type, limit=limit)
+    return result.model_dump(mode="json")
+
+
+@router.post("/full-market/scan")
+def full_market_scan(
+    provider: str = "free",
+    max_symbols: int = 300,
+    include_etfs: bool = True,
+    sync_if_empty: bool = True,
+) -> dict[str, object]:
+    if max_symbols <= 0 or max_symbols > 1000:
+        raise HTTPException(status_code=400, detail="max_symbols must be between 1 and 1000")
+    mode = provider.strip().lower()
+    result = run_full_market_scan(
+        repo=_repo(),
+        provider_mode=mode,
+        max_symbols=max_symbols,
+        include_etfs=include_etfs,
+        sync_if_empty=sync_if_empty,
+    )
+    _repo().save_scan_run(provider=mode, mode=mode, symbols=result.symbols, result=result.scan)
+    return {
+        "symbols": result.symbols,
+        "cards": [card.model_dump(mode="json") for card in result.scan.cards],
+        "items": [item.model_dump(mode="json") for item in result.scan.items],
+        "strategy_health": [item.model_dump(mode="json") for item in result.scan.strategy_health],
+        "factor_rankings": [item.model_dump(mode="json") for item in result.scan.factor_rankings],
+        "sector_strength": [item.model_dump(mode="json") for item in result.scan.sector_strength],
+        "portfolio_plan": result.scan.portfolio_plan.model_dump(mode="json"),
+        "data_health": result.data_health,
     }
 
 

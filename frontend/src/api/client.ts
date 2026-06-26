@@ -18,6 +18,7 @@ import type {
   DeliveriesResponse,
   DeliveryOutboxRecord,
   FactorBacktestResponse,
+  FullMarketScanResponse,
   InstrumentSearchResponse,
   IntradayRadarResponse,
   MarketBarsResponse,
@@ -37,6 +38,8 @@ import type {
   ScanRunsResponse,
   StrategyDiagnosticsResponse,
   StrategyPerformanceResponse,
+  TradableCatalogResponse,
+  TradableCatalogSyncResponse,
   UniverseCreate,
   UniverseRecord,
   UniversesResponse,
@@ -64,9 +67,14 @@ type ScanParams = {
   initial_capital?: string | number;
   risk_per_trade_pct?: string | number;
   max_positions?: number;
+  max_symbols?: number;
   transaction_cost_bps?: string | number;
   slippage_bps?: string | number;
   days?: number;
+  asset_type?: string;
+  include_full_etfs?: boolean;
+  include_etfs?: boolean;
+  sync_if_empty?: boolean;
 };
 
 type RequestOptions = {
@@ -129,6 +137,9 @@ function queryString(params?: ScanParams): string {
   if (params.max_positions) {
     search.set("max_positions", String(params.max_positions));
   }
+  if (params.max_symbols) {
+    search.set("max_symbols", String(params.max_symbols));
+  }
   if (params.transaction_cost_bps) {
     search.set("transaction_cost_bps", String(params.transaction_cost_bps));
   }
@@ -137,6 +148,18 @@ function queryString(params?: ScanParams): string {
   }
   if (params.days) {
     search.set("days", String(params.days));
+  }
+  if (params.asset_type) {
+    search.set("asset_type", params.asset_type);
+  }
+  if (params.include_full_etfs !== undefined) {
+    search.set("include_full_etfs", String(params.include_full_etfs));
+  }
+  if (params.include_etfs !== undefined) {
+    search.set("include_etfs", String(params.include_etfs));
+  }
+  if (params.sync_if_empty !== undefined) {
+    search.set("sync_if_empty", String(params.sync_if_empty));
   }
   const value = search.toString();
   return value ? `?${value}` : "";
@@ -299,6 +322,43 @@ export async function fetchInstrumentSearch(
   limit = 20,
 ): Promise<InstrumentSearchResponse> {
   return apiGet<InstrumentSearchResponse>("/instruments/search", { q, limit });
+}
+
+export async function syncTradableCatalog(
+  includeFullEtfs = true,
+): Promise<TradableCatalogSyncResponse> {
+  return apiPost<TradableCatalogSyncResponse>(
+    `/tradable-catalog/sync${queryString({ include_full_etfs: includeFullEtfs })}`,
+    {},
+  );
+}
+
+export async function fetchTradableCatalog(
+  q = "",
+  limit = 50,
+  assetType?: string,
+): Promise<TradableCatalogResponse> {
+  return apiGet<TradableCatalogResponse>("/tradable-catalog", {
+    q,
+    limit,
+    asset_type: assetType,
+  });
+}
+
+export async function runFullMarketScan(
+  provider: DataProviderMode,
+  maxSymbols = 300,
+  includeEtfs = true,
+): Promise<FullMarketScanResponse> {
+  return apiPost<FullMarketScanResponse>(
+    `/full-market/scan${queryString({
+      provider,
+      max_symbols: maxSymbols,
+      include_etfs: includeEtfs,
+      sync_if_empty: true,
+    })}`,
+    {},
+  );
 }
 
 export async function fetchCatalysts(symbols: string): Promise<CatalystsResponse> {
