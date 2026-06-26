@@ -2,6 +2,7 @@ from datetime import date
 
 from pydantic import BaseModel, Field
 
+from qagent.cards.factor_watch import build_factor_watch_cards
 from qagent.cards.generator import OpportunityCardGenerator
 from qagent.domain.models import OpportunityCard, PortfolioPlan, SectorStrength, TradabilityAssessment, TradingStatus
 from qagent.factors.engine import build_factor_rankings
@@ -16,6 +17,7 @@ from qagent.recommendations.cn_execution import build_trading_constraints
 from qagent.recommendations.decision import build_research_decision
 from qagent.recommendations.enrichment import enrich_opportunity_card
 from qagent.recommendations.portfolio import build_portfolio_plan
+from qagent.recommendations.rotation import sort_recommendation_cards
 from qagent.signals.engine import SignalEngine
 from qagent.strategy_data.models import AnalystInsight, EarningsEvent, FilingEvent, FundamentalSnapshot
 from qagent.strategy_data.providers import StrategyDataProvider, build_strategy_data_provider
@@ -74,6 +76,8 @@ def run_daily_scan(
     cards: list[OpportunityCard] = []
     items: list[ScanItem] = []
     bars_by_instrument = {}
+    trading_status_by_instrument = {}
+    tradability_by_instrument = {}
     strategy_filings_count = 0
     strategy_announcements_count = 0
     strategy_fundamentals_count = 0
@@ -154,6 +158,8 @@ def run_daily_scan(
             trading_status,
             trading_constraints,
         )
+        trading_status_by_instrument[instrument_id] = trading_status
+        tradability_by_instrument[instrument_id] = tradability
         if card:
             card.trading_constraints = trading_constraints
             card.trading_status = trading_status
@@ -175,15 +181,27 @@ def run_daily_scan(
     for ranking in factor_rankings:
         ranking.instrument_label = format_instrument_label(ranking.instrument_id)
     factor_by_id = {ranking.instrument_id: ranking for ranking in factor_rankings}
+    factor_watch_cards = build_factor_watch_cards(
+        factor_rankings=factor_rankings,
+        bars_by_instrument=bars_by_instrument,
+        existing_instrument_ids={card.instrument_id for card in cards},
+    )
+    for card in factor_watch_cards:
+        card.trading_status = trading_status_by_instrument.get(card.instrument_id)
+        card.tradability = tradability_by_instrument.get(card.instrument_id)
+        card.decision = build_research_decision(card)
+        enrich_opportunity_card(card)
+    cards.extend(factor_watch_cards)
     strategy_health = build_strategy_health_from_bars(bars_by_instrument, registry)
     apply_strategy_calibration(cards, strategy_health)
     for card in cards:
         _apply_factor_to_card(card, factor_by_id.get(card.instrument_id))
         card.decision = build_research_decision(card)
         enrich_opportunity_card(card)
-    cards.sort(key=_card_priority_score, reverse=True)
+    cards = sort_recommendation_cards(cards)
     for item in items:
         _apply_factor_to_item(item, factor_by_id.get(item.instrument_id))
+    _promote_items_for_cards(items, cards)
 
     sector_strength = build_sector_strength(cards, bars_by_instrument)
     portfolio_plan = build_portfolio_plan(cards)
@@ -255,8 +273,17 @@ def _apply_factor_to_item(item: ScanItem, ranking: FactorRanking | None) -> None
     item.factor_flags = ranking.flags
 
 
-def _card_priority_score(card: OpportunityCard) -> float:
-    return round(card.rank_score * 0.55 + card.factor_score * 0.45, 4)
+def _promote_items_for_cards(items: list[ScanItem], cards: list[OpportunityCard]) -> None:
+    card_by_instrument = {card.instrument_id: card for card in cards}
+    for item in items:
+        card = card_by_instrument.get(item.instrument_id)
+        if card is None or item.status != "no_setup":
+            continue
+        item.status = card.status.value
+        if card.primary_strategy_id == "factor_rotation_watch":
+            item.reason = "Factor ranking generated an observation card."
+        else:
+            item.reason = "Opportunity card generated."
 
 
 def _scan_item(

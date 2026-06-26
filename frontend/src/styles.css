@@ -425,6 +425,127 @@ h3 {
   font-size: 14px;
 }
 
+.opportunity-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.opportunity-card {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  padding: 12px;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.opportunity-card:hover,
+.opportunity-card.selected {
+  border-color: #8fb7d8;
+  background: #f7fbff;
+}
+
+.opportunity-card header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.opportunity-card h3 {
+  margin: 0;
+  color: #0f4c81;
+  font-size: 16px;
+  line-height: 1.25;
+}
+
+.opportunity-card header p,
+.opportunity-headline,
+.opportunity-card-meta {
+  margin: 0;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.opportunity-tags,
+.opportunity-card-footer,
+.opportunity-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.opportunity-tags span,
+.bucket {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  border: 1px solid #d8dee8;
+  border-radius: 6px;
+  padding: 2px 7px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.bucket-etf_index,
+.bucket-theme_growth {
+  border-color: #bfd7ea;
+  background: #eef7ff;
+  color: #0f4c81;
+}
+
+.bucket-today_action {
+  border-color: #b7e4c7;
+  background: #edf9f0;
+  color: #116b3c;
+}
+
+.bucket-risk_filtered {
+  border-color: #ffc7c7;
+  background: #fff0f0;
+  color: #9f1f1f;
+}
+
+.trade-plan-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.trade-plan-strip div {
+  min-width: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 7px;
+  background: #f8fafc;
+}
+
+.trade-plan-strip span {
+  display: block;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.trade-plan-strip strong {
+  display: block;
+  margin-top: 2px;
+  color: #17202a;
+  font-size: 13px;
+}
+
+.opportunity-card-footer small,
+.opportunity-card-meta span {
+  color: #64748b;
+  font-size: 12px;
+}
+
 table {
   width: max-content;
   min-width: 100%;
@@ -1340,6 +1461,7 @@ tbody tr.selected {
   .split-grid,
   .brief-grid,
   .metric-grid,
+  .opportunity-card-grid,
   .recommendation-grid,
   .context-grid,
   .sector-strength-grid,
@@ -1423,5 +1545,9 @@ tbody tr.selected {
   .panel,
   .agent-panel {
     padding: 12px;
+  }
+
+  .trade-plan-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

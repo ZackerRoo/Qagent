@@ -40,6 +40,18 @@ def test_market_context_adds_storage_chip_theme_labels():
     assert "国产替代" in context.themes
 
 
+def test_market_context_covers_core_etfs_and_ai_compute_theme_names():
+    etf = build_market_context("CN:510300", instrument_label="沪深300ETF 510300.SH")
+    optical = build_market_context("CN:002281", instrument_label="光迅科技 002281.SZ")
+
+    assert etf.industry == "指数ETF"
+    assert "沪深300ETF" in etf.index_memberships
+    assert "指数工具" in etf.themes
+    assert optical.industry == "光通信"
+    assert "AI算力供应链" in optical.themes
+    assert "CPO" in optical.themes
+
+
 def test_daily_scan_cards_include_cn_constraints_context_and_chinese_summary():
     result = run_daily_scan(
         instrument_ids=["CN:000001"],

@@ -75,6 +75,10 @@ export type OpportunityCard = {
   instrument_id: string;
   instrument_label: string | null;
   market: Market;
+  asset_type: string;
+  opportunity_bucket: string;
+  opportunity_tags: string[];
+  rotation_note: string | null;
   status: OpportunityStatus;
   thesis: string;
   score: number;

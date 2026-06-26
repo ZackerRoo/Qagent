@@ -13,6 +13,21 @@ KNOWN_CONTEXT: dict[str, dict[str, list[str] | str]] = {
         "themes": ["AI算力供应链", "5G", "国产替代"],
         "index_memberships": ["沪深300"],
     },
+    "002156": {
+        "industry": "半导体封测",
+        "themes": ["存储芯片", "先进封装", "国产替代"],
+        "index_memberships": ["中证1000"],
+    },
+    "002281": {
+        "industry": "光通信",
+        "themes": ["AI算力供应链", "CPO", "光通信"],
+        "index_memberships": ["中证1000"],
+    },
+    "002371": {
+        "industry": "半导体设备",
+        "themes": ["国产替代", "先进制程", "芯片设备"],
+        "index_memberships": ["沪深300"],
+    },
     "300033": {
         "industry": "金融科技",
         "themes": ["证券IT", "AI应用"],
@@ -83,10 +98,60 @@ KNOWN_CONTEXT: dict[str, dict[str, list[str] | str]] = {
         "themes": ["AI算力供应链", "CPO", "光通信"],
         "index_memberships": ["中证1000"],
     },
+    "300394": {
+        "industry": "光通信",
+        "themes": ["AI算力供应链", "CPO", "光通信"],
+        "index_memberships": ["创业板"],
+    },
+    "300475": {
+        "industry": "存储芯片",
+        "themes": ["存储芯片", "HBM", "国产替代"],
+        "index_memberships": ["创业板"],
+    },
+    "300502": {
+        "industry": "光模块",
+        "themes": ["AI算力供应链", "CPO", "光通信"],
+        "index_memberships": ["创业板"],
+    },
+    "300223": {
+        "industry": "存储芯片",
+        "themes": ["存储芯片", "MCU", "国产替代"],
+        "index_memberships": ["创业板"],
+    },
+    "603019": {
+        "industry": "AI服务器",
+        "themes": ["AI算力供应链", "国产服务器", "数据中心"],
+        "index_memberships": ["中证500"],
+    },
+    "688347": {
+        "industry": "晶圆代工",
+        "themes": ["半导体", "国产替代", "先进制程"],
+        "index_memberships": ["科创板"],
+    },
     "588000": {
         "industry": "指数ETF",
         "themes": ["科创板", "硬科技"],
         "index_memberships": ["科创50ETF"],
+    },
+    "510300": {
+        "industry": "指数ETF",
+        "themes": ["大盘蓝筹", "指数工具"],
+        "index_memberships": ["沪深300ETF"],
+    },
+    "510500": {
+        "industry": "指数ETF",
+        "themes": ["中盘成长", "指数工具"],
+        "index_memberships": ["中证500ETF"],
+    },
+    "512100": {
+        "industry": "指数ETF",
+        "themes": ["小盘成长", "指数工具"],
+        "index_memberships": ["中证1000ETF"],
+    },
+    "159949": {
+        "industry": "指数ETF",
+        "themes": ["创业板", "成长股", "指数工具"],
+        "index_memberships": ["创业板50ETF"],
     },
 }
 

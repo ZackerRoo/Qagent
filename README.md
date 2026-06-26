@@ -20,12 +20,14 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - Free-data strategy evaluator for trend momentum, breakout + volume, healthy pullback, GF-DMA health, PEAD when earnings actuals/estimates exist, analyst revision when estimate revisions exist, TAM-adjusted PEG, Bayesian growth valuation, and A-share limit-status confirmation.
 - Missing-data handling for strategies that need unavailable estimates, options flow, insider transactions, institutional filings, sector breadth, or short-interest data.
 - Strategy-specific trade plans for breakout, healthy pullback, and PEAD earnings drift.
-- Opportunity cards with primary strategy, strategy score, rank score, ranking reasons, strategy stack, trigger, no-chase level, stop, targets, risk/reward, scenario percentages, and signal stack evidence.
+- Opportunity cards with primary strategy, strategy score, rank score, ranking reasons, strategy stack, trigger, no-chase level, stop, targets, risk/reward, scenario percentages, signal stack evidence, opportunity bucket, and asset/theme tags.
 - Research decision layer on each card with action, conviction score, component scores, suggested risk budget, failure conditions, and verification checks.
 - Built-in and custom stock universes for starter theme pools and editable user pools.
 - Scan coverage table showing `setup_ready`, `no_setup`, or `no_data` per symbol plus passed/watch/missing strategy counts.
 - Strategy health summary with sample count, 10-day win rate, average 10/20-day forward return, max 10-day loss, and readiness labels.
 - A-share multifactor ranking layer using momentum, trend quality, liquidity, low-risk, and reversal constraints, with per-factor attribution, flags, and combined opportunity scoring.
+- Factor-watch cards for high-ranked A-share/ETF/theme candidates that have not yet triggered a full strategy signal; these are shown as watch/trigger plans, not confirmed buy signals.
+- Rotation-aware recommendation ordering so ETF/index tools and theme-growth candidates remain visible instead of every scan being dominated by the same high-liquidity stocks.
 - Factor validation backtest that freezes historical factor rankings and checks forward returns without lookahead.
 - Persistent scan history and opportunity snapshots saved from dashboard scans.
 - Outcome replay that computes forward returns, max drawdown, max runup, and target/stop/pending status from saved opportunity snapshots.
@@ -118,7 +120,7 @@ curl 'http://127.0.0.1:8000/api/catalysts?symbols=CN:000001&limit=5'
 curl 'http://127.0.0.1:8000/api/portfolio?provider=fixture'
 ```
 
-`/api/opportunities` returns `cards`, `items`, `strategy_health`, and `data_health`. Cards include `rank_score`, `rank_reasons`, and `decision`. The decision object is a research workflow: action, conviction score, component scores, suggested risk budget, trigger/stop/target references, failure conditions, and verification checks. Strategies that cannot be evaluated with the current free-data scan are returned with `status: "missing_data"` instead of fabricated scores.
+`/api/opportunities` returns `cards`, `items`, `strategy_health`, and `data_health`. Cards include `rank_score`, `rank_reasons`, `asset_type`, `opportunity_bucket`, `opportunity_tags`, `rotation_note`, and `decision`. The decision object is a research workflow: action, conviction score, component scores, suggested risk budget, trigger/stop/target references, failure conditions, and verification checks. Strategies that cannot be evaluated with the current free-data scan are returned with `status: "missing_data"` instead of fabricated scores.
 
 The opportunity scan also returns `factor_rankings`. This is a cross-sectional factor layer for the scanned A-share universe. It does not claim a stock will rise tomorrow; it ranks candidates by price-action factors that are available from free daily bars: momentum, trend quality, liquidity, low-risk behavior, and short-term reversal. Cards expose `factor_score`, `factor_rank`, `factor_flags`, and factor exposures so the dashboard can explain whether a candidate is strong, overextended, illiquid, volatile, or missing history. `/api/factors/backtest` validates those rankings historically by selecting top-ranked names at each historical scan date and measuring forward returns.
 

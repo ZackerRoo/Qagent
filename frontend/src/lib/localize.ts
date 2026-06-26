@@ -190,6 +190,7 @@ const STRATEGY_LABELS: LabelMap = {
   },
   healthy_pullback: { zh: "健康回调", en: "Healthy trend pullback" },
   gf_dma_health: { zh: "GF-DMA 趋势健康", en: "GF-DMA health index" },
+  factor_rotation_watch: { zh: "因子轮动观察", en: "Factor rotation watch" },
   catalyst_financial_transmission: {
     zh: "催化到财务传导",
     en: "Catalyst financial transmission",
@@ -226,6 +227,7 @@ const FAMILY_LABELS: LabelMap = {
   technical_breakout: { zh: "技术突破", en: "Technical breakout" },
   technical_pullback: { zh: "技术回调", en: "Technical pullback" },
   trend_health: { zh: "趋势健康", en: "Trend health" },
+  factor_rotation: { zh: "因子轮动", en: "Factor rotation" },
   event_catalyst: { zh: "事件催化", en: "Event catalyst" },
   earnings_momentum: { zh: "业绩动量", en: "Earnings momentum" },
   earnings_revision: { zh: "业绩上修", en: "Earnings revision" },
@@ -269,6 +271,13 @@ const SIGNAL_LABELS: LabelMap = {
   sec_ownership_filing: { zh: "SEC 持有人文件", en: "SEC ownership filing" },
   insider_form: { zh: "内部人表格", en: "Insider form" },
   institutional_filing: { zh: "机构持仓文件", en: "Institutional filing" },
+  top_factor_rank: { zh: "因子排名靠前", en: "Top factor rank" },
+  trend_or_pullback_confirmation_pending: {
+    zh: "等待趋势或回踩确认",
+    en: "Trend or pullback confirmation pending",
+  },
+  entry_trigger: { zh: "入场触发", en: "Entry trigger" },
+  risk_reward_check: { zh: "盈亏比检查", en: "Risk/reward check" },
 };
 
 const DIRECTION_LABELS: LabelMap = {

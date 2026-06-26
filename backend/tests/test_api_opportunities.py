@@ -28,6 +28,10 @@ def test_opportunities_endpoint_returns_cards():
     assert body["cards"][0]["factor_score"] >= 0
     assert body["cards"][0]["factor_rank"] >= 1
     assert body["cards"][0]["factor_exposures"]
+    assert body["cards"][0]["asset_type"]
+    assert body["cards"][0]["opportunity_bucket"]
+    assert isinstance(body["cards"][0]["opportunity_tags"], list)
+    assert "rotation_note" in body["cards"][0]
     assert body["cards"][0]["decision"]["action"] in {
         "candidate_entry",
         "watch_trigger",

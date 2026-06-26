@@ -241,6 +241,10 @@ class OpportunityCard(BaseModel):
     instrument_id: str
     instrument_label: str | None = None
     market: Market
+    asset_type: str = "stock"
+    opportunity_bucket: str = "stock_momentum"
+    opportunity_tags: list[str] = Field(default_factory=list)
+    rotation_note: str | None = None
     status: OpportunityStatus
     thesis: str
     score: float = Field(ge=0.0, le=1.0)
