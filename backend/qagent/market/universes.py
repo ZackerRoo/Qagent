@@ -34,7 +34,10 @@ def builtin_universes() -> list[UniverseRecord]:
         UniverseRecord(
             universe_id="free_default",
             name="A-Share Full Market",
-            description="Full A-share free-data universe token. The scanner expands it into filtered liquid candidates.",
+            description=(
+                "Composite A-share universe token. The scanner expands it into filtered liquid "
+                "candidates plus core ETFs, index representatives, and theme representatives."
+            ),
             market_scope="CN",
             tags=["free", "default", "cn", "full_market"],
             symbols=DEFAULT_FREE_UNIVERSE,

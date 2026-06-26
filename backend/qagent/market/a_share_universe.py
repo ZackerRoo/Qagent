@@ -6,7 +6,13 @@ import akshare as ak
 import pandas as pd
 from pydantic import BaseModel, Field
 
-from qagent.market.cn_universe_tokens import is_cn_universe_token, resolve_cn_universe_token
+from qagent.market.cn_universe_tokens import (
+    ETF_UNIVERSES,
+    INDEX_UNIVERSES,
+    THEME_UNIVERSES,
+    is_cn_universe_token,
+    resolve_cn_universe_token,
+)
 from qagent.market.instruments import register_cn_instrument_names
 from qagent.market.universe import DEFAULT_A_SHARE_STARTER_UNIVERSE
 
@@ -127,7 +133,10 @@ def _resolve_all_a_share_token(
             min_turnover=min_turnover,
         )
     except Exception as exc:
-        fallback = DEFAULT_A_SHARE_STARTER_UNIVERSE[: max(limit, 0)]
+        starter = DEFAULT_A_SHARE_STARTER_UNIVERSE[: max(limit, 0)]
+        supplements = _build_all_a_share_supplements()
+        fallback = _dedupe_symbols(starter + supplements)
+        supplemental_selected = len([symbol for symbol in supplements if symbol not in starter])
         return ResolvedSymbols(
             symbols=fallback,
             data_health={
@@ -136,17 +145,26 @@ def _resolve_all_a_share_token(
                 "universe_selected": str(len(fallback)),
                 "universe_limit": str(limit),
                 "universe_fallback": "cn_liquid_starter",
+                "universe_supplements": "included",
+                "universe_supplemental_selected": str(supplemental_selected),
                 "universe_error": str(exc),
             },
             is_dynamic=True,
         )
+    supplements = _build_all_a_share_supplements()
+    combined = _dedupe_symbols(selection.symbols + supplements)
+    supplemental_selected = len([symbol for symbol in combined if symbol not in selection.symbols])
     data_health = {
         "universe": CN_ALL_TOKEN,
         "universe_source": selection.source,
         "universe_total": str(selection.total_count),
         "universe_eligible": str(selection.eligible_count),
-        "universe_selected": str(selection.selected_count),
+        "universe_selected": str(len(combined)),
+        "universe_dynamic_selected": str(selection.selected_count),
         "universe_limit": str(limit),
+        "universe_supplements": "included",
+        "universe_supplemental_selected": str(supplemental_selected),
+        "universe_components": "流动性动态样本,核心ETF,主要指数代表,主题代表",
         "universe_filters": "; ".join(selection.filters),
     }
     if selection.excluded_counts:
@@ -155,7 +173,23 @@ def _resolve_all_a_share_token(
         )
     if selection.warnings:
         data_health["universe_warnings"] = " | ".join(selection.warnings[:3])
-    return ResolvedSymbols(symbols=selection.symbols, data_health=data_health, is_dynamic=True)
+    return ResolvedSymbols(symbols=combined, data_health=data_health, is_dynamic=True)
+
+
+def _build_all_a_share_supplements() -> list[str]:
+    symbols: list[str] = []
+    names: dict[str, str] = {}
+    for definition in ETF_UNIVERSES.values():
+        symbols.extend(definition.symbols)
+        names.update(definition.names)
+    for definition in INDEX_UNIVERSES.values():
+        symbols.extend(definition.fallback_symbols)
+        names.update(definition.fallback_names)
+    for definition in THEME_UNIVERSES.values():
+        symbols.extend(definition.fallback_symbols)
+        names.update(definition.fallback_names)
+    register_cn_instrument_names(names)
+    return _dedupe_symbols([f"CN:{symbol}" for symbol in symbols])
 
 
 def _merge_universe_health(items: list[dict[str, str]]) -> dict[str, str]:

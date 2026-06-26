@@ -50,12 +50,17 @@ def test_resolve_symbol_tokens_expands_cn_all_and_registers_names(monkeypatch):
 
     resolved = resolve_symbol_tokens([CN_ALL_TOKEN], limit=2, min_turnover=100_000_000)
 
-    assert resolved.symbols == ["CN:000001", "CN:600000"]
+    assert resolved.symbols[:2] == ["CN:000001", "CN:600000"]
+    assert "CN:588000" in resolved.symbols
+    assert "CN:688981" in resolved.symbols
+    assert "CN:688008" in resolved.symbols
     assert resolved.data_health["universe_total"] == "2"
     assert resolved.data_health["universe_eligible"] == "2"
-    assert resolved.data_health["universe_selected"] == "2"
+    assert int(resolved.data_health["universe_selected"]) > 2
+    assert resolved.data_health["universe_supplements"] == "included"
     assert resolved.data_health["universe_source"] == "akshare_spot_em"
     assert format_instrument_label("CN:600000") == "浦发银行 600000.SH"
+    assert format_instrument_label("CN:588000") == "科创50ETF 588000.SH"
 
 
 def test_resolve_symbol_tokens_keeps_manual_symbols_without_dynamic_metadata():
@@ -73,7 +78,10 @@ def test_resolve_symbol_tokens_falls_back_to_starter_when_full_universe_fails(mo
 
     resolved = resolve_symbol_tokens([CN_ALL_TOKEN], limit=3)
 
-    assert resolved.symbols == ["CN:000001", "CN:000063", "CN:000333"]
+    assert resolved.symbols[:3] == ["CN:000001", "CN:000063", "CN:000333"]
+    assert "CN:588000" in resolved.symbols
+    assert "CN:688008" in resolved.symbols
     assert resolved.data_health["universe"] == CN_ALL_TOKEN
     assert resolved.data_health["universe_fallback"] == "cn_liquid_starter"
+    assert resolved.data_health["universe_supplements"] == "included"
     assert "rate limited" in resolved.data_health["universe_error"]
