@@ -1192,6 +1192,100 @@ tbody tr.selected {
   background: #d97706;
 }
 
+.validation-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.validation-grid-wide {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.validation-card {
+  min-width: 0;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  padding: 10px;
+  background: #ffffff;
+}
+
+.validation-card header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.validation-card header h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.validation-card header span {
+  color: #0f4c81;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.validation-card svg {
+  min-height: 180px;
+}
+
+.validation-line {
+  fill: none;
+  stroke: #0f4c81;
+  stroke-width: 2.25;
+}
+
+.validation-bar-positive {
+  fill: #16a34a;
+}
+
+.validation-bar-negative {
+  fill: #dc2626;
+}
+
+.validation-card text {
+  fill: #64748b;
+  font-size: 11px;
+}
+
+.monthly-return-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.monthly-return-grid div {
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.monthly-return-grid span {
+  display: block;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.monthly-return-grid strong {
+  display: block;
+  margin-top: 3px;
+  font-size: 14px;
+}
+
+.monthly-return-positive {
+  background: #f0f9f4;
+  color: #116b3c;
+}
+
+.monthly-return-negative {
+  background: #fff1f1;
+  color: #9f1f1f;
+}
+
 .scenario-grid div {
   border: 1px solid #e2e8f0;
   border-radius: 6px;
@@ -1502,6 +1596,8 @@ tbody tr.selected {
   .context-grid,
   .sector-strength-grid,
   .scenario-grid,
+  .validation-grid,
+  .validation-grid-wide,
   .catalog-toolbar,
   .form-row,
   .portfolio-form,

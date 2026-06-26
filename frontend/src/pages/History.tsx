@@ -22,11 +22,15 @@ import {
 } from "../lib/localize";
 import type {
   BacktestResponse,
+  BacktestSignal,
   DataProviderMode,
   FactorBacktestResponse,
+  FactorRankBucket,
   OpportunityHistoryResponse,
   OutcomesResponse,
+  PortfolioEquityPoint,
   PortfolioBacktestResponse,
+  PortfolioMonthlyReturn,
   ScanRunsResponse,
   StrategyDiagnosticsResponse,
   StrategyPerformanceResponse,
@@ -44,6 +48,14 @@ function formatRatio(value: number | null) {
     return "-";
   }
   return `${(value * 100).toFixed(0)}%`;
+}
+
+function numberFromDecimalText(value: string | number | null): number | null {
+  if (value === null) {
+    return null;
+  }
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 export function History({ dataMode, symbols }: { dataMode: DataProviderMode; symbols: string }) {
@@ -183,6 +195,13 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
                 <strong>{formatNumber(backtest.summary.max_runup_pct, "%")}</strong>
               </div>
             </div>
+            <div className="validation-grid">
+              <ReturnDistributionChart
+                title={`${t("history.returnDistribution")} 20D`}
+                signals={backtest.signals}
+                horizon="return_20d"
+              />
+            </div>
             <div className="table-shell">
               <table>
                 <thead>
@@ -303,6 +322,12 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
                 <strong>{formatNumber(factorBacktest.summary.worst_forward_return_pct, "%")}</strong>
               </div>
             </div>
+            <div className="validation-grid">
+              <FactorRankBucketChart
+                title={t("history.rankBuckets")}
+                buckets={factorBacktest.rank_buckets}
+              />
+            </div>
             <div className="table-shell">
               <table>
                 <thead>
@@ -388,6 +413,28 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
                 <span>{t("history.exposure")}</span>
                 <strong>{formatNumber(portfolioBacktest.summary.exposure_pct, "%")}</strong>
               </div>
+            </div>
+            <div className="validation-grid validation-grid-wide">
+              <LineValidationChart
+                title={t("history.equityCurve")}
+                points={portfolioBacktest.equity_curve.map((point) => ({
+                  label: point.date,
+                  value: numberFromDecimalText(point.equity),
+                }))}
+                valueFormatter={(value) => value.toFixed(0)}
+              />
+              <LineValidationChart
+                title={t("history.drawdownCurve")}
+                points={portfolioBacktest.equity_curve.map((point) => ({
+                  label: point.date,
+                  value: point.drawdown_pct,
+                }))}
+                valueFormatter={(value) => `${value.toFixed(2)}%`}
+              />
+              <MonthlyReturnHeatmap
+                title={t("history.monthlyReturns")}
+                items={portfolioBacktest.monthly_returns}
+              />
             </div>
             <div className="brief-grid">
               <div className="table-shell">
@@ -665,4 +712,211 @@ export function History({ dataMode, symbols }: { dataMode: DataProviderMode; sym
       </section>
     </div>
   );
+}
+
+type ChartPoint = {
+  label: string;
+  value: number | null;
+};
+
+function LineValidationChart({
+  title,
+  points,
+  valueFormatter,
+}: {
+  title: string;
+  points: ChartPoint[];
+  valueFormatter(value: number): string;
+}) {
+  const clean = points.filter((point): point is { label: string; value: number } => point.value !== null);
+  if (clean.length < 2) {
+    return <div className="validation-card empty-state">{title}: -</div>;
+  }
+  const width = 620;
+  const height = 220;
+  const padding = 34;
+  const values = clean.map((point) => point.value);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const xFor = (index: number) =>
+    padding + (index / Math.max(clean.length - 1, 1)) * (width - padding * 2);
+  const yFor = (value: number) => height - padding - ((value - min) / span) * (height - padding * 2);
+  const path = clean
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${xFor(index).toFixed(2)} ${yFor(point.value).toFixed(2)}`)
+    .join(" ");
+  const latest = clean[clean.length - 1];
+
+  return (
+    <div className="validation-card chart-shell">
+      <header>
+        <h3>{title}</h3>
+        <span>{valueFormatter(latest.value)}</span>
+      </header>
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={title}>
+        <g className="chart-grid">
+          <line x1={padding} y1={padding} x2={padding} y2={height - padding} />
+          <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} />
+          <text x={padding} y={padding - 8}>{valueFormatter(max)}</text>
+          <text x={padding} y={height - padding + 18}>{valueFormatter(min)}</text>
+        </g>
+        <path className="validation-line" d={path} />
+      </svg>
+      <div className="chart-legend">
+        <span>{clean[0].label}</span>
+        <span>{latest.label}</span>
+      </div>
+    </div>
+  );
+}
+
+function ReturnDistributionChart({
+  title,
+  signals,
+  horizon,
+}: {
+  title: string;
+  signals: BacktestSignal[];
+  horizon: "return_5d" | "return_10d" | "return_20d";
+}) {
+  const buckets = buildReturnBuckets(signals.map((signal) => signal[horizon]));
+  return (
+    <BarValidationChart
+      title={title}
+      bars={buckets.map((bucket) => ({
+        label: bucket.label,
+        value: bucket.count,
+        caption: `${bucket.count}`,
+      }))}
+    />
+  );
+}
+
+function FactorRankBucketChart({
+  title,
+  buckets,
+}: {
+  title: string;
+  buckets: FactorRankBucket[];
+}) {
+  return (
+    <BarValidationChart
+      title={title}
+      bars={buckets.map((bucket) => ({
+        label: `#${bucket.factor_rank}`,
+        value: bucket.avg_forward_return_pct ?? 0,
+        caption: `${formatNumber(bucket.avg_forward_return_pct, "%")} / ${formatRatio(bucket.positive_rate)}`,
+      }))}
+    />
+  );
+}
+
+function BarValidationChart({
+  title,
+  bars,
+}: {
+  title: string;
+  bars: { label: string; value: number; caption: string }[];
+}) {
+  if (!bars.length) {
+    return <div className="validation-card empty-state">{title}: -</div>;
+  }
+  const width = 620;
+  const height = 220;
+  const padding = 34;
+  const values = bars.map((bar) => bar.value);
+  const min = Math.min(0, ...values);
+  const max = Math.max(0, ...values);
+  const span = max - min || 1;
+  const zeroY = height - padding - ((0 - min) / span) * (height - padding * 2);
+  const slot = (width - padding * 2) / bars.length;
+  const barWidth = Math.max(14, slot * 0.58);
+  const yFor = (value: number) => height - padding - ((value - min) / span) * (height - padding * 2);
+
+  return (
+    <div className="validation-card chart-shell">
+      <header>
+        <h3>{title}</h3>
+      </header>
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={title}>
+        <g className="chart-grid">
+          <line x1={padding} y1={padding} x2={padding} y2={height - padding} />
+          <line x1={padding} y1={zeroY} x2={width - padding} y2={zeroY} />
+        </g>
+        {bars.map((bar, index) => {
+          const x = padding + index * slot + (slot - barWidth) / 2;
+          const y = Math.min(yFor(bar.value), zeroY);
+          const rectHeight = Math.max(2, Math.abs(zeroY - yFor(bar.value)));
+          return (
+            <g key={`${bar.label}-${index}`}>
+              <rect
+                className={bar.value >= 0 ? "validation-bar-positive" : "validation-bar-negative"}
+                x={x}
+                y={y}
+                width={barWidth}
+                height={rectHeight}
+              />
+              <text x={x + barWidth / 2} y={height - 10} textAnchor="middle">
+                {bar.label}
+              </text>
+              <text x={x + barWidth / 2} y={Math.max(14, y - 6)} textAnchor="middle">
+                {bar.caption}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+function MonthlyReturnHeatmap({
+  title,
+  items,
+}: {
+  title: string;
+  items: PortfolioMonthlyReturn[];
+}) {
+  if (!items.length) {
+    return <div className="validation-card empty-state">{title}: -</div>;
+  }
+  return (
+    <div className="validation-card">
+      <header>
+        <h3>{title}</h3>
+      </header>
+      <div className="monthly-return-grid">
+        {items.map((item) => (
+          <div
+            key={item.month}
+            className={item.return_pct >= 0 ? "monthly-return-positive" : "monthly-return-negative"}
+          >
+            <span>{item.month}</span>
+            <strong>{formatNumber(item.return_pct, "%")}</strong>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function buildReturnBuckets(values: (number | null)[]) {
+  const buckets = [
+    { label: "<-10", count: 0, min: -Infinity, max: -10 },
+    { label: "-10~-5", count: 0, min: -10, max: -5 },
+    { label: "-5~0", count: 0, min: -5, max: 0 },
+    { label: "0~5", count: 0, min: 0, max: 5 },
+    { label: "5~10", count: 0, min: 5, max: 10 },
+    { label: ">10", count: 0, min: 10, max: Infinity },
+  ];
+  for (const value of values) {
+    if (value === null || Number.isNaN(value)) {
+      continue;
+    }
+    const bucket = buckets.find((item) => value >= item.min && value < item.max);
+    if (bucket) {
+      bucket.count += 1;
+    }
+  }
+  return buckets;
 }

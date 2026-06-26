@@ -33,6 +33,9 @@ def test_run_portfolio_backtest_returns_trades_equity_and_summary():
     assert result.trades
     assert result.equity_curve[0].equity == Decimal("100000")
     assert result.equity_curve[-1].equity == result.summary.final_equity
+    assert result.monthly_returns
+    assert result.monthly_returns[0].month == "2026-01"
+    assert result.monthly_returns[-1].ending_equity == result.summary.final_equity
     assert all(trade.entry_date <= trade.exit_date for trade in result.trades)
     assert all(trade.shares > Decimal("0") for trade in result.trades)
     assert result.data_health["lookahead_guard"] == "signals_generated_before_exits"

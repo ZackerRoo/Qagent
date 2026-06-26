@@ -25,9 +25,18 @@ class FactorBacktestSummary(BaseModel):
     worst_forward_return_pct: float | None
 
 
+class FactorRankBucket(BaseModel):
+    factor_rank: int
+    sample_count: int
+    completed_count: int
+    positive_rate: float | None
+    avg_forward_return_pct: float | None
+
+
 class FactorBacktestResult(BaseModel):
     summary: FactorBacktestSummary
     signals: list[FactorBacktestSignal]
+    rank_buckets: list[FactorRankBucket]
     data_health: dict[str, str]
 
 
@@ -48,6 +57,7 @@ def run_factor_backtest(
                 worst_forward_return_pct=None,
             ),
             signals=[],
+            rank_buckets=[],
             data_health={"factor_backtest": "no_bars"},
         )
     ordered = bars.copy()
@@ -102,6 +112,7 @@ def run_factor_backtest(
     return FactorBacktestResult(
         summary=summary,
         signals=signals,
+        rank_buckets=_summarize_rank_buckets(signals),
         data_health={
             "factor_backtest": "ok",
             "forward_days": str(forward_days),
@@ -111,6 +122,35 @@ def run_factor_backtest(
             "signals": str(len(signals)),
         },
     )
+
+
+def _summarize_rank_buckets(signals: list[FactorBacktestSignal]) -> list[FactorRankBucket]:
+    buckets: list[FactorRankBucket] = []
+    for rank in sorted({signal.factor_rank for signal in signals}):
+        rank_signals = [signal for signal in signals if signal.factor_rank == rank]
+        completed_returns = [
+            signal.forward_return_pct
+            for signal in rank_signals
+            if signal.forward_return_pct is not None
+        ]
+        buckets.append(
+            FactorRankBucket(
+                factor_rank=rank,
+                sample_count=len(rank_signals),
+                completed_count=len(completed_returns),
+                positive_rate=(
+                    sum(1 for value in completed_returns if value > 0) / len(completed_returns)
+                    if completed_returns
+                    else None
+                ),
+                avg_forward_return_pct=(
+                    sum(completed_returns) / len(completed_returns)
+                    if completed_returns
+                    else None
+                ),
+            )
+        )
+    return buckets
 
 
 def _minimum_history_days(forward_days: int) -> int:

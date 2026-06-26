@@ -858,6 +858,7 @@ def portfolio_backtest(
         "summary": result.summary.model_dump(mode="json"),
         "trades": [trade.model_dump(mode="json") for trade in result.trades],
         "equity_curve": [point.model_dump(mode="json") for point in result.equity_curve],
+        "monthly_returns": [item.model_dump(mode="json") for item in result.monthly_returns],
         "data_health": {**result.data_health, **resolved.data_health},
     }
 

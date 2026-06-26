@@ -45,6 +45,28 @@ def test_factor_backtest_evaluates_top_ranked_forward_returns():
     assert {signal.instrument_id for signal in result.signals} == {"CN:000001"}
 
 
+def test_factor_backtest_summarizes_forward_returns_by_rank():
+    strong = [10 + index * 0.08 for index in range(180)]
+    mid = [12 + index * 0.03 for index in range(180)]
+    weak = [20 - index * 0.02 for index in range(180)]
+    bars = pd.concat(
+        [
+            _bars("CN:000001", strong, volume=2_000_000),
+            _bars("CN:300750", mid, volume=1_500_000),
+            _bars("CN:600519", weak, volume=1_000_000),
+        ],
+        ignore_index=True,
+    )
+
+    result = run_factor_backtest(bars, forward_days=10, step_days=20, top_n=3)
+
+    assert result.rank_buckets
+    assert [bucket.factor_rank for bucket in result.rank_buckets] == [1, 2, 3]
+    assert all(bucket.sample_count > 0 for bucket in result.rank_buckets)
+    assert result.rank_buckets[0].avg_forward_return_pct is not None
+    assert result.rank_buckets[0].positive_rate is not None
+
+
 def test_factor_backtest_uses_shorter_history_when_development_data_is_limited():
     strong = [10 + index * 0.08 for index in range(70)]
     weak = [20 - index * 0.02 for index in range(70)]

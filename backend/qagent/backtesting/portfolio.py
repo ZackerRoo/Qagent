@@ -51,10 +51,18 @@ class PortfolioBacktestSummary(BaseModel):
     exposure_pct: float | None
 
 
+class PortfolioMonthlyReturn(BaseModel):
+    month: str
+    starting_equity: Decimal
+    ending_equity: Decimal
+    return_pct: float
+
+
 class PortfolioBacktestResult(BaseModel):
     summary: PortfolioBacktestSummary
     trades: list[PortfolioBacktestTrade]
     equity_curve: list[PortfolioEquityPoint]
+    monthly_returns: list[PortfolioMonthlyReturn]
     data_health: dict[str, str]
 
 
@@ -153,6 +161,7 @@ def run_portfolio_backtest(
         summary=summary,
         trades=trades,
         equity_curve=equity_curve,
+        monthly_returns=_build_monthly_returns(equity_curve),
         data_health=data_health,
     )
 
@@ -449,6 +458,33 @@ def _build_summary(
         if exposure_denominator
         else None,
     )
+
+
+def _build_monthly_returns(equity_curve: list[PortfolioEquityPoint]) -> list[PortfolioMonthlyReturn]:
+    if not equity_curve:
+        return []
+    ordered = sorted(equity_curve, key=lambda point: point.date)
+    grouped: dict[str, list[PortfolioEquityPoint]] = {}
+    for point in ordered:
+        grouped.setdefault(point.date.strftime("%Y-%m"), []).append(point)
+
+    monthly_returns: list[PortfolioMonthlyReturn] = []
+    previous_equity = ordered[0].equity
+    for month in sorted(grouped):
+        points = grouped[month]
+        starting_equity = previous_equity
+        ending_equity = points[-1].equity
+        return_pct = _pct((ending_equity - starting_equity) / starting_equity) if starting_equity else 0.0
+        monthly_returns.append(
+            PortfolioMonthlyReturn(
+                month=month,
+                starting_equity=_money(starting_equity),
+                ending_equity=_money(ending_equity),
+                return_pct=return_pct,
+            )
+        )
+        previous_equity = ending_equity
+    return monthly_returns
 
 
 def _profit_factor(wins: list[Decimal], losses: list[Decimal]) -> float | None:

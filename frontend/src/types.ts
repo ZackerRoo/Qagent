@@ -863,9 +863,18 @@ export type FactorBacktestSignal = {
   forward_return_pct: number | null;
 };
 
+export type FactorRankBucket = {
+  factor_rank: number;
+  sample_count: number;
+  completed_count: number;
+  positive_rate: number | null;
+  avg_forward_return_pct: number | null;
+};
+
 export type FactorBacktestResponse = {
   summary: FactorBacktestSummary;
   signals: FactorBacktestSignal[];
+  rank_buckets: FactorRankBucket[];
   data_health: Record<string, string>;
 };
 
@@ -1041,9 +1050,17 @@ export type PortfolioEquityPoint = {
   drawdown_pct: number;
 };
 
+export type PortfolioMonthlyReturn = {
+  month: string;
+  starting_equity: string;
+  ending_equity: string;
+  return_pct: number;
+};
+
 export type PortfolioBacktestResponse = {
   summary: PortfolioBacktestSummary;
   trades: PortfolioBacktestTrade[];
   equity_curve: PortfolioEquityPoint[];
+  monthly_returns: PortfolioMonthlyReturn[];
   data_health: Record<string, string>;
 };

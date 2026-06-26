@@ -31,6 +31,7 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - Factor-watch cards for high-ranked A-share/ETF/theme candidates that have not yet triggered a full strategy signal; these are shown as watch/trigger plans, not confirmed buy signals.
 - Rotation-aware recommendation ordering so ETF/index tools and theme-growth candidates remain visible instead of every scan being dominated by the same high-liquidity stocks.
 - Factor validation backtest that freezes historical factor rankings and checks forward returns without lookahead.
+- Strategy validation charts for return distribution, factor rank buckets, portfolio equity curve, drawdown curve, and monthly returns.
 - Persistent scan history and opportunity snapshots saved from dashboard scans.
 - Outcome replay that computes forward returns, max drawdown, max runup, and target/stop/pending status from saved opportunity snapshots.
 - Strategy performance leaderboard summarizing replayed outcomes by primary strategy.
