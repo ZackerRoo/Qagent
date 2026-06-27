@@ -5,6 +5,8 @@ from fastapi.testclient import TestClient
 
 from qagent.app import create_app
 from qagent.api import routes
+from qagent.jobs.daily_scan import run_daily_scan
+from qagent.providers.fixtures import FixtureMarketDataProvider
 
 
 def test_opportunities_endpoint_returns_cards():
@@ -359,6 +361,103 @@ def test_full_market_batch_scan_endpoint_creates_background_job(tmp_path, monkey
     assert detail.json()["job_id"] == body["job_id"]
     assert latest.status_code == 200
     assert latest.json()["job_id"] == body["job_id"]
+
+
+def test_full_market_batch_latest_result_hydrates_legacy_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'legacy-batch.db'}")
+    repo = routes._repo()
+    scan = run_daily_scan(["US:TEST", "CN:000001"], FixtureMarketDataProvider())
+    legacy_card = scan.cards[0].model_dump(mode="json")
+    legacy_card.pop("confidence_explanation", None)
+    legacy_card.pop("execution_plan", None)
+    repo.save_scan_result_cache(
+        cache_key=routes.full_market_batch_cache_key("fixture", True),
+        provider="fixture",
+        mode="full_market_batch",
+        symbols=["US:TEST", "CN:000001"],
+        payload={
+            "symbols": ["US:TEST", "CN:000001"],
+            "cards": [legacy_card],
+            "items": [],
+            "strategy_health": [],
+            "factor_rankings": [],
+            "sector_strength": [],
+            "portfolio_plan": scan.portfolio_plan.model_dump(mode="json"),
+            "data_health": {"provider": "fixture"},
+        },
+    )
+    repo.save_scan_result_cache(
+        cache_key="today_scan:fixture:2:true:true",
+        provider="fixture",
+        mode="full_market_scan",
+        symbols=["US:TEST", "CN:000001"],
+        payload={
+            "symbols": ["US:TEST", "CN:000001"],
+            "cards": [card.model_dump(mode="json") for card in scan.cards],
+            "items": [item.model_dump(mode="json") for item in scan.items],
+            "strategy_health": [item.model_dump(mode="json") for item in scan.strategy_health],
+            "factor_rankings": [],
+            "sector_strength": [],
+            "portfolio_plan": scan.portfolio_plan.model_dump(mode="json"),
+            "data_health": {"provider": "fixture", "source": "today_scan"},
+        },
+    )
+    client = TestClient(create_app())
+
+    response = client.get(
+        "/api/full-market/batch-scan/latest-result?provider=fixture&include_etfs=true"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cards"][0]["confidence_explanation"]
+    assert body["cards"][0]["execution_plan"]
+    assert body["strategy_health"]
+    assert any(item["curve"] for item in body["strategy_health"])
+    assert body["data_health"]["legacy_cards_hydrated"] == "1"
+    assert body["data_health"]["strategy_health_source"] == "recent_scan_cache"
+
+
+def test_full_market_batch_latest_result_uses_card_calibration_when_no_health_cache(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'calibration-batch.db'}")
+    repo = routes._repo()
+    scan = run_daily_scan(["US:TEST", "CN:000001"], FixtureMarketDataProvider())
+    assert scan.cards[0].strategy_calibration is not None
+    card = scan.cards[0].model_dump(mode="json")
+    card.pop("confidence_explanation", None)
+    card.pop("execution_plan", None)
+    repo.save_scan_result_cache(
+        cache_key=routes.full_market_batch_cache_key("fixture", True),
+        provider="fixture",
+        mode="full_market_batch",
+        symbols=["US:TEST", "CN:000001"],
+        payload={
+            "symbols": ["US:TEST", "CN:000001"],
+            "cards": [card],
+            "items": [],
+            "strategy_health": [],
+            "factor_rankings": [],
+            "sector_strength": [],
+            "portfolio_plan": scan.portfolio_plan.model_dump(mode="json"),
+            "data_health": {"provider": "fixture"},
+        },
+    )
+    client = TestClient(create_app())
+
+    response = client.get(
+        "/api/full-market/batch-scan/latest-result?provider=fixture&include_etfs=true"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["strategy_health"]
+    assert body["strategy_health"][0]["strategy_id"] == card["strategy_calibration"]["strategy_id"]
+    assert body["strategy_health"][0]["sample_count"] == card["strategy_calibration"]["sample_count"]
+    assert body["strategy_health"][0]["curve"] == []
+    assert body["data_health"]["strategy_health_source"] == "card_strategy_calibration"
 
 
 def test_daily_brief_fast_mode_sets_snapshot_controls():

@@ -469,6 +469,31 @@ class QagentRepository:
                 return None
             return self._scan_result_cache_from_row(row)
 
+    def get_latest_scan_result_cache_by_modes(
+        self,
+        provider: str,
+        modes: set[str],
+        max_age: timedelta,
+    ) -> ScanResultCacheRecord | None:
+        earliest = datetime.now(timezone.utc) - max_age
+        normalized_modes = {mode.strip() for mode in modes if mode.strip()}
+        if not normalized_modes:
+            return None
+        with self.session_factory() as session:
+            row = (
+                session.query(ScanResultCacheRow)
+                .filter(
+                    ScanResultCacheRow.provider == provider,
+                    ScanResultCacheRow.mode.in_(normalized_modes),
+                    ScanResultCacheRow.created_at >= earliest,
+                )
+                .order_by(ScanResultCacheRow.created_at.desc(), ScanResultCacheRow.cache_id.desc())
+                .first()
+            )
+            if row is None:
+                return None
+            return self._scan_result_cache_from_row(row)
+
     def get_recent_scan_run_with_snapshots(
         self,
         provider: str,

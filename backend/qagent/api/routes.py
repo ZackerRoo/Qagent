@@ -51,6 +51,7 @@ from qagent.paper_trading.engine import (
 )
 from qagent.providers.factory import build_market_data_provider
 from qagent.providers.status import build_provider_status
+from qagent.recommendations.enrichment import enrich_opportunity_card
 from qagent.recommendations.portfolio import build_portfolio_plan
 from qagent.storage.paper import PaperTradingRepository
 from qagent.storage.repository import (
@@ -1153,13 +1154,16 @@ def latest_full_market_batch_scan_result(
     cache_ttl_minutes: int = 1440,
 ) -> dict[str, object]:
     _validate_scan_cache_ttl(cache_ttl_minutes)
-    cached = _repo().get_recent_scan_result_cache(
+    mode = provider.strip().lower()
+    repo = _repo()
+    cached = repo.get_recent_scan_result_cache(
         cache_key=full_market_batch_cache_key(provider, include_etfs),
         max_age=timedelta(minutes=cache_ttl_minutes),
     )
     if cached is None:
         raise HTTPException(status_code=404, detail="full-market batch result not found")
     payload = deepcopy(cached.payload)
+    _hydrate_full_market_batch_payload(payload, repo, mode, cache_ttl_minutes)
     data_health = payload.setdefault("data_health", {})
     if isinstance(data_health, dict):
         data_health["scan_result_cache"] = "hit"
@@ -1399,6 +1403,122 @@ def _recent_scan_run_fallback_payload(
         "portfolio_plan": portfolio_plan,
         "data_health": data_health,
     }
+
+
+def _hydrate_full_market_batch_payload(
+    payload: dict[str, object],
+    repo: QagentRepository,
+    provider: str,
+    cache_ttl_minutes: int,
+) -> None:
+    data_health = payload.setdefault("data_health", {})
+    if not isinstance(data_health, dict):
+        data_health = {}
+        payload["data_health"] = data_health
+    hydrated_cards = _hydrate_legacy_opportunity_cards(payload)
+    if hydrated_cards:
+        data_health["legacy_cards_hydrated"] = str(hydrated_cards)
+    if not payload.get("strategy_health"):
+        recent = repo.get_latest_scan_result_cache_by_modes(
+            provider=provider,
+            modes={"full_market_scan", "today_scan_fallback"},
+            max_age=timedelta(minutes=cache_ttl_minutes),
+        )
+        if recent and isinstance(recent.payload.get("strategy_health"), list):
+            strategy_health = recent.payload.get("strategy_health", [])
+            if strategy_health:
+                payload["strategy_health"] = deepcopy(strategy_health)
+                data_health["strategy_health_source"] = "recent_scan_cache"
+                data_health["strategy_health_source_cache_id"] = recent.cache_id
+    if not payload.get("strategy_health"):
+        strategy_health = _strategy_health_from_card_calibration(payload)
+        if strategy_health:
+            payload["strategy_health"] = strategy_health
+            data_health["strategy_health_source"] = "card_strategy_calibration"
+
+
+def _hydrate_legacy_opportunity_cards(payload: dict[str, object]) -> int:
+    raw_cards = payload.get("cards")
+    if not isinstance(raw_cards, list):
+        return 0
+    hydrated: list[object] = []
+    hydrated_count = 0
+    for raw_card in raw_cards:
+        if not isinstance(raw_card, dict):
+            hydrated.append(raw_card)
+            continue
+        if raw_card.get("confidence_explanation") and raw_card.get("execution_plan"):
+            hydrated.append(raw_card)
+            continue
+        try:
+            card = OpportunityCard.model_validate(raw_card)
+        except Exception:
+            hydrated.append(raw_card)
+            continue
+        enrich_opportunity_card(card)
+        hydrated.append(card.model_dump(mode="json"))
+        hydrated_count += 1
+    if hydrated_count:
+        payload["cards"] = hydrated
+    return hydrated_count
+
+
+def _strategy_health_from_card_calibration(payload: dict[str, object]) -> list[dict[str, object]]:
+    raw_cards = payload.get("cards")
+    if not isinstance(raw_cards, list):
+        return []
+    by_strategy: dict[str, dict[str, object]] = {}
+    for raw_card in raw_cards:
+        if not isinstance(raw_card, dict):
+            continue
+        calibration = raw_card.get("strategy_calibration")
+        if not isinstance(calibration, dict):
+            continue
+        strategy_id = calibration.get("strategy_id")
+        if not isinstance(strategy_id, str) or not strategy_id:
+            continue
+        sample_count = _int_value(calibration.get("sample_count"))
+        current = by_strategy.get(strategy_id)
+        if current is not None and _int_value(current.get("sample_count")) >= sample_count:
+            continue
+        name, family = _strategy_identity_from_card(raw_card, strategy_id)
+        by_strategy[strategy_id] = {
+            "strategy_id": strategy_id,
+            "name": name,
+            "family": family,
+            "readiness": str(calibration.get("readiness") or "limited_sample"),
+            "sample_count": sample_count,
+            "win_rate_10d": calibration.get("win_rate_10d"),
+            "avg_return_10d": calibration.get("avg_return_10d"),
+            "avg_return_20d": calibration.get("avg_return_20d"),
+            "max_loss_10d": calibration.get("max_loss_10d"),
+            "missing_data": [],
+            "curve": [],
+        }
+    return sorted(by_strategy.values(), key=lambda item: str(item["strategy_id"]))
+
+
+def _strategy_identity_from_card(raw_card: dict[str, object], strategy_id: str) -> tuple[str, str]:
+    evaluations = raw_card.get("strategy_evaluations")
+    if isinstance(evaluations, list):
+        for raw_evaluation in evaluations:
+            if not isinstance(raw_evaluation, dict):
+                continue
+            if raw_evaluation.get("strategy_id") == strategy_id:
+                name = raw_evaluation.get("name")
+                family = raw_evaluation.get("family")
+                return (
+                    str(name or strategy_id),
+                    str(family or "calibrated_strategy"),
+                )
+    return strategy_id, "calibrated_strategy"
+
+
+def _int_value(value: object) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
 
 
 def _full_market_scan_cache_key(
