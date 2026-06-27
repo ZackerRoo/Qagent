@@ -18,6 +18,7 @@ import type {
   DeliveriesResponse,
   DeliveryOutboxRecord,
   FactorBacktestResponse,
+  FullMarketBatchScanJob,
   FullMarketScanResponse,
   InstrumentSearchResponse,
   IntradayRadarResponse,
@@ -36,6 +37,8 @@ import type {
   PositionsResponse,
   ProviderStatusResponse,
   ScanRunsResponse,
+  ScanTask,
+  ScanTasksResponse,
   StrategyDiagnosticsResponse,
   StrategyPerformanceResponse,
   TradableCatalogResponse,
@@ -63,11 +66,15 @@ type ScanParams = {
   run_alerts?: boolean;
   queue_alerts?: boolean;
   run_backtest?: boolean;
+  fast?: boolean;
+  skip_backtest?: boolean;
+  scan_limit?: number;
   status?: string;
   initial_capital?: string | number;
   risk_per_trade_pct?: string | number;
   max_positions?: number;
   max_symbols?: number;
+  batch_size?: number;
   transaction_cost_bps?: string | number;
   slippage_bps?: string | number;
   days?: number;
@@ -75,6 +82,9 @@ type ScanParams = {
   include_full_etfs?: boolean;
   include_etfs?: boolean;
   sync_if_empty?: boolean;
+  force_refresh?: boolean;
+  force_restart?: boolean;
+  cache_ttl_minutes?: number;
 };
 
 type RequestOptions = {
@@ -140,6 +150,9 @@ function queryString(params?: ScanParams): string {
   if (params.max_symbols) {
     search.set("max_symbols", String(params.max_symbols));
   }
+  if (params.batch_size) {
+    search.set("batch_size", String(params.batch_size));
+  }
   if (params.transaction_cost_bps) {
     search.set("transaction_cost_bps", String(params.transaction_cost_bps));
   }
@@ -161,9 +174,35 @@ function queryString(params?: ScanParams): string {
   if (params.sync_if_empty !== undefined) {
     search.set("sync_if_empty", String(params.sync_if_empty));
   }
+  if (params.force_refresh !== undefined) {
+    search.set("force_refresh", String(params.force_refresh));
+  }
+  if (params.force_restart !== undefined) {
+    search.set("force_restart", String(params.force_restart));
+  }
+  if (params.cache_ttl_minutes !== undefined) {
+    search.set("cache_ttl_minutes", String(params.cache_ttl_minutes));
+  }
+  if (params.scan_limit) {
+    search.set("scan_limit", String(params.scan_limit));
+  }
+  if (params.fast !== undefined) {
+    search.set("fast", String(params.fast));
+  }
+  if (params.skip_backtest !== undefined) {
+    search.set("skip_backtest", String(params.skip_backtest));
+  }
   const value = search.toString();
   return value ? `?${value}` : "";
 }
+
+export type DailyBriefRequest = {
+  limit?: number;
+  include_news?: boolean;
+  fast?: boolean;
+  skip_backtest?: boolean;
+  scan_limit?: number;
+};
 
 export async function apiGet<T>(
   path: string,
@@ -361,6 +400,76 @@ export async function runFullMarketScan(
   );
 }
 
+export async function startFullMarketBatchScan(
+  provider: DataProviderMode,
+  batchSize = 200,
+  includeEtfs = true,
+  forceRestart = false,
+  maxSymbols?: number,
+): Promise<FullMarketBatchScanJob> {
+  return apiPost<FullMarketBatchScanJob>(
+    `/full-market/batch-scan${queryString({
+      provider,
+      batch_size: batchSize,
+      max_symbols: maxSymbols,
+      include_etfs: includeEtfs,
+      sync_if_empty: true,
+      force_restart: forceRestart,
+    })}`,
+    {},
+  );
+}
+
+export async function fetchFullMarketBatchScan(
+  jobId: string,
+): Promise<FullMarketBatchScanJob> {
+  return apiGet<FullMarketBatchScanJob>(`/full-market/batch-scan/${jobId}`);
+}
+
+export async function fetchLatestFullMarketBatchScan(
+  provider: DataProviderMode,
+): Promise<FullMarketBatchScanJob> {
+  return apiGet<FullMarketBatchScanJob>("/full-market/batch-scan/latest", { provider });
+}
+
+export async function fetchLatestFullMarketBatchResult(
+  provider: DataProviderMode,
+  includeEtfs = true,
+): Promise<FullMarketScanResponse> {
+  return apiGet<FullMarketScanResponse>("/full-market/batch-scan/latest-result", {
+    provider,
+    include_etfs: includeEtfs,
+  });
+}
+
+export async function startTodayScanTask(
+  provider: DataProviderMode,
+  maxSymbols = 80,
+  includeEtfs = true,
+  forceRefresh = false,
+  cacheTtlMinutes = 60,
+): Promise<ScanTask> {
+  return apiPost<ScanTask>(
+    `/scan-tasks/today${queryString({
+      provider,
+      max_symbols: maxSymbols,
+      include_etfs: includeEtfs,
+      sync_if_empty: true,
+      force_refresh: forceRefresh,
+      cache_ttl_minutes: cacheTtlMinutes,
+    })}`,
+    {},
+  );
+}
+
+export async function fetchScanTask(taskId: string): Promise<ScanTask> {
+  return apiGet<ScanTask>(`/scan-tasks/${taskId}`);
+}
+
+export async function fetchScanTasks(): Promise<ScanTasksResponse> {
+  return apiGet<ScanTasksResponse>("/scan-tasks", { limit: 20 });
+}
+
 export async function fetchCatalysts(symbols: string): Promise<CatalystsResponse> {
   return apiGet<CatalystsResponse>("/catalysts", { symbols, limit: 5 });
 }
@@ -398,6 +507,7 @@ export async function fetchBacktest(
     symbols,
     step_days: 5,
     limit: 100,
+    scan_limit: provider === "free" ? 30 : undefined,
   });
 }
 
@@ -408,6 +518,7 @@ export async function fetchFactorBacktest(
   return apiGet<FactorBacktestResponse>("/factors/backtest", {
     provider,
     symbols,
+    scan_limit: provider === "free" ? 30 : undefined,
   });
 }
 
@@ -424,12 +535,14 @@ export async function fetchPortfolioBacktest(
     max_positions: 5,
     transaction_cost_bps: 5,
     slippage_bps: 5,
+    scan_limit: provider === "free" ? 30 : undefined,
   });
 }
 
 export async function fetchDailyBrief(
   provider: DataProviderMode,
   symbols?: string,
+  params?: DailyBriefRequest,
   options?: RequestOptions,
 ): Promise<DailyBriefResponse> {
   return apiGet<DailyBriefResponse>(
@@ -439,6 +552,7 @@ export async function fetchDailyBrief(
       symbols,
       limit: 5,
       include_news: provider === "free",
+      ...params,
     },
     options,
   );
@@ -447,6 +561,7 @@ export async function fetchDailyBrief(
 export async function saveDailyBriefRun(
   provider: DataProviderMode,
   symbols?: string,
+  params?: DailyBriefRequest,
 ): Promise<BriefRun> {
   return apiPost<BriefRun>(
     `/daily-brief/runs${queryString({
@@ -454,6 +569,7 @@ export async function saveDailyBriefRun(
       symbols,
       limit: 5,
       include_news: provider === "free",
+      ...params,
     })}`,
     {},
   );

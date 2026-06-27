@@ -88,94 +88,100 @@ def run_daily_scan(
     card_generator = OpportunityCardGenerator(strategy_evaluator)
     strategy_mode = provider.name if mode == "development" else mode
     strategy_provider = strategy_data_provider or build_strategy_data_provider(strategy_mode)
+    scan_error_samples: list[str] = []
     reset_cache_stats = getattr(provider, "reset_cache_stats", None)
     if callable(reset_cache_stats):
         reset_cache_stats()
 
     for instrument_id in instrument_ids:
-        bars = provider.get_daily_bars(
-            instrument_ids=[instrument_id],
-            start=start,
-            end=end,
-        )
-        earnings_events = strategy_provider.get_earnings_events(
-            instrument_ids=[instrument_id],
-            start=start,
-            end=end,
-        )
-        filings = strategy_provider.get_filings(
-            instrument_ids=[instrument_id],
-            start=start,
-            end=end,
-        )
-        announcements = strategy_provider.get_announcements(
-            instrument_ids=[instrument_id],
-            start=start,
-            end=end,
-        )
-        fundamentals = strategy_provider.get_fundamentals(
-            instrument_ids=[instrument_id],
-            start=start,
-            end=end,
-        )
-        analyst_insights = strategy_provider.get_analyst_insights(
-            instrument_ids=[instrument_id],
-            start=start,
-            end=end,
-        )
-        strategy_filings_count += len(filings)
-        strategy_announcements_count += len(announcements)
-        strategy_fundamentals_count += len(fundamentals)
-        strategy_analyst_insights_count += len(analyst_insights)
-        bars_by_instrument[instrument_id] = bars
-        signals = signal_engine.generate(instrument_id, bars)
-        strategy_evaluations = strategy_evaluator.evaluate(
-            instrument_id,
-            signals,
-            bars,
-            context={
-                "earnings_events": earnings_events,
-                "filings": filings,
-                "announcements": announcements,
-                "fundamentals": fundamentals,
-                "analyst_insights": analyst_insights,
-                "available_data": _available_strategy_data(
-                    earnings_events,
-                    fundamentals,
-                    analyst_insights,
-                    filings,
-                ),
-            },
-        )
-        card = card_generator.generate(instrument_id, signals, bars, strategy_evaluations)
-        instrument_label = format_instrument_label(instrument_id)
-        trading_constraints = build_trading_constraints(instrument_id, instrument_label)
-        trading_status = evaluate_trading_status(instrument_id, bars, trading_constraints)
-        tradability = evaluate_tradability(
-            instrument_id,
-            instrument_label,
-            bars,
-            trading_status,
-            trading_constraints,
-        )
-        trading_status_by_instrument[instrument_id] = trading_status
-        tradability_by_instrument[instrument_id] = tradability
-        if card:
-            card.trading_constraints = trading_constraints
-            card.trading_status = trading_status
-            card.tradability = tradability
-            cards.append(card)
-        items.append(
-            _scan_item(
-                instrument_id,
-                bars,
-                signals,
-                strategy_evaluations,
-                card,
-                trading_status,
-                tradability,
+        try:
+            bars = provider.get_daily_bars(
+                instrument_ids=[instrument_id],
+                start=start,
+                end=end,
             )
-        )
+            earnings_events = strategy_provider.get_earnings_events(
+                instrument_ids=[instrument_id],
+                start=start,
+                end=end,
+            )
+            filings = strategy_provider.get_filings(
+                instrument_ids=[instrument_id],
+                start=start,
+                end=end,
+            )
+            announcements = strategy_provider.get_announcements(
+                instrument_ids=[instrument_id],
+                start=start,
+                end=end,
+            )
+            fundamentals = strategy_provider.get_fundamentals(
+                instrument_ids=[instrument_id],
+                start=start,
+                end=end,
+            )
+            analyst_insights = strategy_provider.get_analyst_insights(
+                instrument_ids=[instrument_id],
+                start=start,
+                end=end,
+            )
+            strategy_filings_count += len(filings)
+            strategy_announcements_count += len(announcements)
+            strategy_fundamentals_count += len(fundamentals)
+            strategy_analyst_insights_count += len(analyst_insights)
+            bars_by_instrument[instrument_id] = bars
+            signals = signal_engine.generate(instrument_id, bars)
+            strategy_evaluations = strategy_evaluator.evaluate(
+                instrument_id,
+                signals,
+                bars,
+                context={
+                    "earnings_events": earnings_events,
+                    "filings": filings,
+                    "announcements": announcements,
+                    "fundamentals": fundamentals,
+                    "analyst_insights": analyst_insights,
+                    "available_data": _available_strategy_data(
+                        earnings_events,
+                        fundamentals,
+                        analyst_insights,
+                        filings,
+                    ),
+                },
+            )
+            card = card_generator.generate(instrument_id, signals, bars, strategy_evaluations)
+            instrument_label = format_instrument_label(instrument_id)
+            trading_constraints = build_trading_constraints(instrument_id, instrument_label)
+            trading_status = evaluate_trading_status(instrument_id, bars, trading_constraints)
+            tradability = evaluate_tradability(
+                instrument_id,
+                instrument_label,
+                bars,
+                trading_status,
+                trading_constraints,
+            )
+            trading_status_by_instrument[instrument_id] = trading_status
+            tradability_by_instrument[instrument_id] = tradability
+            if card:
+                card.trading_constraints = trading_constraints
+                card.trading_status = trading_status
+                card.tradability = tradability
+                cards.append(card)
+            items.append(
+                _scan_item(
+                    instrument_id,
+                    bars,
+                    signals,
+                    strategy_evaluations,
+                    card,
+                    trading_status,
+                    tradability,
+                )
+            )
+        except Exception as exc:
+            error_message = f"{instrument_id}: {exc}"
+            scan_error_samples.append(error_message)
+            items.append(_scan_error_item(instrument_id, exc))
 
     factor_rankings = _factor_rankings_from_bars(bars_by_instrument)
     for ranking in factor_rankings:
@@ -227,8 +233,12 @@ def run_daily_scan(
         data_health["market_cache_hits"] = str(stats["hits"])
         data_health["market_cache_misses"] = str(stats["misses"])
         data_health["market_cache_rows"] = str(stats["rows"])
+    if scan_error_samples:
+        data_health["scan_errors"] = str(len(scan_error_samples))
+        data_health["scan_error_samples"] = " | ".join(scan_error_samples[:3])
     provider_errors = getattr(provider, "last_errors", [])
     if provider_errors:
+        data_health["provider_error_count"] = str(len(provider_errors))
         data_health["errors"] = " | ".join(provider_errors[:3])
     strategy_provider_errors = getattr(strategy_provider, "last_errors", [])
     if strategy_provider_errors:
@@ -241,6 +251,25 @@ def run_daily_scan(
         sector_strength=sector_strength,
         portfolio_plan=portfolio_plan,
         data_health=data_health,
+    )
+
+
+def _scan_error_item(instrument_id: str, exc: Exception) -> ScanItem:
+    return ScanItem(
+        instrument_id=instrument_id,
+        instrument_label=format_instrument_label(instrument_id),
+        status="data_error",
+        reason=f"Instrument scan failed: {exc}",
+        bars=0,
+        signals=0,
+        blockers=[
+            ScanBlocker(
+                code="instrument_scan_error",
+                severity="block",
+                title="Instrument scan error",
+                message=str(exc),
+            )
+        ],
     )
 
 

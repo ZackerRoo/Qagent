@@ -87,6 +87,7 @@ def build_a_share_universe(
 def resolve_symbol_tokens(
     symbols: list[str],
     limit: int = DEFAULT_A_SHARE_SCAN_LIMIT,
+    include_supplements: bool = True,
     min_price: Decimal | int | str = DEFAULT_A_SHARE_MIN_PRICE,
     min_turnover: Decimal | int | str = DEFAULT_A_SHARE_MIN_TURNOVER,
 ) -> ResolvedSymbols:
@@ -106,11 +107,15 @@ def resolve_symbol_tokens(
     health_items: list[dict[str, str]] = []
     is_dynamic = False
     for token in token_symbols:
-        token_resolution = (
-            _resolve_all_a_share_token(limit, min_price, min_turnover)
-            if token == CN_ALL_TOKEN
-            else resolve_cn_universe_token(token, limit=limit)
-        )
+        if token == CN_ALL_TOKEN:
+            token_resolution = _resolve_all_a_share_token(
+                limit,
+                min_price,
+                min_turnover,
+                include_supplements=include_supplements,
+            )
+        else:
+            token_resolution = resolve_cn_universe_token(token, limit=limit)
         resolved.extend(token_resolution.symbols)
         health_items.append(token_resolution.data_health)
         is_dynamic = is_dynamic or token_resolution.is_dynamic
@@ -126,6 +131,7 @@ def _resolve_all_a_share_token(
     limit: int,
     min_price: Decimal | int | str,
     min_turnover: Decimal | int | str,
+    include_supplements: bool = True,
 ) -> ResolvedSymbols:
     try:
         selection = build_a_share_universe(
@@ -135,8 +141,10 @@ def _resolve_all_a_share_token(
         )
     except Exception as exc:
         starter = DEFAULT_A_SHARE_STARTER_UNIVERSE[: max(limit, 0)]
-        supplements = _build_all_a_share_supplements()
+        supplements = _build_all_a_share_supplements() if include_supplements else []
         fallback = _dedupe_symbols(starter + supplements)
+        if not include_supplements and limit > 0 and len(fallback) > limit:
+            fallback = fallback[:limit]
         supplemental_selected = len([symbol for symbol in supplements if symbol not in starter])
         return ResolvedSymbols(
             symbols=fallback,
@@ -146,14 +154,16 @@ def _resolve_all_a_share_token(
                 "universe_selected": str(len(fallback)),
                 "universe_limit": str(limit),
                 "universe_fallback": "cn_liquid_starter",
-                "universe_supplements": "included",
+                "universe_supplements": "included" if include_supplements else "disabled",
                 "universe_supplemental_selected": str(supplemental_selected),
                 "universe_error": str(exc),
             },
             is_dynamic=True,
         )
-    supplements = _build_all_a_share_supplements()
+    supplements = _build_all_a_share_supplements() if include_supplements else []
     combined = _dedupe_symbols(selection.symbols + supplements)
+    if not include_supplements and limit > 0 and len(combined) > limit:
+        combined = combined[:limit]
     supplemental_selected = len([symbol for symbol in combined if symbol not in selection.symbols])
     data_health = {
         "universe": CN_ALL_TOKEN,
@@ -163,9 +173,13 @@ def _resolve_all_a_share_token(
         "universe_selected": str(len(combined)),
         "universe_dynamic_selected": str(selection.selected_count),
         "universe_limit": str(limit),
-        "universe_supplements": "included",
+        "universe_supplements": "included" if include_supplements else "disabled",
         "universe_supplemental_selected": str(supplemental_selected),
-        "universe_components": "流动性动态样本,核心ETF,全市场ETF,主要指数代表,主题代表",
+        "universe_components": (
+            "流动性动态样本,核心ETF,全市场ETF,主要指数代表,主题代表"
+            if include_supplements
+            else "流动性动态样本"
+        ),
         "universe_filters": "; ".join(selection.filters),
     }
     if selection.excluded_counts:

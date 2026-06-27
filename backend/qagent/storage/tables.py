@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import Date, DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from qagent.db import Base
@@ -132,6 +132,45 @@ class ScanRunRow(Base):
     cards: Mapped[int] = mapped_column(Integer, default=0)
     data_health: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ScanResultCacheRow(Base):
+    __tablename__ = "scan_result_cache"
+
+    cache_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    cache_key: Mapped[str] = mapped_column(String(160), index=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    mode: Mapped[str] = mapped_column(String(32), index=True)
+    symbols: Mapped[str] = mapped_column(Text, default="[]")
+    payload_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class FullMarketScanJobRow(Base):
+    __tablename__ = "full_market_scan_jobs"
+
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="queued")
+    batch_size: Mapped[int] = mapped_column(Integer, default=200)
+    total_symbols: Mapped[int] = mapped_column(Integer, default=0)
+    scanned_symbols: Mapped[int] = mapped_column(Integer, default=0)
+    total_batches: Mapped[int] = mapped_column(Integer, default=0)
+    completed_batches: Mapped[int] = mapped_column(Integer, default=0)
+    cards: Mapped[int] = mapped_column(Integer, default=0)
+    errors: Mapped[int] = mapped_column(Integer, default=0)
+    include_etfs: Mapped[bool] = mapped_column(Boolean, default=True)
+    sync_if_empty: Mapped[bool] = mapped_column(Boolean, default=True)
+    symbols: Mapped[str] = mapped_column(Text, default="[]")
+    message: Mapped[str] = mapped_column(Text, default="")
+    data_health: Mapped[str] = mapped_column(Text, default="{}")
+    result_cache_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class BriefRunRow(Base):

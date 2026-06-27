@@ -17,6 +17,7 @@ import { Overview } from "./pages/Overview";
 import { Portfolio } from "./pages/Portfolio";
 import { Review } from "./pages/Review";
 import { Settings } from "./pages/Settings";
+import { Today } from "./pages/Today";
 import { Watchlist } from "./pages/Watchlist";
 import type {
   DataProviderMode,
@@ -31,9 +32,19 @@ import type {
 import { applyResearchProfile } from "./lib/profiles";
 
 const DEFAULT_SYMBOLS = "CN:ALL";
+const NON_BRIEF_PAGES: PageId[] = [
+  "overview",
+  "opportunities",
+  "watchlist",
+  "portfolio",
+  "alerts",
+  "history",
+  "review",
+  "settings",
+];
 
 export default function App() {
-  const [page, setPage] = useState<PageId>("brief");
+  const [page, setPage] = useState<PageId>("today");
   const [overview, setOverview] = useState<OverviewResponse>();
   const [opportunities, setOpportunities] = useState<OpportunitiesResponse>();
   const [radar, setRadar] = useState<IntradayRadarResponse>();
@@ -47,6 +58,10 @@ export default function App() {
   const [error, setError] = useState("");
   const scanRequestRef = useRef(0);
   const scanAbortRef = useRef<AbortController | null>(null);
+
+  function shouldLoadDashboard(nextPage: PageId = page): boolean {
+    return NON_BRIEF_PAGES.includes(nextPage);
+  }
 
   async function loadDashboard(mode: DataProviderMode, symbolText: string) {
     const requestId = scanRequestRef.current + 1;
@@ -91,8 +106,11 @@ export default function App() {
   }
 
   useEffect(() => {
-    void loadDashboard("free", DEFAULT_SYMBOLS);
     void refreshUniverses();
+
+    if (shouldLoadDashboard(page)) {
+      void loadDashboard("free", DEFAULT_SYMBOLS);
+    }
   }, []);
 
   async function refreshUniverses() {
@@ -100,12 +118,21 @@ export default function App() {
     setUniverses(result.universes);
   }
 
+  useEffect(() => {
+    if (!shouldLoadDashboard()) {
+      return;
+    }
+    void loadDashboard(dataMode, symbols);
+  }, [dataMode, symbols, page]);
+
   function handleDataModeChange(mode: DataProviderMode) {
     setDataMode(mode);
-    void loadDashboard(mode, symbols);
   }
 
   function handleScan() {
+    if (!shouldLoadDashboard()) {
+      return;
+    }
     void loadDashboard(dataMode, symbols);
   }
 
@@ -127,7 +154,6 @@ export default function App() {
     const nextMode = universe.universe_id === "fixture_dev" ? "fixture" : "free";
     setSymbols(nextSymbols);
     setDataMode(nextMode);
-    void loadDashboard(nextMode, nextSymbols);
   }
 
   async function handleSaveUniverse(payload: UniverseCreate) {
@@ -160,6 +186,15 @@ export default function App() {
     }
 
     switch (page) {
+      case "today":
+        return (
+          <Today
+            dataMode={dataMode}
+            profile={profile}
+            selectedCard={selectedCard}
+            onSelect={setSelectedCard}
+          />
+        );
       case "brief":
         return <Brief dataMode={dataMode} symbols={symbols} />;
       case "overview":
@@ -232,6 +267,7 @@ export default function App() {
       universes={universes}
       selectedUniverseId={selectedUniverseId}
       profile={profile}
+      scanEnabled={shouldLoadDashboard()}
       onSymbolsChange={setSymbols}
       onUniverseChange={handleUniverseChange}
       onDataModeChange={handleDataModeChange}

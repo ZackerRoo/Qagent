@@ -396,6 +396,47 @@ export type FullMarketScanResponse = OpportunitiesResponse & {
   symbols: string[];
 };
 
+export type ScanTask = {
+  task_id: string;
+  kind: string;
+  status: "queued" | "running" | "succeeded" | "failed" | string;
+  progress: number;
+  message: string;
+  result: FullMarketScanResponse | null;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+export type ScanTasksResponse = {
+  tasks: ScanTask[];
+};
+
+export type FullMarketBatchScanJob = {
+  job_id: string;
+  provider: DataProviderMode | string;
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | string;
+  batch_size: number;
+  total_symbols: number;
+  scanned_symbols: number;
+  total_batches: number;
+  completed_batches: number;
+  cards: number;
+  errors: number;
+  include_etfs: boolean;
+  sync_if_empty: boolean;
+  message: string;
+  data_health: Record<string, string>;
+  result_cache_key: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  progress: number;
+  symbols_preview: string[];
+};
+
 export type MarketBarPoint = {
   trade_date: string;
   open: number | null;

@@ -1,8 +1,12 @@
 from pydantic import BaseModel, Field
 
+from qagent.db import create_session_factory, initialize_database
+from qagent.domain.models import OpportunityCard
 from qagent.jobs.daily_scan import DailyScanResult, run_daily_scan
 from qagent.market.tradable import load_cn_tradable_instruments
 from qagent.providers.factory import build_market_data_provider
+from qagent.recommendations.portfolio import build_portfolio_plan
+from qagent.recommendations.rotation import sort_recommendation_cards
 from qagent.storage.repository import (
     QagentRepository,
     TradableCatalogSummary,
@@ -82,6 +86,17 @@ def build_full_market_symbols(
     ]
 
 
+def build_full_market_batch_symbols(
+    repo: QagentRepository,
+    include_etfs: bool = True,
+    max_symbols: int | None = None,
+) -> list[str]:
+    asset_types = {"stock", "etf"} if include_etfs else {"stock"}
+    limit = max_symbols if max_symbols is not None else 20_000
+    instruments = repo.list_tradable_instruments(asset_types=asset_types, limit=limit)
+    return [item.instrument_id for item in instruments]
+
+
 def run_full_market_scan(
     repo: QagentRepository,
     provider_mode: str = "free",
@@ -121,3 +136,140 @@ def run_full_market_scan(
         scan=scan,
         data_health=scan.data_health,
     )
+
+
+def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> None:
+    repo = _repo()
+    job = repo.get_full_market_scan_job(job_id)
+    if job is None:
+        return
+    provider = build_market_data_provider(job.provider)
+    all_cards: list[OpportunityCard] = []
+    aggregate_health: dict[str, str] = {
+        "provider": job.provider,
+        "full_market_scan_mode": "batch",
+        "full_market_total_symbols": str(job.total_symbols),
+        "full_market_batch_size": str(job.batch_size),
+        "full_market_batches": str(job.total_batches),
+        "full_market_include_etfs": str(job.include_etfs).lower(),
+    }
+    scanned_symbols = 0
+    completed_batches = 0
+    error_count = 0
+
+    repo.update_full_market_scan_job(
+        job_id,
+        status="running",
+        message=f"Starting full-market scan: {job.total_symbols} symbols",
+        data_health=aggregate_health,
+    )
+
+    for batch in _chunks(job.symbols, job.batch_size):
+        completed_batches += 1
+        try:
+            scan = run_daily_scan(
+                batch,
+                provider,
+                mode=job.provider,
+                strategy_data_provider=EmptyStrategyDataProvider(),
+            )
+            repo.save_scan_run(
+                provider=job.provider,
+                mode=f"batch:{job_id}",
+                symbols=batch,
+                result=scan,
+            )
+            all_cards.extend(scan.cards)
+            _merge_health(aggregate_health, scan.data_health)
+            error_count += _int_health(scan.data_health, "scan_errors")
+        except Exception as exc:
+            error_count += len(batch)
+            aggregate_health[f"batch_{completed_batches}_error"] = str(exc)[:500]
+        scanned_symbols += len(batch)
+        repo.update_full_market_scan_job(
+            job_id,
+            status="running",
+            scanned_symbols=scanned_symbols,
+            completed_batches=completed_batches,
+            cards=len(all_cards),
+            errors=error_count,
+            message=f"Completed batch {completed_batches}/{job.total_batches}",
+            data_health=aggregate_health,
+        )
+
+    ranked_cards = sort_recommendation_cards(all_cards)
+    visible_cards = ranked_cards[:top_cards_limit]
+    portfolio_plan = build_portfolio_plan(visible_cards)
+    cache_key = _full_market_batch_cache_key(job.provider, job.include_etfs)
+    payload = {
+        "symbols": job.symbols,
+        "cards": [card.model_dump(mode="json") for card in visible_cards],
+        "items": [],
+        "strategy_health": [],
+        "factor_rankings": [],
+        "sector_strength": [],
+        "portfolio_plan": portfolio_plan.model_dump(mode="json"),
+        "data_health": {
+            **aggregate_health,
+            "scan_result_cache": "full_market_batch",
+            "scan_result_cache_key": cache_key,
+            "full_market_cards_total": str(len(ranked_cards)),
+            "full_market_cards_returned": str(len(visible_cards)),
+            "scanned": str(scanned_symbols),
+            "cards": str(len(visible_cards)),
+        },
+    }
+    repo.save_scan_result_cache(
+        cache_key=cache_key,
+        provider=job.provider,
+        mode="full_market_batch",
+        symbols=job.symbols,
+        payload=payload,
+    )
+    repo.update_full_market_scan_job(
+        job_id,
+        status="succeeded",
+        scanned_symbols=scanned_symbols,
+        completed_batches=job.total_batches,
+        cards=len(visible_cards),
+        errors=error_count,
+        message="Full-market batch scan complete",
+        data_health=payload["data_health"],
+        result_cache_key=cache_key,
+    )
+
+
+def full_market_batch_cache_key(provider: str, include_etfs: bool = True) -> str:
+    return _full_market_batch_cache_key(provider, include_etfs)
+
+
+def _repo() -> QagentRepository:
+    initialize_database()
+    return QagentRepository(create_session_factory())
+
+
+def _chunks(items: list[str], size: int):
+    for index in range(0, len(items), size):
+        yield items[index : index + size]
+
+
+def _merge_health(target: dict[str, str], source: dict[str, str]) -> None:
+    for key, value in source.items():
+        current = target.get(key)
+        if current is not None and str(current).isdigit() and str(value).isdigit():
+            target[key] = str(int(current) + int(str(value)))
+        elif key == "errors" and current:
+            target[key] = f"{current} | {value}"
+        else:
+            target[key] = str(value)
+
+
+def _int_health(source: dict[str, str], key: str) -> int:
+    try:
+        return int(str(source.get(key, "0")))
+    except ValueError:
+        return 0
+
+
+def _full_market_batch_cache_key(provider: str, include_etfs: bool) -> str:
+    return f"full_market_batch:{provider.strip().lower()}:{str(include_etfs).lower()}"

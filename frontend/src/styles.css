@@ -385,6 +385,77 @@ h3 {
   align-items: center;
 }
 
+.brief-mode-switch {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.brief-mode-switch button {
+  min-width: 88px;
+  height: 32px;
+  border: 0;
+  border-right: 1px solid #e2e8f0;
+  background: #ffffff;
+  color: #475569;
+  padding: 0 10px;
+  cursor: pointer;
+}
+
+.brief-mode-switch button:last-child {
+  border-right: 0;
+}
+
+.brief-mode-switch button.active {
+  background: #0f4c81;
+  color: #ffffff;
+}
+
+.input-compact,
+.checkbox-compact {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.input-compact {
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 0 8px;
+  height: 32px;
+  background: #ffffff;
+  color: #334155;
+}
+
+.input-compact span {
+  font-size: 12px;
+  color: #475569;
+}
+
+.input-compact input {
+  width: 64px;
+  border: 0;
+  color: #17202a;
+  background: transparent;
+  outline: none;
+}
+
+.input-compact select {
+  min-width: 72px;
+  border: 0;
+  color: #17202a;
+  background: transparent;
+  outline: none;
+}
+
+.checkbox-compact {
+  font-size: 12px;
+  color: #334155;
+}
+
 .table-actions {
   flex-wrap: nowrap;
   gap: 6px;
@@ -951,6 +1022,90 @@ tbody tr.selected {
   margin-top: 2px;
   color: #17202a;
   font-size: 18px;
+}
+
+.today-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.today-metrics {
+  margin-top: 0;
+}
+
+.task-progress {
+  display: grid;
+  gap: 7px;
+  border: 1px solid #d8dee8;
+  border-radius: 6px;
+  padding: 10px;
+  background: #f8fafc;
+}
+
+.task-progress div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #475569;
+  font-size: 13px;
+}
+
+.task-progress strong {
+  color: #0f4c81;
+}
+
+.task-progress progress {
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+
+.task-progress progress::-webkit-progress-bar {
+  background: #e2e8f0;
+}
+
+.task-progress progress::-webkit-progress-value {
+  background: #0f4c81;
+}
+
+.task-failed progress::-webkit-progress-value {
+  background: #dc2626;
+}
+
+.task-succeeded progress::-webkit-progress-value {
+  background: #16a34a;
+}
+
+.today-trade-table {
+  max-height: 420px;
+}
+
+.strategy-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.strategy-strip div {
+  display: grid;
+  gap: 5px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 10px;
+  background: #ffffff;
+}
+
+.strategy-strip strong {
+  font-size: 13px;
+}
+
+.strategy-strip span {
+  color: #64748b;
+  font-size: 12px;
 }
 
 .sector-strength {
@@ -1596,6 +1751,7 @@ tbody tr.selected {
   .context-grid,
   .sector-strength-grid,
   .scenario-grid,
+  .strategy-strip,
   .validation-grid,
   .validation-grid-wide,
   .catalog-toolbar,

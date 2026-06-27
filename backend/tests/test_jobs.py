@@ -1,5 +1,7 @@
 from datetime import date
 
+import pandas as pd
+
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.providers.fixtures import FixtureMarketDataProvider
 
@@ -71,6 +73,39 @@ def test_daily_scan_surfaces_provider_errors():
     assert result.items[0].instrument_id == "US:MISS"
     assert result.items[0].status == "no_data"
     assert result.items[0].reason == "No daily bars returned by provider."
+
+
+class ProviderThatRaisesForOneSymbol:
+    name = "partial_failure"
+    last_errors: list[str] = []
+
+    def __init__(self):
+        self.fixture = FixtureMarketDataProvider()
+
+    def get_daily_bars(self, instrument_ids, start, end):
+        if instrument_ids == ["CN:BAD"]:
+            raise ValueError("bad vendor payload")
+        if instrument_ids == ["US:TEST"]:
+            return self.fixture.get_daily_bars(instrument_ids, start, end)
+        return pd.DataFrame()
+
+    def get_snapshot(self, instrument_ids):
+        return pd.DataFrame()
+
+
+def test_daily_scan_continues_after_single_instrument_error():
+    result = run_daily_scan(
+        ["CN:BAD", "US:TEST"],
+        provider=ProviderThatRaisesForOneSymbol(),
+        mode="free",
+    )
+
+    by_id = {item.instrument_id: item for item in result.items}
+    assert by_id["CN:BAD"].status == "data_error"
+    assert "bad vendor payload" in by_id["CN:BAD"].reason
+    assert by_id["US:TEST"].status == "setup_ready"
+    assert len(result.cards) == 1
+    assert result.data_health["scan_errors"] == "1"
 
 
 class StrategyDataProviderWithRecords:

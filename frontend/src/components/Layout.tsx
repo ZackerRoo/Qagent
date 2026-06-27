@@ -3,6 +3,7 @@ import {
   Bell,
   BookOpenCheck,
   Briefcase,
+  CalendarDays,
   History,
   ListFilter,
   Newspaper,
@@ -27,6 +28,7 @@ import { localizeProfile } from "../lib/localize";
 import { researchProfiles } from "../lib/profiles";
 
 const nav = [
+  { id: "today", labelKey: "nav.today", icon: CalendarDays },
   { id: "brief", labelKey: "nav.brief", icon: Newspaper },
   { id: "overview", labelKey: "nav.overview", icon: Activity },
   { id: "opportunities", labelKey: "nav.opportunities", icon: ListFilter },
@@ -50,6 +52,7 @@ type Props = {
   universes: UniverseRecord[];
   selectedUniverseId: string;
   profile: ResearchProfile;
+  scanEnabled: boolean;
   onSymbolsChange(value: string): void;
   onUniverseChange(value: string): void;
   onDataModeChange(mode: DataProviderMode): void;
@@ -68,6 +71,7 @@ export function Layout({
   universes,
   selectedUniverseId,
   profile,
+  scanEnabled,
   onSymbolsChange,
   onUniverseChange,
   onDataModeChange,
@@ -258,7 +262,7 @@ export function Layout({
                 title={formatSelectedSymbols(symbols, selectedLabels, false)}
                 value={formatSelectedSymbols(symbols, selectedLabels)}
               />
-              <button type="button" className="icon-action" onClick={onScan} disabled={isScanning}>
+              <button type="button" className="icon-action" onClick={onScan} disabled={isScanning || !scanEnabled}>
                 <RefreshCw size={16} />
                 <span>{isScanning ? t("top.scanning") : t("top.scan")}</span>
               </button>

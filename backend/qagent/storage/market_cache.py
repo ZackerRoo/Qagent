@@ -1,5 +1,6 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import math
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -222,11 +223,10 @@ def _normalize_bars(bars: pd.DataFrame) -> pd.DataFrame:
     normalized = bars.copy()
     normalized["trade_date"] = pd.to_datetime(normalized["trade_date"]).dt.date
     for column in ["open", "high", "low", "close"]:
-        normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
+        normalized[column] = _finite_numeric(normalized[column])
     if "volume" not in normalized.columns:
         normalized["volume"] = 0
-    volume = pd.to_numeric(normalized["volume"], errors="coerce")
-    volume = volume.replace([float("inf"), float("-inf")], 0).fillna(0)
+    volume = _finite_numeric(normalized["volume"]).fillna(0)
     if not volume.isna().any() and volume.mod(1).eq(0).all():
         normalized["volume"] = volume.astype("int64")
     else:
@@ -235,3 +235,9 @@ def _normalize_bars(bars: pd.DataFrame) -> pd.DataFrame:
         normalized["provider"] = ""
     normalized = normalized.dropna(subset=["open", "high", "low", "close"])
     return normalized[BAR_COLUMNS].sort_values(["instrument_id", "trade_date"]).reset_index(drop=True)
+
+
+def _finite_numeric(series: pd.Series) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce")
+    finite_mask = numeric.map(lambda value: pd.notna(value) and math.isfinite(float(value)))
+    return numeric.where(finite_mask)

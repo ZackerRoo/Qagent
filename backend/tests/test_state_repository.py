@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
 
@@ -121,6 +121,83 @@ def test_repository_saves_scan_run_and_opportunity_snapshots(tmp_path):
     assert snapshots[0].signal_date is not None
     assert snapshots[0].latest_close == Decimal("82.00")
     assert snapshots[0].card["instrument_id"] == "US:TEST"
+
+
+def test_repository_saves_and_loads_recent_scan_result_cache(tmp_path):
+    repo = make_repo(tmp_path)
+    payload = {
+        "symbols": ["CN:000001"],
+        "cards": [],
+        "items": [],
+        "strategy_health": [],
+        "factor_rankings": [],
+        "sector_strength": [],
+        "portfolio_plan": {"profile": "balanced"},
+        "data_health": {"provider": "free"},
+    }
+
+    saved = repo.save_scan_result_cache(
+        cache_key="today_scan:free:30:true:true",
+        provider="free",
+        mode="today_scan",
+        symbols=["CN:000001"],
+        payload=payload,
+    )
+    loaded = repo.get_recent_scan_result_cache(
+        cache_key="today_scan:free:30:true:true",
+        max_age=timedelta(minutes=60),
+    )
+
+    assert saved.cache_id.startswith("scan-cache-")
+    assert loaded is not None
+    assert loaded.payload == payload
+    assert loaded.symbols == ["CN:000001"]
+    assert (
+        repo.get_recent_scan_result_cache(
+            cache_key="today_scan:free:80:true:true",
+            max_age=timedelta(minutes=60),
+        )
+        is None
+    )
+
+
+def test_repository_tracks_full_market_batch_scan_jobs(tmp_path):
+    repo = make_repo(tmp_path)
+
+    job = repo.create_full_market_scan_job(
+        provider="free",
+        symbols=["CN:000001", "CN:000002", "CN:159001"],
+        batch_size=2,
+        include_etfs=True,
+        sync_if_empty=True,
+    )
+    updated = repo.update_full_market_scan_job(
+        job.job_id,
+        status="running",
+        scanned_symbols=2,
+        completed_batches=1,
+        cards=3,
+        errors=1,
+        message="Batch 1/2 complete",
+        data_health={"market_cache_hits": "2"},
+    )
+    loaded = repo.get_full_market_scan_job(job.job_id)
+    latest = repo.get_latest_full_market_scan_job(provider="free")
+
+    assert job.job_id.startswith("full-scan-")
+    assert job.status == "queued"
+    assert job.total_symbols == 3
+    assert job.total_batches == 2
+    assert job.progress == 0
+    assert updated is not None
+    assert updated.progress == 66
+    assert updated.cards == 3
+    assert updated.errors == 1
+    assert loaded is not None
+    assert loaded.message == "Batch 1/2 complete"
+    assert loaded.data_health["market_cache_hits"] == "2"
+    assert latest is not None
+    assert latest.job_id == job.job_id
 
 
 def test_repository_filters_opportunity_snapshots_by_instrument(tmp_path):

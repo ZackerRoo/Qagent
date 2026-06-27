@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
 
@@ -12,8 +14,10 @@ from qagent.storage.tables import (
     AlertRuleRow,
     BriefRunRow,
     DeliveryOutboxRow,
+    FullMarketScanJobRow,
     OpportunitySnapshotRow,
     PositionRow,
+    ScanResultCacheRow,
     ScanRunRow,
     TradableInstrumentRow,
     UniverseRow,
@@ -84,6 +88,52 @@ class ScanRunRecord(BaseModel):
     cards: int
     data_health: dict[str, str]
     created_at: datetime
+
+
+class ScanResultCacheRecord(BaseModel):
+    cache_id: str
+    cache_key: str
+    provider: str
+    mode: str
+    symbols: list[str]
+    payload: dict[str, object]
+    created_at: datetime
+
+
+class ScanRunSnapshotBundle(BaseModel):
+    run: ScanRunRecord
+    snapshots: list[OpportunitySnapshotRecord]
+
+
+class FullMarketScanJobRecord(BaseModel):
+    job_id: str
+    provider: str
+    status: str
+    batch_size: int
+    total_symbols: int
+    scanned_symbols: int
+    total_batches: int
+    completed_batches: int
+    cards: int
+    errors: int
+    include_etfs: bool
+    sync_if_empty: bool
+    symbols: list[str]
+    message: str
+    data_health: dict[str, str]
+    result_cache_key: str | None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+    @property
+    def progress(self) -> int:
+        if self.total_symbols <= 0:
+            return 0
+        if self.status == "succeeded":
+            return 100
+        return max(0, min(99, int(self.scanned_symbols * 100 / self.total_symbols)))
 
 
 class OpportunitySnapshotRecord(BaseModel):
@@ -376,6 +426,190 @@ class QagentRepository:
             )
             return [self._scan_run_from_row(row) for row in rows]
 
+    def save_scan_result_cache(
+        self,
+        cache_key: str,
+        provider: str,
+        mode: str,
+        symbols: list[str],
+        payload: dict[str, object],
+    ) -> ScanResultCacheRecord:
+        cache_id = f"scan-cache-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+        with self.session_factory() as session:
+            row = ScanResultCacheRow(
+                cache_id=cache_id,
+                cache_key=cache_key,
+                provider=provider,
+                mode=mode,
+                symbols=json.dumps(symbols),
+                payload_json=json.dumps(payload, sort_keys=True),
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return self._scan_result_cache_from_row(row)
+
+    def get_recent_scan_result_cache(
+        self,
+        cache_key: str,
+        max_age: timedelta,
+    ) -> ScanResultCacheRecord | None:
+        earliest = datetime.now(timezone.utc) - max_age
+        with self.session_factory() as session:
+            row = (
+                session.query(ScanResultCacheRow)
+                .filter(
+                    ScanResultCacheRow.cache_key == cache_key,
+                    ScanResultCacheRow.created_at >= earliest,
+                )
+                .order_by(ScanResultCacheRow.created_at.desc(), ScanResultCacheRow.cache_id.desc())
+                .first()
+            )
+            if row is None:
+                return None
+            return self._scan_result_cache_from_row(row)
+
+    def get_recent_scan_run_with_snapshots(
+        self,
+        provider: str,
+        scanned: int,
+        max_age: timedelta,
+    ) -> ScanRunSnapshotBundle | None:
+        earliest = datetime.now(timezone.utc) - max_age
+        with self.session_factory() as session:
+            run_row = (
+                session.query(ScanRunRow)
+                .filter(
+                    ScanRunRow.provider == provider,
+                    ScanRunRow.scanned == scanned,
+                    ScanRunRow.created_at >= earliest,
+                )
+                .order_by(ScanRunRow.created_at.desc(), ScanRunRow.run_id.desc())
+                .first()
+            )
+            if run_row is None:
+                return None
+            snapshot_rows = (
+                session.query(OpportunitySnapshotRow)
+                .filter(OpportunitySnapshotRow.run_id == run_row.run_id)
+                .order_by(
+                    OpportunitySnapshotRow.rank_score.desc(),
+                    OpportunitySnapshotRow.score.desc(),
+                    OpportunitySnapshotRow.snapshot_id.desc(),
+                )
+                .all()
+            )
+            return ScanRunSnapshotBundle(
+                run=self._scan_run_from_row(run_row),
+                snapshots=[self._opportunity_snapshot_from_row(row) for row in snapshot_rows],
+            )
+
+    def create_full_market_scan_job(
+        self,
+        provider: str,
+        symbols: list[str],
+        batch_size: int,
+        include_etfs: bool,
+        sync_if_empty: bool,
+    ) -> FullMarketScanJobRecord:
+        now = datetime.now(timezone.utc)
+        total_symbols = len(symbols)
+        total_batches = (total_symbols + batch_size - 1) // batch_size if batch_size > 0 else 0
+        job_id = f"full-scan-{now.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+        with self.session_factory() as session:
+            row = FullMarketScanJobRow(
+                job_id=job_id,
+                provider=provider,
+                status="queued",
+                batch_size=batch_size,
+                total_symbols=total_symbols,
+                scanned_symbols=0,
+                total_batches=total_batches,
+                completed_batches=0,
+                cards=0,
+                errors=0,
+                include_etfs=include_etfs,
+                sync_if_empty=sync_if_empty,
+                symbols=json.dumps(symbols),
+                message="Queued full-market batch scan",
+                data_health=json.dumps({}),
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return self._full_market_scan_job_from_row(row)
+
+    def update_full_market_scan_job(
+        self,
+        job_id: str,
+        *,
+        status: str | None = None,
+        scanned_symbols: int | None = None,
+        completed_batches: int | None = None,
+        cards: int | None = None,
+        errors: int | None = None,
+        message: str | None = None,
+        data_health: dict[str, str] | None = None,
+        result_cache_key: str | None = None,
+    ) -> FullMarketScanJobRecord | None:
+        now = datetime.now(timezone.utc)
+        with self.session_factory() as session:
+            row = session.get(FullMarketScanJobRow, job_id)
+            if row is None:
+                return None
+            if status is not None:
+                row.status = status
+                if status == "running" and row.started_at is None:
+                    row.started_at = now
+                if status in {"succeeded", "failed", "cancelled"}:
+                    row.finished_at = now
+            if scanned_symbols is not None:
+                row.scanned_symbols = scanned_symbols
+            if completed_batches is not None:
+                row.completed_batches = completed_batches
+            if cards is not None:
+                row.cards = cards
+            if errors is not None:
+                row.errors = errors
+            if message is not None:
+                row.message = message
+            if data_health is not None:
+                row.data_health = json.dumps(data_health, sort_keys=True)
+            if result_cache_key is not None:
+                row.result_cache_key = result_cache_key
+            row.updated_at = now
+            session.commit()
+            session.refresh(row)
+            return self._full_market_scan_job_from_row(row)
+
+    def get_full_market_scan_job(self, job_id: str) -> FullMarketScanJobRecord | None:
+        with self.session_factory() as session:
+            row = session.get(FullMarketScanJobRow, job_id)
+            if row is None:
+                return None
+            return self._full_market_scan_job_from_row(row)
+
+    def get_latest_full_market_scan_job(
+        self,
+        provider: str | None = None,
+    ) -> FullMarketScanJobRecord | None:
+        with self.session_factory() as session:
+            query = session.query(FullMarketScanJobRow)
+            if provider:
+                query = query.filter(FullMarketScanJobRow.provider == provider)
+            row = (
+                query.order_by(
+                    FullMarketScanJobRow.created_at.desc(),
+                    FullMarketScanJobRow.job_id.desc(),
+                )
+                .first()
+            )
+            if row is None:
+                return None
+            return self._full_market_scan_job_from_row(row)
+
     def list_opportunity_snapshots(
         self,
         instrument_id: str | None = None,
@@ -625,6 +859,43 @@ class QagentRepository:
             cards=row.cards,
             data_health=json.loads(row.data_health or "{}"),
             created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _scan_result_cache_from_row(row: ScanResultCacheRow) -> ScanResultCacheRecord:
+        return ScanResultCacheRecord(
+            cache_id=row.cache_id,
+            cache_key=row.cache_key,
+            provider=row.provider,
+            mode=row.mode,
+            symbols=json.loads(row.symbols or "[]"),
+            payload=json.loads(row.payload_json),
+            created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _full_market_scan_job_from_row(row: FullMarketScanJobRow) -> FullMarketScanJobRecord:
+        return FullMarketScanJobRecord(
+            job_id=row.job_id,
+            provider=row.provider,
+            status=row.status,
+            batch_size=row.batch_size,
+            total_symbols=row.total_symbols,
+            scanned_symbols=row.scanned_symbols,
+            total_batches=row.total_batches,
+            completed_batches=row.completed_batches,
+            cards=row.cards,
+            errors=row.errors,
+            include_etfs=bool(row.include_etfs),
+            sync_if_empty=bool(row.sync_if_empty),
+            symbols=json.loads(row.symbols or "[]"),
+            message=row.message or "",
+            data_health=json.loads(row.data_health or "{}"),
+            result_cache_key=row.result_cache_key,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            started_at=row.started_at,
+            finished_at=row.finished_at,
         )
 
     @staticmethod

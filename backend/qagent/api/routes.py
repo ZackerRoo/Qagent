@@ -1,5 +1,7 @@
+from copy import deepcopy
 from datetime import date, timedelta
 from decimal import Decimal
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, HTTPException
 
@@ -12,13 +14,24 @@ from qagent.briefing.export import render_daily_brief_markdown
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
 from qagent.catalysts.providers import FreeCatalystProvider
 from qagent.db import create_session_factory, initialize_database
+from qagent.domain.models import OpportunityCard
 from qagent.factors.backtest import run_factor_backtest
 from qagent.jobs.automation import run_research_automation
 from qagent.jobs.daily_scan import run_daily_scan
-from qagent.jobs.full_market import run_full_market_scan, sync_cn_tradable_catalog
+from qagent.jobs.full_market import (
+    build_full_market_batch_symbols,
+    full_market_batch_cache_key,
+    run_full_market_batch_scan_job,
+    run_full_market_scan,
+    sync_cn_tradable_catalog,
+)
 from qagent.jobs.alert_runner import run_alert_rules
 from qagent.jobs.intraday_check import evaluate_snapshot_alerts
-from qagent.market.a_share_universe import ResolvedSymbols, resolve_symbol_tokens
+from qagent.jobs.task_manager import TaskManager
+from qagent.market.a_share_universe import (
+    ResolvedSymbols,
+    resolve_symbol_tokens,
+)
 from qagent.market.instruments import format_instrument_label
 from qagent.market.tradable import search_cn_tradable_instruments
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE, DEFAULT_FREE_UNIVERSE
@@ -38,6 +51,7 @@ from qagent.paper_trading.engine import (
 )
 from qagent.providers.factory import build_market_data_provider
 from qagent.providers.status import build_provider_status
+from qagent.recommendations.portfolio import build_portfolio_plan
 from qagent.storage.paper import PaperTradingRepository
 from qagent.storage.repository import (
     AlertRuleCreate,
@@ -49,6 +63,8 @@ from qagent.storage.market_cache import MarketDataCacheRepository
 from qagent.strategy_data.providers import EmptyStrategyDataProvider
 
 router = APIRouter()
+_task_manager = TaskManager()
+_task_executor = ThreadPoolExecutor(max_workers=2)
 
 
 def _signal_summary(card) -> str:
@@ -112,6 +128,26 @@ def _resolve_symbols(provider_mode: str, symbols: str | None) -> ResolvedSymbols
     if mode == "free":
         return resolve_symbol_tokens(parsed)
     return ResolvedSymbols(symbols=parsed)
+
+
+def _resolve_symbols_with_limit(
+    provider_mode: str,
+    symbols: str | None,
+    scan_limit: int | None = None,
+    include_supplements: bool = True,
+) -> ResolvedSymbols:
+    mode = provider_mode.strip().lower()
+    limit = scan_limit
+    if mode != "free" or not limit:
+        return _resolve_symbols(mode, symbols)
+    if limit < 1 or limit > 1000:
+        raise HTTPException(status_code=400, detail="scan_limit must be between 1 and 1000")
+    parsed = _parse_symbols(symbols, DEFAULT_FREE_UNIVERSE)
+    return resolve_symbol_tokens(
+        parsed,
+        limit=limit,
+        include_supplements=include_supplements,
+    )
 
 
 def _scan(provider_mode: str = "fixture", symbols: str | None = None):
@@ -504,6 +540,7 @@ def factor_backtest(
     forward_days: int = 20,
     step_days: int = 20,
     top_n: int = 3,
+    scan_limit: int | None = None,
 ) -> dict[str, object]:
     mode = provider.strip().lower()
     if forward_days <= 0 or forward_days > 120:
@@ -512,7 +549,12 @@ def factor_backtest(
         raise HTTPException(status_code=400, detail="step_days must be between 1 and 120")
     if top_n <= 0 or top_n > 50:
         raise HTTPException(status_code=400, detail="top_n must be between 1 and 50")
-    resolved = _resolve_symbols(mode, symbols)
+    resolved = _resolve_symbols_with_limit(
+        mode,
+        symbols,
+        scan_limit,
+        include_supplements=scan_limit is None,
+    )
     instrument_ids = resolved.symbols
     start_date, end_date = _factor_backtest_dates(mode, start, end)
     market_provider = build_market_data_provider(mode)
@@ -551,8 +593,22 @@ def daily_brief(
     symbols: str | None = None,
     limit: int = 5,
     include_news: bool = True,
+    fast: bool = False,
+    skip_backtest: bool = False,
+    scan_limit: int | None = None,
 ) -> dict[str, object]:
-    brief = _build_daily_brief_response(provider, symbols, limit, include_news)
+    if fast:
+        skip_backtest = True
+        include_news = False
+    brief = _build_daily_brief_response(
+        provider=provider,
+        symbols=symbols,
+        limit=limit,
+        include_news=include_news,
+        skip_backtest=skip_backtest,
+        scan_limit=scan_limit,
+        fast=fast,
+    )
     return brief.model_dump(mode="json")
 
 
@@ -562,8 +618,22 @@ def save_daily_brief_run(
     symbols: str | None = None,
     limit: int = 5,
     include_news: bool = True,
+    fast: bool = False,
+    skip_backtest: bool = False,
+    scan_limit: int | None = None,
 ) -> dict[str, object]:
-    brief = _build_daily_brief_response(provider, symbols, limit, include_news)
+    if fast:
+        skip_backtest = True
+        include_news = False
+    brief = _build_daily_brief_response(
+        provider=provider,
+        symbols=symbols,
+        limit=limit,
+        include_news=include_news,
+        skip_backtest=skip_backtest,
+        scan_limit=scan_limit,
+        fast=fast,
+    )
     saved = _repo().save_brief_run(brief)
     return saved.model_dump(mode="json")
 
@@ -711,11 +781,21 @@ def _build_daily_brief_response(
     symbols: str | None,
     limit: int,
     include_news: bool,
+    skip_backtest: bool,
+    scan_limit: int | None,
+    fast: bool = False,
 ):
     mode = provider.strip().lower()
     if limit <= 0 or limit > 20:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 20")
-    resolved = _resolve_symbols(mode, symbols)
+    if scan_limit is None and fast:
+        scan_limit = 80 if mode == "free" else None
+    resolved = _resolve_symbols_with_limit(
+        mode,
+        symbols,
+        scan_limit,
+        include_supplements=not fast,
+    )
     instrument_ids = resolved.symbols
     start_date, end_date = _backtest_dates(mode, None, None)
     try:
@@ -726,14 +806,17 @@ def _build_daily_brief_response(
             mode=mode,
             strategy_data_provider=EmptyStrategyDataProvider() if resolved.is_dynamic else None,
         )
-        backtest_result = run_historical_backtest(
-            instrument_ids=instrument_ids,
-            provider=market_provider,
-            start=start_date,
-            end=end_date,
-            step_days=5,
-            max_signals=100,
-        )
+        if skip_backtest:
+            backtest_result = None
+        else:
+            backtest_result = run_historical_backtest(
+                instrument_ids=instrument_ids,
+                provider=market_provider,
+                start=start_date,
+                end=end_date,
+                step_days=5,
+                max_signals=100,
+            )
         position_risks = _position_risks(mode)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -743,6 +826,10 @@ def _build_daily_brief_response(
         "brief_provider": mode,
         "brief_symbols": str(len(instrument_ids)),
         "brief_news": "skipped",
+        "brief_mode": "fast" if fast else "full",
+        "brief_scan_limit": str(scan_limit) if scan_limit else "default",
+        "brief_backtest": "skipped" if skip_backtest else "run",
+        "brief_skip_backtest": str(skip_backtest).lower(),
     }
     brief_health.update(resolved.data_health)
     if resolved.is_dynamic:
@@ -780,6 +867,7 @@ def backtest(
     end: date | None = None,
     step_days: int = 5,
     limit: int = 100,
+    scan_limit: int | None = None,
 ) -> dict[str, object]:
     mode = provider.strip().lower()
     if step_days <= 0 or step_days > 60:
@@ -787,7 +875,12 @@ def backtest(
     if limit <= 0 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
 
-    resolved = _resolve_symbols(mode, symbols)
+    resolved = _resolve_symbols_with_limit(
+        mode,
+        symbols,
+        scan_limit,
+        include_supplements=scan_limit is None,
+    )
     instrument_ids = resolved.symbols
     start_date, end_date = _backtest_dates(mode, start, end)
     try:
@@ -823,6 +916,7 @@ def portfolio_backtest(
     max_positions: int = 5,
     transaction_cost_bps: Decimal = Decimal("5"),
     slippage_bps: Decimal = Decimal("5"),
+    scan_limit: int | None = None,
 ) -> dict[str, object]:
     mode = provider.strip().lower()
     if step_days <= 0 or step_days > 60:
@@ -834,7 +928,12 @@ def portfolio_backtest(
     if max_positions <= 0 or max_positions > 20:
         raise HTTPException(status_code=400, detail="max_positions must be between 1 and 20")
 
-    resolved = _resolve_symbols(mode, symbols)
+    resolved = _resolve_symbols_with_limit(
+        mode,
+        symbols,
+        scan_limit,
+        include_supplements=scan_limit is None,
+    )
     instrument_ids = resolved.symbols
     start_date, end_date = _backtest_dates(mode, start, end)
     try:
@@ -999,8 +1098,169 @@ def full_market_scan(
     include_etfs: bool = True,
     sync_if_empty: bool = True,
 ) -> dict[str, object]:
-    if max_symbols <= 0 or max_symbols > 1000:
-        raise HTTPException(status_code=400, detail="max_symbols must be between 1 and 1000")
+    return _full_market_scan_payload(provider, max_symbols, include_etfs, sync_if_empty)
+
+
+@router.post("/full-market/batch-scan")
+def start_full_market_batch_scan(
+    provider: str = "free",
+    batch_size: int = 200,
+    max_symbols: int | None = None,
+    include_etfs: bool = True,
+    sync_if_empty: bool = True,
+    force_restart: bool = False,
+) -> dict[str, object]:
+    mode = provider.strip().lower()
+    _validate_full_market_batch_scan_params(batch_size, max_symbols)
+    repo = _repo()
+    latest = repo.get_latest_full_market_scan_job(provider=mode)
+    if latest and latest.status in {"queued", "running"} and not force_restart:
+        return _full_market_job_payload(latest)
+
+    summary = repo.tradable_catalog_summary()
+    if sync_if_empty and summary.total_count == 0:
+        sync_cn_tradable_catalog(repo=repo, include_full_etfs=include_etfs)
+    symbols = build_full_market_batch_symbols(
+        repo=repo,
+        include_etfs=include_etfs,
+        max_symbols=max_symbols,
+    )
+    if not symbols:
+        raise HTTPException(status_code=400, detail="tradable catalog is empty")
+    job = repo.create_full_market_scan_job(
+        provider=mode,
+        symbols=symbols,
+        batch_size=batch_size,
+        include_etfs=include_etfs,
+        sync_if_empty=sync_if_empty,
+    )
+    _task_executor.submit(run_full_market_batch_scan_job, job.job_id)
+    return _full_market_job_payload(job)
+
+
+@router.get("/full-market/batch-scan/latest")
+def latest_full_market_batch_scan(provider: str = "free") -> dict[str, object]:
+    job = _repo().get_latest_full_market_scan_job(provider=provider.strip().lower())
+    if job is None:
+        raise HTTPException(status_code=404, detail="full-market batch scan not found")
+    return _full_market_job_payload(job)
+
+
+@router.get("/full-market/batch-scan/latest-result")
+def latest_full_market_batch_scan_result(
+    provider: str = "free",
+    include_etfs: bool = True,
+    cache_ttl_minutes: int = 1440,
+) -> dict[str, object]:
+    _validate_scan_cache_ttl(cache_ttl_minutes)
+    cached = _repo().get_recent_scan_result_cache(
+        cache_key=full_market_batch_cache_key(provider, include_etfs),
+        max_age=timedelta(minutes=cache_ttl_minutes),
+    )
+    if cached is None:
+        raise HTTPException(status_code=404, detail="full-market batch result not found")
+    payload = deepcopy(cached.payload)
+    data_health = payload.setdefault("data_health", {})
+    if isinstance(data_health, dict):
+        data_health["scan_result_cache"] = "hit"
+        data_health["scan_result_cache_id"] = cached.cache_id
+    return payload
+
+
+@router.get("/full-market/batch-scan/{job_id}")
+def full_market_batch_scan_job(job_id: str) -> dict[str, object]:
+    job = _repo().get_full_market_scan_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="full-market batch scan not found")
+    return _full_market_job_payload(job)
+
+
+@router.post("/scan-tasks/today")
+def start_today_scan_task(
+    provider: str = "free",
+    max_symbols: int = 80,
+    include_etfs: bool = True,
+    sync_if_empty: bool = True,
+    force_refresh: bool = False,
+    cache_ttl_minutes: int = 60,
+) -> dict[str, object]:
+    _validate_full_market_scan_params(max_symbols)
+    _validate_scan_cache_ttl(cache_ttl_minutes)
+    record = _task_manager.create(
+        kind="today_scan",
+        message=f"Queued today scan for up to {max_symbols} symbols",
+    )
+    if not force_refresh:
+        cached_payload = _recent_full_market_scan_payload(
+            provider=provider,
+            max_symbols=max_symbols,
+            include_etfs=include_etfs,
+            sync_if_empty=sync_if_empty,
+            cache_ttl_minutes=cache_ttl_minutes,
+        )
+        if cached_payload is not None:
+            cached_payload["task"] = _task_payload(
+                record.task_id,
+                record.kind,
+                provider,
+                max_symbols,
+                include_etfs,
+                cache="hit",
+            )
+            _task_manager.mark_succeeded(
+                record.task_id,
+                cached_payload,
+                message="Loaded recent SQLite scan snapshot",
+            )
+            cached_record = _task_manager.get(record.task_id)
+            return (cached_record or record).model_dump(mode="json")
+
+    def work() -> dict[str, object]:
+        _task_manager.update(
+            record.task_id,
+            progress=15,
+            message="Building tradable A-share universe",
+        )
+        payload = _full_market_scan_payload(provider, max_symbols, include_etfs, sync_if_empty)
+        payload.setdefault("data_health", {})["scan_result_cache"] = (
+            "force_refresh" if force_refresh else "miss"
+        )
+        payload["task"] = _task_payload(
+            record.task_id,
+            record.kind,
+            provider,
+            max_symbols,
+            include_etfs,
+            cache="refresh" if force_refresh else "miss",
+        )
+        return payload
+
+    _task_executor.submit(_task_manager.run, record.task_id, work)
+    return record.model_dump(mode="json")
+
+
+@router.get("/scan-tasks")
+def scan_tasks(limit: int = 20) -> dict[str, list[object]]:
+    if limit <= 0 or limit > 100:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
+    return {"tasks": [record.model_dump(mode="json") for record in _task_manager.list(limit)]}
+
+
+@router.get("/scan-tasks/{task_id}")
+def scan_task(task_id: str) -> dict[str, object]:
+    record = _task_manager.get(task_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="scan task not found")
+    return record.model_dump(mode="json")
+
+
+def _full_market_scan_payload(
+    provider: str,
+    max_symbols: int,
+    include_etfs: bool,
+    sync_if_empty: bool,
+) -> dict[str, object]:
+    _validate_full_market_scan_params(max_symbols)
     mode = provider.strip().lower()
     result = run_full_market_scan(
         repo=_repo(),
@@ -1010,7 +1270,7 @@ def full_market_scan(
         sync_if_empty=sync_if_empty,
     )
     _repo().save_scan_run(provider=mode, mode=mode, symbols=result.symbols, result=result.scan)
-    return {
+    payload = {
         "symbols": result.symbols,
         "cards": [card.model_dump(mode="json") for card in result.scan.cards],
         "items": [item.model_dump(mode="json") for item in result.scan.items],
@@ -1019,6 +1279,155 @@ def full_market_scan(
         "sector_strength": [item.model_dump(mode="json") for item in result.scan.sector_strength],
         "portfolio_plan": result.scan.portfolio_plan.model_dump(mode="json"),
         "data_health": result.data_health,
+    }
+    _repo().save_scan_result_cache(
+        cache_key=_full_market_scan_cache_key(mode, max_symbols, include_etfs, sync_if_empty),
+        provider=mode,
+        mode="full_market_scan",
+        symbols=result.symbols,
+        payload=payload,
+    )
+    return payload
+
+
+def _validate_full_market_scan_params(max_symbols: int) -> None:
+    if max_symbols <= 0 or max_symbols > 1000:
+        raise HTTPException(status_code=400, detail="max_symbols must be between 1 and 1000")
+
+
+def _validate_scan_cache_ttl(cache_ttl_minutes: int) -> None:
+    if cache_ttl_minutes < 0 or cache_ttl_minutes > 1440:
+        raise HTTPException(status_code=400, detail="cache_ttl_minutes must be between 0 and 1440")
+
+
+def _validate_full_market_batch_scan_params(
+    batch_size: int,
+    max_symbols: int | None,
+) -> None:
+    if batch_size <= 0 or batch_size > 500:
+        raise HTTPException(status_code=400, detail="batch_size must be between 1 and 500")
+    if max_symbols is not None and (max_symbols <= 0 or max_symbols > 20_000):
+        raise HTTPException(status_code=400, detail="max_symbols must be between 1 and 20000")
+
+
+def _full_market_job_payload(job) -> dict[str, object]:
+    payload = job.model_dump(mode="json")
+    symbols = payload.pop("symbols", [])
+    payload["progress"] = job.progress
+    payload["symbols_preview"] = symbols[:20]
+    return payload
+
+
+def _recent_full_market_scan_payload(
+    provider: str,
+    max_symbols: int,
+    include_etfs: bool,
+    sync_if_empty: bool,
+    cache_ttl_minutes: int,
+) -> dict[str, object] | None:
+    if cache_ttl_minutes == 0:
+        return None
+    mode = provider.strip().lower()
+    cache_key = _full_market_scan_cache_key(mode, max_symbols, include_etfs, sync_if_empty)
+    cached = _repo().get_recent_scan_result_cache(
+        cache_key=cache_key,
+        max_age=timedelta(minutes=cache_ttl_minutes),
+    )
+    if cached is not None:
+        payload = deepcopy(cached.payload)
+        data_health = payload.setdefault("data_health", {})
+        if isinstance(data_health, dict):
+            data_health["scan_result_cache"] = "hit"
+            data_health["scan_result_cache_key"] = cache_key
+            data_health["scan_result_cache_id"] = cached.cache_id
+        return payload
+
+    payload = _recent_scan_run_fallback_payload(
+        provider=mode,
+        max_symbols=max_symbols,
+        include_etfs=include_etfs,
+        sync_if_empty=sync_if_empty,
+        cache_ttl_minutes=cache_ttl_minutes,
+    )
+    if payload is None:
+        return None
+    _repo().save_scan_result_cache(
+        cache_key=cache_key,
+        provider=mode,
+        mode="today_scan_fallback",
+        symbols=[str(symbol) for symbol in payload.get("symbols", [])],
+        payload=payload,
+    )
+    return payload
+
+
+def _recent_scan_run_fallback_payload(
+    provider: str,
+    max_symbols: int,
+    include_etfs: bool,
+    sync_if_empty: bool,
+    cache_ttl_minutes: int,
+) -> dict[str, object] | None:
+    cache_key = _full_market_scan_cache_key(provider, max_symbols, include_etfs, sync_if_empty)
+    bundle = _repo().get_recent_scan_run_with_snapshots(
+        provider=provider,
+        scanned=max_symbols,
+        max_age=timedelta(minutes=cache_ttl_minutes),
+    )
+    if bundle is None:
+        return None
+    cards = [snapshot.card for snapshot in bundle.snapshots]
+    portfolio_plan = build_portfolio_plan(
+        [OpportunityCard.model_validate(card) for card in cards]
+    ).model_dump(mode="json")
+    data_health = {
+        **bundle.run.data_health,
+        "scan_result_cache": "scan_run_fallback",
+        "scan_result_cache_key": cache_key,
+        "scan_result_source_run": bundle.run.run_id,
+        "full_market_requested": str(max_symbols),
+        "full_market_include_etfs": str(include_etfs).lower(),
+        "reconstructed_items": "false",
+    }
+    return {
+        "symbols": bundle.run.symbols,
+        "cards": cards,
+        "items": [],
+        "strategy_health": [],
+        "factor_rankings": [],
+        "sector_strength": [],
+        "portfolio_plan": portfolio_plan,
+        "data_health": data_health,
+    }
+
+
+def _full_market_scan_cache_key(
+    provider: str,
+    max_symbols: int,
+    include_etfs: bool,
+    sync_if_empty: bool,
+) -> str:
+    return (
+        f"today_scan:{provider.strip().lower()}:{max_symbols}:"
+        f"{str(include_etfs).lower()}:{str(sync_if_empty).lower()}"
+    )
+
+
+def _task_payload(
+    task_id: str,
+    kind: str,
+    provider: str,
+    max_symbols: int,
+    include_etfs: bool,
+    cache: str,
+) -> dict[str, object]:
+    return {
+        "task_id": task_id,
+        "kind": kind,
+        "provider": provider.strip().lower(),
+        "max_symbols": max_symbols,
+        "include_etfs": include_etfs,
+        "cache": cache,
     }
 
 

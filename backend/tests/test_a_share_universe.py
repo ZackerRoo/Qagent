@@ -100,6 +100,36 @@ def test_resolve_symbol_tokens_adds_full_etf_catalog_to_cn_all(monkeypatch):
     assert resolved.data_health["universe_components"] == "流动性动态样本,核心ETF,全市场ETF,主要指数代表,主题代表"
 
 
+def test_resolve_symbol_tokens_can_skip_supplements_for_fast_limited_scan(monkeypatch):
+    def fake_spot():
+        return pd.DataFrame(
+            {
+                "代码": ["000001", "600000", "688001"],
+                "名称": ["平安银行", "浦发银行", "华兴源创"],
+                "最新价": [10.2, 7.8, 23.5],
+                "成交额": [900_000_000, 120_000_000, 850_000_000],
+            }
+        )
+
+    monkeypatch.setattr("qagent.market.a_share_universe.ak", SimpleNamespace(stock_zh_a_spot_em=fake_spot))
+    monkeypatch.setattr(
+        "qagent.market.a_share_universe.load_cn_tradable_instruments",
+        lambda include_full_etfs=True, use_cache=True: EmptyCatalog(),
+    )
+
+    resolved = resolve_symbol_tokens(
+        [CN_ALL_TOKEN],
+        limit=2,
+        include_supplements=False,
+        min_turnover=100_000_000,
+    )
+
+    assert resolved.symbols == ["CN:000001", "CN:688001"]
+    assert resolved.data_health["universe_selected"] == "2"
+    assert resolved.data_health["universe_supplements"] == "disabled"
+    assert resolved.data_health["universe_components"] == "流动性动态样本"
+
+
 def test_resolve_symbol_tokens_keeps_manual_symbols_without_dynamic_metadata():
     resolved = resolve_symbol_tokens(["CN:000001", "CN:000001", "CN:600519"])
 

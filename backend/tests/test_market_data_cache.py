@@ -62,6 +62,40 @@ def test_market_data_cache_coerces_missing_volume_to_zero(tmp_path):
     assert float(loaded.iloc[0]["volume"]) == 0.0
 
 
+def test_market_data_cache_drops_nonfinite_ohlc_rows(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "CN:000001",
+                "trade_date": date(2026, 1, 2),
+                "open": 10.0,
+                "high": 10.4,
+                "low": 9.9,
+                "close": 10.3,
+                "volume": 800_000,
+                "provider": "akshare",
+            },
+            {
+                "instrument_id": "CN:000001",
+                "trade_date": date(2026, 1, 5),
+                "open": 10.2,
+                "high": float("inf"),
+                "low": 10.1,
+                "close": 10.4,
+                "volume": 820_000,
+                "provider": "akshare",
+            },
+        ]
+    )
+
+    saved = repo.save_daily_bars("free", bars)
+    loaded = repo.load_daily_bars("free", ["CN:000001"], date(2026, 1, 1), date(2026, 1, 31))
+
+    assert saved == 1
+    assert loaded["trade_date"].tolist() == [date(2026, 1, 2)]
+
+
 def test_market_data_cache_records_coverage_idempotently_under_concurrency(tmp_path):
     repo = make_cache_repo(tmp_path)
 

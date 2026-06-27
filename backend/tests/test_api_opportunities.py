@@ -1,6 +1,10 @@
+import time
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 from qagent.app import create_app
+from qagent.api import routes
 
 
 def test_opportunities_endpoint_returns_cards():
@@ -168,6 +172,220 @@ def test_daily_brief_endpoint_returns_research_digest():
     assert body["data_caveats"]
     assert body["next_steps"]
     assert body["data_health"]["brief_opportunities"] == str(len(body["top_opportunities"]))
+
+
+def test_today_scan_task_endpoint_returns_pollable_result(monkeypatch):
+    def fake_full_market_scan_payload(provider, max_symbols, include_etfs, sync_if_empty):
+        return {
+            "symbols": ["CN:000001"],
+            "cards": [],
+            "items": [],
+            "strategy_health": [],
+            "factor_rankings": [],
+            "sector_strength": [],
+            "portfolio_plan": {},
+            "data_health": {
+                "provider": provider,
+                "full_market_requested": str(max_symbols),
+                "full_market_include_etfs": str(include_etfs).lower(),
+                "sync_if_empty": str(sync_if_empty).lower(),
+            },
+        }
+
+    monkeypatch.setattr(routes, "_full_market_scan_payload", fake_full_market_scan_payload)
+    client = TestClient(create_app())
+
+    response = client.post("/api/scan-tasks/today?provider=free&max_symbols=1&include_etfs=true")
+
+    assert response.status_code == 200
+    task_id = response.json()["task_id"]
+    detail = None
+    for _ in range(20):
+        poll_response = client.get(f"/api/scan-tasks/{task_id}")
+        assert poll_response.status_code == 200
+        detail = poll_response.json()
+        if detail["status"] == "succeeded":
+            break
+        time.sleep(0.05)
+
+    assert detail is not None
+    assert detail["status"] == "succeeded"
+    assert detail["result"]["symbols"] == ["CN:000001"]
+    assert detail["result"]["data_health"]["full_market_requested"] == "1"
+
+
+def test_today_scan_task_returns_recent_sqlite_cache_without_recompute(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'today-cache.db'}")
+    cached_payload = {
+        "symbols": ["CN:000001"],
+        "cards": [],
+        "items": [],
+        "strategy_health": [],
+        "factor_rankings": [],
+        "sector_strength": [],
+        "portfolio_plan": {"profile": "balanced"},
+        "data_health": {
+            "provider": "free",
+            "full_market_requested": "30",
+            "full_market_include_etfs": "true",
+        },
+    }
+    routes._repo().save_scan_result_cache(
+        cache_key="today_scan:free:30:true:true",
+        provider="free",
+        mode="today_scan",
+        symbols=["CN:000001"],
+        payload=cached_payload,
+    )
+    recompute_calls = []
+
+    def unexpected_full_market_scan_payload(provider, max_symbols, include_etfs, sync_if_empty):
+        recompute_calls.append((provider, max_symbols, include_etfs, sync_if_empty))
+        return cached_payload
+
+    monkeypatch.setattr(routes, "_full_market_scan_payload", unexpected_full_market_scan_payload)
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/scan-tasks/today"
+        "?provider=free&max_symbols=30&include_etfs=true&cache_ttl_minutes=60"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "succeeded"
+    assert body["progress"] == 100
+    assert body["result"]["symbols"] == ["CN:000001"]
+    assert body["result"]["data_health"]["scan_result_cache"] == "hit"
+    assert body["result"]["data_health"]["scan_result_cache_key"] == "today_scan:free:30:true:true"
+    assert recompute_calls == []
+
+
+def test_today_scan_task_reuses_recent_scan_run_when_result_cache_is_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'today-run-fallback.db'}")
+    from qagent.jobs.daily_scan import run_daily_scan
+    from qagent.providers.fixtures import FixtureMarketDataProvider
+
+    scan = run_daily_scan(["CN:000001"], FixtureMarketDataProvider())
+    routes._repo().save_scan_run(
+        provider="free",
+        mode="free",
+        symbols=["CN:000001"],
+        result=scan,
+    )
+    recompute_calls = []
+
+    def unexpected_full_market_scan_payload(provider, max_symbols, include_etfs, sync_if_empty):
+        recompute_calls.append((provider, max_symbols, include_etfs, sync_if_empty))
+        return {}
+
+    monkeypatch.setattr(routes, "_full_market_scan_payload", unexpected_full_market_scan_payload)
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/scan-tasks/today"
+        "?provider=free&max_symbols=1&include_etfs=true&cache_ttl_minutes=60"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "succeeded"
+    assert body["result"]["symbols"] == ["CN:000001"]
+    assert body["result"]["cards"][0]["instrument_id"] == "CN:000001"
+    assert body["result"]["data_health"]["scan_result_cache"] == "scan_run_fallback"
+    assert recompute_calls == []
+
+
+def test_full_market_batch_scan_endpoint_creates_background_job(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'full-batch-api.db'}")
+    routes._repo().replace_tradable_instruments(
+        [
+            SimpleNamespace(
+                instrument_id="CN:000001",
+                symbol="000001",
+                name="平安银行",
+                label="平安银行 000001.SZ",
+                asset_type="stock",
+                exchange="SZ",
+                source="test",
+            ),
+            SimpleNamespace(
+                instrument_id="CN:000002",
+                symbol="000002",
+                name="万科A",
+                label="万科A 000002.SZ",
+                asset_type="stock",
+                exchange="SZ",
+                source="test",
+            ),
+            SimpleNamespace(
+                instrument_id="CN:159001",
+                symbol="159001",
+                name="货币ETF",
+                label="货币ETF 159001.SZ",
+                asset_type="etf",
+                exchange="SZ",
+                source="test",
+            ),
+        ]
+    )
+    submitted = []
+
+    class FakeExecutor:
+        def submit(self, fn, *args, **kwargs):
+            submitted.append((fn, args, kwargs))
+
+    monkeypatch.setattr(routes, "_task_executor", FakeExecutor())
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/full-market/batch-scan"
+        "?provider=free&batch_size=2&max_symbols=3&include_etfs=true"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "queued"
+    assert body["total_symbols"] == 3
+    assert body["batch_size"] == 2
+    assert body["total_batches"] == 2
+    assert body["progress"] == 0
+    assert submitted
+
+    detail = client.get(f"/api/full-market/batch-scan/{body['job_id']}")
+    latest = client.get("/api/full-market/batch-scan/latest?provider=free")
+
+    assert detail.status_code == 200
+    assert detail.json()["job_id"] == body["job_id"]
+    assert latest.status_code == 200
+    assert latest.json()["job_id"] == body["job_id"]
+
+
+def test_daily_brief_fast_mode_sets_snapshot_controls():
+    client = TestClient(create_app())
+
+    response = client.get("/api/daily-brief?provider=fixture&fast=true&limit=4&include_news=false")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data_health"]["brief_mode"] == "fast"
+    assert body["data_health"]["brief_backtest"] == "skipped"
+    assert body["data_health"]["brief_skip_backtest"] == "true"
+    assert body["data_health"]["brief_news"] == "skipped"
+    assert len(body["top_opportunities"]) <= 4
+
+
+def test_daily_brief_full_mode_can_skip_backtest():
+    client = TestClient(create_app())
+
+    response = client.get("/api/daily-brief?provider=fixture&fast=false&skip_backtest=true&limit=3")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data_health"]["brief_mode"] == "full"
+    assert body["data_health"]["brief_backtest"] == "skipped"
+    assert body["data_health"]["brief_skip_backtest"] == "true"
+    assert len(body["top_opportunities"]) <= 3
 
 
 def test_daily_brief_run_api_saves_lists_loads_and_exports_markdown(tmp_path, monkeypatch):

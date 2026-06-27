@@ -4,6 +4,7 @@ import {
   fetchDailyBrief,
   fetchDailyBriefMarkdown,
   fetchDailyBriefRun,
+  DailyBriefRequest,
   fetchDailyBriefRuns,
   fetchDeliveries,
   markDeliverySent,
@@ -49,6 +50,7 @@ function formatRatio(value: number | null) {
 
 export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbols: string }) {
   const { language, t } = useI18n();
+  const FAST_DEFAULT_SCAN_LIMIT = 30;
   const [brief, setBrief] = useState<DailyBriefResponse>();
   const [runs, setRuns] = useState<BriefRun[]>([]);
   const [deliveries, setDeliveries] = useState<DeliveryOutboxRecord[]>([]);
@@ -56,8 +58,34 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState("");
+  const [briefMode, setBriefMode] = useState<"fast" | "full">("fast");
+  const [opportunityLimit, setOpportunityLimit] = useState("5");
+  const [scanLimit, setScanLimit] = useState(String(FAST_DEFAULT_SCAN_LIMIT));
+  const [includeNews, setIncludeNews] = useState(false);
+  const [skipBacktest, setSkipBacktest] = useState(false);
   const briefRequestRef = useRef(0);
   const briefAbortRef = useRef<AbortController | null>(null);
+
+  function parseNumber(value: string): number | undefined {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isNaN(parsed) ? undefined : parsed;
+  }
+
+  function buildBriefRequest(): DailyBriefRequest {
+    const isFast = briefMode === "fast";
+    const safeLimit = parseNumber(opportunityLimit);
+    const safeScanLimit = parseNumber(scanLimit);
+    const boundedScanLimit =
+      safeScanLimit && safeScanLimit >= 1 && safeScanLimit <= 1000 ? safeScanLimit : FAST_DEFAULT_SCAN_LIMIT;
+
+    return {
+      limit: safeLimit && safeLimit > 0 && safeLimit <= 20 ? safeLimit : 5,
+      fast: isFast,
+      include_news: isFast ? false : includeNews,
+      skip_backtest: isFast ? true : skipBacktest,
+      scan_limit: isFast && dataMode === "free" ? boundedScanLimit : undefined,
+    };
+  }
 
   async function loadBrief() {
     const requestId = briefRequestRef.current + 1;
@@ -68,7 +96,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
     try {
       setIsLoading(true);
       setError("");
-      const result = await fetchDailyBrief(dataMode, dataMode === "free" ? symbols : undefined, {
+      const result = await fetchDailyBrief(dataMode, dataMode === "free" ? symbols : undefined, buildBriefRequest(), {
         signal: controller.signal,
       });
       if (requestId !== briefRequestRef.current) {
@@ -104,7 +132,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
     try {
       setIsSaving(true);
       setError("");
-      const saved = await saveDailyBriefRun(dataMode, dataMode === "free" ? symbols : undefined);
+      const saved = await saveDailyBriefRun(dataMode, dataMode === "free" ? symbols : undefined, buildBriefRequest());
       setBrief(saved.payload);
       setMarkdown("");
       await loadRuns();
@@ -173,10 +201,68 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
               {brief ? localizeReason(brief.headline, language) : t("brief.loading")}
             </p>
           </div>
-          <div className="brief-actions">
-            <button className="icon-action" type="button" onClick={loadBrief} disabled={isLoading}>
-              {isLoading ? t("common.refreshing") : t("brief.refresh")}
+        <div className="brief-actions">
+          <div className="brief-mode-switch" role="group" aria-label={t("brief.mode")}>
+            <button
+              className={briefMode === "fast" ? "active" : ""}
+              type="button"
+              onClick={() => setBriefMode("fast")}
+            >
+              {t("brief.modeFast")}
             </button>
+            <button
+              className={briefMode === "full" ? "active" : ""}
+              type="button"
+              onClick={() => setBriefMode("full")}
+            >
+              {t("brief.modeFull")}
+            </button>
+          </div>
+          <label className="input-compact">
+            <span>{t("brief.limit")}</span>
+            <input
+              type="number"
+              min="1"
+              max="20"
+              value={opportunityLimit}
+              onChange={(event) => setOpportunityLimit(event.target.value)}
+            />
+          </label>
+          {dataMode === "free" ? (
+            <label className="input-compact">
+              <span>{t("brief.scanLimit")}</span>
+              <input
+                type="number"
+                min="1"
+                max="1000"
+                value={scanLimit}
+                disabled={briefMode === "full"}
+                onChange={(event) => setScanLimit(event.target.value)}
+                placeholder={t("brief.scanLimit")}
+              />
+            </label>
+          ) : null}
+          <label className="checkbox-compact">
+            <input
+              type="checkbox"
+              checked={skipBacktest}
+              disabled={briefMode === "fast"}
+              onChange={(event) => setSkipBacktest(event.target.checked)}
+            />
+            {t("brief.skipBacktest")}
+          </label>
+          <label className="checkbox-compact">
+            <input
+              type="checkbox"
+              checked={includeNews}
+              disabled={briefMode === "fast"}
+              onChange={(event) => setIncludeNews(event.target.checked)}
+            />
+            {t("brief.includeNews")}
+          </label>
+          <button className="icon-action" type="button" onClick={loadBrief} disabled={isLoading}>
+            {isLoading ? t("common.refreshing") : t("brief.refresh")}
+          </button>
             <button className="icon-action" type="button" onClick={saveBrief} disabled={isSaving}>
               {isSaving ? t("common.saving") : t("brief.save")}
             </button>
