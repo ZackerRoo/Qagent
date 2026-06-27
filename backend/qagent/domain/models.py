@@ -216,6 +216,33 @@ class RecommendationSummary(BaseModel):
     checklist: list[str] = Field(default_factory=list)
 
 
+class ConfidenceDriver(BaseModel):
+    label: str
+    value: str
+    impact: str = "neutral"
+    weight: float | None = None
+
+
+class ConfidenceExplanation(BaseModel):
+    score: float = Field(ge=0.0, le=1.0)
+    label: str
+    summary: str
+    positive_drivers: list[ConfidenceDriver] = Field(default_factory=list)
+    risk_drivers: list[ConfidenceDriver] = Field(default_factory=list)
+    data_checks: list[ConfidenceDriver] = Field(default_factory=list)
+
+
+class ExecutionPlanSummary(BaseModel):
+    action: str
+    action_label: str
+    buy_zone: str
+    sell_plan: str
+    risk_plan: str
+    position_plan: str
+    invalidation: str
+    next_checklist: list[str] = Field(default_factory=list)
+
+
 class OpportunityDecision(BaseModel):
     action: str
     action_label: str
@@ -271,3 +298,5 @@ class OpportunityCard(BaseModel):
     tradability: TradabilityAssessment | None = None
     strategy_calibration: StrategyCalibration | None = None
     recommendation_summary: RecommendationSummary | None = None
+    confidence_explanation: ConfidenceExplanation | None = None
+    execution_plan: ExecutionPlanSummary | None = None

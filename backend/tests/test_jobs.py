@@ -1,9 +1,12 @@
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 
 from qagent.jobs.daily_scan import run_daily_scan
+from qagent.jobs import full_market
 from qagent.providers.fixtures import FixtureMarketDataProvider
+from qagent.db import create_session_factory, initialize_database
+from qagent.storage.repository import QagentRepository
 
 
 def test_daily_scan_returns_cards_for_fixture_universe():
@@ -24,6 +27,37 @@ def test_daily_scan_returns_cards_for_fixture_universe():
     assert result.items[0].strategies_missing_data >= 1
     assert result.cards[0].rank_score >= result.cards[-1].rank_score
     assert result.cards[0].rank_reasons
+
+
+def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'full-batch.db'}")
+    initialize_database()
+    repo = QagentRepository(create_session_factory())
+    job = repo.create_full_market_scan_job(
+        provider="fixture",
+        symbols=["US:TEST", "CN:000001"],
+        batch_size=1,
+        include_etfs=True,
+        sync_if_empty=False,
+    )
+    monkeypatch.setattr(
+        full_market,
+        "build_market_data_provider",
+        lambda provider: FixtureMarketDataProvider(),
+    )
+
+    full_market.run_full_market_batch_scan_job(job.job_id, top_cards_limit=5)
+
+    cached = repo.get_recent_scan_result_cache(
+        cache_key=full_market.full_market_batch_cache_key("fixture", True),
+        max_age=timedelta(minutes=60),
+    )
+
+    assert cached is not None
+    assert cached.payload["strategy_health"]
+    assert any(item["curve"] for item in cached.payload["strategy_health"])
+    assert cached.payload["cards"][0]["confidence_explanation"]
+    assert cached.payload["cards"][0]["execution_plan"]
 
 
 def test_daily_scan_promotes_pead_when_earnings_fixture_is_available():

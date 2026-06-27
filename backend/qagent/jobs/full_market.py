@@ -11,6 +11,7 @@ from qagent.storage.repository import (
     QagentRepository,
     TradableCatalogSummary,
 )
+from qagent.strategies.models import StrategyHealth, StrategyHealthPoint
 from qagent.strategy_data.providers import EmptyStrategyDataProvider
 
 
@@ -145,6 +146,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         return
     provider = build_market_data_provider(job.provider)
     all_cards: list[OpportunityCard] = []
+    strategy_health_batches: list[list[StrategyHealth]] = []
     aggregate_health: dict[str, str] = {
         "provider": job.provider,
         "full_market_scan_mode": "batch",
@@ -180,6 +182,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
                 result=scan,
             )
             all_cards.extend(scan.cards)
+            strategy_health_batches.append(scan.strategy_health)
             _merge_health(aggregate_health, scan.data_health)
             error_count += _int_health(scan.data_health, "scan_errors")
         except Exception as exc:
@@ -200,12 +203,13 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     ranked_cards = sort_recommendation_cards(all_cards)
     visible_cards = ranked_cards[:top_cards_limit]
     portfolio_plan = build_portfolio_plan(visible_cards)
+    strategy_health = _merge_strategy_health(strategy_health_batches)
     cache_key = _full_market_batch_cache_key(job.provider, job.include_etfs)
     payload = {
         "symbols": job.symbols,
         "cards": [card.model_dump(mode="json") for card in visible_cards],
         "items": [],
-        "strategy_health": [],
+        "strategy_health": [item.model_dump(mode="json") for item in strategy_health],
         "factor_rankings": [],
         "sector_strength": [],
         "portfolio_plan": portfolio_plan.model_dump(mode="json"),
@@ -262,6 +266,115 @@ def _merge_health(target: dict[str, str], source: dict[str, str]) -> None:
             target[key] = f"{current} | {value}"
         else:
             target[key] = str(value)
+
+
+def _merge_strategy_health(batches: list[list[StrategyHealth]]) -> list[StrategyHealth]:
+    grouped: dict[str, list[StrategyHealth]] = {}
+    for batch in batches:
+        for item in batch:
+            grouped.setdefault(item.strategy_id, []).append(item)
+
+    merged: list[StrategyHealth] = []
+    for strategy_id, items in grouped.items():
+        sample_count = sum(item.sample_count for item in items)
+        win_rate = _weighted_average(
+            [(item.win_rate_10d, item.sample_count) for item in items]
+        )
+        avg_10d = _weighted_average(
+            [(item.avg_return_10d, item.sample_count) for item in items]
+        )
+        avg_20d = _weighted_average(
+            [(item.avg_return_20d, item.sample_count) for item in items]
+        )
+        max_losses = [
+            item.max_loss_10d
+            for item in items
+            if item.max_loss_10d is not None
+        ]
+        missing_data = sorted({value for item in items for value in item.missing_data})
+        merged.append(
+            StrategyHealth(
+                strategy_id=strategy_id,
+                name=items[0].name,
+                family=items[0].family,
+                readiness=_merged_readiness(items, sample_count, win_rate, avg_10d),
+                sample_count=sample_count,
+                win_rate_10d=win_rate,
+                avg_return_10d=avg_10d,
+                avg_return_20d=avg_20d,
+                max_loss_10d=min(max_losses) if max_losses else None,
+                missing_data=missing_data,
+                curve=_merge_strategy_curve(items),
+            )
+        )
+    return sorted(merged, key=lambda item: item.strategy_id)
+
+
+def _merge_strategy_curve(items: list[StrategyHealth]) -> list[StrategyHealthPoint]:
+    grouped: dict[str, list[StrategyHealthPoint]] = {}
+    for item in items:
+        for point in item.curve:
+            grouped.setdefault(point.label, []).append(point)
+
+    curve: list[StrategyHealthPoint] = []
+    for label in sorted(grouped):
+        points = grouped[label]
+        sample_count = sum(point.sample_count for point in points)
+        win_rate = _weighted_average(
+            [(point.win_rate_10d, point.sample_count) for point in points]
+        )
+        avg_10d = _weighted_average(
+            [(point.avg_return_10d, point.sample_count) for point in points]
+        )
+        avg_20d = _weighted_average(
+            [(point.avg_return_20d, point.sample_count) for point in points]
+        )
+        max_losses = [
+            point.max_loss_10d
+            for point in points
+            if point.max_loss_10d is not None
+        ]
+        curve.append(
+            StrategyHealthPoint(
+                label=label,
+                sample_count=sample_count,
+                win_rate_10d=win_rate,
+                avg_return_10d=avg_10d,
+                avg_return_20d=avg_20d,
+                max_loss_10d=min(max_losses) if max_losses else None,
+            )
+        )
+    return curve
+
+
+def _weighted_average(values: list[tuple[float | None, int]]) -> float | None:
+    weighted_sum = 0.0
+    total_weight = 0
+    for value, weight in values:
+        if value is None or weight <= 0:
+            continue
+        weighted_sum += value * weight
+        total_weight += weight
+    if total_weight == 0:
+        return None
+    return round(weighted_sum / total_weight, 2)
+
+
+def _merged_readiness(
+    items: list[StrategyHealth],
+    sample_count: int,
+    win_rate_10d: float | None,
+    avg_return_10d: float | None,
+) -> str:
+    if sample_count == 0:
+        if all(item.missing_data for item in items):
+            return "missing_data"
+        return "insufficient_history"
+    if sample_count < 20:
+        return "limited_sample"
+    if (win_rate_10d or 0) >= 55 and (avg_return_10d or 0) > 0:
+        return "validated"
+    return "watch"
 
 
 def _int_health(source: dict[str, str], key: str) -> int:

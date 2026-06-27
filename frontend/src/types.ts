@@ -136,6 +136,8 @@ export type OpportunityCard = {
   tradability: TradabilityAssessment | null;
   strategy_calibration: StrategyCalibration | null;
   recommendation_summary: RecommendationSummary | null;
+  confidence_explanation?: ConfidenceExplanation | null;
+  execution_plan?: ExecutionPlanSummary | null;
 };
 
 export type TradingConstraint = {
@@ -171,6 +173,33 @@ export type RecommendationSummary = {
   risk_note: string;
   context_note: string;
   checklist: string[];
+};
+
+export type ConfidenceDriver = {
+  label: string;
+  value: string;
+  impact: string;
+  weight: number | null;
+};
+
+export type ConfidenceExplanation = {
+  score: number;
+  label: string;
+  summary: string;
+  positive_drivers: ConfidenceDriver[];
+  risk_drivers: ConfidenceDriver[];
+  data_checks: ConfidenceDriver[];
+};
+
+export type ExecutionPlanSummary = {
+  action: string;
+  action_label: string;
+  buy_zone: string;
+  sell_plan: string;
+  risk_plan: string;
+  position_plan: string;
+  invalidation: string;
+  next_checklist: string[];
 };
 
 export type TradingStatus = {
@@ -352,6 +381,16 @@ export type StrategyHealth = {
   avg_return_20d: number | null;
   max_loss_10d: number | null;
   missing_data: string[];
+  curve?: StrategyHealthPoint[];
+};
+
+export type StrategyHealthPoint = {
+  label: string;
+  sample_count: number;
+  win_rate_10d: number | null;
+  avg_return_10d: number | null;
+  avg_return_20d: number | null;
+  max_loss_10d: number | null;
 };
 
 export type ScanItem = {

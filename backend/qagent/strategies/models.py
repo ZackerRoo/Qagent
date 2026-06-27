@@ -32,6 +32,15 @@ class StrategyEvaluation(BaseModel):
     data_requirements: list[str] = Field(default_factory=list)
 
 
+class StrategyHealthPoint(BaseModel):
+    label: str
+    sample_count: int
+    win_rate_10d: float | None = None
+    avg_return_10d: float | None = None
+    avg_return_20d: float | None = None
+    max_loss_10d: float | None = None
+
+
 class StrategyHealth(BaseModel):
     strategy_id: str
     name: str
@@ -43,3 +52,4 @@ class StrategyHealth(BaseModel):
     avg_return_20d: float | None = None
     max_loss_10d: float | None = None
     missing_data: list[str] = Field(default_factory=list)
+    curve: list[StrategyHealthPoint] = Field(default_factory=list)

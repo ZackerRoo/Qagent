@@ -1,20 +1,21 @@
 from collections import defaultdict
 from collections.abc import Iterable
+from datetime import date
 
 import pandas as pd
 
 from qagent.monitoring.outcomes import compute_forward_returns
 from qagent.signals.engine import SignalEngine
 from qagent.strategies.evaluator import StrategyEvaluator
-from qagent.strategies.models import StrategyHealth
+from qagent.strategies.models import StrategyHealth, StrategyHealthPoint
 from qagent.strategies.registry import StrategyRegistry
 
 
 def summarize_strategy_health(
     registry: StrategyRegistry,
-    outcome_rows: Iterable[dict[str, float | str | None]],
+    outcome_rows: Iterable[dict[str, object]],
 ) -> list[StrategyHealth]:
-    grouped: dict[str, list[dict[str, float | str | None]]] = defaultdict(list)
+    grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
     for row in outcome_rows:
         strategy_id = row.get("strategy_id")
         if isinstance(strategy_id, str):
@@ -38,6 +39,7 @@ def summarize_strategy_health(
                 avg_return_20d=_average(return_20d),
                 max_loss_10d=min(return_10d) if return_10d else None,
                 missing_data=[] if definition.free_data_ready else list(definition.required_data),
+                curve=_curve_points(rows),
             )
         )
     return health
@@ -69,12 +71,53 @@ def build_strategy_health_from_bars(
             for evaluation in evaluations:
                 if evaluation.status not in {"passed", "watch"} or evaluation.score <= 0:
                     continue
-                outcome_rows.append({"strategy_id": evaluation.strategy_id, **returns})
+                outcome_rows.append(
+                    {
+                        "strategy_id": evaluation.strategy_id,
+                        "signal_date": signal_date,
+                        **returns,
+                    }
+                )
 
     return summarize_strategy_health(registry, outcome_rows)
 
 
-def _numeric_values(rows: list[dict[str, float | str | None]], key: str) -> list[float]:
+def _curve_points(rows: list[dict[str, object]]) -> list[StrategyHealthPoint]:
+    grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        label = _period_label(row.get("signal_date"))
+        if label:
+            grouped[label].append(row)
+
+    curve: list[StrategyHealthPoint] = []
+    for label in sorted(grouped):
+        period_rows = grouped[label]
+        return_10d = _numeric_values(period_rows, "return_10d")
+        return_20d = _numeric_values(period_rows, "return_20d")
+        curve.append(
+            StrategyHealthPoint(
+                label=label,
+                sample_count=len(return_10d),
+                win_rate_10d=_win_rate(return_10d),
+                avg_return_10d=_average(return_10d),
+                avg_return_20d=_average(return_20d),
+                max_loss_10d=min(return_10d) if return_10d else None,
+            )
+        )
+    return curve
+
+
+def _period_label(value: object) -> str | None:
+    if isinstance(value, pd.Timestamp):
+        return value.strftime("%Y-%m")
+    if isinstance(value, date):
+        return value.strftime("%Y-%m")
+    if isinstance(value, str) and len(value) >= 7:
+        return value[:7]
+    return None
+
+
+def _numeric_values(rows: list[dict[str, object]], key: str) -> list[float]:
     values: list[float] = []
     for row in rows:
         value = row.get(key)
