@@ -51,6 +51,8 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
   const [isStarting, setIsStarting] = useState(false);
   const [fullScanJob, setFullScanJob] = useState<FullMarketBatchScanJob>();
   const [isStartingFullScan, setIsStartingFullScan] = useState(false);
+  const [isBulkPaperTracking, setIsBulkPaperTracking] = useState(false);
+  const [bulkPaperMessage, setBulkPaperMessage] = useState("");
   const timerRef = useRef<number | null>(null);
   const batchTimerRef = useRef<number | null>(null);
 
@@ -148,6 +150,41 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
     }
   }
 
+  async function trackTopOpportunities() {
+    const candidates = cards.filter(isTrackablePaperCard).slice(0, 5);
+    if (!candidates.length) {
+      setBulkPaperMessage(t("today.trackTopEmpty"));
+      return;
+    }
+
+    try {
+      setIsBulkPaperTracking(true);
+      setBulkPaperMessage("");
+      let created = 0;
+      let existing = 0;
+      let failed = 0;
+      for (const card of candidates) {
+        try {
+          const result = await createPaperTradeFromOpportunity(paperPayloadFromCard(card, dataMode));
+          if (result.created) {
+            created += 1;
+          } else {
+            existing += 1;
+          }
+        } catch {
+          failed += 1;
+        }
+      }
+      setBulkPaperMessage(
+        language === "zh"
+          ? `已跟踪 ${created} 个，已存在 ${existing} 个，失败 ${failed} 个。`
+          : `Tracked ${created}, already tracked ${existing}, failed ${failed}.`,
+      );
+    } finally {
+      setIsBulkPaperTracking(false);
+    }
+  }
+
   function scheduleFullScanPoll(jobId: string) {
     if (batchTimerRef.current !== null) {
       window.clearTimeout(batchTimerRef.current);
@@ -212,10 +249,13 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
           includeEtfs={includeEtfs}
           isStarting={isStarting}
           isStartingFullScan={isStartingFullScan}
+          isBulkPaperTracking={isBulkPaperTracking}
+          bulkPaperMessage={bulkPaperMessage}
           onScanSizeChange={setScanSize}
           onIncludeEtfsChange={setIncludeEtfs}
           onRefresh={() => startScan(false)}
           onStartFullScan={startBackgroundFullScan}
+          onTrackTop={trackTopOpportunities}
         />
 
         <SignalDistribution cards={cards} actionableCount={actionable.length} />
@@ -278,10 +318,13 @@ function SignalCommandCenter({
   includeEtfs,
   isStarting,
   isStartingFullScan,
+  isBulkPaperTracking,
+  bulkPaperMessage,
   onScanSizeChange,
   onIncludeEtfsChange,
   onRefresh,
   onStartFullScan,
+  onTrackTop,
 }: {
   cards: OpportunityCard[];
   selectedCard?: OpportunityCard;
@@ -298,10 +341,13 @@ function SignalCommandCenter({
   includeEtfs: boolean;
   isStarting: boolean;
   isStartingFullScan: boolean;
+  isBulkPaperTracking: boolean;
+  bulkPaperMessage: string;
   onScanSizeChange(value: string): void;
   onIncludeEtfsChange(value: boolean): void;
   onRefresh(): void;
   onStartFullScan(): void;
+  onTrackTop(): void;
 }) {
   const { t } = useI18n();
   const activeScan = isStarting || isActive(task);
@@ -352,6 +398,14 @@ function SignalCommandCenter({
           >
             {activeFullScan ? t("common.running") : t("today.fullScanStart")}
           </button>
+          <button
+            className="icon-action secondary"
+            type="button"
+            onClick={onTrackTop}
+            disabled={isBulkPaperTracking || !cards.length}
+          >
+            {isBulkPaperTracking ? t("common.running") : t("today.trackTopPaper")}
+          </button>
         </div>
       </div>
 
@@ -398,6 +452,7 @@ function SignalCommandCenter({
             <div className="empty-state compact">{t("today.fullScanNoJob")}</div>
           )}
           {error && <div className="empty-state error compact">{error}</div>}
+          {bulkPaperMessage && <div className="empty-state compact">{bulkPaperMessage}</div>}
           <CompactDataHealth data={dataHealth} language={language} />
         </div>
       </div>
@@ -541,6 +596,29 @@ function bucketCounts(cards: OpportunityCard[]) {
     .sort((left, right) => right.count - left.count);
 }
 
+function isTrackablePaperCard(card: OpportunityCard) {
+  return (
+    Boolean(card.entry_plan.trigger_price) &&
+    card.decision?.risk_status !== "blocked" &&
+    card.decision?.action !== "avoid"
+  );
+}
+
+function paperPayloadFromCard(card: OpportunityCard, dataMode: DataProviderMode) {
+  return {
+    card_id: card.card_id,
+    provider: dataMode,
+    instrument_id: card.instrument_id,
+    strategy_id: card.primary_strategy_id,
+    trigger_price: card.entry_plan.trigger_price,
+    initial_stop: card.exit_plan.initial_stop,
+    target_1: card.exit_plan.target_1,
+    rank_score: card.rank_score,
+    action: card.decision?.action ?? "watch_trigger",
+    risk_status: card.decision?.risk_status ?? "clear",
+  };
+}
+
 function signalBucketLabel(bucket: string, language: "zh" | "en") {
   const labels: Record<string, { zh: string; en: string }> = {
     today_action: { zh: "今日可行动", en: "Actionable" },
@@ -625,9 +703,7 @@ function SelectedOpportunityWorkup({
     weight: null,
   }));
   const canTrack =
-    Boolean(card.entry_plan.trigger_price) &&
-    card.decision?.risk_status !== "blocked" &&
-    card.decision?.action !== "avoid";
+    isTrackablePaperCard(card);
 
   async function addPaperTracking() {
     if (!canTrack) {
@@ -636,18 +712,7 @@ function SelectedOpportunityWorkup({
     }
     try {
       setIsAddingPaper(true);
-      const result = await createPaperTradeFromOpportunity({
-        card_id: card.card_id,
-        provider: dataMode,
-        instrument_id: card.instrument_id,
-        strategy_id: card.primary_strategy_id,
-        trigger_price: card.entry_plan.trigger_price,
-        initial_stop: card.exit_plan.initial_stop,
-        target_1: card.exit_plan.target_1,
-        rank_score: card.rank_score,
-        action: card.decision?.action ?? "watch_trigger",
-        risk_status: card.decision?.risk_status ?? "clear",
-      });
+      const result = await createPaperTradeFromOpportunity(paperPayloadFromCard(card, dataMode));
       setPaperMessage(result.created ? t("today.paperAdded") : t("today.paperExists"));
     } catch (caught) {
       setPaperMessage(caught instanceof Error ? caught.message : t("today.paperFailed"));
