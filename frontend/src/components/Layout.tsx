@@ -159,8 +159,9 @@ export function Layout({
             <p className="eyebrow">{t("top.eyebrow")}</p>
             <h1>{t("top.title")}</h1>
           </div>
-          <div className="top-tools">
+          <div className="top-tools terminal-top-grid">
             <div className="session-strip">
+              <span className="terminal-live">LIVE</span>
               <span>{t("top.dailyScan")}</span>
               <span>{t("top.alerts")}</span>
               <span>{dataMode === "free" ? t("top.freeData") : t("top.fixtureMode")}</span>

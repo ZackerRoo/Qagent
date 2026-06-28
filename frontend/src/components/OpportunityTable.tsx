@@ -1,3 +1,5 @@
+import type { CSSProperties } from "react";
+
 import { useI18n } from "../i18n";
 import { formatInstrumentDisplay } from "../lib/instruments";
 import {
@@ -56,6 +58,13 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
             {card.recommendation_summary?.headline ?? card.thesis}
           </p>
 
+          <div className="opportunity-signal-row">
+            <SignalChip label={t("brief.rank")} value={Math.round(card.rank_score * 100)} />
+            <SignalChip label={t("factors.score")} value={Math.round(card.factor_score * 100)} />
+            <SignalChip label={t("brief.conviction")} value={formatPct(card.decision?.conviction_score)} />
+          </div>
+          <SignalStrengthBar value={signalStrength(card)} />
+
           <div className="trade-plan-strip">
             <PlanMetric label={t("brief.trigger")} value={card.entry_plan.trigger_price ?? "-"} />
             <PlanMetric label={t("brief.stop")} value={card.exit_plan.initial_stop ?? "-"} />
@@ -88,6 +97,22 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
   );
 }
 
+function SignalChip({ label, value }: { label: string; value: string | number }) {
+  return (
+    <span>
+      {label} <strong>{value}</strong>
+    </span>
+  );
+}
+
+function SignalStrengthBar({ value }: { value: number }) {
+  return (
+    <div className="signal-strength-bar" style={{ "--signal-strength": `${value}%` } as CSSProperties}>
+      <span>{value}</span>
+    </div>
+  );
+}
+
 function PlanMetric({ label, value }: { label: string; value: string | number }) {
   return (
     <div>
@@ -99,6 +124,12 @@ function PlanMetric({ label, value }: { label: string; value: string | number })
 
 function formatPct(value: number | undefined) {
   return value === undefined ? "-" : `${Math.round(value * 100)}`;
+}
+
+function signalStrength(card: OpportunityCard) {
+  const conviction = card.decision?.conviction_score ?? 0;
+  const raw = card.rank_score * 0.5 + card.factor_score * 0.25 + conviction * 0.25;
+  return Math.max(0, Math.min(100, Math.round(raw * 100)));
 }
 
 function formatCalibration(card: OpportunityCard) {

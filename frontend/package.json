@@ -6,6 +6,8 @@
     "check:defaults": "node scripts/check-a-share-defaults.mjs",
     "check:instruments": "node scripts/check-instruments.mjs",
     "check:markets": "node scripts/check-market-sections.mjs",
+    "check:today-ui": "node scripts/check-today-ui.mjs",
+    "check:terminal-ui": "node scripts/check-terminal-ui.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import {
+  createPaperTradeFromOpportunity,
   fetchFullMarketBatchScan,
   fetchLatestFullMarketBatchResult,
   fetchLatestFullMarketBatchScan,
@@ -8,12 +9,13 @@ import {
   startFullMarketBatchScan,
   startTodayScanTask,
 } from "../api/client";
-import { DataHealth } from "../components/DataHealth";
 import { MarketOpportunitySections } from "../components/MarketOpportunitySections";
 import { useI18n } from "../i18n";
 import { formatInstrumentDisplay } from "../lib/instruments";
 import {
   localizeAction,
+  localizeDataHealthKey,
+  localizeDataHealthValue,
   localizeReason,
   localizeStrategy,
 } from "../lib/localize";
@@ -56,6 +58,7 @@ export function Today({ dataMode, profile, selectedCard, onSelect }: Props) {
     [profile, result],
   );
   const actionable = cards.filter((card) => card.decision?.risk_status !== "blocked");
+  const blocked = cards.length - actionable.length;
   const etfCount = result?.symbols.filter((symbol) => isEtfSymbol(symbol)).length ?? 0;
   const scannedCount = result ? scanCount(result) : null;
 
@@ -188,106 +191,31 @@ export function Today({ dataMode, profile, selectedCard, onSelect }: Props) {
 
   return (
     <div className="stack">
-        <section className="panel today-panel">
-          <div className="panel-heading">
-            <div>
-              <h2>{t("today.title")}</h2>
-              <p className="brief-headline">{t("today.subtitle")}</p>
-            </div>
-            <div className="brief-actions">
-              <label className="input-compact">
-                <span>{t("today.scanSize")}</span>
-                <select value={scanSize} onChange={(event) => setScanSize(event.target.value)}>
-                  <option value="30">30</option>
-                  <option value="80">80</option>
-                </select>
-              </label>
-              <label className="checkbox-compact">
-                <input
-                  type="checkbox"
-                  checked={includeEtfs}
-                  onChange={(event) => setIncludeEtfs(event.target.checked)}
-                />
-                {t("today.includeEtfs")}
-              </label>
-              <button
-                className="icon-action"
-                type="button"
-                onClick={() => startScan(false)}
-                disabled={isStarting || isActive(task)}
-              >
-                {isStarting || isActive(task) ? t("common.running") : t("today.rescan")}
-              </button>
-            </div>
-          </div>
-          {task && <TaskProgress task={task} />}
-          {error && <div className="empty-state error">{error}</div>}
-          {result && <DataHealth data={result.data_health} language={language} />}
-          <div className="metric-grid today-metrics">
-            <div>
-              <span>{t("common.scanned")}</span>
-              <strong>{scannedCount ?? "-"}</strong>
-            </div>
-            <div>
-              <span>{t("today.actionable")}</span>
-              <strong>{actionable.length || "-"}</strong>
-            </div>
-            <div>
-              <span>{t("settings.catalogEtfs")}</span>
-              <strong>{etfCount || "-"}</strong>
-            </div>
-            <div>
-              <span>{t("common.cards")}</span>
-              <strong>{cards.length || "-"}</strong>
-            </div>
-          </div>
-        </section>
+        <SignalCommandCenter
+          cards={cards}
+          selectedCard={selectedCard}
+          scannedCount={scannedCount}
+          actionableCount={actionable.length}
+          blockedCount={blocked}
+          etfCount={etfCount}
+          dataHealth={result?.data_health ?? {}}
+          language={language}
+          task={task}
+          fullScanJob={fullScanJob}
+          error={error}
+          scanSize={scanSize}
+          includeEtfs={includeEtfs}
+          isStarting={isStarting}
+          isStartingFullScan={isStartingFullScan}
+          onScanSizeChange={setScanSize}
+          onIncludeEtfsChange={setIncludeEtfs}
+          onRefresh={() => startScan(false)}
+          onStartFullScan={startBackgroundFullScan}
+        />
 
-        <section className="panel today-panel">
-          <div className="panel-heading">
-            <div>
-              <h2>{t("today.fullScanTitle")}</h2>
-              <p className="brief-headline">{t("today.fullScanSubtitle")}</p>
-            </div>
-            <div className="brief-actions">
-              <button
-                className="icon-action"
-                type="button"
-                onClick={startBackgroundFullScan}
-                disabled={isStartingFullScan || isFullScanActive(fullScanJob)}
-              >
-                {isStartingFullScan || isFullScanActive(fullScanJob)
-                  ? t("common.running")
-                  : t("today.fullScanStart")}
-              </button>
-            </div>
-          </div>
-          {fullScanJob ? (
-            <FullScanProgress job={fullScanJob} />
-          ) : (
-            <div className="empty-state">{t("today.fullScanNoJob")}</div>
-          )}
-          <div className="metric-grid today-metrics">
-            <div>
-              <span>{t("today.fullScanCoverage")}</span>
-              <strong>{fullScanJob ? `${fullScanJob.scanned_symbols}/${fullScanJob.total_symbols}` : "-"}</strong>
-            </div>
-            <div>
-              <span>{t("today.fullScanBatches")}</span>
-              <strong>{fullScanJob ? `${fullScanJob.completed_batches}/${fullScanJob.total_batches}` : "-"}</strong>
-            </div>
-            <div>
-              <span>{t("common.cards")}</span>
-              <strong>{fullScanJob?.cards ?? "-"}</strong>
-            </div>
-            <div>
-              <span>{t("today.fullScanErrors")}</span>
-              <strong>{fullScanJob?.errors ?? "-"}</strong>
-            </div>
-          </div>
-        </section>
+        <SignalDistribution cards={cards} actionableCount={actionable.length} />
 
-        {selectedCard && <SelectedOpportunityWorkup card={selectedCard} />}
+        {selectedCard && <SelectedOpportunityWorkup card={selectedCard} dataMode={dataMode} />}
 
         <section className="panel">
           <div className="panel-heading">
@@ -324,6 +252,293 @@ export function Today({ dataMode, profile, selectedCard, onSelect }: Props) {
   );
 }
 
+function SignalCommandCenter({
+  cards,
+  selectedCard,
+  scannedCount,
+  actionableCount,
+  blockedCount,
+  etfCount,
+  dataHealth,
+  language,
+  task,
+  fullScanJob,
+  error,
+  scanSize,
+  includeEtfs,
+  isStarting,
+  isStartingFullScan,
+  onScanSizeChange,
+  onIncludeEtfsChange,
+  onRefresh,
+  onStartFullScan,
+}: {
+  cards: OpportunityCard[];
+  selectedCard?: OpportunityCard;
+  scannedCount: number | null;
+  actionableCount: number;
+  blockedCount: number;
+  etfCount: number;
+  dataHealth: Record<string, string>;
+  language: "zh" | "en";
+  task?: ScanTask;
+  fullScanJob?: FullMarketBatchScanJob;
+  error: string;
+  scanSize: string;
+  includeEtfs: boolean;
+  isStarting: boolean;
+  isStartingFullScan: boolean;
+  onScanSizeChange(value: string): void;
+  onIncludeEtfsChange(value: boolean): void;
+  onRefresh(): void;
+  onStartFullScan(): void;
+}) {
+  const { t } = useI18n();
+  const activeScan = isStarting || isActive(task);
+  const activeFullScan = isStartingFullScan || isFullScanActive(fullScanJob);
+  const selectedLabel = selectedCard
+    ? formatInstrumentDisplay(selectedCard.instrument_id, selectedCard.instrument_label)
+    : "-";
+  const topScore = selectedCard ? Math.round(selectedCard.rank_score * 100) : null;
+  const highConfidenceCount = cards.filter(
+    (card) => (card.decision?.conviction_score ?? 0) >= 0.72,
+  ).length;
+  const setupReadyCount = cards.filter((card) =>
+    ["candidate_entry", "watch_trigger", "wait_pullback"].includes(card.decision?.action ?? ""),
+  ).length;
+
+  return (
+    <section className="panel signal-console">
+      <div className="signal-console-header">
+        <div>
+          <p className="eyebrow">{t("today.signalConsole")}</p>
+          <h2>{t("today.title")}</h2>
+          <p className="brief-headline">{t("today.subtitle")}</p>
+        </div>
+        <div className="brief-actions signal-actions">
+          <label className="input-compact">
+            <span>{t("today.scanSize")}</span>
+            <select value={scanSize} onChange={(event) => onScanSizeChange(event.target.value)}>
+              <option value="30">30</option>
+              <option value="80">80</option>
+            </select>
+          </label>
+          <label className="checkbox-compact">
+            <input
+              type="checkbox"
+              checked={includeEtfs}
+              onChange={(event) => onIncludeEtfsChange(event.target.checked)}
+            />
+            {t("today.includeEtfs")}
+          </label>
+          <button className="icon-action" type="button" onClick={onRefresh} disabled={activeScan}>
+            {activeScan ? t("common.running") : t("today.rescan")}
+          </button>
+          <button
+            className="icon-action secondary"
+            type="button"
+            onClick={onStartFullScan}
+            disabled={activeFullScan}
+          >
+            {activeFullScan ? t("common.running") : t("today.fullScanStart")}
+          </button>
+        </div>
+      </div>
+
+      <div className="market-board-grid">
+        <SignalMetric label={t("common.scanned")} value={scannedCount ?? "-"} tone="neutral" />
+        <SignalMetric label={t("today.actionable")} value={actionableCount || "-"} tone="good" />
+        <SignalMetric label={t("today.blocked")} value={blockedCount || "-"} tone="risk" />
+        <SignalMetric label={t("settings.catalogEtfs")} value={etfCount || "-"} tone="info" />
+        <SignalMetric label={t("today.highConfidence")} value={highConfidenceCount || "-"} tone="good" />
+        <SignalMetric label={t("today.setupReady")} value={setupReadyCount || "-"} tone="warning" />
+      </div>
+
+      <div className="signal-console-body">
+        <div className="signal-focus-card">
+          <span>{t("today.topSignal")}</span>
+          <strong>{selectedLabel}</strong>
+          <p>
+            {selectedCard
+              ? localizeReason(
+                  selectedCard.recommendation_summary?.headline ?? selectedCard.thesis,
+                  language,
+                )
+              : t("today.noResult")}
+          </p>
+          <div className="signal-focus-meta">
+            <span>{t("brief.rank")} {topScore ?? "-"}</span>
+            <span>{t("brief.conviction")} {formatPct(selectedCard?.decision?.conviction_score)}</span>
+            <span>{localizeStrategy(selectedCard?.primary_strategy_id ?? "-", language)}</span>
+          </div>
+        </div>
+
+        <div className="signal-status-stack">
+          {task && <TaskProgress task={task} />}
+          {fullScanJob ? (
+            <>
+              <FullScanProgress job={fullScanJob} />
+              <FullScanCompactMetrics job={fullScanJob} />
+            </>
+          ) : (
+            <div className="empty-state compact">{t("today.fullScanNoJob")}</div>
+          )}
+          {error && <div className="empty-state error compact">{error}</div>}
+          <CompactDataHealth data={dataHealth} language={language} />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SignalMetric({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string | number;
+  tone: "neutral" | "good" | "risk" | "info" | "warning";
+}) {
+  return (
+    <div className={`signal-metric signal-metric-${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function FullScanCompactMetrics({ job }: { job: FullMarketBatchScanJob }) {
+  const { t } = useI18n();
+  return (
+    <div className="full-scan-compact">
+      <span>
+        {t("today.fullScanCoverage")} <strong>{job.scanned_symbols}/{job.total_symbols}</strong>
+      </span>
+      <span>
+        {t("today.fullScanBatches")} <strong>{job.completed_batches}/{job.total_batches}</strong>
+      </span>
+      <span>
+        {t("common.cards")} <strong>{job.cards}</strong>
+      </span>
+      <span>
+        {t("today.fullScanErrors")} <strong>{job.errors}</strong>
+      </span>
+    </div>
+  );
+}
+
+function SignalDistribution({
+  cards,
+  actionableCount,
+}: {
+  cards: OpportunityCard[];
+  actionableCount: number;
+}) {
+  const { language, t } = useI18n();
+  const buckets = [...bucketCounts(cards)].slice(0, 7);
+  const maxCount = Math.max(1, ...buckets.map((item) => item.count));
+  const riskClear = cards.filter((card) => card.decision?.risk_status === "clear").length;
+  const riskWarning = cards.filter((card) => card.decision?.risk_status === "warning").length;
+  const riskBlocked = cards.filter((card) => card.decision?.risk_status === "blocked").length;
+
+  return (
+    <section className="panel signal-distribution">
+      <div className="panel-heading">
+        <div>
+          <h2>{t("today.signalDistribution")}</h2>
+          <p className="brief-headline">{t("today.signalDistributionSubtitle")}</p>
+        </div>
+        <span className="count">{cards.length}</span>
+      </div>
+
+      <div className="signal-distribution-grid">
+        <div className="signal-bucket-list">
+          {buckets.length ? (
+            buckets.map((item) => (
+              <div
+                className="signal-bucket-row"
+                key={item.bucket}
+                style={{ "--signal-pct": `${Math.max(8, (item.count / maxCount) * 100)}%` } as CSSProperties}
+              >
+                <span>{signalBucketLabel(item.bucket, language)}</span>
+                <div className="signal-bucket-bar" />
+                <strong>{item.count}</strong>
+              </div>
+            ))
+          ) : (
+            <div className="empty-state compact">{t("today.noResult")}</div>
+          )}
+        </div>
+
+        <div className="signal-risk-grid">
+          <SignalMetric label={t("today.actionable")} value={actionableCount || "-"} tone="good" />
+          <SignalMetric label={t("today.riskClear")} value={riskClear || "-"} tone="good" />
+          <SignalMetric label={t("today.riskWatch")} value={riskWarning || "-"} tone="warning" />
+          <SignalMetric label={t("today.blocked")} value={riskBlocked || "-"} tone="risk" />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function CompactDataHealth({
+  data,
+  language,
+}: {
+  data: Record<string, string>;
+  language: "zh" | "en";
+}) {
+  const { t } = useI18n();
+  const entries = Object.entries(data).filter(([, value]) => value !== "");
+  if (!entries.length) {
+    return <div className="empty-state compact">{t("today.dataTraceEmpty")}</div>;
+  }
+  const visible = entries.slice(0, 6);
+  const hidden = entries.slice(6);
+
+  return (
+    <details className="compact-data-health">
+      <summary>
+        <span>{t("today.dataTrace")}</span>
+        <strong>{entries.length}</strong>
+      </summary>
+      <div>
+        {visible.map(([key, value]) => (
+          <span key={key}>
+            <strong>{localizeDataHealthKey(key, language)}</strong>{" "}
+            {localizeDataHealthValue(value, language)}
+          </span>
+        ))}
+        {hidden.length > 0 && <em>+{hidden.length}</em>}
+      </div>
+    </details>
+  );
+}
+
+function bucketCounts(cards: OpportunityCard[]) {
+  const counts = new Map<string, number>();
+  for (const card of cards) {
+    const bucket = card.opportunity_bucket || "stock_momentum";
+    counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([bucket, count]) => ({ bucket, count }))
+    .sort((left, right) => right.count - left.count);
+}
+
+function signalBucketLabel(bucket: string, language: "zh" | "en") {
+  const labels: Record<string, { zh: string; en: string }> = {
+    today_action: { zh: "今日可行动", en: "Actionable" },
+    etf_index: { zh: "ETF/指数", en: "ETF / index" },
+    theme_growth: { zh: "主题成长", en: "Theme growth" },
+    wait_pullback: { zh: "等待回踩", en: "Wait pullback" },
+    stock_momentum: { zh: "趋势候选", en: "Momentum" },
+    risk_filtered: { zh: "风险过滤", en: "Risk filtered" },
+  };
+  return labels[bucket]?.[language] ?? bucket;
+}
+
 function TaskProgress({ task }: { task: ScanTask }) {
   return (
     <div className={`task-progress task-${task.status}`}>
@@ -348,8 +563,16 @@ function FullScanProgress({ job }: { job: FullMarketBatchScanJob }) {
   );
 }
 
-function SelectedOpportunityWorkup({ card }: { card: OpportunityCard }) {
+function SelectedOpportunityWorkup({
+  card,
+  dataMode,
+}: {
+  card: OpportunityCard;
+  dataMode: DataProviderMode;
+}) {
   const { language, t } = useI18n();
+  const [paperMessage, setPaperMessage] = useState("");
+  const [isAddingPaper, setIsAddingPaper] = useState(false);
   const execution = card.execution_plan;
   const confidence = card.confidence_explanation;
   const actionLabel =
@@ -387,6 +610,37 @@ function SelectedOpportunityWorkup({ card }: { card: OpportunityCard }) {
     impact: "positive",
     weight: null,
   }));
+  const canTrack =
+    Boolean(card.entry_plan.trigger_price) &&
+    card.decision?.risk_status !== "blocked" &&
+    card.decision?.action !== "avoid";
+
+  async function addPaperTracking() {
+    if (!canTrack) {
+      setPaperMessage(t("today.paperBlocked"));
+      return;
+    }
+    try {
+      setIsAddingPaper(true);
+      const result = await createPaperTradeFromOpportunity({
+        card_id: card.card_id,
+        provider: dataMode,
+        instrument_id: card.instrument_id,
+        strategy_id: card.primary_strategy_id,
+        trigger_price: card.entry_plan.trigger_price,
+        initial_stop: card.exit_plan.initial_stop,
+        target_1: card.exit_plan.target_1,
+        rank_score: card.rank_score,
+        action: card.decision?.action ?? "watch_trigger",
+        risk_status: card.decision?.risk_status ?? "clear",
+      });
+      setPaperMessage(result.created ? t("today.paperAdded") : t("today.paperExists"));
+    } catch (caught) {
+      setPaperMessage(caught instanceof Error ? caught.message : t("today.paperFailed"));
+    } finally {
+      setIsAddingPaper(false);
+    }
+  }
 
   return (
     <section className="panel today-workup">
@@ -401,6 +655,18 @@ function SelectedOpportunityWorkup({ card }: { card: OpportunityCard }) {
           <span>{actionLabel}</span>
           <strong>{confidence?.label ?? formatPct(card.decision?.conviction_score)}</strong>
         </div>
+      </div>
+
+      <div className="workup-actions">
+        <button
+          className="icon-action"
+          type="button"
+          onClick={addPaperTracking}
+          disabled={isAddingPaper || !canTrack}
+        >
+          {isAddingPaper ? t("common.running") : t("today.addPaperTracking")}
+        </button>
+        {paperMessage && <span>{paperMessage}</span>}
       </div>
 
       <p className="workup-headline">{localizeReason(headline, language)}</p>

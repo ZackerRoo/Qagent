@@ -645,6 +645,25 @@ export type PaperUpdateResponse = {
   data_health: Record<string, string>;
 };
 
+export type PaperTradeFromOpportunityPayload = {
+  card_id: string;
+  provider: DataProviderMode;
+  instrument_id: string;
+  strategy_id: string | null;
+  trigger_price: string | null;
+  initial_stop: string | null;
+  target_1: string | null;
+  rank_score: number;
+  action: string;
+  risk_status: string;
+};
+
+export type PaperTradeFromOpportunityResponse = {
+  created: boolean;
+  trade: PaperTrade;
+  message: string;
+};
+
 export type AlertRule = {
   rule_id: string;
   instrument_id: string;

@@ -26,6 +26,9 @@ def answer_question(question: str, context: dict[str, object]) -> str:
             return _answer_recommendations(question, cards)
 
     if _is_position_management_question(question, lowered):
+        paper_trade = context.get("paper_trade")
+        if isinstance(paper_trade, dict):
+            return _answer_paper_trade_management(question, context, paper_trade)
         risk = context.get("position_risk")
         if isinstance(risk, dict):
             return _answer_position_management(question, context, risk)
@@ -219,6 +222,51 @@ def _answer_position_management(
         f"Stop gap {stop_gap}; target gap {target_gap}. {management_note} Next check: {next_check}. "
         "This is position-management context, not personalized investment advice."
     )
+
+
+def _answer_paper_trade_management(
+    question: str,
+    context: dict[str, object],
+    trade: dict[str, object],
+) -> str:
+    instrument_id = str(context.get("instrument_id") or trade.get("instrument_id") or "")
+    label = str(context.get("instrument_label") or _instrument_label(instrument_id))
+    if instrument_id and instrument_id not in label:
+        label = f"{label}（{instrument_id}）"
+    status = str(trade.get("status") or "pending")
+    trigger = trade.get("trigger_price") or "-"
+    stop = trade.get("initial_stop") or "-"
+    target = trade.get("target_1") or "-"
+    latest = trade.get("latest_price") or "-"
+    entry = trade.get("entry_price") or "-"
+    pnl = _format_float(trade.get("realized_return_pct") or trade.get("unrealized_return_pct"))
+    note = str(trade.get("notes") or "")
+    action = _paper_trade_action(status)
+
+    if _looks_chinese(question):
+        return (
+            f"{label} 已在模拟盘跟踪，当前状态是 {localize_status(status)}。"
+            f"处理建议：{action}。触发价 {trigger}，止损 {stop}，目标 {target}。"
+            f"入场价 {entry}，最新价 {latest}，模拟盈亏 {pnl}%。"
+            f"{note} 这是模拟盘跟踪情景，不是个性化投资建议。"
+        )
+    return (
+        f"{label} is tracked in the paper book with status {status}. "
+        f"Action: {action}. Trigger {trigger}, stop {stop}, target {target}. "
+        f"Entry {entry}, latest {latest}, paper P/L {pnl}%. "
+        "This is paper-trading context, not personalized investment advice."
+    )
+
+
+def _paper_trade_action(status: str) -> str:
+    actions = {
+        "pending": "未触发买点，继续等触发价；不要提前追高",
+        "open": "已触发开仓，按止损和目标管理，接近目标可考虑分批止盈或上移止损",
+        "target_1_hit": "第一目标已命中，复盘是否止盈或保留跟踪",
+        "stopped": "止损已触发，默认结束这笔交易并复盘原因",
+        "time_exit": "时间止损或触发过期，默认不继续占用机会",
+    }
+    return actions.get(status, "按模拟盘状态继续复核")
 
 
 def _answer_recommendations(question: str, cards: list[object]) -> str:

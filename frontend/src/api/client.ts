@@ -28,6 +28,8 @@ import type {
   OpportunityHistoryResponse,
   OutcomesResponse,
   PaperSeedResponse,
+  PaperTradeFromOpportunityPayload,
+  PaperTradeFromOpportunityResponse,
   PaperTradesResponse,
   PaperUpdateResponse,
   PortfolioBacktestResponse,
@@ -323,6 +325,12 @@ export async function updatePaperTrades(
   provider: DataProviderMode,
 ): Promise<PaperUpdateResponse> {
   return apiPost<PaperUpdateResponse>(`/paper-trades/update?provider=${provider}`, {});
+}
+
+export async function createPaperTradeFromOpportunity(
+  payload: PaperTradeFromOpportunityPayload,
+): Promise<PaperTradeFromOpportunityResponse> {
+  return apiPost<PaperTradeFromOpportunityResponse>("/paper-trades/from-opportunity", payload);
 }
 
 export async function fetchAlertRules(): Promise<AlertRulesResponse> {

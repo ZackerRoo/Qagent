@@ -6,7 +6,12 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, HTTPException
 
 from qagent.agent.responder import answer_question
-from qagent.api.schemas import AgentQueryRequest, AgentQueryResponse, AlertEvaluationRequest
+from qagent.api.schemas import (
+    AgentQueryRequest,
+    AgentQueryResponse,
+    AlertEvaluationRequest,
+    PaperTradeFromOpportunityRequest,
+)
 from qagent.backtesting.engine import run_historical_backtest
 from qagent.backtesting.portfolio import run_portfolio_backtest
 from qagent.briefing.daily import DailyBrief, build_daily_brief
@@ -775,6 +780,52 @@ def update_paper_trade_status(provider: str = "fixture") -> dict[str, object]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return result.model_dump(mode="json")
+
+
+@router.post("/paper-trades/from-opportunity")
+def create_paper_trade_from_opportunity(
+    request: PaperTradeFromOpportunityRequest,
+) -> dict[str, object]:
+    if request.risk_status == "blocked" or request.action == "avoid":
+        raise HTTPException(status_code=400, detail="opportunity is blocked")
+    if not request.instrument_id.strip():
+        raise HTTPException(status_code=400, detail="instrument_id is required")
+    if not request.trigger_price:
+        raise HTTPException(status_code=400, detail="trigger_price is required")
+
+    source_snapshot_id = f"opportunity:{request.card_id.strip()}"
+    repo = _paper_repo()
+    existing = repo.get_trade_by_source_snapshot_id(source_snapshot_id)
+    if existing is not None:
+        return {
+            "created": False,
+            "trade": existing.model_dump(mode="json"),
+            "message": "already_tracking",
+        }
+
+    trade = repo.create_trade(
+        source_snapshot_id=source_snapshot_id,
+        provider=request.provider.strip().lower(),
+        instrument_id=request.instrument_id.strip(),
+        strategy_id=request.strategy_id,
+        signal_date=date.today(),
+        trigger_price=Decimal(str(request.trigger_price)),
+        initial_stop=_decimal_or_none(request.initial_stop),
+        target_1=_decimal_or_none(request.target_1),
+        rank_score=_decimal_or_none(request.rank_score),
+        notes="从机会卡加入模拟跟踪；等待触发价确认后才视为开仓。",
+    )
+    return {
+        "created": True,
+        "trade": trade.model_dump(mode="json"),
+        "message": "tracking_created",
+    }
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    if value in {None, ""}:
+        return None
+    return Decimal(str(value))
 
 
 def _build_daily_brief_response(
@@ -1760,6 +1811,7 @@ def agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
         (risk for risk in position_risks if risk.instrument_id == selected.instrument_id),
         None,
     )
+    selected_paper_trade = _paper_trade_for_instrument(selected.instrument_id)
 
     answer = answer_question(
         request.question,
@@ -1783,11 +1835,25 @@ def agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
                 selected_position_risk.model_dump(mode="json") if selected_position_risk else None
             ),
             "position_risks": [risk.model_dump(mode="json") for risk in position_risks],
+            "paper_trade": (
+                selected_paper_trade.model_dump(mode="json") if selected_paper_trade else None
+            ),
             "provider": mode,
             "data_health": result.data_health,
         },
     )
     return AgentQueryResponse(answer=answer)
+
+
+def _paper_trade_for_instrument(instrument_id: str):
+    return next(
+        (
+            trade
+            for trade in _paper_repo().list_trades(limit=1000)
+            if trade.instrument_id == instrument_id
+        ),
+        None,
+    )
 
 
 def _agent_card_summary(card) -> dict[str, object]:

@@ -47,6 +47,7 @@ class PaperTradingRepository:
         initial_stop: Decimal | None,
         target_1: Decimal | None,
         rank_score: Decimal | None = None,
+        notes: str = "",
     ) -> PaperTradeRecord:
         with self.session_factory() as session:
             existing = (
@@ -68,11 +69,24 @@ class PaperTradingRepository:
                 initial_stop=initial_stop,
                 target_1=target_1,
                 rank_score=rank_score,
+                notes=notes,
             )
             session.add(row)
             session.commit()
             session.refresh(row)
             return self._trade_from_row(row)
+
+    def get_trade_by_source_snapshot_id(
+        self,
+        source_snapshot_id: str,
+    ) -> PaperTradeRecord | None:
+        with self.session_factory() as session:
+            row = (
+                session.query(PaperTradeRow)
+                .filter(PaperTradeRow.source_snapshot_id == source_snapshot_id)
+                .one_or_none()
+            )
+            return self._trade_from_row(row) if row is not None else None
 
     def list_trades(
         self,
