@@ -2563,6 +2563,288 @@ tbody tr.selected {
   grid-template-columns: minmax(130px, 0.5fr) minmax(90px, 0.35fr) minmax(100px, 0.35fr) minmax(100px, 0.35fr) 80px;
 }
 
+.paper-ledger-dashboard {
+  display: grid;
+  gap: 12px;
+}
+
+.paper-ledger-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.32fr);
+  gap: 12px;
+  border: 1px solid rgba(244, 197, 66, 0.32);
+  border-radius: 8px;
+  padding: 14px;
+  background:
+    linear-gradient(135deg, rgba(244, 197, 66, 0.12), rgba(77, 212, 255, 0.05) 48%, rgba(57, 217, 138, 0.06)),
+    var(--terminal-panel-soft);
+}
+
+.paper-ledger-hero h3 {
+  margin: 6px 0 4px;
+  color: var(--terminal-text);
+  font-size: 30px;
+  line-height: 1;
+}
+
+.paper-ledger-hero p,
+.paper-ledger-status-card p,
+.paper-ledger-card-header p {
+  margin: 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ledger-pnl {
+  display: grid;
+  align-content: center;
+  justify-items: end;
+  min-width: 0;
+}
+
+.ledger-pnl span,
+.paper-ledger-status-card span {
+  color: var(--terminal-muted-2);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ledger-pnl strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.ledger-pnl small {
+  margin-top: 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.good {
+  color: var(--terminal-green);
+}
+
+.risk {
+  color: var(--terminal-red);
+}
+
+.paper-ledger-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.paper-ledger-metrics .metric {
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(9, 14, 20, 0.55);
+}
+
+.paper-ledger-visual-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.65fr);
+  gap: 12px;
+}
+
+.paper-ledger-card {
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 12px;
+  background: #0b1117;
+}
+
+.paper-ledger-card-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.paper-ledger-card-header h3 {
+  margin: 0 0 4px;
+  color: var(--terminal-text);
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+.paper-ledger-card-header strong {
+  flex: 0 0 auto;
+  border: 1px solid rgba(77, 212, 255, 0.36);
+  border-radius: 999px;
+  padding: 5px 8px;
+  color: var(--terminal-cyan);
+  font-size: 12px;
+}
+
+.paper-ledger-curve {
+  overflow: hidden;
+  border: 1px solid rgba(77, 212, 255, 0.18);
+  border-radius: 8px;
+  background:
+    linear-gradient(rgba(148, 163, 184, 0.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.07) 1px, transparent 1px),
+    #080d12;
+  background-size: 38px 38px;
+}
+
+.paper-ledger-curve svg {
+  display: block;
+  width: 100%;
+  min-height: 250px;
+}
+
+.paper-ledger-grid line {
+  stroke: rgba(148, 163, 184, 0.16);
+  stroke-width: 1;
+}
+
+.paper-ledger-grid text,
+.paper-ledger-date-label {
+  fill: var(--terminal-muted-2);
+  font-size: 11px;
+}
+
+.paper-ledger-area {
+  fill: url("#paperEquityGradient");
+}
+
+.paper-ledger-line {
+  fill: none;
+  stroke: var(--terminal-yellow);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 3;
+}
+
+.paper-ledger-point circle {
+  fill: var(--terminal-cyan);
+  stroke: #070b0f;
+  stroke-width: 2;
+}
+
+.paper-ledger-last-label {
+  fill: var(--terminal-text);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.paper-return-bars {
+  display: grid;
+  gap: 8px;
+}
+
+.paper-return-row {
+  display: grid;
+  grid-template-columns: minmax(92px, 0.9fr) minmax(120px, 1.2fr) minmax(62px, auto);
+  align-items: center;
+  gap: 8px;
+}
+
+.paper-return-row span {
+  overflow: hidden;
+  color: var(--terminal-text);
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.paper-return-row strong {
+  text-align: right;
+  font-size: 12px;
+}
+
+.paper-return-row small {
+  grid-column: 2 / 4;
+  color: var(--terminal-muted-2);
+  font-size: 11px;
+  line-height: 1.1;
+}
+
+.paper-return-track {
+  display: flex;
+  height: 12px;
+  overflow: hidden;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 999px;
+  background: #111922;
+}
+
+.paper-return-track.positive {
+  justify-content: flex-start;
+}
+
+.paper-return-track.negative {
+  justify-content: flex-end;
+}
+
+.paper-return-track i {
+  display: block;
+  border-radius: 999px;
+}
+
+.paper-return-track.positive i {
+  background: linear-gradient(90deg, rgba(57, 217, 138, 0.3), var(--terminal-green));
+}
+
+.paper-return-track.negative i {
+  background: linear-gradient(90deg, var(--terminal-red), rgba(255, 92, 122, 0.28));
+}
+
+.paper-ledger-status-card {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 11px;
+  background: rgba(9, 14, 20, 0.58);
+}
+
+.paper-ledger-status-card > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.paper-ledger-status-card strong {
+  color: var(--terminal-text);
+}
+
+.paper-ledger-status-stack {
+  display: flex;
+  min-height: 14px;
+  overflow: hidden;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 999px;
+  background: var(--terminal-panel);
+}
+
+.paper-ledger-status-stack i {
+  min-width: 0;
+}
+
+.paper-ledger-status-stack .closed {
+  background: var(--terminal-green);
+}
+
+.paper-ledger-status-stack .open {
+  background: var(--terminal-yellow);
+}
+
+.paper-ledger-status-stack .pending {
+  background: var(--terminal-cyan);
+}
+
 .alert-form {
   grid-template-columns:
     minmax(130px, 0.55fr) minmax(120px, 0.4fr) minmax(110px, 0.35fr)
@@ -2742,6 +3024,9 @@ tbody tr.selected {
   .sector-strength-grid,
   .scenario-grid,
   .scenario-payoff-metrics,
+  .paper-ledger-hero,
+  .paper-ledger-metrics,
+  .paper-ledger-visual-grid,
   .backtest-guide-grid,
   .backtest-interpretation,
   .backtest-result-grid,
@@ -2757,6 +3042,18 @@ tbody tr.selected {
 
   .universe-form {
     grid-template-columns: 1fr;
+  }
+
+  .paper-ledger-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .paper-ledger-hero {
+    grid-template-columns: minmax(0, 1fr) minmax(138px, 0.42fr);
+  }
+
+  .paper-return-row {
+    grid-template-columns: minmax(120px, 0.95fr) minmax(120px, 1.15fr) minmax(58px, auto);
   }
 
   .market-board-grid {

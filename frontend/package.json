@@ -8,6 +8,7 @@
     "check:markets": "node scripts/check-market-sections.mjs",
     "check:scan-lifecycle": "node scripts/check-scan-lifecycle.mjs",
     "check:new-user-flow": "node scripts/check-new-user-flow.mjs",
+    "check:paper-ledger-ui": "node scripts/check-paper-ledger-ui.mjs",
     "check:today-ui": "node scripts/check-today-ui.mjs",
     "check:terminal-ui": "node scripts/check-terminal-ui.mjs",
     "preview": "vite preview"

@@ -638,6 +638,78 @@ export type PaperTradesResponse = {
   trades: PaperTrade[];
 };
 
+export type PaperLedgerSummary = {
+  initial_capital: string;
+  allocation_per_trade_pct: number;
+  allocation_per_trade: string;
+  total_trades: number;
+  pending_trades: number;
+  open_trades: number;
+  closed_trades: number;
+  target_hit_count: number;
+  stopped_count: number;
+  time_exit_count: number;
+  planned_capital: string;
+  allocated_capital: string;
+  market_value: string;
+  cash_available: string;
+  total_equity: string;
+  total_pnl: string;
+  realized_pnl: string;
+  unrealized_pnl: string;
+  total_return_pct: number;
+  open_exposure_pct: number;
+  win_rate: number | null;
+  average_return_pct: number | null;
+  best_return_pct: number | null;
+  worst_return_pct: number | null;
+  max_drawdown_pct: number;
+};
+
+export type PaperLedgerPoint = {
+  date: string;
+  equity: string;
+  pnl: string;
+  drawdown_pct: number;
+  realized_pnl: string;
+  unrealized_pnl: string;
+  event_count: number;
+};
+
+export type PaperLedgerItem = {
+  trade_id: string;
+  instrument_id: string;
+  strategy_id: string | null;
+  status: string;
+  outcome: string;
+  signal_date: string;
+  entry_date: string | null;
+  exit_date: string | null;
+  latest_date: string | null;
+  trigger_price: string;
+  entry_price: string | null;
+  exit_price: string | null;
+  latest_price: string | null;
+  capital_allocated: string;
+  shares: string;
+  market_value: string;
+  realized_pnl: string;
+  unrealized_pnl: string;
+  total_pnl: string;
+  return_pct: number | null;
+  risk_pct: number | null;
+  reward_pct: number | null;
+  holding_days: number;
+  notes: string;
+};
+
+export type PaperLedgerResponse = {
+  summary: PaperLedgerSummary;
+  curve: PaperLedgerPoint[];
+  items: PaperLedgerItem[];
+  data_health: Record<string, string>;
+};
+
 export type PaperSeedResponse = {
   scanned: number;
   created: number;

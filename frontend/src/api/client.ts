@@ -28,6 +28,7 @@ import type {
   OpportunitiesResponse,
   OpportunityHistoryResponse,
   OutcomesResponse,
+  PaperLedgerResponse,
   PaperSeedResponse,
   PaperTradeFromOpportunityPayload,
   PaperTradeFromOpportunityResponse,
@@ -74,6 +75,7 @@ type ScanParams = {
   scan_limit?: number;
   status?: string;
   initial_capital?: string | number;
+  allocation_per_trade_pct?: string | number;
   risk_per_trade_pct?: string | number;
   max_positions?: number;
   max_symbols?: number;
@@ -143,6 +145,9 @@ function queryString(params?: ScanParams): string {
   }
   if (params.initial_capital) {
     search.set("initial_capital", String(params.initial_capital));
+  }
+  if (params.allocation_per_trade_pct) {
+    search.set("allocation_per_trade_pct", String(params.allocation_per_trade_pct));
   }
   if (params.risk_per_trade_pct) {
     search.set("risk_per_trade_pct", String(params.risk_per_trade_pct));
@@ -316,6 +321,17 @@ export async function savePosition(payload: Position): Promise<Position> {
 
 export async function fetchPaperTrades(): Promise<PaperTradesResponse> {
   return apiGet<PaperTradesResponse>("/paper-trades", { limit: 100 });
+}
+
+export async function fetchPaperLedger(
+  initialCapital = 100000,
+  allocationPerTradePct = 10,
+): Promise<PaperLedgerResponse> {
+  return apiGet<PaperLedgerResponse>("/paper-trades/ledger", {
+    initial_capital: initialCapital,
+    allocation_per_trade_pct: allocationPerTradePct,
+    limit: 500,
+  });
 }
 
 export async function seedPaperTrades(provider: DataProviderMode): Promise<PaperSeedResponse> {

@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.paper_trading.engine import (
+    build_paper_ledger,
     seed_paper_trades_from_snapshots,
     update_paper_trades,
 )
@@ -62,3 +63,107 @@ def test_update_paper_trades_marks_target_hit_from_future_bars(tmp_path):
     assert trade.entry_price == Decimal("70.8000")
     assert trade.exit_price == Decimal("74.0000")
     assert trade.realized_return_pct == 4.5198
+
+
+def test_build_paper_ledger_summarizes_cash_equity_and_recommendation_outcomes(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    winning = paper_repo.create_trade(
+        source_snapshot_id="ledger-win",
+        provider="fixture",
+        instrument_id="CN:688059",
+        strategy_id="breakout_volume_confirmation",
+        signal_date=date(2026, 6, 1),
+        trigger_price=Decimal("100"),
+        initial_stop=Decimal("95"),
+        target_1=Decimal("110"),
+        rank_score=Decimal("0.90"),
+    )
+    losing = paper_repo.create_trade(
+        source_snapshot_id="ledger-loss",
+        provider="fixture",
+        instrument_id="CN:000001",
+        strategy_id="pullback_to_rising_20dma",
+        signal_date=date(2026, 6, 2),
+        trigger_price=Decimal("100"),
+        initial_stop=Decimal("95"),
+        target_1=Decimal("110"),
+        rank_score=Decimal("0.70"),
+    )
+    open_trade = paper_repo.create_trade(
+        source_snapshot_id="ledger-open",
+        provider="fixture",
+        instrument_id="CN:159915",
+        strategy_id="sector_rotation_relative_strength",
+        signal_date=date(2026, 6, 3),
+        trigger_price=Decimal("50"),
+        initial_stop=Decimal("47"),
+        target_1=Decimal("58"),
+        rank_score=Decimal("0.80"),
+    )
+    pending = paper_repo.create_trade(
+        source_snapshot_id="ledger-pending",
+        provider="fixture",
+        instrument_id="CN:300750",
+        strategy_id="breakout_volume_confirmation",
+        signal_date=date(2026, 6, 4),
+        trigger_price=Decimal("200"),
+        initial_stop=Decimal("190"),
+        target_1=Decimal("220"),
+        rank_score=Decimal("0.60"),
+    )
+    paper_repo.update_trade(
+        winning.trade_id,
+        status="target_1_hit",
+        entry_date=date(2026, 6, 5),
+        entry_price=Decimal("100"),
+        exit_date=date(2026, 6, 10),
+        exit_price=Decimal("110"),
+        latest_date=date(2026, 6, 10),
+        latest_price=Decimal("110"),
+        realized_return_pct=Decimal("10"),
+        holding_days=5,
+    )
+    paper_repo.update_trade(
+        losing.trade_id,
+        status="stopped",
+        entry_date=date(2026, 6, 6),
+        entry_price=Decimal("100"),
+        exit_date=date(2026, 6, 12),
+        exit_price=Decimal("95"),
+        latest_date=date(2026, 6, 12),
+        latest_price=Decimal("95"),
+        realized_return_pct=Decimal("-5"),
+        holding_days=6,
+    )
+    paper_repo.update_trade(
+        open_trade.trade_id,
+        status="open",
+        entry_date=date(2026, 6, 7),
+        entry_price=Decimal("50"),
+        latest_date=date(2026, 6, 14),
+        latest_price=Decimal("55"),
+        unrealized_return_pct=Decimal("10"),
+        holding_days=7,
+    )
+
+    ledger = build_paper_ledger(
+        paper_repo.list_trades(limit=10),
+        initial_capital=Decimal("100000"),
+        allocation_per_trade_pct=Decimal("10"),
+    )
+
+    assert ledger.summary.total_trades == 4
+    assert ledger.summary.closed_trades == 2
+    assert ledger.summary.open_trades == 1
+    assert ledger.summary.pending_trades == 1
+    assert ledger.summary.total_equity == Decimal("101500.00")
+    assert ledger.summary.cash_available == Decimal("90500.00")
+    assert ledger.summary.market_value == Decimal("11000.00")
+    assert ledger.summary.realized_pnl == Decimal("500.00")
+    assert ledger.summary.unrealized_pnl == Decimal("1000.00")
+    assert ledger.summary.win_rate == 0.5
+    assert ledger.summary.max_drawdown_pct < 0
+    assert ledger.curve[-1].equity == Decimal("101500.00")
+    assert ledger.items[0].instrument_id == pending.instrument_id
+    assert any(item.outcome == "浮盈跟踪" for item in ledger.items)

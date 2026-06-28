@@ -51,6 +51,7 @@ from qagent.monitoring.outcomes import (
 from qagent.monitoring.portfolio import PositionInput, analyze_position_risk
 from qagent.monitoring.alerts import AlertRule, suggest_alert_rules
 from qagent.paper_trading.engine import (
+    build_paper_ledger,
     seed_paper_trades_from_snapshots,
     update_paper_trades,
     summarize_paper_trades,
@@ -782,6 +783,25 @@ def update_paper_trade_status(provider: str = "fixture") -> dict[str, object]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return result.model_dump(mode="json")
+
+
+@router.get("/paper-trades/ledger")
+def paper_trade_ledger(
+    initial_capital: Decimal = Decimal("100000"),
+    allocation_per_trade_pct: Decimal = Decimal("10"),
+    limit: int = 500,
+) -> dict[str, object]:
+    if limit <= 0 or limit > 1000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+    try:
+        ledger = build_paper_ledger(
+            _paper_repo().list_trades(limit=limit),
+            initial_capital=initial_capital,
+            allocation_per_trade_pct=allocation_per_trade_pct,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ledger.model_dump(mode="json")
 
 
 @router.delete("/paper-trades/{trade_id}")

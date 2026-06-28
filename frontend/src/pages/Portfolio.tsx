@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import {
   deletePaperTrade,
+  fetchPaperLedger,
   fetchPaperTrades,
   fetchPortfolio,
   savePosition,
@@ -10,10 +11,13 @@ import {
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
 import { useI18n } from "../i18n";
+import type { Language, TranslationKey } from "../i18n/catalog";
 import { formatInstrumentDisplay } from "../lib/instruments";
 import { localizeAction, localizeStatus, localizeStrategy } from "../lib/localize";
 import type {
   DataProviderMode,
+  PaperLedgerItem,
+  PaperLedgerResponse,
   PaperTradesResponse,
   PortfolioResponse,
   Position,
@@ -37,18 +41,21 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [positions, setPositions] = useState<Position[]>([]);
   const [portfolio, setPortfolio] = useState<PortfolioResponse>();
   const [paper, setPaper] = useState<PaperTradesResponse>();
+  const [ledger, setLedger] = useState<PaperLedgerResponse>();
   const [form, setForm] = useState<Position>(emptyPosition);
   const [paperMessage, setPaperMessage] = useState("");
   const [deletingPaperTradeId, setDeletingPaperTradeId] = useState("");
 
   async function load() {
-    const [result, paperResult] = await Promise.all([
+    const [result, paperResult, ledgerResult] = await Promise.all([
       fetchPortfolio({ provider: dataMode }),
       fetchPaperTrades(),
+      fetchPaperLedger(),
     ]);
     setPortfolio(result);
     setPositions(result.positions);
     setPaper(paperResult);
+    setLedger(ledgerResult);
   }
 
   useEffect(() => {
@@ -78,6 +85,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
         : `Updated ${result.summary.total} trades, ${result.summary.closed} closed`,
     );
     setPaper({ summary: result.summary, trades: result.trades });
+    setLedger(await fetchPaperLedger());
   }
 
   async function removePaperTrade(tradeId: string) {
@@ -197,6 +205,11 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
           <h2>{t("portfolio.paperTitle")}</h2>
           <span className="count">{paper?.summary.total ?? 0}</span>
         </div>
+        {ledger ? (
+          <PaperLedgerDashboard ledger={ledger} language={language} t={t} />
+        ) : (
+          <div className="empty-state">{t("portfolio.noLedger")}</div>
+        )}
         <div className="metric-grid">
           <Metric label={t("portfolio.open")} value={paper?.summary.open ?? 0} />
           <Metric label={t("portfolio.closed")} value={paper?.summary.closed ?? 0} />
@@ -233,6 +246,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
                 <th>{t("portfolio.exit")}</th>
                 <th>{t("portfolio.latest")}</th>
                 <th>{t("portfolio.pnl")}</th>
+                <th>{t("portfolio.paperOutcome")}</th>
                 <th>{t("common.strategy")}</th>
                 <th>{t("common.actions")}</th>
               </tr>
@@ -252,6 +266,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
                   <td>{trade.exit_price ?? "-"}</td>
                   <td>{trade.latest_price ?? "-"}</td>
                   <td>{formatPct(trade.realized_return_pct ?? trade.unrealized_return_pct)}</td>
+                  <td>{ledger?.items.find((item) => item.trade_id === trade.trade_id)?.outcome ?? "-"}</td>
                   <td className="reason-cell">{localizeStrategy(trade.strategy_id, language)}</td>
                   <td>
                     <button
@@ -284,11 +299,273 @@ function Metric({ label, value }: { label: string; value: string | number }) {
   );
 }
 
+function PaperLedgerDashboard({
+  ledger,
+  language,
+  t,
+}: {
+  ledger: PaperLedgerResponse;
+  language: Language;
+  t: (key: TranslationKey) => string;
+}) {
+  const summary = ledger.summary;
+  return (
+    <div className="paper-ledger-dashboard">
+      <div className="paper-ledger-hero">
+        <div>
+          <span className="eyebrow">{t("portfolio.ledgerTitle")}</span>
+          <h3>{formatMoney(summary.total_equity, language)}</h3>
+          <p>{t("portfolio.ledgerSubtitle")}</p>
+        </div>
+        <div className={numberFrom(summary.total_pnl) >= 0 ? "ledger-pnl good" : "ledger-pnl risk"}>
+          <span>{t("portfolio.totalPnl")}</span>
+          <strong>{formatSignedMoney(summary.total_pnl, language)}</strong>
+          <small>{formatPct(summary.total_return_pct)}</small>
+        </div>
+      </div>
+
+      <div className="paper-ledger-metrics">
+        <Metric label={t("portfolio.cash")} value={formatMoney(summary.cash_available, language)} />
+        <Metric label={t("portfolio.marketValue")} value={formatMoney(summary.market_value, language)} />
+        <Metric label={t("portfolio.realized")} value={formatSignedMoney(summary.realized_pnl, language)} />
+        <Metric label={t("portfolio.unrealized")} value={formatSignedMoney(summary.unrealized_pnl, language)} />
+        <Metric label={t("portfolio.maxDrawdown")} value={formatPct(summary.max_drawdown_pct)} />
+        <Metric label={t("portfolio.exposure")} value={formatPct(summary.open_exposure_pct)} />
+      </div>
+
+      <div className="paper-ledger-visual-grid">
+        <div className="paper-ledger-card">
+          <div className="paper-ledger-card-header">
+            <div>
+              <h3>{t("portfolio.equityCurve")}</h3>
+              <p>{t("portfolio.equityCurveSubtitle")}</p>
+            </div>
+            <strong>{formatPct(summary.win_rate != null ? summary.win_rate * 100 : null)}</strong>
+          </div>
+          <PaperEquityCurve curve={ledger.curve} language={language} />
+        </div>
+        <div className="paper-ledger-card">
+          <div className="paper-ledger-card-header">
+            <div>
+              <h3>{t("portfolio.returnBars")}</h3>
+              <p>{t("portfolio.returnBarsSubtitle")}</p>
+            </div>
+            <strong>{summary.total_trades}</strong>
+          </div>
+          <PaperReturnBars items={ledger.items} language={language} />
+        </div>
+      </div>
+
+      <div className="paper-ledger-status-card">
+        <div>
+          <span>{t("portfolio.statusStack")}</span>
+          <strong>
+            {summary.closed_trades} / {summary.open_trades} / {summary.pending_trades}
+          </strong>
+        </div>
+        <div className="paper-ledger-status-stack">
+          <StatusSegment
+            className="closed"
+            value={summary.closed_trades}
+            total={summary.total_trades}
+          />
+          <StatusSegment className="open" value={summary.open_trades} total={summary.total_trades} />
+          <StatusSegment
+            className="pending"
+            value={summary.pending_trades}
+            total={summary.total_trades}
+          />
+        </div>
+        <p>
+          {t("portfolio.accountAssumption")} {t("portfolio.ledgerMethod")}:{" "}
+          {ledger.data_health.ledger_method ?? "-"}.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function PaperEquityCurve({
+  curve,
+  language,
+}: {
+  curve: PaperLedgerResponse["curve"];
+  language: string;
+}) {
+  if (curve.length === 0) {
+    return <div className="mini-curve-empty">-</div>;
+  }
+  const width = 760;
+  const height = 260;
+  const left = 38;
+  const right = 22;
+  const top = 20;
+  const bottom = 34;
+  const values = curve.map((point) => numberFrom(point.equity));
+  const baseValue = values[0] || 1;
+  const minValue = Math.min(...values);
+  const maxValue = Math.max(...values);
+  const padding = Math.max((maxValue - minValue) * 0.18, maxValue * 0.0015, 1);
+  const low = minValue - padding;
+  const high = maxValue + padding;
+  const xFor = (index: number) =>
+    curve.length === 1
+      ? width / 2
+      : left + (index * (width - left - right)) / (curve.length - 1);
+  const yFor = (value: number) =>
+    top + ((high - value) / Math.max(high - low, 1)) * (height - top - bottom);
+  const points = curve.map((point, index) => ({
+    x: xFor(index),
+    y: yFor(numberFrom(point.equity)),
+    point,
+  }));
+  const linePath = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+  const areaPath = `${linePath} L ${points[points.length - 1].x} ${height - bottom} L ${points[0].x} ${height - bottom} Z`;
+  const grid = [0, 1, 2, 3].map((index) => {
+    const y = top + (index * (height - top - bottom)) / 3;
+    const value = high - (index * (high - low)) / 3;
+    return { y, value };
+  });
+  const last = curve[curve.length - 1];
+
+  return (
+    <div className="paper-ledger-curve">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="paper ledger equity curve">
+        <defs>
+          <linearGradient id="paperEquityGradient" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stopColor="rgba(244, 197, 66, 0.42)" />
+            <stop offset="100%" stopColor="rgba(77, 212, 255, 0.02)" />
+          </linearGradient>
+          <filter id="paperCurveGlow" x="-20%" y="-20%" width="140%" height="140%">
+            <feGaussianBlur stdDeviation="3" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+        </defs>
+        {grid.map((line) => (
+          <g key={line.y} className="paper-ledger-grid">
+            <line x1={left} x2={width - right} y1={line.y} y2={line.y} />
+            <text x={6} y={line.y + 4}>
+              {formatPct(((line.value / baseValue) - 1) * 100)}
+            </text>
+          </g>
+        ))}
+        <path className="paper-ledger-area" d={areaPath} />
+        <path className="paper-ledger-line" d={linePath} filter="url(#paperCurveGlow)" />
+        {points.map(({ x, y, point }) => (
+          <g key={`${point.date}-${point.equity}`} className="paper-ledger-point">
+            <circle cx={x} cy={y} r={point.event_count > 1 ? 5 : 4} />
+          </g>
+        ))}
+        <text className="paper-ledger-last-label" x={width - right - 148} y={top + 18}>
+          {compactMoney(numberFrom(last.equity), language)} / {formatPct(last.drawdown_pct)}
+        </text>
+        <text className="paper-ledger-date-label" x={left} y={height - 10}>
+          {curve[0].date}
+        </text>
+        <text className="paper-ledger-date-label" x={width - right - 88} y={height - 10}>
+          {last.date}
+        </text>
+      </svg>
+    </div>
+  );
+}
+
+function PaperReturnBars({
+  items,
+  language,
+}: {
+  items: PaperLedgerItem[];
+  language: string;
+}) {
+  const plotted = items
+    .filter((item) => item.return_pct != null)
+    .sort((left, right) => Math.abs(right.return_pct ?? 0) - Math.abs(left.return_pct ?? 0))
+    .slice(0, 8);
+  if (plotted.length === 0) {
+    return <div className="mini-curve-empty">-</div>;
+  }
+  const maxAbs = Math.max(...plotted.map((item) => Math.abs(item.return_pct ?? 0)), 1);
+  return (
+    <div className="paper-return-bars">
+      {plotted.map((item) => {
+        const value = item.return_pct ?? 0;
+        const width = Math.max(4, Math.min(100, (Math.abs(value) / maxAbs) * 100));
+        return (
+          <div className="paper-return-row" key={item.trade_id}>
+            <span title={formatInstrumentDisplay(item.instrument_id)}>
+              {formatInstrumentDisplay(item.instrument_id)}
+            </span>
+            <div className={`paper-return-track ${value >= 0 ? "positive" : "negative"}`}>
+              <i style={{ width: `${width}%` }} />
+            </div>
+            <strong className={value >= 0 ? "good" : "risk"}>{formatPct(value)}</strong>
+            <small>{item.outcome}</small>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function StatusSegment({
+  className,
+  value,
+  total,
+}: {
+  className: string;
+  value: number;
+  total: number;
+}) {
+  const width = total > 0 ? Math.max(0, (value / total) * 100) : 0;
+  return <i className={className} style={{ width: `${width}%` }} />;
+}
+
 function formatPct(value: number | null): string {
   if (value == null) {
     return "-";
   }
   return `${value.toFixed(2)}%`;
+}
+
+function formatMoney(value: string | number | null, language: string): string {
+  if (value == null) {
+    return "-";
+  }
+  return new Intl.NumberFormat(language === "zh" ? "zh-CN" : "en-US", {
+    style: "currency",
+    currency: "CNY",
+    maximumFractionDigits: 0,
+  }).format(numberFrom(value));
+}
+
+function formatSignedMoney(value: string | number | null, language: string): string {
+  const numeric = numberFrom(value);
+  const formatted = formatMoney(Math.abs(numeric), language);
+  if (numeric > 0) {
+    return `+${formatted}`;
+  }
+  if (numeric < 0) {
+    return `-${formatted}`;
+  }
+  return formatted;
+}
+
+function compactMoney(value: string | number, language: string): string {
+  return new Intl.NumberFormat(language === "zh" ? "zh-CN" : "en-US", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(numberFrom(value));
+}
+
+function numberFrom(value: string | number | null): number {
+  if (value == null) {
+    return 0;
+  }
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
 }
 
 function formatManagement(risk: PositionRisk, language: string, holdingDaysLabel: string): string {

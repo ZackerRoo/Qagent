@@ -67,6 +67,24 @@ def test_paper_trade_api_deletes_trade(tmp_path, monkeypatch):
     assert deleted_again.status_code == 404
 
 
+def test_paper_trade_api_returns_ledger_metrics(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-ledger.db'}")
+    client = TestClient(create_app())
+    client.get("/api/opportunities?provider=fixture&symbols=US:TEST")
+    client.post("/api/paper-trades/seed?provider=fixture&limit=5")
+    client.post("/api/paper-trades/update?provider=fixture")
+
+    response = client.get("/api/paper-trades/ledger?initial_capital=100000")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["total_trades"] == 1
+    assert body["summary"]["closed_trades"] == 1
+    assert body["summary"]["total_equity"] == "99723.56"
+    assert body["curve"]
+    assert body["items"][0]["outcome"] == "止损离场"
+
+
 def test_agent_answers_from_paper_trade_context(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-agent.db'}")
     client = TestClient(create_app())
