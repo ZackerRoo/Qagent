@@ -13,8 +13,12 @@ const checks = [
   ["portfolio loads paper ledger", files.portfolio.includes("fetchPaperLedger")],
   ["portfolio renders equity curve", files.portfolio.includes("paper-ledger-curve")],
   ["portfolio renders return bars", files.portfolio.includes("paper-return-bars")],
+  ["portfolio renders transaction ledger", files.portfolio.includes("PaperTransactionsPanel")],
+  ["portfolio renders validation positions", files.portfolio.includes("PaperPositionsPanel")],
   ["styles include ledger chart shell", files.styles.includes(".paper-ledger-curve")],
   ["styles include return bars", files.styles.includes(".paper-return-bars")],
+  ["styles include transaction table", files.styles.includes(".paper-flow-table")],
+  ["styles include validation positions", files.styles.includes(".paper-position-grid")],
 ];
 
 const failed = checks.filter(([, passed]) => !passed);

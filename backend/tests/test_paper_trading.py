@@ -167,3 +167,75 @@ def test_build_paper_ledger_summarizes_cash_equity_and_recommendation_outcomes(t
     assert ledger.curve[-1].equity == Decimal("101500.00")
     assert ledger.items[0].instrument_id == pending.instrument_id
     assert any(item.outcome == "浮盈跟踪" for item in ledger.items)
+
+
+def test_build_paper_ledger_generates_trade_flows_fees_slippage_and_positions(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    target_trade = paper_repo.create_trade(
+        source_snapshot_id="ledger-target-flow",
+        provider="fixture",
+        instrument_id="CN:688059",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 6, 1),
+        trigger_price=Decimal("100"),
+        initial_stop=Decimal("95"),
+        target_1=Decimal("110"),
+        rank_score=Decimal("0.90"),
+    )
+    open_trade = paper_repo.create_trade(
+        source_snapshot_id="ledger-open-flow",
+        provider="fixture",
+        instrument_id="CN:159915",
+        strategy_id="sector_rotation_relative_strength",
+        signal_date=date(2026, 6, 2),
+        trigger_price=Decimal("50"),
+        initial_stop=Decimal("47"),
+        target_1=Decimal("58"),
+        rank_score=Decimal("0.80"),
+    )
+    paper_repo.update_trade(
+        target_trade.trade_id,
+        status="target_1_hit",
+        entry_date=date(2026, 6, 3),
+        entry_price=Decimal("100"),
+        exit_date=date(2026, 6, 10),
+        exit_price=Decimal("110"),
+        latest_date=date(2026, 6, 10),
+        latest_price=Decimal("110"),
+        realized_return_pct=Decimal("10"),
+        holding_days=7,
+    )
+    paper_repo.update_trade(
+        open_trade.trade_id,
+        status="open",
+        entry_date=date(2026, 6, 4),
+        entry_price=Decimal("50"),
+        latest_date=date(2026, 6, 12),
+        latest_price=Decimal("55"),
+        unrealized_return_pct=Decimal("10"),
+        holding_days=8,
+    )
+
+    ledger = build_paper_ledger(
+        paper_repo.list_trades(limit=10),
+        initial_capital=Decimal("100000"),
+        allocation_per_trade_pct=Decimal("10"),
+        transaction_cost_bps=Decimal("3"),
+        slippage_bps=Decimal("5"),
+        take_profit_pct=Decimal("50"),
+    )
+
+    actions = [transaction.action for transaction in ledger.transactions]
+    assert actions.count("entry_buy") == 2
+    assert "partial_take_profit" in actions
+    assert "final_take_profit" in actions
+    assert ledger.summary.total_fees > Decimal("0")
+    assert ledger.summary.total_slippage > Decimal("0")
+    assert ledger.summary.turnover > Decimal("0")
+    assert ledger.summary.cash_available > Decimal("0")
+    assert ledger.summary.open_exposure_pct < 100
+    assert ledger.positions[0].instrument_id == open_trade.instrument_id
+    assert ledger.positions[0].weight_pct > 0
+    assert ledger.transactions[0].cash_flow < Decimal("0")
+    assert ledger.transactions[-1].cash_balance == ledger.summary.cash_available

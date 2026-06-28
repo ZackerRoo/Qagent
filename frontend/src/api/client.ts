@@ -82,6 +82,7 @@ type ScanParams = {
   batch_size?: number;
   transaction_cost_bps?: string | number;
   slippage_bps?: string | number;
+  take_profit_pct?: string | number;
   days?: number;
   asset_type?: string;
   include_full_etfs?: boolean;
@@ -166,6 +167,9 @@ function queryString(params?: ScanParams): string {
   }
   if (params.slippage_bps) {
     search.set("slippage_bps", String(params.slippage_bps));
+  }
+  if (params.take_profit_pct) {
+    search.set("take_profit_pct", String(params.take_profit_pct));
   }
   if (params.days) {
     search.set("days", String(params.days));
@@ -326,10 +330,16 @@ export async function fetchPaperTrades(): Promise<PaperTradesResponse> {
 export async function fetchPaperLedger(
   initialCapital = 100000,
   allocationPerTradePct = 10,
+  transactionCostBps = 3,
+  slippageBps = 5,
+  takeProfitPct = 50,
 ): Promise<PaperLedgerResponse> {
   return apiGet<PaperLedgerResponse>("/paper-trades/ledger", {
     initial_capital: initialCapital,
     allocation_per_trade_pct: allocationPerTradePct,
+    transaction_cost_bps: transactionCostBps,
+    slippage_bps: slippageBps,
+    take_profit_pct: takeProfitPct,
     limit: 500,
   });
 }

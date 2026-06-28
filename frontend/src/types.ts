@@ -664,6 +664,12 @@ export type PaperLedgerSummary = {
   best_return_pct: number | null;
   worst_return_pct: number | null;
   max_drawdown_pct: number;
+  total_fees: string;
+  total_slippage: string;
+  turnover: string;
+  transaction_cost_bps: number;
+  slippage_bps: number;
+  take_profit_pct: number;
 };
 
 export type PaperLedgerPoint = {
@@ -703,10 +709,44 @@ export type PaperLedgerItem = {
   notes: string;
 };
 
+export type PaperLedgerTransaction = {
+  transaction_id: string;
+  trade_id: string;
+  instrument_id: string;
+  action: string;
+  side: string;
+  trade_date: string;
+  price: string;
+  shares: string;
+  gross_amount: string;
+  fee: string;
+  slippage: string;
+  cash_flow: string;
+  cash_balance: string;
+  notes: string;
+};
+
+export type PaperLedgerPosition = {
+  trade_id: string;
+  instrument_id: string;
+  strategy_id: string | null;
+  entry_date: string;
+  latest_date: string | null;
+  shares: string;
+  cost_basis: string;
+  latest_price: string;
+  market_value: string;
+  unrealized_pnl: string;
+  return_pct: number;
+  weight_pct: number;
+};
+
 export type PaperLedgerResponse = {
   summary: PaperLedgerSummary;
   curve: PaperLedgerPoint[];
   items: PaperLedgerItem[];
+  transactions: PaperLedgerTransaction[];
+  positions: PaperLedgerPosition[];
   data_health: Record<string, string>;
 };
 

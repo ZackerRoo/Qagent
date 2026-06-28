@@ -789,6 +789,9 @@ def update_paper_trade_status(provider: str = "fixture") -> dict[str, object]:
 def paper_trade_ledger(
     initial_capital: Decimal = Decimal("100000"),
     allocation_per_trade_pct: Decimal = Decimal("10"),
+    transaction_cost_bps: Decimal = Decimal("0"),
+    slippage_bps: Decimal = Decimal("0"),
+    take_profit_pct: Decimal = Decimal("100"),
     limit: int = 500,
 ) -> dict[str, object]:
     if limit <= 0 or limit > 1000:
@@ -798,6 +801,9 @@ def paper_trade_ledger(
             _paper_repo().list_trades(limit=limit),
             initial_capital=initial_capital,
             allocation_per_trade_pct=allocation_per_trade_pct,
+            transaction_cost_bps=transaction_cost_bps,
+            slippage_bps=slippage_bps,
+            take_profit_pct=take_profit_pct,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

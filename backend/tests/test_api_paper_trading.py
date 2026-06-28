@@ -80,9 +80,32 @@ def test_paper_trade_api_returns_ledger_metrics(tmp_path, monkeypatch):
     body = response.json()
     assert body["summary"]["total_trades"] == 1
     assert body["summary"]["closed_trades"] == 1
-    assert body["summary"]["total_equity"] == "99723.56"
+    assert body["summary"]["total_equity"] == "99855.77"
     assert body["curve"]
     assert body["items"][0]["outcome"] == "止损离场"
+    assert "transactions" in body
+    assert "positions" in body
+
+
+def test_paper_trade_api_returns_flow_ledger_with_costs(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-flow-ledger.db'}")
+    client = TestClient(create_app())
+    client.get("/api/opportunities?provider=fixture&symbols=US:TEST")
+    client.post("/api/paper-trades/seed?provider=fixture&limit=5")
+    client.post("/api/paper-trades/update?provider=fixture")
+
+    response = client.get(
+        "/api/paper-trades/ledger"
+        "?initial_capital=100000&transaction_cost_bps=3&slippage_bps=5&take_profit_pct=50"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["total_fees"] != "0.00"
+    assert body["summary"]["total_slippage"] != "0.00"
+    assert body["summary"]["turnover"] != "0.00"
+    assert body["transactions"][0]["action"] == "entry_buy"
+    assert body["transactions"][0]["cash_flow"].startswith("-")
 
 
 def test_agent_answers_from_paper_trade_context(tmp_path, monkeypatch):

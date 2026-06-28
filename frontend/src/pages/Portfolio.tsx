@@ -17,7 +17,9 @@ import { localizeAction, localizeStatus, localizeStrategy } from "../lib/localiz
 import type {
   DataProviderMode,
   PaperLedgerItem,
+  PaperLedgerPosition,
   PaperLedgerResponse,
+  PaperLedgerTransaction,
   PaperTradesResponse,
   PortfolioResponse,
   Position,
@@ -331,6 +333,9 @@ function PaperLedgerDashboard({
         <Metric label={t("portfolio.unrealized")} value={formatSignedMoney(summary.unrealized_pnl, language)} />
         <Metric label={t("portfolio.maxDrawdown")} value={formatPct(summary.max_drawdown_pct)} />
         <Metric label={t("portfolio.exposure")} value={formatPct(summary.open_exposure_pct)} />
+        <Metric label={t("portfolio.fees")} value={formatMoney(summary.total_fees, language)} />
+        <Metric label={t("portfolio.slippage")} value={formatMoney(summary.total_slippage, language)} />
+        <Metric label={t("portfolio.turnover")} value={formatMoney(summary.turnover, language)} />
       </div>
 
       <div className="paper-ledger-visual-grid">
@@ -380,7 +385,129 @@ function PaperLedgerDashboard({
           {t("portfolio.accountAssumption")} {t("portfolio.ledgerMethod")}:{" "}
           {ledger.data_health.ledger_method ?? "-"}.
         </p>
+        <p>
+          {formatCostAssumption(
+            t("portfolio.costAssumption"),
+            summary.transaction_cost_bps,
+            summary.slippage_bps,
+            summary.take_profit_pct,
+          )}
+        </p>
       </div>
+
+      <PaperPositionsPanel positions={ledger.positions} language={language} t={t} />
+      <PaperTransactionsPanel transactions={ledger.transactions} language={language} t={t} />
+    </div>
+  );
+}
+
+function PaperPositionsPanel({
+  positions,
+  language,
+  t,
+}: {
+  positions: PaperLedgerPosition[];
+  language: Language;
+  t: (key: TranslationKey) => string;
+}) {
+  return (
+    <div className="paper-ledger-card paper-positions-card">
+      <div className="paper-ledger-card-header">
+        <div>
+          <h3>{t("portfolio.positionsTitle")}</h3>
+          <p>{t("portfolio.positionsSubtitle")}</p>
+        </div>
+        <strong>{positions.length}</strong>
+      </div>
+      {positions.length === 0 ? (
+        <div className="mini-curve-empty">{t("portfolio.noOpenPaperPositions")}</div>
+      ) : (
+        <div className="paper-position-grid">
+          {positions.slice(0, 8).map((position) => (
+            <div className="paper-position-card" key={position.trade_id}>
+              <div>
+                <strong title={formatInstrumentDisplay(position.instrument_id)}>
+                  {formatInstrumentDisplay(position.instrument_id)}
+                </strong>
+                <span>{localizeStrategy(position.strategy_id, language)}</span>
+              </div>
+              <div className="paper-position-stats">
+                <span>{t("portfolio.weight")} {formatPct(position.weight_pct)}</span>
+                <span>{t("portfolio.pnl")} {formatPct(position.return_pct)}</span>
+                <span>{t("portfolio.marketValue")} {formatMoney(position.market_value, language)}</span>
+                <span>{t("portfolio.costBasis")} {formatMoney(position.cost_basis, language)}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PaperTransactionsPanel({
+  transactions,
+  language,
+  t,
+}: {
+  transactions: PaperLedgerTransaction[];
+  language: Language;
+  t: (key: TranslationKey) => string;
+}) {
+  const shown = transactions.slice(-20).reverse();
+  return (
+    <div className="paper-ledger-card">
+      <div className="paper-ledger-card-header">
+        <div>
+          <h3>{t("portfolio.flowTitle")}</h3>
+          <p>{t("portfolio.flowSubtitle")}</p>
+        </div>
+        <strong>{transactions.length}</strong>
+      </div>
+      {shown.length === 0 ? (
+        <div className="mini-curve-empty">{t("portfolio.noTransactions")}</div>
+      ) : (
+        <div className="table-shell paper-flow-table">
+          <table>
+            <thead>
+              <tr>
+                <th>{t("common.date")}</th>
+                <th>{t("common.symbol")}</th>
+                <th>{t("portfolio.side")}</th>
+                <th>{t("portfolio.action")}</th>
+                <th>{t("portfolio.shares")}</th>
+                <th>{t("portfolio.current")}</th>
+                <th>{t("portfolio.turnover")}</th>
+                <th>{t("portfolio.fees")}</th>
+                <th>{t("portfolio.slippage")}</th>
+                <th>{t("portfolio.cashFlow")}</th>
+                <th>{t("portfolio.cashBalance")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((transaction) => (
+                <tr key={transaction.transaction_id}>
+                  <td>{transaction.trade_date}</td>
+                  <td className="ticker" title={formatInstrumentDisplay(transaction.instrument_id)}>
+                    {formatInstrumentDisplay(transaction.instrument_id)}
+                  </td>
+                  <td>{localizeTransactionSide(transaction.side, language)}</td>
+                  <td>{localizeTransactionAction(transaction.action, language)}</td>
+                  <td>{formatShares(transaction.shares)}</td>
+                  <td>{transaction.price}</td>
+                  <td>{formatMoney(transaction.gross_amount, language)}</td>
+                  <td>{formatMoney(transaction.fee, language)}</td>
+                  <td>{formatMoney(transaction.slippage, language)}</td>
+                  <td className={numberFrom(transaction.cash_flow) >= 0 ? "good" : "risk"}>
+                    {formatSignedMoney(transaction.cash_flow, language)}
+                  </td>
+                  <td>{formatMoney(transaction.cash_balance, language)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -566,6 +693,52 @@ function numberFrom(value: string | number | null): number {
   }
   const numeric = typeof value === "number" ? value : Number(value);
   return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function formatShares(value: string | number | null): string {
+  const numeric = numberFrom(value);
+  return new Intl.NumberFormat("zh-CN", {
+    maximumFractionDigits: 2,
+  }).format(numeric);
+}
+
+function formatCostAssumption(
+  template: string,
+  fee: number,
+  slippage: number,
+  takeProfit: number,
+): string {
+  return template
+    .replace("{fee}", fee.toFixed(0))
+    .replace("{slippage}", slippage.toFixed(0))
+    .replace("{takeProfit}", takeProfit.toFixed(0));
+}
+
+function localizeTransactionSide(side: string, language: string): string {
+  if (language !== "zh") {
+    return side === "buy" ? "Buy" : "Sell";
+  }
+  return side === "buy" ? "买入" : "卖出";
+}
+
+function localizeTransactionAction(action: string, language: string): string {
+  const zh: Record<string, string> = {
+    entry_buy: "触发买入",
+    partial_take_profit: "分批止盈",
+    final_take_profit: "剩余止盈",
+    take_profit_exit: "止盈退出",
+    stop_loss_exit: "止损退出",
+    time_exit: "时间退出",
+  };
+  const en: Record<string, string> = {
+    entry_buy: "Entry Buy",
+    partial_take_profit: "Partial Take Profit",
+    final_take_profit: "Final Take Profit",
+    take_profit_exit: "Take Profit Exit",
+    stop_loss_exit: "Stop Loss Exit",
+    time_exit: "Time Exit",
+  };
+  return (language === "zh" ? zh : en)[action] ?? action;
 }
 
 function formatManagement(risk: PositionRisk, language: string, holdingDaysLabel: string): string {

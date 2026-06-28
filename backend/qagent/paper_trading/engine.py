@@ -64,6 +64,12 @@ class PaperLedgerSummary(BaseModel):
     best_return_pct: float | None
     worst_return_pct: float | None
     max_drawdown_pct: float
+    total_fees: Decimal
+    total_slippage: Decimal
+    turnover: Decimal
+    transaction_cost_bps: float
+    slippage_bps: float
+    take_profit_pct: float
 
 
 class PaperLedgerPoint(BaseModel):
@@ -103,10 +109,44 @@ class PaperLedgerItem(BaseModel):
     notes: str
 
 
+class PaperLedgerTransaction(BaseModel):
+    transaction_id: str
+    trade_id: str
+    instrument_id: str
+    action: str
+    side: str
+    trade_date: date
+    price: Decimal
+    shares: Decimal
+    gross_amount: Decimal
+    fee: Decimal
+    slippage: Decimal
+    cash_flow: Decimal
+    cash_balance: Decimal
+    notes: str
+
+
+class PaperLedgerPosition(BaseModel):
+    trade_id: str
+    instrument_id: str
+    strategy_id: str | None
+    entry_date: date
+    latest_date: date | None
+    shares: Decimal
+    cost_basis: Decimal
+    latest_price: Decimal
+    market_value: Decimal
+    unrealized_pnl: Decimal
+    return_pct: float
+    weight_pct: float
+
+
 class PaperLedger(BaseModel):
     summary: PaperLedgerSummary
     curve: list[PaperLedgerPoint]
     items: list[PaperLedgerItem]
+    transactions: list[PaperLedgerTransaction]
+    positions: list[PaperLedgerPosition]
     data_health: dict[str, str]
 
 
@@ -213,63 +253,44 @@ def build_paper_ledger(
     trades: list[PaperTradeRecord],
     initial_capital: Decimal = Decimal("100000"),
     allocation_per_trade_pct: Decimal = Decimal("10"),
+    transaction_cost_bps: Decimal = Decimal("0"),
+    slippage_bps: Decimal = Decimal("0"),
+    take_profit_pct: Decimal = Decimal("100"),
 ) -> PaperLedger:
     if initial_capital <= 0:
         raise ValueError("initial_capital must be greater than zero")
     if allocation_per_trade_pct <= 0 or allocation_per_trade_pct > 100:
         raise ValueError("allocation_per_trade_pct must be between 0 and 100")
+    if transaction_cost_bps < 0 or slippage_bps < 0:
+        raise ValueError("transaction_cost_bps and slippage_bps must be non-negative")
+    if take_profit_pct <= 0 or take_profit_pct > 100:
+        raise ValueError("take_profit_pct must be between 0 and 100")
 
     allocation_per_trade = _money(initial_capital * allocation_per_trade_pct / Decimal("100"))
-    open_trade_count = sum(1 for trade in trades if trade.status == "open")
-    open_allocation_per_trade = (
-        min(allocation_per_trade, _money_down(initial_capital / Decimal(open_trade_count)))
-        if open_trade_count
-        else allocation_per_trade
-    )
     items: list[PaperLedgerItem] = []
-    realized_pnl = Decimal("0")
-    unrealized_pnl = Decimal("0")
-    allocated_capital = Decimal("0")
-    market_value = Decimal("0")
     planned_capital = Decimal("0")
-    curve_events: dict[date, dict[str, object]] = {}
 
     for trade in trades:
-        trade_allocation = (
-            open_allocation_per_trade if trade.status == "open" else allocation_per_trade
-        )
-        item = _ledger_item(trade, trade_allocation)
+        item = _ledger_item(trade, allocation_per_trade)
         items.append(item)
         planned_capital += allocation_per_trade if trade.status == "pending" else Decimal("0")
-        allocated_capital += item.capital_allocated if trade.status == "open" else Decimal("0")
-        market_value += item.market_value if trade.status == "open" else Decimal("0")
-        realized_pnl += item.realized_pnl
-        unrealized_pnl += item.unrealized_pnl
-        event_date = item.exit_date if trade.status in CLOSED_STATUSES else item.latest_date
-        if event_date and item.total_pnl:
-            event = curve_events.setdefault(
-                event_date,
-                {"realized": Decimal("0"), "unrealized": Decimal("0"), "count": 0},
-            )
-            event["realized"] = event["realized"] + item.realized_pnl
-            event["unrealized"] = event["unrealized"] + item.unrealized_pnl
-            event["count"] = int(event["count"]) + 1
 
-    cash_available = _money(initial_capital - allocated_capital + realized_pnl)
-    total_equity = _money(cash_available + market_value)
-    total_pnl = _money(realized_pnl + unrealized_pnl)
+    account = _build_account_ledger(
+        trades=trades,
+        initial_capital=initial_capital,
+        allocation_per_trade=allocation_per_trade,
+        transaction_cost_bps=transaction_cost_bps,
+        slippage_bps=slippage_bps,
+        take_profit_pct=take_profit_pct,
+    )
+
     returns = [item.return_pct for item in items if item.return_pct is not None]
     closed_returns = [
         item.return_pct
         for item in items
         if item.status in CLOSED_STATUSES and item.return_pct is not None
     ]
-    curve = _ledger_curve(
-        trades=trades,
-        initial_capital=initial_capital,
-        events=curve_events,
-    )
-    max_drawdown_pct = min((point.drawdown_pct for point in curve), default=0.0)
+    max_drawdown_pct = min((point.drawdown_pct for point in account["curve"]), default=0.0)
 
     return PaperLedger(
         summary=PaperLedgerSummary(
@@ -284,15 +305,15 @@ def build_paper_ledger(
             stopped_count=sum(1 for trade in trades if trade.status == "stopped"),
             time_exit_count=sum(1 for trade in trades if trade.status == "time_exit"),
             planned_capital=_money(planned_capital),
-            allocated_capital=_money(allocated_capital),
-            market_value=_money(market_value),
-            cash_available=cash_available,
-            total_equity=total_equity,
-            total_pnl=total_pnl,
-            realized_pnl=_money(realized_pnl),
-            unrealized_pnl=_money(unrealized_pnl),
-            total_return_pct=_pct(total_pnl, initial_capital),
-            open_exposure_pct=_pct(market_value, total_equity),
+            allocated_capital=account["allocated_capital"],
+            market_value=account["market_value"],
+            cash_available=account["cash_available"],
+            total_equity=account["total_equity"],
+            total_pnl=account["total_pnl"],
+            realized_pnl=account["realized_pnl"],
+            unrealized_pnl=account["unrealized_pnl"],
+            total_return_pct=_pct(account["total_pnl"], initial_capital),
+            open_exposure_pct=_pct(account["market_value"], account["total_equity"]),
             win_rate=round(
                 sum(1 for value in closed_returns if value > 0) / len(closed_returns),
                 4,
@@ -303,16 +324,346 @@ def build_paper_ledger(
             best_return_pct=round(max(returns), 4) if returns else None,
             worst_return_pct=round(min(returns), 4) if returns else None,
             max_drawdown_pct=max_drawdown_pct,
+            total_fees=account["total_fees"],
+            total_slippage=account["total_slippage"],
+            turnover=account["turnover"],
+            transaction_cost_bps=round(float(transaction_cost_bps), 4),
+            slippage_bps=round(float(slippage_bps), 4),
+            take_profit_pct=round(float(take_profit_pct), 4),
         ),
-        curve=curve,
+        curve=account["curve"],
         items=items,
+        transactions=account["transactions"],
+        positions=account["positions"],
         data_health={
-            "ledger_method": "fixed_notional_with_active_exposure_cap",
+            "ledger_method": "chronological_cash_ledger",
             "allocation_per_trade_pct": str(allocation_per_trade_pct),
-            "active_allocation_per_trade": str(open_allocation_per_trade),
+            "transaction_cost_bps": str(transaction_cost_bps),
+            "slippage_bps": str(slippage_bps),
+            "take_profit_pct": str(take_profit_pct),
             "price_source": "paper_trade_latest_fields",
         },
     )
+
+
+def _build_account_ledger(
+    trades: list[PaperTradeRecord],
+    initial_capital: Decimal,
+    allocation_per_trade: Decimal,
+    transaction_cost_bps: Decimal,
+    slippage_bps: Decimal,
+    take_profit_pct: Decimal,
+) -> dict[str, object]:
+    fee_rate = _bps_rate(transaction_cost_bps)
+    slippage_rate = _bps_rate(slippage_bps)
+    active_lots: list[dict[str, object]] = []
+    transactions: list[PaperLedgerTransaction] = []
+    positions: list[PaperLedgerPosition] = []
+    cash = initial_capital
+    total_fees = Decimal("0")
+    total_slippage = Decimal("0")
+    turnover = Decimal("0")
+    realized_pnl = Decimal("0")
+    dates = {
+        trade.signal_date
+        for trade in trades
+        if trade.signal_date is not None
+    }
+    for trade in trades:
+        if trade.entry_date is not None:
+            dates.add(trade.entry_date)
+        if trade.exit_date is not None:
+            dates.add(trade.exit_date)
+        if trade.latest_date is not None:
+            dates.add(trade.latest_date)
+    if not dates:
+        dates.add(date.today())
+
+    entries_by_date: dict[date, list[PaperTradeRecord]] = {}
+    for trade in sorted(
+        trades,
+        key=lambda item: (item.entry_date or item.signal_date, item.trade_id),
+    ):
+        if trade.entry_date is None or trade.entry_price is None:
+            continue
+        if trade.status not in {"open", *CLOSED_STATUSES}:
+            continue
+        entries_by_date.setdefault(trade.entry_date, []).append(trade)
+
+    curve = [
+        PaperLedgerPoint(
+            date=min(dates),
+            equity=_money(initial_capital),
+            pnl=Decimal("0.00"),
+            drawdown_pct=0.0,
+            realized_pnl=Decimal("0.00"),
+            unrealized_pnl=Decimal("0.00"),
+            event_count=0,
+        )
+    ]
+    high_watermark = initial_capital
+
+    for current_date in sorted(dates):
+        event_count = 0
+        exiting_lots = [
+            lot
+            for lot in active_lots
+            if lot["exit_date"] == current_date and lot["status"] in CLOSED_STATUSES
+        ]
+        for lot in exiting_lots:
+            generated = _sell_lot_transactions(
+                lot=lot,
+                cash=cash,
+                fee_rate=fee_rate,
+                slippage_rate=slippage_rate,
+                take_profit_pct=take_profit_pct,
+            )
+            for transaction, pnl, fee, slippage, gross in generated:
+                cash = transaction.cash_balance
+                realized_pnl += pnl
+                total_fees += fee
+                total_slippage += slippage
+                turnover += gross
+                transactions.append(transaction)
+                event_count += 1
+            active_lots.remove(lot)
+
+        for trade in entries_by_date.get(current_date, []):
+            buy = _buy_lot(
+                trade=trade,
+                cash=cash,
+                allocation_per_trade=allocation_per_trade,
+                fee_rate=fee_rate,
+                slippage_rate=slippage_rate,
+            )
+            if buy is None:
+                continue
+            lot, transaction, fee, slippage, gross = buy
+            cash = transaction.cash_balance
+            total_fees += fee
+            total_slippage += slippage
+            turnover += gross
+            transactions.append(transaction)
+            active_lots.append(lot)
+            event_count += 1
+
+        market_value, unrealized_pnl = _active_lot_market_value(active_lots, current_date)
+        equity = cash + market_value
+        high_watermark = max(high_watermark, equity)
+        drawdown_pct = _pct(equity - high_watermark, high_watermark)
+        if current_date != curve[0].date or event_count:
+            curve.append(
+                PaperLedgerPoint(
+                    date=current_date,
+                    equity=_money(equity),
+                    pnl=_money(equity - initial_capital),
+                    drawdown_pct=drawdown_pct,
+                    realized_pnl=_money(realized_pnl),
+                    unrealized_pnl=_money(unrealized_pnl),
+                    event_count=event_count,
+                )
+            )
+
+    final_market_value, final_unrealized_pnl = _active_lot_market_value(
+        active_lots,
+        max(dates),
+    )
+    total_equity = _money(cash + final_market_value)
+    for lot in active_lots:
+        latest_price = _lot_mark_price(lot, max(dates))
+        market_value = _money(Decimal(str(lot["shares"])) * latest_price)
+        cost_basis = Decimal(str(lot["cost_basis"]))
+        positions.append(
+            PaperLedgerPosition(
+                trade_id=str(lot["trade_id"]),
+                instrument_id=str(lot["instrument_id"]),
+                strategy_id=lot["strategy_id"] if isinstance(lot["strategy_id"], str) else None,
+                entry_date=lot["entry_date"],
+                latest_date=lot["latest_date"],
+                shares=Decimal(str(lot["shares"])),
+                cost_basis=_money(cost_basis),
+                latest_price=latest_price,
+                market_value=market_value,
+                unrealized_pnl=_money(market_value - cost_basis),
+                return_pct=_pct(market_value - cost_basis, cost_basis),
+                weight_pct=_pct(market_value, total_equity),
+            )
+        )
+
+    return {
+        "allocated_capital": _money(sum((position.cost_basis for position in positions), Decimal("0"))),
+        "market_value": _money(final_market_value),
+        "cash_available": _money(cash),
+        "total_equity": total_equity,
+        "total_pnl": _money(total_equity - initial_capital),
+        "realized_pnl": _money(realized_pnl),
+        "unrealized_pnl": _money(final_unrealized_pnl),
+        "total_fees": _money(total_fees),
+        "total_slippage": _money(total_slippage),
+        "turnover": _money(turnover),
+        "curve": curve,
+        "transactions": transactions,
+        "positions": positions,
+    }
+
+
+def _buy_lot(
+    trade: PaperTradeRecord,
+    cash: Decimal,
+    allocation_per_trade: Decimal,
+    fee_rate: Decimal,
+    slippage_rate: Decimal,
+) -> tuple[dict[str, object], PaperLedgerTransaction, Decimal, Decimal, Decimal] | None:
+    if trade.entry_date is None or trade.entry_price is None or trade.entry_price <= 0:
+        return None
+    all_in_rate = Decimal("1") + fee_rate + slippage_rate
+    affordable_gross = cash / all_in_rate if all_in_rate > 0 else cash
+    gross_target = min(allocation_per_trade, affordable_gross)
+    if gross_target <= Decimal("1"):
+        return None
+    shares = _shares(gross_target / trade.entry_price)
+    if shares <= 0:
+        return None
+    gross = _money(shares * trade.entry_price)
+    fee = _money(gross * fee_rate)
+    slippage = _money(gross * slippage_rate)
+    cash_flow = -(gross + fee + slippage)
+    cash_balance = _money(cash + cash_flow)
+    lot = {
+        "trade_id": trade.trade_id,
+        "instrument_id": trade.instrument_id,
+        "strategy_id": trade.strategy_id,
+        "status": trade.status,
+        "entry_date": trade.entry_date,
+        "entry_price": trade.entry_price,
+        "exit_date": trade.exit_date,
+        "exit_price": trade.exit_price,
+        "latest_date": trade.latest_date,
+        "latest_price": trade.latest_price,
+        "shares": shares,
+        "cost_basis": gross + fee + slippage,
+    }
+    transaction = PaperLedgerTransaction(
+        transaction_id=f"{trade.trade_id}-buy",
+        trade_id=trade.trade_id,
+        instrument_id=trade.instrument_id,
+        action="entry_buy",
+        side="buy",
+        trade_date=trade.entry_date,
+        price=trade.entry_price,
+        shares=shares,
+        gross_amount=gross,
+        fee=fee,
+        slippage=slippage,
+        cash_flow=_money(cash_flow),
+        cash_balance=cash_balance,
+        notes="按推荐触发价模拟买入。",
+    )
+    return lot, transaction, fee, slippage, gross
+
+
+def _sell_lot_transactions(
+    lot: dict[str, object],
+    cash: Decimal,
+    fee_rate: Decimal,
+    slippage_rate: Decimal,
+    take_profit_pct: Decimal,
+) -> list[tuple[PaperLedgerTransaction, Decimal, Decimal, Decimal, Decimal]]:
+    status = str(lot["status"])
+    exit_date = lot["exit_date"]
+    exit_price = lot["exit_price"]
+    if not isinstance(exit_date, date) or not isinstance(exit_price, Decimal):
+        return []
+    remaining_shares = Decimal(str(lot["shares"]))
+    cost_basis = Decimal(str(lot["cost_basis"]))
+    cost_per_share = cost_basis / remaining_shares if remaining_shares > 0 else Decimal("0")
+    if remaining_shares <= 0:
+        return []
+
+    portions: list[tuple[str, Decimal]]
+    if status == "target_1_hit" and take_profit_pct < 100:
+        first = _shares(remaining_shares * take_profit_pct / Decimal("100"))
+        portions = [
+            ("partial_take_profit", first),
+            ("final_take_profit", remaining_shares - first),
+        ]
+    else:
+        action = (
+            "take_profit_exit"
+            if status == "target_1_hit"
+            else "stop_loss_exit"
+            if status == "stopped"
+            else "time_exit"
+        )
+        portions = [(action, remaining_shares)]
+
+    results: list[tuple[PaperLedgerTransaction, Decimal, Decimal, Decimal, Decimal]] = []
+    cash_balance = cash
+    for index, (action, shares) in enumerate(portions):
+        if shares <= 0:
+            continue
+        if index == len(portions) - 1:
+            shares = remaining_shares
+        gross = _money(shares * exit_price)
+        fee = _money(gross * fee_rate)
+        slippage = _money(gross * slippage_rate)
+        cash_flow = gross - fee - slippage
+        cash_balance = _money(cash_balance + cash_flow)
+        pnl = cash_flow - (cost_per_share * shares)
+        transaction = PaperLedgerTransaction(
+            transaction_id=f"{lot['trade_id']}-{action}",
+            trade_id=str(lot["trade_id"]),
+            instrument_id=str(lot["instrument_id"]),
+            action=action,
+            side="sell",
+            trade_date=exit_date,
+            price=exit_price,
+            shares=shares,
+            gross_amount=gross,
+            fee=fee,
+            slippage=slippage,
+            cash_flow=_money(cash_flow),
+            cash_balance=cash_balance,
+            notes=_transaction_note(action),
+        )
+        results.append((transaction, pnl, fee, slippage, gross))
+        remaining_shares -= shares
+    return results
+
+
+def _active_lot_market_value(
+    lots: list[dict[str, object]],
+    current_date: date,
+) -> tuple[Decimal, Decimal]:
+    market_value = Decimal("0")
+    unrealized_pnl = Decimal("0")
+    for lot in lots:
+        shares = Decimal(str(lot["shares"]))
+        cost_basis = Decimal(str(lot["cost_basis"]))
+        mark_price = _lot_mark_price(lot, current_date)
+        value = shares * mark_price
+        market_value += value
+        unrealized_pnl += value - cost_basis
+    return _money(market_value), _money(unrealized_pnl)
+
+
+def _lot_mark_price(lot: dict[str, object], current_date: date) -> Decimal:
+    latest_date = lot.get("latest_date")
+    latest_price = lot.get("latest_price")
+    if isinstance(latest_date, date) and latest_date <= current_date and isinstance(latest_price, Decimal):
+        return latest_price
+    return Decimal(str(lot["entry_price"]))
+
+
+def _transaction_note(action: str) -> str:
+    notes = {
+        "partial_take_profit": "到达目标价，按分批止盈规则卖出一部分。",
+        "final_take_profit": "到达目标价后剩余仓位模拟退出。",
+        "take_profit_exit": "到达目标价，模拟止盈退出。",
+        "stop_loss_exit": "跌破止损价，模拟纪律退出。",
+        "time_exit": "超过持有窗口，模拟时间退出。",
+    }
+    return notes.get(action, "模拟交易流水。")
 
 
 def _ledger_item(
@@ -462,6 +813,14 @@ def _money(value: Decimal) -> Decimal:
 
 def _money_down(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+
+
+def _shares(value: Decimal) -> Decimal:
+    return value.quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+
+
+def _bps_rate(value: Decimal) -> Decimal:
+    return value / Decimal("10000")
 
 
 def _evaluate_trade(
