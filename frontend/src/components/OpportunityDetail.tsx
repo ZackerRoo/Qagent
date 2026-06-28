@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { fetchMarketBars } from "../api/client";
 import { useI18n } from "../i18n";
-import { formatInstrumentDisplay } from "../lib/instruments";
+import { formatInstrumentDisplay, formatInstrumentText } from "../lib/instruments";
 import {
   localizeAction,
   localizeCaveat,
@@ -75,14 +75,16 @@ export function OpportunityDetail({
       <div className="panel-heading">
         <div>
           <p className="eyebrow">{card.market}</p>
-          <h2 title={card.instrument_id}>
+          <h2 title={formatInstrumentDisplay(card.instrument_id, card.instrument_label)}>
             {formatInstrumentDisplay(card.instrument_id, card.instrument_label)}
           </h2>
         </div>
         <StatusBadge status={card.status} />
       </div>
 
-      <p className="thesis">{localizeReason(card.thesis, language)}</p>
+      <p className="thesis">
+        {formatInstrumentText(localizeReason(card.thesis, language), card.instrument_id, card.instrument_label)}
+      </p>
 
       {card.recommendation_summary && (
         <div className="recommendation-card">
@@ -90,14 +92,26 @@ export function OpportunityDetail({
             <span>{t("detail.recommendation")}</span>
             <strong>{card.recommendation_summary.stance}</strong>
           </header>
-          <h3>{card.recommendation_summary.headline}</h3>
+          <h3>
+            {formatInstrumentText(
+              card.recommendation_summary.headline,
+              card.instrument_id,
+              card.instrument_label,
+            )}
+          </h3>
           <div className="recommendation-grid">
-            <p>{card.recommendation_summary.buy_timing}</p>
-            <p>{card.recommendation_summary.sell_timing}</p>
-            <p>{card.recommendation_summary.position_note}</p>
-            <p>{card.recommendation_summary.risk_note}</p>
+            <p>{formatInstrumentText(card.recommendation_summary.buy_timing, card.instrument_id, card.instrument_label)}</p>
+            <p>{formatInstrumentText(card.recommendation_summary.sell_timing, card.instrument_id, card.instrument_label)}</p>
+            <p>{formatInstrumentText(card.recommendation_summary.position_note, card.instrument_id, card.instrument_label)}</p>
+            <p>{formatInstrumentText(card.recommendation_summary.risk_note, card.instrument_id, card.instrument_label)}</p>
           </div>
-          <p className="context-note">{card.recommendation_summary.context_note}</p>
+          <p className="context-note">
+            {formatInstrumentText(
+              card.recommendation_summary.context_note,
+              card.instrument_id,
+              card.instrument_label,
+            )}
+          </p>
         </div>
       )}
 

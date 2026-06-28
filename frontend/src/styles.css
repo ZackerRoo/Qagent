@@ -290,6 +290,17 @@ h3 {
   background: #334155;
 }
 
+.icon-action.danger {
+  background: rgba(255, 92, 122, 0.14);
+  color: var(--terminal-red);
+}
+
+.compact-button {
+  height: 28px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
 .session-strip span,
 .data-health span,
 .caveats span,
@@ -1458,6 +1469,153 @@ tbody tr.selected {
   font-size: 12px;
 }
 
+.scenario-payoff-card {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--terminal-border);
+  border-radius: 8px;
+  padding: 14px;
+  background: var(--terminal-panel-soft);
+}
+
+.scenario-payoff-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.scenario-payoff-header h3 {
+  margin: 0;
+  color: var(--terminal-text);
+  font-size: 16px;
+}
+
+.scenario-payoff-header p,
+.scenario-payoff-note {
+  margin: 4px 0 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.scenario-payoff-header strong {
+  flex: 0 0 auto;
+  border: 1px solid rgba(244, 197, 66, 0.35);
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: rgba(244, 197, 66, 0.08);
+  color: var(--terminal-yellow);
+  font-size: 12px;
+}
+
+.scenario-payoff-chart {
+  width: 100%;
+  min-height: 210px;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  background:
+    linear-gradient(rgba(148, 163, 184, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.08) 1px, transparent 1px),
+    var(--terminal-panel);
+  background-size: 42px 42px;
+}
+
+.payoff-axis {
+  stroke: var(--terminal-border);
+  stroke-width: 2;
+}
+
+.scenario-payoff-chart .payoff-loss {
+  fill: rgba(255, 92, 122, 0.38);
+}
+
+.scenario-payoff-chart .payoff-gain {
+  fill: rgba(57, 217, 138, 0.38);
+}
+
+.payoff-marker line {
+  stroke-width: 1.6;
+  stroke-dasharray: 5 5;
+}
+
+.payoff-marker circle {
+  stroke: var(--terminal-bg);
+  stroke-width: 2;
+}
+
+.payoff-marker text,
+.payoff-caption {
+  fill: var(--terminal-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.payoff-marker-entry line,
+.payoff-marker-entry circle {
+  stroke: var(--terminal-cyan);
+  fill: var(--terminal-cyan);
+}
+
+.payoff-marker-stop line,
+.payoff-marker-stop circle {
+  stroke: var(--terminal-red);
+  fill: var(--terminal-red);
+}
+
+.payoff-marker-target line,
+.payoff-marker-target circle {
+  stroke: var(--terminal-green);
+  fill: var(--terminal-green);
+}
+
+.payoff-marker-no-chase line,
+.payoff-marker-no-chase circle {
+  stroke: var(--terminal-yellow);
+  fill: var(--terminal-yellow);
+}
+
+.scenario-payoff-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.scenario-metric {
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 9px;
+  background: var(--terminal-panel);
+}
+
+.scenario-metric span {
+  display: block;
+  color: var(--terminal-muted-2);
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.scenario-metric strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--terminal-text);
+  font-size: 16px;
+  line-height: 1.1;
+}
+
+.scenario-metric-good strong {
+  color: var(--terminal-green);
+}
+
+.scenario-metric-risk strong {
+  color: var(--terminal-red);
+}
+
+.scenario-metric-info strong {
+  color: var(--terminal-cyan);
+}
+
 .workup-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -1932,20 +2090,20 @@ tbody tr.selected {
 
 .validation-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
 }
 
 .validation-grid-wide {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .validation-card {
   min-width: 0;
   border: 1px solid var(--terminal-border);
   border-radius: 8px;
-  padding: 10px;
-  background: var(--terminal-panel);
+  padding: 14px;
+  background: linear-gradient(180deg, rgba(21, 31, 42, 0.92), rgba(13, 20, 28, 0.96));
 }
 
 .validation-card header {
@@ -1961,27 +2119,41 @@ tbody tr.selected {
 }
 
 .validation-card header span {
-  color: #0f4c81;
+  color: var(--terminal-cyan);
   font-size: 13px;
   font-weight: 800;
 }
 
 .validation-card svg {
-  min-height: 180px;
+  width: 100%;
+  min-height: 280px;
+  margin-top: 10px;
 }
 
 .validation-line {
   fill: none;
-  stroke: #0f4c81;
-  stroke-width: 2.25;
+  stroke: var(--terminal-yellow);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.validation-area {
+  pointer-events: none;
+}
+
+.validation-point {
+  fill: var(--terminal-yellow);
+  stroke: var(--terminal-bg);
+  stroke-width: 2;
 }
 
 .validation-bar-positive {
-  fill: #16a34a;
+  fill: var(--terminal-green);
 }
 
 .validation-bar-negative {
-  fill: #dc2626;
+  fill: var(--terminal-red);
 }
 
 .validation-card text {
@@ -1989,11 +2161,76 @@ tbody tr.selected {
   font-size: 11px;
 }
 
+.validation-axis-line,
+.validation-zero-line {
+  stroke: var(--terminal-border);
+  stroke-width: 1.1;
+}
+
+.validation-zero-line {
+  stroke-dasharray: 5 5;
+}
+
+.validation-grid-line {
+  stroke: var(--terminal-border-soft);
+  stroke-width: 1;
+}
+
+.validation-chart-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.validation-chart-meta span,
+.bar-caption-grid span {
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 6px;
+  padding: 8px;
+  background: var(--terminal-panel-soft);
+}
+
+.validation-chart-meta small,
+.bar-caption-grid strong {
+  display: block;
+  color: var(--terminal-muted-2);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.validation-chart-meta strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--terminal-text);
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.bar-caption-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.bar-caption-grid span {
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.bar-caption-grid strong {
+  margin-bottom: 3px;
+  color: var(--terminal-text);
+}
+
 .monthly-return-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
   gap: 7px;
-  margin-top: 8px;
+  margin-top: 10px;
 }
 
 .monthly-return-grid div {
@@ -2015,13 +2252,13 @@ tbody tr.selected {
 }
 
 .monthly-return-positive {
-  background: #f0f9f4;
-  color: #116b3c;
+  background: rgba(74, 222, 128, 0.1);
+  color: var(--terminal-green);
 }
 
 .monthly-return-negative {
   background: rgba(255, 92, 122, 0.08);
-  color: #9f1f1f;
+  color: var(--terminal-red);
 }
 
 .scenario-grid div {
@@ -2101,6 +2338,167 @@ tbody tr.selected {
   border-radius: 8px;
   padding: 9px 10px;
   background: var(--terminal-panel-soft);
+}
+
+.compact-note {
+  margin: 10px 0 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: var(--terminal-panel-soft);
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.backtest-scope-note {
+  display: grid;
+  gap: 5px;
+}
+
+.backtest-scope-note strong {
+  color: var(--terminal-text);
+}
+
+.backtest-scope-note p {
+  margin: 0;
+}
+
+.backtest-guide-panel {
+  border-color: rgba(77, 212, 255, 0.28);
+}
+
+.backtest-result-summary {
+  display: grid;
+  gap: 12px;
+  border: 1px solid rgba(244, 197, 66, 0.32);
+  border-radius: 8px;
+  padding: 14px;
+  background: linear-gradient(180deg, rgba(244, 197, 66, 0.08), rgba(13, 20, 28, 0.96));
+}
+
+.backtest-result-summary header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.backtest-result-summary header span,
+.backtest-result-grid span {
+  display: block;
+  color: var(--terminal-muted-2);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.backtest-result-summary header strong {
+  display: block;
+  margin-top: 5px;
+  color: var(--terminal-yellow);
+  font-size: 18px;
+}
+
+.backtest-result-summary header p {
+  max-width: 520px;
+  margin: 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: right;
+}
+
+.backtest-result-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.backtest-result-grid div {
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(9, 14, 20, 0.68);
+}
+
+.backtest-result-grid strong {
+  display: block;
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--terminal-text);
+  font-size: 15px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backtest-guide-grid,
+.backtest-interpretation {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.backtest-guide-grid div,
+.backtest-interpretation div {
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--terminal-panel-soft);
+}
+
+.backtest-guide-grid span,
+.backtest-interpretation span {
+  display: block;
+  color: var(--terminal-muted-2);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.backtest-guide-grid strong,
+.backtest-interpretation strong {
+  display: block;
+  margin-top: 6px;
+  color: var(--terminal-text);
+  font-size: 18px;
+  line-height: 1.15;
+}
+
+.backtest-guide-grid p,
+.backtest-interpretation p {
+  margin: 7px 0 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.backtest-interpretation {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.opportunity-list-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 12px 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--terminal-panel-soft);
+}
+
+.opportunity-list-toolbar span {
+  color: var(--terminal-muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.opportunity-list-toolbar .icon-action {
+  width: auto;
 }
 
 .error {
@@ -2343,6 +2741,10 @@ tbody tr.selected {
   .context-grid,
   .sector-strength-grid,
   .scenario-grid,
+  .scenario-payoff-metrics,
+  .backtest-guide-grid,
+  .backtest-interpretation,
+  .backtest-result-grid,
   .strategy-strip,
   .validation-grid,
   .validation-grid-wide,
@@ -2604,6 +3006,11 @@ h3 {
 .icon-action.secondary {
   background: rgba(148, 163, 184, 0.14);
   color: var(--terminal-text);
+}
+
+.icon-action.danger {
+  background: rgba(255, 92, 122, 0.14);
+  color: var(--terminal-red);
 }
 
 .square-action {

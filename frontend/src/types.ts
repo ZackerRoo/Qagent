@@ -40,6 +40,11 @@ export type InstrumentSearchResponse = {
   data_health: Record<string, string>;
 };
 
+export type InstrumentLabelsResponse = {
+  labels: Record<string, string>;
+  data_health: Record<string, string>;
+};
+
 export type TradableCatalogSummary = {
   total_count: number;
   stock_count: number;
@@ -765,6 +770,7 @@ export type OpportunitySnapshot = {
   run_id: string;
   card_id: string;
   instrument_id: string;
+  instrument_label?: string | null;
   market: string;
   status: string;
   signal_date: string | null;
@@ -787,6 +793,7 @@ export type OpportunityOutcome = {
   snapshot_id: string;
   run_id: string;
   instrument_id: string;
+  instrument_label?: string | null;
   primary_strategy_id: string | null;
   signal_date: string | null;
   outcome_status: string;
@@ -920,6 +927,7 @@ export type BacktestSummary = {
 export type BacktestSignal = {
   snapshot_id: string;
   instrument_id: string;
+  instrument_label?: string | null;
   signal_date: string;
   primary_strategy_id: string | null;
   status: string;
@@ -955,6 +963,7 @@ export type FactorBacktestSummary = {
 export type FactorBacktestSignal = {
   signal_date: string;
   instrument_id: string;
+  instrument_label?: string | null;
   factor_rank: number;
   factor_score: number;
   entry_close: number;
@@ -1126,6 +1135,7 @@ export type PortfolioBacktestSummary = {
 
 export type PortfolioBacktestTrade = {
   instrument_id: string;
+  instrument_label?: string | null;
   strategy_id: string | null;
   signal_date: string;
   entry_date: string;

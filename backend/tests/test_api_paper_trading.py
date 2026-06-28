@@ -37,6 +37,36 @@ def test_paper_trade_from_opportunity_creates_once_and_rejects_blocked(tmp_path,
     assert listed.json()["summary"]["total"] == 1
 
 
+def test_paper_trade_api_deletes_trade(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-delete.db'}")
+    client = TestClient(create_app())
+    opportunity = {
+        "card_id": "card_delete_0001",
+        "provider": "fixture",
+        "instrument_id": "US:TEST",
+        "strategy_id": "breakout_volume_confirmation",
+        "trigger_price": "82.00",
+        "initial_stop": "78.72",
+        "target_1": "88.56",
+        "rank_score": 0.91,
+        "action": "watch_trigger",
+        "risk_status": "clear",
+    }
+
+    created = client.post("/api/paper-trades/from-opportunity", json=opportunity)
+    trade_id = created.json()["trade"]["trade_id"]
+    deleted = client.delete(f"/api/paper-trades/{trade_id}")
+    listed = client.get("/api/paper-trades")
+    deleted_again = client.delete(f"/api/paper-trades/{trade_id}")
+
+    assert created.status_code == 200
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] is True
+    assert deleted.json()["trade_id"] == trade_id
+    assert listed.json()["summary"]["total"] == 0
+    assert deleted_again.status_code == 404
+
+
 def test_agent_answers_from_paper_trade_context(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-agent.db'}")
     client = TestClient(create_app())

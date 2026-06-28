@@ -84,7 +84,7 @@ function IntradayRadarTable({ radar }: { radar?: IntradayRadarResponse }) {
         <tbody>
           {radar.items.map((item) => (
             <tr key={item.instrument_id}>
-              <td className="ticker" title={item.instrument_id}>
+              <td className="ticker" title={formatInstrumentDisplay(item.instrument_id, item.instrument_label)}>
                 {formatInstrumentDisplay(item.instrument_id, item.instrument_label)}
               </td>
               <td>

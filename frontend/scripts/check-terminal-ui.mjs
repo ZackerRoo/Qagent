@@ -52,6 +52,8 @@ const requiredSelectors = [
   ".opportunity-card",
   ".strategy-health-tile",
   ".chart-shell svg",
+  ".validation-chart-meta",
+  ".bar-caption-grid",
   ".signal-console",
   ".signal-distribution",
   ".portfolio-plan-card",
@@ -73,6 +75,10 @@ assert(
 assert(
   !styles.includes("background: #ffffff;"),
   "global components must not keep broad pure-white panel backgrounds",
+);
+assert(
+  /\.validation-grid\s*\{[\s\S]*grid-template-columns:\s*minmax\(0,\s*1fr\)/.test(styles),
+  "validation charts should default to full-width readable cards",
 );
 
 console.log("terminal ui ok: global shell, panels, tables, cards, charts, and controls use the dark quant terminal theme");

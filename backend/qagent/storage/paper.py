@@ -115,6 +115,15 @@ class PaperTradingRepository:
             session.refresh(row)
             return self._trade_from_row(row)
 
+    def delete_trade(self, trade_id: str) -> bool:
+        with self.session_factory() as session:
+            row = session.get(PaperTradeRow, trade_id)
+            if row is None:
+                return False
+            session.delete(row)
+            session.commit()
+            return True
+
     @staticmethod
     def _trade_from_row(row: PaperTradeRow) -> PaperTradeRecord:
         return PaperTradeRecord(

@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
-  fetchIntradayRadar,
-  fetchOpportunities,
-  fetchOverview,
+  fetchLatestFullMarketBatchResult,
+  fetchInstrumentLabels,
   fetchUniverses,
   saveUniverse,
+  fetchInstrumentSearch,
 } from "./api/client";
 import { AgentPanel } from "./components/AgentPanel";
 import { Layout, type PageId } from "./components/Layout";
@@ -19,8 +19,11 @@ import { Review } from "./pages/Review";
 import { Settings } from "./pages/Settings";
 import { Today } from "./pages/Today";
 import { Watchlist } from "./pages/Watchlist";
+import { registerInstrumentLabels } from "./lib/instruments";
+import { hasInstrumentLabel, marketSymbol } from "./lib/instruments";
 import type {
   DataProviderMode,
+  FullMarketScanResponse,
   IntradayRadarResponse,
   OpportunitiesResponse,
   OpportunityCard,
@@ -32,16 +35,6 @@ import type {
 import { applyResearchProfile } from "./lib/profiles";
 
 const DEFAULT_SYMBOLS = "CN:ALL";
-const NON_BRIEF_PAGES: PageId[] = [
-  "overview",
-  "opportunities",
-  "watchlist",
-  "portfolio",
-  "alerts",
-  "history",
-  "review",
-  "settings",
-];
 
 export default function App() {
   const [page, setPage] = useState<PageId>("today");
@@ -54,86 +47,157 @@ export default function App() {
   const [symbols, setSymbols] = useState(DEFAULT_SYMBOLS);
   const [universes, setUniverses] = useState<UniverseRecord[]>([]);
   const [selectedUniverseId, setSelectedUniverseId] = useState("free_default");
-  const [isScanning, setIsScanning] = useState(false);
-  const [error, setError] = useState("");
-  const scanRequestRef = useRef(0);
-  const scanAbortRef = useRef<AbortController | null>(null);
-
-  function shouldLoadDashboard(nextPage: PageId = page): boolean {
-    return NON_BRIEF_PAGES.includes(nextPage);
-  }
-
-  async function loadDashboard(mode: DataProviderMode, symbolText: string) {
-    const requestId = scanRequestRef.current + 1;
-    scanRequestRef.current = requestId;
-    scanAbortRef.current?.abort();
-    const controller = new AbortController();
-    scanAbortRef.current = controller;
-    setIsScanning(true);
-    setError("");
-    try {
-      const params = {
-        provider: mode,
-        symbols: mode === "free" ? symbolText : undefined,
-      };
-      const [overviewResult, opportunitiesResult, radarResult] = await Promise.all([
-        fetchOverview(params, { signal: controller.signal }),
-        fetchOpportunities(params, { signal: controller.signal }),
-        fetchIntradayRadar(mode, mode === "free" ? symbolText : undefined, {
-          signal: controller.signal,
-        }),
-      ]);
-      if (requestId !== scanRequestRef.current) {
-        return;
-      }
-      setOverview(overviewResult);
-      setOpportunities(opportunitiesResult);
-      setRadar(radarResult);
-      setSelectedCard(applyResearchProfile(opportunitiesResult.cards, profile)[0]);
-    } catch (caught) {
-      if (requestId !== scanRequestRef.current) {
-        return;
-      }
-      if (caught instanceof DOMException && caught.name === "AbortError") {
-        return;
-      }
-      setError(caught instanceof Error ? caught.message : "Failed to load dashboard");
-    } finally {
-      if (requestId === scanRequestRef.current) {
-        setIsScanning(false);
-      }
-    }
-  }
+  const [labelBootstrapNonce, setLabelBootstrapNonce] = useState(0);
 
   useEffect(() => {
     void refreshUniverses();
-
-    if (shouldLoadDashboard(page)) {
-      void loadDashboard("free", DEFAULT_SYMBOLS);
-    }
   }, []);
 
+  useEffect(() => {
+    void bootstrapInstrumentLabels(dataMode);
+  }, [dataMode]);
+
   async function refreshUniverses() {
-    const result = await fetchUniverses();
-    setUniverses(result.universes);
+    try {
+      const result = await fetchUniverses();
+      setUniverses(result.universes);
+    } catch {
+      setUniverses([]);
+    }
   }
 
   useEffect(() => {
-    if (!shouldLoadDashboard()) {
-      return;
+    void loadCachedDashboard(dataMode);
+  }, [dataMode]);
+
+  async function loadCachedDashboard(mode: DataProviderMode) {
+    try {
+      const result = await fetchLatestFullMarketBatchResult(mode, true);
+      applyDashboardResult(result);
+    } catch {
+      setOverview(undefined);
+      setOpportunities(undefined);
+      setRadar(undefined);
     }
-    void loadDashboard(dataMode, symbols);
-  }, [dataMode, symbols, page]);
+  }
+
+  function applyDashboardResult(result: FullMarketScanResponse) {
+    setOpportunities(toOpportunitiesResponse(result));
+    setOverview(toOverviewResponse(result));
+    setRadar(toRadarResponse(result));
+    const nextCards = applyResearchProfile(result.cards, profile);
+    if (nextCards.length) {
+      setSelectedCard(nextCards[0]);
+    }
+
+    const symbols = result.cards
+      .map((card) => card.instrument_id)
+      .concat(result.items.map((item) => item.instrument_id));
+    void hydrateInstrumentLabels(dataMode, symbols);
+  }
 
   function handleDataModeChange(mode: DataProviderMode) {
     setDataMode(mode);
   }
 
-  function handleScan() {
-    if (!shouldLoadDashboard()) {
+  async function bootstrapInstrumentLabels(mode: DataProviderMode) {
+    if (mode !== "free") {
       return;
     }
-    void loadDashboard(dataMode, symbols);
+    await hydrateInstrumentLabels(mode, []);
+  }
+
+  async function hydrateInstrumentLabels(
+    mode: DataProviderMode,
+    rawSymbols: string[],
+  ): Promise<void> {
+    if (mode !== "free") {
+      return;
+    }
+
+    if (!rawSymbols.length) {
+      try {
+        const result = await fetchInstrumentLabels();
+        const loaded = registerInstrumentLabels(result.labels ?? {});
+        if (loaded > 0) {
+          setLabelBootstrapNonce((value) => value + 1);
+        }
+      } catch {
+        // older backend versions may not have /instruments/labels; fallback below.
+        await hydrateInstrumentLabelsFromSearch([]);
+      }
+      return;
+    }
+
+    const symbols = collectMissingCnSymbols(rawSymbols);
+    if (!symbols.length) {
+      return;
+    }
+
+    try {
+      const result = await fetchInstrumentLabels(symbols);
+      const loaded = registerInstrumentLabels(result.labels ?? {});
+      if (loaded > 0) {
+        setLabelBootstrapNonce((value) => value + 1);
+      }
+      const labels = result.labels ?? {};
+      const unresolved = symbols.filter((symbol) => {
+        return !labels[symbol] && !labels[marketSymbol(symbol) as string];
+      });
+      if (!unresolved.length) {
+        return;
+      }
+      await hydrateInstrumentLabelsFromSearch(unresolved);
+      return;
+    } catch {
+      // older backend versions may not have /instruments/labels; fallback below.
+    }
+
+    await hydrateInstrumentLabelsFromSearch(rawSymbols);
+  }
+
+  function collectMissingCnSymbols(rawSymbols: string[]): string[] {
+    const seen = new Set<string>();
+    const missing: string[] = [];
+    for (const symbol of rawSymbols) {
+      const normalized = marketSymbol(symbol);
+      if (!normalized || seen.has(normalized) || !/^\d{6}$/.test(normalized) || hasInstrumentLabel(normalized)) {
+        if (normalized) {
+          seen.add(normalized);
+        }
+        continue;
+      }
+      seen.add(normalized);
+      missing.push(`CN:${normalized}`);
+    }
+    return missing;
+  }
+
+  async function hydrateInstrumentLabelsFromSearch(rawSymbols: string[]): Promise<void> {
+    const symbols = rawSymbols
+      .map((symbol) => marketSymbol(symbol))
+      .filter((symbol): symbol is string => Boolean(symbol) && /^\d{6}$/.test(symbol));
+    const bySymbol: Record<string, string> = {};
+
+    for (const symbol of symbols) {
+      try {
+        const result = await fetchInstrumentSearch(`CN:${symbol}`, 50);
+        const matched = result.items.find((item) => {
+          const itemSymbol = marketSymbol(item.instrument_id);
+          return itemSymbol === symbol || item.instrument_id === `CN:${symbol}`;
+        });
+        if (matched?.label) {
+          bySymbol[symbol] = matched.label;
+        }
+      } catch {
+        // Keep best effort; skip unresolved symbols.
+      }
+    }
+
+    const loaded = registerInstrumentLabels(bySymbol);
+    if (loaded > 0) {
+      setLabelBootstrapNonce((value) => value + 1);
+    }
   }
 
   function handleProfileChange(value: ResearchProfile) {
@@ -181,10 +245,6 @@ export default function App() {
   );
 
   const content = useMemo(() => {
-    if (error) {
-      return <section className="panel error">{error}</section>;
-    }
-
     switch (page) {
       case "today":
         return (
@@ -193,6 +253,7 @@ export default function App() {
             profile={profile}
             selectedCard={selectedCard}
             onSelect={setSelectedCard}
+            onResult={applyDashboardResult}
           />
         );
       case "brief":
@@ -228,7 +289,7 @@ export default function App() {
       case "alerts":
         return <Alerts dataMode={dataMode} />;
       case "history":
-        return <History dataMode={dataMode} symbols={symbols} />;
+        return <History dataMode={dataMode} symbols={symbols} selectedCard={selectedCard} />;
       case "review":
         return <Review symbols={symbols} />;
       case "settings":
@@ -240,12 +301,12 @@ export default function App() {
             onSaveUniverse={handleSaveUniverse}
           />
         );
-      default:
-        return null;
+    default:
+      return null;
     }
   }, [
     dataMode,
-    error,
+    labelBootstrapNonce,
     opportunities,
     page,
     profile,
@@ -262,19 +323,71 @@ export default function App() {
       onPageChange={setPage}
       rightPanel={<AgentPanel selectedCard={selectedCard} dataMode={dataMode} symbols={symbols} />}
       dataMode={dataMode}
-      isScanning={isScanning}
       symbols={symbols}
       universes={universes}
       selectedUniverseId={selectedUniverseId}
       profile={profile}
-      scanEnabled={shouldLoadDashboard()}
       onSymbolsChange={setSymbols}
       onUniverseChange={handleUniverseChange}
       onDataModeChange={handleDataModeChange}
       onProfileChange={handleProfileChange}
-      onScan={handleScan}
     >
       {content}
     </Layout>
   );
+}
+
+function toOpportunitiesResponse(result: FullMarketScanResponse): OpportunitiesResponse {
+  return {
+    cards: result.cards,
+    items: result.items,
+    strategy_health: result.strategy_health,
+    factor_rankings: result.factor_rankings,
+    sector_strength: result.sector_strength,
+    portfolio_plan: result.portfolio_plan,
+    data_health: result.data_health,
+  };
+}
+
+function toOverviewResponse(result: FullMarketScanResponse): OverviewResponse {
+  return {
+    market_regime: {
+      US: "not_in_scope",
+      CN: "latest_cached_scan",
+    },
+    top_cards: result.cards.slice(0, 5),
+    strategy_health: result.strategy_health.slice(0, 6),
+    factor_rankings: result.factor_rankings.slice(0, 10),
+    sector_strength: result.sector_strength.slice(0, 6),
+    portfolio_plan: result.portfolio_plan,
+    data_health: result.data_health,
+  };
+}
+
+function toRadarResponse(result: FullMarketScanResponse): IntradayRadarResponse {
+  return {
+    items: result.cards.slice(0, 20).map((card) => ({
+      instrument_id: card.instrument_id,
+      instrument_label: card.instrument_label,
+      latest_trade_date: null,
+      latest_close: card.entry_plan.trigger_price,
+      previous_close: null,
+      change_pct: null,
+      volume_ratio: null,
+      signal: card.decision?.action ?? card.status,
+      severity: card.decision?.risk_status === "blocked" ? "danger" : "success",
+      score: Number(card.rank_score),
+      message: card.rank_reasons[0] ?? card.thesis,
+      action: card.decision?.action ?? card.status,
+      distance_to_trigger_pct: null,
+      trigger_price: card.entry_plan.trigger_price,
+      initial_stop: card.exit_plan.initial_stop,
+      target_1: card.exit_plan.target_1,
+      no_chase_above: card.entry_plan.no_chase_above,
+    })),
+    data_health: {
+      ...result.data_health,
+      radar_source: "latest_cached_scan",
+    },
+  };
 }

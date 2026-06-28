@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import {
+  deletePaperTrade,
   fetchPaperTrades,
   fetchPortfolio,
   savePosition,
@@ -9,7 +10,7 @@ import {
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
 import { useI18n } from "../i18n";
-import { formatInstrumentLabel } from "../lib/instruments";
+import { formatInstrumentDisplay } from "../lib/instruments";
 import { localizeAction, localizeStatus, localizeStrategy } from "../lib/localize";
 import type {
   DataProviderMode,
@@ -38,6 +39,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [paper, setPaper] = useState<PaperTradesResponse>();
   const [form, setForm] = useState<Position>(emptyPosition);
   const [paperMessage, setPaperMessage] = useState("");
+  const [deletingPaperTradeId, setDeletingPaperTradeId] = useState("");
 
   async function load() {
     const [result, paperResult] = await Promise.all([
@@ -76,6 +78,19 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
         : `Updated ${result.summary.total} trades, ${result.summary.closed} closed`,
     );
     setPaper({ summary: result.summary, trades: result.trades });
+  }
+
+  async function removePaperTrade(tradeId: string) {
+    try {
+      setDeletingPaperTradeId(tradeId);
+      await deletePaperTrade(tradeId);
+      setPaperMessage(language === "zh" ? "已删除模拟记录" : "Paper trade deleted");
+      await load();
+    } catch (caught) {
+      setPaperMessage(caught instanceof Error ? caught.message : "Failed to delete paper trade");
+    } finally {
+      setDeletingPaperTradeId("");
+    }
   }
 
   return (
@@ -136,9 +151,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
                   (item) => item.instrument_id === position.instrument_id,
                 );
                 return (
-                  <tr key={position.instrument_id}>
-                    <td className="ticker" title={position.instrument_id}>
-                      {formatInstrumentLabel(position.instrument_id)}
+                    <tr key={position.instrument_id}>
+                    <td className="ticker" title={formatInstrumentDisplay(position.instrument_id)}>
+                      {formatInstrumentDisplay(position.instrument_id)}
                     </td>
                     <td>{position.shares}</td>
                     <td>{position.entry_price}</td>
@@ -219,13 +234,14 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
                 <th>{t("portfolio.latest")}</th>
                 <th>{t("portfolio.pnl")}</th>
                 <th>{t("common.strategy")}</th>
+                <th>{t("common.actions")}</th>
               </tr>
             </thead>
             <tbody>
               {(paper?.trades ?? []).map((trade) => (
                 <tr key={trade.trade_id}>
-                  <td className="ticker" title={trade.instrument_id}>
-                    {formatInstrumentLabel(trade.instrument_id)}
+                  <td className="ticker" title={formatInstrumentDisplay(trade.instrument_id)}>
+                    {formatInstrumentDisplay(trade.instrument_id)}
                   </td>
                   <td>{localizeStatus(trade.status, language)}</td>
                   <td>{trade.signal_date}</td>
@@ -237,6 +253,18 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
                   <td>{trade.latest_price ?? "-"}</td>
                   <td>{formatPct(trade.realized_return_pct ?? trade.unrealized_return_pct)}</td>
                   <td className="reason-cell">{localizeStrategy(trade.strategy_id, language)}</td>
+                  <td>
+                    <button
+                      className="icon-action danger compact-button"
+                      type="button"
+                      onClick={() => removePaperTrade(trade.trade_id)}
+                      disabled={deletingPaperTradeId === trade.trade_id}
+                    >
+                      {deletingPaperTradeId === trade.trade_id
+                        ? t("common.running")
+                        : t("common.delete")}
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>

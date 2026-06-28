@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { fetchWatchlist, saveWatchlistItem } from "../api/client";
 import { useI18n } from "../i18n";
-import { formatInstrumentLabel } from "../lib/instruments";
+import { formatInstrumentDisplay } from "../lib/instruments";
 import { localizeStatus } from "../lib/localize";
 import type { WatchlistItem } from "../types";
 
@@ -69,8 +69,8 @@ export function Watchlist() {
           <tbody>
             {items.map((item) => (
               <tr key={item.instrument_id}>
-                <td className="ticker" title={item.instrument_id}>
-                  {formatInstrumentLabel(item.instrument_id)}
+                <td className="ticker" title={formatInstrumentDisplay(item.instrument_id)}>
+                  {formatInstrumentDisplay(item.instrument_id)}
                 </td>
                 <td>{localizeStatus(item.status, language)}</td>
                 <td>{item.thesis ?? "-"}</td>

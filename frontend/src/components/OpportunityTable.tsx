@@ -1,7 +1,7 @@
 import type { CSSProperties } from "react";
 
 import { useI18n } from "../i18n";
-import { formatInstrumentDisplay } from "../lib/instruments";
+import { formatInstrumentDisplay, formatInstrumentText } from "../lib/instruments";
 import {
   localizeAction,
   localizeRiskStatus,
@@ -37,7 +37,7 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
         >
           <header>
             <div>
-              <h3 title={card.instrument_id}>
+              <h3 title={formatInstrumentDisplay(card.instrument_id, card.instrument_label)}>
                 {formatInstrumentDisplay(card.instrument_id, card.instrument_label)}
               </h3>
               <p>{formatContext(card, language)}</p>
@@ -55,7 +55,11 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
           </div>
 
           <p className="opportunity-headline">
-            {card.recommendation_summary?.headline ?? card.thesis}
+            {formatInstrumentText(
+              card.recommendation_summary?.headline ?? card.thesis,
+              card.instrument_id,
+              card.instrument_label,
+            )}
           </p>
 
           <div className="opportunity-signal-row">

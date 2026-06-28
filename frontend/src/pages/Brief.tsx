@@ -48,9 +48,11 @@ function formatRatio(value: number | null) {
   return `${(value * 100).toFixed(0)}%`;
 }
 
+const FAST_DEFAULT_SCAN_LIMIT = 30;
+const BRIEF_REQUEST_TIMEOUT_MS = 20_000;
+
 export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbols: string }) {
   const { language, t } = useI18n();
-  const FAST_DEFAULT_SCAN_LIMIT = 30;
   const [brief, setBrief] = useState<DailyBriefResponse>();
   const [runs, setRuns] = useState<BriefRun[]>([]);
   const [deliveries, setDeliveries] = useState<DeliveryOutboxRecord[]>([]);
@@ -93,6 +95,11 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
     briefAbortRef.current?.abort();
     const controller = new AbortController();
     briefAbortRef.current = controller;
+    let timedOut = false;
+    const timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, BRIEF_REQUEST_TIMEOUT_MS);
     try {
       setIsLoading(true);
       setError("");
@@ -108,10 +115,14 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
         return;
       }
       if (caught instanceof DOMException && caught.name === "AbortError") {
+        if (timedOut) {
+          setError(t("brief.timeout"));
+        }
         return;
       }
       setError(caught instanceof Error ? caught.message : "Failed to load daily brief");
     } finally {
+      window.clearTimeout(timeoutId);
       if (requestId === briefRequestRef.current) {
         setIsLoading(false);
       }
@@ -186,7 +197,12 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
   }
 
   useEffect(() => {
-    void loadBrief();
+    briefRequestRef.current += 1;
+    briefAbortRef.current?.abort();
+    setBrief(undefined);
+    setMarkdown("");
+    setIsLoading(false);
+    setError("");
     void loadRuns();
     void loadDeliveries();
   }, [dataMode, symbols]);
@@ -198,7 +214,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
           <div>
             <h2>{t("brief.title")}</h2>
             <p className="brief-headline">
-              {brief ? localizeReason(brief.headline, language) : t("brief.loading")}
+              {brief ? localizeReason(brief.headline, language) : isLoading ? t("brief.loading") : t("brief.empty")}
             </p>
           </div>
         <div className="brief-actions">
@@ -261,10 +277,10 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
             {t("brief.includeNews")}
           </label>
           <button className="icon-action" type="button" onClick={loadBrief} disabled={isLoading}>
-            {isLoading ? t("common.refreshing") : t("brief.refresh")}
+            {isLoading ? t("brief.generating") : t("brief.refresh")}
           </button>
             <button className="icon-action" type="button" onClick={saveBrief} disabled={isSaving}>
-              {isSaving ? t("common.saving") : t("brief.save")}
+              {isSaving ? t("brief.savingBrief") : t("brief.save")}
             </button>
           </div>
         </div>
@@ -597,7 +613,7 @@ function BriefOpportunityTable({ items }: { items: DailyBriefOpportunity[] }) {
         <tbody>
           {items.map((item) => (
             <tr key={item.instrument_id}>
-              <td className="ticker" title={item.instrument_id}>
+              <td className="ticker" title={formatInstrumentDisplay(item.instrument_id, item.instrument_label)}>
                 {formatInstrumentDisplay(item.instrument_id, item.instrument_label)}
               </td>
               <td>
@@ -680,7 +696,7 @@ function BriefEntryWatchTable({ items }: { items: DailyBriefEntryWatch[] }) {
         <tbody>
           {items.map((item) => (
             <tr key={`${item.instrument_id}-${item.trigger_price}`}>
-              <td className="ticker" title={item.instrument_id}>
+              <td className="ticker" title={formatInstrumentDisplay(item.instrument_id, item.instrument_label)}>
                 {formatInstrumentDisplay(item.instrument_id, item.instrument_label)}
               </td>
               <td className="reason-cell">

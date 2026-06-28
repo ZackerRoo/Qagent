@@ -8,7 +8,7 @@ import {
   saveAlertRule,
 } from "../api/client";
 import { useI18n } from "../i18n";
-import { formatInstrumentLabel } from "../lib/instruments";
+import { formatInstrumentDisplay } from "../lib/instruments";
 import { localizeAlertKind, localizeProvider, localizeReason } from "../lib/localize";
 import type { AlertRule, AlertRunResponse, AlertSuggestion, DataProviderMode, TriggeredAlert } from "../types";
 
@@ -166,8 +166,8 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
             {suggestions.map((item) => (
               <tr key={item.rule_id}>
                 <td>{formatRuleLabel(item.rule_id, item.kind, language)}</td>
-                <td className="ticker" title={item.instrument_id}>
-                  {formatInstrumentLabel(item.instrument_id)}
+                <td className="ticker" title={formatInstrumentDisplay(item.instrument_id)}>
+                  {formatInstrumentDisplay(item.instrument_id)}
                 </td>
                 <td>{localizeAlertKind(item.kind, language)}</td>
                 <td>
@@ -210,8 +210,8 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
             {rules.map((item) => (
               <tr key={item.rule_id}>
                 <td>{formatRuleLabel(item.rule_id, item.kind, language)}</td>
-                <td className="ticker" title={item.instrument_id}>
-                  {formatInstrumentLabel(item.instrument_id)}
+                <td className="ticker" title={formatInstrumentDisplay(item.instrument_id)}>
+                  {formatInstrumentDisplay(item.instrument_id)}
                 </td>
                 <td>{localizeAlertKind(item.kind, language)}</td>
                 <td>
@@ -226,7 +226,7 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
         <div className="alert-results">
           {triggered.map((alert) => (
             <div key={`${alert.rule_id}-${alert.triggered_at}`}>
-              <strong title={alert.instrument_id}>{formatInstrumentLabel(alert.instrument_id)}</strong>
+              <strong title={formatInstrumentDisplay(alert.instrument_id)}>{formatInstrumentDisplay(alert.instrument_id)}</strong>
               <span>{localizeReason(alert.message, language)}</span>
             </div>
           ))}

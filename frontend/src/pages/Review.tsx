@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { fetchCatalysts } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
 import { useI18n } from "../i18n";
-import { formatInstrumentLabel } from "../lib/instruments";
+import { formatInstrumentDisplay } from "../lib/instruments";
 import { localizeCatalyst, localizeReason } from "../lib/localize";
 import type { CatalystsResponse } from "../types";
 
@@ -56,9 +56,9 @@ export function Review({ symbols }: { symbols: string }) {
               </thead>
               <tbody>
                 {data.hypotheses.map((item) => (
-                  <tr key={`${item.news_id}-${item.catalyst_type}`}>
-                    <td className="ticker" title={item.instrument_id}>
-                      {formatInstrumentLabel(item.instrument_id)}
+                    <tr key={`${item.news_id}-${item.catalyst_type}`}>
+                    <td className="ticker" title={formatInstrumentDisplay(item.instrument_id)}>
+                      {formatInstrumentDisplay(item.instrument_id)}
                     </td>
                     <td>{localizeCatalyst(item.catalyst_type, language)}</td>
                     <td>{Math.round(item.confidence * 100)}</td>
@@ -85,7 +85,7 @@ export function Review({ symbols }: { symbols: string }) {
           <div className="news-list">
             {data.news.map((item) => (
               <a key={item.news_id} href={item.url ?? "#"} target="_blank" rel="noreferrer">
-                <span title={item.instrument_id}>{formatInstrumentLabel(item.instrument_id)}</span>
+                <span title={formatInstrumentDisplay(item.instrument_id)}>{formatInstrumentDisplay(item.instrument_id)}</span>
                 <strong>{item.title}</strong>
                 <small>
                   {item.publisher ?? item.source}

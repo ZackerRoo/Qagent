@@ -10,7 +10,7 @@ import {
   syncTradableCatalog,
 } from "../api/client";
 import { useI18n } from "../i18n";
-import { formatInstrumentLabel } from "../lib/instruments";
+import { formatInstrumentDisplay } from "../lib/instruments";
 import {
   localizeCapability,
   localizeProvider,
@@ -303,8 +303,11 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
                   <td>{formatScope(universe.market_scope, language)}</td>
                   <td>{formatSource(universe.source, language)}</td>
                   <td>{formatTags(universe.tags, language)}</td>
-                  <td className="reason-cell" title={universe.symbols.join(", ")}>
-                    {universe.symbols.map((symbol) => formatInstrumentLabel(symbol)).join(", ")}
+                  <td
+                    className="reason-cell"
+                    title={universe.symbols.map((symbol) => formatInstrumentDisplay(symbol)).join(", ")}
+                  >
+                    {universe.symbols.map((symbol) => formatInstrumentDisplay(symbol)).join(", ")}
                   </td>
                 </tr>
               ))}
@@ -395,8 +398,8 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
               <tbody>
                 {tradableCatalog.items.map((item) => (
                   <tr key={item.instrument_id}>
-                    <td className="ticker" title={item.instrument_id}>
-                      {item.label || formatInstrumentLabel(item.instrument_id)}
+                    <td className="ticker" title={formatInstrumentDisplay(item.instrument_id, item.label)}>
+                      {formatInstrumentDisplay(item.instrument_id, item.label)}
                     </td>
                     <td>{item.symbol}</td>
                     <td>{formatAssetType(item.asset_type, language)}</td>
@@ -480,7 +483,7 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
               <tbody>
                 {dataCache.summaries.map((summary) => (
                   <tr key={`${summary.provider_mode}-${summary.instrument_id}`}>
-                    <td title={summary.instrument_id}>{formatInstrumentLabel(summary.instrument_id)}</td>
+                    <td title={formatInstrumentDisplay(summary.instrument_id)}>{formatInstrumentDisplay(summary.instrument_id)}</td>
                     <td>{summary.rows}</td>
                     <td>
                       {summary.first_trade_date} {language === "zh" ? "至" : "to"}{" "}
@@ -512,7 +515,7 @@ function splitList(value: string): string[] {
 
 function formatInstrumentList(value: string): string {
   return splitList(value)
-    .map((symbol) => formatInstrumentLabel(symbol))
+    .map((symbol) => formatInstrumentDisplay(symbol))
     .join(", ");
 }
 

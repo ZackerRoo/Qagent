@@ -9,7 +9,6 @@ import {
   Newspaper,
   Plus,
   Settings,
-  RefreshCw,
   Star,
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
@@ -23,7 +22,7 @@ import type {
   TradableInstrument,
   UniverseRecord,
 } from "../types";
-import { formatInstrumentLabel } from "../lib/instruments";
+import { formatInstrumentDisplay } from "../lib/instruments";
 import { localizeProfile } from "../lib/localize";
 import { researchProfiles } from "../lib/profiles";
 
@@ -47,17 +46,14 @@ type Props = {
   onPageChange(page: PageId): void;
   rightPanel: ReactNode;
   dataMode: DataProviderMode;
-  isScanning: boolean;
   symbols: string;
   universes: UniverseRecord[];
   selectedUniverseId: string;
   profile: ResearchProfile;
-  scanEnabled: boolean;
   onSymbolsChange(value: string): void;
   onUniverseChange(value: string): void;
   onDataModeChange(mode: DataProviderMode): void;
   onProfileChange(value: ResearchProfile): void;
-  onScan(): void;
   children: ReactNode;
 };
 
@@ -66,20 +62,18 @@ export function Layout({
   onPageChange,
   rightPanel,
   dataMode,
-  isScanning,
   symbols,
   universes,
   selectedUniverseId,
   profile,
-  scanEnabled,
   onSymbolsChange,
   onUniverseChange,
   onDataModeChange,
   onProfileChange,
-  onScan,
   children,
 }: Props) {
   const { language, setLanguage, t } = useI18n();
+  const pageTitle = getPageTitle(page, t);
   const [instrumentQuery, setInstrumentQuery] = useState("");
   const [instrumentOptions, setInstrumentOptions] = useState<TradableInstrument[]>([]);
   const [selectedLabels, setSelectedLabels] = useState<Record<string, string>>({});
@@ -156,8 +150,8 @@ export function Layout({
       <main className="workspace">
         <header className="top-bar">
           <div className="top-title">
-            <p className="eyebrow">{t("top.eyebrow")}</p>
-            <h1>{t("top.title")}</h1>
+            <p className="eyebrow">Qagent</p>
+            <h1>{pageTitle}</h1>
           </div>
           <div className="top-tools terminal-top-grid">
             <div className="session-strip">
@@ -263,10 +257,6 @@ export function Layout({
                 title={formatSelectedSymbols(symbols, selectedLabels, false)}
                 value={formatSelectedSymbols(symbols, selectedLabels)}
               />
-              <button type="button" className="icon-action" onClick={onScan} disabled={isScanning || !scanEnabled}>
-                <RefreshCw size={16} />
-                <span>{isScanning ? t("top.scanning") : t("top.scan")}</span>
-              </button>
             </div>
           </div>
         </header>
@@ -275,6 +265,11 @@ export function Layout({
       {rightPanel}
     </div>
   );
+}
+
+function getPageTitle(page: PageId, t: (key: TranslationKey) => string): string {
+  const item = nav.find((navItem) => navItem.id === page);
+  return item ? t(item.labelKey as TranslationKey) : "Qagent";
 }
 
 function formatUniverseName(universe: UniverseRecord, language: "zh" | "en"): string {
@@ -358,7 +353,7 @@ function formatSelectedSymbols(
     .split(",")
     .map((item) => item.trim().toUpperCase())
     .filter(Boolean)
-    .map((item) => selectedLabels[item] ?? formatInstrumentLabel(item));
+    .map((item) => formatInstrumentDisplay(item, selectedLabels[item]));
   if (!summarize || labels.length <= 3) {
     return labels.join(", ");
   }

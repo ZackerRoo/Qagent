@@ -11,7 +11,7 @@ import {
 } from "../api/client";
 import { MarketOpportunitySections } from "../components/MarketOpportunitySections";
 import { useI18n } from "../i18n";
-import { formatInstrumentDisplay } from "../lib/instruments";
+import { formatInstrumentDisplay, formatInstrumentText } from "../lib/instruments";
 import {
   localizeAction,
   localizeDataHealthKey,
@@ -36,11 +36,12 @@ type Props = {
   profile: ResearchProfile;
   selectedCard?: OpportunityCard;
   onSelect(card: OpportunityCard): void;
+  onResult(result: FullMarketScanResponse): void;
 };
 
 const autoStartedKeys = new Set<string>();
 
-export function Today({ dataMode, profile, selectedCard, onSelect }: Props) {
+export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: Props) {
   const { language, t } = useI18n();
   const [task, setTask] = useState<ScanTask>();
   const [result, setResult] = useState<FullMarketScanResponse>();
@@ -66,12 +67,14 @@ export function Today({ dataMode, profile, selectedCard, onSelect }: Props) {
     try {
       const fullResult = await fetchLatestFullMarketBatchResult(dataMode, includeEtfs);
       setResult(fullResult);
+      onResult(fullResult);
       const nextCards = applyResearchProfile(fullResult.cards, profile);
       if (nextCards.length) {
         onSelect(nextCards[0]);
       }
     } catch {
-      await startScan(false);
+      setResult(undefined);
+      setTask(undefined);
     }
   }
 
@@ -111,6 +114,7 @@ export function Today({ dataMode, profile, selectedCard, onSelect }: Props) {
       setTask(next);
       if (next.status === "succeeded" && next.result) {
         setResult(next.result);
+        onResult(next.result);
         const nextCards = applyResearchProfile(next.result.cards, profile);
         if (nextCards.length) {
           onSelect(nextCards[0]);
@@ -158,6 +162,7 @@ export function Today({ dataMode, profile, selectedCard, onSelect }: Props) {
       if (next.status === "succeeded") {
         const fullResult = await fetchLatestFullMarketBatchResult(dataMode, includeEtfs);
         setResult(fullResult);
+        onResult(fullResult);
         const nextCards = applyResearchProfile(fullResult.cards, profile);
         if (nextCards.length) {
           onSelect(nextCards[0]);
@@ -235,10 +240,15 @@ export function Today({ dataMode, profile, selectedCard, onSelect }: Props) {
             <span className="count">{cards.length}</span>
           </div>
           <MarketOpportunitySections
-            cards={cards}
+            cards={cards.slice(0, 24)}
             selectedCardId={selectedCard?.card_id}
             onSelect={onSelect}
           />
+          {cards.length > 24 && (
+            <p className="compact-note">
+              {t("today.partialOpportunityList")} {cards.length}
+            </p>
+          )}
         </section>
 
         <section className="panel">
@@ -360,9 +370,13 @@ function SignalCommandCenter({
           <strong>{selectedLabel}</strong>
           <p>
             {selectedCard
-              ? localizeReason(
-                  selectedCard.recommendation_summary?.headline ?? selectedCard.thesis,
-                  language,
+              ? formatInstrumentText(
+                  localizeReason(
+                    selectedCard.recommendation_summary?.headline ?? selectedCard.thesis,
+                    language,
+                  ),
+                  selectedCard.instrument_id,
+                  selectedCard.instrument_label,
                 )
               : t("today.noResult")}
           </p>
@@ -669,7 +683,11 @@ function SelectedOpportunityWorkup({
         {paperMessage && <span>{paperMessage}</span>}
       </div>
 
-      <p className="workup-headline">{localizeReason(headline, language)}</p>
+      <p className="workup-headline">
+        {formatInstrumentText(localizeReason(headline, language), card.instrument_id, card.instrument_label)}
+      </p>
+
+      <OpportunityScenarioPanel card={card} />
 
       <div className="workup-grid">
         <div className="workup-column">
@@ -680,19 +698,19 @@ function SelectedOpportunityWorkup({
           <dl className="execution-list">
             <div>
               <dt>{t("today.buyZone")}</dt>
-              <dd>{localizeReason(buyZone, language)}</dd>
+              <dd>{formatInstrumentText(localizeReason(buyZone, language), card.instrument_id, card.instrument_label)}</dd>
             </div>
             <div>
               <dt>{t("today.sellPlan")}</dt>
-              <dd>{localizeReason(sellPlan, language)}</dd>
+              <dd>{formatInstrumentText(localizeReason(sellPlan, language), card.instrument_id, card.instrument_label)}</dd>
             </div>
             <div>
               <dt>{t("today.positionPlan")}</dt>
-              <dd>{localizeReason(positionPlan, language)}</dd>
+              <dd>{formatInstrumentText(localizeReason(positionPlan, language), card.instrument_id, card.instrument_label)}</dd>
             </div>
             <div>
               <dt>{t("today.riskPlan")}</dt>
-              <dd>{localizeReason(riskPlan, language)}</dd>
+              <dd>{formatInstrumentText(localizeReason(riskPlan, language), card.instrument_id, card.instrument_label)}</dd>
             </div>
           </dl>
           {checklist.length > 0 && (
@@ -700,7 +718,7 @@ function SelectedOpportunityWorkup({
               <h4>{t("today.executionChecklist")}</h4>
               <ul>
                 {checklist.slice(0, 5).map((item) => (
-                  <li key={item}>{localizeReason(item, language)}</li>
+                  <li key={item}>{formatInstrumentText(localizeReason(item, language), card.instrument_id, card.instrument_label)}</li>
                 ))}
               </ul>
             </div>
@@ -713,7 +731,11 @@ function SelectedOpportunityWorkup({
             <span>{formatPct(confidence?.score ?? card.decision?.conviction_score)}</span>
           </div>
           <p className="workup-summary">
-            {localizeReason(confidence?.summary ?? card.thesis, language)}
+            {formatInstrumentText(
+              localizeReason(confidence?.summary ?? card.thesis, language),
+              card.instrument_id,
+              card.instrument_label,
+            )}
           </p>
           <DriverGroup
             title={t("today.positiveDrivers")}
@@ -733,6 +755,184 @@ function SelectedOpportunityWorkup({
         </div>
       </div>
     </section>
+  );
+}
+
+function OpportunityScenarioPanel({ card }: { card: OpportunityCard }) {
+  const { language, t } = useI18n();
+  const entry = parsePrice(card.entry_plan.trigger_price);
+  const stop = parsePrice(card.exit_plan.initial_stop);
+  const target = parsePrice(card.exit_plan.target_1);
+  const noChase = parsePrice(card.entry_plan.no_chase_above);
+  const targetPct = pctBetween(entry, target) ?? card.scenario.target_1_pct;
+  const downsidePct = pctBetween(entry, stop) ?? card.scenario.downside_pct;
+  const riskReward =
+    card.risk_reward ??
+    (targetPct !== null && downsidePct !== null && downsidePct < 0
+      ? Math.abs(targetPct / downsidePct)
+      : null);
+  const calibration = card.strategy_calibration;
+
+  return (
+    <div className="scenario-payoff-card">
+      <div className="scenario-payoff-header">
+        <div>
+          <h3>{t("today.scenarioPanel")}</h3>
+          <p>{t("today.scenarioPanelSubtitle")}</p>
+        </div>
+        <strong>
+          {t("brief.riskReward")} {formatNumber(riskReward, "x")}
+        </strong>
+      </div>
+      <ScenarioPayoffChart entry={entry} stop={stop} target={target} noChase={noChase} />
+      <div className="scenario-payoff-metrics">
+        <ScenarioMetric label={t("today.potentialGain")} value={formatSignedPercent(targetPct)} tone="good" />
+        <ScenarioMetric label={t("today.potentialLoss")} value={formatSignedPercent(downsidePct)} tone="risk" />
+        <ScenarioMetric
+          label={t("today.historyWinRate")}
+          value={formatPercentValue(calibration?.win_rate_10d ?? null)}
+          tone="info"
+        />
+        <ScenarioMetric
+          label={t("today.historyAvgReturn")}
+          value={formatNumber(calibration?.avg_return_10d ?? null, "%")}
+          tone="neutral"
+        />
+        <ScenarioMetric
+          label={t("today.historyMaxLoss")}
+          value={formatNumber(calibration?.max_loss_10d ?? null, "%")}
+          tone="risk"
+        />
+      </div>
+      <p className="scenario-payoff-note">
+        {formatInstrumentText(
+          localizeReason(card.scenario.summary, language),
+          card.instrument_id,
+          card.instrument_label,
+        )}
+      </p>
+    </div>
+  );
+}
+
+function ScenarioMetric({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone: "good" | "risk" | "info" | "neutral";
+}) {
+  return (
+    <div className={`scenario-metric scenario-metric-${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function ScenarioPayoffChart({
+  entry,
+  stop,
+  target,
+  noChase,
+}: {
+  entry: number | null;
+  stop: number | null;
+  target: number | null;
+  noChase: number | null;
+}) {
+  const { t } = useI18n();
+  const values = [entry, stop, target, noChase].filter((value): value is number => value !== null);
+  if (entry === null || !values.length) {
+    return <div className="empty-state compact">{t("today.noScenarioChart")}</div>;
+  }
+
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = Math.max(1, max - min);
+  const left = min - span * 0.08;
+  const right = max + span * 0.08;
+  const width = 760;
+  const height = 210;
+  const padding = { left: 54, right: 34 };
+  const axisY = 116;
+  const xFor = (value: number) =>
+    padding.left + ((value - left) / (right - left || 1)) * (width - padding.left - padding.right);
+  const stopX = stop === null ? null : xFor(stop);
+  const entryX = xFor(entry);
+  const targetX = target === null ? null : xFor(target);
+  const noChaseX = noChase === null ? null : xFor(noChase);
+  const lossWidth = stopX === null ? 0 : Math.abs(entryX - stopX);
+  const gainWidth = targetX === null ? 0 : Math.abs(targetX - entryX);
+
+  return (
+    <svg className="scenario-payoff-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={t("today.scenarioPanel")}>
+      <line className="payoff-axis" x1={padding.left} y1={axisY} x2={width - padding.right} y2={axisY} />
+      {stopX !== null && (
+        <rect
+          className="payoff-loss"
+          x={Math.min(stopX, entryX)}
+          y={axisY - 22}
+          width={Math.max(4, lossWidth)}
+          height="44"
+          rx="6"
+        />
+      )}
+      {targetX !== null && (
+        <rect
+          className="payoff-gain"
+          x={Math.min(entryX, targetX)}
+          y={axisY - 22}
+          width={Math.max(4, gainWidth)}
+          height="44"
+          rx="6"
+        />
+      )}
+      <PayoffMarker x={entryX} y={axisY} label={t("brief.trigger")} value={entry} tone="entry" />
+      {stop !== null && stopX !== null && (
+        <PayoffMarker x={stopX} y={axisY} label={t("brief.stop")} value={stop} tone="stop" />
+      )}
+      {target !== null && targetX !== null && (
+        <PayoffMarker x={targetX} y={axisY} label={t("brief.target")} value={target} tone="target" />
+      )}
+      {noChase !== null && noChaseX !== null && (
+        <PayoffMarker x={noChaseX} y={axisY} label={t("detail.noChase")} value={noChase} tone="no-chase" />
+      )}
+      <text className="payoff-caption" x={padding.left} y={height - 13}>
+        {t("today.scenarioChartCaption")}
+      </text>
+    </svg>
+  );
+}
+
+function PayoffMarker({
+  x,
+  y,
+  label,
+  value,
+  tone,
+}: {
+  x: number;
+  y: number;
+  label: string;
+  value: number;
+  tone: "entry" | "stop" | "target" | "no-chase";
+}) {
+  const labelY = tone === "stop" ? y + 58 : y - 40;
+  const valueY = tone === "stop" ? y + 75 : y - 24;
+  return (
+    <g className={`payoff-marker payoff-marker-${tone}`}>
+      <line x1={x} y1={y - 42} x2={x} y2={y + 42} />
+      <circle cx={x} cy={y} r="5" />
+      <text x={x} y={labelY} textAnchor="middle">
+        {label}
+      </text>
+      <text x={x} y={valueY} textAnchor="middle">
+        {value.toFixed(2)}
+      </text>
+    </g>
   );
 }
 
@@ -784,7 +984,7 @@ function TodayTradePlanTable({ cards }: { cards: OpportunityCard[] }) {
         <tbody>
           {cards.map((card) => (
             <tr key={card.card_id}>
-              <td className="ticker" title={card.instrument_id}>
+              <td className="ticker" title={formatInstrumentDisplay(card.instrument_id, card.instrument_label)}>
                 {formatInstrumentDisplay(card.instrument_id, card.instrument_label)}
               </td>
               <td>{localizeAction(card.decision?.action ?? "watch", language)}</td>
@@ -795,9 +995,13 @@ function TodayTradePlanTable({ cards }: { cards: OpportunityCard[] }) {
               <td>{card.entry_plan.no_chase_above ?? "-"}</td>
               <td className="reason-cell">{localizeStrategy(card.primary_strategy_id, language)}</td>
               <td className="reason-cell">
-                {localizeReason(
-                  card.recommendation_summary?.buy_timing ?? card.rank_reasons[0] ?? card.thesis,
-                  language,
+                {formatInstrumentText(
+                  localizeReason(
+                    card.recommendation_summary?.buy_timing ?? card.rank_reasons[0] ?? card.thesis,
+                    language,
+                  ),
+                  card.instrument_id,
+                  card.instrument_label,
                 )}
               </td>
             </tr>
@@ -933,8 +1137,30 @@ function formatPercentValue(value: number | null): string {
   return `${percent.toFixed(0)}%`;
 }
 
-function formatNumber(value: number | null, suffix = ""): string {
-  return value === null ? "-" : `${value.toFixed(2)}${suffix}`;
+function formatNumber(value: number | null | undefined, suffix = ""): string {
+  return value === null || value === undefined || Number.isNaN(value) ? "-" : `${value.toFixed(2)}${suffix}`;
+}
+
+function formatSignedPercent(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "-";
+  }
+  return `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
+function parsePrice(value: string | number | null | undefined): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function pctBetween(entry: number | null, value: number | null) {
+  if (entry === null || entry === 0 || value === null) {
+    return null;
+  }
+  return ((value - entry) / entry) * 100;
 }
 
 function localizeReadiness(value: string, language: "zh" | "en"): string {

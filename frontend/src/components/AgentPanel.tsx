@@ -37,7 +37,14 @@ export function AgentPanel({ selectedCard, dataMode, symbols }: Props) {
     <aside className="agent-panel">
       <div className="panel-heading">
         <h2>{t("agent.title")}</h2>
-        <span className="count" title={selectedCard?.instrument_id}>
+        <span
+          className="count"
+          title={
+            selectedCard
+              ? formatInstrumentDisplay(selectedCard.instrument_id, selectedCard.instrument_label)
+              : undefined
+          }
+        >
           {selectedCard
             ? formatInstrumentDisplay(selectedCard.instrument_id, selectedCard.instrument_label)
             : t("agent.context")}

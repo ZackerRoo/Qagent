@@ -22,7 +22,7 @@ from qagent.db import create_session_factory, initialize_database
 from qagent.domain.models import OpportunityCard
 from qagent.factors.backtest import run_factor_backtest
 from qagent.jobs.automation import run_research_automation
-from qagent.jobs.daily_scan import run_daily_scan
+from qagent.jobs.daily_scan import DailyScanResult, run_daily_scan
 from qagent.jobs.full_market import (
     build_full_market_batch_symbols,
     full_market_batch_cache_key,
@@ -38,6 +38,7 @@ from qagent.market.a_share_universe import (
     resolve_symbol_tokens,
 )
 from qagent.market.instruments import format_instrument_label
+from qagent.market.instruments import market_symbol
 from qagent.market.tradable import search_cn_tradable_instruments
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE, DEFAULT_FREE_UNIVERSE
 from qagent.market.universes import UniverseCreate, builtin_universes, merge_universes
@@ -572,6 +573,7 @@ def factor_backtest(
         top_n=top_n,
     )
     payload = result.model_dump(mode="json")
+    payload["signals"] = [_attach_instrument_label(signal) for signal in payload.get("signals", [])]
     payload["data_health"].update(resolved.data_health)
     return payload
 
@@ -782,6 +784,14 @@ def update_paper_trade_status(provider: str = "fixture") -> dict[str, object]:
     return result.model_dump(mode="json")
 
 
+@router.delete("/paper-trades/{trade_id}")
+def delete_paper_trade(trade_id: str) -> dict[str, object]:
+    deleted = _paper_repo().delete_trade(trade_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="paper trade not found")
+    return {"deleted": True, "trade_id": trade_id}
+
+
 @router.post("/paper-trades/from-opportunity")
 def create_paper_trade_from_opportunity(
     request: PaperTradeFromOpportunityRequest,
@@ -842,6 +852,33 @@ def _build_daily_brief_response(
         raise HTTPException(status_code=400, detail="limit must be between 1 and 20")
     if scan_limit is None and fast:
         scan_limit = 80 if mode == "free" else None
+    if fast:
+        cached = _cached_daily_scan_for_brief(mode)
+        if cached is not None:
+            scan_result, cached_symbols, cached_health = cached
+            brief_health = {
+                "brief_provider": mode,
+                "brief_symbols": str(len(cached_symbols)),
+                "brief_requested_symbols": symbols or "",
+                "brief_news": "skipped",
+                "brief_mode": "fast",
+                "brief_scan_limit": "cache",
+                "brief_backtest": "skipped",
+                "brief_skip_backtest": "true",
+                **cached_health,
+            }
+            return build_daily_brief(
+                provider=mode,
+                symbols=cached_symbols,
+                scan_result=scan_result,
+                backtest_result=None,
+                catalyst_hypotheses=[],
+                position_risks=[],
+                provider_statuses=build_provider_status(),
+                limit=limit,
+                data_health=brief_health,
+            )
+
     resolved = _resolve_symbols_with_limit(
         mode,
         symbols,
@@ -911,6 +948,55 @@ def _build_daily_brief_response(
     return brief
 
 
+def _cached_daily_scan_for_brief(
+    mode: str,
+) -> tuple[DailyScanResult, list[str], dict[str, str]] | None:
+    repo = _repo()
+    cached = repo.get_latest_scan_result_cache_by_modes(
+        provider=mode,
+        modes={"full_market_scan", "today_scan_fallback", "full_market_batch"},
+        max_age=timedelta(days=7),
+    )
+    if cached is None:
+        return None
+    payload = deepcopy(cached.payload)
+    _hydrate_full_market_batch_payload(payload, repo, mode, cache_ttl_minutes=7 * 24 * 60)
+    cards = payload.get("cards")
+    if not isinstance(cards, list) or not cards:
+        return None
+    normalized = {
+        "cards": cards,
+        "items": payload.get("items") if isinstance(payload.get("items"), list) else [],
+        "strategy_health": payload.get("strategy_health")
+        if isinstance(payload.get("strategy_health"), list)
+        else [],
+        "factor_rankings": payload.get("factor_rankings")
+        if isinstance(payload.get("factor_rankings"), list)
+        else [],
+        "sector_strength": payload.get("sector_strength")
+        if isinstance(payload.get("sector_strength"), list)
+        else [],
+        "portfolio_plan": payload.get("portfolio_plan"),
+        "data_health": payload.get("data_health") if isinstance(payload.get("data_health"), dict) else {},
+    }
+    if not isinstance(normalized["portfolio_plan"], dict):
+        normalized["portfolio_plan"] = build_portfolio_plan(
+            [OpportunityCard.model_validate(card) for card in cards if isinstance(card, dict)]
+        ).model_dump(mode="json")
+    scan_result = DailyScanResult.model_validate(normalized)
+    raw_symbols = payload.get("symbols")
+    if not isinstance(raw_symbols, list):
+        raw_symbols = cached.symbols
+    symbols = [str(symbol) for symbol in raw_symbols if str(symbol)]
+    cache_health = {
+        "brief_cache": "hit",
+        "brief_cache_id": cached.cache_id,
+        "brief_cache_mode": cached.mode,
+        "brief_cache_created_at": cached.created_at.isoformat(),
+    }
+    return scan_result, symbols, cache_health
+
+
 @router.get("/backtest")
 def backtest(
     provider: str = "fixture",
@@ -951,7 +1037,7 @@ def backtest(
     return {
         "summary": result.summary.model_dump(mode="json"),
         "performance": [item.model_dump(mode="json") for item in result.performance],
-        "signals": [item.model_dump(mode="json") for item in result.signals],
+        "signals": [_model_payload_with_label(item) for item in result.signals],
         "data_health": {**result.data_health, **resolved.data_health},
     }
 
@@ -1007,7 +1093,7 @@ def portfolio_backtest(
 
     return {
         "summary": result.summary.model_dump(mode="json"),
-        "trades": [trade.model_dump(mode="json") for trade in result.trades],
+        "trades": [_model_payload_with_label(trade) for trade in result.trades],
         "equity_curve": [point.model_dump(mode="json") for point in result.equity_curve],
         "monthly_returns": [item.model_dump(mode="json") for item in result.monthly_returns],
         "data_health": {**result.data_health, **resolved.data_health},
@@ -1143,6 +1229,34 @@ def tradable_catalog(
     return result.model_dump(mode="json")
 
 
+@router.get("/instruments/labels")
+def instrument_labels(symbols: str = "") -> dict[str, object]:
+    requested = _normalize_symbol_list(symbols)
+    if requested:
+        labels: dict[str, str] = {}
+        for symbol in requested:
+            if symbol in labels:
+                continue
+            labels[symbol] = format_instrument_label(symbol)
+        return {
+            "labels": labels,
+            "data_health": {"requested": str(len(labels))},
+        }
+
+    # Return full tradable map in one shot for UI label hydration.
+    instruments = _repo().list_tradable_instruments(limit=20_000)
+    labels = {item.instrument_id: item.label for item in instruments}
+    if not labels:
+        from qagent.market.tradable import load_cn_tradable_instruments
+
+        catalog = load_cn_tradable_instruments(use_cache=True)
+        labels = {f"CN:{item.symbol}": item.label for item in catalog.items}
+    return {
+        "labels": labels,
+        "data_health": {"requested": str(len(labels))},
+    }
+
+
 @router.post("/full-market/scan")
 def full_market_scan(
     provider: str = "free",
@@ -1190,6 +1304,21 @@ def start_full_market_batch_scan(
     return _full_market_job_payload(job)
 
 
+def _normalize_symbol_list(raw: str) -> list[str]:
+    if not raw.strip():
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in raw.split(","):
+        normalized = value.strip().upper()
+        if not normalized:
+            continue
+        if normalized not in seen:
+            result.append(normalized)
+            seen.add(normalized)
+    return result
+
+
 @router.get("/full-market/batch-scan/latest")
 def latest_full_market_batch_scan(provider: str = "free") -> dict[str, object]:
     job = _repo().get_latest_full_market_scan_job(provider=provider.strip().lower())
@@ -1202,7 +1331,7 @@ def latest_full_market_batch_scan(provider: str = "free") -> dict[str, object]:
 def latest_full_market_batch_scan_result(
     provider: str = "free",
     include_etfs: bool = True,
-    cache_ttl_minutes: int = 1440,
+    cache_ttl_minutes: int = 7 * 24 * 60,
 ) -> dict[str, object]:
     _validate_scan_cache_ttl(cache_ttl_minutes)
     mode = provider.strip().lower()
@@ -1298,7 +1427,11 @@ def start_today_scan_task(
 def scan_tasks(limit: int = 20) -> dict[str, list[object]]:
     if limit <= 0 or limit > 100:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
-    return {"tasks": [record.model_dump(mode="json") for record in _task_manager.list(limit)]}
+    tasks = [
+        _enrich_scan_task_result(record.model_dump(mode="json"))
+        for record in _task_manager.list(limit)
+    ]
+    return {"tasks": tasks}
 
 
 @router.get("/scan-tasks/{task_id}")
@@ -1306,7 +1439,16 @@ def scan_task(task_id: str) -> dict[str, object]:
     record = _task_manager.get(task_id)
     if record is None:
         raise HTTPException(status_code=404, detail="scan task not found")
-    return record.model_dump(mode="json")
+    return _enrich_scan_task_result(record.model_dump(mode="json"))
+
+
+def _enrich_scan_task_result(payload: dict[str, object]) -> dict[str, object]:
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return payload
+    _relabel_instrument_payload(result)
+    _hydrate_legacy_opportunity_cards(result)
+    return payload
 
 
 def _full_market_scan_payload(
@@ -1335,6 +1477,7 @@ def _full_market_scan_payload(
         "portfolio_plan": result.scan.portfolio_plan.model_dump(mode="json"),
         "data_health": result.data_health,
     }
+    _relabel_instrument_payload(payload)
     _repo().save_scan_result_cache(
         cache_key=_full_market_scan_cache_key(mode, max_symbols, include_etfs, sync_if_empty),
         provider=mode,
@@ -1351,8 +1494,8 @@ def _validate_full_market_scan_params(max_symbols: int) -> None:
 
 
 def _validate_scan_cache_ttl(cache_ttl_minutes: int) -> None:
-    if cache_ttl_minutes < 0 or cache_ttl_minutes > 1440:
-        raise HTTPException(status_code=400, detail="cache_ttl_minutes must be between 0 and 1440")
+    if cache_ttl_minutes < 0 or cache_ttl_minutes > 7 * 24 * 60:
+        raise HTTPException(status_code=400, detail="cache_ttl_minutes must be between 0 and 10080")
 
 
 def _validate_full_market_batch_scan_params(
@@ -1390,6 +1533,7 @@ def _recent_full_market_scan_payload(
     )
     if cached is not None:
         payload = deepcopy(cached.payload)
+        _relabel_instrument_payload(payload)
         data_health = payload.setdefault("data_health", {})
         if isinstance(data_health, dict):
             data_health["scan_result_cache"] = "hit"
@@ -1406,6 +1550,7 @@ def _recent_full_market_scan_payload(
     )
     if payload is None:
         return None
+    _relabel_instrument_payload(payload)
     _repo().save_scan_result_cache(
         cache_key=cache_key,
         provider=mode,
@@ -1462,6 +1607,7 @@ def _hydrate_full_market_batch_payload(
     provider: str,
     cache_ttl_minutes: int,
 ) -> None:
+    _relabel_instrument_payload(payload)
     data_health = payload.setdefault("data_health", {})
     if not isinstance(data_health, dict):
         data_health = {}
@@ -1507,11 +1653,131 @@ def _hydrate_legacy_opportunity_cards(payload: dict[str, object]) -> int:
             hydrated.append(raw_card)
             continue
         enrich_opportunity_card(card)
+        if _should_refresh_instrument_label(card.instrument_id, card.instrument_label):
+            card.instrument_label = format_instrument_label(card.instrument_id)
         hydrated.append(card.model_dump(mode="json"))
         hydrated_count += 1
     if hydrated_count:
         payload["cards"] = hydrated
     return hydrated_count
+
+
+def _relabel_instrument_payload(payload: dict[str, object]) -> None:
+    _refresh_instrument_label(payload, "cards")
+    _refresh_instrument_label(payload, "items")
+    _refresh_instrument_label(payload, "factor_rankings")
+    _refresh_portfolio_labels(payload, "portfolio_plan")
+    _refresh_sector_instrument_labels(payload)
+
+
+def _model_payload_with_label(record) -> dict[str, object]:
+    return _attach_instrument_label(record.model_dump(mode="json"))
+
+
+def _snapshot_payload_with_label(record) -> dict[str, object]:
+    payload = _model_payload_with_label(record)
+    card = payload.get("card")
+    if isinstance(card, dict):
+        instrument_id = card.get("instrument_id")
+        current_label = card.get("instrument_label")
+        if isinstance(instrument_id, str):
+            if not isinstance(current_label, str):
+                current_label = None
+            if _should_refresh_instrument_label(instrument_id, current_label):
+                card["instrument_label"] = format_instrument_label(instrument_id)
+    return payload
+
+
+def _attach_instrument_label(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        return {}
+    instrument_id = payload.get("instrument_id")
+    if isinstance(instrument_id, str):
+        payload["instrument_label"] = format_instrument_label(instrument_id)
+    return payload
+
+
+def _refresh_instrument_label(payload: dict[str, object], key: str) -> None:
+    records = payload.get(key)
+    if not isinstance(records, list):
+        return
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        instrument_id = record.get("instrument_id")
+        if not isinstance(instrument_id, str):
+            continue
+        current_label = record.get("instrument_label")
+        if not isinstance(current_label, str):
+            current_label = None
+        if _should_refresh_instrument_label(instrument_id, current_label):
+            record["instrument_label"] = format_instrument_label(instrument_id)
+
+
+def _refresh_sector_instrument_labels(payload: dict[str, object]) -> None:
+    for key in ("leaders", "laggards"):
+        sector_records = payload.get("sector_strength")
+        if not isinstance(sector_records, list):
+            continue
+        for sector in sector_records:
+            if not isinstance(sector, dict):
+                continue
+            moves = sector.get(key)
+            if not isinstance(moves, list):
+                continue
+            for move in moves:
+                if not isinstance(move, dict):
+                    continue
+                instrument_id = move.get("instrument_id")
+                if not isinstance(instrument_id, str):
+                    continue
+                current_label = move.get("instrument_label")
+                if not isinstance(current_label, str):
+                    current_label = None
+                if _should_refresh_instrument_label(instrument_id, current_label):
+                    move["instrument_label"] = format_instrument_label(instrument_id)
+
+
+def _refresh_portfolio_labels(payload: dict[str, object], key: str) -> None:
+    portfolio = payload.get(key)
+    if not isinstance(portfolio, dict):
+        return
+    for section_key in ("allocations", "watchlist"):
+        entries = portfolio.get(section_key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            instrument_id = entry.get("instrument_id")
+            if not isinstance(instrument_id, str):
+                continue
+            current_label = entry.get("instrument_label")
+            if not isinstance(current_label, str):
+                current_label = None
+            if _should_refresh_instrument_label(instrument_id, current_label):
+                entry["instrument_label"] = format_instrument_label(instrument_id)
+
+
+def _should_refresh_instrument_label(instrument_id: str, current_label: str | None) -> bool:
+    if not current_label or not current_label.strip():
+        return True
+    symbol = market_symbol(instrument_id)
+    if not symbol:
+        return current_label.strip() == instrument_id.strip()
+
+    # 如果是 A 股代码类标的，任意不含中文的展示都要升级为可读中文标签。
+    # 旧数据中经常会留下“688059.SH”这类代码形式的标签。
+    if symbol.isdigit():
+        return not _contains_chinese(current_label)
+
+    if _contains_chinese(current_label):
+        return False
+    return current_label.strip() == symbol
+
+
+def _contains_chinese(value: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in value)
 
 
 def _strategy_health_from_card_calibration(payload: dict[str, object]) -> list[dict[str, object]]:
@@ -1663,7 +1929,7 @@ def opportunity_history(
     limit: int = 50,
 ) -> dict[str, list[object]]:
     snapshots = _repo().list_opportunity_snapshots(instrument_id=instrument_id, limit=limit)
-    return {"snapshots": [snapshot.model_dump(mode="json") for snapshot in snapshots]}
+    return {"snapshots": [_snapshot_payload_with_label(snapshot) for snapshot in snapshots]}
 
 
 @router.get("/outcomes")
@@ -1674,7 +1940,7 @@ def outcomes(
 ) -> dict[str, object]:
     replayed, data_health = _replay_outcomes(provider, instrument_id, limit)
     return {
-        "outcomes": [outcome.model_dump(mode="json") for outcome in replayed],
+        "outcomes": [_model_payload_with_label(outcome) for outcome in replayed],
         "data_health": data_health,
     }
 

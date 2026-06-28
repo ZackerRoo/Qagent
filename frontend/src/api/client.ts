@@ -13,6 +13,7 @@ import type {
   BriefRunsResponse,
   CatalystsResponse,
   DataProviderMode,
+  InstrumentLabelsResponse,
   ClearDataCacheResponse,
   DailyBriefResponse,
   DeliveriesResponse,
@@ -327,6 +328,12 @@ export async function updatePaperTrades(
   return apiPost<PaperUpdateResponse>(`/paper-trades/update?provider=${provider}`, {});
 }
 
+export async function deletePaperTrade(tradeId: string): Promise<{ deleted: boolean; trade_id: string }> {
+  return apiDelete<{ deleted: boolean; trade_id: string }>(
+    `/paper-trades/${encodeURIComponent(tradeId)}`,
+  );
+}
+
 export async function createPaperTradeFromOpportunity(
   payload: PaperTradeFromOpportunityPayload,
 ): Promise<PaperTradeFromOpportunityResponse> {
@@ -369,6 +376,16 @@ export async function fetchInstrumentSearch(
   limit = 20,
 ): Promise<InstrumentSearchResponse> {
   return apiGet<InstrumentSearchResponse>("/instruments/search", { q, limit });
+}
+
+export async function fetchInstrumentLabels(
+  symbols?: string[],
+): Promise<InstrumentLabelsResponse> {
+  const joined = symbols?.filter(Boolean).map((symbol) => symbol.trim().toUpperCase()).join(",");
+  return apiGet<InstrumentLabelsResponse>(
+    "/instruments/labels",
+    joined ? { symbols: joined } : undefined,
+  );
 }
 
 export async function syncTradableCatalog(
@@ -447,6 +464,7 @@ export async function fetchLatestFullMarketBatchResult(
   return apiGet<FullMarketScanResponse>("/full-market/batch-scan/latest-result", {
     provider,
     include_etfs: includeEtfs,
+    cache_ttl_minutes: 7 * 24 * 60,
   });
 }
 

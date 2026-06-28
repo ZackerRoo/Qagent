@@ -1,8 +1,10 @@
+import { useState } from "react";
+
 import { MarketOpportunitySections } from "../components/MarketOpportunitySections";
 import { OpportunityDetail } from "../components/OpportunityDetail";
 import { useI18n } from "../i18n";
 import type { TranslationKey } from "../i18n/catalog";
-import { formatInstrumentDisplay } from "../lib/instruments";
+import { formatInstrumentDisplay, formatInstrumentText } from "../lib/instruments";
 import {
   localizeAction,
   localizeFactorFlag,
@@ -55,6 +57,9 @@ export function Opportunities({
   onSelect,
 }: Props) {
   const { language, t } = useI18n();
+  const [visibleCardCount, setVisibleCardCount] = useState(40);
+  const visibleCards = cards.slice(0, visibleCardCount);
+  const hiddenCards = Math.max(0, cards.length - visibleCards.length);
 
   return (
     <div className="split-grid">
@@ -70,8 +75,22 @@ export function Opportunities({
           <OpportunitySummary cards={cards} items={items} />
           <PortfolioPlanPanel plan={portfolioPlan} />
           <SectorStrengthPanel items={sectorStrength} />
+          <div className="opportunity-list-toolbar">
+            <span>
+              {t("opportunities.showing")} {visibleCards.length}/{cards.length}
+            </span>
+            {hiddenCards > 0 && (
+              <button
+                className="icon-action secondary"
+                type="button"
+                onClick={() => setVisibleCardCount((count) => Math.min(cards.length, count + 40))}
+              >
+                {t("opportunities.loadMore")} +{Math.min(40, hiddenCards)}
+              </button>
+            )}
+          </div>
           <MarketOpportunitySections
-            cards={cards}
+            cards={visibleCards}
             selectedCardId={selectedCard?.card_id}
             onSelect={onSelect}
           />
@@ -153,7 +172,7 @@ function PortfolioPlanPanel({ plan }: { plan?: PortfolioPlan }) {
             <tbody>
               {plan.allocations.map((item) => (
                 <tr key={item.instrument_id}>
-                  <td className="ticker" title={item.instrument_id}>
+                  <td className="ticker" title={formatInstrumentDisplay(item.instrument_id, item.instrument_label)}>
                     {formatInstrumentDisplay(item.instrument_id, item.instrument_label)}
                   </td>
                   <td>{localizeAction(item.action, language)}</td>
@@ -285,7 +304,7 @@ function UnrecommendedReasonsTable({ items }: { items: ScanItem[] }) {
         <tbody>
           {rejected.map((item) => (
             <tr key={item.instrument_id}>
-              <td className="ticker" title={item.instrument_id}>
+              <td className="ticker" title={formatInstrumentDisplay(item.instrument_id, item.instrument_label)}>
                 {formatInstrumentDisplay(item.instrument_id, item.instrument_label)}
               </td>
               <td>
@@ -306,7 +325,11 @@ function UnrecommendedReasonsTable({ items }: { items: ScanItem[] }) {
                           )}`,
                       )
                       .join(language === "zh" ? "；" : "; ")
-                  : localizeReason(item.reason, language)}
+                  : formatInstrumentText(
+                      localizeReason(item.reason, language),
+                      item.instrument_id,
+                      item.instrument_label,
+                    )}
               </td>
             </tr>
           ))}
@@ -378,7 +401,7 @@ function ScanCoverageTable({ items }: { items: ScanItem[] }) {
         <tbody>
           {items.map((item) => (
             <tr key={item.instrument_id}>
-              <td className="ticker" title={item.instrument_id}>
+              <td className="ticker" title={formatInstrumentDisplay(item.instrument_id, item.instrument_label)}>
                 {formatInstrumentDisplay(item.instrument_id, item.instrument_label)}
               </td>
               <td>
@@ -397,7 +420,13 @@ function ScanCoverageTable({ items }: { items: ScanItem[] }) {
               <td>{formatScore(item.factor_score)}</td>
               <td>{item.factor_rank ?? "-"}</td>
               <td>{localizeProvider(item.provider, language)}</td>
-              <td className="reason-cell">{localizeReason(item.reason, language)}</td>
+              <td className="reason-cell">
+                {formatInstrumentText(
+                  localizeReason(item.reason, language),
+                  item.instrument_id,
+                  item.instrument_label,
+                )}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -434,7 +463,7 @@ function FactorRankingsTable({ items }: { items: FactorRanking[] }) {
           {items.map((item) => (
             <tr key={item.instrument_id}>
               <td>{item.factor_rank}</td>
-              <td className="ticker" title={item.instrument_id}>
+              <td className="ticker" title={formatInstrumentDisplay(item.instrument_id, item.instrument_label)}>
                 {formatInstrumentDisplay(item.instrument_id, item.instrument_label)}
               </td>
               <td>{formatScore(item.factor_score)}</td>
