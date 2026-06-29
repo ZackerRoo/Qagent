@@ -2157,6 +2157,267 @@ tbody tr.selected {
   font-style: normal;
 }
 
+.rotation-drill-button {
+  border: 1px solid rgba(250, 204, 21, 0.28);
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: var(--terminal-yellow);
+  background: rgba(250, 204, 21, 0.06);
+  cursor: pointer;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.rotation-drill-button.active,
+.rotation-drill-button:hover {
+  border-color: rgba(250, 204, 21, 0.7);
+  background: rgba(250, 204, 21, 0.14);
+}
+
+.rotation-drilldown {
+  display: grid;
+  gap: 12px;
+  border: 1px solid rgba(250, 204, 21, 0.24);
+  border-radius: 8px;
+  margin-top: 12px;
+  padding: 12px;
+  background: rgba(8, 13, 18, 0.76);
+}
+
+.rotation-drilldown > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.rotation-drilldown h3,
+.rotation-drilldown p {
+  margin: 0;
+}
+
+.rotation-drilldown header span {
+  color: var(--terminal-yellow);
+  font-size: 11px;
+}
+
+.rotation-drill-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.rotation-drill-card {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 9px;
+  color: var(--terminal-text);
+  background: rgba(17, 23, 29, 0.9);
+  text-align: left;
+  cursor: pointer;
+}
+
+.rotation-drill-card:hover {
+  border-color: rgba(250, 204, 21, 0.55);
+}
+
+.rotation-drill-card strong,
+.rotation-drill-card em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rotation-drill-card span,
+.rotation-drill-card small,
+.rotation-drill-card em {
+  color: var(--terminal-muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.signal-hub-card {
+  display: grid;
+  gap: 12px;
+  border: 1px solid rgba(77, 212, 255, 0.18);
+  border-radius: 8px;
+  margin: 12px 0;
+  padding: 12px;
+  background:
+    linear-gradient(135deg, rgba(77, 212, 255, 0.08), transparent 44%),
+    rgba(8, 13, 18, 0.78);
+}
+
+.signal-hub-hero {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.signal-hub-hero h3,
+.signal-hub-hero p,
+.signal-hub-hero small {
+  margin: 0;
+}
+
+.signal-hub-hero small {
+  color: var(--terminal-muted);
+}
+
+.signal-hub-score {
+  display: grid;
+  place-items: center;
+  width: 70px;
+  height: 70px;
+  border: 1px solid rgba(250, 204, 21, 0.36);
+  border-radius: 50%;
+  background: rgba(250, 204, 21, 0.08);
+}
+
+.signal-hub-score span {
+  color: var(--terminal-muted);
+  font-size: 11px;
+}
+
+.signal-hub-score strong {
+  color: var(--terminal-yellow);
+  font-size: 22px;
+}
+
+.signal-hub-components,
+.signal-hub-grid,
+.signal-alert-list {
+  display: grid;
+  gap: 8px;
+}
+
+.signal-hub-components {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.signal-hub-component {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 9px;
+  background: rgba(17, 23, 29, 0.86);
+}
+
+.signal-hub-component header,
+.signal-hub-grid header,
+.signal-alert-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.signal-hub-component header span,
+.signal-hub-component p,
+.signal-hub-grid p,
+.signal-alert-box p,
+.signal-alert-box small {
+  margin: 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.signal-hub-component i {
+  display: block;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.2);
+  overflow: hidden;
+}
+
+.signal-hub-component i::before {
+  content: "";
+  display: block;
+  width: var(--hub-width);
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #38bdf8, #facc15);
+}
+
+.signal-hub-grid {
+  grid-template-columns: 0.9fr 1.1fr;
+}
+
+.signal-hub-grid section,
+.signal-alert-box {
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(17, 23, 29, 0.66);
+}
+
+.signal-hub-grid h4,
+.signal-alert-box h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.signal-hub-grid header span {
+  color: var(--terminal-yellow);
+  font-size: 12px;
+}
+
+.signal-hub-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.signal-hub-metrics span,
+.signal-alert-list span {
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 999px;
+  padding: 4px 7px;
+  color: var(--terminal-muted);
+  background: rgba(15, 23, 42, 0.42);
+  font-size: 11px;
+}
+
+.signal-timeline {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.signal-timeline-event {
+  display: grid;
+  grid-template-columns: 100px 64px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.signal-timeline-event span {
+  color: var(--terminal-text);
+  font-size: 12px;
+}
+
+.signal-timeline-event strong {
+  color: var(--terminal-yellow);
+  font-size: 11px;
+}
+
+.signal-alert-box {
+  align-items: flex-start;
+}
+
+.signal-alert-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 220px;
+}
+
 .risk-veto-summary {
   display: flex;
   gap: 8px;
@@ -3334,6 +3595,12 @@ tbody tr.selected {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .rotation-drill-grid,
+  .signal-hub-components,
+  .signal-hub-grid {
+    grid-template-columns: 1fr;
+  }
+
   .full-scan-compact {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -3436,6 +3703,10 @@ tbody tr.selected {
   .signal-console-body,
   .signal-distribution-grid,
   .rotation-radar-grid,
+  .rotation-drill-grid,
+  .signal-hub-components,
+  .signal-hub-grid,
+  .signal-alert-list,
   .full-scan-compact,
   .signal-risk-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3443,7 +3714,21 @@ tbody tr.selected {
 
   .signal-console-body,
   .signal-distribution-grid,
-  .rotation-radar-grid {
+  .rotation-radar-grid,
+  .rotation-drill-grid,
+  .signal-hub-components,
+  .signal-hub-grid,
+  .signal-alert-list,
+  .signal-hub-hero,
+  .signal-alert-box {
+    grid-template-columns: 1fr;
+  }
+
+  .signal-alert-box {
+    display: grid;
+  }
+
+  .signal-timeline-event {
     grid-template-columns: 1fr;
   }
 }

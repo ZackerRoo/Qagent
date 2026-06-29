@@ -62,6 +62,7 @@ from qagent.providers.factory import build_market_data_provider
 from qagent.providers.status import build_provider_status
 from qagent.recommendations.enrichment import enrich_opportunity_card
 from qagent.recommendations.portfolio import build_portfolio_plan
+from qagent.recommendations.signal_hub import build_signal_hub
 from qagent.storage.paper import PaperTradingRepository
 from qagent.storage.repository import (
     AlertRuleCreate,
@@ -443,7 +444,7 @@ def _paper_repo() -> PaperTradingRepository:
 def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict[str, object]:
     result, mode, instrument_ids = _scan(provider, symbols)
     _repo().save_scan_run(provider=mode, mode=mode, symbols=instrument_ids, result=result)
-    return {
+    payload = {
         "cards": [card.model_dump(mode="json") for card in result.cards],
         "items": [item.model_dump(mode="json") for item in result.items],
         "strategy_health": [item.model_dump(mode="json") for item in result.strategy_health],
@@ -453,6 +454,8 @@ def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict
         "portfolio_plan": result.portfolio_plan.model_dump(mode="json"),
         "data_health": result.data_health,
     }
+    _attach_signal_hub_payload(payload)
+    return payload
 
 
 @router.get("/market-bars")
@@ -585,7 +588,7 @@ def factor_backtest(
 @router.get("/overview")
 def overview(provider: str = "fixture", symbols: str | None = None) -> dict[str, object]:
     result, _, _ = _scan(provider, symbols)
-    return {
+    payload = {
         "market_regime": {
             "US": "development_fixture",
             "CN": "development_fixture",
@@ -598,6 +601,8 @@ def overview(provider: str = "fixture", symbols: str | None = None) -> dict[str,
         "portfolio_plan": result.portfolio_plan.model_dump(mode="json"),
         "data_health": result.data_health,
     }
+    _attach_signal_hub_payload(payload, cards_key="top_cards")
+    return payload
 
 
 @router.get("/daily-brief")
@@ -1479,6 +1484,7 @@ def _enrich_scan_task_result(payload: dict[str, object]) -> dict[str, object]:
     _relabel_instrument_payload(result)
     _hydrate_legacy_opportunity_cards(result)
     _attach_rotation_radar_payload(result)
+    _attach_signal_hub_payload(result)
     return payload
 
 
@@ -1513,6 +1519,7 @@ def _full_market_scan_payload(
         "data_health": result.data_health,
     }
     _relabel_instrument_payload(payload)
+    _attach_signal_hub_payload(payload)
     _repo().save_scan_result_cache(
         cache_key=_full_market_scan_cache_key(mode, max_symbols, include_etfs, sync_if_empty),
         provider=mode,
@@ -1570,6 +1577,7 @@ def _recent_full_market_scan_payload(
         payload = deepcopy(cached.payload)
         _relabel_instrument_payload(payload)
         _attach_rotation_radar_payload(payload)
+        _attach_signal_hub_payload(payload)
         data_health = payload.setdefault("data_health", {})
         if isinstance(data_health, dict):
             data_health["scan_result_cache"] = "hit"
@@ -1588,6 +1596,7 @@ def _recent_full_market_scan_payload(
         return None
     _relabel_instrument_payload(payload)
     _attach_rotation_radar_payload(payload)
+    _attach_signal_hub_payload(payload)
     _repo().save_scan_result_cache(
         cache_key=cache_key,
         provider=mode,
@@ -1637,6 +1646,7 @@ def _recent_scan_run_fallback_payload(
         "data_health": data_health,
     }
     _attach_rotation_radar_payload(payload)
+    _attach_signal_hub_payload(payload)
     return payload
 
 
@@ -1672,6 +1682,7 @@ def _hydrate_full_market_batch_payload(
             payload["strategy_health"] = strategy_health
             data_health["strategy_health_source"] = "card_strategy_calibration"
     _attach_rotation_radar_payload(payload)
+    _attach_signal_hub_payload(payload)
 
 
 def _hydrate_legacy_opportunity_cards(payload: dict[str, object]) -> int:
@@ -1736,6 +1747,98 @@ def _attach_rotation_radar_payload(payload: dict[str, object]) -> None:
                 continue
 
     payload["rotation_radar"] = _rotation_radar_payload(cards, sectors)
+
+
+def _attach_signal_hub_payload(
+    payload: dict[str, object],
+    cards_key: str = "cards",
+) -> None:
+    raw_cards = payload.get(cards_key)
+    if not isinstance(raw_cards, list):
+        return
+
+    enriched_cards: list[object] = []
+    rotation = payload.get("rotation_radar")
+    for raw_card in raw_cards:
+        if not isinstance(raw_card, dict):
+            enriched_cards.append(raw_card)
+            continue
+        try:
+            card = OpportunityCard.model_validate(raw_card)
+        except Exception:
+            enriched_cards.append(raw_card)
+            continue
+        rotation_score, rotation_name = _card_rotation_score(card, rotation)
+        card.signal_hub = build_signal_hub(
+            card,
+            rotation_score=rotation_score,
+            rotation_name=rotation_name,
+        )
+        enriched_cards.append(card.model_dump(mode="json"))
+    payload[cards_key] = enriched_cards
+
+
+def _card_rotation_score(
+    card: OpportunityCard,
+    rotation: object,
+) -> tuple[float | None, str | None]:
+    if not isinstance(rotation, dict):
+        return None, None
+    raw_themes = rotation.get("themes")
+    if not isinstance(raw_themes, list):
+        return None, None
+    matched: list[tuple[float, str]] = []
+    card_keys = _card_rotation_keys(card)
+    for raw_theme in raw_themes:
+        if not isinstance(raw_theme, dict):
+            continue
+        name = raw_theme.get("name")
+        score = raw_theme.get("score")
+        if not isinstance(name, str) or not isinstance(score, (int, float)):
+            continue
+        leaders = raw_theme.get("leaders")
+        leader_ids = set()
+        if isinstance(leaders, list):
+            leader_ids = {
+                str(leader.get("instrument_id"))
+                for leader in leaders
+                if isinstance(leader, dict)
+            }
+        if card.instrument_id in leader_ids or name in card_keys:
+            matched.append((float(score), name))
+    if not matched:
+        return None, None
+    return max(matched, key=lambda item: item[0])
+
+
+def _card_rotation_keys(card: OpportunityCard) -> set[str]:
+    keys: set[str] = set()
+    if card.asset_type == "ETF" or card.opportunity_bucket == "etf_index":
+        keys.add("ETF/指数工具")
+    if not card.market_context:
+        return keys
+    keys.add(card.market_context.industry)
+    keys.update(card.market_context.themes)
+    for membership in card.market_context.index_memberships:
+        keys.add(_normalize_rotation_membership(membership))
+    return keys
+
+
+def _normalize_rotation_membership(value: str) -> str:
+    text = value.strip()
+    if "科创" in text:
+        return "科创板"
+    if "创业" in text:
+        return "创业板"
+    if "沪深300" in text:
+        return "沪深300"
+    if "中证500" in text:
+        return "中证500"
+    if "中证1000" in text:
+        return "中证1000"
+    if "ETF" in text.upper():
+        return "ETF/指数工具"
+    return text
 
 
 def _relabel_instrument_payload(payload: dict[str, object]) -> None:

@@ -34,3 +34,15 @@ def test_overview_returns_market_rotation_radar():
     assert radar["data_health"]["rotation_cards"] == "1"
     assert radar["themes"]
     assert radar["themes"][0]["leaders"][0]["instrument_label"] == "平安银行 000001.SZ"
+
+
+def test_opportunities_return_signal_hub_for_cards():
+    client = TestClient(create_app())
+
+    response = client.get("/api/opportunities?provider=fixture&symbols=CN:000001")
+
+    assert response.status_code == 200
+    card = response.json()["cards"][0]
+    assert card["signal_hub"]["components"]
+    assert card["signal_hub"]["similar_validation"]["summary"]
+    assert any(item["kind"] == "signal_weakened" for item in card["signal_hub"]["alert_suggestions"])

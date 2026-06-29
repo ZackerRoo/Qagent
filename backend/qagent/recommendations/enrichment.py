@@ -6,6 +6,7 @@ from qagent.recommendations.explainability import (
     build_execution_plan,
 )
 from qagent.recommendations.rotation import classify_opportunity
+from qagent.recommendations.signal_hub import build_signal_hub
 from qagent.recommendations.summary import build_recommendation_summary
 
 
@@ -23,4 +24,5 @@ def enrich_opportunity_card(card: OpportunityCard) -> OpportunityCard:
     card.recommendation_summary = build_recommendation_summary(card)
     card.confidence_explanation = build_confidence_explanation(card)
     card.execution_plan = build_execution_plan(card)
+    card.signal_hub = build_signal_hub(card)
     return card

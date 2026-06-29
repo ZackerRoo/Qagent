@@ -313,6 +313,7 @@ const ALERT_KIND_LABELS: LabelMap = {
   entry_trigger: { zh: "入场触发", en: "Entry trigger" },
   stop_guard: { zh: "止损保护", en: "Stop guard" },
   target_1_reached: { zh: "目标 1 到达", en: "Target 1 reached" },
+  signal_weakened: { zh: "信号转弱", en: "Signal weakened" },
 };
 
 const CATALYST_LABELS: LabelMap = {

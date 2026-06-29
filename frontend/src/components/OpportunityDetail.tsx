@@ -26,6 +26,7 @@ import {
 } from "../lib/localize";
 import type { DataProviderMode, MarketBarsResponse, OpportunityCard } from "../types";
 import { OpportunityChart } from "./OpportunityChart";
+import { SignalHubPanel } from "./SignalHubPanel";
 import { StatusBadge } from "./StatusBadge";
 
 export function OpportunityDetail({
@@ -85,6 +86,8 @@ export function OpportunityDetail({
       <p className="thesis">
         {formatInstrumentText(localizeReason(card.thesis, language), card.instrument_id, card.instrument_label)}
       </p>
+
+      <SignalHubPanel hub={card.signal_hub} />
 
       {card.recommendation_summary && (
         <div className="recommendation-card">

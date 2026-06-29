@@ -1,4 +1,4 @@
-import { useMemo, type CSSProperties } from "react";
+import { useMemo, useState, type CSSProperties } from "react";
 
 import { useI18n } from "../i18n";
 import { formatInstrumentDisplay } from "../lib/instruments";
@@ -13,10 +13,13 @@ type Props = {
 
 export function MarketRotationRadarPanel({ radar, cards = [], onSelect }: Props) {
   const { language, t } = useI18n();
+  const [selectedThemeKey, setSelectedThemeKey] = useState("");
   const cardByInstrument = useMemo(() => {
     return new Map(cards.map((card) => [card.instrument_id, card]));
   }, [cards]);
   const themes = radar?.themes ?? [];
+  const selectedTheme = themes.find((theme) => themeKey(theme) === selectedThemeKey);
+  const drilldownCards = selectedTheme ? cards.filter((card) => cardMatchesTheme(card, selectedTheme)) : [];
 
   if (!themes.length) {
     return (
@@ -50,10 +53,21 @@ export function MarketRotationRadarPanel({ radar, cards = [], onSelect }: Props)
             theme={theme}
             cardByInstrument={cardByInstrument}
             onSelect={onSelect}
+            onDrill={() => setSelectedThemeKey(themeKey(theme))}
+            isSelected={themeKey(theme) === selectedThemeKey}
             language={language}
           />
         ))}
       </div>
+      {selectedTheme && (
+        <RotationDrilldown
+          theme={selectedTheme}
+          cards={drilldownCards}
+          onSelect={onSelect}
+          onClose={() => setSelectedThemeKey("")}
+          language={language}
+        />
+      )}
     </section>
   );
 }
@@ -62,11 +76,15 @@ function RotationThemeCard({
   theme,
   cardByInstrument,
   onSelect,
+  onDrill,
+  isSelected,
   language,
 }: {
   theme: RotationTheme;
   cardByInstrument: Map<string, OpportunityCard>;
   onSelect?: (card: OpportunityCard) => void;
+  onDrill(): void;
+  isSelected: boolean;
   language: "zh" | "en";
 }) {
   const { t } = useI18n();
@@ -124,6 +142,13 @@ function RotationThemeCard({
 
       <div className="rotation-footer">
         <span className="rotation-stance">{theme.stance}</span>
+        <button
+          className={`rotation-drill-button ${isSelected ? "active" : ""}`}
+          type="button"
+          onClick={onDrill}
+        >
+          {t("rotation.drilldown")}
+        </button>
         <div className="rotation-leaders" aria-label={t("rotation.leaders")}>
           {theme.leaders.map((leader) => {
             const card = cardByInstrument.get(leader.instrument_id);
@@ -147,6 +172,85 @@ function RotationThemeCard({
       </div>
     </article>
   );
+}
+
+function RotationDrilldown({
+  theme,
+  cards,
+  onSelect,
+  onClose,
+  language,
+}: {
+  theme: RotationTheme;
+  cards: OpportunityCard[];
+  onSelect?: (card: OpportunityCard) => void;
+  onClose(): void;
+  language: "zh" | "en";
+}) {
+  const { t } = useI18n();
+  const visible = cards.slice(0, 18);
+
+  return (
+    <div className="rotation-drilldown">
+      <header>
+        <div>
+          <span>{categoryLabel(theme.category, t)}</span>
+          <h3>{theme.name}</h3>
+          <p>{theme.summary}</p>
+        </div>
+        <button className="icon-action secondary" type="button" onClick={onClose}>
+          {t("common.close")}
+        </button>
+      </header>
+      <div className="rotation-drill-grid">
+        {visible.map((card) => (
+          <button
+            key={card.card_id}
+            type="button"
+            onClick={() => onSelect?.(card)}
+            className="rotation-drill-card"
+          >
+            <strong>{formatInstrumentDisplay(card.instrument_id, card.instrument_label)}</strong>
+            <span>{localizeAction(card.decision?.action ?? "watch", language)}</span>
+            <small>
+              {t("brief.trigger")} {card.entry_plan.trigger_price ?? "-"} / {t("brief.stop")}{" "}
+              {card.exit_plan.initial_stop ?? "-"}
+            </small>
+            <em>{card.recommendation_summary?.headline ?? card.thesis}</em>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function themeKey(theme: RotationTheme) {
+  return `${theme.category}:${theme.name}`;
+}
+
+function cardMatchesTheme(card: OpportunityCard, theme: RotationTheme) {
+  if (theme.name === "ETF/指数工具") {
+    return card.asset_type === "ETF" || card.opportunity_bucket === "etf_index";
+  }
+  if (!card.market_context) {
+    return false;
+  }
+  const keys = new Set<string>([
+    card.market_context.industry,
+    ...card.market_context.themes,
+    ...card.market_context.index_memberships.map(normalizeIndexName),
+  ]);
+  return keys.has(theme.name);
+}
+
+function normalizeIndexName(value: string) {
+  if (value.includes("科创")) return "科创板";
+  if (value.includes("创业")) return "创业板";
+  if (value.includes("沪深300")) return "沪深300";
+  if (value.includes("中证500")) return "中证500";
+  if (value.includes("中证1000")) return "中证1000";
+  if (value.toUpperCase().includes("ETF")) return "ETF/指数工具";
+  return value;
 }
 
 function categoryLabel(category: string, t: ReturnType<typeof useI18n>["t"]) {

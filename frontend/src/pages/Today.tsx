@@ -5,12 +5,14 @@ import {
   fetchFullMarketBatchScan,
   fetchLatestFullMarketBatchResult,
   fetchLatestFullMarketBatchScan,
+  saveAlertRule,
   fetchScanTask,
   startFullMarketBatchScan,
   startTodayScanTask,
 } from "../api/client";
 import { MarketRotationRadarPanel } from "../components/MarketRotationRadar";
 import { MarketOpportunitySections } from "../components/MarketOpportunitySections";
+import { SignalHubPanel } from "../components/SignalHubPanel";
 import { useI18n } from "../i18n";
 import { formatInstrumentDisplay, formatInstrumentText } from "../lib/instruments";
 import {
@@ -29,6 +31,7 @@ import type {
   OpportunityCard,
   ResearchProfile,
   ScanTask,
+  SignalAlertSuggestion,
   StrategyHealth,
 } from "../types";
 
@@ -672,6 +675,8 @@ function SelectedOpportunityWorkup({
   const { language, t } = useI18n();
   const [paperMessage, setPaperMessage] = useState("");
   const [isAddingPaper, setIsAddingPaper] = useState(false);
+  const [alertMessage, setAlertMessage] = useState("");
+  const [isSavingAlerts, setIsSavingAlerts] = useState(false);
   const execution = card.execution_plan;
   const confidence = card.confidence_explanation;
   const actionLabel =
@@ -728,6 +733,31 @@ function SelectedOpportunityWorkup({
     }
   }
 
+  async function saveSignalAlerts(alerts: SignalAlertSuggestion[]) {
+    try {
+      setIsSavingAlerts(true);
+      setAlertMessage("");
+      for (const alert of alerts) {
+        await saveAlertRule({
+          rule_id: alert.rule_id,
+          instrument_id: alert.instrument_id,
+          kind: alert.kind,
+          operator: alert.operator,
+          threshold: alert.threshold,
+        });
+      }
+      setAlertMessage(
+        language === "zh"
+          ? `已保存 ${alerts.length} 条提醒。`
+          : `Saved ${alerts.length} alerts.`,
+      );
+    } catch (caught) {
+      setAlertMessage(caught instanceof Error ? caught.message : t("today.paperFailed"));
+    } finally {
+      setIsSavingAlerts(false);
+    }
+  }
+
   return (
     <section className="panel today-workup">
       <div className="panel-heading">
@@ -758,6 +788,13 @@ function SelectedOpportunityWorkup({
       <p className="workup-headline">
         {formatInstrumentText(localizeReason(headline, language), card.instrument_id, card.instrument_label)}
       </p>
+
+      <SignalHubPanel
+        hub={card.signal_hub}
+        onSaveAlerts={saveSignalAlerts}
+        isSavingAlerts={isSavingAlerts}
+        saveMessage={alertMessage}
+      />
 
       <OpportunityScenarioPanel card={card} />
 

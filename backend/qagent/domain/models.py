@@ -232,6 +232,54 @@ class ConfidenceExplanation(BaseModel):
     data_checks: list[ConfidenceDriver] = Field(default_factory=list)
 
 
+class SignalHubComponent(BaseModel):
+    key: str
+    label: str
+    score: float = Field(ge=0.0, le=1.0)
+    status: str
+    detail: str
+
+
+class SimilarSignalValidation(BaseModel):
+    readiness: str
+    sample_count: int
+    win_rate_10d: float | None = None
+    avg_return_10d: float | None = None
+    avg_return_20d: float | None = None
+    max_loss_10d: float | None = None
+    verdict: str
+    summary: str
+
+
+class RecommendationTimelineEvent(BaseModel):
+    key: str
+    label: str
+    status: str
+    severity: str
+    detail: str
+
+
+class SignalAlertSuggestion(BaseModel):
+    rule_id: str
+    instrument_id: str
+    kind: str
+    operator: str
+    threshold: Decimal
+    rationale: str
+
+
+class SignalHub(BaseModel):
+    trust_score: float = Field(ge=0.0, le=1.0)
+    label: str
+    verdict: str
+    rotation_context: str | None = None
+    next_action: str
+    components: list[SignalHubComponent] = Field(default_factory=list)
+    similar_validation: SimilarSignalValidation
+    timeline: list[RecommendationTimelineEvent] = Field(default_factory=list)
+    alert_suggestions: list[SignalAlertSuggestion] = Field(default_factory=list)
+
+
 class ExecutionPlanSummary(BaseModel):
     action: str
     action_label: str
@@ -299,4 +347,5 @@ class OpportunityCard(BaseModel):
     strategy_calibration: StrategyCalibration | None = None
     recommendation_summary: RecommendationSummary | None = None
     confidence_explanation: ConfidenceExplanation | None = None
+    signal_hub: SignalHub | None = None
     execution_plan: ExecutionPlanSummary | None = None

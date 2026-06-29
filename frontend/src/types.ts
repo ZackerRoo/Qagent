@@ -142,6 +142,7 @@ export type OpportunityCard = {
   strategy_calibration: StrategyCalibration | null;
   recommendation_summary: RecommendationSummary | null;
   confidence_explanation?: ConfidenceExplanation | null;
+  signal_hub?: SignalHub | null;
   execution_plan?: ExecutionPlanSummary | null;
 };
 
@@ -194,6 +195,54 @@ export type ConfidenceExplanation = {
   positive_drivers: ConfidenceDriver[];
   risk_drivers: ConfidenceDriver[];
   data_checks: ConfidenceDriver[];
+};
+
+export type SignalHubComponent = {
+  key: string;
+  label: string;
+  score: number;
+  status: string;
+  detail: string;
+};
+
+export type SimilarSignalValidation = {
+  readiness: string;
+  sample_count: number;
+  win_rate_10d: number | null;
+  avg_return_10d: number | null;
+  avg_return_20d: number | null;
+  max_loss_10d: number | null;
+  verdict: string;
+  summary: string;
+};
+
+export type RecommendationTimelineEvent = {
+  key: string;
+  label: string;
+  status: string;
+  severity: string;
+  detail: string;
+};
+
+export type SignalAlertSuggestion = {
+  rule_id: string;
+  instrument_id: string;
+  kind: string;
+  operator: ">=" | "<=";
+  threshold: string;
+  rationale: string;
+};
+
+export type SignalHub = {
+  trust_score: number;
+  label: string;
+  verdict: string;
+  rotation_context: string | null;
+  next_action: string;
+  components: SignalHubComponent[];
+  similar_validation: SimilarSignalValidation;
+  timeline: RecommendationTimelineEvent[];
+  alert_suggestions: SignalAlertSuggestion[];
 };
 
 export type ExecutionPlanSummary = {
