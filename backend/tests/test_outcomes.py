@@ -315,3 +315,8 @@ def test_summarize_recommendation_closure_tracks_recent_windows():
         "CN:BBB",
         "CN:CCC",
     ]
+    assert [outcome.instrument_id for outcome in closure.completed_outcomes] == [
+        "CN:AAA",
+        "CN:BBB",
+        "CN:CCC",
+    ]

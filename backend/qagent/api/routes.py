@@ -2060,10 +2060,16 @@ def recommendation_closure(
         for outcome in payload.get("latest_outcomes", [])
         if isinstance(outcome, dict)
     ]
+    payload["completed_outcomes"] = [
+        _attach_existing_instrument_label(outcome)
+        for outcome in payload.get("completed_outcomes", [])
+        if isinstance(outcome, dict)
+    ]
     payload["data_health"] = {
         **data_health,
         "closure_windows": "30,60,90",
         "as_of": str(as_of),
+        "completed_outcomes": str(len(payload["completed_outcomes"])),
     }
     return payload
 

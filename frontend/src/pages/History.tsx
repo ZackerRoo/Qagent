@@ -919,6 +919,10 @@ function BacktestScopeNote({
 function RecommendationClosurePanel({ closure }: { closure: RecommendationClosureResponse }) {
   const { language, t } = useI18n();
   const latestWindow = closure.windows[0];
+  const validatedWindow = closure.windows.find((window) => window.completed_count > 0) ?? latestWindow;
+  const outcomeRows = closure.completed_outcomes.length
+    ? closure.completed_outcomes
+    : closure.latest_outcomes;
   return (
     <section className="panel">
       <div className="panel-heading">
@@ -935,21 +939,39 @@ function RecommendationClosurePanel({ closure }: { closure: RecommendationClosur
       {closure.windows.length ? (
         <div className="stack">
           <div className="metric-grid closure-window-grid">
+            <div>
+              <span>{t("history.validatedWindow")}</span>
+              <strong>
+                {validatedWindow
+                  ? `${validatedWindow.window_days}${t("history.daysWindow")}`
+                  : "-"}
+              </strong>
+              <small>
+                {t("history.validatedSamples")} {validatedWindow?.completed_count ?? 0}/{validatedWindow?.sample_count ?? 0}
+              </small>
+            </div>
             {closure.windows.map((window) => (
               <div key={window.window_days}>
                 <span>{window.window_days}{t("history.daysWindow")}</span>
-                <strong>{formatRatio(window.win_rate)}</strong>
+                <strong>
+                  {window.win_rate === null ? t("history.waitingValidation") : formatRatio(window.win_rate)}
+                </strong>
                 <small>
-                  {t("common.samples")} {window.sample_count} · {t("history.triggerRate")} {formatRatio(window.trigger_rate)}
+                  {t("history.completedSamples")} {window.completed_count}/{window.sample_count} · {t("history.pendingSamples")} {window.pending_count}
                 </small>
               </div>
             ))}
             <div>
               <span>{t("history.avgReturn")}</span>
-              <strong>{formatNumber(latestWindow?.avg_return_10d ?? null, "%")}</strong>
-              <small>10D · {t("history.maxDd")} {formatNumber(latestWindow?.max_drawdown_pct ?? null, "%")}</small>
+              <strong>{formatNumber(validatedWindow?.avg_return_10d ?? null, "%")}</strong>
+              <small>
+                10D · {t("history.maxDd")} {formatNumber(validatedWindow?.max_drawdown_pct ?? null, "%")}
+              </small>
             </div>
           </div>
+          {latestWindow?.completed_count === 0 ? (
+            <p className="compact-note">{t("history.closurePendingExplanation")}</p>
+          ) : null}
           <div className="validation-grid">
             <ClosureWindowChart
               title={t("history.closureWinChart")}
@@ -964,38 +986,45 @@ function RecommendationClosurePanel({ closure }: { closure: RecommendationClosur
               valueFormatter={(value) => `${value.toFixed(2)}%`}
             />
           </div>
-          {closure.latest_outcomes.length ? (
-            <div className="table-shell">
-              <table>
-                <thead>
-                  <tr>
-                    <th>{t("common.date")}</th>
-                    <th>{t("common.ticker")}</th>
-                    <th>{t("common.status")}</th>
-                    <th>{t("history.triggered")}</th>
-                    <th>10D</th>
-                    <th>20D</th>
-                    <th>{t("history.maxDd")}</th>
-                    <th>{t("history.maxRunup")}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {closure.latest_outcomes.slice(0, PREVIEW_ROW_LIMIT).map((outcome) => (
-                    <tr key={outcome.snapshot_id}>
-                      <td>{outcome.signal_date ?? t("common.pending")}</td>
-                      <td className="ticker" title={formatInstrumentDisplay(outcome.instrument_id, outcome.instrument_label)}>
-                        {formatInstrumentDisplay(outcome.instrument_id, outcome.instrument_label)}
-                      </td>
-                      <td>{localizeStatus(outcome.outcome_status, language)}</td>
-                      <td>{outcome.triggered === null ? "-" : outcome.triggered ? t("common.triggered") : t("common.pending")}</td>
-                      <td>{formatNumber(outcome.return_10d, "%")}</td>
-                      <td>{formatNumber(outcome.return_20d, "%")}</td>
-                      <td>{formatNumber(outcome.max_drawdown_pct, "%")}</td>
-                      <td>{formatNumber(outcome.max_runup_pct, "%")}</td>
+          {outcomeRows.length ? (
+            <div className="stack">
+              <p className="compact-note">
+                {closure.completed_outcomes.length
+                  ? t("history.validatedOutcomes")
+                  : t("history.pendingOutcomes")}
+              </p>
+              <div className="table-shell">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>{t("common.date")}</th>
+                      <th>{t("common.ticker")}</th>
+                      <th>{t("common.status")}</th>
+                      <th>{t("history.triggered")}</th>
+                      <th>10D</th>
+                      <th>20D</th>
+                      <th>{t("history.maxDd")}</th>
+                      <th>{t("history.maxRunup")}</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {outcomeRows.slice(0, PREVIEW_ROW_LIMIT).map((outcome) => (
+                      <tr key={outcome.snapshot_id}>
+                        <td>{outcome.signal_date ?? t("common.pending")}</td>
+                        <td className="ticker" title={formatInstrumentDisplay(outcome.instrument_id, outcome.instrument_label)}>
+                          {formatInstrumentDisplay(outcome.instrument_id, outcome.instrument_label)}
+                        </td>
+                        <td>{localizeStatus(outcome.outcome_status, language)}</td>
+                        <td>{outcome.triggered === null ? "-" : outcome.triggered ? t("common.triggered") : t("common.pending")}</td>
+                        <td>{formatNumber(outcome.return_10d, "%")}</td>
+                        <td>{formatNumber(outcome.return_20d, "%")}</td>
+                        <td>{formatNumber(outcome.max_drawdown_pct, "%")}</td>
+                        <td>{formatNumber(outcome.max_runup_pct, "%")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           ) : (
             <div className="empty-state">{t("history.noClosure")}</div>
@@ -1344,10 +1373,11 @@ function ClosureWindowChart({
       bars={windows.map((window) => {
         const rawValue =
           metric === "win_rate" ? (window.win_rate ?? 0) * 100 : window.avg_return_10d ?? 0;
+        const hasValue = metric === "win_rate" ? window.win_rate !== null : window.avg_return_10d !== null;
         return {
           label: `${window.window_days}D`,
           value: rawValue,
-          valueLabel: valueFormatter(rawValue),
+          valueLabel: hasValue ? valueFormatter(rawValue) : "-",
           caption: `${window.completed_count}/${window.sample_count} ${t("history.completed")} · ${window.verdict}`,
         };
       })}

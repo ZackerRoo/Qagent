@@ -226,6 +226,8 @@ def test_recommendation_closure_api_summarizes_seeded_snapshots(tmp_path, monkey
     assert closure["latest_outcomes"]
     assert closure["latest_outcomes"][0]["instrument_label"]
     assert "triggered" in closure["latest_outcomes"][0]
+    assert len(closure["completed_outcomes"]) == 2
+    assert closure["completed_outcomes"][0]["return_10d"] is not None
     assert closure["data_health"]["closure_windows"] == "30,60,90"
 
 

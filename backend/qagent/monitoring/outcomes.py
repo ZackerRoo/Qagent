@@ -109,6 +109,7 @@ class RecommendationClosureSummary(BaseModel):
     as_of: date
     windows: list[RecommendationClosureWindow]
     latest_outcomes: list[OpportunityOutcome]
+    completed_outcomes: list[OpportunityOutcome]
 
 
 def compute_opportunity_outcome(
@@ -282,6 +283,11 @@ def summarize_recommendation_closure(
     latest_outcomes = [
         outcome for outcome in sorted_outcomes if _is_in_window(outcome, as_of, max_window)
     ][:latest_limit]
+    completed_outcomes = [
+        outcome
+        for outcome in sorted_outcomes
+        if _is_in_window(outcome, as_of, max_window) and outcome.outcome_status != "pending"
+    ][:latest_limit]
 
     return RecommendationClosureSummary(
         as_of=as_of,
@@ -293,6 +299,7 @@ def summarize_recommendation_closure(
             for window_days in windows
         ],
         latest_outcomes=latest_outcomes,
+        completed_outcomes=completed_outcomes,
     )
 
 

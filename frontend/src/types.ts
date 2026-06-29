@@ -953,6 +953,7 @@ export type RecommendationClosureResponse = {
   as_of: string;
   windows: RecommendationClosureWindow[];
   latest_outcomes: OpportunityOutcome[];
+  completed_outcomes: OpportunityOutcome[];
   data_health: Record<string, string>;
 };
 
