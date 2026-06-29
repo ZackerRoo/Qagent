@@ -909,6 +909,7 @@ export type OpportunityOutcome = {
   primary_strategy_id: string | null;
   signal_date: string | null;
   outcome_status: string;
+  triggered: boolean | null;
   return_5d: number | null;
   return_10d: number | null;
   return_20d: number | null;
@@ -922,6 +923,36 @@ export type OpportunityOutcome = {
 
 export type OutcomesResponse = {
   outcomes: OpportunityOutcome[];
+  data_health: Record<string, string>;
+};
+
+export type RecommendationClosureWindow = {
+  window_days: number;
+  sample_count: number;
+  completed_count: number;
+  pending_count: number;
+  triggered_count: number;
+  target_hit_count: number;
+  stopped_count: number;
+  win_count: number;
+  completion_rate: number | null;
+  trigger_rate: number | null;
+  target_hit_rate: number | null;
+  stop_rate: number | null;
+  win_rate: number | null;
+  avg_return_5d: number | null;
+  avg_return_10d: number | null;
+  avg_return_20d: number | null;
+  avg_return_60d: number | null;
+  max_drawdown_pct: number | null;
+  best_runup_pct: number | null;
+  verdict: string;
+};
+
+export type RecommendationClosureResponse = {
+  as_of: string;
+  windows: RecommendationClosureWindow[];
+  latest_outcomes: OpportunityOutcome[];
   data_health: Record<string, string>;
 };
 

@@ -46,6 +46,7 @@ from qagent.market.indicators import add_moving_averages, add_volume_ratio, perc
 from qagent.monitoring.outcomes import (
     compute_opportunity_outcome,
     diagnose_strategy_performance,
+    summarize_recommendation_closure,
     summarize_strategy_performance,
 )
 from qagent.monitoring.portfolio import PositionInput, analyze_position_risk
@@ -1719,6 +1720,12 @@ def _attach_instrument_label(payload: object) -> dict[str, object]:
         return {}
     instrument_id = payload.get("instrument_id")
     if isinstance(instrument_id, str):
+        current_label = payload.get("instrument_label")
+        if isinstance(current_label, str) and not _should_refresh_instrument_label(
+            instrument_id,
+            current_label,
+        ):
+            return payload
         payload["instrument_label"] = format_instrument_label(instrument_id)
     return payload
 
@@ -1979,13 +1986,19 @@ def _replay_outcomes(provider: str, instrument_id: str | None, limit: int):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    instrument_ids = list(dict.fromkeys(snapshot.instrument_id for snapshot in snapshots))
+    all_bars = market_provider.get_daily_bars(
+        instrument_ids,
+        start=date(1900, 1, 1),
+        end=date(2100, 1, 1),
+    )
+
     replayed = []
     for snapshot in snapshots:
-        bars = market_provider.get_daily_bars(
-            [snapshot.instrument_id],
-            start=date(1900, 1, 1),
-            end=date(2100, 1, 1),
-        )
+        if not all_bars.empty and "instrument_id" in all_bars.columns:
+            bars = all_bars.loc[all_bars["instrument_id"] == snapshot.instrument_id]
+        else:
+            bars = all_bars
         replayed.append(compute_opportunity_outcome(snapshot, bars))
     data_health = {
         "provider": provider,
@@ -2027,6 +2040,40 @@ def strategy_diagnostics(
         "diagnostics": [item.model_dump(mode="json") for item in diagnostics],
         "data_health": data_health,
     }
+
+
+@router.get("/recommendation-closure")
+def recommendation_closure(
+    provider: str = "fixture",
+    instrument_id: str | None = None,
+    limit: int = 150,
+) -> dict[str, object]:
+    replayed, data_health = _replay_outcomes(provider, instrument_id, limit)
+    as_of = max(
+        (outcome.signal_date for outcome in replayed if outcome.signal_date is not None),
+        default=date.today(),
+    )
+    summary = summarize_recommendation_closure(replayed, as_of=as_of, windows=(30, 60, 90))
+    payload = summary.model_dump(mode="json")
+    payload["latest_outcomes"] = [
+        _attach_existing_instrument_label(outcome)
+        for outcome in payload.get("latest_outcomes", [])
+        if isinstance(outcome, dict)
+    ]
+    payload["data_health"] = {
+        **data_health,
+        "closure_windows": "30,60,90",
+        "as_of": str(as_of),
+    }
+    return payload
+
+
+def _attach_existing_instrument_label(payload: dict[str, object]) -> dict[str, object]:
+    current_label = payload.get("instrument_label")
+    if isinstance(current_label, str) and current_label.strip():
+        return payload
+    payload["instrument_label"] = None
+    return payload
 
 
 @router.get("/portfolio")

@@ -6,6 +6,7 @@ import {
   fetchOpportunityHistory,
   fetchOutcomes,
   fetchPortfolioBacktest,
+  fetchRecommendationClosure,
   fetchScanRuns,
   fetchStrategyDiagnostics,
   fetchStrategyPerformance,
@@ -32,6 +33,7 @@ import type {
   PortfolioEquityPoint,
   PortfolioBacktestResponse,
   PortfolioMonthlyReturn,
+  RecommendationClosureResponse,
   ScanRunsResponse,
   StrategyDiagnosticsResponse,
   StrategyPerformanceResponse,
@@ -93,6 +95,7 @@ export function History({
   const [runs, setRuns] = useState<ScanRunsResponse>();
   const [history, setHistory] = useState<OpportunityHistoryResponse>();
   const [outcomes, setOutcomes] = useState<OutcomesResponse>();
+  const [closure, setClosure] = useState<RecommendationClosureResponse>();
   const [performance, setPerformance] = useState<StrategyPerformanceResponse>();
   const [diagnostics, setDiagnostics] = useState<StrategyDiagnosticsResponse>();
   const [error, setError] = useState("");
@@ -113,18 +116,21 @@ export function History({
           runResult,
           historyResult,
           outcomeResult,
+          closureResult,
           performanceResult,
           diagnosticsResult,
         ] = await Promise.all([
           fetchScanRuns(),
           fetchOpportunityHistory(),
           fetchOutcomes(dataMode),
+          fetchRecommendationClosure(dataMode),
           fetchStrategyPerformance(dataMode),
           fetchStrategyDiagnostics(dataMode),
         ]);
         setRuns(runResult);
         setHistory(historyResult);
         setOutcomes(outcomeResult);
+        setClosure(closureResult);
         setPerformance(performanceResult);
         setDiagnostics(diagnosticsResult);
       } catch (caught) {
@@ -208,6 +214,8 @@ export function History({
         scanUniverseLabel={scanUniverseLabel}
         hasSelectedCard={Boolean(selectedBacktestSymbols)}
       />
+
+      {closure ? <RecommendationClosurePanel closure={closure} /> : null}
 
       <section className="panel">
         <div className="panel-heading">
@@ -908,6 +916,98 @@ function BacktestScopeNote({
   );
 }
 
+function RecommendationClosurePanel({ closure }: { closure: RecommendationClosureResponse }) {
+  const { language, t } = useI18n();
+  const latestWindow = closure.windows[0];
+  return (
+    <section className="panel">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">{t("history.closureEyebrow")}</p>
+          <h2>{t("history.recommendationClosure")}</h2>
+          <p className="brief-headline">{t("history.recommendationClosureSubtitle")}</p>
+        </div>
+        <span className="count">
+          {t("history.closureAsOf")} {closure.as_of}
+        </span>
+      </div>
+      <DataHealth data={closure.data_health} language={language} />
+      {closure.windows.length ? (
+        <div className="stack">
+          <div className="metric-grid closure-window-grid">
+            {closure.windows.map((window) => (
+              <div key={window.window_days}>
+                <span>{window.window_days}{t("history.daysWindow")}</span>
+                <strong>{formatRatio(window.win_rate)}</strong>
+                <small>
+                  {t("common.samples")} {window.sample_count} · {t("history.triggerRate")} {formatRatio(window.trigger_rate)}
+                </small>
+              </div>
+            ))}
+            <div>
+              <span>{t("history.avgReturn")}</span>
+              <strong>{formatNumber(latestWindow?.avg_return_10d ?? null, "%")}</strong>
+              <small>10D · {t("history.maxDd")} {formatNumber(latestWindow?.max_drawdown_pct ?? null, "%")}</small>
+            </div>
+          </div>
+          <div className="validation-grid">
+            <ClosureWindowChart
+              title={t("history.closureWinChart")}
+              windows={closure.windows}
+              metric="win_rate"
+              valueFormatter={(value) => `${value.toFixed(0)}%`}
+            />
+            <ClosureWindowChart
+              title={t("history.closureReturnChart")}
+              windows={closure.windows}
+              metric="avg_return_10d"
+              valueFormatter={(value) => `${value.toFixed(2)}%`}
+            />
+          </div>
+          {closure.latest_outcomes.length ? (
+            <div className="table-shell">
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t("common.date")}</th>
+                    <th>{t("common.ticker")}</th>
+                    <th>{t("common.status")}</th>
+                    <th>{t("history.triggered")}</th>
+                    <th>10D</th>
+                    <th>20D</th>
+                    <th>{t("history.maxDd")}</th>
+                    <th>{t("history.maxRunup")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {closure.latest_outcomes.slice(0, PREVIEW_ROW_LIMIT).map((outcome) => (
+                    <tr key={outcome.snapshot_id}>
+                      <td>{outcome.signal_date ?? t("common.pending")}</td>
+                      <td className="ticker" title={formatInstrumentDisplay(outcome.instrument_id, outcome.instrument_label)}>
+                        {formatInstrumentDisplay(outcome.instrument_id, outcome.instrument_label)}
+                      </td>
+                      <td>{localizeStatus(outcome.outcome_status, language)}</td>
+                      <td>{outcome.triggered === null ? "-" : outcome.triggered ? t("common.triggered") : t("common.pending")}</td>
+                      <td>{formatNumber(outcome.return_10d, "%")}</td>
+                      <td>{formatNumber(outcome.return_20d, "%")}</td>
+                      <td>{formatNumber(outcome.max_drawdown_pct, "%")}</td>
+                      <td>{formatNumber(outcome.max_runup_pct, "%")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="empty-state">{t("history.noClosure")}</div>
+          )}
+        </div>
+      ) : (
+        <div className="empty-state">{t("history.noClosure")}</div>
+      )}
+    </section>
+  );
+}
+
 function BacktestResultSummary({
   backtest,
   context,
@@ -1208,6 +1308,49 @@ function FactorRankBucketChart({
         valueLabel: formatNumber(bucket.avg_forward_return_pct, "%"),
         caption: `${formatRatio(bucket.positive_rate)} ${t("brief.positive10d")}`,
       }))}
+    />
+  );
+}
+
+function ClosureWindowChart({
+  title,
+  windows,
+  metric,
+  valueFormatter,
+}: {
+  title: string;
+  windows: RecommendationClosureResponse["windows"];
+  metric: "win_rate" | "avg_return_10d";
+  valueFormatter(value: number): string;
+}) {
+  const { t } = useI18n();
+  const latest = windows[0];
+  return (
+    <BarValidationChart
+      title={title}
+      headline={latest ? `${latest.sample_count} ${t("history.samples")}` : "-"}
+      meta={[
+        {
+          label: t("history.targetStop"),
+          value: latest
+            ? `${formatRatio(latest.target_hit_rate)} / ${formatRatio(latest.stop_rate)}`
+            : "-",
+        },
+        {
+          label: t("history.maxDd"),
+          value: formatNumber(latest?.max_drawdown_pct ?? null, "%"),
+        },
+      ]}
+      bars={windows.map((window) => {
+        const rawValue =
+          metric === "win_rate" ? (window.win_rate ?? 0) * 100 : window.avg_return_10d ?? 0;
+        return {
+          label: `${window.window_days}D`,
+          value: rawValue,
+          valueLabel: valueFormatter(rawValue),
+          caption: `${window.completed_count}/${window.sample_count} ${t("history.completed")} · ${window.verdict}`,
+        };
+      })}
     />
   );
 }

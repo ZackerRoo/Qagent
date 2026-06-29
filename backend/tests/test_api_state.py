@@ -1,6 +1,12 @@
+import json
+from datetime import date, datetime, timezone
+from decimal import Decimal
+
 from fastapi.testclient import TestClient
 
 from qagent.app import create_app
+from qagent.db import create_session_factory, initialize_database
+from qagent.storage.tables import OpportunitySnapshotRow, ScanRunRow
 
 
 def test_watchlist_api_adds_and_lists_items(tmp_path, monkeypatch):
@@ -156,6 +162,71 @@ def test_opportunities_api_records_scan_history_and_outcomes(tmp_path, monkeypat
     assert diagnostics[0]["verdict"] in {"effective", "watch", "weak", "insufficient_sample"}
     assert diagnostics[0]["reason"]
     assert diagnostics_response.json()["data_health"]["diagnostics"] == str(len(diagnostics))
+
+
+def test_recommendation_closure_api_summarizes_seeded_snapshots(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'api-closure.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    now = datetime.now(timezone.utc)
+    with session_factory() as session:
+        session.add(
+            ScanRunRow(
+                run_id="scan-closure",
+                provider="fixture",
+                mode="test",
+                symbols=json.dumps(["CN:000001"]),
+                scanned=1,
+                cards=2,
+                data_health="{}",
+                created_at=now,
+            )
+        )
+        for index, signal_date in enumerate([date(2026, 1, 30), date(2026, 2, 2)], start=1):
+            session.add(
+                OpportunitySnapshotRow(
+                    snapshot_id=f"scan-closure:card-{index}",
+                    run_id="scan-closure",
+                    card_id=f"card-{index}",
+                    instrument_id="CN:000001",
+                    market="CN",
+                    status="setup_ready",
+                    signal_date=signal_date,
+                    latest_close=Decimal("10.60"),
+                    primary_strategy_id="breakout_volume_confirmation",
+                    score=Decimal("0.80"),
+                    strategy_score=Decimal("0.82"),
+                    rank_score=Decimal("0.78"),
+                    trigger_price=Decimal("10.60"),
+                    initial_stop=Decimal("10.00"),
+                    target_1=Decimal("11.00"),
+                    card_json=json.dumps(
+                        {
+                            "instrument_id": "CN:000001",
+                            "instrument_label": "平安银行 000001.SZ",
+                        },
+                        sort_keys=True,
+                    ),
+                    created_at=now,
+                )
+            )
+        session.commit()
+
+    client = TestClient(create_app())
+    response = client.get("/api/recommendation-closure?provider=fixture&limit=10")
+
+    assert response.status_code == 200
+    closure = response.json()
+    assert [item["window_days"] for item in closure["windows"]] == [30, 60, 90]
+    assert closure["windows"][0]["sample_count"] == 2
+    assert closure["windows"][0]["completed_count"] == 2
+    assert closure["windows"][0]["triggered_count"] == 2
+    assert closure["windows"][0]["trigger_rate"] == 1
+    assert closure["latest_outcomes"]
+    assert closure["latest_outcomes"][0]["instrument_label"]
+    assert "triggered" in closure["latest_outcomes"][0]
+    assert closure["data_health"]["closure_windows"] == "30,60,90"
 
 
 def test_opportunity_history_api_filters_by_instrument(tmp_path, monkeypatch):

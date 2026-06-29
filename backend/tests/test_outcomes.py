@@ -5,6 +5,7 @@ from qagent.monitoring.outcomes import (
     OpportunityOutcome,
     compute_forward_returns,
     compute_opportunity_outcome,
+    summarize_recommendation_closure,
     summarize_strategy_performance,
 )
 from qagent.monitoring.portfolio import PositionInput, analyze_position_risk
@@ -216,3 +217,101 @@ def test_summarize_strategy_performance_groups_replayed_outcomes():
     assert breakout.avg_return_10d == 1.5
     assert breakout.max_drawdown_pct == -5.0
     assert by_strategy["pead_earnings_drift"].pending_count == 1
+
+
+def test_summarize_recommendation_closure_tracks_recent_windows():
+    outcomes = [
+        OpportunityOutcome(
+            snapshot_id="snap-1",
+            run_id="run-1",
+            instrument_id="CN:AAA",
+            primary_strategy_id="breakout_volume_confirmation",
+            signal_date=date(2026, 6, 20),
+            outcome_status="target_1_hit",
+            triggered=True,
+            return_10d=6.0,
+            return_20d=9.0,
+            max_drawdown_pct=-1.5,
+            max_runup_pct=10.0,
+        ),
+        OpportunityOutcome(
+            snapshot_id="snap-2",
+            run_id="run-1",
+            instrument_id="CN:BBB",
+            primary_strategy_id="breakout_volume_confirmation",
+            signal_date=date(2026, 6, 10),
+            outcome_status="stopped",
+            triggered=True,
+            return_10d=-4.0,
+            return_20d=-6.0,
+            max_drawdown_pct=-8.0,
+            max_runup_pct=2.0,
+        ),
+        OpportunityOutcome(
+            snapshot_id="snap-3",
+            run_id="run-1",
+            instrument_id="CN:CCC",
+            primary_strategy_id="pead_earnings_drift",
+            signal_date=date(2026, 5, 15),
+            outcome_status="working",
+            triggered=False,
+            return_10d=2.0,
+            return_20d=3.0,
+            max_drawdown_pct=-2.0,
+            max_runup_pct=5.0,
+        ),
+        OpportunityOutcome(
+            snapshot_id="snap-4",
+            run_id="run-1",
+            instrument_id="CN:DDD",
+            primary_strategy_id="pead_earnings_drift",
+            signal_date=date(2026, 6, 25),
+            outcome_status="pending",
+            triggered=False,
+        ),
+        OpportunityOutcome(
+            snapshot_id="snap-old",
+            run_id="run-1",
+            instrument_id="CN:OLD",
+            primary_strategy_id="old_setup",
+            signal_date=date(2026, 2, 1),
+            outcome_status="target_1_hit",
+            triggered=True,
+            return_10d=8.0,
+            max_drawdown_pct=-1.0,
+            max_runup_pct=12.0,
+        ),
+    ]
+
+    closure = summarize_recommendation_closure(
+        outcomes,
+        as_of=date(2026, 6, 29),
+        windows=(30, 60, 90),
+    )
+
+    by_window = {item.window_days: item for item in closure.windows}
+    recent = by_window[30]
+    assert recent.sample_count == 3
+    assert recent.completed_count == 2
+    assert recent.pending_count == 1
+    assert recent.triggered_count == 2
+    assert recent.target_hit_count == 1
+    assert recent.stopped_count == 1
+    assert recent.win_count == 1
+    assert recent.trigger_rate == 0.6667
+    assert recent.target_hit_rate == 0.5
+    assert recent.stop_rate == 0.5
+    assert recent.win_rate == 0.5
+    assert recent.avg_return_10d == 1.0
+    assert recent.avg_return_20d == 1.5
+    assert recent.max_drawdown_pct == -8.0
+    assert recent.best_runup_pct == 10.0
+
+    assert by_window[60].sample_count == 4
+    assert by_window[90].sample_count == 4
+    assert [outcome.instrument_id for outcome in closure.latest_outcomes] == [
+        "CN:DDD",
+        "CN:AAA",
+        "CN:BBB",
+        "CN:CCC",
+    ]

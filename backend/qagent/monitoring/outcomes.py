@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pandas as pd
@@ -37,9 +37,11 @@ class OpportunityOutcome(BaseModel):
     snapshot_id: str
     run_id: str
     instrument_id: str
+    instrument_label: str | None = None
     primary_strategy_id: str | None
     signal_date: date | None
     outcome_status: str
+    triggered: bool | None = None
     return_5d: float | None = None
     return_10d: float | None = None
     return_20d: float | None = None
@@ -80,6 +82,35 @@ class StrategyDiagnostic(BaseModel):
     recommendation: str
 
 
+class RecommendationClosureWindow(BaseModel):
+    window_days: int
+    sample_count: int
+    completed_count: int
+    pending_count: int
+    triggered_count: int
+    target_hit_count: int
+    stopped_count: int
+    win_count: int
+    completion_rate: float | None
+    trigger_rate: float | None
+    target_hit_rate: float | None
+    stop_rate: float | None
+    win_rate: float | None
+    avg_return_5d: float | None
+    avg_return_10d: float | None
+    avg_return_20d: float | None
+    avg_return_60d: float | None
+    max_drawdown_pct: float | None
+    best_runup_pct: float | None
+    verdict: str
+
+
+class RecommendationClosureSummary(BaseModel):
+    as_of: date
+    windows: list[RecommendationClosureWindow]
+    latest_outcomes: list[OpportunityOutcome]
+
+
 def compute_opportunity_outcome(
     snapshot: OpportunitySnapshotRecord,
     bars: pd.DataFrame,
@@ -103,6 +134,10 @@ def compute_opportunity_outcome(
     base_close = float(ordered.loc[base_index, "close"])
     max_drawdown_pct = round((float(future["low"].min()) / base_close - 1) * 100, 4)
     max_runup_pct = round((float(future["high"].max()) / base_close - 1) * 100, 4)
+    triggered = (
+        snapshot.trigger_price is not None
+        and bool((future["high"] >= float(snapshot.trigger_price)).any())
+    )
     target_hit = snapshot.target_1 is not None and bool(
         (future["high"] >= float(snapshot.target_1)).any()
     )
@@ -115,9 +150,11 @@ def compute_opportunity_outcome(
         snapshot_id=snapshot.snapshot_id,
         run_id=snapshot.run_id,
         instrument_id=snapshot.instrument_id,
+        instrument_label=_snapshot_instrument_label(snapshot),
         primary_strategy_id=snapshot.primary_strategy_id,
         signal_date=snapshot.signal_date,
         outcome_status=status,
+        triggered=triggered,
         return_5d=returns.get("return_5d"),
         return_10d=returns.get("return_10d"),
         return_20d=returns.get("return_20d"),
@@ -135,9 +172,11 @@ def _pending_outcome(snapshot: OpportunitySnapshotRecord) -> OpportunityOutcome:
         snapshot_id=snapshot.snapshot_id,
         run_id=snapshot.run_id,
         instrument_id=snapshot.instrument_id,
+        instrument_label=_snapshot_instrument_label(snapshot),
         primary_strategy_id=snapshot.primary_strategy_id,
         signal_date=snapshot.signal_date,
         outcome_status="pending",
+        triggered=None,
         trigger_price=snapshot.trigger_price,
         initial_stop=snapshot.initial_stop,
         target_1=snapshot.target_1,
@@ -157,6 +196,16 @@ def _outcome_status(
     if not available_returns:
         return "pending"
     return "working" if available_returns[-1] >= 0 else "lagging"
+
+
+def _snapshot_instrument_label(snapshot: OpportunitySnapshotRecord) -> str | None:
+    card = snapshot.card
+    if not isinstance(card, dict):
+        return None
+    label = card.get("instrument_label")
+    if isinstance(label, str) and label.strip():
+        return label
+    return None
 
 
 def summarize_strategy_performance(
@@ -211,6 +260,122 @@ def diagnose_strategy_performance(
         ),
         reverse=True,
     )
+
+
+def summarize_recommendation_closure(
+    outcomes: list[OpportunityOutcome],
+    *,
+    as_of: date | None = None,
+    windows: tuple[int, ...] = (30, 60, 90),
+    latest_limit: int = 12,
+) -> RecommendationClosureSummary:
+    dated = [outcome for outcome in outcomes if outcome.signal_date is not None]
+    if as_of is None:
+        as_of = max((outcome.signal_date for outcome in dated if outcome.signal_date), default=date.today())
+
+    sorted_outcomes = sorted(
+        dated,
+        key=lambda outcome: (outcome.signal_date or date.min, outcome.snapshot_id),
+        reverse=True,
+    )
+    max_window = max(windows, default=0)
+    latest_outcomes = [
+        outcome for outcome in sorted_outcomes if _is_in_window(outcome, as_of, max_window)
+    ][:latest_limit]
+
+    return RecommendationClosureSummary(
+        as_of=as_of,
+        windows=[
+            _summarize_closure_window(
+                [outcome for outcome in sorted_outcomes if _is_in_window(outcome, as_of, window_days)],
+                window_days,
+            )
+            for window_days in windows
+        ],
+        latest_outcomes=latest_outcomes,
+    )
+
+
+def _summarize_closure_window(
+    outcomes: list[OpportunityOutcome],
+    window_days: int,
+) -> RecommendationClosureWindow:
+    completed = [outcome for outcome in outcomes if outcome.outcome_status != "pending"]
+    return_5d = [outcome.return_5d for outcome in completed if outcome.return_5d is not None]
+    return_10d = [outcome.return_10d for outcome in completed if outcome.return_10d is not None]
+    return_20d = [outcome.return_20d for outcome in completed if outcome.return_20d is not None]
+    return_60d = [outcome.return_60d for outcome in completed if outcome.return_60d is not None]
+    drawdowns = [
+        outcome.max_drawdown_pct for outcome in completed if outcome.max_drawdown_pct is not None
+    ]
+    runups = [outcome.max_runup_pct for outcome in completed if outcome.max_runup_pct is not None]
+    target_hit_count = sum(1 for outcome in completed if outcome.outcome_status == "target_1_hit")
+    stopped_count = sum(1 for outcome in completed if outcome.outcome_status == "stopped")
+    triggered_count = sum(1 for outcome in outcomes if outcome.triggered is True)
+    win_count = sum(1 for value in return_10d if value > 0)
+    target_hit_rate = _ratio(target_hit_count, len(completed))
+    win_rate = _ratio(win_count, len(return_10d))
+    avg_return_10d = _average(return_10d)
+    max_drawdown_pct = min(drawdowns) if drawdowns else None
+
+    return RecommendationClosureWindow(
+        window_days=window_days,
+        sample_count=len(outcomes),
+        completed_count=len(completed),
+        pending_count=len(outcomes) - len(completed),
+        triggered_count=triggered_count,
+        target_hit_count=target_hit_count,
+        stopped_count=stopped_count,
+        win_count=win_count,
+        completion_rate=_ratio(len(completed), len(outcomes)),
+        trigger_rate=_ratio(triggered_count, len(outcomes)),
+        target_hit_rate=target_hit_rate,
+        stop_rate=_ratio(stopped_count, len(completed)),
+        win_rate=win_rate,
+        avg_return_5d=_average(return_5d),
+        avg_return_10d=avg_return_10d,
+        avg_return_20d=_average(return_20d),
+        avg_return_60d=_average(return_60d),
+        max_drawdown_pct=max_drawdown_pct,
+        best_runup_pct=max(runups) if runups else None,
+        verdict=_closure_verdict(
+            sample_count=len(outcomes),
+            completed_count=len(completed),
+            target_hit_rate=target_hit_rate,
+            win_rate=win_rate,
+            avg_return_10d=avg_return_10d,
+            max_drawdown_pct=max_drawdown_pct,
+        ),
+    )
+
+
+def _is_in_window(outcome: OpportunityOutcome, as_of: date, window_days: int) -> bool:
+    if outcome.signal_date is None:
+        return False
+    return as_of - timedelta(days=window_days) <= outcome.signal_date <= as_of
+
+
+def _closure_verdict(
+    *,
+    sample_count: int,
+    completed_count: int,
+    target_hit_rate: float | None,
+    win_rate: float | None,
+    avg_return_10d: float | None,
+    max_drawdown_pct: float | None,
+) -> str:
+    if sample_count < 3 or completed_count < 2:
+        return "样本不足"
+    if (
+        (win_rate is not None and win_rate >= 0.55)
+        or (target_hit_rate is not None and target_hit_rate >= 0.45)
+    ) and (avg_return_10d is None or avg_return_10d >= 0):
+        return "表现健康"
+    if avg_return_10d is not None and avg_return_10d < 0:
+        return "需要降权"
+    if max_drawdown_pct is not None and max_drawdown_pct <= -12:
+        return "回撤偏大"
+    return "继续观察"
 
 
 def _diagnose_strategy(item: StrategyPerformance) -> StrategyDiagnostic:

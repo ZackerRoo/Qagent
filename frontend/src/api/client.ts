@@ -40,6 +40,7 @@ import type {
   Position,
   PositionsResponse,
   ProviderStatusResponse,
+  RecommendationClosureResponse,
   ScanRunsResponse,
   ScanTask,
   ScanTasksResponse,
@@ -536,6 +537,12 @@ export async function fetchOpportunityHistory(): Promise<OpportunityHistoryRespo
 
 export async function fetchOutcomes(provider: DataProviderMode): Promise<OutcomesResponse> {
   return apiGet<OutcomesResponse>("/outcomes", { provider, limit: 50 });
+}
+
+export async function fetchRecommendationClosure(
+  provider: DataProviderMode,
+): Promise<RecommendationClosureResponse> {
+  return apiGet<RecommendationClosureResponse>("/recommendation-closure", { provider, limit: 150 });
 }
 
 export async function fetchStrategyPerformance(
