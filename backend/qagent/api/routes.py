@@ -63,6 +63,7 @@ from qagent.providers.status import build_provider_status
 from qagent.recommendations.enrichment import enrich_opportunity_card
 from qagent.recommendations.portfolio import build_portfolio_plan
 from qagent.recommendations.signal_hub import build_signal_hub
+from qagent.research.command_center import build_research_command_center
 from qagent.storage.paper import PaperTradingRepository
 from qagent.storage.repository import (
     AlertRuleCreate,
@@ -455,6 +456,7 @@ def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict
         "data_health": result.data_health,
     }
     _attach_signal_hub_payload(payload)
+    _attach_research_center_payload(payload)
     return payload
 
 
@@ -602,6 +604,7 @@ def overview(provider: str = "fixture", symbols: str | None = None) -> dict[str,
         "data_health": result.data_health,
     }
     _attach_signal_hub_payload(payload, cards_key="top_cards")
+    _attach_research_center_payload(payload, cards_key="top_cards")
     return payload
 
 
@@ -1485,6 +1488,7 @@ def _enrich_scan_task_result(payload: dict[str, object]) -> dict[str, object]:
     _hydrate_legacy_opportunity_cards(result)
     _attach_rotation_radar_payload(result)
     _attach_signal_hub_payload(result)
+    _attach_research_center_payload(result)
     return payload
 
 
@@ -1520,6 +1524,7 @@ def _full_market_scan_payload(
     }
     _relabel_instrument_payload(payload)
     _attach_signal_hub_payload(payload)
+    _attach_research_center_payload(payload)
     _repo().save_scan_result_cache(
         cache_key=_full_market_scan_cache_key(mode, max_symbols, include_etfs, sync_if_empty),
         provider=mode,
@@ -1583,6 +1588,7 @@ def _recent_full_market_scan_payload(
             data_health["scan_result_cache"] = "hit"
             data_health["scan_result_cache_key"] = cache_key
             data_health["scan_result_cache_id"] = cached.cache_id
+        _attach_research_center_payload(payload)
         return payload
 
     payload = _recent_scan_run_fallback_payload(
@@ -1597,6 +1603,7 @@ def _recent_full_market_scan_payload(
     _relabel_instrument_payload(payload)
     _attach_rotation_radar_payload(payload)
     _attach_signal_hub_payload(payload)
+    _attach_research_center_payload(payload)
     _repo().save_scan_result_cache(
         cache_key=cache_key,
         provider=mode,
@@ -1647,6 +1654,7 @@ def _recent_scan_run_fallback_payload(
     }
     _attach_rotation_radar_payload(payload)
     _attach_signal_hub_payload(payload)
+    _attach_research_center_payload(payload)
     return payload
 
 
@@ -1683,6 +1691,7 @@ def _hydrate_full_market_batch_payload(
             data_health["strategy_health_source"] = "card_strategy_calibration"
     _attach_rotation_radar_payload(payload)
     _attach_signal_hub_payload(payload)
+    _attach_research_center_payload(payload)
 
 
 def _hydrate_legacy_opportunity_cards(payload: dict[str, object]) -> int:
@@ -1776,6 +1785,41 @@ def _attach_signal_hub_payload(
         )
         enriched_cards.append(card.model_dump(mode="json"))
     payload[cards_key] = enriched_cards
+
+
+def _attach_research_center_payload(
+    payload: dict[str, object],
+    cards_key: str = "cards",
+) -> None:
+    raw_cards = payload.get(cards_key)
+    if not isinstance(raw_cards, list):
+        payload["research_center"] = build_research_command_center(cards=[]).model_dump(mode="json")
+        return
+
+    cards: list[OpportunityCard] = []
+    for raw_card in raw_cards:
+        if not isinstance(raw_card, dict):
+            continue
+        try:
+            cards.append(OpportunityCard.model_validate(raw_card))
+        except Exception:
+            continue
+
+    data_health = payload.get("data_health")
+    center = build_research_command_center(
+        cards=cards,
+        portfolio_plan=payload.get("portfolio_plan")
+        if isinstance(payload.get("portfolio_plan"), dict)
+        else None,
+        rotation_radar=payload.get("rotation_radar")
+        if isinstance(payload.get("rotation_radar"), dict)
+        else None,
+        strategy_health=payload.get("strategy_health")
+        if isinstance(payload.get("strategy_health"), list)
+        else [],
+        data_health=data_health if isinstance(data_health, dict) else {},
+    )
+    payload["research_center"] = center.model_dump(mode="json")
 
 
 def _card_rotation_score(

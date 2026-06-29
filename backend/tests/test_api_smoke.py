@@ -30,10 +30,13 @@ def test_overview_returns_market_rotation_radar():
     response = client.get("/api/overview?provider=fixture&symbols=CN:000001")
 
     assert response.status_code == 200
-    radar = response.json()["rotation_radar"]
+    body = response.json()
+    radar = body["rotation_radar"]
     assert radar["data_health"]["rotation_cards"] == "1"
     assert radar["themes"]
     assert radar["themes"][0]["leaders"][0]["instrument_label"] == "平安银行 000001.SZ"
+    assert body["research_center"]["portfolio_advisor"]["summary"]
+    assert body["research_center"]["walk_forward_validation"]["windows"]
 
 
 def test_opportunities_return_signal_hub_for_cards():

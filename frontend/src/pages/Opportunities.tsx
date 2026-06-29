@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { MarketOpportunitySections } from "../components/MarketOpportunitySections";
 import { OpportunityDetail } from "../components/OpportunityDetail";
+import { ResearchCommandCenterPanel } from "../components/ResearchCommandCenter";
 import { useI18n } from "../i18n";
 import type { TranslationKey } from "../i18n/catalog";
 import { formatInstrumentDisplay, formatInstrumentText } from "../lib/instruments";
@@ -25,6 +26,7 @@ import type {
   FactorRanking,
   OpportunityCard,
   PortfolioPlan,
+  ResearchCommandCenter,
   ResearchProfile,
   ScanItem,
   SectorStrength,
@@ -38,6 +40,7 @@ type Props = {
   factorRankings: FactorRanking[];
   sectorStrength: SectorStrength[];
   portfolioPlan?: PortfolioPlan;
+  researchCenter?: ResearchCommandCenter;
   selectedCard?: OpportunityCard;
   dataMode: DataProviderMode;
   profile: ResearchProfile;
@@ -51,6 +54,7 @@ export function Opportunities({
   factorRankings,
   sectorStrength,
   portfolioPlan,
+  researchCenter,
   selectedCard,
   dataMode,
   profile,
@@ -72,6 +76,7 @@ export function Opportunities({
             </span>
           </div>
           <ProfileNote card={selectedCard} profile={profile} />
+          <ResearchCommandCenterPanel center={researchCenter} compact />
           <OpportunitySummary cards={cards} items={items} />
           <PortfolioPlanPanel plan={portfolioPlan} />
           <SectorStrengthPanel items={sectorStrength} />

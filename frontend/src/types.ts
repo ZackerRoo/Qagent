@@ -377,6 +377,104 @@ export type PortfolioPlan = {
   summary: string;
 };
 
+export type PortfolioAdvisorPosition = {
+  instrument_id: string;
+  instrument_label: string | null;
+  action: string;
+  weight_pct: number;
+  risk_budget_pct: number;
+  reason: string;
+};
+
+export type PortfolioAdvisor = {
+  summary: string;
+  target_positions: number;
+  suggested_positions: number;
+  allocated_weight_pct: number;
+  cash_reserve_pct: number;
+  max_single_position_pct: number;
+  blocked_count: number;
+  concentration_warnings: string[];
+  positions: PortfolioAdvisorPosition[];
+};
+
+export type ValidationWindow = {
+  key: string;
+  label: string;
+  sample_count: number;
+  win_rate_10d: number | null;
+  avg_return_10d: number | null;
+  avg_return_20d: number | null;
+  max_loss_10d: number | null;
+  verdict: string;
+};
+
+export type WalkForwardValidation = {
+  summary: string;
+  windows: ValidationWindow[];
+  out_of_sample: ValidationWindow | null;
+  caveats: string[];
+};
+
+export type StrategyAttributionItem = {
+  strategy_id: string;
+  name: string;
+  family: string;
+  card_count: number;
+  contribution_pct: number;
+  avg_rank_score: number;
+  avg_trust_score: number | null;
+  validated_samples: number;
+  win_rate_10d: number | null;
+  avg_return_10d: number | null;
+  top_instruments: string[];
+};
+
+export type StrategyAttribution = {
+  summary: string;
+  strategies: StrategyAttributionItem[];
+  caveats: string[];
+};
+
+export type RecommendationPoolQuality = {
+  summary: string;
+  total_cards: number;
+  actionable_count: number;
+  blocked_count: number;
+  risk_filtered_count: number;
+  data_caveats_count: number;
+  asset_mix: Record<string, number>;
+  top_theme: string | null;
+  top_theme_share_pct: number | null;
+  warnings: string[];
+};
+
+export type AlertDigest = {
+  summary: string;
+  total_suggestions: number;
+  by_kind: Record<string, number>;
+  top_instruments: string[];
+};
+
+export type DailyResearchSummary = {
+  headline: string;
+  watch_themes: string[];
+  top_opportunities: string[];
+  avoid_list: string[];
+  next_actions: string[];
+};
+
+export type ResearchCommandCenter = {
+  as_of: string;
+  portfolio_advisor: PortfolioAdvisor;
+  walk_forward_validation: WalkForwardValidation;
+  strategy_attribution: StrategyAttribution;
+  recommendation_pool_quality: RecommendationPoolQuality;
+  alert_digest: AlertDigest;
+  daily_research_summary: DailyResearchSummary;
+  data_health: Record<string, string>;
+};
+
 export type RiskVeto = {
   code: string;
   severity: string;
@@ -516,6 +614,7 @@ export type OpportunitiesResponse = {
   sector_strength: SectorStrength[];
   rotation_radar: MarketRotationRadar;
   portfolio_plan: PortfolioPlan;
+  research_center?: ResearchCommandCenter;
   data_health: Record<string, string>;
 };
 
@@ -623,6 +722,7 @@ export type OverviewResponse = {
   sector_strength: SectorStrength[];
   rotation_radar: MarketRotationRadar;
   portfolio_plan: PortfolioPlan;
+  research_center?: ResearchCommandCenter;
   data_health: Record<string, string>;
 };
 

@@ -12,6 +12,7 @@ import {
 } from "../api/client";
 import { MarketRotationRadarPanel } from "../components/MarketRotationRadar";
 import { MarketOpportunitySections } from "../components/MarketOpportunitySections";
+import { ResearchCommandCenterPanel } from "../components/ResearchCommandCenter";
 import { SignalHubPanel } from "../components/SignalHubPanel";
 import { useI18n } from "../i18n";
 import { formatInstrumentDisplay, formatInstrumentText } from "../lib/instruments";
@@ -263,6 +264,8 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
         />
 
         <SignalDistribution cards={cards} actionableCount={actionable.length} />
+
+        <ResearchCommandCenterPanel center={result?.research_center} />
 
         <MarketRotationRadarPanel
           radar={result?.rotation_radar}

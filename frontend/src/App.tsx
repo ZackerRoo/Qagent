@@ -277,6 +277,7 @@ export default function App() {
             factorRankings={opportunities?.factor_rankings ?? []}
             sectorStrength={opportunities?.sector_strength ?? []}
             portfolioPlan={opportunities?.portfolio_plan}
+            researchCenter={opportunities?.research_center}
             selectedCard={selectedCard}
             dataMode={dataMode}
             profile={profile}
@@ -347,6 +348,7 @@ function toOpportunitiesResponse(result: FullMarketScanResponse): OpportunitiesR
     sector_strength: result.sector_strength,
     rotation_radar: result.rotation_radar ?? emptyRotationRadar(),
     portfolio_plan: result.portfolio_plan,
+    research_center: result.research_center,
     data_health: result.data_health,
   };
 }
@@ -363,6 +365,7 @@ function toOverviewResponse(result: FullMarketScanResponse): OverviewResponse {
     sector_strength: result.sector_strength.slice(0, 6),
     rotation_radar: result.rotation_radar ?? emptyRotationRadar(),
     portfolio_plan: result.portfolio_plan,
+    research_center: result.research_center,
     data_health: result.data_health,
   };
 }
