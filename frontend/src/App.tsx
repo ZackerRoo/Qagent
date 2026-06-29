@@ -25,6 +25,7 @@ import type {
   DataProviderMode,
   FullMarketScanResponse,
   IntradayRadarResponse,
+  MarketRotationRadar,
   OpportunitiesResponse,
   OpportunityCard,
   OverviewResponse,
@@ -344,6 +345,7 @@ function toOpportunitiesResponse(result: FullMarketScanResponse): OpportunitiesR
     strategy_health: result.strategy_health,
     factor_rankings: result.factor_rankings,
     sector_strength: result.sector_strength,
+    rotation_radar: result.rotation_radar ?? emptyRotationRadar(),
     portfolio_plan: result.portfolio_plan,
     data_health: result.data_health,
   };
@@ -359,8 +361,17 @@ function toOverviewResponse(result: FullMarketScanResponse): OverviewResponse {
     strategy_health: result.strategy_health.slice(0, 6),
     factor_rankings: result.factor_rankings.slice(0, 10),
     sector_strength: result.sector_strength.slice(0, 6),
+    rotation_radar: result.rotation_radar ?? emptyRotationRadar(),
     portfolio_plan: result.portfolio_plan,
     data_health: result.data_health,
+  };
+}
+
+function emptyRotationRadar(): MarketRotationRadar {
+  return {
+    as_of: "",
+    themes: [],
+    data_health: {},
   };
 }
 

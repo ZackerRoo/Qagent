@@ -19,7 +19,7 @@ from qagent.briefing.export import render_daily_brief_markdown
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
 from qagent.catalysts.providers import FreeCatalystProvider
 from qagent.db import create_session_factory, initialize_database
-from qagent.domain.models import OpportunityCard
+from qagent.domain.models import OpportunityCard, SectorStrength
 from qagent.factors.backtest import run_factor_backtest
 from qagent.jobs.automation import run_research_automation
 from qagent.jobs.daily_scan import DailyScanResult, run_daily_scan
@@ -39,6 +39,7 @@ from qagent.market.a_share_universe import (
 )
 from qagent.market.instruments import format_instrument_label
 from qagent.market.instruments import market_symbol
+from qagent.market.rotation_radar import build_rotation_radar
 from qagent.market.tradable import search_cn_tradable_instruments
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE, DEFAULT_FREE_UNIVERSE
 from qagent.market.universes import UniverseCreate, builtin_universes, merge_universes
@@ -448,6 +449,7 @@ def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict
         "strategy_health": [item.model_dump(mode="json") for item in result.strategy_health],
         "factor_rankings": [item.model_dump(mode="json") for item in result.factor_rankings],
         "sector_strength": [item.model_dump(mode="json") for item in result.sector_strength],
+        "rotation_radar": _rotation_radar_payload(result.cards, result.sector_strength),
         "portfolio_plan": result.portfolio_plan.model_dump(mode="json"),
         "data_health": result.data_health,
     }
@@ -592,6 +594,7 @@ def overview(provider: str = "fixture", symbols: str | None = None) -> dict[str,
         "strategy_health": [item.model_dump(mode="json") for item in result.strategy_health[:6]],
         "factor_rankings": [item.model_dump(mode="json") for item in result.factor_rankings[:10]],
         "sector_strength": [item.model_dump(mode="json") for item in result.sector_strength[:6]],
+        "rotation_radar": _rotation_radar_payload(result.cards, result.sector_strength),
         "portfolio_plan": result.portfolio_plan.model_dump(mode="json"),
         "data_health": result.data_health,
     }
@@ -1475,6 +1478,7 @@ def _enrich_scan_task_result(payload: dict[str, object]) -> dict[str, object]:
         return payload
     _relabel_instrument_payload(result)
     _hydrate_legacy_opportunity_cards(result)
+    _attach_rotation_radar_payload(result)
     return payload
 
 
@@ -1501,6 +1505,10 @@ def _full_market_scan_payload(
         "strategy_health": [item.model_dump(mode="json") for item in result.scan.strategy_health],
         "factor_rankings": [item.model_dump(mode="json") for item in result.scan.factor_rankings],
         "sector_strength": [item.model_dump(mode="json") for item in result.scan.sector_strength],
+        "rotation_radar": _rotation_radar_payload(
+            result.scan.cards,
+            result.scan.sector_strength,
+        ),
         "portfolio_plan": result.scan.portfolio_plan.model_dump(mode="json"),
         "data_health": result.data_health,
     }
@@ -1561,6 +1569,7 @@ def _recent_full_market_scan_payload(
     if cached is not None:
         payload = deepcopy(cached.payload)
         _relabel_instrument_payload(payload)
+        _attach_rotation_radar_payload(payload)
         data_health = payload.setdefault("data_health", {})
         if isinstance(data_health, dict):
             data_health["scan_result_cache"] = "hit"
@@ -1578,6 +1587,7 @@ def _recent_full_market_scan_payload(
     if payload is None:
         return None
     _relabel_instrument_payload(payload)
+    _attach_rotation_radar_payload(payload)
     _repo().save_scan_result_cache(
         cache_key=cache_key,
         provider=mode,
@@ -1616,7 +1626,7 @@ def _recent_scan_run_fallback_payload(
         "full_market_include_etfs": str(include_etfs).lower(),
         "reconstructed_items": "false",
     }
-    return {
+    payload = {
         "symbols": bundle.run.symbols,
         "cards": cards,
         "items": [],
@@ -1626,6 +1636,8 @@ def _recent_scan_run_fallback_payload(
         "portfolio_plan": portfolio_plan,
         "data_health": data_health,
     }
+    _attach_rotation_radar_payload(payload)
+    return payload
 
 
 def _hydrate_full_market_batch_payload(
@@ -1659,6 +1671,7 @@ def _hydrate_full_market_batch_payload(
         if strategy_health:
             payload["strategy_health"] = strategy_health
             data_health["strategy_health_source"] = "card_strategy_calibration"
+    _attach_rotation_radar_payload(payload)
 
 
 def _hydrate_legacy_opportunity_cards(payload: dict[str, object]) -> int:
@@ -1687,6 +1700,42 @@ def _hydrate_legacy_opportunity_cards(payload: dict[str, object]) -> int:
     if hydrated_count:
         payload["cards"] = hydrated
     return hydrated_count
+
+
+def _rotation_radar_payload(
+    cards: list[OpportunityCard],
+    sector_strength: list[SectorStrength] | None = None,
+) -> dict[str, object]:
+    return build_rotation_radar(cards, sector_strength or []).model_dump(mode="json")
+
+
+def _attach_rotation_radar_payload(payload: dict[str, object]) -> None:
+    raw_cards = payload.get("cards")
+    if not isinstance(raw_cards, list):
+        payload["rotation_radar"] = _rotation_radar_payload([])
+        return
+
+    cards: list[OpportunityCard] = []
+    for raw_card in raw_cards:
+        if not isinstance(raw_card, dict):
+            continue
+        try:
+            cards.append(OpportunityCard.model_validate(raw_card))
+        except Exception:
+            continue
+
+    sectors: list[SectorStrength] = []
+    raw_sectors = payload.get("sector_strength")
+    if isinstance(raw_sectors, list):
+        for raw_sector in raw_sectors:
+            if not isinstance(raw_sector, dict):
+                continue
+            try:
+                sectors.append(SectorStrength.model_validate(raw_sector))
+            except Exception:
+                continue
+
+    payload["rotation_radar"] = _rotation_radar_payload(cards, sectors)
 
 
 def _relabel_instrument_payload(payload: dict[str, object]) -> None:

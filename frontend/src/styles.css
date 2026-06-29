@@ -1952,6 +1952,211 @@ tbody tr.selected {
   line-height: 1.45;
 }
 
+.rotation-radar {
+  overflow: hidden;
+}
+
+.rotation-radar-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.rotation-card {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--terminal-border) 80%, #facc15);
+  border-radius: 8px;
+  padding: 12px;
+  background:
+    linear-gradient(135deg, rgba(250, 204, 21, 0.1), transparent 42%),
+    var(--terminal-panel-strong);
+}
+
+.rotation-card header,
+.rotation-footer,
+.rotation-metrics {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rotation-card header {
+  justify-content: space-between;
+}
+
+.rotation-card header div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.rotation-category,
+.rotation-score span,
+.rotation-bars span,
+.rotation-metrics span,
+.rotation-stance {
+  color: var(--terminal-muted);
+  font-size: 11px;
+}
+
+.rotation-card strong {
+  color: var(--terminal-text);
+  font-size: 16px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.rotation-score {
+  display: grid;
+  place-items: center;
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at center, var(--terminal-panel-strong) 56%, transparent 57%),
+    conic-gradient(#facc15 var(--rotation-score), rgba(148, 163, 184, 0.28) 0);
+  flex: 0 0 auto;
+}
+
+.rotation-score b {
+  color: #facc15;
+  font-size: 17px;
+  line-height: 1;
+}
+
+.rotation-bars {
+  display: grid;
+  gap: 7px;
+}
+
+.rotation-bars div {
+  display: grid;
+  grid-template-columns: 54px minmax(70px, 1fr) 26px;
+  align-items: center;
+  gap: 7px;
+}
+
+.rotation-bar {
+  display: block;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.2);
+  overflow: hidden;
+}
+
+.rotation-bar::before {
+  content: "";
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+}
+
+.rotation-bar-momentum::before {
+  width: var(--rotation-momentum);
+  background: linear-gradient(90deg, #22c55e, #facc15);
+}
+
+.rotation-bar-breadth::before {
+  width: var(--rotation-breadth);
+  background: linear-gradient(90deg, #38bdf8, #a7f3d0);
+}
+
+.rotation-bars b {
+  color: var(--terminal-text);
+  font-size: 12px;
+  text-align: right;
+}
+
+.rotation-metrics {
+  flex-wrap: wrap;
+  padding: 7px 0;
+  border-block: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.rotation-metrics span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.rotation-metrics strong {
+  color: #f8fafc;
+  font-size: 12px;
+}
+
+.rotation-card p {
+  min-height: 40px;
+  margin: 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.rotation-footer {
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.rotation-stance {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border: 1px solid rgba(250, 204, 21, 0.35);
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: #facc15;
+  background: rgba(250, 204, 21, 0.08);
+  white-space: nowrap;
+}
+
+.rotation-leaders {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rotation-leaders button,
+.rotation-leader-static {
+  display: inline-grid;
+  gap: 1px;
+  max-width: 150px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  border-radius: 7px;
+  padding: 5px 7px;
+  color: var(--terminal-text);
+  background: rgba(15, 23, 42, 0.42);
+  text-align: left;
+}
+
+.rotation-leaders button {
+  cursor: pointer;
+}
+
+.rotation-leaders button:hover {
+  border-color: rgba(250, 204, 21, 0.65);
+  background: rgba(250, 204, 21, 0.08);
+}
+
+.rotation-leaders strong,
+.rotation-leader-static strong {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rotation-leaders span,
+.rotation-leader-static em {
+  color: var(--terminal-muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
 .risk-veto-summary {
   display: flex;
   gap: 8px;
@@ -3125,6 +3330,10 @@ tbody tr.selected {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
+  .rotation-radar-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .full-scan-compact {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -3226,13 +3435,15 @@ tbody tr.selected {
   .market-board-grid,
   .signal-console-body,
   .signal-distribution-grid,
+  .rotation-radar-grid,
   .full-scan-compact,
   .signal-risk-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .signal-console-body,
-  .signal-distribution-grid {
+  .signal-distribution-grid,
+  .rotation-radar-grid {
     grid-template-columns: 1fr;
   }
 }

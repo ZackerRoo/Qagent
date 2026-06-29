@@ -241,6 +241,39 @@ export type SectorStrength = {
   summary: string;
 };
 
+export type RotationThemeLeader = {
+  instrument_id: string;
+  instrument_label: string | null;
+  score: number;
+  action: string;
+  action_label: string;
+  risk_status: string;
+  bucket: string;
+  trigger_price: string | null;
+};
+
+export type RotationTheme = {
+  name: string;
+  category: string;
+  score: number;
+  momentum_score: number;
+  breadth_score: number;
+  opportunity_count: number;
+  actionable_count: number;
+  blocked_count: number;
+  etf_count: number;
+  leaders: RotationThemeLeader[];
+  stance: string;
+  summary: string;
+  tags: string[];
+};
+
+export type MarketRotationRadar = {
+  as_of: string;
+  themes: RotationTheme[];
+  data_health: Record<string, string>;
+};
+
 export type StrategyCalibration = {
   strategy_id: string;
   readiness: string;
@@ -432,6 +465,7 @@ export type OpportunitiesResponse = {
   strategy_health: StrategyHealth[];
   factor_rankings: FactorRanking[];
   sector_strength: SectorStrength[];
+  rotation_radar: MarketRotationRadar;
   portfolio_plan: PortfolioPlan;
   data_health: Record<string, string>;
 };
@@ -538,6 +572,7 @@ export type OverviewResponse = {
   strategy_health: StrategyHealth[];
   factor_rankings: FactorRanking[];
   sector_strength: SectorStrength[];
+  rotation_radar: MarketRotationRadar;
   portfolio_plan: PortfolioPlan;
   data_health: Record<string, string>;
 };

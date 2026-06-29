@@ -9,6 +9,7 @@ import {
   startFullMarketBatchScan,
   startTodayScanTask,
 } from "../api/client";
+import { MarketRotationRadarPanel } from "../components/MarketRotationRadar";
 import { MarketOpportunitySections } from "../components/MarketOpportunitySections";
 import { useI18n } from "../i18n";
 import { formatInstrumentDisplay, formatInstrumentText } from "../lib/instruments";
@@ -259,6 +260,12 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
         />
 
         <SignalDistribution cards={cards} actionableCount={actionable.length} />
+
+        <MarketRotationRadarPanel
+          radar={result?.rotation_radar}
+          cards={cards}
+          onSelect={onSelect}
+        />
 
         {selectedCard && <SelectedOpportunityWorkup card={selectedCard} dataMode={dataMode} />}
 
