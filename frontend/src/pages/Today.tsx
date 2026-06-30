@@ -5,14 +5,22 @@ import {
   fetchFullMarketBatchScan,
   fetchLatestFullMarketBatchResult,
   fetchLatestFullMarketBatchScan,
+  fetchRecommendationFollowThrough,
   saveAlertRule,
   fetchScanTask,
   startFullMarketBatchScan,
   startTodayScanTask,
 } from "../api/client";
+import { ManualActionCenterPanel } from "../components/ManualActionCenter";
 import { MarketRotationRadarPanel } from "../components/MarketRotationRadar";
 import { MarketOpportunitySections } from "../components/MarketOpportunitySections";
+import { MarketIntelligenceCenterPanel } from "../components/MarketIntelligenceCenter";
+import { RecommendationFollowThroughPanel } from "../components/RecommendationFollowThrough";
+import { DecisionQualityCenterPanel } from "../components/DecisionQualityCenter";
+import { OperationalReadinessCenterPanel } from "../components/OperationalReadinessCenter";
+import { AlphaQualityCenterPanel } from "../components/AlphaQualityCenter";
 import { ResearchCommandCenterPanel } from "../components/ResearchCommandCenter";
+import { SignalMonitorCenterPanel } from "../components/SignalMonitorCenter";
 import { SignalHubPanel } from "../components/SignalHubPanel";
 import { useI18n } from "../i18n";
 import { formatInstrumentDisplay, formatInstrumentText } from "../lib/instruments";
@@ -30,6 +38,7 @@ import type {
   FullMarketBatchScanJob,
   FullMarketScanResponse,
   OpportunityCard,
+  RecommendationFollowThroughCenterResponse,
   ResearchProfile,
   ScanTask,
   SignalAlertSuggestion,
@@ -55,6 +64,8 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
   const [error, setError] = useState("");
   const [isStarting, setIsStarting] = useState(false);
   const [fullScanJob, setFullScanJob] = useState<FullMarketBatchScanJob>();
+  const [followthrough, setFollowthrough] =
+    useState<RecommendationFollowThroughCenterResponse>();
   const [isStartingFullScan, setIsStartingFullScan] = useState(false);
   const [isBulkPaperTracking, setIsBulkPaperTracking] = useState(false);
   const [bulkPaperMessage, setBulkPaperMessage] = useState("");
@@ -82,6 +93,18 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
     } catch {
       setResult(undefined);
       setTask(undefined);
+    }
+  }
+
+  async function loadFollowthrough(retry = true) {
+    try {
+      const center = await fetchRecommendationFollowThrough(dataMode);
+      setFollowthrough(center);
+    } catch {
+      setFollowthrough(undefined);
+      if (retry) {
+        window.setTimeout(() => void loadFollowthrough(false), 1400);
+      }
     }
   }
 
@@ -122,6 +145,7 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
       if (next.status === "succeeded" && next.result) {
         setResult(next.result);
         onResult(next.result);
+        void loadFollowthrough();
         const nextCards = applyResearchProfile(next.result.cards, profile);
         if (nextCards.length) {
           onSelect(nextCards[0]);
@@ -205,6 +229,7 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
         const fullResult = await fetchLatestFullMarketBatchResult(dataMode, includeEtfs);
         setResult(fullResult);
         onResult(fullResult);
+        void loadFollowthrough();
         const nextCards = applyResearchProfile(fullResult.cards, profile);
         if (nextCards.length) {
           onSelect(nextCards[0]);
@@ -224,8 +249,9 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
     if (!autoStartedKeys.has(autoKey)) {
       autoStartedKeys.add(autoKey);
       void loadInitialResult();
-      void refreshFullScanJob();
     }
+    void loadFollowthrough();
+    void refreshFullScanJob();
     return () => {
       if (timerRef.current !== null) {
         window.clearTimeout(timerRef.current);
@@ -263,7 +289,23 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
           onTrackTop={trackTopOpportunities}
         />
 
+        <HowToUseTodayPanel cards={cards} followthrough={followthrough} language={language} />
+
+        <OperationalReadinessCenterPanel center={result?.operational_readiness_center} />
+
+        <AlphaQualityCenterPanel center={result?.alpha_quality_center} />
+
+        <DecisionQualityCenterPanel center={result?.decision_quality_center} />
+
+        <SignalMonitorCenterPanel center={result?.signal_monitor} />
+
         <SignalDistribution cards={cards} actionableCount={actionable.length} />
+
+        <ManualActionCenterPanel center={result?.manual_action_center} />
+
+        <RecommendationFollowThroughPanel center={followthrough} />
+
+        <MarketIntelligenceCenterPanel center={result?.market_intelligence} />
 
         <ResearchCommandCenterPanel center={result?.research_center} />
 
@@ -312,6 +354,78 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
           <StrategyValidationStrip items={result?.strategy_health ?? []} />
         </section>
     </div>
+  );
+}
+
+function HowToUseTodayPanel({
+  cards,
+  followthrough,
+  language,
+}: {
+  cards: OpportunityCard[];
+  followthrough?: RecommendationFollowThroughCenterResponse;
+  language: "zh" | "en";
+}) {
+  const firstCard = cards[0];
+  const steps = [
+    {
+      label: language === "zh" ? "1. 找机会" : "1. Find",
+      value: cards.length ? `${cards.length}` : "-",
+      detail:
+        language === "zh"
+          ? "先看今日机会数量和可行动信号，不要只看第一只。"
+          : "Start with opportunity count and actionable signals.",
+    },
+    {
+      label: language === "zh" ? "2. 看质量" : "2. Quality",
+      value: firstCard?.recommendation_quality
+        ? `${Math.round(firstCard.recommendation_quality.score * 100)}`
+        : "-",
+      detail:
+        language === "zh"
+          ? "确认推荐质量、数据源体检和风险阻断项。"
+          : "Check quality gates, data-source checks, and risk vetoes.",
+    },
+    {
+      label: language === "zh" ? "3. 看买卖点" : "3. Plan",
+      value: firstCard?.entry_plan.trigger_price ?? "-",
+      detail:
+        language === "zh"
+          ? "只围绕触发价、止损、目标和不追高价执行。"
+          : "Use trigger, stop, target, and no-chase levels.",
+    },
+    {
+      label: language === "zh" ? "4. 先模拟" : "4. Paper",
+      value: followthrough ? `${Math.round(followthrough.health_score * 100)}` : "-",
+      detail:
+        language === "zh"
+          ? "买入前加入模拟盘，后续看闭环胜率、回撤和超额收益。"
+          : "Track in paper ledger before judging follow-through.",
+    },
+  ];
+
+  return (
+    <section className="panel how-to-use-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>{language === "zh" ? "今天怎么用" : "How to use today"}</h2>
+          <p className="brief-headline">
+            {language === "zh"
+              ? "按机会、质量、买卖点、模拟验证四步走，避免看到推荐就直接追。"
+              : "Use opportunities, quality, trade plan, and paper validation in sequence."}
+          </p>
+        </div>
+      </div>
+      <div className="how-to-use-grid">
+        {steps.map((step) => (
+          <div key={step.label}>
+            <span>{step.label}</span>
+            <strong>{step.value}</strong>
+            <p>{step.detail}</p>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -799,6 +913,9 @@ function SelectedOpportunityWorkup({
         saveMessage={alertMessage}
       />
 
+      <PreTradeRiskPanel card={card} />
+      <RecommendationScoreBreakdownPanel card={card} />
+      <AccountScenarioPanel card={card} />
       <OpportunityScenarioPanel card={card} />
 
       <div className="workup-grid">
@@ -867,6 +984,130 @@ function SelectedOpportunityWorkup({
         </div>
       </div>
     </section>
+  );
+}
+
+function PreTradeRiskPanel({ card }: { card: OpportunityCard }) {
+  const risk = card.pre_trade_risk;
+  if (!risk) {
+    return null;
+  }
+  return (
+    <div className={`pre-trade-risk-panel pre-trade-risk-${risk.status}`}>
+      <div className="pre-trade-risk-heading">
+        <div>
+          <span>买前风控</span>
+          <strong>{risk.label}</strong>
+        </div>
+        <p>{risk.next_action}</p>
+      </div>
+      <div className="pre-trade-risk-metrics">
+        <ScenarioMetric label="风险预算" value={formatNumber(risk.risk_budget_pct, "%")} tone="risk" />
+        <ScenarioMetric label="仓位上限" value={formatNumber(risk.max_position_pct, "%")} tone="info" />
+        <ScenarioMetric label="是否可买" value={risk.can_buy ? "可小仓" : "不买"} tone={risk.can_buy ? "good" : "risk"} />
+        <ScenarioMetric label="能否加仓" value={risk.can_size_up ? "可放大" : "不放大"} tone={risk.can_size_up ? "good" : "neutral"} />
+      </div>
+      <p>{risk.summary}</p>
+      {risk.checks.length > 0 && (
+        <div className="pre-trade-risk-checks">
+          {risk.checks.slice(0, 5).map((check) => (
+            <div key={check.code} className={`pre-trade-check pre-trade-check-${check.severity}`}>
+              <span>{preTradeSeverityLabel(check.severity)}</span>
+              <strong>{check.title}</strong>
+              <p>{check.message}</p>
+              <small>{check.action}</small>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RecommendationScoreBreakdownPanel({ card }: { card: OpportunityCard }) {
+  const score = card.recommendation_score;
+  if (!score) {
+    return null;
+  }
+  const components = score.components
+    .filter((component) => component.key !== "quality_penalties")
+    .sort((left, right) => right.contribution - left.contribution);
+  const penalty = score.components.find((component) => component.key === "quality_penalties");
+  return (
+    <div className="recommendation-score-breakdown">
+      <div className="score-breakdown-heading">
+        <div>
+          <span>推荐质量 2.0</span>
+          <strong>{Math.round(score.final_score * 100)}</strong>
+        </div>
+        <p>{score.summary}</p>
+      </div>
+      <div className="score-breakdown-metrics">
+        <ScenarioMetric label="原始排序" value={formatPct(score.original_rank_score)} tone="neutral" />
+        <ScenarioMetric label="质量分" value={formatPct(score.quality_score)} tone="good" />
+        <ScenarioMetric label="加权分" value={formatPct(score.weighted_score)} tone="info" />
+        <ScenarioMetric label="扣分" value={formatPct(score.penalty_score)} tone={score.penalty_score > 0 ? "risk" : "neutral"} />
+      </div>
+      <div className="score-component-grid">
+        {components.slice(0, 7).map((component) => (
+          <div key={component.key} className={`score-component score-component-${component.status}`}>
+            <div>
+              <span>{component.label}</span>
+              <strong>{Math.round(component.score * 100)}</strong>
+            </div>
+            <i style={{ width: `${Math.max(4, Math.round(component.score * 100))}%` }} />
+            <p>{component.detail}</p>
+          </div>
+        ))}
+      </div>
+      {penalty && <p className="score-penalty-note">{penalty.detail}</p>}
+    </div>
+  );
+}
+
+function AccountScenarioPanel({ card }: { card: OpportunityCard }) {
+  const scenario = card.position_scenario;
+  if (!scenario) {
+    return null;
+  }
+  return (
+    <div className="account-scenario-panel">
+      <div className="account-scenario-heading">
+        <div>
+          <span>买入后情景推演</span>
+          <strong>10万元账户</strong>
+        </div>
+        <p>{scenario.summary}</p>
+      </div>
+      <div className="account-scenario-grid">
+        <ScenarioMetric
+          label="止损账户回撤"
+          value={formatNumber(scenario.account_drawdown_if_stopped_pct, "%")}
+          tone="risk"
+        />
+        <ScenarioMetric
+          label="目标一账户贡献"
+          value={formatNumber(scenario.account_gain_at_target_1_pct, "%")}
+          tone="good"
+        />
+        <ScenarioMetric
+          label="建议仓位"
+          value={formatNumber(scenario.suggested_position_pct, "%")}
+          tone="info"
+        />
+        <ScenarioMetric
+          label="一手资金"
+          value={scenario.min_lot_cash ? `${scenario.min_lot_cash}` : "-"}
+          tone="neutral"
+        />
+      </div>
+      <div className="account-scenario-levels">
+        <span>触发 {scenario.entry_price ?? "-"}</span>
+        <span>止损 {scenario.stop_price ?? "-"}</span>
+        <span>目标一 {scenario.target_1_price ?? "-"}</span>
+        <span>计划股数 {scenario.shares_per_100k ?? 0}</span>
+      </div>
+    </div>
   );
 }
 
@@ -1291,4 +1532,14 @@ function localizeReadiness(value: string, language: "zh" | "en"): string {
     missing_data: "Missing data",
   };
   return (language === "zh" ? zh : en)[value] ?? value;
+}
+
+function preTradeSeverityLabel(value: string): string {
+  const labels: Record<string, string> = {
+    block: "阻断",
+    warning: "确认",
+    risk: "风险",
+    info: "提示",
+  };
+  return labels[value] ?? value;
 }

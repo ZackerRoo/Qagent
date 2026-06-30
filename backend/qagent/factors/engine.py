@@ -13,6 +13,14 @@ FACTOR_WEIGHTS = {
     "reversal": 0.10,
 }
 
+A_SHARE_FACTOR_WEIGHTS = {
+    "momentum": 0.16,
+    "trend_quality": 0.24,
+    "liquidity": 0.16,
+    "low_risk": 0.32,
+    "reversal": 0.12,
+}
+
 
 @dataclass
 class _RawFactors:
@@ -46,8 +54,9 @@ def build_factor_rankings(bars: pd.DataFrame) -> list[FactorRanking]:
     }
     rankings: list[FactorRanking] = []
     for item in raw_items:
+        weights = _factor_weights(item.instrument_id)
         component_score = sum(
-            scores[factor][item.instrument_id] * weight for factor, weight in FACTOR_WEIGHTS.items()
+            scores[factor][item.instrument_id] * weight for factor, weight in weights.items()
         )
         penalty = _execution_penalty(item)
         factor_score = _clamp(component_score * item.data_completeness - penalty)
@@ -64,7 +73,7 @@ def build_factor_rankings(bars: pd.DataFrame) -> list[FactorRanking]:
                 reversal_score=round(scores["reversal"][item.instrument_id], 4),
                 execution_penalty=round(penalty, 4),
                 data_completeness=round(item.data_completeness, 4),
-                factor_exposures=_exposures(item, scores),
+                factor_exposures=_exposures(item, scores, weights),
                 flags=item.flags,
                 missing_data=item.missing_data,
             )
@@ -219,22 +228,32 @@ def _execution_penalty(item: _RawFactors) -> float:
     return _clamp(penalty)
 
 
-def _exposures(item: _RawFactors, scores: dict[str, dict[str, float]]) -> list[FactorExposure]:
+def _factor_weights(instrument_id: str) -> dict[str, float]:
+    if instrument_id.startswith("CN:"):
+        return A_SHARE_FACTOR_WEIGHTS
+    return FACTOR_WEIGHTS
+
+
+def _exposures(
+    item: _RawFactors,
+    scores: dict[str, dict[str, float]],
+    weights: dict[str, float],
+) -> list[FactorExposure]:
     return [
         FactorExposure(
             factor_id="momentum",
             label="Momentum",
             raw_value=item.momentum_raw,
             score=scores["momentum"][item.instrument_id],
-            weight=FACTOR_WEIGHTS["momentum"],
-            explanation="20/60/120 day price momentum ranked within the scan universe.",
+            weight=weights["momentum"],
+            explanation="20/60/120 day price momentum ranked within the scan universe; A-share ranking caps pure momentum influence.",
         ),
         FactorExposure(
             factor_id="trend_quality",
             label="Trend quality",
             raw_value=item.trend_quality_raw,
             score=scores["trend_quality"][item.instrument_id],
-            weight=FACTOR_WEIGHTS["trend_quality"],
+            weight=weights["trend_quality"],
             explanation="Moving-average alignment and distance from 20DMA.",
         ),
         FactorExposure(
@@ -242,7 +261,7 @@ def _exposures(item: _RawFactors, scores: dict[str, dict[str, float]]) -> list[F
             label="Liquidity",
             raw_value=item.liquidity_raw,
             score=scores["liquidity"][item.instrument_id],
-            weight=FACTOR_WEIGHTS["liquidity"],
+            weight=weights["liquidity"],
             explanation="20 day average volume ranked within the scan universe.",
         ),
         FactorExposure(
@@ -250,15 +269,15 @@ def _exposures(item: _RawFactors, scores: dict[str, dict[str, float]]) -> list[F
             label="Low risk",
             raw_value=item.low_risk_raw,
             score=scores["low_risk"][item.instrument_id],
-            weight=FACTOR_WEIGHTS["low_risk"],
-            explanation="Lower 20 day volatility and shallower 60 day drawdown score better.",
+            weight=weights["low_risk"],
+            explanation="Lower 20 day volatility and shallower 60 day drawdown score better; this carries higher weight for A-shares.",
         ),
         FactorExposure(
             factor_id="reversal",
             label="Reversal setup",
             raw_value=item.reversal_raw,
             score=scores["reversal"][item.instrument_id],
-            weight=FACTOR_WEIGHTS["reversal"],
+            weight=weights["reversal"],
             explanation="Short-term pullback pressure inside an intact trend.",
         ),
     ]

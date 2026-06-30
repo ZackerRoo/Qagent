@@ -52,10 +52,32 @@ class BacktestSummary(BaseModel):
     max_runup_pct: float | None
 
 
+class BacktestBenchmarkComparison(BaseModel):
+    label: str
+    benchmark_return_10d: float | None
+    strategy_return_10d: float | None
+    excess_return_10d: float | None
+    verdict: str
+    summary: str
+
+
+class BacktestEnvironmentBreakdown(BaseModel):
+    regime: str
+    sample_count: int
+    completed_count: int
+    benchmark_return_10d: float | None
+    strategy_return_10d: float | None
+    excess_return_10d: float | None
+    win_rate_10d: float | None
+    max_drawdown_pct: float | None
+
+
 class BacktestResult(BaseModel):
     summary: BacktestSummary
     performance: list[StrategyPerformance]
     signals: list[BacktestSignal]
+    benchmark: BacktestBenchmarkComparison
+    environment_breakdown: list[BacktestEnvironmentBreakdown]
     data_health: dict[str, str]
 
 
@@ -139,6 +161,9 @@ def run_historical_backtest(
 
     performance = summarize_strategy_performance(outcomes)
     summary = _build_summary(provider.name, instrument_ids, start, end, scan_dates, outcomes)
+    benchmark_rows = _benchmark_rows(outcomes, all_outcome_bars, instrument_ids)
+    benchmark = _benchmark_comparison(summary, benchmark_rows)
+    environment_breakdown = _environment_breakdown(benchmark_rows)
     data_health = {
         "provider": provider.name,
         "symbols": str(len(instrument_ids)),
@@ -146,6 +171,8 @@ def run_historical_backtest(
         "scan_cards": str(scan_cards),
         "signals": str(len(signals)),
         "lookahead_guard": "bars_limited_to_scan_date",
+        "benchmark": "equal_weight_scanned_universe",
+        "environment_breakdown": str(len(environment_breakdown)),
     }
     provider_errors = getattr(provider, "last_errors", [])
     if provider_errors:
@@ -155,6 +182,8 @@ def run_historical_backtest(
         summary=summary,
         performance=performance,
         signals=sorted(signals, key=lambda item: item.signal_date, reverse=True)[:max_signals],
+        benchmark=benchmark,
+        environment_breakdown=environment_breakdown,
         data_health=data_health,
     )
 
@@ -256,3 +285,160 @@ def _ratio(numerator: int, denominator: int) -> float | None:
     if denominator <= 0:
         return None
     return round(numerator / denominator, 4)
+
+
+def _benchmark_rows(
+    outcomes: list[OpportunityOutcome],
+    bars: pd.DataFrame,
+    instrument_ids: list[str],
+) -> list[dict[str, float | str]]:
+    rows: list[dict[str, float | str]] = []
+    completed = [
+        outcome
+        for outcome in outcomes
+        if outcome.signal_date is not None and outcome.outcome_status != "pending"
+    ]
+    for outcome in completed:
+        benchmark_return = _equal_weight_forward_return(
+            bars,
+            instrument_ids,
+            outcome.signal_date,
+            horizon=10,
+        )
+        if benchmark_return is None:
+            benchmark_return = 0.0
+        strategy_return = outcome.return_10d if outcome.return_10d is not None else 0.0
+        rows.append(
+            {
+                "regime": _benchmark_regime(benchmark_return),
+                "strategy_return_10d": strategy_return,
+                "benchmark_return_10d": benchmark_return,
+                "excess_return_10d": strategy_return - benchmark_return,
+                "max_drawdown_pct": outcome.max_drawdown_pct
+                if outcome.max_drawdown_pct is not None
+                else 0.0,
+            }
+        )
+    return rows
+
+
+def _benchmark_comparison(
+    summary: BacktestSummary,
+    rows: list[dict[str, float | str]],
+) -> BacktestBenchmarkComparison:
+    benchmark_return = _average(
+        [float(row["benchmark_return_10d"]) for row in rows]
+    )
+    strategy_return = summary.avg_return_10d
+    excess_return = (
+        round(strategy_return - benchmark_return, 4)
+        if strategy_return is not None and benchmark_return is not None
+        else None
+    )
+    verdict = _benchmark_verdict(excess_return, len(rows))
+    return BacktestBenchmarkComparison(
+        label="Equal-weight scanned universe",
+        benchmark_return_10d=benchmark_return,
+        strategy_return_10d=strategy_return,
+        excess_return_10d=excess_return,
+        verdict=verdict,
+        summary=_benchmark_summary(verdict, strategy_return, benchmark_return, excess_return),
+    )
+
+
+def _environment_breakdown(
+    rows: list[dict[str, float | str]],
+) -> list[BacktestEnvironmentBreakdown]:
+    result: list[BacktestEnvironmentBreakdown] = []
+    for regime in ("up", "range", "down"):
+        regime_rows = [row for row in rows if row["regime"] == regime]
+        if not regime_rows:
+            continue
+        strategy_returns = [float(row["strategy_return_10d"]) for row in regime_rows]
+        benchmark_returns = [float(row["benchmark_return_10d"]) for row in regime_rows]
+        excess_returns = [float(row["excess_return_10d"]) for row in regime_rows]
+        drawdowns = [float(row["max_drawdown_pct"]) for row in regime_rows]
+        result.append(
+            BacktestEnvironmentBreakdown(
+                regime=regime,
+                sample_count=len(regime_rows),
+                completed_count=len(regime_rows),
+                benchmark_return_10d=_average(benchmark_returns),
+                strategy_return_10d=_average(strategy_returns),
+                excess_return_10d=_average(excess_returns),
+                win_rate_10d=_ratio(sum(1 for value in strategy_returns if value > 0), len(strategy_returns)),
+                max_drawdown_pct=min(drawdowns) if drawdowns else None,
+            )
+        )
+    return result
+
+
+def _equal_weight_forward_return(
+    bars: pd.DataFrame,
+    instrument_ids: list[str],
+    signal_date: date,
+    horizon: int,
+) -> float | None:
+    returns = [
+        value
+        for instrument_id in instrument_ids
+        if (value := _instrument_forward_return(bars, instrument_id, signal_date, horizon)) is not None
+    ]
+    return _average(returns)
+
+
+def _instrument_forward_return(
+    bars: pd.DataFrame,
+    instrument_id: str,
+    signal_date: date,
+    horizon: int,
+) -> float | None:
+    frame = bars[bars["instrument_id"] == instrument_id].copy()
+    if frame.empty:
+        return None
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.date
+    frame = frame.sort_values("trade_date").reset_index(drop=True)
+    eligible = frame.index[frame["trade_date"] >= signal_date].tolist()
+    if not eligible:
+        return None
+    base_index = eligible[0]
+    target_index = base_index + horizon
+    if target_index >= len(frame):
+        return None
+    base_close = float(frame.loc[base_index, "close"])
+    target_close = float(frame.loc[target_index, "close"])
+    if base_close == 0:
+        return None
+    return round((target_close / base_close - 1) * 100, 4)
+
+
+def _benchmark_regime(benchmark_return: float) -> str:
+    if benchmark_return >= 1:
+        return "up"
+    if benchmark_return <= -1:
+        return "down"
+    return "range"
+
+
+def _benchmark_verdict(excess_return: float | None, sample_count: int) -> str:
+    if sample_count < 3 or excess_return is None:
+        return "insufficient_sample"
+    if excess_return >= 0.5:
+        return "outperform"
+    if excess_return <= -0.5:
+        return "underperform"
+    return "inline"
+
+
+def _benchmark_summary(
+    verdict: str,
+    strategy_return: float | None,
+    benchmark_return: float | None,
+    excess_return: float | None,
+) -> str:
+    if verdict == "insufficient_sample":
+        return "Benchmark comparison has too few completed samples."
+    return (
+        f"Strategy 10D avg {strategy_return:.2f}% vs equal-weight universe "
+        f"{benchmark_return:.2f}%; excess {excess_return:+.2f}%."
+    )

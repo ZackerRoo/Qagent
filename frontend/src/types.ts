@@ -140,6 +140,14 @@ export type OpportunityCard = {
   trading_status: TradingStatus | null;
   tradability: TradabilityAssessment | null;
   strategy_calibration: StrategyCalibration | null;
+  quality_score?: number | null;
+  market_fit_score?: number | null;
+  dynamic_score?: number | null;
+  calibration_notes?: string[];
+  recommendation_quality?: RecommendationQualityProfile | null;
+  recommendation_score?: RecommendationScoreBreakdown | null;
+  pre_trade_risk?: PreTradeRiskProfile | null;
+  position_scenario?: PositionScenario | null;
   recommendation_summary: RecommendationSummary | null;
   confidence_explanation?: ConfidenceExplanation | null;
   signal_hub?: SignalHub | null;
@@ -254,6 +262,88 @@ export type ExecutionPlanSummary = {
   position_plan: string;
   invalidation: string;
   next_checklist: string[];
+};
+
+export type RecommendationQualityCheck = {
+  code: string;
+  status: string;
+  label: string;
+  detail: string;
+  score_impact: number;
+};
+
+export type RecommendationQualityProfile = {
+  score: number;
+  tier: string;
+  summary: string;
+  pass_count: number;
+  warn_count: number;
+  block_count: number;
+  checks: RecommendationQualityCheck[];
+};
+
+export type RecommendationScoreComponent = {
+  key: string;
+  label: string;
+  score: number;
+  weight: number;
+  contribution: number;
+  status: string;
+  detail: string;
+};
+
+export type RecommendationScoreBreakdown = {
+  version: string;
+  final_score: number;
+  original_rank_score: number;
+  quality_score: number;
+  weighted_score: number;
+  penalty_score: number;
+  tier: string;
+  summary: string;
+  components: RecommendationScoreComponent[];
+};
+
+export type PreTradeRiskCheck = {
+  code: string;
+  severity: string;
+  title: string;
+  message: string;
+  action: string;
+};
+
+export type PreTradeRiskProfile = {
+  status: string;
+  label: string;
+  can_buy: boolean;
+  can_size_up: boolean;
+  risk_budget_pct: number;
+  max_position_pct: number;
+  next_action: string;
+  summary: string;
+  checks: PreTradeRiskCheck[];
+};
+
+export type PositionScenario = {
+  account_basis: string;
+  entry_price: string | null;
+  stop_price: string | null;
+  target_1_price: string | null;
+  target_2_price: string | null;
+  suggested_risk_pct: number;
+  suggested_position_pct: number;
+  position_value_per_100k: string | null;
+  shares_per_100k: number | null;
+  min_lot: number | null;
+  min_lot_cash: string | null;
+  planned_loss_pct: number | null;
+  target_1_gain_pct: number | null;
+  target_2_gain_pct: number | null;
+  account_drawdown_if_stopped_pct: number;
+  account_gain_at_target_1_pct: number;
+  account_gain_at_target_2_pct: number | null;
+  risk_reward: number | null;
+  summary: string;
 };
 
 export type TradingStatus = {
@@ -475,6 +565,376 @@ export type ResearchCommandCenter = {
   data_health: Record<string, string>;
 };
 
+export type StrategyCalibrationAction = {
+  strategy_id: string;
+  name: string;
+  family: string;
+  action: string;
+  weight_pct: number | null;
+  sample_count: number;
+  win_rate_10d: number | null;
+  avg_return_10d: number | null;
+  max_loss_10d: number | null;
+  reason: string;
+};
+
+export type CalibrationPlaybook = {
+  summary: string;
+  raise_weight_count: number;
+  lower_weight_count: number;
+  collect_sample_count: number;
+  strategy_actions: StrategyCalibrationAction[];
+};
+
+export type MarketExecutionPolicy = {
+  regime: string;
+  label: string;
+  risk_budget_multiplier: number;
+  execution_mode: string;
+  execution_rules: string[];
+  preferred_setups: string[];
+  avoid_setups: string[];
+  summary: string;
+};
+
+export type PortfolioDecisionPolicy = {
+  summary: string;
+  target_positions: number;
+  suggested_positions: number;
+  allocated_weight_pct: number;
+  cash_reserve_pct: number;
+  max_single_position_pct: number;
+  total_risk_budget_pct: number;
+  concentration_warnings: string[];
+  conflict_groups: string[];
+  positions: PortfolioAllocation[];
+};
+
+export type RecommendationDecisionExplanation = {
+  instrument_id: string;
+  instrument_label: string | null;
+  action: string;
+  why_recommended: string;
+  when_to_buy: string;
+  when_to_sell: string;
+  when_not_to_buy: string;
+  position_note: string;
+  validation_note: string;
+  alert_note: string;
+};
+
+export type ValidationPlaybook = {
+  summary: string;
+  linked_count: number;
+  primary_window: string;
+  required_metrics: string[];
+  sample_notes: string[];
+};
+
+export type AlertReadinessItem = {
+  kind: string;
+  title: string;
+  instrument_id: string | null;
+  instrument_label: string | null;
+  condition: string;
+  action: string;
+  readiness: string;
+};
+
+export type AlertReadinessPlaybook = {
+  summary: string;
+  total_alerts: number;
+  ready_count: number;
+  missing_count: number;
+  actions: AlertReadinessItem[];
+};
+
+export type DecisionQualityCenter = {
+  as_of: string;
+  headline: string;
+  readiness_score: number;
+  calibration: CalibrationPlaybook;
+  market_policy: MarketExecutionPolicy;
+  portfolio_policy: PortfolioDecisionPolicy;
+  explanation_cards: RecommendationDecisionExplanation[];
+  validation_playbook: ValidationPlaybook;
+  alert_playbook: AlertReadinessPlaybook;
+  data_health: Record<string, string>;
+};
+
+export type OperationalReadinessCheck = {
+  key: string;
+  label: string;
+  status: string;
+  score: number;
+  user_value: string;
+  evidence: string[];
+  next_action: string;
+};
+
+export type StrategyLearningItem = {
+  strategy_id: string;
+  name: string;
+  action: string;
+  sample_count: number;
+  win_rate_10d: number | null;
+  avg_return_10d: number | null;
+  weight_hint_pct: number | null;
+  reason: string;
+};
+
+export type RecommendationStabilityItem = {
+  instrument_id: string;
+  instrument_label: string | null;
+  current_rank: number;
+  current_score: number;
+  previous_rank: number | null;
+  previous_score: number | null;
+  change: string;
+  reason: string;
+};
+
+export type UserQuestionAnswer = {
+  key: string;
+  question: string;
+  answer: string;
+  source: string;
+};
+
+export type OperationalReadinessCenter = {
+  as_of: string;
+  headline: string;
+  readiness_score: number;
+  checks: OperationalReadinessCheck[];
+  strategy_learning: StrategyLearningItem[];
+  stability_audit: RecommendationStabilityItem[];
+  user_questions: UserQuestionAnswer[];
+  data_health: Record<string, string>;
+};
+
+export type BuyabilityGate = {
+  verdict: string;
+  should_buy_today: boolean;
+  min_rank_score: number;
+  min_quality_score: number;
+  allowed_actions: string[];
+  reason: string;
+  checks: string[];
+};
+
+export type CurrentLeaderReview = {
+  instrument_id: string;
+  instrument_label: string;
+  verdict: string;
+  score_summary: string;
+  strategy_score_text: string;
+  why_it_is_top: string[];
+  buy_discipline: string;
+  invalidation_rules: string[];
+  next_observation: string;
+};
+
+export type StrategyTuningRule = {
+  strategy_id: string;
+  name: string;
+  action: string;
+  weight_multiplier: number;
+  current_candidates: number;
+  sample_count: number;
+  win_rate_10d: number | null;
+  avg_return_10d: number | null;
+  max_loss_10d: number | null;
+  evidence: string;
+};
+
+export type ThemeConfirmation = {
+  name: string;
+  category: string;
+  action: string;
+  score: number;
+  opportunity_count: number;
+  actionable_count: number;
+  leader_labels: string[];
+  evidence: string;
+};
+
+export type AlphaQualityCenter = {
+  as_of: string;
+  headline: string;
+  alpha_score: number;
+  confidence_level: string;
+  buyability_gate: BuyabilityGate;
+  current_leader: CurrentLeaderReview;
+  strategy_tuning: StrategyTuningRule[];
+  theme_confirmation: ThemeConfirmation[];
+  data_health: Record<string, string>;
+};
+
+export type DataSourceQualityCheck = {
+  area: string;
+  label: string;
+  status: string;
+  severity: "ok" | "watch" | "risk" | string;
+  coverage_ratio: number | null;
+  current_source: string | null;
+  impact: string;
+  recommended_action: string;
+};
+
+export type DataQualityCenter = {
+  score: number;
+  adjustment_status: string;
+  suspension_status: string;
+  limit_status: string;
+  industry_status: string;
+  cache_status: string;
+  coverage_ratio: number | null;
+  source_checks?: DataSourceQualityCheck[];
+  missing_inputs: string[];
+  warnings: string[];
+  summary: string;
+};
+
+export type MarketBreadth = {
+  sample_count: number;
+  advance_count: number;
+  decline_count: number;
+  advance_ratio: number | null;
+  avg_change_pct: number | null;
+  median_change_pct: number | null;
+  limit_up_count: number;
+  limit_down_count: number;
+};
+
+export type MarketEnvironmentCenter = {
+  regime: string;
+  score: number;
+  risk_budget_multiplier: number;
+  trend_status: string;
+  liquidity_status: string;
+  breadth: MarketBreadth;
+  top_themes: string[];
+  warnings: string[];
+  summary: string;
+};
+
+export type StrategyWeight = {
+  strategy_id: string;
+  name: string;
+  family: string;
+  weight_pct: number;
+  reason: string;
+};
+
+export type StrategySchedulerCenter = {
+  mode: string;
+  weights: StrategyWeight[];
+  preferred_families: string[];
+  avoided_families: string[];
+  risk_budget_multiplier: number;
+  rules: string[];
+  summary: string;
+};
+
+export type RecommendationCalibrationCenter = {
+  summary: string;
+  score_multiplier: number;
+  promoted_count: number;
+  demoted_count: number;
+  rules_applied: string[];
+};
+
+export type EventHypothesis = {
+  theme: string;
+  catalyst_type: string;
+  direction: string;
+  confidence: number;
+  affected_instruments: string[];
+  verification_path: string[];
+  summary: string;
+};
+
+export type EventHypothesisCenter = {
+  summary: string;
+  hypotheses: EventHypothesis[];
+  data_sources: string[];
+  warnings: string[];
+};
+
+export type MarketIntelligenceCenter = {
+  data_quality: DataQualityCenter;
+  market_environment: MarketEnvironmentCenter;
+  strategy_scheduler: StrategySchedulerCenter;
+  recommendation_calibration: RecommendationCalibrationCenter;
+  event_hypotheses: EventHypothesisCenter;
+  data_health: Record<string, string>;
+};
+
+export type TodayActionItem = {
+  kind: string;
+  priority: string;
+  instrument_id: string | null;
+  instrument_label: string | null;
+  title: string;
+  action: string;
+  reason: string;
+  trigger_price: string | null;
+  initial_stop: string | null;
+  target_1: string | null;
+  no_chase_above: string | null;
+  score: number | null;
+  expected_window: string | null;
+};
+
+export type AlertLoopItem = {
+  kind: string;
+  status: string;
+  instrument_id: string | null;
+  instrument_label: string | null;
+  title: string;
+  action: string;
+  rationale: string;
+  operator: string | null;
+  threshold: string | null;
+  source_rule_id: string | null;
+};
+
+export type DataSourceUpgradeItem = {
+  area: string;
+  status: string;
+  priority: string;
+  title: string;
+  current_source: string;
+  recommended_source: string;
+  impact: string;
+  user_value: string;
+};
+
+export type StrategyEffectivenessItem = {
+  strategy_id: string;
+  name: string;
+  family: string;
+  readiness: string;
+  verdict: string;
+  sample_count: number;
+  win_rate_10d: number | null;
+  avg_return_10d: number | null;
+  avg_return_20d: number | null;
+  max_loss_10d: number | null;
+  weight_pct: number | null;
+  action: string;
+};
+
+export type ManualActionCenter = {
+  as_of: string;
+  headline: string;
+  today_actions: TodayActionItem[];
+  alert_loop: AlertLoopItem[];
+  data_source_roadmap: DataSourceUpgradeItem[];
+  strategy_effectiveness: StrategyEffectivenessItem[];
+  data_health: Record<string, string>;
+};
+
 export type RiskVeto = {
   code: string;
   severity: string;
@@ -597,6 +1057,9 @@ export type ScanItem = {
   trading_status: TradingStatus | null;
   tradability: TradabilityAssessment | null;
   blockers: ScanBlocker[];
+  rejection_category?: string | null;
+  rejection_score?: number | null;
+  remediation?: string | null;
 };
 
 export type ScanBlocker = {
@@ -614,6 +1077,12 @@ export type OpportunitiesResponse = {
   sector_strength: SectorStrength[];
   rotation_radar: MarketRotationRadar;
   portfolio_plan: PortfolioPlan;
+  market_intelligence?: MarketIntelligenceCenter | null;
+  manual_action_center?: ManualActionCenter | null;
+  signal_monitor?: SignalMonitorCenter | null;
+  decision_quality_center?: DecisionQualityCenter | null;
+  operational_readiness_center?: OperationalReadinessCenter | null;
+  alpha_quality_center?: AlphaQualityCenter | null;
   research_center?: ResearchCommandCenter;
   data_health: Record<string, string>;
 };
@@ -722,7 +1191,48 @@ export type OverviewResponse = {
   sector_strength: SectorStrength[];
   rotation_radar: MarketRotationRadar;
   portfolio_plan: PortfolioPlan;
+  market_intelligence?: MarketIntelligenceCenter | null;
+  manual_action_center?: ManualActionCenter | null;
+  signal_monitor?: SignalMonitorCenter | null;
+  decision_quality_center?: DecisionQualityCenter | null;
+  operational_readiness_center?: OperationalReadinessCenter | null;
+  alpha_quality_center?: AlphaQualityCenter | null;
   research_center?: ResearchCommandCenter;
+  data_health: Record<string, string>;
+};
+
+export type SignalMonitorItem = {
+  instrument_id: string;
+  instrument_label: string | null;
+  state: string;
+  severity: string;
+  action: string;
+  reason: string;
+  latest_close: string | null;
+  latest_high: string | null;
+  latest_low: string | null;
+  trigger_price: string | null;
+  initial_stop: string | null;
+  target_1: string | null;
+  no_chase_above: string | null;
+  distance_to_trigger_pct: number | null;
+  distance_to_stop_pct: number | null;
+  distance_to_target_pct: number | null;
+  rank_score: number;
+  risk_status: string | null;
+};
+
+export type SignalMonitorCenter = {
+  as_of: string;
+  headline: string;
+  total: number;
+  triggered_count: number;
+  stop_breached_count: number;
+  near_target_count: number;
+  target_reached_count: number;
+  weakened_count: number;
+  items: SignalMonitorItem[];
+  action_queue: SignalMonitorItem[];
   data_health: Record<string, string>;
 };
 
@@ -1130,6 +1640,13 @@ export type RecommendationClosureWindow = {
   avg_return_60d: number | null;
   max_drawdown_pct: number | null;
   best_runup_pct: number | null;
+  expectancy_10d: number | null;
+  avg_win_10d: number | null;
+  avg_loss_10d: number | null;
+  payoff_ratio_10d: number | null;
+  profit_factor_10d: number | null;
+  max_consecutive_losses: number;
+  risk_verdict: string;
   verdict: string;
 };
 
@@ -1138,6 +1655,38 @@ export type RecommendationClosureResponse = {
   windows: RecommendationClosureWindow[];
   latest_outcomes: OpportunityOutcome[];
   completed_outcomes: OpportunityOutcome[];
+  data_health: Record<string, string>;
+};
+
+export type FollowThroughOutcomeAction = {
+  snapshot_id: string;
+  instrument_id: string;
+  instrument_label?: string | null;
+  signal_date: string | null;
+  outcome_status: string;
+  triggered: boolean | null;
+  return_5d: number | null;
+  return_10d: number | null;
+  return_20d: number | null;
+  max_drawdown_pct: number | null;
+  max_runup_pct: number | null;
+  trigger_price: string | null;
+  initial_stop: string | null;
+  target_1: string | null;
+  severity: "positive" | "watch" | "risk" | string;
+  action: string;
+  reason: string;
+};
+
+export type RecommendationFollowThroughCenterResponse = {
+  as_of: string;
+  headline: string;
+  verdict: string;
+  health_score: number;
+  primary_window_days: number;
+  windows: RecommendationClosureWindow[];
+  focus_outcomes: FollowThroughOutcomeAction[];
+  action_items: string[];
   data_health: Record<string, string>;
 };
 
@@ -1252,6 +1801,26 @@ export type BacktestSummary = {
   max_runup_pct: number | null;
 };
 
+export type BacktestBenchmarkComparison = {
+  label: string;
+  benchmark_return_10d: number | null;
+  strategy_return_10d: number | null;
+  excess_return_10d: number | null;
+  verdict: string;
+  summary: string;
+};
+
+export type BacktestEnvironmentBreakdown = {
+  regime: string;
+  sample_count: number;
+  completed_count: number;
+  benchmark_return_10d: number | null;
+  strategy_return_10d: number | null;
+  excess_return_10d: number | null;
+  win_rate_10d: number | null;
+  max_drawdown_pct: number | null;
+};
+
 export type BacktestSignal = {
   snapshot_id: string;
   instrument_id: string;
@@ -1276,6 +1845,8 @@ export type BacktestResponse = {
   summary: BacktestSummary;
   performance: StrategyPerformance[];
   signals: BacktestSignal[];
+  benchmark: BacktestBenchmarkComparison;
+  environment_breakdown: BacktestEnvironmentBreakdown[];
   data_health: Record<string, string>;
 };
 
@@ -1307,10 +1878,20 @@ export type FactorRankBucket = {
   avg_forward_return_pct: number | null;
 };
 
+export type FactorInformationCoefficient = {
+  sample_count: number;
+  mean_ic: number | null;
+  mean_rank_ic: number | null;
+  positive_ic_rate: number | null;
+  positive_rank_ic_rate: number | null;
+  top_bottom_spread_pct: number | null;
+};
+
 export type FactorBacktestResponse = {
   summary: FactorBacktestSummary;
   signals: FactorBacktestSignal[];
   rank_buckets: FactorRankBucket[];
+  information_coefficient: FactorInformationCoefficient;
   data_health: Record<string, string>;
 };
 

@@ -7,7 +7,11 @@ import {
   localizeRiskStatus,
   localizeStrategy,
 } from "../lib/localize";
-import type { OpportunityCard } from "../types";
+import type {
+  OpportunityCard,
+  RecommendationQualityProfile,
+  RecommendationScoreBreakdown,
+} from "../types";
 import { StatusBadge } from "./StatusBadge";
 
 type Props = {
@@ -67,6 +71,8 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
             <SignalChip label={t("factors.score")} value={Math.round(card.factor_score * 100)} />
             <SignalChip label={t("brief.conviction")} value={formatPct(card.decision?.conviction_score)} />
           </div>
+          <RecommendationQualityStrip profile={card.recommendation_quality} />
+          <RecommendationScoreMini score={card.recommendation_score} />
           <SignalStrengthBar value={signalStrength(card)} />
 
           <div className="trade-plan-strip">
@@ -101,6 +107,68 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
   );
 }
 
+function RecommendationScoreMini({
+  score,
+}: {
+  score?: RecommendationScoreBreakdown | null;
+}) {
+  if (!score) {
+    return null;
+  }
+  const topComponents = score.components
+    .filter((component) => component.key !== "quality_penalties")
+    .sort((left, right) => right.contribution - left.contribution)
+    .slice(0, 3);
+  return (
+    <div className="recommendation-score-mini">
+      <div>
+        <span>综合推荐分</span>
+        <strong>{Math.round(score.final_score * 100)}</strong>
+      </div>
+      <div className="recommendation-score-mini-bars">
+        {topComponents.map((component) => (
+          <span key={component.key} title={`${component.label}: ${component.detail}`}>
+            <i style={{ width: `${Math.max(4, Math.round(component.score * 100))}%` }} />
+            {component.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RecommendationQualityStrip({
+  profile,
+}: {
+  profile?: RecommendationQualityProfile | null;
+}) {
+  if (!profile) {
+    return (
+      <div className="recommendation-quality-strip recommendation-quality-missing">
+        <span>推荐质量：</span>
+        <strong>待评估</strong>
+      </div>
+    );
+  }
+  const topIssue = profile.checks.find((check) => check.status === "block")
+    ?? profile.checks.find((check) => check.status === "warn")
+    ?? profile.checks.find((check) => check.status === "pass");
+  return (
+    <div className={`recommendation-quality-strip quality-tier-${profile.tier}`}>
+      <div>
+        <span>推荐质量：</span>
+        <strong>{qualityTierLabel(profile.tier)} · {Math.round(profile.score * 100)}</strong>
+      </div>
+      <div className="recommendation-quality-counts">
+        <span>通过 {profile.pass_count}</span>
+        <span>警告 {profile.warn_count}</span>
+        <span>阻断 {profile.block_count}</span>
+      </div>
+      {topIssue && <p>{topIssue.label}：{topIssue.detail}</p>}
+    </div>
+  );
+}
+
 function SignalChip({ label, value }: { label: string; value: string | number }) {
   return (
     <span>
@@ -124,6 +192,17 @@ function PlanMetric({ label, value }: { label: string; value: string | number })
       <strong>{value}</strong>
     </div>
   );
+}
+
+function qualityTierLabel(tier: string) {
+  const labels: Record<string, string> = {
+    high_quality: "高质量候选",
+    quality_candidate: "质量候选",
+    watchlist: "观察",
+    low_quality: "低质量",
+    risk_filtered: "风险过滤",
+  };
+  return labels[tier] ?? tier;
 }
 
 function formatPct(value: number | undefined) {

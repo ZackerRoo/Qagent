@@ -1,3 +1,4 @@
+from datetime import date
 import time
 from types import SimpleNamespace
 
@@ -21,6 +22,27 @@ def test_opportunities_endpoint_returns_cards():
     assert "factor_rankings" in body
     assert "sector_strength" in body
     assert "portfolio_plan" in body
+    assert "signal_monitor" in body
+    assert "decision_quality_center" in body
+    assert "operational_readiness_center" in body
+    assert "alpha_quality_center" in body
+    assert body["signal_monitor"]["total"] == len(body["cards"])
+    assert body["signal_monitor"]["action_queue"]
+    assert body["decision_quality_center"]["explanation_cards"]
+    assert len(body["operational_readiness_center"]["checks"]) == 6
+    assert body["operational_readiness_center"]["user_questions"]
+    assert any(
+        item["key"] == "top_recommendation"
+        for item in body["operational_readiness_center"]["user_questions"]
+    )
+    assert body["alpha_quality_center"]["buyability_gate"]["verdict"]
+    assert body["alpha_quality_center"]["current_leader"]["instrument_id"]
+    assert body["alpha_quality_center"]["strategy_tuning"]
+    assert body["alpha_quality_center"]["theme_confirmation"]
+    assert body["data_health"]["signal_monitor_total"] == str(len(body["cards"]))
+    assert body["data_health"]["decision_quality_cards"] == str(len(body["cards"]))
+    assert body["data_health"]["operational_readiness_checks"] == "6"
+    assert body["data_health"]["alpha_quality_cards"] == str(len(body["cards"]))
     assert body["factor_rankings"]
     assert body["sector_strength"]
     assert len(body["cards"]) >= 1
@@ -29,7 +51,14 @@ def test_opportunities_endpoint_returns_cards():
     assert body["cards"][0]["strategy_evaluations"]
     assert body["cards"][0]["primary_strategy_id"]
     assert body["cards"][0]["strategy_score"] >= 0
-    assert body["cards"][0]["rank_score"] >= body["cards"][0]["strategy_score"]
+    assert 0 <= body["cards"][0]["rank_score"] <= 1
+    assert body["cards"][0]["dynamic_score"] == body["cards"][0]["rank_score"]
+    assert body["cards"][0]["quality_score"] is not None
+    assert body["cards"][0]["market_fit_score"] is not None
+    assert body["cards"][0]["recommendation_quality"]["score"] >= 0
+    assert body["cards"][0]["recommendation_quality"]["tier"]
+    assert body["cards"][0]["recommendation_quality"]["checks"]
+    assert body["cards"][0]["calibration_notes"]
     assert body["cards"][0]["rank_reasons"]
     assert body["cards"][0]["factor_score"] >= 0
     assert body["cards"][0]["factor_rank"] >= 1
@@ -402,6 +431,14 @@ def test_full_market_batch_latest_result_hydrates_legacy_cache(tmp_path, monkeyp
             "data_health": {"provider": "fixture", "source": "today_scan"},
         },
     )
+    routes._market_cache_repo().save_daily_bars(
+        "fixture",
+        FixtureMarketDataProvider().get_daily_bars(
+            ["US:TEST", "CN:000001"],
+            date(2026, 1, 1),
+            date(2026, 3, 31),
+        ),
+    )
     client = TestClient(create_app())
 
     response = client.get(
@@ -416,6 +453,13 @@ def test_full_market_batch_latest_result_hydrates_legacy_cache(tmp_path, monkeyp
     assert any(item["curve"] for item in body["strategy_health"])
     assert body["data_health"]["legacy_cards_hydrated"] == "1"
     assert body["data_health"]["strategy_health_source"] == "recent_scan_cache"
+    assert body["signal_monitor"]["total"] == len(body["cards"])
+    assert body["signal_monitor"]["action_queue"]
+    assert body["signal_monitor"]["items"][0]["latest_close"] is not None
+    assert body["decision_quality_center"]["explanation_cards"]
+    assert body["decision_quality_center"]["alert_playbook"]["total_alerts"] >= 3
+    assert body["data_health"]["signal_monitor_total"] == str(len(body["cards"]))
+    assert body["data_health"]["decision_quality_cards"] == str(len(body["cards"]))
 
 
 def test_full_market_batch_latest_result_uses_card_calibration_when_no_health_cache(
@@ -458,6 +502,9 @@ def test_full_market_batch_latest_result_uses_card_calibration_when_no_health_ca
     assert body["strategy_health"][0]["sample_count"] == card["strategy_calibration"]["sample_count"]
     assert body["strategy_health"][0]["curve"] == []
     assert body["data_health"]["strategy_health_source"] == "card_strategy_calibration"
+    assert body["signal_monitor"]["total"] == len(body["cards"])
+    assert body["signal_monitor"]["action_queue"]
+    assert body["decision_quality_center"]["explanation_cards"]
 
 
 def test_daily_brief_fast_mode_sets_snapshot_controls():

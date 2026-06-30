@@ -302,8 +302,11 @@ function UnrecommendedReasonsTable({ items }: { items: ScanItem[] }) {
           <tr>
             <th>{t("common.ticker")}</th>
             <th>{t("common.status")}</th>
+            <th>{language === "zh" ? "排除类别" : "Category"}</th>
+            <th>{language === "zh" ? "排除强度" : "Severity"}</th>
             <th>{t("opportunities.close")}</th>
             <th>{t("common.reason")}</th>
+            <th>{language === "zh" ? "怎么修复" : "Remediation"}</th>
           </tr>
         </thead>
         <tbody>
@@ -317,6 +320,8 @@ function UnrecommendedReasonsTable({ items }: { items: ScanItem[] }) {
                   {localizeStatus(item.status, language)}
                 </span>
               </td>
+              <td>{rejectionCategoryLabel(item.rejection_category, language)}</td>
+              <td>{formatScore(item.rejection_score)}</td>
               <td>{item.latest_close ?? "-"}</td>
               <td className="reason-cell">
                 {item.blockers.length
@@ -336,6 +341,7 @@ function UnrecommendedReasonsTable({ items }: { items: ScanItem[] }) {
                       item.instrument_label,
                     )}
               </td>
+              <td className="reason-cell">{item.remediation ?? "-"}</td>
             </tr>
           ))}
         </tbody>
@@ -345,7 +351,28 @@ function UnrecommendedReasonsTable({ items }: { items: ScanItem[] }) {
 }
 
 function isUnrecommended(item: ScanItem): boolean {
-  return item.status === "no_setup" || item.status === "no_data";
+  return item.status === "no_setup" || item.status === "no_data" || item.status === "data_error";
+}
+
+function rejectionCategoryLabel(category: string | null | undefined, language: "zh" | "en") {
+  const zh: Record<string, string> = {
+    data_missing: "数据缺失",
+    weak_signal: "信号不足",
+    execution_blocked: "交易受限",
+    scan_error: "扫描错误",
+    not_ranked: "排序不足",
+  };
+  const en: Record<string, string> = {
+    data_missing: "Data missing",
+    weak_signal: "Weak signal",
+    execution_blocked: "Execution blocked",
+    scan_error: "Scan error",
+    not_ranked: "Not ranked",
+  };
+  if (!category) {
+    return "-";
+  }
+  return language === "zh" ? zh[category] ?? category : en[category] ?? category;
 }
 
 function MarketScanCoverageSections({ items }: { items: ScanItem[] }) {

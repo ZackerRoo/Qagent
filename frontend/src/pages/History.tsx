@@ -53,6 +53,13 @@ function formatRatio(value: number | null) {
   return `${(value * 100).toFixed(0)}%`;
 }
 
+function formatMultiple(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "-";
+  }
+  return `${value.toFixed(2)}x`;
+}
+
 function numberFromDecimalText(value: string | number | null): number | null {
   if (value === null) {
     return null;
@@ -429,6 +436,22 @@ export function History({
               <div>
                 <span>{t("history.worstForward")}</span>
                 <strong>{formatNumber(factorBacktest.summary.worst_forward_return_pct, "%")}</strong>
+              </div>
+              <div>
+                <span>{language === "zh" ? "IC均值" : "Mean IC"}</span>
+                <strong>{formatNumber(factorBacktest.information_coefficient.mean_ic)}</strong>
+              </div>
+              <div>
+                <span>{language === "zh" ? "Rank IC" : "Rank IC"}</span>
+                <strong>{formatNumber(factorBacktest.information_coefficient.mean_rank_ic)}</strong>
+              </div>
+              <div>
+                <span>{language === "zh" ? "多空差" : "Top-Bottom"}</span>
+                <strong>{formatNumber(factorBacktest.information_coefficient.top_bottom_spread_pct, "%")}</strong>
+              </div>
+              <div>
+                <span>{language === "zh" ? "IC正值率" : "Positive IC"}</span>
+                <strong>{formatRatio(factorBacktest.information_coefficient.positive_ic_rate)}</strong>
               </div>
             </div>
             <div className="validation-grid">
@@ -968,6 +991,22 @@ function RecommendationClosurePanel({ closure }: { closure: RecommendationClosur
                 10D · {t("history.maxDd")} {formatNumber(validatedWindow?.max_drawdown_pct ?? null, "%")}
               </small>
             </div>
+            <div>
+              <span>{language === "zh" ? "期望收益" : "Expectancy"}</span>
+              <strong>{formatNumber(validatedWindow?.expectancy_10d ?? null, "%")}</strong>
+              <small>
+                {language === "zh" ? "风险结论" : "Risk"} {validatedWindow?.risk_verdict ?? "-"}
+              </small>
+            </div>
+            <div>
+              <span>{language === "zh" ? "盈亏比 / PF" : "Payoff / PF"}</span>
+              <strong>
+                {formatMultiple(validatedWindow?.payoff_ratio_10d)} / {formatMultiple(validatedWindow?.profit_factor_10d)}
+              </strong>
+              <small>
+                {language === "zh" ? "最大连续亏损" : "Max loss streak"} {validatedWindow?.max_consecutive_losses ?? 0}
+              </small>
+            </div>
           </div>
           {latestWindow?.completed_count === 0 ? (
             <p className="compact-note">{t("history.closurePendingExplanation")}</p>
@@ -1087,6 +1126,38 @@ function BacktestResultSummary({
           <strong>{formatNumber(backtest.summary.max_drawdown_pct, "%")}</strong>
         </div>
       </div>
+      <div className="backtest-result-grid benchmark-grid">
+        <div>
+          <span>{language === "zh" ? "等权基准" : "Benchmark"}</span>
+          <strong>{formatNumber(backtest.benchmark.benchmark_return_10d, "%")}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "推荐均值" : "Strategy avg"}</span>
+          <strong>{formatNumber(backtest.benchmark.strategy_return_10d, "%")}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "超额收益" : "Excess"}</span>
+          <strong>{formatNumber(backtest.benchmark.excess_return_10d, "%")}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "对比结论" : "Verdict"}</span>
+          <strong>{benchmarkVerdictLabel(backtest.benchmark.verdict, language)}</strong>
+        </div>
+      </div>
+      {backtest.environment_breakdown.length ? (
+        <div className="environment-breakdown-grid">
+          {backtest.environment_breakdown.map((item) => (
+            <div key={item.regime}>
+              <span>{environmentLabel(item.regime, language)}</span>
+              <strong>{formatNumber(item.excess_return_10d, "%")}</strong>
+              <small>
+                {language === "zh" ? "样本" : "Samples"} {item.sample_count} · {language === "zh" ? "胜率" : "Win"}{" "}
+                {formatRatio(item.win_rate_10d)}
+              </small>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1139,6 +1210,36 @@ function backtestInstrumentLabels(signals: BacktestSignal[], fallback: string): 
     }
   }
   return labels.length ? labels : [fallback];
+}
+
+function benchmarkVerdictLabel(verdict: string, language: "zh" | "en") {
+  const zh: Record<string, string> = {
+    outperform: "跑赢",
+    inline: "接近基准",
+    underperform: "跑输",
+    insufficient_sample: "样本不足",
+  };
+  const en: Record<string, string> = {
+    outperform: "Outperform",
+    inline: "Inline",
+    underperform: "Underperform",
+    insufficient_sample: "Insufficient",
+  };
+  return language === "zh" ? zh[verdict] ?? verdict : en[verdict] ?? verdict;
+}
+
+function environmentLabel(regime: string, language: "zh" | "en") {
+  const zh: Record<string, string> = {
+    up: "上涨环境",
+    range: "震荡环境",
+    down: "下跌环境",
+  };
+  const en: Record<string, string> = {
+    up: "Up regime",
+    range: "Range regime",
+    down: "Down regime",
+  };
+  return language === "zh" ? zh[regime] ?? regime : en[regime] ?? regime;
 }
 
 function backtestDateRange(signals: BacktestSignal[]): string | null {

@@ -11,13 +11,32 @@ from qagent.market.instruments import format_instrument_label
 from qagent.market.sector_strength import build_sector_strength
 from qagent.market.tradability import evaluate_tradability
 from qagent.market.trading_status import evaluate_trading_status
+from qagent.monitoring.signal_monitor import SignalMonitorCenter, build_signal_monitor_center
 from qagent.providers.base import MarketDataProvider
 from qagent.recommendations.calibration import apply_strategy_calibration
 from qagent.recommendations.cn_execution import build_trading_constraints
 from qagent.recommendations.decision import build_research_decision
 from qagent.recommendations.enrichment import enrich_opportunity_card
 from qagent.recommendations.portfolio import build_portfolio_plan
+from qagent.recommendations.quality_gate import (
+    apply_recommendation_quality_gate,
+    recommendation_quality_data_health,
+)
 from qagent.recommendations.rotation import sort_recommendation_cards
+from qagent.research.action_center import ManualActionCenter, build_manual_action_center
+from qagent.research.decision_quality import (
+    DecisionQualityCenter,
+    build_decision_quality_center,
+)
+from qagent.research.market_intelligence import (
+    MarketIntelligenceCenter,
+    apply_market_intelligence_to_cards,
+    build_market_intelligence_center,
+)
+from qagent.research.operational_readiness import (
+    OperationalReadinessCenter,
+    build_operational_readiness_center,
+)
 from qagent.signals.engine import SignalEngine
 from qagent.strategy_data.models import AnalystInsight, EarningsEvent, FilingEvent, FundamentalSnapshot
 from qagent.strategy_data.providers import StrategyDataProvider, build_strategy_data_provider
@@ -53,6 +72,9 @@ class ScanItem(BaseModel):
     trading_status: TradingStatus | None = None
     tradability: TradabilityAssessment | None = None
     blockers: list[ScanBlocker] = Field(default_factory=list)
+    rejection_category: str | None = None
+    rejection_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    remediation: str | None = None
 
 
 class DailyScanResult(BaseModel):
@@ -62,6 +84,11 @@ class DailyScanResult(BaseModel):
     factor_rankings: list[FactorRanking]
     sector_strength: list[SectorStrength]
     portfolio_plan: PortfolioPlan
+    market_intelligence: MarketIntelligenceCenter | None = None
+    manual_action_center: ManualActionCenter | None = None
+    signal_monitor: SignalMonitorCenter | None = None
+    decision_quality_center: DecisionQualityCenter | None = None
+    operational_readiness_center: OperationalReadinessCenter | None = None
     data_health: dict[str, str]
 
 
@@ -243,6 +270,63 @@ def run_daily_scan(
     strategy_provider_errors = getattr(strategy_provider, "last_errors", [])
     if strategy_provider_errors:
         data_health["strategy_data_errors"] = " | ".join(strategy_provider_errors[:3])
+    data_health.update(
+        _a_share_data_readiness(
+            cards=cards,
+            items=items,
+            bars_by_instrument=bars_by_instrument,
+            data_health=data_health,
+        )
+    )
+
+    market_intelligence = build_market_intelligence_center(
+        cards=cards,
+        items=items,
+        bars_by_instrument=bars_by_instrument,
+        strategy_health=strategy_health,
+        data_health=data_health,
+    )
+    apply_market_intelligence_to_cards(cards, market_intelligence)
+    apply_recommendation_quality_gate(cards)
+    cards = sort_recommendation_cards(cards)
+    sector_strength = build_sector_strength(cards, bars_by_instrument)
+    portfolio_plan = build_portfolio_plan(cards)
+    data_health.update(market_intelligence.data_health)
+    data_health.update(recommendation_quality_data_health(cards))
+    manual_action_center = build_manual_action_center(
+        cards=cards,
+        market_intelligence=market_intelligence,
+        strategy_health=strategy_health,
+        data_health=data_health,
+    )
+    data_health.update(manual_action_center.data_health)
+    signal_monitor = build_signal_monitor_center(
+        cards,
+        bars_by_instrument=bars_by_instrument,
+        as_of=end,
+    )
+    data_health.update(signal_monitor.data_health)
+    decision_quality_center = build_decision_quality_center(
+        cards=cards,
+        market_intelligence=market_intelligence,
+        portfolio_plan=portfolio_plan,
+        signal_monitor=signal_monitor,
+        strategy_health=strategy_health,
+        data_health=data_health,
+        as_of=end,
+    )
+    data_health.update(decision_quality_center.data_health)
+    operational_readiness_center = build_operational_readiness_center(
+        cards=cards,
+        market_intelligence=market_intelligence,
+        decision_quality_center=decision_quality_center,
+        signal_monitor=signal_monitor,
+        strategy_health=strategy_health,
+        data_health=data_health,
+        as_of=end,
+    )
+    data_health.update(operational_readiness_center.data_health)
+
     return DailyScanResult(
         cards=cards,
         items=items,
@@ -250,6 +334,11 @@ def run_daily_scan(
         factor_rankings=factor_rankings,
         sector_strength=sector_strength,
         portfolio_plan=portfolio_plan,
+        market_intelligence=market_intelligence,
+        manual_action_center=manual_action_center,
+        signal_monitor=signal_monitor,
+        decision_quality_center=decision_quality_center,
+        operational_readiness_center=operational_readiness_center,
         data_health=data_health,
     )
 
@@ -262,15 +351,18 @@ def _scan_error_item(instrument_id: str, exc: Exception) -> ScanItem:
         reason=f"Instrument scan failed: {exc}",
         bars=0,
         signals=0,
-        blockers=[
-            ScanBlocker(
-                code="instrument_scan_error",
-                severity="block",
-                title="Instrument scan error",
-                message=str(exc),
-            )
-        ],
-    )
+            blockers=[
+                ScanBlocker(
+                    code="instrument_scan_error",
+                    severity="block",
+                    title="Instrument scan error",
+                    message=str(exc),
+                )
+            ],
+            rejection_category="scan_error",
+            rejection_score=1.0,
+            remediation="重试行情源或暂时移出该标的，避免单只数据异常影响全市场排序。",
+        )
 
 
 def _factor_rankings_from_bars(bars_by_instrument: dict[str, object]) -> list[FactorRanking]:
@@ -343,6 +435,9 @@ def _scan_item(
                     message="The market data provider did not return daily OHLCV bars.",
                 )
             ],
+            rejection_category="data_missing",
+            rejection_score=1.0,
+            remediation="补齐日线 OHLCV 后再进入推荐池；开发阶段可先换用 SQLite 最近快照。",
             **strategy_counts,
         )
 
@@ -402,7 +497,122 @@ def _scan_item(
         provider=provider,
         trading_status=trading_status,
         tradability=tradability,
+        rejection_category=_rejection_category(blockers),
+        rejection_score=_rejection_score(blockers, signals, strategy_counts),
+        remediation=_rejection_remediation(blockers),
     )
+
+
+def _rejection_category(blockers: list[ScanBlocker]) -> str:
+    codes = {blocker.code for blocker in blockers}
+    if any(blocker.severity == "block" for blocker in blockers):
+        return "execution_blocked"
+    if "strategy_data_missing" in codes:
+        return "data_missing"
+    if "no_active_signals" in codes or "no_strategy_passed" in codes or "signal_threshold_not_met" in codes:
+        return "weak_signal"
+    return "not_ranked"
+
+
+def _rejection_score(
+    blockers: list[ScanBlocker],
+    signals: list,
+    strategy_counts: dict[str, int],
+) -> float:
+    score = min(1.0, 0.2 + len(blockers) * 0.16)
+    if not signals:
+        score += 0.18
+    if strategy_counts["strategies_passed"] == 0:
+        score += 0.18
+    if any(blocker.severity == "block" for blocker in blockers):
+        score += 0.24
+    return round(min(1.0, score), 4)
+
+
+def _rejection_remediation(blockers: list[ScanBlocker]) -> str:
+    category = _rejection_category(blockers)
+    if category == "execution_blocked":
+        return "先确认涨跌停、停牌、流动性和权限限制；可交易性恢复前不要纳入买入候选。"
+    if category == "data_missing":
+        return "补齐策略需要的数据源，如复权价格、财报公告、资金流或足够历史 K 线。"
+    if category == "weak_signal":
+        return "等待趋势、突破、量能或健康回调信号增强，再重新进入排序。"
+    return "当前排序优势不足，继续观察因子分、策略胜率和市场环境是否改善。"
+
+
+def _a_share_data_readiness(
+    *,
+    cards: list[OpportunityCard],
+    items: list[ScanItem],
+    bars_by_instrument: dict[str, object],
+    data_health: dict[str, str],
+) -> dict[str, str]:
+    cn_items = [item for item in items if item.instrument_id.startswith("CN:")]
+    cn_cards = [card for card in cards if card.instrument_id.startswith("CN:")]
+    if not cn_items and not cn_cards:
+        return {
+            "a_share_data_readiness_score": "0.00",
+            "a_share_data_scope": "no_cn_symbols",
+        }
+
+    liquidity_ready = any(
+        item.tradability and (item.tradability.avg_amount_20d or item.tradability.avg_volume_20d)
+        for item in cn_items
+    )
+    price_limit_ready = any(item.trading_status for item in cn_items) or any(
+        card.trading_constraints and card.trading_constraints.price_limit_pct is not None
+        for card in cn_cards
+    )
+    industry_ready = any(card.market_context for card in cn_cards)
+    index_ready = any(
+        card.market_context and card.market_context.index_memberships for card in cn_cards
+    )
+    has_etf = any(card.asset_type.upper() == "ETF" for card in cn_cards)
+    statuses = {
+        "a_share_adjusted_price": "ready"
+        if data_health.get("adjusted_bars")
+        else "partial"
+        if data_health.get("provider") in {"free", "fixture"}
+        else "missing",
+        "a_share_suspension": "ready" if any(item.trading_status for item in cn_items) else "missing",
+        "a_share_price_limit": "ready" if price_limit_ready else "missing",
+        "a_share_industry": "ready" if industry_ready else "missing",
+        "a_share_liquidity": "ready" if liquidity_ready else "partial" if cn_items else "missing",
+        "a_share_turnover": "partial" if liquidity_ready else "missing",
+        "a_share_index_constituents": "ready" if index_ready else "partial" if has_etf else "missing",
+        "a_share_fund_flow": "ready" if data_health.get("fund_flow") else "missing",
+        "a_share_announcements": "ready"
+        if _int_health(data_health, "strategy_announcements") > 0
+        else "partial"
+        if _int_health(data_health, "strategy_fundamentals") > 0
+        else "missing",
+    }
+    score = sum(_readiness_value(status) for status in statuses.values()) / len(statuses)
+    covered_bars = sum(
+        1
+        for instrument_id, bars in bars_by_instrument.items()
+        if instrument_id.startswith("CN:") and not bars.empty
+    )
+    return {
+        **statuses,
+        "a_share_data_readiness_score": f"{score:.2f}",
+        "a_share_bars_coverage": f"{covered_bars}/{len(cn_items)}",
+    }
+
+
+def _readiness_value(status: str) -> float:
+    if status == "ready":
+        return 1.0
+    if status == "partial":
+        return 0.55
+    return 0.0
+
+
+def _int_health(source: dict[str, str], key: str) -> int:
+    try:
+        return int(source.get(key, "0"))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _strategy_counts(evaluations: list[StrategyEvaluation]) -> dict[str, int]:

@@ -65,6 +65,11 @@ def test_factor_backtest_summarizes_forward_returns_by_rank():
     assert all(bucket.sample_count > 0 for bucket in result.rank_buckets)
     assert result.rank_buckets[0].avg_forward_return_pct is not None
     assert result.rank_buckets[0].positive_rate is not None
+    assert result.information_coefficient.sample_count > 0
+    assert result.information_coefficient.mean_ic is not None
+    assert result.information_coefficient.mean_rank_ic is not None
+    assert result.information_coefficient.top_bottom_spread_pct is not None
+    assert result.information_coefficient.top_bottom_spread_pct > 0
 
 
 def test_factor_backtest_uses_shorter_history_when_development_data_is_limited():

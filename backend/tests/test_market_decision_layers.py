@@ -52,6 +52,20 @@ def test_daily_scan_adds_sector_strength_and_strategy_calibration():
     assert any(item.industry == "银行" for item in result.sector_strength)
     assert all(card.strategy_calibration for card in result.cards)
     assert any("策略校准" in reason for card in result.cards for reason in card.rank_reasons)
+    assert result.market_intelligence is not None
+    assert result.market_intelligence.data_quality.summary
+    assert result.market_intelligence.market_environment.summary
+    assert result.market_intelligence.strategy_scheduler.weights
+    assert result.market_intelligence.event_hypotheses.summary
+    assert all(card.dynamic_score is not None for card in result.cards)
+    assert any(card.calibration_notes for card in result.cards)
+    assert all(card.recommendation_quality for card in result.cards)
+    assert any(
+        card.recommendation_quality.tier in {"high_quality", "quality_candidate", "watchlist", "risk_filtered"}
+        for card in result.cards
+        if card.recommendation_quality
+    )
+    assert "recommendation_quality_cards" in result.data_health
 
 
 def test_sector_strength_groups_cards_by_cn_industry():

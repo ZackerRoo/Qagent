@@ -42,6 +42,13 @@ def test_run_historical_backtest_returns_signal_outcomes_and_strategy_performanc
     assert result.summary.avg_return_10d is not None
     assert result.performance
     assert result.signals
+    assert result.benchmark.label == "Equal-weight scanned universe"
+    assert result.benchmark.benchmark_return_10d is not None
+    assert result.benchmark.excess_return_10d is not None
+    assert result.benchmark.verdict in {"outperform", "inline", "underperform", "insufficient_sample"}
+    assert result.environment_breakdown
+    assert {item.regime for item in result.environment_breakdown}.issubset({"up", "range", "down"})
+    assert sum(item.sample_count for item in result.environment_breakdown) >= result.summary.completed_signals
     assert all(signal.signal_date <= date(2026, 3, 20) for signal in result.signals)
     assert all(signal.snapshot_id.startswith("backtest-") for signal in result.signals)
     assert result.data_health["lookahead_guard"] == "bars_limited_to_scan_date"

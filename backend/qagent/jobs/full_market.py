@@ -2,11 +2,23 @@ from pydantic import BaseModel, Field
 
 from qagent.db import create_session_factory, initialize_database
 from qagent.domain.models import OpportunityCard
-from qagent.jobs.daily_scan import DailyScanResult, run_daily_scan
+from qagent.jobs.daily_scan import DailyScanResult, ScanItem, run_daily_scan
 from qagent.market.tradable import load_cn_tradable_instruments
+from qagent.monitoring.signal_monitor import build_signal_monitor_center
 from qagent.providers.factory import build_market_data_provider
 from qagent.recommendations.portfolio import build_portfolio_plan
+from qagent.recommendations.quality_gate import (
+    apply_recommendation_quality_gate,
+    recommendation_quality_data_health,
+)
 from qagent.recommendations.rotation import sort_recommendation_cards
+from qagent.research.action_center import build_manual_action_center
+from qagent.research.decision_quality import build_decision_quality_center
+from qagent.research.market_intelligence import (
+    apply_market_intelligence_to_cards,
+    build_market_intelligence_center,
+)
+from qagent.research.operational_readiness import build_operational_readiness_center
 from qagent.storage.repository import (
     QagentRepository,
     TradableCatalogSummary,
@@ -146,6 +158,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         return
     provider = build_market_data_provider(job.provider)
     all_cards: list[OpportunityCard] = []
+    all_items: list[ScanItem] = []
     strategy_health_batches: list[list[StrategyHealth]] = []
     aggregate_health: dict[str, str] = {
         "provider": job.provider,
@@ -182,6 +195,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
                 result=scan,
             )
             all_cards.extend(scan.cards)
+            all_items.extend(scan.items)
             strategy_health_batches.append(scan.strategy_health)
             _merge_health(aggregate_health, scan.data_health)
             error_count += _int_health(scan.data_health, "scan_errors")
@@ -200,28 +214,80 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
             data_health=aggregate_health,
         )
 
+    strategy_health = _merge_strategy_health(strategy_health_batches)
+    market_intelligence = build_market_intelligence_center(
+        cards=all_cards,
+        items=all_items,
+        bars_by_instrument={},
+        strategy_health=strategy_health,
+        data_health=aggregate_health,
+    )
+    apply_market_intelligence_to_cards(all_cards, market_intelligence)
+    apply_recommendation_quality_gate(all_cards)
     ranked_cards = sort_recommendation_cards(all_cards)
     visible_cards = ranked_cards[:top_cards_limit]
+    visible_items = _visible_rejected_items(all_items, limit=500)
     portfolio_plan = build_portfolio_plan(visible_cards)
-    strategy_health = _merge_strategy_health(strategy_health_batches)
     cache_key = _full_market_batch_cache_key(job.provider, job.include_etfs)
+    payload_data_health = {
+        **aggregate_health,
+        **market_intelligence.data_health,
+        **recommendation_quality_data_health(visible_cards),
+        "scan_result_cache": "full_market_batch",
+        "scan_result_cache_key": cache_key,
+        "full_market_cards_total": str(len(ranked_cards)),
+        "full_market_cards_returned": str(len(visible_cards)),
+        "full_market_rejected_items": str(
+            len([item for item in all_items if _is_rejected_item(item)])
+        ),
+        "full_market_items_returned": str(len(visible_items)),
+        "scanned": str(scanned_symbols),
+        "cards": str(len(visible_cards)),
+    }
+    manual_action_center = build_manual_action_center(
+        cards=visible_cards,
+        market_intelligence=market_intelligence,
+        strategy_health=strategy_health,
+        data_health=payload_data_health,
+    )
+    payload_data_health.update(manual_action_center.data_health)
+    signal_monitor = build_signal_monitor_center(
+        visible_cards,
+        bars_by_instrument={},
+    )
+    payload_data_health.update(signal_monitor.data_health)
+    decision_quality_center = build_decision_quality_center(
+        cards=visible_cards,
+        market_intelligence=market_intelligence,
+        portfolio_plan=portfolio_plan,
+        signal_monitor=signal_monitor,
+        strategy_health=strategy_health,
+        data_health=payload_data_health,
+    )
+    payload_data_health.update(decision_quality_center.data_health)
+    operational_readiness_center = build_operational_readiness_center(
+        cards=visible_cards,
+        market_intelligence=market_intelligence,
+        decision_quality_center=decision_quality_center,
+        signal_monitor=signal_monitor,
+        strategy_health=strategy_health,
+        data_health=payload_data_health,
+    )
+    payload_data_health.update(operational_readiness_center.data_health)
     payload = {
         "symbols": job.symbols,
         "cards": [card.model_dump(mode="json") for card in visible_cards],
-        "items": [],
+        "items": [item.model_dump(mode="json") for item in visible_items],
         "strategy_health": [item.model_dump(mode="json") for item in strategy_health],
         "factor_rankings": [],
         "sector_strength": [],
         "portfolio_plan": portfolio_plan.model_dump(mode="json"),
-        "data_health": {
-            **aggregate_health,
-            "scan_result_cache": "full_market_batch",
-            "scan_result_cache_key": cache_key,
-            "full_market_cards_total": str(len(ranked_cards)),
-            "full_market_cards_returned": str(len(visible_cards)),
-            "scanned": str(scanned_symbols),
-            "cards": str(len(visible_cards)),
-        },
+        "market_intelligence": market_intelligence.model_dump(mode="json"),
+        "manual_action_center": manual_action_center.model_dump(mode="json"),
+        "signal_monitor": signal_monitor.model_dump(mode="json"),
+        "decision_quality_center": decision_quality_center.model_dump(mode="json"),
+        "operational_readiness_center": operational_readiness_center.model_dump(mode="json"),
+        "data_health": payload_data_health,
     }
     repo.save_scan_result_cache(
         cache_key=cache_key,
@@ -250,6 +316,27 @@ def full_market_batch_cache_key(provider: str, include_etfs: bool = True) -> str
 def _repo() -> QagentRepository:
     initialize_database()
     return QagentRepository(create_session_factory())
+
+
+def _visible_rejected_items(items: list[ScanItem], limit: int = 500) -> list[ScanItem]:
+    rejected = [item for item in items if _is_rejected_item(item)]
+    rejected.sort(
+        key=lambda item: (
+            _rejection_status_rank(item.status),
+            item.rejection_score or 0,
+            item.factor_score or 0,
+        ),
+        reverse=True,
+    )
+    return rejected[:limit]
+
+
+def _is_rejected_item(item: ScanItem) -> bool:
+    return item.status in {"no_data", "no_setup", "data_error"}
+
+
+def _rejection_status_rank(status: str) -> int:
+    return {"data_error": 3, "no_data": 2, "no_setup": 1}.get(status, 0)
 
 
 def _chunks(items: list[str], size: int):

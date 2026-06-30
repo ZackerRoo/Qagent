@@ -165,6 +165,52 @@ class MarketDataCacheRepository:
         )
         return _normalize_bars(frame)
 
+    def load_latest_daily_bars(
+        self,
+        provider_mode: str,
+        instrument_ids: list[str],
+    ) -> pd.DataFrame:
+        if not instrument_ids:
+            return pd.DataFrame(columns=BAR_COLUMNS)
+        unique_ids = sorted(set(instrument_ids))
+        with self.session_factory() as session:
+            rows = (
+                session.query(MarketBarCacheRow)
+                .filter(
+                    MarketBarCacheRow.provider_mode == provider_mode,
+                    MarketBarCacheRow.instrument_id.in_(unique_ids),
+                )
+                .order_by(
+                    MarketBarCacheRow.instrument_id,
+                    MarketBarCacheRow.trade_date.desc(),
+                )
+                .all()
+            )
+        if not rows:
+            return pd.DataFrame(columns=BAR_COLUMNS)
+
+        latest_by_instrument: dict[str, MarketBarCacheRow] = {}
+        for row in rows:
+            latest_by_instrument.setdefault(row.instrument_id, row)
+
+        frame = pd.DataFrame(
+            [
+                {
+                    "instrument_id": row.instrument_id,
+                    "trade_date": row.trade_date,
+                    "open": row.open,
+                    "high": row.high,
+                    "low": row.low,
+                    "close": row.close,
+                    "volume": row.volume,
+                    "provider": row.source_provider,
+                }
+                for row in latest_by_instrument.values()
+            ],
+            columns=BAR_COLUMNS,
+        )
+        return _normalize_bars(frame)
+
     def list_summaries(
         self,
         provider_mode: str | None = None,

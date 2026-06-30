@@ -306,6 +306,13 @@ def test_summarize_recommendation_closure_tracks_recent_windows():
     assert recent.avg_return_20d == 1.5
     assert recent.max_drawdown_pct == -8.0
     assert recent.best_runup_pct == 10.0
+    assert recent.expectancy_10d == 1.0
+    assert recent.avg_win_10d == 6.0
+    assert recent.avg_loss_10d == -4.0
+    assert recent.payoff_ratio_10d == 1.5
+    assert recent.profit_factor_10d == 1.5
+    assert recent.max_consecutive_losses == 1
+    assert recent.risk_verdict in {"健康", "观察", "降权", "样本不足"}
 
     assert by_window[60].sample_count == 4
     assert by_window[90].sample_count == 4

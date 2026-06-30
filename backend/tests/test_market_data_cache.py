@@ -38,6 +38,27 @@ def test_market_data_cache_saves_and_loads_daily_bars(tmp_path):
     assert summaries[0].source_providers == ["fixture"]
 
 
+def test_market_data_cache_loads_latest_daily_bar_per_instrument(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    provider = FixtureMarketDataProvider()
+    bars = provider.get_daily_bars(
+        ["US:TEST", "CN:000001"],
+        date(2026, 1, 1),
+        date(2026, 3, 31),
+    )
+
+    repo.save_daily_bars("fixture", bars)
+
+    latest = repo.load_latest_daily_bars("fixture", ["CN:000001", "US:TEST", "US:MISS"])
+
+    assert latest["instrument_id"].tolist() == ["CN:000001", "US:TEST"]
+    assert latest.groupby("instrument_id")["trade_date"].nunique().tolist() == [1, 1]
+    assert latest["trade_date"].tolist() == [
+        bars[bars["instrument_id"].eq("CN:000001")]["trade_date"].max(),
+        bars[bars["instrument_id"].eq("US:TEST")]["trade_date"].max(),
+    ]
+
+
 def test_market_data_cache_coerces_missing_volume_to_zero(tmp_path):
     repo = make_cache_repo(tmp_path)
     bars = pd.DataFrame(

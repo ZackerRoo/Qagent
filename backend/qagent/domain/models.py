@@ -291,6 +291,88 @@ class ExecutionPlanSummary(BaseModel):
     next_checklist: list[str] = Field(default_factory=list)
 
 
+class RecommendationQualityCheck(BaseModel):
+    code: str
+    status: str
+    label: str
+    detail: str
+    score_impact: float = 0.0
+
+
+class RecommendationQualityProfile(BaseModel):
+    score: float = Field(ge=0.0, le=1.0)
+    tier: str
+    summary: str
+    pass_count: int
+    warn_count: int
+    block_count: int
+    checks: list[RecommendationQualityCheck] = Field(default_factory=list)
+
+
+class RecommendationScoreComponent(BaseModel):
+    key: str
+    label: str
+    score: float = Field(ge=0.0, le=1.0)
+    weight: float = Field(ge=0.0)
+    contribution: float = Field(ge=0.0)
+    status: str
+    detail: str
+
+
+class RecommendationScoreBreakdown(BaseModel):
+    version: str = "quality_v2"
+    final_score: float = Field(ge=0.0, le=1.0)
+    original_rank_score: float = Field(ge=0.0, le=1.0)
+    quality_score: float = Field(ge=0.0, le=1.0)
+    weighted_score: float = Field(ge=0.0, le=1.0)
+    penalty_score: float = Field(ge=0.0)
+    tier: str
+    summary: str
+    components: list[RecommendationScoreComponent] = Field(default_factory=list)
+
+
+class PreTradeRiskCheck(BaseModel):
+    code: str
+    severity: str
+    title: str
+    message: str
+    action: str
+
+
+class PreTradeRiskProfile(BaseModel):
+    status: str
+    label: str
+    can_buy: bool
+    can_size_up: bool
+    risk_budget_pct: float = Field(ge=0.0)
+    max_position_pct: float = Field(ge=0.0)
+    next_action: str
+    summary: str
+    checks: list[PreTradeRiskCheck] = Field(default_factory=list)
+
+
+class PositionScenario(BaseModel):
+    account_basis: str = "per_100k"
+    entry_price: Decimal | None = None
+    stop_price: Decimal | None = None
+    target_1_price: Decimal | None = None
+    target_2_price: Decimal | None = None
+    suggested_risk_pct: float = Field(ge=0.0)
+    suggested_position_pct: float = Field(ge=0.0)
+    position_value_per_100k: Decimal | None = None
+    shares_per_100k: int | None = None
+    min_lot: int | None = None
+    min_lot_cash: Decimal | None = None
+    planned_loss_pct: float | None = None
+    target_1_gain_pct: float | None = None
+    target_2_gain_pct: float | None = None
+    account_drawdown_if_stopped_pct: float = Field(ge=0.0)
+    account_gain_at_target_1_pct: float = Field(ge=0.0)
+    account_gain_at_target_2_pct: float | None = None
+    risk_reward: float | None = None
+    summary: str
+
+
 class OpportunityDecision(BaseModel):
     action: str
     action_label: str
@@ -345,6 +427,14 @@ class OpportunityCard(BaseModel):
     trading_status: TradingStatus | None = None
     tradability: TradabilityAssessment | None = None
     strategy_calibration: StrategyCalibration | None = None
+    quality_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    market_fit_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    dynamic_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    calibration_notes: list[str] = Field(default_factory=list)
+    recommendation_quality: RecommendationQualityProfile | None = None
+    recommendation_score: RecommendationScoreBreakdown | None = None
+    pre_trade_risk: PreTradeRiskProfile | None = None
+    position_scenario: PositionScenario | None = None
     recommendation_summary: RecommendationSummary | None = None
     confidence_explanation: ConfidenceExplanation | None = None
     signal_hub: SignalHub | None = None

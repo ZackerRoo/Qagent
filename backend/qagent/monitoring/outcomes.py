@@ -102,6 +102,13 @@ class RecommendationClosureWindow(BaseModel):
     avg_return_60d: float | None
     max_drawdown_pct: float | None
     best_runup_pct: float | None
+    expectancy_10d: float | None = None
+    avg_win_10d: float | None = None
+    avg_loss_10d: float | None = None
+    payoff_ratio_10d: float | None = None
+    profit_factor_10d: float | None = None
+    max_consecutive_losses: int = 0
+    risk_verdict: str = "样本不足"
     verdict: str
 
 
@@ -323,6 +330,11 @@ def _summarize_closure_window(
     target_hit_rate = _ratio(target_hit_count, len(completed))
     win_rate = _ratio(win_count, len(return_10d))
     avg_return_10d = _average(return_10d)
+    avg_win_10d = _average([value for value in return_10d if value > 0])
+    avg_loss_10d = _average([value for value in return_10d if value < 0])
+    payoff_ratio_10d = _payoff_ratio(avg_win_10d, avg_loss_10d)
+    profit_factor_10d = _profit_factor(return_10d)
+    max_consecutive_losses = _max_consecutive_losses(completed)
     max_drawdown_pct = min(drawdowns) if drawdowns else None
 
     return RecommendationClosureWindow(
@@ -345,6 +357,22 @@ def _summarize_closure_window(
         avg_return_60d=_average(return_60d),
         max_drawdown_pct=max_drawdown_pct,
         best_runup_pct=max(runups) if runups else None,
+        expectancy_10d=avg_return_10d,
+        avg_win_10d=avg_win_10d,
+        avg_loss_10d=avg_loss_10d,
+        payoff_ratio_10d=payoff_ratio_10d,
+        profit_factor_10d=profit_factor_10d,
+        max_consecutive_losses=max_consecutive_losses,
+        risk_verdict=_risk_verdict(
+            sample_count=len(outcomes),
+            completed_count=len(completed),
+            win_rate=win_rate,
+            expectancy_10d=avg_return_10d,
+            profit_factor_10d=profit_factor_10d,
+            max_consecutive_losses=max_consecutive_losses,
+            max_drawdown_pct=max_drawdown_pct,
+            stop_rate=_ratio(stopped_count, len(completed)),
+        ),
         verdict=_closure_verdict(
             sample_count=len(outcomes),
             completed_count=len(completed),
@@ -461,3 +489,69 @@ def _ratio(numerator: int, denominator: int) -> float | None:
     if denominator <= 0:
         return None
     return round(numerator / denominator, 4)
+
+
+def _payoff_ratio(avg_win: float | None, avg_loss: float | None) -> float | None:
+    if avg_win is None or avg_loss is None or avg_loss == 0:
+        return None
+    return round(avg_win / abs(avg_loss), 4)
+
+
+def _profit_factor(values: list[float]) -> float | None:
+    gross_profit = sum(value for value in values if value > 0)
+    gross_loss = abs(sum(value for value in values if value < 0))
+    if gross_profit == 0 and gross_loss == 0:
+        return None
+    if gross_loss == 0:
+        return None
+    return round(gross_profit / gross_loss, 4)
+
+
+def _max_consecutive_losses(outcomes: list[OpportunityOutcome]) -> int:
+    ordered = sorted(
+        outcomes,
+        key=lambda outcome: (outcome.signal_date or date.min, outcome.snapshot_id),
+    )
+    longest = 0
+    current = 0
+    for outcome in ordered:
+        is_loss = (
+            outcome.outcome_status == "stopped"
+            or (outcome.return_10d is not None and outcome.return_10d < 0)
+        )
+        if is_loss:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
+
+
+def _risk_verdict(
+    *,
+    sample_count: int,
+    completed_count: int,
+    win_rate: float | None,
+    expectancy_10d: float | None,
+    profit_factor_10d: float | None,
+    max_consecutive_losses: int,
+    max_drawdown_pct: float | None,
+    stop_rate: float | None,
+) -> str:
+    if sample_count < 3 or completed_count < 2:
+        return "样本不足"
+    if (
+        (expectancy_10d is not None and expectancy_10d < 0)
+        or (profit_factor_10d is not None and profit_factor_10d < 0.85)
+        or max_consecutive_losses >= 3
+        or (stop_rate is not None and stop_rate >= 0.5 and (win_rate or 0) < 0.5)
+        or (max_drawdown_pct is not None and max_drawdown_pct <= -12)
+    ):
+        return "降权"
+    if (
+        (expectancy_10d is not None and expectancy_10d > 0)
+        and (win_rate is None or win_rate >= 0.5)
+        and (profit_factor_10d is None or profit_factor_10d >= 1.1)
+    ):
+        return "健康"
+    return "观察"

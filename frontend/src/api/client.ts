@@ -41,6 +41,7 @@ import type {
   PositionsResponse,
   ProviderStatusResponse,
   RecommendationClosureResponse,
+  RecommendationFollowThroughCenterResponse,
   ScanRunsResponse,
   ScanTask,
   ScanTasksResponse,
@@ -543,6 +544,15 @@ export async function fetchRecommendationClosure(
   provider: DataProviderMode,
 ): Promise<RecommendationClosureResponse> {
   return apiGet<RecommendationClosureResponse>("/recommendation-closure", { provider, limit: 150 });
+}
+
+export async function fetchRecommendationFollowThrough(
+  provider: DataProviderMode,
+): Promise<RecommendationFollowThroughCenterResponse> {
+  return apiGet<RecommendationFollowThroughCenterResponse>(
+    "/recommendation-followthrough",
+    { provider, limit: 120 },
+  );
 }
 
 export async function fetchStrategyPerformance(

@@ -19,7 +19,7 @@ from qagent.briefing.export import render_daily_brief_markdown
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
 from qagent.catalysts.providers import FreeCatalystProvider
 from qagent.db import create_session_factory, initialize_database
-from qagent.domain.models import OpportunityCard, SectorStrength
+from qagent.domain.models import OpportunityCard, PortfolioPlan, SectorStrength
 from qagent.factors.backtest import run_factor_backtest
 from qagent.jobs.automation import run_research_automation
 from qagent.jobs.daily_scan import DailyScanResult, run_daily_scan
@@ -39,7 +39,7 @@ from qagent.market.a_share_universe import (
 )
 from qagent.market.instruments import format_instrument_label
 from qagent.market.instruments import market_symbol
-from qagent.market.rotation_radar import build_rotation_radar
+from qagent.market.rotation_radar import MarketRotationRadar, build_rotation_radar
 from qagent.market.tradable import search_cn_tradable_instruments
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE, DEFAULT_FREE_UNIVERSE
 from qagent.market.universes import UniverseCreate, builtin_universes, merge_universes
@@ -50,6 +50,8 @@ from qagent.monitoring.outcomes import (
     summarize_recommendation_closure,
     summarize_strategy_performance,
 )
+from qagent.monitoring.followthrough import build_recommendation_followthrough_center
+from qagent.monitoring.signal_monitor import SignalMonitorCenter, build_signal_monitor_center
 from qagent.monitoring.portfolio import PositionInput, analyze_position_risk
 from qagent.monitoring.alerts import AlertRule, suggest_alert_rules
 from qagent.paper_trading.engine import (
@@ -62,8 +64,22 @@ from qagent.providers.factory import build_market_data_provider
 from qagent.providers.status import build_provider_status
 from qagent.recommendations.enrichment import enrich_opportunity_card
 from qagent.recommendations.portfolio import build_portfolio_plan
+from qagent.recommendations.quality_gate import (
+    apply_recommendation_quality_gate,
+    recommendation_quality_data_health,
+)
+from qagent.recommendations.rotation import sort_recommendation_cards
 from qagent.recommendations.signal_hub import build_signal_hub
+from qagent.research.action_center import build_manual_action_center
+from qagent.research.alpha_quality import build_alpha_quality_center
 from qagent.research.command_center import build_research_command_center
+from qagent.research.decision_quality import build_decision_quality_center
+from qagent.research.market_intelligence import MarketIntelligenceCenter
+from qagent.research.market_intelligence import (
+    apply_market_intelligence_to_cards,
+    build_market_intelligence_center,
+)
+from qagent.research.operational_readiness import build_operational_readiness_center
 from qagent.storage.paper import PaperTradingRepository
 from qagent.storage.repository import (
     AlertRuleCreate,
@@ -73,6 +89,7 @@ from qagent.storage.repository import (
 )
 from qagent.storage.market_cache import MarketDataCacheRepository
 from qagent.strategy_data.providers import EmptyStrategyDataProvider
+from qagent.strategies.models import StrategyHealth
 
 router = APIRouter()
 _task_manager = TaskManager()
@@ -453,9 +470,31 @@ def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict
         "sector_strength": [item.model_dump(mode="json") for item in result.sector_strength],
         "rotation_radar": _rotation_radar_payload(result.cards, result.sector_strength),
         "portfolio_plan": result.portfolio_plan.model_dump(mode="json"),
+        "market_intelligence": result.market_intelligence.model_dump(mode="json")
+        if result.market_intelligence
+        else None,
+        "manual_action_center": result.manual_action_center.model_dump(mode="json")
+        if result.manual_action_center
+        else None,
+        "signal_monitor": result.signal_monitor.model_dump(mode="json")
+        if result.signal_monitor
+        else None,
+        "decision_quality_center": result.decision_quality_center.model_dump(mode="json")
+        if result.decision_quality_center
+        else None,
+        "operational_readiness_center": result.operational_readiness_center.model_dump(mode="json")
+        if result.operational_readiness_center
+        else None,
         "data_health": result.data_health,
     }
     _attach_signal_hub_payload(payload)
+    _attach_market_intelligence_payload(payload)
+    _attach_recommendation_quality_payload(payload)
+    _attach_manual_action_center_payload(payload)
+    _attach_signal_monitor_payload(payload)
+    _attach_decision_quality_payload(payload)
+    _attach_operational_readiness_payload(payload)
+    _attach_alpha_quality_payload(payload)
     _attach_research_center_payload(payload)
     return payload
 
@@ -601,9 +640,31 @@ def overview(provider: str = "fixture", symbols: str | None = None) -> dict[str,
         "sector_strength": [item.model_dump(mode="json") for item in result.sector_strength[:6]],
         "rotation_radar": _rotation_radar_payload(result.cards, result.sector_strength),
         "portfolio_plan": result.portfolio_plan.model_dump(mode="json"),
+        "market_intelligence": result.market_intelligence.model_dump(mode="json")
+        if result.market_intelligence
+        else None,
+        "manual_action_center": result.manual_action_center.model_dump(mode="json")
+        if result.manual_action_center
+        else None,
+        "signal_monitor": result.signal_monitor.model_dump(mode="json")
+        if result.signal_monitor
+        else None,
+        "decision_quality_center": result.decision_quality_center.model_dump(mode="json")
+        if result.decision_quality_center
+        else None,
+        "operational_readiness_center": result.operational_readiness_center.model_dump(mode="json")
+        if result.operational_readiness_center
+        else None,
         "data_health": result.data_health,
     }
     _attach_signal_hub_payload(payload, cards_key="top_cards")
+    _attach_market_intelligence_payload(payload, cards_key="top_cards")
+    _attach_recommendation_quality_payload(payload, cards_key="top_cards")
+    _attach_manual_action_center_payload(payload, cards_key="top_cards")
+    _attach_signal_monitor_payload(payload, cards_key="top_cards")
+    _attach_decision_quality_payload(payload, cards_key="top_cards")
+    _attach_operational_readiness_payload(payload, cards_key="top_cards")
+    _attach_alpha_quality_payload(payload, cards_key="top_cards")
     _attach_research_center_payload(payload, cards_key="top_cards")
     return payload
 
@@ -1014,6 +1075,12 @@ def _cached_daily_scan_for_brief(
         "sector_strength": payload.get("sector_strength")
         if isinstance(payload.get("sector_strength"), list)
         else [],
+        "market_intelligence": payload.get("market_intelligence")
+        if isinstance(payload.get("market_intelligence"), dict)
+        else None,
+        "manual_action_center": payload.get("manual_action_center")
+        if isinstance(payload.get("manual_action_center"), dict)
+        else None,
         "portfolio_plan": payload.get("portfolio_plan"),
         "data_health": payload.get("data_health") if isinstance(payload.get("data_health"), dict) else {},
     }
@@ -1076,6 +1143,10 @@ def backtest(
         "summary": result.summary.model_dump(mode="json"),
         "performance": [item.model_dump(mode="json") for item in result.performance],
         "signals": [_model_payload_with_label(item) for item in result.signals],
+        "benchmark": result.benchmark.model_dump(mode="json"),
+        "environment_breakdown": [
+            item.model_dump(mode="json") for item in result.environment_breakdown
+        ],
         "data_health": {**result.data_health, **resolved.data_health},
     }
 
@@ -1488,6 +1559,13 @@ def _enrich_scan_task_result(payload: dict[str, object]) -> dict[str, object]:
     _hydrate_legacy_opportunity_cards(result)
     _attach_rotation_radar_payload(result)
     _attach_signal_hub_payload(result)
+    _attach_market_intelligence_payload(result)
+    _attach_recommendation_quality_payload(result)
+    _attach_manual_action_center_payload(result)
+    _attach_signal_monitor_payload(result)
+    _attach_decision_quality_payload(result)
+    _attach_operational_readiness_payload(result)
+    _attach_alpha_quality_payload(result)
     _attach_research_center_payload(result)
     return payload
 
@@ -1520,10 +1598,32 @@ def _full_market_scan_payload(
             result.scan.sector_strength,
         ),
         "portfolio_plan": result.scan.portfolio_plan.model_dump(mode="json"),
+        "market_intelligence": result.scan.market_intelligence.model_dump(mode="json")
+        if result.scan.market_intelligence
+        else None,
+        "manual_action_center": result.scan.manual_action_center.model_dump(mode="json")
+        if result.scan.manual_action_center
+        else None,
+        "signal_monitor": result.scan.signal_monitor.model_dump(mode="json")
+        if result.scan.signal_monitor
+        else None,
+        "decision_quality_center": result.scan.decision_quality_center.model_dump(mode="json")
+        if result.scan.decision_quality_center
+        else None,
+        "operational_readiness_center": result.scan.operational_readiness_center.model_dump(mode="json")
+        if result.scan.operational_readiness_center
+        else None,
         "data_health": result.data_health,
     }
     _relabel_instrument_payload(payload)
     _attach_signal_hub_payload(payload)
+    _attach_market_intelligence_payload(payload)
+    _attach_recommendation_quality_payload(payload)
+    _attach_manual_action_center_payload(payload)
+    _attach_signal_monitor_payload(payload)
+    _attach_decision_quality_payload(payload)
+    _attach_operational_readiness_payload(payload)
+    _attach_alpha_quality_payload(payload)
     _attach_research_center_payload(payload)
     _repo().save_scan_result_cache(
         cache_key=_full_market_scan_cache_key(mode, max_symbols, include_etfs, sync_if_empty),
@@ -1583,11 +1683,18 @@ def _recent_full_market_scan_payload(
         _relabel_instrument_payload(payload)
         _attach_rotation_radar_payload(payload)
         _attach_signal_hub_payload(payload)
+        _attach_market_intelligence_payload(payload)
+        _attach_recommendation_quality_payload(payload)
         data_health = payload.setdefault("data_health", {})
         if isinstance(data_health, dict):
             data_health["scan_result_cache"] = "hit"
             data_health["scan_result_cache_key"] = cache_key
             data_health["scan_result_cache_id"] = cached.cache_id
+        _attach_manual_action_center_payload(payload)
+        _attach_signal_monitor_payload(payload)
+        _attach_decision_quality_payload(payload)
+        _attach_operational_readiness_payload(payload)
+        _attach_alpha_quality_payload(payload)
         _attach_research_center_payload(payload)
         return payload
 
@@ -1603,6 +1710,13 @@ def _recent_full_market_scan_payload(
     _relabel_instrument_payload(payload)
     _attach_rotation_radar_payload(payload)
     _attach_signal_hub_payload(payload)
+    _attach_market_intelligence_payload(payload)
+    _attach_recommendation_quality_payload(payload)
+    _attach_manual_action_center_payload(payload)
+    _attach_signal_monitor_payload(payload)
+    _attach_decision_quality_payload(payload)
+    _attach_operational_readiness_payload(payload)
+    _attach_alpha_quality_payload(payload)
     _attach_research_center_payload(payload)
     _repo().save_scan_result_cache(
         cache_key=cache_key,
@@ -1654,6 +1768,13 @@ def _recent_scan_run_fallback_payload(
     }
     _attach_rotation_radar_payload(payload)
     _attach_signal_hub_payload(payload)
+    _attach_market_intelligence_payload(payload)
+    _attach_recommendation_quality_payload(payload)
+    _attach_manual_action_center_payload(payload)
+    _attach_signal_monitor_payload(payload)
+    _attach_decision_quality_payload(payload)
+    _attach_operational_readiness_payload(payload)
+    _attach_alpha_quality_payload(payload)
     _attach_research_center_payload(payload)
     return payload
 
@@ -1691,6 +1812,13 @@ def _hydrate_full_market_batch_payload(
             data_health["strategy_health_source"] = "card_strategy_calibration"
     _attach_rotation_radar_payload(payload)
     _attach_signal_hub_payload(payload)
+    _attach_market_intelligence_payload(payload)
+    _attach_recommendation_quality_payload(payload)
+    _attach_manual_action_center_payload(payload)
+    _attach_signal_monitor_payload(payload)
+    _attach_decision_quality_payload(payload)
+    _attach_operational_readiness_payload(payload)
+    _attach_alpha_quality_payload(payload)
     _attach_research_center_payload(payload)
 
 
@@ -1785,6 +1913,376 @@ def _attach_signal_hub_payload(
         )
         enriched_cards.append(card.model_dump(mode="json"))
     payload[cards_key] = enriched_cards
+
+
+def _attach_market_intelligence_payload(
+    payload: dict[str, object],
+    cards_key: str = "cards",
+) -> None:
+    if isinstance(payload.get("market_intelligence"), dict):
+        return
+    raw_cards = payload.get(cards_key)
+    if not isinstance(raw_cards, list):
+        return
+    cards: list[OpportunityCard] = []
+    for raw_card in raw_cards:
+        if not isinstance(raw_card, dict):
+            continue
+        try:
+            cards.append(OpportunityCard.model_validate(raw_card))
+        except Exception:
+            continue
+    if not cards:
+        return
+
+    raw_health = payload.get("strategy_health")
+    strategy_health: list[StrategyHealth] = []
+    if isinstance(raw_health, list):
+        for item in raw_health:
+            if not isinstance(item, dict):
+                continue
+            try:
+                strategy_health.append(StrategyHealth.model_validate(item))
+            except Exception:
+                continue
+
+    raw_data_health = payload.get("data_health")
+    data_health = raw_data_health if isinstance(raw_data_health, dict) else {}
+    raw_items = payload.get("items")
+    items = raw_items if isinstance(raw_items, list) else []
+    center = build_market_intelligence_center(
+        cards=cards,
+        items=items,
+        bars_by_instrument={},
+        strategy_health=strategy_health,
+        data_health=data_health,
+    )
+    apply_market_intelligence_to_cards(cards, center)
+    payload[cards_key] = [card.model_dump(mode="json") for card in cards]
+    payload["market_intelligence"] = center.model_dump(mode="json")
+    payload_data_health = payload.setdefault("data_health", {})
+    if isinstance(payload_data_health, dict):
+        payload_data_health.update(center.data_health)
+
+
+def _attach_recommendation_quality_payload(
+    payload: dict[str, object],
+    cards_key: str = "cards",
+) -> None:
+    raw_cards = payload.get(cards_key)
+    if not isinstance(raw_cards, list):
+        return
+    if raw_cards and all(
+        isinstance(raw_card, dict) and isinstance(raw_card.get("recommendation_quality"), dict)
+        for raw_card in raw_cards
+    ):
+        return
+
+    cards: list[OpportunityCard] = []
+    for raw_card in raw_cards:
+        if not isinstance(raw_card, dict):
+            continue
+        try:
+            cards.append(OpportunityCard.model_validate(raw_card))
+        except Exception:
+            continue
+    if not cards:
+        return
+
+    apply_recommendation_quality_gate(cards)
+    cards = sort_recommendation_cards(cards)
+    payload[cards_key] = [card.model_dump(mode="json") for card in cards]
+    payload_data_health = payload.setdefault("data_health", {})
+    if isinstance(payload_data_health, dict):
+        payload_data_health.update(recommendation_quality_data_health(cards))
+
+
+def _attach_manual_action_center_payload(
+    payload: dict[str, object],
+    cards_key: str = "cards",
+) -> None:
+    if isinstance(payload.get("manual_action_center"), dict):
+        return
+    raw_cards = payload.get(cards_key)
+    if not isinstance(raw_cards, list):
+        return
+
+    cards: list[OpportunityCard] = []
+    for raw_card in raw_cards:
+        if not isinstance(raw_card, dict):
+            continue
+        try:
+            cards.append(OpportunityCard.model_validate(raw_card))
+        except Exception:
+            continue
+    if not cards:
+        return
+
+    raw_health = payload.get("strategy_health")
+    strategy_health: list[StrategyHealth] = []
+    if isinstance(raw_health, list):
+        for item in raw_health:
+            if not isinstance(item, dict):
+                continue
+            try:
+                strategy_health.append(StrategyHealth.model_validate(item))
+            except Exception:
+                continue
+
+    raw_data_health = payload.get("data_health")
+    data_health = raw_data_health if isinstance(raw_data_health, dict) else {}
+    center = build_manual_action_center(
+        cards=cards,
+        market_intelligence=payload.get("market_intelligence")
+        if isinstance(payload.get("market_intelligence"), dict)
+        else None,
+        strategy_health=strategy_health,
+        data_health=data_health,
+    )
+    payload["manual_action_center"] = center.model_dump(mode="json")
+    payload_data_health = payload.setdefault("data_health", {})
+    if isinstance(payload_data_health, dict):
+        payload_data_health.update(center.data_health)
+
+
+def _attach_signal_monitor_payload(
+    payload: dict[str, object],
+    cards_key: str = "cards",
+) -> None:
+    if isinstance(payload.get("signal_monitor"), dict):
+        return
+    raw_cards = payload.get(cards_key)
+    if not isinstance(raw_cards, list):
+        return
+
+    cards: list[OpportunityCard] = []
+    for raw_card in raw_cards:
+        if not isinstance(raw_card, dict):
+            continue
+        try:
+            cards.append(OpportunityCard.model_validate(raw_card))
+        except Exception:
+            continue
+    if not cards:
+        return
+
+    provider = _payload_provider_mode(payload)
+    bars_by_instrument = _cached_latest_bars_by_instrument(provider, cards)
+    center = build_signal_monitor_center(cards, bars_by_instrument=bars_by_instrument)
+    payload["signal_monitor"] = center.model_dump(mode="json")
+    payload_data_health = payload.setdefault("data_health", {})
+    if isinstance(payload_data_health, dict):
+        payload_data_health.update(center.data_health)
+        if provider:
+            payload_data_health["signal_monitor_price_source"] = "market_cache"
+            payload_data_health["signal_monitor_cached_bars"] = str(len(bars_by_instrument))
+
+
+def _payload_provider_mode(payload: dict[str, object]) -> str | None:
+    data_health = payload.get("data_health")
+    if isinstance(data_health, dict):
+        provider = data_health.get("provider")
+        if isinstance(provider, str) and provider.strip():
+            return provider.strip().lower()
+    provider = payload.get("provider")
+    if isinstance(provider, str) and provider.strip():
+        return provider.strip().lower()
+    return None
+
+
+def _cached_latest_bars_by_instrument(
+    provider: str | None,
+    cards: list[OpportunityCard],
+) -> dict[str, object]:
+    if not provider:
+        return {}
+    instrument_ids = sorted({card.instrument_id for card in cards})
+    if not instrument_ids:
+        return {}
+    try:
+        latest = _market_cache_repo().load_latest_daily_bars(provider, instrument_ids)
+    except Exception:
+        return {}
+    if latest.empty:
+        return {}
+    return {
+        str(instrument_id): group.copy()
+        for instrument_id, group in latest.groupby("instrument_id", sort=False)
+    }
+
+
+def _attach_decision_quality_payload(
+    payload: dict[str, object],
+    cards_key: str = "cards",
+) -> None:
+    if isinstance(payload.get("decision_quality_center"), dict):
+        return
+    raw_cards = payload.get(cards_key)
+    if not isinstance(raw_cards, list):
+        return
+
+    cards = _cards_from_payload(raw_cards)
+    if not cards:
+        return
+
+    center = build_decision_quality_center(
+        cards=cards,
+        market_intelligence=_market_intelligence_from_payload(payload.get("market_intelligence")),
+        portfolio_plan=_portfolio_plan_from_payload(payload.get("portfolio_plan")),
+        signal_monitor=_signal_monitor_from_payload(payload.get("signal_monitor")),
+        strategy_health=_strategy_health_from_payload(payload.get("strategy_health")),
+        data_health=payload.get("data_health") if isinstance(payload.get("data_health"), dict) else {},
+    )
+    payload["decision_quality_center"] = center.model_dump(mode="json")
+    payload_data_health = payload.setdefault("data_health", {})
+    if isinstance(payload_data_health, dict):
+        payload_data_health.update(center.data_health)
+
+
+def _attach_operational_readiness_payload(
+    payload: dict[str, object],
+    cards_key: str = "cards",
+) -> None:
+    if isinstance(payload.get("operational_readiness_center"), dict):
+        return
+    raw_cards = payload.get(cards_key)
+    if not isinstance(raw_cards, list):
+        return
+
+    cards = _cards_from_payload(raw_cards)
+    if not cards:
+        return
+
+    alert_rules_count = 0
+    try:
+        alert_rules_count = len(_repo().list_alert_rules())
+    except Exception:
+        alert_rules_count = 0
+
+    center = build_operational_readiness_center(
+        cards=cards,
+        market_intelligence=_market_intelligence_from_payload(payload.get("market_intelligence")),
+        decision_quality_center=(
+            None
+            if not isinstance(payload.get("decision_quality_center"), dict)
+            else build_decision_quality_center(
+                cards=cards,
+                market_intelligence=_market_intelligence_from_payload(
+                    payload.get("market_intelligence")
+                ),
+                portfolio_plan=_portfolio_plan_from_payload(payload.get("portfolio_plan")),
+                signal_monitor=_signal_monitor_from_payload(payload.get("signal_monitor")),
+                strategy_health=_strategy_health_from_payload(payload.get("strategy_health")),
+                data_health=payload.get("data_health")
+                if isinstance(payload.get("data_health"), dict)
+                else {},
+            )
+        ),
+        signal_monitor=_signal_monitor_from_payload(payload.get("signal_monitor")),
+        strategy_health=_strategy_health_from_payload(payload.get("strategy_health")),
+        data_health=payload.get("data_health") if isinstance(payload.get("data_health"), dict) else {},
+        alert_rules_count=alert_rules_count,
+    )
+    payload["operational_readiness_center"] = center.model_dump(mode="json")
+    payload_data_health = payload.setdefault("data_health", {})
+    if isinstance(payload_data_health, dict):
+        payload_data_health.update(center.data_health)
+
+
+def _attach_alpha_quality_payload(
+    payload: dict[str, object],
+    cards_key: str = "cards",
+) -> None:
+    if isinstance(payload.get("alpha_quality_center"), dict):
+        return
+    raw_cards = payload.get(cards_key)
+    if not isinstance(raw_cards, list):
+        return
+    cards = _cards_from_payload(raw_cards)
+    if not cards:
+        return
+
+    center = build_alpha_quality_center(
+        cards=cards,
+        rotation_radar=_rotation_radar_from_payload(payload.get("rotation_radar")),
+        strategy_health=_strategy_health_from_payload(payload.get("strategy_health")),
+        data_health=payload.get("data_health") if isinstance(payload.get("data_health"), dict) else {},
+    )
+    payload["alpha_quality_center"] = center.model_dump(mode="json")
+    payload_data_health = payload.setdefault("data_health", {})
+    if isinstance(payload_data_health, dict):
+        payload_data_health.update(center.data_health)
+
+
+def _cards_from_payload(raw_cards: list[object]) -> list[OpportunityCard]:
+    cards: list[OpportunityCard] = []
+    for raw_card in raw_cards:
+        if not isinstance(raw_card, dict):
+            continue
+        try:
+            cards.append(OpportunityCard.model_validate(raw_card))
+        except Exception:
+            continue
+    return cards
+
+
+def _market_intelligence_from_payload(value: object) -> MarketIntelligenceCenter | None:
+    if isinstance(value, MarketIntelligenceCenter):
+        return value
+    if isinstance(value, dict):
+        try:
+            return MarketIntelligenceCenter.model_validate(value)
+        except Exception:
+            return None
+    return None
+
+
+def _portfolio_plan_from_payload(value: object) -> PortfolioPlan | None:
+    if isinstance(value, PortfolioPlan):
+        return value
+    if isinstance(value, dict):
+        try:
+            return PortfolioPlan.model_validate(value)
+        except Exception:
+            return None
+    return None
+
+
+def _signal_monitor_from_payload(value: object) -> SignalMonitorCenter | None:
+    if isinstance(value, SignalMonitorCenter):
+        return value
+    if isinstance(value, dict):
+        try:
+            return SignalMonitorCenter.model_validate(value)
+        except Exception:
+            return None
+    return None
+
+
+def _rotation_radar_from_payload(value: object) -> MarketRotationRadar | None:
+    if isinstance(value, MarketRotationRadar):
+        return value
+    if isinstance(value, dict):
+        try:
+            return MarketRotationRadar.model_validate(value)
+        except Exception:
+            return None
+    return None
+
+
+def _strategy_health_from_payload(value: object) -> list[StrategyHealth]:
+    if not isinstance(value, list):
+        return []
+    health: list[StrategyHealth] = []
+    for item in value:
+        if isinstance(item, StrategyHealth):
+            health.append(item)
+        elif isinstance(item, dict):
+            try:
+                health.append(StrategyHealth.model_validate(item))
+            except Exception:
+                continue
+    return health
 
 
 def _attach_research_center_payload(
@@ -2268,6 +2766,25 @@ def recommendation_closure(
         "completed_outcomes": str(len(payload["completed_outcomes"])),
     }
     return payload
+
+
+@router.get("/recommendation-followthrough")
+def recommendation_followthrough(
+    provider: str = "fixture",
+    instrument_id: str | None = None,
+    limit: int = 150,
+) -> dict[str, object]:
+    replayed, data_health = _replay_outcomes(provider, instrument_id, limit)
+    as_of = max(
+        (outcome.signal_date for outcome in replayed if outcome.signal_date is not None),
+        default=date.today(),
+    )
+    closure = summarize_recommendation_closure(replayed, as_of=as_of, windows=(30, 60, 90))
+    center = build_recommendation_followthrough_center(
+        closure,
+        data_health=data_health,
+    )
+    return center.model_dump(mode="json")
 
 
 def _attach_existing_instrument_label(payload: dict[str, object]) -> dict[str, object]:

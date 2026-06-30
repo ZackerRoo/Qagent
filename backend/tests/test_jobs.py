@@ -27,6 +27,21 @@ def test_daily_scan_returns_cards_for_fixture_universe():
     assert result.items[0].strategies_missing_data >= 1
     assert result.cards[0].rank_score >= result.cards[-1].rank_score
     assert result.cards[0].rank_reasons
+    assert result.data_health["a_share_data_readiness_score"]
+    assert result.data_health["a_share_price_limit"] == "ready"
+    assert result.data_health["a_share_liquidity"] in {"ready", "partial", "missing"}
+    assert result.data_health["a_share_announcements"] in {"ready", "partial", "missing"}
+    assert result.signal_monitor is not None
+    assert result.signal_monitor.total == len(result.cards)
+    assert result.signal_monitor.action_queue
+    assert result.data_health["signal_monitor_total"] == str(len(result.cards))
+    assert result.decision_quality_center is not None
+    assert result.decision_quality_center.explanation_cards
+    assert result.data_health["decision_quality_cards"] == str(len(result.cards))
+    assert result.operational_readiness_center is not None
+    assert len(result.operational_readiness_center.checks) == 6
+    assert result.operational_readiness_center.user_questions
+    assert result.data_health["operational_readiness_checks"] == "6"
 
 
 def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path, monkeypatch):
@@ -58,6 +73,45 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
     assert any(item["curve"] for item in cached.payload["strategy_health"])
     assert cached.payload["cards"][0]["confidence_explanation"]
     assert cached.payload["cards"][0]["execution_plan"]
+    assert cached.payload["signal_monitor"]["total"] == len(cached.payload["cards"])
+    assert cached.payload["signal_monitor"]["action_queue"]
+    assert cached.payload["decision_quality_center"]["explanation_cards"]
+    assert cached.payload["data_health"]["decision_quality_cards"] == str(len(cached.payload["cards"]))
+    assert cached.payload["operational_readiness_center"]["checks"]
+    assert cached.payload["operational_readiness_center"]["user_questions"]
+    assert cached.payload["data_health"]["operational_readiness_checks"] == "6"
+
+
+def test_full_market_batch_job_caches_rejected_items_with_remediation(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'full-batch-rejected.db'}")
+    initialize_database()
+    repo = QagentRepository(create_session_factory())
+    job = repo.create_full_market_scan_job(
+        provider="fixture",
+        symbols=["US:TEST", "US:UNKNOWN"],
+        batch_size=1,
+        include_etfs=True,
+        sync_if_empty=False,
+    )
+    monkeypatch.setattr(
+        full_market,
+        "build_market_data_provider",
+        lambda provider: FixtureMarketDataProvider(),
+    )
+
+    full_market.run_full_market_batch_scan_job(job.job_id, top_cards_limit=5)
+
+    cached = repo.get_recent_scan_result_cache(
+        cache_key=full_market.full_market_batch_cache_key("fixture", True),
+        max_age=timedelta(minutes=60),
+    )
+
+    assert cached is not None
+    rejected = [item for item in cached.payload["items"] if item["status"] in {"no_data", "no_setup", "data_error"}]
+    assert rejected
+    assert rejected[0]["rejection_category"] in {"data_missing", "weak_signal", "execution_blocked", "scan_error"}
+    assert rejected[0]["remediation"]
+    assert cached.payload["data_health"]["full_market_rejected_items"] == str(len(rejected))
 
 
 def test_daily_scan_promotes_pead_when_earnings_fixture_is_available():
@@ -107,6 +161,8 @@ def test_daily_scan_surfaces_provider_errors():
     assert result.items[0].instrument_id == "US:MISS"
     assert result.items[0].status == "no_data"
     assert result.items[0].reason == "No daily bars returned by provider."
+    assert result.items[0].rejection_category == "data_missing"
+    assert result.items[0].remediation
 
 
 class ProviderThatRaisesForOneSymbol:
@@ -137,6 +193,7 @@ def test_daily_scan_continues_after_single_instrument_error():
     by_id = {item.instrument_id: item for item in result.items}
     assert by_id["CN:BAD"].status == "data_error"
     assert "bad vendor payload" in by_id["CN:BAD"].reason
+    assert by_id["CN:BAD"].rejection_category == "scan_error"
     assert by_id["US:TEST"].status == "setup_ready"
     assert len(result.cards) == 1
     assert result.data_health["scan_errors"] == "1"
