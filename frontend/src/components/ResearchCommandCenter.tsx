@@ -4,8 +4,11 @@ import { useI18n } from "../i18n";
 import { formatInstrumentDisplay } from "../lib/instruments";
 import { localizeAction, localizeStrategyFamily } from "../lib/localize";
 import type {
+  DataReliabilityCheck,
+  RankingCalibrationDiagnostic,
   ResearchCommandCenter,
   StrategyAttributionItem,
+  UserAcceptanceCheck,
   ValidationWindow,
 } from "../types";
 
@@ -37,6 +40,9 @@ export function ResearchCommandCenterPanel({ center, compact = false }: Props) {
   const pool = center.recommendation_pool_quality;
   const alerts = center.alert_digest;
   const daily = center.daily_research_summary;
+  const acceptance = center.user_acceptance_audit;
+  const rankingAudit = center.ranking_calibration_audit;
+  const dataAudit = center.data_reliability_audit;
   const outOfSample = validation.out_of_sample;
   const topStrategy = attribution.strategies[0];
 
@@ -142,6 +148,57 @@ export function ResearchCommandCenterPanel({ center, compact = false }: Props) {
         </div>
       </div>
 
+      <div className="research-audit-grid">
+        <div className="research-audit-block">
+          <header>
+            <div>
+              <h3>用户验收</h3>
+              <p>新用户能不能从推荐走到验证</p>
+            </div>
+            <strong>{Math.round(acceptance.readiness_score * 100)}</strong>
+          </header>
+          <p>{acceptance.verdict}</p>
+          <div className="research-audit-list">
+            {acceptance.checks.slice(0, 6).map((check) => (
+              <AcceptanceRow key={check.key} check={check} />
+            ))}
+          </div>
+        </div>
+
+        <div className="research-audit-block">
+          <header>
+            <div>
+              <h3>排序校准</h3>
+              <p>推荐分、概率和池子覆盖是否一致</p>
+            </div>
+            <strong>{Math.round(rankingAudit.confidence_score * 100)}</strong>
+          </header>
+          <p>{rankingAudit.summary}</p>
+          <div className="research-audit-list">
+            {rankingAudit.diagnostics.slice(0, 5).map((item) => (
+              <RankingDiagnosticRow key={item.key} item={item} />
+            ))}
+          </div>
+          <InlineNotes items={rankingAudit.suggested_actions} />
+        </div>
+
+        <div className="research-audit-block">
+          <header>
+            <div>
+              <h3>数据可靠性</h3>
+              <p>哪些字段真实可用，哪些还要补</p>
+            </div>
+            <strong>{Math.round(dataAudit.score * 100)}</strong>
+          </header>
+          <p>{dataAudit.summary}</p>
+          <div className="research-audit-list">
+            {dataAudit.checks.slice(0, 7).map((check) => (
+              <DataReliabilityRow key={check.key} check={check} />
+            ))}
+          </div>
+        </div>
+      </div>
+
       <div className="research-action-strip">
         <div>
           <h3>{t("research.nextActions")}</h3>
@@ -172,6 +229,42 @@ export function ResearchCommandCenterPanel({ center, compact = false }: Props) {
         </div>
       </div>
     </section>
+  );
+}
+
+function AcceptanceRow({ check }: { check: UserAcceptanceCheck }) {
+  return (
+    <article className={`research-audit-row audit-${check.status}`}>
+      <div>
+        <strong>{check.title}</strong>
+        <span>{statusLabel(check.status)} · {Math.round(check.score * 100)}</span>
+      </div>
+      <p>{check.evidence}</p>
+    </article>
+  );
+}
+
+function RankingDiagnosticRow({ item }: { item: RankingCalibrationDiagnostic }) {
+  return (
+    <article className={`research-audit-row audit-${item.status}`}>
+      <div>
+        <strong>{item.title}</strong>
+        <span>{statusLabel(item.status)} · {item.metric}</span>
+      </div>
+      <p>{item.evidence}</p>
+    </article>
+  );
+}
+
+function DataReliabilityRow({ check }: { check: DataReliabilityCheck }) {
+  return (
+    <article className={`research-audit-row audit-${check.status}`}>
+      <div>
+        <strong>{check.label}</strong>
+        <span>{statusLabel(check.status)} · {check.source}</span>
+      </div>
+      <p>{check.evidence}</p>
+    </article>
   );
 }
 
@@ -257,6 +350,15 @@ function alertKindLabel(kind: string, language: "zh" | "en") {
     signal_weakened: { zh: "转弱", en: "Weakening" },
   };
   return labels[kind]?.[language] ?? kind;
+}
+
+function statusLabel(status: string) {
+  const labels: Record<string, string> = {
+    pass: "通过",
+    warn: "观察",
+    block: "阻断",
+  };
+  return labels[status] ?? status;
 }
 
 function formatPct(value: number | null | undefined) {

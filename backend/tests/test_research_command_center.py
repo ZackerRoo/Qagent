@@ -7,6 +7,8 @@ from qagent.domain.models import StrategyCalibration
 from qagent.factors.models import FactorExposure, FactorRanking
 from qagent.market.rotation_radar import build_rotation_radar
 from qagent.recommendations.portfolio import build_portfolio_plan
+from qagent.recommendations.probability import apply_probability_calibration
+from qagent.recommendations.quality_gate import apply_recommendation_quality_gate
 from qagent.recommendations.signal_hub import build_signal_hub
 from qagent.research.command_center import build_research_command_center
 from qagent.strategies.models import StrategyHealth, StrategyHealthPoint
@@ -23,6 +25,8 @@ def test_research_command_center_summarizes_portfolio_validation_attribution_ale
     blocked.opportunity_bucket = "risk_filtered"
 
     cards = [memory, foundry, etf, blocked]
+    apply_recommendation_quality_gate(cards)
+    apply_probability_calibration(cards, [_health()])
     rotation = build_rotation_radar(cards)
     for card in cards:
         card.signal_hub = build_signal_hub(card, rotation_score=0.82, rotation_name="半导体")
@@ -32,7 +36,14 @@ def test_research_command_center_summarizes_portfolio_validation_attribution_ale
         portfolio_plan=plan,
         rotation_radar=rotation,
         strategy_health=[_health()],
-        data_health={"provider": "fixture"},
+        data_health={
+            "provider": "fixture",
+            "market_cache": "enabled",
+            "a_share_data_readiness_score": "0.72",
+            "a_share_price_limit": "ready",
+            "a_share_liquidity": "ready",
+            "a_share_announcements": "partial",
+        },
     )
 
     assert center.portfolio_advisor.suggested_positions >= 1
@@ -47,7 +58,20 @@ def test_research_command_center_summarizes_portfolio_validation_attribution_ale
     assert center.alert_digest.total_suggestions >= 8
     assert center.alert_digest.by_kind["signal_weakened"] >= 1
     assert center.daily_research_summary.next_actions
+    assert center.user_acceptance_audit.readiness_score > 0
+    assert any(check.key == "opportunity_selection" for check in center.user_acceptance_audit.checks)
+    assert any(check.key == "backtest_or_followthrough" for check in center.user_acceptance_audit.checks)
+    assert center.ranking_calibration_audit.diagnostics
+    assert any(
+        item.key == "rank_probability_alignment"
+        for item in center.ranking_calibration_audit.diagnostics
+    )
+    assert center.data_reliability_audit.score > 0
+    assert any(check.key == "a_share_price_limit" for check in center.data_reliability_audit.checks)
+    assert any(check.key == "market_cache" for check in center.data_reliability_audit.checks)
     assert center.data_health["research_center_cards"] == "4"
+    assert "research_acceptance_score" in center.data_health
+    assert "research_data_reliability_score" in center.data_health
 
 
 def _card(

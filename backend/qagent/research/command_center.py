@@ -99,6 +99,59 @@ class DailyResearchSummary(BaseModel):
     next_actions: list[str] = Field(default_factory=list)
 
 
+class UserAcceptanceCheck(BaseModel):
+    key: str
+    title: str
+    status: str
+    score: float = Field(ge=0.0, le=1.0)
+    evidence: str
+    action: str
+
+
+class UserAcceptanceAudit(BaseModel):
+    verdict: str
+    readiness_score: float = Field(ge=0.0, le=1.0)
+    checks: list[UserAcceptanceCheck] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
+    next_actions: list[str] = Field(default_factory=list)
+
+
+class RankingCalibrationDiagnostic(BaseModel):
+    key: str
+    title: str
+    status: str
+    metric: str
+    evidence: str
+    action: str
+
+
+class RankingCalibrationAudit(BaseModel):
+    summary: str
+    confidence_score: float = Field(ge=0.0, le=1.0)
+    diagnostics: list[RankingCalibrationDiagnostic] = Field(default_factory=list)
+    suggested_actions: list[str] = Field(default_factory=list)
+    weight_guidance: dict[str, str] = Field(default_factory=dict)
+
+
+class DataReliabilityCheck(BaseModel):
+    key: str
+    label: str
+    status: str
+    source: str
+    evidence: str
+    action: str
+
+
+class DataReliabilityAudit(BaseModel):
+    summary: str
+    score: float = Field(ge=0.0, le=1.0)
+    ready_count: int
+    partial_count: int
+    missing_count: int
+    checks: list[DataReliabilityCheck] = Field(default_factory=list)
+    gaps: list[str] = Field(default_factory=list)
+
+
 class ResearchCommandCenter(BaseModel):
     as_of: str
     portfolio_advisor: PortfolioAdvisor
@@ -107,6 +160,9 @@ class ResearchCommandCenter(BaseModel):
     recommendation_pool_quality: RecommendationPoolQuality
     alert_digest: AlertDigest
     daily_research_summary: DailyResearchSummary
+    user_acceptance_audit: UserAcceptanceAudit
+    ranking_calibration_audit: RankingCalibrationAudit
+    data_reliability_audit: DataReliabilityAudit
     data_health: dict[str, str] = Field(default_factory=dict)
 
 
@@ -126,11 +182,27 @@ def build_research_command_center(
     pool = _build_pool_quality(cards, rotation)
     alerts = _build_alert_digest(cards)
     summary = _build_daily_summary(cards, rotation, validation, alerts)
+    data_audit = _build_data_reliability_audit(data_health or {}, cards)
+    acceptance = _build_user_acceptance_audit(
+        cards=cards,
+        validation=validation,
+        alerts=alerts,
+        pool=pool,
+        data_reliability=data_audit,
+    )
+    ranking_audit = _build_ranking_calibration_audit(
+        cards=cards,
+        pool=pool,
+        attribution=attribution,
+    )
     merged_health = {
         **(data_health or {}),
         "research_center_cards": str(len(cards)),
         "research_center_strategies": str(len(attribution.strategies)),
         "research_center_alert_suggestions": str(alerts.total_suggestions),
+        "research_acceptance_score": f"{acceptance.readiness_score:.2f}",
+        "research_ranking_calibration_score": f"{ranking_audit.confidence_score:.2f}",
+        "research_data_reliability_score": f"{data_audit.score:.2f}",
     }
     return ResearchCommandCenter(
         as_of=date.today().isoformat(),
@@ -140,6 +212,9 @@ def build_research_command_center(
         recommendation_pool_quality=pool,
         alert_digest=alerts,
         daily_research_summary=summary,
+        user_acceptance_audit=acceptance,
+        ranking_calibration_audit=ranking_audit,
+        data_reliability_audit=data_audit,
         data_health=merged_health,
     )
 
@@ -593,6 +668,458 @@ def _build_daily_summary(
         avoid_list=avoid_names,
         next_actions=actions[:6],
     )
+
+
+def _build_user_acceptance_audit(
+    *,
+    cards: list[OpportunityCard],
+    validation: WalkForwardValidation,
+    alerts: AlertDigest,
+    pool: RecommendationPoolQuality,
+    data_reliability: DataReliabilityAudit,
+) -> UserAcceptanceAudit:
+    actionable = [card for card in cards if not _is_blocked(card)]
+    leader = actionable[0] if actionable else (cards[0] if cards else None)
+    checks = [
+        _acceptance_check(
+            "opportunity_selection",
+            "能不能找到机会",
+            1.0 if len(cards) >= 20 and actionable else 0.65 if cards else 0.0,
+            f"当前候选 {len(cards)} 个，可行动 {len(actionable)} 个。",
+            "先用全 A 后台扫描扩充候选池，再看机会列表前 20 个。",
+        ),
+        _acceptance_check(
+            "top_recommendation_explanation",
+            "能不能看懂为什么推荐",
+            _leader_explanation_score(leader),
+            _leader_explanation_evidence(leader),
+            "首选卡必须同时给出中文名称、推荐理由、概率校准和风险解释。",
+        ),
+        _acceptance_check(
+            "buy_sell_plan",
+            "能不能知道怎么买卖",
+            _trade_plan_score(leader),
+            _trade_plan_evidence(leader),
+            "买点、止损、目标价和禁追位缺一项都只能观察。",
+        ),
+        _acceptance_check(
+            "backtest_or_followthrough",
+            "能不能验证过去是否有效",
+            _validation_score(validation),
+            validation.summary,
+            "在回测页复核当前推荐 Top N，并持续看推荐闭环 30/60/90 天表现。",
+        ),
+        _acceptance_check(
+            "paper_and_alert_loop",
+            "能不能落到模拟盘和提醒",
+            1.0 if alerts.total_suggestions >= max(1, len(actionable)) else 0.62 if alerts.total_suggestions else 0.25,
+            alerts.summary,
+            "把前 3-5 个候选加入模拟盘，并保存买点、止损、目标和变弱提醒。",
+        ),
+        _acceptance_check(
+            "data_realism",
+            "数据是否足够真实",
+            data_reliability.score,
+            data_reliability.summary,
+            "优先补齐复权、停牌、涨跌停、ST、行业和指数成分数据。",
+        ),
+    ]
+    score = mean(check.score for check in checks) if checks else 0.0
+    blockers = [check.title for check in checks if check.status == "block"]
+    next_actions = [check.action for check in checks if check.status != "pass"][:5]
+    if not next_actions:
+        next_actions = [
+            "按推荐列表前 3-5 个候选做模拟盘验证。",
+            "每天复盘推荐闭环，保留有效策略、降权失效策略。",
+        ]
+    verdict = "可进入日常使用"
+    if score < 0.45 or blockers:
+        verdict = "暂不适合直接使用"
+    elif score < 0.72:
+        verdict = "可小仓验证"
+    return UserAcceptanceAudit(
+        verdict=verdict,
+        readiness_score=round(score, 4),
+        checks=checks,
+        blockers=blockers,
+        next_actions=next_actions,
+    )
+
+
+def _build_ranking_calibration_audit(
+    *,
+    cards: list[OpportunityCard],
+    pool: RecommendationPoolQuality,
+    attribution: StrategyAttribution,
+) -> RankingCalibrationAudit:
+    diagnostics = [
+        _rank_probability_alignment(cards),
+        _ranking_concentration(pool, attribution),
+        _ranking_coverage(cards),
+        _ranking_score_spread(cards),
+        _probability_coverage(cards),
+    ]
+    confidence = mean(_diagnostic_score(item.status) for item in diagnostics) if diagnostics else 0.0
+    actions = [item.action for item in diagnostics if item.status != "pass"][:5]
+    if not actions:
+        actions = ["保持当前排序框架，继续用模拟盘和闭环结果校准权重。"]
+    weak = [item for item in attribution.strategies if (item.win_rate_10d or 0) < 45 or (item.avg_return_10d or 0) < 0]
+    strong = [item for item in attribution.strategies if (item.win_rate_10d or 0) >= 56 and (item.avg_return_10d or 0) > 0]
+    guidance = {
+        "raise": "、".join(item.name for item in strong[:3]) or "暂无明确加权策略",
+        "lower": "、".join(item.name for item in weak[:3]) or "暂无明确降权策略",
+        "observe": "优先观察分数高但概率偏低、主题过度集中的候选。",
+    }
+    summary = (
+        f"排序验收分 {confidence:.0%}："
+        f"{sum(1 for item in diagnostics if item.status == 'pass')} 项通过，"
+        f"{sum(1 for item in diagnostics if item.status == 'warn')} 项需观察，"
+        f"{sum(1 for item in diagnostics if item.status == 'block')} 项阻断。"
+    )
+    return RankingCalibrationAudit(
+        summary=summary,
+        confidence_score=round(confidence, 4),
+        diagnostics=diagnostics,
+        suggested_actions=actions,
+        weight_guidance=guidance,
+    )
+
+
+def _build_data_reliability_audit(
+    data_health: dict[str, str],
+    cards: list[OpportunityCard],
+) -> DataReliabilityAudit:
+    provider = data_health.get("provider", "unknown")
+    checks = [
+        _data_check(
+            "provider",
+            "行情源",
+            "pass" if provider not in {"fixture", "unknown"} else "warn",
+            provider,
+            f"当前 provider={provider}。",
+            "开发样例可用于功能测试，真实使用优先切到免费/正式行情源。",
+        ),
+        _data_check(
+            "market_cache",
+            "SQLite 行情缓存",
+            "pass" if data_health.get("market_cache") == "enabled" else "warn",
+            data_health.get("market_cache", "missing"),
+            "用于避免每次全量扫描都重新拉数据。",
+            "确保刷新快照和后台扫描会写入 SQLite。",
+        ),
+        _data_check(
+            "a_share_readiness",
+            "A 股数据完整度",
+            _score_status(_health_float(data_health, "a_share_data_readiness_score")),
+            data_health.get("a_share_data_readiness_score", "-"),
+            f"当前 A 股数据体检分 {data_health.get('a_share_data_readiness_score', '-')}。",
+            "低于 0.70 时不要把结果当成可直接交易信号。",
+        ),
+        _data_check(
+            "a_share_price_limit",
+            "涨跌停/交易约束",
+            _ready_status(data_health.get("a_share_price_limit")),
+            data_health.get("a_share_price_limit", "missing"),
+            "影响能不能买入、是否追高、是否一字板不可成交。",
+            "必须持续校验涨跌停、停牌、权限和 T+1 约束。",
+        ),
+        _data_check(
+            "a_share_liquidity",
+            "流动性",
+            _ready_status(data_health.get("a_share_liquidity")),
+            data_health.get("a_share_liquidity", "missing"),
+            "成交额/成交量会影响滑点和能否退出。",
+            "流动性 partial 或 missing 时下调仓位和排序。",
+        ),
+        _data_check(
+            "a_share_announcements",
+            "公告/财报/事件",
+            _ready_status(data_health.get("a_share_announcements")),
+            data_health.get("a_share_announcements", "missing"),
+            "缺公告会让事件驱动和财务传导假设失真。",
+            "正式使用前补公告、财报、龙虎榜和资金流。",
+        ),
+        _data_check(
+            "probability_calibration",
+            "概率校准覆盖",
+            _coverage_status(data_health.get("probability_calibration_cards"), len(cards)),
+            data_health.get("probability_calibration_cards", "0"),
+            "每张推荐卡都应有胜率估计和排序调权。",
+            "如果覆盖不足，先刷新扫描或清理旧缓存水合结果。",
+        ),
+    ]
+    ready = sum(1 for check in checks if check.status == "pass")
+    partial = sum(1 for check in checks if check.status == "warn")
+    missing = sum(1 for check in checks if check.status == "block")
+    score = mean(_diagnostic_score(check.status) for check in checks) if checks else 0.0
+    gaps = [check.action for check in checks if check.status != "pass"][:6]
+    summary = f"数据可靠性 {score:.0%}：可用 {ready} 项，部分可用 {partial} 项，缺口 {missing} 项。"
+    return DataReliabilityAudit(
+        summary=summary,
+        score=round(score, 4),
+        ready_count=ready,
+        partial_count=partial,
+        missing_count=missing,
+        checks=checks,
+        gaps=gaps,
+    )
+
+
+def _acceptance_check(
+    key: str,
+    title: str,
+    score: float,
+    evidence: str,
+    action: str,
+) -> UserAcceptanceCheck:
+    clamped = max(0.0, min(1.0, score))
+    if clamped >= 0.78:
+        status = "pass"
+    elif clamped >= 0.45:
+        status = "warn"
+    else:
+        status = "block"
+    return UserAcceptanceCheck(
+        key=key,
+        title=title,
+        status=status,
+        score=round(clamped, 4),
+        evidence=evidence,
+        action=action,
+    )
+
+
+def _leader_explanation_score(card: OpportunityCard | None) -> float:
+    if card is None:
+        return 0.0
+    score = 0.0
+    if card.instrument_label:
+        score += 0.18
+    if card.recommendation_summary and card.recommendation_summary.headline:
+        score += 0.2
+    if card.probability_forecast:
+        score += 0.24
+    if card.recommendation_quality:
+        score += 0.18
+    if card.confidence_explanation:
+        score += 0.1
+    if card.rank_reasons:
+        score += 0.1
+    return min(1.0, score)
+
+
+def _leader_explanation_evidence(card: OpportunityCard | None) -> str:
+    if card is None:
+        return "当前没有首选推荐。"
+    parts = [_label(card.instrument_id, card.instrument_label)]
+    if card.probability_forecast:
+        parts.append(f"10日胜率估计 {card.probability_forecast.win_probability_10d:.0%}")
+    if card.recommendation_quality:
+        parts.append(f"推荐质量 {card.recommendation_quality.score:.0%}")
+    return "；".join(parts)
+
+
+def _trade_plan_score(card: OpportunityCard | None) -> float:
+    if card is None:
+        return 0.0
+    fields = [
+        card.entry_plan.trigger_price,
+        card.entry_plan.no_chase_above,
+        card.exit_plan.initial_stop,
+        card.exit_plan.target_1,
+    ]
+    return sum(value is not None for value in fields) / len(fields)
+
+
+def _trade_plan_evidence(card: OpportunityCard | None) -> str:
+    if card is None:
+        return "当前没有可评估交易计划。"
+    return (
+        f"触发 {card.entry_plan.trigger_price or '-'}，"
+        f"止损 {card.exit_plan.initial_stop or '-'}，"
+        f"目标 {card.exit_plan.target_1 or '-'}，"
+        f"禁追 {card.entry_plan.no_chase_above or '-'}。"
+    )
+
+
+def _validation_score(validation: WalkForwardValidation) -> float:
+    window = validation.out_of_sample
+    if window is None or window.sample_count <= 0:
+        return 0.0
+    if window.sample_count >= 20 and (window.avg_return_10d or 0) > 0:
+        return 1.0
+    if window.sample_count >= 10:
+        return 0.72
+    return 0.5
+
+
+def _rank_probability_alignment(cards: list[OpportunityCard]) -> RankingCalibrationDiagnostic:
+    ranked = sorted(cards, key=lambda card: card.rank_score, reverse=True)[:20]
+    forecasted = [card for card in ranked if card.probability_forecast is not None]
+    mismatches = [
+        card
+        for card in forecasted
+        if card.rank_score >= 0.68
+        and (
+            card.probability_forecast.win_probability_10d < 0.5
+            or card.probability_forecast.expected_return_10d < 0
+        )
+    ]
+    rate = len(mismatches) / len(forecasted) if forecasted else 1.0
+    if not forecasted:
+        status = "block"
+    elif rate <= 0.15:
+        status = "pass"
+    elif rate <= 0.35:
+        status = "warn"
+    else:
+        status = "block"
+    return RankingCalibrationDiagnostic(
+        key="rank_probability_alignment",
+        title="排序和概率是否一致",
+        status=status,
+        metric=f"{len(mismatches)}/{len(forecasted)}",
+        evidence=f"前 20 个已校准候选中，{len(mismatches)} 个高排序但胜率/期望收益偏弱。",
+        action="高排序但概率偏弱的票要继续降权，或要求更强买点确认后再进入可买池。",
+    )
+
+
+def _ranking_concentration(
+    pool: RecommendationPoolQuality,
+    attribution: StrategyAttribution,
+) -> RankingCalibrationDiagnostic:
+    top_strategy = attribution.strategies[0] if attribution.strategies else None
+    strategy_share = top_strategy.contribution_pct if top_strategy else 0.0
+    theme_share = pool.top_theme_share_pct or 0.0
+    max_share = max(strategy_share, theme_share)
+    status = "pass" if max_share < 45 else "warn" if max_share < 65 else "block"
+    leader = top_strategy.name if strategy_share >= theme_share and top_strategy else pool.top_theme or "-"
+    return RankingCalibrationDiagnostic(
+        key="concentration_control",
+        title="推荐是否过度集中",
+        status=status,
+        metric=f"{max_share:.1f}%",
+        evidence=f"最高集中来源 {leader}，占比 {max_share:.1f}%。",
+        action="如果集中度过高，限制同策略/同主题连续上榜数量，引入 ETF 和不同板块候选。",
+    )
+
+
+def _ranking_coverage(cards: list[OpportunityCard]) -> RankingCalibrationDiagnostic:
+    asset_types = {card.asset_type.lower() for card in cards}
+    has_etf = any(card.asset_type.upper() == "ETF" or card.opportunity_bucket == "etf_index" for card in cards)
+    has_stock = "stock" in asset_types
+    status = "pass" if has_etf and has_stock else "warn" if cards else "block"
+    return RankingCalibrationDiagnostic(
+        key="market_coverage",
+        title="股票/ETF/主题是否进入统一池",
+        status=status,
+        metric=f"股票 {sum(card.asset_type.lower() == 'stock' for card in cards)} / ETF {sum(card.asset_type.upper() == 'ETF' or card.opportunity_bucket == 'etf_index' for card in cards)}",
+        evidence="统一池需要同时允许个股、ETF、指数工具和主题候选参与排序。",
+        action="如果 ETF 或主题候选缺失，先检查全 A 综合池和指数/ETF 补充池是否写入。",
+    )
+
+
+def _ranking_score_spread(cards: list[OpportunityCard]) -> RankingCalibrationDiagnostic:
+    ranked = sorted(cards, key=lambda card: card.rank_score, reverse=True)
+    if len(ranked) < 5:
+        return RankingCalibrationDiagnostic(
+            key="score_spread",
+            title="排序分差是否足够",
+            status="warn",
+            metric=f"{len(ranked)} 个",
+            evidence="候选太少，无法判断分数分层。",
+            action="扩大扫描范围后再判断排序分层。",
+        )
+    spread = ranked[0].rank_score - ranked[min(9, len(ranked) - 1)].rank_score
+    status = "pass" if spread >= 0.05 else "warn"
+    return RankingCalibrationDiagnostic(
+        key="score_spread",
+        title="排序分差是否能区分强弱",
+        status=status,
+        metric=f"{spread:.1%}",
+        evidence=f"首位和第 {min(10, len(ranked))} 位排序分差 {spread:.1%}。",
+        action="分差太小时，提高概率、质量和风险项权重，避免推荐看起来都差不多。",
+    )
+
+
+def _probability_coverage(cards: list[OpportunityCard]) -> RankingCalibrationDiagnostic:
+    coverage = sum(card.probability_forecast is not None for card in cards)
+    rate = coverage / len(cards) if cards else 0.0
+    status = "pass" if rate >= 0.9 else "warn" if rate >= 0.5 else "block"
+    return RankingCalibrationDiagnostic(
+        key="probability_coverage",
+        title="概率校准是否覆盖推荐池",
+        status=status,
+        metric=f"{coverage}/{len(cards)}",
+        evidence=f"{coverage} 个候选有 5/10/20 日胜率估计。",
+        action="概率覆盖不足时，先刷新扫描或对旧缓存补水合，再允许排序出推荐。",
+    )
+
+
+def _data_check(
+    key: str,
+    label: str,
+    status: str,
+    source: str,
+    evidence: str,
+    action: str,
+) -> DataReliabilityCheck:
+    return DataReliabilityCheck(
+        key=key,
+        label=label,
+        status=status,
+        source=source,
+        evidence=evidence,
+        action=action,
+    )
+
+
+def _diagnostic_score(status: str) -> float:
+    return {"pass": 1.0, "warn": 0.58, "block": 0.18}.get(status, 0.4)
+
+
+def _score_status(value: float | None) -> str:
+    if value is None:
+        return "block"
+    if value >= 0.7:
+        return "pass"
+    if value >= 0.45:
+        return "warn"
+    return "block"
+
+
+def _ready_status(value: str | None) -> str:
+    if value == "ready":
+        return "pass"
+    if value == "partial":
+        return "warn"
+    return "block"
+
+
+def _coverage_status(value: str | None, total: int) -> str:
+    count = _int_text(value)
+    if total <= 0:
+        return "block"
+    rate = count / total
+    if rate >= 0.9:
+        return "pass"
+    if rate >= 0.5:
+        return "warn"
+    return "block"
+
+
+def _health_float(data_health: dict[str, str], key: str) -> float | None:
+    try:
+        return float(str(data_health.get(key, "")).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_text(value: str | None) -> int:
+    try:
+        return int(str(value or "0").strip())
+    except ValueError:
+        return 0
 
 
 def _signal_hub(card: OpportunityCard):

@@ -26,6 +26,7 @@ def test_opportunities_endpoint_returns_cards():
     assert "decision_quality_center" in body
     assert "operational_readiness_center" in body
     assert "alpha_quality_center" in body
+    assert "research_center" in body
     assert body["signal_monitor"]["total"] == len(body["cards"])
     assert body["signal_monitor"]["action_queue"]
     assert body["decision_quality_center"]["explanation_cards"]
@@ -39,6 +40,9 @@ def test_opportunities_endpoint_returns_cards():
     assert body["alpha_quality_center"]["current_leader"]["instrument_id"]
     assert body["alpha_quality_center"]["strategy_tuning"]
     assert body["alpha_quality_center"]["theme_confirmation"]
+    assert body["research_center"]["user_acceptance_audit"]["checks"]
+    assert body["research_center"]["ranking_calibration_audit"]["diagnostics"]
+    assert body["research_center"]["data_reliability_audit"]["checks"]
     assert body["data_health"]["signal_monitor_total"] == str(len(body["cards"]))
     assert body["data_health"]["decision_quality_cards"] == str(len(body["cards"]))
     assert body["data_health"]["operational_readiness_checks"] == "6"

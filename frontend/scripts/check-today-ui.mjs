@@ -121,6 +121,11 @@ assert(styles.includes(".alpha-quality-gate"), "CSS must define alpha quality bu
 assert(styles.includes(".followthrough-window-row"), "CSS must define follow-through window chart rows");
 assert(styles.includes(".research-center"), "CSS must define research command center layout");
 assert(styles.includes(".signal-strength-bar"), "CSS must define signal strength bars");
+assert(intelligence.includes("数据质量"), "Market intelligence must keep data quality copy");
+assert(readFileSync(resolve(__dirname, "../src/components/ResearchCommandCenter.tsx"), "utf8").includes("用户验收"), "Research command center must render user acceptance audit");
+assert(readFileSync(resolve(__dirname, "../src/components/ResearchCommandCenter.tsx"), "utf8").includes("排序校准"), "Research command center must render ranking calibration audit");
+assert(readFileSync(resolve(__dirname, "../src/components/ResearchCommandCenter.tsx"), "utf8").includes("数据可靠性"), "Research command center must render data reliability audit");
+assert(styles.includes(".research-audit-grid"), "CSS must define research audit grid");
 assert(styles.includes(".recommendation-quality-strip"), "CSS must define recommendation quality strip");
 assert(styles.includes(".recommendation-score-breakdown"), "CSS must define recommendation score breakdown");
 assert(styles.includes(".probability-forecast-mini"), "CSS must define probability forecast mini cards");

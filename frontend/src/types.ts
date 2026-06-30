@@ -572,6 +572,59 @@ export type DailyResearchSummary = {
   next_actions: string[];
 };
 
+export type UserAcceptanceCheck = {
+  key: string;
+  title: string;
+  status: string;
+  score: number;
+  evidence: string;
+  action: string;
+};
+
+export type UserAcceptanceAudit = {
+  verdict: string;
+  readiness_score: number;
+  checks: UserAcceptanceCheck[];
+  blockers: string[];
+  next_actions: string[];
+};
+
+export type RankingCalibrationDiagnostic = {
+  key: string;
+  title: string;
+  status: string;
+  metric: string;
+  evidence: string;
+  action: string;
+};
+
+export type RankingCalibrationAudit = {
+  summary: string;
+  confidence_score: number;
+  diagnostics: RankingCalibrationDiagnostic[];
+  suggested_actions: string[];
+  weight_guidance: Record<string, string>;
+};
+
+export type DataReliabilityCheck = {
+  key: string;
+  label: string;
+  status: string;
+  source: string;
+  evidence: string;
+  action: string;
+};
+
+export type DataReliabilityAudit = {
+  summary: string;
+  score: number;
+  ready_count: number;
+  partial_count: number;
+  missing_count: number;
+  checks: DataReliabilityCheck[];
+  gaps: string[];
+};
+
 export type ResearchCommandCenter = {
   as_of: string;
   portfolio_advisor: PortfolioAdvisor;
@@ -580,6 +633,9 @@ export type ResearchCommandCenter = {
   recommendation_pool_quality: RecommendationPoolQuality;
   alert_digest: AlertDigest;
   daily_research_summary: DailyResearchSummary;
+  user_acceptance_audit: UserAcceptanceAudit;
+  ranking_calibration_audit: RankingCalibrationAudit;
+  data_reliability_audit: DataReliabilityAudit;
   data_health: Record<string, string>;
 };
 
