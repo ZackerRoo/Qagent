@@ -129,8 +129,14 @@ def _buyability_gate(
     rank_ok = leader.rank_score >= min_rank
     quality_score = _quality_score(leader)
     quality_ok = quality_score >= min_quality
+    forecast = leader.probability_forecast
+    probability_ok = forecast is None or (
+        forecast.win_probability_10d >= 0.52 and forecast.expected_return_10d >= 0
+    )
     risk_ok = risk_status != "blocked" and action != "avoid"
-    should_buy = bool(rank_ok and quality_ok and risk_ok and action == "candidate_entry")
+    should_buy = bool(
+        rank_ok and quality_ok and probability_ok and risk_ok and action == "candidate_entry"
+    )
     if should_buy:
         verdict = "可小仓位验证"
     elif rank_ok and quality_ok and risk_ok and action == "watch_trigger":
@@ -142,6 +148,13 @@ def _buyability_gate(
         f"质量分 {_fmt_score(quality_score)} / 门槛 {_fmt_score(min_quality)}",
         f"动作 {_action_label(action)}，风险 {_risk_label(risk_status)}",
     ]
+    if forecast is not None:
+        checks.append(
+            f"10日胜率估计 {_fmt_score(forecast.win_probability_10d)}，"
+            f"期望收益 {_fmt_pct(forecast.expected_return_10d)}"
+        )
+    else:
+        checks.append("概率校准待补齐。")
     reason = (
         "只有触发价、质量分、排序分和风险状态同时达标，才允许从观察进入模拟/小仓位。"
         if verdict != "可小仓位验证"
@@ -180,16 +193,19 @@ def _leader_review(
     why = [summary]
     if leader.rank_reasons:
         why.extend(leader.rank_reasons[:2])
+    if leader.probability_forecast is not None:
+        why.append(leader.probability_forecast.reason)
     if theme_names:
         why.append("当前较强主题：" + "、".join(theme_names))
     action = leader.decision.action if leader.decision else "watch"
+    probability_text = _probability_summary(leader)
     return CurrentLeaderReview(
         instrument_id=leader.instrument_id,
         instrument_label=leader.instrument_label or leader.instrument_id,
         verdict=gate.verdict,
         score_summary=(
             f"排序分 {_fmt_score(leader.rank_score)}，质量分 {_fmt_score(_quality_score(leader))}，"
-            f"因子分 {_fmt_score(leader.factor_score)}。"
+            f"因子分 {_fmt_score(leader.factor_score)}。{probability_text}"
         ),
         strategy_score_text=(
             f"策略分 {_fmt_score(leader.strategy_score)}，主策略 {_strategy_label(leader.primary_strategy_id)}。"
@@ -394,6 +410,17 @@ def _quality_score(card: OpportunityCard) -> float:
     return card.rank_score
 
 
+def _probability_summary(card: OpportunityCard) -> str:
+    forecast = card.probability_forecast
+    if forecast is None:
+        return " 概率校准待补齐。"
+    return (
+        f" 10日胜率估计 {_fmt_score(forecast.win_probability_10d)}，"
+        f"期望收益 {_fmt_pct(forecast.expected_return_10d)}，"
+        f"可信度 {_confidence_label(forecast.confidence)}。"
+    )
+
+
 def _float_health(data_health: dict[str, str], key: str) -> float | None:
     try:
         return float(str(data_health.get(key, "")).strip())
@@ -442,6 +469,15 @@ def _strategy_label(strategy_id: str | None) -> str:
         "factor_rotation_watch": "因子轮动观察",
     }
     return labels.get(strategy_id or "", strategy_id or "未分类")
+
+
+def _confidence_label(value: str) -> str:
+    labels = {
+        "validated": "已验证",
+        "limited_sample": "样本偏少",
+        "unverified": "待验证",
+    }
+    return labels.get(value, value)
 
 
 def _average(values: list[float]) -> float:

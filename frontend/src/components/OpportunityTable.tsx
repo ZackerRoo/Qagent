@@ -73,6 +73,7 @@ export function OpportunityTable({ cards, selectedCardId, onSelect }: Props) {
           </div>
           <RecommendationQualityStrip profile={card.recommendation_quality} />
           <RecommendationScoreMini score={card.recommendation_score} />
+          <ProbabilityForecastMini card={card} />
           <SignalStrengthBar value={signalStrength(card)} />
 
           <div className="trade-plan-strip">
@@ -169,6 +170,51 @@ function RecommendationQualityStrip({
   );
 }
 
+function ProbabilityForecastMini({ card }: { card: OpportunityCard }) {
+  const forecast = card.probability_forecast;
+  if (!forecast) {
+    return (
+      <div className="probability-forecast-mini forecast-missing">
+        <div>
+          <span>概率校准</span>
+          <strong>待生成</strong>
+        </div>
+        <p>完成扫描后会显示 5/10/20 日胜率估计和期望收益。</p>
+      </div>
+    );
+  }
+  const points = [
+    { label: "5日", value: forecast.win_probability_5d },
+    { label: "10日", value: forecast.win_probability_10d },
+    { label: "20日", value: forecast.win_probability_20d },
+  ];
+  return (
+    <div className={`probability-forecast-mini forecast-${forecast.confidence}`}>
+      <div className="probability-forecast-head">
+        <div>
+          <span>概率校准</span>
+          <strong>{forecast.score_band}</strong>
+        </div>
+        <b>{confidenceLabel(forecast.confidence)} · 样本 {forecast.sample_count}</b>
+      </div>
+      <div className="probability-window-bars">
+        {points.map((point) => (
+          <span key={point.label}>
+            <em>{point.label}</em>
+            <i style={{ width: `${Math.round(point.value * 100)}%` }} />
+            <strong>{Math.round(point.value * 100)}%</strong>
+          </span>
+        ))}
+      </div>
+      <div className="probability-forecast-foot">
+        <span>10日期望 {formatSignedPct(forecast.expected_return_10d)}</span>
+        <span>策略权重 x{forecast.strategy_multiplier.toFixed(2)}</span>
+        <span>排序 {formatRankAdjustment(forecast.rank_adjustment)}</span>
+      </div>
+    </div>
+  );
+}
+
 function SignalChip({ label, value }: { label: string; value: string | number }) {
   return (
     <span>
@@ -207,6 +253,26 @@ function qualityTierLabel(tier: string) {
 
 function formatPct(value: number | undefined) {
   return value === undefined ? "-" : `${Math.round(value * 100)}`;
+}
+
+function formatSignedPct(value: number) {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(1)}%`;
+}
+
+function formatRankAdjustment(value: number) {
+  if (Math.abs(value) < 0.001) {
+    return "不变";
+  }
+  return `${value > 0 ? "+" : ""}${Math.round(value * 100)}分`;
+}
+
+function confidenceLabel(value: string) {
+  const labels: Record<string, string> = {
+    validated: "已验证",
+    limited_sample: "样本偏少",
+    unverified: "待验证",
+  };
+  return labels[value] ?? value;
 }
 
 function signalStrength(card: OpportunityCard) {

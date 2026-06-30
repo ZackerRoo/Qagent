@@ -58,6 +58,14 @@ def test_opportunities_endpoint_returns_cards():
     assert body["cards"][0]["recommendation_quality"]["score"] >= 0
     assert body["cards"][0]["recommendation_quality"]["tier"]
     assert body["cards"][0]["recommendation_quality"]["checks"]
+    assert body["cards"][0]["probability_forecast"]["win_probability_10d"] >= 0
+    assert body["cards"][0]["probability_forecast"]["expected_return_10d"] is not None
+    assert body["cards"][0]["probability_forecast"]["confidence"] in {
+        "validated",
+        "limited_sample",
+        "unverified",
+    }
+    assert body["data_health"]["probability_calibration_cards"] == str(len(body["cards"]))
     assert body["cards"][0]["calibration_notes"]
     assert body["cards"][0]["rank_reasons"]
     assert body["cards"][0]["factor_score"] >= 0
@@ -449,6 +457,7 @@ def test_full_market_batch_latest_result_hydrates_legacy_cache(tmp_path, monkeyp
     body = response.json()
     assert body["cards"][0]["confidence_explanation"]
     assert body["cards"][0]["execution_plan"]
+    assert body["cards"][0]["probability_forecast"]
     assert body["strategy_health"]
     assert any(item["curve"] for item in body["strategy_health"])
     assert body["data_health"]["legacy_cards_hydrated"] == "1"
@@ -460,6 +469,7 @@ def test_full_market_batch_latest_result_hydrates_legacy_cache(tmp_path, monkeyp
     assert body["decision_quality_center"]["alert_playbook"]["total_alerts"] >= 3
     assert body["data_health"]["signal_monitor_total"] == str(len(body["cards"]))
     assert body["data_health"]["decision_quality_cards"] == str(len(body["cards"]))
+    assert body["data_health"]["probability_calibration_cards"] == str(len(body["cards"]))
 
 
 def test_full_market_batch_latest_result_uses_card_calibration_when_no_health_cache(
@@ -502,6 +512,7 @@ def test_full_market_batch_latest_result_uses_card_calibration_when_no_health_ca
     assert body["strategy_health"][0]["sample_count"] == card["strategy_calibration"]["sample_count"]
     assert body["strategy_health"][0]["curve"] == []
     assert body["data_health"]["strategy_health_source"] == "card_strategy_calibration"
+    assert body["cards"][0]["probability_forecast"]
     assert body["signal_monitor"]["total"] == len(body["cards"])
     assert body["signal_monitor"]["action_queue"]
     assert body["decision_quality_center"]["explanation_cards"]

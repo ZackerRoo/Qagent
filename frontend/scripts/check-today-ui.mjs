@@ -59,7 +59,9 @@ assert(table.includes("SignalStrengthBar"), "Opportunity cards must render a sig
 assert(table.includes("opportunity-signal-row"), "Opportunity cards must show rank/factor/conviction as a signal row");
 assert(table.includes("RecommendationQualityStrip"), "Opportunity cards must render recommendation quality");
 assert(table.includes("RecommendationScoreMini"), "Opportunity cards must summarize recommendation score v2");
+assert(table.includes("ProbabilityForecastMini"), "Opportunity cards must render probability calibration");
 assert(table.includes("recommendation-quality-strip"), "Opportunity cards must expose recommendation quality class");
+assert(table.includes("10日期望"), "Opportunity cards must explain probability forecast in Chinese");
 assert(table.includes("质量"), "Opportunity cards must explain recommendation quality in Chinese");
 assert(intelligence.includes("策略调度"), "Market intelligence must show strategy scheduling");
 assert(intelligence.includes("事件假设"), "Market intelligence must show event hypotheses");
@@ -121,6 +123,8 @@ assert(styles.includes(".research-center"), "CSS must define research command ce
 assert(styles.includes(".signal-strength-bar"), "CSS must define signal strength bars");
 assert(styles.includes(".recommendation-quality-strip"), "CSS must define recommendation quality strip");
 assert(styles.includes(".recommendation-score-breakdown"), "CSS must define recommendation score breakdown");
+assert(styles.includes(".probability-forecast-mini"), "CSS must define probability forecast mini cards");
+assert(styles.includes(".probability-window-bars"), "CSS must define probability forecast window bars");
 assert(styles.includes(".pre-trade-risk-panel"), "CSS must define pre-trade risk panel");
 assert(styles.includes(".account-scenario-panel"), "CSS must define account-level scenario panel");
 assert(styles.includes(".recommendation-score-mini"), "CSS must define score mini strip");

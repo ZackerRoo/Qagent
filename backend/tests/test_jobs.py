@@ -27,6 +27,11 @@ def test_daily_scan_returns_cards_for_fixture_universe():
     assert result.items[0].strategies_missing_data >= 1
     assert result.cards[0].rank_score >= result.cards[-1].rank_score
     assert result.cards[0].rank_reasons
+    assert result.cards[0].probability_forecast is not None
+    assert 0 <= result.cards[0].probability_forecast.win_probability_10d <= 1
+    assert result.cards[0].probability_forecast.evidence
+    assert result.data_health["probability_calibration_cards"] == str(len(result.cards))
+    assert "strategy_auto_weighting_applied" in result.data_health
     assert result.data_health["a_share_data_readiness_score"]
     assert result.data_health["a_share_price_limit"] == "ready"
     assert result.data_health["a_share_liquidity"] in {"ready", "partial", "missing"}
@@ -73,6 +78,7 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
     assert any(item["curve"] for item in cached.payload["strategy_health"])
     assert cached.payload["cards"][0]["confidence_explanation"]
     assert cached.payload["cards"][0]["execution_plan"]
+    assert cached.payload["cards"][0]["probability_forecast"]
     assert cached.payload["signal_monitor"]["total"] == len(cached.payload["cards"])
     assert cached.payload["signal_monitor"]["action_queue"]
     assert cached.payload["decision_quality_center"]["explanation_cards"]
@@ -80,6 +86,7 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
     assert cached.payload["operational_readiness_center"]["checks"]
     assert cached.payload["operational_readiness_center"]["user_questions"]
     assert cached.payload["data_health"]["operational_readiness_checks"] == "6"
+    assert cached.payload["data_health"]["probability_calibration_cards"] == str(len(cached.payload["cards"]))
 
 
 def test_full_market_batch_job_caches_rejected_items_with_remediation(tmp_path, monkeypatch):

@@ -18,6 +18,10 @@ from qagent.recommendations.cn_execution import build_trading_constraints
 from qagent.recommendations.decision import build_research_decision
 from qagent.recommendations.enrichment import enrich_opportunity_card
 from qagent.recommendations.portfolio import build_portfolio_plan
+from qagent.recommendations.probability import (
+    apply_probability_calibration,
+    probability_calibration_data_health,
+)
 from qagent.recommendations.quality_gate import (
     apply_recommendation_quality_gate,
     recommendation_quality_data_health,
@@ -288,11 +292,13 @@ def run_daily_scan(
     )
     apply_market_intelligence_to_cards(cards, market_intelligence)
     apply_recommendation_quality_gate(cards)
+    apply_probability_calibration(cards, strategy_health)
     cards = sort_recommendation_cards(cards)
     sector_strength = build_sector_strength(cards, bars_by_instrument)
     portfolio_plan = build_portfolio_plan(cards)
     data_health.update(market_intelligence.data_health)
     data_health.update(recommendation_quality_data_health(cards))
+    data_health.update(probability_calibration_data_health(cards))
     manual_action_center = build_manual_action_center(
         cards=cards,
         market_intelligence=market_intelligence,

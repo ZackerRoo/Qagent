@@ -64,6 +64,10 @@ from qagent.providers.factory import build_market_data_provider
 from qagent.providers.status import build_provider_status
 from qagent.recommendations.enrichment import enrich_opportunity_card
 from qagent.recommendations.portfolio import build_portfolio_plan
+from qagent.recommendations.probability import (
+    apply_probability_calibration,
+    probability_calibration_data_health,
+)
 from qagent.recommendations.quality_gate import (
     apply_recommendation_quality_gate,
     recommendation_quality_data_health,
@@ -490,6 +494,7 @@ def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict
     _attach_signal_hub_payload(payload)
     _attach_market_intelligence_payload(payload)
     _attach_recommendation_quality_payload(payload)
+    _attach_probability_forecast_payload(payload)
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)
@@ -660,6 +665,7 @@ def overview(provider: str = "fixture", symbols: str | None = None) -> dict[str,
     _attach_signal_hub_payload(payload, cards_key="top_cards")
     _attach_market_intelligence_payload(payload, cards_key="top_cards")
     _attach_recommendation_quality_payload(payload, cards_key="top_cards")
+    _attach_probability_forecast_payload(payload, cards_key="top_cards")
     _attach_manual_action_center_payload(payload, cards_key="top_cards")
     _attach_signal_monitor_payload(payload, cards_key="top_cards")
     _attach_decision_quality_payload(payload, cards_key="top_cards")
@@ -1561,6 +1567,7 @@ def _enrich_scan_task_result(payload: dict[str, object]) -> dict[str, object]:
     _attach_signal_hub_payload(result)
     _attach_market_intelligence_payload(result)
     _attach_recommendation_quality_payload(result)
+    _attach_probability_forecast_payload(result)
     _attach_manual_action_center_payload(result)
     _attach_signal_monitor_payload(result)
     _attach_decision_quality_payload(result)
@@ -1619,6 +1626,7 @@ def _full_market_scan_payload(
     _attach_signal_hub_payload(payload)
     _attach_market_intelligence_payload(payload)
     _attach_recommendation_quality_payload(payload)
+    _attach_probability_forecast_payload(payload)
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)
@@ -1685,6 +1693,7 @@ def _recent_full_market_scan_payload(
         _attach_signal_hub_payload(payload)
         _attach_market_intelligence_payload(payload)
         _attach_recommendation_quality_payload(payload)
+        _attach_probability_forecast_payload(payload)
         data_health = payload.setdefault("data_health", {})
         if isinstance(data_health, dict):
             data_health["scan_result_cache"] = "hit"
@@ -1712,6 +1721,7 @@ def _recent_full_market_scan_payload(
     _attach_signal_hub_payload(payload)
     _attach_market_intelligence_payload(payload)
     _attach_recommendation_quality_payload(payload)
+    _attach_probability_forecast_payload(payload)
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)
@@ -1770,6 +1780,7 @@ def _recent_scan_run_fallback_payload(
     _attach_signal_hub_payload(payload)
     _attach_market_intelligence_payload(payload)
     _attach_recommendation_quality_payload(payload)
+    _attach_probability_forecast_payload(payload)
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)
@@ -1814,6 +1825,7 @@ def _hydrate_full_market_batch_payload(
     _attach_signal_hub_payload(payload)
     _attach_market_intelligence_payload(payload)
     _attach_recommendation_quality_payload(payload)
+    _attach_probability_forecast_payload(payload)
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)
@@ -1995,6 +2007,33 @@ def _attach_recommendation_quality_payload(
     payload_data_health = payload.setdefault("data_health", {})
     if isinstance(payload_data_health, dict):
         payload_data_health.update(recommendation_quality_data_health(cards))
+
+
+def _attach_probability_forecast_payload(
+    payload: dict[str, object],
+    cards_key: str = "cards",
+) -> None:
+    raw_cards = payload.get(cards_key)
+    if not isinstance(raw_cards, list):
+        return
+    cards = _cards_from_payload(raw_cards)
+    if not cards:
+        return
+    if raw_cards and all(
+        isinstance(raw_card, dict) and isinstance(raw_card.get("probability_forecast"), dict)
+        for raw_card in raw_cards
+    ):
+        payload_data_health = payload.setdefault("data_health", {})
+        if isinstance(payload_data_health, dict):
+            payload_data_health.update(probability_calibration_data_health(cards))
+        return
+
+    apply_probability_calibration(cards, _strategy_health_from_payload(payload.get("strategy_health")))
+    cards = sort_recommendation_cards(cards)
+    payload[cards_key] = [card.model_dump(mode="json") for card in cards]
+    payload_data_health = payload.setdefault("data_health", {})
+    if isinstance(payload_data_health, dict):
+        payload_data_health.update(probability_calibration_data_health(cards))
 
 
 def _attach_manual_action_center_payload(

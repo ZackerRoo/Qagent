@@ -146,6 +146,7 @@ export type OpportunityCard = {
   calibration_notes?: string[];
   recommendation_quality?: RecommendationQualityProfile | null;
   recommendation_score?: RecommendationScoreBreakdown | null;
+  probability_forecast?: RecommendationProbabilityForecast | null;
   pre_trade_risk?: PreTradeRiskProfile | null;
   position_scenario?: PositionScenario | null;
   recommendation_summary: RecommendationSummary | null;
@@ -302,6 +303,23 @@ export type RecommendationScoreBreakdown = {
   tier: string;
   summary: string;
   components: RecommendationScoreComponent[];
+};
+
+export type RecommendationProbabilityForecast = {
+  version: string;
+  win_probability_5d: number;
+  win_probability_10d: number;
+  win_probability_20d: number;
+  expected_return_10d: number;
+  expected_return_20d: number;
+  confidence: string;
+  sample_count: number;
+  calibration_source: string;
+  score_band: string;
+  strategy_multiplier: number;
+  rank_adjustment: number;
+  reason: string;
+  evidence: string[];
 };
 
 export type PreTradeRiskCheck = {

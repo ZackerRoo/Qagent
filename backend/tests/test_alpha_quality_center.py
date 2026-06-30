@@ -6,6 +6,7 @@ from qagent.cards.factor_watch import build_factor_watch_card
 from qagent.domain.models import StrategyCalibration
 from qagent.factors.models import FactorRanking
 from qagent.market.rotation_radar import build_rotation_radar
+from qagent.recommendations.probability import apply_probability_calibration
 from qagent.recommendations.quality_gate import apply_recommendation_quality_gate
 from qagent.research.alpha_quality import build_alpha_quality_center
 from qagent.strategies.models import StrategyHealth, StrategyHealthPoint
@@ -20,6 +21,7 @@ def test_alpha_quality_center_turns_recommendations_into_buyability_policy():
     follower.market_context.themes = ["半导体", "国产替代"]
     cards = [leader, follower]
     apply_recommendation_quality_gate(cards)
+    apply_probability_calibration(cards, [_health()])
     radar = build_rotation_radar(cards, limit=5)
 
     center = build_alpha_quality_center(
@@ -36,6 +38,9 @@ def test_alpha_quality_center_turns_recommendations_into_buyability_policy():
     assert center.buyability_gate.min_rank_score >= 0.6
     assert "华锐精密" in center.current_leader.instrument_label
     assert center.current_leader.strategy_score_text
+    assert "10日胜率估计" in center.current_leader.score_summary
+    assert "样本偏少" in center.current_leader.score_summary or "已验证" in center.current_leader.score_summary
+    assert any("10日胜率估计" in item for item in center.buyability_gate.checks)
     assert center.current_leader.buy_discipline
     assert center.current_leader.invalidation_rules
     assert center.strategy_tuning

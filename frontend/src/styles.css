@@ -838,6 +838,108 @@ h3 {
   background: linear-gradient(90deg, rgba(56, 189, 248, 0.42), rgba(244, 197, 66, 0.32));
 }
 
+.probability-forecast-mini {
+  display: grid;
+  gap: 8px;
+  border: 1px solid rgba(57, 217, 138, 0.24);
+  border-radius: 8px;
+  padding: 9px;
+  background: linear-gradient(135deg, rgba(57, 217, 138, 0.08), rgba(56, 189, 248, 0.07));
+}
+
+.probability-forecast-head,
+.probability-forecast-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.probability-forecast-head > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.probability-forecast-mini span,
+.probability-forecast-mini p,
+.probability-forecast-mini b,
+.probability-forecast-mini em {
+  color: var(--terminal-muted-2);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.probability-forecast-mini strong {
+  color: var(--terminal-text);
+  font-size: 13px;
+}
+
+.probability-forecast-head b {
+  flex-shrink: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--terminal-muted);
+}
+
+.probability-window-bars {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.probability-window-bars span {
+  position: relative;
+  display: grid;
+  min-height: 42px;
+  overflow: hidden;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 6px;
+  padding: 6px;
+  background: rgba(0, 0, 0, 0.15);
+  isolation: isolate;
+}
+
+.probability-window-bars i {
+  position: absolute;
+  inset: auto auto 0 0;
+  z-index: -1;
+  height: 5px;
+  border-radius: 0 999px 999px 0;
+  background: linear-gradient(90deg, #39d98a, #38bdf8);
+}
+
+.probability-window-bars strong {
+  align-self: end;
+  color: var(--terminal-cyan);
+  font-size: 15px;
+}
+
+.probability-forecast-foot {
+  flex-wrap: wrap;
+}
+
+.probability-forecast-foot span {
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 6px;
+  padding: 3px 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.forecast-limited_sample,
+.forecast-unverified,
+.forecast-missing {
+  border-color: rgba(244, 197, 66, 0.28);
+  background: linear-gradient(135deg, rgba(244, 197, 66, 0.09), rgba(56, 189, 248, 0.06));
+}
+
+.probability-forecast-mini p {
+  margin: 0;
+  line-height: 1.35;
+}
+
 .signal-strength-bar {
   position: relative;
   overflow: hidden;

@@ -331,6 +331,23 @@ class RecommendationScoreBreakdown(BaseModel):
     components: list[RecommendationScoreComponent] = Field(default_factory=list)
 
 
+class RecommendationProbabilityForecast(BaseModel):
+    version: str = "probability_v1"
+    win_probability_5d: float = Field(ge=0.0, le=1.0)
+    win_probability_10d: float = Field(ge=0.0, le=1.0)
+    win_probability_20d: float = Field(ge=0.0, le=1.0)
+    expected_return_10d: float
+    expected_return_20d: float
+    confidence: str
+    sample_count: int = Field(ge=0)
+    calibration_source: str
+    score_band: str
+    strategy_multiplier: float = Field(ge=0.0, le=2.0)
+    rank_adjustment: float
+    reason: str
+    evidence: list[str] = Field(default_factory=list)
+
+
 class PreTradeRiskCheck(BaseModel):
     code: str
     severity: str
@@ -433,6 +450,7 @@ class OpportunityCard(BaseModel):
     calibration_notes: list[str] = Field(default_factory=list)
     recommendation_quality: RecommendationQualityProfile | None = None
     recommendation_score: RecommendationScoreBreakdown | None = None
+    probability_forecast: RecommendationProbabilityForecast | None = None
     pre_trade_risk: PreTradeRiskProfile | None = None
     position_scenario: PositionScenario | None = None
     recommendation_summary: RecommendationSummary | None = None
