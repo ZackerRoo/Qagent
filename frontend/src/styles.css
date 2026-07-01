@@ -5842,6 +5842,30 @@ tbody tr.selected {
   line-height: 1.45;
 }
 
+.chart-empty-explanation {
+  min-height: 180px;
+  margin-top: 12px;
+  border: 1px dashed rgba(143, 166, 191, 0.32);
+  border-radius: 8px;
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  background: rgba(8, 14, 22, 0.36);
+  color: var(--terminal-muted);
+}
+
+.chart-empty-explanation strong {
+  color: var(--terminal-text);
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.chart-empty-explanation p {
+  margin: 8px 0 0;
+  line-height: 1.55;
+}
+
 .equity-validation-chart .validation-line {
   stroke: var(--terminal-green);
 }

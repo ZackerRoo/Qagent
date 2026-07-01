@@ -1343,6 +1343,20 @@ function RecommendationCalibrationCenterPanel({
     0,
   );
   const sampleCount = calibration.score_bands.reduce((sum, band) => sum + band.sample_count, 0);
+  const waitingForMaturity = sampleCount > 0 && completedCount === 0;
+  const calibrationActions = waitingForMaturity
+    ? [
+        language === "zh"
+          ? "这些推荐样本已经记录，但还没有满 10 个交易日，暂时不能计算 10 日胜率。"
+          : "The recommendations are recorded, but none have reached a full 10-trading-day window yet.",
+        language === "zh"
+          ? "短期先看是否触发买点、是否到止损或目标；10D 胜率要等后续行情。"
+          : "For now, watch trigger, stop, and target events; 10D win rate needs more future bars.",
+        language === "zh"
+          ? "等至少 2-3 个完成样本后，这里才会开始调整推荐权重。"
+          : "Weights should only start moving after at least 2-3 completed samples.",
+      ]
+    : calibration.action_items;
 
   return (
     <section className={`panel recommendation-calibration-center verdict-${tone}`}>
@@ -1370,10 +1384,22 @@ function RecommendationCalibrationCenterPanel({
       <div className="calibration-hero">
         <div className="calibration-headline-card">
           <span>{language === "zh" ? "当前判断" : "Verdict"}</span>
-          <strong>{calibrationVerdictLabel(calibration.verdict, language)}</strong>
-          <p>{calibrationHeadline(calibration.headline, language)}</p>
+          <strong>
+            {waitingForMaturity
+              ? language === "zh"
+                ? "等待10日验证"
+                : "Waiting for 10D validation"
+              : calibrationVerdictLabel(calibration.verdict, language)}
+          </strong>
+          <p>
+            {waitingForMaturity
+              ? language === "zh"
+                ? `已记录 ${sampleCount} 个推荐样本，但完成 10 日收益验证的是 ${completedCount} 个，所以现在不能用它判断推荐模型好坏。`
+                : `${sampleCount} recommendation samples are recorded, but ${completedCount} have completed 10D return validation, so this cannot judge signal quality yet.`
+              : calibrationHeadline(calibration.headline, language)}
+          </p>
           <div className="calibration-action-list">
-            {calibration.action_items.map((item) => (
+            {calibrationActions.map((item) => (
               <span key={item}>{item}</span>
             ))}
           </div>
@@ -1460,8 +1486,13 @@ function RecommendationCalibrationCenterPanel({
           ]}
           caption={
             language === "zh"
-              ? "曲线向上代表推荐后的平均收益在改善；如果曲线走平或下滑，需要降低对应分数段或信号权重。"
-              : "An upward curve means recommendations are improving; flat or falling curves suggest weight cuts."
+              ? "这条线只统计已经完成 10 日收益验证的推荐；如果没有线，说明推荐还太新，不代表系统没扫描。"
+              : "This line only uses recommendations with completed 10D outcomes. If no line appears, signals are still too new."
+          }
+          emptyMessage={
+            language === "zh"
+              ? "暂无完成 10 日验证的推荐，等后续交易日产生收益结果后自动生成曲线。"
+              : "No completed 10D recommendation outcomes yet; the curve will appear after future trading days mature."
           }
         />
       </div>
@@ -1891,6 +1922,7 @@ function LineValidationChart({
   valueFormatter,
   tone = "return",
   caption,
+  emptyMessage,
   extraMeta = [],
   className = "",
 }: {
@@ -1899,13 +1931,26 @@ function LineValidationChart({
   valueFormatter(value: number): string;
   tone?: "return" | "drawdown" | "equity";
   caption?: string;
+  emptyMessage?: string;
   extraMeta?: ChartMeta[];
   className?: string;
 }) {
   const { t } = useI18n();
   const clean = points.filter((point): point is { label: string; value: number } => point.value !== null);
   if (clean.length < 2) {
-    return <div className="validation-card empty-state">{title}: -</div>;
+    return (
+      <div className={`validation-card chart-shell line-validation-chart ${className}`.trim()}>
+        <header>
+          <h3>{title}</h3>
+          <span>-</span>
+        </header>
+        {extraMeta.length ? <ChartMetaStrip items={extraMeta} /> : null}
+        <div className="chart-empty-explanation">
+          <strong>{t("history.waitingValidation")}</strong>
+          <p>{emptyMessage ?? caption ?? `${title}: -`}</p>
+        </div>
+      </div>
+    );
   }
   const width = 760;
   const height = 300;
@@ -2103,24 +2148,56 @@ function ClosureWindowChart({
   metric: "win_rate" | "avg_return_10d";
   valueFormatter(value: number): string;
 }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const latest = windows[0];
+  const hasAnyMetric = windows.some((window) =>
+    metric === "win_rate" ? window.win_rate !== null : window.avg_return_10d !== null,
+  );
+  const headline = latest ? `${latest.sample_count} ${t("history.samples")}` : "-";
+  const meta = [
+    {
+      label: t("history.targetStop"),
+      value: latest
+        ? `${formatRatio(latest.target_hit_rate)} / ${formatRatio(latest.stop_rate)}`
+        : "-",
+    },
+    {
+      label: t("history.maxDd"),
+      value: formatNumber(latest?.max_drawdown_pct ?? null, "%"),
+    },
+  ];
+  if (!hasAnyMetric) {
+    return (
+      <div className="validation-card chart-shell closure-waiting-chart">
+        <header>
+          <h3>{title}</h3>
+          <span>{headline}</span>
+        </header>
+        <ChartMetaStrip items={meta} />
+        <div className="chart-empty-explanation">
+          <strong>{language === "zh" ? "等待10日收益样本" : "Waiting for 10D outcomes"}</strong>
+          <p>
+            {language === "zh"
+              ? `当前已有 ${latest?.completed_count ?? 0}/${latest?.sample_count ?? 0} 个推荐完成触发、止盈或止损状态，但还没有能计算 10 日胜率/10 日均值的成熟收益样本。`
+              : `${latest?.completed_count ?? 0}/${latest?.sample_count ?? 0} recommendations have trigger, target, or stop status, but none have matured enough for 10D win-rate or average-return metrics.`}
+          </p>
+        </div>
+        <div className="bar-caption-grid">
+          {windows.map((window) => (
+            <span key={window.window_days}>
+              <strong>{window.window_days}D</strong>
+              {window.completed_count}/{window.sample_count} {t("history.completed")} · {window.verdict}
+            </span>
+          ))}
+        </div>
+      </div>
+    );
+  }
   return (
     <BarValidationChart
       title={title}
-      headline={latest ? `${latest.sample_count} ${t("history.samples")}` : "-"}
-      meta={[
-        {
-          label: t("history.targetStop"),
-          value: latest
-            ? `${formatRatio(latest.target_hit_rate)} / ${formatRatio(latest.stop_rate)}`
-            : "-",
-        },
-        {
-          label: t("history.maxDd"),
-          value: formatNumber(latest?.max_drawdown_pct ?? null, "%"),
-        },
-      ]}
+      headline={headline}
+      meta={meta}
       bars={windows.map((window) => {
         const rawValue =
           metric === "win_rate" ? (window.win_rate ?? 0) * 100 : window.avg_return_10d ?? 0;
