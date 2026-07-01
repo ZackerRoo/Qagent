@@ -74,12 +74,16 @@ def run_research_automation(
     paper_update = None
     paper_repo = PaperTradingRepository(repo.session_factory)
     if seed_paper and scan_result.cards:
-        snapshots = repo.list_opportunity_snapshots(limit=len(scan_result.cards))
+        snapshots = repo.list_opportunity_snapshots(
+            limit=len(scan_result.cards),
+            provider=mode,
+        )
         seed_result = seed_paper_trades_from_snapshots(
             paper_repo,
             snapshots,
             provider=mode,
             max_created=len(scan_result.cards),
+            max_signal_age_days=0 if mode != "fixture" else None,
         )
         paper_seed_created = seed_result.created
     if update_paper:

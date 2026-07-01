@@ -270,7 +270,7 @@ def seed_paper_trades_from_snapshots(
     snapshots: list[OpportunitySnapshotRecord],
     provider: str,
     max_created: int | None = None,
-    max_signal_age_days: int | None = 0,
+    max_signal_age_days: int | None = None,
     as_of: datetime | None = None,
 ) -> PaperSeedResult:
     created = 0

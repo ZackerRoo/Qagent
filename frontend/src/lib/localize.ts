@@ -511,15 +511,15 @@ const DATA_HEALTH_KEYS: LabelMap = {
 };
 
 const DATA_HEALTH_VALUES: LabelMap = {
-  fixture: { zh: "样例", en: "Fixture" },
+  fixture: { zh: "开发数据", en: "Development data" },
   free: { zh: "免费", en: "Free" },
   development: { zh: "开发", en: "Development" },
-  development_fixture: { zh: "开发样例", en: "Development fixture" },
-  fixture_strategy_data: { zh: "样例策略数据", en: "Fixture strategy data" },
+  development_fixture: { zh: "开发数据", en: "Development data" },
+  fixture_strategy_data: { zh: "开发策略数据", en: "Development strategy data" },
   free_strategy_data: { zh: "免费策略数据", en: "Free strategy data" },
   a_stock_data_reference: { zh: "A股增强数据源", en: "A-stock enhanced source" },
   a_share_enhanced_disabled: { zh: "A股增强未启用", en: "A-share enhanced disabled" },
-  fake_astock_enhanced: { zh: "A股增强测试源", en: "A-share enhanced test source" },
+  fake_astock_enhanced: { zh: "A股增强开发源", en: "A-share enhanced development source" },
   yfinance: { zh: "yfinance", en: "yfinance" },
   baostock: { zh: "BaoStock", en: "BaoStock" },
   akshare: { zh: "AKShare", en: "AKShare" },
@@ -599,7 +599,7 @@ const DATA_HEALTH_VALUES: LabelMap = {
 };
 
 const PROVIDER_NAME_LABELS: LabelMap = {
-  "Fixture data": { zh: "样例数据", en: "Fixture data" },
+  "Fixture data": { zh: "开发数据", en: "Development data" },
   "Yahoo Finance via yfinance": { zh: "Yahoo Finance / yfinance", en: "Yahoo Finance via yfinance" },
   "AKShare with BaoStock fallback": {
     zh: "AKShare + BaoStock 备用",
@@ -738,7 +738,7 @@ const EXACT_TEXT_ZH: Record<string, string> = {
   "Treat the brief as research context, not personalized investment advice.":
     "把简报当作研究上下文，而不是个性化投资建议。",
   "Deterministic development data for US:TEST and CN:000001.":
-    "用于本地开发的确定性样例数据。",
+    "用于本地开发的确定性数据。",
   "Free market data; may be delayed or incomplete.": "免费行情数据，可能延迟或不完整。",
   "Free A-share market data with provider-dependent coverage.":
     "免费 A股行情数据，覆盖范围取决于上游数据源。",
@@ -988,7 +988,7 @@ export function localizeCaveat(value: string | null | undefined, language: Langu
     return value;
   }
   if (value === "fixture data") {
-    return "样例数据";
+    return "开发数据";
   }
   if (value.startsWith("provider: ")) {
     return `数据源：${value.replace("provider: ", "")}`;

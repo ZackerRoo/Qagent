@@ -298,7 +298,7 @@ function formatContext(card: OpportunityCard, language: "zh" | "en") {
       return language === "zh" ? "ETF/指数工具" : "ETF / index";
     }
     if (card.market === "US") {
-      return language === "zh" ? "美股样例" : "US stock";
+      return language === "zh" ? "美股标的" : "US stock";
     }
     return language === "zh" ? "A股" : "A-share";
   }

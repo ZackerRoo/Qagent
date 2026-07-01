@@ -77,6 +77,12 @@ export function Layout({
   const [instrumentQuery, setInstrumentQuery] = useState("");
   const [instrumentOptions, setInstrumentOptions] = useState<TradableInstrument[]>([]);
   const [selectedLabels, setSelectedLabels] = useState<Record<string, string>>({});
+  const visibleUniverses = universes.filter((universe) => universe.universe_id !== "fixture_dev");
+  const selectedUniverseValue = visibleUniverses.some(
+    (universe) => universe.universe_id === selectedUniverseId,
+  )
+    ? selectedUniverseId
+    : "free_default";
 
   useEffect(() => {
     const query = instrumentQuery.trim();
@@ -158,7 +164,7 @@ export function Layout({
               <span className="terminal-live">LIVE</span>
               <span>{t("top.dailyScan")}</span>
               <span>{t("top.alerts")}</span>
-              <span>{dataMode === "free" ? t("top.freeData") : t("top.fixtureMode")}</span>
+              <span>{t("top.freeData")}</span>
               <span>
                 {t("top.profile")}: {localizeProfile(profile, language)}
               </span>
@@ -180,28 +186,12 @@ export function Layout({
                   {t("language.en")}
                 </button>
               </div>
-              <div className="segment data-mode-toggle" aria-label={t("top.dataSource")}>
-                <button
-                  type="button"
-                  className={dataMode === "fixture" ? "active" : ""}
-                  onClick={() => onDataModeChange("fixture")}
-                >
-                  {t("top.fixture")}
-                </button>
-                <button
-                  type="button"
-                  className={dataMode === "free" ? "active" : ""}
-                  onClick={() => onDataModeChange("free")}
-                >
-                  {t("top.free")}
-                </button>
-              </div>
               <select
                 aria-label={t("top.universe")}
-                value={selectedUniverseId}
+                value={selectedUniverseValue}
                 onChange={(event) => onUniverseChange(event.target.value)}
               >
-                {universes.map((universe) => (
+                {visibleUniverses.map((universe) => (
                   <option key={universe.universe_id} value={universe.universe_id}>
                     {formatUniverseName(universe, language)}
                   </option>
@@ -277,7 +267,7 @@ function formatUniverseName(universe: UniverseRecord, language: "zh" | "en"): st
     return universe.name;
   }
   const labels: Record<string, string> = {
-    fixture_dev: "样例开发池",
+    fixture_dev: "开发调试池",
     free_default: "全A综合池",
     cn_liquid_starter: "A股30只流动性样本池",
     cn_index_kcb50: "科创50成分股",

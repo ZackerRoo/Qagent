@@ -130,12 +130,12 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
   }
 
   async function loadRuns() {
-    const result = await fetchDailyBriefRuns();
+    const result = await fetchDailyBriefRuns(dataMode);
     setRuns(result.runs);
   }
 
   async function loadDeliveries() {
-    const result = await fetchDeliveries();
+    const result = await fetchDeliveries(undefined, dataMode);
     setDeliveries(result.deliveries);
   }
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
   fetchBacktest,
@@ -74,7 +74,7 @@ const PREVIEW_ROW_LIMIT = 24;
 const EQUITY_ROW_LIMIT = 40;
 
 type BacktestRunContext = {
-  kind: "selected" | "quick";
+  kind: "selected";
   label: string;
   provider: DataProviderMode;
 };
@@ -89,14 +89,11 @@ export function History({
   selectedCard?: OpportunityCard;
 }) {
   const { language, t } = useI18n();
-  const quickBacktestProvider = "fixture";
-  const quickBacktestSymbols = "CN:000001";
   const selectedBacktestSymbols = selectedCard?.instrument_id;
   const selectedBacktestLabel = selectedCard
     ? formatInstrumentDisplay(selectedCard.instrument_id, selectedCard.instrument_label)
     : "";
-  const quickBacktestLabel = formatInstrumentDisplay(quickBacktestSymbols);
-  const activeBacktestLabel = selectedBacktestLabel || quickBacktestLabel;
+  const activeBacktestLabel = selectedBacktestLabel || t("history.selectedMissing");
   const scanUniverseLabel = symbols === "CN:ALL" ? t("history.fullAUniverse") : symbols;
   const [backtest, setBacktest] = useState<BacktestResponse>();
   const [factorBacktest, setFactorBacktest] = useState<FactorBacktestResponse>();
@@ -116,7 +113,6 @@ export function History({
   const [isFactorBacktesting, setIsFactorBacktesting] = useState(false);
   const [isPortfolioBacktesting, setIsPortfolioBacktesting] = useState(false);
   const [backtestRunContext, setBacktestRunContext] = useState<BacktestRunContext>();
-  const autoBacktestRef = useRef(false);
 
   useEffect(() => {
     async function load() {
@@ -131,8 +127,8 @@ export function History({
           performanceResult,
           diagnosticsResult,
         ] = await Promise.all([
-          fetchScanRuns(),
-          fetchOpportunityHistory(),
+          fetchScanRuns(dataMode),
+          fetchOpportunityHistory(dataMode),
           fetchOutcomes(dataMode),
           fetchRecommendationClosure(dataMode),
           fetchRecommendationCalibration(dataMode),
@@ -153,29 +149,20 @@ export function History({
     void load();
   }, [dataMode]);
 
-  useEffect(() => {
-    if (autoBacktestRef.current) {
+  async function runBacktest() {
+    if (!selectedBacktestSymbols) {
+      setBacktestError(t("history.noSelectedBacktestScope"));
       return;
     }
-    autoBacktestRef.current = true;
-    void runBacktest(false);
-  }, []);
-
-  async function runBacktest(useSelected = true) {
     try {
       setIsBacktesting(true);
       setBacktestError("");
-      const isSelectedRun = Boolean(useSelected && selectedBacktestSymbols);
-      const provider = isSelectedRun ? dataMode : quickBacktestProvider;
-      const backtestSymbols =
-        isSelectedRun ? selectedBacktestSymbols : quickBacktestSymbols;
-      const label = isSelectedRun ? selectedBacktestLabel : quickBacktestLabel;
-      const result = await fetchBacktest(provider, backtestSymbols);
+      const result = await fetchBacktest(dataMode, selectedBacktestSymbols);
       setBacktest(result);
       setBacktestRunContext({
-        kind: isSelectedRun ? "selected" : "quick",
-        label,
-        provider,
+        kind: "selected",
+        label: selectedBacktestLabel,
+        provider: dataMode,
       });
     } catch (caught) {
       setBacktestError(caught instanceof Error ? caught.message : "Failed to run backtest");
@@ -185,13 +172,14 @@ export function History({
   }
 
   async function runPortfolioBacktest() {
+    if (!selectedBacktestSymbols) {
+      setPortfolioBacktestError(t("history.noSelectedBacktestScope"));
+      return;
+    }
     try {
       setIsPortfolioBacktesting(true);
       setPortfolioBacktestError("");
-      const result = await fetchPortfolioBacktest(
-        selectedBacktestSymbols ? dataMode : quickBacktestProvider,
-        selectedBacktestSymbols ?? quickBacktestSymbols,
-      );
+      const result = await fetchPortfolioBacktest(dataMode, selectedBacktestSymbols);
       setPortfolioBacktest(result);
     } catch (caught) {
       setPortfolioBacktestError(
@@ -203,13 +191,14 @@ export function History({
   }
 
   async function runFactorBacktest() {
+    if (!selectedBacktestSymbols) {
+      setFactorBacktestError(t("history.noSelectedBacktestScope"));
+      return;
+    }
     try {
       setIsFactorBacktesting(true);
       setFactorBacktestError("");
-      const result = await fetchFactorBacktest(
-        selectedBacktestSymbols ? dataMode : quickBacktestProvider,
-        selectedBacktestSymbols ?? quickBacktestSymbols,
-      );
+      const result = await fetchFactorBacktest(dataMode, selectedBacktestSymbols);
       setFactorBacktest(result);
     } catch (caught) {
       setFactorBacktestError(
@@ -240,8 +229,7 @@ export function History({
         isBacktesting={isBacktesting}
         isFactorBacktesting={isFactorBacktesting}
         isPortfolioBacktesting={isPortfolioBacktesting}
-        onRunSelected={() => runBacktest(true)}
-        onRunQuick={() => runBacktest(false)}
+        onRunSelected={runBacktest}
         onRunFactor={runFactorBacktest}
         onRunPortfolio={runPortfolioBacktest}
       />
@@ -261,24 +249,15 @@ export function History({
             <button
               className="icon-action"
               type="button"
-              onClick={() => runBacktest(true)}
-              disabled={isBacktesting}
+              onClick={runBacktest}
+              disabled={isBacktesting || !selectedBacktestSymbols}
             >
               {isBacktesting ? t("common.running") : t("history.runSelectedBacktest")}
-            </button>
-            <button
-              className="icon-action secondary"
-              type="button"
-              onClick={() => runBacktest(false)}
-              disabled={isBacktesting}
-            >
-              {isBacktesting ? t("common.running") : t("history.runQuickSample")}
             </button>
           </div>
         </div>
         <BacktestScopeNote
           selectedLabel={selectedBacktestLabel}
-          quickLabel={quickBacktestLabel}
           hasSelectedCard={Boolean(selectedBacktestSymbols)}
         />
         {backtestError && <div className="empty-state error">{backtestError}</div>}
@@ -915,7 +894,6 @@ function BacktestCommandCenter({
   isFactorBacktesting,
   isPortfolioBacktesting,
   onRunSelected,
-  onRunQuick,
   onRunFactor,
   onRunPortfolio,
 }: {
@@ -931,7 +909,6 @@ function BacktestCommandCenter({
   isFactorBacktesting: boolean;
   isPortfolioBacktesting: boolean;
   onRunSelected(): void;
-  onRunQuick(): void;
   onRunFactor(): void;
   onRunPortfolio(): void;
 }) {
@@ -941,19 +918,7 @@ function BacktestCommandCenter({
   const testedLabel = backtest
     ? backtestInstrumentLabels(backtest.signals, backtestRunContext?.label ?? activeLabel).join(" / ")
     : activeLabel;
-  const isQuickSampleResult =
-    Boolean(backtest && hasSelectedCard && backtestRunContext?.kind !== "selected");
-  const verdict = isQuickSampleResult
-    ? {
-        tone: "watch" as const,
-        title: language === "zh" ? "当前是样例结果" : "Sample result",
-        action: language === "zh" ? "请先回测当前推荐" : "Run current signal first",
-        detail:
-          language === "zh"
-            ? `页面正在展示 ${testedLabel} 的快速样例，不代表 ${selectedLabel || activeLabel} 的真实验证结果。`
-            : `The page is showing the quick sample ${testedLabel}, not the selected signal ${selectedLabel || activeLabel}.`,
-      }
-    : buildBacktestVerdict(backtest, portfolioBacktest, closure, language);
+  const verdict = buildBacktestVerdict(backtest, portfolioBacktest, closure, language);
   const sampleValue = backtest
     ? `${backtest.summary.completed_signals}/${backtest.summary.evaluated_signals}`
     : "-";
@@ -985,21 +950,21 @@ function BacktestCommandCenter({
                 ? "来自今日或机会页选中的推荐。"
                 : "Selected from Today or Opportunities."
               : language === "zh"
-                ? "暂无选中推荐，先使用快速样例。"
-                : "No selected signal yet; quick sample is used."}
+                ? "先在今日或机会页选择一只推荐。"
+                : "Select a recommendation from Today or Opportunities first."}
           </p>
         </div>
         <div>
           <span>{language === "zh" ? "当前回测结果" : "Displayed backtest"}</span>
           <strong>{testedLabel}</strong>
           <p>
-            {isQuickSampleResult
+            {hasSelectedCard
               ? language === "zh"
-                ? "这是快速样例，点击“回测当前推荐”后才会切换到选中股票。"
-                : "This is the quick sample. Run the current signal to switch targets."
-              : language === "zh"
                 ? "当前图表和表格对应这个标的。"
-                : "Charts and tables below belong to this target."}
+                : "Charts and tables below belong to this target."
+              : language === "zh"
+                ? "还没有运行真实推荐回测。"
+                : "No current-recommendation backtest has run yet."}
           </p>
         </div>
         <div>
@@ -1025,16 +990,28 @@ function BacktestCommandCenter({
       </div>
 
       <div className="backtest-action-grid">
-        <button className="icon-action" type="button" onClick={onRunSelected} disabled={isBacktesting}>
+        <button
+          className="icon-action"
+          type="button"
+          onClick={onRunSelected}
+          disabled={isBacktesting || !hasSelectedCard}
+        >
           {isBacktesting ? t("common.running") : t("history.runSelectedBacktest")}
         </button>
-        <button className="icon-action secondary" type="button" onClick={onRunQuick} disabled={isBacktesting}>
-          {isBacktesting ? t("common.running") : t("history.runQuickSample")}
-        </button>
-        <button className="icon-action secondary" type="button" onClick={onRunPortfolio} disabled={isPortfolioBacktesting}>
+        <button
+          className="icon-action secondary"
+          type="button"
+          onClick={onRunPortfolio}
+          disabled={isPortfolioBacktesting || !hasSelectedCard}
+        >
           {isPortfolioBacktesting ? t("common.running") : t("history.runPortfolio")}
         </button>
-        <button className="icon-action secondary" type="button" onClick={onRunFactor} disabled={isFactorBacktesting}>
+        <button
+          className="icon-action secondary"
+          type="button"
+          onClick={onRunFactor}
+          disabled={isFactorBacktesting || !hasSelectedCard}
+        >
           {isFactorBacktesting ? t("common.running") : t("history.runFactor")}
         </button>
       </div>
@@ -1192,11 +1169,9 @@ function BacktestGuidePanel({
 
 function BacktestScopeNote({
   selectedLabel,
-  quickLabel,
   hasSelectedCard,
 }: {
   selectedLabel: string;
-  quickLabel: string;
   hasSelectedCard: boolean;
 }) {
   const { t } = useI18n();
@@ -1207,9 +1182,6 @@ function BacktestScopeNote({
         {hasSelectedCard
           ? `${t("history.selectedBacktestScope")}: ${selectedLabel}`
           : t("history.noSelectedBacktestScope")}
-      </p>
-      <p>
-        {t("history.quickBacktestScope")} {t("history.sampleSymbols")}: {quickLabel}
       </p>
       <p>{t("history.realBacktestScope")}</p>
     </div>
@@ -1633,8 +1605,7 @@ function BacktestResultSummary({
   const { language, t } = useI18n();
   const labels = backtestInstrumentLabels(backtest.signals, context?.label ?? fallbackLabel);
   const dateRange = backtestDateRange(backtest.signals);
-  const scopeLabel =
-    context?.kind === "selected" ? t("history.resultCurrentPick") : t("history.resultQuickSample");
+  const scopeLabel = t("history.resultCurrentPick");
 
   return (
     <div className="backtest-result-summary">
@@ -1652,7 +1623,7 @@ function BacktestResultSummary({
         </div>
         <div>
           <span>{t("history.resultProvider")}</span>
-          <strong>{localizeProvider(context?.provider ?? "fixture", language)}</strong>
+          <strong>{localizeProvider(context?.provider ?? "free", language)}</strong>
         </div>
         <div>
           <span>{t("history.samples")}</span>

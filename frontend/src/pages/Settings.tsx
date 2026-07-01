@@ -790,7 +790,7 @@ function formatUniverseName(universe: UniverseRecord, language: "zh" | "en"): st
     return universe.name;
   }
   const labels: Record<string, string> = {
-    fixture_dev: "样例开发池",
+    fixture_dev: "开发调试池",
     free_default: "全A综合池",
     cn_liquid_starter: "A股30只流动性样本池",
     cn_index_kcb50: "科创50成分股",
@@ -827,7 +827,7 @@ function formatTags(tags: string[], language: "zh" | "en"): string {
     starter: "入门",
     blue_chip: "蓝筹",
     liquid: "高流动性",
-    fixture: "样例",
+    fixture: "开发",
     dev: "开发",
     custom: "自定义",
   };

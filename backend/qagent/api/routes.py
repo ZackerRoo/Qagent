@@ -742,8 +742,14 @@ def save_daily_brief_run(
 
 
 @router.get("/daily-brief/runs")
-def daily_brief_runs(limit: int = 20) -> dict[str, list[object]]:
-    return {"runs": [run.model_dump(mode="json") for run in _repo().list_brief_runs(limit=limit)]}
+def daily_brief_runs(provider: str | None = None, limit: int = 20) -> dict[str, list[object]]:
+    mode = provider.strip().lower() if provider else None
+    return {
+        "runs": [
+            run.model_dump(mode="json")
+            for run in _repo().list_brief_runs(limit=limit, provider=mode)
+        ]
+    }
 
 
 @router.get("/daily-brief/runs/{brief_id}")
@@ -786,13 +792,18 @@ def queue_daily_brief_delivery(
 
 
 @router.get("/deliveries")
-def deliveries(status: str | None = None, limit: int = 20) -> dict[str, list[object]]:
+def deliveries(
+    status: str | None = None,
+    provider: str | None = None,
+    limit: int = 20,
+) -> dict[str, list[object]]:
     if limit <= 0 or limit > 100:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
+    mode = provider.strip().lower() if provider else None
     return {
         "deliveries": [
             delivery.model_dump(mode="json")
-            for delivery in _repo().list_delivery_outbox(status=status, limit=limit)
+            for delivery in _repo().list_delivery_outbox(status=status, limit=limit, provider=mode)
         ]
     }
 
@@ -1018,12 +1029,16 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
 
     if settings.seed_paper and mode != "fixture":
         try:
-            snapshots = repo.list_opportunity_snapshots(limit=max(settings.seed_limit * 10, 50))
+            snapshots = repo.list_opportunity_snapshots(
+                limit=max(settings.seed_limit * 10, 50),
+                provider=mode,
+            )
             seed_result = seed_paper_trades_from_snapshots(
                 paper_repo,
                 snapshots,
                 provider=mode,
                 max_created=settings.seed_limit,
+                max_signal_age_days=0,
             )
             paper_created += seed_result.created
             data_health["automation_seed_snapshots"] = str(len(snapshots))
@@ -1144,12 +1159,16 @@ def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, o
     if limit <= 0 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
     mode = provider.strip().lower()
-    snapshots = _repo().list_opportunity_snapshots(limit=max(limit * 10, limit))
+    snapshots = _repo().list_opportunity_snapshots(
+        limit=max(limit * 10, limit),
+        provider=mode,
+    )
     result = seed_paper_trades_from_snapshots(
         _paper_repo(),
         snapshots,
         provider=mode,
         max_created=limit,
+        max_signal_age_days=0 if mode != "fixture" else None,
     )
     return result.model_dump(mode="json")
 
@@ -3158,23 +3177,36 @@ def run_alerts(
 
 
 @router.get("/alert-suggestions")
-def alert_suggestions(limit: int = 50) -> dict[str, list[object]]:
-    snapshots = _repo().list_opportunity_snapshots(limit=limit)
+def alert_suggestions(provider: str | None = None, limit: int = 50) -> dict[str, list[object]]:
+    mode = provider.strip().lower() if provider else None
+    snapshots = _repo().list_opportunity_snapshots(limit=limit, provider=mode)
     suggestions = suggest_alert_rules(snapshots)
     return {"suggestions": [item.model_dump(mode="json") for item in suggestions]}
 
 
 @router.get("/scan-runs")
-def scan_runs(limit: int = 20) -> dict[str, list[object]]:
-    return {"runs": [run.model_dump(mode="json") for run in _repo().list_scan_runs(limit=limit)]}
+def scan_runs(provider: str | None = None, limit: int = 20) -> dict[str, list[object]]:
+    mode = provider.strip().lower() if provider else None
+    return {
+        "runs": [
+            run.model_dump(mode="json")
+            for run in _repo().list_scan_runs(limit=limit, provider=mode)
+        ]
+    }
 
 
 @router.get("/opportunity-history")
 def opportunity_history(
+    provider: str | None = None,
     instrument_id: str | None = None,
     limit: int = 50,
 ) -> dict[str, list[object]]:
-    snapshots = _repo().list_opportunity_snapshots(instrument_id=instrument_id, limit=limit)
+    mode = provider.strip().lower() if provider else None
+    snapshots = _repo().list_opportunity_snapshots(
+        instrument_id=instrument_id,
+        limit=limit,
+        provider=mode,
+    )
     return {"snapshots": [_snapshot_payload_with_label(snapshot) for snapshot in snapshots]}
 
 
@@ -3193,7 +3225,11 @@ def outcomes(
 
 def _replay_outcomes(provider: str, instrument_id: str | None, limit: int):
     repo = _repo()
-    snapshots = repo.list_opportunity_snapshots(instrument_id=instrument_id, limit=limit)
+    snapshots = repo.list_opportunity_snapshots(
+        instrument_id=instrument_id,
+        limit=limit,
+        provider=provider,
+    )
     try:
         market_provider = build_market_data_provider(provider)
     except ValueError as exc:
@@ -3331,7 +3367,11 @@ def _replay_snapshot_outcome_pairs(
     limit: int,
 ):
     repo = _repo()
-    snapshots = repo.list_opportunity_snapshots(instrument_id=instrument_id, limit=limit)
+    snapshots = repo.list_opportunity_snapshots(
+        instrument_id=instrument_id,
+        limit=limit,
+        provider=provider,
+    )
     try:
         market_provider = build_market_data_provider(provider)
     except ValueError as exc:

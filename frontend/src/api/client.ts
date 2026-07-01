@@ -567,12 +567,14 @@ export async function fetchCatalysts(symbols: string): Promise<CatalystsResponse
   return apiGet<CatalystsResponse>("/catalysts", { symbols, limit: 5 });
 }
 
-export async function fetchScanRuns(): Promise<ScanRunsResponse> {
-  return apiGet<ScanRunsResponse>("/scan-runs", { limit: 20 });
+export async function fetchScanRuns(provider?: DataProviderMode): Promise<ScanRunsResponse> {
+  return apiGet<ScanRunsResponse>("/scan-runs", { provider, limit: 20 });
 }
 
-export async function fetchOpportunityHistory(): Promise<OpportunityHistoryResponse> {
-  return apiGet<OpportunityHistoryResponse>("/opportunity-history", { limit: 50 });
+export async function fetchOpportunityHistory(
+  provider?: DataProviderMode,
+): Promise<OpportunityHistoryResponse> {
+  return apiGet<OpportunityHistoryResponse>("/opportunity-history", { provider, limit: 50 });
 }
 
 export async function fetchOutcomes(provider: DataProviderMode): Promise<OutcomesResponse> {
@@ -692,8 +694,8 @@ export async function saveDailyBriefRun(
   );
 }
 
-export async function fetchDailyBriefRuns(): Promise<BriefRunsResponse> {
-  return apiGet<BriefRunsResponse>("/daily-brief/runs", { limit: 10 });
+export async function fetchDailyBriefRuns(provider?: DataProviderMode): Promise<BriefRunsResponse> {
+  return apiGet<BriefRunsResponse>("/daily-brief/runs", { provider, limit: 10 });
 }
 
 export async function fetchDailyBriefRun(briefId: string): Promise<BriefRunDetailResponse> {
@@ -711,8 +713,11 @@ export async function queueBriefDelivery(briefId: string): Promise<DeliveryOutbo
   );
 }
 
-export async function fetchDeliveries(status?: string): Promise<DeliveriesResponse> {
-  return apiGet<DeliveriesResponse>("/deliveries", { status, limit: 20 });
+export async function fetchDeliveries(
+  status?: string,
+  provider?: DataProviderMode,
+): Promise<DeliveriesResponse> {
+  return apiGet<DeliveriesResponse>("/deliveries", { status, provider, limit: 20 });
 }
 
 export async function markDeliverySent(deliveryId: string): Promise<DeliveryOutboxRecord> {

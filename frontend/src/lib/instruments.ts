@@ -81,7 +81,7 @@ const US_INSTRUMENT_NAMES: Record<string, string> = {
   AAPL: "Apple",
   MSFT: "Microsoft",
   NVDA: "NVIDIA",
-  TEST: "样例测试",
+  TEST: "开发标的",
 };
 
 export function registerInstrumentLabels(labels: Record<string, string>): number {

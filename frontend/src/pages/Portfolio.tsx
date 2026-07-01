@@ -451,8 +451,8 @@ function PaperSessionStarter({
           <h3>{account?.label ?? form.label}</h3>
           <p>
             {language === "zh"
-              ? "从这里启动干净的模拟盘统计，避免开发测试记录混进正式胜率、回撤和权益曲线。"
-              : "Start a clean paper-trading run so test records do not pollute win rate, drawdown, or equity curves."}
+              ? "从这里启动干净的模拟盘统计，避免旧记录混进正式胜率、回撤和权益曲线。"
+              : "Start a clean paper-trading run so old records do not pollute win rate, drawdown, or equity curves."}
           </p>
         </div>
         <div className="paper-session-status">
@@ -536,7 +536,7 @@ function PaperSessionStarter({
           />
           <span>
             {language === "zh"
-              ? "清空开发测试记录，从今天重新统计"
+              ? "清空旧记录，从今天重新统计"
               : "Clear development records and restart tracking"}
           </span>
         </label>

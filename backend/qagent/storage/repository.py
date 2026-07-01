@@ -416,10 +416,13 @@ class QagentRepository:
             session.refresh(run_row)
             return self._scan_run_from_row(run_row)
 
-    def list_scan_runs(self, limit: int = 20) -> list[ScanRunRecord]:
+    def list_scan_runs(self, limit: int = 20, provider: str | None = None) -> list[ScanRunRecord]:
         with self.session_factory() as session:
+            query = session.query(ScanRunRow)
+            if provider:
+                query = query.filter(ScanRunRow.provider == provider)
             rows = (
-                session.query(ScanRunRow)
+                query
                 .order_by(ScanRunRow.created_at.desc(), ScanRunRow.run_id.desc())
                 .limit(limit)
                 .all()
@@ -639,11 +642,15 @@ class QagentRepository:
         self,
         instrument_id: str | None = None,
         limit: int = 50,
+        provider: str | None = None,
     ) -> list[OpportunitySnapshotRecord]:
         with self.session_factory() as session:
             query = session.query(OpportunitySnapshotRow)
             if instrument_id:
                 query = query.filter(OpportunitySnapshotRow.instrument_id == instrument_id)
+            if provider:
+                query = query.join(ScanRunRow, OpportunitySnapshotRow.run_id == ScanRunRow.run_id)
+                query = query.filter(ScanRunRow.provider == provider)
             rows = (
                 query.order_by(
                     OpportunitySnapshotRow.created_at.desc(),
@@ -676,10 +683,13 @@ class QagentRepository:
             session.refresh(row)
             return self._brief_run_from_row(row)
 
-    def list_brief_runs(self, limit: int = 20) -> list[BriefRunRecord]:
+    def list_brief_runs(self, limit: int = 20, provider: str | None = None) -> list[BriefRunRecord]:
         with self.session_factory() as session:
+            query = session.query(BriefRunRow)
+            if provider:
+                query = query.filter(BriefRunRow.provider == provider)
             rows = (
-                session.query(BriefRunRow)
+                query
                 .order_by(BriefRunRow.created_at.desc(), BriefRunRow.brief_id.desc())
                 .limit(limit)
                 .all()
@@ -761,11 +771,15 @@ class QagentRepository:
         self,
         status: str | None = None,
         limit: int = 20,
+        provider: str | None = None,
     ) -> list[DeliveryOutboxRecord]:
         with self.session_factory() as session:
             query = session.query(DeliveryOutboxRow)
             if status:
                 query = query.filter(DeliveryOutboxRow.status == status)
+            if provider:
+                query = query.join(BriefRunRow, DeliveryOutboxRow.brief_id == BriefRunRow.brief_id)
+                query = query.filter(BriefRunRow.provider == provider)
             rows = (
                 query.order_by(
                     DeliveryOutboxRow.created_at.desc(),
