@@ -846,7 +846,7 @@ def run_automation(
 
 @router.get("/automation/scheduler")
 def automation_scheduler_state() -> dict[str, object]:
-    return _automation_scheduler.state().model_dump(mode="json")
+    return _automation_scheduler.refresh_if_due(_run_auto_processing_cycle).model_dump(mode="json")
 
 
 @router.post("/automation/scheduler/run-once")

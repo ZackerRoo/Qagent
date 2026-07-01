@@ -1,7 +1,11 @@
+from datetime import datetime, timedelta, timezone
+
 from fastapi.testclient import TestClient
 
+import qagent.api.routes as routes
 from qagent.app import create_app
 from qagent.db import create_session_factory, initialize_database
+from qagent.jobs.automation_scheduler import AutomationScheduler, AutoProcessingSettings
 from qagent.storage.repository import QagentRepository
 
 
@@ -88,3 +92,34 @@ def test_automation_scheduler_start_and_stop_are_visible(tmp_path, monkeypatch):
     assert stopped.status_code == 200
     assert stopped.json()["enabled"] is False
     assert stopped.json()["next_run_at"] is None
+
+
+def test_automation_scheduler_state_runs_overdue_cycle(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'automation-scheduler-overdue.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    scheduler = AutomationScheduler()
+    overdue_at = datetime.now(timezone.utc) - timedelta(minutes=45)
+    with scheduler._lock:
+        scheduler._enabled = True
+        scheduler._status = "idle"
+        scheduler._settings = AutoProcessingSettings(
+            provider="fixture",
+            symbols="US:TEST",
+            interval_seconds=60,
+            run_scan=False,
+            seed_paper=False,
+            update_paper=False,
+            run_alerts=False,
+        )
+        scheduler._next_run_at = overdue_at
+    monkeypatch.setattr(routes, "_automation_scheduler", scheduler)
+    client = TestClient(create_app())
+
+    response = client.get("/api/automation/scheduler")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["enabled"] is True
+    assert body["run_count"] == 1
+    assert body["last_completed_at"] is not None
+    assert datetime.fromisoformat(body["next_run_at"]) > datetime.now(timezone.utc)

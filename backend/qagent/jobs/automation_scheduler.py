@@ -74,6 +74,22 @@ class AutomationScheduler:
         with self._lock:
             return self._state_unlocked()
 
+    def refresh_if_due(self, runner: CycleRunner) -> AutoProcessingState:
+        now = _utc_now()
+        should_run = False
+        settings: AutoProcessingSettings | None = None
+        with self._lock:
+            if self._enabled and self._status != "running":
+                settings = self._settings
+                should_run = self._next_run_at is not None and self._next_run_at <= now
+
+        if should_run and settings is not None:
+            self._execute(settings, runner)
+
+        self._ensure_loop_thread(runner)
+        with self._lock:
+            return self._state_unlocked()
+
     def start(self, settings: AutoProcessingSettings, runner: CycleRunner) -> AutoProcessingState:
         with self._lock:
             self._settings = settings
@@ -113,15 +129,31 @@ class AutomationScheduler:
 
     def _loop(self, runner: CycleRunner) -> None:
         while not self._stop_event.is_set():
-            settings = self.state().settings
+            with self._lock:
+                settings = self._settings
+                next_run_at = self._next_run_at
+            if next_run_at is not None:
+                wait_seconds = (next_run_at - _utc_now()).total_seconds()
+                if wait_seconds > 0 and self._stop_event.wait(wait_seconds):
+                    break
+                if wait_seconds > 0:
+                    continue
             self._execute(settings, runner)
-            if self._stop_event.wait(settings.interval_seconds):
-                break
         with self._lock:
             self._enabled = False
             if self._status == "running":
                 self._status = "idle"
             self._next_run_at = None
+
+    def _ensure_loop_thread(self, runner: CycleRunner) -> None:
+        with self._lock:
+            if not self._enabled:
+                return
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop_event.clear()
+            self._thread = Thread(target=self._loop, args=(runner,), daemon=True)
+            self._thread.start()
 
     def _execute(self, settings: AutoProcessingSettings, runner: CycleRunner) -> None:
         if not self._run_lock.acquire(blocking=False):
