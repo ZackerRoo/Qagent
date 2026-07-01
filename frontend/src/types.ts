@@ -139,6 +139,7 @@ export type OpportunityCard = {
   market_context: MarketContext | null;
   trading_status: TradingStatus | null;
   tradability: TradabilityAssessment | null;
+  data_quality_audit?: DataQualityAudit | null;
   strategy_calibration: StrategyCalibration | null;
   quality_score?: number | null;
   market_fit_score?: number | null;
@@ -458,6 +459,22 @@ export type TradabilityAssessment = {
   avg_volume_20d: number | null;
   avg_amount_20d: string | null;
   checks: TradabilityCheck[];
+  summary: string;
+};
+
+export type DataQualityIssue = {
+  code: string;
+  severity: string;
+  title: string;
+  message: string;
+  action: string;
+};
+
+export type DataQualityAudit = {
+  status: string;
+  score: number;
+  can_recommend: boolean;
+  issues: DataQualityIssue[];
   summary: string;
 };
 
@@ -1130,6 +1147,7 @@ export type ScanItem = {
   factor_flags: string[];
   trading_status: TradingStatus | null;
   tradability: TradabilityAssessment | null;
+  data_quality_audit?: DataQualityAudit | null;
   blockers: ScanBlocker[];
   rejection_category?: string | null;
   rejection_score?: number | null;

@@ -4,7 +4,19 @@ from pydantic import BaseModel, Field
 
 from qagent.cards.factor_watch import build_factor_watch_cards
 from qagent.cards.generator import OpportunityCardGenerator
-from qagent.domain.models import OpportunityCard, PortfolioPlan, SectorStrength, TradabilityAssessment, TradingStatus
+from qagent.domain.models import (
+    DataQualityAudit,
+    OpportunityCard,
+    PortfolioPlan,
+    SectorStrength,
+    TradabilityAssessment,
+    TradingStatus,
+)
+from qagent.market.cn_context import build_market_context
+from qagent.market.data_quality import (
+    assess_instrument_data_quality,
+    summarize_data_quality_audits,
+)
 from qagent.factors.engine import build_factor_rankings
 from qagent.factors.models import FactorRanking
 from qagent.market.instruments import format_instrument_label
@@ -75,6 +87,7 @@ class ScanItem(BaseModel):
     factor_flags: list[str] = Field(default_factory=list)
     trading_status: TradingStatus | None = None
     tradability: TradabilityAssessment | None = None
+    data_quality_audit: DataQualityAudit | None = None
     blockers: list[ScanBlocker] = Field(default_factory=list)
     rejection_category: str | None = None
     rejection_score: float | None = Field(default=None, ge=0.0, le=1.0)
@@ -109,6 +122,7 @@ def run_daily_scan(
     bars_by_instrument = {}
     trading_status_by_instrument = {}
     tradability_by_instrument = {}
+    data_quality_by_instrument: dict[str, DataQualityAudit] = {}
     strategy_filings_count = 0
     strategy_announcements_count = 0
     strategy_fundamentals_count = 0
@@ -191,12 +205,23 @@ def run_daily_scan(
                 trading_status,
                 trading_constraints,
             )
+            data_quality_audit = assess_instrument_data_quality(
+                instrument_id,
+                instrument_label,
+                bars,
+                trading_status=trading_status,
+                tradability=tradability,
+                market_context=build_market_context(instrument_id, instrument_label),
+                adjusted_price_ready=_bars_have_adjusted_price(bars),
+            )
             trading_status_by_instrument[instrument_id] = trading_status
             tradability_by_instrument[instrument_id] = tradability
+            data_quality_by_instrument[instrument_id] = data_quality_audit
             if card:
                 card.trading_constraints = trading_constraints
                 card.trading_status = trading_status
                 card.tradability = tradability
+                _apply_data_quality_audit_to_card(card, data_quality_audit)
                 cards.append(card)
             items.append(
                 _scan_item(
@@ -207,6 +232,7 @@ def run_daily_scan(
                     card,
                     trading_status,
                     tradability,
+                    data_quality_audit,
                 )
             )
         except Exception as exc:
@@ -226,6 +252,10 @@ def run_daily_scan(
     for card in factor_watch_cards:
         card.trading_status = trading_status_by_instrument.get(card.instrument_id)
         card.tradability = tradability_by_instrument.get(card.instrument_id)
+        _apply_data_quality_audit_to_card(
+            card,
+            data_quality_by_instrument.get(card.instrument_id),
+        )
         card.decision = build_research_decision(card)
         enrich_opportunity_card(card)
     cards.extend(factor_watch_cards)
@@ -274,6 +304,7 @@ def run_daily_scan(
     strategy_provider_errors = getattr(strategy_provider, "last_errors", [])
     if strategy_provider_errors:
         data_health["strategy_data_errors"] = " | ".join(strategy_provider_errors[:3])
+    data_health.update(summarize_data_quality_audits(data_quality_by_instrument.values()))
     data_health.update(
         _a_share_data_readiness(
             cards=cards,
@@ -421,6 +452,7 @@ def _scan_item(
     card: OpportunityCard | None,
     trading_status: TradingStatus | None,
     tradability: TradabilityAssessment | None,
+    data_quality_audit: DataQualityAudit | None,
 ) -> ScanItem:
     strategy_counts = _strategy_counts(strategy_evaluations)
     if bars.empty:
@@ -433,6 +465,7 @@ def _scan_item(
             signals=0,
             trading_status=trading_status,
             tradability=tradability,
+            data_quality_audit=data_quality_audit,
             blockers=[
                 ScanBlocker(
                     code="no_daily_bars",
@@ -465,6 +498,7 @@ def _scan_item(
             provider=provider,
             trading_status=trading_status,
             tradability=tradability,
+            data_quality_audit=data_quality_audit,
         )
 
     blockers = _setup_blockers(signals, strategy_evaluations, strategy_counts)
@@ -488,6 +522,17 @@ def _scan_item(
             for check in tradability.checks
             if check.severity == "block"
         )
+    if data_quality_audit:
+        blockers.extend(
+            ScanBlocker(
+                code=f"data_quality_{issue.code}",
+                severity=issue.severity,
+                title=issue.title,
+                message=issue.message,
+            )
+            for issue in data_quality_audit.issues
+            if issue.severity == "block"
+        )
 
     return ScanItem(
         instrument_id=instrument_id,
@@ -503,6 +548,7 @@ def _scan_item(
         provider=provider,
         trading_status=trading_status,
         tradability=tradability,
+        data_quality_audit=data_quality_audit,
         rejection_category=_rejection_category(blockers),
         rejection_score=_rejection_score(blockers, signals, strategy_counts),
         remediation=_rejection_remediation(blockers),
@@ -513,6 +559,8 @@ def _rejection_category(blockers: list[ScanBlocker]) -> str:
     codes = {blocker.code for blocker in blockers}
     if any(blocker.severity == "block" for blocker in blockers):
         return "execution_blocked"
+    if any(code.startswith("data_quality_") for code in codes):
+        return "data_quality"
     if "strategy_data_missing" in codes:
         return "data_missing"
     if "no_active_signals" in codes or "no_strategy_passed" in codes or "signal_threshold_not_met" in codes:
@@ -544,6 +592,37 @@ def _rejection_remediation(blockers: list[ScanBlocker]) -> str:
     if category == "weak_signal":
         return "等待趋势、突破、量能或健康回调信号增强，再重新进入排序。"
     return "当前排序优势不足，继续观察因子分、策略胜率和市场环境是否改善。"
+
+
+def _apply_data_quality_audit_to_card(
+    card: OpportunityCard,
+    audit: DataQualityAudit | None,
+) -> None:
+    if audit is None:
+        return
+    card.data_quality_audit = audit
+    note = f"数据质量：{audit.summary}"
+    if note not in card.rank_reasons:
+        card.rank_reasons.append(note)
+    for issue in audit.issues[:3]:
+        caveat = f"data_quality_{issue.code}"
+        if caveat not in card.data_caveats:
+            card.data_caveats.append(caveat)
+        detail = f"数据质量待处理：{issue.title} - {issue.action}"
+        if detail not in card.calibration_notes:
+            card.calibration_notes.append(detail)
+
+
+def _bars_have_adjusted_price(bars) -> bool:
+    adjusted_columns = {
+        "adj_close",
+        "adjusted_close",
+        "adjust_factor",
+        "复权收盘",
+        "前复权收盘",
+        "后复权收盘",
+    }
+    return any(column in bars.columns for column in adjusted_columns)
 
 
 def _a_share_data_readiness(

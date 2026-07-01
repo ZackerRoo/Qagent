@@ -172,6 +172,47 @@ export function OpportunityDetail({
             )}
           </div>
         )}
+        {card.data_quality_audit && (
+          <div className="context-panel data-quality-audit-panel">
+            <h3>{language === "zh" ? "数据质量审计" : "Data Quality Audit"}</h3>
+            <div className="context-metrics">
+              <span className={`status status-${card.data_quality_audit.status}`}>
+                {dataQualityAuditStatusLabel(card.data_quality_audit.status, language)}
+              </span>
+              <span>
+                {language === "zh" ? "质量分" : "Score"}{" "}
+                {Math.round(card.data_quality_audit.score * 100)}
+              </span>
+              <span>
+                {card.data_quality_audit.can_recommend
+                  ? language === "zh"
+                    ? "可进入推荐"
+                    : "Eligible"
+                  : language === "zh"
+                    ? "阻断推荐"
+                    : "Blocked"}
+              </span>
+            </div>
+            <p className="context-note">{card.data_quality_audit.summary}</p>
+            {card.data_quality_audit.issues.length > 0 ? (
+              <div className="risk-veto-list compact">
+                {card.data_quality_audit.issues.slice(0, 4).map((issue) => (
+                  <div key={issue.code} className={`risk-veto risk-veto-${issue.severity}`}>
+                    <strong>{issue.title}</strong>
+                    <p>{issue.message}</p>
+                    <p>{issue.action}</p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="context-note">
+                {language === "zh"
+                  ? "未发现 A 股专项硬阻断。"
+                  : "No A-share hard data blockers found."}
+              </p>
+            )}
+          </div>
+        )}
         {card.market_context && (
           <div className="context-panel">
             <h3>{t("detail.marketContext")}</h3>
@@ -500,6 +541,20 @@ function formatEvidence(evidence: Record<string, unknown>, language: "zh" | "en"
 
 function formatDecisionPct(value: number | undefined) {
   return value === undefined ? "-" : `${Math.round(value * 100)}`;
+}
+
+function dataQualityAuditStatusLabel(status: string, language: "zh" | "en") {
+  const zh: Record<string, string> = {
+    ready: "可用",
+    watch: "观察",
+    blocked: "阻断",
+  };
+  const en: Record<string, string> = {
+    ready: "Ready",
+    watch: "Watch",
+    blocked: "Blocked",
+  };
+  return language === "zh" ? zh[status] ?? status : en[status] ?? status;
 }
 
 function formatRiskBudget(value: number | undefined) {

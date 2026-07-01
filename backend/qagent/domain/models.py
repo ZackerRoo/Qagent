@@ -181,6 +181,22 @@ class TradabilityAssessment(BaseModel):
     summary: str
 
 
+class DataQualityIssue(BaseModel):
+    code: str
+    severity: str
+    title: str
+    message: str
+    action: str
+
+
+class DataQualityAudit(BaseModel):
+    status: str
+    score: float = Field(ge=0.0, le=1.0)
+    can_recommend: bool
+    issues: list[DataQualityIssue] = Field(default_factory=list)
+    summary: str
+
+
 class PortfolioAllocation(BaseModel):
     instrument_id: str
     instrument_label: str | None = None
@@ -443,6 +459,7 @@ class OpportunityCard(BaseModel):
     market_context: MarketContext | None = None
     trading_status: TradingStatus | None = None
     tradability: TradabilityAssessment | None = None
+    data_quality_audit: DataQualityAudit | None = None
     strategy_calibration: StrategyCalibration | None = None
     quality_score: float | None = Field(default=None, ge=0.0, le=1.0)
     market_fit_score: float | None = Field(default=None, ge=0.0, le=1.0)

@@ -197,6 +197,24 @@ def _checks(card: OpportunityCard) -> list[RecommendationQualityCheck]:
 
 
 def _data_check(card: OpportunityCard) -> RecommendationQualityCheck:
+    if card.data_quality_audit is not None:
+        audit = card.data_quality_audit
+        if audit.status == "blocked":
+            return _check(
+                "data_quality_blocked",
+                "block",
+                "数据质量阻断",
+                audit.summary,
+                -0.26,
+            )
+        if audit.status == "watch":
+            return _check(
+                "data_quality_watch",
+                "warn",
+                "数据质量待补齐",
+                audit.summary,
+                -0.08,
+            )
     missing = len(card.data_caveats)
     if "insufficient_history" in card.factor_flags:
         return _check(

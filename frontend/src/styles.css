@@ -5006,6 +5006,141 @@ tbody tr.selected {
   border-color: rgba(77, 212, 255, 0.28);
 }
 
+.backtest-command-center {
+  display: grid;
+  gap: 14px;
+  border-color: rgba(244, 197, 66, 0.36);
+  background:
+    linear-gradient(135deg, rgba(244, 197, 66, 0.1), rgba(77, 212, 255, 0.05) 48%, rgba(57, 217, 138, 0.06)),
+    var(--terminal-panel);
+}
+
+.backtest-command-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.36fr);
+  gap: 14px;
+  align-items: stretch;
+}
+
+.backtest-command-hero h2 {
+  margin: 4px 0 6px;
+  font-size: 28px;
+  line-height: 1.05;
+}
+
+.backtest-verdict-card {
+  display: grid;
+  align-content: center;
+  gap: 6px;
+  border: 1px solid var(--terminal-border);
+  border-radius: 8px;
+  padding: 14px;
+  background: rgba(9, 14, 20, 0.72);
+}
+
+.backtest-verdict-card span,
+.backtest-verdict-grid span,
+.portfolio-backtest-verdict span,
+.portfolio-risk-readout span {
+  color: var(--terminal-muted-2);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.backtest-verdict-card strong {
+  color: var(--terminal-text);
+  font-size: 22px;
+  line-height: 1.08;
+}
+
+.backtest-verdict-card p,
+.backtest-verdict-grid p,
+.portfolio-backtest-verdict p,
+.portfolio-risk-readout small {
+  margin: 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.verdict-good {
+  border-color: rgba(57, 217, 138, 0.4);
+  background: rgba(57, 217, 138, 0.08);
+}
+
+.verdict-watch {
+  border-color: rgba(244, 197, 66, 0.42);
+  background: rgba(244, 197, 66, 0.08);
+}
+
+.verdict-bad {
+  border-color: rgba(255, 92, 122, 0.42);
+  background: rgba(255, 92, 122, 0.08);
+}
+
+.backtest-verdict-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.backtest-verdict-grid div {
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(9, 14, 20, 0.68);
+}
+
+.backtest-verdict-grid strong {
+  display: block;
+  margin: 5px 0 4px;
+  overflow: hidden;
+  color: var(--terminal-text);
+  font-size: 18px;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backtest-action-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.backtest-flow-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.backtest-flow-strip span {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: var(--terminal-panel-soft);
+  color: var(--terminal-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.backtest-flow-strip strong {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(244, 197, 66, 0.16);
+  color: var(--terminal-yellow);
+  font-size: 12px;
+}
+
 .backtest-result-summary {
   display: grid;
   gap: 12px;
@@ -5152,6 +5287,137 @@ tbody tr.selected {
 
 .backtest-interpretation {
   grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.portfolio-backtest-visuals {
+  display: grid;
+  gap: 12px;
+}
+
+.portfolio-backtest-verdict {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 0.22fr) minmax(150px, 0.24fr);
+  gap: 12px;
+  align-items: stretch;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(9, 14, 20, 0.72);
+}
+
+.portfolio-backtest-verdict strong {
+  display: block;
+  margin-top: 5px;
+  color: var(--terminal-text);
+  font-size: 20px;
+  line-height: 1.1;
+}
+
+.portfolio-risk-readout {
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--terminal-panel-soft);
+}
+
+.portfolio-risk-readout strong {
+  font-size: 22px;
+}
+
+.portfolio-risk-readout small {
+  display: block;
+  margin-top: 5px;
+}
+
+.portfolio-chart-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.validation-chart-caption {
+  margin: 10px 0 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--terminal-panel-soft);
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.equity-validation-chart .validation-line {
+  stroke: var(--terminal-green);
+}
+
+.equity-validation-chart .validation-point {
+  fill: var(--terminal-green);
+}
+
+.drawdown-risk-chart {
+  border-color: rgba(255, 92, 122, 0.36);
+}
+
+.drawdown-risk-chart .validation-line {
+  stroke: var(--terminal-red);
+}
+
+.drawdown-risk-chart .validation-area {
+  fill: rgba(255, 92, 122, 0.14);
+}
+
+.drawdown-risk-chart .validation-point {
+  fill: var(--terminal-red);
+}
+
+.drawdown-risk-chart header span {
+  color: var(--terminal-red);
+}
+
+.history-detail-drawer {
+  border: 1px solid var(--terminal-border);
+  border-radius: 8px;
+  background: var(--terminal-panel);
+  box-shadow: var(--terminal-shadow);
+}
+
+.history-detail-drawer summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 18px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.history-detail-drawer summary::-webkit-details-marker {
+  display: none;
+}
+
+.history-detail-drawer summary strong {
+  display: block;
+  margin: 3px 0;
+  color: var(--terminal-text);
+  font-size: 18px;
+}
+
+.history-detail-drawer summary span:not(.count) {
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.history-detail-stack {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--terminal-border-soft);
+  padding: 12px;
+}
+
+.history-detail-panel {
+  box-shadow: none;
 }
 
 .opportunity-list-toolbar {
@@ -5778,6 +6044,12 @@ tbody tr.selected {
   .paper-ledger-hero,
   .paper-ledger-metrics,
   .paper-ledger-visual-grid,
+  .backtest-command-hero,
+  .backtest-verdict-grid,
+  .backtest-action-grid,
+  .backtest-flow-strip,
+  .portfolio-backtest-verdict,
+  .portfolio-chart-pair,
   .backtest-guide-grid,
   .backtest-interpretation,
   .backtest-result-grid,

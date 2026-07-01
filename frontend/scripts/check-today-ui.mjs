@@ -12,10 +12,11 @@ const decisionQualityPath = resolve(__dirname, "../src/components/DecisionQualit
 const operationalReadinessPath = resolve(__dirname, "../src/components/OperationalReadinessCenter.tsx");
 const alphaQualityPath = resolve(__dirname, "../src/components/AlphaQualityCenter.tsx");
 const tablePath = resolve(__dirname, "../src/components/OpportunityTable.tsx");
+const detailPath = resolve(__dirname, "../src/components/OpportunityDetail.tsx");
 const stylesPath = resolve(__dirname, "../src/styles.css");
 const catalogPath = resolve(__dirname, "../src/i18n/catalog.ts");
 
-for (const path of [todayPath, manualActionPath, intelligencePath, followthroughPath, signalMonitorPath, decisionQualityPath, operationalReadinessPath, alphaQualityPath, tablePath, stylesPath, catalogPath]) {
+for (const path of [todayPath, manualActionPath, intelligencePath, followthroughPath, signalMonitorPath, decisionQualityPath, operationalReadinessPath, alphaQualityPath, tablePath, detailPath, stylesPath, catalogPath]) {
   if (!existsSync(path)) {
     throw new Error(`missing ${path}`);
   }
@@ -30,6 +31,7 @@ const decisionQuality = readFileSync(decisionQualityPath, "utf8");
 const operationalReadiness = readFileSync(operationalReadinessPath, "utf8");
 const alphaQuality = readFileSync(alphaQualityPath, "utf8");
 const table = readFileSync(tablePath, "utf8");
+const detail = readFileSync(detailPath, "utf8");
 const styles = readFileSync(stylesPath, "utf8");
 const catalog = readFileSync(catalogPath, "utf8");
 
@@ -63,6 +65,8 @@ assert(table.includes("ProbabilityForecastMini"), "Opportunity cards must render
 assert(table.includes("recommendation-quality-strip"), "Opportunity cards must expose recommendation quality class");
 assert(table.includes("10日期望"), "Opportunity cards must explain probability forecast in Chinese");
 assert(table.includes("质量"), "Opportunity cards must explain recommendation quality in Chinese");
+assert(detail.includes("data_quality_audit"), "Opportunity detail must render A-share data quality audit");
+assert(detail.includes("dataQualityAuditStatusLabel"), "Opportunity detail must label data quality audit status");
 assert(intelligence.includes("策略调度"), "Market intelligence must show strategy scheduling");
 assert(intelligence.includes("事件假设"), "Market intelligence must show event hypotheses");
 assert(intelligence.includes("数据质量"), "Market intelligence must show data quality");

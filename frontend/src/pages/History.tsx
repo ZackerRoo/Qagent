@@ -222,6 +222,24 @@ export function History({
         hasSelectedCard={Boolean(selectedBacktestSymbols)}
       />
 
+      <BacktestCommandCenter
+        backtest={backtest}
+        portfolioBacktest={portfolioBacktest}
+        closure={closure}
+        backtestRunContext={backtestRunContext}
+        activeLabel={activeBacktestLabel}
+        selectedLabel={selectedBacktestLabel}
+        scanUniverseLabel={scanUniverseLabel}
+        hasSelectedCard={Boolean(selectedBacktestSymbols)}
+        isBacktesting={isBacktesting}
+        isFactorBacktesting={isFactorBacktesting}
+        isPortfolioBacktesting={isPortfolioBacktesting}
+        onRunSelected={() => runBacktest(true)}
+        onRunQuick={() => runBacktest(false)}
+        onRunFactor={runFactorBacktest}
+        onRunPortfolio={runPortfolioBacktest}
+      />
+
       {closure ? <RecommendationClosurePanel closure={closure} /> : null}
 
       <section className="panel">
@@ -550,28 +568,7 @@ export function History({
                 <strong>{formatNumber(portfolioBacktest.summary.exposure_pct, "%")}</strong>
               </div>
             </div>
-            <div className="validation-grid validation-grid-wide">
-              <LineValidationChart
-                title={t("history.equityCurve")}
-                points={portfolioBacktest.equity_curve.map((point) => ({
-                  label: point.date,
-                  value: numberFromDecimalText(point.equity),
-                }))}
-                valueFormatter={(value) => value.toFixed(0)}
-              />
-              <LineValidationChart
-                title={t("history.drawdownCurve")}
-                points={portfolioBacktest.equity_curve.map((point) => ({
-                  label: point.date,
-                  value: point.drawdown_pct,
-                }))}
-                valueFormatter={(value) => `${value.toFixed(2)}%`}
-              />
-              <MonthlyReturnHeatmap
-                title={t("history.monthlyReturns")}
-                items={portfolioBacktest.monthly_returns}
-              />
-            </div>
+            <PortfolioBacktestVisuals portfolioBacktest={portfolioBacktest} />
             <div className="brief-grid">
               <div className="table-shell">
                 <table>
@@ -642,7 +639,31 @@ export function History({
         )}
       </section>
 
-      <section className="panel">
+      <details className="history-detail-drawer">
+        <summary>
+          <div>
+            <p className="eyebrow">{language === "zh" ? "证据明细" : "Evidence Details"}</p>
+            <strong>
+              {language === "zh"
+                ? "扫描记录、机会快照、策略表现和结果复盘"
+                : "Scan runs, opportunity snapshots, strategy performance, and outcome replay"}
+            </strong>
+            <span>
+              {language === "zh"
+                ? "默认收起，避免干扰回测结论；需要查原始样本时再展开。"
+                : "Collapsed by default so the validation result remains readable."}
+            </span>
+          </div>
+          <span className="count">
+            {(runs?.runs.length ?? 0) +
+              (history?.snapshots.length ?? 0) +
+              (performance?.performance.length ?? 0) +
+              (diagnostics?.diagnostics.length ?? 0) +
+              (outcomes?.outcomes.length ?? 0)}
+          </span>
+        </summary>
+        <div className="history-detail-stack">
+      <section className="panel history-detail-panel">
         <div className="panel-heading">
           <h2>{t("history.scanRuns")}</h2>
           <span className="count">{runs?.runs.length ?? 0}</span>
@@ -683,7 +704,7 @@ export function History({
         )}
       </section>
 
-      <section className="panel">
+      <section className="panel history-detail-panel">
         <div className="panel-heading">
           <h2>{t("history.snapshots")}</h2>
           <span className="count">{history?.snapshots.length ?? 0}</span>
@@ -733,7 +754,7 @@ export function History({
         />
       </section>
 
-      <section className="panel">
+      <section className="panel history-detail-panel">
         <div className="panel-heading">
           <h2>{t("history.strategyPerformance")}</h2>
           <span className="count">{performance?.performance.length ?? 0}</span>
@@ -777,7 +798,7 @@ export function History({
         )}
       </section>
 
-      <section className="panel">
+      <section className="panel history-detail-panel">
         <div className="panel-heading">
           <h2>{t("history.strategyDiagnostics")}</h2>
           <span className="count">{diagnostics?.diagnostics.length ?? 0}</span>
@@ -823,7 +844,7 @@ export function History({
         )}
       </section>
 
-      <section className="panel">
+      <section className="panel history-detail-panel">
         <div className="panel-heading">
           <h2>{t("history.outcomeReplay")}</h2>
           <span className="count">{outcomes?.outcomes.length ?? 0}</span>
@@ -868,8 +889,257 @@ export function History({
           total={outcomes?.outcomes.length ?? 0}
         />
       </section>
+        </div>
+      </details>
     </div>
   );
+}
+
+function BacktestCommandCenter({
+  backtest,
+  portfolioBacktest,
+  closure,
+  backtestRunContext,
+  activeLabel,
+  selectedLabel,
+  scanUniverseLabel,
+  hasSelectedCard,
+  isBacktesting,
+  isFactorBacktesting,
+  isPortfolioBacktesting,
+  onRunSelected,
+  onRunQuick,
+  onRunFactor,
+  onRunPortfolio,
+}: {
+  backtest?: BacktestResponse;
+  portfolioBacktest?: PortfolioBacktestResponse;
+  closure?: RecommendationClosureResponse;
+  backtestRunContext?: BacktestRunContext;
+  activeLabel: string;
+  selectedLabel: string;
+  scanUniverseLabel: string;
+  hasSelectedCard: boolean;
+  isBacktesting: boolean;
+  isFactorBacktesting: boolean;
+  isPortfolioBacktesting: boolean;
+  onRunSelected(): void;
+  onRunQuick(): void;
+  onRunFactor(): void;
+  onRunPortfolio(): void;
+}) {
+  const { language, t } = useI18n();
+  const completedWindow =
+    closure?.windows.find((window) => window.completed_count > 0) ?? closure?.windows[0];
+  const testedLabel = backtest
+    ? backtestInstrumentLabels(backtest.signals, backtestRunContext?.label ?? activeLabel).join(" / ")
+    : activeLabel;
+  const isQuickSampleResult =
+    Boolean(backtest && hasSelectedCard && backtestRunContext?.kind !== "selected");
+  const verdict = isQuickSampleResult
+    ? {
+        tone: "watch" as const,
+        title: language === "zh" ? "当前是样例结果" : "Sample result",
+        action: language === "zh" ? "请先回测当前推荐" : "Run current signal first",
+        detail:
+          language === "zh"
+            ? `页面正在展示 ${testedLabel} 的快速样例，不代表 ${selectedLabel || activeLabel} 的真实验证结果。`
+            : `The page is showing the quick sample ${testedLabel}, not the selected signal ${selectedLabel || activeLabel}.`,
+      }
+    : buildBacktestVerdict(backtest, portfolioBacktest, closure, language);
+  const sampleValue = backtest
+    ? `${backtest.summary.completed_signals}/${backtest.summary.evaluated_signals}`
+    : "-";
+  const portfolioReturn = portfolioBacktest
+    ? formatNumber(portfolioBacktest.summary.total_return_pct, "%")
+    : "-";
+  return (
+    <section className="panel backtest-command-center">
+      <div className="backtest-command-hero">
+        <div>
+          <p className="eyebrow">{language === "zh" ? "回测工作台" : "Backtest Desk"}</p>
+          <h2>{language === "zh" ? "先看结论，再看证据" : "Decision first, evidence next"}</h2>
+          <p className="brief-headline">
+            {language === "zh"
+              ? "这里不是让用户猜图表，而是回答：当前推荐是否值得验证、历史有没有样本、按规则交易后的账户曲线和回撤怎么样。"
+              : "This page answers whether the current signal deserves validation, whether samples exist, and how the account curve and drawdown behaved."}
+          </p>
+        </div>
+        <BacktestVerdictCard verdict={verdict} />
+      </div>
+
+      <div className="backtest-verdict-grid">
+        <div>
+          <span>{language === "zh" ? "当前推荐" : "Current recommendation"}</span>
+          <strong>{selectedLabel || activeLabel}</strong>
+          <p>
+            {hasSelectedCard
+              ? language === "zh"
+                ? "来自今日或机会页选中的推荐。"
+                : "Selected from Today or Opportunities."
+              : language === "zh"
+                ? "暂无选中推荐，先使用快速样例。"
+                : "No selected signal yet; quick sample is used."}
+          </p>
+        </div>
+        <div>
+          <span>{language === "zh" ? "当前回测结果" : "Displayed backtest"}</span>
+          <strong>{testedLabel}</strong>
+          <p>
+            {isQuickSampleResult
+              ? language === "zh"
+                ? "这是快速样例，点击“回测当前推荐”后才会切换到选中股票。"
+                : "This is the quick sample. Run the current signal to switch targets."
+              : language === "zh"
+                ? "当前图表和表格对应这个标的。"
+                : "Charts and tables below belong to this target."}
+          </p>
+        </div>
+        <div>
+          <span>{language === "zh" ? "事件级样本" : "Event samples"}</span>
+          <strong>{sampleValue}</strong>
+          <p>{language === "zh" ? "已完成样本 / 已评估信号，样本越多越可信。" : "Completed / evaluated signals."}</p>
+        </div>
+        <div>
+          <span>{language === "zh" ? "10日胜率" : "10D win rate"}</span>
+          <strong>{backtest ? formatRatio(backtest.summary.positive_rate_10d) : "-"}</strong>
+          <p>{language === "zh" ? "衡量推荐后短期正收益概率。" : "Positive return rate after the signal."}</p>
+        </div>
+        <div>
+          <span>{language === "zh" ? "最大回撤" : "Max drawdown"}</span>
+          <strong>{backtest ? formatNumber(backtest.summary.max_drawdown_pct, "%") : "-"}</strong>
+          <p>{language === "zh" ? "判断亏损波动是否在可承受范围。" : "Checks whether downside is tolerable."}</p>
+        </div>
+        <div>
+          <span>{language === "zh" ? "组合收益" : "Portfolio return"}</span>
+          <strong>{portfolioReturn}</strong>
+          <p>{language === "zh" ? "把推荐转成买卖流水后的账户结果。" : "Account result after trade simulation."}</p>
+        </div>
+      </div>
+
+      <div className="backtest-action-grid">
+        <button className="icon-action" type="button" onClick={onRunSelected} disabled={isBacktesting}>
+          {isBacktesting ? t("common.running") : t("history.runSelectedBacktest")}
+        </button>
+        <button className="icon-action secondary" type="button" onClick={onRunQuick} disabled={isBacktesting}>
+          {isBacktesting ? t("common.running") : t("history.runQuickSample")}
+        </button>
+        <button className="icon-action secondary" type="button" onClick={onRunPortfolio} disabled={isPortfolioBacktesting}>
+          {isPortfolioBacktesting ? t("common.running") : t("history.runPortfolio")}
+        </button>
+        <button className="icon-action secondary" type="button" onClick={onRunFactor} disabled={isFactorBacktesting}>
+          {isFactorBacktesting ? t("common.running") : t("history.runFactor")}
+        </button>
+      </div>
+
+      <div className="backtest-flow-strip">
+        <span>
+          <strong>1</strong>
+          {language === "zh" ? "先选推荐" : "Pick signal"}
+        </span>
+        <span>
+          <strong>2</strong>
+          {language === "zh" ? "跑事件回测" : "Run event test"}
+        </span>
+        <span>
+          <strong>3</strong>
+          {language === "zh" ? "看组合曲线和回撤" : "Check equity and drawdown"}
+        </span>
+        <span>
+          <strong>4</strong>
+          {language === "zh" ? "展开证据明细" : "Open evidence details"}
+        </span>
+      </div>
+
+      <p className="compact-note">
+        {language === "zh"
+          ? `当前股票池：${scanUniverseLabel}。最近推荐闭环样本：${completedWindow?.completed_count ?? 0}/${completedWindow?.sample_count ?? 0}。`
+          : `Universe: ${scanUniverseLabel}. Recent closure samples: ${completedWindow?.completed_count ?? 0}/${completedWindow?.sample_count ?? 0}.`}
+      </p>
+    </section>
+  );
+}
+
+function BacktestVerdictCard({
+  verdict,
+}: {
+  verdict: { tone: "good" | "watch" | "bad"; title: string; detail: string; action: string };
+}) {
+  return (
+    <div className={`backtest-verdict-card verdict-${verdict.tone}`}>
+      <span>{verdict.title}</span>
+      <strong>{verdict.action}</strong>
+      <p>{verdict.detail}</p>
+    </div>
+  );
+}
+
+function buildBacktestVerdict(
+  backtest: BacktestResponse | undefined,
+  portfolioBacktest: PortfolioBacktestResponse | undefined,
+  closure: RecommendationClosureResponse | undefined,
+  language: "zh" | "en",
+): { tone: "good" | "watch" | "bad"; title: string; detail: string; action: string } {
+  const zh = language === "zh";
+  if (!backtest) {
+    return {
+      tone: "watch",
+      title: zh ? "待验证" : "Not tested",
+      action: zh ? "先运行当前推荐回测" : "Run current signal",
+      detail: zh
+        ? "还没有事件级回测结果，先看当前推荐是否有历史样本，再决定是否继续做组合验证。"
+        : "No event-level result yet. Run the current signal first, then move to portfolio validation.",
+    };
+  }
+
+  const completed = backtest.summary.completed_signals;
+  const winRate = backtest.summary.positive_rate_10d ?? 0;
+  const avgReturn = backtest.summary.avg_return_10d ?? 0;
+  const maxDrawdown = Math.abs(backtest.summary.max_drawdown_pct ?? 0);
+  const portfolioReturn = portfolioBacktest?.summary.total_return_pct ?? null;
+  const closureWindow = closure?.windows.find((window) => window.completed_count > 0);
+
+  if (completed < 5) {
+    return {
+      tone: "watch",
+      title: zh ? "样本偏少" : "Limited sample",
+      action: zh ? "继续观察，不要只按一次回测下结论" : "Observe before trusting",
+      detail: zh
+        ? `当前只有 ${completed} 个完成样本，适合检查流程和图表，不适合直接证明策略有效。`
+        : `Only ${completed} completed samples. Useful for workflow checks, not enough to prove edge.`,
+    };
+  }
+
+  if (winRate >= 0.55 && avgReturn > 0 && maxDrawdown <= 8 && (portfolioReturn === null || portfolioReturn >= 0)) {
+    return {
+      tone: "good",
+      title: zh ? "可继续验证" : "Validation worthy",
+      action: zh ? "看组合回测和回撤后再决定仓位" : "Check portfolio risk next",
+      detail: zh
+        ? `10日胜率 ${formatRatio(winRate)}，均值 ${formatNumber(avgReturn, "%")}，最大回撤 ${formatNumber(backtest.summary.max_drawdown_pct, "%")}。`
+        : `10D win rate ${formatRatio(winRate)}, average ${formatNumber(avgReturn, "%")}, max drawdown ${formatNumber(backtest.summary.max_drawdown_pct, "%")}.`,
+    };
+  }
+
+  if (avgReturn <= 0 || maxDrawdown > 12 || (portfolioReturn !== null && portfolioReturn < 0)) {
+    return {
+      tone: "bad",
+      title: zh ? "需要降权" : "De-prioritize",
+      action: zh ? "暂不按强推荐处理" : "Do not treat as high conviction",
+      detail: zh
+        ? `历史均值或回撤不够好，闭环样本 ${closureWindow?.completed_count ?? 0} 个，建议回到机会页看替代标的。`
+        : `Historical average or drawdown is weak. Closure samples: ${closureWindow?.completed_count ?? 0}.`,
+    };
+  }
+
+  return {
+    tone: "watch",
+    title: zh ? "中性观察" : "Neutral watch",
+    action: zh ? "需要更多样本或更严格触发价" : "Needs more evidence",
+    detail: zh
+      ? `胜率 ${formatRatio(winRate)}，均值 ${formatNumber(avgReturn, "%")}；可以继续看，但不要只看单一指标。`
+      : `Win rate ${formatRatio(winRate)}, average ${formatNumber(avgReturn, "%")}; keep watching multiple metrics.`,
+  };
 }
 
 function BacktestGuidePanel({
@@ -1195,6 +1465,87 @@ function BacktestInterpretation({ backtest }: { backtest: BacktestResponse }) {
   );
 }
 
+function PortfolioBacktestVisuals({
+  portfolioBacktest,
+}: {
+  portfolioBacktest: PortfolioBacktestResponse;
+}) {
+  const { language, t } = useI18n();
+  const worstDrawdown = minBy(portfolioBacktest.equity_curve, (point) => point.drawdown_pct);
+  const latest = portfolioBacktest.equity_curve[portfolioBacktest.equity_curve.length - 1];
+  const returnTone =
+    portfolioBacktest.summary.total_return_pct > 0
+      ? "good"
+      : portfolioBacktest.summary.total_return_pct < 0
+        ? "bad"
+        : "watch";
+
+  return (
+    <div className="portfolio-backtest-visuals">
+      <div className={`portfolio-backtest-verdict verdict-${returnTone}`}>
+        <div>
+          <span>{language === "zh" ? "账户验证结论" : "Account verdict"}</span>
+          <strong>
+            {language === "zh"
+              ? `总收益 ${formatNumber(portfolioBacktest.summary.total_return_pct, "%")}`
+              : `Total return ${formatNumber(portfolioBacktest.summary.total_return_pct, "%")}`}
+          </strong>
+          <p>
+            {language === "zh"
+              ? "这里把推荐信号变成买入/卖出流水，检查按规则执行后账户是否真的增长。"
+              : "Signals are converted into buy/sell records to test whether rule-based execution grows the account."}
+          </p>
+        </div>
+        <div className="portfolio-risk-readout">
+          <span>{t("history.maxDd")}</span>
+          <strong>{formatNumber(portfolioBacktest.summary.max_drawdown_pct, "%")}</strong>
+          <small>
+            {worstDrawdown
+              ? `${worstDrawdown.date} · ${formatNumber(worstDrawdown.drawdown_pct, "%")}`
+              : "-"}
+          </small>
+        </div>
+        <div className="portfolio-risk-readout">
+          <span>{language === "zh" ? "最新权益" : "Latest equity"}</span>
+          <strong>{latest ? numberFromDecimalText(latest.equity)?.toFixed(0) ?? latest.equity : "-"}</strong>
+          <small>
+            {language === "zh" ? "含已平仓和未平仓影响" : "Includes closed and open position effects"}
+          </small>
+        </div>
+      </div>
+
+      <div className="portfolio-chart-pair">
+        <LineValidationChart
+          title={t("history.equityCurve")}
+          tone="equity"
+          points={portfolioBacktest.equity_curve.map((point) => ({
+            label: point.date,
+            value: numberFromDecimalText(point.equity),
+          }))}
+          valueFormatter={(value) => value.toFixed(0)}
+          caption={
+            language === "zh"
+              ? "资金曲线越平滑越好；只看最终收益不够，还要看中途是否出现大幅回撤。"
+              : "A smoother equity curve is better; final return alone is not enough without drawdown context."
+          }
+        />
+        <DrawdownRiskChart
+          title={t("history.drawdownCurve")}
+          points={portfolioBacktest.equity_curve.map((point) => ({
+            label: point.date,
+            value: point.drawdown_pct,
+          }))}
+        />
+      </div>
+
+      <MonthlyReturnHeatmap
+        title={t("history.monthlyReturns")}
+        items={portfolioBacktest.monthly_returns}
+      />
+    </div>
+  );
+}
+
 function backtestInstrumentLabels(signals: BacktestSignal[], fallback: string): string[] {
   const labels: string[] = [];
   const seen = new Set<string>();
@@ -1292,21 +1643,29 @@ function LineValidationChart({
   title,
   points,
   valueFormatter,
+  tone = "return",
+  caption,
+  extraMeta = [],
+  className = "",
 }: {
   title: string;
   points: ChartPoint[];
   valueFormatter(value: number): string;
+  tone?: "return" | "drawdown" | "equity";
+  caption?: string;
+  extraMeta?: ChartMeta[];
+  className?: string;
 }) {
+  const { t } = useI18n();
   const clean = points.filter((point): point is { label: string; value: number } => point.value !== null);
   if (clean.length < 2) {
     return <div className="validation-card empty-state">{title}: -</div>;
   }
-  const { t } = useI18n();
   const width = 760;
   const height = 300;
   const padding = { top: 34, right: 26, bottom: 48, left: 60 };
   const values = clean.map((point) => point.value);
-  const [min, max] = paddedDomain(values, false);
+  const [min, max] = paddedDomain(values, tone === "drawdown");
   const mid = min + (max - min) / 2;
   const xFor = (index: number) =>
     padding.left +
@@ -1318,12 +1677,14 @@ function LineValidationChart({
   const path = clean
     .map((point, index) => `${index === 0 ? "M" : "L"} ${xFor(index).toFixed(2)} ${yFor(point.value).toFixed(2)}`)
     .join(" ");
-  const areaPath = `${path} L ${xFor(clean.length - 1).toFixed(2)} ${height - padding.bottom} L ${xFor(0).toFixed(2)} ${height - padding.bottom} Z`;
+  const baselineY = tone === "drawdown" ? yFor(0) : height - padding.bottom;
+  const areaPath = `${path} L ${xFor(clean.length - 1).toFixed(2)} ${baselineY.toFixed(2)} L ${xFor(0).toFixed(2)} ${baselineY.toFixed(2)} Z`;
   const first = clean[0];
   const latest = clean[clean.length - 1];
+  const showZeroLine = tone === "drawdown" || (min < 0 && max > 0);
 
   return (
-    <div className="validation-card chart-shell">
+    <div className={`validation-card chart-shell line-validation-chart ${tone}-validation-chart ${className}`.trim()}>
       <header>
         <h3>{title}</h3>
         <span>{valueFormatter(latest.value)}</span>
@@ -1332,8 +1693,10 @@ function LineValidationChart({
         items={[
           { label: t("history.startPoint"), value: `${first.label} · ${valueFormatter(first.value)}` },
           { label: t("history.endPoint"), value: `${latest.label} · ${valueFormatter(latest.value)}` },
+          ...extraMeta,
         ]}
       />
+      {caption ? <p className="validation-chart-caption">{caption}</p> : null}
       <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={title}>
         <defs>
           <linearGradient id={`line-fill-${slugify(title)}`} x1="0" x2="0" y1="0" y2="1">
@@ -1363,6 +1726,15 @@ function LineValidationChart({
             x2={width - padding.right}
             y2={height - padding.bottom}
           />
+          {showZeroLine ? (
+            <line
+              className="validation-zero-line"
+              x1={padding.left}
+              y1={yFor(0)}
+              x2={width - padding.right}
+              y2={yFor(0)}
+            />
+          ) : null}
           <text x={padding.left} y={height - 14}>{first.label}</text>
           <text x={width - padding.right} y={height - 14} textAnchor="end">{latest.label}</text>
         </g>
@@ -1371,6 +1743,38 @@ function LineValidationChart({
         <circle className="validation-point" cx={xFor(clean.length - 1)} cy={yFor(latest.value)} r="4" />
       </svg>
     </div>
+  );
+}
+
+function DrawdownRiskChart({
+  title,
+  points,
+}: {
+  title: string;
+  points: ChartPoint[];
+}) {
+  const { language } = useI18n();
+  const clean = points.filter((point): point is { label: string; value: number } => point.value !== null);
+  const worst = minBy(clean, (point) => point.value);
+  return (
+    <LineValidationChart
+      title={title}
+      tone="drawdown"
+      className="drawdown-risk-chart"
+      points={points}
+      valueFormatter={(value) => `${value.toFixed(2)}%`}
+      extraMeta={[
+        {
+          label: language === "zh" ? "最深回撤" : "Worst drawdown",
+          value: worst ? `${worst.label} · ${formatNumber(worst.value, "%")}` : "-",
+        },
+      ]}
+      caption={
+        language === "zh"
+          ? "回撤越接近 0 越好；向下的红色区域表示账户从高点回落的幅度，是判断能否承受这套策略的核心图。"
+          : "Closer to zero is better. The negative area shows the account drop from prior peaks."
+      }
+    />
   );
 }
 

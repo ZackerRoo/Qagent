@@ -419,6 +419,17 @@ const DATA_HEALTH_KEYS: LabelMap = {
   triggered: { zh: "触发", en: "Triggered" },
   backtest_scans: { zh: "回测扫描", en: "Backtest scans" },
   backtest_signals: { zh: "回测信号", en: "Backtest signals" },
+  source_signals: { zh: "原始信号", en: "Source signals" },
+  trade_candidates: { zh: "交易候选", en: "Trade candidates" },
+  execution_rules: { zh: "执行规则", en: "Execution rules" },
+  cn_execution_rules: { zh: "A股交易规则", en: "CN execution rules" },
+  max_positions: { zh: "最大持仓数", en: "Max positions" },
+  a_share_quality_audited: { zh: "A股质量审计", en: "A-share quality audited" },
+  a_share_quality_ready: { zh: "质量可用", en: "Quality ready" },
+  a_share_quality_watch: { zh: "质量观察", en: "Quality watch" },
+  a_share_quality_blocked: { zh: "质量阻断", en: "Quality blocked" },
+  a_share_quality_score: { zh: "质量均分", en: "Quality score" },
+  a_share_quality_top_issues: { zh: "主要质量问题", en: "Top quality issues" },
   scan_dates: { zh: "扫描日期数", en: "Scan dates" },
   scan_cards: { zh: "扫描机会卡", en: "Scan cards" },
   lookahead_guard: { zh: "未来函数保护", en: "Lookahead guard" },
@@ -518,6 +529,25 @@ const DATA_HEALTH_VALUES: LabelMap = {
   recent_scan_cache: { zh: "最近扫描缓存", en: "Recent scan cache" },
   empty_strategy_data: { zh: "空策略数据", en: "Empty strategy data" },
   bars_limited_to_scan_date: { zh: "K线已限制到信号日，避免未来函数", en: "Bars limited to signal date" },
+  signals_generated_before_exits: { zh: "先生成信号再计算退出，避免未来函数", en: "Signals generated before exits" },
+  fees_slippage: { zh: "手续费/滑点", en: "Fees/slippage" },
+  t_plus_one: { zh: "T+1", en: "T+1" },
+  limit_price_guard: { zh: "涨跌停保护", en: "Limit-price guard" },
+  round_lot_100: { zh: "100股整手", en: "100-share lots" },
+  risk_warning_name: { zh: "ST/退市风险名称", en: "Risk-warning name" },
+  trading_status_limit_up: { zh: "接近涨停", en: "Near limit up" },
+  trading_status_limit_down: { zh: "接近跌停", en: "Near limit down" },
+  trading_status_no_data: { zh: "无行情", en: "No market data" },
+  trading_status_insufficient_history: { zh: "历史不足", en: "Insufficient history" },
+  no_recent_volume: { zh: "疑似停牌/无成交", en: "No recent volume" },
+  low_liquidity: { zh: "成交额不足", en: "Low liquidity" },
+  low_volume: { zh: "成交量不足", en: "Low volume" },
+  permission_required: { zh: "需确认交易权限", en: "Permission required" },
+  missing_adjusted_price: { zh: "复权价格未确认", en: "Adjusted price missing" },
+  missing_market_context: { zh: "行业主题缺失", en: "Market context missing" },
+  missing_index_constituents: { zh: "指数成分未确认", en: "Index constituents missing" },
+  invalid_latest_price: { zh: "最新价格异常", en: "Invalid latest price" },
+  no_daily_bars: { zh: "无日线行情", en: "No daily bars" },
   run: { zh: "已运行", en: "Run" },
   skipped: { zh: "已跳过", en: "Skipped" },
   skipped_for_dynamic_universe: { zh: "全市场动态池已跳过", en: "Skipped for dynamic universe" },
@@ -893,6 +923,12 @@ export function localizeDataHealthKey(value: string, language: Language): string
 }
 
 export function localizeDataHealthValue(value: string, language: Language): string {
+  if (value.includes(",")) {
+    return value
+      .split(",")
+      .map((item) => label(DATA_HEALTH_VALUES, item.trim(), language))
+      .join(language === "zh" ? "、" : ", ");
+  }
   return label(DATA_HEALTH_VALUES, value, language);
 }
 
@@ -923,6 +959,9 @@ export function localizeCaveat(value: string | null | undefined, language: Langu
   }
   if (value.startsWith("provider: ")) {
     return `数据源：${value.replace("provider: ", "")}`;
+  }
+  if (value.startsWith("data_quality_")) {
+    return localizeDataHealthValue(value.replace("data_quality_", ""), language);
   }
   return localizeFactorFlag(value, language);
 }
