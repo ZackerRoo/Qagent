@@ -13,6 +13,13 @@ from qagent.domain.models import (
     TradingStatus,
 )
 from qagent.market.cn_context import build_market_context
+from qagent.config import get_settings
+from qagent.market.astock_enhanced import (
+    AShareEnhancedProvider,
+    apply_a_share_enhanced_to_cards,
+    build_a_share_enhanced_provider,
+    summarize_a_share_enhanced_snapshots,
+)
 from qagent.market.data_quality import (
     assess_instrument_data_quality,
     summarize_data_quality_audits,
@@ -114,6 +121,8 @@ def run_daily_scan(
     provider: MarketDataProvider,
     mode: str = "development",
     strategy_data_provider: StrategyDataProvider | None = None,
+    a_share_enhanced_provider: AShareEnhancedProvider | None = None,
+    a_share_enhanced_top_n: int | None = None,
     start: date = date(2026, 1, 1),
     end: date = date(2026, 12, 31),
 ) -> DailyScanResult:
@@ -133,6 +142,7 @@ def run_daily_scan(
     card_generator = OpportunityCardGenerator(strategy_evaluator)
     strategy_mode = provider.name if mode == "development" else mode
     strategy_provider = strategy_data_provider or build_strategy_data_provider(strategy_mode)
+    enhanced_provider = a_share_enhanced_provider or build_a_share_enhanced_provider(mode, provider.name)
     scan_error_samples: list[str] = []
     reset_cache_stats = getattr(provider, "reset_cache_stats", None)
     if callable(reset_cache_stats):
@@ -269,6 +279,15 @@ def run_daily_scan(
     for item in items:
         _apply_factor_to_item(item, factor_by_id.get(item.instrument_id))
     _promote_items_for_cards(items, cards)
+    enhanced_requested, enhanced_snapshots = _load_a_share_enhanced_snapshots(
+        cards,
+        enhanced_provider,
+        end,
+        a_share_enhanced_top_n,
+    )
+    apply_a_share_enhanced_to_cards(cards, enhanced_snapshots)
+    if enhanced_snapshots:
+        cards = sort_recommendation_cards(cards)
 
     sector_strength = build_sector_strength(cards, bars_by_instrument)
     portfolio_plan = build_portfolio_plan(cards)
@@ -305,6 +324,13 @@ def run_daily_scan(
     if strategy_provider_errors:
         data_health["strategy_data_errors"] = " | ".join(strategy_provider_errors[:3])
     data_health.update(summarize_data_quality_audits(data_quality_by_instrument.values()))
+    data_health.update(
+        summarize_a_share_enhanced_snapshots(
+            enhanced_snapshots,
+            enhanced_provider,
+            enhanced_requested,
+        )
+    )
     data_health.update(
         _a_share_data_readiness(
             cards=cards,
@@ -442,6 +468,29 @@ def _promote_items_for_cards(items: list[ScanItem], cards: list[OpportunityCard]
             item.reason = "Factor ranking generated an observation card."
         else:
             item.reason = "Opportunity card generated."
+
+
+def _load_a_share_enhanced_snapshots(
+    cards: list[OpportunityCard],
+    provider: AShareEnhancedProvider,
+    as_of: date,
+    top_n: int | None,
+) -> tuple[int, dict]:
+    limit = top_n if top_n is not None else get_settings().a_share_enhanced_max_cards
+    if limit <= 0:
+        return 0, {}
+    instrument_ids = [
+        card.instrument_id
+        for card in cards
+        if card.instrument_id.startswith("CN:")
+    ][:limit]
+    if not instrument_ids:
+        return 0, {}
+    try:
+        return len(instrument_ids), provider.get_snapshots(instrument_ids, as_of=as_of)
+    except Exception as exc:  # pragma: no cover - provider guard
+        provider.last_errors.append(f"a_share_enhanced_scan: {exc}")
+        return len(instrument_ids), {}
 
 
 def _scan_item(

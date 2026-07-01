@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -6,6 +8,8 @@ from pydantic import BaseModel, Field
 from qagent.domain.enums import Direction, Market, OpportunityStatus, SignalType
 from qagent.factors.models import FactorExposure
 from qagent.strategies.models import StrategyEvaluation
+
+Date = date
 
 
 class Instrument(BaseModel):
@@ -194,6 +198,72 @@ class DataQualityAudit(BaseModel):
     score: float = Field(ge=0.0, le=1.0)
     can_recommend: bool
     issues: list[DataQualityIssue] = Field(default_factory=list)
+    summary: str
+
+
+class AShareFundFlowInsight(BaseModel):
+    trend: str
+    score: float = Field(ge=0.0, le=1.0)
+    lookback_days: int = 0
+    main_net_inflow_20d: float | None = None
+    super_net_inflow_20d: float | None = None
+    latest_main_net_inflow: float | None = None
+    summary: str
+
+
+class AShareDragonTigerInsight(BaseModel):
+    score: float = Field(ge=0.0, le=1.0)
+    recent_records: int = 0
+    latest_date: Date | None = None
+    latest_reason: str | None = None
+    latest_net_buy_wan: float | None = None
+    institution_net_buy_wan: float | None = None
+    summary: str
+
+
+class AShareLimitSentiment(BaseModel):
+    score: float = Field(ge=0.0, le=1.0)
+    date: Date | None = None
+    limit_up_count: int = 0
+    break_board_count: int = 0
+    limit_down_count: int = 0
+    break_rate_pct: float | None = None
+    max_height: int = 0
+    member_status: str = "none"
+    member_reason: str | None = None
+    summary: str
+
+
+class AShareRiskEventProfile(BaseModel):
+    score: float = Field(ge=0.0, le=1.0)
+    upcoming_lockup_count: int = 0
+    max_lockup_ratio_pct: float | None = None
+    margin_balance_change_pct: float | None = None
+    warnings: list[str] = Field(default_factory=list)
+    summary: str
+
+
+class AShareResearchCoverage(BaseModel):
+    score: float = Field(ge=0.0, le=1.0)
+    report_count: int = 0
+    latest_report_date: Date | None = None
+    latest_title: str | None = None
+    latest_rating: str | None = None
+    summary: str
+
+
+class AShareEnhancedSnapshot(BaseModel):
+    status: str
+    score: float = Field(ge=0.0, le=1.0)
+    provider: str
+    as_of: Date
+    fund_flow: AShareFundFlowInsight
+    dragon_tiger: AShareDragonTigerInsight
+    limit_sentiment: AShareLimitSentiment
+    risk_events: AShareRiskEventProfile
+    research_coverage: AShareResearchCoverage
+    signals: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     summary: str
 
 
@@ -460,6 +530,7 @@ class OpportunityCard(BaseModel):
     trading_status: TradingStatus | None = None
     tradability: TradabilityAssessment | None = None
     data_quality_audit: DataQualityAudit | None = None
+    a_share_enhanced: AShareEnhancedSnapshot | None = None
     strategy_calibration: StrategyCalibration | None = None
     quality_score: float | None = Field(default=None, ge=0.0, le=1.0)
     market_fit_score: float | None = Field(default=None, ge=0.0, le=1.0)

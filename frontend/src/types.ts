@@ -140,6 +140,7 @@ export type OpportunityCard = {
   trading_status: TradingStatus | null;
   tradability: TradabilityAssessment | null;
   data_quality_audit?: DataQualityAudit | null;
+  a_share_enhanced?: AShareEnhancedSnapshot | null;
   strategy_calibration: StrategyCalibration | null;
   quality_score?: number | null;
   market_fit_score?: number | null;
@@ -362,6 +363,72 @@ export type PositionScenario = {
   account_gain_at_target_1_pct: number;
   account_gain_at_target_2_pct: number | null;
   risk_reward: number | null;
+  summary: string;
+};
+
+export type AShareFundFlowInsight = {
+  trend: string;
+  score: number;
+  lookback_days: number;
+  main_net_inflow_20d: number | null;
+  super_net_inflow_20d: number | null;
+  latest_main_net_inflow: number | null;
+  summary: string;
+};
+
+export type AShareDragonTigerInsight = {
+  score: number;
+  recent_records: number;
+  latest_date: string | null;
+  latest_reason: string | null;
+  latest_net_buy_wan: number | null;
+  institution_net_buy_wan: number | null;
+  summary: string;
+};
+
+export type AShareLimitSentiment = {
+  score: number;
+  date: string | null;
+  limit_up_count: number;
+  break_board_count: number;
+  limit_down_count: number;
+  break_rate_pct: number | null;
+  max_height: number;
+  member_status: string;
+  member_reason: string | null;
+  summary: string;
+};
+
+export type AShareRiskEventProfile = {
+  score: number;
+  upcoming_lockup_count: number;
+  max_lockup_ratio_pct: number | null;
+  margin_balance_change_pct: number | null;
+  warnings: string[];
+  summary: string;
+};
+
+export type AShareResearchCoverage = {
+  score: number;
+  report_count: number;
+  latest_report_date: string | null;
+  latest_title: string | null;
+  latest_rating: string | null;
+  summary: string;
+};
+
+export type AShareEnhancedSnapshot = {
+  status: string;
+  score: number;
+  provider: string;
+  as_of: string;
+  fund_flow: AShareFundFlowInsight;
+  dragon_tiger: AShareDragonTigerInsight;
+  limit_sentiment: AShareLimitSentiment;
+  risk_events: AShareRiskEventProfile;
+  research_coverage: AShareResearchCoverage;
+  signals: string[];
+  warnings: string[];
   summary: string;
 };
 

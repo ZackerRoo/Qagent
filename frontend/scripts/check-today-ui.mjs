@@ -67,6 +67,8 @@ assert(table.includes("10日期望"), "Opportunity cards must explain probabilit
 assert(table.includes("质量"), "Opportunity cards must explain recommendation quality in Chinese");
 assert(detail.includes("data_quality_audit"), "Opportunity detail must render A-share data quality audit");
 assert(detail.includes("dataQualityAuditStatusLabel"), "Opportunity detail must label data quality audit status");
+assert(detail.includes("a_share_enhanced"), "Opportunity detail must render A-share enhanced data");
+assert(detail.includes("a-share-enhanced-panel"), "Opportunity detail must expose A-share enhanced data panel class");
 assert(intelligence.includes("策略调度"), "Market intelligence must show strategy scheduling");
 assert(intelligence.includes("事件假设"), "Market intelligence must show event hypotheses");
 assert(intelligence.includes("数据质量"), "Market intelligence must show data quality");

@@ -121,6 +121,19 @@ class MarketDataCacheSpanRow(Base):
     )
 
 
+class AShareEnhancedCacheRow(Base):
+    __tablename__ = "a_share_enhanced_cache"
+
+    provider: Mapped[str] = mapped_column(String(64), primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    as_of: Mapped[date] = mapped_column(Date, primary_key=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    cached_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
 class ScanRunRow(Base):
     __tablename__ = "scan_runs"
 

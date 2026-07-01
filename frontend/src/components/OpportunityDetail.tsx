@@ -213,6 +213,56 @@ export function OpportunityDetail({
             )}
           </div>
         )}
+        {card.a_share_enhanced && (
+          <div className="context-panel a-share-enhanced-panel">
+            <h3>{language === "zh" ? "A股增强数据" : "A-share Enhanced Data"}</h3>
+            <div className="context-metrics">
+              <span className={`status status-${card.a_share_enhanced.status}`}>
+                {aShareEnhancedStatusLabel(card.a_share_enhanced.status, language)}
+              </span>
+              <span>
+                {language === "zh" ? "增强分" : "Score"}{" "}
+                {Math.round(card.a_share_enhanced.score * 100)}
+              </span>
+              <span>{card.a_share_enhanced.provider}</span>
+            </div>
+            <p className="context-note">{card.a_share_enhanced.summary}</p>
+            <div className="enhanced-signal-grid">
+              <div>
+                <strong>{language === "zh" ? "资金流" : "Fund Flow"}</strong>
+                <span>{aShareFundFlowTrendLabel(card.a_share_enhanced.fund_flow.trend, language)}</span>
+                <p>{card.a_share_enhanced.fund_flow.summary}</p>
+              </div>
+              <div>
+                <strong>{language === "zh" ? "龙虎榜" : "Dragon Tiger"}</strong>
+                <span>{card.a_share_enhanced.dragon_tiger.recent_records}</span>
+                <p>{card.a_share_enhanced.dragon_tiger.summary}</p>
+              </div>
+              <div>
+                <strong>{language === "zh" ? "涨停情绪" : "Limit Sentiment"}</strong>
+                <span>{aShareLimitStatusLabel(card.a_share_enhanced.limit_sentiment.member_status, language)}</span>
+                <p>{card.a_share_enhanced.limit_sentiment.summary}</p>
+              </div>
+              <div>
+                <strong>{language === "zh" ? "事件风险" : "Event Risk"}</strong>
+                <span>{Math.round(card.a_share_enhanced.risk_events.score * 100)}</span>
+                <p>{card.a_share_enhanced.risk_events.summary}</p>
+              </div>
+              <div>
+                <strong>{language === "zh" ? "研报覆盖" : "Research"}</strong>
+                <span>{card.a_share_enhanced.research_coverage.report_count}</span>
+                <p>{card.a_share_enhanced.research_coverage.summary}</p>
+              </div>
+            </div>
+            {card.a_share_enhanced.signals.length > 0 && (
+              <div className="rank-reasons">
+                {card.a_share_enhanced.signals.map((signal) => (
+                  <span key={signal}>{aShareEnhancedSignalLabel(signal, language)}</span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         {card.market_context && (
           <div className="context-panel">
             <h3>{t("detail.marketContext")}</h3>
@@ -555,6 +605,70 @@ function dataQualityAuditStatusLabel(status: string, language: "zh" | "en") {
     blocked: "Blocked",
   };
   return language === "zh" ? zh[status] ?? status : en[status] ?? status;
+}
+
+function aShareEnhancedStatusLabel(status: string, language: "zh" | "en") {
+  const zh: Record<string, string> = {
+    ready: "可用",
+    watch: "观察",
+    risk: "有风险",
+  };
+  const en: Record<string, string> = {
+    ready: "Ready",
+    watch: "Watch",
+    risk: "Risk",
+  };
+  return language === "zh" ? zh[status] ?? status : en[status] ?? status;
+}
+
+function aShareFundFlowTrendLabel(trend: string, language: "zh" | "en") {
+  const zh: Record<string, string> = {
+    positive: "净流入",
+    negative: "净流出",
+    mixed: "分歧",
+    missing: "缺失",
+  };
+  const en: Record<string, string> = {
+    positive: "Positive",
+    negative: "Negative",
+    mixed: "Mixed",
+    missing: "Missing",
+  };
+  return language === "zh" ? zh[trend] ?? trend : en[trend] ?? trend;
+}
+
+function aShareLimitStatusLabel(status: string, language: "zh" | "en") {
+  const zh: Record<string, string> = {
+    limit_up: "涨停池",
+    break_board: "炸板",
+    limit_down: "跌停池",
+    none: "未入池",
+  };
+  const en: Record<string, string> = {
+    limit_up: "Limit up",
+    break_board: "Break board",
+    limit_down: "Limit down",
+    none: "None",
+  };
+  return language === "zh" ? zh[status] ?? status : en[status] ?? status;
+}
+
+function aShareEnhancedSignalLabel(signal: string, language: "zh" | "en") {
+  const zh: Record<string, string> = {
+    fund_flow_positive: "资金净流入",
+    dragon_tiger_net_buy: "龙虎榜净买入",
+    limit_up_member: "涨停池成员",
+    risk_event_watch: "事件风险观察",
+    research_coverage: "研报覆盖",
+  };
+  const en: Record<string, string> = {
+    fund_flow_positive: "Fund flow positive",
+    dragon_tiger_net_buy: "Dragon tiger net buy",
+    limit_up_member: "Limit-up member",
+    risk_event_watch: "Risk watch",
+    research_coverage: "Research coverage",
+  };
+  return language === "zh" ? zh[signal] ?? signal : en[signal] ?? signal;
 }
 
 function formatRiskBudget(value: number | undefined) {

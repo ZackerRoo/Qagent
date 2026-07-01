@@ -1094,6 +1094,7 @@ tbody tr.selected {
 .status-danger,
 .status-block,
 .status-blocked,
+.status-risk,
 .status-weak {
   background: rgba(255, 92, 122, 0.12);
   color: #9f1f1f;
@@ -1233,6 +1234,42 @@ tbody tr.selected {
   padding: 4px 7px;
   color: var(--terminal-muted);
   font-size: 12px;
+}
+
+.enhanced-signal-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.enhanced-signal-grid div {
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 6px;
+  padding: 8px;
+  background: rgba(15, 23, 42, 0.22);
+}
+
+.enhanced-signal-grid strong {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--terminal-text);
+  font-size: 12px;
+}
+
+.enhanced-signal-grid span {
+  display: inline-flex;
+  margin-bottom: 5px;
+  color: var(--terminal-accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.enhanced-signal-grid p {
+  margin: 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .detail-section {
