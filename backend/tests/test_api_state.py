@@ -323,6 +323,110 @@ def test_recommendation_followthrough_api_returns_user_facing_health_center(
     assert center["data_health"]["followthrough_windows"] == "30,60,90"
 
 
+def test_recommendation_calibration_api_groups_scores_and_signal_effects(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = f"sqlite:///{tmp_path / 'api-calibration.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    now = datetime.now(timezone.utc)
+    with session_factory() as session:
+        session.add(
+            ScanRunRow(
+                run_id="scan-calibration",
+                provider="fixture",
+                mode="test",
+                symbols=json.dumps(["CN:000001"]),
+                scanned=1,
+                cards=4,
+                data_health="{}",
+                created_at=now,
+            )
+        )
+        cards = [
+            (
+                "card-high-flow",
+                date(2026, 1, 27),
+                Decimal("0.91"),
+                ["fund_flow_positive", "dragon_tiger_net_buy"],
+            ),
+            (
+                "card-high-limit",
+                date(2026, 1, 30),
+                Decimal("0.84"),
+                ["limit_up_member", "research_coverage"],
+            ),
+            (
+                "card-mid",
+                date(2026, 2, 2),
+                Decimal("0.68"),
+                ["research_coverage"],
+            ),
+            (
+                "card-low",
+                date(2026, 2, 5),
+                Decimal("0.48"),
+                ["risk_event_watch"],
+            ),
+        ]
+        for index, (card_id, signal_date, rank_score, flags) in enumerate(cards, start=1):
+            session.add(
+                OpportunitySnapshotRow(
+                    snapshot_id=f"scan-calibration:{card_id}",
+                    run_id="scan-calibration",
+                    card_id=card_id,
+                    instrument_id="CN:000001",
+                    market="CN",
+                    status="setup_ready",
+                    signal_date=signal_date,
+                    latest_close=Decimal("10.60"),
+                    primary_strategy_id="breakout_volume_confirmation",
+                    score=Decimal("0.80"),
+                    strategy_score=Decimal("0.82"),
+                    rank_score=rank_score,
+                    trigger_price=Decimal("10.60"),
+                    initial_stop=Decimal("10.00"),
+                    target_1=Decimal("11.00"),
+                    card_json=json.dumps(
+                        {
+                            "instrument_id": "CN:000001",
+                            "instrument_label": "平安银行 000001.SZ",
+                            "rank_score": float(rank_score),
+                            "factor_flags": flags,
+                            "a_share_enhanced": {"signals": flags},
+                            "recommendation_score": {
+                                "final_score": float(rank_score),
+                                "tier": "high_quality" if index <= 2 else "watchlist",
+                            },
+                        },
+                        sort_keys=True,
+                    ),
+                    created_at=now,
+                )
+            )
+        session.commit()
+
+    client = TestClient(create_app())
+    response = client.get("/api/recommendation-calibration?provider=fixture&limit=20")
+
+    assert response.status_code == 200
+    center = response.json()
+    assert center["headline"]
+    assert center["verdict"] in {"可信度提升", "继续观察", "需要降权", "样本不足"}
+    assert 0 <= center["reliability_score"] <= 1
+    assert center["score_bands"]
+    assert any(item["band"] == "80+" for item in center["score_bands"])
+    assert center["signal_effects"]
+    assert any(item["signal_key"] == "fund_flow_positive" for item in center["signal_effects"])
+    assert center["weight_suggestions"]
+    assert center["curve_points"]
+    assert center["recent_samples"][0]["instrument_label"] == "平安银行 000001.SZ"
+    assert center["data_health"]["recommendation_calibration_samples"] == "4"
+    assert center["data_health"]["recommendation_calibration_score_bands"] == str(len(center["score_bands"]))
+
+
 def test_opportunity_history_api_filters_by_instrument(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'api-history-filter.db'}")
     client = TestClient(create_app())

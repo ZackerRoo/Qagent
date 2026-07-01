@@ -5,6 +5,7 @@ import type {
   AlertRule,
   AlertRulesResponse,
   AlertSuggestionsResponse,
+  AutoProcessingState,
   AutomationRunResponse,
   BacktestResponse,
   BriefMarkdownResponse,
@@ -30,16 +31,21 @@ import type {
   OutcomesResponse,
   PaperLedgerResponse,
   PaperSeedResponse,
+  PaperSessionResponse,
+  PaperSessionStartPayload,
+  PaperSessionStartResponse,
   PaperTradeFromOpportunityPayload,
   PaperTradeFromOpportunityResponse,
   PaperTradesResponse,
   PaperUpdateResponse,
+  PaperValidationResponse,
   PortfolioBacktestResponse,
   OverviewResponse,
   PortfolioResponse,
   Position,
   PositionsResponse,
   ProviderStatusResponse,
+  RecommendationCalibrationResponse,
   RecommendationClosureResponse,
   RecommendationFollowThroughCenterResponse,
   ScanRunsResponse,
@@ -72,10 +78,17 @@ type ScanParams = {
   run_alerts?: boolean;
   queue_alerts?: boolean;
   run_backtest?: boolean;
+  run_scan?: boolean;
   fast?: boolean;
   skip_backtest?: boolean;
   scan_limit?: number;
   status?: string;
+  interval_seconds?: number;
+  scan_max_age_minutes?: number;
+  sync_if_empty?: boolean;
+  seed_paper?: boolean;
+  seed_limit?: number;
+  update_paper?: boolean;
   initial_capital?: string | number;
   allocation_per_trade_pct?: string | number;
   risk_per_trade_pct?: string | number;
@@ -89,7 +102,6 @@ type ScanParams = {
   asset_type?: string;
   include_full_etfs?: boolean;
   include_etfs?: boolean;
-  sync_if_empty?: boolean;
   force_refresh?: boolean;
   force_restart?: boolean;
   cache_ttl_minutes?: number;
@@ -329,21 +341,48 @@ export async function fetchPaperTrades(): Promise<PaperTradesResponse> {
   return apiGet<PaperTradesResponse>("/paper-trades", { limit: 100 });
 }
 
-export async function fetchPaperLedger(
-  initialCapital = 100000,
-  allocationPerTradePct = 10,
-  transactionCostBps = 3,
-  slippageBps = 5,
-  takeProfitPct = 50,
-): Promise<PaperLedgerResponse> {
+type PaperLedgerRequest = {
+  initialCapital?: string | number;
+  allocationPerTradePct?: string | number;
+  maxPositions?: number;
+  transactionCostBps?: string | number;
+  slippageBps?: string | number;
+  takeProfitPct?: string | number;
+};
+
+export async function fetchPaperLedger(params: PaperLedgerRequest = {}): Promise<PaperLedgerResponse> {
   return apiGet<PaperLedgerResponse>("/paper-trades/ledger", {
-    initial_capital: initialCapital,
-    allocation_per_trade_pct: allocationPerTradePct,
-    transaction_cost_bps: transactionCostBps,
-    slippage_bps: slippageBps,
-    take_profit_pct: takeProfitPct,
+    initial_capital: params.initialCapital,
+    allocation_per_trade_pct: params.allocationPerTradePct,
+    max_positions: params.maxPositions,
+    transaction_cost_bps: params.transactionCostBps,
+    slippage_bps: params.slippageBps,
+    take_profit_pct: params.takeProfitPct,
     limit: 500,
   });
+}
+
+export async function fetchPaperValidation(): Promise<PaperValidationResponse> {
+  return apiGet<PaperValidationResponse>("/paper-trades/validation", { limit: 500 });
+}
+
+export async function runPaperValidation(
+  provider: DataProviderMode,
+): Promise<PaperValidationResponse> {
+  return apiPost<PaperValidationResponse>(
+    `/paper-trades/validation/run${queryString({ provider, limit: 500 })}`,
+    {},
+  );
+}
+
+export async function fetchPaperSession(): Promise<PaperSessionResponse> {
+  return apiGet<PaperSessionResponse>("/paper-trades/session");
+}
+
+export async function startPaperSession(
+  payload: PaperSessionStartPayload,
+): Promise<PaperSessionStartResponse> {
+  return apiPost<PaperSessionStartResponse>("/paper-trades/session/start", payload);
 }
 
 export async function seedPaperTrades(provider: DataProviderMode): Promise<PaperSeedResponse> {
@@ -546,6 +585,15 @@ export async function fetchRecommendationClosure(
   return apiGet<RecommendationClosureResponse>("/recommendation-closure", { provider, limit: 150 });
 }
 
+export async function fetchRecommendationCalibration(
+  provider: DataProviderMode,
+): Promise<RecommendationCalibrationResponse> {
+  return apiGet<RecommendationCalibrationResponse>(
+    "/recommendation-calibration",
+    { provider, limit: provider === "free" ? 80 : 200 },
+  );
+}
+
 export async function fetchRecommendationFollowThrough(
   provider: DataProviderMode,
 ): Promise<RecommendationFollowThroughCenterResponse> {
@@ -704,4 +752,58 @@ export async function runAutomation(
     })}`,
     {},
   );
+}
+
+export async function fetchAutomationScheduler(): Promise<AutoProcessingState> {
+  return apiGet<AutoProcessingState>("/automation/scheduler");
+}
+
+export async function runAutomationSchedulerOnce(
+  provider: DataProviderMode,
+  symbols?: string,
+): Promise<AutoProcessingState> {
+  return apiPost<AutoProcessingState>(
+    `/automation/scheduler/run-once${queryString({
+      provider,
+      symbols,
+      interval_seconds: 1800,
+      include_etfs: true,
+      run_scan: true,
+      scan_max_age_minutes: 240,
+      batch_size: 200,
+      seed_paper: true,
+      seed_limit: 5,
+      update_paper: true,
+      run_alerts: true,
+      queue_alerts: true,
+    })}`,
+    {},
+  );
+}
+
+export async function startAutomationScheduler(
+  provider: DataProviderMode,
+  symbols?: string,
+): Promise<AutoProcessingState> {
+  return apiPost<AutoProcessingState>(
+    `/automation/scheduler/start${queryString({
+      provider,
+      symbols,
+      interval_seconds: 1800,
+      include_etfs: true,
+      run_scan: true,
+      scan_max_age_minutes: 240,
+      batch_size: 200,
+      seed_paper: true,
+      seed_limit: 5,
+      update_paper: true,
+      run_alerts: true,
+      queue_alerts: true,
+    })}`,
+    {},
+  );
+}
+
+export async function stopAutomationScheduler(): Promise<AutoProcessingState> {
+  return apiPost<AutoProcessingState>("/automation/scheduler/stop", {});
 }

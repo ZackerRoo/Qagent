@@ -6,6 +6,7 @@ import {
   fetchOpportunityHistory,
   fetchOutcomes,
   fetchPortfolioBacktest,
+  fetchRecommendationCalibration,
   fetchRecommendationClosure,
   fetchScanRuns,
   fetchStrategyDiagnostics,
@@ -33,6 +34,7 @@ import type {
   PortfolioEquityPoint,
   PortfolioBacktestResponse,
   PortfolioMonthlyReturn,
+  RecommendationCalibrationResponse,
   RecommendationClosureResponse,
   ScanRunsResponse,
   StrategyDiagnosticsResponse,
@@ -103,6 +105,7 @@ export function History({
   const [history, setHistory] = useState<OpportunityHistoryResponse>();
   const [outcomes, setOutcomes] = useState<OutcomesResponse>();
   const [closure, setClosure] = useState<RecommendationClosureResponse>();
+  const [calibration, setCalibration] = useState<RecommendationCalibrationResponse>();
   const [performance, setPerformance] = useState<StrategyPerformanceResponse>();
   const [diagnostics, setDiagnostics] = useState<StrategyDiagnosticsResponse>();
   const [error, setError] = useState("");
@@ -124,6 +127,7 @@ export function History({
           historyResult,
           outcomeResult,
           closureResult,
+          calibrationResult,
           performanceResult,
           diagnosticsResult,
         ] = await Promise.all([
@@ -131,6 +135,7 @@ export function History({
           fetchOpportunityHistory(),
           fetchOutcomes(dataMode),
           fetchRecommendationClosure(dataMode),
+          fetchRecommendationCalibration(dataMode),
           fetchStrategyPerformance(dataMode),
           fetchStrategyDiagnostics(dataMode),
         ]);
@@ -138,6 +143,7 @@ export function History({
         setHistory(historyResult);
         setOutcomes(outcomeResult);
         setClosure(closureResult);
+        setCalibration(calibrationResult);
         setPerformance(performanceResult);
         setDiagnostics(diagnosticsResult);
       } catch (caught) {
@@ -241,6 +247,7 @@ export function History({
       />
 
       {closure ? <RecommendationClosurePanel closure={closure} /> : null}
+      {calibration ? <RecommendationCalibrationCenterPanel calibration={calibration} /> : null}
 
       <section className="panel">
         <div className="panel-heading">
@@ -1346,6 +1353,274 @@ function RecommendationClosurePanel({ closure }: { closure: RecommendationClosur
   );
 }
 
+function RecommendationCalibrationCenterPanel({
+  calibration,
+}: {
+  calibration: RecommendationCalibrationResponse;
+}) {
+  const { language } = useI18n();
+  const tone = calibrationToneFromVerdict(calibration.verdict);
+  const totalSamples = calibration.recent_samples.length
+    ? calibration.recent_samples.reduce((max, sample) => Math.max(max, sample.score), 0)
+    : calibration.reliability_score;
+  const bestBand = maxBy(calibration.score_bands, (band) => band.reliability_score);
+  const bestEffect = calibration.signal_effects[0];
+  const latestCurvePoint = calibration.curve_points[calibration.curve_points.length - 1];
+  const completedCount = calibration.score_bands.reduce(
+    (sum, band) => sum + band.completed_count,
+    0,
+  );
+  const sampleCount = calibration.score_bands.reduce((sum, band) => sum + band.sample_count, 0);
+
+  return (
+    <section className={`panel recommendation-calibration-center verdict-${tone}`}>
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">
+            {language === "zh" ? "推荐质量校准" : "Recommendation Calibration"}
+          </p>
+          <h2>
+            {language === "zh" ? "哪些推荐真的更容易赚钱" : "Which Signals Deserve Trust"}
+          </h2>
+          <p className="brief-headline">
+            {language === "zh"
+              ? "把每次推荐后的 5/10/20 日表现回灌到排序模型，检查高分股、增强信号和策略权重是否真的有效。"
+              : "Feeds 5/10/20D follow-through back into ranking quality, score bands, and signal weights."}
+          </p>
+        </div>
+        <span className="count">
+          {language === "zh" ? "截至" : "As of"} {calibration.as_of}
+        </span>
+      </div>
+
+      <DataHealth data={calibration.data_health} language={language} />
+
+      <div className="calibration-hero">
+        <div className="calibration-headline-card">
+          <span>{language === "zh" ? "当前判断" : "Verdict"}</span>
+          <strong>{calibrationVerdictLabel(calibration.verdict, language)}</strong>
+          <p>{calibrationHeadline(calibration.headline, language)}</p>
+          <div className="calibration-action-list">
+            {calibration.action_items.map((item) => (
+              <span key={item}>{item}</span>
+            ))}
+          </div>
+        </div>
+        <div className="calibration-score-ring">
+          <span>{language === "zh" ? "可信度" : "Reliability"}</span>
+          <strong>{Math.round(calibration.reliability_score * 100)}</strong>
+          <div className="calibration-score-track">
+            <i style={{ width: `${Math.round(calibration.reliability_score * 100)}%` }} />
+          </div>
+          <small>
+            {language === "zh"
+              ? `最高样本分 ${Math.round(totalSamples * 100)}`
+              : `Top sample score ${Math.round(totalSamples * 100)}`}
+          </small>
+        </div>
+      </div>
+
+      <div className="calibration-kpis">
+        <div>
+          <span>{language === "zh" ? "校准样本" : "Samples"}</span>
+          <strong>{completedCount}/{sampleCount}</strong>
+          <p>{language === "zh" ? "已完成 / 全部推荐快照" : "Completed / all snapshots"}</p>
+        </div>
+        <div>
+          <span>{language === "zh" ? "基准胜率" : "Baseline win"}</span>
+          <strong>{formatRatio(calibration.baseline_win_rate_10d)}</strong>
+          <p>{language === "zh" ? "推荐后 10 日正收益比例" : "10D positive rate after signals"}</p>
+        </div>
+        <div>
+          <span>{language === "zh" ? "基准均值" : "Baseline avg"}</span>
+          <strong>{formatNumber(calibration.baseline_avg_return_10d, "%")}</strong>
+          <p>{language === "zh" ? "推荐后 10 日平均收益" : "Average 10D return"}</p>
+        </div>
+        <div>
+          <span>{language === "zh" ? "最佳分层" : "Best band"}</span>
+          <strong>{bestBand ? calibrationBandLabel(bestBand.label, language) : "-"}</strong>
+          <p>
+            {bestBand
+              ? `${formatRatio(bestBand.win_rate_10d)} · ${formatNumber(bestBand.avg_return_10d, "%")}`
+              : language === "zh"
+                ? "等待样本"
+                : "Waiting for samples"}
+          </p>
+        </div>
+        <div>
+          <span>{language === "zh" ? "最强信号" : "Best signal"}</span>
+          <strong>
+            {bestEffect
+              ? calibrationSignalLabel(bestEffect.signal_key, bestEffect.label, language)
+              : "-"}
+          </strong>
+          <p>
+            {bestEffect
+              ? `${formatNumber(bestEffect.lift_vs_baseline_10d, "%")} ${language === "zh" ? "超额" : "lift"}`
+              : language === "zh"
+                ? "等待样本"
+                : "Waiting for samples"}
+          </p>
+        </div>
+      </div>
+
+      <div className="validation-grid">
+        <LineValidationChart
+          title={language === "zh" ? "累计推荐收益校准曲线" : "Cumulative Calibration Curve"}
+          className="calibration-curve"
+          tone="return"
+          points={calibration.curve_points.map((point) => ({
+            label: point.date,
+            value: point.cumulative_avg_return_10d,
+          }))}
+          valueFormatter={(value) => `${value.toFixed(2)}%`}
+          extraMeta={[
+            {
+              label: language === "zh" ? "累计胜率" : "Cumulative win",
+              value: formatRatio(latestCurvePoint?.cumulative_win_rate_10d ?? null),
+            },
+            {
+              label: language === "zh" ? "完成样本" : "Completed",
+              value: latestCurvePoint
+                ? `${latestCurvePoint.completed_count}/${latestCurvePoint.sample_count}`
+                : "-",
+            },
+          ]}
+          caption={
+            language === "zh"
+              ? "曲线向上代表推荐后的平均收益在改善；如果曲线走平或下滑，需要降低对应分数段或信号权重。"
+              : "An upward curve means recommendations are improving; flat or falling curves suggest weight cuts."
+          }
+        />
+      </div>
+
+      <div className="calibration-grid">
+        <div className="calibration-score-bands">
+          <header>
+            <h3>{language === "zh" ? "分数分层表现" : "Score Band Performance"}</h3>
+            <span>{calibration.score_bands.length}</span>
+          </header>
+          {calibration.score_bands.map((band) => (
+            <div key={band.band} className={`calibration-band-row verdict-${calibrationToneFromVerdict(band.verdict)}`}>
+              <div>
+                <strong>{calibrationBandLabel(band.label, language)}</strong>
+                <small>{band.completed_count}/{band.sample_count} {language === "zh" ? "样本" : "samples"}</small>
+              </div>
+              <div>
+                <span>{language === "zh" ? "胜率" : "Win"}</span>
+                <b>{formatRatio(band.win_rate_10d)}</b>
+              </div>
+              <div>
+                <span>{language === "zh" ? "10日均值" : "10D avg"}</span>
+                <b>{formatNumber(band.avg_return_10d, "%")}</b>
+              </div>
+              <div>
+                <span>{language === "zh" ? "最大回撤" : "Max DD"}</span>
+                <b>{formatNumber(band.max_drawdown_pct, "%")}</b>
+              </div>
+              <div>
+                <span>{language === "zh" ? "结论" : "Verdict"}</span>
+                <b>{calibrationVerdictLabel(band.verdict, language)}</b>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="calibration-signal-effects">
+          <header>
+            <h3>{language === "zh" ? "信号贡献校准" : "Signal Contribution"}</h3>
+            <span>{calibration.signal_effects.length}</span>
+          </header>
+          {calibration.signal_effects.slice(0, 8).map((effect) => (
+            <div key={effect.signal_key} className={`calibration-effect-row ${calibrationActionClass(effect.weight_action)}`}>
+              <div>
+                <strong>{calibrationSignalLabel(effect.signal_key, effect.label, language)}</strong>
+                <small>{effect.completed_count}/{effect.sample_count} {language === "zh" ? "样本" : "samples"}</small>
+              </div>
+              <div>
+                <span>{language === "zh" ? "超额" : "Lift"}</span>
+                <b>{formatNumber(effect.lift_vs_baseline_10d, "%")}</b>
+              </div>
+              <div>
+                <span>{language === "zh" ? "胜率" : "Win"}</span>
+                <b>{formatRatio(effect.win_rate_10d)}</b>
+              </div>
+              <div>
+                <span>{language === "zh" ? "动作" : "Action"}</span>
+                <b>{calibrationActionLabel(effect.weight_action, language)}</b>
+              </div>
+              <p>{calibrationReason(effect.reason, language)}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="calibration-bottom-grid">
+        <div className="calibration-suggestion-list">
+          <header>
+            <h3>{language === "zh" ? "权重调整建议" : "Weight Suggestions"}</h3>
+            <span>{calibration.weight_suggestions.length}</span>
+          </header>
+          {calibration.weight_suggestions.map((suggestion) => (
+            <div key={`${suggestion.key}-${suggestion.action}`}>
+              <strong>
+                {calibrationSignalLabel(suggestion.key, suggestion.label, language)}
+                <em>{formatWeightDelta(suggestion.delta)}</em>
+              </strong>
+              <span>{calibrationActionLabel(suggestion.action, language)}</span>
+              <p>{calibrationReason(suggestion.reason, language)}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className="calibration-sample-list">
+          <header>
+            <h3>{language === "zh" ? "最近推荐样本" : "Recent Samples"}</h3>
+            <span>{calibration.recent_samples.length}</span>
+          </header>
+          <div className="table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th>{language === "zh" ? "日期" : "Date"}</th>
+                  <th>{language === "zh" ? "股票" : "Ticker"}</th>
+                  <th>{language === "zh" ? "分数" : "Score"}</th>
+                  <th>{language === "zh" ? "结果" : "Outcome"}</th>
+                  <th>10D</th>
+                  <th>{language === "zh" ? "信号" : "Signals"}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {calibration.recent_samples.slice(0, PREVIEW_ROW_LIMIT).map((sample) => (
+                  <tr key={sample.snapshot_id}>
+                    <td>{sample.signal_date ?? "-"}</td>
+                    <td className="ticker" title={formatInstrumentDisplay(sample.instrument_id, sample.instrument_label)}>
+                      {formatInstrumentDisplay(sample.instrument_id, sample.instrument_label)}
+                    </td>
+                    <td>{Math.round(sample.score * 100)}</td>
+                    <td>{localizeStatus(sample.outcome_status, language)}</td>
+                    <td>{formatNumber(sample.return_10d, "%")}</td>
+                    <td>
+                      <div className="calibration-signal-tags">
+                        {sample.signals.slice(0, 3).map((signal) => (
+                          <span key={`${sample.snapshot_id}-${signal}`}>
+                            {calibrationSignalLabel(signal, signal, language)}
+                          </span>
+                        ))}
+                        {!sample.signals.length ? <span>-</span> : null}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function BacktestResultSummary({
   backtest,
   context,
@@ -2070,6 +2345,131 @@ function formatCompactTick(value: number): string {
 
 function slugify(value: string): string {
   return value.replace(/[^a-zA-Z0-9]/g, "-").replace(/-+/g, "-").slice(0, 32) || "chart";
+}
+
+function calibrationToneFromVerdict(verdict: string): "good" | "watch" | "bad" {
+  if (["可信度提升", "有效", "提高"].includes(verdict)) {
+    return "good";
+  }
+  if (["需要降权", "失效", "降低"].includes(verdict)) {
+    return "bad";
+  }
+  return "watch";
+}
+
+function calibrationActionClass(action: string): string {
+  if (action === "提高") {
+    return "calibration-action-raise";
+  }
+  if (action === "降低") {
+    return "calibration-action-lower";
+  }
+  return "calibration-action-keep";
+}
+
+function calibrationVerdictLabel(verdict: string, language: "zh" | "en"): string {
+  if (language === "zh") {
+    return verdict;
+  }
+  const labels: Record<string, string> = {
+    可信度提升: "Higher confidence",
+    继续观察: "Keep watching",
+    需要降权: "De-prioritize",
+    样本不足: "Limited sample",
+    有效: "Effective",
+    观察: "Watch",
+    失效: "Weak",
+  };
+  return labels[verdict] ?? verdict;
+}
+
+function calibrationActionLabel(action: string, language: "zh" | "en"): string {
+  if (language === "zh") {
+    return action;
+  }
+  const labels: Record<string, string> = {
+    提高: "Increase",
+    降低: "Reduce",
+    保持: "Hold",
+  };
+  return labels[action] ?? action;
+}
+
+function calibrationBandLabel(label: string, language: "zh" | "en"): string {
+  if (language === "zh") {
+    return label;
+  }
+  return label
+    .replace("分以上", "+ score")
+    .replace("分以下", "- score")
+    .replace("分", " score");
+}
+
+function calibrationSignalLabel(key: string, fallback: string, language: "zh" | "en"): string {
+  const labels: Record<string, { zh: string; en: string }> = {
+    rank_score: { zh: "推荐总分", en: "Ranking score" },
+    sample_collection: { zh: "样本积累", en: "Sample collection" },
+    fund_flow_positive: { zh: "资金净流入", en: "Positive fund flow" },
+    dragon_tiger_net_buy: { zh: "龙虎榜净买入", en: "Dragon-tiger net buy" },
+    limit_up_member: { zh: "涨停池成员", en: "Limit-up pool member" },
+    risk_event_watch: { zh: "事件风险观察", en: "Risk event watch" },
+    research_coverage: { zh: "研报覆盖", en: "Research coverage" },
+    quality_high_quality: { zh: "高质量推荐", en: "High-quality recommendation" },
+    quality_quality_candidate: { zh: "质量候选", en: "Quality candidate" },
+    quality_low_quality: { zh: "低质量推荐", en: "Low-quality recommendation" },
+    quality_watchlist: { zh: "观察推荐", en: "Watchlist recommendation" },
+    quality_risk_filtered: { zh: "风险过滤", en: "Risk filtered" },
+    insufficient_history: { zh: "历史不足", en: "Insufficient history" },
+    overextended: { zh: "短线过热", en: "Overextended" },
+    weak_data_quality: { zh: "数据质量偏弱", en: "Weak data quality" },
+    poor_risk_reward: { zh: "盈亏比不足", en: "Poor risk/reward" },
+    low_liquidity: { zh: "流动性偏弱", en: "Low liquidity" },
+    high_volatility: { zh: "波动偏高", en: "High volatility" },
+    incomplete_trade_plan: { zh: "交易计划不完整", en: "Incomplete trade plan" },
+    too_close_to_no_chase: { zh: "接近不追高位", en: "Too close to no-chase" },
+  };
+  const known = labels[key];
+  if (known) {
+    return known[language];
+  }
+  if (language === "zh" && /[\u4e00-\u9fa5]/.test(fallback)) {
+    return fallback;
+  }
+  return fallback.replace(/_/g, " ");
+}
+
+function calibrationHeadline(headline: string, language: "zh" | "en"): string {
+  if (language === "zh") {
+    return headline;
+  }
+  return "Qagent is comparing recent recommendations against their actual 5/10/20D follow-through, then using the evidence to raise or lower ranking weights.";
+}
+
+function calibrationReason(reason: string, language: "zh" | "en"): string {
+  if (language === "zh") {
+    return reason;
+  }
+  if (reason.includes("样本不足")) {
+    return "Not enough completed samples to adjust this weight yet.";
+  }
+  if (reason.includes("高于基准")) {
+    return "This signal is outperforming the baseline and can receive a higher weight.";
+  }
+  if (reason.includes("低于基准")) {
+    return "This signal is underperforming the baseline and should receive a lower weight.";
+  }
+  if (reason.includes("暂未显示显著超额")) {
+    return "No clear excess return yet; keep the weight unchanged.";
+  }
+  return reason;
+}
+
+function formatWeightDelta(delta: number): string {
+  if (delta === 0) {
+    return "0%";
+  }
+  const prefix = delta > 0 ? "+" : "";
+  return `${prefix}${Math.round(delta * 100)}%`;
 }
 
 function buildReturnBuckets(values: (number | null)[]) {

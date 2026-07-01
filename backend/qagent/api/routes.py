@@ -1,5 +1,5 @@
 from copy import deepcopy
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
 
@@ -10,6 +10,7 @@ from qagent.api.schemas import (
     AgentQueryRequest,
     AgentQueryResponse,
     AlertEvaluationRequest,
+    PaperSessionStartRequest,
     PaperTradeFromOpportunityRequest,
 )
 from qagent.backtesting.engine import run_historical_backtest
@@ -22,6 +23,11 @@ from qagent.db import create_session_factory, initialize_database
 from qagent.domain.models import OpportunityCard, PortfolioPlan, SectorStrength
 from qagent.factors.backtest import run_factor_backtest
 from qagent.jobs.automation import run_research_automation
+from qagent.jobs.automation_scheduler import (
+    AutoProcessingCycleResult,
+    AutoProcessingSettings,
+    AutomationScheduler,
+)
 from qagent.jobs.daily_scan import DailyScanResult, run_daily_scan
 from qagent.jobs.full_market import (
     build_full_market_batch_symbols,
@@ -51,11 +57,15 @@ from qagent.monitoring.outcomes import (
     summarize_strategy_performance,
 )
 from qagent.monitoring.followthrough import build_recommendation_followthrough_center
+from qagent.monitoring.recommendation_calibration import (
+    build_recommendation_calibration_center,
+)
 from qagent.monitoring.signal_monitor import SignalMonitorCenter, build_signal_monitor_center
 from qagent.monitoring.portfolio import PositionInput, analyze_position_risk
 from qagent.monitoring.alerts import AlertRule, suggest_alert_rules
 from qagent.paper_trading.engine import (
     build_paper_ledger,
+    build_paper_validation,
     seed_paper_trades_from_snapshots,
     update_paper_trades,
     summarize_paper_trades,
@@ -84,7 +94,7 @@ from qagent.research.market_intelligence import (
     build_market_intelligence_center,
 )
 from qagent.research.operational_readiness import build_operational_readiness_center
-from qagent.storage.paper import PaperTradingRepository
+from qagent.storage.paper import PaperAccountSettings, PaperTradingRepository
 from qagent.storage.repository import (
     AlertRuleCreate,
     PositionCreate,
@@ -98,6 +108,7 @@ from qagent.strategies.models import StrategyHealth
 router = APIRouter()
 _task_manager = TaskManager()
 _task_executor = ThreadPoolExecutor(max_workers=2)
+_automation_scheduler = AutomationScheduler()
 
 
 def _signal_summary(card) -> str:
@@ -498,9 +509,12 @@ def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)
+    _attach_live_paper_health_payload(payload)
+    payload.pop("operational_readiness_center", None)
     _attach_operational_readiness_payload(payload)
     _attach_alpha_quality_payload(payload)
     _attach_research_center_payload(payload)
+    _attach_live_paper_health_payload(payload)
     return payload
 
 
@@ -830,6 +844,283 @@ def run_automation(
     return result.model_dump(mode="json")
 
 
+@router.get("/automation/scheduler")
+def automation_scheduler_state() -> dict[str, object]:
+    return _automation_scheduler.state().model_dump(mode="json")
+
+
+@router.post("/automation/scheduler/run-once")
+def run_automation_scheduler_once(
+    provider: str = "free",
+    symbols: str | None = None,
+    interval_seconds: int = 1800,
+    include_etfs: bool = True,
+    run_scan: bool = True,
+    scan_max_age_minutes: int = 240,
+    batch_size: int = 200,
+    max_symbols: int | None = None,
+    sync_if_empty: bool = True,
+    seed_paper: bool = True,
+    seed_limit: int = 5,
+    update_paper: bool = True,
+    run_alerts: bool = True,
+    queue_alerts: bool = True,
+) -> dict[str, object]:
+    settings = _auto_processing_settings(
+        provider=provider,
+        symbols=symbols,
+        interval_seconds=interval_seconds,
+        include_etfs=include_etfs,
+        run_scan=run_scan,
+        scan_max_age_minutes=scan_max_age_minutes,
+        batch_size=batch_size,
+        max_symbols=max_symbols,
+        sync_if_empty=sync_if_empty,
+        seed_paper=seed_paper,
+        seed_limit=seed_limit,
+        update_paper=update_paper,
+        run_alerts=run_alerts,
+        queue_alerts=queue_alerts,
+    )
+    state = _automation_scheduler.run_once(settings, _run_auto_processing_cycle)
+    return state.model_dump(mode="json")
+
+
+@router.post("/automation/scheduler/start")
+def start_automation_scheduler(
+    provider: str = "free",
+    symbols: str | None = None,
+    interval_seconds: int = 1800,
+    include_etfs: bool = True,
+    run_scan: bool = True,
+    scan_max_age_minutes: int = 240,
+    batch_size: int = 200,
+    max_symbols: int | None = None,
+    sync_if_empty: bool = True,
+    seed_paper: bool = True,
+    seed_limit: int = 5,
+    update_paper: bool = True,
+    run_alerts: bool = True,
+    queue_alerts: bool = True,
+) -> dict[str, object]:
+    settings = _auto_processing_settings(
+        provider=provider,
+        symbols=symbols,
+        interval_seconds=interval_seconds,
+        include_etfs=include_etfs,
+        run_scan=run_scan,
+        scan_max_age_minutes=scan_max_age_minutes,
+        batch_size=batch_size,
+        max_symbols=max_symbols,
+        sync_if_empty=sync_if_empty,
+        seed_paper=seed_paper,
+        seed_limit=seed_limit,
+        update_paper=update_paper,
+        run_alerts=run_alerts,
+        queue_alerts=queue_alerts,
+    )
+    state = _automation_scheduler.start(settings, _run_auto_processing_cycle)
+    return state.model_dump(mode="json")
+
+
+@router.post("/automation/scheduler/stop")
+def stop_automation_scheduler() -> dict[str, object]:
+    return _automation_scheduler.stop().model_dump(mode="json")
+
+
+def _auto_processing_settings(
+    *,
+    provider: str,
+    symbols: str | None,
+    interval_seconds: int,
+    include_etfs: bool,
+    run_scan: bool,
+    scan_max_age_minutes: int,
+    batch_size: int,
+    max_symbols: int | None,
+    sync_if_empty: bool,
+    seed_paper: bool,
+    seed_limit: int,
+    update_paper: bool,
+    run_alerts: bool,
+    queue_alerts: bool,
+) -> AutoProcessingSettings:
+    try:
+        return AutoProcessingSettings(
+            provider=provider.strip().lower(),
+            symbols=symbols,
+            interval_seconds=interval_seconds,
+            include_etfs=include_etfs,
+            run_scan=run_scan,
+            scan_max_age_minutes=scan_max_age_minutes,
+            batch_size=batch_size,
+            max_symbols=max_symbols,
+            sync_if_empty=sync_if_empty,
+            seed_paper=seed_paper,
+            seed_limit=seed_limit,
+            update_paper=update_paper,
+            run_alerts=run_alerts,
+            queue_alerts=queue_alerts,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessingCycleResult:
+    started_at = datetime.now(timezone.utc)
+    mode = settings.provider.strip().lower()
+    repo = _repo()
+    paper_repo = _paper_repo()
+    errors: list[str] = []
+    data_health: dict[str, str] = {
+        "automation_scheduler": "enabled",
+        "automation_provider": mode,
+        "automation_run_scan": str(settings.run_scan).lower(),
+        "automation_seed_paper": str(settings.seed_paper).lower(),
+        "automation_update_paper": str(settings.update_paper).lower(),
+        "automation_run_alerts": str(settings.run_alerts).lower(),
+    }
+    scan_status = "disabled"
+    scan_started = False
+    scan_job_id: str | None = None
+    paper_created = 0
+    alerts_triggered = 0
+
+    if settings.run_scan:
+        try:
+            if mode == "fixture":
+                resolved = _resolve_symbols(mode, settings.symbols)
+                automation = run_research_automation(
+                    repo=repo,
+                    provider=build_market_data_provider(mode),
+                    provider_mode=mode,
+                    symbols=resolved.symbols,
+                    include_news=False,
+                    queue_brief=False,
+                    run_alerts=False,
+                    run_backtest=False,
+                    seed_paper=settings.seed_paper,
+                    update_paper=False,
+                    limit=settings.seed_limit,
+                )
+                paper_created += automation.summary.paper_created
+                scan_status = "completed"
+                data_health.update(automation.data_health)
+            else:
+                scan_status, scan_started, scan_job_id = _maybe_start_automatic_full_scan(
+                    repo,
+                    settings,
+                )
+        except Exception as exc:
+            scan_status = "failed"
+            errors.append(f"scan: {exc}")
+
+    if settings.seed_paper and mode != "fixture":
+        try:
+            snapshots = repo.list_opportunity_snapshots(limit=settings.seed_limit)
+            seed_result = seed_paper_trades_from_snapshots(paper_repo, snapshots, provider=mode)
+            paper_created += seed_result.created
+            data_health["automation_seed_snapshots"] = str(len(snapshots))
+        except Exception as exc:
+            errors.append(f"paper_seed: {exc}")
+
+    paper_total = 0
+    paper_closed = 0
+    if settings.update_paper:
+        try:
+            paper_update = update_paper_trades(
+                paper_repo,
+                provider=build_market_data_provider(mode),
+            )
+            paper_total = paper_update.summary.total
+            paper_closed = paper_update.summary.closed
+            data_health.update(paper_update.data_health)
+        except Exception as exc:
+            errors.append(f"paper_update: {exc}")
+            summary = summarize_paper_trades(paper_repo.list_trades(limit=1000))
+            paper_total = summary.total
+            paper_closed = summary.closed
+    else:
+        summary = summarize_paper_trades(paper_repo.list_trades(limit=1000))
+        paper_total = summary.total
+        paper_closed = summary.closed
+
+    if settings.run_alerts:
+        try:
+            alert_result = run_alert_rules(
+                repo=repo,
+                provider=build_market_data_provider(mode),
+                queue_delivery=settings.queue_alerts,
+            )
+            alerts_triggered = alert_result.summary.triggered
+            data_health.update(alert_result.data_health)
+        except Exception as exc:
+            errors.append(f"alerts: {exc}")
+
+    finished_at = datetime.now(timezone.utc)
+    data_health.update(
+        {
+            "automation_scan_status": scan_status,
+            "automation_scan_started": str(scan_started).lower(),
+            "automation_paper_created": str(paper_created),
+            "automation_paper_total": str(paper_total),
+            "automation_paper_closed": str(paper_closed),
+            "automation_alerts_triggered": str(alerts_triggered),
+            "automation_errors": str(len(errors)),
+        }
+    )
+    return AutoProcessingCycleResult(
+        provider=mode,
+        started_at=started_at,
+        finished_at=finished_at,
+        scan_status=scan_status,
+        scan_started=scan_started,
+        scan_job_id=scan_job_id,
+        paper_created=paper_created,
+        paper_total=paper_total,
+        paper_closed=paper_closed,
+        alerts_triggered=alerts_triggered,
+        errors=errors,
+        data_health=data_health,
+    )
+
+
+def _maybe_start_automatic_full_scan(
+    repo: QagentRepository,
+    settings: AutoProcessingSettings,
+) -> tuple[str, bool, str | None]:
+    mode = settings.provider.strip().lower()
+    latest = repo.get_latest_full_market_scan_job(provider=mode)
+    if latest and latest.status in {"queued", "running"}:
+        return "already_running", False, latest.job_id
+    cached = repo.get_recent_scan_result_cache(
+        cache_key=full_market_batch_cache_key(mode, settings.include_etfs),
+        max_age=timedelta(minutes=settings.scan_max_age_minutes),
+    )
+    if cached is not None:
+        return "cache_fresh", False, latest.job_id if latest else None
+
+    summary = repo.tradable_catalog_summary()
+    if settings.sync_if_empty and summary.total_count == 0:
+        sync_cn_tradable_catalog(repo=repo, include_full_etfs=settings.include_etfs)
+    symbols = build_full_market_batch_symbols(
+        repo=repo,
+        include_etfs=settings.include_etfs,
+        max_symbols=settings.max_symbols,
+    )
+    if not symbols:
+        raise ValueError("tradable catalog is empty")
+    job = repo.create_full_market_scan_job(
+        provider=mode,
+        symbols=symbols,
+        batch_size=settings.batch_size,
+        include_etfs=settings.include_etfs,
+        sync_if_empty=settings.sync_if_empty,
+    )
+    _task_executor.submit(run_full_market_batch_scan_job, job.job_id)
+    return "queued", True, job.job_id
+
+
 @router.get("/paper-trades")
 def paper_trades(status: str | None = None, limit: int = 100) -> dict[str, object]:
     if limit <= 0 or limit > 500:
@@ -864,29 +1155,136 @@ def update_paper_trade_status(provider: str = "fixture") -> dict[str, object]:
     return result.model_dump(mode="json")
 
 
+@router.get("/paper-trades/session")
+def paper_trade_session() -> dict[str, object]:
+    repo = _paper_repo()
+    account = repo.get_account_settings()
+    trades = repo.list_trades(limit=1000)
+    return {
+        "account": account.model_dump(mode="json"),
+        "summary": summarize_paper_trades(trades).model_dump(mode="json"),
+        "data_health": _paper_account_data_health(account),
+    }
+
+
+@router.post("/paper-trades/session/start")
+def start_paper_trade_session(request: PaperSessionStartRequest) -> dict[str, object]:
+    repo = _paper_repo()
+    initial_capital = _decimal_or_none(request.initial_capital) or Decimal("0")
+    allocation_per_trade_pct = _decimal_or_none(request.allocation_per_trade_pct) or Decimal("0")
+    transaction_cost_bps = _decimal_or_none(request.transaction_cost_bps) or Decimal("-1")
+    slippage_bps = _decimal_or_none(request.slippage_bps) or Decimal("-1")
+    take_profit_pct = _decimal_or_none(request.take_profit_pct) or Decimal("0")
+    _validate_paper_account_inputs(
+        initial_capital=initial_capital,
+        allocation_per_trade_pct=allocation_per_trade_pct,
+        max_positions=request.max_positions,
+        transaction_cost_bps=transaction_cost_bps,
+        slippage_bps=slippage_bps,
+        take_profit_pct=take_profit_pct,
+    )
+    cleared = repo.clear_trades() if request.reset_existing else 0
+    account = repo.start_account_session(
+        label=request.label.strip() or "A股正式模拟盘",
+        initial_capital=initial_capital,
+        allocation_per_trade_pct=allocation_per_trade_pct,
+        max_positions=request.max_positions,
+        transaction_cost_bps=transaction_cost_bps,
+        slippage_bps=slippage_bps,
+        take_profit_pct=take_profit_pct,
+    )
+    ledger = build_paper_ledger(
+        repo.list_trades(limit=1000),
+        initial_capital=account.initial_capital,
+        allocation_per_trade_pct=account.allocation_per_trade_pct,
+        max_positions=account.max_positions,
+        transaction_cost_bps=account.transaction_cost_bps,
+        slippage_bps=account.slippage_bps,
+        take_profit_pct=account.take_profit_pct,
+    )
+    ledger.data_health.update(_paper_account_data_health(account))
+    return {
+        "account": account.model_dump(mode="json"),
+        "cleared_trades": cleared,
+        "ledger": ledger.model_dump(mode="json"),
+    }
+
+
 @router.get("/paper-trades/ledger")
 def paper_trade_ledger(
-    initial_capital: Decimal = Decimal("100000"),
-    allocation_per_trade_pct: Decimal = Decimal("10"),
-    transaction_cost_bps: Decimal = Decimal("0"),
-    slippage_bps: Decimal = Decimal("0"),
-    take_profit_pct: Decimal = Decimal("100"),
+    initial_capital: Decimal | None = None,
+    allocation_per_trade_pct: Decimal | None = None,
+    max_positions: int | None = None,
+    transaction_cost_bps: Decimal | None = None,
+    slippage_bps: Decimal | None = None,
+    take_profit_pct: Decimal | None = None,
     limit: int = 500,
 ) -> dict[str, object]:
     if limit <= 0 or limit > 1000:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+    account = _paper_repo().get_account_settings()
     try:
         ledger = build_paper_ledger(
             _paper_repo().list_trades(limit=limit),
-            initial_capital=initial_capital,
-            allocation_per_trade_pct=allocation_per_trade_pct,
-            transaction_cost_bps=transaction_cost_bps,
-            slippage_bps=slippage_bps,
-            take_profit_pct=take_profit_pct,
+            initial_capital=initial_capital or account.initial_capital,
+            allocation_per_trade_pct=allocation_per_trade_pct or account.allocation_per_trade_pct,
+            max_positions=max_positions or account.max_positions,
+            transaction_cost_bps=transaction_cost_bps or account.transaction_cost_bps,
+            slippage_bps=slippage_bps or account.slippage_bps,
+            take_profit_pct=take_profit_pct or account.take_profit_pct,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    ledger.data_health.update(_paper_account_data_health(account))
     return ledger.model_dump(mode="json")
+
+
+@router.get("/paper-trades/validation")
+def paper_trade_validation(limit: int = 500) -> dict[str, object]:
+    if limit <= 0 or limit > 1000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+    return _paper_validation_payload(limit=limit)
+
+
+@router.post("/paper-trades/validation/run")
+def run_paper_trade_validation(provider: str = "fixture", limit: int = 500) -> dict[str, object]:
+    if limit <= 0 or limit > 1000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+    mode = provider.strip().lower()
+    try:
+        update_result = update_paper_trades(
+            _paper_repo(),
+            provider=build_market_data_provider(mode),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    payload = _paper_validation_payload(limit=limit)
+    payload["data_health"].update(
+        {
+            **update_result.data_health,
+            "validation_refreshed": "true",
+            "validation_provider": mode,
+        }
+    )
+    return payload
+
+
+def _paper_validation_payload(limit: int = 500) -> dict[str, object]:
+    repo = _paper_repo()
+    account = repo.get_account_settings()
+    trades = repo.list_trades(limit=limit)
+    ledger = build_paper_ledger(
+        trades,
+        initial_capital=account.initial_capital,
+        allocation_per_trade_pct=account.allocation_per_trade_pct,
+        max_positions=account.max_positions,
+        transaction_cost_bps=account.transaction_cost_bps,
+        slippage_bps=account.slippage_bps,
+        take_profit_pct=account.take_profit_pct,
+    )
+    ledger.data_health.update(_paper_account_data_health(account))
+    validation = build_paper_validation(trades, ledger)
+    return validation.model_dump(mode="json")
 
 
 @router.delete("/paper-trades/{trade_id}")
@@ -941,6 +1339,47 @@ def _decimal_or_none(value: object) -> Decimal | None:
     if value in {None, ""}:
         return None
     return Decimal(str(value))
+
+
+def _validate_paper_account_inputs(
+    *,
+    initial_capital: Decimal,
+    allocation_per_trade_pct: Decimal,
+    max_positions: int,
+    transaction_cost_bps: Decimal,
+    slippage_bps: Decimal,
+    take_profit_pct: Decimal,
+) -> None:
+    if initial_capital <= 0:
+        raise HTTPException(status_code=400, detail="initial_capital must be greater than zero")
+    if allocation_per_trade_pct <= 0 or allocation_per_trade_pct > 100:
+        raise HTTPException(
+            status_code=400,
+            detail="allocation_per_trade_pct must be between 0 and 100",
+        )
+    if max_positions <= 0:
+        raise HTTPException(status_code=400, detail="max_positions must be greater than zero")
+    if transaction_cost_bps < 0 or slippage_bps < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="transaction_cost_bps and slippage_bps must be non-negative",
+        )
+    if take_profit_pct <= 0 or take_profit_pct > 100:
+        raise HTTPException(status_code=400, detail="take_profit_pct must be between 0 and 100")
+
+
+def _paper_account_data_health(account: PaperAccountSettings) -> dict[str, str]:
+    return {
+        "paper_session_id": account.session_id,
+        "paper_session_status": account.status,
+        "paper_session_label": account.label,
+        "paper_initial_capital": str(account.initial_capital),
+        "paper_allocation_per_trade_pct": str(account.allocation_per_trade_pct),
+        "paper_max_positions": str(account.max_positions),
+        "paper_transaction_cost_bps": str(account.transaction_cost_bps),
+        "paper_slippage_bps": str(account.slippage_bps),
+        "paper_take_profit_pct": str(account.take_profit_pct),
+    }
 
 
 def _build_daily_brief_response(
@@ -1630,9 +2069,12 @@ def _full_market_scan_payload(
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)
+    _attach_live_paper_health_payload(payload)
+    payload.pop("operational_readiness_center", None)
     _attach_operational_readiness_payload(payload)
     _attach_alpha_quality_payload(payload)
     _attach_research_center_payload(payload)
+    _attach_live_paper_health_payload(payload)
     _repo().save_scan_result_cache(
         cache_key=_full_market_scan_cache_key(mode, max_symbols, include_etfs, sync_if_empty),
         provider=mode,
@@ -1829,9 +2271,12 @@ def _hydrate_full_market_batch_payload(
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)
+    _attach_live_paper_health_payload(payload)
+    payload.pop("operational_readiness_center", None)
     _attach_operational_readiness_payload(payload)
     _attach_alpha_quality_payload(payload)
     _attach_research_center_payload(payload)
+    _attach_live_paper_health_payload(payload)
 
 
 def _hydrate_legacy_opportunity_cards(payload: dict[str, object]) -> int:
@@ -2226,6 +2671,29 @@ def _attach_operational_readiness_payload(
     payload_data_health = payload.setdefault("data_health", {})
     if isinstance(payload_data_health, dict):
         payload_data_health.update(center.data_health)
+
+
+def _attach_live_paper_health_payload(payload: dict[str, object]) -> None:
+    data_health = payload.setdefault("data_health", {})
+    if not isinstance(data_health, dict):
+        data_health = {}
+        payload["data_health"] = data_health
+    try:
+        trades = _paper_repo().list_trades(limit=1000)
+        summary = summarize_paper_trades(trades)
+    except Exception:
+        return
+    data_health.update(
+        {
+            "paper_total": str(summary.total),
+            "paper_pending": str(summary.pending),
+            "paper_open": str(summary.open),
+            "paper_closed": str(summary.closed),
+            "paper_target_hit_count": str(summary.target_hit_count),
+            "paper_stopped_count": str(summary.stopped_count),
+            "paper_ledger": "true",
+        }
+    )
 
 
 def _attach_alpha_quality_payload(
@@ -2824,6 +3292,62 @@ def recommendation_followthrough(
         data_health=data_health,
     )
     return center.model_dump(mode="json")
+
+
+@router.get("/recommendation-calibration")
+def recommendation_calibration(
+    provider: str = "fixture",
+    instrument_id: str | None = None,
+    limit: int = 200,
+) -> dict[str, object]:
+    pairs, data_health = _replay_snapshot_outcome_pairs(provider, instrument_id, limit)
+    as_of = max(
+        (outcome.signal_date for _, outcome in pairs if outcome.signal_date is not None),
+        default=date.today(),
+    )
+    center = build_recommendation_calibration_center(
+        pairs,
+        as_of=as_of,
+        data_health=data_health,
+    )
+    return center.model_dump(mode="json")
+
+
+def _replay_snapshot_outcome_pairs(
+    provider: str,
+    instrument_id: str | None,
+    limit: int,
+):
+    repo = _repo()
+    snapshots = repo.list_opportunity_snapshots(instrument_id=instrument_id, limit=limit)
+    try:
+        market_provider = build_market_data_provider(provider)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    instrument_ids = list(dict.fromkeys(snapshot.instrument_id for snapshot in snapshots))
+    all_bars = market_provider.get_daily_bars(
+        instrument_ids,
+        start=date(1900, 1, 1),
+        end=date(2100, 1, 1),
+    )
+
+    pairs = []
+    for snapshot in snapshots:
+        if not all_bars.empty and "instrument_id" in all_bars.columns:
+            bars = all_bars.loc[all_bars["instrument_id"] == snapshot.instrument_id]
+        else:
+            bars = all_bars
+        pairs.append((snapshot, compute_opportunity_outcome(snapshot, bars)))
+    data_health = {
+        "provider": provider,
+        "snapshots": str(len(snapshots)),
+        "outcomes": str(len(pairs)),
+    }
+    provider_errors = getattr(market_provider, "last_errors", [])
+    if provider_errors:
+        data_health["errors"] = " | ".join(provider_errors[:3])
+    return pairs, data_health
 
 
 def _attach_existing_instrument_label(payload: dict[str, object]) -> dict[str, object]:

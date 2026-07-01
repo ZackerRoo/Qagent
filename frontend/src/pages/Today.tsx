@@ -2,9 +2,11 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 
 import {
   createPaperTradeFromOpportunity,
+  fetchAutomationScheduler,
   fetchFullMarketBatchScan,
   fetchLatestFullMarketBatchResult,
   fetchLatestFullMarketBatchScan,
+  fetchPaperValidation,
   fetchRecommendationFollowThrough,
   saveAlertRule,
   fetchScanTask,
@@ -13,7 +15,6 @@ import {
 } from "../api/client";
 import { ManualActionCenterPanel } from "../components/ManualActionCenter";
 import { MarketRotationRadarPanel } from "../components/MarketRotationRadar";
-import { MarketOpportunitySections } from "../components/MarketOpportunitySections";
 import { MarketIntelligenceCenterPanel } from "../components/MarketIntelligenceCenter";
 import { RecommendationFollowThroughPanel } from "../components/RecommendationFollowThrough";
 import { DecisionQualityCenterPanel } from "../components/DecisionQualityCenter";
@@ -22,6 +23,7 @@ import { AlphaQualityCenterPanel } from "../components/AlphaQualityCenter";
 import { ResearchCommandCenterPanel } from "../components/ResearchCommandCenter";
 import { SignalMonitorCenterPanel } from "../components/SignalMonitorCenter";
 import { SignalHubPanel } from "../components/SignalHubPanel";
+import type { PageId } from "../components/Layout";
 import { useI18n } from "../i18n";
 import { formatInstrumentDisplay, formatInstrumentText } from "../lib/instruments";
 import {
@@ -33,11 +35,13 @@ import {
 } from "../lib/localize";
 import { applyResearchProfile } from "../lib/profiles";
 import type {
+  AutoProcessingState,
   ConfidenceDriver,
   DataProviderMode,
   FullMarketBatchScanJob,
   FullMarketScanResponse,
   OpportunityCard,
+  PaperValidationResponse,
   RecommendationFollowThroughCenterResponse,
   ResearchProfile,
   ScanTask,
@@ -51,11 +55,10 @@ type Props = {
   selectedCard?: OpportunityCard;
   onSelect(card: OpportunityCard): void;
   onResult(result: FullMarketScanResponse): void;
+  onNavigate?(page: PageId): void;
 };
 
-const autoStartedKeys = new Set<string>();
-
-export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: Props) {
+export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onNavigate }: Props) {
   const { language, t } = useI18n();
   const [task, setTask] = useState<ScanTask>();
   const [result, setResult] = useState<FullMarketScanResponse>();
@@ -66,11 +69,14 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
   const [fullScanJob, setFullScanJob] = useState<FullMarketBatchScanJob>();
   const [followthrough, setFollowthrough] =
     useState<RecommendationFollowThroughCenterResponse>();
+  const [automationScheduler, setAutomationScheduler] = useState<AutoProcessingState>();
+  const [paperValidation, setPaperValidation] = useState<PaperValidationResponse>();
   const [isStartingFullScan, setIsStartingFullScan] = useState(false);
   const [isBulkPaperTracking, setIsBulkPaperTracking] = useState(false);
   const [bulkPaperMessage, setBulkPaperMessage] = useState("");
   const timerRef = useRef<number | null>(null);
   const batchTimerRef = useRef<number | null>(null);
+  const autoPaperTimerRef = useRef<number | null>(null);
 
   const cards = useMemo(
     () => applyResearchProfile(result?.cards ?? [], profile),
@@ -117,6 +123,20 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
       }
     } catch {
       setFullScanJob(undefined);
+    }
+  }
+
+  async function loadAutoPaperStatus() {
+    try {
+      const [scheduler, validation] = await Promise.all([
+        fetchAutomationScheduler(),
+        fetchPaperValidation(),
+      ]);
+      setAutomationScheduler(scheduler);
+      setPaperValidation(validation);
+    } catch {
+      setAutomationScheduler(undefined);
+      setPaperValidation(undefined);
     }
   }
 
@@ -209,6 +229,8 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
           ? `已跟踪 ${created} 个，已存在 ${existing} 个，失败 ${failed} 个。`
           : `Tracked ${created}, already tracked ${existing}, failed ${failed}.`,
       );
+      void loadFollowthrough();
+      void loadAutoPaperStatus();
     } finally {
       setIsBulkPaperTracking(false);
     }
@@ -245,13 +267,11 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
   }
 
   useEffect(() => {
-    const autoKey = `${dataMode}:30:true`;
-    if (!autoStartedKeys.has(autoKey)) {
-      autoStartedKeys.add(autoKey);
-      void loadInitialResult();
-    }
+    void loadInitialResult();
     void loadFollowthrough();
     void refreshFullScanJob();
+    void loadAutoPaperStatus();
+    autoPaperTimerRef.current = window.setInterval(() => void loadAutoPaperStatus(), 15000);
     return () => {
       if (timerRef.current !== null) {
         window.clearTimeout(timerRef.current);
@@ -259,11 +279,14 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
       if (batchTimerRef.current !== null) {
         window.clearTimeout(batchTimerRef.current);
       }
+      if (autoPaperTimerRef.current !== null) {
+        window.clearInterval(autoPaperTimerRef.current);
+      }
     };
-  }, [dataMode]);
+  }, [dataMode, includeEtfs]);
 
   return (
-    <div className="stack">
+    <div className="stack today-decision-page">
         <SignalCommandCenter
           cards={cards}
           selectedCard={selectedCard}
@@ -289,35 +312,491 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
           onTrackTop={trackTopOpportunities}
         />
 
+        <TodayRouteCards
+          cards={cards}
+          selectedCard={selectedCard}
+          paperValidation={paperValidation}
+          fullScanJob={fullScanJob}
+          language={language}
+          onNavigate={onNavigate}
+        />
+
+        <TodayDecisionDesk
+          cards={cards.slice(0, 5)}
+          selectedCard={selectedCard}
+          dataMode={dataMode}
+          language={language}
+          onSelect={onSelect}
+          onTrackTop={trackTopOpportunities}
+          isBulkPaperTracking={isBulkPaperTracking}
+          bulkPaperMessage={bulkPaperMessage}
+        />
+
+        <AutoPaperStatusStrip
+          scheduler={automationScheduler}
+          validation={paperValidation}
+          fullScanJob={fullScanJob}
+          language={language}
+        />
+
+        <TodayValidationSnapshot
+          validation={paperValidation}
+          followthrough={followthrough}
+          language={language}
+          onNavigate={onNavigate}
+        />
+
+        <TodayRiskBrief
+          cards={cards}
+          result={result}
+          language={language}
+          onNavigate={onNavigate}
+        />
+
+        <TodayAdvancedAnalysis
+          cards={cards}
+          actionableCount={actionable.length}
+          followthrough={followthrough}
+          result={result}
+          selectedCard={selectedCard}
+          dataMode={dataMode}
+          onSelect={onSelect}
+        />
+    </div>
+  );
+}
+
+function TodayRouteCards({
+  cards,
+  selectedCard,
+  paperValidation,
+  fullScanJob,
+  language,
+  onNavigate,
+}: {
+  cards: OpportunityCard[];
+  selectedCard?: OpportunityCard;
+  paperValidation?: PaperValidationResponse;
+  fullScanJob?: FullMarketBatchScanJob;
+  language: "zh" | "en";
+  onNavigate?: (page: PageId) => void;
+}) {
+  const routeCards = [
+    {
+      page: "opportunities" as PageId,
+      label: language === "zh" ? "全部机会" : "All opportunities",
+      value: cards.length ? String(cards.length) : "-",
+      detail:
+        language === "zh"
+          ? "查看完整股票/ETF列表、因子、主题和未入选原因。"
+          : "Full stock/ETF list, factors, themes, and rejected names.",
+    },
+    {
+      page: "overview" as PageId,
+      label: language === "zh" ? "市场雷达" : "Market radar",
+      value: fullScanJob ? `${Math.round(fullScanJob.progress)}%` : "-",
+      detail:
+        language === "zh"
+          ? "看板块轮动、指数/ETF、主题强弱。"
+          : "Sector rotation, indices, ETFs, and theme strength.",
+    },
+    {
+      page: "portfolio" as PageId,
+      label: language === "zh" ? "模拟验证" : "Paper validation",
+      value: paperValidation ? `${paperValidation.summary.closed_trades}/${paperValidation.summary.total_trades}` : "-",
+      detail:
+        language === "zh"
+          ? "看推荐买入后 5/10/20 天到底赚没赚。"
+          : "Check 5/10/20 day follow-through after recommendations.",
+    },
+    {
+      page: "history" as PageId,
+      label: language === "zh" ? "回测策略" : "Backtest",
+      value: selectedCard ? formatPct(selectedCard.decision?.conviction_score) : "-",
+      detail:
+        language === "zh"
+          ? "看策略胜率、回撤、样本外和历史表现。"
+          : "Review win rate, drawdown, OOS, and historical results.",
+    },
+  ];
+
+  return (
+    <section className="today-route-grid" aria-label={language === "zh" ? "页面拆分入口" : "Split page shortcuts"}>
+      {routeCards.map((item) => (
+        <button
+          key={item.page}
+          type="button"
+          className="today-route-card"
+          onClick={() => onNavigate?.(item.page)}
+          disabled={!onNavigate}
+        >
+          <span>{item.label}</span>
+          <strong>{item.value}</strong>
+          <p>{item.detail}</p>
+        </button>
+      ))}
+    </section>
+  );
+}
+
+function TodayDecisionDesk({
+  cards,
+  selectedCard,
+  dataMode,
+  language,
+  onSelect,
+  onTrackTop,
+  isBulkPaperTracking,
+  bulkPaperMessage,
+}: {
+  cards: OpportunityCard[];
+  selectedCard?: OpportunityCard;
+  dataMode: DataProviderMode;
+  language: "zh" | "en";
+  onSelect(card: OpportunityCard): void;
+  onTrackTop(): void;
+  isBulkPaperTracking: boolean;
+  bulkPaperMessage: string;
+}) {
+  return (
+    <section className="panel today-decision-desk">
+      <div className="panel-heading">
+        <div>
+          <h2>{language === "zh" ? "今日决策台" : "Today Decision Desk"}</h2>
+          <p className="brief-headline">
+            {language === "zh"
+              ? "只放今天真正要看的 Top 机会、买卖点和下一步动作。"
+              : "Only the top opportunities, trade levels, and next actions for today."}
+          </p>
+        </div>
+        <button
+          className="icon-action"
+          type="button"
+          onClick={onTrackTop}
+          disabled={isBulkPaperTracking || !cards.length}
+        >
+          {isBulkPaperTracking
+            ? language === "zh" ? "处理中" : "Running"
+            : language === "zh" ? "跟踪前5" : "Track top 5"}
+        </button>
+      </div>
+      {bulkPaperMessage && <div className="empty-state compact">{bulkPaperMessage}</div>}
+      <div className="today-decision-grid">
+        <div className="today-top-list">
+          {cards.length ? (
+            cards.map((card, index) => (
+              <button
+                key={card.card_id}
+                type="button"
+                className={`today-opportunity-row ${selectedCard?.card_id === card.card_id ? "active" : ""}`}
+                onClick={() => onSelect(card)}
+              >
+                <span>{index + 1}</span>
+                <strong title={formatInstrumentDisplay(card.instrument_id, card.instrument_label)}>
+                  {formatInstrumentDisplay(card.instrument_id, card.instrument_label)}
+                </strong>
+                <em>{localizeAction(card.decision?.action ?? "watch", language)}</em>
+                <small>{Math.round(card.rank_score * 100)}</small>
+              </button>
+            ))
+          ) : (
+            <div className="empty-state">{language === "zh" ? "暂无今日机会。" : "No opportunities yet."}</div>
+          )}
+        </div>
+        <TodayTradeTicket card={selectedCard ?? cards[0]} dataMode={dataMode} language={language} />
+      </div>
+    </section>
+  );
+}
+
+function TodayTradeTicket({
+  card,
+  dataMode,
+  language,
+}: {
+  card?: OpportunityCard;
+  dataMode: DataProviderMode;
+  language: "zh" | "en";
+}) {
+  const [paperMessage, setPaperMessage] = useState("");
+  const [isAddingPaper, setIsAddingPaper] = useState(false);
+  if (!card) {
+    return (
+      <div className="today-trade-ticket empty">
+        {language === "zh" ? "选择一只机会后查看买卖计划。" : "Select an opportunity to view the plan."}
+      </div>
+    );
+  }
+
+  const activeCard = card;
+  const canTrack = isTrackablePaperCard(activeCard);
+  const headline = activeCard.recommendation_summary?.headline ?? activeCard.thesis;
+  const confidence = activeCard.confidence_explanation?.score ?? activeCard.decision?.conviction_score ?? null;
+
+  async function addPaperTracking() {
+    if (!canTrack) {
+      setPaperMessage(language === "zh" ? "该机会被风险阻断，不能加入模拟跟踪。" : "This setup is blocked.");
+      return;
+    }
+    try {
+      setIsAddingPaper(true);
+      const result = await createPaperTradeFromOpportunity(paperPayloadFromCard(activeCard, dataMode));
+      setPaperMessage(
+        result.created
+          ? language === "zh" ? "已加入模拟跟踪。" : "Added to paper tracking."
+          : language === "zh" ? "已在模拟跟踪中。" : "Already tracked.",
+      );
+    } catch (caught) {
+      setPaperMessage(caught instanceof Error ? caught.message : language === "zh" ? "加入失败。" : "Failed.");
+    } finally {
+      setIsAddingPaper(false);
+    }
+  }
+
+  return (
+    <div className="today-trade-ticket">
+      <div className="today-ticket-head">
+        <div>
+          <span>{language === "zh" ? "当前机会" : "Selected"}</span>
+          <strong>{formatInstrumentDisplay(card.instrument_id, card.instrument_label)}</strong>
+        </div>
+        <em>{formatPct(confidence)}</em>
+      </div>
+      <p>
+        {formatInstrumentText(
+          localizeReason(headline, language),
+          card.instrument_id,
+          card.instrument_label,
+        )}
+      </p>
+      <div className="today-ticket-levels">
+        <ScenarioMetric label={language === "zh" ? "触发价" : "Trigger"} value={card.entry_plan.trigger_price ?? "-"} tone="info" />
+        <ScenarioMetric label={language === "zh" ? "止损" : "Stop"} value={card.exit_plan.initial_stop ?? "-"} tone="risk" />
+        <ScenarioMetric label={language === "zh" ? "目标" : "Target"} value={card.exit_plan.target_1 ?? "-"} tone="good" />
+        <ScenarioMetric label={language === "zh" ? "不追高" : "No chase"} value={card.entry_plan.no_chase_above ?? "-"} tone="neutral" />
+      </div>
+      <div className="today-ticket-plan">
+        <div>
+          <span>{language === "zh" ? "怎么买" : "Buy"}</span>
+          <p>
+            {formatInstrumentText(
+              localizeReason(card.recommendation_summary?.buy_timing ?? card.entry_plan.confirmation ?? "-", language),
+              card.instrument_id,
+              card.instrument_label,
+            )}
+          </p>
+        </div>
+        <div>
+          <span>{language === "zh" ? "怎么卖" : "Sell"}</span>
+          <p>
+            {formatInstrumentText(
+              localizeReason(card.recommendation_summary?.sell_timing ?? card.exit_plan.invalidation ?? "-", language),
+              card.instrument_id,
+              card.instrument_label,
+            )}
+          </p>
+        </div>
+        <div>
+          <span>{language === "zh" ? "风险" : "Risk"}</span>
+          <p>
+            {formatInstrumentText(
+              localizeReason(card.recommendation_summary?.risk_note ?? card.exit_plan.invalidation ?? "-", language),
+              card.instrument_id,
+              card.instrument_label,
+            )}
+          </p>
+        </div>
+      </div>
+      <div className="workup-actions compact">
+        <button
+          className="icon-action"
+          type="button"
+          onClick={addPaperTracking}
+          disabled={isAddingPaper || !canTrack}
+        >
+          {isAddingPaper
+            ? language === "zh" ? "处理中" : "Running"
+            : language === "zh" ? "加入模拟盘" : "Track paper"}
+        </button>
+        {paperMessage && <span>{paperMessage}</span>}
+      </div>
+    </div>
+  );
+}
+
+function TodayValidationSnapshot({
+  validation,
+  followthrough,
+  language,
+  onNavigate,
+}: {
+  validation?: PaperValidationResponse;
+  followthrough?: RecommendationFollowThroughCenterResponse;
+  language: "zh" | "en";
+  onNavigate?: (page: PageId) => void;
+}) {
+  const summary = validation?.summary;
+  const age = validation?.sample_age;
+  return (
+    <section className="panel today-validation-snapshot">
+      <div className="panel-heading">
+        <div>
+          <h2>{language === "zh" ? "推荐后验证" : "Recommendation Validation"}</h2>
+          <p className="brief-headline">
+            {language === "zh"
+              ? "只看用户关心的结果：按推荐买了之后有没有赚钱、样本是否成熟。"
+              : "The user-facing result: did tracked recommendations work, and is the sample mature?"}
+          </p>
+        </div>
+        <button
+          type="button"
+          className="icon-action secondary"
+          onClick={() => onNavigate?.("portfolio")}
+          disabled={!onNavigate}
+        >
+          {language === "zh" ? "看模拟盘" : "Open ledger"}
+        </button>
+      </div>
+      <div className="today-validation-grid">
+        <SignalMetric
+          label={language === "zh" ? "总收益" : "Total return"}
+          value={summary ? formatNumber(summary.total_return_pct, "%") : "-"}
+          tone={(summary?.total_return_pct ?? 0) >= 0 ? "good" : "risk"}
+        />
+        <SignalMetric
+          label={language === "zh" ? "胜率" : "Win rate"}
+          value={summary?.win_rate != null ? `${(summary.win_rate * 100).toFixed(1)}%` : "-"}
+          tone="info"
+        />
+        <SignalMetric
+          label={language === "zh" ? "最大回撤" : "Max drawdown"}
+          value={summary ? formatNumber(summary.max_drawdown_pct, "%") : "-"}
+          tone="risk"
+        />
+        <SignalMetric
+          label={language === "zh" ? "闭环记录" : "Closed"}
+          value={summary ? `${summary.closed_trades}/${summary.total_trades}` : "-"}
+          tone="neutral"
+        />
+        <SignalMetric
+          label={language === "zh" ? "样本年龄" : "Sample age"}
+          value={age ? `${age.average_days_since_signal.toFixed(1)}D` : "-"}
+          tone="warning"
+        />
+        <SignalMetric
+          label={language === "zh" ? "跟踪健康度" : "Follow-through"}
+          value={followthrough ? `${Math.round(followthrough.health_score * 100)}` : "-"}
+          tone="good"
+        />
+      </div>
+      {age && (
+        <div className="today-validation-age">
+          <span>5D <strong>{age.mature_5d}</strong> / {age.pending_5d} {language === "zh" ? "待验证" : "pending"}</span>
+          <span>10D <strong>{age.mature_10d}</strong> / {age.pending_10d} {language === "zh" ? "待验证" : "pending"}</span>
+          <span>20D <strong>{age.mature_20d}</strong> / {age.pending_20d} {language === "zh" ? "待验证" : "pending"}</span>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function TodayRiskBrief({
+  cards,
+  result,
+  language,
+  onNavigate,
+}: {
+  cards: OpportunityCard[];
+  result?: FullMarketScanResponse;
+  language: "zh" | "en";
+  onNavigate?: (page: PageId) => void;
+}) {
+  const blocked = cards.filter((card) => card.decision?.risk_status === "blocked").length;
+  const warnings = cards.filter((card) => card.decision?.risk_status === "warning").length;
+  const dataScore = Number(result?.data_health?.a_share_data_readiness_score ?? result?.data_health?.market_intelligence_data_score);
+  const readableDataScore = Number.isFinite(dataScore) ? `${Math.round(dataScore * 100)}%` : "-";
+  const alertCount = Number(result?.data_health?.signal_monitor_weakened ?? 0);
+
+  return (
+    <section className="panel today-risk-brief">
+      <div className="panel-heading">
+        <div>
+          <h2>{language === "zh" ? "今天先看风险" : "Risk First"}</h2>
+          <p className="brief-headline">
+            {language === "zh"
+              ? "把数据质量、风险阻断和推荐变弱先露出来，避免只看收益。"
+              : "Surface data quality, blocked setups, and weakening recommendations first."}
+          </p>
+        </div>
+        <button
+          type="button"
+          className="icon-action secondary"
+          onClick={() => onNavigate?.("alerts")}
+          disabled={!onNavigate}
+        >
+          {language === "zh" ? "看提醒" : "Alerts"}
+        </button>
+      </div>
+      <div className="today-risk-grid">
+        <SignalMetric label={language === "zh" ? "风险阻断" : "Blocked"} value={blocked || "-"} tone="risk" />
+        <SignalMetric label={language === "zh" ? "需观察" : "Watch"} value={warnings || "-"} tone="warning" />
+        <SignalMetric label={language === "zh" ? "数据质量" : "Data score"} value={readableDataScore} tone="info" />
+        <SignalMetric label={language === "zh" ? "变弱信号" : "Weakening"} value={Number.isFinite(alertCount) && alertCount > 0 ? alertCount : "-"} tone="warning" />
+      </div>
+    </section>
+  );
+}
+
+function TodayAdvancedAnalysis({
+  cards,
+  actionableCount,
+  followthrough,
+  result,
+  selectedCard,
+  dataMode,
+  onSelect,
+}: {
+  cards: OpportunityCard[];
+  actionableCount: number;
+  followthrough?: RecommendationFollowThroughCenterResponse;
+  result?: FullMarketScanResponse;
+  selectedCard?: OpportunityCard;
+  dataMode: DataProviderMode;
+  onSelect(card: OpportunityCard): void;
+}) {
+  const { language, t } = useI18n();
+  return (
+    <details className="panel today-advanced-analysis">
+      <summary>
+        <div>
+          <span className="eyebrow">{language === "zh" ? "高级分析" : "Advanced analysis"}</span>
+          <strong>{language === "zh" ? "展开查看完整研究面板" : "Open full research panels"}</strong>
+          <p>
+            {language === "zh"
+              ? "策略、因子、市场情报、决策质量和完整价位表默认收起，避免今日页过载。"
+              : "Strategy, factors, market intelligence, decision quality, and full tables are collapsed by default."}
+          </p>
+        </div>
+        <span>{language === "zh" ? "展开" : "Open"}</span>
+      </summary>
+      <div className="today-advanced-stack">
         <HowToUseTodayPanel cards={cards} followthrough={followthrough} language={language} />
-
         <OperationalReadinessCenterPanel center={result?.operational_readiness_center} />
-
         <AlphaQualityCenterPanel center={result?.alpha_quality_center} />
-
         <DecisionQualityCenterPanel center={result?.decision_quality_center} />
-
         <SignalMonitorCenterPanel center={result?.signal_monitor} />
-
-        <SignalDistribution cards={cards} actionableCount={actionable.length} />
-
+        <SignalDistribution cards={cards} actionableCount={actionableCount} />
         <ManualActionCenterPanel center={result?.manual_action_center} />
-
         <RecommendationFollowThroughPanel center={followthrough} />
-
         <MarketIntelligenceCenterPanel center={result?.market_intelligence} />
-
         <ResearchCommandCenterPanel center={result?.research_center} />
-
         <MarketRotationRadarPanel
           radar={result?.rotation_radar}
           cards={cards}
           onSelect={onSelect}
         />
-
         {selectedCard && <SelectedOpportunityWorkup card={selectedCard} dataMode={dataMode} />}
-
-        <section className="panel">
+        <section className="panel nested-panel">
           <div className="panel-heading">
             <h2>{t("today.tradePlan")}</h2>
             <span className="count">{cards.length}</span>
@@ -328,31 +807,116 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult }: P
             <div className="empty-state">{t("today.noResult")}</div>
           )}
         </section>
-
-        <section className="panel">
-          <div className="panel-heading">
-            <h2>{t("opportunities.title")}</h2>
-            <span className="count">{cards.length}</span>
-          </div>
-          <MarketOpportunitySections
-            cards={cards.slice(0, 24)}
-            selectedCardId={selectedCard?.card_id}
-            onSelect={onSelect}
-          />
-          {cards.length > 24 && (
-            <p className="compact-note">
-              {t("today.partialOpportunityList")} {cards.length}
-            </p>
-          )}
-        </section>
-
-        <section className="panel">
+        <section className="panel nested-panel">
           <div className="panel-heading">
             <h2>{t("today.validation")}</h2>
             <span className="count">{result?.strategy_health.length ?? 0}</span>
           </div>
           <StrategyValidationStrip items={result?.strategy_health ?? []} />
         </section>
+      </div>
+    </details>
+  );
+}
+
+function AutoPaperStatusStrip({
+  scheduler,
+  validation,
+  fullScanJob,
+  language,
+}: {
+  scheduler?: AutoProcessingState;
+  validation?: PaperValidationResponse;
+  fullScanJob?: FullMarketBatchScanJob;
+  language: "zh" | "en";
+}) {
+  const enabled = scheduler?.enabled ?? false;
+  const summary = validation?.summary;
+  const age = validation?.sample_age;
+  const fullScanActive = fullScanJob ? isFullScanActive(fullScanJob) : false;
+  return (
+    <section className={`panel auto-paper-status-strip ${enabled ? "is-running" : "is-stopped"}`}>
+      <div className="auto-paper-status-head">
+        <div>
+          <span className="eyebrow">{language === "zh" ? "自动模拟盘" : "Auto paper"}</span>
+          <h2>{enabled ? language === "zh" ? "正在自动跑" : "Running" : language === "zh" ? "尚未开启" : "Stopped"}</h2>
+          <p>
+            {language === "zh"
+              ? "这里直接回答后台是否在跑、下一次什么时候跑、5/10/20 天验证还差多少样本。"
+              : "Shows whether the loop is running, next run time, and 5/10/20 day validation maturity."}
+          </p>
+        </div>
+        <div className="auto-paper-status-badge">
+          <strong>{enabled ? "LIVE" : "OFF"}</strong>
+          <span>{scheduler?.settings.interval_seconds ? formatIntervalSeconds(scheduler.settings.interval_seconds, language) : "-"}</span>
+        </div>
+      </div>
+
+      <div className="auto-paper-status-grid">
+        <AutoPaperMetric
+          label={language === "zh" ? "上次运行" : "Last run"}
+          value={formatMaybeDateTime(scheduler?.last_completed_at, language)}
+        />
+        <AutoPaperMetric
+          label={language === "zh" ? "下次运行" : "Next run"}
+          value={enabled ? formatMaybeDateTime(scheduler?.next_run_at, language) : "-"}
+        />
+        <AutoPaperMetric
+          label={language === "zh" ? "模拟记录" : "Trades"}
+          value={summary?.total_trades ?? "-"}
+        />
+        <AutoPaperMetric
+          label={language === "zh" ? "已闭环" : "Closed"}
+          value={summary?.closed_trades ?? "-"}
+        />
+        <AutoPaperMetric
+          label={language === "zh" ? "当前收益" : "Return"}
+          value={summary ? formatNumber(summary.total_return_pct, "%") : "-"}
+        />
+        <AutoPaperMetric
+          label={language === "zh" ? "全量扫描" : "Full scan"}
+          value={fullScanJob ? localizeScanJobStatus(fullScanJob.status, language) : "-"}
+          tone={fullScanActive ? "running" : "neutral"}
+        />
+      </div>
+
+      {age && (
+        <div className="auto-paper-age-strip">
+          <span>
+            {language === "zh" ? "样本平均年龄" : "Average age"}{" "}
+            <strong>{age.average_days_since_signal.toFixed(1)}D</strong>
+          </span>
+          <span>
+            5D <strong>{age.mature_5d}</strong>
+            {age.days_to_next_5d != null && ` / ${language === "zh" ? "还差" : "next"} ${age.days_to_next_5d}D`}
+          </span>
+          <span>
+            10D <strong>{age.mature_10d}</strong>
+            {age.days_to_next_10d != null && ` / ${language === "zh" ? "还差" : "next"} ${age.days_to_next_10d}D`}
+          </span>
+          <span>
+            20D <strong>{age.mature_20d}</strong>
+            {age.days_to_next_20d != null && ` / ${language === "zh" ? "还差" : "next"} ${age.days_to_next_20d}D`}
+          </span>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AutoPaperMetric({
+  label,
+  value,
+  tone = "neutral",
+}: {
+  label: string;
+  value: string | number;
+  tone?: "neutral" | "running";
+}) {
+  return (
+    <div className={`auto-paper-metric metric-${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
     </div>
   );
 }
@@ -946,8 +1510,8 @@ function SelectedOpportunityWorkup({
             <div className="checklist-block">
               <h4>{t("today.executionChecklist")}</h4>
               <ul>
-                {checklist.slice(0, 5).map((item) => (
-                  <li key={item}>{formatInstrumentText(localizeReason(item, language), card.instrument_id, card.instrument_label)}</li>
+                {checklist.slice(0, 5).map((item, index) => (
+                  <li key={`${index}:${item}`}>{formatInstrumentText(localizeReason(item, language), card.instrument_id, card.instrument_label)}</li>
                 ))}
               </ul>
             </div>
@@ -1305,8 +1869,8 @@ function DriverGroup({
     <div className="driver-group">
       <h4>{title}</h4>
       <ul className="driver-list">
-        {drivers.slice(0, 5).map((driver) => (
-          <li key={`${driver.label}:${driver.value}`} className={`driver-${driver.impact}`}>
+        {drivers.slice(0, 5).map((driver, index) => (
+          <li key={`${index}:${driver.label}:${driver.value}`} className={`driver-${driver.impact}`}>
             <span>{driver.label}</span>
             <strong>{localizeReason(driver.value, language)}</strong>
           </li>
@@ -1499,6 +2063,46 @@ function formatSignedPercent(value: number | null | undefined) {
     return "-";
   }
   return `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
+function formatMaybeDateTime(value: string | null | undefined, language: "zh" | "en"): string {
+  if (!value) {
+    return "-";
+  }
+  return new Date(value).toLocaleString(language === "zh" ? "zh-CN" : "en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatIntervalSeconds(value: number, language: "zh" | "en"): string {
+  if (value < 60) {
+    return language === "zh" ? `${value}秒` : `${value}s`;
+  }
+  const minutes = Math.round(value / 60);
+  if (minutes < 60) {
+    return language === "zh" ? `${minutes}分钟` : `${minutes}m`;
+  }
+  const hours = Math.round(minutes / 60);
+  return language === "zh" ? `${hours}小时` : `${hours}h`;
+}
+
+function localizeScanJobStatus(status: string, language: "zh" | "en"): string {
+  const zh: Record<string, string> = {
+    queued: "排队中",
+    running: "扫描中",
+    succeeded: "已完成",
+    failed: "失败",
+  };
+  const en: Record<string, string> = {
+    queued: "Queued",
+    running: "Running",
+    succeeded: "Done",
+    failed: "Failed",
+  };
+  return (language === "zh" ? zh : en)[status] ?? status;
 }
 
 function parsePrice(value: string | number | null | undefined): number | null {

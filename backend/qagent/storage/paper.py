@@ -1,11 +1,11 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import uuid4
 
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, sessionmaker
 
-from qagent.storage.tables import PaperTradeRow
+from qagent.storage.tables import PaperAccountSettingsRow, PaperTradeRow, utc_now
 
 
 class PaperTradeRecord(BaseModel):
@@ -30,6 +30,20 @@ class PaperTradeRecord(BaseModel):
     realized_return_pct: float | None
     holding_days: int
     notes: str
+
+
+class PaperAccountSettings(BaseModel):
+    account_id: str
+    session_id: str
+    label: str
+    status: str
+    initial_capital: Decimal
+    allocation_per_trade_pct: Decimal
+    max_positions: int
+    transaction_cost_bps: Decimal
+    slippage_bps: Decimal
+    take_profit_pct: Decimal
+    started_at: datetime
 
 
 class PaperTradingRepository:
@@ -124,6 +138,63 @@ class PaperTradingRepository:
             session.commit()
             return True
 
+    def clear_trades(self) -> int:
+        with self.session_factory() as session:
+            count = session.query(PaperTradeRow).delete()
+            session.commit()
+            return int(count)
+
+    def get_account_settings(self) -> PaperAccountSettings:
+        with self.session_factory() as session:
+            row = session.get(PaperAccountSettingsRow, "default")
+            if row is None:
+                return self._default_account_settings()
+            return self._account_from_row(row)
+
+    def start_account_session(
+        self,
+        *,
+        label: str,
+        initial_capital: Decimal,
+        allocation_per_trade_pct: Decimal,
+        max_positions: int,
+        transaction_cost_bps: Decimal,
+        slippage_bps: Decimal,
+        take_profit_pct: Decimal,
+    ) -> PaperAccountSettings:
+        with self.session_factory() as session:
+            now = utc_now()
+            row = session.get(PaperAccountSettingsRow, "default")
+            if row is None:
+                row = PaperAccountSettingsRow(
+                    account_id="default",
+                    session_id=f"paper-session-{uuid4().hex[:12]}",
+                    label=label,
+                    status="active",
+                    initial_capital=initial_capital,
+                    allocation_per_trade_pct=allocation_per_trade_pct,
+                    max_positions=max_positions,
+                    transaction_cost_bps=transaction_cost_bps,
+                    slippage_bps=slippage_bps,
+                    take_profit_pct=take_profit_pct,
+                    started_at=now,
+                )
+                session.add(row)
+            else:
+                row.session_id = f"paper-session-{uuid4().hex[:12]}"
+                row.label = label
+                row.status = "active"
+                row.initial_capital = initial_capital
+                row.allocation_per_trade_pct = allocation_per_trade_pct
+                row.max_positions = max_positions
+                row.transaction_cost_bps = transaction_cost_bps
+                row.slippage_bps = slippage_bps
+                row.take_profit_pct = take_profit_pct
+                row.started_at = now
+            session.commit()
+            session.refresh(row)
+            return self._account_from_row(row)
+
     @staticmethod
     def _trade_from_row(row: PaperTradeRow) -> PaperTradeRecord:
         return PaperTradeRecord(
@@ -148,6 +219,38 @@ class PaperTradingRepository:
             realized_return_pct=_float_or_none(row.realized_return_pct),
             holding_days=row.holding_days,
             notes=row.notes,
+        )
+
+    @staticmethod
+    def _default_account_settings() -> PaperAccountSettings:
+        return PaperAccountSettings(
+            account_id="default",
+            session_id="paper-session-default",
+            label="默认模拟盘",
+            status="draft",
+            initial_capital=Decimal("100000"),
+            allocation_per_trade_pct=Decimal("10"),
+            max_positions=5,
+            transaction_cost_bps=Decimal("0"),
+            slippage_bps=Decimal("0"),
+            take_profit_pct=Decimal("100"),
+            started_at=utc_now(),
+        )
+
+    @staticmethod
+    def _account_from_row(row: PaperAccountSettingsRow) -> PaperAccountSettings:
+        return PaperAccountSettings(
+            account_id=row.account_id,
+            session_id=row.session_id,
+            label=row.label,
+            status=row.status,
+            initial_capital=row.initial_capital,
+            allocation_per_trade_pct=row.allocation_per_trade_pct,
+            max_positions=row.max_positions,
+            transaction_cost_bps=row.transaction_cost_bps,
+            slippage_bps=row.slippage_bps,
+            take_profit_pct=row.take_profit_pct,
+            started_at=row.started_at,
         )
 
 

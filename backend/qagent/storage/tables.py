@@ -275,3 +275,23 @@ class PaperTradeRow(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
+
+
+class PaperAccountSettingsRow(Base):
+    __tablename__ = "paper_account_settings"
+
+    account_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(96), index=True)
+    label: Mapped[str] = mapped_column(String(128), default="正式模拟盘")
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    initial_capital: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    allocation_per_trade_pct: Mapped[Decimal] = mapped_column(Numeric(8, 4))
+    max_positions: Mapped[int] = mapped_column(Integer, default=5)
+    transaction_cost_bps: Mapped[Decimal] = mapped_column(Numeric(8, 4))
+    slippage_bps: Mapped[Decimal] = mapped_column(Numeric(8, 4))
+    take_profit_pct: Mapped[Decimal] = mapped_column(Numeric(8, 4))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )

@@ -2,11 +2,15 @@ import { useEffect, useState } from "react";
 
 import {
   clearDataCache,
+  fetchAutomationScheduler,
   fetchDataCache,
   fetchProviderStatus,
   fetchTradableCatalog,
   runFullMarketScan,
   runAutomation,
+  runAutomationSchedulerOnce,
+  startAutomationScheduler,
+  stopAutomationScheduler,
   syncTradableCatalog,
 } from "../api/client";
 import { useI18n } from "../i18n";
@@ -20,6 +24,7 @@ import {
 } from "../lib/localize";
 import type {
   AutomationRunResponse,
+  AutoProcessingState,
   DataProviderMode,
   MarketDataCacheResponse,
   ProviderStatusResponse,
@@ -49,6 +54,8 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
   const [providerStatus, setProviderStatus] = useState<ProviderStatusResponse>();
   const [dataCache, setDataCache] = useState<MarketDataCacheResponse>();
   const [automationResult, setAutomationResult] = useState<AutomationRunResponse>();
+  const [automationScheduler, setAutomationScheduler] = useState<AutoProcessingState>();
+  const [automationBusy, setAutomationBusy] = useState(false);
   const [tradableCatalog, setTradableCatalog] = useState<TradableCatalogResponse>();
   const [catalogQuery, setCatalogQuery] = useState("");
   const [catalogAssetType, setCatalogAssetType] = useState("");
@@ -62,22 +69,35 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
   const [error, setError] = useState("");
 
   useEffect(() => {
-    async function load() {
-      try {
-        setError("");
-        const [providers, cache, catalog] = await Promise.all([
-          fetchProviderStatus(),
-          fetchDataCache(dataMode),
-          fetchTradableCatalog("", 12),
-        ]);
-        setProviderStatus(providers);
-        setDataCache(cache);
-        setTradableCatalog(catalog);
-      } catch (caught) {
-        setError(caught instanceof Error ? caught.message : "Failed to load provider status");
+    let cancelled = false;
+    const apply = <T,>(setter: (value: T) => void) => (value: T) => {
+      if (!cancelled) {
+        setter(value);
       }
-    }
-    void load();
+    };
+    const fail = (caught: unknown, fallback: string) => {
+      if (!cancelled) {
+        setError(caught instanceof Error ? caught.message : fallback);
+      }
+    };
+
+    setError("");
+    void fetchProviderStatus()
+      .then(apply(setProviderStatus))
+      .catch((caught) => fail(caught, "Failed to load provider status"));
+    void fetchDataCache(dataMode)
+      .then(apply(setDataCache))
+      .catch((caught) => fail(caught, "Failed to load data cache"));
+    void fetchTradableCatalog("", 12)
+      .then(apply(setTradableCatalog))
+      .catch((caught) => fail(caught, "Failed to load tradable catalog"));
+    void fetchAutomationScheduler()
+      .then(apply(setAutomationScheduler))
+      .catch((caught) => fail(caught, "Failed to load automatic processing"));
+
+    return () => {
+      cancelled = true;
+    };
   }, [dataMode]);
 
   async function saveUniverseForm() {
@@ -112,6 +132,44 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
       setDataCache(await fetchDataCache(dataMode));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Failed to run automation");
+    }
+  }
+
+  async function runAutomationCycleNow() {
+    try {
+      setError("");
+      setAutomationBusy(true);
+      const state = await runAutomationSchedulerOnce(dataMode, symbols);
+      setAutomationScheduler(state);
+      setDataCache(await fetchDataCache(dataMode));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to run automatic processing");
+    } finally {
+      setAutomationBusy(false);
+    }
+  }
+
+  async function startAutomationLoop() {
+    try {
+      setError("");
+      setAutomationBusy(true);
+      setAutomationScheduler(await startAutomationScheduler(dataMode, symbols));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to start automatic processing");
+    } finally {
+      setAutomationBusy(false);
+    }
+  }
+
+  async function stopAutomationLoop() {
+    try {
+      setError("");
+      setAutomationBusy(true);
+      setAutomationScheduler(await stopAutomationScheduler());
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to stop automatic processing");
+    } finally {
+      setAutomationBusy(false);
     }
   }
 
@@ -203,6 +261,14 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
           <h2>{t("settings.automation")}</h2>
           <span className="count">{automationResult ? t("settings.ready") : t("settings.idle")}</span>
         </div>
+        <AutomaticProcessingPanel
+          state={automationScheduler}
+          busy={automationBusy}
+          language={language}
+          onRunOnce={runAutomationCycleNow}
+          onStart={startAutomationLoop}
+          onStop={stopAutomationLoop}
+        />
         <div className="form-row">
           <button type="button" onClick={runAutomationNow}>
             {t("settings.runAutomation")}
@@ -506,6 +572,98 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
   );
 }
 
+function AutomaticProcessingPanel({
+  state,
+  busy,
+  language,
+  onRunOnce,
+  onStart,
+  onStop,
+}: {
+  state?: AutoProcessingState;
+  busy: boolean;
+  language: "zh" | "en";
+  onRunOnce(): void;
+  onStart(): void;
+  onStop(): void;
+}) {
+  const enabled = state?.enabled ?? false;
+  const result = state?.last_result;
+  return (
+    <div className="auto-processing-panel">
+      <div className="auto-processing-head">
+        <div>
+          <span>{language === "zh" ? "自动处理系统" : "Automatic Processing"}</span>
+          <strong>
+            {enabled
+              ? language === "zh"
+                ? "运行中"
+                : "Running"
+              : language === "zh"
+                ? "已关闭"
+                : "Off"}
+          </strong>
+        </div>
+        <div className="auto-processing-actions">
+          <button type="button" onClick={onRunOnce} disabled={busy}>
+            {busy ? (language === "zh" ? "处理中" : "Running") : language === "zh" ? "立即执行一轮" : "Run once"}
+          </button>
+          <button type="button" onClick={onStart} disabled={busy || enabled}>
+            {language === "zh" ? "开启自动处理" : "Start loop"}
+          </button>
+          <button type="button" onClick={onStop} disabled={busy || !enabled}>
+            {language === "zh" ? "停止" : "Stop"}
+          </button>
+        </div>
+      </div>
+
+      <div className="settings-list auto-processing-metrics">
+        <div>
+          <span>{language === "zh" ? "运行间隔" : "Interval"}</span>
+          <strong>{formatInterval(state?.settings.interval_seconds, language)}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "下次运行" : "Next run"}</span>
+          <strong>{formatMaybeDate(state?.next_run_at)}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "已执行轮次" : "Runs"}</span>
+          <strong>{state?.run_count ?? 0}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "扫描状态" : "Scan status"}</span>
+          <strong>{localizeAutomationScanStatus(result?.scan_status, language)}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "模拟盘" : "Paper"}</span>
+          <strong>
+            {result
+              ? language === "zh"
+                ? `${result.paper_created} 新增 / ${result.paper_total} 合计 / ${result.paper_closed} 闭环`
+                : `${result.paper_created} new / ${result.paper_total} total / ${result.paper_closed} closed`
+              : "-"}
+          </strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "提醒触发" : "Alerts"}</span>
+          <strong>{result?.alerts_triggered ?? "-"}</strong>
+        </div>
+      </div>
+
+      {result?.scan_job_id && (
+        <div className="empty-state compact">
+          {language === "zh" ? "全量扫描任务：" : "Full scan job: "}
+          {result.scan_job_id}
+        </div>
+      )}
+      {state?.last_error && <div className="empty-state error compact">{state.last_error}</div>}
+      {result?.errors.length ? (
+        <div className="empty-state error compact">{result.errors.slice(0, 2).join("；")}</div>
+      ) : null}
+    </div>
+  );
+}
+
 function splitList(value: string): string[] {
   return value
     .split(",")
@@ -524,6 +682,40 @@ function formatTimestamp(value: string | null): string {
     return "-";
   }
   return new Date(value).toLocaleString();
+}
+
+function formatMaybeDate(value?: string | null): string {
+  return formatTimestamp(value ?? null);
+}
+
+function formatInterval(value: number | undefined, language: "zh" | "en"): string {
+  if (!value) {
+    return "-";
+  }
+  if (value < 60) {
+    return language === "zh" ? `${value} 秒` : `${value}s`;
+  }
+  const minutes = Math.round(value / 60);
+  if (minutes < 60) {
+    return language === "zh" ? `${minutes} 分钟` : `${minutes}m`;
+  }
+  const hours = Math.round(minutes / 60);
+  return language === "zh" ? `${hours} 小时` : `${hours}h`;
+}
+
+function localizeAutomationScanStatus(value: string | undefined, language: "zh" | "en"): string {
+  const labels: Record<string, { zh: string; en: string }> = {
+    disabled: { zh: "未扫描", en: "Disabled" },
+    completed: { zh: "已完成", en: "Completed" },
+    queued: { zh: "已排队", en: "Queued" },
+    already_running: { zh: "已有任务运行", en: "Already running" },
+    cache_fresh: { zh: "缓存仍新鲜", en: "Cache fresh" },
+    failed: { zh: "失败", en: "Failed" },
+  };
+  if (!value) {
+    return "-";
+  }
+  return labels[value]?.[language] ?? value;
 }
 
 function formatNumber(value: number, language: "zh" | "en"): string {

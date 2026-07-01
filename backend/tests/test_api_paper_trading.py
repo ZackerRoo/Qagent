@@ -67,6 +67,59 @@ def test_paper_trade_api_deletes_trade(tmp_path, monkeypatch):
     assert deleted_again.status_code == 404
 
 
+def test_paper_trade_session_start_resets_records_and_saves_rules(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-session.db'}")
+    client = TestClient(create_app())
+    client.post(
+        "/api/paper-trades/from-opportunity",
+        json={
+            "card_id": "card_session_0001",
+            "provider": "fixture",
+            "instrument_id": "US:TEST",
+            "strategy_id": "breakout_volume_confirmation",
+            "trigger_price": "82.00",
+            "initial_stop": "78.72",
+            "target_1": "88.56",
+            "rank_score": 0.91,
+            "action": "watch_trigger",
+            "risk_status": "clear",
+        },
+    )
+
+    started = client.post(
+        "/api/paper-trades/session/start",
+        json={
+            "label": "A股正式模拟盘",
+            "reset_existing": True,
+            "initial_capital": "100000",
+            "allocation_per_trade_pct": "10",
+            "max_positions": 5,
+            "transaction_cost_bps": "5",
+            "slippage_bps": "5",
+            "take_profit_pct": "50",
+        },
+    )
+    listed = client.get("/api/paper-trades")
+    session = client.get("/api/paper-trades/session")
+    ledger = client.get("/api/paper-trades/ledger")
+
+    assert started.status_code == 200
+    body = started.json()
+    assert body["cleared_trades"] == 1
+    assert body["account"]["label"] == "A股正式模拟盘"
+    assert body["account"]["status"] == "active"
+    assert body["account"]["initial_capital"] == "100000.0000"
+    assert body["account"]["max_positions"] == 5
+    assert body["account"]["transaction_cost_bps"] == "5.0000"
+    assert body["ledger"]["summary"]["max_positions"] == 5
+    assert body["ledger"]["summary"]["transaction_cost_bps"] == 5.0
+    assert listed.json()["summary"]["total"] == 0
+    assert session.json()["account"]["label"] == "A股正式模拟盘"
+    assert ledger.json()["summary"]["take_profit_pct"] == 50.0
+    assert ledger.json()["summary"]["max_positions"] == 5
+    assert ledger.json()["data_health"]["paper_session_status"] == "active"
+
+
 def test_paper_trade_api_returns_ledger_metrics(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-ledger.db'}")
     client = TestClient(create_app())
@@ -85,6 +138,39 @@ def test_paper_trade_api_returns_ledger_metrics(tmp_path, monkeypatch):
     assert body["items"][0]["outcome"] == "止损离场"
     assert "transactions" in body
     assert "positions" in body
+
+
+def test_paper_trade_auto_validation_reports_5_10_20_day_outcomes(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-validation.db'}")
+    client = TestClient(create_app())
+    client.get("/api/opportunities?provider=fixture&symbols=US:TEST")
+    client.post("/api/paper-trades/seed?provider=fixture&limit=5")
+
+    response = client.post("/api/paper-trades/validation/run?provider=fixture")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["total_trades"] == 1
+    assert body["summary"]["closed_trades"] == 1
+    assert body["summary"]["primary_window_days"] == 20
+    assert body["summary"]["verdict"] in {"profitable", "risk", "building_sample", "no_data"}
+    assert [window["window_days"] for window in body["windows"]] == [5, 10, 20]
+    assert body["windows"][0]["evaluated_trades"] == 1
+    assert body["items"][0]["instrument_id"] == "US:TEST"
+    assert body["items"][0]["validation_state"] in {"closed", "open", "waiting_entry", "expired"}
+    assert body["curve"]
+    assert body["sample_age"]["average_days_since_signal"] >= 0
+    assert body["sample_age"]["mature_5d"] >= 0
+    assert body["sample_age"]["mature_10d"] >= 0
+    assert body["sample_age"]["mature_20d"] >= 0
+    assert body["batches"]
+    assert body["batches"][0]["batch_date"]
+    assert body["batches"][0]["total_trades"] == 1
+    assert [window["window_days"] for window in body["batches"][0]["windows"]] == [5, 10, 20]
+    assert body["credibility"]["level"] in {"high", "medium", "low", "insufficient"}
+    assert body["credibility"]["score"] >= 0
+    assert body["credibility"]["summary"]
+    assert body["data_health"]["validation_windows"] == "5,10,20"
 
 
 def test_paper_trade_api_returns_flow_ledger_with_costs(tmp_path, monkeypatch):

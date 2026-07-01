@@ -9,6 +9,7 @@
     "check:scan-lifecycle": "node scripts/check-scan-lifecycle.mjs",
     "check:new-user-flow": "node scripts/check-new-user-flow.mjs",
     "check:paper-ledger-ui": "node scripts/check-paper-ledger-ui.mjs",
+    "check:automation-ui": "node scripts/check-automation-ui.mjs",
     "check:backtest-ui": "node scripts/check-backtest-ui.mjs",
     "check:today-ui": "node scripts/check-today-ui.mjs",
     "check:terminal-ui": "node scripts/check-terminal-ui.mjs",

@@ -34,6 +34,9 @@ const table = readFileSync(tablePath, "utf8");
 const detail = readFileSync(detailPath, "utf8");
 const styles = readFileSync(stylesPath, "utf8");
 const catalog = readFileSync(catalogPath, "utf8");
+const trackTopStart = today.indexOf("async function trackTopOpportunities()");
+const trackTopEnd = today.indexOf("function scheduleFullScanPoll", trackTopStart);
+const trackTopBlock = today.slice(trackTopStart, trackTopEnd);
 
 function assert(condition, message) {
   if (!condition) {
@@ -42,7 +45,17 @@ function assert(condition, message) {
 }
 
 assert(today.includes("SignalCommandCenter"), "Today page must render the signal command center");
+assert(today.includes("today-decision-page"), "Today page must expose the simplified decision page shell");
+assert(today.includes("TodayRouteCards"), "Today page must split deep analysis into destination shortcuts");
+assert(today.includes("TodayDecisionDesk"), "Today page must render a compact decision desk");
+assert(today.includes("TodayTradeTicket"), "Today page must render one selected opportunity ticket");
+assert(today.includes("TodayValidationSnapshot"), "Today page must render a compact validation snapshot");
+assert(today.includes("TodayRiskBrief"), "Today page must render a compact risk brief");
+assert(today.includes("TodayAdvancedAnalysis"), "Today page must keep advanced analysis collapsed by default");
 assert(today.includes("HowToUseTodayPanel"), "Today page must render the how-to-use guide");
+assert(today.includes("AutoPaperStatusStrip"), "Today page must render automatic paper status strip");
+assert(today.includes("fetchAutomationScheduler"), "Today page must load automation scheduler state");
+assert(today.includes("fetchPaperValidation"), "Today page must load paper validation state");
 assert(today.includes("SignalDistribution"), "Today page must render signal distribution");
 assert(today.includes("ManualActionCenterPanel"), "Today page must render manual action center");
 assert(today.includes("MarketIntelligenceCenterPanel"), "Today page must render market intelligence");
@@ -57,6 +70,17 @@ assert(today.includes("PreTradeRiskPanel"), "Today page must render pre-trade ri
 assert(today.includes("AccountScenarioPanel"), "Today page must render account-level scenario panel");
 assert(today.includes("CompactDataHealth"), "Today page must keep data health in a compact panel");
 assert(today.includes("signal-console"), "Today page must expose signal-console layout class");
+assert(!today.includes("autoStartedKeys"), "Today page must reload cached scan results when remounted");
+assert(
+  today.includes("void loadInitialResult();") && today.includes("}, [dataMode, includeEtfs]);"),
+  "Today page must reload cached scan results when data mode or ETF filter changes",
+);
+assert(
+  trackTopBlock.includes("setBulkPaperMessage(") &&
+    trackTopBlock.includes("void loadFollowthrough();") &&
+    trackTopBlock.indexOf("setBulkPaperMessage(") < trackTopBlock.indexOf("void loadFollowthrough();"),
+  "Today page must refresh follow-through data after adding top opportunities to paper trading",
+);
 assert(table.includes("SignalStrengthBar"), "Opportunity cards must render a signal strength bar");
 assert(table.includes("opportunity-signal-row"), "Opportunity cards must show rank/factor/conviction as a signal row");
 assert(table.includes("RecommendationQualityStrip"), "Opportunity cards must render recommendation quality");
@@ -105,7 +129,14 @@ assert(manualAction.includes("提醒闭环"), "Manual action center must show al
 assert(manualAction.includes("数据源升级路线"), "Manual action center must show data source roadmap");
 assert(manualAction.includes("策略有效性"), "Manual action center must show strategy effectiveness");
 assert(styles.includes(".signal-console"), "CSS must define signal-console layout");
+assert(styles.includes(".today-route-grid"), "CSS must define split destination cards");
+assert(styles.includes(".today-decision-desk"), "CSS must define compact decision desk");
+assert(styles.includes(".today-trade-ticket"), "CSS must define selected opportunity ticket");
+assert(styles.includes(".today-validation-snapshot"), "CSS must define compact validation snapshot");
+assert(styles.includes(".today-risk-brief"), "CSS must define compact risk brief");
+assert(styles.includes(".today-advanced-analysis"), "CSS must define collapsed advanced analysis");
 assert(styles.includes(".how-to-use-panel"), "CSS must define how-to-use guide layout");
+assert(styles.includes(".auto-paper-status-strip"), "CSS must define automatic paper status strip");
 assert(styles.includes(".manual-action-center"), "CSS must define manual action center layout");
 assert(styles.includes(".manual-strategy-bar"), "CSS must define manual action strategy bars");
 assert(styles.includes(".market-intelligence-center"), "CSS must define market intelligence layout");

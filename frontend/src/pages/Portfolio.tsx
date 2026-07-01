@@ -3,10 +3,14 @@ import { useEffect, useState } from "react";
 import {
   deletePaperTrade,
   fetchPaperLedger,
+  fetchPaperSession,
   fetchPaperTrades,
+  fetchPaperValidation,
   fetchPortfolio,
+  runPaperValidation,
   savePosition,
   seedPaperTrades,
+  startPaperSession,
   updatePaperTrades,
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
@@ -20,7 +24,10 @@ import type {
   PaperLedgerPosition,
   PaperLedgerResponse,
   PaperLedgerTransaction,
+  PaperSessionResponse,
+  PaperSessionStartPayload,
   PaperTradesResponse,
+  PaperValidationResponse,
   PortfolioResponse,
   Position,
   PositionRisk,
@@ -38,26 +45,47 @@ const emptyPosition: Position = {
   thesis: "",
 };
 
+const defaultPaperSessionForm: PaperSessionStartPayload = {
+  label: "A股正式模拟盘",
+  reset_existing: true,
+  initial_capital: "100000",
+  allocation_per_trade_pct: "10",
+  max_positions: 5,
+  transaction_cost_bps: "5",
+  slippage_bps: "5",
+  take_profit_pct: "50",
+};
+
 export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const { language, t } = useI18n();
   const [positions, setPositions] = useState<Position[]>([]);
   const [portfolio, setPortfolio] = useState<PortfolioResponse>();
   const [paper, setPaper] = useState<PaperTradesResponse>();
   const [ledger, setLedger] = useState<PaperLedgerResponse>();
+  const [validation, setValidation] = useState<PaperValidationResponse>();
+  const [paperSession, setPaperSession] = useState<PaperSessionResponse>();
+  const [paperSessionForm, setPaperSessionForm] = useState<PaperSessionStartPayload>(defaultPaperSessionForm);
   const [form, setForm] = useState<Position>(emptyPosition);
   const [paperMessage, setPaperMessage] = useState("");
+  const [isStartingPaperSession, setIsStartingPaperSession] = useState(false);
+  const [isRunningValidation, setIsRunningValidation] = useState(false);
   const [deletingPaperTradeId, setDeletingPaperTradeId] = useState("");
 
   async function load() {
-    const [result, paperResult, ledgerResult] = await Promise.all([
+    const [result, paperResult, paperSessionResult, ledgerResult, validationResult] = await Promise.all([
       fetchPortfolio({ provider: dataMode }),
       fetchPaperTrades(),
+      fetchPaperSession(),
       fetchPaperLedger(),
+      fetchPaperValidation(),
     ]);
     setPortfolio(result);
     setPositions(result.positions);
     setPaper(paperResult);
+    setPaperSession(paperSessionResult);
+    setPaperSessionForm(formFromPaperSession(paperSessionResult));
     setLedger(ledgerResult);
+    setValidation(validationResult);
   }
 
   useEffect(() => {
@@ -87,7 +115,53 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
         : `Updated ${result.summary.total} trades, ${result.summary.closed} closed`,
     );
     setPaper({ summary: result.summary, trades: result.trades });
-    setLedger(await fetchPaperLedger());
+    const [ledgerResult, validationResult] = await Promise.all([
+      fetchPaperLedger(),
+      fetchPaperValidation(),
+    ]);
+    setLedger(ledgerResult);
+    setValidation(validationResult);
+  }
+
+  async function runValidationNow() {
+    try {
+      setIsRunningValidation(true);
+      const validationResult = await runPaperValidation(dataMode);
+      const [paperResult, ledgerResult] = await Promise.all([
+        fetchPaperTrades(),
+        fetchPaperLedger(),
+      ]);
+      setValidation(validationResult);
+      setPaper(paperResult);
+      setLedger(ledgerResult);
+      setPaperMessage(
+        language === "zh"
+          ? `已完成自动模拟验证：${validationResult.summary.total_trades} 笔，${validationResult.summary.closed_trades} 笔已闭环`
+          : `Validation updated: ${validationResult.summary.total_trades} trades, ${validationResult.summary.closed_trades} closed`,
+      );
+    } catch (caught) {
+      setPaperMessage(caught instanceof Error ? caught.message : "Failed to run paper validation");
+    } finally {
+      setIsRunningValidation(false);
+    }
+  }
+
+  async function startFormalPaperSession() {
+    try {
+      setIsStartingPaperSession(true);
+      const result = await startPaperSession(paperSessionForm);
+      setLedger(result.ledger);
+      setPaperMessage(
+        language === "zh"
+          ? `已启动正式模拟盘，清空 ${result.cleared_trades} 条旧记录`
+          : `Started paper session, cleared ${result.cleared_trades} old records`,
+      );
+      await load();
+    } catch (caught) {
+      setPaperMessage(caught instanceof Error ? caught.message : "Failed to start paper session");
+    } finally {
+      setIsStartingPaperSession(false);
+    }
   }
 
   async function removePaperTrade(tradeId: string) {
@@ -207,6 +281,20 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
           <h2>{t("portfolio.paperTitle")}</h2>
           <span className="count">{paper?.summary.total ?? 0}</span>
         </div>
+        <PaperSessionStarter
+          session={paperSession}
+          form={paperSessionForm}
+          isStarting={isStartingPaperSession}
+          language={language}
+          onChange={setPaperSessionForm}
+          onStart={startFormalPaperSession}
+        />
+        <PaperValidationCenter
+          validation={validation}
+          language={language}
+          running={isRunningValidation}
+          onRun={runValidationNow}
+        />
         {ledger ? (
           <PaperLedgerDashboard ledger={ledger} language={language} t={t} />
         ) : (
@@ -288,6 +376,477 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
           </table>
         </div>
       </section>
+    </div>
+  );
+}
+
+function PaperSessionStarter({
+  session,
+  form,
+  isStarting,
+  language,
+  onChange,
+  onStart,
+}: {
+  session?: PaperSessionResponse;
+  form: PaperSessionStartPayload;
+  isStarting: boolean;
+  language: Language;
+  onChange(value: PaperSessionStartPayload): void;
+  onStart(): void;
+}) {
+  const account = session?.account;
+  const setField = <K extends keyof PaperSessionStartPayload>(
+    key: K,
+    value: PaperSessionStartPayload[K],
+  ) => {
+    onChange({ ...form, [key]: value });
+  };
+  return (
+    <div className="paper-session-starter">
+      <div className="paper-session-current">
+        <div>
+          <span className="eyebrow">
+            {language === "zh" ? "正式模拟盘批次" : "Paper Session"}
+          </span>
+          <h3>{account?.label ?? form.label}</h3>
+          <p>
+            {language === "zh"
+              ? "从这里启动干净的模拟盘统计，避免开发测试记录混进正式胜率、回撤和权益曲线。"
+              : "Start a clean paper-trading run so test records do not pollute win rate, drawdown, or equity curves."}
+          </p>
+        </div>
+        <div className="paper-session-status">
+          <span>{language === "zh" ? "状态" : "Status"}</span>
+          <strong>{localizeStatus(account?.status ?? "pending", language)}</strong>
+          <small>
+            {account?.started_at
+              ? new Date(account.started_at).toLocaleString()
+              : language === "zh"
+                ? "尚未正式启动"
+                : "Not started"}
+          </small>
+        </div>
+      </div>
+
+      <div className="paper-session-rule-grid">
+        <label>
+          <span>{language === "zh" ? "批次名称" : "Session label"}</span>
+          <input
+            value={form.label}
+            onChange={(event) => setField("label", event.target.value)}
+          />
+        </label>
+        <label>
+          <span>{language === "zh" ? "初始资金" : "Initial capital"}</span>
+          <input
+            inputMode="decimal"
+            value={form.initial_capital}
+            onChange={(event) => setField("initial_capital", event.target.value)}
+          />
+        </label>
+        <label>
+          <span>{language === "zh" ? "单票仓位 %" : "Position %"}</span>
+          <input
+            inputMode="decimal"
+            value={form.allocation_per_trade_pct}
+            onChange={(event) => setField("allocation_per_trade_pct", event.target.value)}
+          />
+        </label>
+        <label>
+          <span>{language === "zh" ? "最大持仓" : "Max positions"}</span>
+          <input
+            type="number"
+            min="1"
+            value={form.max_positions}
+            onChange={(event) => setField("max_positions", Number(event.target.value) || 1)}
+          />
+        </label>
+        <label>
+          <span>{language === "zh" ? "手续费 bp" : "Fee bp"}</span>
+          <input
+            inputMode="decimal"
+            value={form.transaction_cost_bps}
+            onChange={(event) => setField("transaction_cost_bps", event.target.value)}
+          />
+        </label>
+        <label>
+          <span>{language === "zh" ? "滑点 bp" : "Slippage bp"}</span>
+          <input
+            inputMode="decimal"
+            value={form.slippage_bps}
+            onChange={(event) => setField("slippage_bps", event.target.value)}
+          />
+        </label>
+        <label>
+          <span>{language === "zh" ? "首目标止盈 %" : "Take-profit %"}</span>
+          <input
+            inputMode="decimal"
+            value={form.take_profit_pct}
+            onChange={(event) => setField("take_profit_pct", event.target.value)}
+          />
+        </label>
+      </div>
+
+      <div className="paper-session-action-row">
+        <label className="paper-session-reset-check">
+          <input
+            type="checkbox"
+            checked={form.reset_existing}
+            onChange={(event) => setField("reset_existing", event.target.checked)}
+          />
+          <span>
+            {language === "zh"
+              ? "清空开发测试记录，从今天重新统计"
+              : "Clear development records and restart tracking"}
+          </span>
+        </label>
+        <button type="button" className="icon-action" onClick={onStart} disabled={isStarting}>
+          {isStarting
+            ? language === "zh" ? "启动中" : "Starting"
+            : language === "zh" ? "启动正式模拟盘" : "Start Paper Session"}
+        </button>
+      </div>
+
+      <div className="paper-session-rule-strip">
+        <span>
+          {language === "zh" ? "当前资金" : "Capital"}{" "}
+          <strong>{account ? formatMoney(account.initial_capital, language) : formatMoney(form.initial_capital, language)}</strong>
+        </span>
+        <span>
+          {language === "zh" ? "单票" : "Per trade"}{" "}
+          <strong>{account?.allocation_per_trade_pct ?? form.allocation_per_trade_pct}%</strong>
+        </span>
+        <span>
+          {language === "zh" ? "成本" : "Costs"}{" "}
+          <strong>
+            {account?.transaction_cost_bps ?? form.transaction_cost_bps}bp / {account?.slippage_bps ?? form.slippage_bps}bp
+          </strong>
+        </span>
+        <span>
+          {language === "zh" ? "首目标卖出" : "First target sell"}{" "}
+          <strong>{account?.take_profit_pct ?? form.take_profit_pct}%</strong>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function formFromPaperSession(session: PaperSessionResponse): PaperSessionStartPayload {
+  if (session.account.status !== "active") {
+    return defaultPaperSessionForm;
+  }
+  return {
+    label: session.account.label,
+    reset_existing: true,
+    initial_capital: decimalText(session.account.initial_capital),
+    allocation_per_trade_pct: decimalText(session.account.allocation_per_trade_pct),
+    max_positions: session.account.max_positions,
+    transaction_cost_bps: decimalText(session.account.transaction_cost_bps),
+    slippage_bps: decimalText(session.account.slippage_bps),
+    take_profit_pct: decimalText(session.account.take_profit_pct),
+  };
+}
+
+function PaperValidationCenter({
+  validation,
+  language,
+  running,
+  onRun,
+}: {
+  validation?: PaperValidationResponse;
+  language: Language;
+  running: boolean;
+  onRun(): void;
+}) {
+  if (!validation) {
+    return (
+      <div className="paper-validation-center">
+        <div className="mini-curve-empty">
+          {language === "zh" ? "正在加载自动模拟验证。" : "Loading paper validation."}
+        </div>
+      </div>
+    );
+  }
+  const summary = validation.summary;
+  const shownItems = validation.items.slice(0, 8);
+  return (
+    <div className={`paper-validation-center validation-${summary.verdict}`}>
+      <div className="paper-validation-hero">
+        <div>
+          <span className="eyebrow">
+            {language === "zh" ? "自动模拟验证中心" : "Automatic Paper Validation"}
+          </span>
+          <h3>{summary.headline}</h3>
+          <p>
+            {language === "zh"
+              ? "把 Qagent 推荐批次自动转成模拟交易，持续看 5/10/20 天后是否赚钱。"
+              : "Turns Qagent recommendation batches into tracked paper outcomes over 5/10/20 days."}
+          </p>
+        </div>
+        <div className="paper-validation-verdict">
+          <span>{language === "zh" ? "验证结论" : "Verdict"}</span>
+          <strong>{localizeValidationVerdict(summary.verdict, language)}</strong>
+          <small>{formatPct(summary.total_return_pct)}</small>
+          <button type="button" className="icon-action" onClick={onRun} disabled={running}>
+            {running
+              ? language === "zh" ? "验证中" : "Running"
+              : language === "zh" ? "运行自动验证" : "Run validation"}
+          </button>
+        </div>
+      </div>
+
+      <div className="paper-validation-summary">
+        <Metric label={language === "zh" ? "模拟记录" : "Trades"} value={summary.total_trades} />
+        <Metric label={language === "zh" ? "已触发" : "Triggered"} value={summary.triggered_trades} />
+        <Metric label={language === "zh" ? "已闭环" : "Closed"} value={summary.closed_trades} />
+        <Metric
+          label={language === "zh" ? "胜率" : "Win rate"}
+          value={summary.win_rate != null ? `${(summary.win_rate * 100).toFixed(1)}%` : "-"}
+        />
+        <Metric label={language === "zh" ? "平均收益" : "Avg return"} value={formatPct(summary.average_return_pct)} />
+        <Metric label={language === "zh" ? "最大回撤" : "Max drawdown"} value={formatPct(summary.max_drawdown_pct)} />
+      </div>
+
+      <div className="paper-validation-insight-grid">
+        <PaperValidationAgeCard age={validation.sample_age} language={language} />
+        <PaperValidationCredibilityCard credibility={validation.credibility} language={language} />
+      </div>
+
+      <div className="paper-validation-windows">
+        {validation.windows.map((window) => (
+          <div className="paper-validation-window" key={window.window_days}>
+            <div>
+              <span>{window.window_days}{language === "zh" ? "天验证" : "D validation"}</span>
+              <strong>{formatPct(window.total_return_pct)}</strong>
+            </div>
+            <p>
+              {language === "zh"
+                ? `${window.evaluated_trades}/${window.eligible_trades} 笔可评价，胜率 ${window.win_rate != null ? `${(window.win_rate * 100).toFixed(1)}%` : "-"}`
+                : `${window.evaluated_trades}/${window.eligible_trades} evaluated, win rate ${window.win_rate != null ? `${(window.win_rate * 100).toFixed(1)}%` : "-"}`}
+            </p>
+            <div className="paper-validation-window-bars">
+              <i
+                className="positive"
+                style={{ width: `${window.evaluated_trades ? (window.positive_trades / window.evaluated_trades) * 100 : 0}%` }}
+              />
+              <i
+                className="negative"
+                style={{ width: `${window.evaluated_trades ? (window.negative_trades / window.evaluated_trades) * 100 : 0}%` }}
+              />
+            </div>
+            <small>
+              {language === "zh"
+                ? `待验证 ${window.pending_trades}，止盈 ${window.target_hit_count}，止损 ${window.stopped_count}`
+                : `${window.pending_trades} pending, ${window.target_hit_count} targets, ${window.stopped_count} stops`}
+            </small>
+          </div>
+        ))}
+      </div>
+
+      <PaperValidationBatchList batches={validation.batches} language={language} />
+
+      <div className="paper-validation-grid">
+        <div className="paper-ledger-card">
+          <div className="paper-ledger-card-header">
+            <div>
+              <h3>{language === "zh" ? "验证收益曲线" : "Validation Curve"}</h3>
+              <p>
+                {language === "zh"
+                  ? "展示这批模拟推荐按规则买卖后的账户变化。"
+                  : "Account curve for the tracked recommendation batch."}
+              </p>
+            </div>
+            <strong>{formatPct(summary.total_return_pct)}</strong>
+          </div>
+          <PaperEquityCurve curve={validation.curve} language={language} />
+        </div>
+
+        <div className="paper-ledger-card">
+          <div className="paper-ledger-card-header">
+            <div>
+              <h3>{language === "zh" ? "推荐后续明细" : "Follow-through Items"}</h3>
+              <p>
+                {language === "zh"
+                  ? "每只推荐是否触发、是否闭环、当前收益和下一步动作。"
+                  : "Trigger, closure, return, and next action for each recommendation."}
+              </p>
+            </div>
+            <strong>{shownItems.length}</strong>
+          </div>
+          {shownItems.length === 0 ? (
+            <div className="mini-curve-empty">
+              {language === "zh" ? "还没有模拟验证记录。" : "No validation records yet."}
+            </div>
+          ) : (
+            <div className="paper-validation-items">
+              {shownItems.map((item) => (
+                <div className="paper-validation-item" key={item.trade_id}>
+                  <div>
+                    <strong title={formatInstrumentDisplay(item.instrument_id)}>
+                      {formatInstrumentDisplay(item.instrument_id)}
+                    </strong>
+                    <span>{localizeValidationState(item.validation_state, language)}</span>
+                  </div>
+                  <div className="paper-validation-item-stats">
+                    <span>{language === "zh" ? "收益" : "Return"} {formatPct(item.return_pct)}</span>
+                    <span>{language === "zh" ? "盈亏" : "P/L"} {formatSignedMoney(item.pnl, language)}</span>
+                    <span>{language === "zh" ? "信号后" : "Age"} {item.days_since_signal}D</span>
+                  </div>
+                  <p>{item.next_action}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PaperValidationAgeCard({
+  age,
+  language,
+}: {
+  age: PaperValidationResponse["sample_age"];
+  language: Language;
+}) {
+  const rows = [
+    {
+      label: "5D",
+      mature: age.mature_5d,
+      pending: age.pending_5d,
+      next: age.days_to_next_5d,
+    },
+    {
+      label: "10D",
+      mature: age.mature_10d,
+      pending: age.pending_10d,
+      next: age.days_to_next_10d,
+    },
+    {
+      label: "20D",
+      mature: age.mature_20d,
+      pending: age.pending_20d,
+      next: age.days_to_next_20d,
+    },
+  ];
+  return (
+    <div className="paper-validation-age">
+      <div>
+        <span className="eyebrow">{language === "zh" ? "样本年龄" : "Sample age"}</span>
+        <strong>{age.average_days_since_signal.toFixed(1)}D</strong>
+        <p>
+          {language === "zh"
+            ? `最新 ${age.newest_days_since_signal}D，最老 ${age.oldest_days_since_signal}D。`
+            : `Newest ${age.newest_days_since_signal}D, oldest ${age.oldest_days_since_signal}D.`}
+        </p>
+      </div>
+      <div className="paper-validation-age-rows">
+        {rows.map((row) => (
+          <div key={row.label}>
+            <span>{row.label}</span>
+            <strong>
+              {row.mature} {language === "zh" ? "成熟" : "mature"}
+            </strong>
+            <small>
+              {row.pending} {language === "zh" ? "待验证" : "pending"}
+              {row.next != null
+                ? ` / ${language === "zh" ? "最近还差" : "next in"} ${row.next}D`
+                : ""}
+            </small>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PaperValidationCredibilityCard({
+  credibility,
+  language,
+}: {
+  credibility: PaperValidationResponse["credibility"];
+  language: Language;
+}) {
+  return (
+    <div className={`paper-validation-credibility credibility-${credibility.level}`}>
+      <div>
+        <span className="eyebrow">{language === "zh" ? "结果可信度" : "Credibility"}</span>
+        <strong>{localizeCredibilityLevel(credibility.level, language)}</strong>
+        <p>{credibility.summary}</p>
+      </div>
+      <div className="paper-validation-score">
+        <i style={{ width: `${Math.max(0, Math.min(100, credibility.score * 100))}%` }} />
+      </div>
+      <div className="paper-validation-evidence">
+        {credibility.evidence.slice(0, 4).map((item) => (
+          <span key={item}>{item}</span>
+        ))}
+      </div>
+      {credibility.warnings.length > 0 && (
+        <ul>
+          {credibility.warnings.slice(0, 3).map((warning) => (
+            <li key={warning}>{warning}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function PaperValidationBatchList({
+  batches,
+  language,
+}: {
+  batches: PaperValidationResponse["batches"];
+  language: Language;
+}) {
+  if (!batches.length) {
+    return null;
+  }
+  return (
+    <div className="paper-validation-batches">
+      <div className="paper-ledger-card-header">
+        <div>
+          <h3>{language === "zh" ? "模拟批次" : "Validation Batches"}</h3>
+          <p>
+            {language === "zh"
+              ? "按推荐日期查看每一批 Top 候选后续 5/10/20 天表现。"
+              : "Review each recommendation date batch across 5/10/20 day outcomes."}
+          </p>
+        </div>
+        <strong>{batches.length}</strong>
+      </div>
+      <div className="paper-validation-batch-grid">
+        {batches.slice(0, 6).map((batch) => (
+          <div className="paper-validation-batch" key={batch.batch_id}>
+            <div className="paper-validation-batch-head">
+              <strong>{batch.batch_date}</strong>
+              <span>{batch.age_days}D</span>
+            </div>
+            <div className="paper-validation-batch-metrics">
+              <span>{language === "zh" ? "记录" : "Trades"} {batch.total_trades}</span>
+              <span>{language === "zh" ? "触发" : "Triggered"} {batch.triggered_trades}</span>
+              <span>{language === "zh" ? "闭环" : "Closed"} {batch.closed_trades}</span>
+              <span>{language === "zh" ? "收益" : "Return"} {formatPct(batch.total_return_pct)}</span>
+            </div>
+            <div className="paper-validation-batch-windows">
+              {batch.windows.map((window) => (
+                <span key={window.window_days}>
+                  {window.window_days}D {formatPct(window.total_return_pct)}
+                </span>
+              ))}
+            </div>
+            <p>
+              {batch.top_instruments
+                .slice(0, 3)
+                .map((instrument) => formatInstrumentDisplay(instrument))
+                .join(" / ")}
+            </p>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -695,6 +1254,14 @@ function numberFrom(value: string | number | null): number {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
+function decimalText(value: string | number | null): string {
+  const numeric = numberFrom(value);
+  if (Number.isInteger(numeric)) {
+    return String(numeric);
+  }
+  return String(numeric);
+}
+
 function formatShares(value: string | number | null): string {
   const numeric = numberFrom(value);
   return new Intl.NumberFormat("zh-CN", {
@@ -739,6 +1306,56 @@ function localizeTransactionAction(action: string, language: string): string {
     time_exit: "Time Exit",
   };
   return (language === "zh" ? zh : en)[action] ?? action;
+}
+
+function localizeValidationVerdict(verdict: string, language: string): string {
+  const zh: Record<string, string> = {
+    profitable: "验证为正",
+    risk: "存在风险",
+    building_sample: "样本积累中",
+    no_data: "暂无数据",
+  };
+  const en: Record<string, string> = {
+    profitable: "Profitable",
+    risk: "Risk",
+    building_sample: "Building sample",
+    no_data: "No data",
+  };
+  return (language === "zh" ? zh : en)[verdict] ?? verdict;
+}
+
+function localizeCredibilityLevel(level: string, language: string): string {
+  const zh: Record<string, string> = {
+    high: "可信度高",
+    medium: "可信度中等",
+    low: "可信度偏低",
+    insufficient: "样本不足",
+  };
+  const en: Record<string, string> = {
+    high: "High",
+    medium: "Medium",
+    low: "Low",
+    insufficient: "Insufficient",
+  };
+  return (language === "zh" ? zh : en)[level] ?? level;
+}
+
+function localizeValidationState(state: string, language: string): string {
+  const zh: Record<string, string> = {
+    waiting_entry: "等待买点",
+    open: "持仓跟踪",
+    closed: "已经闭环",
+    expired: "买点过期",
+    tracked: "跟踪中",
+  };
+  const en: Record<string, string> = {
+    waiting_entry: "Waiting entry",
+    open: "Open",
+    closed: "Closed",
+    expired: "Expired",
+    tracked: "Tracked",
+  };
+  return (language === "zh" ? zh : en)[state] ?? state;
 }
 
 function formatManagement(risk: PositionRisk, language: string, holdingDaysLabel: string): string {

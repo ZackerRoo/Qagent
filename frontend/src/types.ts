@@ -1495,6 +1495,7 @@ export type PaperLedgerSummary = {
   initial_capital: string;
   allocation_per_trade_pct: number;
   allocation_per_trade: string;
+  max_positions: number;
   total_trades: number;
   pending_trades: number;
   open_trades: number;
@@ -1601,6 +1602,150 @@ export type PaperLedgerResponse = {
   transactions: PaperLedgerTransaction[];
   positions: PaperLedgerPosition[];
   data_health: Record<string, string>;
+};
+
+export type PaperValidationSummary = {
+  total_trades: number;
+  triggered_trades: number;
+  pending_trades: number;
+  open_trades: number;
+  closed_trades: number;
+  target_hit_count: number;
+  stopped_count: number;
+  time_exit_count: number;
+  primary_window_days: number;
+  win_rate: number | null;
+  average_return_pct: number | null;
+  total_return_pct: number;
+  max_drawdown_pct: number;
+  verdict: string;
+  headline: string;
+};
+
+export type PaperValidationWindow = {
+  window_days: number;
+  eligible_trades: number;
+  evaluated_trades: number;
+  pending_trades: number;
+  positive_trades: number;
+  negative_trades: number;
+  win_rate: number | null;
+  average_return_pct: number | null;
+  total_pnl: string;
+  total_return_pct: number | null;
+  max_drawdown_pct: number;
+  target_hit_count: number;
+  stopped_count: number;
+  time_exit_count: number;
+};
+
+export type PaperValidationItem = {
+  trade_id: string;
+  instrument_id: string;
+  strategy_id: string | null;
+  status: string;
+  validation_state: string;
+  signal_date: string;
+  entry_date: string | null;
+  exit_date: string | null;
+  latest_date: string | null;
+  days_since_signal: number;
+  holding_days: number;
+  return_pct: number | null;
+  pnl: string;
+  capital_allocated: string;
+  outcome: string;
+  next_action: string;
+};
+
+export type PaperValidationSampleAge = {
+  average_days_since_signal: number;
+  newest_days_since_signal: number;
+  oldest_days_since_signal: number;
+  mature_5d: number;
+  mature_10d: number;
+  mature_20d: number;
+  pending_5d: number;
+  pending_10d: number;
+  pending_20d: number;
+  days_to_next_5d: number | null;
+  days_to_next_10d: number | null;
+  days_to_next_20d: number | null;
+};
+
+export type PaperValidationBatch = {
+  batch_id: string;
+  batch_date: string;
+  age_days: number;
+  total_trades: number;
+  triggered_trades: number;
+  pending_trades: number;
+  open_trades: number;
+  closed_trades: number;
+  win_rate: number | null;
+  average_return_pct: number | null;
+  total_pnl: string;
+  total_return_pct: number | null;
+  max_drawdown_pct: number;
+  top_instruments: string[];
+  windows: PaperValidationWindow[];
+};
+
+export type PaperValidationCredibility = {
+  score: number;
+  level: string;
+  summary: string;
+  warnings: string[];
+  evidence: string[];
+  concentration_pct: number | null;
+};
+
+export type PaperValidationResponse = {
+  summary: PaperValidationSummary;
+  windows: PaperValidationWindow[];
+  sample_age: PaperValidationSampleAge;
+  batches: PaperValidationBatch[];
+  credibility: PaperValidationCredibility;
+  items: PaperValidationItem[];
+  curve: PaperLedgerPoint[];
+  data_health: Record<string, string>;
+};
+
+export type PaperAccountSettings = {
+  account_id: string;
+  session_id: string;
+  label: string;
+  status: string;
+  initial_capital: string;
+  allocation_per_trade_pct: string;
+  max_positions: number;
+  transaction_cost_bps: string;
+  slippage_bps: string;
+  take_profit_pct: string;
+  started_at: string;
+};
+
+export type PaperSessionResponse = {
+  account: PaperAccountSettings;
+  summary: PaperTradingSummary;
+  data_health: Record<string, string>;
+};
+
+export type PaperSessionStartPayload = {
+  label: string;
+  reset_existing: boolean;
+  initial_capital: string;
+  allocation_per_trade_pct: string;
+  max_positions: number;
+  transaction_cost_bps: string;
+  slippage_bps: string;
+  take_profit_pct: string;
+};
+
+export type PaperSessionStartResponse = {
+  account: PaperAccountSettings;
+  cleared_trades: number;
+  ledger: PaperLedgerResponse;
 };
 
 export type PaperSeedResponse = {
@@ -1849,6 +1994,86 @@ export type RecommendationFollowThroughCenterResponse = {
   data_health: Record<string, string>;
 };
 
+export type RecommendationCalibrationSample = {
+  snapshot_id: string;
+  instrument_id: string;
+  instrument_label?: string | null;
+  signal_date: string | null;
+  score: number;
+  score_band: string;
+  primary_strategy_id: string | null;
+  signals: string[];
+  outcome_status: string;
+  return_5d: number | null;
+  return_10d: number | null;
+  return_20d: number | null;
+  max_drawdown_pct: number | null;
+  max_runup_pct: number | null;
+};
+
+export type RecommendationCalibrationBand = {
+  band: string;
+  label: string;
+  min_score: number;
+  max_score: number;
+  sample_count: number;
+  completed_count: number;
+  win_rate_10d: number | null;
+  avg_return_10d: number | null;
+  avg_return_20d: number | null;
+  max_drawdown_pct: number | null;
+  best_runup_pct: number | null;
+  reliability_score: number;
+  verdict: string;
+};
+
+export type RecommendationSignalEffect = {
+  signal_key: string;
+  label: string;
+  sample_count: number;
+  completed_count: number;
+  win_rate_10d: number | null;
+  avg_return_10d: number | null;
+  baseline_avg_return_10d: number | null;
+  lift_vs_baseline_10d: number | null;
+  reliability_score: number;
+  weight_action: string;
+  suggested_weight_delta: number;
+  reason: string;
+};
+
+export type RecommendationWeightSuggestion = {
+  key: string;
+  label: string;
+  action: string;
+  delta: number;
+  reason: string;
+};
+
+export type RecommendationCalibrationCurvePoint = {
+  date: string;
+  sample_count: number;
+  completed_count: number;
+  cumulative_win_rate_10d: number | null;
+  cumulative_avg_return_10d: number | null;
+};
+
+export type RecommendationCalibrationResponse = {
+  as_of: string;
+  headline: string;
+  verdict: string;
+  reliability_score: number;
+  baseline_win_rate_10d: number | null;
+  baseline_avg_return_10d: number | null;
+  score_bands: RecommendationCalibrationBand[];
+  signal_effects: RecommendationSignalEffect[];
+  weight_suggestions: RecommendationWeightSuggestion[];
+  curve_points: RecommendationCalibrationCurvePoint[];
+  recent_samples: RecommendationCalibrationSample[];
+  action_items: string[];
+  data_health: Record<string, string>;
+};
+
 export type ProviderStatus = {
   provider_id: string;
   name: string;
@@ -1902,6 +2127,50 @@ export type AutomationRunResponse = {
   alert_run: AlertRunResponse | null;
   paper_update: PaperUpdateResponse | null;
   data_health: Record<string, string>;
+};
+
+export type AutoProcessingSettings = {
+  provider: string;
+  symbols: string | null;
+  interval_seconds: number;
+  include_etfs: boolean;
+  run_scan: boolean;
+  scan_max_age_minutes: number;
+  batch_size: number;
+  max_symbols: number | null;
+  sync_if_empty: boolean;
+  seed_paper: boolean;
+  seed_limit: number;
+  update_paper: boolean;
+  run_alerts: boolean;
+  queue_alerts: boolean;
+};
+
+export type AutoProcessingCycleResult = {
+  provider: string;
+  started_at: string;
+  finished_at: string;
+  scan_status: string;
+  scan_started: boolean;
+  scan_job_id: string | null;
+  paper_created: number;
+  paper_total: number;
+  paper_closed: number;
+  alerts_triggered: number;
+  errors: string[];
+  data_health: Record<string, string>;
+};
+
+export type AutoProcessingState = {
+  enabled: boolean;
+  status: string;
+  settings: AutoProcessingSettings;
+  run_count: number;
+  last_started_at: string | null;
+  last_completed_at: string | null;
+  next_run_at: string | null;
+  last_error: string | null;
+  last_result: AutoProcessingCycleResult | null;
 };
 
 export type StrategyPerformance = {

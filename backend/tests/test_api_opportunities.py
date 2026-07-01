@@ -522,6 +522,72 @@ def test_full_market_batch_latest_result_uses_card_calibration_when_no_health_ca
     assert body["decision_quality_center"]["explanation_cards"]
 
 
+def test_full_market_batch_latest_result_refreshes_paper_account_health(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-health.db'}")
+    repo = routes._repo()
+    scan = run_daily_scan(["US:TEST", "CN:000001"], FixtureMarketDataProvider())
+    stale_operational = scan.operational_readiness_center.model_dump(mode="json")
+    stale_operational["checks"] = [
+        {
+            **check,
+            "evidence": ["模拟记录 0 条", "已闭环 0 条", "支持现金、仓位、交易流水、手续费/滑点和收益曲线"],
+        }
+        if check["key"] == "paper_account"
+        else check
+        for check in stale_operational["checks"]
+    ]
+    repo.save_scan_result_cache(
+        cache_key=routes.full_market_batch_cache_key("fixture", True),
+        provider="fixture",
+        mode="full_market_batch",
+        symbols=["US:TEST", "CN:000001"],
+        payload={
+            "symbols": ["US:TEST", "CN:000001"],
+            "cards": [card.model_dump(mode="json") for card in scan.cards],
+            "items": [item.model_dump(mode="json") for item in scan.items],
+            "strategy_health": [item.model_dump(mode="json") for item in scan.strategy_health],
+            "factor_rankings": [],
+            "sector_strength": [],
+            "portfolio_plan": scan.portfolio_plan.model_dump(mode="json"),
+            "operational_readiness_center": stale_operational,
+            "data_health": {"provider": "fixture", "paper_total": "0", "paper_closed": "0"},
+        },
+    )
+    client = TestClient(create_app())
+    created = client.post(
+        "/api/paper-trades/from-opportunity",
+        json={
+            "card_id": "card_paper_health",
+            "provider": "fixture",
+            "instrument_id": "US:TEST",
+            "strategy_id": "breakout_volume_confirmation",
+            "trigger_price": "82.00",
+            "initial_stop": "78.72",
+            "target_1": "88.56",
+            "rank_score": 0.91,
+            "action": "watch_trigger",
+            "risk_status": "clear",
+        },
+    )
+    assert created.status_code == 200
+    assert client.get("/api/paper-trades").json()["summary"]["total"] == 1
+
+    response = client.get(
+        "/api/full-market/batch-scan/latest-result?provider=fixture&include_etfs=true"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data_health"]["paper_total"] == "1"
+    paper_check = next(
+        item for item in body["operational_readiness_center"]["checks"] if item["key"] == "paper_account"
+    )
+    assert "模拟记录 1 条" in paper_check["evidence"]
+
+
 def test_daily_brief_fast_mode_sets_snapshot_controls():
     client = TestClient(create_app())
 

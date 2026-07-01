@@ -255,6 +255,7 @@ export default function App() {
             selectedCard={selectedCard}
             onSelect={setSelectedCard}
             onResult={applyDashboardResult}
+            onNavigate={setPage}
           />
         );
       case "brief":

@@ -1,5 +1,6 @@
 from datetime import date
 from decimal import Decimal, ROUND_DOWN
+from collections import defaultdict
 
 import pandas as pd
 from pydantic import BaseModel
@@ -42,6 +43,7 @@ class PaperLedgerSummary(BaseModel):
     initial_capital: Decimal
     allocation_per_trade_pct: float
     allocation_per_trade: Decimal
+    max_positions: int
     total_trades: int
     pending_trades: int
     open_trades: int
@@ -150,6 +152,113 @@ class PaperLedger(BaseModel):
     data_health: dict[str, str]
 
 
+class PaperValidationSummary(BaseModel):
+    total_trades: int
+    triggered_trades: int
+    pending_trades: int
+    open_trades: int
+    closed_trades: int
+    target_hit_count: int
+    stopped_count: int
+    time_exit_count: int
+    primary_window_days: int
+    win_rate: float | None
+    average_return_pct: float | None
+    total_return_pct: float
+    max_drawdown_pct: float
+    verdict: str
+    headline: str
+
+
+class PaperValidationWindow(BaseModel):
+    window_days: int
+    eligible_trades: int
+    evaluated_trades: int
+    pending_trades: int
+    positive_trades: int
+    negative_trades: int
+    win_rate: float | None
+    average_return_pct: float | None
+    total_pnl: Decimal
+    total_return_pct: float | None
+    max_drawdown_pct: float
+    target_hit_count: int
+    stopped_count: int
+    time_exit_count: int
+
+
+class PaperValidationItem(BaseModel):
+    trade_id: str
+    instrument_id: str
+    strategy_id: str | None
+    status: str
+    validation_state: str
+    signal_date: date
+    entry_date: date | None
+    exit_date: date | None
+    latest_date: date | None
+    days_since_signal: int
+    holding_days: int
+    return_pct: float | None
+    pnl: Decimal
+    capital_allocated: Decimal
+    outcome: str
+    next_action: str
+
+
+class PaperValidationSampleAge(BaseModel):
+    average_days_since_signal: float
+    newest_days_since_signal: int
+    oldest_days_since_signal: int
+    mature_5d: int
+    mature_10d: int
+    mature_20d: int
+    pending_5d: int
+    pending_10d: int
+    pending_20d: int
+    days_to_next_5d: int | None
+    days_to_next_10d: int | None
+    days_to_next_20d: int | None
+
+
+class PaperValidationBatch(BaseModel):
+    batch_id: str
+    batch_date: date
+    age_days: int
+    total_trades: int
+    triggered_trades: int
+    pending_trades: int
+    open_trades: int
+    closed_trades: int
+    win_rate: float | None
+    average_return_pct: float | None
+    total_pnl: Decimal
+    total_return_pct: float | None
+    max_drawdown_pct: float
+    top_instruments: list[str]
+    windows: list[PaperValidationWindow]
+
+
+class PaperValidationCredibility(BaseModel):
+    score: float
+    level: str
+    summary: str
+    warnings: list[str]
+    evidence: list[str]
+    concentration_pct: float | None
+
+
+class PaperValidationResult(BaseModel):
+    summary: PaperValidationSummary
+    windows: list[PaperValidationWindow]
+    sample_age: PaperValidationSampleAge
+    batches: list[PaperValidationBatch]
+    credibility: PaperValidationCredibility
+    items: list[PaperValidationItem]
+    curve: list[PaperLedgerPoint]
+    data_health: dict[str, str]
+
+
 def seed_paper_trades_from_snapshots(
     repo: PaperTradingRepository,
     snapshots: list[OpportunitySnapshotRecord],
@@ -253,6 +362,7 @@ def build_paper_ledger(
     trades: list[PaperTradeRecord],
     initial_capital: Decimal = Decimal("100000"),
     allocation_per_trade_pct: Decimal = Decimal("10"),
+    max_positions: int = 5,
     transaction_cost_bps: Decimal = Decimal("0"),
     slippage_bps: Decimal = Decimal("0"),
     take_profit_pct: Decimal = Decimal("100"),
@@ -261,6 +371,8 @@ def build_paper_ledger(
         raise ValueError("initial_capital must be greater than zero")
     if allocation_per_trade_pct <= 0 or allocation_per_trade_pct > 100:
         raise ValueError("allocation_per_trade_pct must be between 0 and 100")
+    if max_positions <= 0:
+        raise ValueError("max_positions must be greater than zero")
     if transaction_cost_bps < 0 or slippage_bps < 0:
         raise ValueError("transaction_cost_bps and slippage_bps must be non-negative")
     if take_profit_pct <= 0 or take_profit_pct > 100:
@@ -279,6 +391,7 @@ def build_paper_ledger(
         trades=trades,
         initial_capital=initial_capital,
         allocation_per_trade=allocation_per_trade,
+        max_positions=max_positions,
         transaction_cost_bps=transaction_cost_bps,
         slippage_bps=slippage_bps,
         take_profit_pct=take_profit_pct,
@@ -297,6 +410,7 @@ def build_paper_ledger(
             initial_capital=_money(initial_capital),
             allocation_per_trade_pct=round(float(allocation_per_trade_pct), 4),
             allocation_per_trade=allocation_per_trade,
+            max_positions=max_positions,
             total_trades=len(trades),
             pending_trades=sum(1 for trade in trades if trade.status == "pending"),
             open_trades=sum(1 for trade in trades if trade.status == "open"),
@@ -338,6 +452,7 @@ def build_paper_ledger(
         data_health={
             "ledger_method": "chronological_cash_ledger",
             "allocation_per_trade_pct": str(allocation_per_trade_pct),
+            "max_positions": str(max_positions),
             "transaction_cost_bps": str(transaction_cost_bps),
             "slippage_bps": str(slippage_bps),
             "take_profit_pct": str(take_profit_pct),
@@ -346,10 +461,94 @@ def build_paper_ledger(
     )
 
 
+def build_paper_validation(
+    trades: list[PaperTradeRecord],
+    ledger: PaperLedger,
+    windows: tuple[int, ...] = (5, 10, 20),
+    as_of: date | None = None,
+) -> PaperValidationResult:
+    if not windows:
+        raise ValueError("windows must not be empty")
+    as_of = as_of or _validation_as_of(trades)
+    ledger_items = {item.trade_id: item for item in ledger.items}
+    items = [
+        _validation_item(
+            trade=trade,
+            ledger_item=ledger_items.get(trade.trade_id),
+            allocation_per_trade=ledger.summary.allocation_per_trade,
+            as_of=as_of,
+        )
+        for trade in trades
+    ]
+    window_results = [
+        _validation_window(
+            items=items,
+            window_days=window,
+            allocation_per_trade=ledger.summary.allocation_per_trade,
+            max_drawdown_pct=ledger.summary.max_drawdown_pct,
+        )
+        for window in windows
+    ]
+    sample_age = _validation_sample_age(items, windows)
+    batches = _validation_batches(
+        items=items,
+        windows=windows,
+        allocation_per_trade=ledger.summary.allocation_per_trade,
+    )
+    primary_window = window_results[-1]
+    verdict = _validation_verdict(
+        total_trades=len(items),
+        evaluated_trades=primary_window.evaluated_trades,
+        total_return_pct=ledger.summary.total_return_pct,
+        max_drawdown_pct=ledger.summary.max_drawdown_pct,
+    )
+    credibility = _validation_credibility(
+        items=items,
+        sample_age=sample_age,
+        primary_window=primary_window,
+        total_return_pct=ledger.summary.total_return_pct,
+        max_drawdown_pct=ledger.summary.max_drawdown_pct,
+    )
+    return PaperValidationResult(
+        summary=PaperValidationSummary(
+            total_trades=len(items),
+            triggered_trades=sum(1 for item in items if item.entry_date is not None),
+            pending_trades=sum(1 for trade in trades if trade.status == "pending"),
+            open_trades=sum(1 for trade in trades if trade.status == "open"),
+            closed_trades=sum(1 for trade in trades if trade.status in CLOSED_STATUSES),
+            target_hit_count=ledger.summary.target_hit_count,
+            stopped_count=ledger.summary.stopped_count,
+            time_exit_count=ledger.summary.time_exit_count,
+            primary_window_days=windows[-1],
+            win_rate=ledger.summary.win_rate,
+            average_return_pct=ledger.summary.average_return_pct,
+            total_return_pct=ledger.summary.total_return_pct,
+            max_drawdown_pct=ledger.summary.max_drawdown_pct,
+            verdict=verdict,
+            headline=_validation_headline(verdict, primary_window, ledger.summary.total_return_pct),
+        ),
+        windows=window_results,
+        sample_age=sample_age,
+        batches=batches,
+        credibility=credibility,
+        items=items,
+        curve=ledger.curve,
+        data_health={
+            **ledger.data_health,
+            "validation_windows": ",".join(str(window) for window in windows),
+            "validation_items": str(len(items)),
+            "validation_batches": str(len(batches)),
+            "validation_credibility": credibility.level,
+            "validation_primary_window": str(windows[-1]),
+        },
+    )
+
+
 def _build_account_ledger(
     trades: list[PaperTradeRecord],
     initial_capital: Decimal,
     allocation_per_trade: Decimal,
+    max_positions: int,
     transaction_cost_bps: Decimal,
     slippage_bps: Decimal,
     take_profit_pct: Decimal,
@@ -429,6 +628,8 @@ def _build_account_ledger(
             active_lots.remove(lot)
 
         for trade in entries_by_date.get(current_date, []):
+            if len(active_lots) >= max_positions:
+                continue
             buy = _buy_lot(
                 trade=trade,
                 cash=cash,
@@ -505,6 +706,336 @@ def _build_account_ledger(
         "transactions": transactions,
         "positions": positions,
     }
+
+
+def _validation_as_of(trades: list[PaperTradeRecord]) -> date:
+    dates = [
+        value
+        for trade in trades
+        for value in (trade.latest_date, trade.exit_date, trade.entry_date, trade.signal_date)
+        if value is not None
+    ]
+    return max(dates) if dates else date.today()
+
+
+def _validation_item(
+    trade: PaperTradeRecord,
+    ledger_item: PaperLedgerItem | None,
+    allocation_per_trade: Decimal,
+    as_of: date,
+) -> PaperValidationItem:
+    return_pct = (
+        trade.realized_return_pct
+        if trade.realized_return_pct is not None
+        else trade.unrealized_return_pct
+    )
+    capital_allocated = allocation_per_trade if trade.entry_date is not None else Decimal("0")
+    pnl = Decimal("0")
+    outcome = _outcome_label(trade.status, return_pct)
+    if ledger_item is not None:
+        pnl = ledger_item.total_pnl
+        outcome = ledger_item.outcome
+        if ledger_item.return_pct is not None:
+            return_pct = ledger_item.return_pct
+    state = _validation_state(trade)
+    return PaperValidationItem(
+        trade_id=trade.trade_id,
+        instrument_id=trade.instrument_id,
+        strategy_id=trade.strategy_id,
+        status=trade.status,
+        validation_state=state,
+        signal_date=trade.signal_date,
+        entry_date=trade.entry_date,
+        exit_date=trade.exit_date,
+        latest_date=trade.latest_date,
+        days_since_signal=max((as_of - trade.signal_date).days, 0),
+        holding_days=trade.holding_days,
+        return_pct=return_pct,
+        pnl=_money(pnl),
+        capital_allocated=_money(capital_allocated),
+        outcome=outcome,
+        next_action=_validation_next_action(state, return_pct),
+    )
+
+
+def _validation_window(
+    items: list[PaperValidationItem],
+    window_days: int,
+    allocation_per_trade: Decimal,
+    max_drawdown_pct: float,
+) -> PaperValidationWindow:
+    evaluated = [
+        item
+        for item in items
+        if item.status in CLOSED_STATUSES or item.days_since_signal >= window_days
+    ]
+    returns = [item.return_pct if item.return_pct is not None else 0.0 for item in evaluated]
+    total_pnl = sum((item.pnl for item in evaluated), Decimal("0"))
+    denominator = allocation_per_trade * Decimal(str(len(evaluated)))
+    return PaperValidationWindow(
+        window_days=window_days,
+        eligible_trades=len(items),
+        evaluated_trades=len(evaluated),
+        pending_trades=len(items) - len(evaluated),
+        positive_trades=sum(1 for value in returns if value > 0),
+        negative_trades=sum(1 for value in returns if value < 0),
+        win_rate=round(sum(1 for value in returns if value > 0) / len(returns), 4)
+        if returns
+        else None,
+        average_return_pct=round(sum(returns) / len(returns), 4) if returns else None,
+        total_pnl=_money(total_pnl),
+        total_return_pct=_pct(total_pnl, denominator) if denominator > 0 else None,
+        max_drawdown_pct=max_drawdown_pct,
+        target_hit_count=sum(1 for item in evaluated if item.status == "target_1_hit"),
+        stopped_count=sum(1 for item in evaluated if item.status == "stopped"),
+        time_exit_count=sum(1 for item in evaluated if item.status == "time_exit"),
+    )
+
+
+def _validation_sample_age(
+    items: list[PaperValidationItem],
+    windows: tuple[int, ...],
+) -> PaperValidationSampleAge:
+    if not items:
+        return PaperValidationSampleAge(
+            average_days_since_signal=0.0,
+            newest_days_since_signal=0,
+            oldest_days_since_signal=0,
+            mature_5d=0,
+            mature_10d=0,
+            mature_20d=0,
+            pending_5d=0,
+            pending_10d=0,
+            pending_20d=0,
+            days_to_next_5d=None,
+            days_to_next_10d=None,
+            days_to_next_20d=None,
+        )
+    ages = [item.days_since_signal for item in items]
+    return PaperValidationSampleAge(
+        average_days_since_signal=round(sum(ages) / len(ages), 2),
+        newest_days_since_signal=min(ages),
+        oldest_days_since_signal=max(ages),
+        mature_5d=_mature_count(items, 5),
+        mature_10d=_mature_count(items, 10),
+        mature_20d=_mature_count(items, 20),
+        pending_5d=len(items) - _mature_count(items, 5),
+        pending_10d=len(items) - _mature_count(items, 10),
+        pending_20d=len(items) - _mature_count(items, 20),
+        days_to_next_5d=_days_to_next_mature(items, 5),
+        days_to_next_10d=_days_to_next_mature(items, 10),
+        days_to_next_20d=_days_to_next_mature(items, 20),
+    )
+
+
+def _validation_batches(
+    items: list[PaperValidationItem],
+    windows: tuple[int, ...],
+    allocation_per_trade: Decimal,
+) -> list[PaperValidationBatch]:
+    grouped: defaultdict[date, list[PaperValidationItem]] = defaultdict(list)
+    for item in items:
+        grouped[item.signal_date].append(item)
+    batches: list[PaperValidationBatch] = []
+    for batch_date, batch_items in sorted(grouped.items(), reverse=True):
+        returns = [
+            item.return_pct
+            for item in batch_items
+            if item.return_pct is not None and (
+                item.status in CLOSED_STATUSES or item.days_since_signal >= windows[-1]
+            )
+        ]
+        total_pnl = sum((item.pnl for item in batch_items), Decimal("0"))
+        denominator = allocation_per_trade * Decimal(str(max(len(batch_items), 1)))
+        batch_windows = [
+            _validation_window(
+                items=batch_items,
+                window_days=window,
+                allocation_per_trade=allocation_per_trade,
+                max_drawdown_pct=_items_drawdown(batch_items),
+            )
+            for window in windows
+        ]
+        batches.append(
+            PaperValidationBatch(
+                batch_id=f"paper-batch-{batch_date:%Y%m%d}",
+                batch_date=batch_date,
+                age_days=max((item.days_since_signal for item in batch_items), default=0),
+                total_trades=len(batch_items),
+                triggered_trades=sum(1 for item in batch_items if item.entry_date is not None),
+                pending_trades=sum(1 for item in batch_items if item.status == "pending"),
+                open_trades=sum(1 for item in batch_items if item.status == "open"),
+                closed_trades=sum(1 for item in batch_items if item.status in CLOSED_STATUSES),
+                win_rate=round(sum(1 for value in returns if value > 0) / len(returns), 4)
+                if returns
+                else None,
+                average_return_pct=round(sum(returns) / len(returns), 4) if returns else None,
+                total_pnl=_money(total_pnl),
+                total_return_pct=_pct(total_pnl, denominator) if denominator > 0 else None,
+                max_drawdown_pct=_items_drawdown(batch_items),
+                top_instruments=[item.instrument_id for item in batch_items[:5]],
+                windows=batch_windows,
+            )
+        )
+    return batches
+
+
+def _validation_credibility(
+    items: list[PaperValidationItem],
+    sample_age: PaperValidationSampleAge,
+    primary_window: PaperValidationWindow,
+    total_return_pct: float,
+    max_drawdown_pct: float,
+) -> PaperValidationCredibility:
+    if not items:
+        return PaperValidationCredibility(
+            score=0.0,
+            level="insufficient",
+            summary="还没有模拟样本，不能判断推荐有效性。",
+            warnings=["请先把今日推荐加入模拟盘。"],
+            evidence=[],
+            concentration_pct=None,
+        )
+
+    closed_count = sum(1 for item in items if item.status in CLOSED_STATUSES)
+    sample_score = min(len(items) / 20, 1) * 0.25
+    closed_score = min(closed_count / 10, 1) * 0.25
+    maturity_score = min(sample_age.mature_10d / max(len(items), 1), 1) * 0.2
+    drawdown_score = max(0.0, min(1.0, (12 + max_drawdown_pct) / 12)) * 0.15
+    concentration_pct = _pnl_concentration(items)
+    concentration_score = (1 - min((concentration_pct or 0) / 100, 1)) * 0.15
+    score = round(sample_score + closed_score + maturity_score + drawdown_score + concentration_score, 4)
+    warnings: list[str] = []
+    if len(items) < 20:
+        warnings.append("样本少于 20 笔，先看方向，不宜过度相信胜率。")
+    if sample_age.mature_10d < 5:
+        warnings.append("10日成熟样本少于 5 笔，短期胜率还在积累。")
+    if closed_count < 5:
+        warnings.append("闭环交易少于 5 笔，止盈/止损统计还不稳定。")
+    if concentration_pct is not None and concentration_pct > 60:
+        warnings.append("收益集中度偏高，可能主要由少数标的贡献。")
+    if max_drawdown_pct <= -8:
+        warnings.append("最大回撤超过 8%，需要降低仓位或复核策略。")
+    if score >= 0.75:
+        level = "high"
+    elif score >= 0.5:
+        level = "medium"
+    elif score > 0:
+        level = "low"
+    else:
+        level = "insufficient"
+    if total_return_pct > 0 and warnings:
+        summary = "当前收益为正，但样本成熟度仍需继续观察。"
+    elif total_return_pct > 0:
+        summary = "当前模拟验证为正，样本质量相对可用。"
+    elif primary_window.evaluated_trades == 0:
+        summary = "样本还未成熟，先等待 5/10/20 天窗口。"
+    else:
+        summary = "当前模拟验证偏弱，需要复核推荐和风控规则。"
+    return PaperValidationCredibility(
+        score=score,
+        level=level,
+        summary=summary,
+        warnings=warnings,
+        evidence=[
+            f"模拟样本 {len(items)} 笔",
+            f"已闭环 {closed_count} 笔",
+            f"10日成熟样本 {sample_age.mature_10d} 笔",
+            f"20日窗口可评价 {primary_window.evaluated_trades} 笔",
+        ],
+        concentration_pct=concentration_pct,
+    )
+
+
+def _mature_count(items: list[PaperValidationItem], window_days: int) -> int:
+    return sum(
+        1
+        for item in items
+        if item.status in CLOSED_STATUSES or item.days_since_signal >= window_days
+    )
+
+
+def _days_to_next_mature(
+    items: list[PaperValidationItem],
+    window_days: int,
+) -> int | None:
+    pending = [
+        max(window_days - item.days_since_signal, 0)
+        for item in items
+        if item.status not in CLOSED_STATUSES and item.days_since_signal < window_days
+    ]
+    return min(pending) if pending else None
+
+
+def _items_drawdown(items: list[PaperValidationItem]) -> float:
+    returns = [item.return_pct for item in items if item.return_pct is not None]
+    if not returns:
+        return 0.0
+    return round(min(0.0, min(returns)), 4)
+
+
+def _pnl_concentration(items: list[PaperValidationItem]) -> float | None:
+    pnl_values = [abs(float(item.pnl)) for item in items if item.pnl != 0]
+    if not pnl_values:
+        return None
+    return round(max(pnl_values) / sum(pnl_values) * 100, 4)
+
+
+def _validation_state(trade: PaperTradeRecord) -> str:
+    if trade.status == "pending":
+        return "waiting_entry"
+    if trade.status == "open":
+        return "open"
+    if trade.status == "time_exit" and trade.entry_date is None:
+        return "expired"
+    if trade.status in CLOSED_STATUSES:
+        return "closed"
+    return "tracked"
+
+
+def _validation_next_action(state: str, return_pct: float | None) -> str:
+    if state == "waiting_entry":
+        return "等待触发价，不追高。"
+    if state == "open":
+        if return_pct is not None and return_pct >= 0:
+            return "继续跟踪目标价和推荐变弱提醒。"
+        return "重点检查止损价和仓位风险。"
+    if state == "expired":
+        return "买点未触发，作为无成交样本记录。"
+    if state == "closed":
+        return "已闭环，纳入胜率、收益和回撤统计。"
+    return "继续观察。"
+
+
+def _validation_verdict(
+    total_trades: int,
+    evaluated_trades: int,
+    total_return_pct: float,
+    max_drawdown_pct: float,
+) -> str:
+    if total_trades == 0:
+        return "no_data"
+    if evaluated_trades == 0:
+        return "building_sample"
+    if total_return_pct > 0 and max_drawdown_pct > -8:
+        return "profitable"
+    if total_return_pct < 0 or max_drawdown_pct <= -8:
+        return "risk"
+    return "building_sample"
+
+
+def _validation_headline(
+    verdict: str,
+    primary_window: PaperValidationWindow,
+    total_return_pct: float,
+) -> str:
+    if verdict == "no_data":
+        return "还没有模拟记录，先把今日推荐加入模拟盘。"
+    if verdict == "building_sample":
+        return f"{primary_window.window_days}日窗口样本仍在积累，先看触发率和回撤。"
+    if verdict == "profitable":
+        return f"{primary_window.window_days}日验证为正，总收益 {total_return_pct:.2f}%。"
+    return f"{primary_window.window_days}日验证存在风险，总收益 {total_return_pct:.2f}%。"
 
 
 def _buy_lot(

@@ -27,3 +27,14 @@ class PaperTradeFromOpportunityRequest(BaseModel):
     rank_score: float | None = None
     action: str = "watch_trigger"
     risk_status: str = "clear"
+
+
+class PaperSessionStartRequest(BaseModel):
+    label: str = "A股正式模拟盘"
+    reset_existing: bool = True
+    initial_capital: str = "100000"
+    allocation_per_trade_pct: str = "10"
+    max_positions: int = 5
+    transaction_cost_bps: str = "5"
+    slippage_bps: str = "5"
+    take_profit_pct: str = "50"
