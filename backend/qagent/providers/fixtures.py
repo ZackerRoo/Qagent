@@ -8,7 +8,7 @@ class FixtureMarketDataProvider:
     name = "fixture"
 
     def __init__(self, fixture_dir: Path | None = None):
-        self.fixture_dir = fixture_dir or Path(__file__).parents[2] / "tests" / "fixtures"
+        self.fixture_dir = fixture_dir or Path(__file__).parent / "fixture_data"
 
     def get_daily_bars(
         self, instrument_ids: list[str], start: date, end: date

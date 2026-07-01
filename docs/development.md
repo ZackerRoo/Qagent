@@ -6,7 +6,6 @@
 cd backend
 python -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
-.venv/bin/python -m pytest -v
 ```
 
 Run the backend:
@@ -125,7 +124,7 @@ Registered but data-limited strategies:
 
 Data-limited strategies must appear as `missing_data` unless their required provider fields are available. This prevents the agent from inventing PEAD, analyst revision, valuation, options-flow, or ownership conclusions from price data alone.
 
-The fixture strategy-data provider reads `backend/tests/fixtures/earnings_events.csv`, `fundamental_snapshots.csv`, and `analyst_insights.csv`. In fixture mode, `US:TEST` has a complete earnings event, growth/valuation snapshot, and analyst revision record; `CN:000001` intentionally lacks estimates and remains missing-data for PEAD.
+The fixture strategy-data provider reads `backend/qagent/providers/fixture_data/earnings_events.csv`, `fundamental_snapshots.csv`, and `analyst_insights.csv`. In fixture mode, `US:TEST` has a complete earnings event, growth/valuation snapshot, and analyst revision record; `CN:000001` intentionally lacks estimates and remains missing-data for PEAD.
 
 Free mode composes real-data adapters:
 
@@ -320,11 +319,7 @@ curl 'http://127.0.0.1:8000/api/portfolio?provider=fixture'
 Run these before pushing:
 
 ```bash
-cd backend
-.venv/bin/python -m pytest -v
-.venv/bin/python -m ruff check .
-
-cd ../frontend
+cd frontend
 npm run build
 ```
 

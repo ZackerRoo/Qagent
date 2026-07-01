@@ -66,6 +66,7 @@ from qagent.monitoring.alerts import AlertRule, suggest_alert_rules
 from qagent.paper_trading.engine import (
     build_paper_ledger,
     build_paper_validation,
+    paper_execution_data_health,
     seed_paper_trades_from_snapshots,
     update_paper_trades,
     summarize_paper_trades,
@@ -1017,8 +1018,13 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
 
     if settings.seed_paper and mode != "fixture":
         try:
-            snapshots = repo.list_opportunity_snapshots(limit=settings.seed_limit)
-            seed_result = seed_paper_trades_from_snapshots(paper_repo, snapshots, provider=mode)
+            snapshots = repo.list_opportunity_snapshots(limit=max(settings.seed_limit * 10, 50))
+            seed_result = seed_paper_trades_from_snapshots(
+                paper_repo,
+                snapshots,
+                provider=mode,
+                max_created=settings.seed_limit,
+            )
             paper_created += seed_result.created
             data_health["automation_seed_snapshots"] = str(len(snapshots))
         except Exception as exc:
@@ -1129,6 +1135,7 @@ def paper_trades(status: str | None = None, limit: int = 100) -> dict[str, objec
     return {
         "summary": summarize_paper_trades(trades).model_dump(mode="json"),
         "trades": [trade.model_dump(mode="json") for trade in trades],
+        "data_health": paper_execution_data_health(),
     }
 
 
@@ -1137,8 +1144,13 @@ def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, o
     if limit <= 0 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
     mode = provider.strip().lower()
-    snapshots = _repo().list_opportunity_snapshots(limit=limit)
-    result = seed_paper_trades_from_snapshots(_paper_repo(), snapshots, provider=mode)
+    snapshots = _repo().list_opportunity_snapshots(limit=max(limit * 10, limit))
+    result = seed_paper_trades_from_snapshots(
+        _paper_repo(),
+        snapshots,
+        provider=mode,
+        max_created=limit,
+    )
     return result.model_dump(mode="json")
 
 

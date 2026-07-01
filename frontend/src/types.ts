@@ -1489,6 +1489,7 @@ export type PaperTradingSummary = {
 export type PaperTradesResponse = {
   summary: PaperTradingSummary;
   trades: PaperTrade[];
+  data_health: Record<string, string>;
 };
 
 export type PaperLedgerSummary = {

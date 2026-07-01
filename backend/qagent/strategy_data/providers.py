@@ -113,7 +113,7 @@ class FixtureStrategyDataProvider(BaseStrategyDataProvider):
 
     def __init__(self, fixture_dir: Path | None = None):
         super().__init__()
-        self.fixture_dir = fixture_dir or Path(__file__).parents[2] / "tests" / "fixtures"
+        self.fixture_dir = fixture_dir or Path(__file__).parents[1] / "providers" / "fixture_data"
 
     def get_earnings_events(
         self,

@@ -6458,6 +6458,83 @@ tbody tr.selected {
   white-space: nowrap;
 }
 
+.paper-execution-status {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.46fr);
+  gap: 12px;
+  align-items: stretch;
+  border: 1px solid rgba(77, 212, 255, 0.24);
+  border-radius: 8px;
+  padding: 12px;
+  background:
+    linear-gradient(135deg, rgba(77, 212, 255, 0.08), transparent 42%),
+    rgba(9, 14, 20, 0.72);
+}
+
+.paper-execution-status h3,
+.paper-execution-status p {
+  margin: 0;
+}
+
+.paper-execution-status h3 {
+  margin-top: 4px;
+  color: var(--terminal-text);
+  font-size: 17px;
+  line-height: 1.2;
+}
+
+.paper-execution-status p {
+  margin-top: 6px;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.paper-execution-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.paper-execution-metrics span {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 9px;
+  color: var(--terminal-muted-2);
+  background: rgba(8, 13, 18, 0.68);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.paper-execution-metrics strong {
+  overflow: hidden;
+  color: var(--terminal-text);
+  font-size: 15px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.execution-regular {
+  border-color: rgba(74, 222, 128, 0.38);
+  background:
+    linear-gradient(135deg, rgba(74, 222, 128, 0.1), transparent 44%),
+    rgba(9, 14, 20, 0.72);
+}
+
+.execution-after_close,
+.execution-midday_break,
+.execution-pre_open {
+  border-color: rgba(244, 197, 66, 0.34);
+}
+
+.execution-closed {
+  border-color: rgba(255, 92, 122, 0.3);
+}
+
 .paper-validation-center {
   display: grid;
   gap: 12px;
@@ -7361,6 +7438,8 @@ tbody tr.selected {
   .paper-ledger-metrics,
   .paper-ledger-visual-grid,
   .paper-session-current,
+  .paper-execution-status,
+  .paper-execution-metrics,
   .paper-session-rule-grid,
   .paper-session-action-row,
   .paper-session-rule-strip,

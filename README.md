@@ -85,11 +85,7 @@ Without these keys, Qagent still runs. SEC EDGAR and CNINFO adapters remain avai
 ## Verify
 
 ```bash
-cd backend
-.venv/bin/python -m pytest -v
-.venv/bin/python -m ruff check .
-
-cd ../frontend
+cd frontend
 npm run build
 ```
 

@@ -1,6 +1,7 @@
-from datetime import date
-from decimal import Decimal, ROUND_DOWN
 from collections import defaultdict
+from datetime import date, datetime, time
+from decimal import Decimal, ROUND_DOWN
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from pydantic import BaseModel
@@ -12,6 +13,11 @@ from qagent.storage.repository import OpportunitySnapshotRecord
 
 OPEN_STATUSES = {"pending", "open"}
 CLOSED_STATUSES = {"target_1_hit", "stopped", "time_exit"}
+A_SHARE_TZ = ZoneInfo("Asia/Shanghai")
+A_SHARE_MORNING_START = time(9, 30)
+A_SHARE_MORNING_END = time(11, 30)
+A_SHARE_AFTERNOON_START = time(13, 0)
+A_SHARE_AFTERNOON_END = time(15, 0)
 
 
 class PaperSeedResult(BaseModel):
@@ -263,15 +269,28 @@ def seed_paper_trades_from_snapshots(
     repo: PaperTradingRepository,
     snapshots: list[OpportunitySnapshotRecord],
     provider: str,
+    max_created: int | None = None,
+    max_signal_age_days: int | None = 0,
+    as_of: datetime | None = None,
 ) -> PaperSeedResult:
     created = 0
     skipped = 0
     existing = {trade.source_snapshot_id for trade in repo.list_trades(limit=1000)}
+    current_date = _a_share_local_datetime(as_of).date()
     for snapshot in snapshots:
+        if max_created is not None and created >= max_created:
+            skipped += 1
+            continue
         if snapshot.snapshot_id in existing:
             skipped += 1
             continue
         if snapshot.signal_date is None or snapshot.trigger_price is None:
+            skipped += 1
+            continue
+        if (
+            max_signal_age_days is not None
+            and (current_date - snapshot.signal_date).days > max_signal_age_days
+        ):
             skipped += 1
             continue
         repo.create_trade(
@@ -294,9 +313,13 @@ def update_paper_trades(
     provider: MarketDataProvider,
     max_holding_days: int = 20,
     max_entry_wait_days: int = 10,
+    as_of: datetime | None = None,
 ) -> PaperUpdateResult:
     trades = repo.list_trades(limit=1000)
     active = [trade for trade in trades if trade.status in OPEN_STATUSES]
+    execution_time = _a_share_local_datetime(as_of)
+    execution_session = _a_share_execution_session(execution_time)
+    fills_deferred = 0
     for trade in active:
         bars = provider.get_daily_bars(
             [trade.instrument_id],
@@ -305,7 +328,14 @@ def update_paper_trades(
         )
         if bars.empty:
             continue
-        updated = _evaluate_trade(trade, bars, max_holding_days, max_entry_wait_days)
+        updated, deferred = _evaluate_trade(
+            trade,
+            bars,
+            max_holding_days,
+            max_entry_wait_days,
+            as_of=execution_time,
+        )
+        fills_deferred += deferred
         repo.update_trade(trade.trade_id, **updated)
     refreshed = repo.list_trades(limit=1000)
     provider_errors = getattr(provider, "last_errors", [])
@@ -313,6 +343,11 @@ def update_paper_trades(
         "provider": provider.name,
         "trades": str(len(refreshed)),
         "active_checked": str(len(active)),
+        **paper_execution_data_health(
+            as_of=execution_time,
+            fills_deferred=fills_deferred,
+            session=execution_session,
+        ),
     }
     if provider_errors:
         data_health["errors"] = " | ".join(provider_errors[:3])
@@ -321,6 +356,19 @@ def update_paper_trades(
         trades=refreshed,
         data_health=data_health,
     )
+
+
+def paper_execution_data_health(
+    as_of: datetime | None = None,
+    *,
+    fills_deferred: int = 0,
+    session: str | None = None,
+) -> dict[str, str]:
+    execution_time = _a_share_local_datetime(as_of)
+    return {
+        "paper_execution_session": session or _a_share_execution_session(execution_time),
+        "paper_execution_fills_deferred": str(fills_deferred),
+    }
 
 
 def summarize_paper_trades(trades: list[PaperTradeRecord]) -> PaperTradingSummary:
@@ -1354,12 +1402,77 @@ def _bps_rate(value: Decimal) -> Decimal:
     return value / Decimal("10000")
 
 
+def _a_share_local_datetime(value: datetime | None = None) -> datetime:
+    if value is None:
+        return datetime.now(A_SHARE_TZ)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=A_SHARE_TZ)
+    return value.astimezone(A_SHARE_TZ)
+
+
+def _a_share_execution_session(value: datetime) -> str:
+    local = _a_share_local_datetime(value)
+    if local.weekday() >= 5:
+        return "closed"
+    current = local.time()
+    if A_SHARE_MORNING_START <= current <= A_SHARE_MORNING_END:
+        return "regular"
+    if A_SHARE_AFTERNOON_START <= current <= A_SHARE_AFTERNOON_END:
+        return "regular"
+    if A_SHARE_MORNING_END < current < A_SHARE_AFTERNOON_START:
+        return "midday_break"
+    if current > A_SHARE_AFTERNOON_END:
+        return "after_close"
+    return "pre_open"
+
+
+def _is_a_share_trade(trade: PaperTradeRecord) -> bool:
+    return trade.instrument_id.upper().startswith("CN:")
+
+
+def _a_share_can_fill_bar(
+    trade: PaperTradeRecord,
+    trade_date: date,
+    as_of: datetime | None,
+    *,
+    status: str,
+    entry_date: date | None,
+) -> bool:
+    if not _is_a_share_trade(trade) or as_of is None:
+        return True
+    local = _a_share_local_datetime(as_of)
+    current_date = local.date()
+    if trade_date > current_date:
+        return False
+    if trade_date < current_date:
+        return True
+
+    session = _a_share_execution_session(local)
+    if session == "regular":
+        return True
+    if session == "after_close":
+        if status == "pending":
+            return trade.signal_date < trade_date
+        if status == "open":
+            return entry_date is not None and entry_date < trade_date
+    return False
+
+
+def _append_note(existing: str, note: str) -> str:
+    if not existing:
+        return note
+    if note in existing:
+        return existing
+    return f"{existing} {note}"
+
+
 def _evaluate_trade(
     trade: PaperTradeRecord,
     bars: pd.DataFrame,
     max_holding_days: int,
     max_entry_wait_days: int,
-) -> dict[str, object]:
+    as_of: datetime | None = None,
+) -> tuple[dict[str, object], int]:
     ordered = bars.sort_values("trade_date").reset_index(drop=True)
     if pd.api.types.is_datetime64_any_dtype(ordered["trade_date"]):
         ordered["trade_date"] = ordered["trade_date"].dt.date
@@ -1367,90 +1480,148 @@ def _evaluate_trade(
     entry_price = trade.entry_price
     status = trade.status
     notes = trade.notes
+    deferred_fills = 0
 
     for _, row in ordered.iterrows():
         trade_date = row["trade_date"]
+        if isinstance(trade_date, pd.Timestamp):
+            trade_date = trade_date.date()
+        elif isinstance(trade_date, datetime):
+            trade_date = trade_date.date()
         high = Decimal(str(row["high"]))
         low = Decimal(str(row["low"]))
         close = Decimal(str(row["close"]))
         if status == "pending":
             wait_days = max((trade_date - trade.signal_date).days, 0)
             if high >= trade.trigger_price:
+                if not _a_share_can_fill_bar(
+                    trade,
+                    trade_date,
+                    as_of,
+                    status=status,
+                    entry_date=entry_date,
+                ):
+                    deferred_fills += 1
+                    notes = _append_note(
+                        notes,
+                        "A股非交易时段：当天买点已出现，等待下个交易时段确认。",
+                    )
+                    continue
                 status = "open"
                 entry_date = trade_date
                 entry_price = trade.trigger_price
-                notes = "Entry triggered by daily high crossing trigger."
+                notes = _append_note(notes, "触发价被日内高点确认，模拟开仓。")
             elif wait_days > max_entry_wait_days:
-                return {
-                    "status": "time_exit",
-                    "latest_date": trade_date,
-                    "latest_price": close,
-                    "exit_date": trade_date,
-                    "exit_price": close,
-                    "realized_return_pct": Decimal("0"),
-                    "holding_days": 0,
-                    "notes": "Entry trigger expired before execution.",
-                }
+                return (
+                    {
+                        "status": "time_exit",
+                        "latest_date": trade_date,
+                        "latest_price": close,
+                        "exit_date": trade_date,
+                        "exit_price": close,
+                        "realized_return_pct": Decimal("0"),
+                        "holding_days": 0,
+                        "notes": "买点等待超时，未开仓退出跟踪。",
+                    },
+                    deferred_fills,
+                )
             else:
                 continue
 
         if status == "open" and entry_date is not None and entry_price is not None:
             holding_days = max((trade_date - entry_date).days, 0)
+            if not _a_share_can_fill_bar(
+                trade,
+                trade_date,
+                as_of,
+                status=status,
+                entry_date=entry_date,
+            ):
+                exit_condition_reached = (
+                    (trade.initial_stop is not None and low <= trade.initial_stop)
+                    or (trade.target_1 is not None and high >= trade.target_1)
+                    or holding_days >= max_holding_days
+                )
+                if exit_condition_reached:
+                    deferred_fills += 1
+                    notes = _append_note(
+                        notes,
+                        "A股非交易时段：卖出条件已出现，等待交易时段确认。",
+                    )
+                continue
+            if _is_a_share_trade(trade) and trade_date == entry_date:
+                notes = _append_note(notes, "A股 T+1：买入当日不模拟卖出。")
+                continue
             if trade.initial_stop is not None and low <= trade.initial_stop:
-                return _closed_update(
-                    status="stopped",
-                    entry_date=entry_date,
-                    entry_price=entry_price,
-                    exit_date=trade_date,
-                    exit_price=trade.initial_stop,
-                    latest_price=close,
-                    holding_days=holding_days,
-                    notes="Initial stop touched.",
+                return (
+                    _closed_update(
+                        status="stopped",
+                        entry_date=entry_date,
+                        entry_price=entry_price,
+                        exit_date=trade_date,
+                        exit_price=trade.initial_stop,
+                        latest_price=close,
+                        holding_days=holding_days,
+                        notes="触及初始止损，模拟离场。",
+                    ),
+                    deferred_fills,
                 )
             if trade.target_1 is not None and high >= trade.target_1:
-                return _closed_update(
-                    status="target_1_hit",
-                    entry_date=entry_date,
-                    entry_price=entry_price,
-                    exit_date=trade_date,
-                    exit_price=trade.target_1,
-                    latest_price=close,
-                    holding_days=holding_days,
-                    notes="Target 1 touched.",
+                return (
+                    _closed_update(
+                        status="target_1_hit",
+                        entry_date=entry_date,
+                        entry_price=entry_price,
+                        exit_date=trade_date,
+                        exit_price=trade.target_1,
+                        latest_price=close,
+                        holding_days=holding_days,
+                        notes="触及第一目标价，模拟止盈。",
+                    ),
+                    deferred_fills,
                 )
             if holding_days >= max_holding_days:
-                return _closed_update(
-                    status="time_exit",
-                    entry_date=entry_date,
-                    entry_price=entry_price,
-                    exit_date=trade_date,
-                    exit_price=close,
-                    latest_price=close,
-                    holding_days=holding_days,
-                    notes="Maximum holding window reached.",
+                return (
+                    _closed_update(
+                        status="time_exit",
+                        entry_date=entry_date,
+                        entry_price=entry_price,
+                        exit_date=trade_date,
+                        exit_price=close,
+                        latest_price=close,
+                        holding_days=holding_days,
+                        notes="达到最长持有窗口，按收盘价模拟退出。",
+                    ),
+                    deferred_fills,
                 )
 
     latest = ordered.iloc[-1]
     latest_date = latest["trade_date"]
     latest_price = Decimal(str(latest["close"]))
     if status == "open" and entry_date is not None and entry_price is not None:
-        return {
-            "status": "open",
-            "entry_date": entry_date,
-            "entry_price": entry_price,
+        return (
+            {
+                "status": "open",
+                "entry_date": entry_date,
+                "entry_price": entry_price,
+                "latest_date": latest_date,
+                "latest_price": latest_price,
+                "unrealized_return_pct": Decimal(str(_return_pct(entry_price, latest_price))),
+                "holding_days": max((latest_date - entry_date).days, 0),
+                "notes": notes,
+            },
+            deferred_fills,
+        )
+    return (
+        {
+            "status": "pending",
             "latest_date": latest_date,
             "latest_price": latest_price,
-            "unrealized_return_pct": Decimal(str(_return_pct(entry_price, latest_price))),
-            "holding_days": max((latest_date - entry_date).days, 0),
+            "holding_days": 0,
             "notes": notes,
-        }
-    return {
-        "status": "pending",
-        "latest_date": latest_date,
-        "latest_price": latest_price,
-        "holding_days": 0,
-        "notes": notes,
-    }
+        },
+        deferred_fills,
+    )
 
 
 def _closed_update(

@@ -64,6 +64,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [ledger, setLedger] = useState<PaperLedgerResponse>();
   const [validation, setValidation] = useState<PaperValidationResponse>();
   const [paperSession, setPaperSession] = useState<PaperSessionResponse>();
+  const [paperExecutionHealth, setPaperExecutionHealth] = useState<Record<string, string>>({});
   const [paperSessionForm, setPaperSessionForm] = useState<PaperSessionStartPayload>(defaultPaperSessionForm);
   const [form, setForm] = useState<Position>(emptyPosition);
   const [paperMessage, setPaperMessage] = useState("");
@@ -82,6 +83,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     setPortfolio(result);
     setPositions(result.positions);
     setPaper(paperResult);
+    setPaperExecutionHealth(paperResult.data_health);
     setPaperSession(paperSessionResult);
     setPaperSessionForm(formFromPaperSession(paperSessionResult));
     setLedger(ledgerResult);
@@ -111,10 +113,11 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     const result = await updatePaperTrades(dataMode);
     setPaperMessage(
       language === "zh"
-        ? `已更新 ${result.summary.total} 笔交易，${result.summary.closed} 笔已结束`
-        : `Updated ${result.summary.total} trades, ${result.summary.closed} closed`,
+        ? `已更新 ${result.summary.total} 笔交易，${result.summary.closed} 笔已结束，延迟成交 ${result.data_health.paper_execution_fills_deferred ?? "0"} 笔`
+        : `Updated ${result.summary.total} trades, ${result.summary.closed} closed, ${result.data_health.paper_execution_fills_deferred ?? "0"} fills deferred`,
     );
-    setPaper({ summary: result.summary, trades: result.trades });
+    setPaperExecutionHealth(result.data_health);
+    setPaper({ summary: result.summary, trades: result.trades, data_health: result.data_health });
     const [ledgerResult, validationResult] = await Promise.all([
       fetchPaperLedger(),
       fetchPaperValidation(),
@@ -289,6 +292,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
           onChange={setPaperSessionForm}
           onStart={startFormalPaperSession}
         />
+        <PaperExecutionStatus dataHealth={paperExecutionHealth} language={language} />
         <PaperValidationCenter
           validation={validation}
           language={language}
@@ -376,6 +380,41 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
           </table>
         </div>
       </section>
+    </div>
+  );
+}
+
+function PaperExecutionStatus({
+  dataHealth,
+  language,
+}: {
+  dataHealth: Record<string, string>;
+  language: Language;
+}) {
+  const session = dataHealth.paper_execution_session ?? "unknown";
+  const deferred = Number(dataHealth.paper_execution_fills_deferred ?? 0);
+  const meta = executionSessionMeta(session, language);
+  return (
+    <div className={`paper-execution-status execution-${session}`}>
+      <div>
+        <span className="eyebrow">{language === "zh" ? "A股模拟成交规则" : "A-share execution guard"}</span>
+        <h3>{meta.title}</h3>
+        <p>{meta.description}</p>
+      </div>
+      <div className="paper-execution-metrics">
+        <span>
+          {language === "zh" ? "成交状态" : "Fill mode"}
+          <strong>{meta.mode}</strong>
+        </span>
+        <span>
+          {language === "zh" ? "延迟成交" : "Deferred fills"}
+          <strong>{deferred}</strong>
+        </span>
+        <span>
+          {language === "zh" ? "A股限制" : "A-share rule"}
+          <strong>T+1</strong>
+        </span>
+      </div>
     </div>
   );
 }
@@ -530,6 +569,55 @@ function PaperSessionStarter({
       </div>
     </div>
   );
+}
+
+function executionSessionMeta(session: string, language: Language) {
+  const zh = language === "zh";
+  const labels: Record<string, { title: string; description: string; mode: string }> = {
+    regular: {
+      title: zh ? "当前处于 A 股交易时段" : "A-share regular session",
+      description: zh
+        ? "模拟盘可以按触发价、止损价和目标价确认当天成交；买入当天仍遵守 T+1，不模拟卖出。"
+        : "Paper trades can confirm current-day triggers, stops, and targets; same-day exits are still blocked by T+1.",
+      mode: zh ? "允许确认" : "Fill allowed",
+    },
+    midday_break: {
+      title: zh ? "当前处于午间休市" : "Midday break",
+      description: zh
+        ? "午休不生成新的当天成交，只更新已有记录和等待下午开盘确认。"
+        : "No new current-day fills during the break; records wait for the afternoon session.",
+      mode: zh ? "等待开盘" : "Waiting",
+    },
+    after_close: {
+      title: zh ? "当前处于收盘后" : "After close",
+      description: zh
+        ? "收盘后可更新净值和已可确认的历史结果，但不会把当天新信号追认为已买入。"
+        : "After close can update marks and historical outcomes, but same-day new signals are not back-filled as bought.",
+      mode: zh ? "延后确认" : "Deferred",
+    },
+    pre_open: {
+      title: zh ? "当前处于开盘前" : "Pre-open",
+      description: zh
+        ? "开盘前不生成当天买卖成交，等交易时段再确认触发。"
+        : "No current-day buy/sell fills before the regular session.",
+      mode: zh ? "等待开盘" : "Waiting",
+    },
+    closed: {
+      title: zh ? "当前不是 A 股交易日" : "Market closed",
+      description: zh
+        ? "非交易日只做账本和历史状态更新，不生成当天买卖成交。"
+        : "Non-trading days update ledger state only, without current-day fills.",
+      mode: zh ? "不成交" : "No fills",
+    },
+    unknown: {
+      title: zh ? "尚未获取成交时段" : "Execution status unavailable",
+      description: zh
+        ? "点击更新模拟盘后，会显示当前是否允许确认 A 股成交。"
+        : "Update paper trades to show whether A-share fills can be confirmed now.",
+      mode: zh ? "未更新" : "Unknown",
+    },
+  };
+  return labels[session] ?? labels.unknown;
 }
 
 function formFromPaperSession(session: PaperSessionResponse): PaperSessionStartPayload {
