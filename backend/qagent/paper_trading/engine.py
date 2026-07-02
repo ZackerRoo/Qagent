@@ -270,26 +270,40 @@ def seed_paper_trades_from_snapshots(
     snapshots: list[OpportunitySnapshotRecord],
     provider: str,
     max_created: int | None = None,
+    max_active_trades: int | None = None,
     max_signal_age_days: int | None = None,
     as_of: datetime | None = None,
+    signal_date_override: date | None = None,
 ) -> PaperSeedResult:
     created = 0
     skipped = 0
-    existing = {trade.source_snapshot_id for trade in repo.list_trades(limit=1000)}
+    existing_trades = repo.list_trades(limit=1000)
+    existing = {trade.source_snapshot_id for trade in existing_trades}
+    active_instruments = {
+        trade.instrument_id for trade in existing_trades if trade.status in OPEN_STATUSES
+    }
+    active_count = sum(1 for trade in existing_trades if trade.status in OPEN_STATUSES)
     current_date = _a_share_local_datetime(as_of).date()
     for snapshot in snapshots:
         if max_created is not None and created >= max_created:
             skipped += 1
             continue
+        if max_active_trades is not None and active_count + created >= max_active_trades:
+            skipped += 1
+            continue
         if snapshot.snapshot_id in existing:
             skipped += 1
             continue
-        if snapshot.signal_date is None or snapshot.trigger_price is None:
+        if snapshot.instrument_id in active_instruments:
+            skipped += 1
+            continue
+        signal_date = signal_date_override or snapshot.signal_date
+        if signal_date is None or snapshot.trigger_price is None:
             skipped += 1
             continue
         if (
             max_signal_age_days is not None
-            and (current_date - snapshot.signal_date).days > max_signal_age_days
+            and (current_date - signal_date).days > max_signal_age_days
         ):
             skipped += 1
             continue
@@ -298,13 +312,14 @@ def seed_paper_trades_from_snapshots(
             provider=provider,
             instrument_id=snapshot.instrument_id,
             strategy_id=snapshot.primary_strategy_id,
-            signal_date=snapshot.signal_date,
+            signal_date=signal_date,
             trigger_price=snapshot.trigger_price,
             initial_stop=snapshot.initial_stop,
             target_1=snapshot.target_1,
             rank_score=snapshot.rank_score,
         )
         created += 1
+        active_instruments.add(snapshot.instrument_id)
     return PaperSeedResult(scanned=len(snapshots), created=created, skipped=skipped)
 
 

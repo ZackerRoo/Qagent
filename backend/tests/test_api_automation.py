@@ -1,6 +1,7 @@
 import json
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 
@@ -185,6 +186,239 @@ def test_automation_scheduler_seeds_latest_signal_day_not_latest_inserted_rows(
     trades = client.get("/api/paper-trades?limit=10").json()["trades"]
     assert [trade["instrument_id"] for trade in trades] == ["CN:588190", "CN:588850"]
     assert {trade["signal_date"] for trade in trades} == {"2026-07-01"}
+
+
+def test_automation_scheduler_seeds_from_cached_recommendation_order(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'automation-cache-recommendations.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    repo = QagentRepository(session_factory)
+    now = datetime.now(timezone.utc)
+    with session_factory() as session:
+        session.add(
+            ScanRunRow(
+                run_id="scan-cache-seed",
+                provider="free",
+                mode="full_market",
+                symbols=json.dumps(["CN:002747", "CN:688052", "CN:588850", "CN:588190"]),
+                scanned=4,
+                cards=4,
+                data_health="{}",
+                created_at=now,
+            )
+        )
+        for index, (card_id, instrument_id, rank_score, factor_score, strategy_score) in enumerate(
+            [
+                ("card-stock-estun", "CN:002747", Decimal("0.62"), 0.66, 1.0),
+                ("card-stock-naxin", "CN:688052", Decimal("0.64"), 0.69, 0.88),
+                ("card-etf-machine", "CN:588850", Decimal("0.99"), 0.57, 0.82),
+                ("card-etf-100", "CN:588190", Decimal("0.98"), 0.60, 0.86),
+            ],
+            start=1,
+        ):
+            card_payload = {
+                "card_id": card_id,
+                "instrument_id": instrument_id,
+                "instrument_label": instrument_id,
+                "rank_score": float(rank_score),
+                "factor_score": factor_score,
+                "strategy_score": strategy_score,
+                "decision": {"risk_status": "warning", "components": {}},
+            }
+            session.add(
+                OpportunitySnapshotRow(
+                    snapshot_id=f"scan-cache-seed:card-{index}",
+                    run_id="scan-cache-seed",
+                    card_id=card_id,
+                    instrument_id=instrument_id,
+                    market="CN",
+                    status="setup_ready",
+                    signal_date=date(2026, 7, 1),
+                    latest_close=Decimal("10.00"),
+                    primary_strategy_id="trend_momentum_stage2",
+                    score=rank_score,
+                    strategy_score=Decimal(str(strategy_score)),
+                    rank_score=rank_score,
+                    trigger_price=Decimal("10.20"),
+                    initial_stop=Decimal("9.80"),
+                    target_1=Decimal("11.00"),
+                    card_json=json.dumps(card_payload, sort_keys=True),
+                    created_at=now,
+                )
+            )
+        session.commit()
+    repo.save_scan_result_cache(
+        cache_key="full_market_batch:free:true",
+        provider="free",
+        mode="full_market_batch",
+        symbols=["CN:002747", "CN:688052", "CN:588850", "CN:588190"],
+        payload={
+            "symbols": ["CN:002747", "CN:688052", "CN:588850", "CN:588190"],
+            "cards": [
+                {
+                    "card_id": "card-stock-estun",
+                    "instrument_id": "CN:002747",
+                    "rank_score": 0.62,
+                    "factor_score": 0.66,
+                    "strategy_score": 1.0,
+                    "decision": {"risk_status": "warning", "components": {}},
+                    "entry_plan": {"trigger_price": "10.20"},
+                },
+                {
+                    "card_id": "card-stock-naxin",
+                    "instrument_id": "CN:688052",
+                    "rank_score": 0.64,
+                    "factor_score": 0.69,
+                    "strategy_score": 0.88,
+                    "decision": {"risk_status": "warning", "components": {}},
+                    "entry_plan": {"trigger_price": "10.20"},
+                },
+                {
+                    "card_id": "card-etf-machine",
+                    "instrument_id": "CN:588850",
+                    "rank_score": 0.99,
+                    "factor_score": 0.1,
+                    "strategy_score": 0.1,
+                    "decision": {"risk_status": "warning", "components": {}},
+                    "entry_plan": {"trigger_price": "10.20"},
+                },
+                {
+                    "card_id": "card-etf-100",
+                    "instrument_id": "CN:588190",
+                    "rank_score": 0.98,
+                    "factor_score": 0.1,
+                    "strategy_score": 0.1,
+                    "decision": {"risk_status": "warning", "components": {}},
+                    "entry_plan": {"trigger_price": "10.20"},
+                },
+            ],
+            "items": [],
+            "strategy_health": [],
+            "factor_rankings": [],
+            "sector_strength": [],
+            "portfolio_plan": {"profile": "balanced"},
+            "data_health": {"provider": "free"},
+        },
+    )
+
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/automation/scheduler/run-once"
+        "?provider=free&include_etfs=true&run_scan=false&run_alerts=false"
+        "&update_paper=false&seed_paper=true&seed_limit=2"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["last_result"]["paper_created"] == 2
+    assert body["last_result"]["data_health"]["automation_seed_source"] == "latest_recommendation_cache"
+
+    trades = client.get("/api/paper-trades?limit=10").json()["trades"]
+    assert {trade["instrument_id"] for trade in trades} == {"CN:002747", "CN:688052"}
+    assert {trade["signal_date"] for trade in trades} == {
+        datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    }
+
+    with session_factory() as session:
+        session.add(
+            ScanRunRow(
+                run_id="scan-cache-seed-second",
+                provider="free",
+                mode="full_market",
+                symbols=json.dumps(["CN:002747", "CN:688052"]),
+                scanned=2,
+                cards=2,
+                data_health="{}",
+                created_at=now + timedelta(minutes=1),
+            )
+        )
+        for index, (card_id, instrument_id, rank_score, factor_score, strategy_score) in enumerate(
+            [
+                ("card-stock-estun-new", "CN:002747", Decimal("0.63"), 0.66, 1.0),
+                ("card-stock-naxin-new", "CN:688052", Decimal("0.65"), 0.69, 0.88),
+            ],
+            start=1,
+        ):
+            session.add(
+                OpportunitySnapshotRow(
+                    snapshot_id=f"scan-cache-seed-second:card-{index}",
+                    run_id="scan-cache-seed-second",
+                    card_id=card_id,
+                    instrument_id=instrument_id,
+                    market="CN",
+                    status="setup_ready",
+                    signal_date=date(2026, 7, 1),
+                    latest_close=Decimal("10.00"),
+                    primary_strategy_id="trend_momentum_stage2",
+                    score=rank_score,
+                    strategy_score=Decimal(str(strategy_score)),
+                    rank_score=rank_score,
+                    trigger_price=Decimal("10.20"),
+                    initial_stop=Decimal("9.80"),
+                    target_1=Decimal("11.00"),
+                    card_json=json.dumps(
+                        {
+                            "card_id": card_id,
+                            "instrument_id": instrument_id,
+                            "rank_score": float(rank_score),
+                            "factor_score": factor_score,
+                            "strategy_score": strategy_score,
+                            "decision": {"risk_status": "warning", "components": {}},
+                        },
+                        sort_keys=True,
+                    ),
+                    created_at=now + timedelta(minutes=1),
+                )
+            )
+        session.commit()
+    repo.save_scan_result_cache(
+        cache_key="full_market_batch:free:true",
+        provider="free",
+        mode="full_market_batch",
+        symbols=["CN:002747", "CN:688052"],
+        payload={
+            "symbols": ["CN:002747", "CN:688052"],
+            "cards": [
+                {
+                    "card_id": "card-stock-estun-new",
+                    "instrument_id": "CN:002747",
+                    "rank_score": 0.63,
+                    "factor_score": 0.66,
+                    "strategy_score": 1.0,
+                    "decision": {"risk_status": "warning", "components": {}},
+                    "entry_plan": {"trigger_price": "10.20"},
+                },
+                {
+                    "card_id": "card-stock-naxin-new",
+                    "instrument_id": "CN:688052",
+                    "rank_score": 0.65,
+                    "factor_score": 0.69,
+                    "strategy_score": 0.88,
+                    "decision": {"risk_status": "warning", "components": {}},
+                    "entry_plan": {"trigger_price": "10.20"},
+                },
+            ],
+            "items": [],
+            "strategy_health": [],
+            "factor_rankings": [],
+            "sector_strength": [],
+            "portfolio_plan": {"profile": "balanced"},
+            "data_health": {"provider": "free"},
+        },
+    )
+
+    second = client.post(
+        "/api/automation/scheduler/run-once"
+        "?provider=free&include_etfs=true&run_scan=false&run_alerts=false"
+        "&update_paper=false&seed_paper=true&seed_limit=2"
+    )
+
+    assert second.status_code == 200
+    second_body = second.json()
+    assert second_body["last_result"]["paper_created"] == 0
+    assert second_body["last_result"]["paper_total"] == 2
 
 
 def test_automation_scheduler_start_and_stop_are_visible(tmp_path, monkeypatch):

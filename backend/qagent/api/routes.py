@@ -2,6 +2,8 @@ from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
+import math
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException
 
@@ -1029,19 +1031,30 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
 
     if settings.seed_paper and mode != "fixture":
         try:
-            snapshots = repo.list_latest_signal_opportunity_snapshots(
+            snapshots, seed_health = _paper_seed_snapshots_from_recommendations(
+                repo,
+                mode=mode,
+                include_etfs=settings.include_etfs,
+                max_age=timedelta(minutes=max(settings.scan_max_age_minutes, 1)),
                 limit=settings.seed_limit,
-                provider=mode,
+            )
+            tracking_signal_date = (
+                _a_share_today()
+                if seed_health.get("automation_seed_source") == "latest_recommendation_cache"
+                else None
             )
             seed_result = seed_paper_trades_from_snapshots(
                 paper_repo,
                 snapshots,
                 provider=mode,
                 max_created=settings.seed_limit,
+                max_active_trades=settings.seed_limit,
                 max_signal_age_days=None,
+                signal_date_override=tracking_signal_date,
             )
             paper_created += seed_result.created
             data_health["automation_seed_snapshots"] = str(len(snapshots))
+            data_health.update(seed_health)
             if snapshots and snapshots[0].signal_date is not None:
                 data_health["automation_seed_latest_signal_date"] = (
                     snapshots[0].signal_date.isoformat()
@@ -1110,6 +1123,133 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
     )
 
 
+def _paper_seed_snapshots_from_recommendations(
+    repo: QagentRepository,
+    *,
+    mode: str,
+    include_etfs: bool,
+    max_age: timedelta,
+    limit: int,
+) -> tuple[list, dict[str, str]]:
+    snapshots, health = _paper_seed_snapshots_from_latest_cache(
+        repo,
+        mode=mode,
+        include_etfs=include_etfs,
+        max_age=max_age,
+        limit=limit,
+    )
+    if snapshots:
+        return snapshots, health
+
+    fallback = repo.list_latest_signal_opportunity_snapshots(limit=limit, provider=mode)
+    return fallback, {
+        "automation_seed_source": "latest_signal_day",
+        "automation_seed_rank_profile": "rank_score",
+    }
+
+
+def _paper_seed_snapshots_from_latest_cache(
+    repo: QagentRepository,
+    *,
+    mode: str,
+    include_etfs: bool,
+    max_age: timedelta,
+    limit: int,
+) -> tuple[list, dict[str, str]]:
+    cached = repo.get_recent_scan_result_cache(
+        cache_key=full_market_batch_cache_key(mode, include_etfs),
+        max_age=max_age,
+    )
+    if cached is None:
+        return [], {}
+    raw_cards = cached.payload.get("cards")
+    if not isinstance(raw_cards, list):
+        return [], {}
+
+    cards = [
+        card
+        for card in raw_cards
+        if isinstance(card, dict) and _is_trackable_cached_paper_card(card)
+    ]
+    ranked = sorted(cards, key=_balanced_cached_card_score, reverse=True)
+    ranked = ranked[: max(limit * 3, limit)]
+    card_ids = [_string_value(card.get("card_id")) for card in ranked]
+    instrument_ids = [_string_value(card.get("instrument_id")) for card in ranked]
+    snapshots_by_card = {
+        snapshot.card_id: snapshot
+        for snapshot in repo.list_latest_opportunity_snapshots_by_card_ids(
+            card_ids,
+            provider=mode,
+        )
+    }
+    snapshots_by_instrument = {
+        snapshot.instrument_id: snapshot
+        for snapshot in repo.list_latest_opportunity_snapshots_by_instruments(
+            instrument_ids,
+            provider=mode,
+        )
+    }
+
+    selected = []
+    seen_snapshot_ids: set[str] = set()
+    for card in ranked:
+        snapshot = snapshots_by_card.get(_string_value(card.get("card_id")))
+        if snapshot is None:
+            snapshot = snapshots_by_instrument.get(_string_value(card.get("instrument_id")))
+        if snapshot is None or snapshot.snapshot_id in seen_snapshot_ids:
+            continue
+        selected.append(snapshot)
+        seen_snapshot_ids.add(snapshot.snapshot_id)
+        if len(selected) >= limit:
+            break
+    if not selected:
+        return [], {}
+    return selected, {
+        "automation_seed_source": "latest_recommendation_cache",
+        "automation_seed_cache_id": cached.cache_id,
+        "automation_seed_rank_profile": "balanced",
+    }
+
+
+def _is_trackable_cached_paper_card(card: dict[str, object]) -> bool:
+    entry_plan = card.get("entry_plan")
+    trigger_price = entry_plan.get("trigger_price") if isinstance(entry_plan, dict) else None
+    decision = card.get("decision")
+    risk_status = decision.get("risk_status") if isinstance(decision, dict) else None
+    action = decision.get("action") if isinstance(decision, dict) else None
+    return bool(trigger_price) and risk_status != "blocked" and action != "avoid"
+
+
+def _balanced_cached_card_score(card: dict[str, object]) -> float:
+    base = (
+        _float_value(card.get("rank_score")) * 0.45
+        + _float_value(card.get("factor_score")) * 0.25
+        + _float_value(card.get("strategy_score")) * 0.3
+    )
+    decision = card.get("decision")
+    risk_status = decision.get("risk_status") if isinstance(decision, dict) else None
+    risk_penalty = 0.45 if risk_status == "blocked" else 0.16 if risk_status == "warning" else 0
+    return max(0.0, min(1.0, base - risk_penalty * 0.65))
+
+
+def _float_value(value: object) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(result):
+        return 0.0
+    return result
+
+
+def _string_value(value: object) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _a_share_today() -> date:
+    return datetime.now(ZoneInfo("Asia/Shanghai")).date()
+
+
 def _maybe_start_automatic_full_scan(
     repo: QagentRepository,
     settings: AutoProcessingSettings,
@@ -1163,16 +1303,21 @@ def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, o
     if limit <= 0 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
     mode = provider.strip().lower()
-    snapshots = _repo().list_latest_signal_opportunity_snapshots(
+    snapshots, _ = _paper_seed_snapshots_from_recommendations(
+        _repo(),
+        mode=mode,
+        include_etfs=True,
+        max_age=timedelta(days=7),
         limit=limit,
-        provider=mode,
     )
     result = seed_paper_trades_from_snapshots(
         _paper_repo(),
         snapshots,
         provider=mode,
         max_created=limit,
+        max_active_trades=limit,
         max_signal_age_days=None,
+        signal_date_override=_a_share_today(),
     )
     return result.model_dump(mode="json")
 

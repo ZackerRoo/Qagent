@@ -708,6 +708,72 @@ class QagentRepository:
                     break
             return snapshots
 
+    def list_latest_opportunity_snapshots_by_card_ids(
+        self,
+        card_ids: list[str],
+        provider: str | None = None,
+    ) -> list[OpportunitySnapshotRecord]:
+        ordered_ids = [card_id for card_id in _dedupe_strings(card_ids) if card_id]
+        if not ordered_ids:
+            return []
+        with self.session_factory() as session:
+            query = session.query(OpportunitySnapshotRow).filter(
+                OpportunitySnapshotRow.card_id.in_(ordered_ids),
+                OpportunitySnapshotRow.trigger_price.isnot(None),
+            )
+            if provider:
+                query = query.join(ScanRunRow, OpportunitySnapshotRow.run_id == ScanRunRow.run_id)
+                query = query.filter(ScanRunRow.provider == provider)
+            rows = (
+                query.order_by(
+                    OpportunitySnapshotRow.created_at.desc(),
+                    OpportunitySnapshotRow.snapshot_id.desc(),
+                )
+                .all()
+            )
+            latest_by_card_id: dict[str, OpportunitySnapshotRecord] = {}
+            for row in rows:
+                if row.card_id not in latest_by_card_id:
+                    latest_by_card_id[row.card_id] = self._opportunity_snapshot_from_row(row)
+            return [
+                latest_by_card_id[card_id]
+                for card_id in ordered_ids
+                if card_id in latest_by_card_id
+            ]
+
+    def list_latest_opportunity_snapshots_by_instruments(
+        self,
+        instrument_ids: list[str],
+        provider: str | None = None,
+    ) -> list[OpportunitySnapshotRecord]:
+        ordered_ids = [instrument_id for instrument_id in _dedupe_strings(instrument_ids) if instrument_id]
+        if not ordered_ids:
+            return []
+        with self.session_factory() as session:
+            query = session.query(OpportunitySnapshotRow).filter(
+                OpportunitySnapshotRow.instrument_id.in_(ordered_ids),
+                OpportunitySnapshotRow.trigger_price.isnot(None),
+            )
+            if provider:
+                query = query.join(ScanRunRow, OpportunitySnapshotRow.run_id == ScanRunRow.run_id)
+                query = query.filter(ScanRunRow.provider == provider)
+            rows = (
+                query.order_by(
+                    OpportunitySnapshotRow.created_at.desc(),
+                    OpportunitySnapshotRow.snapshot_id.desc(),
+                )
+                .all()
+            )
+            latest_by_instrument: dict[str, OpportunitySnapshotRecord] = {}
+            for row in rows:
+                if row.instrument_id not in latest_by_instrument:
+                    latest_by_instrument[row.instrument_id] = self._opportunity_snapshot_from_row(row)
+            return [
+                latest_by_instrument[instrument_id]
+                for instrument_id in ordered_ids
+                if instrument_id in latest_by_instrument
+            ]
+
     def save_brief_run(self, brief) -> BriefRunRecord:
         brief_id = f"brief-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
         payload = brief.model_dump(mode="json")
@@ -1122,3 +1188,15 @@ def _asset_sort_rank(asset_type: str) -> int:
 
 def _asset_browse_rank(asset_type: str) -> int:
     return {"stock": 0, "etf": 1}.get(asset_type, 2)
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        normalized = value.strip()
+        if not normalized or normalized in seen:
+            continue
+        result.append(normalized)
+        seen.add(normalized)
+    return result
