@@ -1,5 +1,8 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
+
+import pandas as pd
 
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.paper_trading.engine import (
@@ -11,6 +14,29 @@ from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.storage.paper import PaperTradingRepository
 
 from test_state_repository import make_repo
+
+
+class SingleDayCnProvider:
+    name = "single_day_cn"
+    last_errors: list[str] = []
+
+    def get_daily_bars(self, instrument_ids, start, end):
+        return pd.DataFrame(
+            [
+                {
+                    "instrument_id": instrument_ids[0],
+                    "trade_date": date(2026, 7, 1),
+                    "open": Decimal("2.00"),
+                    "high": Decimal("2.20"),
+                    "low": Decimal("1.98"),
+                    "close": Decimal("2.10"),
+                    "volume": 100000,
+                }
+            ]
+        )
+
+    def get_snapshot(self, instrument_ids):
+        return pd.DataFrame()
 
 
 def test_paper_trading_seeds_unique_trades_from_opportunity_snapshots(tmp_path):
@@ -32,6 +58,35 @@ def test_paper_trading_seeds_unique_trades_from_opportunity_snapshots(tmp_path):
     assert trades[0].trigger_price == Decimal("83.2000")
     assert trades[0].initial_stop == Decimal("80.9000")
     assert trades[0].target_1 == Decimal("89.7600")
+
+
+def test_a_share_paper_trade_does_not_backfill_entry_on_signal_date(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    paper_repo.create_trade(
+        source_snapshot_id="manual-CN-588850",
+        provider="free",
+        instrument_id="CN:588850",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("2.10"),
+        initial_stop=Decimal("2.00"),
+        target_1=Decimal("2.30"),
+        rank_score=Decimal("0.91"),
+    )
+
+    result = update_paper_trades(
+        paper_repo,
+        provider=SingleDayCnProvider(),
+        as_of=datetime(2026, 7, 2, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    trade = paper_repo.list_trades()[0]
+
+    assert result.data_health["paper_execution_session"] == "regular"
+    assert result.data_health["paper_execution_fills_deferred"] == "1"
+    assert trade.status == "pending"
+    assert trade.entry_date is None
+    assert "等待下个交易日" in trade.notes
 
 
 def test_update_paper_trades_marks_target_hit_from_future_bars(tmp_path):

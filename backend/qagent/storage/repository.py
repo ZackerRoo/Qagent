@@ -6,6 +6,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.domain.models import OpportunityCard
@@ -660,6 +661,52 @@ class QagentRepository:
                 .all()
             )
             return [self._opportunity_snapshot_from_row(row) for row in rows]
+
+    def list_latest_signal_opportunity_snapshots(
+        self,
+        limit: int = 50,
+        provider: str | None = None,
+    ) -> list[OpportunitySnapshotRecord]:
+        with self.session_factory() as session:
+            latest_query = session.query(func.max(OpportunitySnapshotRow.signal_date)).filter(
+                OpportunitySnapshotRow.signal_date.isnot(None),
+                OpportunitySnapshotRow.trigger_price.isnot(None),
+            )
+            if provider:
+                latest_query = latest_query.join(
+                    ScanRunRow,
+                    OpportunitySnapshotRow.run_id == ScanRunRow.run_id,
+                ).filter(ScanRunRow.provider == provider)
+            latest_signal_date = latest_query.scalar()
+            if latest_signal_date is None:
+                return []
+
+            query = session.query(OpportunitySnapshotRow).filter(
+                OpportunitySnapshotRow.signal_date == latest_signal_date,
+                OpportunitySnapshotRow.trigger_price.isnot(None),
+            )
+            if provider:
+                query = query.join(ScanRunRow, OpportunitySnapshotRow.run_id == ScanRunRow.run_id)
+                query = query.filter(ScanRunRow.provider == provider)
+            rows = (
+                query.order_by(
+                    OpportunitySnapshotRow.rank_score.desc(),
+                    OpportunitySnapshotRow.score.desc(),
+                    OpportunitySnapshotRow.created_at.desc(),
+                    OpportunitySnapshotRow.snapshot_id.desc(),
+                )
+                .all()
+            )
+            snapshots: list[OpportunitySnapshotRecord] = []
+            seen_instruments: set[str] = set()
+            for row in rows:
+                if row.instrument_id in seen_instruments:
+                    continue
+                snapshots.append(self._opportunity_snapshot_from_row(row))
+                seen_instruments.add(row.instrument_id)
+                if len(snapshots) >= limit:
+                    break
+            return snapshots
 
     def save_brief_run(self, brief) -> BriefRunRecord:
         brief_id = f"brief-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"

@@ -1029,8 +1029,8 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
 
     if settings.seed_paper and mode != "fixture":
         try:
-            snapshots = repo.list_opportunity_snapshots(
-                limit=max(settings.seed_limit * 10, 50),
+            snapshots = repo.list_latest_signal_opportunity_snapshots(
+                limit=settings.seed_limit,
                 provider=mode,
             )
             seed_result = seed_paper_trades_from_snapshots(
@@ -1038,10 +1038,14 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 snapshots,
                 provider=mode,
                 max_created=settings.seed_limit,
-                max_signal_age_days=0,
+                max_signal_age_days=None,
             )
             paper_created += seed_result.created
             data_health["automation_seed_snapshots"] = str(len(snapshots))
+            if snapshots and snapshots[0].signal_date is not None:
+                data_health["automation_seed_latest_signal_date"] = (
+                    snapshots[0].signal_date.isoformat()
+                )
         except Exception as exc:
             errors.append(f"paper_seed: {exc}")
 
@@ -1159,8 +1163,8 @@ def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, o
     if limit <= 0 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
     mode = provider.strip().lower()
-    snapshots = _repo().list_opportunity_snapshots(
-        limit=max(limit * 10, limit),
+    snapshots = _repo().list_latest_signal_opportunity_snapshots(
+        limit=limit,
         provider=mode,
     )
     result = seed_paper_trades_from_snapshots(
@@ -1168,7 +1172,7 @@ def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, o
         snapshots,
         provider=mode,
         max_created=limit,
-        max_signal_age_days=0 if mode != "fixture" else None,
+        max_signal_age_days=None,
     )
     return result.model_dump(mode="json")
 

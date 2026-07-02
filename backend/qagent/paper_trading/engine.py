@@ -1444,6 +1444,8 @@ def _a_share_can_fill_bar(
     current_date = local.date()
     if trade_date > current_date:
         return False
+    if status == "pending" and trade_date <= trade.signal_date:
+        return False
     if trade_date < current_date:
         return True
 
@@ -1504,7 +1506,7 @@ def _evaluate_trade(
                     deferred_fills += 1
                     notes = _append_note(
                         notes,
-                        "A股非交易时段：当天买点已出现，等待下个交易时段确认。",
+                        "A股交易规则：信号日不回填买入，等待下个交易日确认。",
                     )
                     continue
                 status = "open"

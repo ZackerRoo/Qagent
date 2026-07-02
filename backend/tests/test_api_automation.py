@@ -1,4 +1,6 @@
-from datetime import datetime, timedelta, timezone
+import json
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 
 from fastapi.testclient import TestClient
 
@@ -7,6 +9,7 @@ from qagent.app import create_app
 from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.automation_scheduler import AutomationScheduler, AutoProcessingSettings
 from qagent.storage.repository import QagentRepository
+from qagent.storage.tables import OpportunitySnapshotRow, ScanRunRow
 
 
 def test_automation_run_api_saves_brief_and_queues_delivery(tmp_path, monkeypatch):
@@ -68,6 +71,120 @@ def test_automation_scheduler_run_once_updates_paper_status(tmp_path, monkeypatc
     assert body["last_result"]["paper_closed"] >= 0
     assert body["run_count"] == 1
     assert body["next_run_at"] is None
+
+
+def test_automation_scheduler_seeds_latest_signal_day_not_latest_inserted_rows(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = f"sqlite:///{tmp_path / 'automation-latest-signal.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    now = datetime.now(timezone.utc)
+    with session_factory() as session:
+        session.add_all(
+            [
+                ScanRunRow(
+                    run_id="scan-latest-signal",
+                    provider="free",
+                    mode="full_market",
+                    symbols=json.dumps(["CN:588850", "CN:588190"]),
+                    scanned=2,
+                    cards=2,
+                    data_health="{}",
+                    created_at=now - timedelta(minutes=10),
+                ),
+                ScanRunRow(
+                    run_id="scan-old-inserted-last",
+                    provider="free",
+                    mode="full_market",
+                    symbols=json.dumps(["CN:589300", "CN:589630"]),
+                    scanned=2,
+                    cards=2,
+                    data_health="{}",
+                    created_at=now,
+                ),
+            ]
+        )
+        for index, (run_id, instrument_id, signal_date, rank_score, created_at) in enumerate(
+            [
+                (
+                    "scan-latest-signal",
+                    "CN:588850",
+                    date(2026, 7, 1),
+                    Decimal("0.91"),
+                    now - timedelta(minutes=10),
+                ),
+                (
+                    "scan-latest-signal",
+                    "CN:588190",
+                    date(2026, 7, 1),
+                    Decimal("0.88"),
+                    now - timedelta(minutes=10),
+                ),
+                (
+                    "scan-old-inserted-last",
+                    "CN:589300",
+                    date(2026, 6, 26),
+                    Decimal("0.99"),
+                    now,
+                ),
+                (
+                    "scan-old-inserted-last",
+                    "CN:589630",
+                    date(2026, 6, 26),
+                    Decimal("0.98"),
+                    now,
+                ),
+            ],
+            start=1,
+        ):
+            session.add(
+                OpportunitySnapshotRow(
+                    snapshot_id=f"{run_id}:card-{index}",
+                    run_id=run_id,
+                    card_id=f"card-{index}",
+                    instrument_id=instrument_id,
+                    market="CN",
+                    status="setup_ready",
+                    signal_date=signal_date,
+                    latest_close=Decimal("2.00"),
+                    primary_strategy_id="sector_rotation_relative_strength",
+                    score=rank_score,
+                    strategy_score=rank_score,
+                    rank_score=rank_score,
+                    trigger_price=Decimal("2.10"),
+                    initial_stop=Decimal("1.95"),
+                    target_1=Decimal("2.40"),
+                    card_json=json.dumps(
+                        {
+                            "instrument_id": instrument_id,
+                            "instrument_label": instrument_id,
+                        },
+                        sort_keys=True,
+                    ),
+                    created_at=created_at,
+                )
+            )
+        session.commit()
+
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/automation/scheduler/run-once"
+        "?provider=free&run_scan=false&run_alerts=false&update_paper=false"
+        "&seed_paper=true&seed_limit=2"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["last_result"]["paper_created"] == 2
+    assert body["last_result"]["data_health"]["automation_seed_latest_signal_date"] == "2026-07-01"
+
+    trades = client.get("/api/paper-trades?limit=10").json()["trades"]
+    assert [trade["instrument_id"] for trade in trades] == ["CN:588190", "CN:588850"]
+    assert {trade["signal_date"] for trade in trades} == {"2026-07-01"}
 
 
 def test_automation_scheduler_start_and_stop_are_visible(tmp_path, monkeypatch):
