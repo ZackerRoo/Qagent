@@ -14,5 +14,6 @@ data/*.log
 data/*.pid
 data/outbox*/
 .qagent-cache/
+.qagent-runtime/
 backend/.qagent-cache/
 .env
