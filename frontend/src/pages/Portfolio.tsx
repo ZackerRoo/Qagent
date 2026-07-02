@@ -26,6 +26,7 @@ import type {
   PaperLedgerTransaction,
   PaperSessionResponse,
   PaperSessionStartPayload,
+  PaperTrade,
   PaperTradesResponse,
   PaperValidationResponse,
   PortfolioResponse,
@@ -341,6 +342,8 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
                 <th>{t("portfolio.latest")}</th>
                 <th>{t("portfolio.pnl")}</th>
                 <th>{t("portfolio.paperOutcome")}</th>
+                <th>{language === "zh" ? "撮合备注" : "Fill note"}</th>
+                <th>{language === "zh" ? "下一步动作" : "Next action"}</th>
                 <th>{t("common.strategy")}</th>
                 <th>{t("common.actions")}</th>
               </tr>
@@ -361,6 +364,8 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
                   <td>{trade.latest_price ?? "-"}</td>
                   <td>{formatPct(trade.realized_return_pct ?? trade.unrealized_return_pct)}</td>
                   <td>{ledger?.items.find((item) => item.trade_id === trade.trade_id)?.outcome ?? "-"}</td>
+                  <td className="reason-cell">{trade.notes || "-"}</td>
+                  <td className="reason-cell">{paperNextAction(trade, language)}</td>
                   <td className="reason-cell">{localizeStrategy(trade.strategy_id, language)}</td>
                   <td>
                     <button
@@ -393,6 +398,8 @@ function PaperExecutionStatus({
 }) {
   const session = dataHealth.paper_execution_session ?? "unknown";
   const deferred = Number(dataHealth.paper_execution_fills_deferred ?? 0);
+  const minuteChecked = Number(dataHealth.paper_minute_checked ?? 0);
+  const minuteRows = Number(dataHealth.paper_minute_rows ?? 0);
   const meta = executionSessionMeta(session, language);
   return (
     <div className={`paper-execution-status execution-${session}`}>
@@ -409,6 +416,10 @@ function PaperExecutionStatus({
         <span>
           {language === "zh" ? "延迟成交" : "Deferred fills"}
           <strong>{deferred}</strong>
+        </span>
+        <span>
+          {language === "zh" ? "分钟撮合" : "Minute fills"}
+          <strong>{minuteChecked} / {minuteRows}</strong>
         </span>
         <span>
           {language === "zh" ? "A股限制" : "A-share rule"}
@@ -1444,6 +1455,54 @@ function localizeValidationState(state: string, language: string): string {
     tracked: "Tracked",
   };
   return (language === "zh" ? zh : en)[state] ?? state;
+}
+
+function paperNextAction(trade: PaperTrade, language: string): string {
+  if (language === "zh") {
+    if (trade.status === "pending") {
+      if (!trade.latest_price) {
+        return "等待分钟行情；有数据后检查是否到触发价。";
+      }
+      return "继续等待触发价；超时未触发会释放名额。";
+    }
+    if (trade.status === "open") {
+      return "持仓跟踪；下一交易日起检查止损和目标价。";
+    }
+    if (trade.status === "missed_entry") {
+      return "已错过买点并释放名额；下一轮自动补入新机会。";
+    }
+    if (trade.status === "target_1_hit") {
+      return "已止盈闭环；进入胜率和收益统计。";
+    }
+    if (trade.status === "stopped") {
+      return "已止损闭环；进入回撤和失败样本统计。";
+    }
+    if (trade.status === "time_exit") {
+      return "已超时退出；释放名额并记录为未触发/弱跟随样本。";
+    }
+    return "继续观察模拟结果。";
+  }
+  if (trade.status === "pending") {
+    return trade.latest_price
+      ? "Wait for trigger; release the slot if it times out."
+      : "Wait for minute data before checking the trigger.";
+  }
+  if (trade.status === "open") {
+    return "Track the position; check stop and target from the next trading day.";
+  }
+  if (trade.status === "missed_entry") {
+    return "Entry was missed; release the slot and backfill a new candidate.";
+  }
+  if (trade.status === "target_1_hit") {
+    return "Closed at target; include in win-rate and return stats.";
+  }
+  if (trade.status === "stopped") {
+    return "Stopped out; include in drawdown and failure samples.";
+  }
+  if (trade.status === "time_exit") {
+    return "Timed out; release the slot and record weak follow-through.";
+  }
+  return "Keep monitoring the paper result.";
 }
 
 function formatManagement(risk: PositionRisk, language: string, holdingDaysLabel: string): string {

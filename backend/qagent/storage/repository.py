@@ -13,6 +13,7 @@ from qagent.domain.models import OpportunityCard
 from qagent.market.universes import UniverseCreate, UniverseRecord, normalize_symbols
 from qagent.storage.tables import (
     AlertRuleRow,
+    AutomationSchedulerStateRow,
     BriefRunRow,
     DeliveryOutboxRow,
     FullMarketScanJobRow,
@@ -128,6 +129,12 @@ class FullMarketScanJobRecord(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
 
+
+class AutomationSchedulerStateRecord(BaseModel):
+    enabled: bool
+    settings: dict[str, object]
+    updated_at: datetime
+
     @property
     def progress(self) -> int:
         if self.total_symbols <= 0:
@@ -225,6 +232,37 @@ def _parse_tags(value: str | None) -> list[str]:
 class QagentRepository:
     def __init__(self, session_factory: sessionmaker[Session]):
         self.session_factory = session_factory
+
+    def save_automation_scheduler_state(
+        self,
+        *,
+        enabled: bool,
+        settings: dict[str, object],
+    ) -> AutomationSchedulerStateRecord:
+        with self.session_factory() as session:
+            now = datetime.now(timezone.utc)
+            row = session.get(AutomationSchedulerStateRow, "default")
+            if row is None:
+                row = AutomationSchedulerStateRow(
+                    state_id="default",
+                    enabled=enabled,
+                    settings_json=json.dumps(settings, sort_keys=True),
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+            else:
+                row.enabled = enabled
+                row.settings_json = json.dumps(settings, sort_keys=True)
+                row.updated_at = now
+            session.commit()
+            session.refresh(row)
+            return self._automation_scheduler_state_from_row(row)
+
+    def get_automation_scheduler_state(self) -> AutomationSchedulerStateRecord | None:
+        with self.session_factory() as session:
+            row = session.get(AutomationSchedulerStateRow, "default")
+            return self._automation_scheduler_state_from_row(row) if row is not None else None
 
     def upsert_watchlist_item(self, item: WatchlistCreate) -> WatchlistItem:
         with self.session_factory() as session:
@@ -1102,6 +1140,20 @@ class QagentRepository:
             created_at=row.created_at,
             updated_at=row.updated_at,
             sent_at=row.sent_at,
+        )
+
+    @staticmethod
+    def _automation_scheduler_state_from_row(
+        row: AutomationSchedulerStateRow,
+    ) -> AutomationSchedulerStateRecord:
+        try:
+            settings = json.loads(row.settings_json or "{}")
+        except json.JSONDecodeError:
+            settings = {}
+        return AutomationSchedulerStateRecord(
+            enabled=row.enabled,
+            settings=settings if isinstance(settings, dict) else {},
+            updated_at=row.updated_at,
         )
 
 

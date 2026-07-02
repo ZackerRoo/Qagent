@@ -934,12 +934,37 @@ def start_automation_scheduler(
         queue_alerts=queue_alerts,
     )
     state = _automation_scheduler.start(settings, _run_auto_processing_cycle)
+    _persist_automation_scheduler_state(state)
     return state.model_dump(mode="json")
 
 
 @router.post("/automation/scheduler/stop")
 def stop_automation_scheduler() -> dict[str, object]:
-    return _automation_scheduler.stop().model_dump(mode="json")
+    state = _automation_scheduler.stop()
+    _persist_automation_scheduler_state(state)
+    return state.model_dump(mode="json")
+
+
+def restore_automation_scheduler_from_storage() -> None:
+    repo = _repo()
+    saved = repo.get_automation_scheduler_state()
+    if saved is None:
+        return
+    try:
+        settings = AutoProcessingSettings.model_validate(saved.settings)
+    except ValueError:
+        return
+    if saved.enabled:
+        _automation_scheduler.start(settings, _run_auto_processing_cycle)
+    else:
+        _automation_scheduler.configure(settings)
+
+
+def _persist_automation_scheduler_state(state) -> None:
+    _repo().save_automation_scheduler_state(
+        enabled=state.enabled,
+        settings=state.settings.model_dump(mode="json"),
+    )
 
 
 def _auto_processing_settings(
@@ -1200,8 +1225,6 @@ def _paper_seed_snapshots_from_latest_cache(
             continue
         selected.append(snapshot)
         seen_snapshot_ids.add(snapshot.snapshot_id)
-        if len(selected) >= limit:
-            break
     if not selected:
         return [], {}
     return selected, {
@@ -1317,7 +1340,7 @@ def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, o
         max_created=limit,
         max_active_trades=limit,
         max_signal_age_days=None,
-        signal_date_override=_a_share_today(),
+        signal_date_override=_a_share_today() if mode != "fixture" else None,
     )
     return result.model_dump(mode="json")
 

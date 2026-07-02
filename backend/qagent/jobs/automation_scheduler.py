@@ -74,6 +74,13 @@ class AutomationScheduler:
         with self._lock:
             return self._state_unlocked()
 
+    def configure(self, settings: AutoProcessingSettings) -> AutoProcessingState:
+        with self._lock:
+            self._settings = settings
+            if not self._enabled:
+                self._next_run_at = None
+            return self._state_unlocked()
+
     def refresh_if_due(self, runner: CycleRunner) -> AutoProcessingState:
         now = _utc_now()
         should_run = False

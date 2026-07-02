@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from contextlib import contextmanager
 from threading import RLock
 import math
@@ -8,6 +8,8 @@ import akshare as ak
 import baostock as bs
 import pandas as pd
 import requests
+
+from qagent.providers.base import MINUTE_BAR_COLUMNS
 
 BAR_COLUMNS = ["instrument_id", "trade_date", "open", "high", "low", "close", "volume", "provider"]
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 3
@@ -78,6 +80,44 @@ class FreeCnMarketDataProvider:
         if bars.empty:
             return bars
         return bars.groupby("instrument_id", as_index=False).tail(1).reset_index(drop=True)
+
+    def get_minute_bars(
+        self,
+        instrument_ids: list[str],
+        start: datetime,
+        end: datetime,
+    ) -> pd.DataFrame:
+        self.last_errors = []
+        frames: list[pd.DataFrame] = []
+        start_value = _local_naive_datetime(start)
+        end_value = _local_naive_datetime(end)
+        for instrument_id in instrument_ids:
+            symbol = instrument_id.split(":", 1)[1]
+            if self._source_circuit_open():
+                self.last_errors.append(
+                    f"{instrument_id}: skipped minute data after "
+                    f"{self.consecutive_source_failures} consecutive source failures"
+                )
+                continue
+            try:
+                normalized = self._load_akshare_sina_minute(
+                    symbol,
+                    start_value,
+                    end_value,
+                    self.request_timeout_seconds,
+                )
+            except Exception as exc:
+                self.consecutive_source_failures += 1
+                self.last_errors.append(f"{instrument_id}: akshare_sina_minute: {exc}")
+                continue
+            self.consecutive_source_failures = 0
+            if normalized.empty:
+                continue
+            normalized["instrument_id"] = instrument_id
+            frames.append(normalized[MINUTE_BAR_COLUMNS])
+        if not frames:
+            return pd.DataFrame(columns=MINUTE_BAR_COLUMNS)
+        return pd.concat(frames, ignore_index=True)
 
     def _source_circuit_open(self) -> bool:
         return self.consecutive_source_failures >= self.failure_circuit_breaker_threshold
@@ -158,10 +198,50 @@ class FreeCnMarketDataProvider:
         normalized["provider"] = "baostock"
         return _coerce_bar_types(normalized)
 
+    @staticmethod
+    def _load_akshare_sina_minute(
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        request_timeout_seconds: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    ) -> pd.DataFrame:
+        with _bounded_network_calls(request_timeout_seconds):
+            raw = ak.stock_zh_a_minute(
+                symbol=_to_sina_symbol(symbol),
+                period="1",
+                adjust="",
+            )
+        if raw.empty:
+            return pd.DataFrame(columns=MINUTE_BAR_COLUMNS)
+        normalized = raw.rename(
+            columns={
+                "day": "timestamp",
+            }
+        ).copy()
+        normalized["timestamp"] = pd.to_datetime(normalized["timestamp"], errors="coerce")
+        normalized = normalized[
+            (normalized["timestamp"] >= start) & (normalized["timestamp"] <= end)
+        ]
+        if normalized.empty:
+            return pd.DataFrame(columns=MINUTE_BAR_COLUMNS)
+        normalized["provider"] = "akshare_sina_minute"
+        return _coerce_minute_bar_types(normalized)
+
 
 def _to_baostock_symbol(symbol: str) -> str:
     prefix = "sh" if symbol.startswith(("5", "6", "9")) else "sz"
     return f"{prefix}.{symbol}"
+
+
+def _to_sina_symbol(symbol: str) -> str:
+    prefix = "sh" if symbol.startswith(("5", "6", "9")) else "sz"
+    return f"{prefix}{symbol}"
+
+
+def _local_naive_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone().replace(tzinfo=None)
 
 
 @contextmanager
@@ -193,6 +273,14 @@ def _coerce_bar_types(frame: pd.DataFrame) -> pd.DataFrame:
         normalized[column] = _finite_numeric(normalized[column])
     normalized["volume"] = normalized["volume"].fillna(0)
     return normalized.dropna(subset=["open", "high", "low", "close"])
+
+
+def _coerce_minute_bar_types(frame: pd.DataFrame) -> pd.DataFrame:
+    normalized = frame.copy()
+    for column in ["open", "high", "low", "close", "volume"]:
+        normalized[column] = _finite_numeric(normalized[column])
+    normalized["volume"] = normalized["volume"].fillna(0)
+    return normalized.dropna(subset=["timestamp", "open", "high", "low", "close"])
 
 
 def _finite_numeric(series: pd.Series) -> pd.Series:

@@ -10,7 +10,7 @@ from qagent.app import create_app
 from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.automation_scheduler import AutomationScheduler, AutoProcessingSettings
 from qagent.storage.repository import QagentRepository
-from qagent.storage.tables import OpportunitySnapshotRow, ScanRunRow
+from qagent.storage.tables import OpportunitySnapshotRow, PaperTradeRow, ScanRunRow
 
 
 def test_automation_run_api_saves_brief_and_queues_delivery(tmp_path, monkeypatch):
@@ -421,6 +421,128 @@ def test_automation_scheduler_seeds_from_cached_recommendation_order(tmp_path, m
     assert second_body["last_result"]["paper_total"] == 2
 
 
+def test_automation_scheduler_backfills_closed_paper_slot_from_deeper_cache_candidates(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = f"sqlite:///{tmp_path / 'automation-cache-backfill.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    repo = QagentRepository(session_factory)
+    now = datetime.now(timezone.utc)
+    candidates = [
+        ("card-a", "CN:688001", Decimal("0.90"), 1.0, 1.0),
+        ("card-b", "CN:688002", Decimal("0.88"), 0.98, 0.98),
+        ("card-c", "CN:688003", Decimal("0.86"), 0.96, 0.96),
+    ]
+    with session_factory() as session:
+        session.add(
+            ScanRunRow(
+                run_id="scan-cache-backfill",
+                provider="free",
+                mode="full_market",
+                symbols=json.dumps([instrument_id for _, instrument_id, *_ in candidates]),
+                scanned=len(candidates),
+                cards=len(candidates),
+                data_health="{}",
+                created_at=now,
+            )
+        )
+        for index, (card_id, instrument_id, rank_score, factor_score, strategy_score) in enumerate(
+            candidates,
+            start=1,
+        ):
+            card_payload = {
+                "card_id": card_id,
+                "instrument_id": instrument_id,
+                "rank_score": float(rank_score),
+                "factor_score": factor_score,
+                "strategy_score": strategy_score,
+                "decision": {"risk_status": "clear", "components": {}},
+            }
+            session.add(
+                OpportunitySnapshotRow(
+                    snapshot_id=f"scan-cache-backfill:card-{index}",
+                    run_id="scan-cache-backfill",
+                    card_id=card_id,
+                    instrument_id=instrument_id,
+                    market="CN",
+                    status="setup_ready",
+                    signal_date=date(2026, 7, 1),
+                    latest_close=Decimal("10.00"),
+                    primary_strategy_id="trend_momentum_stage2",
+                    score=rank_score,
+                    strategy_score=Decimal(str(strategy_score)),
+                    rank_score=rank_score,
+                    trigger_price=Decimal("10.20"),
+                    initial_stop=Decimal("9.80"),
+                    target_1=Decimal("11.00"),
+                    card_json=json.dumps(card_payload, sort_keys=True),
+                    created_at=now,
+                )
+            )
+        session.commit()
+    repo.save_scan_result_cache(
+        cache_key="full_market_batch:free:true",
+        provider="free",
+        mode="full_market_batch",
+        symbols=[instrument_id for _, instrument_id, *_ in candidates],
+        payload={
+            "symbols": [instrument_id for _, instrument_id, *_ in candidates],
+            "cards": [
+                {
+                    "card_id": card_id,
+                    "instrument_id": instrument_id,
+                    "rank_score": float(rank_score),
+                    "factor_score": factor_score,
+                    "strategy_score": strategy_score,
+                    "decision": {"risk_status": "clear", "components": {}},
+                    "entry_plan": {"trigger_price": "10.20"},
+                }
+                for card_id, instrument_id, rank_score, factor_score, strategy_score in candidates
+            ],
+            "items": [],
+            "strategy_health": [],
+            "factor_rankings": [],
+            "sector_strength": [],
+            "portfolio_plan": {"profile": "balanced"},
+            "data_health": {"provider": "free"},
+        },
+    )
+
+    client = TestClient(create_app())
+    first = client.post(
+        "/api/automation/scheduler/run-once"
+        "?provider=free&include_etfs=true&run_scan=false&run_alerts=false"
+        "&update_paper=false&seed_paper=true&seed_limit=2"
+    )
+    assert first.status_code == 200
+    assert first.json()["last_result"]["paper_created"] == 2
+
+    with session_factory() as session:
+        first_trade = (
+            session.query(PaperTradeRow)
+            .filter(PaperTradeRow.instrument_id == "CN:688001")
+            .one()
+        )
+        first_trade.status = "missed_entry"
+        session.commit()
+
+    second = client.post(
+        "/api/automation/scheduler/run-once"
+        "?provider=free&include_etfs=true&run_scan=false&run_alerts=false"
+        "&update_paper=false&seed_paper=true&seed_limit=2"
+    )
+
+    assert second.status_code == 200
+    assert second.json()["last_result"]["paper_created"] == 1
+    trades = client.get("/api/paper-trades?limit=10").json()["trades"]
+    active = {trade["instrument_id"] for trade in trades if trade["status"] in {"pending", "open"}}
+    assert active == {"CN:688002", "CN:688003"}
+
+
 def test_automation_scheduler_start_and_stop_are_visible(tmp_path, monkeypatch):
     database_url = f"sqlite:///{tmp_path / 'automation-scheduler-start.db'}"
     monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
@@ -443,6 +565,72 @@ def test_automation_scheduler_start_and_stop_are_visible(tmp_path, monkeypatch):
     assert stopped.status_code == 200
     assert stopped.json()["enabled"] is False
     assert stopped.json()["next_run_at"] is None
+
+
+def test_automation_scheduler_restores_enabled_state_after_app_restart(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = f"sqlite:///{tmp_path / 'automation-scheduler-restore.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
+
+    with TestClient(create_app()) as client:
+        started = client.post(
+            "/api/automation/scheduler/start"
+            "?provider=fixture&symbols=US:TEST&interval_seconds=900"
+            "&run_scan=false&seed_paper=false&update_paper=false"
+            "&run_alerts=false&queue_alerts=false"
+        )
+        assert started.status_code == 200
+        assert started.json()["enabled"] is True
+
+    monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
+    with TestClient(create_app()) as restarted_client:
+        restored = restarted_client.get("/api/automation/scheduler")
+
+    assert restored.status_code == 200
+    body = restored.json()
+    assert body["enabled"] is True
+    assert body["settings"]["provider"] == "fixture"
+    assert body["settings"]["symbols"] == "US:TEST"
+    assert body["settings"]["interval_seconds"] == 900
+    assert body["settings"]["run_scan"] is False
+    assert body["settings"]["seed_paper"] is False
+    assert body["settings"]["update_paper"] is False
+    assert body["next_run_at"] is not None
+
+
+def test_automation_scheduler_restores_stopped_state_after_app_restart(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = f"sqlite:///{tmp_path / 'automation-scheduler-stop-restore.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
+
+    with TestClient(create_app()) as client:
+        started = client.post(
+            "/api/automation/scheduler/start"
+            "?provider=fixture&symbols=US:TEST&interval_seconds=900"
+            "&run_scan=false&seed_paper=false&update_paper=false"
+            "&run_alerts=false&queue_alerts=false"
+        )
+        stopped = client.post("/api/automation/scheduler/stop")
+        assert started.status_code == 200
+        assert stopped.status_code == 200
+        assert stopped.json()["enabled"] is False
+
+    monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
+    with TestClient(create_app()) as restarted_client:
+        restored = restarted_client.get("/api/automation/scheduler")
+
+    assert restored.status_code == 200
+    body = restored.json()
+    assert body["enabled"] is False
+    assert body["settings"]["provider"] == "fixture"
+    assert body["settings"]["symbols"] == "US:TEST"
+    assert body["next_run_at"] is None
 
 
 def test_automation_scheduler_state_runs_overdue_cycle(tmp_path, monkeypatch):

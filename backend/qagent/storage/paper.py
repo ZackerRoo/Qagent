@@ -1,3 +1,4 @@
+import json
 from datetime import date, datetime
 from decimal import Decimal
 from uuid import uuid4
@@ -5,7 +6,12 @@ from uuid import uuid4
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, sessionmaker
 
-from qagent.storage.tables import PaperAccountSettingsRow, PaperTradeRow, utc_now
+from qagent.storage.tables import (
+    OpportunitySnapshotRow,
+    PaperAccountSettingsRow,
+    PaperTradeRow,
+    utc_now,
+)
 
 
 class PaperTradeRecord(BaseModel):
@@ -44,6 +50,12 @@ class PaperAccountSettings(BaseModel):
     slippage_bps: Decimal
     take_profit_pct: Decimal
     started_at: datetime
+
+
+class PaperTradeSourceContext(BaseModel):
+    source_snapshot_id: str
+    created_at: datetime
+    card: dict[str, object]
 
 
 class PaperTradingRepository:
@@ -101,6 +113,24 @@ class PaperTradingRepository:
                 .one_or_none()
             )
             return self._trade_from_row(row) if row is not None else None
+
+    def get_trade_source_context(
+        self,
+        source_snapshot_id: str,
+    ) -> PaperTradeSourceContext | None:
+        with self.session_factory() as session:
+            row = session.get(OpportunitySnapshotRow, source_snapshot_id)
+            if row is None:
+                return None
+            try:
+                card = json.loads(row.card_json or "{}")
+            except json.JSONDecodeError:
+                card = {}
+            return PaperTradeSourceContext(
+                source_snapshot_id=source_snapshot_id,
+                created_at=row.created_at,
+                card=card if isinstance(card, dict) else {},
+            )
 
     def list_trades(
         self,

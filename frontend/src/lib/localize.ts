@@ -69,6 +69,7 @@ const STATUS_LABELS: LabelMap = {
   target_1_hit: { zh: "目标 1 命中", en: "Target 1 hit" },
   stopped: { zh: "止损", en: "Stopped" },
   time_exit: { zh: "时间退出", en: "Time exit" },
+  missed_entry: { zh: "错过买点", en: "Missed entry" },
   stop_breached: { zh: "跌破止损", en: "Stop breached" },
   target_reached: { zh: "到达目标", en: "Target reached" },
   near_target: { zh: "接近目标", en: "Near target" },

@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from decimal import Decimal, ROUND_DOWN
 from zoneinfo import ZoneInfo
 
@@ -7,12 +7,12 @@ import pandas as pd
 from pydantic import BaseModel
 
 from qagent.providers.base import MarketDataProvider
-from qagent.storage.paper import PaperTradeRecord, PaperTradingRepository
+from qagent.storage.paper import PaperTradeRecord, PaperTradeSourceContext, PaperTradingRepository
 from qagent.storage.repository import OpportunitySnapshotRecord
 
 
 OPEN_STATUSES = {"pending", "open"}
-CLOSED_STATUSES = {"target_1_hit", "stopped", "time_exit"}
+CLOSED_STATUSES = {"target_1_hit", "stopped", "time_exit", "missed_entry"}
 A_SHARE_TZ = ZoneInfo("Asia/Shanghai")
 A_SHARE_MORNING_START = time(9, 30)
 A_SHARE_MORNING_END = time(11, 30)
@@ -335,7 +335,22 @@ def update_paper_trades(
     execution_time = _a_share_local_datetime(as_of)
     execution_session = _a_share_execution_session(execution_time)
     fills_deferred = 0
+    minute_checked = 0
+    minute_rows = 0
     for trade in active:
+        minute_update, checked, rows = _try_evaluate_trade_with_minutes(
+            repo,
+            provider,
+            trade,
+            max_holding_days=max_holding_days,
+            max_entry_wait_days=max_entry_wait_days,
+            as_of=execution_time,
+        )
+        minute_checked += checked
+        minute_rows += rows
+        if minute_update is not None:
+            repo.update_trade(trade.trade_id, **minute_update)
+            continue
         bars = provider.get_daily_bars(
             [trade.instrument_id],
             start=trade.signal_date,
@@ -363,6 +378,8 @@ def update_paper_trades(
             fills_deferred=fills_deferred,
             session=execution_session,
         ),
+        "paper_minute_checked": str(minute_checked),
+        "paper_minute_rows": str(minute_rows),
     }
     if provider_errors:
         data_health["errors"] = " | ".join(provider_errors[:3])
@@ -1639,6 +1656,230 @@ def _evaluate_trade(
         },
         deferred_fills,
     )
+
+
+def _try_evaluate_trade_with_minutes(
+    repo: PaperTradingRepository,
+    provider: MarketDataProvider,
+    trade: PaperTradeRecord,
+    *,
+    max_holding_days: int,
+    max_entry_wait_days: int,
+    as_of: datetime,
+) -> tuple[dict[str, object] | None, int, int]:
+    getter = getattr(provider, "get_minute_bars", None)
+    if getter is None or not _is_a_share_trade(trade):
+        return None, 0, 0
+    source_context = repo.get_trade_source_context(trade.source_snapshot_id)
+    signal_datetime = _trade_signal_datetime(trade, source_context)
+    if signal_datetime is None:
+        return None, 0, 0
+    start = signal_datetime
+    end = _a_share_local_datetime(as_of).replace(tzinfo=None)
+    try:
+        minute_bars = getter([trade.instrument_id], start, end)
+    except Exception:
+        return None, 1, 0
+    if minute_bars.empty:
+        return None, 1, 0
+    update = _evaluate_trade_with_minutes(
+        trade,
+        minute_bars,
+        max_holding_days=max_holding_days,
+        max_entry_wait_days=max_entry_wait_days,
+        signal_datetime=signal_datetime,
+        no_chase_above=_trade_no_chase_above(trade, source_context),
+    )
+    return update, 1, len(minute_bars)
+
+
+def _evaluate_trade_with_minutes(
+    trade: PaperTradeRecord,
+    minute_bars: pd.DataFrame,
+    *,
+    max_holding_days: int,
+    max_entry_wait_days: int,
+    signal_datetime: datetime,
+    no_chase_above: Decimal | None,
+) -> dict[str, object]:
+    ordered = minute_bars.sort_values("timestamp").reset_index(drop=True)
+    ordered["timestamp"] = pd.to_datetime(ordered["timestamp"], errors="coerce")
+    ordered = ordered.dropna(subset=["timestamp"])
+    ordered = ordered[ordered["timestamp"] > signal_datetime]
+    if ordered.empty:
+        return {
+            "status": trade.status,
+            "holding_days": trade.holding_days,
+            "notes": _append_note(trade.notes, "分钟数据尚未覆盖推荐后的交易时间。"),
+        }
+    entry_date = trade.entry_date
+    entry_price = trade.entry_price
+    status = trade.status
+    notes = trade.notes
+
+    for _, row in ordered.iterrows():
+        timestamp = row["timestamp"].to_pydatetime()
+        trade_date = timestamp.date()
+        open_price = Decimal(str(row["open"]))
+        high = Decimal(str(row["high"]))
+        low = Decimal(str(row["low"]))
+        close = Decimal(str(row["close"]))
+
+        if status == "pending":
+            wait_days = max((trade_date - trade.signal_date).days, 0)
+            if high >= trade.trigger_price:
+                missed = _minute_entry_missed(
+                    trigger_price=trade.trigger_price,
+                    no_chase_above=no_chase_above,
+                    open_price=open_price,
+                    low=low,
+                )
+                if missed:
+                    return {
+                        "status": "missed_entry",
+                        "latest_date": trade_date,
+                        "latest_price": close,
+                        "exit_date": trade_date,
+                        "exit_price": close,
+                        "realized_return_pct": Decimal("0"),
+                        "holding_days": 0,
+                        "notes": _append_note(
+                            notes,
+                            "分钟线显示价格已超过追高上限，放弃本次模拟买入。",
+                        ),
+                    }
+                status = "open"
+                entry_date = trade_date
+                entry_price = _minute_entry_price(
+                    trigger_price=trade.trigger_price,
+                    open_price=open_price,
+                    low=low,
+                )
+                notes = _append_note(notes, "分钟线确认触发价，模拟开仓。")
+            elif wait_days > max_entry_wait_days:
+                return {
+                    "status": "time_exit",
+                    "latest_date": trade_date,
+                    "latest_price": close,
+                    "exit_date": trade_date,
+                    "exit_price": close,
+                    "realized_return_pct": Decimal("0"),
+                    "holding_days": 0,
+                    "notes": "买点等待超时，未开仓退出跟踪。",
+                }
+            else:
+                continue
+
+        if status == "open" and entry_date is not None and entry_price is not None:
+            holding_days = max((trade_date - entry_date).days, 0)
+            if trade_date == entry_date:
+                notes = _append_note(notes, "A股 T+1：买入当日不模拟卖出。")
+                continue
+            if trade.initial_stop is not None and low <= trade.initial_stop:
+                return _closed_update(
+                    status="stopped",
+                    entry_date=entry_date,
+                    entry_price=entry_price,
+                    exit_date=trade_date,
+                    exit_price=trade.initial_stop,
+                    latest_price=close,
+                    holding_days=holding_days,
+                    notes="分钟线触及初始止损，模拟离场。",
+                )
+            if trade.target_1 is not None and high >= trade.target_1:
+                return _closed_update(
+                    status="target_1_hit",
+                    entry_date=entry_date,
+                    entry_price=entry_price,
+                    exit_date=trade_date,
+                    exit_price=trade.target_1,
+                    latest_price=close,
+                    holding_days=holding_days,
+                    notes="分钟线触及第一目标价，模拟止盈。",
+                )
+            if holding_days >= max_holding_days:
+                return _closed_update(
+                    status="time_exit",
+                    entry_date=entry_date,
+                    entry_price=entry_price,
+                    exit_date=trade_date,
+                    exit_price=close,
+                    latest_price=close,
+                    holding_days=holding_days,
+                    notes="达到最长持有窗口，按分钟收盘价模拟退出。",
+                )
+
+    latest = ordered.iloc[-1]
+    latest_date = latest["timestamp"].date()
+    latest_price = Decimal(str(latest["close"]))
+    if status == "open" and entry_date is not None and entry_price is not None:
+        return {
+            "status": "open",
+            "entry_date": entry_date,
+            "entry_price": entry_price,
+            "latest_date": latest_date,
+            "latest_price": latest_price,
+            "unrealized_return_pct": Decimal(str(_return_pct(entry_price, latest_price))),
+            "holding_days": max((latest_date - entry_date).days, 0),
+            "notes": notes,
+        }
+    return {
+        "status": "pending",
+        "latest_date": latest_date,
+        "latest_price": latest_price,
+        "holding_days": 0,
+        "notes": _append_note(notes, "分钟线未到触发价，继续等待。"),
+    }
+
+
+def _trade_signal_datetime(
+    trade: PaperTradeRecord,
+    source_context: PaperTradeSourceContext | None,
+) -> datetime | None:
+    if source_context is None:
+        return None
+    value = source_context.created_at
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(A_SHARE_TZ).replace(tzinfo=None)
+
+
+def _trade_no_chase_above(
+    trade: PaperTradeRecord,
+    source_context: PaperTradeSourceContext | None,
+) -> Decimal | None:
+    value = None
+    if source_context is not None:
+        entry_plan = source_context.card.get("entry_plan")
+        if isinstance(entry_plan, dict):
+            value = entry_plan.get("no_chase_above")
+    if value is None:
+        return (trade.trigger_price * Decimal("1.03")).quantize(Decimal("0.0001"))
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return (trade.trigger_price * Decimal("1.03")).quantize(Decimal("0.0001"))
+
+
+def _minute_entry_missed(
+    *,
+    trigger_price: Decimal,
+    no_chase_above: Decimal | None,
+    open_price: Decimal,
+    low: Decimal,
+) -> bool:
+    if no_chase_above is None:
+        return False
+    return low > no_chase_above or (open_price > no_chase_above and low > trigger_price)
+
+
+def _minute_entry_price(
+    *,
+    trigger_price: Decimal,
+    open_price: Decimal,
+    low: Decimal,
+) -> Decimal:
+    return trigger_price if low <= trigger_price else open_price
 
 
 def _closed_update(

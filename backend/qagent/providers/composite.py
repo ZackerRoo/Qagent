@@ -1,8 +1,8 @@
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 
-from qagent.providers.base import MarketDataProvider
+from qagent.providers.base import MINUTE_BAR_COLUMNS, MarketDataProvider
 
 
 BAR_COLUMNS = ["instrument_id", "trade_date", "open", "high", "low", "close", "volume", "provider"]
@@ -40,6 +40,27 @@ class CompositeMarketDataProvider:
                 frames.append(snapshot)
         if not frames:
             return pd.DataFrame(columns=BAR_COLUMNS)
+        return pd.concat(frames, ignore_index=True)
+
+    def get_minute_bars(
+        self,
+        instrument_ids: list[str],
+        start: datetime,
+        end: datetime,
+    ) -> pd.DataFrame:
+        self.last_errors = []
+        frames: list[pd.DataFrame] = []
+        for market, market_instruments in self._group_by_market(instrument_ids).items():
+            provider = self._provider_for_market(market)
+            getter = getattr(provider, "get_minute_bars", None)
+            if getter is None:
+                continue
+            minute_bars = getter(market_instruments, start, end)
+            self.last_errors.extend(getattr(provider, "last_errors", []))
+            if not minute_bars.empty:
+                frames.append(minute_bars)
+        if not frames:
+            return pd.DataFrame(columns=MINUTE_BAR_COLUMNS)
         return pd.concat(frames, ignore_index=True)
 
     def _provider_for_market(self, market: str) -> MarketDataProvider:

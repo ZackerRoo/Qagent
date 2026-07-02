@@ -1,9 +1,9 @@
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 from pydantic import BaseModel
 
-from qagent.providers.base import MarketDataProvider
+from qagent.providers.base import MINUTE_BAR_COLUMNS, MarketDataProvider
 from qagent.storage.market_cache import BAR_COLUMNS, MarketDataCacheRepository
 
 
@@ -103,3 +103,16 @@ class CachedMarketDataProvider:
         if bars.empty:
             return bars
         return bars.groupby("instrument_id", as_index=False).tail(1).reset_index(drop=True)
+
+    def get_minute_bars(
+        self,
+        instrument_ids: list[str],
+        start: datetime,
+        end: datetime,
+    ) -> pd.DataFrame:
+        getter = getattr(self.provider, "get_minute_bars", None)
+        if getter is None:
+            return pd.DataFrame(columns=MINUTE_BAR_COLUMNS)
+        frame = getter(instrument_ids, start, end)
+        self.last_errors.extend(getattr(self.provider, "last_errors", []))
+        return frame

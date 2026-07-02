@@ -1,4 +1,5 @@
-from datetime import date, datetime
+import json
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -12,6 +13,7 @@ from qagent.paper_trading.engine import (
 )
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.storage.paper import PaperTradingRepository
+from qagent.storage.tables import OpportunitySnapshotRow, ScanRunRow
 
 from test_state_repository import make_repo
 
@@ -34,6 +36,23 @@ class SingleDayCnProvider:
                 }
             ]
         )
+
+    def get_snapshot(self, instrument_ids):
+        return pd.DataFrame()
+
+
+class MinuteCnProvider:
+    name = "minute_cn"
+    last_errors: list[str] = []
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def get_daily_bars(self, instrument_ids, start, end):
+        return pd.DataFrame()
+
+    def get_minute_bars(self, instrument_ids, start, end):
+        return pd.DataFrame(self.rows)
 
     def get_snapshot(self, instrument_ids):
         return pd.DataFrame()
@@ -87,6 +106,118 @@ def test_a_share_paper_trade_does_not_backfill_entry_on_signal_date(tmp_path):
     assert trade.status == "pending"
     assert trade.entry_date is None
     assert "等待下个交易日" in trade.notes
+
+
+def test_a_share_paper_trade_opens_from_post_signal_minute_cross(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    snapshot_id = _insert_cn_snapshot(
+        repo,
+        instrument_id="CN:688052",
+        created_at=datetime(2026, 7, 2, 3, 38, tzinfo=timezone.utc),
+        trigger_price=Decimal("10.00"),
+        no_chase_above=Decimal("10.50"),
+    )
+    paper_repo.create_trade(
+        source_snapshot_id=snapshot_id,
+        provider="free",
+        instrument_id="CN:688052",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 2),
+        trigger_price=Decimal("10.00"),
+        initial_stop=Decimal("9.50"),
+        target_1=Decimal("11.00"),
+        rank_score=Decimal("0.91"),
+    )
+    provider = MinuteCnProvider(
+        [
+            {
+                "instrument_id": "CN:688052",
+                "timestamp": datetime(2026, 7, 2, 11, 30),
+                "open": Decimal("9.80"),
+                "high": Decimal("10.20"),
+                "low": Decimal("9.70"),
+                "close": Decimal("10.10"),
+                "volume": 1000,
+                "provider": "test_minute",
+            },
+            {
+                "instrument_id": "CN:688052",
+                "timestamp": datetime(2026, 7, 2, 13, 5),
+                "open": Decimal("9.90"),
+                "high": Decimal("10.20"),
+                "low": Decimal("9.85"),
+                "close": Decimal("10.10"),
+                "volume": 1000,
+                "provider": "test_minute",
+            },
+        ]
+    )
+
+    result = update_paper_trades(
+        paper_repo,
+        provider=provider,
+        as_of=datetime(2026, 7, 2, 14, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    trade = paper_repo.list_trades()[0]
+
+    assert result.data_health["paper_minute_checked"] == "1"
+    assert result.data_health["paper_minute_rows"] == "2"
+    assert trade.status == "open"
+    assert trade.entry_date == date(2026, 7, 2)
+    assert trade.entry_price == Decimal("10.0000")
+    assert "分钟线" in trade.notes
+
+
+def test_a_share_paper_trade_marks_missed_when_minute_price_gaps_above_chase_limit(
+    tmp_path,
+):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    snapshot_id = _insert_cn_snapshot(
+        repo,
+        instrument_id="CN:002747",
+        created_at=datetime(2026, 7, 2, 3, 36, tzinfo=timezone.utc),
+        trigger_price=Decimal("10.00"),
+        no_chase_above=Decimal("10.30"),
+    )
+    paper_repo.create_trade(
+        source_snapshot_id=snapshot_id,
+        provider="free",
+        instrument_id="CN:002747",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 2),
+        trigger_price=Decimal("10.00"),
+        initial_stop=Decimal("9.50"),
+        target_1=Decimal("11.00"),
+        rank_score=Decimal("0.91"),
+    )
+    provider = MinuteCnProvider(
+        [
+            {
+                "instrument_id": "CN:002747",
+                "timestamp": datetime(2026, 7, 2, 13, 1),
+                "open": Decimal("11.00"),
+                "high": Decimal("11.20"),
+                "low": Decimal("10.80"),
+                "close": Decimal("11.10"),
+                "volume": 1000,
+                "provider": "test_minute",
+            }
+        ]
+    )
+
+    update_paper_trades(
+        paper_repo,
+        provider=provider,
+        as_of=datetime(2026, 7, 2, 14, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    trade = paper_repo.list_trades()[0]
+
+    assert trade.status == "missed_entry"
+    assert trade.entry_date is None
+    assert trade.realized_return_pct == 0.0
+    assert "超过追高上限" in trade.notes
 
 
 def test_update_paper_trades_marks_target_hit_from_future_bars(tmp_path):
@@ -294,3 +425,58 @@ def test_build_paper_ledger_generates_trade_flows_fees_slippage_and_positions(tm
     assert ledger.positions[0].weight_pct > 0
     assert ledger.transactions[0].cash_flow < Decimal("0")
     assert ledger.transactions[-1].cash_balance == ledger.summary.cash_available
+
+
+def _insert_cn_snapshot(
+    repo,
+    *,
+    instrument_id: str,
+    created_at: datetime,
+    trigger_price: Decimal,
+    no_chase_above: Decimal,
+) -> str:
+    snapshot_id = f"scan-minute:{instrument_id}"
+    card = {
+        "instrument_id": instrument_id,
+        "instrument_label": instrument_id,
+        "entry_plan": {
+            "trigger_price": str(trigger_price),
+            "no_chase_above": str(no_chase_above),
+        },
+    }
+    with repo.session_factory() as session:
+        session.add(
+            ScanRunRow(
+                run_id="scan-minute",
+                provider="free",
+                mode="full_market",
+                symbols=json.dumps([instrument_id]),
+                scanned=1,
+                cards=1,
+                data_health="{}",
+                created_at=created_at,
+            )
+        )
+        session.add(
+            OpportunitySnapshotRow(
+                snapshot_id=snapshot_id,
+                run_id="scan-minute",
+                card_id=f"card-{instrument_id}",
+                instrument_id=instrument_id,
+                market="CN",
+                status="setup_ready",
+                signal_date=date(2026, 7, 2),
+                latest_close=trigger_price,
+                primary_strategy_id="trend_momentum_stage2",
+                score=Decimal("0.90"),
+                strategy_score=Decimal("0.90"),
+                rank_score=Decimal("0.90"),
+                trigger_price=trigger_price,
+                initial_stop=Decimal("9.50"),
+                target_1=Decimal("11.00"),
+                card_json=json.dumps(card, sort_keys=True),
+                created_at=created_at,
+            )
+        )
+        session.commit()
+    return snapshot_id
