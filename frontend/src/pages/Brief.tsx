@@ -208,7 +208,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
   }, [dataMode, symbols]);
 
   return (
-    <div className="stack">
+    <div className="stack brief-page">
       <section className="panel">
         <div className="panel-heading">
           <div>

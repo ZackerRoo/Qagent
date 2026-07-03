@@ -1280,7 +1280,18 @@ def _maybe_start_automatic_full_scan(
     mode = settings.provider.strip().lower()
     latest = repo.get_latest_full_market_scan_job(provider=mode)
     if latest and latest.status in {"queued", "running"}:
-        return "already_running", False, latest.job_id
+        if not _full_market_scan_job_is_stale(latest, settings):
+            return "already_running", False, latest.job_id
+        repo.update_full_market_scan_job(
+            latest.job_id,
+            status="failed",
+            message="Stale full-market scan reset by automation scheduler",
+            data_health={
+                **latest.data_health,
+                "full_market_stale_reset": "true",
+                "full_market_stale_reset_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
     cached = repo.get_recent_scan_result_cache(
         cache_key=full_market_batch_cache_key(mode, settings.include_etfs),
         max_age=timedelta(minutes=settings.scan_max_age_minutes),
@@ -1307,6 +1318,27 @@ def _maybe_start_automatic_full_scan(
     )
     _task_executor.submit(run_full_market_batch_scan_job, job.job_id)
     return "queued", True, job.job_id
+
+
+def _full_market_scan_job_is_stale(job, settings: AutoProcessingSettings) -> bool:
+    if job.status not in {"queued", "running"}:
+        return False
+    updated_at = _as_utc_datetime(job.updated_at)
+    stale_after = timedelta(
+        seconds=max(settings.interval_seconds * 2, settings.scan_max_age_minutes * 60, 30 * 60)
+    )
+    if datetime.now(timezone.utc) - updated_at > stale_after:
+        return True
+    if job.total_symbols > 0 and job.scanned_symbols >= job.total_symbols:
+        if job.total_batches > 0 and job.completed_batches >= job.total_batches:
+            return datetime.now(timezone.utc) - updated_at > timedelta(minutes=10)
+    return False
+
+
+def _as_utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 @router.get("/paper-trades")
@@ -2311,9 +2343,17 @@ def _validate_full_market_batch_scan_params(
 def _full_market_job_payload(job) -> dict[str, object]:
     payload = job.model_dump(mode="json")
     symbols = payload.pop("symbols", [])
-    payload["progress"] = job.progress
+    payload["progress"] = _full_market_job_progress(job)
     payload["symbols_preview"] = symbols[:20]
     return payload
+
+
+def _full_market_job_progress(job) -> int:
+    if job.total_symbols <= 0:
+        return 0
+    if job.status == "succeeded":
+        return 100
+    return max(0, min(99, int(job.scanned_symbols * 100 / job.total_symbols)))
 
 
 def _recent_full_market_scan_payload(

@@ -182,12 +182,114 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   }
 
   return (
-    <div className="stack">
-      <section className="panel stack">
+    <div className="stack portfolio-page">
+      <section className="panel stack paper-ledger-primary-panel">
         <div className="panel-heading">
-          <h2>{t("portfolio.title")}</h2>
-          <span className="count">{positions.length}</span>
+          <h2>{t("portfolio.paperTitle")}</h2>
+          <span className="count">{paper?.summary.total ?? 0}</span>
         </div>
+        {ledger ? (
+          <PaperLedgerDashboard ledger={ledger} language={language} t={t} />
+        ) : (
+          <div className="empty-state">{t("portfolio.noLedger")}</div>
+        )}
+        <PaperValidationCenter
+          validation={validation}
+          language={language}
+          running={isRunningValidation}
+          onRun={runValidationNow}
+        />
+        <PaperExecutionStatus dataHealth={paperExecutionHealth} language={language} />
+        <div className="metric-grid">
+          <Metric label={t("portfolio.open")} value={paper?.summary.open ?? 0} />
+          <Metric label={t("portfolio.closed")} value={paper?.summary.closed ?? 0} />
+          <Metric label={t("portfolio.targets")} value={paper?.summary.target_hit_count ?? 0} />
+          <Metric
+            label={t("portfolio.winRate")}
+            value={
+              paper?.summary.win_rate != null
+                ? `${(paper.summary.win_rate * 100).toFixed(1)}%`
+                : "-"
+            }
+          />
+        </div>
+        <div className="form-row">
+          <button type="button" onClick={seedPaper}>
+            {t("portfolio.seedPaper")}
+          </button>
+          <button type="button" onClick={updatePaper}>
+            {t("portfolio.updatePaper")}
+          </button>
+        </div>
+        {paperMessage && <div className="empty-state">{paperMessage}</div>}
+        <div className="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>{t("common.symbol")}</th>
+                <th>{t("common.status")}</th>
+                <th>{t("portfolio.signal")}</th>
+                <th>{t("brief.trigger")}</th>
+                <th>{t("brief.stop")}</th>
+                <th>{t("brief.target")}</th>
+                <th>{t("portfolio.entry")}</th>
+                <th>{t("portfolio.exit")}</th>
+                <th>{t("portfolio.latest")}</th>
+                <th>{t("portfolio.pnl")}</th>
+                <th>{t("portfolio.paperOutcome")}</th>
+                <th>{language === "zh" ? "撮合备注" : "Fill note"}</th>
+                <th>{language === "zh" ? "下一步动作" : "Next action"}</th>
+                <th>{t("common.strategy")}</th>
+                <th>{t("common.actions")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(paper?.trades ?? []).map((trade) => (
+                <tr key={trade.trade_id}>
+                  <td className="ticker" title={formatInstrumentDisplay(trade.instrument_id)}>
+                    {formatInstrumentDisplay(trade.instrument_id)}
+                  </td>
+                  <td>{localizeStatus(trade.status, language)}</td>
+                  <td>{trade.signal_date}</td>
+                  <td>{trade.trigger_price}</td>
+                  <td>{trade.initial_stop ?? "-"}</td>
+                  <td>{trade.target_1 ?? "-"}</td>
+                  <td>{trade.entry_price ?? "-"}</td>
+                  <td>{trade.exit_price ?? "-"}</td>
+                  <td>{trade.latest_price ?? "-"}</td>
+                  <td>{formatPct(trade.realized_return_pct ?? trade.unrealized_return_pct)}</td>
+                  <td>{ledger?.items.find((item) => item.trade_id === trade.trade_id)?.outcome ?? "-"}</td>
+                  <td className="reason-cell">{trade.notes || "-"}</td>
+                  <td className="reason-cell">{paperNextAction(trade, language)}</td>
+                  <td className="reason-cell">{localizeStrategy(trade.strategy_id, language)}</td>
+                  <td>
+                    <button
+                      className="icon-action danger compact-button"
+                      type="button"
+                      onClick={() => removePaperTrade(trade.trade_id)}
+                      disabled={deletingPaperTradeId === trade.trade_id}
+                    >
+                      {deletingPaperTradeId === trade.trade_id
+                        ? t("common.running")
+                        : t("common.delete")}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <details className="panel stack compact-drawer manual-portfolio-drawer">
+        <summary>
+          <div>
+            <p className="eyebrow">{language === "zh" ? "手动组合" : "Manual Portfolio"}</p>
+            <h2>{t("portfolio.title")}</h2>
+          </div>
+          <span className="count">{positions.length}</span>
+        </summary>
+        <div className="drawer-stack">
         {portfolio && <DataHealth data={portfolio.data_health} language={language} />}
         <div className="form-row portfolio-form">
           <input
@@ -278,13 +380,17 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
             </tbody>
           </table>
         </div>
-      </section>
-
-      <section className="panel stack">
-        <div className="panel-heading">
-          <h2>{t("portfolio.paperTitle")}</h2>
-          <span className="count">{paper?.summary.total ?? 0}</span>
         </div>
+      </details>
+
+      <details className="panel stack compact-drawer paper-session-drawer">
+        <summary>
+          <div>
+            <p className="eyebrow">{language === "zh" ? "模拟盘设置" : "Paper Settings"}</p>
+            <h2>{language === "zh" ? "资金、手续费、仓位参数" : "Capital, cost, position rules"}</h2>
+          </div>
+          <span className="count">{positions.length}</span>
+        </summary>
         <PaperSessionStarter
           session={paperSession}
           form={paperSessionForm}
@@ -293,98 +399,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
           onChange={setPaperSessionForm}
           onStart={startFormalPaperSession}
         />
-        <PaperExecutionStatus dataHealth={paperExecutionHealth} language={language} />
-        <PaperValidationCenter
-          validation={validation}
-          language={language}
-          running={isRunningValidation}
-          onRun={runValidationNow}
-        />
-        {ledger ? (
-          <PaperLedgerDashboard ledger={ledger} language={language} t={t} />
-        ) : (
-          <div className="empty-state">{t("portfolio.noLedger")}</div>
-        )}
-        <div className="metric-grid">
-          <Metric label={t("portfolio.open")} value={paper?.summary.open ?? 0} />
-          <Metric label={t("portfolio.closed")} value={paper?.summary.closed ?? 0} />
-          <Metric label={t("portfolio.targets")} value={paper?.summary.target_hit_count ?? 0} />
-          <Metric
-            label={t("portfolio.winRate")}
-            value={
-              paper?.summary.win_rate != null
-                ? `${(paper.summary.win_rate * 100).toFixed(1)}%`
-                : "-"
-            }
-          />
-        </div>
-        <div className="form-row">
-          <button type="button" onClick={seedPaper}>
-            {t("portfolio.seedPaper")}
-          </button>
-          <button type="button" onClick={updatePaper}>
-            {t("portfolio.updatePaper")}
-          </button>
-        </div>
-        {paperMessage && <div className="empty-state">{paperMessage}</div>}
-        <div className="table-shell">
-          <table>
-            <thead>
-              <tr>
-                <th>{t("common.symbol")}</th>
-                <th>{t("common.status")}</th>
-                <th>{t("portfolio.signal")}</th>
-                <th>{t("brief.trigger")}</th>
-                <th>{t("brief.stop")}</th>
-                <th>{t("brief.target")}</th>
-                <th>{t("portfolio.entry")}</th>
-                <th>{t("portfolio.exit")}</th>
-                <th>{t("portfolio.latest")}</th>
-                <th>{t("portfolio.pnl")}</th>
-                <th>{t("portfolio.paperOutcome")}</th>
-                <th>{language === "zh" ? "撮合备注" : "Fill note"}</th>
-                <th>{language === "zh" ? "下一步动作" : "Next action"}</th>
-                <th>{t("common.strategy")}</th>
-                <th>{t("common.actions")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(paper?.trades ?? []).map((trade) => (
-                <tr key={trade.trade_id}>
-                  <td className="ticker" title={formatInstrumentDisplay(trade.instrument_id)}>
-                    {formatInstrumentDisplay(trade.instrument_id)}
-                  </td>
-                  <td>{localizeStatus(trade.status, language)}</td>
-                  <td>{trade.signal_date}</td>
-                  <td>{trade.trigger_price}</td>
-                  <td>{trade.initial_stop ?? "-"}</td>
-                  <td>{trade.target_1 ?? "-"}</td>
-                  <td>{trade.entry_price ?? "-"}</td>
-                  <td>{trade.exit_price ?? "-"}</td>
-                  <td>{trade.latest_price ?? "-"}</td>
-                  <td>{formatPct(trade.realized_return_pct ?? trade.unrealized_return_pct)}</td>
-                  <td>{ledger?.items.find((item) => item.trade_id === trade.trade_id)?.outcome ?? "-"}</td>
-                  <td className="reason-cell">{trade.notes || "-"}</td>
-                  <td className="reason-cell">{paperNextAction(trade, language)}</td>
-                  <td className="reason-cell">{localizeStrategy(trade.strategy_id, language)}</td>
-                  <td>
-                    <button
-                      className="icon-action danger compact-button"
-                      type="button"
-                      onClick={() => removePaperTrade(trade.trade_id)}
-                      disabled={deletingPaperTradeId === trade.trade_id}
-                    >
-                      {deletingPaperTradeId === trade.trade_id
-                        ? t("common.running")
-                        : t("common.delete")}
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
+      </details>
     </div>
   );
 }

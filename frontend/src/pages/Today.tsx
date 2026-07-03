@@ -332,26 +332,28 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onN
           bulkPaperMessage={bulkPaperMessage}
         />
 
-        <AutoPaperStatusStrip
-          scheduler={automationScheduler}
-          validation={paperValidation}
-          fullScanJob={fullScanJob}
-          language={language}
-        />
+        <div className="dashboard-secondary-grid">
+          <AutoPaperStatusStrip
+            scheduler={automationScheduler}
+            validation={paperValidation}
+            fullScanJob={fullScanJob}
+            language={language}
+          />
 
-        <TodayValidationSnapshot
-          validation={paperValidation}
-          followthrough={followthrough}
-          language={language}
-          onNavigate={onNavigate}
-        />
+          <TodayValidationSnapshot
+            validation={paperValidation}
+            followthrough={followthrough}
+            language={language}
+            onNavigate={onNavigate}
+          />
 
-        <TodayRiskBrief
-          cards={cards}
-          result={result}
-          language={language}
-          onNavigate={onNavigate}
-        />
+          <TodayRiskBrief
+            cards={cards}
+            result={result}
+            language={language}
+            onNavigate={onNavigate}
+          />
+        </div>
 
         <TodayAdvancedAnalysis
           cards={cards}

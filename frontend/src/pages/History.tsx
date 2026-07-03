@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   fetchBacktest,
@@ -113,6 +113,7 @@ export function History({
   const [isFactorBacktesting, setIsFactorBacktesting] = useState(false);
   const [isPortfolioBacktesting, setIsPortfolioBacktesting] = useState(false);
   const [backtestRunContext, setBacktestRunContext] = useState<BacktestRunContext>();
+  const autoBacktestKeyRef = useRef("");
 
   useEffect(() => {
     async function load() {
@@ -161,7 +162,7 @@ export function History({
       setBacktest(result);
       setBacktestRunContext({
         kind: "selected",
-        label: selectedBacktestLabel,
+        label: selectedBacktestLabel || formatInstrumentDisplay(selectedBacktestSymbols),
         provider: dataMode,
       });
     } catch (caught) {
@@ -209,8 +210,42 @@ export function History({
     }
   }
 
+  useEffect(() => {
+    if (!selectedBacktestSymbols) {
+      return;
+    }
+    const key = `${dataMode}:${selectedBacktestSymbols}`;
+    if (autoBacktestKeyRef.current === key) {
+      return;
+    }
+    autoBacktestKeyRef.current = key;
+    setBacktestError("");
+    setIsBacktesting(true);
+
+    void fetchBacktest(dataMode, selectedBacktestSymbols).then((result) => {
+      if (autoBacktestKeyRef.current !== key) {
+        return;
+      }
+      setBacktest(result);
+      setBacktestRunContext({
+        kind: "selected",
+        label: selectedBacktestLabel,
+        provider: dataMode,
+      });
+    }).catch((caught) => {
+      if (autoBacktestKeyRef.current === key) {
+        setBacktestError(caught instanceof Error ? caught.message : "Failed to run backtest");
+      }
+    }).finally(() => {
+      if (autoBacktestKeyRef.current !== key) {
+        return;
+      }
+      setIsBacktesting(false);
+    });
+  }, [dataMode, selectedBacktestSymbols]);
+
   return (
-    <div className="stack">
+    <div className="stack history-page">
       <BacktestGuidePanel
         selectedLabel={activeBacktestLabel}
         scanUniverseLabel={scanUniverseLabel}
@@ -233,9 +268,6 @@ export function History({
         onRunFactor={runFactorBacktest}
         onRunPortfolio={runPortfolioBacktest}
       />
-
-      {closure ? <RecommendationClosurePanel closure={closure} /> : null}
-      {calibration ? <RecommendationCalibrationCenterPanel calibration={calibration} /> : null}
 
       <section className="panel">
         <div className="panel-heading">
@@ -625,6 +657,8 @@ export function History({
         )}
       </section>
 
+      <ForwardValidationDrawer closure={closure} calibration={calibration} />
+
       <details className="history-detail-drawer">
         <summary>
           <div>
@@ -881,6 +915,49 @@ export function History({
   );
 }
 
+function ForwardValidationDrawer({
+  closure,
+  calibration,
+}: {
+  closure?: RecommendationClosureResponse;
+  calibration?: RecommendationCalibrationResponse;
+}) {
+  const { language } = useI18n();
+  const completedCalibration =
+    calibration?.score_bands.reduce((sum, band) => sum + band.completed_count, 0) ?? 0;
+  const totalCalibration =
+    calibration?.score_bands.reduce((sum, band) => sum + band.sample_count, 0) ?? 0;
+  const completedClosure = closure?.completed_outcomes.length ?? 0;
+  const totalClosure = closure?.windows[0]?.sample_count ?? 0;
+
+  return (
+    <details className="compact-drawer history-forward-validation-drawer">
+      <summary>
+        <div>
+          <p className="eyebrow">
+            {language === "zh" ? "推荐后跟踪" : "Post-Recommendation Tracking"}
+          </p>
+          <strong>
+            {language === "zh" ? "不是历史回测，等样本成熟后看闭环" : "Not a backtest; tracks future follow-through"}
+          </strong>
+          <span>
+            {language === "zh"
+              ? "历史回测在上方；这里统计已经发出的推荐在未来 5/10/20 日是否触发、止损、止盈。"
+              : "Historical replay is above; this tracks whether published recommendations later trigger, stop, or hit targets."}
+          </span>
+        </div>
+        <span className="count">
+          {completedCalibration + completedClosure}/{totalCalibration + totalClosure}
+        </span>
+      </summary>
+      <div className="history-forward-validation-stack">
+        {closure ? <RecommendationClosurePanel closure={closure} /> : null}
+        {calibration ? <RecommendationCalibrationCenterPanel calibration={calibration} /> : null}
+      </div>
+    </details>
+  );
+}
+
 function BacktestCommandCenter({
   backtest,
   portfolioBacktest,
@@ -1037,8 +1114,8 @@ function BacktestCommandCenter({
 
       <p className="compact-note">
         {language === "zh"
-          ? `当前股票池：${scanUniverseLabel}。最近推荐闭环样本：${completedWindow?.completed_count ?? 0}/${completedWindow?.sample_count ?? 0}。`
-          : `Universe: ${scanUniverseLabel}. Recent closure samples: ${completedWindow?.completed_count ?? 0}/${completedWindow?.sample_count ?? 0}.`}
+          ? `当前股票池：${scanUniverseLabel}。本页主线是历史行情重放；推荐后闭环样本 ${completedWindow?.completed_count ?? 0}/${completedWindow?.sample_count ?? 0} 已放到下方折叠区。`
+          : `Universe: ${scanUniverseLabel}. This page focuses on historical replay; post-recommendation closure ${completedWindow?.completed_count ?? 0}/${completedWindow?.sample_count ?? 0} is collapsed below.`}
       </p>
     </section>
   );
@@ -1135,17 +1212,17 @@ function BacktestGuidePanel({
   scanUniverseLabel: string;
   hasSelectedCard: boolean;
 }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   return (
-    <section className="panel backtest-guide-panel">
-      <div className="panel-heading">
+    <details className="panel backtest-guide-panel compact-drawer">
+      <summary>
         <div>
           <p className="eyebrow">{t("history.guideEyebrow")}</p>
           <h2>{t("history.guideTitle")}</h2>
           <p className="brief-headline">{t("history.guideSubtitle")}</p>
         </div>
         <span className="count">{hasSelectedCard ? t("history.selectedReady") : t("history.selectedMissing")}</span>
-      </div>
+      </summary>
       <div className="backtest-guide-grid">
         <div>
           <span>{t("history.stepFind")}</span>
@@ -1163,7 +1240,7 @@ function BacktestGuidePanel({
           <p>{t("history.stepUseText")}</p>
         </div>
       </div>
-    </section>
+    </details>
   );
 }
 
@@ -1174,7 +1251,7 @@ function BacktestScopeNote({
   selectedLabel: string;
   hasSelectedCard: boolean;
 }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   return (
     <div className="empty-state compact backtest-scope-note">
       <strong>{t("history.backtestScope")}</strong>
@@ -1335,8 +1412,6 @@ function RecommendationCalibrationCenterPanel({
   const totalSamples = calibration.recent_samples.length
     ? calibration.recent_samples.reduce((max, sample) => Math.max(max, sample.score), 0)
     : calibration.reliability_score;
-  const bestBand = maxBy(calibration.score_bands, (band) => band.reliability_score);
-  const bestEffect = calibration.signal_effects[0];
   const latestCurvePoint = calibration.curve_points[calibration.curve_points.length - 1];
   const completedCount = calibration.score_bands.reduce(
     (sum, band) => sum + band.completed_count,
@@ -1344,6 +1419,23 @@ function RecommendationCalibrationCenterPanel({
   );
   const sampleCount = calibration.score_bands.reduce((sum, band) => sum + band.sample_count, 0);
   const waitingForMaturity = sampleCount > 0 && completedCount === 0;
+  const bestBand = waitingForMaturity
+    ? undefined
+    : maxBy(
+        calibration.score_bands.filter((band) => band.completed_count > 0),
+        (band) => band.reliability_score,
+      );
+  const bestEffect = waitingForMaturity
+    ? undefined
+    : maxBy(
+        calibration.signal_effects.filter(
+          (effect) =>
+            effect.completed_count > 0 &&
+            effect.lift_vs_baseline_10d !== null &&
+            effect.lift_vs_baseline_10d > 0,
+        ),
+        (effect) => effect.lift_vs_baseline_10d ?? -999,
+      );
   const calibrationActions = waitingForMaturity
     ? [
         language === "zh"
@@ -1436,9 +1528,21 @@ function RecommendationCalibrationCenterPanel({
         </div>
         <div>
           <span>{language === "zh" ? "最佳分层" : "Best band"}</span>
-          <strong>{bestBand ? calibrationBandLabel(bestBand.label, language) : "-"}</strong>
+          <strong>
+            {waitingForMaturity
+              ? language === "zh"
+                ? "等待10日验证"
+                : "Waiting for 10D"
+              : bestBand
+                ? calibrationBandLabel(bestBand.label, language)
+                : "-"}
+          </strong>
           <p>
-            {bestBand
+            {waitingForMaturity
+              ? language === "zh"
+                ? "推荐样本还没有成熟"
+                : "Samples are not mature yet"
+              : bestBand
               ? `${formatRatio(bestBand.win_rate_10d)} · ${formatNumber(bestBand.avg_return_10d, "%")}`
               : language === "zh"
                 ? "等待样本"
@@ -1448,12 +1552,20 @@ function RecommendationCalibrationCenterPanel({
         <div>
           <span>{language === "zh" ? "最强信号" : "Best signal"}</span>
           <strong>
-            {bestEffect
-              ? calibrationSignalLabel(bestEffect.signal_key, bestEffect.label, language)
-              : "-"}
+            {waitingForMaturity
+              ? language === "zh"
+                ? "暂无成熟信号"
+                : "No mature signal"
+              : bestEffect
+                ? calibrationSignalLabel(bestEffect.signal_key, bestEffect.label, language)
+                : "-"}
           </strong>
           <p>
-            {bestEffect
+            {waitingForMaturity
+              ? language === "zh"
+                ? "不是回测无数据，是推荐后样本未满10日"
+                : "This is future tracking, not missing backtest data"
+              : bestEffect
               ? `${formatNumber(bestEffect.lift_vs_baseline_10d, "%")} ${language === "zh" ? "超额" : "lift"}`
               : language === "zh"
                 ? "等待样本"
@@ -1534,27 +1646,38 @@ function RecommendationCalibrationCenterPanel({
             <h3>{language === "zh" ? "信号贡献校准" : "Signal Contribution"}</h3>
             <span>{calibration.signal_effects.length}</span>
           </header>
-          {calibration.signal_effects.slice(0, 8).map((effect) => (
-            <div key={effect.signal_key} className={`calibration-effect-row ${calibrationActionClass(effect.weight_action)}`}>
-              <div>
-                <strong>{calibrationSignalLabel(effect.signal_key, effect.label, language)}</strong>
-                <small>{effect.completed_count}/{effect.sample_count} {language === "zh" ? "样本" : "samples"}</small>
-              </div>
-              <div>
-                <span>{language === "zh" ? "超额" : "Lift"}</span>
-                <b>{formatNumber(effect.lift_vs_baseline_10d, "%")}</b>
-              </div>
-              <div>
-                <span>{language === "zh" ? "胜率" : "Win"}</span>
-                <b>{formatRatio(effect.win_rate_10d)}</b>
-              </div>
-              <div>
-                <span>{language === "zh" ? "动作" : "Action"}</span>
-                <b>{calibrationActionLabel(effect.weight_action, language)}</b>
-              </div>
-              <p>{calibrationReason(effect.reason, language)}</p>
+          {waitingForMaturity ? (
+            <div className="chart-empty-explanation">
+              <strong>{language === "zh" ? "等待成熟样本" : "Waiting for mature samples"}</strong>
+              <p>
+                {language === "zh"
+                  ? "这些标签只是推荐时记录下来的状态，不代表已经证明哪个信号最强；等 10 日收益样本出现后再计算超额收益和权重动作。"
+                  : "These labels are recorded at recommendation time; lift and weight actions are calculated only after 10D outcomes mature."}
+              </p>
             </div>
-          ))}
+          ) : (
+            calibration.signal_effects.slice(0, 8).map((effect) => (
+              <div key={effect.signal_key} className={`calibration-effect-row ${calibrationActionClass(effect.weight_action)}`}>
+                <div>
+                  <strong>{calibrationSignalLabel(effect.signal_key, effect.label, language)}</strong>
+                  <small>{effect.completed_count}/{effect.sample_count} {language === "zh" ? "样本" : "samples"}</small>
+                </div>
+                <div>
+                  <span>{language === "zh" ? "超额" : "Lift"}</span>
+                  <b>{formatNumber(effect.lift_vs_baseline_10d, "%")}</b>
+                </div>
+                <div>
+                  <span>{language === "zh" ? "胜率" : "Win"}</span>
+                  <b>{formatRatio(effect.win_rate_10d)}</b>
+                </div>
+                <div>
+                  <span>{language === "zh" ? "动作" : "Action"}</span>
+                  <b>{calibrationActionLabel(effect.weight_action, language)}</b>
+                </div>
+                <p>{calibrationReason(effect.reason, language)}</p>
+              </div>
+            ))
+          )}
         </div>
       </div>
 
@@ -2078,7 +2201,7 @@ function ReturnDistributionChart({
   signals: BacktestSignal[];
   horizon: "return_5d" | "return_10d" | "return_20d";
 }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const returns = signals
     .map((signal) => signal[horizon])
     .filter((value): value is number => value !== null && !Number.isNaN(value));
@@ -2086,22 +2209,77 @@ function ReturnDistributionChart({
   const positive = returns.filter((value) => value >= 0).length;
   const negative = returns.length - positive;
   const bestBucket = [...buckets].sort((left, right) => right.count - left.count)[0];
+  const bestReturn = returns.length ? Math.max(...returns) : null;
+  const worstReturn = returns.length ? Math.min(...returns) : null;
+  const averageReturn = returns.length
+    ? returns.reduce((sum, value) => sum + value, 0) / returns.length
+    : null;
   return (
-    <BarValidationChart
-      title={title}
-      headline={`${returns.length} ${t("history.samples")}`}
-      meta={[
-        { label: t("history.positiveSamples"), value: String(positive) },
-        { label: t("history.negativeSamples"), value: String(negative) },
-        { label: t("history.bestBucket"), value: bestBucket ? `${bestBucket.label} · ${bestBucket.count}` : "-" },
-      ]}
-      bars={buckets.map((bucket) => ({
-        label: bucket.label,
-        value: bucket.count,
-        valueLabel: String(bucket.count),
-        caption: `${bucket.count} ${t("history.samples")}`,
-      }))}
-    />
+    <div className="validation-card return-distribution-card">
+      <header>
+        <h3>{title}</h3>
+        <span>{returns.length} {t("history.samples")}</span>
+      </header>
+      <ChartMetaStrip
+        items={[
+          { label: t("history.positiveSamples"), value: String(positive) },
+          { label: t("history.negativeSamples"), value: String(negative) },
+          { label: t("history.bestBucket"), value: bestBucket ? `${bestBucket.label} · ${bestBucket.count}` : "-" },
+          { label: t("history.avgReturn"), value: formatNumber(averageReturn, "%") },
+        ]}
+      />
+      {!returns.length ? (
+        <div className="chart-empty-explanation">
+          <strong>{t("history.waitingValidation")}</strong>
+          <p>{title}: -</p>
+        </div>
+      ) : (
+        <>
+          <div className="return-distribution-summary">
+            <div>
+              <span>{t("history.worstForward")}</span>
+              <strong className="risk">{formatNumber(worstReturn, "%")}</strong>
+            </div>
+            <div>
+              <span>{t("history.avgReturn")}</span>
+              <strong className={(averageReturn ?? 0) >= 0 ? "good" : "risk"}>
+                {formatNumber(averageReturn, "%")}
+              </strong>
+            </div>
+            <div>
+              <span>{t("history.bestForward")}</span>
+              <strong className="good">{formatNumber(bestReturn, "%")}</strong>
+            </div>
+          </div>
+          <div className="return-bucket-list" role="img" aria-label={title}>
+            {buckets.map((bucket) => {
+              const share = returns.length ? bucket.count / returns.length : 0;
+              return (
+                <div key={bucket.label} className={bucket.max <= 0 ? "return-bucket negative" : "return-bucket positive"}>
+                  <div className="return-bucket-head">
+                    <strong>{bucket.label}%</strong>
+                    <span>{bucket.count} {t("history.samples")}</span>
+                  </div>
+                  <div className="return-bucket-track">
+                    <i style={{ width: `${Math.max(bucket.count ? 7 : 0, Math.round(share * 100))}%` }} />
+                  </div>
+                  <small>{Math.round(share * 100)}%</small>
+                </div>
+              );
+            })}
+          </div>
+          <p className="validation-chart-caption">
+            {positive >= negative
+              ? language === "zh"
+                ? "盈利样本更多，但仍要结合最大回撤判断是否值得承受波动。"
+                : "There are more winning samples, but drawdown still decides whether the volatility is tolerable."
+              : language === "zh"
+                ? "亏损样本更多，说明这个信号的历史分布偏弱，需要降低信心或等待更强确认。"
+                : "There are more losing samples, so this signal distribution is weak and needs stronger confirmation."}
+          </p>
+        </>
+      )}
+    </div>
   );
 }
 

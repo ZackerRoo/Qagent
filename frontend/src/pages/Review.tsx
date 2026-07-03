@@ -25,7 +25,7 @@ export function Review({ symbols }: { symbols: string }) {
   }, [symbols]);
 
   return (
-    <div className="stack">
+    <div className="stack review-page">
       <section className="panel">
         <div className="panel-heading">
           <h2>{t("review.title")}</h2>

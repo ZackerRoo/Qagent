@@ -18,7 +18,7 @@ export function Overview({ overview, radar, selectedCardId, onSelect }: Props) {
   const { language, t } = useI18n();
 
   return (
-    <div className="page-grid">
+    <div className="page-grid overview-page">
       <section className="panel wide">
         <div className="panel-heading">
           <h2>{t("overview.regime")}</h2>

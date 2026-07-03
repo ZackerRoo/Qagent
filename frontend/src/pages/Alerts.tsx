@@ -74,7 +74,7 @@ export function Alerts({ dataMode }: { dataMode: DataProviderMode }) {
   }
 
   return (
-    <section className="panel stack">
+    <section className="panel stack alerts-page">
       <div className="panel-heading">
         <h2>{t("alerts.title")}</h2>
         <div className="brief-actions">

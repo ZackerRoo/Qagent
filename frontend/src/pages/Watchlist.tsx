@@ -36,7 +36,7 @@ export function Watchlist() {
   }
 
   return (
-    <section className="panel stack">
+    <section className="panel stack watchlist-page">
       <div className="panel-heading">
         <h2>{t("watchlist.title")}</h2>
         <span className="count">{items.length}</span>

@@ -228,7 +228,7 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
   }
 
   return (
-    <div className="stack">
+    <div className="stack settings-page">
       <section className="panel">
         <div className="panel-heading">
           <h2>{t("settings.title")}</h2>

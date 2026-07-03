@@ -66,7 +66,7 @@ export function Opportunities({
   const hiddenCards = Math.max(0, cards.length - visibleCards.length);
 
   return (
-    <div className="split-grid">
+    <div className="split-grid opportunities-page">
       <div className="stack">
         <section className="panel">
           <div className="panel-heading">
@@ -76,10 +76,7 @@ export function Opportunities({
             </span>
           </div>
           <ProfileNote card={selectedCard} profile={profile} />
-          <ResearchCommandCenterPanel center={researchCenter} compact />
           <OpportunitySummary cards={cards} items={items} />
-          <PortfolioPlanPanel plan={portfolioPlan} />
-          <SectorStrengthPanel items={sectorStrength} />
           <div className="opportunity-list-toolbar">
             <span>
               {t("opportunities.showing")} {visibleCards.length}/{cards.length}
@@ -99,6 +96,20 @@ export function Opportunities({
             selectedCardId={selectedCard?.card_id}
             onSelect={onSelect}
           />
+          <details className="compact-drawer opportunity-insights-drawer">
+            <summary>
+              <div>
+                <span className="eyebrow">{language === "zh" ? "研究细节" : "Research detail"}</span>
+                <strong>{language === "zh" ? "组合建议、行业强弱、研究中枢" : "Portfolio, sectors, command center"}</strong>
+              </div>
+              <span className="count">{sectorStrength.length}</span>
+            </summary>
+            <div className="drawer-stack">
+              <ResearchCommandCenterPanel center={researchCenter} compact />
+              <PortfolioPlanPanel plan={portfolioPlan} />
+              <SectorStrengthPanel items={sectorStrength} />
+            </div>
+          </details>
         </section>
         <section className="panel">
           <div className="panel-heading">
