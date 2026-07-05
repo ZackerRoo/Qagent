@@ -29,6 +29,7 @@ import type {
   OpportunitiesResponse,
   OpportunityHistoryResponse,
   OutcomesResponse,
+  PaperDailyReportResponse,
   PaperLedgerResponse,
   PaperSeedResponse,
   PaperSessionResponse,
@@ -337,11 +338,12 @@ export async function savePosition(payload: Position): Promise<Position> {
   return apiPost<Position>("/positions", payload);
 }
 
-export async function fetchPaperTrades(): Promise<PaperTradesResponse> {
-  return apiGet<PaperTradesResponse>("/paper-trades", { limit: 100 });
+export async function fetchPaperTrades(provider?: DataProviderMode): Promise<PaperTradesResponse> {
+  return apiGet<PaperTradesResponse>("/paper-trades", { provider, limit: 100 });
 }
 
 type PaperLedgerRequest = {
+  provider?: DataProviderMode;
   initialCapital?: string | number;
   allocationPerTradePct?: string | number;
   maxPositions?: number;
@@ -352,6 +354,7 @@ type PaperLedgerRequest = {
 
 export async function fetchPaperLedger(params: PaperLedgerRequest = {}): Promise<PaperLedgerResponse> {
   return apiGet<PaperLedgerResponse>("/paper-trades/ledger", {
+    provider: params.provider,
     initial_capital: params.initialCapital,
     allocation_per_trade_pct: params.allocationPerTradePct,
     max_positions: params.maxPositions,
@@ -362,8 +365,17 @@ export async function fetchPaperLedger(params: PaperLedgerRequest = {}): Promise
   });
 }
 
-export async function fetchPaperValidation(): Promise<PaperValidationResponse> {
-  return apiGet<PaperValidationResponse>("/paper-trades/validation", { limit: 500 });
+export async function fetchPaperValidation(provider?: DataProviderMode): Promise<PaperValidationResponse> {
+  return apiGet<PaperValidationResponse>("/paper-trades/validation", { provider, limit: 500 });
+}
+
+export async function fetchPaperDailyReport(
+  provider: DataProviderMode,
+): Promise<PaperDailyReportResponse> {
+  return apiGet<PaperDailyReportResponse>("/paper-trades/daily-report", {
+    provider,
+    limit: 500,
+  });
 }
 
 export async function runPaperValidation(
@@ -375,8 +387,8 @@ export async function runPaperValidation(
   );
 }
 
-export async function fetchPaperSession(): Promise<PaperSessionResponse> {
-  return apiGet<PaperSessionResponse>("/paper-trades/session");
+export async function fetchPaperSession(provider?: DataProviderMode): Promise<PaperSessionResponse> {
+  return apiGet<PaperSessionResponse>("/paper-trades/session", { provider });
 }
 
 export async function startPaperSession(

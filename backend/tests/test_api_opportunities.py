@@ -3,6 +3,7 @@ import time
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+import pandas as pd
 
 from qagent.app import create_app
 from qagent.api import routes
@@ -408,7 +409,8 @@ def test_full_market_batch_latest_result_hydrates_legacy_cache(tmp_path, monkeyp
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'legacy-batch.db'}")
     repo = routes._repo()
     scan = run_daily_scan(["US:TEST", "CN:000001"], FixtureMarketDataProvider())
-    legacy_card = scan.cards[0].model_dump(mode="json")
+    cn_card = next(card for card in scan.cards if card.instrument_id == "CN:000001")
+    legacy_card = cn_card.model_dump(mode="json")
     legacy_card.pop("confidence_explanation", None)
     legacy_card.pop("execution_plan", None)
     repo.save_scan_result_cache(
@@ -445,10 +447,39 @@ def test_full_market_batch_latest_result_hydrates_legacy_cache(tmp_path, monkeyp
     )
     routes._market_cache_repo().save_daily_bars(
         "fixture",
-        FixtureMarketDataProvider().get_daily_bars(
-            ["US:TEST", "CN:000001"],
-            date(2026, 1, 1),
-            date(2026, 3, 31),
+        pd.concat(
+            [
+                FixtureMarketDataProvider().get_daily_bars(
+                    ["CN:000001"],
+                    date(2026, 1, 1),
+                    date(2026, 3, 31),
+                ),
+                pd.DataFrame(
+                    [
+                        {
+                            "instrument_id": benchmark_id,
+                            "trade_date": trade_date,
+                            "open": close,
+                            "high": close,
+                            "low": close,
+                            "close": close,
+                            "volume": 1000000,
+                            "provider": "fixture_index",
+                        }
+                        for benchmark_id, first_close, last_close in [
+                            ("CN:000300.IDX", 100, 103),
+                            ("CN:000905.IDX", 100, 101),
+                            ("CN:399006.IDX", 100, 98),
+                            ("CN:000688.IDX", 100, 105),
+                        ]
+                        for trade_date, close in [
+                            (date(2026, 2, 1), first_close),
+                            (date(2026, 3, 31), last_close),
+                        ]
+                    ]
+                ),
+            ],
+            ignore_index=True,
         ),
     )
     client = TestClient(create_app())
@@ -461,6 +492,8 @@ def test_full_market_batch_latest_result_hydrates_legacy_cache(tmp_path, monkeyp
     body = response.json()
     assert body["cards"][0]["confidence_explanation"]
     assert body["cards"][0]["execution_plan"]
+    assert body["cards"][0]["recommendation_brief"]["why"]
+    assert body["cards"][0]["benchmark_comparison"]["items"]
     assert body["cards"][0]["probability_forecast"]
     assert body["strategy_health"]
     assert any(item["curve"] for item in body["strategy_health"])
@@ -474,6 +507,8 @@ def test_full_market_batch_latest_result_hydrates_legacy_cache(tmp_path, monkeyp
     assert body["data_health"]["signal_monitor_total"] == str(len(body["cards"]))
     assert body["data_health"]["decision_quality_cards"] == str(len(body["cards"]))
     assert body["data_health"]["probability_calibration_cards"] == str(len(body["cards"]))
+    assert body["data_health"]["recommendation_brief_cards"] == str(len(body["cards"]))
+    assert body["data_health"]["cached_benchmark_comparison_cards"] == str(len(body["cards"]))
 
 
 def test_full_market_batch_latest_result_uses_card_calibration_when_no_health_cache(

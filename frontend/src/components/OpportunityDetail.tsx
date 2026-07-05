@@ -87,6 +87,46 @@ export function OpportunityDetail({
         {formatInstrumentText(localizeReason(card.thesis, language), card.instrument_id, card.instrument_label)}
       </p>
 
+      {card.recommendation_brief && (
+        <div className="recommendation-brief-card">
+          <div className="brief-verdict">
+            <span>{language === "zh" ? "当前结论" : "Verdict"}</span>
+            <strong>{card.recommendation_brief.current_verdict}</strong>
+          </div>
+          <div className="brief-grid">
+            <BriefCell label={language === "zh" ? "为什么推荐" : "Why"} value={card.recommendation_brief.why} />
+            <BriefCell label={language === "zh" ? "买点" : "Buy point"} value={card.recommendation_brief.buy_point} />
+            <BriefCell label={language === "zh" ? "止损" : "Stop"} value={card.recommendation_brief.stop_loss} />
+            <BriefCell label={language === "zh" ? "目标" : "Target"} value={card.recommendation_brief.target} />
+            <BriefCell label={language === "zh" ? "风险" : "Risk"} value={card.recommendation_brief.risk} />
+            <BriefCell label={language === "zh" ? "历史胜率" : "History"} value={card.recommendation_brief.history_odds} />
+          </div>
+        </div>
+      )}
+
+      {card.benchmark_comparison && (
+        <div className="benchmark-comparison-card">
+          <header>
+            <div>
+              <span className="eyebrow">{language === "zh" ? "指数对比" : "Benchmark"}</span>
+              <h3>{card.benchmark_comparison.summary}</h3>
+            </div>
+            <strong>{formatSignedPct(card.benchmark_comparison.primary.excess_return_pct)}</strong>
+          </header>
+          <div className="benchmark-pill-grid">
+            {card.benchmark_comparison.items.map((item) => (
+              <div key={item.benchmark_id} className={`benchmark-pill benchmark-${item.verdict}`}>
+                <span>{item.name}</span>
+                <strong>{formatSignedPct(item.excess_return_pct)}</strong>
+                <small>
+                  {language === "zh" ? "指数" : "Index"} {formatSignedPct(item.return_pct)}
+                </small>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <SignalHubPanel hub={card.signal_hub} />
 
       {card.recommendation_summary && (
@@ -587,6 +627,15 @@ function formatEvidence(evidence: Record<string, unknown>, language: "zh" | "en"
         `${localizeEvidenceKey(key, language)}: ${localizeEvidenceValue(value, language)}`,
     )
     .join(" · ");
+}
+
+function BriefCell({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <span>{label}</span>
+      <p>{value}</p>
+    </div>
+  );
 }
 
 function formatDecisionPct(value: number | undefined) {

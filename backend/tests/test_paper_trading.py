@@ -7,7 +7,9 @@ import pandas as pd
 
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.paper_trading.engine import (
+    build_paper_daily_report,
     build_paper_ledger,
+    build_paper_validation,
     seed_paper_trades_from_snapshots,
     update_paper_trades,
 )
@@ -425,6 +427,94 @@ def test_build_paper_ledger_generates_trade_flows_fees_slippage_and_positions(tm
     assert ledger.positions[0].weight_pct > 0
     assert ledger.transactions[0].cash_flow < Decimal("0")
     assert ledger.transactions[-1].cash_balance == ledger.summary.cash_available
+
+
+def test_paper_daily_report_summarizes_actions_and_benchmark_excess(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    new_trade = paper_repo.create_trade(
+        source_snapshot_id="daily-new",
+        provider="fixture",
+        instrument_id="CN:000001",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 3),
+        trigger_price=Decimal("10"),
+        initial_stop=Decimal("9.5"),
+        target_1=Decimal("11"),
+        rank_score=Decimal("0.80"),
+    )
+    open_trade = paper_repo.create_trade(
+        source_snapshot_id="daily-open",
+        provider="fixture",
+        instrument_id="CN:688059",
+        strategy_id="factor_rotation_watch",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("20"),
+        initial_stop=Decimal("19"),
+        target_1=Decimal("23"),
+        rank_score=Decimal("0.86"),
+    )
+    paper_repo.update_trade(
+        open_trade.trade_id,
+        status="open",
+        entry_date=date(2026, 7, 2),
+        entry_price=Decimal("20"),
+        latest_date=date(2026, 7, 3),
+        latest_price=Decimal("21"),
+        unrealized_return_pct=Decimal("5"),
+        holding_days=1,
+    )
+    target_trade = paper_repo.create_trade(
+        source_snapshot_id="daily-target",
+        provider="fixture",
+        instrument_id="CN:588200",
+        strategy_id="sector_rotation_relative_strength",
+        signal_date=date(2026, 6, 28),
+        trigger_price=Decimal("5"),
+        initial_stop=Decimal("4.8"),
+        target_1=Decimal("5.5"),
+        rank_score=Decimal("0.90"),
+    )
+    paper_repo.update_trade(
+        target_trade.trade_id,
+        status="target_1_hit",
+        entry_date=date(2026, 6, 30),
+        entry_price=Decimal("5"),
+        exit_date=date(2026, 7, 3),
+        exit_price=Decimal("5.5"),
+        latest_date=date(2026, 7, 3),
+        latest_price=Decimal("5.5"),
+        realized_return_pct=Decimal("10"),
+        holding_days=3,
+    )
+
+    trades = paper_repo.list_trades(limit=20)
+    ledger = build_paper_ledger(trades)
+    validation = build_paper_validation(trades, ledger, as_of=date(2026, 7, 3))
+    report = build_paper_daily_report(
+        trades=trades,
+        ledger=ledger,
+        validation=validation,
+        as_of=date(2026, 7, 3),
+        benchmark_items=[
+            {
+                "name": "沪深300",
+                "return_pct": 1.2,
+                "excess_return_pct": ledger.summary.total_return_pct - 1.2,
+            }
+        ],
+    )
+
+    assert report.report_date == date(2026, 7, 3)
+    assert report.summary.new_opportunities == 1
+    assert report.summary.open_positions == 1
+    assert report.summary.closed_today == 1
+    assert report.summary.target_hits_today == 1
+    assert report.benchmark.items[0].name == "沪深300"
+    assert report.next_trade_day_focus
+    assert any(item.instrument_id == new_trade.instrument_id for item in report.new_opportunities)
+    assert any(item.instrument_id == open_trade.instrument_id for item in report.holdings)
+    assert any(item.instrument_id == target_trade.instrument_id for item in report.closed_today)
 
 
 def _insert_cn_snapshot(

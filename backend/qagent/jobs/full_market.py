@@ -7,6 +7,7 @@ from qagent.market.tradable import load_cn_tradable_instruments
 from qagent.monitoring.signal_monitor import build_signal_monitor_center
 from qagent.providers.factory import build_market_data_provider
 from qagent.recommendations.portfolio import build_portfolio_plan
+from qagent.recommendations.brief import apply_recommendation_briefs
 from qagent.recommendations.feedback import (
     apply_recommendation_feedback_calibration,
     build_recent_recommendation_feedback_center,
@@ -249,6 +250,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     apply_recommendation_quality_gate(all_cards)
     apply_probability_calibration(all_cards, strategy_health)
     apply_recommendation_feedback_calibration(all_cards, feedback_center)
+    brief_health = apply_recommendation_briefs(all_cards)
     ranked_cards = sort_recommendation_cards(all_cards)
     visible_cards = ranked_cards[:top_cards_limit]
     visible_items = _visible_rejected_items(all_items, limit=500)
@@ -261,6 +263,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         **recommendation_quality_data_health(visible_cards),
         **probability_calibration_data_health(visible_cards),
         **recommendation_feedback_data_health(visible_cards),
+        **brief_health,
         "scan_result_cache": "full_market_batch",
         "scan_result_cache_key": cache_key,
         "full_market_cards_total": str(len(ranked_cards)),

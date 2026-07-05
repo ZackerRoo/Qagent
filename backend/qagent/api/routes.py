@@ -52,6 +52,11 @@ from qagent.market.tradable import search_cn_tradable_instruments
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE, DEFAULT_FREE_UNIVERSE
 from qagent.market.universes import UniverseCreate, builtin_universes, merge_universes
 from qagent.market.indicators import add_moving_averages, add_volume_ratio, percent_distance
+from qagent.market.benchmarks import (
+    CN_BENCHMARKS,
+    build_benchmark_comparison_for_card,
+    benchmark_items_for_return_from_bars,
+)
 from qagent.monitoring.outcomes import (
     compute_opportunity_outcome,
     diagnose_strategy_performance,
@@ -66,6 +71,7 @@ from qagent.monitoring.signal_monitor import SignalMonitorCenter, build_signal_m
 from qagent.monitoring.portfolio import PositionInput, analyze_position_risk
 from qagent.monitoring.alerts import AlertRule, suggest_alert_rules
 from qagent.paper_trading.engine import (
+    build_paper_daily_report,
     build_paper_ledger,
     build_paper_validation,
     paper_execution_data_health,
@@ -76,6 +82,7 @@ from qagent.paper_trading.engine import (
 from qagent.providers.factory import build_market_data_provider
 from qagent.providers.status import build_provider_status
 from qagent.recommendations.enrichment import enrich_opportunity_card
+from qagent.recommendations.brief import apply_recommendation_briefs
 from qagent.recommendations.feedback import build_recent_recommendation_feedback_center
 from qagent.recommendations.portfolio import build_portfolio_plan
 from qagent.recommendations.probability import (
@@ -1112,17 +1119,18 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             paper_update = update_paper_trades(
                 paper_repo,
                 provider=build_market_data_provider(mode),
+                provider_mode=mode,
             )
             paper_total = paper_update.summary.total
             paper_closed = paper_update.summary.closed
             data_health.update(paper_update.data_health)
         except Exception as exc:
             errors.append(f"paper_update: {exc}")
-            summary = summarize_paper_trades(paper_repo.list_trades(limit=1000))
+            summary = summarize_paper_trades(paper_repo.list_trades(limit=1000, provider=mode))
             paper_total = summary.total
             paper_closed = summary.closed
     else:
-        summary = summarize_paper_trades(paper_repo.list_trades(limit=1000))
+        summary = summarize_paper_trades(paper_repo.list_trades(limit=1000, provider=mode))
         paper_total = summary.total
         paper_closed = summary.closed
 
@@ -1360,14 +1368,22 @@ def _as_utc_datetime(value: datetime) -> datetime:
 
 
 @router.get("/paper-trades")
-def paper_trades(status: str | None = None, limit: int = 100) -> dict[str, object]:
+def paper_trades(
+    status: str | None = None,
+    limit: int = 100,
+    provider: str | None = None,
+) -> dict[str, object]:
     if limit <= 0 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
-    trades = _paper_repo().list_trades(status=status, limit=limit)
+    mode = provider.strip().lower() if provider else None
+    trades = _paper_repo().list_trades(status=status, limit=limit, provider=mode)
     return {
         "summary": summarize_paper_trades(trades).model_dump(mode="json"),
         "trades": [trade.model_dump(mode="json") for trade in trades],
-        "data_health": paper_execution_data_health(),
+        "data_health": {
+            **paper_execution_data_health(),
+            "paper_provider_filter": mode or "all",
+        },
     }
 
 
@@ -1402,6 +1418,7 @@ def update_paper_trade_status(provider: str = "fixture") -> dict[str, object]:
         result = update_paper_trades(
             _paper_repo(),
             provider=build_market_data_provider(mode),
+            provider_mode=mode,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1409,14 +1426,18 @@ def update_paper_trade_status(provider: str = "fixture") -> dict[str, object]:
 
 
 @router.get("/paper-trades/session")
-def paper_trade_session() -> dict[str, object]:
+def paper_trade_session(provider: str | None = None) -> dict[str, object]:
     repo = _paper_repo()
     account = repo.get_account_settings()
-    trades = repo.list_trades(limit=1000)
+    mode = provider.strip().lower() if provider else None
+    trades = repo.list_trades(limit=1000, provider=mode)
     return {
         "account": account.model_dump(mode="json"),
         "summary": summarize_paper_trades(trades).model_dump(mode="json"),
-        "data_health": _paper_account_data_health(account),
+        "data_health": {
+            **_paper_account_data_health(account),
+            "paper_provider_filter": mode or "all",
+        },
     }
 
 
@@ -1472,13 +1493,15 @@ def paper_trade_ledger(
     slippage_bps: Decimal | None = None,
     take_profit_pct: Decimal | None = None,
     limit: int = 500,
+    provider: str | None = None,
 ) -> dict[str, object]:
     if limit <= 0 or limit > 1000:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
     account = _paper_repo().get_account_settings()
+    mode = provider.strip().lower() if provider else None
     try:
         ledger = build_paper_ledger(
-            _paper_repo().list_trades(limit=limit),
+            _paper_repo().list_trades(limit=limit, provider=mode),
             initial_capital=initial_capital or account.initial_capital,
             allocation_per_trade_pct=allocation_per_trade_pct or account.allocation_per_trade_pct,
             max_positions=max_positions or account.max_positions,
@@ -1488,15 +1511,21 @@ def paper_trade_ledger(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    ledger.data_health.update(_paper_account_data_health(account))
+    ledger.data_health.update(
+        {
+            **_paper_account_data_health(account),
+            "paper_provider_filter": mode or "all",
+        }
+    )
     return ledger.model_dump(mode="json")
 
 
 @router.get("/paper-trades/validation")
-def paper_trade_validation(limit: int = 500) -> dict[str, object]:
+def paper_trade_validation(limit: int = 500, provider: str | None = None) -> dict[str, object]:
     if limit <= 0 or limit > 1000:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
-    return _paper_validation_payload(limit=limit)
+    mode = provider.strip().lower() if provider else None
+    return _paper_validation_payload(limit=limit, provider=mode)
 
 
 @router.post("/paper-trades/validation/run")
@@ -1508,10 +1537,11 @@ def run_paper_trade_validation(provider: str = "fixture", limit: int = 500) -> d
         update_result = update_paper_trades(
             _paper_repo(),
             provider=build_market_data_provider(mode),
+            provider_mode=mode,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    payload = _paper_validation_payload(limit=limit)
+    payload = _paper_validation_payload(limit=limit, provider=mode)
     payload["data_health"].update(
         {
             **update_result.data_health,
@@ -1522,10 +1552,10 @@ def run_paper_trade_validation(provider: str = "fixture", limit: int = 500) -> d
     return payload
 
 
-def _paper_validation_payload(limit: int = 500) -> dict[str, object]:
+def _paper_validation_payload(limit: int = 500, provider: str | None = None) -> dict[str, object]:
     repo = _paper_repo()
     account = repo.get_account_settings()
-    trades = repo.list_trades(limit=limit)
+    trades = repo.list_trades(limit=limit, provider=provider)
     ledger = build_paper_ledger(
         trades,
         initial_capital=account.initial_capital,
@@ -1535,9 +1565,81 @@ def _paper_validation_payload(limit: int = 500) -> dict[str, object]:
         slippage_bps=account.slippage_bps,
         take_profit_pct=account.take_profit_pct,
     )
-    ledger.data_health.update(_paper_account_data_health(account))
+    ledger.data_health.update(
+        {
+            **_paper_account_data_health(account),
+            "paper_provider_filter": provider or "all",
+        }
+    )
     validation = build_paper_validation(trades, ledger)
+    validation.data_health["paper_provider_filter"] = provider or "all"
     return validation.model_dump(mode="json")
+
+
+def _paper_report_date(trades) -> date:
+    dates = [
+        value
+        for trade in trades
+        for value in (trade.latest_date, trade.exit_date, trade.entry_date, trade.signal_date)
+        if value is not None
+    ]
+    return max(dates) if dates else _a_share_today()
+
+
+@router.get("/paper-trades/daily-report")
+def paper_trade_daily_report(provider: str = "fixture", limit: int = 500) -> dict[str, object]:
+    if limit <= 0 or limit > 1000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+    mode = provider.strip().lower()
+    repo = _paper_repo()
+    account = repo.get_account_settings()
+    trades = repo.list_trades(limit=limit, provider=mode)
+    ledger = build_paper_ledger(
+        trades,
+        initial_capital=account.initial_capital,
+        allocation_per_trade_pct=account.allocation_per_trade_pct,
+        max_positions=account.max_positions,
+        transaction_cost_bps=account.transaction_cost_bps,
+        slippage_bps=account.slippage_bps,
+        take_profit_pct=account.take_profit_pct,
+    )
+    ledger.data_health.update(
+        {
+            **_paper_account_data_health(account),
+            "paper_provider_filter": mode,
+        }
+    )
+    validation = build_paper_validation(trades, ledger)
+    report_date = _paper_report_date(trades)
+    benchmark_items: list[dict[str, object]] = []
+    benchmark_rows = 0
+    if trades:
+        benchmark_ids = [item.benchmark_id for item in CN_BENCHMARKS]
+        benchmark_bars = _market_cache_repo().load_daily_bars(
+            mode,
+            benchmark_ids,
+            min(trade.signal_date for trade in trades),
+            report_date,
+        )
+        benchmark_rows = len(benchmark_bars)
+        benchmark_items = benchmark_items_for_return_from_bars(
+            benchmark_bars=benchmark_bars,
+            base_return_pct=ledger.summary.total_return_pct,
+        )
+    report = build_paper_daily_report(
+        trades=trades,
+        ledger=ledger,
+        validation=validation,
+        as_of=report_date,
+        benchmark_items=benchmark_items,
+    )
+    report.data_health.update(
+        {
+            "paper_daily_benchmarks_source": "market_cache_only",
+            "paper_daily_benchmark_rows": str(benchmark_rows),
+        }
+    )
+    return report.model_dump(mode="json")
 
 
 @router.delete("/paper-trades/{trade_id}")
@@ -2255,6 +2357,7 @@ def _enrich_scan_task_result(payload: dict[str, object]) -> dict[str, object]:
         return payload
     _relabel_instrument_payload(result)
     _hydrate_legacy_opportunity_cards(result)
+    _attach_card_briefs_and_cached_benchmarks(result, _payload_provider_mode(result))
     _attach_rotation_radar_payload(result)
     _attach_signal_hub_payload(result)
     _attach_market_intelligence_payload(result)
@@ -2507,6 +2610,7 @@ def _hydrate_full_market_batch_payload(
     hydrated_cards = _hydrate_legacy_opportunity_cards(payload)
     if hydrated_cards:
         data_health["legacy_cards_hydrated"] = str(hydrated_cards)
+    _attach_card_briefs_and_cached_benchmarks(payload, provider)
     if not payload.get("strategy_health"):
         recent = repo.get_latest_scan_result_cache_by_modes(
             provider=provider,
@@ -2566,6 +2670,92 @@ def _hydrate_legacy_opportunity_cards(payload: dict[str, object]) -> int:
     if hydrated_count:
         payload["cards"] = hydrated
     return hydrated_count
+
+
+def _attach_card_briefs_and_cached_benchmarks(
+    payload: dict[str, object],
+    provider: str | None,
+) -> None:
+    raw_cards = payload.get("cards")
+    if not isinstance(raw_cards, list):
+        return
+    cards = _cards_from_payload(raw_cards)
+    if not cards:
+        return
+
+    data_health = payload.setdefault("data_health", {})
+    if not isinstance(data_health, dict):
+        data_health = {}
+        payload["data_health"] = data_health
+
+    data_health.update(apply_recommendation_briefs(cards))
+    data_health.update(_apply_cached_benchmark_comparisons(cards, provider))
+    payload["cards"] = [card.model_dump(mode="json") for card in cards]
+
+
+def _apply_cached_benchmark_comparisons(
+    cards: list[OpportunityCard],
+    provider: str | None,
+) -> dict[str, str]:
+    cn_cards = [card for card in cards if card.instrument_id.startswith("CN:")]
+    if not provider or not cn_cards:
+        return {
+            "cached_benchmark_comparison_cards": "0",
+            "cached_benchmark_comparison_missing_cards": str(len(cn_cards)),
+            "cached_benchmark_comparison_rows": "0",
+        }
+
+    start = date.today() - timedelta(days=180)
+    end = date.today()
+    benchmark_ids = [item.benchmark_id for item in CN_BENCHMARKS]
+    instrument_ids = sorted({card.instrument_id for card in cn_cards})
+    try:
+        cached = _market_cache_repo().load_daily_bars(
+            provider,
+            instrument_ids + benchmark_ids,
+            start,
+            end,
+        )
+    except Exception:
+        return {
+            "cached_benchmark_comparison_cards": "0",
+            "cached_benchmark_comparison_missing_cards": str(len(cn_cards)),
+            "cached_benchmark_comparison_rows": "0",
+        }
+    if cached.empty:
+        return {
+            "cached_benchmark_comparison_cards": "0",
+            "cached_benchmark_comparison_missing_cards": str(len(cn_cards)),
+            "cached_benchmark_comparison_rows": "0",
+        }
+
+    frames = {
+        str(instrument_id): group.copy()
+        for instrument_id, group in cached.groupby("instrument_id", sort=False)
+    }
+    empty_frame = cached.iloc[0:0].copy()
+    benchmark_frames = {
+        benchmark_id: frames.get(benchmark_id, empty_frame)
+        for benchmark_id in benchmark_ids
+    }
+    applied = 0
+    missing = 0
+    for card in cn_cards:
+        comparison = build_benchmark_comparison_for_card(
+            card,
+            instrument_bars=frames.get(card.instrument_id, empty_frame),
+            benchmark_frames=benchmark_frames,
+        )
+        if comparison is None:
+            missing += 1
+            continue
+        card.benchmark_comparison = comparison
+        applied += 1
+    return {
+        "cached_benchmark_comparison_cards": str(applied),
+        "cached_benchmark_comparison_missing_cards": str(missing),
+        "cached_benchmark_comparison_rows": str(len(cached)),
+    }
 
 
 def _rotation_radar_payload(
@@ -2940,7 +3130,8 @@ def _attach_live_paper_health_payload(payload: dict[str, object]) -> None:
         data_health = {}
         payload["data_health"] = data_health
     try:
-        trades = _paper_repo().list_trades(limit=1000)
+        provider = _payload_provider_mode(payload)
+        trades = _paper_repo().list_trades(limit=1000, provider=provider)
         summary = summarize_paper_trades(trades)
     except Exception:
         return
@@ -2953,6 +3144,7 @@ def _attach_live_paper_health_payload(payload: dict[str, object]) -> None:
             "paper_target_hit_count": str(summary.target_hit_count),
             "paper_stopped_count": str(summary.stopped_count),
             "paper_ledger": "true",
+            "paper_provider_filter": provider or "all",
         }
     )
 
@@ -3714,7 +3906,7 @@ def agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
         (risk for risk in position_risks if risk.instrument_id == selected.instrument_id),
         None,
     )
-    selected_paper_trade = _paper_trade_for_instrument(selected.instrument_id)
+    selected_paper_trade = _paper_trade_for_instrument(selected.instrument_id, mode)
 
     answer = answer_question(
         request.question,
@@ -3748,11 +3940,11 @@ def agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
     return AgentQueryResponse(answer=answer)
 
 
-def _paper_trade_for_instrument(instrument_id: str):
+def _paper_trade_for_instrument(instrument_id: str, provider: str | None = None):
     return next(
         (
             trade
-            for trade in _paper_repo().list_trades(limit=1000)
+            for trade in _paper_repo().list_trades(limit=1000, provider=provider)
             if trade.instrument_id == instrument_id
         ),
         None,

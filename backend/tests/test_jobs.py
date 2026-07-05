@@ -51,6 +51,34 @@ def test_daily_scan_returns_cards_for_fixture_universe():
     assert result.data_health["operational_readiness_checks"] == "6"
 
 
+def test_daily_scan_adds_benchmark_comparison_and_quick_brief():
+    result = run_daily_scan(
+        instrument_ids=["CN:000001"],
+        provider=BenchmarkFixtureProvider(),
+        mode="fixture",
+        start=date(2026, 1, 1),
+        end=date(2026, 3, 31),
+    )
+
+    card = result.cards[0]
+    assert card.recommendation_brief is not None
+    assert card.recommendation_brief.why
+    assert card.recommendation_brief.buy_point
+    assert card.recommendation_brief.stop_loss
+    assert card.recommendation_brief.target
+    assert card.recommendation_brief.history_odds
+    assert card.recommendation_brief.current_verdict in {"适合买", "等待买点", "不适合"}
+    assert card.benchmark_comparison is not None
+    assert {item.name for item in card.benchmark_comparison.items} == {
+        "沪深300",
+        "中证500",
+        "创业板指",
+        "科创50",
+    }
+    assert card.benchmark_comparison.primary.excess_return_pct is not None
+    assert result.data_health["benchmark_comparison_cards"] == str(len(result.cards))
+
+
 def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'full-batch.db'}")
     initialize_database()
@@ -231,6 +259,24 @@ def test_daily_scan_continues_after_single_instrument_error():
     assert result.data_health["scan_errors"] == "1"
 
 
+class BenchmarkFixtureProvider(FixtureMarketDataProvider):
+    def get_daily_bars(self, instrument_ids, start, end):
+        benchmark_ids = {
+            "CN:000300.IDX": 0.04,
+            "CN:000905.IDX": 0.02,
+            "CN:399006.IDX": -0.01,
+            "CN:000688.IDX": 0.08,
+        }
+        if all(instrument_id in benchmark_ids for instrument_id in instrument_ids):
+            frames = [
+                _benchmark_bars(instrument_id, total_return)
+                for instrument_id, total_return in benchmark_ids.items()
+                if instrument_id in instrument_ids
+            ]
+            return pd.concat(frames, ignore_index=True)
+        return super().get_daily_bars(instrument_ids, start, end)
+
+
 def _scan_item(instrument_id: str, status: str) -> ScanItem:
     return ScanItem(
         instrument_id=instrument_id,
@@ -313,6 +359,26 @@ def test_daily_scan_surfaces_strategy_data_counts_and_errors():
         provider=FixtureMarketDataProvider(),
         strategy_data_provider=StrategyDataProviderWithRecords(),
     )
+
+
+def _benchmark_bars(instrument_id: str, total_return: float) -> pd.DataFrame:
+    start = date(2026, 1, 1)
+    rows = []
+    for index in range(70):
+        close = 100 * (1 + total_return * index / 69)
+        rows.append(
+            {
+                "instrument_id": instrument_id,
+                "trade_date": start + timedelta(days=index),
+                "open": close,
+                "high": close * 1.01,
+                "low": close * 0.99,
+                "close": close,
+                "volume": 5_000_000,
+                "provider": "benchmark_fixture",
+            }
+        )
+    return pd.DataFrame(rows)
 
     assert result.data_health["strategy_filings"] == "1"
     assert result.data_health["strategy_announcements"] == "1"

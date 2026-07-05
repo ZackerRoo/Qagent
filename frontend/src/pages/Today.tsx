@@ -130,7 +130,7 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onN
     try {
       const [scheduler, validation] = await Promise.all([
         fetchAutomationScheduler(),
-        fetchPaperValidation(),
+        fetchPaperValidation(dataMode),
       ]);
       setAutomationScheduler(scheduler);
       setPaperValidation(validation);

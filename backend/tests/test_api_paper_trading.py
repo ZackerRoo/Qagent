@@ -67,6 +67,41 @@ def test_paper_trade_api_deletes_trade(tmp_path, monkeypatch):
     assert deleted_again.status_code == 404
 
 
+def test_paper_trade_api_filters_by_provider(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-provider-filter.db'}")
+    client = TestClient(create_app())
+    base = {
+        "instrument_id": "CN:000001",
+        "strategy_id": "trend_momentum",
+        "trigger_price": "12.00",
+        "initial_stop": "11.40",
+        "target_1": "13.20",
+        "rank_score": 0.82,
+        "action": "watch_trigger",
+        "risk_status": "clear",
+    }
+    client.post(
+        "/api/paper-trades/from-opportunity",
+        json={**base, "card_id": "card_filter_free", "provider": "free"},
+    )
+    client.post(
+        "/api/paper-trades/from-opportunity",
+        json={**base, "card_id": "card_filter_fixture", "provider": "fixture"},
+    )
+
+    listed = client.get("/api/paper-trades?provider=free")
+    ledger = client.get("/api/paper-trades/ledger?provider=free")
+    validation = client.get("/api/paper-trades/validation?provider=free")
+    report = client.get("/api/paper-trades/daily-report?provider=free")
+
+    assert listed.status_code == 200
+    assert listed.json()["summary"]["total"] == 1
+    assert listed.json()["trades"][0]["provider"] == "free"
+    assert ledger.json()["summary"]["total_trades"] == 1
+    assert validation.json()["summary"]["total_trades"] == 1
+    assert report.json()["summary"]["total_trades"] == 1
+
+
 def test_paper_trade_session_start_resets_records_and_saves_rules(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-session.db'}")
     client = TestClient(create_app())
@@ -138,6 +173,55 @@ def test_paper_trade_api_returns_ledger_metrics(tmp_path, monkeypatch):
     assert body["items"][0]["outcome"] == "止损离场"
     assert "transactions" in body
     assert "positions" in body
+
+
+def test_paper_trade_api_returns_daily_report(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-daily-report.db'}")
+    client = TestClient(create_app())
+    client.get("/api/opportunities?provider=fixture&symbols=US:TEST")
+    client.post("/api/paper-trades/seed?provider=fixture&limit=5")
+    client.post("/api/paper-trades/update?provider=fixture")
+
+    response = client.get("/api/paper-trades/daily-report")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["total_trades"] == 1
+    assert "next_trade_day_focus" in body
+    assert body["data_health"]["paper_daily_report"] == "ready"
+
+
+def test_paper_trade_daily_report_uses_cached_benchmarks_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-daily-report-cache.db'}")
+    client = TestClient(create_app())
+    client.post(
+        "/api/paper-trades/from-opportunity",
+        json={
+            "card_id": "card_report_cache_0001",
+            "provider": "free",
+            "instrument_id": "CN:000001",
+            "strategy_id": "trend_momentum",
+            "trigger_price": "12.00",
+            "initial_stop": "11.40",
+            "target_1": "13.20",
+            "rank_score": 0.82,
+            "action": "watch_trigger",
+            "risk_status": "clear",
+        },
+    )
+
+    def fail_live_provider(*_args, **_kwargs):
+        raise AssertionError("daily report should not fetch live benchmark data")
+
+    monkeypatch.setattr("qagent.api.routes.build_market_data_provider", fail_live_provider)
+
+    response = client.get("/api/paper-trades/daily-report?provider=free")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["total_trades"] == 1
+    assert body["benchmark"]["items"]
+    assert body["data_health"]["paper_daily_benchmarks_source"] == "market_cache_only"
 
 
 def test_paper_trade_auto_validation_reports_5_10_20_day_outcomes(tmp_path, monkeypatch):

@@ -57,14 +57,26 @@ class FreeCnMarketDataProvider:
                 continue
             source_errors: list[str] = []
             try:
-                normalized = self._load_akshare(
-                    symbol,
-                    start,
-                    end,
-                    self.request_timeout_seconds,
-                )
+                if _is_index_symbol(symbol):
+                    normalized = self._load_akshare_index(
+                        _index_code(symbol),
+                        start,
+                        end,
+                        self.request_timeout_seconds,
+                    )
+                else:
+                    normalized = self._load_akshare(
+                        symbol,
+                        start,
+                        end,
+                        self.request_timeout_seconds,
+                    )
             except Exception as exc:
                 source_errors.append(f"akshare: {exc}")
+                if _is_index_symbol(symbol):
+                    self.consecutive_source_failures += 1
+                    self.last_errors.append(f"{instrument_id}: {'; '.join(source_errors)}")
+                    continue
                 try:
                     normalized = self._load_baostock(
                         symbol,
@@ -178,6 +190,35 @@ class FreeCnMarketDataProvider:
         return _coerce_bar_types(normalized)
 
     @staticmethod
+    def _load_akshare_index(
+        symbol: str,
+        start: date,
+        end: date,
+        request_timeout_seconds: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    ) -> pd.DataFrame:
+        with _bounded_network_calls(request_timeout_seconds):
+            raw = ak.index_zh_a_hist(
+                symbol=symbol,
+                period="daily",
+                start_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"),
+            )
+        if raw.empty:
+            return pd.DataFrame(columns=BAR_COLUMNS)
+        normalized = raw.rename(
+            columns={
+                "日期": "trade_date",
+                "开盘": "open",
+                "最高": "high",
+                "最低": "low",
+                "收盘": "close",
+                "成交量": "volume",
+            }
+        ).copy()
+        normalized["provider"] = "akshare_index"
+        return _coerce_bar_types(normalized)
+
+    @staticmethod
     def _load_baostock(
         symbol: str,
         start: date,
@@ -280,6 +321,14 @@ def _bounded_network_calls(timeout_seconds: int):
 
 def _is_etf_symbol(symbol: str) -> bool:
     return symbol.startswith(("15", "16", "51", "52", "56", "58"))
+
+
+def _is_index_symbol(symbol: str) -> bool:
+    return symbol.upper().endswith(".IDX")
+
+
+def _index_code(symbol: str) -> str:
+    return symbol.split(".", 1)[0]
 
 
 def _coerce_bar_types(frame: pd.DataFrame) -> pd.DataFrame:

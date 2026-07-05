@@ -152,6 +152,8 @@ export type OpportunityCard = {
   pre_trade_risk?: PreTradeRiskProfile | null;
   position_scenario?: PositionScenario | null;
   recommendation_summary: RecommendationSummary | null;
+  recommendation_brief?: RecommendationBrief | null;
+  benchmark_comparison?: BenchmarkComparison | null;
   confidence_explanation?: ConfidenceExplanation | null;
   signal_hub?: SignalHub | null;
   execution_plan?: ExecutionPlanSummary | null;
@@ -190,6 +192,34 @@ export type RecommendationSummary = {
   risk_note: string;
   context_note: string;
   checklist: string[];
+};
+
+export type RecommendationBrief = {
+  why: string;
+  buy_point: string;
+  stop_loss: string;
+  target: string;
+  risk: string;
+  history_odds: string;
+  current_verdict: string;
+};
+
+export type BenchmarkComparisonItem = {
+  benchmark_id: string;
+  name: string;
+  start_date: string | null;
+  end_date: string | null;
+  instrument_return_pct: number | null;
+  return_pct: number | null;
+  excess_return_pct: number | null;
+  verdict: string;
+  summary: string;
+};
+
+export type BenchmarkComparison = {
+  primary: BenchmarkComparisonItem;
+  items: BenchmarkComparisonItem[];
+  summary: string;
 };
 
 export type ConfidenceDriver = {
@@ -1715,6 +1745,59 @@ export type PaperValidationResponse = {
   credibility: PaperValidationCredibility;
   items: PaperValidationItem[];
   curve: PaperLedgerPoint[];
+  data_health: Record<string, string>;
+};
+
+export type PaperDailyReportSummary = {
+  total_trades: number;
+  new_opportunities: number;
+  triggered_today: number;
+  open_positions: number;
+  closed_today: number;
+  target_hits_today: number;
+  stopped_today: number;
+  total_return_pct: number;
+  max_drawdown_pct: number;
+  win_rate: number | null;
+};
+
+export type PaperDailyReportItem = {
+  trade_id: string;
+  instrument_id: string;
+  strategy_id: string | null;
+  status: string;
+  signal_date: string;
+  entry_date: string | null;
+  exit_date: string | null;
+  return_pct: number | null;
+  pnl: string;
+  next_action: string;
+  notes: string;
+};
+
+export type PaperDailyBenchmarkItem = {
+  benchmark_id: string | null;
+  name: string;
+  return_pct: number | null;
+  excess_return_pct: number | null;
+  summary: string;
+};
+
+export type PaperDailyBenchmark = {
+  total_return_pct: number;
+  items: PaperDailyBenchmarkItem[];
+  summary: string;
+};
+
+export type PaperDailyReportResponse = {
+  report_date: string;
+  summary: PaperDailyReportSummary;
+  benchmark: PaperDailyBenchmark;
+  new_opportunities: PaperDailyReportItem[];
+  triggered_today: PaperDailyReportItem[];
+  holdings: PaperDailyReportItem[];
+  closed_today: PaperDailyReportItem[];
+  next_trade_day_focus: string[];
   data_health: Record<string, string>;
 };
 

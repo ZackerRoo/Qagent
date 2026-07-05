@@ -87,7 +87,11 @@ def run_research_automation(
         )
         paper_seed_created = seed_result.created
     if update_paper:
-        paper_update = update_paper_trades(paper_repo, provider=provider)
+        paper_update = update_paper_trades(
+            paper_repo,
+            provider=provider,
+            provider_mode=mode,
+        )
     start_date, end_date = _backtest_dates(mode)
     backtest_result = None
     if run_backtest:
@@ -152,7 +156,7 @@ def run_research_automation(
             alerts_triggered=alert_result.summary.triggered if alert_result else 0,
             backtest_signals=len(backtest_result.signals) if backtest_result else 0,
             paper_created=paper_seed_created,
-            paper_total=paper_update.summary.total if paper_update else len(paper_repo.list_trades()),
+            paper_total=paper_update.summary.total if paper_update else len(paper_repo.list_trades(provider=mode)),
             paper_closed=paper_update.summary.closed if paper_update else 0,
         ),
         scan_run_id=scan_run.run_id,

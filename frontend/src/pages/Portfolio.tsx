@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import {
   deletePaperTrade,
+  fetchPaperDailyReport,
   fetchPaperLedger,
   fetchPaperSession,
   fetchPaperTrades,
@@ -21,6 +22,7 @@ import { localizeAction, localizeStatus, localizeStrategy } from "../lib/localiz
 import type {
   DataProviderMode,
   PaperLedgerItem,
+  PaperDailyReportResponse,
   PaperLedgerPosition,
   PaperLedgerResponse,
   PaperLedgerTransaction,
@@ -63,6 +65,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [portfolio, setPortfolio] = useState<PortfolioResponse>();
   const [paper, setPaper] = useState<PaperTradesResponse>();
   const [ledger, setLedger] = useState<PaperLedgerResponse>();
+  const [dailyReport, setDailyReport] = useState<PaperDailyReportResponse>();
   const [validation, setValidation] = useState<PaperValidationResponse>();
   const [paperSession, setPaperSession] = useState<PaperSessionResponse>();
   const [paperExecutionHealth, setPaperExecutionHealth] = useState<Record<string, string>>({});
@@ -74,12 +77,13 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [deletingPaperTradeId, setDeletingPaperTradeId] = useState("");
 
   async function load() {
-    const [result, paperResult, paperSessionResult, ledgerResult, validationResult] = await Promise.all([
+    const [result, paperResult, paperSessionResult, ledgerResult, validationResult, dailyReportResult] = await Promise.all([
       fetchPortfolio({ provider: dataMode }),
-      fetchPaperTrades(),
-      fetchPaperSession(),
-      fetchPaperLedger(),
-      fetchPaperValidation(),
+      fetchPaperTrades(dataMode),
+      fetchPaperSession(dataMode),
+      fetchPaperLedger({ provider: dataMode }),
+      fetchPaperValidation(dataMode),
+      fetchPaperDailyReport(dataMode),
     ]);
     setPortfolio(result);
     setPositions(result.positions);
@@ -89,6 +93,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     setPaperSessionForm(formFromPaperSession(paperSessionResult));
     setLedger(ledgerResult);
     setValidation(validationResult);
+    setDailyReport(dailyReportResult);
   }
 
   useEffect(() => {
@@ -119,25 +124,29 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     );
     setPaperExecutionHealth(result.data_health);
     setPaper({ summary: result.summary, trades: result.trades, data_health: result.data_health });
-    const [ledgerResult, validationResult] = await Promise.all([
-      fetchPaperLedger(),
-      fetchPaperValidation(),
+    const [ledgerResult, validationResult, dailyReportResult] = await Promise.all([
+      fetchPaperLedger({ provider: dataMode }),
+      fetchPaperValidation(dataMode),
+      fetchPaperDailyReport(dataMode),
     ]);
     setLedger(ledgerResult);
     setValidation(validationResult);
+    setDailyReport(dailyReportResult);
   }
 
   async function runValidationNow() {
     try {
       setIsRunningValidation(true);
       const validationResult = await runPaperValidation(dataMode);
-      const [paperResult, ledgerResult] = await Promise.all([
-        fetchPaperTrades(),
-        fetchPaperLedger(),
+      const [paperResult, ledgerResult, dailyReportResult] = await Promise.all([
+        fetchPaperTrades(dataMode),
+        fetchPaperLedger({ provider: dataMode }),
+        fetchPaperDailyReport(dataMode),
       ]);
       setValidation(validationResult);
       setPaper(paperResult);
       setLedger(ledgerResult);
+      setDailyReport(dailyReportResult);
       setPaperMessage(
         language === "zh"
           ? `已完成自动模拟验证：${validationResult.summary.total_trades} 笔，${validationResult.summary.closed_trades} 笔已闭环`
@@ -193,6 +202,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
         ) : (
           <div className="empty-state">{t("portfolio.noLedger")}</div>
         )}
+        <PaperDailyReportPanel report={dailyReport} language={language} />
         <PaperValidationCenter
           validation={validation}
           language={language}
@@ -660,6 +670,108 @@ function formFromPaperSession(session: PaperSessionResponse): PaperSessionStartP
     slippage_bps: decimalText(session.account.slippage_bps),
     take_profit_pct: decimalText(session.account.take_profit_pct),
   };
+}
+
+function PaperDailyReportPanel({
+  report,
+  language,
+}: {
+  report?: PaperDailyReportResponse;
+  language: Language;
+}) {
+  if (!report) {
+    return (
+      <div className="paper-daily-report">
+        <div className="mini-curve-empty">
+          {language === "zh" ? "正在加载模拟盘日报。" : "Loading paper daily report."}
+        </div>
+      </div>
+    );
+  }
+  const summary = report.summary;
+  return (
+    <div className="paper-daily-report">
+      <div className="paper-daily-head">
+        <div>
+          <span className="eyebrow">{language === "zh" ? "模拟盘日报" : "Paper Daily Report"}</span>
+          <h3>
+            {report.report_date} · {report.benchmark.summary}
+          </h3>
+        </div>
+        <strong>{formatPct(summary.total_return_pct)}</strong>
+      </div>
+      <div className="paper-validation-summary paper-daily-summary">
+        <Metric label={language === "zh" ? "新增机会" : "New"} value={summary.new_opportunities} />
+        <Metric label={language === "zh" ? "今日触发" : "Triggered"} value={summary.triggered_today} />
+        <Metric label={language === "zh" ? "持仓中" : "Open"} value={summary.open_positions} />
+        <Metric label={language === "zh" ? "今日闭环" : "Closed"} value={summary.closed_today} />
+        <Metric label={language === "zh" ? "止盈" : "Targets"} value={summary.target_hits_today} />
+        <Metric label={language === "zh" ? "回撤" : "Drawdown"} value={formatPct(summary.max_drawdown_pct)} />
+      </div>
+      {report.benchmark.items.length > 0 && (
+        <div className="paper-daily-benchmark-grid">
+          {report.benchmark.items.map((item) => (
+            <div key={item.benchmark_id ?? item.name}>
+              <span>{item.name}</span>
+              <strong>{formatPct(item.excess_return_pct)}</strong>
+              <small>{item.summary}</small>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="paper-daily-focus">
+        {report.next_trade_day_focus.map((item) => (
+          <span key={item}>{item}</span>
+        ))}
+      </div>
+      <div className="paper-daily-columns">
+        <PaperDailyColumn
+          title={language === "zh" ? "新增机会" : "New Opportunities"}
+          items={report.new_opportunities}
+          empty={language === "zh" ? "今日没有新增模拟机会。" : "No new paper opportunities today."}
+        />
+        <PaperDailyColumn
+          title={language === "zh" ? "持仓变化" : "Holdings"}
+          items={report.holdings}
+          empty={language === "zh" ? "当前没有模拟持仓。" : "No open paper holdings."}
+        />
+        <PaperDailyColumn
+          title={language === "zh" ? "今日闭环" : "Closed Today"}
+          items={report.closed_today}
+          empty={language === "zh" ? "今日没有止盈/止损闭环。" : "No exits today."}
+        />
+      </div>
+    </div>
+  );
+}
+
+function PaperDailyColumn({
+  title,
+  items,
+  empty,
+}: {
+  title: string;
+  items: PaperDailyReportResponse["holdings"];
+  empty: string;
+}) {
+  return (
+    <div className="paper-daily-column">
+      <h4>{title}</h4>
+      {items.length === 0 ? (
+        <p>{empty}</p>
+      ) : (
+        items.slice(0, 5).map((item) => (
+          <div key={item.trade_id} className="paper-daily-item">
+            <strong title={formatInstrumentDisplay(item.instrument_id)}>
+              {formatInstrumentDisplay(item.instrument_id)}
+            </strong>
+            <span>{formatPct(item.return_pct)}</span>
+            <small>{item.next_action}</small>
+          </div>
+        ))
+      )}
+    </div>
+  );
 }
 
 function PaperValidationCenter({

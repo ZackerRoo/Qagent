@@ -304,6 +304,34 @@ class RecommendationSummary(BaseModel):
     checklist: list[str] = Field(default_factory=list)
 
 
+class RecommendationBrief(BaseModel):
+    why: str
+    buy_point: str
+    stop_loss: str
+    target: str
+    risk: str
+    history_odds: str
+    current_verdict: str
+
+
+class BenchmarkComparisonItem(BaseModel):
+    benchmark_id: str
+    name: str
+    start_date: Date | None = None
+    end_date: Date | None = None
+    instrument_return_pct: float | None = None
+    return_pct: float | None = None
+    excess_return_pct: float | None = None
+    verdict: str
+    summary: str
+
+
+class BenchmarkComparison(BaseModel):
+    primary: BenchmarkComparisonItem
+    items: list[BenchmarkComparisonItem] = Field(default_factory=list)
+    summary: str
+
+
 class ConfidenceDriver(BaseModel):
     label: str
     value: str
@@ -544,6 +572,8 @@ class OpportunityCard(BaseModel):
     pre_trade_risk: PreTradeRiskProfile | None = None
     position_scenario: PositionScenario | None = None
     recommendation_summary: RecommendationSummary | None = None
+    recommendation_brief: RecommendationBrief | None = None
+    benchmark_comparison: BenchmarkComparison | None = None
     confidence_explanation: ConfidenceExplanation | None = None
     signal_hub: SignalHub | None = None
     execution_plan: ExecutionPlanSummary | None = None

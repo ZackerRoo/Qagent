@@ -27,12 +27,14 @@ from qagent.market.data_quality import (
 from qagent.factors.engine import build_factor_rankings
 from qagent.factors.models import FactorRanking
 from qagent.market.instruments import format_instrument_label
+from qagent.market.benchmarks import apply_benchmark_comparisons
 from qagent.market.sector_strength import build_sector_strength
 from qagent.market.tradability import evaluate_tradability
 from qagent.market.trading_status import evaluate_trading_status
 from qagent.monitoring.signal_monitor import SignalMonitorCenter, build_signal_monitor_center
 from qagent.providers.base import MarketDataProvider
 from qagent.recommendations.calibration import apply_strategy_calibration
+from qagent.recommendations.brief import apply_recommendation_briefs
 from qagent.recommendations.cn_execution import build_trading_constraints
 from qagent.recommendations.decision import build_research_decision
 from qagent.recommendations.enrichment import enrich_opportunity_card
@@ -363,6 +365,16 @@ def run_daily_scan(
     apply_probability_calibration(cards, strategy_health)
     apply_recommendation_feedback_calibration(cards, recommendation_feedback_center)
     cards = sort_recommendation_cards(cards)
+    data_health.update(
+        apply_benchmark_comparisons(
+            cards,
+            provider=provider,
+            bars_by_instrument=bars_by_instrument,
+            start=start,
+            end=end,
+        )
+    )
+    data_health.update(apply_recommendation_briefs(cards))
     sector_strength = build_sector_strength(cards, bars_by_instrument, items=items)
     portfolio_plan = build_portfolio_plan(cards)
     data_health.update(market_intelligence.data_health)

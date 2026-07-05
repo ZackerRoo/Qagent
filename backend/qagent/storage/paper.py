@@ -136,11 +136,14 @@ class PaperTradingRepository:
         self,
         status: str | None = None,
         limit: int = 100,
+        provider: str | None = None,
     ) -> list[PaperTradeRecord]:
         with self.session_factory() as session:
             query = session.query(PaperTradeRow)
             if status:
                 query = query.filter(PaperTradeRow.status == status)
+            if provider:
+                query = query.filter(PaperTradeRow.provider == provider)
             rows = (
                 query.order_by(PaperTradeRow.created_at.desc(), PaperTradeRow.trade_id.desc())
                 .limit(limit)

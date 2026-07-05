@@ -1,6 +1,7 @@
 from collections import defaultdict
 from datetime import date, datetime, time, timezone
 from decimal import Decimal, ROUND_DOWN
+from typing import Mapping
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -265,6 +266,59 @@ class PaperValidationResult(BaseModel):
     data_health: dict[str, str]
 
 
+class PaperDailyReportSummary(BaseModel):
+    total_trades: int
+    new_opportunities: int
+    triggered_today: int
+    open_positions: int
+    closed_today: int
+    target_hits_today: int
+    stopped_today: int
+    total_return_pct: float
+    max_drawdown_pct: float
+    win_rate: float | None
+
+
+class PaperDailyReportItem(BaseModel):
+    trade_id: str
+    instrument_id: str
+    strategy_id: str | None
+    status: str
+    signal_date: date
+    entry_date: date | None = None
+    exit_date: date | None = None
+    return_pct: float | None = None
+    pnl: Decimal = Decimal("0")
+    next_action: str
+    notes: str
+
+
+class PaperDailyBenchmarkItem(BaseModel):
+    benchmark_id: str | None = None
+    name: str
+    return_pct: float | None = None
+    excess_return_pct: float | None = None
+    summary: str
+
+
+class PaperDailyBenchmark(BaseModel):
+    total_return_pct: float
+    items: list[PaperDailyBenchmarkItem]
+    summary: str
+
+
+class PaperDailyReport(BaseModel):
+    report_date: date
+    summary: PaperDailyReportSummary
+    benchmark: PaperDailyBenchmark
+    new_opportunities: list[PaperDailyReportItem]
+    triggered_today: list[PaperDailyReportItem]
+    holdings: list[PaperDailyReportItem]
+    closed_today: list[PaperDailyReportItem]
+    next_trade_day_focus: list[str]
+    data_health: dict[str, str]
+
+
 def seed_paper_trades_from_snapshots(
     repo: PaperTradingRepository,
     snapshots: list[OpportunitySnapshotRecord],
@@ -277,7 +331,7 @@ def seed_paper_trades_from_snapshots(
 ) -> PaperSeedResult:
     created = 0
     skipped = 0
-    existing_trades = repo.list_trades(limit=1000)
+    existing_trades = repo.list_trades(limit=1000, provider=provider)
     existing = {trade.source_snapshot_id for trade in existing_trades}
     active_instruments = {
         trade.instrument_id for trade in existing_trades if trade.status in OPEN_STATUSES
@@ -326,11 +380,12 @@ def seed_paper_trades_from_snapshots(
 def update_paper_trades(
     repo: PaperTradingRepository,
     provider: MarketDataProvider,
+    provider_mode: str | None = None,
     max_holding_days: int = 20,
     max_entry_wait_days: int = 10,
     as_of: datetime | None = None,
 ) -> PaperUpdateResult:
-    trades = repo.list_trades(limit=1000)
+    trades = repo.list_trades(limit=1000, provider=provider_mode)
     active = [trade for trade in trades if trade.status in OPEN_STATUSES]
     execution_time = _a_share_local_datetime(as_of)
     execution_session = _a_share_execution_session(execution_time)
@@ -367,10 +422,11 @@ def update_paper_trades(
         )
         fills_deferred += deferred
         repo.update_trade(trade.trade_id, **updated)
-    refreshed = repo.list_trades(limit=1000)
+    refreshed = repo.list_trades(limit=1000, provider=provider_mode)
     provider_errors = getattr(provider, "last_errors", [])
     data_health = {
         "provider": provider.name,
+        "paper_provider_filter": provider_mode or "all",
         "trades": str(len(refreshed)),
         "active_checked": str(len(active)),
         **paper_execution_data_health(
@@ -622,6 +678,186 @@ def build_paper_validation(
             "validation_primary_window": str(windows[-1]),
         },
     )
+
+
+def build_paper_daily_report(
+    *,
+    trades: list[PaperTradeRecord],
+    ledger: PaperLedger,
+    validation: PaperValidationResult,
+    as_of: date | None = None,
+    benchmark_items: list[Mapping[str, object]] | None = None,
+) -> PaperDailyReport:
+    report_date = as_of or _validation_as_of(trades)
+    ledger_by_id = {item.trade_id: item for item in ledger.items}
+    validation_by_id = {item.trade_id: item for item in validation.items}
+    new_opportunities = [
+        _daily_report_item(trade, ledger_by_id, validation_by_id)
+        for trade in trades
+        if trade.signal_date == report_date
+    ]
+    triggered_today = [
+        _daily_report_item(trade, ledger_by_id, validation_by_id)
+        for trade in trades
+        if trade.entry_date == report_date
+    ]
+    holdings = [
+        _daily_report_item(trade, ledger_by_id, validation_by_id)
+        for trade in trades
+        if trade.status == "open"
+    ]
+    closed_today = [
+        _daily_report_item(trade, ledger_by_id, validation_by_id)
+        for trade in trades
+        if trade.exit_date == report_date and trade.status in CLOSED_STATUSES
+    ]
+    benchmark = _paper_daily_benchmark(
+        total_return_pct=ledger.summary.total_return_pct,
+        benchmark_items=benchmark_items or [],
+    )
+    return PaperDailyReport(
+        report_date=report_date,
+        summary=PaperDailyReportSummary(
+            total_trades=len(trades),
+            new_opportunities=len(new_opportunities),
+            triggered_today=len(triggered_today),
+            open_positions=len(holdings),
+            closed_today=len(closed_today),
+            target_hits_today=sum(1 for trade in closed_today if trade.status == "target_1_hit"),
+            stopped_today=sum(1 for trade in closed_today if trade.status == "stopped"),
+            total_return_pct=ledger.summary.total_return_pct,
+            max_drawdown_pct=ledger.summary.max_drawdown_pct,
+            win_rate=ledger.summary.win_rate,
+        ),
+        benchmark=benchmark,
+        new_opportunities=new_opportunities,
+        triggered_today=triggered_today,
+        holdings=holdings,
+        closed_today=closed_today,
+        next_trade_day_focus=_next_trade_day_focus(
+            new_opportunities=new_opportunities,
+            holdings=holdings,
+            closed_today=closed_today,
+            validation=validation,
+        ),
+        data_health={
+            **ledger.data_health,
+            "paper_daily_report": "ready",
+            "paper_daily_report_date": report_date.isoformat(),
+            "paper_daily_report_trades": str(len(trades)),
+            "paper_daily_report_benchmarks": str(len(benchmark.items)),
+        },
+    )
+def _daily_report_item(
+    trade: PaperTradeRecord,
+    ledger_by_id: dict[str, PaperLedgerItem],
+    validation_by_id: dict[str, PaperValidationItem],
+) -> PaperDailyReportItem:
+    ledger_item = ledger_by_id.get(trade.trade_id)
+    validation_item = validation_by_id.get(trade.trade_id)
+    return PaperDailyReportItem(
+        trade_id=trade.trade_id,
+        instrument_id=trade.instrument_id,
+        strategy_id=trade.strategy_id,
+        status=trade.status,
+        signal_date=trade.signal_date,
+        entry_date=trade.entry_date,
+        exit_date=trade.exit_date,
+        return_pct=(
+            ledger_item.return_pct
+            if ledger_item is not None
+            else trade.realized_return_pct
+            if trade.realized_return_pct is not None
+            else trade.unrealized_return_pct
+        ),
+        pnl=ledger_item.total_pnl if ledger_item is not None else Decimal("0"),
+        next_action=validation_item.next_action if validation_item is not None else _paper_next_action(trade),
+        notes=trade.notes,
+    )
+
+
+def _paper_daily_benchmark(
+    *,
+    total_return_pct: float,
+    benchmark_items: list[Mapping[str, object]],
+) -> PaperDailyBenchmark:
+    items: list[PaperDailyBenchmarkItem] = []
+    for raw in benchmark_items:
+        name = str(raw.get("name") or raw.get("benchmark_id") or "基准")
+        return_pct = _float_mapping_value(raw, "return_pct")
+        excess_return_pct = _float_mapping_value(raw, "excess_return_pct")
+        items.append(
+            PaperDailyBenchmarkItem(
+                benchmark_id=str(raw.get("benchmark_id")) if raw.get("benchmark_id") is not None else None,
+                name=name,
+                return_pct=return_pct,
+                excess_return_pct=excess_return_pct,
+                summary=_paper_benchmark_item_summary(name, return_pct, excess_return_pct),
+            )
+        )
+    best = next((item for item in items if item.excess_return_pct is not None), None)
+    if best is None:
+        summary = "暂无指数基准数据，先看模拟盘绝对收益和回撤。"
+    elif best.excess_return_pct is not None and best.excess_return_pct >= 0:
+        summary = f"模拟盘相对{best.name}超额 {best.excess_return_pct:+.2f}%。"
+    else:
+        summary = f"模拟盘相对{best.name}落后 {best.excess_return_pct:+.2f}%。"
+    return PaperDailyBenchmark(
+        total_return_pct=total_return_pct,
+        items=items,
+        summary=summary,
+    )
+
+
+def _paper_benchmark_item_summary(
+    name: str,
+    return_pct: float | None,
+    excess_return_pct: float | None,
+) -> str:
+    if return_pct is None or excess_return_pct is None:
+        return f"{name} 数据不足。"
+    return f"{name} {return_pct:+.2f}%，模拟盘超额 {excess_return_pct:+.2f}%。"
+
+
+def _next_trade_day_focus(
+    *,
+    new_opportunities: list[PaperDailyReportItem],
+    holdings: list[PaperDailyReportItem],
+    closed_today: list[PaperDailyReportItem],
+    validation: PaperValidationResult,
+) -> list[str]:
+    focus: list[str] = []
+    if new_opportunities:
+        focus.append(f"{len(new_opportunities)} 个新增机会等待触发，未到买点不追高。")
+    if holdings:
+        focus.append(f"{len(holdings)} 个持仓继续检查止损、目标价和推荐变弱信号。")
+    if closed_today:
+        focus.append(f"{len(closed_today)} 笔今日闭环，已计入胜率和收益曲线。")
+    if validation.sample_age.days_to_next_10d is not None:
+        focus.append(f"最近 10 日验证样本还差 {validation.sample_age.days_to_next_10d} 天成熟。")
+    if not focus:
+        focus.append("暂无需要动作的模拟记录，等待下一次扫描产生新机会。")
+    return focus[:4]
+
+
+def _paper_next_action(trade: PaperTradeRecord) -> str:
+    if trade.status == "pending":
+        return "等待触发价。"
+    if trade.status == "open":
+        return "跟踪止损和目标价。"
+    if trade.status in CLOSED_STATUSES:
+        return "已闭环，纳入统计。"
+    return "继续观察。"
+
+
+def _float_mapping_value(raw: Mapping[str, object], key: str) -> float | None:
+    value = raw.get(key)
+    if value is None:
+        return None
+    try:
+        return round(float(value), 4)
+    except (TypeError, ValueError):
+        return None
 
 
 def _build_account_ledger(
