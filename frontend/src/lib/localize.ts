@@ -296,18 +296,26 @@ const FACTOR_LABELS: LabelMap = {
 };
 
 const FACTOR_EXPLANATIONS_ZH: Record<string, string> = {
+  valuation: "A股优先使用盈利收益率 EP，估值越便宜且利润为正，得分越高。",
+  size: "A股市值过滤，规避壳价值小市值，同时保留中等市值弹性。",
+  quality: "ROE、毛利率、净利率和增长质量综合评分。",
   momentum: "20/60/120 日价格动量在扫描股票池中的排名。",
   trend_quality: "均线排列质量，以及股价相对 20 日均线的位置。",
   liquidity: "20 日平均成交量在扫描股票池中的排名。",
   low_risk: "20 日波动率更低、60 日回撤更浅的股票得分更高。",
+  risk_filter: "综合过热、波动、回撤、流动性、量能异常和壳风险的可执行过滤。",
   reversal: "强趋势中的短线回踩，或弱势中的反转迹象。",
 };
 
 const FACTOR_FLAGS: LabelMap = {
   insufficient_history: { zh: "历史不足", en: "Insufficient history" },
   overextended: { zh: "短线过热", en: "Overextended" },
+  fomo_escape_risk: { zh: "FOMO逃逸风险", en: "FOMO escape risk" },
   high_volatility: { zh: "波动偏高", en: "High volatility" },
+  deep_drawdown_risk: { zh: "深回撤风险", en: "Deep drawdown risk" },
   low_liquidity: { zh: "流动性偏弱", en: "Low liquidity" },
+  volume_spike_overheat: { zh: "量能过热", en: "Volume spike overheat" },
+  shell_size_risk: { zh: "壳市值风险", en: "Shell-size risk" },
   fund_flow_positive: { zh: "资金净流入", en: "Fund flow positive" },
   dragon_tiger_net_buy: { zh: "龙虎榜净买入", en: "Dragon tiger net buy" },
   limit_up_member: { zh: "涨停池成员", en: "Limit-up member" },

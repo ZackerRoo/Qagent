@@ -11,7 +11,19 @@ import requests
 
 from qagent.providers.base import MINUTE_BAR_COLUMNS
 
-BAR_COLUMNS = ["instrument_id", "trade_date", "open", "high", "low", "close", "volume", "provider"]
+BAR_COLUMNS = [
+    "instrument_id",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "provider",
+    "adjusted_close",
+    "adjustment_factor",
+    "adjustment_type",
+]
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 3
 DEFAULT_FAILURE_CIRCUIT_BREAKER_THRESHOLD = 3
 _NETWORK_TIMEOUT_LOCK = RLock()
@@ -145,9 +157,9 @@ class FreeCnMarketDataProvider:
                     period="daily",
                     start_date=start.strftime("%Y%m%d"),
                     end_date=end.strftime("%Y%m%d"),
-                    adjust="",
+                    adjust="qfq",
                 )
-                provider_name = "akshare"
+                provider_name = "akshare_qfq"
         if raw.empty:
             return pd.DataFrame(columns=BAR_COLUMNS)
         normalized = raw.rename(
@@ -161,6 +173,8 @@ class FreeCnMarketDataProvider:
             }
         ).copy()
         normalized["provider"] = provider_name
+        if provider_name.endswith("qfq"):
+            normalized = _mark_adjusted(normalized, "qfq")
         return _coerce_bar_types(normalized)
 
     @staticmethod
@@ -182,7 +196,7 @@ class FreeCnMarketDataProvider:
                     start_date=start.isoformat(),
                     end_date=end.isoformat(),
                     frequency="d",
-                    adjustflag="3",
+                    adjustflag="2",
                 )
             if result.error_code != "0":
                 raise RuntimeError(result.error_msg)
@@ -195,7 +209,8 @@ class FreeCnMarketDataProvider:
         if raw.empty:
             return pd.DataFrame(columns=BAR_COLUMNS)
         normalized = raw.rename(columns={"date": "trade_date"}).copy()
-        normalized["provider"] = "baostock"
+        normalized["provider"] = "baostock_qfq"
+        normalized = _mark_adjusted(normalized, "qfq")
         return _coerce_bar_types(normalized)
 
     @staticmethod
@@ -271,8 +286,23 @@ def _coerce_bar_types(frame: pd.DataFrame) -> pd.DataFrame:
     normalized = frame.copy()
     for column in ["open", "high", "low", "close", "volume"]:
         normalized[column] = _finite_numeric(normalized[column])
+    for column in ["adjusted_close", "adjustment_factor"]:
+        if column in normalized.columns:
+            normalized[column] = _finite_numeric(normalized[column])
     normalized["volume"] = normalized["volume"].fillna(0)
+    for column in BAR_COLUMNS:
+        if column not in normalized.columns:
+            normalized[column] = None
     return normalized.dropna(subset=["open", "high", "low", "close"])
+
+
+def _mark_adjusted(frame: pd.DataFrame, adjustment_type: str) -> pd.DataFrame:
+    normalized = frame.copy()
+    close = _finite_numeric(normalized["close"])
+    normalized["adjusted_close"] = close
+    normalized["adjustment_factor"] = 1.0
+    normalized["adjustment_type"] = adjustment_type
+    return normalized
 
 
 def _coerce_minute_bar_types(frame: pd.DataFrame) -> pd.DataFrame:

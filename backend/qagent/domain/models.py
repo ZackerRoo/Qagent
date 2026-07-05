@@ -144,8 +144,10 @@ class SectorMove(BaseModel):
 
 class SectorStrength(BaseModel):
     industry: str
+    category: str = "industry"
     themes: list[str] = Field(default_factory=list)
     symbols: list[str] = Field(default_factory=list)
+    sample_count: int = 0
     avg_change_pct: float
     advance_ratio: float
     total_volume: int

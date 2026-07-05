@@ -230,7 +230,13 @@ function SectorStrengthPanel({ items }: { items: SectorStrength[] }) {
         {visible.map((item) => (
           <div key={item.industry} className="sector-card">
             <header>
-              <strong>{item.industry}</strong>
+              <div>
+                <strong>{item.industry}</strong>
+                <small>
+                  {item.category === "theme" ? "主题" : "行业"} ·{" "}
+                  {item.sample_count ?? item.symbols.length} 样本
+                </small>
+              </div>
               <span>{formatScore(item.score)}</span>
             </header>
             <div className="sector-metrics">
@@ -493,10 +499,14 @@ function FactorRankingsTable({ items }: { items: FactorRanking[] }) {
             <th>{t("factors.rank")}</th>
             <th>{t("common.ticker")}</th>
             <th>{t("factors.score")}</th>
+            <th>{t("factors.valuation")}</th>
+            <th>{t("factors.size")}</th>
+            <th>{t("factors.quality")}</th>
             <th>{t("factors.momentum")}</th>
             <th>{t("factors.trend")}</th>
             <th>{t("factors.liquidity")}</th>
             <th>{t("factors.lowRisk")}</th>
+            <th>{t("factors.riskFilter")}</th>
             <th>{t("factors.reversal")}</th>
             <th>{t("factors.penalty")}</th>
             <th>{t("factors.flags")}</th>
@@ -510,10 +520,14 @@ function FactorRankingsTable({ items }: { items: FactorRanking[] }) {
                 {formatInstrumentDisplay(item.instrument_id, item.instrument_label)}
               </td>
               <td>{formatScore(item.factor_score)}</td>
+              <td>{formatScore(item.valuation_score)}</td>
+              <td>{formatScore(item.size_score)}</td>
+              <td>{formatScore(item.quality_score)}</td>
               <td>{formatScore(item.momentum_score)}</td>
               <td>{formatScore(item.trend_quality_score)}</td>
               <td>{formatScore(item.liquidity_score)}</td>
               <td>{formatScore(item.low_risk_score)}</td>
+              <td>{formatScore(item.risk_filter_score)}</td>
               <td>{formatScore(item.reversal_score)}</td>
               <td>{formatScore(item.execution_penalty)}</td>
               <td className="reason-cell">

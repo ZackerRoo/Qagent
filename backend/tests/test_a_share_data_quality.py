@@ -80,3 +80,32 @@ def test_daily_scan_attaches_a_share_data_quality_audit_to_cards_and_health():
     assert result.data_health["a_share_quality_score"]
     assert result.data_health["a_share_quality_ready"] in {"0", "1"}
     assert result.items[0].data_quality_audit is not None
+
+
+def test_daily_scan_reports_adjusted_bar_coverage_when_provider_marks_adjusted_prices():
+    result = run_daily_scan(
+        instrument_ids=["CN:000001"],
+        provider=AdjustedFixtureProvider(),
+        end=date(2026, 3, 20),
+    )
+
+    assert result.data_health["adjusted_bars"] == "1"
+    assert result.data_health["adjustment_status"] == "ready"
+    assert result.data_health["a_share_adjusted_price"] == "ready"
+    assert result.items[0].data_quality_audit is not None
+    issue_codes = {issue.code for issue in result.items[0].data_quality_audit.issues}
+    assert "missing_adjusted_price" not in issue_codes
+
+
+class AdjustedFixtureProvider(FixtureMarketDataProvider):
+    name = "fixture_adjusted"
+
+    def get_daily_bars(self, instrument_ids, start, end):
+        bars = super().get_daily_bars(instrument_ids, start, end)
+        if bars.empty:
+            return bars
+        adjusted = bars.copy()
+        adjusted["adjusted_close"] = adjusted["close"]
+        adjusted["adjustment_factor"] = 1.0
+        adjusted["adjustment_type"] = "qfq"
+        return adjusted

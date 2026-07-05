@@ -36,6 +36,10 @@ from qagent.recommendations.calibration import apply_strategy_calibration
 from qagent.recommendations.cn_execution import build_trading_constraints
 from qagent.recommendations.decision import build_research_decision
 from qagent.recommendations.enrichment import enrich_opportunity_card
+from qagent.recommendations.feedback import (
+    apply_recommendation_feedback_calibration,
+    recommendation_feedback_data_health,
+)
 from qagent.recommendations.portfolio import build_portfolio_plan
 from qagent.recommendations.probability import (
     apply_probability_calibration,
@@ -60,6 +64,7 @@ from qagent.research.operational_readiness import (
     OperationalReadinessCenter,
     build_operational_readiness_center,
 )
+from qagent.monitoring.recommendation_calibration import RecommendationCalibrationCenter
 from qagent.signals.engine import SignalEngine
 from qagent.strategy_data.models import AnalystInsight, EarningsEvent, FilingEvent, FundamentalSnapshot
 from qagent.strategy_data.providers import StrategyDataProvider, build_strategy_data_provider
@@ -123,6 +128,7 @@ def run_daily_scan(
     strategy_data_provider: StrategyDataProvider | None = None,
     a_share_enhanced_provider: AShareEnhancedProvider | None = None,
     a_share_enhanced_top_n: int | None = None,
+    recommendation_feedback_center: RecommendationCalibrationCenter | None = None,
     start: date = date(2026, 1, 1),
     end: date = date(2026, 12, 31),
 ) -> DailyScanResult:
@@ -132,6 +138,7 @@ def run_daily_scan(
     trading_status_by_instrument = {}
     tradability_by_instrument = {}
     data_quality_by_instrument: dict[str, DataQualityAudit] = {}
+    fundamentals_by_instrument: dict[str, FundamentalSnapshot] = {}
     strategy_filings_count = 0
     strategy_announcements_count = 0
     strategy_fundamentals_count = 0
@@ -185,6 +192,9 @@ def run_daily_scan(
             strategy_fundamentals_count += len(fundamentals)
             strategy_analyst_insights_count += len(analyst_insights)
             bars_by_instrument[instrument_id] = bars
+            latest_fundamental = _latest_fundamental(fundamentals)
+            if latest_fundamental is not None:
+                fundamentals_by_instrument[instrument_id] = latest_fundamental
             signals = signal_engine.generate(instrument_id, bars)
             strategy_evaluations = strategy_evaluator.evaluate(
                 instrument_id,
@@ -250,7 +260,7 @@ def run_daily_scan(
             scan_error_samples.append(error_message)
             items.append(_scan_error_item(instrument_id, exc))
 
-    factor_rankings = _factor_rankings_from_bars(bars_by_instrument)
+    factor_rankings = _factor_rankings_from_bars(bars_by_instrument, fundamentals_by_instrument)
     for ranking in factor_rankings:
         ranking.instrument_label = format_instrument_label(ranking.instrument_id)
     factor_by_id = {ranking.instrument_id: ranking for ranking in factor_rankings}
@@ -289,7 +299,7 @@ def run_daily_scan(
     if enhanced_snapshots:
         cards = sort_recommendation_cards(cards)
 
-    sector_strength = build_sector_strength(cards, bars_by_instrument)
+    sector_strength = build_sector_strength(cards, bars_by_instrument, items=items)
     portfolio_plan = build_portfolio_plan(cards)
 
     data_health = {
@@ -323,6 +333,7 @@ def run_daily_scan(
     strategy_provider_errors = getattr(strategy_provider, "last_errors", [])
     if strategy_provider_errors:
         data_health["strategy_data_errors"] = " | ".join(strategy_provider_errors[:3])
+    data_health.update(_adjusted_bar_health(bars_by_instrument))
     data_health.update(summarize_data_quality_audits(data_quality_by_instrument.values()))
     data_health.update(
         summarize_a_share_enhanced_snapshots(
@@ -350,12 +361,14 @@ def run_daily_scan(
     apply_market_intelligence_to_cards(cards, market_intelligence)
     apply_recommendation_quality_gate(cards)
     apply_probability_calibration(cards, strategy_health)
+    apply_recommendation_feedback_calibration(cards, recommendation_feedback_center)
     cards = sort_recommendation_cards(cards)
-    sector_strength = build_sector_strength(cards, bars_by_instrument)
+    sector_strength = build_sector_strength(cards, bars_by_instrument, items=items)
     portfolio_plan = build_portfolio_plan(cards)
     data_health.update(market_intelligence.data_health)
     data_health.update(recommendation_quality_data_health(cards))
     data_health.update(probability_calibration_data_health(cards))
+    data_health.update(recommendation_feedback_data_health(cards))
     manual_action_center = build_manual_action_center(
         cards=cards,
         market_intelligence=market_intelligence,
@@ -428,13 +441,25 @@ def _scan_error_item(instrument_id: str, exc: Exception) -> ScanItem:
         )
 
 
-def _factor_rankings_from_bars(bars_by_instrument: dict[str, object]) -> list[FactorRanking]:
+def _factor_rankings_from_bars(
+    bars_by_instrument: dict[str, object],
+    fundamentals_by_instrument: dict[str, FundamentalSnapshot] | None = None,
+) -> list[FactorRanking]:
     frames = [bars for bars in bars_by_instrument.values() if not bars.empty]
     if not frames:
         return []
     import pandas as pd
 
-    return build_factor_rankings(pd.concat(frames, ignore_index=True))
+    return build_factor_rankings(
+        pd.concat(frames, ignore_index=True),
+        fundamentals=fundamentals_by_instrument,
+    )
+
+
+def _latest_fundamental(fundamentals: list[FundamentalSnapshot]) -> FundamentalSnapshot | None:
+    if not fundamentals:
+        return None
+    return sorted(fundamentals, key=lambda item: item.as_of_date)[-1]
 
 
 def _apply_factor_to_card(card: OpportunityCard, ranking: FactorRanking | None) -> None:
@@ -674,6 +699,42 @@ def _bars_have_adjusted_price(bars) -> bool:
     return any(column in bars.columns for column in adjusted_columns)
 
 
+def _adjusted_bar_health(bars_by_instrument: dict[str, object]) -> dict[str, str]:
+    cn_frames = [
+        bars
+        for instrument_id, bars in bars_by_instrument.items()
+        if instrument_id.startswith("CN:") and not bars.empty
+    ]
+    if not cn_frames:
+        return {
+            "adjusted_bars": "0",
+            "adjustment_status": "missing",
+            "adjusted_bar_coverage": "0/0",
+        }
+    adjusted = [bars for bars in cn_frames if _bars_have_adjusted_price(bars)]
+    adjustment_types = sorted(
+        {
+            str(value)
+            for bars in adjusted
+            if "adjustment_type" in bars.columns
+            for value in bars["adjustment_type"].dropna().unique().tolist()
+            if str(value).strip()
+        }
+    )
+    if len(adjusted) == len(cn_frames):
+        status = "ready"
+    elif adjusted:
+        status = "partial"
+    else:
+        status = "missing"
+    return {
+        "adjusted_bars": str(len(adjusted)),
+        "adjustment_status": status,
+        "adjusted_bar_coverage": f"{len(adjusted)}/{len(cn_frames)}",
+        "adjustment_types": ",".join(adjustment_types) if adjustment_types else "unknown",
+    }
+
+
 def _a_share_data_readiness(
     *,
     cards: list[OpportunityCard],
@@ -704,7 +765,7 @@ def _a_share_data_readiness(
     has_etf = any(card.asset_type.upper() == "ETF" for card in cn_cards)
     statuses = {
         "a_share_adjusted_price": "ready"
-        if data_health.get("adjusted_bars")
+        if _int_health(data_health, "adjusted_bars") > 0
         else "partial"
         if data_health.get("provider") in {"free", "fixture"}
         else "missing",

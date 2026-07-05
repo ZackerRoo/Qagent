@@ -455,6 +455,8 @@ export type SectorMove = {
 
 export type SectorStrength = {
   industry: string;
+  category?: string;
+  sample_count?: number;
   themes: string[];
   symbols: string[];
   avg_change_pct: number;
@@ -1115,10 +1117,14 @@ export type FactorRanking = {
   factor_score: number;
   factor_rank: number;
   percentile: number;
+  valuation_score: number;
+  size_score: number;
+  quality_score: number;
   momentum_score: number;
   trend_quality_score: number;
   liquidity_score: number;
   low_risk_score: number;
+  risk_filter_score: number;
   reversal_score: number;
   execution_penalty: number;
   data_completeness: number;
@@ -2307,6 +2313,16 @@ export type FactorRankBucket = {
   avg_forward_return_pct: number | null;
 };
 
+export type FactorQuantileBucket = {
+  quantile: number;
+  label: string;
+  sample_count: number;
+  completed_count: number;
+  positive_rate: number | null;
+  avg_forward_return_pct: number | null;
+  avg_factor_score: number | null;
+};
+
 export type FactorInformationCoefficient = {
   sample_count: number;
   mean_ic: number | null;
@@ -2316,11 +2332,23 @@ export type FactorInformationCoefficient = {
   top_bottom_spread_pct: number | null;
 };
 
+export type FactorExposureInformationCoefficient = {
+  factor_id: string;
+  label: string;
+  sample_count: number;
+  mean_ic: number | null;
+  mean_rank_ic: number | null;
+  positive_ic_rate: number | null;
+  top_bottom_spread_pct: number | null;
+};
+
 export type FactorBacktestResponse = {
   summary: FactorBacktestSummary;
   signals: FactorBacktestSignal[];
   rank_buckets: FactorRankBucket[];
+  quantile_buckets: FactorQuantileBucket[];
   information_coefficient: FactorInformationCoefficient;
+  factor_ic: FactorExposureInformationCoefficient[];
   data_health: Record<string, string>;
 };
 

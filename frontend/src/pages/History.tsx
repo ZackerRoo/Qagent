@@ -27,6 +27,8 @@ import type {
   BacktestSignal,
   DataProviderMode,
   FactorBacktestResponse,
+  FactorExposureInformationCoefficient,
+  FactorQuantileBucket,
   FactorRankBucket,
   OpportunityHistoryResponse,
   OpportunityCard,
@@ -95,6 +97,7 @@ export function History({
     : "";
   const activeBacktestLabel = selectedBacktestLabel || t("history.selectedMissing");
   const scanUniverseLabel = symbols === "CN:ALL" ? t("history.fullAUniverse") : symbols;
+  const factorBacktestSymbols = symbols || selectedBacktestSymbols;
   const [backtest, setBacktest] = useState<BacktestResponse>();
   const [factorBacktest, setFactorBacktest] = useState<FactorBacktestResponse>();
   const [portfolioBacktest, setPortfolioBacktest] = useState<PortfolioBacktestResponse>();
@@ -192,14 +195,14 @@ export function History({
   }
 
   async function runFactorBacktest() {
-    if (!selectedBacktestSymbols) {
+    if (!factorBacktestSymbols) {
       setFactorBacktestError(t("history.noSelectedBacktestScope"));
       return;
     }
     try {
       setIsFactorBacktesting(true);
       setFactorBacktestError("");
-      const result = await fetchFactorBacktest(dataMode, selectedBacktestSymbols);
+      const result = await fetchFactorBacktest(dataMode, factorBacktestSymbols, dataMode === "free" ? 120 : undefined);
       setFactorBacktest(result);
     } catch (caught) {
       setFactorBacktestError(
@@ -444,6 +447,11 @@ export function History({
             {isFactorBacktesting ? t("common.running") : t("history.runFactor")}
           </button>
         </div>
+        <p className="compact-note">
+          {language === "zh"
+            ? `验证范围：${scanUniverseLabel}。因子 IC 和分层收益需要横截面股票池，不跟随单只当前推荐。`
+            : `Scope: ${scanUniverseLabel}. Factor IC and quantile returns use a cross-sectional universe, not only the selected recommendation.`}
+        </p>
         {factorBacktestError && <div className="empty-state error">{factorBacktestError}</div>}
         {factorBacktest ? (
           <div className="stack">
@@ -495,7 +503,12 @@ export function History({
                 title={t("history.rankBuckets")}
                 buckets={factorBacktest.rank_buckets}
               />
+              <FactorQuantileBucketChart
+                title={t("history.factorQuantiles")}
+                buckets={factorBacktest.quantile_buckets}
+              />
             </div>
+            <FactorIcTable items={factorBacktest.factor_ic} />
             <div className="table-shell">
               <table>
                 <thead>
@@ -2313,6 +2326,129 @@ function FactorRankBucketChart({
       }))}
     />
   );
+}
+
+function FactorQuantileBucketChart({
+  title,
+  buckets,
+}: {
+  title: string;
+  buckets: FactorQuantileBucket[];
+}) {
+  const { language, t } = useI18n();
+  const completed = buckets.filter((bucket) => bucket.avg_forward_return_pct !== null);
+  const best = [...completed].sort(
+    (left, right) => (right.avg_forward_return_pct ?? -999) - (left.avg_forward_return_pct ?? -999),
+  )[0];
+  return (
+    <BarValidationChart
+      title={title}
+      headline={`${completed.reduce((sum, bucket) => sum + bucket.completed_count, 0)} ${t("history.samples")}`}
+      meta={[
+        {
+          label: t("history.bestBucket"),
+          value: best ? `${factorQuantileLabel(best, language)} · ${formatNumber(best.avg_forward_return_pct, "%")}` : "-",
+        },
+      ]}
+      bars={buckets.map((bucket) => ({
+        label: factorQuantileLabel(bucket, language),
+        value: bucket.avg_forward_return_pct ?? 0,
+        valueLabel: formatNumber(bucket.avg_forward_return_pct, "%"),
+        caption: `${formatRatio(bucket.positive_rate)} ${t("brief.positive10d")} · ${bucket.completed_count}/${bucket.sample_count}`,
+      }))}
+    />
+  );
+}
+
+function FactorIcTable({ items }: { items: FactorExposureInformationCoefficient[] }) {
+  const { language, t } = useI18n();
+  const hasRows = items.length > 0;
+  return (
+    <div className="validation-card factor-ic-card">
+      <header>
+        <h3>{t("history.factorIcBySignal")}</h3>
+        <span>{items.length}</span>
+      </header>
+      <p className="validation-chart-caption">
+        {language === "zh"
+          ? "IC 看因子分数和未来收益是否同向，Rank IC 看排序是否有效，多空差看高分组相对低分组的超额。"
+          : "IC checks whether factor scores move with future returns, Rank IC checks sorting power, and top-bottom spread shows high-score excess over low-score names."}
+      </p>
+      {!hasRows ? (
+        <div className="chart-empty-explanation">
+          <strong>{language === "zh" ? "等待因子样本" : "Waiting for factor samples"}</strong>
+          <p>
+            {language === "zh"
+              ? "历史窗口不足时暂时不会生成逐因子 IC。先运行全市场扫描和因子回测。"
+              : "Per-factor IC needs enough historical windows. Run full-market scan and factor backtest first."}
+          </p>
+        </div>
+      ) : (
+        <div className="table-shell compact-table">
+          <table>
+            <thead>
+              <tr>
+                <th>{language === "zh" ? "因子" : "Factor"}</th>
+                <th>{t("history.samples")}</th>
+                <th>IC</th>
+                <th>Rank IC</th>
+                <th>{language === "zh" ? "正IC率" : "Positive IC"}</th>
+                <th>{language === "zh" ? "多空差" : "Top-Bottom"}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((item) => (
+                <tr key={item.factor_id}>
+                  <td>{factorIcLabel(item, language)}</td>
+                  <td>{item.sample_count}</td>
+                  <td className={signedCellClass(item.mean_ic)}>{formatNumber(item.mean_ic)}</td>
+                  <td className={signedCellClass(item.mean_rank_ic)}>{formatNumber(item.mean_rank_ic)}</td>
+                  <td>{formatRatio(item.positive_ic_rate)}</td>
+                  <td className={signedCellClass(item.top_bottom_spread_pct)}>
+                    {formatNumber(item.top_bottom_spread_pct, "%")}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function factorQuantileLabel(bucket: FactorQuantileBucket, language: string) {
+  if (language !== "zh") {
+    return bucket.label;
+  }
+  if (bucket.quantile === 1) return "前20%";
+  if (bucket.quantile === 5) return "后20%";
+  return `${bucket.quantile}档`;
+}
+
+function factorIcLabel(item: FactorExposureInformationCoefficient, language: string) {
+  if (language !== "zh") {
+    return item.label;
+  }
+  const labels: Record<string, string> = {
+    valuation: "EP估值",
+    size: "市值过滤",
+    quality: "质量",
+    momentum: "动量",
+    trend_quality: "趋势质量",
+    liquidity: "流动性",
+    low_risk: "低波动",
+    risk_filter: "风险过滤",
+    reversal: "回踩",
+  };
+  return labels[item.factor_id] ?? item.label;
+}
+
+function signedCellClass(value: number | null) {
+  if (value === null || Number.isNaN(value)) {
+    return undefined;
+  }
+  return value >= 0 ? "good" : "risk";
 }
 
 function ClosureWindowChart({

@@ -121,9 +121,13 @@ def _strategy_evaluation(ranking: FactorRanking, strategy_score: float) -> Strat
         },
         score_components={
             "factor_score": ranking.factor_score,
+            "valuation": ranking.valuation_score,
+            "size": ranking.size_score,
+            "quality": ranking.quality_score,
             "trend_quality": ranking.trend_quality_score,
             "liquidity": ranking.liquidity_score,
             "low_risk": ranking.low_risk_score,
+            "risk_filter": ranking.risk_filter_score,
         },
         missing_data=[],
         data_requirements=["daily_ohlcv", "cross_sectional_factor_rank"],

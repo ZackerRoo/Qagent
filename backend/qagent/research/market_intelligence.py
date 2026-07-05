@@ -219,8 +219,10 @@ def _build_data_quality(
     if provider == "free":
         warnings.append("免费数据覆盖可用于开发验证，正式使用前需要复权、停牌和公告源补强。")
 
-    adjustment_status = "ready" if "adjusted_bars" in data_health else "unknown"
-    if provider == "free":
+    adjustment_status = data_health.get("adjustment_status") or "unknown"
+    if _int_health(data_health, "adjusted_bars") > 0:
+        adjustment_status = "ready" if adjustment_status == "ready" else "partial"
+    elif provider == "free":
         adjustment_status = "partial"
     suspension_status = "ready" if data_health.get("suspension_flags") else "unknown"
     limit_status = "ready" if any(card.trading_status for card in cards) else "unknown"

@@ -76,6 +76,7 @@ from qagent.paper_trading.engine import (
 from qagent.providers.factory import build_market_data_provider
 from qagent.providers.status import build_provider_status
 from qagent.recommendations.enrichment import enrich_opportunity_card
+from qagent.recommendations.feedback import build_recent_recommendation_feedback_center
 from qagent.recommendations.portfolio import build_portfolio_plan
 from qagent.recommendations.probability import (
     apply_probability_calibration,
@@ -105,7 +106,8 @@ from qagent.storage.repository import (
     WatchlistCreate,
 )
 from qagent.storage.market_cache import MarketDataCacheRepository
-from qagent.strategy_data.providers import EmptyStrategyDataProvider
+from qagent.strategy_data.models import FundamentalSnapshot
+from qagent.strategy_data.providers import EmptyStrategyDataProvider, build_strategy_data_provider
 from qagent.strategies.models import StrategyHealth
 
 router = APIRouter()
@@ -204,11 +206,17 @@ def _scan(provider_mode: str = "fixture", symbols: str | None = None):
     try:
         provider = build_market_data_provider(mode)
         strategy_data_provider = EmptyStrategyDataProvider() if resolved.is_dynamic else None
+        feedback_center = build_recent_recommendation_feedback_center(
+            repo=_repo(),
+            provider=mode,
+            market_provider=provider,
+        )
         result = run_daily_scan(
             instrument_ids,
             provider,
             mode=mode,
             strategy_data_provider=strategy_data_provider,
+            recommendation_feedback_center=feedback_center,
         )
         result.data_health.update(resolved.data_health)
         if resolved.is_dynamic:
@@ -636,11 +644,21 @@ def factor_backtest(
     start_date, end_date = _factor_backtest_dates(mode, start, end)
     market_provider = build_market_data_provider(mode)
     bars = market_provider.get_daily_bars(instrument_ids, start_date, end_date)
+    fundamentals: list[FundamentalSnapshot] = []
+    try:
+        fundamentals = build_strategy_data_provider(mode).get_fundamentals(
+            instrument_ids,
+            start=start_date,
+            end=end_date,
+        )
+    except Exception:
+        fundamentals = []
     result = run_factor_backtest(
         bars,
         forward_days=forward_days,
         step_days=step_days,
         top_n=top_n,
+        fundamentals=fundamentals,
     )
     payload = result.model_dump(mode="json")
     payload["signals"] = [_attach_instrument_label(signal) for signal in payload.get("signals", [])]

@@ -3,53 +3,80 @@ from dataclasses import dataclass
 import pandas as pd
 
 from qagent.factors.models import FactorExposure, FactorRanking
+from qagent.strategy_data.models import FundamentalSnapshot
 
 
 FACTOR_WEIGHTS = {
-    "momentum": 0.30,
-    "trend_quality": 0.25,
-    "liquidity": 0.15,
-    "low_risk": 0.20,
-    "reversal": 0.10,
+    "valuation": 0.08,
+    "size": 0.06,
+    "quality": 0.08,
+    "momentum": 0.22,
+    "trend_quality": 0.22,
+    "liquidity": 0.12,
+    "low_risk": 0.10,
+    "risk_filter": 0.06,
+    "reversal": 0.06,
 }
 
 A_SHARE_FACTOR_WEIGHTS = {
-    "momentum": 0.16,
-    "trend_quality": 0.24,
-    "liquidity": 0.16,
-    "low_risk": 0.32,
-    "reversal": 0.12,
+    "valuation": 0.14,
+    "size": 0.10,
+    "quality": 0.12,
+    "momentum": 0.14,
+    "trend_quality": 0.20,
+    "liquidity": 0.10,
+    "low_risk": 0.08,
+    "risk_filter": 0.08,
+    "reversal": 0.04,
 }
 
 
 @dataclass
 class _RawFactors:
     instrument_id: str
+    valuation_raw: float | None
+    size_raw: float | None
+    quality_raw: float | None
     momentum_raw: float | None
     trend_quality_raw: float | None
     liquidity_raw: float | None
     low_risk_raw: float | None
+    risk_filter_raw: float | None
     reversal_raw: float | None
     distance_ma20: float | None
     volatility_20d: float | None
     max_drawdown_60d: float | None
     volume_ratio_5_20: float | None
+    market_cap: float | None
     data_completeness: float
     missing_data: list[str]
     flags: list[str]
 
 
-def build_factor_rankings(bars: pd.DataFrame) -> list[FactorRanking]:
+def build_factor_rankings(
+    bars: pd.DataFrame,
+    fundamentals: list[FundamentalSnapshot] | dict[str, FundamentalSnapshot] | None = None,
+) -> list[FactorRanking]:
     if bars.empty:
         return []
-    raw_items = [_raw_factors(symbol, frame) for symbol, frame in bars.groupby("instrument_id")]
+    fundamental_by_id = _latest_fundamentals(fundamentals)
+    raw_items = [
+        _raw_factors(symbol, frame, fundamental_by_id.get(symbol))
+        for symbol, frame in bars.groupby("instrument_id")
+    ]
     scores = {
+        "valuation": _rank_scores({item.instrument_id: item.valuation_raw for item in raw_items}),
+        "size": _size_scores(raw_items),
+        "quality": _rank_scores({item.instrument_id: item.quality_raw for item in raw_items}),
         "momentum": _rank_scores({item.instrument_id: item.momentum_raw for item in raw_items}),
         "trend_quality": _rank_scores(
             {item.instrument_id: item.trend_quality_raw for item in raw_items}
         ),
         "liquidity": _rank_scores({item.instrument_id: item.liquidity_raw for item in raw_items}),
         "low_risk": _rank_scores({item.instrument_id: item.low_risk_raw for item in raw_items}),
+        "risk_filter": _rank_scores(
+            {item.instrument_id: item.risk_filter_raw for item in raw_items}
+        ),
         "reversal": _rank_scores({item.instrument_id: item.reversal_raw for item in raw_items}),
     }
     rankings: list[FactorRanking] = []
@@ -66,10 +93,14 @@ def build_factor_rankings(bars: pd.DataFrame) -> list[FactorRanking]:
                 factor_score=round(factor_score, 4),
                 factor_rank=0,
                 percentile=0.0,
+                valuation_score=round(scores["valuation"][item.instrument_id], 4),
+                size_score=round(scores["size"][item.instrument_id], 4),
+                quality_score=round(scores["quality"][item.instrument_id], 4),
                 momentum_score=round(scores["momentum"][item.instrument_id], 4),
                 trend_quality_score=round(scores["trend_quality"][item.instrument_id], 4),
                 liquidity_score=round(scores["liquidity"][item.instrument_id], 4),
                 low_risk_score=round(scores["low_risk"][item.instrument_id], 4),
+                risk_filter_score=round(scores["risk_filter"][item.instrument_id], 4),
                 reversal_score=round(scores["reversal"][item.instrument_id], 4),
                 execution_penalty=round(penalty, 4),
                 data_completeness=round(item.data_completeness, 4),
@@ -86,12 +117,25 @@ def build_factor_rankings(bars: pd.DataFrame) -> list[FactorRanking]:
     return rankings
 
 
-def _raw_factors(instrument_id: str, bars: pd.DataFrame) -> _RawFactors:
+def _raw_factors(
+    instrument_id: str,
+    bars: pd.DataFrame,
+    fundamental: FundamentalSnapshot | None = None,
+) -> _RawFactors:
     ordered = bars.sort_values("trade_date").copy()
     close = pd.to_numeric(ordered["close"], errors="coerce").dropna()
     volume = pd.to_numeric(ordered["volume"], errors="coerce").dropna()
     missing: list[str] = []
     flags: list[str] = []
+    valuation_raw = _earnings_yield(fundamental)
+    size_raw = _float_or_none(fundamental.market_cap if fundamental is not None else None)
+    quality_raw = _fundamental_quality(fundamental)
+    if valuation_raw is None:
+        missing.append("valuation_ep")
+    if size_raw is None:
+        missing.append("market_cap")
+    if quality_raw is None:
+        missing.append("quality_fundamentals")
     if len(close) < 20:
         missing.append("20d_return")
     if len(close) < 60:
@@ -124,12 +168,18 @@ def _raw_factors(instrument_id: str, bars: pd.DataFrame) -> _RawFactors:
         alignment += 1.0 if ma50 >= ma100 else 0.0
         alignment_inputs += 1
     trend_quality_raw = alignment / alignment_inputs if alignment_inputs else None
-    if trend_quality_raw is not None and distance_ma20 is not None:
-        trend_quality_raw += max(min(distance_ma20, 0.12), -0.12)
 
     avg_volume_20 = float(volume.tail(20).mean()) if len(volume) >= 20 else None
     avg_volume_5 = float(volume.tail(5).mean()) if len(volume) >= 5 else None
     volume_ratio_5_20 = avg_volume_5 / avg_volume_20 if avg_volume_5 and avg_volume_20 else None
+    if trend_quality_raw is not None:
+        if distance_ma20 is not None:
+            trend_quality_raw += max(min(distance_ma20, 0.10), -0.10)
+        if volume_ratio_5_20 is not None:
+            if 1.05 <= volume_ratio_5_20 <= 2.8:
+                trend_quality_raw += 0.07
+            elif volume_ratio_5_20 > 4.0:
+                trend_quality_raw -= 0.05
     liquidity_raw = avg_volume_20
 
     returns = close.pct_change().dropna()
@@ -149,26 +199,143 @@ def _raw_factors(instrument_id: str, bars: pd.DataFrame) -> _RawFactors:
 
     if distance_ma20 is not None and distance_ma20 > 0.12:
         flags.append("overextended")
+    if distance_ma20 is not None and distance_ma20 > 0.24:
+        flags.append("fomo_escape_risk")
     if volatility_20d is not None and volatility_20d > 0.045:
         flags.append("high_volatility")
+    if max_drawdown_60d is not None and max_drawdown_60d < -0.28:
+        flags.append("deep_drawdown_risk")
     if avg_volume_20 is not None and avg_volume_20 < 300_000:
         flags.append("low_liquidity")
-    completeness = (5 - len(set(missing))) / 5
+    if volume_ratio_5_20 is not None and volume_ratio_5_20 > 4.0:
+        flags.append("volume_spike_overheat")
+    if _is_a_share(instrument_id) and size_raw is not None and size_raw < 2_000_000_000:
+        flags.append("shell_size_risk")
+    risk_filter_raw = _risk_filter_raw(
+        distance_ma20=distance_ma20,
+        volatility_20d=volatility_20d,
+        max_drawdown_60d=max_drawdown_60d,
+        avg_volume_20=avg_volume_20,
+        volume_ratio_5_20=volume_ratio_5_20,
+        market_cap=size_raw if _is_a_share(instrument_id) else None,
+    )
+    completeness = _data_completeness(missing)
     return _RawFactors(
         instrument_id=instrument_id,
+        valuation_raw=valuation_raw,
+        size_raw=size_raw,
+        quality_raw=quality_raw,
         momentum_raw=momentum_raw,
         trend_quality_raw=trend_quality_raw,
         liquidity_raw=liquidity_raw,
         low_risk_raw=low_risk_raw,
+        risk_filter_raw=risk_filter_raw,
         reversal_raw=reversal_raw,
         distance_ma20=distance_ma20,
         volatility_20d=volatility_20d,
         max_drawdown_60d=max_drawdown_60d,
         volume_ratio_5_20=volume_ratio_5_20,
+        market_cap=size_raw,
         data_completeness=max(0.2, completeness),
         missing_data=sorted(set(missing)),
         flags=sorted(set(flags)),
     )
+
+
+def _latest_fundamentals(
+    fundamentals: list[FundamentalSnapshot] | dict[str, FundamentalSnapshot] | None,
+) -> dict[str, FundamentalSnapshot]:
+    if fundamentals is None:
+        return {}
+    if isinstance(fundamentals, dict):
+        return fundamentals
+    latest: dict[str, FundamentalSnapshot] = {}
+    for item in fundamentals:
+        current = latest.get(item.instrument_id)
+        if current is None or item.as_of_date > current.as_of_date:
+            latest[item.instrument_id] = item
+    return latest
+
+
+def _earnings_yield(fundamental: FundamentalSnapshot | None) -> float | None:
+    if fundamental is None:
+        return None
+    yields = []
+    for pe in [fundamental.pe_ratio, fundamental.forward_pe]:
+        value = _float_or_none(pe)
+        if value is not None and value > 0:
+            yields.append(1 / value)
+    if not yields:
+        return None
+    return sum(yields) / len(yields)
+
+
+def _fundamental_quality(fundamental: FundamentalSnapshot | None) -> float | None:
+    if fundamental is None:
+        return None
+    components = []
+    roe = _float_or_none(fundamental.return_on_equity_pct)
+    gross_margin = _float_or_none(fundamental.gross_margin_pct)
+    net_margin = _float_or_none(fundamental.net_margin_pct)
+    operating_margin = _float_or_none(fundamental.operating_margin_pct)
+    revenue_growth = _float_or_none(fundamental.revenue_growth_pct)
+    earnings_growth = _float_or_none(fundamental.earnings_growth_pct)
+    if roe is not None:
+        components.append((_bounded_score(roe, -5, 25), 0.30))
+    if gross_margin is not None:
+        components.append((_bounded_score(gross_margin, 5, 55), 0.20))
+    if net_margin is not None:
+        components.append((_bounded_score(net_margin, -10, 25), 0.18))
+    elif operating_margin is not None:
+        components.append((_bounded_score(operating_margin, -10, 25), 0.14))
+    if revenue_growth is not None:
+        components.append((_bounded_score(revenue_growth, -20, 35), 0.16))
+    if earnings_growth is not None:
+        components.append((_bounded_score(earnings_growth, -30, 45), 0.16))
+    if not components:
+        return None
+    weight_sum = sum(weight for _, weight in components)
+    return sum(score * weight for score, weight in components) / weight_sum
+
+
+def _risk_filter_raw(
+    *,
+    distance_ma20: float | None,
+    volatility_20d: float | None,
+    max_drawdown_60d: float | None,
+    avg_volume_20: float | None,
+    volume_ratio_5_20: float | None,
+    market_cap: float | None,
+) -> float:
+    score = 1.0
+    if distance_ma20 is not None:
+        if distance_ma20 > 0.12:
+            score -= min(0.28, (distance_ma20 - 0.12) * 1.25)
+        if distance_ma20 < -0.18:
+            score -= min(0.18, abs(distance_ma20 + 0.18))
+    if volatility_20d is not None:
+        score -= min(0.26, max(0.0, volatility_20d - 0.03) * 5.0)
+    if max_drawdown_60d is not None:
+        score -= min(0.20, max(0.0, abs(max_drawdown_60d) - 0.18) * 0.9)
+    if avg_volume_20 is not None and avg_volume_20 < 300_000:
+        score -= 0.16 if avg_volume_20 < 120_000 else 0.10
+    if volume_ratio_5_20 is not None and volume_ratio_5_20 > 4.0:
+        score -= min(0.12, (volume_ratio_5_20 - 4.0) * 0.025)
+    if market_cap is not None and market_cap < 2_000_000_000:
+        score -= 0.18
+    return _clamp(score)
+
+
+def _data_completeness(missing: list[str]) -> float:
+    technical_missing = sum(
+        1 for key in {"20d_return", "60d_return", "120d_return"} if key in missing
+    )
+    fundamental_missing = sum(
+        1
+        for key in {"valuation_ep", "market_cap", "quality_fundamentals"}
+        if key in missing
+    )
+    return _clamp(1.0 - technical_missing * 0.10 - fundamental_missing * 0.06)
 
 
 def _period_return(close: pd.Series, window: int) -> float | None:
@@ -217,14 +384,53 @@ def _rank_scores(values: dict[str, float | None]) -> dict[str, float]:
     return {key: round(ranked.get(key, 0.35), 4) for key in values}
 
 
+def _size_scores(items: list[_RawFactors]) -> dict[str, float]:
+    if not any(item.size_raw is not None for item in items):
+        return {item.instrument_id: 0.5 for item in items}
+    scores: dict[str, float] = {}
+    rank_fallback = _rank_scores({item.instrument_id: item.size_raw for item in items})
+    for item in items:
+        market_cap = item.size_raw
+        if market_cap is None:
+            scores[item.instrument_id] = 0.35
+            continue
+        if _is_a_share(item.instrument_id):
+            scores[item.instrument_id] = _a_share_size_score(market_cap)
+        else:
+            scores[item.instrument_id] = rank_fallback[item.instrument_id]
+    return {key: round(value, 4) for key, value in scores.items()}
+
+
+def _a_share_size_score(market_cap: float) -> float:
+    if market_cap < 2_000_000_000:
+        return 0.05
+    if market_cap < 5_000_000_000:
+        return 0.35
+    if market_cap < 20_000_000_000:
+        return 0.78
+    if market_cap < 150_000_000_000:
+        return 0.95
+    if market_cap < 500_000_000_000:
+        return 0.72
+    return 0.55
+
+
 def _execution_penalty(item: _RawFactors) -> float:
     penalty = 0.0
     if item.distance_ma20 is not None and item.distance_ma20 > 0.12:
         penalty += min(0.20, (item.distance_ma20 - 0.12) * 1.5)
+    if item.distance_ma20 is not None and item.distance_ma20 > 0.24:
+        penalty += min(0.12, (item.distance_ma20 - 0.24) * 1.2)
     if "low_liquidity" in item.flags:
         penalty += 0.10
     if "high_volatility" in item.flags:
         penalty += 0.08
+    if "deep_drawdown_risk" in item.flags:
+        penalty += 0.08
+    if "volume_spike_overheat" in item.flags:
+        penalty += 0.06
+    if "shell_size_risk" in item.flags:
+        penalty += 0.12
     return _clamp(penalty)
 
 
@@ -240,6 +446,30 @@ def _exposures(
     weights: dict[str, float],
 ) -> list[FactorExposure]:
     return [
+        FactorExposure(
+            factor_id="valuation",
+            label="A-share EP valuation",
+            raw_value=item.valuation_raw,
+            score=scores["valuation"][item.instrument_id],
+            weight=weights["valuation"],
+            explanation="Earnings yield from PE/forward PE. For A-shares this uses EP rather than PB when fundamental data is available.",
+        ),
+        FactorExposure(
+            factor_id="size",
+            label="A-share size filter",
+            raw_value=item.market_cap,
+            score=scores["size"][item.instrument_id],
+            weight=weights["size"],
+            explanation="Market-cap suitability. A-share scoring avoids shell-like micro caps while still allowing mid-cap elasticity.",
+        ),
+        FactorExposure(
+            factor_id="quality",
+            label="Quality",
+            raw_value=item.quality_raw,
+            score=scores["quality"][item.instrument_id],
+            weight=weights["quality"],
+            explanation="ROE, margins, and growth quality from fundamental snapshots when available.",
+        ),
         FactorExposure(
             factor_id="momentum",
             label="Momentum",
@@ -273,6 +503,14 @@ def _exposures(
             explanation="Lower 20 day volatility and shallower 60 day drawdown score better; this carries higher weight for A-shares.",
         ),
         FactorExposure(
+            factor_id="risk_filter",
+            label="Risk filter",
+            raw_value=item.risk_filter_raw,
+            score=scores["risk_filter"][item.instrument_id],
+            weight=weights["risk_filter"],
+            explanation="Penalty-aware filter for overextension, high volatility, deep drawdown, low liquidity, volume spikes, and shell-size risk.",
+        ),
+        FactorExposure(
             factor_id="reversal",
             label="Reversal setup",
             raw_value=item.reversal_raw,
@@ -280,7 +518,27 @@ def _exposures(
             weight=weights["reversal"],
             explanation="Short-term pullback pressure inside an intact trend.",
         ),
-    ]
+]
+
+
+def _bounded_score(value: float, low: float, high: float) -> float:
+    if high <= low:
+        return 0.5
+    return _clamp((value - low) / (high - low))
+
+
+def _float_or_none(value: object) -> float | None:
+    try:
+        result = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(result):
+        return None
+    return result
+
+
+def _is_a_share(instrument_id: str) -> bool:
+    return instrument_id.startswith("CN:")
 
 
 def _clamp(value: float) -> float:

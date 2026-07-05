@@ -1,12 +1,17 @@
 from pydantic import BaseModel, Field
 
 from qagent.db import create_session_factory, initialize_database
-from qagent.domain.models import OpportunityCard
+from qagent.domain.models import OpportunityCard, SectorStrength
 from qagent.jobs.daily_scan import DailyScanResult, ScanItem, run_daily_scan
 from qagent.market.tradable import load_cn_tradable_instruments
 from qagent.monitoring.signal_monitor import build_signal_monitor_center
 from qagent.providers.factory import build_market_data_provider
 from qagent.recommendations.portfolio import build_portfolio_plan
+from qagent.recommendations.feedback import (
+    apply_recommendation_feedback_calibration,
+    build_recent_recommendation_feedback_center,
+    recommendation_feedback_data_health,
+)
 from qagent.recommendations.probability import (
     apply_probability_calibration,
     probability_calibration_data_health,
@@ -133,11 +138,17 @@ def run_full_market_scan(
         include_etfs=include_etfs,
     )
     provider = build_market_data_provider(provider_mode)
+    feedback_center = build_recent_recommendation_feedback_center(
+        repo=repo,
+        provider=provider_mode,
+        market_provider=provider,
+    )
     scan = run_daily_scan(
         symbols,
         provider,
         mode=provider_mode,
         strategy_data_provider=EmptyStrategyDataProvider(),
+        recommendation_feedback_center=feedback_center,
     )
     scan.data_health.update(
         {
@@ -161,8 +172,14 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     if job is None:
         return
     provider = build_market_data_provider(job.provider)
+    feedback_center = build_recent_recommendation_feedback_center(
+        repo=repo,
+        provider=job.provider,
+        market_provider=provider,
+    )
     all_cards: list[OpportunityCard] = []
     all_items: list[ScanItem] = []
+    sector_strength_batches: list[SectorStrength] = []
     strategy_health_batches: list[list[StrategyHealth]] = []
     aggregate_health: dict[str, str] = {
         "provider": job.provider,
@@ -191,6 +208,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
                 provider,
                 mode=job.provider,
                 strategy_data_provider=EmptyStrategyDataProvider(),
+                recommendation_feedback_center=feedback_center,
             )
             repo.save_scan_run(
                 provider=job.provider,
@@ -200,6 +218,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
             )
             all_cards.extend(scan.cards)
             all_items.extend(scan.items)
+            sector_strength_batches.extend(scan.sector_strength)
             strategy_health_batches.append(scan.strategy_health)
             _merge_health(aggregate_health, scan.data_health)
             error_count += _int_health(scan.data_health, "scan_errors")
@@ -229,9 +248,11 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     apply_market_intelligence_to_cards(all_cards, market_intelligence)
     apply_recommendation_quality_gate(all_cards)
     apply_probability_calibration(all_cards, strategy_health)
+    apply_recommendation_feedback_calibration(all_cards, feedback_center)
     ranked_cards = sort_recommendation_cards(all_cards)
     visible_cards = ranked_cards[:top_cards_limit]
     visible_items = _visible_rejected_items(all_items, limit=500)
+    sector_strength = _merge_sector_strength(sector_strength_batches)[:12]
     portfolio_plan = build_portfolio_plan(visible_cards)
     cache_key = _full_market_batch_cache_key(job.provider, job.include_etfs)
     payload_data_health = {
@@ -239,6 +260,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         **market_intelligence.data_health,
         **recommendation_quality_data_health(visible_cards),
         **probability_calibration_data_health(visible_cards),
+        **recommendation_feedback_data_health(visible_cards),
         "scan_result_cache": "full_market_batch",
         "scan_result_cache_key": cache_key,
         "full_market_cards_total": str(len(ranked_cards)),
@@ -247,6 +269,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
             len([item for item in all_items if _is_rejected_item(item)])
         ),
         "full_market_items_returned": str(len(visible_items)),
+        "sector_strength": str(len(sector_strength)),
         "scanned": str(scanned_symbols),
         "cards": str(len(visible_cards)),
     }
@@ -286,7 +309,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         "items": [item.model_dump(mode="json") for item in visible_items],
         "strategy_health": [item.model_dump(mode="json") for item in strategy_health],
         "factor_rankings": [],
-        "sector_strength": [],
+        "sector_strength": [item.model_dump(mode="json") for item in sector_strength],
         "portfolio_plan": portfolio_plan.model_dump(mode="json"),
         "market_intelligence": market_intelligence.model_dump(mode="json"),
         "manual_action_center": manual_action_center.model_dump(mode="json"),
@@ -401,6 +424,63 @@ def _merge_strategy_health(batches: list[list[StrategyHealth]]) -> list[Strategy
             )
         )
     return sorted(merged, key=lambda item: item.strategy_id)
+
+
+def _merge_sector_strength(items: list[SectorStrength]) -> list[SectorStrength]:
+    grouped: dict[tuple[str, str], list[SectorStrength]] = {}
+    for item in items:
+        grouped.setdefault((item.category, item.industry), []).append(item)
+
+    merged: list[SectorStrength] = []
+    for group in grouped.values():
+        sample_count = sum(max(item.sample_count, len(item.symbols), 1) for item in group)
+        symbols = sorted({symbol for item in group for symbol in item.symbols})
+        themes = sorted({theme for item in group for theme in item.themes})
+        leaders = sorted(
+            [leader for item in group for leader in item.leaders],
+            key=lambda leader: leader.change_pct,
+            reverse=True,
+        )[:5]
+        laggards = sorted(
+            [laggard for item in group for laggard in item.laggards],
+            key=lambda laggard: laggard.change_pct,
+        )[:3]
+        score = _weighted_average(
+            [
+                (item.score, max(item.sample_count, len(item.symbols), 1))
+                for item in group
+            ]
+        )
+        avg_change_pct = _weighted_average(
+            [
+                (item.avg_change_pct, max(item.sample_count, len(item.symbols), 1))
+                for item in group
+            ]
+        )
+        advance_ratio = _weighted_average(
+            [
+                (item.advance_ratio, max(item.sample_count, len(item.symbols), 1))
+                for item in group
+            ]
+        )
+        representative = max(group, key=lambda item: item.score)
+        merged.append(
+            SectorStrength(
+                industry=representative.industry,
+                category=representative.category,
+                themes=themes[:8],
+                symbols=symbols[:20],
+                sample_count=sample_count,
+                avg_change_pct=avg_change_pct,
+                advance_ratio=advance_ratio,
+                total_volume=sum(item.total_volume for item in group),
+                score=round(score, 2),
+                leaders=leaders,
+                laggards=laggards,
+                summary=representative.summary,
+            )
+        )
+    return sorted(merged, key=lambda item: item.score, reverse=True)
 
 
 def _merge_strategy_curve(items: list[StrategyHealth]) -> list[StrategyHealthPoint]:

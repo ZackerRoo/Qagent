@@ -633,11 +633,12 @@ export async function fetchBacktest(
 export async function fetchFactorBacktest(
   provider: DataProviderMode,
   symbols?: string,
+  scanLimit?: number,
 ): Promise<FactorBacktestResponse> {
   return apiGet<FactorBacktestResponse>("/factors/backtest", {
     provider,
     symbols,
-    scan_limit: provider === "free" ? 30 : undefined,
+    scan_limit: scanLimit ?? (provider === "free" ? 120 : undefined),
   });
 }
 

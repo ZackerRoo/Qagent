@@ -6,6 +6,8 @@ from qagent.jobs.daily_scan import run_daily_scan
 from qagent.jobs import full_market
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.db import create_session_factory, initialize_database
+from qagent.jobs.daily_scan import ScanItem
+from qagent.market.sector_strength import build_sector_strength
 from qagent.storage.repository import QagentRepository
 
 
@@ -87,6 +89,8 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
     assert cached.payload["operational_readiness_center"]["user_questions"]
     assert cached.payload["data_health"]["operational_readiness_checks"] == "6"
     assert cached.payload["data_health"]["probability_calibration_cards"] == str(len(cached.payload["cards"]))
+    assert cached.payload["sector_strength"]
+    assert cached.payload["data_health"]["sector_strength"] == str(len(cached.payload["sector_strength"]))
 
 
 def test_full_market_batch_job_caches_rejected_items_with_remediation(tmp_path, monkeypatch):
@@ -172,6 +176,27 @@ def test_daily_scan_surfaces_provider_errors():
     assert result.items[0].remediation
 
 
+def test_sector_strength_uses_full_scan_items_for_theme_breadth():
+    items = [
+        _scan_item("CN:688981", "watch"),
+        _scan_item("CN:688008", "watch"),
+        _scan_item("CN:000001", "watch"),
+    ]
+    bars_by_instrument = {
+        item.instrument_id: _theme_bars(item.instrument_id, direction=1 if item.instrument_id != "CN:000001" else -1)
+        for item in items
+    }
+
+    sectors = build_sector_strength([], bars_by_instrument, items=items)
+
+    by_name = {item.industry: item for item in sectors}
+    assert "半导体" in by_name
+    assert "存储芯片" in by_name
+    assert by_name["半导体"].category == "theme"
+    assert by_name["半导体"].sample_count >= 2
+    assert by_name["半导体"].score > by_name["银行"].score
+
+
 class ProviderThatRaisesForOneSymbol:
     name = "partial_failure"
     last_errors: list[str] = []
@@ -204,6 +229,39 @@ def test_daily_scan_continues_after_single_instrument_error():
     assert by_id["US:TEST"].status == "setup_ready"
     assert len(result.cards) == 1
     assert result.data_health["scan_errors"] == "1"
+
+
+def _scan_item(instrument_id: str, status: str) -> ScanItem:
+    return ScanItem(
+        instrument_id=instrument_id,
+        instrument_label=None,
+        status=status,
+        reason="test",
+        bars=80,
+        signals=0,
+        latest_close="10.00",
+        latest_trade_date=date(2026, 3, 20),
+    )
+
+
+def _theme_bars(instrument_id: str, direction: int = 1) -> pd.DataFrame:
+    start = date(2026, 1, 1)
+    rows = []
+    for index in range(80):
+        close = 10 + direction * index * 0.04
+        rows.append(
+            {
+                "instrument_id": instrument_id,
+                "trade_date": start + timedelta(days=index),
+                "open": close - 0.02,
+                "high": close + 0.08,
+                "low": close - 0.08,
+                "close": close,
+                "volume": 1_500_000 + index * 2_000,
+                "provider": "fixture",
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 class StrategyDataProviderWithRecords:
