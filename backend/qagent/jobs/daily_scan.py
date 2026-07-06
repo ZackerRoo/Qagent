@@ -40,6 +40,7 @@ from qagent.recommendations.decision import build_research_decision
 from qagent.recommendations.enrichment import enrich_opportunity_card
 from qagent.recommendations.feedback import (
     apply_recommendation_feedback_calibration,
+    apply_recommendation_feedback_quality_gate,
     recommendation_feedback_data_health,
 )
 from qagent.recommendations.portfolio import build_portfolio_plan
@@ -364,6 +365,7 @@ def run_daily_scan(
     apply_recommendation_quality_gate(cards)
     apply_probability_calibration(cards, strategy_health)
     apply_recommendation_feedback_calibration(cards, recommendation_feedback_center)
+    apply_recommendation_feedback_quality_gate(cards, recommendation_feedback_center)
     cards = sort_recommendation_cards(cards)
     data_health.update(
         apply_benchmark_comparisons(

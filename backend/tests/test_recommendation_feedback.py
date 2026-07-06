@@ -11,8 +11,10 @@ from qagent.monitoring.recommendation_calibration import (
 )
 from qagent.recommendations.feedback import (
     apply_recommendation_feedback_calibration,
+    apply_recommendation_feedback_quality_gate,
     recommendation_feedback_data_health,
 )
+from qagent.recommendations.quality_gate import apply_recommendation_quality_gate
 
 
 def test_recommendation_feedback_promotes_working_signals_and_demotes_failed_signals():
@@ -83,6 +85,49 @@ def test_recommendation_feedback_promotes_working_signals_and_demotes_failed_sig
     health = recommendation_feedback_data_health([winner, loser])
     assert health["recommendation_feedback_cards"] == "2"
     assert health["recommendation_feedback_adjusted"] == "2"
+
+
+def test_recommendation_feedback_blocks_signals_with_bad_followthrough():
+    card = _card("CN:002747", "埃斯顿 002747.SZ", 0.74, ["trend_momentum"])
+    apply_recommendation_quality_gate([card])
+    center = RecommendationCalibrationCenter(
+        as_of=date(2026, 7, 6),
+        headline="推荐校准：部分信号转弱",
+        verdict="谨慎",
+        reliability_score=0.72,
+        baseline_win_rate_10d=0.46,
+        baseline_avg_return_10d=0.3,
+        score_bands=[],
+        signal_effects=[
+            RecommendationSignalEffect(
+                signal_key="trend_momentum",
+                label="二阶段趋势动量",
+                sample_count=9,
+                completed_count=6,
+                win_rate_10d=0.25,
+                avg_return_10d=-2.8,
+                baseline_avg_return_10d=0.3,
+                lift_vs_baseline_10d=-3.1,
+                reliability_score=0.7,
+                weight_action="降低",
+                suggested_weight_delta=-0.08,
+                reason="最近推荐后 10 日收益显著弱于基准。",
+            )
+        ],
+    )
+
+    apply_recommendation_feedback_quality_gate([card], center)
+
+    assert card.decision is not None
+    assert card.decision.action == "avoid"
+    assert card.decision.risk_status == "blocked"
+    assert card.recommendation_quality is not None
+    assert card.recommendation_quality.tier == "risk_filtered"
+    assert any(check.code == "feedback_quality_gate" for check in card.recommendation_quality.checks)
+    assert card.pre_trade_risk is not None
+    assert card.pre_trade_risk.can_buy is False
+    health = recommendation_feedback_data_health([card])
+    assert health["recommendation_feedback_blocked"] == "1"
 
 
 def _card(instrument_id: str, label: str, score: float, flags: list[str]):

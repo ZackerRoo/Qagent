@@ -1,6 +1,11 @@
+from datetime import date
+from decimal import Decimal
+
+import pandas as pd
 from fastapi.testclient import TestClient
 
 from qagent.app import create_app
+from qagent.api import routes
 
 
 def test_paper_trade_from_opportunity_creates_once_and_rejects_blocked(tmp_path, monkeypatch):
@@ -222,6 +227,135 @@ def test_paper_trade_daily_report_uses_cached_benchmarks_only(tmp_path, monkeypa
     assert body["summary"]["total_trades"] == 1
     assert body["benchmark"]["items"]
     assert body["data_health"]["paper_daily_benchmarks_source"] == "market_cache_only"
+
+
+def test_paper_trade_daily_report_uses_cached_etf_proxy_benchmarks(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-daily-report-proxy.db'}")
+    client = TestClient(create_app())
+    trade = routes._paper_repo().create_trade(
+        source_snapshot_id="opportunity:card_report_proxy_0001",
+        provider="free",
+        instrument_id="CN:002747",
+        strategy_id="trend_momentum",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("30.00"),
+        initial_stop=Decimal("28.50"),
+        target_1=Decimal("33.00"),
+        rank_score=Decimal("0.82"),
+        notes="test proxy benchmark trade",
+    )
+    routes._paper_repo().update_trade(
+        trade.trade_id,
+        latest_date=date(2026, 7, 6),
+        latest_price=Decimal("30.60"),
+    )
+    routes._market_cache_repo().save_daily_bars(
+        "free",
+        pd.DataFrame(
+            [
+                {
+                    "instrument_id": proxy_id,
+                    "trade_date": trade_date,
+                    "open": close,
+                    "high": close,
+                    "low": close,
+                    "close": close,
+                    "volume": 1_000_000,
+                    "provider": "proxy_fixture",
+                }
+                for proxy_id, first_close, last_close in [
+                    ("CN:510300", 100, 102),
+                    ("CN:510500", 100, 101),
+                    ("CN:159915", 100, 98),
+                    ("CN:588000", 100, 104),
+                ]
+                for trade_date, close in [
+                    (date(2026, 7, 1), first_close),
+                    (date(2026, 7, 6), last_close),
+                ]
+            ]
+        ),
+    )
+
+    def fail_live_provider(*_args, **_kwargs):
+        raise AssertionError("daily report should not fetch live benchmark data")
+
+    monkeypatch.setattr("qagent.api.routes.build_market_data_provider", fail_live_provider)
+
+    response = client.get("/api/paper-trades/daily-report?provider=free")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data_health"]["paper_daily_benchmarks_source"] == "market_cache_only"
+    assert body["data_health"]["paper_daily_benchmark_rows"] == "8"
+    assert {item["name"] for item in body["benchmark"]["items"]} == {
+        "沪深300",
+        "中证500",
+        "创业板指",
+        "科创50",
+    }
+    assert all(item["return_pct"] is not None for item in body["benchmark"]["items"])
+
+
+def test_paper_trade_daily_report_falls_back_to_recent_cached_benchmarks(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-daily-report-recent-proxy.db'}")
+    client = TestClient(create_app())
+    trade = routes._paper_repo().create_trade(
+        source_snapshot_id="opportunity:card_report_recent_proxy_0001",
+        provider="free",
+        instrument_id="CN:002747",
+        strategy_id="trend_momentum",
+        signal_date=date(2026, 7, 6),
+        trigger_price=Decimal("30.00"),
+        initial_stop=Decimal("28.50"),
+        target_1=Decimal("33.00"),
+        rank_score=Decimal("0.82"),
+        notes="test recent proxy benchmark fallback",
+    )
+    routes._paper_repo().update_trade(
+        trade.trade_id,
+        latest_date=date(2026, 7, 6),
+        latest_price=Decimal("30.60"),
+    )
+    routes._market_cache_repo().save_daily_bars(
+        "free",
+        pd.DataFrame(
+            [
+                {
+                    "instrument_id": proxy_id,
+                    "trade_date": trade_date,
+                    "open": close,
+                    "high": close,
+                    "low": close,
+                    "close": close,
+                    "volume": 1_000_000,
+                    "provider": "proxy_fixture",
+                }
+                for proxy_id, first_close, last_close in [
+                    ("CN:510300", 100, 102),
+                    ("CN:510500", 100, 101),
+                    ("CN:159915", 100, 98),
+                    ("CN:588000", 100, 104),
+                ]
+                for trade_date, close in [
+                    (date(2026, 6, 20), first_close),
+                    (date(2026, 6, 26), last_close),
+                ]
+            ]
+        ),
+    )
+
+    def fail_live_provider(*_args, **_kwargs):
+        raise AssertionError("daily report should not fetch live benchmark data")
+
+    monkeypatch.setattr("qagent.api.routes.build_market_data_provider", fail_live_provider)
+
+    response = client.get("/api/paper-trades/daily-report?provider=free")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data_health"]["paper_daily_benchmark_rows"] == "8"
+    assert all(item["return_pct"] is not None for item in body["benchmark"]["items"])
 
 
 def test_paper_trade_auto_validation_reports_5_10_20_day_outcomes(tmp_path, monkeypatch):

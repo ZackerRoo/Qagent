@@ -53,7 +53,9 @@ from qagent.market.universe import DEFAULT_DEV_UNIVERSE, DEFAULT_FREE_UNIVERSE
 from qagent.market.universes import UniverseCreate, builtin_universes, merge_universes
 from qagent.market.indicators import add_moving_averages, add_volume_ratio, percent_distance
 from qagent.market.benchmarks import (
-    CN_BENCHMARKS,
+    benchmark_ids,
+    benchmark_proxy_ids,
+    benchmark_frames_from_bars,
     build_benchmark_comparison_for_card,
     benchmark_items_for_return_from_bars,
 )
@@ -1614,11 +1616,15 @@ def paper_trade_daily_report(provider: str = "fixture", limit: int = 500) -> dic
     benchmark_items: list[dict[str, object]] = []
     benchmark_rows = 0
     if trades:
-        benchmark_ids = [item.benchmark_id for item in CN_BENCHMARKS]
+        cached_benchmark_ids = benchmark_ids() + benchmark_proxy_ids()
+        benchmark_start = min(
+            min(trade.signal_date for trade in trades),
+            report_date - timedelta(days=180),
+        )
         benchmark_bars = _market_cache_repo().load_daily_bars(
             mode,
-            benchmark_ids,
-            min(trade.signal_date for trade in trades),
+            cached_benchmark_ids,
+            benchmark_start,
             report_date,
         )
         benchmark_rows = len(benchmark_bars)
@@ -2707,12 +2713,12 @@ def _apply_cached_benchmark_comparisons(
 
     start = date.today() - timedelta(days=180)
     end = date.today()
-    benchmark_ids = [item.benchmark_id for item in CN_BENCHMARKS]
+    cached_benchmark_ids = benchmark_ids() + benchmark_proxy_ids()
     instrument_ids = sorted({card.instrument_id for card in cn_cards})
     try:
         cached = _market_cache_repo().load_daily_bars(
             provider,
-            instrument_ids + benchmark_ids,
+            sorted(set(instrument_ids + cached_benchmark_ids)),
             start,
             end,
         )
@@ -2734,10 +2740,7 @@ def _apply_cached_benchmark_comparisons(
         for instrument_id, group in cached.groupby("instrument_id", sort=False)
     }
     empty_frame = cached.iloc[0:0].copy()
-    benchmark_frames = {
-        benchmark_id: frames.get(benchmark_id, empty_frame)
-        for benchmark_id in benchmark_ids
-    }
+    benchmark_frames = benchmark_frames_from_bars(cached)
     applied = 0
     missing = 0
     for card in cn_cards:

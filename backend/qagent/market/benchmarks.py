@@ -28,6 +28,21 @@ CN_BENCHMARKS = (
     BenchmarkDefinition("CN:000688.IDX", "科创50", ("科创", "科创50", "半导体", "芯片")),
 )
 
+CN_BENCHMARK_PROXIES: dict[str, tuple[str, ...]] = {
+    "CN:000300.IDX": ("CN:510300", "CN:159919"),
+    "CN:000905.IDX": ("CN:510500", "CN:159922"),
+    "CN:399006.IDX": ("CN:159915", "CN:159949"),
+    "CN:000688.IDX": ("CN:588000", "CN:588080"),
+}
+
+
+def benchmark_ids() -> list[str]:
+    return [item.benchmark_id for item in CN_BENCHMARKS]
+
+
+def benchmark_proxy_ids() -> list[str]:
+    return sorted({proxy_id for proxy_ids in CN_BENCHMARK_PROXIES.values() for proxy_id in proxy_ids})
+
 
 def apply_benchmark_comparisons(
     cards: list[OpportunityCard],
@@ -38,12 +53,8 @@ def apply_benchmark_comparisons(
     end: date,
     lookback_rows: int = 20,
 ) -> dict[str, str]:
-    benchmark_ids = [item.benchmark_id for item in CN_BENCHMARKS]
-    benchmark_bars = _load_benchmark_bars(provider, benchmark_ids, start, end)
-    benchmark_frames = {
-        benchmark_id: _bars_for(benchmark_bars, benchmark_id)
-        for benchmark_id in benchmark_ids
-    }
+    benchmark_bars = load_benchmark_bars(provider, start, end)
+    benchmark_frames = benchmark_frames_from_bars(benchmark_bars)
     applied = 0
     missing = 0
     for card in cards:
@@ -138,8 +149,7 @@ def benchmark_items_for_return(
     base_return_pct: float,
     lookback_rows: int = 20,
 ) -> list[dict[str, float | str | None]]:
-    benchmark_ids = [item.benchmark_id for item in CN_BENCHMARKS]
-    benchmark_bars = _load_benchmark_bars(provider, benchmark_ids, start, end)
+    benchmark_bars = load_benchmark_bars(provider, start, end)
     return benchmark_items_for_return_from_bars(
         benchmark_bars=benchmark_bars,
         base_return_pct=base_return_pct,
@@ -154,9 +164,10 @@ def benchmark_items_for_return_from_bars(
     lookback_rows: int = 20,
 ) -> list[dict[str, float | str | None]]:
     rows: list[dict[str, float | str | None]] = []
+    benchmark_frames = benchmark_frames_from_bars(benchmark_bars)
     for definition in CN_BENCHMARKS:
         benchmark_return = _period_return_pct(
-            _bars_for(benchmark_bars, definition.benchmark_id),
+            benchmark_frames.get(definition.benchmark_id, pd.DataFrame()),
             lookback_rows,
         )
         excess = None if benchmark_return is None else round(base_return_pct - benchmark_return, 4)
@@ -171,6 +182,47 @@ def benchmark_items_for_return_from_bars(
     return rows
 
 
+def load_benchmark_bars(
+    provider: MarketDataProvider,
+    start: date,
+    end: date,
+) -> pd.DataFrame:
+    ids = benchmark_ids()
+    direct = _load_benchmark_bars(provider, ids, start, end)
+    missing_ids = [benchmark_id for benchmark_id in ids if _bars_for(direct, benchmark_id).empty]
+    if not missing_ids:
+        return direct
+    proxy_ids = sorted(
+        {
+            proxy_id
+            for benchmark_id in missing_ids
+            for proxy_id in CN_BENCHMARK_PROXIES.get(benchmark_id, ())
+        }
+    )
+    proxy_bars = _load_benchmark_bars(provider, proxy_ids, start, end) if proxy_ids else pd.DataFrame()
+    proxy_frames = _proxy_frames_from_bars(proxy_bars, missing_ids)
+    frames = [direct] if not direct.empty else []
+    frames.extend(frame for frame in proxy_frames.values() if not frame.empty)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def benchmark_frames_from_bars(benchmark_bars: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    direct_frames = {
+        benchmark_id: _bars_for(benchmark_bars, benchmark_id)
+        for benchmark_id in benchmark_ids()
+    }
+    missing_ids = [benchmark_id for benchmark_id, frame in direct_frames.items() if frame.empty]
+    if not missing_ids:
+        return direct_frames
+    proxy_frames = _proxy_frames_from_bars(benchmark_bars, missing_ids)
+    for benchmark_id, frame in proxy_frames.items():
+        if not frame.empty:
+            direct_frames[benchmark_id] = frame
+    return direct_frames
+
+
 def _load_benchmark_bars(
     provider: MarketDataProvider,
     benchmark_ids: list[str],
@@ -181,6 +233,30 @@ def _load_benchmark_bars(
         return provider.get_daily_bars(benchmark_ids, start, end)
     except Exception:
         return pd.DataFrame()
+
+
+def _proxy_frames_from_bars(
+    frame: pd.DataFrame,
+    benchmark_ids_to_fill: list[str],
+) -> dict[str, pd.DataFrame]:
+    frames: dict[str, pd.DataFrame] = {}
+    if frame.empty or "instrument_id" not in frame.columns:
+        return frames
+    for benchmark_id in benchmark_ids_to_fill:
+        for proxy_id in CN_BENCHMARK_PROXIES.get(benchmark_id, ()):
+            proxy_frame = _bars_for(frame, proxy_id)
+            if proxy_frame.empty:
+                continue
+            normalized = proxy_frame.copy()
+            normalized["benchmark_proxy_id"] = proxy_id
+            normalized["instrument_id"] = benchmark_id
+            if "provider" in normalized.columns:
+                normalized["provider"] = normalized["provider"].astype(str) + f":proxy:{proxy_id}"
+            else:
+                normalized["provider"] = f"proxy:{proxy_id}"
+            frames[benchmark_id] = normalized
+            break
+    return frames
 
 
 def _bars_for(frame: pd.DataFrame, instrument_id: str) -> pd.DataFrame:
