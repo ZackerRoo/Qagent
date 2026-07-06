@@ -175,9 +175,9 @@ export function OpportunityDetail({
               </span>
             </div>
             <div className="risk-veto-list compact">
-              {card.trading_status.notes.map((note) => (
+              {card.trading_status.notes.map((note, index) => (
                 <div
-                  key={note}
+                  key={`${note}-${index}`}
                   className={`risk-veto risk-veto-${card.trading_status?.severity ?? "info"}`}
                 >
                   <p>{note}</p>
@@ -296,8 +296,8 @@ export function OpportunityDetail({
             </div>
             {card.a_share_enhanced.signals.length > 0 && (
               <div className="rank-reasons">
-                {card.a_share_enhanced.signals.map((signal) => (
-                  <span key={signal}>{aShareEnhancedSignalLabel(signal, language)}</span>
+                {card.a_share_enhanced.signals.map((signal, index) => (
+                  <span key={`${signal}-${index}`}>{aShareEnhancedSignalLabel(signal, language)}</span>
                 ))}
               </div>
             )}
@@ -309,13 +309,13 @@ export function OpportunityDetail({
             <div className="context-metrics">
               <span>{card.market_context.board}</span>
               <span>{card.market_context.industry}</span>
-              {card.market_context.index_memberships.map((item) => (
-                <span key={item}>{item}</span>
+              {card.market_context.index_memberships.map((item, index) => (
+                <span key={`${item}-${index}`}>{item}</span>
               ))}
             </div>
             <div className="rank-reasons">
-              {card.market_context.themes.map((theme) => (
-                <span key={theme}>{theme}</span>
+              {card.market_context.themes.map((theme, index) => (
+                <span key={`${theme}-${index}`}>{theme}</span>
               ))}
             </div>
           </div>
@@ -433,8 +433,8 @@ export function OpportunityDetail({
       <div className="detail-section">
         <h3>{t("factors.title")}</h3>
         <div className="rank-reasons">
-          {(card.factor_flags.length ? card.factor_flags : [t("common.none")]).map((flag) => (
-            <span key={flag}>{localizeFactorFlag(flag, language)}</span>
+          {(card.factor_flags.length ? card.factor_flags : [t("common.none")]).map((flag, index) => (
+            <span key={`${flag}-${index}`}>{localizeFactorFlag(flag, language)}</span>
           ))}
         </div>
         <div className="strategy-stack">
@@ -540,8 +540,8 @@ export function OpportunityDetail({
       <div className="detail-section">
         <h3>{t("detail.ranking")}</h3>
         <div className="rank-reasons">
-          {card.rank_reasons.map((reason) => (
-            <span key={reason}>{localizeReason(reason, language)}</span>
+          {card.rank_reasons.map((reason, index) => (
+            <span key={`${reason}-${index}`}>{localizeReason(reason, language)}</span>
           ))}
         </div>
       </div>
@@ -612,8 +612,8 @@ export function OpportunityDetail({
       </div>
 
       <div className="caveats">
-        {card.data_caveats.map((item) => (
-          <span key={item}>{localizeCaveat(item, language)}</span>
+        {card.data_caveats.map((item, index) => (
+          <span key={`${item}-${index}`}>{localizeCaveat(item, language)}</span>
         ))}
       </div>
     </section>
@@ -754,8 +754,8 @@ function DecisionList({
   return (
     <div className="decision-list">
       <h3>{title}</h3>
-      {items.map((item) => (
-        <p key={item}>{localizeReason(item, language)}</p>
+      {items.map((item, index) => (
+        <p key={`${item}-${index}`}>{localizeReason(item, language)}</p>
       ))}
     </div>
   );

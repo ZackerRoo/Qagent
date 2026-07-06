@@ -5765,6 +5765,181 @@ tbody tr.selected {
   gap: 8px;
 }
 
+.effectiveness-center {
+  display: grid;
+  gap: 14px;
+  border-color: rgba(77, 212, 255, 0.26);
+  background:
+    linear-gradient(135deg, rgba(77, 212, 255, 0.09), rgba(244, 197, 66, 0.06) 44%, rgba(57, 217, 138, 0.05)),
+    var(--terminal-panel);
+}
+
+.effectiveness-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.28fr);
+  gap: 14px;
+  align-items: stretch;
+}
+
+.effectiveness-hero h2 {
+  margin: 4px 0 6px;
+  font-size: 24px;
+  line-height: 1.08;
+}
+
+.effectiveness-verdict {
+  display: grid;
+  align-content: center;
+  gap: 5px;
+  border: 1px solid var(--terminal-border);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(9, 14, 20, 0.74);
+}
+
+.effectiveness-verdict span,
+.effectiveness-kpi-grid span,
+.effectiveness-card header span {
+  color: var(--terminal-muted-2);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.effectiveness-verdict strong {
+  color: var(--terminal-text);
+  font-size: 22px;
+  line-height: 1.08;
+}
+
+.effectiveness-verdict p {
+  margin: 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.effectiveness-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 8px;
+}
+
+.effectiveness-kpi-grid div {
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(9, 14, 20, 0.58);
+}
+
+.effectiveness-kpi-grid strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--terminal-text);
+  font-size: 19px;
+  line-height: 1.1;
+}
+
+.effectiveness-kpi-grid small {
+  display: block;
+  margin-top: 6px;
+  overflow: hidden;
+  color: var(--terminal-muted);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.effectiveness-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+}
+
+.effectiveness-chart-grid .validation-card svg {
+  min-height: 210px;
+}
+
+.effectiveness-chart-grid .validation-chart-caption,
+.effectiveness-chart-grid .chart-meta-strip {
+  font-size: 11px;
+}
+
+.effectiveness-lists {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.effectiveness-card {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(9, 14, 20, 0.58);
+}
+
+.effectiveness-card header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.effectiveness-card header h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.weight-action-list,
+.recent-outcome-list {
+  display: grid;
+  gap: 8px;
+}
+
+.weight-action-list div,
+.recent-outcome-list div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 7px;
+  padding: 8px;
+  background: var(--terminal-panel-soft);
+}
+
+.weight-action-list strong,
+.recent-outcome-list strong {
+  overflow: hidden;
+  color: var(--terminal-text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.weight-action-list p,
+.recent-outcome-list small {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 0;
+  color: var(--terminal-muted);
+  font-size: 11px;
+  line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.weight-action-list span,
+.recent-outcome-list > div > span:not(.status) {
+  color: var(--terminal-muted-2);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .backtest-result-grid div {
   min-width: 0;
   border: 1px solid var(--terminal-border-soft);
@@ -9313,6 +9488,383 @@ td {
   font-size: 11px;
 }
 
+.effectiveness-center {
+  overflow: hidden;
+  border-color: rgba(77, 212, 255, 0.26);
+  background:
+    radial-gradient(circle at 15% 8%, rgba(77, 212, 255, 0.12), transparent 30%),
+    linear-gradient(135deg, rgba(77, 212, 255, 0.09), rgba(244, 197, 66, 0.06) 44%, rgba(57, 217, 138, 0.05)),
+    var(--terminal-panel);
+  color: var(--terminal-text);
+}
+
+.effectiveness-center .eyebrow {
+  color: var(--terminal-yellow);
+}
+
+.effectiveness-center .brief-headline,
+.effectiveness-center .compact-note,
+.effectiveness-center .validation-chart-caption,
+.effectiveness-center .weight-action-list p,
+.effectiveness-center .recent-outcome-list small,
+.effectiveness-center .effectiveness-verdict p {
+  color: var(--terminal-muted);
+}
+
+.effectiveness-center .effectiveness-hero h2 {
+  color: var(--terminal-text);
+}
+
+.effectiveness-center .effectiveness-verdict,
+.effectiveness-center .effectiveness-kpi-grid div,
+.effectiveness-center .effectiveness-card,
+.effectiveness-center .validation-card {
+  border-color: var(--terminal-border-soft);
+  background: rgba(9, 14, 20, 0.72);
+  box-shadow: none;
+}
+
+.effectiveness-center .effectiveness-verdict span,
+.effectiveness-center .effectiveness-kpi-grid span,
+.effectiveness-center .effectiveness-card header span,
+.effectiveness-center .validation-card header span,
+.effectiveness-center .validation-chart-meta small,
+.effectiveness-center .bar-caption-grid strong {
+  color: var(--terminal-muted-2);
+}
+
+.effectiveness-center .effectiveness-verdict strong,
+.effectiveness-center .effectiveness-kpi-grid strong,
+.effectiveness-center .effectiveness-card header h3,
+.effectiveness-center .weight-action-list strong,
+.effectiveness-center .recent-outcome-list strong,
+.effectiveness-center .validation-card header h3,
+.effectiveness-center .validation-chart-meta strong,
+.effectiveness-center .bar-caption-grid strong,
+.effectiveness-center .chart-empty-explanation strong {
+  color: var(--terminal-text);
+}
+
+.effectiveness-temperature-board {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.26fr) minmax(0, 1fr) minmax(170px, 0.24fr);
+  gap: 12px;
+  align-items: stretch;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 12px;
+  background:
+    linear-gradient(135deg, rgba(77, 212, 255, 0.08), rgba(244, 197, 66, 0.06)),
+    rgba(8, 13, 18, 0.86);
+  box-shadow: none;
+}
+
+.temperature-gauge {
+  display: grid;
+  align-content: center;
+  gap: 8px;
+  border-radius: 8px;
+  padding: 18px;
+  color: var(--terminal-text);
+}
+
+.temperature-hot {
+  background: linear-gradient(160deg, rgba(244, 197, 66, 0.18), rgba(77, 212, 255, 0.08));
+}
+
+.temperature-warm {
+  background: linear-gradient(160deg, rgba(77, 212, 255, 0.12), rgba(244, 197, 66, 0.1));
+}
+
+.temperature-cool {
+  background: linear-gradient(160deg, rgba(148, 163, 184, 0.12), rgba(77, 212, 255, 0.06));
+}
+
+.temperature-gauge span,
+.temperature-side-stack span {
+  color: var(--terminal-muted-2);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.temperature-gauge strong {
+  color: var(--terminal-yellow);
+  font-size: clamp(46px, 5vw, 72px);
+  line-height: 0.92;
+  letter-spacing: 0;
+}
+
+.temperature-gauge small {
+  margin-left: 4px;
+  color: var(--terminal-cyan);
+  font-size: 22px;
+}
+
+.temperature-gauge p,
+.temperature-side-stack small {
+  margin: 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.temperature-main-chart {
+  min-width: 0;
+}
+
+.temperature-trend-chart {
+  height: 100%;
+  min-height: 300px;
+}
+
+.effectiveness-center .temperature-trend-chart {
+  box-shadow: none;
+}
+
+.temperature-trend-chart svg {
+  min-height: 300px;
+}
+
+.temperature-side-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.temperature-side-stack div {
+  display: grid;
+  align-content: center;
+  gap: 6px;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--terminal-panel-soft);
+}
+
+.temperature-side-stack strong {
+  color: var(--terminal-text);
+  font-size: 22px;
+  line-height: 1;
+}
+
+.effectiveness-center .validation-grid-line,
+.effectiveness-center .validation-axis-line,
+.effectiveness-center .validation-zero-line {
+  stroke: var(--terminal-border-soft);
+}
+
+.effectiveness-center .validation-card text {
+  fill: var(--terminal-muted-2);
+}
+
+.empty-validation-graphic {
+  width: 100%;
+  min-height: 180px;
+  margin-top: 10px;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(77, 212, 255, 0.06), rgba(9, 14, 20, 0.3)),
+    rgba(8, 14, 22, 0.36);
+}
+
+.empty-validation-stroke {
+  fill: none;
+  stroke: var(--terminal-muted-2);
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-dasharray: 10 10;
+}
+
+.empty-validation-bar {
+  fill: rgba(77, 212, 255, 0.24);
+}
+
+.effectiveness-center .validation-line {
+  stroke: var(--terminal-cyan);
+  stroke-width: 3;
+}
+
+.effectiveness-center .validation-point {
+  fill: #facc15;
+  stroke: var(--terminal-bg);
+}
+
+.effectiveness-center .validation-chart-meta span,
+.effectiveness-center .bar-caption-grid span,
+.effectiveness-center .compact-note,
+.effectiveness-center .validation-chart-caption,
+.effectiveness-center .chart-empty-explanation,
+.effectiveness-center .weight-action-list div,
+.effectiveness-center .recent-outcome-list div {
+  border-color: var(--terminal-border-soft);
+  background: var(--terminal-panel-soft);
+}
+
+.effectiveness-chart-grid {
+  grid-template-columns: repeat(2, minmax(260px, 1fr));
+}
+
+.effectiveness-center .xhs-bar-card svg {
+  min-height: 250px;
+}
+
+.effectiveness-center .validation-bar-positive {
+  fill: var(--terminal-green);
+}
+
+.effectiveness-center .validation-bar-negative {
+  fill: var(--terminal-red);
+}
+
+.return-distribution-card {
+  border-color: var(--terminal-border);
+  background:
+    linear-gradient(180deg, rgba(21, 31, 42, 0.92), rgba(13, 20, 28, 0.96));
+  color: var(--terminal-text);
+}
+
+.return-distribution-card header h3,
+.return-distribution-summary strong,
+.return-bucket-head strong {
+  color: var(--terminal-text);
+}
+
+.return-distribution-card header span {
+  color: var(--terminal-cyan);
+}
+
+.return-distribution-card .validation-chart-meta span,
+.return-distribution-summary div {
+  border-color: var(--terminal-border-soft);
+  background: var(--terminal-panel-soft);
+}
+
+.return-distribution-card .validation-chart-meta small,
+.return-distribution-summary span,
+.return-bucket-head span,
+.return-bucket small,
+.return-distribution-card .validation-chart-caption {
+  color: var(--terminal-muted);
+}
+
+.return-bucket-list {
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(8, 14, 22, 0.36);
+}
+
+.return-bucket {
+  grid-template-columns: minmax(92px, 0.16fr) minmax(0, 1fr) 50px;
+}
+
+.return-bucket-track {
+  height: 14px;
+  border: 0;
+  background: rgba(148, 163, 184, 0.18);
+}
+
+.return-bucket.negative .return-bucket-track i {
+  background: linear-gradient(90deg, rgba(255, 92, 122, 0.44), rgba(255, 92, 122, 0.92));
+}
+
+.return-bucket.positive .return-bucket-track i {
+  background: linear-gradient(90deg, rgba(77, 212, 255, 0.42), rgba(57, 217, 138, 0.92));
+}
+
+.opportunities-page .detail-panel {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+
+.opportunities-page .detail-panel .panel-heading,
+.opportunities-page .detail-panel .thesis,
+.opportunities-page .recommendation-brief-card,
+.opportunities-page .benchmark-comparison-card,
+.opportunities-page .signal-hub-card {
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(77, 212, 255, 0.08), rgba(244, 197, 66, 0.05)),
+    #0a1016;
+  color: var(--terminal-text);
+}
+
+.opportunities-page .detail-panel .panel-heading {
+  margin: 0;
+  padding: 12px;
+}
+
+.opportunities-page .detail-panel .panel-heading h2 {
+  margin-top: 4px;
+  color: var(--terminal-text);
+}
+
+.opportunities-page .detail-panel .thesis {
+  margin: 0;
+  padding: 12px;
+  color: var(--terminal-muted);
+}
+
+.opportunities-page .recommendation-brief-card,
+.opportunities-page .benchmark-comparison-card,
+.opportunities-page .signal-hub-card {
+  margin: 0;
+  box-shadow: none;
+}
+
+.opportunities-page .brief-grid > div,
+.opportunities-page .benchmark-pill,
+.opportunities-page .signal-hub-component,
+.opportunities-page .signal-hub-grid section,
+.opportunities-page .signal-alert-box {
+  border-color: var(--terminal-border-soft);
+  background: rgba(17, 23, 29, 0.78);
+}
+
+.opportunities-page .brief-grid span,
+.opportunities-page .brief-verdict span,
+.opportunities-page .signal-hub-score span,
+.opportunities-page .signal-hub-component header span,
+.opportunities-page .signal-hub-component p,
+.opportunities-page .signal-hub-grid p,
+.opportunities-page .signal-hub-hero small {
+  color: var(--terminal-muted);
+}
+
+.opportunities-page .brief-grid p,
+.opportunities-page .benchmark-pill small {
+  color: var(--terminal-muted);
+}
+
+.opportunities-page .brief-verdict strong,
+.opportunities-page .benchmark-comparison-card header > strong,
+.opportunities-page .signal-hub-score strong {
+  color: var(--terminal-yellow);
+}
+
+.opportunities-page .signal-hub-score {
+  border-color: rgba(250, 204, 21, 0.36);
+  background: rgba(250, 204, 21, 0.08);
+}
+
+.opportunities-page .signal-hub-components {
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+}
+
+.opportunities-page .signal-hub-grid,
+.opportunities-page .context-grid {
+  grid-template-columns: 1fr;
+}
+
+.opportunities-page .signal-hub-component p {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
 @media (max-width: 1500px) {
   .opportunities-page {
     grid-template-columns: minmax(0, 1fr);
@@ -9323,7 +9875,7 @@ td {
   }
 
   .opportunities-page .signal-hub-components {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
   }
 }
 
@@ -9339,6 +9891,16 @@ td {
 
   .dashboard-secondary-grid .auto-paper-status-strip {
     grid-column: auto;
+  }
+
+  .effectiveness-temperature-board {
+    grid-template-columns: 1fr;
+  }
+
+  .effectiveness-hero,
+  .effectiveness-chart-grid,
+  .effectiveness-lists {
+    grid-template-columns: 1fr;
   }
 
   .signal-actions,

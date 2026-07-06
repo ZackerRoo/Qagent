@@ -38,6 +38,7 @@ import type {
   PortfolioMonthlyReturn,
   RecommendationCalibrationResponse,
   RecommendationClosureResponse,
+  RecommendationClosureWindow,
   ScanRunsResponse,
   StrategyDiagnosticsResponse,
   StrategyPerformanceResponse,
@@ -270,6 +271,13 @@ export function History({
         onRunSelected={runBacktest}
         onRunFactor={runFactorBacktest}
         onRunPortfolio={runPortfolioBacktest}
+      />
+
+      <RecommendationEffectivenessCenter
+        closure={closure}
+        calibration={calibration}
+        performance={performance}
+        outcomes={outcomes}
       />
 
       <section className="panel">
@@ -926,6 +934,331 @@ export function History({
       </details>
     </div>
   );
+}
+
+function RecommendationEffectivenessCenter({
+  closure,
+  calibration,
+  performance,
+  outcomes,
+}: {
+  closure?: RecommendationClosureResponse;
+  calibration?: RecommendationCalibrationResponse;
+  performance?: StrategyPerformanceResponse;
+  outcomes?: OutcomesResponse;
+}) {
+  const { language, t } = useI18n();
+  const primaryWindow =
+    closure?.windows.find((window) => window.completed_count > 0) ?? closure?.windows[0];
+  const completedSamples = primaryWindow?.completed_count ?? 0;
+  const totalSamples = primaryWindow?.sample_count ?? 0;
+  const strongestEffects = [...(calibration?.signal_effects ?? [])]
+    .filter((effect) => effect.completed_count > 0)
+    .sort((left, right) => (right.reliability_score - left.reliability_score) || (right.completed_count - left.completed_count))
+    .slice(0, 6);
+  const strategyRows = [...(performance?.performance ?? [])]
+    .filter((item) => item.sample_count > 0)
+    .sort((left, right) => {
+      const leftScore = (left.avg_return_10d ?? -99) + (left.positive_rate_10d ?? 0) * 6;
+      const rightScore = (right.avg_return_10d ?? -99) + (right.positive_rate_10d ?? 0) * 6;
+      return rightScore - leftScore;
+    })
+    .slice(0, 6);
+  const recentOutcomes = (closure?.completed_outcomes.length ? closure.completed_outcomes : closure?.latest_outcomes) ?? outcomes?.outcomes ?? [];
+  const recentSamples = calibration?.recent_samples ?? [];
+  const verdict = effectivenessVerdict(primaryWindow, calibration, language);
+  const matureRate = totalSamples ? completedSamples / totalSamples : 0;
+  const temperatureScore =
+    primaryWindow?.win_rate !== null && primaryWindow?.win_rate !== undefined
+      ? Math.round(primaryWindow.win_rate * 100)
+      : calibration
+        ? Math.round(calibration.reliability_score * 100)
+        : Math.round(matureRate * 100);
+  const temperatureTone =
+    temperatureScore >= 65 ? "hot" : temperatureScore >= 45 ? "warm" : "cool";
+  const calibrationCurve = (calibration?.curve_points ?? []).map((point) => ({
+    label: point.date,
+    value: point.cumulative_avg_return_10d,
+  }));
+  const matureCurvePoints = calibrationCurve.filter((point) => point.value !== null);
+  const latestCurvePoint = matureCurvePoints[matureCurvePoints.length - 1];
+  const firstCurvePoint = calibrationCurve.find((point) => point.value !== null);
+  const curveChange =
+    latestCurvePoint?.value !== null &&
+    latestCurvePoint?.value !== undefined &&
+    firstCurvePoint?.value !== null &&
+    firstCurvePoint?.value !== undefined
+      ? latestCurvePoint.value - firstCurvePoint.value
+      : null;
+
+  return (
+    <section className="panel effectiveness-center">
+      <div className="effectiveness-hero">
+        <div>
+          <p className="eyebrow">{language === "zh" ? "推荐有效性复盘" : "Recommendation Review"}</p>
+          <h2>{language === "zh" ? "Qagent 的推荐到底准不准" : "Is Qagent's signal working?"}</h2>
+          <p className="brief-headline">
+            {language === "zh"
+              ? "把推荐后的收益、策略表现和权重调整放在一屏，先看结论，再看样本。"
+              : "One screen for post-signal returns, strategy ranking, and weight changes."}
+          </p>
+        </div>
+        <div className={`effectiveness-verdict verdict-${verdict.tone}`}>
+          <span>{verdict.label}</span>
+          <strong>{verdict.value}</strong>
+          <p>{verdict.detail}</p>
+        </div>
+      </div>
+
+      <div className="effectiveness-temperature-board">
+        <div className={`temperature-gauge temperature-${temperatureTone}`}>
+          <span>{language === "zh" ? "推荐温度指数" : "Signal Temperature"}</span>
+          <strong>
+            {temperatureScore}
+            <small>%</small>
+          </strong>
+          <p>
+            {language === "zh"
+              ? "综合胜率、样本成熟度和校准可信度，不是买入指令。"
+              : "Blends win rate, sample maturity, and calibration quality. Not a buy order."}
+          </p>
+        </div>
+        <div className="temperature-main-chart">
+          <LineValidationChart
+            title={language === "zh" ? "推荐收益趋势" : "Signal Return Trend"}
+            points={calibrationCurve}
+            valueFormatter={(value) => `${value.toFixed(2)}%`}
+            emptyMessage={
+              language === "zh"
+                ? "推荐样本还没成熟，等 10 日收益出来后自动画趋势线。"
+                : "Waiting for mature 10D outcomes."
+            }
+            caption={
+              curveChange === null
+                ? language === "zh"
+                  ? "这张图用来观察推荐后的收益是否持续改善。"
+                  : "This chart checks whether post-signal returns keep improving."
+                : language === "zh"
+                  ? `从首个样本到最新样本变化 ${formatNumber(curveChange, "%")}，向上代表推荐质量在改善。`
+                  : `Change from first to latest sample is ${formatNumber(curveChange, "%")}. Upward is better.`
+            }
+            className="temperature-trend-chart"
+          />
+        </div>
+        <div className="temperature-side-stack">
+          {[
+            {
+              label: language === "zh" ? "成熟样本" : "Mature samples",
+              value: `${completedSamples}/${totalSamples}`,
+              note: primaryWindow ? `${primaryWindow.window_days}D` : "-",
+            },
+            {
+              label: language === "zh" ? "平均收益" : "Avg return",
+              value: formatNumber(primaryWindow?.avg_return_10d ?? null, "%"),
+              note: language === "zh" ? "推荐后10日" : "10D after signal",
+            },
+            {
+              label: language === "zh" ? "最大回撤" : "Max drawdown",
+              value: formatNumber(primaryWindow?.max_drawdown_pct ?? null, "%"),
+              note: language === "zh" ? "越接近0越好" : "Closer to 0 is better",
+            },
+          ].map((item) => (
+            <div key={item.label}>
+              <span>{item.label}</span>
+              <strong>{item.value}</strong>
+              <small>{item.note}</small>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="effectiveness-kpi-grid">
+        <div>
+          <span>{language === "zh" ? "闭环样本" : "Closure sample"}</span>
+          <strong>{completedSamples}/{totalSamples}</strong>
+          <small>{primaryWindow ? `${primaryWindow.window_days}D ${primaryWindow.verdict}` : "-"}</small>
+        </div>
+        <div>
+          <span>{language === "zh" ? "10日胜率" : "10D win rate"}</span>
+          <strong>{formatRatio(primaryWindow?.win_rate ?? null)}</strong>
+          <small>{language === "zh" ? "推荐后正收益比例" : "Positive after signal"}</small>
+        </div>
+        <div>
+          <span>{language === "zh" ? "10日均值" : "10D average"}</span>
+          <strong>{formatNumber(primaryWindow?.avg_return_10d ?? null, "%")}</strong>
+          <small>{language === "zh" ? "单次推荐期望收益" : "Average forward return"}</small>
+        </div>
+        <div>
+          <span>{language === "zh" ? "最大回撤" : "Max drawdown"}</span>
+          <strong>{formatNumber(primaryWindow?.max_drawdown_pct ?? null, "%")}</strong>
+          <small>{language === "zh" ? "看能否承受亏损波动" : "Downside tolerance"}</small>
+        </div>
+        <div>
+          <span>{language === "zh" ? "校准可信度" : "Calibration"}</span>
+          <strong>{calibration ? Math.round(calibration.reliability_score * 100) : "-"}</strong>
+          <small>{calibration?.verdict ?? (language === "zh" ? "等待样本" : "Waiting")}</small>
+        </div>
+      </div>
+
+      <div className="effectiveness-chart-grid">
+        <BarValidationChart
+          title={language === "zh" ? "策略排行榜" : "Strategy Ranking"}
+          headline={`${strategyRows.length} ${t("history.samples")}`}
+          meta={[
+            {
+              label: language === "zh" ? "样本来源" : "Source",
+              value: language === "zh" ? "推荐后表现" : "Post-signal outcomes",
+            },
+          ]}
+          bars={strategyRows.map((item) => ({
+            label: localizeStrategy(item.strategy_id, language),
+            value: item.avg_return_10d ?? 0,
+            valueLabel: formatNumber(item.avg_return_10d, "%"),
+            caption: `${formatRatio(item.positive_rate_10d)} · ${item.completed_count}/${item.sample_count}`,
+          }))}
+          className="xhs-bar-card"
+        />
+        <BarValidationChart
+          title={language === "zh" ? "信号增益" : "Signal Lift"}
+          headline={`${strongestEffects.length} ${language === "zh" ? "信号" : "signals"}`}
+          meta={[
+            {
+              label: language === "zh" ? "动作" : "Action",
+              value: calibration?.weight_suggestions.length
+                ? `${calibration.weight_suggestions.length} ${language === "zh" ? "条建议" : "suggestions"}`
+                : language === "zh" ? "暂不调整" : "No change",
+            },
+          ]}
+          bars={strongestEffects.map((effect) => ({
+            label: effect.label,
+            value: effect.lift_vs_baseline_10d ?? 0,
+            valueLabel: formatNumber(effect.lift_vs_baseline_10d, "%"),
+            caption: `${effect.weight_action} ${signedPercent(effect.suggested_weight_delta)} · ${effect.completed_count}/${effect.sample_count}`,
+          }))}
+          className="xhs-bar-card"
+        />
+      </div>
+
+      <div className="effectiveness-lists">
+        <div className="effectiveness-card">
+          <header>
+            <h3>{language === "zh" ? "权重调整清单" : "Weight Actions"}</h3>
+            <span>{calibration?.weight_suggestions.length ?? 0}</span>
+          </header>
+          {!calibration?.weight_suggestions.length ? (
+            <p className="compact-note">
+              {language === "zh" ? "暂无需要调权的信号，继续积累推荐样本。" : "No signal needs weight adjustment yet."}
+            </p>
+          ) : (
+            <div className="weight-action-list">
+              {calibration.weight_suggestions.slice(0, 6).map((item) => (
+                <div key={item.key}>
+                  <strong>{item.label}</strong>
+                  <span className={item.delta >= 0 ? "good" : "risk"}>
+                    {item.action} {signedPercent(item.delta)}
+                  </span>
+                  <p>{item.reason}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="effectiveness-card">
+          <header>
+            <h3>{language === "zh" ? "最近推荐结果" : "Recent Outcomes"}</h3>
+            <span>{recentOutcomes.length}</span>
+          </header>
+          <div className="recent-outcome-list">
+            {recentOutcomes.slice(0, 5).map((item) => (
+              <div key={`${item.snapshot_id}-${item.instrument_id}`}>
+                <strong>{formatInstrumentDisplay(item.instrument_id, item.instrument_label)}</strong>
+                <span className={`status status-${item.outcome_status}`}>
+                  {localizeStatus(item.outcome_status, language)}
+                </span>
+                <small>
+                  {item.signal_date ?? "-"} · 5D {formatNumber(item.return_5d, "%")} · 10D {formatNumber(item.return_10d, "%")} · 20D {formatNumber(item.return_20d, "%")}
+                </small>
+              </div>
+            ))}
+            {!recentOutcomes.length ? (
+              <p className="compact-note">{language === "zh" ? "还没有成熟的推荐结果。" : "No mature outcomes yet."}</p>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="effectiveness-card">
+          <header>
+            <h3>{language === "zh" ? "最近校准样本" : "Recent Calibration Samples"}</h3>
+            <span>{recentSamples.length}</span>
+          </header>
+          <div className="recent-outcome-list">
+            {recentSamples.slice(0, 5).map((item) => (
+              <div key={`${item.snapshot_id}-${item.instrument_id}`}>
+                <strong>{formatInstrumentDisplay(item.instrument_id, item.instrument_label)}</strong>
+                <span>{Math.round(item.score * 100)} · {item.score_band}</span>
+                <small>
+                  {localizeStrategy(item.primary_strategy_id, language)} · 10D {formatNumber(item.return_10d, "%")} · {localizeStatus(item.outcome_status, language)}
+                </small>
+              </div>
+            ))}
+            {!recentSamples.length ? (
+              <p className="compact-note">{language === "zh" ? "等待推荐校准样本。" : "Waiting for calibration samples."}</p>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function effectivenessVerdict(
+  window: RecommendationClosureWindow | undefined,
+  calibration: RecommendationCalibrationResponse | undefined,
+  language: "zh" | "en",
+) {
+  const zh = language === "zh";
+  if (!window || window.completed_count < 5) {
+    return {
+      tone: "watch" as const,
+      label: zh ? "样本不足" : "Limited",
+      value: `${window?.completed_count ?? 0}/${window?.sample_count ?? 0}`,
+      detail: zh ? "先观察胜率、均值和回撤，不急着放大仓位。" : "Track win rate, average return, and drawdown first.",
+    };
+  }
+  const winRate = window.win_rate ?? 0;
+  const avgReturn = window.avg_return_10d ?? 0;
+  const drawdown = Math.abs(window.max_drawdown_pct ?? 0);
+  const reliability = calibration?.reliability_score ?? 0;
+  if (winRate >= 0.55 && avgReturn > 0 && drawdown <= 8 && reliability >= 0.45) {
+    return {
+      tone: "good" as const,
+      label: zh ? "表现健康" : "Healthy",
+      value: formatRatio(winRate),
+      detail: zh ? "推荐后收益和风险暂时匹配，可继续按模拟盘验证。" : "Return and risk are aligned enough for forward testing.",
+    };
+  }
+  if (avgReturn < 0 || drawdown > 12 || winRate < 0.4) {
+    return {
+      tone: "bad" as const,
+      label: zh ? "需要降权" : "De-rate",
+      value: formatNumber(avgReturn, "%"),
+      detail: zh ? "推荐后表现偏弱，需要看权重调整和替代策略。" : "Post-signal performance is weak; check weight actions.",
+    };
+  }
+  return {
+    tone: "watch" as const,
+    label: zh ? "中性观察" : "Watch",
+    value: formatRatio(winRate),
+    detail: zh ? "有部分正反馈，但还没强到可以提高信心。" : "Some signal, but not enough to raise conviction.",
+  };
+}
+
+function signedPercent(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "-";
+  }
+  return `${value >= 0 ? "+" : ""}${(value * 100).toFixed(0)}%`;
 }
 
 function ForwardValidationDrawer({
@@ -2081,6 +2414,7 @@ function LineValidationChart({
           <span>-</span>
         </header>
         {extraMeta.length ? <ChartMetaStrip items={extraMeta} /> : null}
+        <EmptyValidationGraphic title={title} variant="line" />
         <div className="chart-empty-explanation">
           <strong>{t("history.waitingValidation")}</strong>
           <p>{emptyMessage ?? caption ?? `${title}: -`}</p>
@@ -2539,14 +2873,34 @@ function BarValidationChart({
   headline,
   meta = [],
   bars,
+  className = "",
 }: {
   title: string;
   headline?: string;
   meta?: ChartMeta[];
   bars: BarValidationBar[];
+  className?: string;
 }) {
+  const { language } = useI18n();
   if (!bars.length) {
-    return <div className="validation-card empty-state">{title}: -</div>;
+    return (
+      <div className={`validation-card chart-shell empty-validation-chart ${className}`.trim()}>
+        <header>
+          <h3>{title}</h3>
+          <span>{headline ?? "-"}</span>
+        </header>
+        {meta.length ? <ChartMetaStrip items={meta} /> : null}
+        <EmptyValidationGraphic title={title} variant="bar" />
+        <div className="chart-empty-explanation">
+          <strong>{language === "zh" ? "等待样本" : "Waiting for samples"}</strong>
+          <p>
+            {language === "zh"
+              ? "当前样本不足，后续推荐完成 5/10/20 日跟踪后会自动生成图表。"
+              : "Not enough samples yet. The chart will appear after tracked recommendations mature."}
+          </p>
+        </div>
+      </div>
+    );
   }
   const width = 760;
   const height = 300;
@@ -2559,7 +2913,7 @@ function BarValidationChart({
   const barWidth = Math.min(58, Math.max(18, slot * 0.54));
 
   return (
-    <div className="validation-card chart-shell">
+    <div className={`validation-card chart-shell bar-validation-chart ${className}`.trim()}>
       <header>
         <h3>{title}</h3>
         {headline ? <span>{headline}</span> : null}
@@ -2621,6 +2975,73 @@ function BarValidationChart({
         ))}
       </div>
     </div>
+  );
+}
+
+function EmptyValidationGraphic({
+  title,
+  variant,
+}: {
+  title: string;
+  variant: "line" | "bar";
+}) {
+  const width = 760;
+  const height = 220;
+  const padding = { top: 26, right: 24, bottom: 34, left: 52 };
+  const chartWidth = width - padding.left - padding.right;
+  const baseline = height - padding.bottom - 44;
+  const bars = [0.36, 0.54, 0.42, 0.68, 0.48, 0.58];
+  return (
+    <svg className="empty-validation-graphic" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={title}>
+      <g className="chart-grid">
+        {[0, 1, 2].map((tick) => {
+          const y = padding.top + tick * 58;
+          return (
+            <line
+              key={tick}
+              className="validation-grid-line"
+              x1={padding.left}
+              y1={y}
+              x2={width - padding.right}
+              y2={y}
+            />
+          );
+        })}
+        <line
+          className="validation-axis-line"
+          x1={padding.left}
+          y1={height - padding.bottom}
+          x2={width - padding.right}
+          y2={height - padding.bottom}
+        />
+      </g>
+      {variant === "line" ? (
+        <path
+          className="empty-validation-stroke"
+          d={`M ${padding.left} ${baseline} C ${padding.left + chartWidth * 0.18} ${baseline - 26}, ${padding.left + chartWidth * 0.32} ${baseline + 20}, ${padding.left + chartWidth * 0.5} ${baseline - 4} S ${padding.left + chartWidth * 0.82} ${baseline - 30}, ${width - padding.right} ${baseline - 10}`}
+        />
+      ) : (
+        bars.map((bar, index) => {
+          const slot = chartWidth / bars.length;
+          const barWidth = Math.min(54, slot * 0.52);
+          const x = padding.left + index * slot + (slot - barWidth) / 2;
+          const barHeight = 116 * bar;
+          return (
+            <rect
+              key={index}
+              className="empty-validation-bar"
+              x={x}
+              y={height - padding.bottom - barHeight}
+              width={barWidth}
+              height={barHeight}
+              rx="6"
+            />
+          );
+        })
+      )}
+      <text x={padding.left} y={height - 10}>等待样本</text>
+      <text x={width - padding.right} y={height - 10} textAnchor="end">自动生成</text>
+    </svg>
   );
 }
 
