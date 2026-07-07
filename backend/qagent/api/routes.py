@@ -1081,7 +1081,10 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             scan_status = "failed"
             errors.append(f"scan: {exc}")
 
-    if settings.seed_paper and mode != "fixture":
+    allow_seed_paper, risk_gate_health = _paper_seed_risk_gate(paper_repo, mode)
+    data_health.update(risk_gate_health)
+
+    if settings.seed_paper and mode != "fixture" and allow_seed_paper:
         try:
             snapshots, seed_health = _paper_seed_snapshots_from_recommendations(
                 repo,
@@ -1113,6 +1116,8 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 )
         except Exception as exc:
             errors.append(f"paper_seed: {exc}")
+    elif settings.seed_paper and mode != "fixture":
+        data_health["automation_seed_skipped_by_risk_gate"] = "true"
 
     paper_total = 0
     paper_closed = 0
@@ -1174,6 +1179,55 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
         errors=errors,
         data_health=data_health,
     )
+
+
+def _paper_seed_risk_gate(
+    paper_repo: PaperTradingRepository,
+    mode: str,
+) -> tuple[bool, dict[str, str]]:
+    trades = paper_repo.list_trades(limit=1000, provider=mode)
+    if not trades:
+        return True, {
+            "paper_risk_gate_action": "allow_new_entries",
+            "paper_risk_gate_reason": "no_paper_history",
+        }
+    account = paper_repo.get_account_settings()
+    ledger = build_paper_ledger(
+        trades,
+        initial_capital=account.initial_capital,
+        allocation_per_trade_pct=account.allocation_per_trade_pct,
+        max_positions=account.max_positions,
+        transaction_cost_bps=account.transaction_cost_bps,
+        slippage_bps=account.slippage_bps,
+        take_profit_pct=account.take_profit_pct,
+    )
+    summary = ledger.summary
+    reasons: list[str] = []
+    if summary.total_trades >= 5 and summary.total_return_pct <= -2.0:
+        reasons.append(f"total_return {summary.total_return_pct:.2f}% <= -2.00%")
+    if summary.total_trades >= 5 and summary.max_drawdown_pct <= -2.0:
+        reasons.append(f"max_drawdown {summary.max_drawdown_pct:.2f}% <= -2.00%")
+    if (
+        summary.closed_trades >= 3
+        and summary.win_rate is not None
+        and summary.win_rate <= 0.25
+    ):
+        reasons.append(f"closed_win_rate {summary.win_rate:.2%} <= 25%")
+    if summary.stopped_count >= 3 and summary.target_hit_count == 0:
+        reasons.append("stopped_count >= 3 and target_hit_count = 0")
+
+    action = "pause_new_entries" if reasons else "allow_new_entries"
+    return not reasons, {
+        "paper_risk_gate_action": action,
+        "paper_risk_gate_reason": " | ".join(reasons) if reasons else "within_limits",
+        "paper_risk_gate_total_return_pct": f"{summary.total_return_pct:.4f}",
+        "paper_risk_gate_max_drawdown_pct": f"{summary.max_drawdown_pct:.4f}",
+        "paper_risk_gate_closed_trades": str(summary.closed_trades),
+        "paper_risk_gate_stopped_count": str(summary.stopped_count),
+        "paper_risk_gate_win_rate": (
+            f"{summary.win_rate:.4f}" if summary.win_rate is not None else ""
+        ),
+    }
 
 
 def _paper_seed_snapshots_from_recommendations(
@@ -1596,6 +1650,7 @@ def paper_trade_daily_report(provider: str = "fixture", limit: int = 500) -> dic
     repo = _paper_repo()
     account = repo.get_account_settings()
     trades = repo.list_trades(limit=limit, provider=mode)
+    asset_type_by_instrument = _paper_asset_types_for_trades(trades)
     ledger = build_paper_ledger(
         trades,
         initial_capital=account.initial_capital,
@@ -1638,14 +1693,29 @@ def paper_trade_daily_report(provider: str = "fixture", limit: int = 500) -> dic
         validation=validation,
         as_of=report_date,
         benchmark_items=benchmark_items,
+        asset_type_by_instrument=asset_type_by_instrument,
     )
+    _, risk_gate_health = _paper_seed_risk_gate(repo, mode)
     report.data_health.update(
         {
             "paper_daily_benchmarks_source": "market_cache_only",
             "paper_daily_benchmark_rows": str(benchmark_rows),
+            **risk_gate_health,
         }
     )
     return report.model_dump(mode="json")
+
+
+def _paper_asset_types_for_trades(trades) -> dict[str, str]:
+    instrument_ids = {trade.instrument_id for trade in trades}
+    if not instrument_ids:
+        return {}
+    instruments = _repo().list_tradable_instruments(limit=20_000)
+    return {
+        instrument.instrument_id: instrument.asset_type
+        for instrument in instruments
+        if instrument.instrument_id in instrument_ids
+    }
 
 
 @router.delete("/paper-trades/{trade_id}")

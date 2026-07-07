@@ -13,7 +13,9 @@ from qagent.paper_trading.engine import (
     seed_paper_trades_from_snapshots,
     update_paper_trades,
 )
+from qagent.providers.cached import CachedMarketDataProvider
 from qagent.providers.fixtures import FixtureMarketDataProvider
+from qagent.storage.market_cache import MarketDataCacheRepository
 from qagent.storage.paper import PaperTradingRepository
 from qagent.storage.tables import OpportunitySnapshotRow, ScanRunRow
 
@@ -55,6 +57,20 @@ class MinuteCnProvider:
 
     def get_minute_bars(self, instrument_ids, start, end):
         return pd.DataFrame(self.rows)
+
+    def get_snapshot(self, instrument_ids):
+        return pd.DataFrame()
+
+
+class EmptyMinuteAndDailyProvider:
+    name = "empty_live"
+    last_errors: list[str] = ["live source unavailable"]
+
+    def get_daily_bars(self, instrument_ids, start, end):
+        return pd.DataFrame()
+
+    def get_minute_bars(self, instrument_ids, start, end):
+        return pd.DataFrame()
 
     def get_snapshot(self, instrument_ids):
         return pd.DataFrame()
@@ -220,6 +236,203 @@ def test_a_share_paper_trade_marks_missed_when_minute_price_gaps_above_chase_lim
     assert trade.entry_date is None
     assert trade.realized_return_pct == 0.0
     assert "超过追高上限" in trade.notes
+
+
+def test_update_paper_trades_uses_cached_daily_bars_when_minute_source_is_empty(
+    tmp_path,
+):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    cache = MarketDataCacheRepository(repo.session_factory)
+    cache.save_daily_bars(
+        "free",
+        pd.DataFrame(
+            [
+                {
+                    "instrument_id": "CN:588850",
+                    "trade_date": date(2026, 7, 2),
+                    "open": Decimal("2.08"),
+                    "high": Decimal("2.22"),
+                    "low": Decimal("2.05"),
+                    "close": Decimal("2.18"),
+                    "volume": 100000,
+                    "provider": "sqlite_cache",
+                }
+            ]
+        ),
+    )
+    cache.record_coverage(
+        "free",
+        "CN:588850",
+        date(2026, 7, 1),
+        date(2026, 7, 2),
+        row_count=1,
+    )
+    paper_repo.create_trade(
+        source_snapshot_id="manual-CN-588850-cache",
+        provider="free",
+        instrument_id="CN:588850",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("2.10"),
+        initial_stop=Decimal("2.00"),
+        target_1=Decimal("2.30"),
+        rank_score=Decimal("0.91"),
+    )
+    provider = CachedMarketDataProvider(
+        EmptyMinuteAndDailyProvider(),
+        cache=cache,
+        provider_mode="free",
+    )
+
+    result = update_paper_trades(
+        paper_repo,
+        provider=provider,
+        provider_mode="free",
+        as_of=datetime(2026, 7, 2, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    trade = paper_repo.list_trades(provider="free")[0]
+
+    assert result.data_health["paper_daily_fallback_rows"] == "1"
+    assert trade.status == "open"
+    assert trade.entry_date == date(2026, 7, 2)
+    assert trade.latest_price == Decimal("2.1800")
+    assert "日内高点确认" in trade.notes
+
+
+def test_open_a_share_trade_ignores_minute_bars_before_entry_date(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    snapshot_id = _insert_cn_snapshot(
+        repo,
+        instrument_id="CN:588850",
+        created_at=datetime(2026, 7, 2, 3, 38, tzinfo=timezone.utc),
+        trigger_price=Decimal("2.29"),
+        no_chase_above=Decimal("2.35"),
+    )
+    trade = paper_repo.create_trade(
+        source_snapshot_id=snapshot_id,
+        provider="free",
+        instrument_id="CN:588850",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 2),
+        trigger_price=Decimal("2.29"),
+        initial_stop=Decimal("2.20"),
+        target_1=Decimal("2.47"),
+        rank_score=Decimal("0.91"),
+    )
+    paper_repo.update_trade(
+        trade.trade_id,
+        status="open",
+        entry_date=date(2026, 7, 3),
+        entry_price=Decimal("2.29"),
+        latest_date=date(2026, 7, 3),
+        latest_price=Decimal("2.25"),
+        unrealized_return_pct=Decimal("-1.7467"),
+        holding_days=0,
+    )
+    provider = MinuteCnProvider(
+        [
+            {
+                "instrument_id": "CN:588850",
+                "timestamp": datetime(2026, 7, 2, 14, 0),
+                "open": Decimal("2.24"),
+                "high": Decimal("2.25"),
+                "low": Decimal("2.18"),
+                "close": Decimal("2.20"),
+                "volume": 1000,
+                "provider": "test_minute",
+            },
+            {
+                "instrument_id": "CN:588850",
+                "timestamp": datetime(2026, 7, 3, 10, 0),
+                "open": Decimal("2.25"),
+                "high": Decimal("2.28"),
+                "low": Decimal("2.23"),
+                "close": Decimal("2.26"),
+                "volume": 1000,
+                "provider": "test_minute",
+            },
+        ]
+    )
+
+    update_paper_trades(
+        paper_repo,
+        provider=provider,
+        provider_mode="free",
+        as_of=datetime(2026, 7, 3, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    refreshed = paper_repo.list_trades(provider="free")[0]
+
+    assert refreshed.status == "open"
+    assert refreshed.entry_date == date(2026, 7, 3)
+    assert refreshed.exit_date is None
+    assert refreshed.latest_date == date(2026, 7, 3)
+    assert refreshed.latest_price == Decimal("2.2600")
+
+
+def test_update_paper_trades_repairs_exit_before_entry_records(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    snapshot_id = _insert_cn_snapshot(
+        repo,
+        instrument_id="CN:588850",
+        created_at=datetime(2026, 7, 2, 3, 38, tzinfo=timezone.utc),
+        trigger_price=Decimal("2.29"),
+        no_chase_above=Decimal("2.35"),
+    )
+    trade = paper_repo.create_trade(
+        source_snapshot_id=snapshot_id,
+        provider="free",
+        instrument_id="CN:588850",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 2),
+        trigger_price=Decimal("2.29"),
+        initial_stop=Decimal("2.20"),
+        target_1=Decimal("2.47"),
+        rank_score=Decimal("0.91"),
+    )
+    paper_repo.update_trade(
+        trade.trade_id,
+        status="stopped",
+        entry_date=date(2026, 7, 3),
+        entry_price=Decimal("2.29"),
+        exit_date=date(2026, 7, 2),
+        exit_price=Decimal("2.20"),
+        latest_date=date(2026, 7, 2),
+        latest_price=Decimal("2.20"),
+        realized_return_pct=Decimal("-3.9301"),
+        holding_days=0,
+    )
+    provider = MinuteCnProvider(
+        [
+            {
+                "instrument_id": "CN:588850",
+                "timestamp": datetime(2026, 7, 3, 10, 0),
+                "open": Decimal("2.25"),
+                "high": Decimal("2.28"),
+                "low": Decimal("2.23"),
+                "close": Decimal("2.26"),
+                "volume": 1000,
+                "provider": "test_minute",
+            },
+        ]
+    )
+
+    result = update_paper_trades(
+        paper_repo,
+        provider=provider,
+        provider_mode="free",
+        as_of=datetime(2026, 7, 3, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    refreshed = paper_repo.list_trades(provider="free")[0]
+
+    assert result.data_health["paper_repaired_invalid_dates"] == "1"
+    assert refreshed.status == "open"
+    assert refreshed.exit_date is None
+    assert refreshed.realized_return_pct is None
+    assert refreshed.latest_date == date(2026, 7, 3)
+    assert "修复异常日期" in refreshed.notes
 
 
 def test_update_paper_trades_marks_target_hit_from_future_bars(tmp_path):
@@ -515,6 +728,77 @@ def test_paper_daily_report_summarizes_actions_and_benchmark_excess(tmp_path):
     assert any(item.instrument_id == new_trade.instrument_id for item in report.new_opportunities)
     assert any(item.instrument_id == open_trade.instrument_id for item in report.holdings)
     assert any(item.instrument_id == target_trade.instrument_id for item in report.closed_today)
+
+
+def test_paper_daily_report_groups_stock_and_etf_performance(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    stock = paper_repo.create_trade(
+        source_snapshot_id="daily-stock",
+        provider="fixture",
+        instrument_id="CN:605589",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("20"),
+        initial_stop=Decimal("19"),
+        target_1=Decimal("23"),
+        rank_score=Decimal("0.80"),
+    )
+    etf = paper_repo.create_trade(
+        source_snapshot_id="daily-etf",
+        provider="fixture",
+        instrument_id="CN:588850",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("2.20"),
+        initial_stop=Decimal("2.10"),
+        target_1=Decimal("2.40"),
+        rank_score=Decimal("0.70"),
+    )
+    paper_repo.update_trade(
+        stock.trade_id,
+        status="target_1_hit",
+        entry_date=date(2026, 7, 2),
+        entry_price=Decimal("20"),
+        exit_date=date(2026, 7, 4),
+        exit_price=Decimal("23"),
+        latest_date=date(2026, 7, 4),
+        latest_price=Decimal("23"),
+        realized_return_pct=Decimal("15"),
+        holding_days=2,
+    )
+    paper_repo.update_trade(
+        etf.trade_id,
+        status="open",
+        entry_date=date(2026, 7, 2),
+        entry_price=Decimal("2.20"),
+        latest_date=date(2026, 7, 4),
+        latest_price=Decimal("2.112"),
+        unrealized_return_pct=Decimal("-4"),
+        holding_days=2,
+    )
+
+    trades = paper_repo.list_trades(limit=20)
+    ledger = build_paper_ledger(trades)
+    validation = build_paper_validation(trades, ledger, as_of=date(2026, 7, 4))
+    report = build_paper_daily_report(
+        trades=trades,
+        ledger=ledger,
+        validation=validation,
+        as_of=date(2026, 7, 4),
+        asset_type_by_instrument={"CN:605589": "stock", "CN:588850": "etf"},
+    )
+
+    groups = {group.asset_type: group for group in report.asset_groups}
+    assert groups["stock"].label == "股票"
+    assert groups["stock"].total_trades == 1
+    assert groups["stock"].closed_trades == 1
+    assert groups["stock"].win_rate == 1.0
+    assert groups["stock"].total_return_pct > 0
+    assert groups["etf"].label == "ETF"
+    assert groups["etf"].open_trades == 1
+    assert groups["etf"].average_return_pct == -4.0
+    assert groups["etf"].total_return_pct < 0
 
 
 def _insert_cn_snapshot(

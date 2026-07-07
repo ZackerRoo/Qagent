@@ -202,6 +202,12 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
         ) : (
           <div className="empty-state">{t("portfolio.noLedger")}</div>
         )}
+        <PaperReviewDashboard
+          report={dailyReport}
+          ledger={ledger}
+          validation={validation}
+          language={language}
+        />
         <PaperDailyReportPanel report={dailyReport} language={language} />
         <PaperValidationCenter
           validation={validation}
@@ -741,6 +747,266 @@ function PaperDailyReportPanel({
           empty={language === "zh" ? "今日没有止盈/止损闭环。" : "No exits today."}
         />
       </div>
+    </div>
+  );
+}
+
+function PaperReviewDashboard({
+  report,
+  ledger,
+  validation,
+  language,
+}: {
+  report?: PaperDailyReportResponse;
+  ledger?: PaperLedgerResponse;
+  validation?: PaperValidationResponse;
+  language: Language;
+}) {
+  if (!report) {
+    return (
+      <div className="paper-review-dashboard">
+        <div className="mini-curve-empty">
+          {language === "zh" ? "正在加载模拟盘复盘。" : "Loading paper review."}
+        </div>
+      </div>
+    );
+  }
+  const summary = report.summary;
+  const stoppedItems = report.closed_today.filter((item) =>
+    `${item.status} ${item.next_action} ${item.notes}`.includes("stop") ||
+    `${item.status} ${item.next_action} ${item.notes}`.includes("止损"),
+  );
+  const primaryBenchmark = report.benchmark.items[0];
+  const primaryBenchmarkVerdict = primaryBenchmark
+    ? benchmarkReviewLabel(primaryBenchmark.excess_return_pct, primaryBenchmark.name, language)
+    : "-";
+  const focusItems = report.next_trade_day_focus.slice(0, 5);
+  const riskGate = paperRiskGateCopy(report.data_health, language);
+  const assetGroups = report.asset_groups ?? [];
+  return (
+    <div className="paper-review-dashboard">
+      <div className="paper-review-hero">
+        <div>
+          <span className="eyebrow">{language === "zh" ? "模拟盘复盘" : "Paper Review"}</span>
+          <h3>
+            {language === "zh"
+              ? "按推荐买了到底赚没赚"
+              : "Did the recommendations make money?"}
+          </h3>
+          <p>
+            {language === "zh"
+              ? "把今日新增、触发、止损、当前收益曲线、指数对比和明日关注压成一屏。"
+              : "One screen for new signals, triggers, stops, equity curve, benchmark, and next focus."}
+          </p>
+        </div>
+        <div className={summary.total_return_pct >= 0 ? "paper-review-return good" : "paper-review-return risk"}>
+          <span>{language === "zh" ? "当前总收益" : "Total return"}</span>
+          <strong>{formatPct(summary.total_return_pct)}</strong>
+          <small>{report.report_date}</small>
+        </div>
+      </div>
+
+      <div className="paper-review-grid">
+        <Metric label={language === "zh" ? "今天新增" : "New today"} value={summary.new_opportunities} />
+        <Metric label={language === "zh" ? "今天触发" : "Triggered today"} value={summary.triggered_today} />
+        <Metric label={language === "zh" ? "今天止损" : "Stopped today"} value={summary.stopped_today} />
+        <Metric label={language === "zh" ? "持仓中" : "Holdings"} value={summary.open_positions} />
+        <Metric label={language === "zh" ? "最大回撤" : "Max drawdown"} value={formatPct(summary.max_drawdown_pct)} />
+        <Metric
+          label={language === "zh" ? "胜率" : "Win rate"}
+          value={summary.win_rate != null ? `${(summary.win_rate * 100).toFixed(1)}%` : "-"}
+        />
+      </div>
+
+      <div className={`paper-risk-gate ${riskGate.paused ? "is-paused" : "is-allowed"}`}>
+        <div>
+          <span>{language === "zh" ? "自动开仓风控" : "Auto-entry risk gate"}</span>
+          <strong>{riskGate.title}</strong>
+        </div>
+        <p>{riskGate.reason}</p>
+      </div>
+
+      <PaperAssetGroupCards groups={assetGroups} language={language} />
+
+      <div className="paper-review-main">
+        <div className="paper-ledger-card">
+          <div className="paper-ledger-card-header">
+            <div>
+              <h3>{language === "zh" ? "当前收益曲线" : "Current equity curve"}</h3>
+              <p>
+                {language === "zh"
+                  ? "用模拟盘真实账本曲线观察推荐组合是否稳定向上。"
+                  : "Uses the real paper ledger curve to show whether the recommendation basket is improving."}
+              </p>
+            </div>
+            <strong>{formatPct(validation?.summary.total_return_pct ?? summary.total_return_pct)}</strong>
+          </div>
+          <PaperEquityCurve curve={validation?.curve.length ? validation.curve : ledger?.curve ?? []} language={language} />
+        </div>
+        <div className="paper-review-side">
+          <div className="paper-review-benchmark">
+            <span>{language === "zh" ? "跑赢指数了吗" : "Benchmark"}</span>
+            <strong>{primaryBenchmarkVerdict}</strong>
+            <p>{report.benchmark.summary}</p>
+            <div className="paper-review-benchmark-list">
+              {report.benchmark.items.slice(0, 4).map((item) => (
+                <span key={item.benchmark_id ?? item.name}>
+                  {item.name} {formatPct(item.excess_return_pct)}
+                </span>
+              ))}
+            </div>
+          </div>
+          <div className="paper-review-focus">
+            <span>{language === "zh" ? "接下来关注什么" : "Next focus"}</span>
+            {focusItems.length ? (
+              focusItems.map((item) => <p key={item}>{item}</p>)
+            ) : (
+              <p>{language === "zh" ? "等待下一次自动更新。" : "Waiting for next auto update."}</p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="paper-review-lists">
+        <PaperReviewList
+          title={language === "zh" ? "今天新增" : "New today"}
+          items={report.new_opportunities}
+          empty={language === "zh" ? "今天没有新增机会。" : "No new opportunities today."}
+        />
+        <PaperReviewList
+          title={language === "zh" ? "今天触发" : "Triggered today"}
+          items={report.triggered_today}
+          empty={language === "zh" ? "今天没有触发买点。" : "No trigger today."}
+        />
+        <PaperReviewList
+          title={language === "zh" ? "今天止损/闭环" : "Stopped / closed"}
+          items={stoppedItems.length ? stoppedItems : report.closed_today}
+          empty={language === "zh" ? "今天没有止损或闭环。" : "No stops or exits today."}
+        />
+      </div>
+    </div>
+  );
+}
+
+function PaperAssetGroupCards({
+  groups,
+  language,
+}: {
+  groups: PaperDailyReportResponse["asset_groups"];
+  language: Language;
+}) {
+  if (!groups.length) {
+    return null;
+  }
+  return (
+    <div className="paper-asset-groups">
+      {groups.map((group) => {
+        const returnClass = (group.total_return_pct ?? 0) >= 0 ? "good" : "risk";
+        return (
+          <div key={group.asset_type} className="paper-asset-group-card">
+            <header>
+              <span>{group.label}</span>
+              <strong className={returnClass}>{formatPct(group.total_return_pct)}</strong>
+            </header>
+            <div className="paper-asset-group-metrics">
+              <span>
+                {language === "zh" ? "样本" : "Trades"} <b>{group.total_trades}</b>
+              </span>
+              <span>
+                {language === "zh" ? "持仓" : "Open"} <b>{group.open_trades}</b>
+              </span>
+              <span>
+                {language === "zh" ? "胜率" : "Win"}{" "}
+                <b>{group.win_rate != null ? `${(group.win_rate * 100).toFixed(0)}%` : "-"}</b>
+              </span>
+            </div>
+            <p>
+              {language === "zh"
+                ? `均值 ${formatPct(group.average_return_pct)}，最好 ${formatPct(group.best_return_pct)}，最差 ${formatPct(group.worst_return_pct)}`
+                : `Avg ${formatPct(group.average_return_pct)}, best ${formatPct(group.best_return_pct)}, worst ${formatPct(group.worst_return_pct)}`}
+            </p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function paperRiskGateCopy(health: Record<string, string>, language: Language) {
+  const action = health.paper_risk_gate_action;
+  const paused = action === "pause_new_entries";
+  const rawReason = health.paper_risk_gate_reason || "";
+  if (language === "zh") {
+    return {
+      paused,
+      title: paused ? "暂停新增模拟单" : "允许新增模拟单",
+      reason: paused
+        ? `当前模拟盘触发风控：${localizeRiskGateReason(rawReason)}。已有持仓继续更新。`
+        : "当前回撤和胜率还在允许范围内，系统可以继续接收新机会。",
+    };
+  }
+  return {
+    paused,
+    title: paused ? "New entries paused" : "New entries allowed",
+    reason: paused
+      ? `Risk gate triggered: ${rawReason || "paper ledger under pressure"}. Existing positions still update.`
+      : "Drawdown and win rate are within limits; new opportunities can still enter the ledger.",
+  };
+}
+
+function localizeRiskGateReason(reason: string) {
+  if (!reason || reason === "within_limits") {
+    return "未触发限制";
+  }
+  return [
+    ["total_return", "总收益"],
+    ["max_drawdown", "最大回撤"],
+    ["closed_win_rate", "闭环胜率"],
+    ["stopped_count >= 3 and target_hit_count = 0", "止损次数较多且尚无止盈"],
+    ["<= -2.00%", "低于 -2.00%"],
+    ["<= 25%", "低于 25%"],
+  ].reduce((text, [from, to]) => text.split(from).join(to), reason);
+}
+
+function benchmarkReviewLabel(value: number | null, name: string, language: Language) {
+  if (value === null || Number.isNaN(value)) {
+    return `${name} -`;
+  }
+  const beat = value >= 0;
+  if (language === "zh") {
+    return `${beat ? "跑赢" : "落后"} ${name}`;
+  }
+  return `${beat ? "Beat" : "Lag"} ${name}`;
+}
+
+function PaperReviewList({
+  title,
+  items,
+  empty,
+}: {
+  title: string;
+  items: PaperDailyReportResponse["holdings"];
+  empty: string;
+}) {
+  return (
+    <div className="paper-review-list">
+      <header>
+        <h4>{title}</h4>
+        <span>{items.length}</span>
+      </header>
+      {items.length ? (
+        items.slice(0, 4).map((item) => (
+          <div key={item.trade_id}>
+            <strong title={formatInstrumentDisplay(item.instrument_id)}>
+              {formatInstrumentDisplay(item.instrument_id)}
+            </strong>
+            <span>{formatPct(item.return_pct)}</span>
+            <p>{item.next_action}</p>
+          </div>
+        ))
+      ) : (
+        <p className="compact-note">{empty}</p>
+      )}
     </div>
   );
 }

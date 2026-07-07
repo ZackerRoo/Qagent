@@ -1775,6 +1775,23 @@ export type PaperDailyReportItem = {
   notes: string;
 };
 
+export type PaperDailyAssetGroup = {
+  asset_type: string;
+  label: string;
+  total_trades: number;
+  pending_trades: number;
+  open_trades: number;
+  closed_trades: number;
+  positive_trades: number;
+  negative_trades: number;
+  win_rate: number | null;
+  average_return_pct: number | null;
+  total_pnl: string;
+  total_return_pct: number | null;
+  best_return_pct: number | null;
+  worst_return_pct: number | null;
+};
+
 export type PaperDailyBenchmarkItem = {
   benchmark_id: string | null;
   name: string;
@@ -1797,6 +1814,7 @@ export type PaperDailyReportResponse = {
   triggered_today: PaperDailyReportItem[];
   holdings: PaperDailyReportItem[];
   closed_today: PaperDailyReportItem[];
+  asset_groups: PaperDailyAssetGroup[];
   next_trade_day_focus: string[];
   data_health: Record<string, string>;
 };

@@ -543,6 +543,102 @@ def test_automation_scheduler_backfills_closed_paper_slot_from_deeper_cache_cand
     assert active == {"CN:688002", "CN:688003"}
 
 
+def test_automation_scheduler_pauses_new_paper_entries_when_ledger_drawdown_is_high(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = f"sqlite:///{tmp_path / 'automation-risk-pause.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    now = datetime.now(timezone.utc)
+    with session_factory() as session:
+        session.add(
+            ScanRunRow(
+                run_id="scan-risk-pause",
+                provider="free",
+                mode="full_market",
+                symbols=json.dumps(["CN:688999"]),
+                scanned=1,
+                cards=1,
+                data_health="{}",
+                created_at=now,
+            )
+        )
+        session.add(
+            OpportunitySnapshotRow(
+                snapshot_id="scan-risk-pause:card-1",
+                run_id="scan-risk-pause",
+                card_id="card-risk-pause",
+                instrument_id="CN:688999",
+                market="CN",
+                status="setup_ready",
+                signal_date=date(2026, 7, 7),
+                latest_close=Decimal("10.00"),
+                primary_strategy_id="trend_momentum_stage2",
+                score=Decimal("0.95"),
+                strategy_score=Decimal("0.95"),
+                rank_score=Decimal("0.95"),
+                trigger_price=Decimal("10.20"),
+                initial_stop=Decimal("9.80"),
+                target_1=Decimal("11.00"),
+                card_json=json.dumps(
+                    {
+                        "card_id": "card-risk-pause",
+                        "instrument_id": "CN:688999",
+                        "entry_plan": {"trigger_price": "10.20"},
+                        "decision": {"risk_status": "clear"},
+                    },
+                    sort_keys=True,
+                ),
+                created_at=now,
+            )
+        )
+        for index in range(5):
+            session.add(
+                PaperTradeRow(
+                    trade_id=f"paper-risk-loss-{index}",
+                    source_snapshot_id=f"manual-risk-loss-{index}",
+                    provider="free",
+                    instrument_id=f"CN:68800{index}",
+                    strategy_id="trend_momentum_stage2",
+                    status="stopped",
+                    signal_date=date(2026, 7, 1),
+                    trigger_price=Decimal("100"),
+                    initial_stop=Decimal("95"),
+                    target_1=Decimal("110"),
+                    rank_score=Decimal("0.80"),
+                    entry_date=date(2026, 7, 2),
+                    entry_price=Decimal("100"),
+                    exit_date=date(2026, 7, 3),
+                    exit_price=Decimal("95"),
+                    latest_date=date(2026, 7, 3),
+                    latest_price=Decimal("95"),
+                    realized_return_pct=Decimal("-5"),
+                    holding_days=1,
+                    notes="测试止损",
+                )
+            )
+        session.commit()
+
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/automation/scheduler/run-once"
+        "?provider=free&include_etfs=true&run_scan=false&run_alerts=false"
+        "&update_paper=false&seed_paper=true&seed_limit=1"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    health = body["last_result"]["data_health"]
+    assert body["last_result"]["paper_created"] == 0
+    assert health["paper_risk_gate_action"] == "pause_new_entries"
+    assert health["automation_seed_skipped_by_risk_gate"] == "true"
+    trades = client.get("/api/paper-trades?provider=free&limit=20").json()["trades"]
+    assert "CN:688999" not in {trade["instrument_id"] for trade in trades}
+
+
 def test_automation_scheduler_start_and_stop_are_visible(tmp_path, monkeypatch):
     database_url = f"sqlite:///{tmp_path / 'automation-scheduler-start.db'}"
     monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)

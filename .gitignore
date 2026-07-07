@@ -13,6 +13,7 @@ data/*.db-*
 data/*.log
 data/*.pid
 data/outbox*/
+logs/
 .qagent-cache/
 .qagent-runtime/
 backend/.qagent-cache/

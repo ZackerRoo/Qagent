@@ -9865,6 +9865,305 @@ td {
   -webkit-line-clamp: 3;
 }
 
+.replay-center,
+.factor-strategy-center,
+.weight-action-center,
+.reliability-center {
+  display: grid;
+  gap: 12px;
+  border-color: rgba(77, 212, 255, 0.22);
+}
+
+.replay-kpi-strip,
+.reliability-grid,
+.paper-review-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 8px;
+}
+
+.replay-kpi-strip div,
+.reliability-card {
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--terminal-panel-soft);
+}
+
+.replay-kpi-strip span,
+.reliability-card span,
+.paper-review-benchmark span,
+.paper-review-focus span {
+  display: block;
+  color: var(--terminal-muted-2);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.replay-kpi-strip strong,
+.reliability-card strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--terminal-text);
+  font-size: 20px;
+}
+
+.replay-table td {
+  vertical-align: top;
+}
+
+.effectiveness-dual-table {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.reliability-card p {
+  margin: 8px 0 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.reliability-good {
+  border-color: rgba(57, 217, 138, 0.35);
+}
+
+.reliability-watch {
+  border-color: rgba(244, 197, 66, 0.35);
+}
+
+.reliability-risk {
+  border-color: rgba(255, 92, 122, 0.35);
+}
+
+.paper-review-dashboard {
+  display: grid;
+  gap: 12px;
+  border: 1px solid rgba(77, 212, 255, 0.26);
+  border-radius: 8px;
+  padding: 14px;
+  background:
+    linear-gradient(135deg, rgba(77, 212, 255, 0.09), rgba(244, 197, 66, 0.05)),
+    #0a1016;
+}
+
+.paper-review-hero,
+.paper-review-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.32fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.paper-review-hero h3 {
+  margin: 4px 0 6px;
+  font-size: 24px;
+}
+
+.paper-review-hero p,
+.paper-review-benchmark p,
+.paper-review-focus p,
+.paper-review-list p {
+  margin: 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.paper-review-return,
+.paper-review-benchmark,
+.paper-review-focus,
+.paper-review-list {
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(9, 14, 20, 0.72);
+}
+
+.paper-review-return {
+  display: grid;
+  align-content: center;
+  gap: 6px;
+}
+
+.paper-review-return span,
+.paper-review-return small {
+  color: var(--terminal-muted-2);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.paper-review-return strong {
+  color: var(--terminal-text);
+  font-size: 28px;
+}
+
+.paper-risk-gate {
+  display: grid;
+  grid-template-columns: minmax(190px, 0.34fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  border: 1px solid rgba(57, 217, 138, 0.28);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(57, 217, 138, 0.08);
+}
+
+.paper-risk-gate.is-paused {
+  border-color: rgba(255, 92, 122, 0.34);
+  background: rgba(255, 92, 122, 0.09);
+}
+
+.paper-risk-gate span,
+.paper-asset-group-card header span {
+  display: block;
+  color: var(--terminal-muted-2);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.paper-risk-gate strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--terminal-text);
+  font-size: 17px;
+}
+
+.paper-risk-gate p {
+  margin: 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.paper-asset-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.paper-asset-group-card {
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 12px;
+  background:
+    linear-gradient(180deg, rgba(77, 212, 255, 0.07), rgba(244, 197, 66, 0.04)),
+    rgba(9, 14, 20, 0.76);
+}
+
+.paper-asset-group-card header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.paper-asset-group-card header strong {
+  font-size: 18px;
+}
+
+.paper-asset-group-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin: 10px 0;
+}
+
+.paper-asset-group-metrics span {
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 8px;
+  color: var(--terminal-muted-2);
+  font-size: 11px;
+}
+
+.paper-asset-group-metrics b {
+  display: block;
+  margin-top: 2px;
+  color: var(--terminal-text);
+  font-size: 14px;
+}
+
+.paper-asset-group-card p {
+  margin: 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+}
+
+.paper-review-side,
+.paper-review-lists {
+  display: grid;
+  gap: 10px;
+}
+
+.paper-review-benchmark strong {
+  display: block;
+  margin: 5px 0;
+  color: var(--terminal-cyan);
+  font-size: 18px;
+}
+
+.paper-review-benchmark-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.paper-review-benchmark-list span {
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 999px;
+  padding: 5px 8px;
+  background: var(--terminal-panel-soft);
+  color: var(--terminal-muted);
+  font-size: 11px;
+}
+
+.paper-review-lists {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.paper-review-list header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.paper-review-list h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.paper-review-list header span {
+  color: var(--terminal-cyan);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.paper-review-list > div {
+  display: grid;
+  gap: 4px;
+  border-top: 1px solid var(--terminal-border-soft);
+  padding: 8px 0;
+}
+
+.paper-review-list strong {
+  color: var(--terminal-text);
+}
+
+.paper-review-list > div > span {
+  color: var(--terminal-yellow);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 @media (max-width: 1500px) {
   .opportunities-page {
     grid-template-columns: minmax(0, 1fr);
@@ -9899,7 +10198,12 @@ td {
 
   .effectiveness-hero,
   .effectiveness-chart-grid,
-  .effectiveness-lists {
+  .effectiveness-lists,
+  .effectiveness-dual-table,
+  .paper-risk-gate,
+  .paper-review-hero,
+  .paper-review-main,
+  .paper-review-lists {
     grid-template-columns: 1fr;
   }
 

@@ -293,6 +293,23 @@ class PaperDailyReportItem(BaseModel):
     notes: str
 
 
+class PaperDailyAssetGroup(BaseModel):
+    asset_type: str
+    label: str
+    total_trades: int
+    pending_trades: int
+    open_trades: int
+    closed_trades: int
+    positive_trades: int
+    negative_trades: int
+    win_rate: float | None
+    average_return_pct: float | None
+    total_pnl: Decimal
+    total_return_pct: float | None
+    best_return_pct: float | None
+    worst_return_pct: float | None
+
+
 class PaperDailyBenchmarkItem(BaseModel):
     benchmark_id: str | None = None
     name: str
@@ -315,6 +332,7 @@ class PaperDailyReport(BaseModel):
     triggered_today: list[PaperDailyReportItem]
     holdings: list[PaperDailyReportItem]
     closed_today: list[PaperDailyReportItem]
+    asset_groups: list[PaperDailyAssetGroup]
     next_trade_day_focus: list[str]
     data_health: dict[str, str]
 
@@ -386,12 +404,17 @@ def update_paper_trades(
     as_of: datetime | None = None,
 ) -> PaperUpdateResult:
     trades = repo.list_trades(limit=1000, provider=provider_mode)
+    repaired_invalid_dates = _repair_impossible_trade_dates(repo, trades)
+    if repaired_invalid_dates:
+        trades = repo.list_trades(limit=1000, provider=provider_mode)
     active = [trade for trade in trades if trade.status in OPEN_STATUSES]
     execution_time = _a_share_local_datetime(as_of)
     execution_session = _a_share_execution_session(execution_time)
     fills_deferred = 0
     minute_checked = 0
     minute_rows = 0
+    daily_fallback_checked = 0
+    daily_fallback_rows = 0
     for trade in active:
         minute_update, checked, rows = _try_evaluate_trade_with_minutes(
             repo,
@@ -406,11 +429,14 @@ def update_paper_trades(
         if minute_update is not None:
             repo.update_trade(trade.trade_id, **minute_update)
             continue
+        daily_fallback_checked += 1
+        daily_end = max(trade.signal_date, execution_time.date())
         bars = provider.get_daily_bars(
             [trade.instrument_id],
             start=trade.signal_date,
-            end=date(2100, 1, 1),
+            end=daily_end,
         )
+        daily_fallback_rows += len(bars)
         if bars.empty:
             continue
         updated, deferred = _evaluate_trade(
@@ -436,6 +462,9 @@ def update_paper_trades(
         ),
         "paper_minute_checked": str(minute_checked),
         "paper_minute_rows": str(minute_rows),
+        "paper_daily_fallback_checked": str(daily_fallback_checked),
+        "paper_daily_fallback_rows": str(daily_fallback_rows),
+        "paper_repaired_invalid_dates": str(repaired_invalid_dates),
     }
     if provider_errors:
         data_health["errors"] = " | ".join(provider_errors[:3])
@@ -444,6 +473,38 @@ def update_paper_trades(
         trades=refreshed,
         data_health=data_health,
     )
+
+
+def _repair_impossible_trade_dates(
+    repo: PaperTradingRepository,
+    trades: list[PaperTradeRecord],
+) -> int:
+    repaired = 0
+    for trade in trades:
+        if (
+            trade.entry_date is None
+            or trade.entry_price is None
+            or trade.exit_date is None
+            or trade.exit_date >= trade.entry_date
+        ):
+            continue
+        repo.update_trade(
+            trade.trade_id,
+            status="open",
+            exit_date=None,
+            exit_price=None,
+            realized_return_pct=None,
+            latest_date=trade.entry_date,
+            latest_price=trade.entry_price,
+            unrealized_return_pct=Decimal("0"),
+            holding_days=0,
+            notes=_append_note(
+                trade.notes,
+                "修复异常日期：历史记录出现离场早于入场，已恢复为持仓重新评估。",
+            ),
+        )
+        repaired += 1
+    return repaired
 
 
 def paper_execution_data_health(
@@ -687,6 +748,7 @@ def build_paper_daily_report(
     validation: PaperValidationResult,
     as_of: date | None = None,
     benchmark_items: list[Mapping[str, object]] | None = None,
+    asset_type_by_instrument: Mapping[str, str] | None = None,
 ) -> PaperDailyReport:
     report_date = as_of or _validation_as_of(trades)
     ledger_by_id = {item.trade_id: item for item in ledger.items}
@@ -734,6 +796,11 @@ def build_paper_daily_report(
         triggered_today=triggered_today,
         holdings=holdings,
         closed_today=closed_today,
+        asset_groups=_paper_asset_groups(
+            ledger.items,
+            asset_type_by_instrument=asset_type_by_instrument or {},
+            allocation_per_trade=ledger.summary.allocation_per_trade,
+        ),
         next_trade_day_focus=_next_trade_day_focus(
             new_opportunities=new_opportunities,
             holdings=holdings,
@@ -748,6 +815,89 @@ def build_paper_daily_report(
             "paper_daily_report_benchmarks": str(len(benchmark.items)),
         },
     )
+
+
+def _paper_asset_groups(
+    items: list[PaperLedgerItem],
+    *,
+    asset_type_by_instrument: Mapping[str, str],
+    allocation_per_trade: Decimal,
+) -> list[PaperDailyAssetGroup]:
+    grouped: dict[str, list[PaperLedgerItem]] = defaultdict(list)
+    for item in items:
+        grouped[_paper_asset_type(item.instrument_id, asset_type_by_instrument)].append(item)
+    return [
+        _paper_asset_group(asset_type, group_items, allocation_per_trade=allocation_per_trade)
+        for asset_type, group_items in sorted(
+            grouped.items(),
+            key=lambda pair: (_paper_asset_rank(pair[0]), pair[0]),
+        )
+    ]
+
+
+def _paper_asset_group(
+    asset_type: str,
+    items: list[PaperLedgerItem],
+    *,
+    allocation_per_trade: Decimal,
+) -> PaperDailyAssetGroup:
+    returns = [item.return_pct for item in items if item.return_pct is not None]
+    closed = [item for item in items if item.status in CLOSED_STATUSES]
+    positive = [value for value in returns if value > 0]
+    negative = [value for value in returns if value < 0]
+    total_pnl = _money(sum((item.total_pnl for item in items), Decimal("0")))
+    effective_items = [item for item in items if item.status != "pending"]
+    capital_base = allocation_per_trade * Decimal(len(effective_items))
+    total_return_pct = (
+        round(float(total_pnl / capital_base * Decimal("100")), 4)
+        if capital_base > 0
+        else None
+    )
+    return PaperDailyAssetGroup(
+        asset_type=asset_type,
+        label=_paper_asset_label(asset_type),
+        total_trades=len(items),
+        pending_trades=sum(1 for item in items if item.status == "pending"),
+        open_trades=sum(1 for item in items if item.status == "open"),
+        closed_trades=len(closed),
+        positive_trades=len(positive),
+        negative_trades=len(negative),
+        win_rate=round(len(positive) / len(closed), 4) if closed else None,
+        average_return_pct=round(sum(returns) / len(returns), 4) if returns else None,
+        total_pnl=total_pnl,
+        total_return_pct=total_return_pct,
+        best_return_pct=round(max(returns), 4) if returns else None,
+        worst_return_pct=round(min(returns), 4) if returns else None,
+    )
+
+
+def _paper_asset_type(
+    instrument_id: str,
+    asset_type_by_instrument: Mapping[str, str],
+) -> str:
+    raw = asset_type_by_instrument.get(instrument_id)
+    if raw:
+        normalized = raw.strip().lower()
+        if normalized:
+            return normalized
+    symbol = instrument_id.split(":", 1)[-1]
+    if symbol.startswith(("15", "16", "51", "56", "58")):
+        return "etf"
+    return "stock" if instrument_id.upper().startswith("CN:") else "other"
+
+
+def _paper_asset_label(asset_type: str) -> str:
+    labels = {
+        "stock": "股票",
+        "etf": "ETF",
+        "index": "指数",
+        "fund": "基金",
+    }
+    return labels.get(asset_type, asset_type.upper())
+
+
+def _paper_asset_rank(asset_type: str) -> int:
+    return {"stock": 0, "etf": 1, "index": 2, "fund": 3}.get(asset_type, 9)
 def _daily_report_item(
     trade: PaperTradeRecord,
     ledger_by_id: dict[str, PaperLedgerItem],
@@ -1799,6 +1949,8 @@ def _evaluate_trade(
                 continue
 
         if status == "open" and entry_date is not None and entry_price is not None:
+            if trade_date < entry_date:
+                continue
             holding_days = max((trade_date - entry_date).days, 0)
             if not _a_share_can_fill_bar(
                 trade,
@@ -2007,6 +2159,8 @@ def _evaluate_trade_with_minutes(
                 continue
 
         if status == "open" and entry_date is not None and entry_price is not None:
+            if trade_date < entry_date:
+                continue
             holding_days = max((trade_date - entry_date).days, 0)
             if trade_date == entry_date:
                 notes = _append_note(notes, "A股 T+1：买入当日不模拟卖出。")

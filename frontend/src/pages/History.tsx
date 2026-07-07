@@ -30,8 +30,10 @@ import type {
   FactorExposureInformationCoefficient,
   FactorQuantileBucket,
   FactorRankBucket,
+  OpportunityOutcome,
   OpportunityHistoryResponse,
   OpportunityCard,
+  OpportunitySnapshot,
   OutcomesResponse,
   PortfolioEquityPoint,
   PortfolioBacktestResponse,
@@ -278,6 +280,26 @@ export function History({
         calibration={calibration}
         performance={performance}
         outcomes={outcomes}
+      />
+
+      <RecommendationReplayCenter history={history} outcomes={outcomes} />
+
+      <StrategyFactorEffectivenessCenter
+        performance={performance}
+        diagnostics={diagnostics}
+        calibration={calibration}
+        factorBacktest={factorBacktest}
+      />
+
+      <SignalWeightActionCenter calibration={calibration} />
+
+      <ValidationReliabilityPanel
+        closure={closure}
+        calibration={calibration}
+        performance={performance}
+        outcomes={outcomes}
+        backtest={backtest}
+        factorBacktest={factorBacktest}
       />
 
       <section className="panel">
@@ -1210,6 +1232,542 @@ function RecommendationEffectivenessCenter({
       </div>
     </section>
   );
+}
+
+function RecommendationReplayCenter({
+  history,
+  outcomes,
+}: {
+  history?: OpportunityHistoryResponse;
+  outcomes?: OutcomesResponse;
+}) {
+  const { language } = useI18n();
+  const outcomeMap = new Map((outcomes?.outcomes ?? []).map((outcome) => [outcome.snapshot_id, outcome]));
+  const rows = (history?.snapshots ?? [])
+    .slice()
+    .sort((left, right) => (right.signal_date ?? "").localeCompare(left.signal_date ?? ""))
+    .slice(0, 12)
+    .map((snapshot) => ({ snapshot, outcome: outcomeMap.get(snapshot.snapshot_id) }));
+  const completed = rows.filter((row) => row.outcome && row.outcome.outcome_status !== "pending").length;
+  const triggered = rows.filter((row) => row.outcome?.triggered).length;
+  return (
+    <section className="panel replay-center">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">{language === "zh" ? "推荐复盘中心" : "Recommendation Replay"}</p>
+          <h2>{language === "zh" ? "每只推荐后面到底发生了什么" : "What happened after each recommendation"}</h2>
+          <p className="brief-headline">
+            {language === "zh"
+              ? "按推荐日追踪推荐理由、买点、触发状态、5/10/20日收益、指数超额和结果归因。"
+              : "Tracks thesis, buy point, trigger state, forward returns, benchmark excess, and attribution."}
+          </p>
+        </div>
+        <span className="count">
+          {completed}/{rows.length} {language === "zh" ? "已闭环" : "closed"}
+        </span>
+      </div>
+      <div className="replay-kpi-strip">
+        <MetricLike label={language === "zh" ? "最近推荐" : "Recent signals"} value={rows.length} />
+        <MetricLike label={language === "zh" ? "已触发" : "Triggered"} value={triggered} />
+        <MetricLike label={language === "zh" ? "已闭环" : "Closed"} value={completed} />
+        <MetricLike
+          label={language === "zh" ? "20日正收益" : "Positive 20D"}
+          value={formatRatio(ratio(rows.filter((row) => (row.outcome?.return_20d ?? -Infinity) > 0).length, rows.filter((row) => row.outcome?.return_20d !== null && row.outcome?.return_20d !== undefined).length))}
+        />
+      </div>
+      {!rows.length ? (
+        <div className="empty-state">
+          {language === "zh" ? "还没有推荐快照，先运行一次今日扫描。" : "No recommendation snapshots yet."}
+        </div>
+      ) : (
+        <div className="table-shell replay-table">
+          <table>
+            <thead>
+              <tr>
+                <th>{language === "zh" ? "推荐日" : "Date"}</th>
+                <th>{language === "zh" ? "标的" : "Ticker"}</th>
+                <th>{language === "zh" ? "推荐理由" : "Why"}</th>
+                <th>{language === "zh" ? "买点" : "Buy point"}</th>
+                <th>{language === "zh" ? "触发" : "Triggered"}</th>
+                <th>5D</th>
+                <th>10D</th>
+                <th>20D</th>
+                <th>{language === "zh" ? "沪深300" : "CSI 300"}</th>
+                <th>{language === "zh" ? "科创50" : "STAR 50"}</th>
+                <th>{language === "zh" ? "结果归因" : "Attribution"}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(({ snapshot, outcome }) => (
+                <tr key={snapshot.snapshot_id}>
+                  <td>{snapshot.signal_date ?? "-"}</td>
+                  <td className="ticker" title={formatInstrumentDisplay(snapshot.instrument_id, snapshot.instrument_label ?? snapshot.card.instrument_label)}>
+                    {formatInstrumentDisplay(snapshot.instrument_id, snapshot.instrument_label ?? snapshot.card.instrument_label)}
+                  </td>
+                  <td className="reason-cell" title={replayReason(snapshot)}>
+                    {replayReason(snapshot)}
+                  </td>
+                  <td className="reason-cell">{replayBuyPoint(snapshot)}</td>
+                  <td>
+                    <span className={`status status-${outcome?.triggered ? "triggered" : "pending"}`}>
+                      {outcome?.triggered ? (language === "zh" ? "已触发" : "Yes") : (language === "zh" ? "等待" : "Waiting")}
+                    </span>
+                  </td>
+                  <td className={signedCellClass(outcome?.return_5d ?? null)}>{formatNumber(outcome?.return_5d ?? null, "%")}</td>
+                  <td className={signedCellClass(outcome?.return_10d ?? null)}>{formatNumber(outcome?.return_10d ?? null, "%")}</td>
+                  <td className={signedCellClass(outcome?.return_20d ?? null)}>{formatNumber(outcome?.return_20d ?? null, "%")}</td>
+                  <td>{benchmarkBeatLabel(snapshot, "沪深300", language)}</td>
+                  <td>{benchmarkBeatLabel(snapshot, "科创50", language)}</td>
+                  <td className="reason-cell">{replayAttribution(snapshot, outcome, language)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function StrategyFactorEffectivenessCenter({
+  performance,
+  diagnostics,
+  calibration,
+  factorBacktest,
+}: {
+  performance?: StrategyPerformanceResponse;
+  diagnostics?: StrategyDiagnosticsResponse;
+  calibration?: RecommendationCalibrationResponse;
+  factorBacktest?: FactorBacktestResponse;
+}) {
+  const { language } = useI18n();
+  const diagnosticMap = new Map((diagnostics?.diagnostics ?? []).map((item) => [item.strategy_id, item]));
+  const strategies = [...(performance?.performance ?? [])]
+    .filter((item) => item.sample_count > 0)
+    .sort((left, right) => strategyEffectScore(right) - strategyEffectScore(left))
+    .slice(0, 8);
+  const factors = factorBacktest?.factor_ic.length
+    ? factorBacktest.factor_ic.map((item) => ({
+        id: item.factor_id,
+        label: factorIcLabel(item, language),
+        sample: item.sample_count,
+        win: item.positive_ic_rate,
+        avg: item.top_bottom_spread_pct,
+        excess: item.mean_rank_ic,
+        action: factorAction(item.top_bottom_spread_pct, item.mean_rank_ic, item.sample_count, language),
+      }))
+    : (calibration?.signal_effects ?? []).slice(0, 6).map((effect) => ({
+        id: effect.signal_key,
+        label: effect.label,
+        sample: effect.sample_count,
+        win: effect.win_rate_10d,
+        avg: effect.avg_return_10d,
+        excess: effect.lift_vs_baseline_10d,
+        action: localizeWeightAction(effect.weight_action, language),
+      }));
+  return (
+    <section className="panel factor-strategy-center">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">{language === "zh" ? "策略和因子有效性" : "Strategy and Factor Effectiveness"}</p>
+          <h2>{language === "zh" ? "最近哪些方法有效，哪些失效" : "What is working recently"}</h2>
+          <p className="brief-headline">
+            {language === "zh"
+              ? "不是只看单只股票，而是统计策略、质量、估值、主题和低波动过滤在最近样本里的表现。"
+              : "Aggregates strategy and factor performance instead of judging one stock at a time."}
+          </p>
+        </div>
+        <span className="count">{strategies.length + factors.length}</span>
+      </div>
+      <div className="effectiveness-dual-table">
+        <div className="effectiveness-card">
+          <header>
+            <h3>{language === "zh" ? "策略排行榜" : "Strategy ranking"}</h3>
+            <span>{strategies.length}</span>
+          </header>
+          <div className="table-shell compact-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>{language === "zh" ? "策略" : "Strategy"}</th>
+                  <th>{language === "zh" ? "样本" : "Samples"}</th>
+                  <th>{language === "zh" ? "胜率" : "Win"}</th>
+                  <th>{language === "zh" ? "均值" : "Avg"}</th>
+                  <th>{language === "zh" ? "回撤" : "DD"}</th>
+                  <th>{language === "zh" ? "判断" : "Status"}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {strategies.map((item) => {
+                  const diagnostic = diagnosticMap.get(item.strategy_id);
+                  return (
+                    <tr key={item.strategy_id}>
+                      <td className="reason-cell">{localizeStrategy(item.strategy_id, language)}</td>
+                      <td>{item.completed_count}/{item.sample_count}</td>
+                      <td>{formatRatio(item.positive_rate_10d)}</td>
+                      <td className={signedCellClass(item.avg_return_10d)}>{formatNumber(item.avg_return_10d, "%")}</td>
+                      <td>{formatNumber(item.max_drawdown_pct, "%")}</td>
+                      <td>
+                        <span className={`status status-${diagnostic?.verdict ?? strategyStatus(item)}`}>
+                          {diagnostic
+                            ? localizeDiagnosticVerdict(diagnostic.verdict, language)
+                            : strategyStatusLabel(item, language)}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div className="effectiveness-card">
+          <header>
+            <h3>{language === "zh" ? "因子排行榜" : "Factor ranking"}</h3>
+            <span>{factorBacktest ? (language === "zh" ? "历史验证" : "backtested") : (language === "zh" ? "推荐样本" : "signal sample")}</span>
+          </header>
+          <div className="table-shell compact-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>{language === "zh" ? "因子/信号" : "Factor"}</th>
+                  <th>{language === "zh" ? "样本" : "Samples"}</th>
+                  <th>{language === "zh" ? "胜率/IC" : "Win/IC"}</th>
+                  <th>{language === "zh" ? "收益/多空差" : "Return/spread"}</th>
+                  <th>{language === "zh" ? "超额" : "Lift"}</th>
+                  <th>{language === "zh" ? "动作" : "Action"}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {factors.map((item) => (
+                  <tr key={item.id}>
+                    <td className="reason-cell">{item.label}</td>
+                    <td>{item.sample}</td>
+                    <td>{formatRatio(item.win)}</td>
+                    <td className={signedCellClass(item.avg)}>{formatNumber(item.avg, "%")}</td>
+                    <td className={signedCellClass(item.excess)}>{formatNumber(item.excess, factorBacktest ? "" : "%")}</td>
+                    <td>{item.action}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {!factorBacktest ? (
+            <p className="compact-note">
+              {language === "zh"
+                ? "运行因子回测后，这里会切换成 IC、Rank IC 和分层收益验证。"
+                : "Run factor backtest to switch this table to IC, Rank IC, and quantile-return evidence."}
+            </p>
+          ) : null}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SignalWeightActionCenter({
+  calibration,
+}: {
+  calibration?: RecommendationCalibrationResponse;
+}) {
+  const { language } = useI18n();
+  const suggestionMap = new Map((calibration?.weight_suggestions ?? []).map((item) => [item.key, item]));
+  const rows = (calibration?.signal_effects ?? [])
+    .slice()
+    .sort((left, right) => Math.abs(right.suggested_weight_delta) - Math.abs(left.suggested_weight_delta))
+    .slice(0, 16);
+  return (
+    <section className="panel weight-action-center">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">{language === "zh" ? "自动权重调整可视化" : "Automatic Weight Actions"}</p>
+          <h2>{language === "zh" ? "为什么某个信号被加权或降权" : "Why a signal is boosted or reduced"}</h2>
+          <p className="brief-headline">
+            {language === "zh"
+              ? "后端门禁和降权结果展开成表，用户能看到样本数、胜率、均值、超额和当前动作。"
+              : "Shows sample count, win rate, average return, excess return, and the current gate action."}
+          </p>
+        </div>
+        <span className="count">{rows.length}</span>
+      </div>
+      {!rows.length ? (
+        <div className="empty-state">
+          {language === "zh" ? "暂无信号校准样本，继续积累推荐后表现。" : "No signal calibration sample yet."}
+        </div>
+      ) : (
+        <div className="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>{language === "zh" ? "信号" : "Signal"}</th>
+                <th>{language === "zh" ? "样本数" : "Samples"}</th>
+                <th>{language === "zh" ? "胜率" : "Win rate"}</th>
+                <th>{language === "zh" ? "平均收益" : "Avg return"}</th>
+                <th>{language === "zh" ? "超额收益" : "Excess"}</th>
+                <th>{language === "zh" ? "当前动作" : "Action"}</th>
+                <th>{language === "zh" ? "原因" : "Reason"}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((effect) => {
+                const suggestion = suggestionMap.get(effect.signal_key);
+                return (
+                  <tr key={effect.signal_key}>
+                    <td className="reason-cell">{effect.label}</td>
+                    <td>{effect.completed_count}/{effect.sample_count}</td>
+                    <td>{formatRatio(effect.win_rate_10d)}</td>
+                    <td className={signedCellClass(effect.avg_return_10d)}>{formatNumber(effect.avg_return_10d, "%")}</td>
+                    <td className={signedCellClass(effect.lift_vs_baseline_10d)}>{formatNumber(effect.lift_vs_baseline_10d, "%")}</td>
+                    <td>
+                      <span className={`status status-${effect.weight_action}`}>
+                        {suggestion ? `${suggestion.action} ${signedPercent(suggestion.delta)}` : localizeWeightAction(effect.weight_action, language)}
+                      </span>
+                    </td>
+                    <td className="reason-cell">{suggestion?.reason ?? effect.reason}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ValidationReliabilityPanel({
+  closure,
+  calibration,
+  performance,
+  outcomes,
+  backtest,
+  factorBacktest,
+}: {
+  closure?: RecommendationClosureResponse;
+  calibration?: RecommendationCalibrationResponse;
+  performance?: StrategyPerformanceResponse;
+  outcomes?: OutcomesResponse;
+  backtest?: BacktestResponse;
+  factorBacktest?: FactorBacktestResponse;
+}) {
+  const { language } = useI18n();
+  const totalSamples = closure?.windows[0]?.sample_count ?? outcomes?.outcomes.length ?? 0;
+  const completedSamples = closure?.windows[0]?.completed_count ?? outcomes?.outcomes.filter((item) => item.outcome_status !== "pending").length ?? 0;
+  const mergedHealth = {
+    ...(outcomes?.data_health ?? {}),
+    ...(performance?.data_health ?? {}),
+    ...(calibration?.data_health ?? {}),
+    ...(closure?.data_health ?? {}),
+    ...(backtest?.data_health ?? {}),
+    ...(factorBacktest?.data_health ?? {}),
+  };
+  const checks = [
+    {
+      key: "sample",
+      label: language === "zh" ? "样本够不够" : "Sample size",
+      value: `${completedSamples}/${totalSamples}`,
+      status: completedSamples >= 80 ? "good" : completedSamples >= 20 ? "watch" : "risk",
+      note: language === "zh" ? "推荐闭环样本越多，胜率和均值越可信。" : "More closed samples make win rate and average return more reliable.",
+    },
+    {
+      key: "adjusted",
+      label: language === "zh" ? "是否复权" : "Adjusted prices",
+      value: dataHealthHas(mergedHealth, ["adjusted_bars", "adjustment_status"]) ? (language === "zh" ? "已参与" : "ready") : (language === "zh" ? "未确认" : "unknown"),
+      status: dataHealthHas(mergedHealth, ["adjusted_bars", "adjustment_status"]) ? "good" : "watch",
+      note: language === "zh" ? "复权影响长期收益和均线判断。" : "Adjusted bars affect long-horizon returns and moving averages.",
+    },
+    {
+      key: "benchmark",
+      label: language === "zh" ? "是否有指数基准" : "Benchmark",
+      value: backtest?.benchmark.label ?? mergedHealth.benchmark ?? (language === "zh" ? "等待回测" : "waiting"),
+      status: backtest?.benchmark || mergedHealth.benchmark ? "good" : "watch",
+      note: language === "zh" ? "没有基准时，涨了也不知道是不是只是大盘上涨。" : "Without a benchmark, gains may simply be market beta.",
+    },
+    {
+      key: "fundamental",
+      label: language === "zh" ? "财务数据是否参与验证" : "Financial history",
+      value: dataHealthHas(mergedHealth, ["strategy_fundamentals", "fundamentals", "financial_snapshots"]) ? (language === "zh" ? "已参与" : "included") : (language === "zh" ? "当前不足" : "limited"),
+      status: dataHealthHas(mergedHealth, ["strategy_fundamentals", "fundamentals", "financial_snapshots"]) ? "good" : "risk",
+      note: language === "zh" ? "EP、质量等因子需要历史财务快照，样本不足时只能作为当前辅助。" : "EP and quality factors need historical financial snapshots to be fully validated.",
+    },
+  ];
+  return (
+    <section className="panel reliability-center">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">{language === "zh" ? "数据可靠性" : "Data Reliability"}</p>
+          <h2>{language === "zh" ? "哪些结论可信，哪些还只是观察" : "Which conclusions are reliable"}</h2>
+        </div>
+        <span className="count">{checks.filter((item) => item.status === "good").length}/{checks.length}</span>
+      </div>
+      <div className="reliability-grid">
+        {checks.map((check) => (
+          <div className={`reliability-card reliability-${check.status}`} key={check.key}>
+            <span>{check.label}</span>
+            <strong>{check.value}</strong>
+            <p>{check.note}</p>
+          </div>
+        ))}
+      </div>
+      <DataHealth data={mergedHealth} language={language} />
+    </section>
+  );
+}
+
+function MetricLike({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function ratio(numerator: number, denominator: number): number | null {
+  if (!denominator) {
+    return null;
+  }
+  return numerator / denominator;
+}
+
+function replayReason(snapshot: OpportunitySnapshot): string {
+  return (
+    snapshot.card.recommendation_brief?.why ||
+    snapshot.card.recommendation_summary?.headline ||
+    snapshot.card.thesis ||
+    "-"
+  );
+}
+
+function replayBuyPoint(snapshot: OpportunitySnapshot): string {
+  return (
+    snapshot.card.recommendation_brief?.buy_point ||
+    snapshot.card.entry_plan.confirmation ||
+    snapshot.trigger_price ||
+    "-"
+  );
+}
+
+function benchmarkBeatLabel(
+  snapshot: OpportunitySnapshot,
+  benchmarkKeyword: string,
+  language: "zh" | "en",
+): string {
+  const comparison = snapshot.card.benchmark_comparison?.items.find((item) =>
+    item.name.includes(benchmarkKeyword) || item.benchmark_id.includes(benchmarkKeyword),
+  );
+  if (!comparison || comparison.excess_return_pct === null || Number.isNaN(comparison.excess_return_pct)) {
+    return "-";
+  }
+  const beat = comparison.excess_return_pct >= 0;
+  const prefix = language === "zh" ? (beat ? "跑赢" : "落后") : (beat ? "Beat" : "Lag");
+  return `${prefix} ${formatNumber(comparison.excess_return_pct, "%")}`;
+}
+
+function replayAttribution(
+  snapshot: OpportunitySnapshot,
+  outcome: OpportunityOutcome | undefined,
+  language: "zh" | "en",
+): string {
+  const strategy = localizeStrategy(snapshot.primary_strategy_id, language);
+  const topFactor = [...snapshot.card.factor_exposures]
+    .sort((left, right) => right.score * right.weight - left.score * left.weight)[0];
+  const factor = topFactor ? factorLabel(topFactor.factor_id, language) : snapshot.card.factor_flags[0];
+  const return20 = outcome?.return_20d;
+  if (return20 === null || return20 === undefined) {
+    return language === "zh"
+      ? `${strategy} / ${factor ?? "因子"}：等待 20 日结果`
+      : `${strategy} / ${factor ?? "factor"}: waiting for 20D result`;
+  }
+  if (return20 > 0) {
+    return language === "zh"
+      ? `${strategy} 有效，主要由 ${factor ?? "综合因子"} 支撑`
+      : `${strategy} worked, supported by ${factor ?? "combined factors"}`;
+  }
+  return language === "zh"
+    ? `${strategy} 暂弱，检查 ${factor ?? "因子"} 是否失效或市场环境不配合`
+    : `${strategy} weak; check whether ${factor ?? "factor"} failed or regime was poor`;
+}
+
+function strategyEffectScore(item: StrategyPerformanceResponse["performance"][number]) {
+  return (item.avg_return_10d ?? -20) + (item.positive_rate_10d ?? 0) * 8 - Math.abs(item.max_drawdown_pct ?? 0) * 0.12;
+}
+
+function strategyStatus(item: StrategyPerformanceResponse["performance"][number]) {
+  if (item.completed_count < 5) return "watch";
+  if ((item.avg_return_10d ?? 0) > 0 && (item.positive_rate_10d ?? 0) >= 0.5) return "good";
+  if ((item.avg_return_10d ?? 0) < 0 || (item.positive_rate_10d ?? 1) < 0.4) return "risk";
+  return "watch";
+}
+
+function strategyStatusLabel(item: StrategyPerformanceResponse["performance"][number], language: "zh" | "en") {
+  const status = strategyStatus(item);
+  if (language !== "zh") {
+    return status === "good" ? "Working" : status === "risk" ? "Weak" : "Watch";
+  }
+  return status === "good" ? "最近有效" : status === "risk" ? "最近失效" : "观察";
+}
+
+function factorAction(
+  spread: number | null,
+  rankIc: number | null,
+  sampleCount: number,
+  language: "zh" | "en",
+) {
+  if (sampleCount < 10) {
+    return language === "zh" ? "样本不足" : "Limited";
+  }
+  if ((spread ?? 0) > 0 && (rankIc ?? 0) > 0) {
+    return language === "zh" ? "加权" : "Boost";
+  }
+  if ((spread ?? 0) < 0 || (rankIc ?? 0) < 0) {
+    return language === "zh" ? "降权" : "Reduce";
+  }
+  return language === "zh" ? "维持" : "Keep";
+}
+
+function factorLabel(factorId: string, language: "zh" | "en") {
+  if (language !== "zh") {
+    return factorId;
+  }
+  const labels: Record<string, string> = {
+    valuation: "EP估值",
+    size: "市值过滤",
+    quality: "质量因子",
+    momentum: "趋势动量",
+    trend_quality: "趋势质量",
+    liquidity: "流动性",
+    low_risk: "低波动过滤",
+    risk_filter: "风险过滤",
+    reversal: "回踩反转",
+    theme_strength: "主题强度",
+  };
+  return labels[factorId] ?? factorId;
+}
+
+function localizeWeightAction(action: string, language: "zh" | "en") {
+  if (language !== "zh") {
+    return action;
+  }
+  const labels: Record<string, string> = {
+    boost: "加权",
+    keep: "维持",
+    reduce: "降权",
+    disable: "禁用",
+    watch: "观察",
+  };
+  return labels[action] ?? action;
+}
+
+function dataHealthHas(dataHealth: Record<string, string>, keys: string[]) {
+  return keys.some((key) => {
+    const value = dataHealth[key];
+    if (!value) {
+      return false;
+    }
+    const normalized = String(value).toLowerCase();
+    return normalized !== "0" && normalized !== "false" && normalized !== "unknown" && normalized !== "missing";
+  });
 }
 
 function effectivenessVerdict(
