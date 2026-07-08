@@ -6,6 +6,7 @@ import {
   fetchFullMarketBatchScan,
   fetchLatestFullMarketBatchResult,
   fetchLatestFullMarketBatchScan,
+  fetchMarketBars,
   fetchPaperValidation,
   fetchRecommendationFollowThrough,
   saveAlertRule,
@@ -17,6 +18,7 @@ import { ManualActionCenterPanel } from "../components/ManualActionCenter";
 import { MarketRotationRadarPanel } from "../components/MarketRotationRadar";
 import { MarketIntelligenceCenterPanel } from "../components/MarketIntelligenceCenter";
 import { RecommendationFollowThroughPanel } from "../components/RecommendationFollowThrough";
+import { OpportunityCandlestickChart } from "../components/OpportunityChart";
 import { DecisionQualityCenterPanel } from "../components/DecisionQualityCenter";
 import { OperationalReadinessCenterPanel } from "../components/OperationalReadinessCenter";
 import { AlphaQualityCenterPanel } from "../components/AlphaQualityCenter";
@@ -40,6 +42,7 @@ import type {
   DataProviderMode,
   FullMarketBatchScanJob,
   FullMarketScanResponse,
+  MarketBarsResponse,
   OpportunityCard,
   PaperValidationResponse,
   RecommendationFollowThroughCenterResponse,
@@ -609,6 +612,7 @@ function TodayTradeTicket({
           </p>
         </div>
       </div>
+      <TodayRecommendationKline card={activeCard} dataMode={dataMode} language={language} />
       <div className="workup-actions compact">
         <button
           className="icon-action"
@@ -623,6 +627,56 @@ function TodayTradeTicket({
         {paperMessage && <span>{paperMessage}</span>}
       </div>
     </div>
+  );
+}
+
+function TodayRecommendationKline({
+  card,
+  dataMode,
+  language,
+}: {
+  card: OpportunityCard;
+  dataMode: DataProviderMode;
+  language: "zh" | "en";
+}) {
+  const [chart, setChart] = useState<MarketBarsResponse>();
+  const [chartError, setChartError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setChart(undefined);
+    setChartError("");
+    void fetchMarketBars(dataMode, card.instrument_id, 160)
+      .then((result) => {
+        if (!cancelled) {
+          setChart(result);
+        }
+      })
+      .catch((caught) => {
+        if (!cancelled) {
+          setChartError(caught instanceof Error ? caught.message : language === "zh" ? "K线加载失败。" : "Failed to load K-line.");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [card.instrument_id, dataMode, language]);
+
+  return (
+    <section className="today-kline-panel" aria-label={language === "zh" ? "当前推荐K线买卖点" : "Selected recommendation K-line levels"}>
+      <header>
+        <div>
+          <span>{language === "zh" ? "日K复盘" : "Daily K-line"}</span>
+          <strong>{formatInstrumentDisplay(card.instrument_id, card.instrument_label)}</strong>
+        </div>
+        <small>{language === "zh" ? "K线 / 成交量 / 均线 / 买卖点" : "Candles / volume / moving averages / levels"}</small>
+      </header>
+      {chartError ? (
+        <p className="empty error">{chartError}</p>
+      ) : (
+        <OpportunityCandlestickChart data={chart} levels={chartLevelsFromTodayCard(card)} />
+      )}
+    </section>
   );
 }
 
@@ -1309,6 +1363,16 @@ function paperPayloadFromCard(card: OpportunityCard, dataMode: DataProviderMode)
     rank_score: card.rank_score,
     action: card.decision?.action ?? "watch_trigger",
     risk_status: card.decision?.risk_status ?? "clear",
+  };
+}
+
+function chartLevelsFromTodayCard(card: OpportunityCard): Partial<MarketBarsResponse["levels"]> {
+  return {
+    trigger_price: card.entry_plan.trigger_price ?? card.decision?.trigger_price ?? null,
+    initial_stop: card.exit_plan.initial_stop ?? card.decision?.initial_stop ?? null,
+    target_1: card.exit_plan.target_1 ?? card.decision?.target_1 ?? null,
+    target_2: card.exit_plan.target_2 ?? null,
+    no_chase_above: card.entry_plan.no_chase_above ?? card.decision?.no_chase_above ?? null,
   };
 }
 

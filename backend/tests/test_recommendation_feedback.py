@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from decimal import Decimal
 
 import pandas as pd
 
@@ -9,9 +10,18 @@ from qagent.monitoring.recommendation_calibration import (
     RecommendationCalibrationCenter,
     RecommendationSignalEffect,
 )
+from qagent.paper_trading.engine import (
+    PaperDailyBenchmark,
+    PaperDailyReport,
+    PaperDailyReportSummary,
+    PaperFailureAttributionItem,
+    PaperRiskGateStatus,
+)
 from qagent.recommendations.feedback import (
     apply_recommendation_feedback_calibration,
     apply_recommendation_feedback_quality_gate,
+    apply_paper_trading_feedback,
+    paper_trading_feedback_data_health,
     recommendation_feedback_data_health,
 )
 from qagent.recommendations.quality_gate import apply_recommendation_quality_gate
@@ -130,6 +140,64 @@ def test_recommendation_feedback_blocks_signals_with_bad_followthrough():
     assert health["recommendation_feedback_blocked"] == "1"
 
 
+def test_paper_trading_feedback_demotes_failed_strategy_and_etf_cluster():
+    failed_etf = _card("CN:588200", "科创芯片ETF嘉实 588200.SH", 0.78, ["trend_momentum_stage2"])
+    failed_etf.primary_strategy_id = "trend_momentum_stage2"
+    unrelated = _card("CN:600519", "贵州茅台 600519.SH", 0.78, ["quality_compounder"])
+    unrelated.primary_strategy_id = "quality_compounder"
+    report = _paper_report(
+        [
+            PaperFailureAttributionItem(
+                dimension="strategy",
+                key="trend_momentum_stage2",
+                label="二阶段趋势动量",
+                total_trades=8,
+                evaluated_trades=6,
+                closed_trades=5,
+                stopped_trades=4,
+                target_hit_trades=0,
+                win_rate=0.17,
+                average_return_pct=-2.8,
+                total_pnl=-Decimal("820"),
+                total_return_pct=-4.4,
+                worst_return_pct=-6.8,
+                verdict="drag",
+                note="模拟盘中该策略连续止损。",
+            ),
+            PaperFailureAttributionItem(
+                dimension="asset",
+                key="etf",
+                label="ETF",
+                total_trades=5,
+                evaluated_trades=5,
+                closed_trades=4,
+                stopped_trades=4,
+                target_hit_trades=0,
+                win_rate=0.0,
+                average_return_pct=-3.2,
+                total_pnl=-Decimal("650"),
+                total_return_pct=-5.3,
+                worst_return_pct=-7.2,
+                verdict="drag",
+                note="ETF 组合近期模拟盘表现偏弱。",
+            ),
+        ]
+    )
+
+    before_failed = failed_etf.rank_score
+    before_unrelated = unrelated.rank_score
+
+    apply_paper_trading_feedback([failed_etf, unrelated], report)
+
+    assert failed_etf.rank_score < before_failed
+    assert unrelated.rank_score == before_unrelated
+    assert any("模拟盘反馈" in reason for reason in failed_etf.rank_reasons)
+    assert any("二阶段趋势动量" in note for note in failed_etf.calibration_notes)
+    health = paper_trading_feedback_data_health([failed_etf, unrelated])
+    assert health["paper_feedback_adjusted"] == "1"
+    assert health["paper_feedback_blocked"] == "0"
+
+
 def _card(instrument_id: str, label: str, score: float, flags: list[str]):
     card = build_factor_watch_card(
         instrument_id,
@@ -176,3 +244,39 @@ def _bars(instrument_id: str) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def _paper_report(failure_attribution: list[PaperFailureAttributionItem]) -> PaperDailyReport:
+    return PaperDailyReport(
+        report_date=date(2026, 7, 8),
+        summary=PaperDailyReportSummary(
+            total_trades=10,
+            new_opportunities=0,
+            triggered_today=0,
+            open_positions=1,
+            closed_today=2,
+            target_hits_today=0,
+            stopped_today=2,
+            total_return_pct=-4.2,
+            max_drawdown_pct=-6.4,
+            win_rate=0.18,
+        ),
+        benchmark=PaperDailyBenchmark(total_return_pct=-1.0, items=[], summary="跑输基准。"),
+        risk_gate=PaperRiskGateStatus(
+            action="pause_new_entries",
+            can_add_entries=False,
+            title="暂停新增",
+            reason="模拟盘连续止损。",
+            reasons=["连续止损", "跑输基准"],
+            recovery_conditions=["等待止损率下降", "恢复目标命中"],
+        ),
+        failure_attribution=failure_attribution,
+        event_timeline=[],
+        new_opportunities=[],
+        triggered_today=[],
+        holdings=[],
+        closed_today=[],
+        asset_groups=[],
+        next_trade_day_focus=[],
+        data_health={},
+    )

@@ -40,6 +40,7 @@ import type {
   PaperTradesResponse,
   PaperUpdateResponse,
   PaperValidationResponse,
+  ParameterSensitivityResponse,
   PortfolioBacktestResponse,
   OverviewResponse,
   PortfolioResponse,
@@ -638,6 +639,19 @@ export async function fetchBacktest(
     symbols,
     step_days: 5,
     limit: 100,
+    scan_limit: provider === "free" ? 30 : undefined,
+  });
+}
+
+export async function fetchParameterSensitivity(
+  provider: DataProviderMode,
+  symbols?: string,
+): Promise<ParameterSensitivityResponse> {
+  return apiGet<ParameterSensitivityResponse>("/parameter-sensitivity", {
+    provider,
+    symbols,
+    step_days: 5,
+    limit: 150,
     scan_limit: provider === "free" ? 30 : undefined,
   });
 }

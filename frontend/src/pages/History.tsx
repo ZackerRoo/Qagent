@@ -5,6 +5,7 @@ import {
   fetchFactorBacktest,
   fetchOpportunityHistory,
   fetchOutcomes,
+  fetchParameterSensitivity,
   fetchPortfolioBacktest,
   fetchRecommendationCalibration,
   fetchRecommendationClosure,
@@ -35,6 +36,7 @@ import type {
   OpportunityCard,
   OpportunitySnapshot,
   OutcomesResponse,
+  ParameterSensitivityResponse,
   PortfolioEquityPoint,
   PortfolioBacktestResponse,
   PortfolioMonthlyReturn,
@@ -104,6 +106,7 @@ export function History({
   const [backtest, setBacktest] = useState<BacktestResponse>();
   const [factorBacktest, setFactorBacktest] = useState<FactorBacktestResponse>();
   const [portfolioBacktest, setPortfolioBacktest] = useState<PortfolioBacktestResponse>();
+  const [parameterSensitivity, setParameterSensitivity] = useState<ParameterSensitivityResponse>();
   const [runs, setRuns] = useState<ScanRunsResponse>();
   const [history, setHistory] = useState<OpportunityHistoryResponse>();
   const [outcomes, setOutcomes] = useState<OutcomesResponse>();
@@ -113,6 +116,7 @@ export function History({
   const [diagnostics, setDiagnostics] = useState<StrategyDiagnosticsResponse>();
   const [error, setError] = useState("");
   const [backtestError, setBacktestError] = useState("");
+  const [parameterSensitivityError, setParameterSensitivityError] = useState("");
   const [factorBacktestError, setFactorBacktestError] = useState("");
   const [portfolioBacktestError, setPortfolioBacktestError] = useState("");
   const [isBacktesting, setIsBacktesting] = useState(false);
@@ -164,8 +168,16 @@ export function History({
     try {
       setIsBacktesting(true);
       setBacktestError("");
+      setParameterSensitivityError("");
       const result = await fetchBacktest(dataMode, selectedBacktestSymbols);
       setBacktest(result);
+      fetchParameterSensitivity(dataMode, selectedBacktestSymbols)
+        .then(setParameterSensitivity)
+        .catch((caught) => {
+          setParameterSensitivityError(
+            caught instanceof Error ? caught.message : "Failed to run parameter sensitivity",
+          );
+        });
       setBacktestRunContext({
         kind: "selected",
         label: selectedBacktestLabel || formatInstrumentDisplay(selectedBacktestSymbols),
@@ -226,6 +238,7 @@ export function History({
     }
     autoBacktestKeyRef.current = key;
     setBacktestError("");
+    setParameterSensitivityError("");
     setIsBacktesting(true);
 
     void fetchBacktest(dataMode, selectedBacktestSymbols).then((result) => {
@@ -238,6 +251,19 @@ export function History({
         label: selectedBacktestLabel,
         provider: dataMode,
       });
+      fetchParameterSensitivity(dataMode, selectedBacktestSymbols)
+        .then((sensitivity) => {
+          if (autoBacktestKeyRef.current === key) {
+            setParameterSensitivity(sensitivity);
+          }
+        })
+        .catch((caught) => {
+          if (autoBacktestKeyRef.current === key) {
+            setParameterSensitivityError(
+              caught instanceof Error ? caught.message : "Failed to run parameter sensitivity",
+            );
+          }
+        });
     }).catch((caught) => {
       if (autoBacktestKeyRef.current === key) {
         setBacktestError(caught instanceof Error ? caught.message : "Failed to run backtest");
@@ -334,6 +360,12 @@ export function History({
               fallbackLabel={activeBacktestLabel}
             />
             <BacktestInterpretation backtest={backtest} />
+            {parameterSensitivityError && (
+              <div className="empty-state error">{parameterSensitivityError}</div>
+            )}
+            {parameterSensitivity ? (
+              <ParameterSensitivityPanel sensitivity={parameterSensitivity} />
+            ) : null}
             <DataHealth data={backtest.data_health} language={language} />
             <div className="metric-grid">
               <div>
@@ -486,6 +518,7 @@ export function History({
         {factorBacktest ? (
           <div className="stack">
             <DataHealth data={factorBacktest.data_health} language={language} />
+            <FactorTearSheet factorBacktest={factorBacktest} />
             <div className="metric-grid">
               <div>
                 <span>{t("common.samples")}</span>
@@ -595,6 +628,7 @@ export function History({
         {portfolioBacktest ? (
           <div className="stack">
             <DataHealth data={portfolioBacktest.data_health} language={language} />
+            <PerformanceTearSheet portfolioBacktest={portfolioBacktest} />
             <div className="metric-grid">
               <div>
                 <span>{t("history.initial")}</span>
@@ -975,7 +1009,7 @@ function RecommendationEffectivenessCenter({
   const completedSamples = primaryWindow?.completed_count ?? 0;
   const totalSamples = primaryWindow?.sample_count ?? 0;
   const strongestEffects = [...(calibration?.signal_effects ?? [])]
-    .filter((effect) => effect.completed_count > 0)
+    .filter((effect) => effect.completed_count > 0 && effect.lift_vs_baseline_10d !== null)
     .sort((left, right) => (right.reliability_score - left.reliability_score) || (right.completed_count - left.completed_count))
     .slice(0, 6);
   const strategyRows = [...(performance?.performance ?? [])]
@@ -986,6 +1020,7 @@ function RecommendationEffectivenessCenter({
       return rightScore - leftScore;
     })
     .slice(0, 6);
+  const strategyChartRows = strategyRows.filter((item) => item.completed_count > 0 && item.avg_return_10d !== null);
   const recentOutcomes = (closure?.completed_outcomes.length ? closure.completed_outcomes : closure?.latest_outcomes) ?? outcomes?.outcomes ?? [];
   const recentSamples = calibration?.recent_samples ?? [];
   const verdict = effectivenessVerdict(primaryWindow, calibration, language);
@@ -1018,10 +1053,10 @@ function RecommendationEffectivenessCenter({
       <div className="effectiveness-hero">
         <div>
           <p className="eyebrow">{language === "zh" ? "推荐有效性复盘" : "Recommendation Review"}</p>
-          <h2>{language === "zh" ? "Qagent 的推荐到底准不准" : "Is Qagent's signal working?"}</h2>
+          <h2>{language === "zh" ? "真实推荐复盘，不是历史回测" : "Live recommendation review, not a backtest"}</h2>
           <p className="brief-headline">
             {language === "zh"
-              ? "把推荐后的收益、策略表现和权重调整放在一屏，先看结论，再看样本。"
+              ? "这里只统计 Qagent 已经真实发出的推荐。推荐发出后要等 5/10/20/30 个交易日走完，才会进入收益、胜率和权重校准。"
               : "One screen for post-signal returns, strategy ranking, and weight changes."}
           </p>
         </div>
@@ -1031,6 +1066,11 @@ function RecommendationEffectivenessCenter({
           <p>{verdict.detail}</p>
         </div>
       </div>
+      <p className="compact-note">
+        {language === "zh"
+          ? "历史回测用过去行情重放，在下方“历史回测”区域；这里的 8/150、0/8 指真实推荐到期情况，不代表过去行情没有数据。"
+          : "Historical replay is in the Historical Backtest section below; ratios here describe live recommendations maturing over future windows."}
+      </p>
 
       <div className="effectiveness-temperature-board">
         <div className={`temperature-gauge temperature-${temperatureTone}`}>
@@ -1070,9 +1110,9 @@ function RecommendationEffectivenessCenter({
         <div className="temperature-side-stack">
           {[
             {
-              label: language === "zh" ? "成熟样本" : "Mature samples",
+              label: language === "zh" ? "已到期推荐" : "Mature recommendations",
               value: `${completedSamples}/${totalSamples}`,
-              note: primaryWindow ? `${primaryWindow.window_days}D` : "-",
+              note: primaryWindow ? `${primaryWindow.window_days}D ${language === "zh" ? "窗口" : "window"}` : "-",
             },
             {
               label: language === "zh" ? "平均收益" : "Avg return",
@@ -1096,9 +1136,15 @@ function RecommendationEffectivenessCenter({
 
       <div className="effectiveness-kpi-grid">
         <div>
-          <span>{language === "zh" ? "闭环样本" : "Closure sample"}</span>
+          <span>{language === "zh" ? "已到期 / 全部真实推荐" : "Mature / all live signals"}</span>
           <strong>{completedSamples}/{totalSamples}</strong>
-          <small>{primaryWindow ? `${primaryWindow.window_days}D ${primaryWindow.verdict}` : "-"}</small>
+          <small>
+            {primaryWindow
+              ? language === "zh"
+                ? `${primaryWindow.window_days}D 窗口，未到期不计入胜率`
+                : `${primaryWindow.window_days}D window; immature signals are excluded`
+              : "-"}
+          </small>
         </div>
         <div>
           <span>{language === "zh" ? "10日胜率" : "10D win rate"}</span>
@@ -1124,19 +1170,26 @@ function RecommendationEffectivenessCenter({
 
       <div className="effectiveness-chart-grid">
         <BarValidationChart
-          title={language === "zh" ? "策略排行榜" : "Strategy Ranking"}
-          headline={`${strategyRows.length} ${t("history.samples")}`}
+          title={language === "zh" ? "真实推荐策略表现" : "Live Strategy Performance"}
+          headline={
+            language === "zh"
+              ? `${strategyChartRows.length}/${strategyRows.length} 有10日结果`
+              : `${strategyChartRows.length}/${strategyRows.length} with 10D results`
+          }
           meta={[
             {
               label: language === "zh" ? "样本来源" : "Source",
-              value: language === "zh" ? "推荐后表现" : "Post-signal outcomes",
+              value: language === "zh" ? "真实推荐到期后表现" : "Mature live recommendations",
             },
           ]}
-          bars={strategyRows.map((item) => ({
+          bars={strategyChartRows.map((item) => ({
             label: localizeStrategy(item.strategy_id, language),
-            value: item.avg_return_10d ?? 0,
+            value: item.avg_return_10d ?? Number.NaN,
             valueLabel: formatNumber(item.avg_return_10d, "%"),
-            caption: `${formatRatio(item.positive_rate_10d)} · ${item.completed_count}/${item.sample_count}`,
+            caption:
+              language === "zh"
+                ? `${formatRatio(item.positive_rate_10d)} · ${item.completed_count}/${item.sample_count} 已到期`
+                : `${formatRatio(item.positive_rate_10d)} · ${item.completed_count}/${item.sample_count} mature`,
           }))}
           className="xhs-bar-card"
         />
@@ -1153,7 +1206,7 @@ function RecommendationEffectivenessCenter({
           ]}
           bars={strongestEffects.map((effect) => ({
             label: effect.label,
-            value: effect.lift_vs_baseline_10d ?? 0,
+            value: effect.lift_vs_baseline_10d ?? Number.NaN,
             valueLabel: formatNumber(effect.lift_vs_baseline_10d, "%"),
             caption: `${effect.weight_action} ${signedPercent(effect.suggested_weight_delta)} · ${effect.completed_count}/${effect.sample_count}`,
           }))}
@@ -1373,7 +1426,7 @@ function StrategyFactorEffectivenessCenter({
           <h2>{language === "zh" ? "最近哪些方法有效，哪些失效" : "What is working recently"}</h2>
           <p className="brief-headline">
             {language === "zh"
-              ? "不是只看单只股票，而是统计策略、质量、估值、主题和低波动过滤在最近样本里的表现。"
+              ? "这里分两类：策略表看真实推荐到期后的表现；因子表运行因子回测后才切换成历史 IC、Rank IC 和分层收益。"
               : "Aggregates strategy and factor performance instead of judging one stock at a time."}
           </p>
         </div>
@@ -1390,7 +1443,7 @@ function StrategyFactorEffectivenessCenter({
               <thead>
                 <tr>
                   <th>{language === "zh" ? "策略" : "Strategy"}</th>
-                  <th>{language === "zh" ? "样本" : "Samples"}</th>
+                  <th>{language === "zh" ? "已到期/全部" : "Mature/all"}</th>
                   <th>{language === "zh" ? "胜率" : "Win"}</th>
                   <th>{language === "zh" ? "均值" : "Avg"}</th>
                   <th>{language === "zh" ? "回撤" : "DD"}</th>
@@ -1400,6 +1453,7 @@ function StrategyFactorEffectivenessCenter({
               <tbody>
                 {strategies.map((item) => {
                   const diagnostic = diagnosticMap.get(item.strategy_id);
+                  const waiting = item.completed_count < 5;
                   return (
                     <tr key={item.strategy_id}>
                       <td className="reason-cell">{localizeStrategy(item.strategy_id, language)}</td>
@@ -1408,8 +1462,12 @@ function StrategyFactorEffectivenessCenter({
                       <td className={signedCellClass(item.avg_return_10d)}>{formatNumber(item.avg_return_10d, "%")}</td>
                       <td>{formatNumber(item.max_drawdown_pct, "%")}</td>
                       <td>
-                        <span className={`status status-${diagnostic?.verdict ?? strategyStatus(item)}`}>
-                          {diagnostic
+                        <span className={`status status-${waiting ? "watch" : diagnostic?.verdict ?? strategyStatus(item)}`}>
+                          {waiting
+                            ? language === "zh"
+                              ? "等待到期"
+                              : "Maturing"
+                            : diagnostic
                             ? localizeDiagnosticVerdict(diagnostic.verdict, language)
                             : strategyStatusLabel(item, language)}
                         </span>
@@ -1455,7 +1513,7 @@ function StrategyFactorEffectivenessCenter({
           {!factorBacktest ? (
             <p className="compact-note">
               {language === "zh"
-                ? "运行因子回测后，这里会切换成 IC、Rank IC 和分层收益验证。"
+                ? "注意：左侧策略表不是历史回测，它来自真实推荐复盘。运行因子回测后，右侧才会显示历史 IC、Rank IC 和分层收益验证。"
                 : "Run factor backtest to switch this table to IC, Rank IC, and quantile-return evidence."}
             </p>
           ) : null}
@@ -1779,9 +1837,11 @@ function effectivenessVerdict(
   if (!window || window.completed_count < 5) {
     return {
       tone: "watch" as const,
-      label: zh ? "样本不足" : "Limited",
+      label: zh ? "等待推荐到期" : "Waiting for maturity",
       value: `${window?.completed_count ?? 0}/${window?.sample_count ?? 0}`,
-      detail: zh ? "先观察胜率、均值和回撤，不急着放大仓位。" : "Track win rate, average return, and drawdown first.",
+      detail: zh
+        ? "这是真实推荐复盘，不是历史回测。未走完窗口的推荐不会计入胜率和均值。"
+        : "This is live follow-through, not a historical backtest. Immature signals are excluded from win rate and average return.",
     };
   }
   const winRate = window.win_rate ?? 0;
@@ -2769,6 +2829,204 @@ function BacktestInterpretation({ backtest }: { backtest: BacktestResponse }) {
   );
 }
 
+function ParameterSensitivityPanel({
+  sensitivity,
+}: {
+  sensitivity: ParameterSensitivityResponse;
+}) {
+  const { language } = useI18n();
+  const recommended = sensitivity.recommended;
+  const topScenarios = sensitivity.grid.slice(0, 6);
+  return (
+    <div className="validation-card parameter-sensitivity-sheet">
+      <header>
+        <div>
+          <h3>{language === "zh" ? "参数敏感性" : "Parameter Sensitivity"}</h3>
+          <p>
+            {language === "zh"
+              ? "比较不同止损、止盈和持有天数下，历史推荐信号的表现。"
+              : "Compares stop, target, and holding-day settings across historical recommendation signals."}
+          </p>
+        </div>
+        <span>{sensitivity.summary.sample_count} {language === "zh" ? "样本" : "samples"}</span>
+      </header>
+      <div className="metric-grid compact">
+        <div>
+          <span>{language === "zh" ? "建议止损" : "Stop"}</span>
+          <strong>{recommended ? `${recommended.stop_loss_pct}%` : "-"}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "建议目标" : "Target"}</span>
+          <strong>{recommended ? `${recommended.target_pct}%` : "-"}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "建议持有" : "Hold"}</span>
+          <strong>{recommended ? `${recommended.hold_days}D` : "-"}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "历史均值" : "Avg"}</span>
+          <strong>{recommended ? formatNumber(recommended.avg_return_pct, "%") : "-"}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "胜率" : "Win rate"}</span>
+          <strong>{recommended ? formatRatio(recommended.win_rate) : "-"}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "最差结果" : "Worst"}</span>
+          <strong>{recommended ? formatNumber(recommended.worst_return_pct, "%") : "-"}</strong>
+        </div>
+      </div>
+      <BarValidationChart
+        title={language === "zh" ? "参数网格均值收益" : "Parameter Grid Avg Return"}
+        headline={recommended?.verdict ?? "-"}
+        meta={[
+          {
+            label: language === "zh" ? "场景" : "Scenarios",
+            value: String(sensitivity.summary.scenario_count),
+          },
+          {
+            label: language === "zh" ? "口径" : "Basis",
+            value: language === "zh" ? "历史信号" : sensitivity.summary.data_basis,
+          },
+        ]}
+        bars={topScenarios.map((scenario) => ({
+          label: `${scenario.stop_loss_pct}/${scenario.target_pct}/${scenario.hold_days}D`,
+          value: scenario.avg_return_pct ?? 0,
+          valueLabel: formatNumber(scenario.avg_return_pct, "%"),
+          caption: `${formatRatio(scenario.win_rate)} · ${formatNumber(scenario.max_drawdown_pct, "%")}`,
+        }))}
+      />
+    </div>
+  );
+}
+
+function FactorTearSheet({
+  factorBacktest,
+}: {
+  factorBacktest: FactorBacktestResponse;
+}) {
+  const { language } = useI18n();
+  const ic = factorBacktest.information_coefficient;
+  const topFactor = maxBy(factorBacktest.factor_ic, (item) => item.mean_rank_ic ?? -Infinity);
+  const quantiles = factorBacktest.quantile_buckets.slice().sort((left, right) => left.quantile - right.quantile);
+  return (
+    <div className="validation-card factor-tear-sheet">
+      <header>
+        <div>
+          <h3>{language === "zh" ? "因子 Tear Sheet" : "Factor Tear Sheet"}</h3>
+          <p>
+            {language === "zh"
+              ? "看 IC、Rank IC 和分层收益，判断因子排序是不是真的有历史区分度。"
+              : "Uses IC, Rank IC, and quantile returns to judge whether factor ranking had historical separation."}
+          </p>
+        </div>
+        <span>{factorBacktest.summary.completed_count}/{factorBacktest.summary.sample_count}</span>
+      </header>
+      <div className="metric-grid compact">
+        <div>
+          <span>IC</span>
+          <strong>{formatNumber(ic.mean_ic)}</strong>
+        </div>
+        <div>
+          <span>Rank IC</span>
+          <strong>{formatNumber(ic.mean_rank_ic)}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "多空差" : "Spread"}</span>
+          <strong>{formatNumber(ic.top_bottom_spread_pct, "%")}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "IC正值率" : "Positive IC"}</span>
+          <strong>{formatRatio(ic.positive_ic_rate)}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "最佳因子" : "Best factor"}</span>
+          <strong>{topFactor ? topFactor.label : "-"}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "平均前瞻" : "Avg forward"}</span>
+          <strong>{formatNumber(factorBacktest.summary.avg_forward_return_pct, "%")}</strong>
+        </div>
+      </div>
+      <BarValidationChart
+        title={language === "zh" ? "分层收益" : "Quantile Return"}
+        headline={formatNumber(ic.top_bottom_spread_pct, "%")}
+        bars={quantiles.map((bucket) => ({
+          label: bucket.label,
+          value: bucket.avg_forward_return_pct ?? 0,
+          valueLabel: formatNumber(bucket.avg_forward_return_pct, "%"),
+          caption: `${bucket.completed_count}/${bucket.sample_count} · ${formatRatio(bucket.positive_rate)}`,
+        }))}
+      />
+    </div>
+  );
+}
+
+function PerformanceTearSheet({
+  portfolioBacktest,
+}: {
+  portfolioBacktest: PortfolioBacktestResponse;
+}) {
+  const { language } = useI18n();
+  const monthly = portfolioBacktest.monthly_returns.map((item) => item.return_pct);
+  const positiveMonths = monthly.filter((value) => value > 0).length;
+  const calmar =
+    portfolioBacktest.summary.max_drawdown_pct < 0
+      ? portfolioBacktest.summary.total_return_pct / Math.abs(portfolioBacktest.summary.max_drawdown_pct)
+      : null;
+  const sharpeProxy = monthly.length > 1 ? monthlySharpeProxy(monthly) : null;
+  return (
+    <div className="validation-card performance-tear-sheet">
+      <header>
+        <div>
+          <h3>{language === "zh" ? "绩效 Tear Sheet" : "Performance Tear Sheet"}</h3>
+          <p>
+            {language === "zh"
+              ? "把账户收益、回撤、胜率和月度稳定性放在一起看。"
+              : "Combines account return, drawdown, win rate, and monthly stability."}
+          </p>
+        </div>
+        <span>{portfolioBacktest.summary.trade_count} {language === "zh" ? "笔" : "trades"}</span>
+      </header>
+      <div className="metric-grid compact">
+        <div>
+          <span>{language === "zh" ? "总收益" : "Return"}</span>
+          <strong>{formatNumber(portfolioBacktest.summary.total_return_pct, "%")}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "最大回撤" : "Max DD"}</span>
+          <strong>{formatNumber(portfolioBacktest.summary.max_drawdown_pct, "%")}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "收益/回撤" : "Return/DD"}</span>
+          <strong>{formatMultiple(calmar)}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "夏普近似" : "Sharpe proxy"}</span>
+          <strong>{formatNumber(sharpeProxy)}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "正收益月份" : "Positive months"}</span>
+          <strong>{formatRatio(monthly.length ? positiveMonths / monthly.length : null)}</strong>
+        </div>
+        <div>
+          <span>{language === "zh" ? "盈利因子" : "Profit factor"}</span>
+          <strong>{formatNumber(portfolioBacktest.summary.profit_factor)}</strong>
+        </div>
+      </div>
+      <LineValidationChart
+        title={language === "zh" ? "权益走势" : "Equity Trend"}
+        tone="equity"
+        points={portfolioBacktest.equity_curve.map((point) => ({
+          label: point.date,
+          value: numberFromDecimalText(point.equity),
+        }))}
+        valueFormatter={(value) => value.toFixed(0)}
+      />
+    </div>
+  );
+}
+
 function PortfolioBacktestVisuals({
   portfolioBacktest,
 }: {
@@ -3440,7 +3698,8 @@ function BarValidationChart({
   className?: string;
 }) {
   const { language } = useI18n();
-  if (!bars.length) {
+  const validBars = bars.filter((bar) => Number.isFinite(bar.value));
+  if (!validBars.length) {
     return (
       <div className={`validation-card chart-shell empty-validation-chart ${className}`.trim()}>
         <header>
@@ -3450,11 +3709,11 @@ function BarValidationChart({
         {meta.length ? <ChartMetaStrip items={meta} /> : null}
         <EmptyValidationGraphic title={title} variant="bar" />
         <div className="chart-empty-explanation">
-          <strong>{language === "zh" ? "等待样本" : "Waiting for samples"}</strong>
+          <strong>{language === "zh" ? "等待真实推荐到期" : "Waiting for mature live signals"}</strong>
           <p>
             {language === "zh"
-              ? "当前样本不足，后续推荐完成 5/10/20 日跟踪后会自动生成图表。"
-              : "Not enough samples yet. The chart will appear after tracked recommendations mature."}
+              ? "这里统计真实推荐发出后的表现；等推荐走完 5/10/20 日窗口并产生收益值后才会画图。历史行情回测请看下方单独模块。"
+              : "This chart uses live recommendation follow-through. It appears after recommendations mature into 5/10/20D return values."}
           </p>
         </div>
       </div>
@@ -3463,11 +3722,11 @@ function BarValidationChart({
   const width = 760;
   const height = 300;
   const padding = { top: 36, right: 26, bottom: 52, left: 60 };
-  const values = bars.map((bar) => bar.value);
+  const values = validBars.map((bar) => bar.value);
   const [min, max] = paddedDomain(values, true);
   const mid = min + (max - min) / 2;
   const zeroY = yForChartValue(0, min, max, height, padding);
-  const slot = (width - padding.left - padding.right) / bars.length;
+  const slot = (width - padding.left - padding.right) / validBars.length;
   const barWidth = Math.min(58, Math.max(18, slot * 0.54));
 
   return (
@@ -3499,7 +3758,7 @@ function BarValidationChart({
           ))}
           <line className="validation-zero-line" x1={padding.left} y1={zeroY} x2={width - padding.right} y2={zeroY} />
         </g>
-        {bars.map((bar, index) => {
+        {validBars.map((bar, index) => {
           const x = padding.left + index * slot + (slot - barWidth) / 2;
           const valueY = yForChartValue(bar.value, min, max, height, padding);
           const y = Math.min(valueY, zeroY);
@@ -3525,7 +3784,7 @@ function BarValidationChart({
         })}
       </svg>
       <div className="bar-caption-grid">
-        {bars.map((bar) => (
+        {validBars.map((bar) => (
           <span key={bar.label}>
             <strong>{bar.label}</strong>
             {bar.caption}
@@ -3597,7 +3856,7 @@ function EmptyValidationGraphic({
           );
         })
       )}
-      <text x={padding.left} y={height - 10}>等待样本</text>
+      <text x={padding.left} y={height - 10}>等待到期</text>
       <text x={width - padding.right} y={height - 10} textAnchor="end">自动生成</text>
     </svg>
   );
@@ -3858,4 +4117,18 @@ function minBy<T>(items: T[], picker: (item: T) => number | null): T | undefined
     }
   }
   return worst;
+}
+
+function monthlySharpeProxy(values: number[]): number | null {
+  if (values.length < 2) {
+    return null;
+  }
+  const average = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance =
+    values.reduce((sum, value) => sum + (value - average) ** 2, 0) / (values.length - 1);
+  const deviation = Math.sqrt(variance);
+  if (!Number.isFinite(deviation) || deviation === 0) {
+    return null;
+  }
+  return (average / deviation) * Math.sqrt(12);
 }

@@ -341,24 +341,26 @@ function UnrecommendedReasonsTable({ items }: { items: ScanItem[] }) {
               <td>{formatScore(item.rejection_score)}</td>
               <td>{item.latest_close ?? "-"}</td>
               <td className="reason-cell">
-                {item.blockers.length
-                  ? item.blockers
-                      .map(
-                        (blocker) =>
-                          `${localizeScanBlocker(blocker.code, language)}：${localizeScanBlockerMessage(
-                            blocker.code,
-                            blocker.message,
-                            language,
-                          )}`,
-                      )
-                      .join(language === "zh" ? "；" : "; ")
-                  : formatInstrumentText(
-                      localizeReason(item.reason, language),
-                      item.instrument_id,
-                      item.instrument_label,
-                    )}
+                <ReasonDigest
+                  text={
+                    item.blockers.length
+                      ? item.blockers.map(
+                          (blocker) =>
+                            `${localizeScanBlocker(blocker.code, language)}：${localizeScanBlockerMessage(
+                              blocker.code,
+                              blocker.message,
+                              language,
+                            )}`,
+                        )
+                      : formatInstrumentText(
+                          localizeReason(item.reason, language),
+                          item.instrument_id,
+                          item.instrument_label,
+                        )
+                  }
+                />
               </td>
-              <td className="reason-cell">{item.remediation ?? "-"}</td>
+              <td className="reason-cell"><ReasonDigest text={item.remediation ?? "-"} /></td>
             </tr>
           ))}
         </tbody>
@@ -470,11 +472,13 @@ function ScanCoverageTable({ items }: { items: ScanItem[] }) {
               <td>{item.factor_rank ?? "-"}</td>
               <td>{localizeProvider(item.provider, language)}</td>
               <td className="reason-cell">
-                {formatInstrumentText(
-                  localizeReason(item.reason, language),
-                  item.instrument_id,
-                  item.instrument_label,
-                )}
+                <ReasonDigest
+                  text={formatInstrumentText(
+                    localizeReason(item.reason, language),
+                    item.instrument_id,
+                    item.instrument_label,
+                  )}
+                />
               </td>
             </tr>
           ))}
@@ -531,11 +535,13 @@ function FactorRankingsTable({ items }: { items: FactorRanking[] }) {
               <td>{formatScore(item.reversal_score)}</td>
               <td>{formatScore(item.execution_penalty)}</td>
               <td className="reason-cell">
-                {item.flags.length
-                  ? item.flags
-                      .map((flag) => localizeFactorFlag(flag, language))
-                      .join(language === "zh" ? "、" : ", ")
-                  : "-"}
+                <ReasonDigest
+                  text={
+                    item.flags.length
+                      ? item.flags.map((flag) => localizeFactorFlag(flag, language))
+                      : "-"
+                  }
+                />
               </td>
             </tr>
           ))}
@@ -543,6 +549,50 @@ function FactorRankingsTable({ items }: { items: FactorRanking[] }) {
       </table>
     </div>
   );
+}
+
+function ReasonDigest({ text }: { text: string | string[] }) {
+  const { language } = useI18n();
+  const detail = Array.isArray(text) ? text.filter(Boolean).join(language === "zh" ? "；" : "; ") : text;
+  const labels = reasonDigestLabels(detail, language);
+  if (!detail || detail === "-") {
+    return <span>-</span>;
+  }
+  return (
+    <details className="reason-details">
+      <summary className="reason-digest">
+        {labels.map((label) => (
+          <span key={label}>{label}</span>
+        ))}
+      </summary>
+      <p>{detail}</p>
+    </details>
+  );
+}
+
+function reasonDigestLabels(text: string, language: "zh" | "en"): string[] {
+  const normalized = text.toLowerCase();
+  const labels: string[] = [];
+  const push = (zh: string, en: string) => labels.push(language === "zh" ? zh : en);
+  if (normalized.includes("触发") || normalized.includes("买点") || normalized.includes("entry")) {
+    push("等待触发", "Wait trigger");
+  }
+  if (normalized.includes("数据") || normalized.includes("missing") || normalized.includes("partial")) {
+    push("数据降权", "Data haircut");
+  }
+  if (normalized.includes("历史不足") || normalized.includes("sample") || normalized.includes("history")) {
+    push("历史不足", "Thin history");
+  }
+  if (normalized.includes("校准") || normalized.includes("weight") || normalized.includes("概率")) {
+    push("动态校准", "Calibrated");
+  }
+  if (normalized.includes("质量") || normalized.includes("quality")) {
+    push("质量复核", "Quality check");
+  }
+  if (!labels.length) {
+    labels.push(text.split(/[；;，,.]/)[0].slice(0, language === "zh" ? 8 : 18));
+  }
+  return [...new Set(labels)].slice(0, 3);
 }
 
 function StrategyHealthTable({ items }: { items: StrategyHealth[] }) {

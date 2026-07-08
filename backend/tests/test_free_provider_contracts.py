@@ -101,7 +101,8 @@ def test_free_cn_provider_normalizes_akshare_daily(monkeypatch):
     bars = provider.get_daily_bars(["CN:000001"], date(2026, 1, 1), date(2026, 1, 31))
 
     assert bars["instrument_id"].tolist() == ["CN:000001", "CN:000001"]
-    assert bars["provider"].eq("akshare").all()
+    assert bars["provider"].eq("akshare_qfq").all()
+    assert bars["adjustment_type"].eq("qfq").all()
     assert bars["volume"].tolist() == [800_000, 820_000]
 
 
@@ -282,6 +283,7 @@ def test_free_cn_provider_falls_back_to_baostock(monkeypatch):
     bars = provider.get_daily_bars(["CN:000001"], date(2026, 1, 1), date(2026, 1, 31))
 
     assert bars["instrument_id"].tolist() == ["CN:000001"]
-    assert bars["provider"].tolist() == ["baostock"]
+    assert bars["provider"].tolist() == ["baostock_qfq"]
+    assert bars["adjustment_type"].tolist() == ["qfq"]
     assert bars.iloc[0]["close"] == 11.5
     assert provider.last_errors == []

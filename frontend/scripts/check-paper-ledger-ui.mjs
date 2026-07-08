@@ -32,10 +32,19 @@ const checks = [
   ["portfolio renders return bars", files.portfolio.includes("paper-return-bars")],
   ["portfolio renders transaction ledger", files.portfolio.includes("PaperTransactionsPanel")],
   ["portfolio renders validation positions", files.portfolio.includes("PaperPositionsPanel")],
+  ["portfolio renders structured risk gate", files.portfolio.includes("PaperRiskGatePanel")],
+  ["portfolio renders failure attribution", files.portfolio.includes("PaperFailureAttributionPanel")],
+  ["portfolio renders event timeline", files.portfolio.includes("PaperEventTimelinePanel")],
+  ["types expose report risk gate", files.portfolio.includes("report.risk_gate")],
+  ["types expose failure attribution", files.portfolio.includes("failure_attribution")],
+  ["types expose event timeline", files.portfolio.includes("event_timeline")],
   ["styles include ledger chart shell", files.styles.includes(".paper-ledger-curve")],
   ["styles include return bars", files.styles.includes(".paper-return-bars")],
   ["styles include transaction table", files.styles.includes(".paper-flow-table")],
   ["styles include validation positions", files.styles.includes(".paper-position-grid")],
+  ["styles include risk gate panel", files.styles.includes(".paper-risk-gate-panel")],
+  ["styles include attribution panel", files.styles.includes(".paper-attribution-grid")],
+  ["styles include event timeline", files.styles.includes(".paper-event-timeline")],
 ];
 
 const failed = checks.filter(([, passed]) => !passed);

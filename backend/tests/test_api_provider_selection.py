@@ -29,6 +29,18 @@ class RecordingProvider:
         return bars.groupby("instrument_id", as_index=False).tail(1).reset_index(drop=True)
 
 
+CN_BENCHMARK_CALLS = {
+    ("CN:000300.IDX",),
+    ("CN:000905.IDX",),
+    ("CN:399006.IDX",),
+    ("CN:000688.IDX",),
+}
+
+
+def assert_cn_benchmark_calls(calls: list[list[str]]) -> None:
+    assert {tuple(call) for call in calls} == CN_BENCHMARK_CALLS
+
+
 def test_opportunities_endpoint_can_scan_free_us_and_cn_providers(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'provider-selection.db'}")
     us_provider = RecordingProvider("free_us", "US:TEST")
@@ -51,7 +63,8 @@ def test_opportunities_endpoint_can_scan_free_us_and_cn_providers(tmp_path, monk
     assert body["data_health"]["mode"] == "free"
     assert {card["instrument_id"] for card in body["cards"]} == {"US:AAPL", "CN:000001"}
     assert us_provider.calls == [["US:AAPL"]]
-    assert cn_provider.calls == [["CN:000001"]]
+    assert cn_provider.calls[0] == ["CN:000001"]
+    assert_cn_benchmark_calls(cn_provider.calls[1:])
 
 
 def test_agent_endpoint_uses_requested_provider_and_symbols(tmp_path, monkeypatch):
@@ -85,7 +98,8 @@ def test_agent_endpoint_uses_requested_provider_and_symbols(tmp_path, monkeypatc
     assert "US:TEST" not in answer
     assert "触发" in answer or "买点" in answer
     assert "止损" in answer
-    assert cn_provider.calls == [["CN:000001"]]
+    assert cn_provider.calls[0] == ["CN:000001"]
+    assert_cn_benchmark_calls(cn_provider.calls[1:])
     assert us_provider.calls == []
 
 
@@ -133,4 +147,5 @@ def test_opportunities_endpoint_expands_cn_all_with_universe_metadata(
     assert body["data_health"]["universe_selected"] == "2"
     assert body["data_health"]["strategy_data_skipped"] == "true"
     assert body["data_health"]["scanned"] == "2"
-    assert cn_provider.calls == [["CN:000001"], ["CN:600000"]]
+    assert cn_provider.calls[:2] == [["CN:000001"], ["CN:600000"]]
+    assert_cn_benchmark_calls(cn_provider.calls[2:])

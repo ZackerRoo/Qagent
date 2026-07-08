@@ -129,12 +129,6 @@ class FullMarketScanJobRecord(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
 
-
-class AutomationSchedulerStateRecord(BaseModel):
-    enabled: bool
-    settings: dict[str, object]
-    updated_at: datetime
-
     @property
     def progress(self) -> int:
         if self.total_symbols <= 0:
@@ -142,6 +136,12 @@ class AutomationSchedulerStateRecord(BaseModel):
         if self.status == "succeeded":
             return 100
         return max(0, min(99, int(self.scanned_symbols * 100 / self.total_symbols)))
+
+
+class AutomationSchedulerStateRecord(BaseModel):
+    enabled: bool
+    settings: dict[str, object]
+    updated_at: datetime
 
 
 class OpportunitySnapshotRecord(BaseModel):

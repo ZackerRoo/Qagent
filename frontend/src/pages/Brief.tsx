@@ -7,11 +7,13 @@ import {
   DailyBriefRequest,
   fetchDailyBriefRuns,
   fetchDeliveries,
+  fetchMarketBars,
   markDeliverySent,
   queueBriefDelivery,
   saveDailyBriefRun,
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
+import { OpportunityCandlestickChart } from "../components/OpportunityChart";
 import { useI18n } from "../i18n";
 import type { TranslationKey } from "../i18n/catalog";
 import { formatInstrumentDisplay } from "../lib/instruments";
@@ -32,6 +34,7 @@ import type {
   DailyBriefResponse,
   DataProviderMode,
   DeliveryOutboxRecord,
+  MarketBarsResponse,
 } from "../types";
 
 function formatNumber(value: number | null, suffix = "") {
@@ -306,6 +309,9 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
             </div>
           </div>
         )}
+        {brief?.top_opportunities[0] ? (
+          <BriefKlineFocus item={brief.top_opportunities[0]} dataMode={dataMode} language={language} />
+        ) : null}
       </section>
 
       <section className="panel">
@@ -586,6 +592,62 @@ function BriefOpportunityMarketSections({ items }: { items: DailyBriefOpportunit
   );
 }
 
+function BriefKlineFocus({
+  item,
+  dataMode,
+  language,
+}: {
+  item: DailyBriefOpportunity;
+  dataMode: DataProviderMode;
+  language: "zh" | "en";
+}) {
+  const [chart, setChart] = useState<MarketBarsResponse>();
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setChart(undefined);
+    setError("");
+    void fetchMarketBars(dataMode, item.instrument_id, 160)
+      .then((result) => {
+        if (!cancelled) {
+          setChart(result);
+        }
+      })
+      .catch((caught) => {
+        if (!cancelled) {
+          setError(caught instanceof Error ? caught.message : language === "zh" ? "K线加载失败" : "Failed to load chart");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [dataMode, item.instrument_id, language]);
+
+  return (
+    <div className="brief-kline-focus">
+      <div className="brief-kline-side">
+        <span>{language === "zh" ? "重点机会" : "Focus"}</span>
+        <strong>{formatInstrumentDisplay(item.instrument_id, item.instrument_label)}</strong>
+        <div className="brief-kline-metrics">
+          <span>{language === "zh" ? "买点" : "Entry"} <b>{item.trigger_price ?? "-"}</b></span>
+          <span>{language === "zh" ? "止损" : "Stop"} <b>{item.initial_stop ?? "-"}</b></span>
+          <span>{language === "zh" ? "目标" : "Target"} <b>{item.target_1 ?? "-"}</b></span>
+          <span>{language === "zh" ? "信心" : "Conviction"} <b>{formatRatio(item.conviction_score)}</b></span>
+        </div>
+        <ReasonDigest text={item.rank_reasons.map((reason) => localizeReason(reason, language))} />
+      </div>
+      <div className="brief-kline-chart">
+        {error ? (
+          <p className="empty error">{error}</p>
+        ) : (
+          <OpportunityCandlestickChart data={chart} levels={briefChartLevels(item)} />
+        )}
+      </div>
+    </div>
+  );
+}
+
 function BriefOpportunityTable({ items }: { items: DailyBriefOpportunity[] }) {
   const { language, t } = useI18n();
 
@@ -639,7 +701,7 @@ function BriefOpportunityTable({ items }: { items: DailyBriefOpportunity[] }) {
               <td>{item.target_1 ?? "-"}</td>
               <td>{formatNumber(item.risk_reward)}</td>
               <td className="reason-cell">
-                {item.rank_reasons.map((reason) => localizeReason(reason, language)).join("；")}
+                <ReasonDigest text={item.rank_reasons.map((reason) => localizeReason(reason, language))} />
               </td>
             </tr>
           ))}
@@ -647,6 +709,55 @@ function BriefOpportunityTable({ items }: { items: DailyBriefOpportunity[] }) {
       </table>
     </div>
   );
+}
+
+function ReasonDigest({ text }: { text: string | string[] }) {
+  const { language } = useI18n();
+  const detail = Array.isArray(text) ? text.filter(Boolean).join(language === "zh" ? "；" : "; ") : text;
+  const labels = reasonDigestLabels(detail, language);
+  if (!detail) {
+    return <span>-</span>;
+  }
+  return (
+    <details className="reason-details">
+      <summary className="reason-digest">
+        {labels.map((label) => (
+          <span key={label}>{label}</span>
+        ))}
+      </summary>
+      <p>{detail}</p>
+    </details>
+  );
+}
+
+function reasonDigestLabels(text: string, language: "zh" | "en"): string[] {
+  const normalized = text.toLowerCase();
+  const labels: string[] = [];
+  const push = (zh: string, en: string) => labels.push(language === "zh" ? zh : en);
+  if (normalized.includes("触发") || normalized.includes("买点") || normalized.includes("entry")) {
+    push("等待触发", "Wait trigger");
+  }
+  if (normalized.includes("数据") || normalized.includes("missing") || normalized.includes("partial")) {
+    push("数据降权", "Data haircut");
+  }
+  if (normalized.includes("历史不足") || normalized.includes("sample") || normalized.includes("history")) {
+    push("历史不足", "Thin history");
+  }
+  if (normalized.includes("校准") || normalized.includes("weight") || normalized.includes("概率")) {
+    push("动态校准", "Calibrated");
+  }
+  if (!labels.length) {
+    labels.push(text.split(/[；;，,.]/)[0].slice(0, language === "zh" ? 8 : 18));
+  }
+  return [...new Set(labels)].slice(0, 3);
+}
+
+function briefChartLevels(item: DailyBriefOpportunity): Partial<MarketBarsResponse["levels"]> {
+  return {
+    trigger_price: item.trigger_price,
+    initial_stop: item.initial_stop,
+    target_1: item.target_1,
+  };
 }
 
 function BriefEntryWatchMarketSections({ items }: { items: DailyBriefEntryWatch[] }) {

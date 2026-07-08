@@ -49,6 +49,9 @@ assert(today.includes("today-decision-page"), "Today page must expose the simpli
 assert(today.includes("TodayRouteCards"), "Today page must split deep analysis into destination shortcuts");
 assert(today.includes("TodayDecisionDesk"), "Today page must render a compact decision desk");
 assert(today.includes("TodayTradeTicket"), "Today page must render one selected opportunity ticket");
+assert(today.includes("TodayRecommendationKline"), "Today page must show the selected recommendation K-line on the home decision desk");
+assert(today.includes("fetchMarketBars"), "Today page must fetch market bars for the selected recommendation K-line");
+assert(today.includes("OpportunityCandlestickChart"), "Today page must render the candlestick chart directly on the home page");
 assert(today.includes("TodayValidationSnapshot"), "Today page must render a compact validation snapshot");
 assert(today.includes("TodayRiskBrief"), "Today page must render a compact risk brief");
 assert(today.includes("TodayAdvancedAnalysis"), "Today page must keep advanced analysis collapsed by default");
@@ -93,6 +96,12 @@ assert(detail.includes("data_quality_audit"), "Opportunity detail must render A-
 assert(detail.includes("dataQualityAuditStatusLabel"), "Opportunity detail must label data quality audit status");
 assert(detail.includes("a_share_enhanced"), "Opportunity detail must render A-share enhanced data");
 assert(detail.includes("a-share-enhanced-panel"), "Opportunity detail must expose A-share enhanced data panel class");
+assert(detail.includes("OpportunityCandlestickChart"), "Opportunity detail must render a candlestick chart for recommendation review");
+assert(detail.includes("chartLevelsFromCard"), "Opportunity detail must pass trigger, stop, target, and no-chase levels into the K-line chart");
+assert(readFileSync(resolve(__dirname, "../src/components/OpportunityChart.tsx"), "utf8").includes("candlestick-wick"), "Opportunity chart must draw K-line candle wicks");
+assert(readFileSync(resolve(__dirname, "../src/components/OpportunityChart.tsx"), "utf8").includes("volume-bar"), "Opportunity chart must draw volume bars");
+assert(readFileSync(resolve(__dirname, "../src/components/OpportunityChart.tsx"), "utf8").includes("MA5"), "Opportunity chart must include MA5/MA10/MA20/MA60 legend support");
+assert(styles.includes(".today-kline-panel"), "Today page must style the inline K-line review panel");
 assert(intelligence.includes("策略调度"), "Market intelligence must show strategy scheduling");
 assert(intelligence.includes("事件假设"), "Market intelligence must show event hypotheses");
 assert(intelligence.includes("数据质量"), "Market intelligence must show data quality");
@@ -155,6 +164,9 @@ assert(styles.includes(".operational-readiness-question"), "CSS must define oper
 assert(styles.includes(".alpha-quality-center"), "CSS must define alpha quality center layout");
 assert(styles.includes(".alpha-quality-grid"), "CSS must define alpha quality grid");
 assert(styles.includes(".alpha-quality-gate"), "CSS must define alpha quality buyability gate");
+assert(styles.includes(".candlestick-chart"), "CSS must define candlestick chart layout");
+assert(styles.includes(".candlestick-wick"), "CSS must define candle wick styling");
+assert(styles.includes(".volume-bar"), "CSS must define chart volume bar styling");
 assert(styles.includes(".followthrough-window-row"), "CSS must define follow-through window chart rows");
 assert(styles.includes(".research-center"), "CSS must define research command center layout");
 assert(styles.includes(".signal-strength-bar"), "CSS must define signal strength bars");

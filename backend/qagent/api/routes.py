@@ -17,6 +17,7 @@ from qagent.api.schemas import (
 )
 from qagent.backtesting.engine import run_historical_backtest
 from qagent.backtesting.portfolio import run_portfolio_backtest
+from qagent.backtesting.sensitivity import build_parameter_sensitivity
 from qagent.briefing.daily import DailyBrief, build_daily_brief
 from qagent.briefing.export import render_daily_brief_markdown
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
@@ -73,6 +74,7 @@ from qagent.monitoring.signal_monitor import SignalMonitorCenter, build_signal_m
 from qagent.monitoring.portfolio import PositionInput, analyze_position_risk
 from qagent.monitoring.alerts import AlertRule, suggest_alert_rules
 from qagent.paper_trading.engine import (
+    PaperDailyReport,
     build_paper_daily_report,
     build_paper_ledger,
     build_paper_validation,
@@ -85,7 +87,11 @@ from qagent.providers.factory import build_market_data_provider
 from qagent.providers.status import build_provider_status
 from qagent.recommendations.enrichment import enrich_opportunity_card
 from qagent.recommendations.brief import apply_recommendation_briefs
-from qagent.recommendations.feedback import build_recent_recommendation_feedback_center
+from qagent.recommendations.feedback import (
+    apply_paper_trading_feedback,
+    build_recent_recommendation_feedback_center,
+    paper_trading_feedback_data_health,
+)
 from qagent.recommendations.portfolio import build_portfolio_plan
 from qagent.recommendations.probability import (
     apply_probability_calibration,
@@ -259,6 +265,17 @@ def _chart_dates(mode: str, days: int) -> tuple[date, date]:
         return date(1900, 1, 1), date(2100, 1, 1)
     end_date = date.today()
     return end_date - timedelta(days=max(days * 3, 240)), end_date
+
+
+def _normalize_chart_instrument(instrument_id: str) -> str:
+    value = instrument_id.strip().upper()
+    if value.startswith("CN:"):
+        symbol = market_symbol(value)
+        return f"CN:{symbol}" if len(symbol) == 6 and symbol.isdigit() else value
+    if ":" in value:
+        return value
+    symbol = market_symbol(value)
+    return f"CN:{symbol}" if len(symbol) == 6 and symbol.isdigit() else value
 
 
 def _chart_bar(row) -> dict[str, object]:
@@ -522,6 +539,7 @@ def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict
         else None,
         "data_health": result.data_health,
     }
+    _attach_card_briefs_and_cached_benchmarks(payload, mode)
     _attach_signal_hub_payload(payload)
     _attach_market_intelligence_payload(payload)
     _attach_recommendation_quality_payload(payload)
@@ -545,7 +563,7 @@ def market_bars(
     days: int = 160,
 ) -> dict[str, object]:
     mode = provider.strip().lower()
-    instrument = instrument_id.strip().upper()
+    instrument = _normalize_chart_instrument(instrument_id)
     if days <= 0 or days > 500:
         raise HTTPException(status_code=400, detail="days must be between 1 and 500")
     try:
@@ -553,7 +571,10 @@ def market_bars(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     start_date, end_date = _chart_dates(mode, days)
-    bars = market_provider.get_daily_bars([instrument], start=start_date, end=end_date)
+    try:
+        bars = market_provider.get_daily_bars([instrument], start=start_date, end=end_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if bars.empty:
         raise HTTPException(status_code=404, detail="market bars not found")
     enriched = add_moving_averages(bars.sort_values("trade_date"), windows=(20, 50, 100, 200))
@@ -2027,6 +2048,52 @@ def backtest(
     }
 
 
+@router.get("/parameter-sensitivity")
+def parameter_sensitivity(
+    provider: str = "fixture",
+    symbols: str | None = None,
+    start: date | None = None,
+    end: date | None = None,
+    step_days: int = 5,
+    limit: int = 150,
+    scan_limit: int | None = None,
+) -> dict[str, object]:
+    mode = provider.strip().lower()
+    if step_days <= 0 or step_days > 60:
+        raise HTTPException(status_code=400, detail="step_days must be between 1 and 60")
+    if limit <= 0 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+    resolved = _resolve_symbols_with_limit(
+        mode,
+        symbols,
+        scan_limit,
+        include_supplements=scan_limit is None,
+    )
+    instrument_ids = resolved.symbols
+    start_date, end_date = _backtest_dates(mode, start, end)
+    try:
+        market_provider = build_market_data_provider(mode)
+        backtest_result = run_historical_backtest(
+            instrument_ids=instrument_ids,
+            provider=market_provider,
+            start=start_date,
+            end=end_date,
+            step_days=step_days,
+            max_signals=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    result = build_parameter_sensitivity(backtest_result.signals)
+    payload = result.model_dump(mode="json")
+    payload["data_health"].update(
+        {
+            **backtest_result.data_health,
+            **resolved.data_health,
+        }
+    )
+    return payload
+
+
 @router.get("/portfolio-backtest")
 def portfolio_backtest(
     provider: str = "fixture",
@@ -2766,7 +2833,36 @@ def _attach_card_briefs_and_cached_benchmarks(
 
     data_health.update(apply_recommendation_briefs(cards))
     data_health.update(_apply_cached_benchmark_comparisons(cards, provider))
+    data_health.update(_apply_live_paper_trading_feedback(cards, provider))
     payload["cards"] = [card.model_dump(mode="json") for card in cards]
+
+
+def _apply_live_paper_trading_feedback(
+    cards: list[OpportunityCard],
+    provider: str | None,
+) -> dict[str, str]:
+    if not provider:
+        return {
+            "paper_feedback_cards": str(len(cards)),
+            "paper_feedback_adjusted": "0",
+            "paper_feedback_blocked": "0",
+            "paper_feedback_source": "missing_provider",
+        }
+    try:
+        report = PaperDailyReport.model_validate(
+            paper_trade_daily_report(provider=provider, limit=500)
+        )
+    except Exception:
+        return {
+            "paper_feedback_cards": str(len(cards)),
+            "paper_feedback_adjusted": "0",
+            "paper_feedback_blocked": "0",
+            "paper_feedback_source": "unavailable",
+        }
+    apply_paper_trading_feedback(cards, report)
+    health = paper_trading_feedback_data_health(cards)
+    health["paper_feedback_source"] = "paper_daily_report"
+    return health
 
 
 def _apply_cached_benchmark_comparisons(

@@ -1806,10 +1806,55 @@ export type PaperDailyBenchmark = {
   summary: string;
 };
 
+export type PaperRiskGateStatus = {
+  action: string;
+  can_add_entries: boolean;
+  title: string;
+  reason: string;
+  reasons: string[];
+  recovery_conditions: string[];
+};
+
+export type PaperFailureAttributionItem = {
+  dimension: string;
+  key: string;
+  label: string;
+  total_trades: number;
+  evaluated_trades: number;
+  closed_trades: number;
+  stopped_trades: number;
+  target_hit_trades: number;
+  win_rate: number | null;
+  average_return_pct: number | null;
+  total_pnl: string;
+  total_return_pct: number | null;
+  worst_return_pct: number | null;
+  verdict: string;
+  note: string;
+};
+
+export type PaperEventTimelineItem = {
+  event_id: string;
+  trade_id: string;
+  instrument_id: string;
+  strategy_id: string | null;
+  event_date: string;
+  event_type: string;
+  title: string;
+  description: string;
+  status: string;
+  price: string | null;
+  pnl: string;
+  return_pct: number | null;
+};
+
 export type PaperDailyReportResponse = {
   report_date: string;
   summary: PaperDailyReportSummary;
   benchmark: PaperDailyBenchmark;
+  risk_gate: PaperRiskGateStatus;
+  failure_attribution: PaperFailureAttributionItem[];
+  event_timeline: PaperEventTimelineItem[];
   new_opportunities: PaperDailyReportItem[];
   triggered_today: PaperDailyReportItem[];
   holdings: PaperDailyReportItem[];
@@ -2383,6 +2428,38 @@ export type BacktestResponse = {
   signals: BacktestSignal[];
   benchmark: BacktestBenchmarkComparison;
   environment_breakdown: BacktestEnvironmentBreakdown[];
+  data_health: Record<string, string>;
+};
+
+export type ParameterSensitivityScenario = {
+  stop_loss_pct: number;
+  target_pct: number;
+  hold_days: number;
+  sample_count: number;
+  win_rate: number | null;
+  avg_return_pct: number | null;
+  median_return_pct: number | null;
+  max_drawdown_pct: number | null;
+  best_return_pct: number | null;
+  worst_return_pct: number | null;
+  is_recommended: boolean;
+  verdict: string;
+  summary: string;
+};
+
+export type ParameterSensitivitySummary = {
+  sample_count: number;
+  scenario_count: number;
+  recommended_stop_loss_pct: number | null;
+  recommended_target_pct: number | null;
+  recommended_hold_days: number | null;
+  data_basis: string;
+};
+
+export type ParameterSensitivityResponse = {
+  summary: ParameterSensitivitySummary;
+  recommended: ParameterSensitivityScenario | null;
+  grid: ParameterSensitivityScenario[];
   data_health: Record<string, string>;
 };
 

@@ -781,7 +781,6 @@ function PaperReviewDashboard({
     ? benchmarkReviewLabel(primaryBenchmark.excess_return_pct, primaryBenchmark.name, language)
     : "-";
   const focusItems = report.next_trade_day_focus.slice(0, 5);
-  const riskGate = paperRiskGateCopy(report.data_health, language);
   const assetGroups = report.asset_groups ?? [];
   return (
     <div className="paper-review-dashboard">
@@ -818,15 +817,10 @@ function PaperReviewDashboard({
         />
       </div>
 
-      <div className={`paper-risk-gate ${riskGate.paused ? "is-paused" : "is-allowed"}`}>
-        <div>
-          <span>{language === "zh" ? "自动开仓风控" : "Auto-entry risk gate"}</span>
-          <strong>{riskGate.title}</strong>
-        </div>
-        <p>{riskGate.reason}</p>
-      </div>
+      <PaperRiskGatePanel riskGate={report.risk_gate} health={report.data_health} language={language} />
 
       <PaperAssetGroupCards groups={assetGroups} language={language} />
+      <PaperFailureAttributionPanel items={report.failure_attribution} language={language} />
 
       <div className="paper-review-main">
         <div className="paper-ledger-card">
@@ -884,7 +878,53 @@ function PaperReviewDashboard({
           empty={language === "zh" ? "今天没有止损或闭环。" : "No stops or exits today."}
         />
       </div>
+      <PaperEventTimelinePanel items={report.event_timeline} language={language} />
     </div>
+  );
+}
+
+function PaperRiskGatePanel({
+  riskGate,
+  health,
+  language,
+}: {
+  riskGate?: PaperDailyReportResponse["risk_gate"];
+  health: Record<string, string>;
+  language: Language;
+}) {
+  const fallback = paperRiskGateCopy(health, language);
+  const paused = riskGate ? !riskGate.can_add_entries : fallback.paused;
+  const title = riskGate?.title ?? fallback.title;
+  const reason = riskGate?.reason ?? fallback.reason;
+  const reasons = (riskGate?.reasons ?? []).filter((item) => item !== "within_limits" && item !== "no_paper_history");
+  const recovery = riskGate?.recovery_conditions ?? [];
+  return (
+    <section className={`paper-risk-gate-panel ${paused ? "is-paused" : "is-allowed"}`}>
+      <div className="paper-risk-gate-head">
+        <div>
+          <span>{language === "zh" ? "自动开仓风控" : "Auto-entry risk gate"}</span>
+          <strong>{title}</strong>
+        </div>
+        <em>{paused ? (language === "zh" ? "暂停新增" : "Paused") : (language === "zh" ? "允许新增" : "Allowed")}</em>
+      </div>
+      <p>{reason}</p>
+      {(reasons.length > 0 || recovery.length > 0) && (
+        <div className="paper-risk-gate-detail">
+          <div>
+            <span>{language === "zh" ? "触发原因" : "Reasons"}</span>
+            {(reasons.length ? reasons : [language === "zh" ? "当前未触发限制" : "No active limit"]).map((item) => (
+              <small key={item}>{item}</small>
+            ))}
+          </div>
+          <div>
+            <span>{language === "zh" ? "恢复条件" : "Recovery"}</span>
+            {(recovery.length ? recovery.slice(0, 4) : [language === "zh" ? "继续积累闭环样本" : "Keep accumulating closed samples"]).map((item) => (
+              <small key={item}>{item}</small>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -932,6 +972,97 @@ function PaperAssetGroupCards({
   );
 }
 
+function PaperFailureAttributionPanel({
+  items,
+  language,
+}: {
+  items: PaperDailyReportResponse["failure_attribution"];
+  language: Language;
+}) {
+  if (!items.length) {
+    return null;
+  }
+  const visible = items.slice(0, 6);
+  return (
+    <section className="paper-attribution-panel">
+      <div className="paper-ledger-card-header">
+        <div>
+          <h3>{language === "zh" ? "亏损归因" : "Failure attribution"}</h3>
+          <p>
+            {language === "zh"
+              ? "把当前模拟盘拖累项按策略、资产和状态拆开，方便判断该降权什么。"
+              : "Breaks down current drag by strategy, asset, and status."}
+          </p>
+        </div>
+        <strong>{visible.length}</strong>
+      </div>
+      <div className="paper-attribution-grid">
+        {visible.map((item) => (
+          <div key={`${item.dimension}:${item.key}`} className={`paper-attribution-card verdict-${item.verdict}`}>
+            <header>
+              <span>{attributionDimensionLabel(item.dimension, language)}</span>
+              <strong>{item.label}</strong>
+            </header>
+            <div className="paper-attribution-metrics">
+              <span>{language === "zh" ? "收益" : "Return"} <b>{formatPct(item.total_return_pct)}</b></span>
+              <span>{language === "zh" ? "盈亏" : "PnL"} <b>{formatSignedMoney(item.total_pnl, language)}</b></span>
+              <span>{language === "zh" ? "胜率" : "Win"} <b>{item.win_rate != null ? `${(item.win_rate * 100).toFixed(0)}%` : "-"}</b></span>
+              <span>{language === "zh" ? "样本" : "Samples"} <b>{item.evaluated_trades}/{item.total_trades}</b></span>
+            </div>
+            <p>{item.note}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PaperEventTimelinePanel({
+  items,
+  language,
+}: {
+  items: PaperDailyReportResponse["event_timeline"];
+  language: Language;
+}) {
+  if (!items.length) {
+    return null;
+  }
+  return (
+    <section className="paper-event-timeline">
+      <div className="paper-ledger-card-header">
+        <div>
+          <h3>{language === "zh" ? "模拟事件流" : "Paper event timeline"}</h3>
+          <p>
+            {language === "zh"
+              ? "按时间串起推荐、触发、估值更新和退出，检查每笔记录到底发生了什么。"
+              : "A chronological view of signals, entries, marks, and exits."}
+          </p>
+        </div>
+        <strong>{items.length}</strong>
+      </div>
+      <div className="paper-event-list">
+        {items.slice(0, 14).map((item) => (
+          <div key={item.event_id} className={`paper-event-item event-${item.event_type}`}>
+            <time>{item.event_date}</time>
+            <div>
+              <span>{eventTypeLabel(item.event_type, language)}</span>
+              <strong title={formatInstrumentDisplay(item.instrument_id)}>
+                {formatInstrumentDisplay(item.instrument_id)}
+              </strong>
+              <p>{item.title} · {item.description}</p>
+              <small>{localizeStrategy(item.strategy_id, language)}</small>
+            </div>
+            <em>
+              {item.price ?? "-"}
+              <b>{formatPct(item.return_pct)}</b>
+            </em>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function paperRiskGateCopy(health: Record<string, string>, language: Language) {
   const action = health.paper_risk_gate_action;
   const paused = action === "pause_new_entries";
@@ -952,6 +1083,27 @@ function paperRiskGateCopy(health: Record<string, string>, language: Language) {
       ? `Risk gate triggered: ${rawReason || "paper ledger under pressure"}. Existing positions still update.`
       : "Drawdown and win rate are within limits; new opportunities can still enter the ledger.",
   };
+}
+
+function attributionDimensionLabel(value: string, language: Language) {
+  const zh = language === "zh";
+  const labels: Record<string, { zh: string; en: string }> = {
+    strategy: { zh: "策略", en: "Strategy" },
+    asset: { zh: "资产", en: "Asset" },
+    status: { zh: "状态", en: "Status" },
+  };
+  return labels[value]?.[zh ? "zh" : "en"] ?? value;
+}
+
+function eventTypeLabel(value: string, language: Language) {
+  const zh = language === "zh";
+  const labels: Record<string, { zh: string; en: string }> = {
+    signal: { zh: "推荐", en: "Signal" },
+    entry: { zh: "买入", en: "Entry" },
+    mark: { zh: "更新", en: "Mark" },
+    exit: { zh: "退出", en: "Exit" },
+  };
+  return labels[value]?.[zh ? "zh" : "en"] ?? value;
 }
 
 function localizeRiskGateReason(reason: string) {

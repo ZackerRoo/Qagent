@@ -442,6 +442,10 @@ const DATA_HEALTH_KEYS: LabelMap = {
   triggered: { zh: "触发", en: "Triggered" },
   backtest_scans: { zh: "回测扫描", en: "Backtest scans" },
   backtest_signals: { zh: "回测信号", en: "Backtest signals" },
+  sensitivity_signals: { zh: "敏感性原始信号", en: "Sensitivity signals" },
+  sensitivity_completed_signals: { zh: "敏感性有效信号", en: "Sensitivity completed signals" },
+  sensitivity_scenarios: { zh: "参数场景", en: "Sensitivity scenarios" },
+  sensitivity_model: { zh: "参数敏感性模型", en: "Sensitivity model" },
   source_signals: { zh: "原始信号", en: "Source signals" },
   trade_candidates: { zh: "交易候选", en: "Trade candidates" },
   execution_rules: { zh: "执行规则", en: "Execution rules" },
@@ -464,6 +468,34 @@ const DATA_HEALTH_KEYS: LabelMap = {
   a_share_enhanced_errors: { zh: "增强源错误", en: "Enhanced source errors" },
   a_share_enhanced_cache_hits: { zh: "增强缓存命中", en: "Enhanced cache hits" },
   a_share_enhanced_cache_misses: { zh: "增强缓存未命中", en: "Enhanced cache misses" },
+  a_share_adjusted_price: { zh: "A股复权价格", en: "A-share adjusted price" },
+  a_share_announcements: { zh: "A股公告", en: "A-share announcements" },
+  a_share_bars_coverage: { zh: "A股K线覆盖", en: "A-share bars coverage" },
+  a_share_data_readiness_score: { zh: "A股数据就绪度", en: "A-share data readiness score" },
+  a_share_fund_flow: { zh: "A股资金流", en: "A-share fund flow" },
+  a_share_index_constituents: { zh: "A股指数成分", en: "A-share index constituents" },
+  a_share_industry: { zh: "A股行业分类", en: "A-share industry" },
+  a_share_liquidity: { zh: "A股流动性", en: "A-share liquidity" },
+  a_share_price_limit: { zh: "A股涨跌停", en: "A-share price limit" },
+  a_share_suspension: { zh: "A股停牌状态", en: "A-share suspension" },
+  a_share_turnover: { zh: "A股换手率", en: "A-share turnover" },
+  adjusted_bar_coverage: { zh: "复权K线覆盖", en: "Adjusted bar coverage" },
+  adjusted_bars: { zh: "复权K线", en: "Adjusted bars" },
+  adjustment_status: { zh: "复权状态", en: "Adjustment status" },
+  adjustment_types: { zh: "复权类型", en: "Adjustment types" },
+  benchmark_comparison_benchmarks: { zh: "指数基准", en: "Benchmark comparison benchmarks" },
+  benchmark_comparison_cards: { zh: "指数对比样本", en: "Benchmark comparison cards" },
+  benchmark_comparison_missing_cards: { zh: "缺少指数对比样本", en: "Missing benchmark comparison cards" },
+  data_source_checks: { zh: "数据源检查项", en: "Data source checks" },
+  data_source_missing: { zh: "缺失数据源", en: "Data source missing" },
+  data_source_ready: { zh: "可用数据源", en: "Data source ready" },
+  decision_quality_alerts: { zh: "决策提醒", en: "Decision quality alerts" },
+  decision_quality_cards: { zh: "决策质量样本", en: "Decision quality cards" },
+  decision_quality_explanations: { zh: "决策解释", en: "Decision quality explanations" },
+  decision_quality_readiness: { zh: "决策质量就绪度", en: "Decision quality readiness" },
+  market_intelligence_bars: { zh: "市场情报K线", en: "Market intelligence bars" },
+  market_intelligence_cards: { zh: "市场情报样本", en: "Market intelligence cards" },
+  market_intelligence_data_score: { zh: "市场情报数据分", en: "Market intelligence data score" },
   scan_dates: { zh: "扫描日期数", en: "Scan dates" },
   scan_cards: { zh: "扫描机会卡", en: "Scan cards" },
   lookahead_guard: { zh: "未来函数保护", en: "Lookahead guard" },
@@ -540,6 +572,11 @@ const DATA_HEALTH_VALUES: LabelMap = {
   batch: { zh: "批量", en: "Batch" },
   cache: { zh: "缓存", en: "Cache" },
   included: { zh: "已纳入", en: "Included" },
+  historical_recommendation_signals: { zh: "历史推荐信号", en: "Historical recommendation signals" },
+  stop_target_hold_grid_from_backtest_signals: {
+    zh: "基于回测信号的止损/止盈/持有网格",
+    en: "Stop/target/hold grid from backtest signals",
+  },
   CN_ALL: { zh: "全A综合候选池", en: "All A-share composite candidates" },
   "CN:ALL": { zh: "全A综合候选池", en: "All A-share composite candidates" },
   akshare_spot_em: { zh: "AKShare 东方财富实时行情", en: "AKShare Eastmoney spot" },
@@ -961,7 +998,14 @@ export function localizeDataRequirement(
 }
 
 export function localizeDataHealthKey(value: string, language: Language): string {
-  return label(DATA_HEALTH_KEYS, value, language);
+  const mapped = DATA_HEALTH_KEYS[value];
+  if (mapped) {
+    return mapped[language];
+  }
+  if (language === "zh") {
+    return localizeDataHealthFallback(value);
+  }
+  return humanize(value);
 }
 
 export function localizeDataHealthValue(value: string, language: Language): string {
@@ -971,7 +1015,14 @@ export function localizeDataHealthValue(value: string, language: Language): stri
       .map((item) => label(DATA_HEALTH_VALUES, item.trim(), language))
       .join(language === "zh" ? "、" : ", ");
   }
-  return label(DATA_HEALTH_VALUES, value, language);
+  const mapped = DATA_HEALTH_VALUES[value];
+  if (mapped) {
+    return mapped[language];
+  }
+  if (language === "zh") {
+    return localizeDataHealthFallback(value);
+  }
+  return humanize(value);
 }
 
 export function localizeProvider(value: string | null | undefined, language: Language): string {
@@ -1185,4 +1236,83 @@ function label(map: LabelMap, value: string | null | undefined, language: Langua
 
 function humanize(value: string): string {
   return value.replace(/_/g, " ");
+}
+
+const DATA_HEALTH_FALLBACK_ZH: Record<string, string> = {
+  a: "A",
+  share: "股",
+  ashare: "A股",
+  adjusted: "复权",
+  adjustment: "复权",
+  price: "价格",
+  bars: "K线",
+  bar: "K线",
+  coverage: "覆盖",
+  announcements: "公告",
+  announcement: "公告",
+  missing: "缺失",
+  partial: "部分覆盖",
+  available: "可用",
+  unavailable: "不可用",
+  ready: "可用",
+  readiness: "就绪度",
+  score: "分",
+  fund: "资金",
+  flow: "流",
+  index: "指数",
+  constituents: "成分",
+  industry: "行业",
+  liquidity: "流动性",
+  limit: "涨跌停",
+  suspension: "停牌",
+  turnover: "换手率",
+  benchmark: "基准",
+  comparison: "对比",
+  cards: "样本",
+  card: "样本",
+  checks: "检查",
+  source: "来源",
+  sources: "来源",
+  decision: "决策",
+  quality: "质量",
+  alerts: "提醒",
+  explanations: "解释",
+  market: "市场",
+  intelligence: "情报",
+  cache: "缓存",
+  hits: "命中",
+  misses: "未命中",
+  rows: "行数",
+  returned: "返回",
+  rejected: "剔除",
+  items: "项",
+  requested: "请求",
+  batch: "批次",
+  batches: "批次",
+  actions: "动作",
+  strategies: "策略",
+  roadmap: "路线图",
+  manual: "手动",
+  full: "全量",
+  data: "数据",
+  yes: "是",
+  no: "否",
+  unknown: "未知",
+  enabled: "已启用",
+  disabled: "未启用",
+};
+
+function localizeDataHealthFallback(value: string): string {
+  const text = value.trim();
+  if (!text) {
+    return "-";
+  }
+  if (/^-?\d+(\.\d+)?(\/-?\d+(\.\d+)?)?$/.test(text)) {
+    return text;
+  }
+  return text
+    .replace(/[_-]+/g, " ")
+    .split(/\s+/)
+    .map((part) => DATA_HEALTH_FALLBACK_ZH[part.toLowerCase()] ?? part)
+    .join("");
 }

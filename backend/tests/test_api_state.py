@@ -462,6 +462,23 @@ def test_backtest_api_returns_fixture_validation(tmp_path, monkeypatch):
     assert body["data_health"]["lookahead_guard"] == "bars_limited_to_scan_date"
 
 
+def test_parameter_sensitivity_api_returns_recommended_grid(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'api-parameter-sensitivity.db'}")
+    client = TestClient(create_app())
+
+    response = client.get(
+        "/api/parameter-sensitivity?provider=fixture&symbols=US:TEST,CN:000001"
+        "&start=2026-01-30&end=2026-03-20&step_days=5"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["scenario_count"] > 0
+    assert body["recommended"] is not None
+    assert body["grid"][0]["is_recommended"] is True
+    assert body["data_health"]["sensitivity_model"] == "stop_target_hold_grid_from_backtest_signals"
+
+
 def test_portfolio_backtest_api_returns_account_level_validation(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'api-portfolio-backtest.db'}")
     client = TestClient(create_app())

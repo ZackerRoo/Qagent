@@ -5,6 +5,7 @@ import pandas as pd
 
 from qagent.backtesting.engine import BacktestSignal
 from qagent.backtesting.portfolio import _candidate_from_signal, _size_trade, run_portfolio_backtest
+from qagent.backtesting.sensitivity import build_parameter_sensitivity
 from qagent.providers.fixtures import FixtureMarketDataProvider
 
 
@@ -171,3 +172,68 @@ def test_cn_portfolio_sizing_uses_round_lots():
 
     assert trade is not None
     assert trade.shares % Decimal("100") == 0
+
+
+def test_parameter_sensitivity_scores_stop_target_and_holding_grid():
+    signals = [
+        BacktestSignal(
+            snapshot_id="win",
+            instrument_id="CN:000001",
+            signal_date=date(2026, 1, 1),
+            primary_strategy_id="trend_momentum_stage2",
+            status="setup_ready",
+            rank_score=Decimal("0.82"),
+            trigger_price=Decimal("10"),
+            initial_stop=Decimal("9.5"),
+            target_1=Decimal("11"),
+            outcome_status="target_1_hit",
+            return_5d=3.0,
+            return_10d=7.0,
+            return_20d=12.0,
+            max_drawdown_pct=-2.0,
+            max_runup_pct=8.0,
+        ),
+        BacktestSignal(
+            snapshot_id="loss",
+            instrument_id="CN:000002",
+            signal_date=date(2026, 1, 2),
+            primary_strategy_id="trend_momentum_stage2",
+            status="setup_ready",
+            rank_score=Decimal("0.76"),
+            trigger_price=Decimal("20"),
+            initial_stop=Decimal("19"),
+            target_1=Decimal("22"),
+            outcome_status="stop_hit",
+            return_5d=-4.0,
+            return_10d=-6.0,
+            return_20d=-9.0,
+            max_drawdown_pct=-7.0,
+            max_runup_pct=1.0,
+        ),
+    ]
+
+    result = build_parameter_sensitivity(
+        signals,
+        stop_loss_pcts=[3.0, 6.0],
+        target_pcts=[5.0, 10.0],
+        hold_days=[5, 10],
+    )
+
+    assert result.summary.scenario_count == 8
+    assert result.summary.sample_count == 2
+    assert result.recommended is not None
+    assert result.recommended.stop_loss_pct == 3.0
+    assert result.recommended.target_pct == 10.0
+    assert result.recommended.hold_days == 10
+    assert result.recommended.avg_return_pct == 2.0
+    assert result.recommended.max_drawdown_pct == -3.0
+    assert result.grid[0].is_recommended is True
+
+    positive_only = build_parameter_sensitivity(
+        [signals[0]],
+        stop_loss_pcts=[3.0],
+        target_pcts=[10.0],
+        hold_days=[5],
+    )
+    assert positive_only.recommended is not None
+    assert positive_only.recommended.max_drawdown_pct == 0.0

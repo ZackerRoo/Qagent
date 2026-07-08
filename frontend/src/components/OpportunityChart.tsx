@@ -1,137 +1,329 @@
 import { useI18n } from "../i18n";
 import type { MarketBarsResponse } from "../types";
 
-type Point = {
-  x: number;
-  y: number;
+type ChartLevelOverrides = Partial<MarketBarsResponse["levels"]>;
+
+type CandleBar = {
+  trade_date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  ma5: number | null;
+  ma10: number | null;
+  ma20: number | null;
+  ma60: number | null;
 };
 
-type SeriesKey = "close" | "ma20" | "ma50";
+type LevelDefinition = {
+  key: keyof MarketBarsResponse["levels"];
+  label: string;
+  value: number;
+  className: string;
+};
 
-export function OpportunityChart({ data }: { data?: MarketBarsResponse }) {
-  const { t } = useI18n();
-  const bars = data?.bars.filter((bar) => bar.close !== null) ?? [];
+export function OpportunityCandlestickChart({
+  data,
+  levels,
+}: {
+  data?: MarketBarsResponse;
+  levels?: ChartLevelOverrides;
+}) {
+  const { language, t } = useI18n();
+  const rawBars = data?.bars.filter(
+    (bar) =>
+      isNumber(bar.open) &&
+      isNumber(bar.high) &&
+      isNumber(bar.low) &&
+      isNumber(bar.close) &&
+      bar.high >= bar.low,
+  ) ?? [];
 
-  if (!data || bars.length < 2) {
+  if (!data || rawBars.length < 2) {
     return <p className="empty">{t("common.loading")}</p>;
   }
 
-  const width = 640;
-  const height = 220;
-  const pad = { top: 12, right: 52, bottom: 24, left: 44 };
-  const values = [
-    ...bars.flatMap((bar) => [bar.close, bar.ma20, bar.ma50]).filter(isNumber),
-    ...Object.values(data.levels).map(Number).filter(isNumber),
+  const bars = addLocalMovingAverages(rawBars).slice(-120);
+  const mergedLevels = { ...data.levels, ...levels };
+  const chartLevels = buildLevels(mergedLevels, language);
+
+  const width = 760;
+  const height = 430;
+  const pad = { top: 28, right: 86, bottom: 34, left: 56 };
+  const priceBottom = 300;
+  const volumeTop = 326;
+  const volumeBottom = 396;
+  const chartWidth = width - pad.left - pad.right;
+  const priceValues = [
+    ...bars.flatMap((bar) => [bar.high, bar.low, bar.ma5, bar.ma10, bar.ma20, bar.ma60]).filter(isNumber),
+    ...chartLevels.map((level) => level.value),
   ];
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = max - min || 1;
-  const x = (index: number) =>
-    pad.left + (index / Math.max(bars.length - 1, 1)) * (width - pad.left - pad.right);
+  const min = Math.min(...priceValues);
+  const max = Math.max(...priceValues);
+  const priceRange = max - min || Math.max(Math.abs(max), 1);
+  const priceMin = min - priceRange * 0.08;
+  const priceMax = max + priceRange * 0.08;
+  const maxVolume = Math.max(...bars.map((bar) => bar.volume), 1);
+  const slot = chartWidth / bars.length;
+  const candleWidth = Math.min(10, Math.max(3, slot * 0.58));
+
+  const x = (index: number) => pad.left + index * slot + slot / 2;
   const y = (value: number) =>
-    pad.top + (1 - (value - min) / range) * (height - pad.top - pad.bottom);
+    pad.top + (1 - (value - priceMin) / (priceMax - priceMin || 1)) * (priceBottom - pad.top);
+  const volumeY = (value: number) => volumeBottom - (value / maxVolume) * (volumeBottom - volumeTop);
 
   return (
-    <div className="chart-shell">
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={t("detail.chart")}>
-        <rect x="0" y="0" width={width} height={height} rx="6" />
-        <Grid min={min} max={max} y={y} width={width} pad={pad} />
-        <Series bars={bars} seriesKey="close" x={x} y={y} className="series-close" />
-        <Series bars={bars} seriesKey="ma20" x={x} y={y} className="series-ma20" />
-        <Series bars={bars} seriesKey="ma50" x={x} y={y} className="series-ma50" />
-        <Level label={t("brief.trigger")} value={data.levels.trigger_price} y={y} width={width} pad={pad} className="level-trigger" />
-        <Level label={t("brief.stop")} value={data.levels.initial_stop} y={y} width={width} pad={pad} className="level-stop" />
-        <Level label={t("brief.target")} value={data.levels.target_1} y={y} width={width} pad={pad} className="level-target" />
-        <Level label={t("detail.noChase")} value={data.levels.no_chase_above} y={y} width={width} pad={pad} className="level-no-chase" />
+    <div className="chart-shell candlestick-chart">
+      <div className="candlestick-chart-head">
+        <div>
+          <span>{language === "zh" ? "K线复盘" : "Candlestick Review"}</span>
+          <strong>{data.instrument_id}</strong>
+        </div>
+        <small>
+          {bars[0]?.trade_date} - {bars[bars.length - 1]?.trade_date}
+        </small>
+      </div>
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={language === "zh" ? "推荐股票K线图" : "Recommendation candlestick chart"}>
+        <rect className="chart-bg" x="0" y="0" width={width} height={height} rx="8" />
+        <PriceGrid min={priceMin} max={priceMax} y={y} width={width} pad={pad} priceBottom={priceBottom} />
+        <VolumeGrid width={width} pad={pad} volumeTop={volumeTop} volumeBottom={volumeBottom} />
+        {chartLevels.map((level) => (
+          <PriceLevel key={level.key} level={level} y={y} width={width} pad={pad} />
+        ))}
+        <MovingAverageLine bars={bars} averageKey="ma5" x={x} y={y} className="series-ma5" />
+        <MovingAverageLine bars={bars} averageKey="ma10" x={x} y={y} className="series-ma10" />
+        <MovingAverageLine bars={bars} averageKey="ma20" x={x} y={y} className="series-ma20" />
+        <MovingAverageLine bars={bars} averageKey="ma60" x={x} y={y} className="series-ma60" />
+        {bars.map((bar, index) => {
+          const centerX = x(index);
+          const isUp = bar.close >= bar.open;
+          const bodyTop = y(Math.max(bar.open, bar.close));
+          const bodyBottom = y(Math.min(bar.open, bar.close));
+          const bodyHeight = Math.max(2, bodyBottom - bodyTop);
+          const klass = isUp ? "candle-up" : "candle-down";
+          const volumeHeight = Math.max(1, volumeBottom - volumeY(bar.volume));
+          return (
+            <g key={`${bar.trade_date}-${index}`} className={klass}>
+              <line className="candlestick-wick" x1={centerX} x2={centerX} y1={y(bar.high)} y2={y(bar.low)} />
+              <rect
+                className="candlestick-body"
+                x={centerX - candleWidth / 2}
+                y={bodyTop}
+                width={candleWidth}
+                height={bodyHeight}
+                rx="1"
+              />
+              <rect
+                className="volume-bar"
+                x={centerX - candleWidth / 2}
+                y={volumeBottom - volumeHeight}
+                width={candleWidth}
+                height={volumeHeight}
+                rx="1"
+              />
+            </g>
+          );
+        })}
+        <DateAxis bars={bars} x={x} height={height} pad={pad} />
       </svg>
-      <div className="chart-legend">
-        <span className="legend-close">{t("opportunities.close")}</span>
+      <div className="chart-legend candlestick-legend">
+        <span className="legend-candle">{language === "zh" ? "K线" : "Candle"}</span>
+        <span className="legend-volume">{language === "zh" ? "成交量" : "Volume"}</span>
+        <span className="legend-ma5">MA5</span>
+        <span className="legend-ma10">MA10</span>
         <span className="legend-ma20">MA20</span>
-        <span className="legend-ma50">MA50</span>
+        <span className="legend-ma60">MA60</span>
+        <span className="legend-trigger">{language === "zh" ? "买点" : "Entry"}</span>
+        <span className="legend-stop">{language === "zh" ? "止损" : "Stop"}</span>
+        <span className="legend-target">{language === "zh" ? "目标" : "Target"}</span>
+        <span className="legend-no-chase">{language === "zh" ? "不追高" : "No chase"}</span>
       </div>
     </div>
   );
 }
 
-function Series({
-  bars,
-  seriesKey,
-  x,
-  y,
-  className,
-}: {
-  bars: MarketBarsResponse["bars"];
-  seriesKey: SeriesKey;
-  x(index: number): number;
-  y(value: number): number;
-  className: string;
-}) {
-  const points: Point[] = bars
-    .map((bar, index) => ({ value: bar[seriesKey], index }))
-    .filter((item): item is { value: number; index: number } => isNumber(item.value))
-    .map((item) => ({ x: x(item.index), y: y(item.value) }));
-  if (!points.length) {
-    return null;
-  }
-  return <polyline className={className} points={points.map((point) => `${point.x},${point.y}`).join(" ")} />;
+export function OpportunityChart(props: { data?: MarketBarsResponse; levels?: ChartLevelOverrides }) {
+  return <OpportunityCandlestickChart {...props} />;
 }
 
-function Grid({
+function addLocalMovingAverages(rawBars: MarketBarsResponse["bars"]): CandleBar[] {
+  const closes = rawBars.map((bar) => Number(bar.close));
+  return rawBars.map((bar, index) => ({
+    trade_date: bar.trade_date,
+    open: Number(bar.open),
+    high: Number(bar.high),
+    low: Number(bar.low),
+    close: Number(bar.close),
+    volume: Number(bar.volume ?? 0),
+    ma5: movingAverage(closes, index, 5),
+    ma10: movingAverage(closes, index, 10),
+    ma20: movingAverage(closes, index, 20),
+    ma60: movingAverage(closes, index, 60),
+  }));
+}
+
+function movingAverage(values: number[], index: number, window: number): number | null {
+  if (index + 1 < window) {
+    return null;
+  }
+  const slice = values.slice(index + 1 - window, index + 1);
+  return slice.reduce((sum, value) => sum + value, 0) / window;
+}
+
+function buildLevels(levels: MarketBarsResponse["levels"], language: "zh" | "en"): LevelDefinition[] {
+  const labels = {
+    trigger_price: language === "zh" ? "买点" : "Entry",
+    initial_stop: language === "zh" ? "止损" : "Stop",
+    target_1: language === "zh" ? "目标" : "Target",
+    no_chase_above: language === "zh" ? "不追高" : "No chase",
+  } as const;
+  const classes = {
+    trigger_price: "level-trigger",
+    initial_stop: "level-stop",
+    target_1: "level-target",
+    no_chase_above: "level-no-chase",
+  } as const;
+  return (Object.keys(labels) as (keyof typeof labels)[])
+    .map((key) => ({
+      key,
+      label: labels[key],
+      value: Number(levels[key]),
+      className: classes[key],
+    }))
+    .filter((level) => isNumber(level.value));
+}
+
+function PriceGrid({
   min,
   max,
   y,
   width,
   pad,
+  priceBottom,
 }: {
   min: number;
   max: number;
   y(value: number): number;
   width: number;
   pad: { left: number; right: number };
+  priceBottom: number;
 }) {
-  const ticks = [min, min + (max - min) / 2, max];
+  const ticks = [max, min + (max - min) * 0.66, min + (max - min) * 0.33, min];
   return (
-    <g className="chart-grid">
+    <g className="chart-grid price-grid">
       {ticks.map((tick) => (
         <g key={tick}>
           <line x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} />
-          <text x={6} y={y(tick) + 4}>
-            {tick.toFixed(2)}
+          <text x={pad.left - 8} y={y(tick) + 4} textAnchor="end">
+            {formatPrice(tick)}
           </text>
         </g>
       ))}
+      <line x1={pad.left} x2={width - pad.right} y1={priceBottom} y2={priceBottom} />
     </g>
   );
 }
 
-function Level({
-  label,
-  value,
-  y,
+function VolumeGrid({
   width,
   pad,
-  className,
+  volumeTop,
+  volumeBottom,
 }: {
-  label: string;
-  value: string | null;
-  y(value: number): number;
   width: number;
   pad: { left: number; right: number };
-  className: string;
+  volumeTop: number;
+  volumeBottom: number;
 }) {
-  const numeric = Number(value);
-  if (!isNumber(numeric)) {
-    return null;
-  }
-  const lineY = y(numeric);
   return (
-    <g className={className}>
-      <line x1={pad.left} x2={width - pad.right} y1={lineY} y2={lineY} />
-      <text x={width - pad.right + 6} y={lineY + 4}>
-        {label}
+    <g className="chart-grid volume-grid">
+      <line x1={pad.left} x2={width - pad.right} y1={volumeTop} y2={volumeTop} />
+      <line x1={pad.left} x2={width - pad.right} y1={volumeBottom} y2={volumeBottom} />
+      <text x={pad.left - 8} y={volumeTop + 12} textAnchor="end">
+        VOL
       </text>
     </g>
   );
+}
+
+function MovingAverageLine({
+  bars,
+  averageKey,
+  x,
+  y,
+  className,
+}: {
+  bars: CandleBar[];
+  averageKey: "ma5" | "ma10" | "ma20" | "ma60";
+  x(index: number): number;
+  y(value: number): number;
+  className: string;
+}) {
+  const points = bars
+    .map((bar, index) => ({ value: bar[averageKey], index }))
+    .filter((item): item is { value: number; index: number } => isNumber(item.value))
+    .map((item) => `${x(item.index)},${y(item.value)}`);
+  if (points.length < 2) {
+    return null;
+  }
+  return <polyline className={`moving-average-line ${className}`} points={points.join(" ")} />;
+}
+
+function PriceLevel({
+  level,
+  y,
+  width,
+  pad,
+}: {
+  level: LevelDefinition;
+  y(value: number): number;
+  width: number;
+  pad: { left: number; right: number };
+}) {
+  const lineY = y(level.value);
+  return (
+    <g className={`price-level ${level.className}`}>
+      <line x1={pad.left} x2={width - pad.right} y1={lineY} y2={lineY} />
+      <text x={width - pad.right + 8} y={lineY + 4}>
+        {level.label} {formatPrice(level.value)}
+      </text>
+    </g>
+  );
+}
+
+function DateAxis({
+  bars,
+  x,
+  height,
+  pad,
+}: {
+  bars: CandleBar[];
+  x(index: number): number;
+  height: number;
+  pad: { left: number; right: number };
+}) {
+  const positions = [0, Math.floor((bars.length - 1) / 2), bars.length - 1];
+  return (
+    <g className="date-axis">
+      {positions.map((index) => (
+        <text key={`${bars[index]?.trade_date}-${index}`} x={x(index)} y={height - 12} textAnchor="middle">
+          {bars[index]?.trade_date.slice(5)}
+        </text>
+      ))}
+      <line x1={pad.left} x2={760 - pad.right} y1={height - 28} y2={height - 28} />
+    </g>
+  );
+}
+
+function formatPrice(value: number) {
+  if (Math.abs(value) >= 100) {
+    return value.toFixed(1);
+  }
+  if (Math.abs(value) >= 10) {
+    return value.toFixed(2);
+  }
+  return value.toFixed(3);
 }
 
 function isNumber(value: unknown): value is number {

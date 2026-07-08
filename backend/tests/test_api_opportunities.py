@@ -19,6 +19,11 @@ def test_opportunities_endpoint_returns_cards():
     assert "cards" in body
     assert "items" in body
     assert "data_health" in body
+    assert body["data_health"]["paper_feedback_source"] in {
+        "paper_daily_report",
+        "missing_provider",
+        "unavailable",
+    }
     assert "strategy_health" in body
     assert "factor_rankings" in body
     assert "sector_strength" in body
@@ -162,6 +167,18 @@ def test_market_bars_endpoint_returns_chart_ready_series_and_trade_levels():
     assert body["levels"]["trigger_price"] is not None
     assert body["levels"]["initial_stop"] is not None
     assert body["data_health"]["provider"] == "fixture"
+
+
+def test_market_bars_endpoint_accepts_bare_a_share_symbols():
+    client = TestClient(create_app())
+
+    response = client.get("/api/market-bars?provider=fixture&instrument_id=000001.SZ&days=80")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["instrument_id"] == "CN:000001"
+    assert body["bars"]
+    assert body["data_health"]["instrument"] == "CN:000001"
 
 
 def test_intraday_radar_endpoint_returns_actionable_scan_items():

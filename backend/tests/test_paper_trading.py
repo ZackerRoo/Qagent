@@ -801,6 +801,102 @@ def test_paper_daily_report_groups_stock_and_etf_performance(tmp_path):
     assert groups["etf"].total_return_pct < 0
 
 
+def test_paper_daily_report_explains_risk_gate_failures_and_event_timeline(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    stopped = paper_repo.create_trade(
+        source_snapshot_id="daily-risk-stopped",
+        provider="fixture",
+        instrument_id="CN:002747",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("30"),
+        initial_stop=Decimal("28.50"),
+        target_1=Decimal("33"),
+        rank_score=Decimal("0.80"),
+    )
+    paper_repo.update_trade(
+        stopped.trade_id,
+        status="stopped",
+        entry_date=date(2026, 7, 2),
+        entry_price=Decimal("30"),
+        exit_date=date(2026, 7, 4),
+        exit_price=Decimal("28.50"),
+        latest_date=date(2026, 7, 4),
+        latest_price=Decimal("28.50"),
+        realized_return_pct=Decimal("-5"),
+        holding_days=2,
+    )
+    for index in range(2):
+        extra = paper_repo.create_trade(
+            source_snapshot_id=f"daily-risk-extra-{index}",
+            provider="fixture",
+            instrument_id=f"CN:30060{index}",
+            strategy_id="trend_momentum_stage2",
+            signal_date=date(2026, 7, 1),
+            trigger_price=Decimal("20"),
+            initial_stop=Decimal("19"),
+            target_1=Decimal("22"),
+            rank_score=Decimal("0.70"),
+        )
+        paper_repo.update_trade(
+            extra.trade_id,
+            status="stopped",
+            entry_date=date(2026, 7, 2),
+            entry_price=Decimal("20"),
+            exit_date=date(2026, 7, 4),
+            exit_price=Decimal("19"),
+            latest_date=date(2026, 7, 4),
+            latest_price=Decimal("19"),
+            realized_return_pct=Decimal("-5"),
+            holding_days=2,
+        )
+    open_trade = paper_repo.create_trade(
+        source_snapshot_id="daily-risk-open",
+        provider="fixture",
+        instrument_id="CN:588850",
+        strategy_id="factor_rotation_watch",
+        signal_date=date(2026, 7, 2),
+        trigger_price=Decimal("2.20"),
+        initial_stop=Decimal("2.10"),
+        target_1=Decimal("2.40"),
+        rank_score=Decimal("0.70"),
+    )
+    paper_repo.update_trade(
+        open_trade.trade_id,
+        status="open",
+        entry_date=date(2026, 7, 3),
+        entry_price=Decimal("2.20"),
+        latest_date=date(2026, 7, 4),
+        latest_price=Decimal("2.12"),
+        unrealized_return_pct=Decimal("-3.64"),
+        holding_days=1,
+    )
+
+    trades = paper_repo.list_trades(limit=20)
+    ledger = build_paper_ledger(trades)
+    validation = build_paper_validation(trades, ledger, as_of=date(2026, 7, 4))
+    report = build_paper_daily_report(
+        trades=trades,
+        ledger=ledger,
+        validation=validation,
+        as_of=date(2026, 7, 4),
+        asset_type_by_instrument={"CN:002747": "stock", "CN:588850": "etf"},
+    )
+
+    assert report.risk_gate.action == "pause_new_entries"
+    assert report.risk_gate.can_add_entries is False
+    assert report.risk_gate.reasons
+    assert any(item.dimension == "strategy" for item in report.failure_attribution)
+    assert any(item.dimension == "asset" and item.key == "etf" for item in report.failure_attribution)
+    worst = report.failure_attribution[0]
+    assert worst.total_pnl < 0
+    assert worst.note
+    event_types = {item.event_type for item in report.event_timeline}
+    assert {"signal", "entry", "exit"}.issubset(event_types)
+    assert any(item.trade_id == stopped.trade_id and item.event_type == "exit" for item in report.event_timeline)
+
+
 def _insert_cn_snapshot(
     repo,
     *,

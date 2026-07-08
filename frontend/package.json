@@ -11,6 +11,7 @@
     "check:paper-ledger-ui": "node scripts/check-paper-ledger-ui.mjs",
     "check:automation-ui": "node scripts/check-automation-ui.mjs",
     "check:backtest-ui": "node scripts/check-backtest-ui.mjs",
+    "check:dashboard-noise-ui": "node scripts/check-dashboard-noise-ui.mjs",
     "check:today-ui": "node scripts/check-today-ui.mjs",
     "check:terminal-ui": "node scripts/check-terminal-ui.mjs",
     "preview": "vite preview"

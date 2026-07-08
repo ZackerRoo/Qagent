@@ -25,7 +25,7 @@ import {
   localizeStrategyFamily,
 } from "../lib/localize";
 import type { DataProviderMode, MarketBarsResponse, OpportunityCard } from "../types";
-import { OpportunityChart } from "./OpportunityChart";
+import { OpportunityCandlestickChart } from "./OpportunityChart";
 import { SignalHubPanel } from "./SignalHubPanel";
 import { StatusBadge } from "./StatusBadge";
 
@@ -86,6 +86,15 @@ export function OpportunityDetail({
       <p className="thesis">
         {formatInstrumentText(localizeReason(card.thesis, language), card.instrument_id, card.instrument_label)}
       </p>
+
+      <div className="detail-section detail-kline-primary">
+        <h3>{t("detail.chart")}</h3>
+        {chartError ? (
+          <p className="empty error">{chartError}</p>
+        ) : (
+          <OpportunityCandlestickChart data={chart} levels={chartLevelsFromCard(card)} />
+        )}
+      </div>
 
       {card.recommendation_brief && (
         <div className="recommendation-brief-card">
@@ -372,11 +381,6 @@ export function OpportunityDetail({
             <p className="context-note">{card.strategy_calibration.message}</p>
           </div>
         )}
-      </div>
-
-      <div className="detail-section">
-        <h3>{t("detail.chart")}</h3>
-        {chartError ? <p className="empty error">{chartError}</p> : <OpportunityChart data={chart} />}
       </div>
 
       <div className="metric-grid">
@@ -740,6 +744,16 @@ function formatSignedPct(value: number | null) {
     return "-";
   }
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
+function chartLevelsFromCard(card: OpportunityCard): Partial<MarketBarsResponse["levels"]> {
+  return {
+    trigger_price: card.entry_plan.trigger_price ?? card.decision?.trigger_price ?? null,
+    initial_stop: card.exit_plan.initial_stop ?? card.decision?.initial_stop ?? null,
+    target_1: card.exit_plan.target_1 ?? card.decision?.target_1 ?? null,
+    target_2: card.exit_plan.target_2 ?? null,
+    no_chase_above: card.entry_plan.no_chase_above ?? card.decision?.no_chase_above ?? null,
+  };
 }
 
 function DecisionList({

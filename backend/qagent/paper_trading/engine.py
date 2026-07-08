@@ -324,10 +324,55 @@ class PaperDailyBenchmark(BaseModel):
     summary: str
 
 
+class PaperRiskGateStatus(BaseModel):
+    action: str
+    can_add_entries: bool
+    title: str
+    reason: str
+    reasons: list[str]
+    recovery_conditions: list[str]
+
+
+class PaperFailureAttributionItem(BaseModel):
+    dimension: str
+    key: str
+    label: str
+    total_trades: int
+    evaluated_trades: int
+    closed_trades: int
+    stopped_trades: int
+    target_hit_trades: int
+    win_rate: float | None
+    average_return_pct: float | None
+    total_pnl: Decimal
+    total_return_pct: float | None
+    worst_return_pct: float | None
+    verdict: str
+    note: str
+
+
+class PaperEventTimelineItem(BaseModel):
+    event_id: str
+    trade_id: str
+    instrument_id: str
+    strategy_id: str | None
+    event_date: date
+    event_type: str
+    title: str
+    description: str
+    status: str
+    price: Decimal | None = None
+    pnl: Decimal = Decimal("0")
+    return_pct: float | None = None
+
+
 class PaperDailyReport(BaseModel):
     report_date: date
     summary: PaperDailyReportSummary
     benchmark: PaperDailyBenchmark
+    risk_gate: PaperRiskGateStatus
+    failure_attribution: list[PaperFailureAttributionItem]
+    event_timeline: list[PaperEventTimelineItem]
     new_opportunities: list[PaperDailyReportItem]
     triggered_today: list[PaperDailyReportItem]
     holdings: list[PaperDailyReportItem]
@@ -792,6 +837,17 @@ def build_paper_daily_report(
             win_rate=ledger.summary.win_rate,
         ),
         benchmark=benchmark,
+        risk_gate=_paper_risk_gate_status(ledger),
+        failure_attribution=_paper_failure_attribution(
+            ledger.items,
+            asset_type_by_instrument=asset_type_by_instrument or {},
+            allocation_per_trade=ledger.summary.allocation_per_trade,
+        ),
+        event_timeline=_paper_event_timeline(
+            trades=trades,
+            ledger_by_id=ledger_by_id,
+            validation_by_id=validation_by_id,
+        ),
         new_opportunities=new_opportunities,
         triggered_today=triggered_today,
         holdings=holdings,
@@ -898,6 +954,235 @@ def _paper_asset_label(asset_type: str) -> str:
 
 def _paper_asset_rank(asset_type: str) -> int:
     return {"stock": 0, "etf": 1, "index": 2, "fund": 3}.get(asset_type, 9)
+
+
+def _paper_risk_gate_status(ledger: PaperLedger) -> PaperRiskGateStatus:
+    summary = ledger.summary
+    reasons: list[str] = []
+    if summary.total_trades >= 5 and summary.total_return_pct <= -2.0:
+        reasons.append(f"总收益 {summary.total_return_pct:.2f}% 低于 -2.00%")
+    if summary.total_trades >= 5 and summary.max_drawdown_pct <= -2.0:
+        reasons.append(f"最大回撤 {summary.max_drawdown_pct:.2f}% 低于 -2.00%")
+    if (
+        summary.closed_trades >= 3
+        and summary.win_rate is not None
+        and summary.win_rate <= 0.25
+    ):
+        reasons.append(f"闭环胜率 {summary.win_rate:.0%} 低于 25%")
+    if summary.stopped_count >= 3 and summary.target_hit_count == 0:
+        reasons.append("止损次数较多且尚无止盈")
+
+    if summary.total_trades == 0:
+        return PaperRiskGateStatus(
+            action="allow_new_entries",
+            can_add_entries=True,
+            title="允许新增模拟单",
+            reason="还没有模拟历史，允许从新推荐开始跟踪。",
+            reasons=["no_paper_history"],
+            recovery_conditions=["至少积累 5 笔模拟记录后再判断门禁。"],
+        )
+
+    can_add_entries = not reasons
+    return PaperRiskGateStatus(
+        action="allow_new_entries" if can_add_entries else "pause_new_entries",
+        can_add_entries=can_add_entries,
+        title="允许新增模拟单" if can_add_entries else "暂停新增模拟单",
+        reason="当前回撤和胜率仍在允许范围内。"
+        if can_add_entries
+        else "；".join(reasons),
+        reasons=reasons or ["within_limits"],
+        recovery_conditions=[
+            "总收益回到 -2% 以上",
+            "最大回撤收敛到 -2% 以内",
+            "闭环胜率回到 25% 以上",
+            "出现目标命中或连续止损减少",
+        ],
+    )
+
+
+def _paper_failure_attribution(
+    items: list[PaperLedgerItem],
+    *,
+    asset_type_by_instrument: Mapping[str, str],
+    allocation_per_trade: Decimal,
+) -> list[PaperFailureAttributionItem]:
+    grouped: dict[tuple[str, str, str], list[PaperLedgerItem]] = defaultdict(list)
+    for item in items:
+        asset_type = _paper_asset_type(item.instrument_id, asset_type_by_instrument)
+        grouped[("asset", asset_type, _paper_asset_label(asset_type))].append(item)
+        grouped[("strategy", item.strategy_id or "unknown", item.strategy_id or "未分类策略")].append(item)
+        grouped[("status", item.status, _paper_status_label(item.status))].append(item)
+
+    attribution = [
+        _paper_failure_group(
+            dimension=dimension,
+            key=key,
+            label=label,
+            items=group_items,
+            allocation_per_trade=allocation_per_trade,
+        )
+        for (dimension, key, label), group_items in grouped.items()
+    ]
+    return sorted(
+        attribution,
+        key=lambda item: (item.total_pnl, -item.evaluated_trades, item.dimension, item.key),
+    )[:12]
+
+
+def _paper_failure_group(
+    *,
+    dimension: str,
+    key: str,
+    label: str,
+    items: list[PaperLedgerItem],
+    allocation_per_trade: Decimal,
+) -> PaperFailureAttributionItem:
+    evaluated = [item for item in items if item.status != "pending" and item.return_pct is not None]
+    closed = [item for item in items if item.status in CLOSED_STATUSES]
+    returns = [item.return_pct for item in evaluated if item.return_pct is not None]
+    total_pnl = _money(sum((item.total_pnl for item in items), Decimal("0")))
+    capital_base = allocation_per_trade * Decimal(str(len(evaluated)))
+    total_return_pct = _pct(total_pnl, capital_base) if capital_base > 0 else None
+    win_rate = (
+        round(sum(1 for value in returns if value > 0) / len(returns), 4)
+        if returns
+        else None
+    )
+    average_return_pct = round(sum(returns) / len(returns), 4) if returns else None
+    worst_return_pct = round(min(returns), 4) if returns else None
+    if total_pnl < 0:
+        verdict = "drag"
+        note = f"{label} 当前拖累模拟盘，优先复核买点、止损和是否追高。"
+    elif total_pnl > 0:
+        verdict = "contributor"
+        note = f"{label} 当前贡献正收益，可继续观察是否稳定。"
+    else:
+        verdict = "neutral"
+        note = f"{label} 暂无明确收益贡献，继续等待样本。"
+    return PaperFailureAttributionItem(
+        dimension=dimension,
+        key=key,
+        label=label,
+        total_trades=len(items),
+        evaluated_trades=len(evaluated),
+        closed_trades=len(closed),
+        stopped_trades=sum(1 for item in items if item.status == "stopped"),
+        target_hit_trades=sum(1 for item in items if item.status == "target_1_hit"),
+        win_rate=win_rate,
+        average_return_pct=average_return_pct,
+        total_pnl=total_pnl,
+        total_return_pct=total_return_pct,
+        worst_return_pct=worst_return_pct,
+        verdict=verdict,
+        note=note,
+    )
+
+
+def _paper_status_label(status: str) -> str:
+    return {
+        "pending": "等待触发",
+        "open": "持仓中",
+        "target_1_hit": "目标命中",
+        "stopped": "止损",
+        "time_exit": "时间退出",
+        "missed_entry": "错过买点",
+    }.get(status, status)
+
+
+def _paper_event_timeline(
+    *,
+    trades: list[PaperTradeRecord],
+    ledger_by_id: dict[str, PaperLedgerItem],
+    validation_by_id: dict[str, PaperValidationItem],
+) -> list[PaperEventTimelineItem]:
+    events: list[PaperEventTimelineItem] = []
+    for trade in trades:
+        ledger_item = ledger_by_id.get(trade.trade_id)
+        validation_item = validation_by_id.get(trade.trade_id)
+        events.append(
+            PaperEventTimelineItem(
+                event_id=f"{trade.trade_id}:signal",
+                trade_id=trade.trade_id,
+                instrument_id=trade.instrument_id,
+                strategy_id=trade.strategy_id,
+                event_date=trade.signal_date,
+                event_type="signal",
+                title="生成推荐",
+                description="推荐进入模拟观察，等待触发价确认。",
+                status=trade.status,
+                price=trade.trigger_price,
+                pnl=ledger_item.total_pnl if ledger_item is not None else Decimal("0"),
+                return_pct=ledger_item.return_pct if ledger_item is not None else None,
+            )
+        )
+        if trade.entry_date is not None and trade.entry_price is not None:
+            events.append(
+                PaperEventTimelineItem(
+                    event_id=f"{trade.trade_id}:entry",
+                    trade_id=trade.trade_id,
+                    instrument_id=trade.instrument_id,
+                    strategy_id=trade.strategy_id,
+                    event_date=trade.entry_date,
+                    event_type="entry",
+                    title="触发买点",
+                    description="价格触发计划买点，按模拟盘仓位和成本规则入账。",
+                    status=trade.status,
+                    price=trade.entry_price,
+                    pnl=ledger_item.total_pnl if ledger_item is not None else Decimal("0"),
+                    return_pct=ledger_item.return_pct if ledger_item is not None else None,
+                )
+            )
+        if trade.exit_date is not None and trade.exit_price is not None:
+            events.append(
+                PaperEventTimelineItem(
+                    event_id=f"{trade.trade_id}:exit",
+                    trade_id=trade.trade_id,
+                    instrument_id=trade.instrument_id,
+                    strategy_id=trade.strategy_id,
+                    event_date=trade.exit_date,
+                    event_type="exit",
+                    title=_paper_exit_title(trade.status),
+                    description=validation_item.next_action if validation_item is not None else _paper_next_action(trade),
+                    status=trade.status,
+                    price=trade.exit_price,
+                    pnl=ledger_item.total_pnl if ledger_item is not None else Decimal("0"),
+                    return_pct=ledger_item.return_pct if ledger_item is not None else None,
+                )
+            )
+        elif trade.latest_date is not None:
+            events.append(
+                PaperEventTimelineItem(
+                    event_id=f"{trade.trade_id}:mark",
+                    trade_id=trade.trade_id,
+                    instrument_id=trade.instrument_id,
+                    strategy_id=trade.strategy_id,
+                    event_date=trade.latest_date,
+                    event_type="mark",
+                    title="更新估值" if trade.status == "open" else "继续等待",
+                    description=validation_item.next_action if validation_item is not None else _paper_next_action(trade),
+                    status=trade.status,
+                    price=trade.latest_price,
+                    pnl=ledger_item.total_pnl if ledger_item is not None else Decimal("0"),
+                    return_pct=ledger_item.return_pct if ledger_item is not None else None,
+                )
+            )
+    order = {"exit": 4, "mark": 3, "entry": 2, "signal": 1}
+    return sorted(
+        events,
+        key=lambda item: (item.event_date, order.get(item.event_type, 0), item.trade_id),
+        reverse=True,
+    )[:60]
+
+
+def _paper_exit_title(status: str) -> str:
+    return {
+        "target_1_hit": "目标命中",
+        "stopped": "触发止损",
+        "time_exit": "时间退出",
+        "missed_entry": "错过买点",
+    }.get(status, "结束跟踪")
+
+
 def _daily_report_item(
     trade: PaperTradeRecord,
     ledger_by_id: dict[str, PaperLedgerItem],
