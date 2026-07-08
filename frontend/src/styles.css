@@ -8880,9 +8880,57 @@ tbody tr.selected {
 
 .price-level text,
 .date-axis text,
-.volume-grid text {
+.volume-grid text,
+.signal-marker text {
   fill: var(--terminal-muted-2);
   font-size: 11px;
+}
+
+.signal-marker-guide {
+  stroke: rgba(148, 163, 184, 0.38);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+}
+
+.signal-marker-pin {
+  stroke: rgba(7, 13, 20, 0.92);
+  stroke-width: 1.2;
+}
+
+.signal-marker-badge {
+  stroke: rgba(7, 13, 20, 0.85);
+  stroke-width: 1;
+}
+
+.signal-marker text {
+  fill: #071018;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.signal-marker-recommendation .signal-marker-pin,
+.signal-marker-recommendation .signal-marker-badge {
+  fill: var(--terminal-cyan);
+}
+
+.signal-marker-entry .signal-marker-pin,
+.signal-marker-entry .signal-marker-badge {
+  fill: var(--terminal-blue);
+}
+
+.signal-marker-stop .signal-marker-pin,
+.signal-marker-stop .signal-marker-badge {
+  fill: var(--terminal-red);
+}
+
+.signal-marker-target .signal-marker-pin,
+.signal-marker-target .signal-marker-badge {
+  fill: var(--terminal-green);
+}
+
+.signal-marker-no-chase .signal-marker-pin,
+.signal-marker-no-chase .signal-marker-badge {
+  fill: var(--terminal-yellow);
 }
 
 .date-axis line {
@@ -8928,6 +8976,10 @@ tbody tr.selected {
 
 .candlestick-legend .legend-no-chase::before {
   background: var(--terminal-yellow);
+}
+
+.candlestick-legend .legend-signal::before {
+  background: linear-gradient(90deg, var(--terminal-cyan), var(--terminal-blue));
 }
 
 .risk-veto-block {

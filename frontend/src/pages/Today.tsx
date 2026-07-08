@@ -19,6 +19,7 @@ import { MarketRotationRadarPanel } from "../components/MarketRotationRadar";
 import { MarketIntelligenceCenterPanel } from "../components/MarketIntelligenceCenter";
 import { RecommendationFollowThroughPanel } from "../components/RecommendationFollowThrough";
 import { OpportunityCandlestickChart } from "../components/OpportunityChart";
+import type { SignalMarker } from "../components/OpportunityChart";
 import { DecisionQualityCenterPanel } from "../components/DecisionQualityCenter";
 import { OperationalReadinessCenterPanel } from "../components/OperationalReadinessCenter";
 import { AlphaQualityCenterPanel } from "../components/AlphaQualityCenter";
@@ -674,7 +675,11 @@ function TodayRecommendationKline({
       {chartError ? (
         <p className="empty error">{chartError}</p>
       ) : (
-        <OpportunityCandlestickChart data={chart} levels={chartLevelsFromTodayCard(card)} />
+        <OpportunityCandlestickChart
+          data={chart}
+          levels={chartLevelsFromTodayCard(card)}
+          markers={signalMarkersFromTodayCard(card)}
+        />
       )}
     </section>
   );
@@ -1374,6 +1379,20 @@ function chartLevelsFromTodayCard(card: OpportunityCard): Partial<MarketBarsResp
     target_2: card.exit_plan.target_2 ?? null,
     no_chase_above: card.entry_plan.no_chase_above ?? card.decision?.no_chase_above ?? null,
   };
+}
+
+function signalMarkersFromTodayCard(card: OpportunityCard): SignalMarker[] {
+  return compactSignalMarkers([
+    { kind: "recommendation" },
+    { kind: "entry", price: card.entry_plan.trigger_price ?? card.decision?.trigger_price },
+    { kind: "stop", price: card.exit_plan.initial_stop ?? card.decision?.initial_stop },
+    { kind: "target", price: card.exit_plan.target_1 ?? card.decision?.target_1 },
+    { kind: "no_chase", price: card.entry_plan.no_chase_above ?? card.decision?.no_chase_above },
+  ]);
+}
+
+function compactSignalMarkers(markers: SignalMarker[]): SignalMarker[] {
+  return markers.filter((marker) => marker.kind === "recommendation" || marker.price !== null && marker.price !== undefined && marker.price !== "");
 }
 
 function signalBucketLabel(bucket: string, language: "zh" | "en") {

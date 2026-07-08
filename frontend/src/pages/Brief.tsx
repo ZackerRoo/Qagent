@@ -14,6 +14,7 @@ import {
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
 import { OpportunityCandlestickChart } from "../components/OpportunityChart";
+import type { SignalMarker } from "../components/OpportunityChart";
 import { useI18n } from "../i18n";
 import type { TranslationKey } from "../i18n/catalog";
 import { formatInstrumentDisplay } from "../lib/instruments";
@@ -641,7 +642,11 @@ function BriefKlineFocus({
         {error ? (
           <p className="empty error">{error}</p>
         ) : (
-          <OpportunityCandlestickChart data={chart} levels={briefChartLevels(item)} />
+          <OpportunityCandlestickChart
+            data={chart}
+            levels={briefChartLevels(item)}
+            markers={briefSignalMarkers(item)}
+          />
         )}
       </div>
     </div>
@@ -758,6 +763,19 @@ function briefChartLevels(item: DailyBriefOpportunity): Partial<MarketBarsRespon
     initial_stop: item.initial_stop,
     target_1: item.target_1,
   };
+}
+
+function briefSignalMarkers(item: DailyBriefOpportunity): SignalMarker[] {
+  return compactSignalMarkers([
+    { kind: "recommendation" },
+    { kind: "entry", price: item.trigger_price },
+    { kind: "stop", price: item.initial_stop },
+    { kind: "target", price: item.target_1 },
+  ]);
+}
+
+function compactSignalMarkers(markers: SignalMarker[]): SignalMarker[] {
+  return markers.filter((marker) => marker.kind === "recommendation" || marker.price !== null && marker.price !== undefined && marker.price !== "");
 }
 
 function BriefEntryWatchMarketSections({ items }: { items: DailyBriefEntryWatch[] }) {

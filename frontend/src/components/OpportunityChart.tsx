@@ -3,6 +3,15 @@ import type { MarketBarsResponse } from "../types";
 
 type ChartLevelOverrides = Partial<MarketBarsResponse["levels"]>;
 
+export type SignalMarkerKind = "recommendation" | "entry" | "stop" | "target" | "no_chase";
+
+export type SignalMarker = {
+  kind: SignalMarkerKind;
+  date?: string | null;
+  price?: string | number | null;
+  label?: string | null;
+};
+
 type CandleBar = {
   trade_date: string;
   open: number;
@@ -23,12 +32,22 @@ type LevelDefinition = {
   className: string;
 };
 
+type SignalMarkerDefinition = {
+  kind: SignalMarkerKind;
+  label: string;
+  index: number;
+  value: number;
+  className: string;
+};
+
 export function OpportunityCandlestickChart({
   data,
   levels,
+  markers,
 }: {
   data?: MarketBarsResponse;
   levels?: ChartLevelOverrides;
+  markers?: SignalMarker[];
 }) {
   const { language, t } = useI18n();
   const rawBars = data?.bars.filter(
@@ -47,6 +66,7 @@ export function OpportunityCandlestickChart({
   const bars = addLocalMovingAverages(rawBars).slice(-120);
   const mergedLevels = { ...data.levels, ...levels };
   const chartLevels = buildLevels(mergedLevels, language);
+  const signalMarkers = buildSignalMarkers(markers ?? [], bars, language);
 
   const width = 760;
   const height = 430;
@@ -58,6 +78,7 @@ export function OpportunityCandlestickChart({
   const priceValues = [
     ...bars.flatMap((bar) => [bar.high, bar.low, bar.ma5, bar.ma10, bar.ma20, bar.ma60]).filter(isNumber),
     ...chartLevels.map((level) => level.value),
+    ...signalMarkers.map((marker) => marker.value),
   ];
   const min = Math.min(...priceValues);
   const max = Math.max(...priceValues);
@@ -125,6 +146,7 @@ export function OpportunityCandlestickChart({
             </g>
           );
         })}
+        <SignalMarkers markers={signalMarkers} x={x} y={y} width={width} pad={pad} />
         <DateAxis bars={bars} x={x} height={height} pad={pad} />
       </svg>
       <div className="chart-legend candlestick-legend">
@@ -138,12 +160,15 @@ export function OpportunityCandlestickChart({
         <span className="legend-stop">{language === "zh" ? "止损" : "Stop"}</span>
         <span className="legend-target">{language === "zh" ? "目标" : "Target"}</span>
         <span className="legend-no-chase">{language === "zh" ? "不追高" : "No chase"}</span>
+        {signalMarkers.length ? (
+          <span className="legend-signal">{language === "zh" ? "信号标记" : "Signal markers"}</span>
+        ) : null}
       </div>
     </div>
   );
 }
 
-export function OpportunityChart(props: { data?: MarketBarsResponse; levels?: ChartLevelOverrides }) {
+export function OpportunityChart(props: { data?: MarketBarsResponse; levels?: ChartLevelOverrides; markers?: SignalMarker[] }) {
   return <OpportunityCandlestickChart {...props} />;
 }
 
@@ -192,6 +217,140 @@ function buildLevels(levels: MarketBarsResponse["levels"], language: "zh" | "en"
       className: classes[key],
     }))
     .filter((level) => isNumber(level.value));
+}
+
+function buildSignalMarkers(
+  markers: SignalMarker[],
+  bars: CandleBar[],
+  language: "zh" | "en",
+): SignalMarkerDefinition[] {
+  if (!bars.length) {
+    return [];
+  }
+  return markers
+    .map((marker) => {
+      const index = marker.date ? nearestBarIndex(bars, marker.date) : bars.length - 1;
+      const value = markerPrice(marker.price, bars[index]);
+      if (!isNumber(value)) {
+        return null;
+      }
+      return {
+        kind: marker.kind,
+        label: marker.label || signalMarkerLabel(marker.kind, language),
+        index,
+        value,
+        className: `signal-marker-${marker.kind.replace("_", "-")}`,
+      };
+    })
+    .filter((marker): marker is SignalMarkerDefinition => marker !== null);
+}
+
+function nearestBarIndex(bars: CandleBar[], date: string): number {
+  const exact = bars.findIndex((bar) => bar.trade_date === date);
+  if (exact >= 0) {
+    return exact;
+  }
+  const target = Date.parse(date);
+  if (!Number.isFinite(target)) {
+    return bars.length - 1;
+  }
+  let bestIndex = bars.length - 1;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  bars.forEach((bar, index) => {
+    const parsed = Date.parse(bar.trade_date);
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+    const distance = Math.abs(parsed - target);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = index;
+    }
+  });
+  return bestIndex;
+}
+
+function markerPrice(price: SignalMarker["price"], bar: CandleBar): number | null {
+  if (price === null || price === undefined || price === "") {
+    return bar.close;
+  }
+  const parsed = Number(price);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function signalMarkerLabel(kind: SignalMarkerKind, language: "zh" | "en") {
+  const labels = {
+    recommendation: language === "zh" ? "推荐" : "Signal",
+    entry: language === "zh" ? "买点" : "Entry",
+    stop: language === "zh" ? "止损" : "Stop",
+    target: language === "zh" ? "目标" : "Target",
+    no_chase: language === "zh" ? "不追高" : "No chase",
+  } satisfies Record<SignalMarkerKind, string>;
+  return labels[kind];
+}
+
+function SignalMarkers({
+  markers,
+  x,
+  y,
+  width,
+  pad,
+}: {
+  markers: SignalMarkerDefinition[];
+  x(index: number): number;
+  y(value: number): number;
+  width: number;
+  pad: { left: number; right: number };
+}) {
+  if (!markers.length) {
+    return null;
+  }
+  return (
+    <g className="signal-markers">
+      {markers.map((marker, order) => {
+        const centerX = x(marker.index);
+        const centerY = y(marker.value);
+        const direction = marker.kind === "stop" ? 1 : -1;
+        const labelWidth = Math.max(38, marker.label.length * 12 + 16);
+        const labelX = Math.min(width - pad.right - labelWidth, Math.max(pad.left, centerX + 9));
+        const labelY = centerY + direction * 25 + orderOffset(order, marker.kind);
+        const triangle =
+          direction < 0
+            ? `M ${centerX} ${centerY - 10} L ${centerX + 7} ${centerY + 2} L ${centerX - 7} ${centerY + 2} Z`
+            : `M ${centerX} ${centerY + 10} L ${centerX + 7} ${centerY - 2} L ${centerX - 7} ${centerY - 2} Z`;
+        return (
+          <g key={`${marker.kind}-${marker.index}-${marker.value}`} className={`signal-marker ${marker.className}`}>
+            <line
+              className="signal-marker-guide"
+              x1={centerX}
+              x2={centerX}
+              y1={centerY}
+              y2={labelY}
+            />
+            <path className="signal-marker-pin" d={triangle} />
+            <rect
+              className="signal-marker-badge"
+              x={labelX}
+              y={labelY - 10}
+              width={labelWidth}
+              height="20"
+              rx="6"
+            />
+            <text x={labelX + labelWidth / 2} y={labelY + 4} textAnchor="middle">
+              {marker.label}
+            </text>
+          </g>
+        );
+      })}
+    </g>
+  );
+}
+
+function orderOffset(order: number, kind: SignalMarkerKind): number {
+  if (kind === "recommendation") {
+    return -12;
+  }
+  return (order % 3) * 10;
 }
 
 function PriceGrid({

@@ -6,6 +6,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const files = {
   dataHealth: resolve(__dirname, "../src/components/DataHealth.tsx"),
   opportunityDetail: resolve(__dirname, "../src/components/OpportunityDetail.tsx"),
+  opportunityChart: resolve(__dirname, "../src/components/OpportunityChart.tsx"),
+  today: resolve(__dirname, "../src/pages/Today.tsx"),
   brief: resolve(__dirname, "../src/pages/Brief.tsx"),
   opportunities: resolve(__dirname, "../src/pages/Opportunities.tsx"),
   overview: resolve(__dirname, "../src/pages/Overview.tsx"),
@@ -21,6 +23,8 @@ for (const path of Object.values(files)) {
 
 const dataHealth = readFileSync(files.dataHealth, "utf8");
 const opportunityDetail = readFileSync(files.opportunityDetail, "utf8");
+const opportunityChart = readFileSync(files.opportunityChart, "utf8");
+const today = readFileSync(files.today, "utf8");
 const brief = readFileSync(files.brief, "utf8");
 const opportunities = readFileSync(files.opportunities, "utf8");
 const overview = readFileSync(files.overview, "utf8");
@@ -39,12 +43,17 @@ assert(dataHealth.includes("data-health-details"), "DataHealth must hide raw key
 assert(dataHealth.includes("systemKeys"), "DataHealth must classify system/debug fields instead of dumping all keys");
 assert(dataHealth.includes("dataHealthScore"), "DataHealth must show a score/readiness style summary");
 assert(opportunityDetail.indexOf("detail-kline-primary") < opportunityDetail.indexOf("recommendation-brief-card"), "Opportunity detail K-line must appear before text-heavy brief cards");
+assert(opportunityChart.includes("SignalMarker"), "K-line chart must support recommendation signal markers");
+assert(opportunityChart.includes("signal-marker"), "K-line chart must render visible signal marker SVG groups");
+assert(opportunityDetail.includes("signalMarkersFromCard"), "Opportunity detail must pass signal markers into the K-line chart");
+assert(today.includes("signalMarkersFromTodayCard"), "Today page must pass signal markers into the K-line chart");
 
 assert(brief.includes("BriefKlineFocus"), "Brief page must render a K-line focus panel for top opportunities");
 assert(brief.includes("fetchMarketBars"), "Brief page must fetch bars for the focus K-line");
 assert(brief.includes("OpportunityCandlestickChart"), "Brief page must reuse the candlestick chart");
 assert(brief.includes("brief-kline-focus"), "Brief page must expose K-line focus styling hook");
 assert(brief.includes("ReasonDigest"), "Brief tables must summarize long reasons");
+assert(brief.includes("briefSignalMarkers"), "Brief K-line must pass signal markers into the chart");
 
 assert(opportunities.includes("ReasonDigest"), "Opportunity scan tables must summarize long reasons");
 assert(opportunities.includes("reason-digest"), "Opportunity scan tables must render short reason chips");
@@ -61,5 +70,6 @@ assert(styles.includes(".reason-digest"), "CSS must define short reason digest c
 assert(styles.includes("details.reason-details:not([open])"), "Closed long reasons must be hidden");
 assert(styles.includes(".brief-kline-focus"), "CSS must define brief K-line focus layout");
 assert(styles.includes(".detail-kline-primary"), "CSS must define primary detail K-line layout");
+assert(styles.includes(".signal-marker"), "CSS must define K-line signal marker styling");
 
 console.log("dashboard noise ui checks passed");
