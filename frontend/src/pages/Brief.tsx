@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import {
   fetchDailyBrief,
@@ -36,6 +36,8 @@ import type {
   DataProviderMode,
   DeliveryOutboxRecord,
   MarketBarsResponse,
+  OpportunitiesResponse,
+  OpportunityCard,
 } from "../types";
 
 function formatNumber(value: number | null, suffix = "") {
@@ -55,7 +57,15 @@ function formatRatio(value: number | null) {
 const FAST_DEFAULT_SCAN_LIMIT = 30;
 const BRIEF_REQUEST_TIMEOUT_MS = 20_000;
 
-export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbols: string }) {
+export function Brief({
+  dataMode,
+  symbols,
+  currentOpportunities,
+}: {
+  dataMode: DataProviderMode;
+  symbols: string;
+  currentOpportunities?: OpportunitiesResponse;
+}) {
   const { language, t } = useI18n();
   const [brief, setBrief] = useState<DailyBriefResponse>();
   const [runs, setRuns] = useState<BriefRun[]>([]);
@@ -93,7 +103,24 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
     };
   }
 
+  const todayBrief = useMemo(() => {
+    if (!currentOpportunities?.cards.length) {
+      return undefined;
+    }
+    const safeLimit = parseNumber(opportunityLimit);
+    const limit = safeLimit && safeLimit > 0 && safeLimit <= 20 ? safeLimit : 5;
+    return buildTodayBriefFromOpportunities(currentOpportunities, dataMode, symbols, limit);
+  }, [currentOpportunities, dataMode, opportunityLimit, symbols]);
+
+  const displayBrief = brief ?? todayBrief;
+
   async function loadBrief() {
+    if (todayBrief && briefMode === "fast") {
+      setBrief(undefined);
+      setMarkdown("");
+      setError("");
+      return;
+    }
     const requestId = briefRequestRef.current + 1;
     briefRequestRef.current = requestId;
     briefAbortRef.current?.abort();
@@ -144,6 +171,12 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
   }
 
   async function saveBrief() {
+    if (todayBrief && briefMode === "fast") {
+      setBrief(undefined);
+      setMarkdown("");
+      setError(language === "zh" ? "当前简报已与今日页同步；如需保存历史快照，请切到完整模式。" : "This brief is synced with Today; use full mode to save a historical snapshot.");
+      return;
+    }
     try {
       setIsSaving(true);
       setError("");
@@ -218,7 +251,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
           <div>
             <h2>{t("brief.title")}</h2>
             <p className="brief-headline">
-              {brief ? localizeReason(brief.headline, language) : isLoading ? t("brief.loading") : t("brief.empty")}
+              {displayBrief ? localizeReason(displayBrief.headline, language) : isLoading ? t("brief.loading") : t("brief.empty")}
             </p>
           </div>
         <div className="brief-actions">
@@ -289,31 +322,34 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
           </div>
         </div>
         {error && <div className="empty-state error">{error}</div>}
-        {brief && <DataHealth data={brief.data_health} language={language} />}
-        {brief && (
+        {todayBrief && !brief && <div className="brief-sync-banner">{language === "zh" ? "当前简报与今日页使用同一批机会，刷新不会重新排序。" : "This brief uses the same opportunity set as Today."}</div>}
+        {displayBrief && <DataHealth data={displayBrief.data_health} language={language} />}
+        {displayBrief && (
           <div className="metric-grid brief-metrics">
             <div>
               <span>{t("brief.opportunities")}</span>
-              <strong>{brief.top_opportunities.length}</strong>
+              <strong>{displayBrief.top_opportunities.length}</strong>
             </div>
             <div>
               <span>{t("brief.entryWatch")}</span>
-              <strong>{brief.entry_watch.length}</strong>
+              <strong>{displayBrief.entry_watch.length}</strong>
             </div>
             <div>
               <span>{t("brief.riskAlerts")}</span>
-              <strong>{brief.risk_alerts.length}</strong>
+              <strong>{displayBrief.risk_alerts.length}</strong>
             </div>
             <div>
               <span>{t("brief.catalysts")}</span>
-              <strong>{brief.catalyst_watch.length}</strong>
+              <strong>{displayBrief.catalyst_watch.length}</strong>
             </div>
           </div>
         )}
-        {brief?.top_opportunities[0] ? (
-          <BriefKlineFocus item={brief.top_opportunities[0]} dataMode={dataMode} language={language} />
+        {displayBrief?.top_opportunities[0] ? (
+          <BriefKlineFocus item={displayBrief.top_opportunities[0]} dataMode={dataMode} language={language} />
         ) : null}
       </section>
+
+      <BriefThemeRadarSummary opportunities={currentOpportunities} />
 
       <section className="panel">
         <div className="panel-heading">
@@ -442,12 +478,12 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
       <section className="panel">
         <div className="panel-heading">
           <h2>{t("brief.top")}</h2>
-          <span className="count">{brief?.top_opportunities.length ?? 0}</span>
+          <span className="count">{displayBrief?.top_opportunities.length ?? 0}</span>
         </div>
-        {!brief?.top_opportunities.length ? (
+        {!displayBrief?.top_opportunities.length ? (
           <div className="empty-state">{t("brief.noRanked")}</div>
         ) : (
-          <BriefOpportunityMarketSections items={brief.top_opportunities} />
+          <BriefOpportunityMarketSections items={displayBrief.top_opportunities} />
         )}
       </section>
 
@@ -455,21 +491,21 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
         <section className="panel">
           <div className="panel-heading">
             <h2>{t("brief.entryWatch")}</h2>
-            <span className="count">{brief?.entry_watch.length ?? 0}</span>
+            <span className="count">{displayBrief?.entry_watch.length ?? 0}</span>
           </div>
-          {!brief?.entry_watch.length ? (
+          {!displayBrief?.entry_watch.length ? (
             <div className="empty-state">{t("brief.noTrigger")}</div>
           ) : (
-            <BriefEntryWatchMarketSections items={brief.entry_watch} />
+            <BriefEntryWatchMarketSections items={displayBrief.entry_watch} />
           )}
         </section>
 
         <section className="panel">
           <div className="panel-heading">
             <h2>{t("brief.validation")}</h2>
-            <span className="count">{brief?.strategy_validation.length ?? 0}</span>
+            <span className="count">{displayBrief?.strategy_validation.length ?? 0}</span>
           </div>
-          {!brief?.strategy_validation.length ? (
+          {!displayBrief?.strategy_validation.length ? (
             <div className="empty-state">{t("brief.noValidation")}</div>
           ) : (
             <div className="table-shell">
@@ -484,7 +520,7 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
                   </tr>
                 </thead>
                 <tbody>
-                  {brief.strategy_validation.map((item) => (
+                  {displayBrief.strategy_validation.map((item) => (
                     <tr key={item.strategy_id}>
                       <td className="reason-cell">{localizeStrategy(item.strategy_id, language)}</td>
                       <td>{item.sample_count}</td>
@@ -503,9 +539,9 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
       <div className="brief-grid">
         <BriefList
           title={t("brief.catalystWatch")}
-          count={brief?.catalyst_watch.length ?? 0}
+          count={displayBrief?.catalyst_watch.length ?? 0}
           items={
-            brief?.catalyst_watch.map((item) => ({
+            displayBrief?.catalyst_watch.map((item) => ({
               key: `${item.instrument_id}-${item.title}`,
               title: `${formatInstrumentDisplay(item.instrument_id, item.instrument_label)} · ${localizeCatalyst(
                 item.catalyst_type,
@@ -521,9 +557,9 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
         />
         <BriefList
           title={t("brief.riskAlerts")}
-          count={brief?.risk_alerts.length ?? 0}
+          count={displayBrief?.risk_alerts.length ?? 0}
           items={
-            brief?.risk_alerts.map((item) => ({
+            displayBrief?.risk_alerts.map((item) => ({
               key: `${item.instrument_id}-${item.status}`,
               title: `${formatInstrumentDisplay(item.instrument_id, item.instrument_label)} · ${localizeStatus(
                 item.status,
@@ -539,9 +575,9 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
       <div className="brief-grid">
         <BriefList
           title={t("brief.dataCaveats")}
-          count={brief?.data_caveats.length ?? 0}
+          count={displayBrief?.data_caveats.length ?? 0}
           items={
-            brief?.data_caveats.map((item) => ({
+            displayBrief?.data_caveats.map((item) => ({
               key: item,
               title: t("brief.caveat"),
               body: localizeCaveat(item, language),
@@ -551,9 +587,9 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
         />
         <BriefList
           title={t("brief.nextSteps")}
-          count={brief?.next_steps.length ?? 0}
+          count={displayBrief?.next_steps.length ?? 0}
           items={
-            brief?.next_steps.map((item) => ({
+            displayBrief?.next_steps.map((item) => ({
               key: item,
               title: t("brief.check"),
               body: localizeReason(item, language),
@@ -564,6 +600,195 @@ export function Brief({ dataMode, symbols }: { dataMode: DataProviderMode; symbo
       </div>
     </div>
   );
+}
+
+function BriefThemeRadarSummary({ opportunities }: { opportunities?: OpportunitiesResponse }) {
+  const { language } = useI18n();
+  const themes = opportunities?.rotation_radar?.themes ?? [];
+  if (!themes.length) {
+    return null;
+  }
+
+  return (
+    <section className="panel brief-theme-summary">
+      <div className="panel-heading">
+        <div>
+          <h2>{language === "zh" ? "今日主题摘要" : "Theme Summary"}</h2>
+          <p className="brief-headline">
+            {language === "zh" ? "和今日页同源：先看强方向，再看代表 ETF 和个股。" : "Same source as Today: strong themes, leaders, and tradable setups."}
+          </p>
+        </div>
+        <span className="count">{themes.length}</span>
+      </div>
+      <div className="brief-theme-grid">
+        {themes.slice(0, 4).map((theme) => {
+          const score = Math.round(theme.score * 100);
+          const momentum = Math.round(theme.momentum_score * 100);
+          const breadth = Math.round(theme.breadth_score * 100);
+          return (
+            <article className="brief-theme-card" key={`${theme.category}-${theme.name}`}>
+              <div className="brief-theme-head">
+                <div>
+                  <span>{theme.category === "industry" ? (language === "zh" ? "行业" : "Industry") : language === "zh" ? "主题" : "Theme"}</span>
+                  <strong>{theme.name}</strong>
+                </div>
+                <em>{score}</em>
+              </div>
+              <div className="brief-theme-bars">
+                <span>{language === "zh" ? "动量" : "Momentum"} <b>{momentum}</b></span>
+                <i style={{ "--theme-bar": `${Math.max(4, momentum)}%` } as CSSProperties} />
+                <span>{language === "zh" ? "广度" : "Breadth"} <b>{breadth}</b></span>
+                <i style={{ "--theme-bar": `${Math.max(4, breadth)}%` } as CSSProperties} />
+              </div>
+              <p>{theme.summary}</p>
+              <div className="brief-theme-metrics">
+                <small>{language === "zh" ? "机会" : "Cards"} <b>{theme.opportunity_count}</b></small>
+                <small>{language === "zh" ? "可行动" : "Actionable"} <b>{theme.actionable_count}</b></small>
+                <small>ETF <b>{theme.etf_count}</b></small>
+              </div>
+              <div className="brief-theme-leaders">
+                {theme.leaders.slice(0, 3).map((leader) => (
+                  <span key={leader.instrument_id}>
+                    {formatInstrumentDisplay(leader.instrument_id, leader.instrument_label)}
+                  </span>
+                ))}
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function buildTodayBriefFromOpportunities(
+  currentOpportunities: OpportunitiesResponse,
+  dataMode: DataProviderMode,
+  symbols: string,
+  limit: number,
+): DailyBriefResponse {
+  const cards = currentOpportunities.cards.slice(0, limit);
+  const entryWatch = cards
+    .filter((card) => Boolean(card.entry_plan.trigger_price))
+    .map(cardToEntryWatch);
+  const topThemes = currentOpportunities.rotation_radar.themes.slice(0, 3).map((theme) => theme.name);
+  const dataHealth = {
+    ...currentOpportunities.data_health,
+    brief_source: "today_current_scan",
+    brief_opportunities: String(cards.length),
+    brief_entry_watch: String(entryWatch.length),
+    brief_theme_count: String(currentOpportunities.rotation_radar.themes.length),
+    brief_source_note: "same_as_today_page",
+  };
+  return {
+    generated_at: new Date().toISOString(),
+    provider: dataMode,
+    symbols: todayBriefSymbols(currentOpportunities, symbols),
+    headline: todayBriefHeadline(cards, topThemes),
+    top_opportunities: cards.map(cardToBriefOpportunity),
+    entry_watch: entryWatch,
+    risk_alerts: [],
+    catalyst_watch: [],
+    strategy_validation: currentOpportunities.strategy_health.slice(0, limit).map((item) => ({
+      strategy_id: item.strategy_id,
+      sample_count: item.sample_count,
+      completed_count: item.sample_count,
+      target_hit_rate: null,
+      positive_rate_10d: item.win_rate_10d,
+      avg_return_10d: item.avg_return_10d,
+      max_drawdown_pct: item.max_loss_10d,
+      max_runup_pct: item.avg_return_20d,
+    })),
+    data_caveats: todayBriefCaveats(currentOpportunities),
+    next_steps: todayBriefNextSteps(cards, topThemes),
+    data_health: dataHealth,
+  };
+}
+
+function cardToBriefOpportunity(card: OpportunityCard): DailyBriefOpportunity {
+  return {
+    instrument_id: card.instrument_id,
+    instrument_label: card.instrument_label,
+    status: card.status,
+    primary_strategy_id: card.primary_strategy_id,
+    rank_score: card.rank_score,
+    factor_score: card.factor_score,
+    factor_rank: card.factor_rank,
+    factor_flags: card.factor_flags,
+    thesis: card.thesis,
+    trigger_price: card.entry_plan.trigger_price,
+    initial_stop: card.exit_plan.initial_stop,
+    target_1: card.exit_plan.target_1,
+    risk_reward: card.risk_reward,
+    scenario_summary: card.scenario.summary,
+    decision_action: card.decision?.action ?? null,
+    decision_label: card.decision?.action_label ?? null,
+    conviction_score: card.decision?.conviction_score ?? null,
+    suggested_risk_pct: card.decision?.suggested_risk_pct ?? null,
+    rank_reasons: card.rank_reasons,
+    failure_conditions: card.decision?.failure_conditions ?? [],
+    verification_checks: card.decision?.verification_checks ?? [],
+    data_caveats: card.data_caveats,
+  };
+}
+
+function cardToEntryWatch(card: OpportunityCard): DailyBriefEntryWatch {
+  return {
+    instrument_id: card.instrument_id,
+    instrument_label: card.instrument_label,
+    primary_strategy_id: card.primary_strategy_id,
+    trigger_price: card.entry_plan.trigger_price ?? "-",
+    initial_stop: card.exit_plan.initial_stop,
+    target_1: card.exit_plan.target_1,
+    risk_reward: card.risk_reward,
+    decision_action: card.decision?.action ?? null,
+    conviction_score: card.decision?.conviction_score ?? null,
+    suggested_risk_pct: card.decision?.suggested_risk_pct ?? null,
+    note: card.entry_plan.confirmation || card.recommendation_summary?.buy_timing || "Watch trigger and invalidation before action.",
+  };
+}
+
+function todayBriefSymbols(currentOpportunities: OpportunitiesResponse, fallback: string) {
+  const symbols = currentOpportunities.cards.map((card) => card.instrument_id);
+  if (symbols.length) {
+    return symbols;
+  }
+  return fallback.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function todayBriefHeadline(cards: OpportunityCard[], topThemes: string[]) {
+  if (!cards.length) {
+    return "今日页暂无可展示机会，先刷新全市场扫描。";
+  }
+  const leader = formatInstrumentDisplay(cards[0].instrument_id, cards[0].instrument_label);
+  const themeText = topThemes.length ? `；强方向：${topThemes.join("、")}` : "";
+  return `今日简报与今日页同源：${cards.length} 个重点机会，首选 ${leader}${themeText}。`;
+}
+
+function todayBriefCaveats(currentOpportunities: OpportunitiesResponse) {
+  const caveats = new Set<string>();
+  for (const card of currentOpportunities.cards.slice(0, 8)) {
+    for (const caveat of card.data_caveats.slice(0, 2)) {
+      caveats.add(caveat);
+    }
+  }
+  if (!caveats.size) {
+    caveats.add("当前简报来自今日页同一批扫描结果，不是独立重新生成的旧简报。");
+  }
+  return [...caveats].slice(0, 6);
+}
+
+function todayBriefNextSteps(cards: OpportunityCard[], topThemes: string[]) {
+  const steps = [
+    "先以今日页 Top 机会为准，确认买点、止损、目标和模拟盘准入状态。",
+  ];
+  if (cards[0]) {
+    steps.push(`重点跟踪 ${formatInstrumentDisplay(cards[0].instrument_id, cards[0].instrument_label)} 是否触发买点。`);
+  }
+  if (topThemes.length) {
+    steps.push(`主题轮动关注 ${topThemes.join("、")}，优先看强主题里的 ETF 和代表股票。`);
+  }
+  return steps;
 }
 
 function BriefOpportunityMarketSections({ items }: { items: DailyBriefOpportunity[] }) {

@@ -234,6 +234,16 @@ export default function App() {
     () => (opportunities ? applyResearchProfile(opportunities.cards, profile) : []),
     [opportunities, profile],
   );
+  const profiledBriefOpportunities = useMemo(
+    () =>
+      opportunities
+        ? {
+            ...opportunities,
+            cards: profiledOpportunities,
+          }
+        : undefined,
+    [opportunities, profiledOpportunities],
+  );
   const profiledOverview = useMemo(
     () =>
       overview
@@ -259,7 +269,7 @@ export default function App() {
           />
         );
       case "brief":
-        return <Brief dataMode={dataMode} symbols={symbols} />;
+        return <Brief dataMode={dataMode} symbols={symbols} currentOpportunities={profiledBriefOpportunities} />;
       case "overview":
         return (
           <Overview
@@ -314,6 +324,7 @@ export default function App() {
     page,
     profile,
     profiledOpportunities,
+    profiledBriefOpportunities,
     profiledOverview,
     radar,
     selectedCard,

@@ -9,6 +9,7 @@ const files = {
   opportunityChart: resolve(__dirname, "../src/components/OpportunityChart.tsx"),
   today: resolve(__dirname, "../src/pages/Today.tsx"),
   brief: resolve(__dirname, "../src/pages/Brief.tsx"),
+  app: resolve(__dirname, "../src/App.tsx"),
   opportunities: resolve(__dirname, "../src/pages/Opportunities.tsx"),
   overview: resolve(__dirname, "../src/pages/Overview.tsx"),
   localize: resolve(__dirname, "../src/lib/localize.ts"),
@@ -26,6 +27,7 @@ const opportunityDetail = readFileSync(files.opportunityDetail, "utf8");
 const opportunityChart = readFileSync(files.opportunityChart, "utf8");
 const today = readFileSync(files.today, "utf8");
 const brief = readFileSync(files.brief, "utf8");
+const app = readFileSync(files.app, "utf8");
 const opportunities = readFileSync(files.opportunities, "utf8");
 const overview = readFileSync(files.overview, "utf8");
 const localize = readFileSync(files.localize, "utf8");
@@ -54,6 +56,16 @@ assert(brief.includes("OpportunityCandlestickChart"), "Brief page must reuse the
 assert(brief.includes("brief-kline-focus"), "Brief page must expose K-line focus styling hook");
 assert(brief.includes("ReasonDigest"), "Brief tables must summarize long reasons");
 assert(brief.includes("briefSignalMarkers"), "Brief K-line must pass signal markers into the chart");
+assert(app.includes("profiledBriefOpportunities") && app.includes("currentOpportunities={profiledBriefOpportunities}"), "Brief page must receive the same profiled opportunity set used by Today");
+assert(brief.includes("buildTodayBriefFromOpportunities"), "Brief page must derive its default summary from the current Today opportunity set");
+assert(
+  brief.includes("brief_source: \"today_current_scan\"") &&
+    brief.includes("currentOpportunities?.cards.length") &&
+    brief.includes("if (todayBrief && briefMode === \"fast\")") &&
+    brief.includes("setBrief(undefined);"),
+  "Brief refresh must prefer current Today opportunities before falling back to a separate daily-brief request",
+);
+assert(brief.includes("BriefThemeRadarSummary"), "Brief page must show a same-source theme summary");
 
 assert(opportunities.includes("ReasonDigest"), "Opportunity scan tables must summarize long reasons");
 assert(opportunities.includes("reason-digest"), "Opportunity scan tables must render short reason chips");
@@ -69,6 +81,8 @@ assert(styles.includes("details.compact-data-health:not([open])"), "Closed data-
 assert(styles.includes(".reason-digest"), "CSS must define short reason digest chips");
 assert(styles.includes("details.reason-details:not([open])"), "Closed long reasons must be hidden");
 assert(styles.includes(".brief-kline-focus"), "CSS must define brief K-line focus layout");
+assert(styles.includes(".brief-sync-banner"), "CSS must define same-source brief banner");
+assert(styles.includes(".brief-theme-grid"), "CSS must define same-source theme cards");
 assert(styles.includes(".detail-kline-primary"), "CSS must define primary detail K-line layout");
 assert(styles.includes(".signal-marker"), "CSS must define K-line signal marker styling");
 
