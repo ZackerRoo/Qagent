@@ -29,6 +29,7 @@ import type {
   OpportunitiesResponse,
   OpportunityHistoryResponse,
   OutcomesResponse,
+  PaperCandidatePoolResponse,
   PaperDailyReportResponse,
   PaperLedgerResponse,
   PaperSeedResponse,
@@ -379,6 +380,16 @@ export async function fetchPaperDailyReport(
   });
 }
 
+export async function fetchPaperCandidatePool(
+  provider: DataProviderMode,
+): Promise<PaperCandidatePoolResponse> {
+  return apiGet<PaperCandidatePoolResponse>("/paper-trades/candidate-pool", {
+    provider,
+    include_etfs: true,
+    limit: 20,
+  });
+}
+
 export async function runPaperValidation(
   provider: DataProviderMode,
 ): Promise<PaperValidationResponse> {
@@ -591,7 +602,7 @@ export async function fetchOpportunityHistory(
 }
 
 export async function fetchOutcomes(provider: DataProviderMode): Promise<OutcomesResponse> {
-  return apiGet<OutcomesResponse>("/outcomes", { provider, limit: 50 });
+  return apiGet<OutcomesResponse>("/outcomes", { provider, limit: 30 });
 }
 
 export async function fetchRecommendationClosure(

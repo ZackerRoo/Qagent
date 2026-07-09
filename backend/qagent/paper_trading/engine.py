@@ -5,7 +5,7 @@ from typing import Mapping
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from qagent.providers.base import MarketDataProvider
 from qagent.storage.paper import PaperTradeRecord, PaperTradeSourceContext, PaperTradingRepository
@@ -324,6 +324,32 @@ class PaperDailyBenchmark(BaseModel):
     summary: str
 
 
+class PaperMarketContext(BaseModel):
+    regime: str
+    title: str
+    summary: str
+    benchmark_name: str | None = None
+    benchmark_return_pct: float | None = None
+    excess_return_pct: float | None = None
+    market_drag_score: float = 0.0
+    strategy_drag_score: float = 0.0
+
+
+class PaperTriggerQualitySummary(BaseModel):
+    total_trades: int
+    pending_count: int
+    triggered_count: int
+    missed_entry_count: int
+    no_chase_missed_count: int
+    stopped_count: int
+    target_hit_count: int
+    trigger_rate: float | None
+    miss_rate: float | None
+    stop_after_trigger_rate: float | None
+    verdict: str
+    summary: str
+
+
 class PaperRiskGateStatus(BaseModel):
     action: str
     can_add_entries: bool
@@ -331,6 +357,10 @@ class PaperRiskGateStatus(BaseModel):
     reason: str
     reasons: list[str]
     recovery_conditions: list[str]
+    recovery_state: str = "normal"
+    recovery_score: float = 1.0
+    max_new_entries: int = 5
+    position_size_multiplier: float = 1.0
 
 
 class PaperFailureAttributionItem(BaseModel):
@@ -371,6 +401,29 @@ class PaperDailyReport(BaseModel):
     summary: PaperDailyReportSummary
     benchmark: PaperDailyBenchmark
     risk_gate: PaperRiskGateStatus
+    market_context: PaperMarketContext = Field(
+        default_factory=lambda: PaperMarketContext(
+            regime="no_benchmark",
+            title="暂无指数归因",
+            summary="暂无指数基准数据，先看模拟盘绝对收益和回撤。",
+        )
+    )
+    trigger_quality: PaperTriggerQualitySummary = Field(
+        default_factory=lambda: PaperTriggerQualitySummary(
+            total_trades=0,
+            pending_count=0,
+            triggered_count=0,
+            missed_entry_count=0,
+            no_chase_missed_count=0,
+            stopped_count=0,
+            target_hit_count=0,
+            trigger_rate=None,
+            miss_rate=None,
+            stop_after_trigger_rate=None,
+            verdict="waiting",
+            summary="暂无模拟单，等待推荐进入验证。",
+        )
+    )
     failure_attribution: list[PaperFailureAttributionItem]
     event_timeline: list[PaperEventTimelineItem]
     new_opportunities: list[PaperDailyReportItem]
@@ -822,6 +875,8 @@ def build_paper_daily_report(
         total_return_pct=ledger.summary.total_return_pct,
         benchmark_items=benchmark_items or [],
     )
+    market_context = _paper_market_context(benchmark)
+    trigger_quality = _paper_trigger_quality(trades)
     return PaperDailyReport(
         report_date=report_date,
         summary=PaperDailyReportSummary(
@@ -837,7 +892,13 @@ def build_paper_daily_report(
             win_rate=ledger.summary.win_rate,
         ),
         benchmark=benchmark,
-        risk_gate=_paper_risk_gate_status(ledger),
+        risk_gate=build_paper_risk_gate_status(
+            ledger,
+            market_context=market_context,
+            trigger_quality=trigger_quality,
+        ),
+        market_context=market_context,
+        trigger_quality=trigger_quality,
         failure_attribution=_paper_failure_attribution(
             ledger.items,
             asset_type_by_instrument=asset_type_by_instrument or {},
@@ -870,6 +931,19 @@ def build_paper_daily_report(
             "paper_daily_report_trades": str(len(trades)),
             "paper_daily_report_benchmarks": str(len(benchmark.items)),
         },
+    )
+
+
+def build_paper_risk_gate_status(
+    ledger: PaperLedger,
+    *,
+    market_context: PaperMarketContext | None = None,
+    trigger_quality: PaperTriggerQualitySummary | None = None,
+) -> PaperRiskGateStatus:
+    return _paper_risk_gate_status(
+        ledger,
+        market_context=market_context,
+        trigger_quality=trigger_quality,
     )
 
 
@@ -956,7 +1030,114 @@ def _paper_asset_rank(asset_type: str) -> int:
     return {"stock": 0, "etf": 1, "index": 2, "fund": 3}.get(asset_type, 9)
 
 
-def _paper_risk_gate_status(ledger: PaperLedger) -> PaperRiskGateStatus:
+def _paper_market_context(benchmark: PaperDailyBenchmark) -> PaperMarketContext:
+    item = next((entry for entry in benchmark.items if entry.excess_return_pct is not None), None)
+    if item is None:
+        return PaperMarketContext(
+            regime="no_benchmark",
+            title="暂无指数归因",
+            summary="暂无指数基准数据，先看模拟盘绝对收益和回撤。",
+        )
+    benchmark_return = item.return_pct
+    excess = item.excess_return_pct
+    market_drag = 0.0
+    strategy_drag = 0.0
+    if benchmark_return is not None and benchmark_return < 0:
+        market_drag = min(abs(benchmark_return) / 8.0, 1.0)
+    if excess is not None and excess < 0:
+        strategy_drag = min(abs(excess) / 8.0, 1.0)
+
+    if excess is not None and excess >= 0:
+        return PaperMarketContext(
+            regime="outperforming",
+            title="跑赢指数",
+            summary=f"模拟盘相对{item.name}超额 {excess:+.2f}%，说明当前收益不是单纯靠大盘。",
+            benchmark_name=item.name,
+            benchmark_return_pct=benchmark_return,
+            excess_return_pct=excess,
+            market_drag_score=market_drag,
+            strategy_drag_score=strategy_drag,
+        )
+    if benchmark_return is not None and benchmark_return <= -1.0 and market_drag >= strategy_drag:
+        return PaperMarketContext(
+            regime="market_drag",
+            title="市场拖累",
+            summary=f"{item.name}同期 {benchmark_return:+.2f}%，模拟盘下行主要受市场环境影响，优先缩仓而不是直接否定策略。",
+            benchmark_name=item.name,
+            benchmark_return_pct=benchmark_return,
+            excess_return_pct=excess,
+            market_drag_score=market_drag,
+            strategy_drag_score=strategy_drag,
+        )
+    return PaperMarketContext(
+        regime="strategy_underperforming",
+        title="策略/买点跑输",
+        summary=f"{item.name}同期 {benchmark_return:+.2f}%，模拟盘跑输 {excess:+.2f}%，重点复核选股、触发价和止损规则。",
+        benchmark_name=item.name,
+        benchmark_return_pct=benchmark_return,
+        excess_return_pct=excess,
+        market_drag_score=market_drag,
+        strategy_drag_score=strategy_drag,
+    )
+
+
+def _paper_trigger_quality(trades: list[PaperTradeRecord]) -> PaperTriggerQualitySummary:
+    total = len(trades)
+    pending = sum(1 for trade in trades if trade.status == "pending")
+    triggered = sum(1 for trade in trades if trade.entry_date is not None)
+    missed = sum(1 for trade in trades if trade.status == "missed_entry")
+    no_chase_missed = sum(
+        1
+        for trade in trades
+        if trade.status == "missed_entry" and ("追高" in trade.notes or "no-chase" in trade.notes.lower())
+    )
+    stopped = sum(1 for trade in trades if trade.status == "stopped")
+    target_hit = sum(1 for trade in trades if trade.status == "target_1_hit")
+    trigger_rate = round(triggered / total, 4) if total else None
+    miss_rate = round(missed / total, 4) if total else None
+    stop_after_trigger_rate = round(stopped / triggered, 4) if triggered else None
+
+    if total == 0:
+        verdict = "waiting"
+        summary = "暂无模拟单，等待推荐进入验证。"
+    elif no_chase_missed >= 1 and (miss_rate or 0) >= 0.15:
+        verdict = "needs_tighter_entry"
+        summary = f"{no_chase_missed} 笔因为不追高规则错过，说明触发价和追高上限需要更精细。"
+    elif stopped >= 3 and (stop_after_trigger_rate or 0) >= 0.5:
+        verdict = "stop_rules_weak"
+        summary = f"触发后止损比例 {stop_after_trigger_rate:.0%}，优先复核入场确认和止损距离。"
+    elif pending > triggered and pending / total >= 0.5:
+        verdict = "waiting"
+        summary = f"{pending} 笔仍在等待触发，当前更多是观察池，不是已经买入。"
+    elif target_hit >= stopped and triggered:
+        verdict = "healthy"
+        summary = "触发后表现相对健康，可以继续按原规则跟踪。"
+    else:
+        verdict = "watch"
+        summary = "触发质量仍需观察，先保持小样本跟踪。"
+
+    return PaperTriggerQualitySummary(
+        total_trades=total,
+        pending_count=pending,
+        triggered_count=triggered,
+        missed_entry_count=missed,
+        no_chase_missed_count=no_chase_missed,
+        stopped_count=stopped,
+        target_hit_count=target_hit,
+        trigger_rate=trigger_rate,
+        miss_rate=miss_rate,
+        stop_after_trigger_rate=stop_after_trigger_rate,
+        verdict=verdict,
+        summary=summary,
+    )
+
+
+def _paper_risk_gate_status(
+    ledger: PaperLedger,
+    *,
+    market_context: PaperMarketContext | None = None,
+    trigger_quality: PaperTriggerQualitySummary | None = None,
+) -> PaperRiskGateStatus:
     summary = ledger.summary
     reasons: list[str] = []
     if summary.total_trades >= 5 and summary.total_return_pct <= -2.0:
@@ -980,24 +1161,104 @@ def _paper_risk_gate_status(ledger: PaperLedger) -> PaperRiskGateStatus:
             reason="还没有模拟历史，允许从新推荐开始跟踪。",
             reasons=["no_paper_history"],
             recovery_conditions=["至少积累 5 笔模拟记录后再判断门禁。"],
+            recovery_state="normal",
+            recovery_score=1.0,
+            max_new_entries=max(summary.max_positions, 1),
+            position_size_multiplier=1.0,
         )
 
-    can_add_entries = not reasons
+    recovery_score = _paper_recovery_score(summary, market_context, trigger_quality)
+    severe = _paper_risk_gate_is_severe(summary)
+    if not reasons:
+        return PaperRiskGateStatus(
+            action="allow_new_entries",
+            can_add_entries=True,
+            title="允许新增模拟单",
+            reason="当前回撤、胜率和触发质量仍在允许范围内。",
+            reasons=["within_limits"],
+            recovery_conditions=["继续按最大持仓上限执行，不追高。"],
+            recovery_state="normal",
+            recovery_score=recovery_score,
+            max_new_entries=max(summary.max_positions - summary.open_trades - summary.pending_trades, 0),
+            position_size_multiplier=1.0,
+        )
+
+    if severe and recovery_score < 0.45:
+        return PaperRiskGateStatus(
+            action="pause_new_entries",
+            can_add_entries=False,
+            title="暂停新增模拟单",
+            reason="；".join(reasons),
+            reasons=reasons,
+            recovery_conditions=[
+                "总收益回到 -2% 以上",
+                "最大回撤收敛到 -2% 以内",
+                "闭环胜率回到 25% 以上",
+                "出现目标命中或连续止损减少",
+            ],
+            recovery_state="paused",
+            recovery_score=recovery_score,
+            max_new_entries=0,
+            position_size_multiplier=0.0,
+        )
+
     return PaperRiskGateStatus(
-        action="allow_new_entries" if can_add_entries else "pause_new_entries",
-        can_add_entries=can_add_entries,
-        title="允许新增模拟单" if can_add_entries else "暂停新增模拟单",
-        reason="当前回撤和胜率仍在允许范围内。"
-        if can_add_entries
-        else "；".join(reasons),
-        reasons=reasons or ["within_limits"],
+        action="resume_probe_entries",
+        can_add_entries=True,
+        title="恢复小仓位试单",
+        reason="；".join(reasons) + "。风控尚未完全恢复，但允许 1 笔高质量新机会试单，避免错过强信号。",
+        reasons=reasons,
         recovery_conditions=[
-            "总收益回到 -2% 以上",
-            "最大回撤收敛到 -2% 以内",
-            "闭环胜率回到 25% 以上",
-            "出现目标命中或连续止损减少",
+            "恢复期只允许 1 笔试单，且必须来自当前最高质量推荐",
+            "试单后继续观察总收益、最大回撤和止损次数",
+            "若再次触发止损或跑输指数扩大，会重新暂停新增",
+            "若胜率和收益恢复，再切回正常新增",
         ],
+        recovery_state="probing",
+        recovery_score=recovery_score,
+        max_new_entries=1,
+        position_size_multiplier=0.35,
     )
+
+
+def _paper_recovery_score(
+    summary: PaperLedgerSummary,
+    market_context: PaperMarketContext | None,
+    trigger_quality: PaperTriggerQualitySummary | None,
+) -> float:
+    score = 0.4
+    if summary.total_return_pct > -2.0:
+        score += 0.18
+    if summary.max_drawdown_pct > -2.0:
+        score += 0.16
+    if summary.win_rate is None or summary.win_rate > 0.25:
+        score += 0.14
+    if summary.target_hit_count > 0 or summary.stopped_count < 3:
+        score += 0.12
+    if market_context is not None:
+        if market_context.regime == "market_drag":
+            score += 0.08
+        elif market_context.regime == "strategy_underperforming":
+            score -= 0.08
+    if trigger_quality is not None:
+        if trigger_quality.verdict == "healthy":
+            score += 0.08
+        elif trigger_quality.verdict in {"needs_tighter_entry", "stop_rules_weak"}:
+            score -= 0.08
+    return round(max(0.0, min(1.0, score)), 4)
+
+
+def _paper_risk_gate_is_severe(summary: PaperLedgerSummary) -> bool:
+    if summary.total_return_pct <= -6.0 or summary.max_drawdown_pct <= -6.0:
+        return True
+    if (
+        summary.stopped_count >= 6
+        and summary.win_rate is not None
+        and summary.win_rate <= 0.15
+        and summary.target_hit_count == 0
+    ):
+        return True
+    return False
 
 
 def _paper_failure_attribution(

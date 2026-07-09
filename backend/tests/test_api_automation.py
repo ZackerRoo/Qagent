@@ -595,7 +595,7 @@ def test_automation_scheduler_pauses_new_paper_entries_when_ledger_drawdown_is_h
                 created_at=now,
             )
         )
-        for index in range(5):
+        for index in range(6):
             session.add(
                 PaperTradeRow(
                     trade_id=f"paper-risk-loss-{index}",
@@ -637,6 +637,209 @@ def test_automation_scheduler_pauses_new_paper_entries_when_ledger_drawdown_is_h
     assert health["automation_seed_skipped_by_risk_gate"] == "true"
     trades = client.get("/api/paper-trades?provider=free&limit=20").json()["trades"]
     assert "CN:688999" not in {trade["instrument_id"] for trade in trades}
+
+
+def test_automation_scheduler_replaces_stale_pending_with_strong_candidate(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = f"sqlite:///{tmp_path / 'automation-replacement.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    now = datetime.now(timezone.utc)
+    with session_factory() as session:
+        session.add(
+            ScanRunRow(
+                run_id="scan-replacement",
+                provider="free",
+                mode="full_market",
+                symbols=json.dumps(["CN:588000", "CN:159558"]),
+                scanned=2,
+                cards=2,
+                data_health="{}",
+                created_at=now,
+            )
+        )
+        session.add(
+            OpportunitySnapshotRow(
+                snapshot_id="scan-replacement:588000",
+                run_id="scan-replacement",
+                card_id="card-588000",
+                instrument_id="CN:588000",
+                market="CN",
+                status="setup_ready",
+                signal_date=date(2026, 7, 9),
+                latest_close=Decimal("2.20"),
+                primary_strategy_id="trend_momentum_stage2",
+                score=Decimal("0.94"),
+                strategy_score=Decimal("0.96"),
+                rank_score=Decimal("0.93"),
+                trigger_price=Decimal("2.22"),
+                initial_stop=Decimal("2.10"),
+                target_1=Decimal("2.45"),
+                card_json=json.dumps(
+                    {
+                        "card_id": "card-588000",
+                        "instrument_id": "CN:588000",
+                        "instrument_label": "科创50ETF华夏 588000.SH",
+                        "entry_plan": {"trigger_price": "2.22"},
+                        "decision": {"risk_status": "clear", "action": "watch_trigger"},
+                    },
+                    sort_keys=True,
+                ),
+                created_at=now,
+            )
+        )
+        session.add(
+            OpportunitySnapshotRow(
+                snapshot_id="scan-replacement:159558",
+                run_id="scan-replacement",
+                card_id="card-159558",
+                instrument_id="CN:159558",
+                market="CN",
+                status="setup_ready",
+                signal_date=date(2026, 7, 9),
+                latest_close=Decimal("4.15"),
+                primary_strategy_id="trend_momentum_stage2",
+                score=Decimal("0.99"),
+                strategy_score=Decimal("0.99"),
+                rank_score=Decimal("0.99"),
+                trigger_price=Decimal("4.15"),
+                initial_stop=Decimal("3.98"),
+                target_1=Decimal("4.49"),
+                card_json=json.dumps(
+                    {
+                        "card_id": "card-159558",
+                        "instrument_id": "CN:159558",
+                        "instrument_label": "半导体设备ETF易方达 159558.SZ",
+                        "entry_plan": {"trigger_price": "4.15"},
+                        "decision": {"risk_status": "clear", "action": "watch_trigger"},
+                    },
+                    sort_keys=True,
+                ),
+                created_at=now,
+            )
+        )
+        for index in range(3):
+            session.add(
+                PaperTradeRow(
+                    trade_id=f"paper-risk-loss-{index}",
+                    source_snapshot_id=f"manual-risk-loss-{index}",
+                    provider="free",
+                    instrument_id=f"CN:68810{index}",
+                    strategy_id="trend_momentum_stage2",
+                    status="stopped",
+                    signal_date=date(2026, 7, 1),
+                    trigger_price=Decimal("100"),
+                    initial_stop=Decimal("95"),
+                    target_1=Decimal("110"),
+                    rank_score=Decimal("0.80"),
+                    entry_date=date(2026, 7, 2),
+                    entry_price=Decimal("100"),
+                    exit_date=date(2026, 7, 3),
+                    exit_price=Decimal("95"),
+                    latest_date=date(2026, 7, 3),
+                    latest_price=Decimal("95"),
+                    realized_return_pct=Decimal("-5"),
+                    holding_days=1,
+                    notes="测试止损",
+                )
+            )
+        stale_pending = PaperTradeRow(
+            trade_id="paper-stale-pending",
+            source_snapshot_id="manual-stale-pending",
+            provider="free",
+            instrument_id="CN:159558",
+            strategy_id="trend_momentum_stage2",
+            status="pending",
+            signal_date=date(2026, 7, 1),
+            trigger_price=Decimal("4.15"),
+            initial_stop=Decimal("3.98"),
+            target_1=Decimal("4.49"),
+            rank_score=Decimal("0.62"),
+            latest_date=date(2026, 7, 9),
+            latest_price=Decimal("1.55"),
+            notes="等待触发",
+        )
+        open_trade = PaperTradeRow(
+            trade_id="paper-open-keep",
+            source_snapshot_id="manual-open-keep",
+            provider="free",
+            instrument_id="CN:560180",
+            strategy_id="trend_momentum_stage2",
+            status="open",
+            signal_date=date(2026, 7, 4),
+            trigger_price=Decimal("1.24"),
+            initial_stop=Decimal("1.18"),
+            target_1=Decimal("1.36"),
+            rank_score=Decimal("0.72"),
+            entry_date=date(2026, 7, 7),
+            entry_price=Decimal("1.24"),
+            latest_date=date(2026, 7, 9),
+            latest_price=Decimal("1.25"),
+            unrealized_return_pct=Decimal("0.8"),
+            holding_days=2,
+            notes="持仓观察",
+        )
+        extra_pending = [
+            PaperTradeRow(
+                trade_id=f"paper-extra-pending-{index}",
+                source_snapshot_id=f"manual-extra-pending-{index}",
+                provider="free",
+                instrument_id=f"CN:58819{index}",
+                strategy_id="trend_momentum_stage2",
+                status="pending",
+                signal_date=date(2026, 7, 7),
+                trigger_price=Decimal("2.20"),
+                initial_stop=Decimal("2.10"),
+                target_1=Decimal("2.40"),
+                rank_score=Decimal("0.74"),
+                latest_date=date(2026, 7, 9),
+                latest_price=Decimal("2.15"),
+                notes="等待触发",
+            )
+            for index in range(3)
+        ]
+        session.add_all([stale_pending, open_trade, *extra_pending])
+        session.commit()
+
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/automation/scheduler/run-once"
+        "?provider=free&include_etfs=true&run_scan=false&run_alerts=false"
+        "&update_paper=false&seed_paper=true&seed_limit=1"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    health = body["last_result"]["data_health"]
+    assert body["last_result"]["paper_created"] == 1
+    assert health["paper_replacement_action"] == "replaced_pending"
+    assert health["paper_candidate_pool_waiting_count"] == "1"
+    pool_response = client.get(
+        "/api/paper-trades/candidate-pool?provider=free&include_etfs=true&limit=10"
+    )
+    assert pool_response.status_code == 200
+    pool = pool_response.json()
+    assert pool["summary"]["active_count"] == 5
+    assert pool["summary"]["market_adaptive_action"] == "theme_boost_enabled"
+    assert any(
+        item["instrument_id"] == "CN:588000"
+        and item["status"] == "active_in_paper"
+        and item["market_theme_boost"] > 0
+        for item in pool["items"]
+    )
+    post_stale_item = next(
+        item for item in pool["items"] if item["instrument_id"] == "CN:159558"
+    )
+    assert post_stale_item["status"] == "tracked_before"
+    trades = client.get("/api/paper-trades?provider=free&limit=20").json()["trades"]
+    by_id = {trade["trade_id"]: trade for trade in trades}
+    assert by_id["paper-stale-pending"]["status"] == "missed_entry"
+    assert "候补替换" in by_id["paper-stale-pending"]["notes"]
+    assert "CN:588000" in {trade["instrument_id"] for trade in trades}
 
 
 def test_automation_scheduler_start_and_stop_are_visible(tmp_path, monkeypatch):

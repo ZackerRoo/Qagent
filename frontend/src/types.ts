@@ -1806,6 +1806,32 @@ export type PaperDailyBenchmark = {
   summary: string;
 };
 
+export type PaperMarketContext = {
+  regime: string;
+  title: string;
+  summary: string;
+  benchmark_name: string | null;
+  benchmark_return_pct: number | null;
+  excess_return_pct: number | null;
+  market_drag_score: number;
+  strategy_drag_score: number;
+};
+
+export type PaperTriggerQualitySummary = {
+  total_trades: number;
+  pending_count: number;
+  triggered_count: number;
+  missed_entry_count: number;
+  no_chase_missed_count: number;
+  stopped_count: number;
+  target_hit_count: number;
+  trigger_rate: number | null;
+  miss_rate: number | null;
+  stop_after_trigger_rate: number | null;
+  verdict: string;
+  summary: string;
+};
+
 export type PaperRiskGateStatus = {
   action: string;
   can_add_entries: boolean;
@@ -1813,6 +1839,10 @@ export type PaperRiskGateStatus = {
   reason: string;
   reasons: string[];
   recovery_conditions: string[];
+  recovery_state: string;
+  recovery_score: number;
+  max_new_entries: number;
+  position_size_multiplier: number;
 };
 
 export type PaperFailureAttributionItem = {
@@ -1853,6 +1883,8 @@ export type PaperDailyReportResponse = {
   summary: PaperDailyReportSummary;
   benchmark: PaperDailyBenchmark;
   risk_gate: PaperRiskGateStatus;
+  market_context: PaperMarketContext;
+  trigger_quality: PaperTriggerQualitySummary;
   failure_attribution: PaperFailureAttributionItem[];
   event_timeline: PaperEventTimelineItem[];
   new_opportunities: PaperDailyReportItem[];
@@ -1861,6 +1893,43 @@ export type PaperDailyReportResponse = {
   closed_today: PaperDailyReportItem[];
   asset_groups: PaperDailyAssetGroup[];
   next_trade_day_focus: string[];
+  data_health: Record<string, string>;
+};
+
+export type PaperCandidatePoolItem = {
+  snapshot_id: string;
+  instrument_id: string;
+  instrument_label: string;
+  strategy_id: string | null;
+  signal_date: string | null;
+  rank_score: number;
+  priority_score: number;
+  market_theme_boost: number;
+  entry_gap_pct: number | null;
+  trigger_price: string | null;
+  latest_close: string | null;
+  status: string;
+  action: string;
+  replacement_target: string | null;
+  replacement_pressure: number | null;
+  reason: string;
+};
+
+export type PaperCandidatePoolSummary = {
+  total_candidates: number;
+  shown_candidates: number;
+  active_count: number;
+  max_positions: number;
+  waiting_count: number;
+  replacement_candidates: number;
+  risk_action: string;
+  entry_calibration_action: string;
+  market_adaptive_action: string;
+};
+
+export type PaperCandidatePoolResponse = {
+  items: PaperCandidatePoolItem[];
+  summary: PaperCandidatePoolSummary;
   data_health: Record<string, string>;
 };
 

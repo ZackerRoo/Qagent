@@ -7,6 +7,7 @@ import {
   fetchLatestFullMarketBatchResult,
   fetchLatestFullMarketBatchScan,
   fetchMarketBars,
+  fetchPaperCandidatePool,
   fetchPaperValidation,
   fetchRecommendationFollowThrough,
   saveAlertRule,
@@ -45,6 +46,8 @@ import type {
   FullMarketScanResponse,
   MarketBarsResponse,
   OpportunityCard,
+  PaperCandidatePoolItem,
+  PaperCandidatePoolResponse,
   PaperValidationResponse,
   RecommendationFollowThroughCenterResponse,
   ResearchProfile,
@@ -75,6 +78,7 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onN
     useState<RecommendationFollowThroughCenterResponse>();
   const [automationScheduler, setAutomationScheduler] = useState<AutoProcessingState>();
   const [paperValidation, setPaperValidation] = useState<PaperValidationResponse>();
+  const [paperCandidatePool, setPaperCandidatePool] = useState<PaperCandidatePoolResponse>();
   const [isStartingFullScan, setIsStartingFullScan] = useState(false);
   const [isBulkPaperTracking, setIsBulkPaperTracking] = useState(false);
   const [bulkPaperMessage, setBulkPaperMessage] = useState("");
@@ -132,15 +136,18 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onN
 
   async function loadAutoPaperStatus() {
     try {
-      const [scheduler, validation] = await Promise.all([
+      const [scheduler, validation, candidatePool] = await Promise.all([
         fetchAutomationScheduler(),
         fetchPaperValidation(dataMode),
+        fetchPaperCandidatePool(dataMode),
       ]);
       setAutomationScheduler(scheduler);
       setPaperValidation(validation);
+      setPaperCandidatePool(candidatePool);
     } catch {
       setAutomationScheduler(undefined);
       setPaperValidation(undefined);
+      setPaperCandidatePool(undefined);
     }
   }
 
@@ -330,6 +337,7 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onN
           selectedCard={selectedCard}
           dataMode={dataMode}
           language={language}
+          paperCandidatePool={paperCandidatePool}
           onSelect={onSelect}
           onTrackTop={trackTopOpportunities}
           isBulkPaperTracking={isBulkPaperTracking}
@@ -454,16 +462,22 @@ function TodayDecisionDesk({
   onTrackTop,
   isBulkPaperTracking,
   bulkPaperMessage,
+  paperCandidatePool,
 }: {
   cards: OpportunityCard[];
   selectedCard?: OpportunityCard;
   dataMode: DataProviderMode;
   language: "zh" | "en";
+  paperCandidatePool?: PaperCandidatePoolResponse;
   onSelect(card: OpportunityCard): void;
   onTrackTop(): void;
   isBulkPaperTracking: boolean;
   bulkPaperMessage: string;
 }) {
+  const paperByInstrument = useMemo(
+    () => paperAdmissionMap(paperCandidatePool),
+    [paperCandidatePool],
+  );
   return (
     <section className="panel today-decision-desk">
       <div className="panel-heading">
@@ -498,18 +512,29 @@ function TodayDecisionDesk({
                 onClick={() => onSelect(card)}
               >
                 <span>{index + 1}</span>
-                <strong title={formatInstrumentDisplay(card.instrument_id, card.instrument_label)}>
-                  {formatInstrumentDisplay(card.instrument_id, card.instrument_label)}
-                </strong>
+                <div>
+                  <strong title={formatInstrumentDisplay(card.instrument_id, card.instrument_label)}>
+                    {formatInstrumentDisplay(card.instrument_id, card.instrument_label)}
+                  </strong>
+                  <small className={`today-paper-admission-mini status-${paperByInstrument.get(card.instrument_id)?.status ?? "unknown"}`}>
+                    {paperAdmissionShortLabel(paperByInstrument.get(card.instrument_id), language)}
+                  </small>
+                </div>
                 <em>{localizeAction(card.decision?.action ?? "watch", language)}</em>
-                <small>{Math.round(card.rank_score * 100)}</small>
+                <small className="today-rank-score">{Math.round(card.rank_score * 100)}</small>
               </button>
             ))
           ) : (
             <div className="empty-state">{language === "zh" ? "暂无今日机会。" : "No opportunities yet."}</div>
           )}
         </div>
-        <TodayTradeTicket card={selectedCard ?? cards[0]} dataMode={dataMode} language={language} />
+        <TodayTradeTicket
+          card={selectedCard ?? cards[0]}
+          dataMode={dataMode}
+          language={language}
+          paperAdmission={paperByInstrument.get((selectedCard ?? cards[0])?.instrument_id ?? "")}
+          paperCandidatePool={paperCandidatePool}
+        />
       </div>
     </section>
   );
@@ -519,10 +544,14 @@ function TodayTradeTicket({
   card,
   dataMode,
   language,
+  paperAdmission,
+  paperCandidatePool,
 }: {
   card?: OpportunityCard;
   dataMode: DataProviderMode;
   language: "zh" | "en";
+  paperAdmission?: PaperCandidatePoolItem;
+  paperCandidatePool?: PaperCandidatePoolResponse;
 }) {
   const [paperMessage, setPaperMessage] = useState("");
   const [isAddingPaper, setIsAddingPaper] = useState(false);
@@ -581,6 +610,11 @@ function TodayTradeTicket({
         <ScenarioMetric label={language === "zh" ? "目标" : "Target"} value={card.exit_plan.target_1 ?? "-"} tone="good" />
         <ScenarioMetric label={language === "zh" ? "不追高" : "No chase"} value={card.entry_plan.no_chase_above ?? "-"} tone="neutral" />
       </div>
+      <TodayPaperAdmissionCard
+        admission={paperAdmission}
+        candidatePool={paperCandidatePool}
+        language={language}
+      />
       <div className="today-ticket-plan">
         <div>
           <span>{language === "zh" ? "怎么买" : "Buy"}</span>
@@ -628,6 +662,60 @@ function TodayTradeTicket({
         {paperMessage && <span>{paperMessage}</span>}
       </div>
     </div>
+  );
+}
+
+function TodayPaperAdmissionCard({
+  admission,
+  candidatePool,
+  language,
+}: {
+  admission?: PaperCandidatePoolItem;
+  candidatePool?: PaperCandidatePoolResponse;
+  language: "zh" | "en";
+}) {
+  if (!candidatePool) {
+    return (
+      <section className="today-paper-admission-card">
+        <span>{language === "zh" ? "模拟盘准入" : "Paper admission"}</span>
+        <strong>{language === "zh" ? "正在读取" : "Loading"}</strong>
+      </section>
+    );
+  }
+  const summary = candidatePool.summary;
+  const status = admission?.status ?? "not_in_pool";
+  const label = paperAdmissionLabel(status, language);
+  const reason = admission
+    ? admission.reason
+    : language === "zh"
+      ? "当前机会不在最新候补池前列，先按机会卡观察。"
+      : "This setup is not near the top of the current paper candidate pool.";
+  const action = admission?.action ?? (language === "zh" ? "观察" : "Watch");
+  return (
+    <section className={`today-paper-admission-card status-${status}`}>
+      <div className="today-paper-admission-head">
+        <div>
+          <span>{language === "zh" ? "模拟盘准入" : "Paper admission"}</span>
+          <strong>{label}</strong>
+        </div>
+        <em>{summary.active_count}/{summary.max_positions}</em>
+      </div>
+      <p>{paperAdmissionExplanation(admission, summary, language)}</p>
+      <div className="today-paper-admission-metrics">
+        <small>{language === "zh" ? "优先级" : "Priority"} <b>{admission ? Math.round(admission.priority_score * 100) : "-"}</b></small>
+        <small>{language === "zh" ? "买点差" : "Entry gap"} <b>{formatAdmissionGap(admission?.entry_gap_pct)}</b></small>
+        <small>{language === "zh" ? "候补" : "Waiting"} <b>{summary.waiting_count}</b></small>
+      </div>
+      <div className="today-paper-admission-note">
+        <span>{action}</span>
+        <small title={reason}>{reason}</small>
+        {admission?.replacement_target && (
+          <small>
+            {language === "zh" ? "可替换" : "Can replace"} {formatInstrumentDisplay(admission.replacement_target)}
+          </small>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -1369,6 +1457,87 @@ function paperPayloadFromCard(card: OpportunityCard, dataMode: DataProviderMode)
     action: card.decision?.action ?? "watch_trigger",
     risk_status: card.decision?.risk_status ?? "clear",
   };
+}
+
+function paperAdmissionMap(candidatePool?: PaperCandidatePoolResponse) {
+  return new Map(
+    (candidatePool?.items ?? []).map((item) => [item.instrument_id, item] as const),
+  );
+}
+
+function paperAdmissionShortLabel(
+  admission: PaperCandidatePoolItem | undefined,
+  language: "zh" | "en",
+) {
+  if (!admission) {
+    return language === "zh" ? "未入候补" : "Not queued";
+  }
+  return paperAdmissionLabel(admission.status, language);
+}
+
+function paperAdmissionLabel(status: string, language: "zh" | "en") {
+  const labels: Record<string, { zh: string; en: string }> = {
+    active_in_paper: { zh: "已在模拟盘", en: "In paper" },
+    ready_to_add: { zh: "可加入", en: "Ready" },
+    replace_candidate: { zh: "可替换", en: "Replace" },
+    waiting_for_slot: { zh: "满额等待", en: "Waiting slot" },
+    waiting: { zh: "排队", en: "Queued" },
+    tracked_before: { zh: "已跟踪/冷却", en: "Cooling" },
+    paused_by_risk: { zh: "风控暂停", en: "Risk paused" },
+    not_in_pool: { zh: "未入候补", en: "Not queued" },
+    unknown: { zh: "待判断", en: "Pending" },
+  };
+  return labels[status]?.[language] ?? status;
+}
+
+function paperAdmissionExplanation(
+  admission: PaperCandidatePoolItem | undefined,
+  summary: PaperCandidatePoolResponse["summary"],
+  language: "zh" | "en",
+) {
+  if (!admission) {
+    return language === "zh"
+      ? "未进入当前候补池前列，不会自动进入模拟盘。"
+      : "Not high enough in the current candidate pool for automatic paper entry.";
+  }
+  if (admission.status === "active_in_paper") {
+    return language === "zh"
+      ? "已经在模拟盘跟踪，后续只更新触发、止损、止盈和收益。"
+      : "Already tracked in paper; future cycles update fills, stops, targets, and PnL.";
+  }
+  if (admission.status === "waiting_for_slot") {
+    return language === "zh"
+      ? `模拟盘满额 ${summary.active_count}/${summary.max_positions}，等待空位或分数超过替换门槛。`
+      : `Paper book is full ${summary.active_count}/${summary.max_positions}; waiting for a slot or replacement threshold.`;
+  }
+  if (admission.status === "replace_candidate") {
+    return language === "zh"
+      ? "优先级足够高，下一轮可能替换低质量等待单。"
+      : "Priority is high enough to replace a weaker pending entry.";
+  }
+  if (admission.status === "tracked_before") {
+    return language === "zh"
+      ? "近期已经释放或跟踪过，先进入冷却，避免反复占用名额。"
+      : "Recently released or tracked; cooling down to avoid repeated slot churn.";
+  }
+  if (admission.status === "paused_by_risk") {
+    return language === "zh"
+      ? "模拟盘风控暂停新增，只更新已有记录。"
+      : "Paper risk gate is paused; only existing records update.";
+  }
+  if (admission.status === "ready_to_add") {
+    return language === "zh"
+      ? "模拟盘有空位，下一轮自动处理时可加入。"
+      : "There is an open slot; next automation cycle can add it.";
+  }
+  return language === "zh" ? "进入候补队列，等待下一轮自动处理。" : "Queued for the next automation cycle.";
+}
+
+function formatAdmissionGap(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "-";
+  }
+  return `${value.toFixed(1)}%`;
 }
 
 function chartLevelsFromTodayCard(card: OpportunityCard): Partial<MarketBarsResponse["levels"]> {

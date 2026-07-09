@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import {
   deletePaperTrade,
+  fetchPaperCandidatePool,
   fetchPaperDailyReport,
   fetchPaperLedger,
   fetchPaperSession,
@@ -21,6 +22,7 @@ import { formatInstrumentDisplay } from "../lib/instruments";
 import { localizeAction, localizeStatus, localizeStrategy } from "../lib/localize";
 import type {
   DataProviderMode,
+  PaperCandidatePoolResponse,
   PaperLedgerItem,
   PaperDailyReportResponse,
   PaperLedgerPosition,
@@ -66,6 +68,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [paper, setPaper] = useState<PaperTradesResponse>();
   const [ledger, setLedger] = useState<PaperLedgerResponse>();
   const [dailyReport, setDailyReport] = useState<PaperDailyReportResponse>();
+  const [candidatePool, setCandidatePool] = useState<PaperCandidatePoolResponse>();
   const [validation, setValidation] = useState<PaperValidationResponse>();
   const [paperSession, setPaperSession] = useState<PaperSessionResponse>();
   const [paperExecutionHealth, setPaperExecutionHealth] = useState<Record<string, string>>({});
@@ -77,13 +80,22 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [deletingPaperTradeId, setDeletingPaperTradeId] = useState("");
 
   async function load() {
-    const [result, paperResult, paperSessionResult, ledgerResult, validationResult, dailyReportResult] = await Promise.all([
+    const [
+      result,
+      paperResult,
+      paperSessionResult,
+      ledgerResult,
+      validationResult,
+      dailyReportResult,
+      candidatePoolResult,
+    ] = await Promise.all([
       fetchPortfolio({ provider: dataMode }),
       fetchPaperTrades(dataMode),
       fetchPaperSession(dataMode),
       fetchPaperLedger({ provider: dataMode }),
       fetchPaperValidation(dataMode),
       fetchPaperDailyReport(dataMode),
+      fetchPaperCandidatePool(dataMode),
     ]);
     setPortfolio(result);
     setPositions(result.positions);
@@ -94,6 +106,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     setLedger(ledgerResult);
     setValidation(validationResult);
     setDailyReport(dailyReportResult);
+    setCandidatePool(candidatePoolResult);
   }
 
   useEffect(() => {
@@ -124,29 +137,33 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     );
     setPaperExecutionHealth(result.data_health);
     setPaper({ summary: result.summary, trades: result.trades, data_health: result.data_health });
-    const [ledgerResult, validationResult, dailyReportResult] = await Promise.all([
+    const [ledgerResult, validationResult, dailyReportResult, candidatePoolResult] = await Promise.all([
       fetchPaperLedger({ provider: dataMode }),
       fetchPaperValidation(dataMode),
       fetchPaperDailyReport(dataMode),
+      fetchPaperCandidatePool(dataMode),
     ]);
     setLedger(ledgerResult);
     setValidation(validationResult);
     setDailyReport(dailyReportResult);
+    setCandidatePool(candidatePoolResult);
   }
 
   async function runValidationNow() {
     try {
       setIsRunningValidation(true);
       const validationResult = await runPaperValidation(dataMode);
-      const [paperResult, ledgerResult, dailyReportResult] = await Promise.all([
+      const [paperResult, ledgerResult, dailyReportResult, candidatePoolResult] = await Promise.all([
         fetchPaperTrades(dataMode),
         fetchPaperLedger({ provider: dataMode }),
         fetchPaperDailyReport(dataMode),
+        fetchPaperCandidatePool(dataMode),
       ]);
       setValidation(validationResult);
       setPaper(paperResult);
       setLedger(ledgerResult);
       setDailyReport(dailyReportResult);
+      setCandidatePool(candidatePoolResult);
       setPaperMessage(
         language === "zh"
           ? `已完成自动模拟验证：${validationResult.summary.total_trades} 笔，${validationResult.summary.closed_trades} 笔已闭环`
@@ -206,6 +223,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
           report={dailyReport}
           ledger={ledger}
           validation={validation}
+          candidatePool={candidatePool}
           language={language}
         />
         <PaperDailyReportPanel report={dailyReport} language={language} />
@@ -755,11 +773,13 @@ function PaperReviewDashboard({
   report,
   ledger,
   validation,
+  candidatePool,
   language,
 }: {
   report?: PaperDailyReportResponse;
   ledger?: PaperLedgerResponse;
   validation?: PaperValidationResponse;
+  candidatePool?: PaperCandidatePoolResponse;
   language: Language;
 }) {
   if (!report) {
@@ -817,8 +837,14 @@ function PaperReviewDashboard({
         />
       </div>
 
+      <PaperDailyDecisionStrip report={report} language={language} />
+
       <PaperRiskGatePanel riskGate={report.risk_gate} health={report.data_health} language={language} />
 
+      <PaperControlInsightGrid report={report} language={language} />
+
+      <PaperCandidatePoolPanel candidatePool={candidatePool} language={language} />
+      <PaperPostRecommendationLeaderboard report={report} language={language} />
       <PaperAssetGroupCards groups={assetGroups} language={language} />
       <PaperFailureAttributionPanel items={report.failure_attribution} language={language} />
 
@@ -883,6 +909,73 @@ function PaperReviewDashboard({
   );
 }
 
+function PaperDailyDecisionStrip({
+  report,
+  language,
+}: {
+  report: PaperDailyReportResponse;
+  language: Language;
+}) {
+  const primaryBenchmark = report.benchmark.items[0];
+  const benchmarkText = primaryBenchmark
+    ? `${benchmarkReviewLabel(primaryBenchmark.excess_return_pct, primaryBenchmark.name, language)} ${formatPct(primaryBenchmark.excess_return_pct)}`
+    : language === "zh" ? "等待基准" : "Waiting benchmark";
+  const action =
+    report.triggered_today.length > 0
+      ? language === "zh"
+        ? "复核触发单的止损和仓位"
+        : "Review stops and sizing"
+      : report.new_opportunities.length > 0
+        ? language === "zh"
+          ? "等待买点，不追高"
+          : "Wait for trigger"
+        : report.holdings.length > 0
+          ? language === "zh"
+            ? "跟踪持仓，不随意加仓"
+            : "Monitor holdings"
+          : language === "zh"
+            ? "等待下一次扫描"
+            : "Wait for next scan";
+  const rows = [
+    {
+      label: language === "zh" ? "新增机会" : "New",
+      value: report.summary.new_opportunities,
+      note: report.new_opportunities[0]?.next_action ?? (language === "zh" ? "无新增" : "None"),
+    },
+    {
+      label: language === "zh" ? "触发买点" : "Triggered",
+      value: report.summary.triggered_today,
+      note: report.triggered_today[0]?.next_action ?? (language === "zh" ? "无触发" : "None"),
+    },
+    {
+      label: language === "zh" ? "止损/止盈" : "Exit",
+      value: `${report.summary.stopped_today}/${report.summary.target_hits_today}`,
+      note: language === "zh" ? "止损 / 止盈" : "Stop / target",
+    },
+    {
+      label: language === "zh" ? "指数对比" : "Benchmark",
+      value: benchmarkText,
+      note: report.benchmark.summary,
+    },
+    {
+      label: language === "zh" ? "下一步" : "Next",
+      value: action,
+      note: report.next_trade_day_focus[0] ?? "-",
+    },
+  ];
+  return (
+    <div className="paper-daily-decision-strip">
+      {rows.map((row) => (
+        <div key={row.label}>
+          <span>{row.label}</span>
+          <strong>{row.value}</strong>
+          <small title={row.note}>{row.note}</small>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function PaperRiskGatePanel({
   riskGate,
   health,
@@ -894,20 +987,37 @@ function PaperRiskGatePanel({
 }) {
   const fallback = paperRiskGateCopy(health, language);
   const paused = riskGate ? !riskGate.can_add_entries : fallback.paused;
+  const probing = riskGate?.action === "resume_probe_entries";
   const title = riskGate?.title ?? fallback.title;
   const reason = riskGate?.reason ?? fallback.reason;
   const reasons = (riskGate?.reasons ?? []).filter((item) => item !== "within_limits" && item !== "no_paper_history");
   const recovery = riskGate?.recovery_conditions ?? [];
+  const badge = probing
+    ? language === "zh" ? "恢复试单" : "Probe"
+    : paused ? language === "zh" ? "暂停新增" : "Paused" : language === "zh" ? "允许新增" : "Allowed";
   return (
-    <section className={`paper-risk-gate-panel ${paused ? "is-paused" : "is-allowed"}`}>
+    <section className={`paper-risk-gate-panel ${paused ? "is-paused" : probing ? "is-probing" : "is-allowed"}`}>
       <div className="paper-risk-gate-head">
         <div>
           <span>{language === "zh" ? "自动开仓风控" : "Auto-entry risk gate"}</span>
           <strong>{title}</strong>
         </div>
-        <em>{paused ? (language === "zh" ? "暂停新增" : "Paused") : (language === "zh" ? "允许新增" : "Allowed")}</em>
+        <em>{badge}</em>
       </div>
       <p>{reason}</p>
+      {riskGate && (
+        <div className="paper-risk-gate-metrics">
+          <span>
+            {language === "zh" ? "恢复分" : "Recovery"} <b>{Math.round(riskGate.recovery_score * 100)}</b>
+          </span>
+          <span>
+            {language === "zh" ? "新增上限" : "New limit"} <b>{riskGate.max_new_entries}</b>
+          </span>
+          <span>
+            {language === "zh" ? "仓位倍率" : "Size"} <b>{Math.round(riskGate.position_size_multiplier * 100)}%</b>
+          </span>
+        </div>
+      )}
       {(reasons.length > 0 || recovery.length > 0) && (
         <div className="paper-risk-gate-detail">
           <div>
@@ -925,6 +1035,229 @@ function PaperRiskGatePanel({
         </div>
       )}
     </section>
+  );
+}
+
+function PaperControlInsightGrid({
+  report,
+  language,
+}: {
+  report: PaperDailyReportResponse;
+  language: Language;
+}) {
+  const market = report.market_context;
+  const trigger = report.trigger_quality;
+  const marketTone = market.regime === "outperforming"
+    ? "good"
+    : market.regime === "strategy_underperforming"
+      ? "risk"
+      : "watch";
+  const triggerTone = trigger.verdict === "healthy"
+    ? "good"
+    : ["needs_tighter_entry", "stop_rules_weak"].includes(trigger.verdict)
+      ? "risk"
+      : "watch";
+  return (
+    <div className="paper-control-insights">
+      <div className={`paper-control-card tone-${marketTone}`}>
+        <span>{language === "zh" ? "市场归因" : "Market attribution"}</span>
+        <strong>{market.title}</strong>
+        <p>{market.summary}</p>
+        <div className="paper-control-meter">
+          <small>{language === "zh" ? "市场拖累" : "Market drag"}</small>
+          <i style={{ width: `${Math.round(market.market_drag_score * 100)}%` }} />
+        </div>
+        <div className="paper-control-meter is-strategy">
+          <small>{language === "zh" ? "策略拖累" : "Strategy drag"}</small>
+          <i style={{ width: `${Math.round(market.strategy_drag_score * 100)}%` }} />
+        </div>
+      </div>
+      <div className={`paper-control-card tone-${triggerTone}`}>
+        <span>{language === "zh" ? "买点触发质量" : "Trigger quality"}</span>
+        <strong>{triggerQualityLabel(trigger.verdict, language)}</strong>
+        <p>{trigger.summary}</p>
+        <div className="paper-control-stats">
+          <small>{language === "zh" ? "触发" : "Triggered"} <b>{trigger.triggered_count}</b></small>
+          <small>{language === "zh" ? "等待" : "Pending"} <b>{trigger.pending_count}</b></small>
+          <small>{language === "zh" ? "错过" : "Missed"} <b>{trigger.missed_entry_count}</b></small>
+          <small>{language === "zh" ? "止损" : "Stopped"} <b>{trigger.stopped_count}</b></small>
+        </div>
+      </div>
+      <div className="paper-control-card tone-watch">
+        <span>{language === "zh" ? "推荐状态" : "Recommendation state"}</span>
+        <strong>{paperRecommendationState(report.risk_gate, language)}</strong>
+        <p>
+          {language === "zh"
+            ? "今日推荐会先经过模拟盘风控、市场归因和买点质量检查；恢复期只让最高质量机会进入验证。"
+            : "New recommendations pass through paper risk, market attribution, and trigger-quality checks before entering validation."}
+        </p>
+        <div className="paper-control-stats">
+          <small>{language === "zh" ? "试单上限" : "Probe"} <b>{report.risk_gate.max_new_entries}</b></small>
+          <small>{language === "zh" ? "恢复分" : "Score"} <b>{Math.round(report.risk_gate.recovery_score * 100)}</b></small>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PaperCandidatePoolPanel({
+  candidatePool,
+  language,
+}: {
+  candidatePool?: PaperCandidatePoolResponse;
+  language: Language;
+}) {
+  if (!candidatePool) {
+    return (
+      <section className="paper-candidate-panel">
+        <div className="mini-curve-empty">
+          {language === "zh" ? "正在加载候补池。" : "Loading candidate pool."}
+        </div>
+      </section>
+    );
+  }
+  const summary = candidatePool.summary;
+  const visible = candidatePool.items.slice(0, 6);
+  return (
+    <section className="paper-candidate-panel">
+      <div className="paper-ledger-card-header">
+        <div>
+          <h3>{language === "zh" ? "候补机会池" : "Candidate pool"}</h3>
+          <p>
+            {language === "zh"
+              ? "模拟盘满额时不会直接放弃新机会，会先比较候补质量、买点距离和主题强度。"
+              : "When the paper book is full, Qagent compares quality, entry distance, and theme strength before replacing stale pending names."}
+          </p>
+        </div>
+        <strong>{summary.active_count}/{summary.max_positions}</strong>
+      </div>
+      <div className="paper-candidate-summary">
+        <div>
+          <span>{language === "zh" ? "等待候补" : "Waiting"}</span>
+          <strong>{summary.waiting_count}</strong>
+          <small>{language === "zh" ? "不含已在模拟盘" : "Excluding active paper names"}</small>
+        </div>
+        <div>
+          <span>{language === "zh" ? "可替换" : "Replaceable"}</span>
+          <strong>{summary.replacement_candidates}</strong>
+          <small>{language === "zh" ? "只替换低质量等待单" : "Only stale pending names"}</small>
+        </div>
+        <div>
+          <span>{language === "zh" ? "买点校准" : "Entry calibration"}</span>
+          <strong>{paperEntryCalibrationLabel(summary.entry_calibration_action, language)}</strong>
+          <small>{language === "zh" ? "远离触发价会降优先级" : "Far triggers lose priority"}</small>
+        </div>
+        <div>
+          <span>{language === "zh" ? "市场自适应" : "Market adaptive"}</span>
+          <strong>{paperMarketAdaptiveLabel(summary.market_adaptive_action, language)}</strong>
+          <small>{language === "zh" ? "科创/芯片等强主题加权" : "Strong themes get a boost"}</small>
+        </div>
+      </div>
+      <div className="paper-candidate-list">
+        {visible.map((item) => (
+          <div key={item.snapshot_id} className={`paper-candidate-item status-${item.status}`}>
+            <div>
+              <span>{paperCandidateStatusLabel(item.status, language)}</span>
+              <strong title={item.instrument_label || item.instrument_id}>
+                {formatInstrumentDisplay(item.instrument_label || item.instrument_id)}
+              </strong>
+              <small>{localizeStrategy(item.strategy_id, language)}</small>
+            </div>
+            <div className="paper-candidate-metrics">
+              <span>{language === "zh" ? "优先级" : "Priority"} <b>{Math.round(item.priority_score * 100)}</b></span>
+              <span>{language === "zh" ? "主题" : "Theme"} <b>{item.market_theme_boost > 0 ? "+8" : "0"}</b></span>
+              <span>{language === "zh" ? "买点差" : "Entry gap"} <b>{formatPctValue(item.entry_gap_pct)}</b></span>
+            </div>
+            <p title={item.reason}>
+              {item.reason}
+              {item.replacement_target
+                ? ` · ${language === "zh" ? "替换" : "Replace"} ${formatInstrumentDisplay(item.replacement_target)}`
+                : ""}
+            </p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PaperPostRecommendationLeaderboard({
+  report,
+  language,
+}: {
+  report: PaperDailyReportResponse;
+  language: Language;
+}) {
+  const evaluated = report.failure_attribution
+    .filter((item) => item.evaluated_trades > 0)
+    .sort((left, right) => (right.total_return_pct ?? -999) - (left.total_return_pct ?? -999));
+  const leaders = evaluated.slice(0, 3);
+  const drags = [...evaluated]
+    .sort((left, right) => (left.total_return_pct ?? 999) - (right.total_return_pct ?? 999))
+    .slice(0, 3);
+  if (!leaders.length && !drags.length) {
+    return null;
+  }
+  return (
+    <section className="paper-post-leaderboard">
+      <div className="paper-ledger-card-header">
+        <div>
+          <h3>{language === "zh" ? "推荐后表现排行" : "Post-recommendation ranking"}</h3>
+          <p>
+            {language === "zh"
+              ? "看哪些策略、资产或状态最近贡献收益，哪些在拖累，后续自动权重会参考这里。"
+              : "Shows which strategies, assets, or states are contributing versus dragging recent paper results."}
+          </p>
+        </div>
+        <strong>{evaluated.length}</strong>
+      </div>
+      <div className="paper-post-leaderboard-grid">
+        <PaperPostRankingColumn
+          title={language === "zh" ? "更有效" : "Working"}
+          items={leaders}
+          language={language}
+          tone="good"
+        />
+        <PaperPostRankingColumn
+          title={language === "zh" ? "需降权" : "Needs weight cut"}
+          items={drags}
+          language={language}
+          tone="risk"
+        />
+      </div>
+    </section>
+  );
+}
+
+function PaperPostRankingColumn({
+  title,
+  items,
+  language,
+  tone,
+}: {
+  title: string;
+  items: PaperDailyReportResponse["failure_attribution"];
+  language: Language;
+  tone: "good" | "risk";
+}) {
+  return (
+    <div className={`paper-post-column tone-${tone}`}>
+      <header>{title}</header>
+      {items.length ? (
+        items.map((item) => (
+          <div key={`${title}:${item.dimension}:${item.key}`} className="paper-post-row">
+            <span>{attributionDimensionLabel(item.dimension, language)}</span>
+            <strong>{item.label}</strong>
+            <em>{formatPct(item.total_return_pct)}</em>
+            <small>
+              {language === "zh" ? "样本" : "Samples"} {item.evaluated_trades}/{item.total_trades}
+            </small>
+          </div>
+        ))
+      ) : (
+        <p>{language === "zh" ? "暂无闭环样本。" : "No closed samples yet."}</p>
+      )}
+    </div>
   );
 }
 
@@ -1083,6 +1416,61 @@ function paperRiskGateCopy(health: Record<string, string>, language: Language) {
       ? `Risk gate triggered: ${rawReason || "paper ledger under pressure"}. Existing positions still update.`
       : "Drawdown and win rate are within limits; new opportunities can still enter the ledger.",
   };
+}
+
+function triggerQualityLabel(verdict: string, language: Language) {
+  const zh = language === "zh";
+  const labels: Record<string, { zh: string; en: string }> = {
+    healthy: { zh: "触发健康", en: "Healthy" },
+    needs_tighter_entry: { zh: "买点需收紧", en: "Tighten entry" },
+    stop_rules_weak: { zh: "止损偏多", en: "Stops elevated" },
+    waiting: { zh: "等待触发", en: "Waiting" },
+    watch: { zh: "继续观察", en: "Watch" },
+  };
+  return labels[verdict]?.[zh ? "zh" : "en"] ?? verdict;
+}
+
+function paperCandidateStatusLabel(status: string, language: Language) {
+  const zh = language === "zh";
+  const labels: Record<string, { zh: string; en: string }> = {
+    active_in_paper: { zh: "已在模拟盘", en: "In paper" },
+    ready_to_add: { zh: "可加入", en: "Ready" },
+    replace_candidate: { zh: "可替换", en: "Replace" },
+    waiting_for_slot: { zh: "满额等待", en: "Waiting slot" },
+    waiting: { zh: "排队", en: "Waiting" },
+    tracked_before: { zh: "已跟踪过", en: "Tracked" },
+    paused_by_risk: { zh: "风控暂停", en: "Risk paused" },
+  };
+  return labels[status]?.[zh ? "zh" : "en"] ?? status;
+}
+
+function paperEntryCalibrationLabel(action: string, language: Language) {
+  const zh = language === "zh";
+  const labels: Record<string, { zh: string; en: string }> = {
+    replace_far_pending: { zh: "替换远买点", en: "Replace far entries" },
+    tighten_far_triggers: { zh: "收紧远买点", en: "Tighten far triggers" },
+    keep_current_trigger: { zh: "规则正常", en: "Keep rules" },
+  };
+  return labels[action]?.[zh ? "zh" : "en"] ?? action;
+}
+
+function paperMarketAdaptiveLabel(action: string, language: Language) {
+  const zh = language === "zh";
+  const labels: Record<string, { zh: string; en: string }> = {
+    theme_boost_enabled: { zh: "强主题加权", en: "Theme boost" },
+    theme_boost_idle: { zh: "无主题加权", en: "No theme boost" },
+  };
+  return labels[action]?.[zh ? "zh" : "en"] ?? action;
+}
+
+function paperRecommendationState(riskGate: PaperDailyReportResponse["risk_gate"], language: Language) {
+  if (riskGate.action === "pause_new_entries") {
+    return language === "zh" ? "今天只跟踪，不新增" : "Track only";
+  }
+  if (riskGate.action === "resume_probe_entries") {
+    return language === "zh" ? "只允许最高质量试单" : "Best ideas only";
+  }
+  return language === "zh" ? "可正常接收新推荐" : "Normal intake";
 }
 
 function attributionDimensionLabel(value: string, language: Language) {
@@ -1858,6 +2246,10 @@ function formatPct(value: number | null): string {
     return "-";
   }
   return `${value.toFixed(2)}%`;
+}
+
+function formatPctValue(value: number | null): string {
+  return formatPct(value);
 }
 
 function formatMoney(value: string | number | null, language: string): string {

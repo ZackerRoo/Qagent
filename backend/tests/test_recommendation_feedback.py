@@ -198,6 +198,45 @@ def test_paper_trading_feedback_demotes_failed_strategy_and_etf_cluster():
     assert health["paper_feedback_blocked"] == "0"
 
 
+def test_paper_trading_feedback_promotes_contributing_strategy():
+    winner = _card("CN:688981", "中芯国际 688981.SH", 0.70, ["quality_compounder"])
+    winner.primary_strategy_id = "quality_compounder"
+    unrelated = _card("CN:002747", "埃斯顿 002747.SZ", 0.70, ["trend_momentum_stage2"])
+    unrelated.primary_strategy_id = "trend_momentum_stage2"
+    report = _paper_report(
+        [
+            PaperFailureAttributionItem(
+                dimension="strategy",
+                key="quality_compounder",
+                label="质量因子",
+                total_trades=7,
+                evaluated_trades=5,
+                closed_trades=4,
+                stopped_trades=1,
+                target_hit_trades=3,
+                win_rate=0.75,
+                average_return_pct=4.6,
+                total_pnl=Decimal("1380"),
+                total_return_pct=7.1,
+                worst_return_pct=-1.2,
+                verdict="contributor",
+                note="质量因子近期贡献正收益。",
+            )
+        ]
+    )
+
+    before_winner = winner.rank_score
+    before_unrelated = unrelated.rank_score
+
+    apply_paper_trading_feedback([winner, unrelated], report)
+
+    assert winner.rank_score > before_winner
+    assert unrelated.rank_score == before_unrelated
+    assert any("模拟盘反馈加权" in reason for reason in winner.rank_reasons)
+    health = paper_trading_feedback_data_health([winner, unrelated])
+    assert health["paper_feedback_adjusted"] == "1"
+
+
 def _card(instrument_id: str, label: str, score: float, flags: list[str]):
     card = build_factor_watch_card(
         instrument_id,

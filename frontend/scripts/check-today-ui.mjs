@@ -59,6 +59,9 @@ assert(today.includes("HowToUseTodayPanel"), "Today page must render the how-to-
 assert(today.includes("AutoPaperStatusStrip"), "Today page must render automatic paper status strip");
 assert(today.includes("fetchAutomationScheduler"), "Today page must load automation scheduler state");
 assert(today.includes("fetchPaperValidation"), "Today page must load paper validation state");
+assert(today.includes("fetchPaperCandidatePool"), "Today page must load paper-trading candidate admission state");
+assert(today.includes("TodayPaperAdmissionCard"), "Today page must explain whether the selected opportunity can enter paper trading");
+assert(today.includes("paperAdmissionShortLabel"), "Today opportunity rows must show compact paper admission labels");
 assert(today.includes("SignalDistribution"), "Today page must render signal distribution");
 assert(today.includes("ManualActionCenterPanel"), "Today page must render manual action center");
 assert(today.includes("MarketIntelligenceCenterPanel"), "Today page must render market intelligence");
@@ -146,6 +149,8 @@ assert(styles.includes(".today-risk-brief"), "CSS must define compact risk brief
 assert(styles.includes(".today-advanced-analysis"), "CSS must define collapsed advanced analysis");
 assert(styles.includes(".how-to-use-panel"), "CSS must define how-to-use guide layout");
 assert(styles.includes(".auto-paper-status-strip"), "CSS must define automatic paper status strip");
+assert(styles.includes(".today-paper-admission-card"), "CSS must define paper admission explanation card");
+assert(styles.includes(".today-paper-admission-mini"), "CSS must define compact paper admission labels");
 assert(styles.includes(".manual-action-center"), "CSS must define manual action center layout");
 assert(styles.includes(".manual-strategy-bar"), "CSS must define manual action strategy bars");
 assert(styles.includes(".market-intelligence-center"), "CSS must define market intelligence layout");

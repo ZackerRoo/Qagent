@@ -827,7 +827,7 @@ def test_paper_daily_report_explains_risk_gate_failures_and_event_timeline(tmp_p
         realized_return_pct=Decimal("-5"),
         holding_days=2,
     )
-    for index in range(2):
+    for index in range(5):
         extra = paper_repo.create_trade(
             source_snapshot_id=f"daily-risk-extra-{index}",
             provider="fixture",
@@ -845,10 +845,10 @@ def test_paper_daily_report_explains_risk_gate_failures_and_event_timeline(tmp_p
             entry_date=date(2026, 7, 2),
             entry_price=Decimal("20"),
             exit_date=date(2026, 7, 4),
-            exit_price=Decimal("19"),
+            exit_price=Decimal("18.40"),
             latest_date=date(2026, 7, 4),
-            latest_price=Decimal("19"),
-            realized_return_pct=Decimal("-5"),
+            latest_price=Decimal("18.40"),
+            realized_return_pct=Decimal("-8"),
             holding_days=2,
         )
     open_trade = paper_repo.create_trade(
@@ -895,6 +895,128 @@ def test_paper_daily_report_explains_risk_gate_failures_and_event_timeline(tmp_p
     event_types = {item.event_type for item in report.event_timeline}
     assert {"signal", "entry", "exit"}.issubset(event_types)
     assert any(item.trade_id == stopped.trade_id and item.event_type == "exit" for item in report.event_timeline)
+
+
+def test_paper_daily_report_explains_recovery_market_context_and_trigger_quality(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    for index, loss_pct in enumerate((Decimal("-4"), Decimal("-2")), start=1):
+        stopped = paper_repo.create_trade(
+            source_snapshot_id=f"daily-recovery-stopped-{index}",
+            provider="fixture",
+            instrument_id=f"CN:30{index:04d}",
+            strategy_id="trend_momentum_stage2",
+            signal_date=date(2026, 7, 1),
+            trigger_price=Decimal("10"),
+            initial_stop=Decimal("9.50"),
+            target_1=Decimal("11"),
+            rank_score=Decimal("0.80"),
+        )
+        exit_price = Decimal("10") * (Decimal("1") + loss_pct / Decimal("100"))
+        paper_repo.update_trade(
+            stopped.trade_id,
+            status="stopped",
+            entry_date=date(2026, 7, 2),
+            entry_price=Decimal("10"),
+            exit_date=date(2026, 7, 4),
+            exit_price=exit_price,
+            latest_date=date(2026, 7, 4),
+            latest_price=exit_price,
+            realized_return_pct=loss_pct,
+            holding_days=2,
+            notes="触发止损",
+        )
+    missed = paper_repo.create_trade(
+        source_snapshot_id="daily-recovery-missed",
+        provider="fixture",
+        instrument_id="CN:002747",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 3),
+        trigger_price=Decimal("10"),
+        initial_stop=Decimal("9.50"),
+        target_1=Decimal("11"),
+        rank_score=Decimal("0.80"),
+    )
+    paper_repo.update_trade(
+        missed.trade_id,
+        status="missed_entry",
+        exit_date=date(2026, 7, 6),
+        latest_date=date(2026, 7, 6),
+        latest_price=Decimal("10.80"),
+        realized_return_pct=Decimal("0"),
+        notes="价格超过不追高价，标记为错过买点。",
+    )
+    open_trade = paper_repo.create_trade(
+        source_snapshot_id="daily-recovery-open",
+        provider="fixture",
+        instrument_id="CN:588200",
+        strategy_id="factor_rotation_watch",
+        signal_date=date(2026, 7, 4),
+        trigger_price=Decimal("12"),
+        initial_stop=Decimal("11.40"),
+        target_1=Decimal("13.20"),
+        rank_score=Decimal("0.82"),
+    )
+    paper_repo.update_trade(
+        open_trade.trade_id,
+        status="open",
+        entry_date=date(2026, 7, 7),
+        entry_price=Decimal("12"),
+        latest_date=date(2026, 7, 9),
+        latest_price=Decimal("11.88"),
+        unrealized_return_pct=Decimal("-1"),
+        holding_days=2,
+        notes="持仓观察",
+    )
+    paper_repo.create_trade(
+        source_snapshot_id="daily-recovery-pending",
+        provider="fixture",
+        instrument_id="CN:588850",
+        strategy_id="factor_rotation_watch",
+        signal_date=date(2026, 7, 8),
+        trigger_price=Decimal("9.90"),
+        initial_stop=Decimal("9.40"),
+        target_1=Decimal("10.80"),
+        rank_score=Decimal("0.84"),
+        notes="等待触发价",
+    )
+
+    trades = paper_repo.list_trades(limit=20)
+    ledger = build_paper_ledger(
+        trades,
+        initial_capital=Decimal("100000"),
+        allocation_per_trade_pct=Decimal("10"),
+        transaction_cost_bps=Decimal("5"),
+        slippage_bps=Decimal("5"),
+        take_profit_pct=Decimal("50"),
+    )
+    validation = build_paper_validation(trades, ledger, as_of=date(2026, 7, 9))
+    report = build_paper_daily_report(
+        trades=trades,
+        ledger=ledger,
+        validation=validation,
+        as_of=date(2026, 7, 9),
+        benchmark_items=[
+            {
+                "benchmark_id": "CN:000300",
+                "name": "沪深300",
+                "return_pct": 3.2,
+                "excess_return_pct": ledger.summary.total_return_pct - 3.2,
+            }
+        ],
+        asset_type_by_instrument={"CN:588200": "etf", "CN:588850": "etf"},
+    )
+
+    assert report.market_context.regime == "strategy_underperforming"
+    assert "跑输" in report.market_context.summary
+    assert report.trigger_quality.missed_entry_count == 1
+    assert report.trigger_quality.pending_count == 1
+    assert report.trigger_quality.verdict in {"needs_tighter_entry", "watch"}
+    assert report.risk_gate.action == "resume_probe_entries"
+    assert report.risk_gate.can_add_entries is True
+    assert report.risk_gate.max_new_entries == 1
+    assert 0 < report.risk_gate.position_size_multiplier < 1
+    assert any("试单" in item for item in report.risk_gate.recovery_conditions)
 
 
 def _insert_cn_snapshot(

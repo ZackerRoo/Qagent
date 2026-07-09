@@ -35,6 +35,8 @@ const checks = [
   ["portfolio renders structured risk gate", files.portfolio.includes("PaperRiskGatePanel")],
   ["portfolio renders failure attribution", files.portfolio.includes("PaperFailureAttributionPanel")],
   ["portfolio renders event timeline", files.portfolio.includes("PaperEventTimelinePanel")],
+  ["portfolio renders daily decision strip", files.portfolio.includes("PaperDailyDecisionStrip")],
+  ["portfolio daily strip explains next action", files.portfolio.includes("等待买点，不追高")],
   ["types expose report risk gate", files.portfolio.includes("report.risk_gate")],
   ["types expose failure attribution", files.portfolio.includes("failure_attribution")],
   ["types expose event timeline", files.portfolio.includes("event_timeline")],
@@ -45,6 +47,7 @@ const checks = [
   ["styles include risk gate panel", files.styles.includes(".paper-risk-gate-panel")],
   ["styles include attribution panel", files.styles.includes(".paper-attribution-grid")],
   ["styles include event timeline", files.styles.includes(".paper-event-timeline")],
+  ["styles include daily decision strip", files.styles.includes(".paper-daily-decision-strip")],
 ];
 
 const failed = checks.filter(([, passed]) => !passed);

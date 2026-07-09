@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   fetchBacktest,
   fetchFactorBacktest,
+  fetchMarketBars,
   fetchOpportunityHistory,
   fetchOutcomes,
   fetchParameterSensitivity,
@@ -14,6 +15,7 @@ import {
   fetchStrategyPerformance,
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
+import { OpportunityCandlestickChart, type SignalMarker } from "../components/OpportunityChart";
 import { useI18n } from "../i18n";
 import { formatInstrumentDisplay } from "../lib/instruments";
 import {
@@ -31,6 +33,7 @@ import type {
   FactorExposureInformationCoefficient,
   FactorQuantileBucket,
   FactorRankBucket,
+  MarketBarsResponse,
   OpportunityOutcome,
   OpportunityHistoryResponse,
   OpportunityCard,
@@ -115,6 +118,7 @@ export function History({
   const [performance, setPerformance] = useState<StrategyPerformanceResponse>();
   const [diagnostics, setDiagnostics] = useState<StrategyDiagnosticsResponse>();
   const [error, setError] = useState("");
+  const [isHistoryLoading, setIsHistoryLoading] = useState(true);
   const [backtestError, setBacktestError] = useState("");
   const [parameterSensitivityError, setParameterSensitivityError] = useState("");
   const [factorBacktestError, setFactorBacktestError] = useState("");
@@ -126,38 +130,52 @@ export function History({
   const autoBacktestKeyRef = useRef("");
 
   useEffect(() => {
-    async function load() {
-      try {
-        setError("");
-        const [
-          runResult,
-          historyResult,
-          outcomeResult,
-          closureResult,
-          calibrationResult,
-          performanceResult,
-          diagnosticsResult,
-        ] = await Promise.all([
-          fetchScanRuns(dataMode),
-          fetchOpportunityHistory(dataMode),
-          fetchOutcomes(dataMode),
-          fetchRecommendationClosure(dataMode),
-          fetchRecommendationCalibration(dataMode),
-          fetchStrategyPerformance(dataMode),
-          fetchStrategyDiagnostics(dataMode),
-        ]);
-        setRuns(runResult);
-        setHistory(historyResult);
-        setOutcomes(outcomeResult);
-        setClosure(closureResult);
-        setCalibration(calibrationResult);
-        setPerformance(performanceResult);
-        setDiagnostics(diagnosticsResult);
-      } catch (caught) {
-        setError(caught instanceof Error ? caught.message : "Failed to load history");
+    let cancelled = false;
+    setError("");
+    setIsHistoryLoading(true);
+    const failures: string[] = [];
+    const coreLabels = new Set(["history snapshots", "outcomes", "recommendation closure"]);
+    let pendingCoreLoads = coreLabels.size;
+    const finishCoreLoad = (label: string) => {
+      if (!coreLabels.has(label)) {
+        return;
       }
-    }
-    void load();
+      pendingCoreLoads -= 1;
+      if (pendingCoreLoads <= 0 && !cancelled) {
+        setIsHistoryLoading(false);
+      }
+    };
+    const loadOne = async <T,>(
+      label: string,
+      promise: Promise<T>,
+      setter: (value: T) => void,
+    ) => {
+      try {
+        const result = await promise;
+        if (!cancelled) {
+          setter(result);
+        }
+      } catch (caught) {
+        failures.push(`${label}: ${caught instanceof Error ? caught.message : "failed"}`);
+        if (!cancelled) {
+          setError(failures.join(" / "));
+        }
+      } finally {
+        finishCoreLoad(label);
+      }
+    };
+
+    void loadOne("scan runs", fetchScanRuns(dataMode), setRuns);
+    void loadOne("history snapshots", fetchOpportunityHistory(dataMode), setHistory);
+    void loadOne("outcomes", fetchOutcomes(dataMode), setOutcomes);
+    void loadOne("recommendation closure", fetchRecommendationClosure(dataMode), setClosure);
+    void loadOne("recommendation calibration", fetchRecommendationCalibration(dataMode), setCalibration);
+    void loadOne("strategy performance", fetchStrategyPerformance(dataMode), setPerformance);
+    void loadOne("strategy diagnostics", fetchStrategyDiagnostics(dataMode), setDiagnostics);
+
+    return () => {
+      cancelled = true;
+    };
   }, [dataMode]);
 
   async function runBacktest() {
@@ -283,6 +301,7 @@ export function History({
         scanUniverseLabel={scanUniverseLabel}
         hasSelectedCard={Boolean(selectedBacktestSymbols)}
       />
+      {error && <div className="empty-state error history-load-warning">{error}</div>}
 
       <BacktestCommandCenter
         backtest={backtest}
@@ -301,32 +320,57 @@ export function History({
         onRunPortfolio={runPortfolioBacktest}
       />
 
-      <RecommendationEffectivenessCenter
-        closure={closure}
-        calibration={calibration}
-        performance={performance}
-        outcomes={outcomes}
-      />
+      {isHistoryLoading ? (
+        <section className="panel history-loading-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">{language === "zh" ? "回测数据" : "Backtest data"}</p>
+              <h2>{language === "zh" ? "正在加载推荐复盘" : "Loading recommendation replay"}</h2>
+              <p>
+                {language === "zh"
+                  ? "正在读取推荐快照、后续表现和 30/60/90 天闭环结果。"
+                  : "Loading snapshots, outcomes, and 30/60/90 day validation results."}
+              </p>
+            </div>
+          </div>
+          <div className="loading-bars" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </div>
+        </section>
+      ) : (
+        <>
+          <RecommendationEffectivenessCenter
+            closure={closure}
+            calibration={calibration}
+            performance={performance}
+            outcomes={outcomes}
+          />
 
-      <RecommendationReplayCenter history={history} outcomes={outcomes} />
+          <RecommendationReplayCenter dataMode={dataMode} history={history} outcomes={outcomes} />
 
-      <StrategyFactorEffectivenessCenter
-        performance={performance}
-        diagnostics={diagnostics}
-        calibration={calibration}
-        factorBacktest={factorBacktest}
-      />
+          <StrategyFactorEffectivenessCenter
+            history={history}
+            outcomes={outcomes}
+            performance={performance}
+            diagnostics={diagnostics}
+            calibration={calibration}
+            factorBacktest={factorBacktest}
+          />
 
-      <SignalWeightActionCenter calibration={calibration} />
+          <SignalWeightActionCenter calibration={calibration} />
 
-      <ValidationReliabilityPanel
-        closure={closure}
-        calibration={calibration}
-        performance={performance}
-        outcomes={outcomes}
-        backtest={backtest}
-        factorBacktest={factorBacktest}
-      />
+          <ValidationReliabilityPanel
+            closure={closure}
+            calibration={calibration}
+            performance={performance}
+            outcomes={outcomes}
+            backtest={backtest}
+            factorBacktest={factorBacktest}
+          />
+        </>
+      )}
 
       <section className="panel">
         <div className="panel-heading">
@@ -1288,9 +1332,11 @@ function RecommendationEffectivenessCenter({
 }
 
 function RecommendationReplayCenter({
+  dataMode,
   history,
   outcomes,
 }: {
+  dataMode: DataProviderMode;
   history?: OpportunityHistoryResponse;
   outcomes?: OutcomesResponse;
 }) {
@@ -1301,8 +1347,48 @@ function RecommendationReplayCenter({
     .sort((left, right) => (right.signal_date ?? "").localeCompare(left.signal_date ?? ""))
     .slice(0, 12)
     .map((snapshot) => ({ snapshot, outcome: outcomeMap.get(snapshot.snapshot_id) }));
+  const [selectedSnapshotId, setSelectedSnapshotId] = useState<string>("");
+  const [chart, setChart] = useState<MarketBarsResponse>();
+  const [chartError, setChartError] = useState("");
+  const selectedRow =
+    rows.find((row) => row.snapshot.snapshot_id === selectedSnapshotId) ?? rows[0];
+  useEffect(() => {
+    if (!rows.length) {
+      setSelectedSnapshotId("");
+      return;
+    }
+    if (!selectedSnapshotId || !rows.some((row) => row.snapshot.snapshot_id === selectedSnapshotId)) {
+      setSelectedSnapshotId(rows[0].snapshot.snapshot_id);
+    }
+  }, [rows, selectedSnapshotId]);
+  useEffect(() => {
+    if (!selectedRow) {
+      setChart(undefined);
+      return;
+    }
+    let cancelled = false;
+    setChartError("");
+    setChart(undefined);
+    fetchMarketBars(dataMode, selectedRow.snapshot.instrument_id, 220)
+      .then((result) => {
+        if (!cancelled) {
+          setChart(result);
+        }
+      })
+      .catch((caught) => {
+        if (!cancelled) {
+          setChartError(caught instanceof Error ? caught.message : "Failed to load replay K-line");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [dataMode, selectedRow?.snapshot.snapshot_id]);
   const completed = rows.filter((row) => row.outcome && row.outcome.outcome_status !== "pending").length;
   const triggered = rows.filter((row) => row.outcome?.triggered).length;
+  const markers = selectedRow
+    ? replaySignalMarkers(selectedRow.snapshot, selectedRow.outcome, chart, language)
+    : [];
   return (
     <section className="panel replay-center">
       <div className="panel-heading">
@@ -1333,49 +1419,76 @@ function RecommendationReplayCenter({
           {language === "zh" ? "还没有推荐快照，先运行一次今日扫描。" : "No recommendation snapshots yet."}
         </div>
       ) : (
-        <div className="table-shell replay-table">
-          <table>
-            <thead>
-              <tr>
-                <th>{language === "zh" ? "推荐日" : "Date"}</th>
-                <th>{language === "zh" ? "标的" : "Ticker"}</th>
-                <th>{language === "zh" ? "推荐理由" : "Why"}</th>
-                <th>{language === "zh" ? "买点" : "Buy point"}</th>
-                <th>{language === "zh" ? "触发" : "Triggered"}</th>
-                <th>5D</th>
-                <th>10D</th>
-                <th>20D</th>
-                <th>{language === "zh" ? "沪深300" : "CSI 300"}</th>
-                <th>{language === "zh" ? "科创50" : "STAR 50"}</th>
-                <th>{language === "zh" ? "结果归因" : "Attribution"}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map(({ snapshot, outcome }) => (
-                <tr key={snapshot.snapshot_id}>
-                  <td>{snapshot.signal_date ?? "-"}</td>
-                  <td className="ticker" title={formatInstrumentDisplay(snapshot.instrument_id, snapshot.instrument_label ?? snapshot.card.instrument_label)}>
-                    {formatInstrumentDisplay(snapshot.instrument_id, snapshot.instrument_label ?? snapshot.card.instrument_label)}
-                  </td>
-                  <td className="reason-cell" title={replayReason(snapshot)}>
-                    {replayReason(snapshot)}
-                  </td>
-                  <td className="reason-cell">{replayBuyPoint(snapshot)}</td>
-                  <td>
-                    <span className={`status status-${outcome?.triggered ? "triggered" : "pending"}`}>
-                      {outcome?.triggered ? (language === "zh" ? "已触发" : "Yes") : (language === "zh" ? "等待" : "Waiting")}
-                    </span>
-                  </td>
-                  <td className={signedCellClass(outcome?.return_5d ?? null)}>{formatNumber(outcome?.return_5d ?? null, "%")}</td>
-                  <td className={signedCellClass(outcome?.return_10d ?? null)}>{formatNumber(outcome?.return_10d ?? null, "%")}</td>
-                  <td className={signedCellClass(outcome?.return_20d ?? null)}>{formatNumber(outcome?.return_20d ?? null, "%")}</td>
-                  <td>{benchmarkBeatLabel(snapshot, "沪深300", language)}</td>
-                  <td>{benchmarkBeatLabel(snapshot, "科创50", language)}</td>
-                  <td className="reason-cell">{replayAttribution(snapshot, outcome, language)}</td>
+        <div className="replay-workbench">
+          <div className="table-shell replay-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>{language === "zh" ? "推荐日" : "Date"}</th>
+                  <th>{language === "zh" ? "标的" : "Ticker"}</th>
+                  <th>{language === "zh" ? "触发" : "Triggered"}</th>
+                  <th>5D</th>
+                  <th>10D</th>
+                  <th>20D</th>
+                  <th>{language === "zh" ? "归因" : "Attribution"}</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {rows.map(({ snapshot, outcome }) => {
+                  const selected = selectedRow?.snapshot.snapshot_id === snapshot.snapshot_id;
+                  return (
+                    <tr
+                      key={snapshot.snapshot_id}
+                      className={selected ? "is-selected" : ""}
+                      onClick={() => setSelectedSnapshotId(snapshot.snapshot_id)}
+                    >
+                      <td>{snapshot.signal_date ?? "-"}</td>
+                      <td className="ticker" title={formatInstrumentDisplay(snapshot.instrument_id, snapshot.instrument_label ?? snapshot.card.instrument_label)}>
+                        {formatInstrumentDisplay(snapshot.instrument_id, snapshot.instrument_label ?? snapshot.card.instrument_label)}
+                      </td>
+                      <td>
+                        <span className={`status status-${outcome?.triggered ? "triggered" : "pending"}`}>
+                          {outcome?.triggered ? (language === "zh" ? "已触发" : "Yes") : (language === "zh" ? "等待" : "Waiting")}
+                        </span>
+                      </td>
+                      <td className={signedCellClass(outcome?.return_5d ?? null)}>{formatNumber(outcome?.return_5d ?? null, "%")}</td>
+                      <td className={signedCellClass(outcome?.return_10d ?? null)}>{formatNumber(outcome?.return_10d ?? null, "%")}</td>
+                      <td className={signedCellClass(outcome?.return_20d ?? null)}>{formatNumber(outcome?.return_20d ?? null, "%")}</td>
+                      <td className="reason-cell">{replayAttribution(snapshot, outcome, language)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {selectedRow ? (
+            <div className="replay-detail-stack">
+              <ReplayDetailCard
+                snapshot={selectedRow.snapshot}
+                outcome={selectedRow.outcome}
+                language={language}
+              />
+              <div className="replay-kline-card">
+                <div className="paper-ledger-card-header">
+                  <div>
+                    <h3>{language === "zh" ? "事件 K 线复盘" : "Event K-line Replay"}</h3>
+                    <p>
+                      {language === "zh"
+                        ? "标记推荐日、真实触发、止损/目标和 5/10/20 日表现，用来判断推荐是否真的按规则发展。"
+                        : "Marks signal date, trigger, stop/target, and 5/10/20D follow-through."}
+                    </p>
+                  </div>
+                  <strong>{markers.length}</strong>
+                </div>
+                {chartError ? <div className="empty-state error">{chartError}</div> : null}
+                <OpportunityCandlestickChart
+                  data={chart}
+                  levels={replayChartLevels(selectedRow.snapshot, selectedRow.outcome)}
+                  markers={markers}
+                />
+              </div>
+            </div>
+          ) : null}
         </div>
       )}
     </section>
@@ -1383,11 +1496,15 @@ function RecommendationReplayCenter({
 }
 
 function StrategyFactorEffectivenessCenter({
+  history,
+  outcomes,
   performance,
   diagnostics,
   calibration,
   factorBacktest,
 }: {
+  history?: OpportunityHistoryResponse;
+  outcomes?: OutcomesResponse;
   performance?: StrategyPerformanceResponse;
   diagnostics?: StrategyDiagnosticsResponse;
   calibration?: RecommendationCalibrationResponse;
@@ -1519,8 +1636,325 @@ function StrategyFactorEffectivenessCenter({
           ) : null}
         </div>
       </div>
+      <RollingEffectivenessBoard
+        history={history}
+        outcomes={outcomes}
+        calibration={calibration}
+        performance={performance}
+      />
     </section>
   );
+}
+
+function RollingEffectivenessBoard({
+  history,
+  outcomes,
+  calibration,
+  performance,
+}: {
+  history?: OpportunityHistoryResponse;
+  outcomes?: OutcomesResponse;
+  calibration?: RecommendationCalibrationResponse;
+  performance?: StrategyPerformanceResponse;
+}) {
+  const { language } = useI18n();
+  const pairs = outcomeSnapshotPairs(history, outcomes);
+  const strategyRows = rollingRows(pairs, "strategy", language).slice(0, 8);
+  const factorRows = rollingRows(pairs, "factor", language).slice(0, 8);
+  const themeRows = rollingRows(pairs, "theme", language).slice(0, 8);
+  const hasLiveRows = strategyRows.length || factorRows.length || themeRows.length;
+  const fallbackStrategyRows = !strategyRows.length
+    ? (performance?.performance ?? []).slice(0, 5).map((item) => rollingFallbackRow(localizeStrategy(item.strategy_id, language), item.completed_count, item.sample_count, item.positive_rate_10d, item.avg_return_10d, language))
+    : [];
+  const fallbackFactorRows = !factorRows.length
+    ? (calibration?.signal_effects ?? []).slice(0, 5).map((item) => rollingFallbackRow(item.label, item.completed_count, item.sample_count, item.win_rate_10d, item.avg_return_10d, language))
+    : [];
+
+  return (
+    <div className="rolling-effectiveness-board">
+      <div className="rolling-effectiveness-head">
+        <div>
+          <span className="eyebrow">{language === "zh" ? "30/60/90 天胜率看板" : "30/60/90D Win-rate Board"}</span>
+          <h3>{language === "zh" ? "策略、因子、主题最近有没有继续有效" : "Recent strategy, factor, and theme effectiveness"}</h3>
+          <p>
+            {language === "zh"
+              ? "这里看真实推荐样本到期后的近 30/60/90 天表现；样本成熟指推荐已经走完 10 日窗口，不代表历史行情没数据。"
+              : "Uses live recommendation follow-through by 30/60/90D windows; mature means the signal has a 10D outcome."}
+          </p>
+        </div>
+        <strong>{pairs.length}</strong>
+      </div>
+      {!hasLiveRows && !fallbackStrategyRows.length && !fallbackFactorRows.length ? (
+        <div className="empty-state">
+          {language === "zh"
+            ? "还没有可聚合的推荐后表现，先运行扫描并让模拟盘继续积累。"
+            : "No follow-through samples yet."}
+        </div>
+      ) : (
+        <div className="rolling-effectiveness-grid">
+          <RollingEffectivenessTable
+            title={language === "zh" ? "策略胜率" : "Strategy win rate"}
+            rows={strategyRows.length ? strategyRows : fallbackStrategyRows}
+          />
+          <RollingEffectivenessTable
+            title={language === "zh" ? "因子胜率" : "Factor win rate"}
+            rows={factorRows.length ? factorRows : fallbackFactorRows}
+          />
+          <RollingEffectivenessTable
+            title={language === "zh" ? "主题胜率" : "Theme win rate"}
+            rows={themeRows}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+type OutcomeSnapshotPair = {
+  snapshot?: OpportunitySnapshot;
+  outcome: OpportunityOutcome;
+};
+
+type RollingEffectivenessRow = {
+  key: string;
+  label: string;
+  samples90: number;
+  completed90: number;
+  win30: number | null;
+  avg30: number | null;
+  win60: number | null;
+  avg60: number | null;
+  win90: number | null;
+  avg90: number | null;
+  action: string;
+  actionTone: "good" | "watch" | "risk";
+};
+
+function RollingEffectivenessTable({
+  title,
+  rows,
+}: {
+  title: string;
+  rows: RollingEffectivenessRow[];
+}) {
+  const { language } = useI18n();
+  return (
+    <div className="rolling-effectiveness-table">
+      <header>
+        <h4>{title}</h4>
+        <span>{rows.length}</span>
+      </header>
+      {!rows.length ? (
+        <p className="compact-note">{language === "zh" ? "暂无可用样本。" : "No sample yet."}</p>
+      ) : (
+        <div className="table-shell compact-table">
+          <table>
+            <thead>
+              <tr>
+                <th>{language === "zh" ? "名称" : "Name"}</th>
+                <th>30D</th>
+                <th>60D</th>
+                <th>90D</th>
+                <th>{language === "zh" ? "成熟" : "Mature"}</th>
+                <th>{language === "zh" ? "动作" : "Action"}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.key}>
+                  <td className="reason-cell">{row.label}</td>
+                  <td>{rollingMetricLabel(row.win30, row.avg30)}</td>
+                  <td>{rollingMetricLabel(row.win60, row.avg60)}</td>
+                  <td>{rollingMetricLabel(row.win90, row.avg90)}</td>
+                  <td>{row.completed90}/{row.samples90}</td>
+                  <td>
+                    <span className={`status status-${row.actionTone}`}>{row.action}</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function outcomeSnapshotPairs(
+  history: OpportunityHistoryResponse | undefined,
+  outcomes: OutcomesResponse | undefined,
+): OutcomeSnapshotPair[] {
+  const snapshotMap = new Map((history?.snapshots ?? []).map((snapshot) => [snapshot.snapshot_id, snapshot]));
+  return (outcomes?.outcomes ?? []).map((outcome) => ({
+    outcome,
+    snapshot: snapshotMap.get(outcome.snapshot_id),
+  }));
+}
+
+function rollingRows(
+  pairs: OutcomeSnapshotPair[],
+  dimension: "strategy" | "factor" | "theme",
+  language: "zh" | "en",
+): RollingEffectivenessRow[] {
+  const asOf = latestOutcomeDate(pairs);
+  const grouped = new Map<string, { label: string; pairs: OutcomeSnapshotPair[] }>();
+  pairs.forEach((pair) => {
+    rollingKeys(pair, dimension, language).forEach((item) => {
+      const bucket = grouped.get(item.key) ?? { label: item.label, pairs: [] };
+      bucket.pairs.push(pair);
+      grouped.set(item.key, bucket);
+    });
+  });
+
+  return [...grouped.entries()]
+    .map(([key, bucket]) => {
+      const metrics30 = rollingMetrics(bucket.pairs, asOf, 30);
+      const metrics60 = rollingMetrics(bucket.pairs, asOf, 60);
+      const metrics90 = rollingMetrics(bucket.pairs, asOf, 90);
+      const action = rollingAction(metrics90, language);
+      return {
+        key,
+        label: bucket.label,
+        samples90: metrics90.samples,
+        completed90: metrics90.completed,
+        win30: metrics30.winRate,
+        avg30: metrics30.avgReturn,
+        win60: metrics60.winRate,
+        avg60: metrics60.avgReturn,
+        win90: metrics90.winRate,
+        avg90: metrics90.avgReturn,
+        action: action.label,
+        actionTone: action.tone,
+      };
+    })
+    .filter((row) => row.samples90 > 0)
+    .sort((left, right) => rollingSortScore(right) - rollingSortScore(left));
+}
+
+function rollingKeys(
+  pair: OutcomeSnapshotPair,
+  dimension: "strategy" | "factor" | "theme",
+  language: "zh" | "en",
+): { key: string; label: string }[] {
+  const snapshot = pair.snapshot;
+  if (dimension === "strategy") {
+    const key = pair.outcome.primary_strategy_id || snapshot?.primary_strategy_id || "unclassified";
+    return [{ key: `strategy:${key}`, label: localizeStrategy(key, language) }];
+  }
+  if (dimension === "theme") {
+    return dedupeStrings([
+      ...(snapshot?.card.market_context?.themes ?? []),
+      ...(snapshot?.card.opportunity_tags ?? []),
+    ])
+      .filter((item) => !["cn", "stock", "etf"].includes(item.toLowerCase()))
+      .slice(0, 4)
+      .map((item) => ({ key: `theme:${item}`, label: item }));
+  }
+  const factorIds = [
+    ...((snapshot?.card.factor_exposures ?? [])
+      .filter((item) => item.score * item.weight >= 0.08)
+      .map((item) => item.factor_id)),
+    ...(snapshot?.card.factor_flags ?? []),
+  ];
+  return dedupeStrings(factorIds)
+    .slice(0, 4)
+    .map((item) => ({ key: `factor:${item}`, label: factorLabel(item, language) }));
+}
+
+function rollingMetrics(pairs: OutcomeSnapshotPair[], asOf: Date, windowDays: number) {
+  const inWindow = pairs.filter((pair) => {
+    const date = pair.outcome.signal_date;
+    if (!date) {
+      return false;
+    }
+    const parsed = Date.parse(date);
+    if (!Number.isFinite(parsed)) {
+      return false;
+    }
+    const ageDays = Math.floor((asOf.getTime() - parsed) / 86400000);
+    return ageDays >= 0 && ageDays <= windowDays;
+  });
+  const completed = inWindow.filter((pair) => pair.outcome.return_10d !== null && pair.outcome.return_10d !== undefined);
+  const returns = completed.map((pair) => pair.outcome.return_10d).filter((value): value is number => value !== null && value !== undefined);
+  return {
+    samples: inWindow.length,
+    completed: completed.length,
+    winRate: returns.length ? returns.filter((value) => value > 0).length / returns.length : null,
+    avgReturn: returns.length ? returns.reduce((sum, value) => sum + value, 0) / returns.length : null,
+  };
+}
+
+function latestOutcomeDate(pairs: OutcomeSnapshotPair[]): Date {
+  const timestamps = pairs
+    .map((pair) => Date.parse(pair.outcome.signal_date ?? ""))
+    .filter((value) => Number.isFinite(value));
+  return new Date(timestamps.length ? Math.max(...timestamps) : Date.now());
+}
+
+function rollingAction(
+  metrics: ReturnType<typeof rollingMetrics>,
+  language: "zh" | "en",
+): { label: string; tone: "good" | "watch" | "risk" } {
+  if (metrics.completed < 5) {
+    return { label: language === "zh" ? "观察" : "Watch", tone: "watch" };
+  }
+  if ((metrics.winRate ?? 0) >= 0.55 && (metrics.avgReturn ?? 0) > 0) {
+    return { label: language === "zh" ? "加权" : "Boost", tone: "good" };
+  }
+  if ((metrics.winRate ?? 1) < 0.4 || (metrics.avgReturn ?? 0) < 0) {
+    return { label: language === "zh" ? "降权" : "Reduce", tone: "risk" };
+  }
+  return { label: language === "zh" ? "维持" : "Keep", tone: "watch" };
+}
+
+function rollingFallbackRow(
+  label: string,
+  completed: number,
+  samples: number,
+  winRate: number | null,
+  avgReturn: number | null,
+  language: "zh" | "en",
+): RollingEffectivenessRow {
+  const action = rollingAction({ samples, completed, winRate, avgReturn }, language);
+  return {
+    key: `fallback:${label}`,
+    label,
+    samples90: samples,
+    completed90: completed,
+    win30: null,
+    avg30: null,
+    win60: null,
+    avg60: null,
+    win90: winRate,
+    avg90: avgReturn,
+    action: action.label,
+    actionTone: action.tone,
+  };
+}
+
+function rollingMetricLabel(winRate: number | null, avgReturn: number | null) {
+  if (winRate === null && avgReturn === null) {
+    return "-";
+  }
+  return `${formatRatio(winRate)} / ${formatNumber(avgReturn, "%")}`;
+}
+
+function rollingSortScore(row: RollingEffectivenessRow) {
+  return (row.avg90 ?? -50) + (row.win90 ?? 0) * 10 + row.completed90 * 0.05;
+}
+
+function dedupeStrings(values: (string | null | undefined)[]) {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  values.forEach((value) => {
+    const normalized = String(value ?? "").trim();
+    if (!normalized || seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    result.push(normalized);
+  });
+  return result;
 }
 
 function SignalWeightActionCenter({
@@ -1679,6 +2113,260 @@ function MetricLike({ label, value }: { label: string; value: string | number })
       <strong>{value}</strong>
     </div>
   );
+}
+
+function ReplayDetailCard({
+  snapshot,
+  outcome,
+  language,
+}: {
+  snapshot: OpportunitySnapshot;
+  outcome?: OpportunityOutcome;
+  language: "zh" | "en";
+}) {
+  const label = formatInstrumentDisplay(
+    snapshot.instrument_id,
+    snapshot.instrument_label ?? snapshot.card.instrument_label,
+  );
+  const status = outcome?.outcome_status ?? "pending";
+  const benchmarkRows = [
+    {
+      key: "csi300",
+      label: language === "zh" ? "沪深300" : "CSI 300",
+      value: benchmarkBeatLabel(snapshot, "沪深300", language),
+    },
+    {
+      key: "star50",
+      label: language === "zh" ? "科创50" : "STAR 50",
+      value: benchmarkBeatLabel(snapshot, "科创50", language),
+    },
+  ];
+  const fields = [
+    {
+      label: language === "zh" ? "为什么推荐" : "Why",
+      value: replayReason(snapshot),
+    },
+    {
+      label: language === "zh" ? "买点" : "Buy point",
+      value: replayBuyPoint(snapshot),
+    },
+    {
+      label: language === "zh" ? "止损" : "Stop",
+      value: snapshot.card.recommendation_brief?.stop_loss || snapshot.initial_stop || "-",
+    },
+    {
+      label: language === "zh" ? "目标" : "Target",
+      value: snapshot.card.recommendation_brief?.target || snapshot.target_1 || "-",
+    },
+    {
+      label: language === "zh" ? "主要风险" : "Risk",
+      value: snapshot.card.recommendation_brief?.risk || snapshot.card.recommendation_summary?.risk_note || "-",
+    },
+    {
+      label: language === "zh" ? "历史胜率" : "Historical odds",
+      value:
+        snapshot.card.recommendation_brief?.history_odds ||
+        snapshot.card.strategy_calibration?.message ||
+        "-",
+    },
+  ];
+
+  return (
+    <div className="replay-detail-card">
+      <div className="replay-detail-head">
+        <div>
+          <span className="eyebrow">{language === "zh" ? "单只推荐复盘" : "Single Signal Replay"}</span>
+          <h3>{label}</h3>
+          <p>
+            {snapshot.signal_date ?? "-"} · {localizeStrategy(snapshot.primary_strategy_id, language)}
+          </p>
+        </div>
+        <div className={`replay-outcome-badge status-${status}`}>
+          <span>{language === "zh" ? "当前结果" : "Outcome"}</span>
+          <strong>{localizeStatus(status, language)}</strong>
+        </div>
+      </div>
+
+      <div className="replay-detail-grid">
+        {fields.map((field) => (
+          <div key={field.label}>
+            <span>{field.label}</span>
+            <p title={field.value}>{field.value}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="replay-return-strip">
+        <MetricLike label="5D" value={formatNumber(outcome?.return_5d ?? null, "%")} />
+        <MetricLike label="10D" value={formatNumber(outcome?.return_10d ?? null, "%")} />
+        <MetricLike label="20D" value={formatNumber(outcome?.return_20d ?? null, "%")} />
+        <MetricLike
+          label={language === "zh" ? "最大回撤" : "Max DD"}
+          value={formatNumber(outcome?.max_drawdown_pct ?? null, "%")}
+        />
+        <MetricLike
+          label={language === "zh" ? "最大上冲" : "Max runup"}
+          value={formatNumber(outcome?.max_runup_pct ?? null, "%")}
+        />
+      </div>
+
+      <div className="replay-benchmark-strip">
+        {benchmarkRows.map((item) => (
+          <span key={item.key}>
+            {item.label} <strong>{item.value}</strong>
+          </span>
+        ))}
+      </div>
+
+      <div className="replay-attribution-box">
+        <span>{language === "zh" ? "结果归因" : "Attribution"}</span>
+        <p>{replayAttribution(snapshot, outcome, language)}</p>
+      </div>
+    </div>
+  );
+}
+
+function replayChartLevels(
+  snapshot: OpportunitySnapshot,
+  outcome?: OpportunityOutcome,
+): Partial<MarketBarsResponse["levels"]> {
+  return {
+    trigger_price: outcome?.trigger_price ?? snapshot.trigger_price,
+    initial_stop: outcome?.initial_stop ?? snapshot.initial_stop,
+    target_1: outcome?.target_1 ?? snapshot.target_1,
+    no_chase_above: snapshot.card.entry_plan.no_chase_above,
+  };
+}
+
+function replaySignalMarkers(
+  snapshot: OpportunitySnapshot,
+  outcome: OpportunityOutcome | undefined,
+  chart: MarketBarsResponse | undefined,
+  language: "zh" | "en",
+): SignalMarker[] {
+  const bars = chart?.bars ?? [];
+  const signalDate = snapshot.signal_date;
+  const signalIndex = signalDate ? barIndexOnOrAfter(bars, signalDate) : -1;
+  const signalPrice =
+    snapshot.latest_close ??
+    outcome?.trigger_price ??
+    snapshot.trigger_price ??
+    (signalIndex >= 0 ? bars[signalIndex]?.close : null);
+  const trigger = numberFromDecimalText(outcome?.trigger_price ?? snapshot.trigger_price);
+  const stop = numberFromDecimalText(outcome?.initial_stop ?? snapshot.initial_stop);
+  const target = numberFromDecimalText(outcome?.target_1 ?? snapshot.target_1);
+  const triggerIndex =
+    signalIndex >= 0 && trigger !== null
+      ? firstBarIndex(bars, signalIndex + 1, (bar) => numberFromDecimalText(bar.high) !== null && Number(bar.high) >= trigger)
+      : -1;
+  const stopIndex =
+    stop !== null
+      ? firstBarIndex(bars, Math.max(triggerIndex, signalIndex) + 1, (bar) => numberFromDecimalText(bar.low) !== null && Number(bar.low) <= stop)
+      : -1;
+  const targetIndex =
+    target !== null
+      ? firstBarIndex(bars, Math.max(triggerIndex, signalIndex) + 1, (bar) => numberFromDecimalText(bar.high) !== null && Number(bar.high) >= target)
+      : -1;
+  const missedIndex =
+    outcome?.triggered === false && signalIndex >= 0
+      ? Math.min(signalIndex + 10, bars.length - 1)
+      : -1;
+
+  return compactSignalMarkers([
+    {
+      kind: "recommendation",
+      date: signalDate,
+      price: signalPrice,
+      label: language === "zh" ? "推荐日" : "Signal",
+    },
+    triggerIndex >= 0
+      ? {
+          kind: "entry",
+          date: bars[triggerIndex]?.trade_date,
+          price: trigger,
+          label: language === "zh" ? "触发买点" : "Triggered",
+        }
+      : null,
+    targetIndex >= 0 && outcome?.outcome_status === "target_1_hit"
+      ? {
+          kind: "target",
+          date: bars[targetIndex]?.trade_date,
+          price: target,
+          label: language === "zh" ? "目标命中" : "Target hit",
+        }
+      : null,
+    stopIndex >= 0 && outcome?.outcome_status === "stopped"
+      ? {
+          kind: "stop",
+          date: bars[stopIndex]?.trade_date,
+          price: stop,
+          label: language === "zh" ? "止损触发" : "Stopped",
+        }
+      : null,
+    missedIndex >= 0
+      ? {
+          kind: "missed",
+          date: bars[missedIndex]?.trade_date,
+          price: trigger ?? signalPrice,
+          label: language === "zh" ? "未触发" : "Missed",
+        }
+      : null,
+    returnMarker(snapshot, outcome?.return_5d ?? null, bars, signalIndex, 5, "return5"),
+    returnMarker(snapshot, outcome?.return_10d ?? null, bars, signalIndex, 10, "return10"),
+    returnMarker(snapshot, outcome?.return_20d ?? null, bars, signalIndex, 20, "return20"),
+  ]);
+}
+
+function returnMarker(
+  snapshot: OpportunitySnapshot,
+  value: number | null,
+  bars: MarketBarsResponse["bars"],
+  signalIndex: number,
+  horizon: 5 | 10 | 20,
+  kind: SignalMarker["kind"],
+): SignalMarker | null {
+  if (value === null || signalIndex < 0 || signalIndex + horizon >= bars.length) {
+    return null;
+  }
+  const bar = bars[signalIndex + horizon];
+  return {
+    kind,
+    date: bar.trade_date,
+    price: bar.close ?? snapshot.latest_close,
+    label: `${horizon}D ${formatNumber(value, "%")}`,
+  };
+}
+
+function compactSignalMarkers(items: (SignalMarker | null)[]): SignalMarker[] {
+  return items.filter((item): item is SignalMarker => Boolean(item));
+}
+
+function barIndexOnOrAfter(bars: MarketBarsResponse["bars"], date: string): number {
+  const exact = bars.findIndex((bar) => bar.trade_date === date);
+  if (exact >= 0) {
+    return exact;
+  }
+  const target = Date.parse(date);
+  if (!Number.isFinite(target)) {
+    return -1;
+  }
+  return bars.findIndex((bar) => {
+    const parsed = Date.parse(bar.trade_date);
+    return Number.isFinite(parsed) && parsed >= target;
+  });
+}
+
+function firstBarIndex(
+  bars: MarketBarsResponse["bars"],
+  start: number,
+  predicate: (bar: MarketBarsResponse["bars"][number]) => boolean,
+): number {
+  for (let index = Math.max(start, 0); index < bars.length; index += 1) {
+    if (predicate(bars[index])) {
+      return index;
+    }
+  }
+  return -1;
 }
 
 function ratio(numerator: number, denominator: number): number | null {

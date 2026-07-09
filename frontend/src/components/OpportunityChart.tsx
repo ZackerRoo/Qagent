@@ -3,7 +3,16 @@ import type { MarketBarsResponse } from "../types";
 
 type ChartLevelOverrides = Partial<MarketBarsResponse["levels"]>;
 
-export type SignalMarkerKind = "recommendation" | "entry" | "stop" | "target" | "no_chase";
+export type SignalMarkerKind =
+  | "recommendation"
+  | "entry"
+  | "stop"
+  | "target"
+  | "no_chase"
+  | "missed"
+  | "return5"
+  | "return10"
+  | "return20";
 
 export type SignalMarker = {
   kind: SignalMarkerKind;
@@ -285,6 +294,10 @@ function signalMarkerLabel(kind: SignalMarkerKind, language: "zh" | "en") {
     stop: language === "zh" ? "止损" : "Stop",
     target: language === "zh" ? "目标" : "Target",
     no_chase: language === "zh" ? "不追高" : "No chase",
+    missed: language === "zh" ? "错过" : "Missed",
+    return5: "5D",
+    return10: "10D",
+    return20: "20D",
   } satisfies Record<SignalMarkerKind, string>;
   return labels[kind];
 }
@@ -349,6 +362,9 @@ function SignalMarkers({
 function orderOffset(order: number, kind: SignalMarkerKind): number {
   if (kind === "recommendation") {
     return -12;
+  }
+  if (kind === "return5" || kind === "return10" || kind === "return20") {
+    return 14 + (order % 3) * 9;
   }
   return (order % 3) * 10;
 }

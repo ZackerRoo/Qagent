@@ -131,17 +131,37 @@ def apply_paper_trading_feedback(
     cards: list[OpportunityCard],
     report: object | None,
 ) -> list[OpportunityCard]:
-    effects = _paper_drag_effects(report)
-    if not effects:
+    drag_effects = _paper_drag_effects(report)
+    contributor_effects = _paper_contributor_effects(report)
+    if not drag_effects and not contributor_effects:
         return cards
     risk_gate = getattr(report, "risk_gate", None)
     paused = bool(risk_gate and getattr(risk_gate, "can_add_entries", True) is False)
     for card in cards:
-        matched = _matched_paper_drag_effects(card, effects)
-        if not matched:
+        matched_drags = _matched_paper_effects(card, drag_effects)
+        if matched_drags:
+            raw_delta = -sum(_paper_effect_strength(effect, paused) for effect in matched_drags)
+            delta = _clamp(raw_delta, -0.12, -0.02)
+            card.rank_score = round(_clamp(card.rank_score + delta, 0.0, 1.0), 4)
+            card.dynamic_score = card.rank_score
+            if card.recommendation_score is not None:
+                card.recommendation_score.final_score = card.rank_score
+                card.recommendation_score.summary = (
+                    f"推荐分 {card.rank_score:.0%}：已纳入模拟盘闭环反馈 {delta:+.1%}。"
+                )
+            labels = "、".join(str(getattr(effect, "label", getattr(effect, "key", ""))) for effect in matched_drags[:3])
+            note = f"模拟盘反馈降权：{labels} 在模拟盘中近期拖累收益，推荐分调整 {delta:+.1%}。"
+            if note not in card.rank_reasons:
+                card.rank_reasons.append(note)
+            if note not in card.calibration_notes:
+                card.calibration_notes.append(note)
             continue
-        raw_delta = -sum(_paper_effect_strength(effect, paused) for effect in matched)
-        delta = _clamp(raw_delta, -0.12, -0.02)
+
+        matched_contributors = _matched_paper_effects(card, contributor_effects)
+        if not matched_contributors:
+            continue
+        raw_delta = sum(_paper_contributor_strength(effect, paused) for effect in matched_contributors)
+        delta = _clamp(raw_delta, 0.015, 0.06)
         card.rank_score = round(_clamp(card.rank_score + delta, 0.0, 1.0), 4)
         card.dynamic_score = card.rank_score
         if card.recommendation_score is not None:
@@ -149,8 +169,8 @@ def apply_paper_trading_feedback(
             card.recommendation_score.summary = (
                 f"推荐分 {card.rank_score:.0%}：已纳入模拟盘闭环反馈 {delta:+.1%}。"
             )
-        labels = "、".join(str(getattr(effect, "label", getattr(effect, "key", ""))) for effect in matched[:3])
-        note = f"模拟盘反馈降权：{labels} 在模拟盘中近期拖累收益，推荐分调整 {delta:+.1%}。"
+        labels = "、".join(str(getattr(effect, "label", getattr(effect, "key", ""))) for effect in matched_contributors[:3])
+        note = f"模拟盘反馈加权：{labels} 在模拟盘中近期贡献收益，推荐分调整 {delta:+.1%}。"
         if note not in card.rank_reasons:
             card.rank_reasons.append(note)
         if note not in card.calibration_notes:
@@ -162,7 +182,7 @@ def paper_trading_feedback_data_health(cards: list[OpportunityCard]) -> dict[str
     adjusted = sum(
         1
         for card in cards
-        if any("模拟盘反馈降权" in reason for reason in card.rank_reasons)
+        if any("模拟盘反馈降权" in reason or "模拟盘反馈加权" in reason for reason in card.rank_reasons)
     )
     blocked = sum(
         1
@@ -204,6 +224,22 @@ def _paper_drag_effects(report: object | None) -> dict[tuple[str, str], object]:
     return effects
 
 
+def _paper_contributor_effects(report: object | None) -> dict[tuple[str, str], object]:
+    if report is None:
+        return {}
+    items = getattr(report, "failure_attribution", []) or []
+    effects: dict[tuple[str, str], object] = {}
+    for item in items:
+        if not _is_actionable_paper_contributor(item):
+            continue
+        dimension = str(getattr(item, "dimension", "")).strip().lower()
+        key = str(getattr(item, "key", "")).strip()
+        if not dimension or not key:
+            continue
+        effects[(dimension, key)] = item
+    return effects
+
+
 def _is_actionable_paper_drag(item: object) -> bool:
     if str(getattr(item, "verdict", "")).lower() != "drag":
         return False
@@ -217,7 +253,22 @@ def _is_actionable_paper_drag(item: object) -> bool:
     return weak_return or weak_win_rate
 
 
-def _matched_paper_drag_effects(
+def _is_actionable_paper_contributor(item: object) -> bool:
+    if str(getattr(item, "verdict", "")).lower() != "contributor":
+        return False
+    evaluated = int(getattr(item, "evaluated_trades", 0) or 0)
+    if evaluated < 3:
+        return False
+    total_return = getattr(item, "total_return_pct", None)
+    win_rate = getattr(item, "win_rate", None)
+    target_hits = int(getattr(item, "target_hit_trades", 0) or 0)
+    stopped = int(getattr(item, "stopped_trades", 0) or 0)
+    strong_return = total_return is not None and float(total_return) >= 2.0
+    strong_win_rate = win_rate is not None and float(win_rate) >= 0.6
+    return (strong_return or strong_win_rate) and target_hits >= stopped
+
+
+def _matched_paper_effects(
     card: OpportunityCard,
     effects: dict[tuple[str, str], object],
 ) -> list[object]:
@@ -266,6 +317,22 @@ def _paper_effect_strength(effect: object, paused: bool) -> float:
         strength += 0.02
     if paused:
         strength += 0.015
+    return strength
+
+
+def _paper_contributor_strength(effect: object, paused: bool) -> float:
+    total_return = getattr(effect, "total_return_pct", None)
+    win_rate = getattr(effect, "win_rate", None)
+    target_hits = int(getattr(effect, "target_hit_trades", 0) or 0)
+    strength = 0.015
+    if total_return is not None:
+        strength += min(float(total_return) / 220.0, 0.035)
+    if win_rate is not None and float(win_rate) >= 0.6:
+        strength += 0.01
+    if target_hits >= 2:
+        strength += 0.008
+    if paused:
+        strength *= 0.75
     return strength
 
 

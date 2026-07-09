@@ -61,6 +61,7 @@ from qagent.market.benchmarks import (
     benchmark_items_for_return_from_bars,
 )
 from qagent.monitoring.outcomes import (
+    OpportunityOutcome,
     compute_opportunity_outcome,
     diagnose_strategy_performance,
     summarize_recommendation_closure,
@@ -75,6 +76,7 @@ from qagent.monitoring.portfolio import PositionInput, analyze_position_risk
 from qagent.monitoring.alerts import AlertRule, suggest_alert_rules
 from qagent.paper_trading.engine import (
     PaperDailyReport,
+    build_paper_risk_gate_status,
     build_paper_daily_report,
     build_paper_ledger,
     build_paper_validation,
@@ -114,8 +116,10 @@ from qagent.research.market_intelligence import (
 )
 from qagent.research.operational_readiness import build_operational_readiness_center
 from qagent.storage.paper import PaperAccountSettings, PaperTradingRepository
+from qagent.storage.paper import PaperTradeRecord
 from qagent.storage.repository import (
     AlertRuleCreate,
+    OpportunitySnapshotRecord,
     PositionCreate,
     QagentRepository,
     WatchlistCreate,
@@ -1107,13 +1111,58 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
 
     if settings.seed_paper and mode != "fixture" and allow_seed_paper:
         try:
+            effective_seed_limit = _paper_seed_limit_from_risk_gate(
+                settings.seed_limit,
+                risk_gate_health,
+            )
+            effective_active_limit = _paper_seed_active_limit_from_risk_gate(
+                paper_repo,
+                settings.seed_limit,
+                risk_gate_health,
+            )
+            candidate_pool_limit = _paper_candidate_pool_limit(effective_seed_limit)
             snapshots, seed_health = _paper_seed_snapshots_from_recommendations(
                 repo,
                 mode=mode,
                 include_etfs=settings.include_etfs,
                 max_age=timedelta(minutes=max(settings.scan_max_age_minutes, 1)),
-                limit=settings.seed_limit,
+                limit=candidate_pool_limit,
             )
+            pool_health = _paper_candidate_pool_health(
+                paper_repo=paper_repo,
+                snapshots=snapshots,
+                provider=mode,
+                risk_gate_health=risk_gate_health,
+            )
+            data_health.update(pool_health)
+            replacement_health = _maybe_replace_pending_paper_trade_for_candidate(
+                paper_repo=paper_repo,
+                snapshots=snapshots,
+                provider=mode,
+                risk_gate_health=risk_gate_health,
+            )
+            data_health.update(replacement_health)
+            replaced_instrument = replacement_health.get("paper_replacement_replacee")
+            if replacement_health.get("paper_replacement_action") == "replaced_pending" and replaced_instrument:
+                snapshots = [
+                    snapshot
+                    for snapshot in snapshots
+                    if snapshot.instrument_id != replaced_instrument
+                ]
+                data_health["paper_replacement_excluded_replacee"] = replaced_instrument
+            recently_released = _paper_recently_released_instruments(
+                paper_repo.list_trades(limit=1000, provider=mode)
+            )
+            if recently_released:
+                before_release_filter = len(snapshots)
+                snapshots = [
+                    snapshot
+                    for snapshot in snapshots
+                    if snapshot.instrument_id not in recently_released
+                ]
+                data_health["paper_recently_released_blocked"] = str(
+                    before_release_filter - len(snapshots)
+                )
             tracking_signal_date = (
                 _a_share_today()
                 if seed_health.get("automation_seed_source") == "latest_recommendation_cache"
@@ -1123,13 +1172,16 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 paper_repo,
                 snapshots,
                 provider=mode,
-                max_created=settings.seed_limit,
-                max_active_trades=settings.seed_limit,
+                max_created=effective_seed_limit,
+                max_active_trades=effective_active_limit,
                 max_signal_age_days=None,
                 signal_date_override=tracking_signal_date,
             )
             paper_created += seed_result.created
             data_health["automation_seed_snapshots"] = str(len(snapshots))
+            data_health["automation_seed_effective_limit"] = str(effective_seed_limit)
+            data_health["automation_seed_active_limit"] = str(effective_active_limit)
+            data_health["automation_seed_candidate_pool_limit"] = str(candidate_pool_limit)
             data_health.update(seed_health)
             if snapshots and snapshots[0].signal_date is not None:
                 data_health["automation_seed_latest_signal_date"] = (
@@ -1222,25 +1274,15 @@ def _paper_seed_risk_gate(
         slippage_bps=account.slippage_bps,
         take_profit_pct=account.take_profit_pct,
     )
+    risk_gate = build_paper_risk_gate_status(ledger)
     summary = ledger.summary
-    reasons: list[str] = []
-    if summary.total_trades >= 5 and summary.total_return_pct <= -2.0:
-        reasons.append(f"total_return {summary.total_return_pct:.2f}% <= -2.00%")
-    if summary.total_trades >= 5 and summary.max_drawdown_pct <= -2.0:
-        reasons.append(f"max_drawdown {summary.max_drawdown_pct:.2f}% <= -2.00%")
-    if (
-        summary.closed_trades >= 3
-        and summary.win_rate is not None
-        and summary.win_rate <= 0.25
-    ):
-        reasons.append(f"closed_win_rate {summary.win_rate:.2%} <= 25%")
-    if summary.stopped_count >= 3 and summary.target_hit_count == 0:
-        reasons.append("stopped_count >= 3 and target_hit_count = 0")
-
-    action = "pause_new_entries" if reasons else "allow_new_entries"
-    return not reasons, {
-        "paper_risk_gate_action": action,
-        "paper_risk_gate_reason": " | ".join(reasons) if reasons else "within_limits",
+    return risk_gate.can_add_entries, {
+        "paper_risk_gate_action": risk_gate.action,
+        "paper_risk_gate_reason": risk_gate.reason,
+        "paper_risk_gate_recovery_state": risk_gate.recovery_state,
+        "paper_risk_gate_recovery_score": f"{risk_gate.recovery_score:.4f}",
+        "paper_risk_gate_max_new_entries": str(risk_gate.max_new_entries),
+        "paper_risk_gate_position_size_multiplier": f"{risk_gate.position_size_multiplier:.4f}",
         "paper_risk_gate_total_return_pct": f"{summary.total_return_pct:.4f}",
         "paper_risk_gate_max_drawdown_pct": f"{summary.max_drawdown_pct:.4f}",
         "paper_risk_gate_closed_trades": str(summary.closed_trades),
@@ -1249,6 +1291,414 @@ def _paper_seed_risk_gate(
             f"{summary.win_rate:.4f}" if summary.win_rate is not None else ""
         ),
     }
+
+
+def _paper_seed_limit_from_risk_gate(
+    configured_limit: int,
+    risk_gate_health: dict[str, str],
+) -> int:
+    if risk_gate_health.get("paper_risk_gate_action") != "resume_probe_entries":
+        return configured_limit
+    try:
+        max_new = int(risk_gate_health.get("paper_risk_gate_max_new_entries", "1"))
+    except ValueError:
+        max_new = 1
+    return max(1, min(configured_limit, max_new))
+
+
+def _paper_seed_active_limit_from_risk_gate(
+    paper_repo: PaperTradingRepository,
+    configured_limit: int,
+    risk_gate_health: dict[str, str],
+) -> int:
+    if risk_gate_health.get("paper_risk_gate_action") != "resume_probe_entries":
+        return configured_limit
+    account = paper_repo.get_account_settings()
+    return max(1, account.max_positions)
+
+
+def _paper_candidate_pool_limit(effective_seed_limit: int) -> int:
+    return max(30, min(120, max(1, effective_seed_limit) * 12))
+
+
+def _paper_candidate_pool_snapshot_items(
+    *,
+    paper_repo: PaperTradingRepository,
+    snapshots: list[OpportunitySnapshotRecord],
+    provider: str,
+    risk_gate_health: dict[str, str],
+    limit: int,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    account = paper_repo.get_account_settings()
+    trades = paper_repo.list_trades(limit=1000, provider=provider)
+    active = [trade for trade in trades if trade.status in {"pending", "open"}]
+    active_by_instrument = {trade.instrument_id: trade for trade in active}
+    existing_sources = {trade.source_snapshot_id for trade in trades}
+    recently_released_by_instrument = {
+        trade.instrument_id: trade
+        for trade in trades
+        if _paper_trade_recently_released(trade)
+    }
+    recently_released = set(recently_released_by_instrument)
+    active_count = len(active)
+    replacee = _paper_replacement_trade(active)
+    replacee_score = _float_value(replacee.rank_score) if replacee else 0.0
+    replacee_pressure = _paper_pending_replacement_pressure(replacee) if replacee else 0.0
+    risk_action = risk_gate_health.get("paper_risk_gate_action", "")
+    replacement_used = False
+    items: list[dict[str, object]] = []
+    for snapshot in sorted(snapshots, key=_paper_snapshot_priority_score, reverse=True):
+        if len(items) >= limit:
+            break
+        score = _paper_snapshot_priority_score(snapshot)
+        theme_boost = _paper_theme_boost(snapshot)
+        active_trade = active_by_instrument.get(snapshot.instrument_id)
+        reference_trade = active_trade or recently_released_by_instrument.get(snapshot.instrument_id)
+        latest_value = (
+            reference_trade.latest_price
+            if reference_trade is not None and reference_trade.latest_price is not None
+            else snapshot.latest_close
+        )
+        entry_gap_pct = _paper_entry_gap_pct(snapshot, latest_value=latest_value)
+        status = "waiting"
+        action = "等待下一轮"
+        replacement_target = None
+        replacement_pressure = None
+        if active_trade is not None:
+            status = "active_in_paper"
+            action = "已在模拟盘"
+        elif snapshot.instrument_id in recently_released:
+            status = "tracked_before"
+            action = "刚释放冷却"
+        elif snapshot.snapshot_id in existing_sources:
+            status = "tracked_before"
+            action = "历史已跟踪"
+        elif risk_action == "pause_new_entries":
+            status = "paused_by_risk"
+            action = "风控暂停新增"
+        elif active_count < account.max_positions:
+            status = "ready_to_add"
+            action = "有空位，下一轮可加入"
+        elif (
+            replacee is not None
+            and not replacement_used
+            and _paper_candidate_should_replace(
+                candidate_score=score,
+                replacee_score=replacee_score,
+                replacee_pressure=replacee_pressure,
+            )
+        ):
+            status = "replace_candidate"
+            action = "可替换低质量等待单"
+            replacement_target = replacee.instrument_id
+            replacement_pressure = replacee_pressure
+            replacement_used = True
+        elif active_count >= account.max_positions:
+            status = "waiting_for_slot"
+            action = "满额等待"
+        items.append(
+            {
+                "snapshot_id": snapshot.snapshot_id,
+                "instrument_id": snapshot.instrument_id,
+                "instrument_label": _paper_snapshot_label(snapshot),
+                "strategy_id": snapshot.primary_strategy_id,
+                "signal_date": snapshot.signal_date.isoformat() if snapshot.signal_date else None,
+                "rank_score": _float_value(snapshot.rank_score),
+                "priority_score": score,
+                "market_theme_boost": theme_boost,
+                "entry_gap_pct": entry_gap_pct,
+                "trigger_price": str(snapshot.trigger_price) if snapshot.trigger_price is not None else None,
+                "latest_close": str(latest_value) if latest_value is not None else None,
+                "status": status,
+                "action": action,
+                "replacement_target": replacement_target,
+                "replacement_pressure": replacement_pressure,
+                "reason": _paper_candidate_reason(snapshot, theme_boost, entry_gap_pct),
+            }
+        )
+    waiting_count = sum(1 for item in items if item["status"] in {"waiting", "waiting_for_slot", "replace_candidate", "ready_to_add"})
+    replacement_candidates = sum(1 for item in items if item["status"] == "replace_candidate")
+    summary = {
+        "total_candidates": len(snapshots),
+        "shown_candidates": len(items),
+        "active_count": active_count,
+        "max_positions": account.max_positions,
+        "waiting_count": waiting_count,
+        "replacement_candidates": replacement_candidates,
+        "risk_action": risk_action,
+        "entry_calibration_action": _paper_entry_calibration_action(items),
+        "market_adaptive_action": (
+            "theme_boost_enabled"
+            if any(item["market_theme_boost"] for item in items)
+            else "theme_boost_idle"
+        ),
+    }
+    return items, summary
+
+
+def _paper_snapshot_label(snapshot: OpportunitySnapshotRecord) -> str:
+    label = snapshot.card.get("instrument_label") or snapshot.card.get("instrument_name")
+    return str(label).strip() if label else snapshot.instrument_id
+
+
+def _paper_entry_gap_pct(
+    snapshot: OpportunitySnapshotRecord,
+    *,
+    latest_value: Decimal | None = None,
+) -> float | None:
+    latest = latest_value if latest_value is not None else snapshot.latest_close
+    if not snapshot.trigger_price or not latest or snapshot.trigger_price <= 0:
+        return None
+    return round(float((snapshot.trigger_price - latest) / snapshot.trigger_price * 100), 2)
+
+
+def _paper_candidate_reason(
+    snapshot: OpportunitySnapshotRecord,
+    theme_boost: float,
+    entry_gap_pct: float | None,
+) -> str:
+    parts = []
+    if theme_boost > 0:
+        parts.append("强主题加权")
+    if entry_gap_pct is not None:
+        if entry_gap_pct > 8:
+            parts.append(f"触发价偏远 {entry_gap_pct:.1f}%")
+        elif entry_gap_pct >= 0:
+            parts.append(f"接近买点 {entry_gap_pct:.1f}%")
+        else:
+            parts.append(f"已越过触发 {abs(entry_gap_pct):.1f}%")
+    if snapshot.signal_date == _a_share_today():
+        parts.append("今日信号")
+    return " / ".join(parts) if parts else "按综合优先级排队"
+
+
+def _paper_entry_calibration_action(items: list[dict[str, object]]) -> str:
+    far_waiting = [
+        item
+        for item in items
+        if item.get("status") in {"waiting_for_slot", "active_in_paper"}
+        and (item.get("entry_gap_pct") or 0) > 8
+    ]
+    replaceable = [item for item in items if item.get("status") == "replace_candidate"]
+    if replaceable:
+        return "replace_far_pending"
+    if far_waiting:
+        return "tighten_far_triggers"
+    return "keep_current_trigger"
+
+
+def _paper_candidate_pool_health(
+    *,
+    paper_repo: PaperTradingRepository,
+    snapshots: list[OpportunitySnapshotRecord],
+    provider: str,
+    risk_gate_health: dict[str, str],
+) -> dict[str, str]:
+    trades = paper_repo.list_trades(limit=1000, provider=provider)
+    active_instruments = {trade.instrument_id for trade in trades if trade.status in {"pending", "open"}}
+    waiting = [
+        snapshot
+        for snapshot in snapshots
+        if snapshot.instrument_id not in active_instruments
+    ]
+    boosted = [snapshot for snapshot in snapshots if _paper_theme_boost(snapshot) > 0]
+    top = waiting[0] if waiting else snapshots[0] if snapshots else None
+    return {
+        "paper_candidate_pool_total": str(len(snapshots)),
+        "paper_candidate_pool_waiting_count": str(len(waiting)),
+        "paper_candidate_pool_active_count": str(len(active_instruments)),
+        "paper_candidate_pool_top": top.instrument_id if top else "",
+        "paper_candidate_pool_top_score": f"{_paper_snapshot_priority_score(top):.4f}" if top else "",
+        "paper_market_adaptive_theme_boosted": str(len(boosted)),
+        "paper_candidate_pool_risk_action": risk_gate_health.get("paper_risk_gate_action", ""),
+    }
+
+
+def _maybe_replace_pending_paper_trade_for_candidate(
+    *,
+    paper_repo: PaperTradingRepository,
+    snapshots: list[OpportunitySnapshotRecord],
+    provider: str,
+    risk_gate_health: dict[str, str],
+) -> dict[str, str]:
+    if not snapshots:
+        return {"paper_replacement_action": "no_candidate"}
+    if risk_gate_health.get("paper_risk_gate_action") == "pause_new_entries":
+        return {"paper_replacement_action": "paused_by_risk_gate"}
+
+    account = paper_repo.get_account_settings()
+    trades = paper_repo.list_trades(limit=1000, provider=provider)
+    active = [trade for trade in trades if trade.status in {"pending", "open"}]
+    if len(active) < account.max_positions:
+        return {
+            "paper_replacement_action": "slot_available",
+            "paper_replacement_active_count": str(len(active)),
+            "paper_replacement_max_positions": str(account.max_positions),
+        }
+
+    active_instruments = {trade.instrument_id for trade in active}
+    existing_sources = {trade.source_snapshot_id for trade in trades}
+    recently_released = _paper_recently_released_instruments(trades)
+    candidates = [
+        snapshot
+        for snapshot in sorted(snapshots, key=_paper_snapshot_priority_score, reverse=True)
+        if snapshot.instrument_id not in active_instruments
+        and snapshot.instrument_id not in recently_released
+        and snapshot.snapshot_id not in existing_sources
+    ]
+    if not candidates:
+        return {
+            "paper_replacement_action": "no_new_candidate",
+            "paper_replacement_active_count": str(len(active)),
+        }
+    replacee = _paper_replacement_trade(active)
+    if replacee is None:
+        return {
+            "paper_replacement_action": "no_replaceable_pending",
+            "paper_replacement_candidate": candidates[0].instrument_id,
+        }
+    candidate = candidates[0]
+    candidate_score = _paper_snapshot_priority_score(candidate)
+    replacee_score = _float_value(replacee.rank_score)
+    pressure = _paper_pending_replacement_pressure(replacee)
+    if not _paper_candidate_should_replace(
+        candidate_score=candidate_score,
+        replacee_score=replacee_score,
+        replacee_pressure=pressure,
+    ):
+        return {
+            "paper_replacement_action": "kept_existing_pending",
+            "paper_replacement_candidate": candidate.instrument_id,
+            "paper_replacement_candidate_score": f"{candidate_score:.4f}",
+            "paper_replacement_replacee": replacee.instrument_id,
+            "paper_replacement_replacee_score": f"{replacee_score:.4f}",
+            "paper_replacement_pressure": f"{pressure:.4f}",
+        }
+
+    today = _a_share_today()
+    note = _append_note_text(
+        replacee.notes,
+        (
+            "候补替换：模拟盘名额已满，"
+            f"{candidate.instrument_id} 优先级 {candidate_score:.2f} 高于当前等待单；"
+            "原单转入已跟踪，不再占用活跃名额。"
+        ),
+    )
+    paper_repo.update_trade(
+        replacee.trade_id,
+        status="missed_entry",
+        exit_date=today,
+        latest_date=replacee.latest_date or today,
+        latest_price=replacee.latest_price,
+        realized_return_pct=Decimal("0"),
+        notes=note,
+    )
+    return {
+        "paper_replacement_action": "replaced_pending",
+        "paper_replacement_candidate": candidate.instrument_id,
+        "paper_replacement_candidate_score": f"{candidate_score:.4f}",
+        "paper_replacement_replacee": replacee.instrument_id,
+        "paper_replacement_replacee_score": f"{replacee_score:.4f}",
+        "paper_replacement_pressure": f"{pressure:.4f}",
+    }
+
+
+def _paper_replacement_trade(active: list[PaperTradeRecord]) -> PaperTradeRecord | None:
+    pending = [trade for trade in active if trade.status == "pending"]
+    if not pending:
+        return None
+    ranked = sorted(
+        pending,
+        key=lambda trade: (
+            _paper_pending_replacement_pressure(trade),
+            -_float_value(trade.rank_score),
+        ),
+        reverse=True,
+    )
+    return ranked[0] if ranked else None
+
+
+def _paper_pending_replacement_pressure(trade: PaperTradeRecord) -> float:
+    today = _a_share_today()
+    age_days = max((today - trade.signal_date).days, 0) if trade.signal_date else 0
+    gap = 0.0
+    if trade.trigger_price and trade.latest_price and trade.trigger_price > 0:
+        gap = max(0.0, float((trade.trigger_price - trade.latest_price) / trade.trigger_price))
+    pressure = 0.0
+    if age_days >= 2:
+        pressure += 0.18
+    if age_days >= 4:
+        pressure += 0.18
+    if gap >= 0.05:
+        pressure += 0.18
+    if gap >= 0.15:
+        pressure += 0.25
+    if _float_value(trade.rank_score) < 0.7:
+        pressure += 0.12
+    return round(min(1.0, pressure), 4)
+
+
+def _paper_candidate_should_replace(
+    *,
+    candidate_score: float,
+    replacee_score: float,
+    replacee_pressure: float,
+) -> bool:
+    if candidate_score < 0.68:
+        return False
+    if replacee_pressure >= 0.5 and candidate_score >= replacee_score + 0.03:
+        return True
+    if replacee_pressure >= 0.75 and candidate_score >= 0.7:
+        return True
+    return candidate_score >= replacee_score + 0.12
+
+
+def _paper_snapshot_priority_score(snapshot: OpportunitySnapshotRecord | None) -> float:
+    if snapshot is None:
+        return 0.0
+    base = _float_value(snapshot.rank_score) * 0.72 + _float_value(snapshot.strategy_score) * 0.18 + _float_value(snapshot.score) * 0.1
+    theme_boost = _paper_theme_boost(snapshot)
+    freshness_boost = 0.02 if snapshot.signal_date == _a_share_today() else 0.0
+    return round(max(0.0, min(1.0, base + theme_boost + freshness_boost)), 4)
+
+
+def _paper_theme_boost(snapshot: OpportunitySnapshotRecord) -> float:
+    text = " ".join(
+        str(value)
+        for value in (
+            snapshot.instrument_id,
+            snapshot.card.get("instrument_label"),
+            snapshot.card.get("instrument_name"),
+            snapshot.card.get("theme"),
+            snapshot.card.get("sector"),
+        )
+        if value
+    )
+    if any(keyword in text for keyword in ("科创", "半导体", "芯片", "集成电路", "先进封装")):
+        return 0.08
+    if any(keyword in text for keyword in ("机器人", "AI", "人工智能")):
+        return 0.04
+    return 0.0
+
+
+def _append_note_text(existing: str, text: str) -> str:
+    if not existing:
+        return text
+    if text in existing:
+        return existing
+    return f"{existing} {text}"
+
+
+def _paper_recently_released_instruments(trades: list[PaperTradeRecord]) -> set[str]:
+    return {trade.instrument_id for trade in trades if _paper_trade_recently_released(trade)}
+
+
+def _paper_trade_recently_released(trade: PaperTradeRecord) -> bool:
+    today = _a_share_today()
+    if trade.status != "missed_entry" or "候补替换" not in trade.notes:
+        return False
+    release_date = trade.exit_date or trade.latest_date or trade.signal_date
+    return release_date is not None and 0 <= (today - release_date).days <= 3
 
 
 def _paper_seed_snapshots_from_recommendations(
@@ -1725,6 +2175,51 @@ def paper_trade_daily_report(provider: str = "fixture", limit: int = 500) -> dic
         }
     )
     return report.model_dump(mode="json")
+
+
+@router.get("/paper-trades/candidate-pool")
+def paper_trade_candidate_pool(
+    provider: str = "free",
+    include_etfs: bool = True,
+    limit: int = 30,
+) -> dict[str, object]:
+    if limit <= 0 or limit > 100:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
+    mode = provider.strip().lower()
+    repo = _repo()
+    paper_repo = _paper_repo()
+    _, risk_gate_health = _paper_seed_risk_gate(paper_repo, mode)
+    snapshots, seed_health = _paper_seed_snapshots_from_recommendations(
+        repo,
+        mode=mode,
+        include_etfs=include_etfs,
+        max_age=timedelta(days=7),
+        limit=max(limit, _paper_candidate_pool_limit(1)),
+    )
+    items, summary = _paper_candidate_pool_snapshot_items(
+        paper_repo=paper_repo,
+        snapshots=snapshots,
+        provider=mode,
+        risk_gate_health=risk_gate_health,
+        limit=limit,
+    )
+    data_health = {
+        **risk_gate_health,
+        **seed_health,
+        **_paper_candidate_pool_health(
+            paper_repo=paper_repo,
+            snapshots=snapshots,
+            provider=mode,
+            risk_gate_health=risk_gate_health,
+        ),
+        "paper_candidate_pool_endpoint": "true",
+        "paper_candidate_pool_limit": str(limit),
+    }
+    return {
+        "items": items,
+        "summary": summary,
+        "data_health": data_health,
+    }
 
 
 def _paper_asset_types_for_trades(trades) -> dict[str, str]:
@@ -2607,7 +3102,20 @@ def _validate_full_market_batch_scan_params(
 def _full_market_job_payload(job) -> dict[str, object]:
     payload = job.model_dump(mode="json")
     symbols = payload.pop("symbols", [])
+    if _is_completed_full_market_job(job):
+        data_health = payload.setdefault("data_health", {})
+        if isinstance(data_health, dict) and payload.get("status") != "succeeded":
+            data_health["raw_status"] = str(payload.get("status", ""))
+            data_health["status_normalized"] = "completed_progress"
+        payload["status"] = "succeeded"
+        if not payload.get("result_cache_key"):
+            payload["result_cache_key"] = full_market_batch_cache_key(
+                job.provider,
+                job.include_etfs,
+            )
     payload["progress"] = _full_market_job_progress(job)
+    if payload["status"] == "succeeded":
+        payload["progress"] = 100
     payload["symbols_preview"] = symbols[:20]
     return payload
 
@@ -2618,6 +3126,20 @@ def _full_market_job_progress(job) -> int:
     if job.status == "succeeded":
         return 100
     return max(0, min(99, int(job.scanned_symbols * 100 / job.total_symbols)))
+
+
+def _is_completed_full_market_job(job) -> bool:
+    if job.status == "succeeded":
+        return True
+    if job.status not in {"queued", "running"}:
+        return False
+    if job.total_symbols <= 0 or job.total_batches <= 0:
+        return False
+    return (
+        job.scanned_symbols >= job.total_symbols
+        and job.completed_batches >= job.total_batches
+        and job.cards > 0
+    )
 
 
 def _recent_full_market_scan_payload(
@@ -3807,7 +4329,11 @@ def outcomes(
     instrument_id: str | None = None,
     limit: int = 50,
 ) -> dict[str, object]:
-    replayed, data_health = _replay_outcomes(provider, instrument_id, limit)
+    effective_limit = _outcomes_preview_limit(provider, instrument_id, limit)
+    replayed, data_health = _replay_outcomes(provider, instrument_id, effective_limit)
+    if effective_limit != limit:
+        data_health["requested_limit"] = str(limit)
+        data_health["preview_limit"] = str(effective_limit)
     return {
         "outcomes": [_model_payload_with_label(outcome) for outcome in replayed],
         "data_health": data_health,
@@ -3821,20 +4347,33 @@ def _replay_outcomes(provider: str, instrument_id: str | None, limit: int):
         limit=limit,
         provider=provider,
     )
+    dated_snapshots = [snapshot for snapshot in snapshots if snapshot.signal_date is not None]
+    if not dated_snapshots:
+        replayed = [_pending_snapshot_outcome(snapshot) for snapshot in snapshots]
+        return replayed, {
+            "provider": provider,
+            "snapshots": str(len(snapshots)),
+            "outcomes": str(len(replayed)),
+            "bar_window": "none",
+        }
     try:
         market_provider = build_market_data_provider(provider)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    instrument_ids = list(dict.fromkeys(snapshot.instrument_id for snapshot in snapshots))
+    instrument_ids = list(dict.fromkeys(snapshot.instrument_id for snapshot in dated_snapshots))
+    start, end = _snapshot_replay_window(dated_snapshots)
     all_bars = market_provider.get_daily_bars(
         instrument_ids,
-        start=date(1900, 1, 1),
-        end=date(2100, 1, 1),
+        start=start,
+        end=end,
     )
 
     replayed = []
     for snapshot in snapshots:
+        if snapshot.signal_date is None:
+            replayed.append(_pending_snapshot_outcome(snapshot))
+            continue
         if not all_bars.empty and "instrument_id" in all_bars.columns:
             bars = all_bars.loc[all_bars["instrument_id"] == snapshot.instrument_id]
         else:
@@ -3844,6 +4383,8 @@ def _replay_outcomes(provider: str, instrument_id: str | None, limit: int):
         "provider": provider,
         "snapshots": str(len(snapshots)),
         "outcomes": str(len(replayed)),
+        "bar_window": f"{start}:{end}",
+        "bar_instruments": str(len(instrument_ids)),
     }
     provider_errors = getattr(market_provider, "last_errors", [])
     if provider_errors:
@@ -3963,20 +4504,33 @@ def _replay_snapshot_outcome_pairs(
         limit=limit,
         provider=provider,
     )
+    dated_snapshots = [snapshot for snapshot in snapshots if snapshot.signal_date is not None]
+    if not dated_snapshots:
+        pairs = [(snapshot, _pending_snapshot_outcome(snapshot)) for snapshot in snapshots]
+        return pairs, {
+            "provider": provider,
+            "snapshots": str(len(snapshots)),
+            "outcomes": str(len(pairs)),
+            "bar_window": "none",
+        }
     try:
         market_provider = build_market_data_provider(provider)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    instrument_ids = list(dict.fromkeys(snapshot.instrument_id for snapshot in snapshots))
+    instrument_ids = list(dict.fromkeys(snapshot.instrument_id for snapshot in dated_snapshots))
+    start, end = _snapshot_replay_window(dated_snapshots)
     all_bars = market_provider.get_daily_bars(
         instrument_ids,
-        start=date(1900, 1, 1),
-        end=date(2100, 1, 1),
+        start=start,
+        end=end,
     )
 
     pairs = []
     for snapshot in snapshots:
+        if snapshot.signal_date is None:
+            pairs.append((snapshot, _pending_snapshot_outcome(snapshot)))
+            continue
         if not all_bars.empty and "instrument_id" in all_bars.columns:
             bars = all_bars.loc[all_bars["instrument_id"] == snapshot.instrument_id]
         else:
@@ -3986,11 +4540,55 @@ def _replay_snapshot_outcome_pairs(
         "provider": provider,
         "snapshots": str(len(snapshots)),
         "outcomes": str(len(pairs)),
+        "bar_window": f"{start}:{end}",
+        "bar_instruments": str(len(instrument_ids)),
     }
     provider_errors = getattr(market_provider, "last_errors", [])
     if provider_errors:
         data_health["errors"] = " | ".join(provider_errors[:3])
     return pairs, data_health
+
+
+def _snapshot_replay_window(snapshots) -> tuple[date, date]:
+    signal_dates = [snapshot.signal_date for snapshot in snapshots if snapshot.signal_date is not None]
+    if not signal_dates:
+        today = date.today()
+        return today, today
+    return min(signal_dates) - timedelta(days=7), max(signal_dates) + timedelta(days=75)
+
+
+def _pending_snapshot_outcome(snapshot) -> OpportunityOutcome:
+    return OpportunityOutcome(
+        snapshot_id=snapshot.snapshot_id,
+        run_id=snapshot.run_id,
+        instrument_id=snapshot.instrument_id,
+        instrument_label=_snapshot_card_label(snapshot),
+        primary_strategy_id=snapshot.primary_strategy_id,
+        signal_date=snapshot.signal_date,
+        outcome_status="pending",
+        triggered=None,
+        trigger_price=snapshot.trigger_price,
+        initial_stop=snapshot.initial_stop,
+        target_1=snapshot.target_1,
+    )
+
+
+def _snapshot_card_label(snapshot) -> str | None:
+    card = snapshot.card
+    if not isinstance(card, dict):
+        return None
+    label = card.get("instrument_label")
+    if isinstance(label, str) and label.strip():
+        return label
+    return None
+
+
+def _outcomes_preview_limit(provider: str, instrument_id: str | None, limit: int) -> int:
+    if instrument_id:
+        return limit
+    if provider.strip().lower() == "free":
+        return min(limit, 30)
+    return limit
 
 
 def _attach_existing_instrument_label(payload: dict[str, object]) -> dict[str, object]:

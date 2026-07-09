@@ -22,6 +22,23 @@ session_line() {
   (screen -ls 2>/dev/null || true) | grep -E "[0-9]+[.]${session}[[:space:]]" | head -1 | sed 's/^[[:space:]]*//'
 }
 
+owned_port_line() {
+  local port="$1"
+  local pids
+  pids="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+  [[ -z "$pids" ]] && return 1
+  while read -r pid; do
+    [[ -z "$pid" ]] && continue
+    local command
+    command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    if [[ "$command" == *"$ROOT_DIR"* ]]; then
+      echo "$pid: $command"
+      return 0
+    fi
+  done <<<"$pids"
+  return 1
+}
+
 start_one() {
   local name="$1"
   local session="$2"
@@ -33,6 +50,10 @@ start_one() {
     return
   fi
   if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+    if owned_port_line "$port" >/dev/null; then
+      echo "$name already running $(owned_port_line "$port")"
+      return
+    fi
     echo "$name port $port is already in use"
     lsof -nP -iTCP:"$port" -sTCP:LISTEN
     return 1
@@ -41,7 +62,9 @@ start_one() {
   screen -dmS "$session" /bin/bash -lc "cd '$ROOT_DIR' && exec '$runner' >> '$log' 2>&1"
   local ready="false"
   for _ in {1..20}; do
-    if has_session "$session" && lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+    if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 && {
+      has_session "$session" || owned_port_line "$port" >/dev/null
+    }; then
       ready="true"
       break
     fi
@@ -51,7 +74,11 @@ start_one() {
     echo "$name failed to start; see $log"
     return 1
   fi
-  echo "$name started $(session_line "$session") log=$log"
+  if has_session "$session"; then
+    echo "$name started $(session_line "$session") log=$log"
+  else
+    echo "$name started $(owned_port_line "$port") log=$log"
+  fi
 }
 
 stop_one() {
@@ -71,9 +98,48 @@ status_one() {
   local port="$3"
   if has_session "$session"; then
     echo "$name running $(session_line "$session") port=$port"
+  elif owned_port_line "$port" >/dev/null; then
+    echo "$name running $(owned_port_line "$port") port=$port"
   else
     echo "$name stopped port=$port"
   fi
+}
+
+kill_owned_port_processes() {
+  local port="$1"
+  local pids
+  pids="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+  [[ -z "$pids" ]] && return 0
+  while read -r pid; do
+    [[ -z "$pid" ]] && continue
+    local command
+    command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    if [[ "$command" == *"$ROOT_DIR"* ]]; then
+      kill "$pid" 2>/dev/null || true
+    else
+      echo "port $port is still used by non-Qagent process $pid: $command" >&2
+      return 1
+    fi
+  done <<<"$pids"
+}
+
+wait_port_free() {
+  local port="$1"
+  for _ in {1..20}; do
+    if ! lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  kill_owned_port_processes "$port"
+  for _ in {1..20}; do
+    if ! lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "port $port did not become free" >&2
+  return 1
 }
 
 case "${1:-start}" in
@@ -84,6 +150,8 @@ case "${1:-start}" in
   stop)
     stop_one frontend "$FRONTEND_SESSION"
     stop_one backend "$BACKEND_SESSION"
+    wait_port_free 5173
+    wait_port_free 8000
     ;;
   restart)
     "$0" stop
