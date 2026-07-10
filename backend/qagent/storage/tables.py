@@ -121,6 +121,30 @@ class MarketDataCacheSpanRow(Base):
     )
 
 
+class FundamentalSnapshotRow(Base):
+    __tablename__ = "fundamental_snapshots"
+
+    provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
+    as_of_date: Mapped[date] = mapped_column(Date, primary_key=True, index=True)
+    source_provider: Mapped[str] = mapped_column(String(64), primary_key=True)
+    revenue_growth_pct: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    earnings_growth_pct: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    gross_margin_pct: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    operating_margin_pct: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    net_margin_pct: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    return_on_equity_pct: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    market_cap: Mapped[Decimal | None] = mapped_column(Numeric(28, 6), nullable=True)
+    pe_ratio: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    forward_pe: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    peg_ratio: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    price_to_sales: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    cached_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
 class AShareEnhancedCacheRow(Base):
     __tablename__ = "a_share_enhanced_cache"
 

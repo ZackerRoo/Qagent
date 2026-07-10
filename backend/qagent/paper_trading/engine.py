@@ -14,6 +14,7 @@ from qagent.storage.repository import OpportunitySnapshotRecord
 
 OPEN_STATUSES = {"pending", "open"}
 CLOSED_STATUSES = {"target_1_hit", "stopped", "time_exit", "missed_entry"}
+EXECUTED_CLOSED_STATUSES = {"target_1_hit", "stopped", "time_exit"}
 A_SHARE_TZ = ZoneInfo("Asia/Shanghai")
 A_SHARE_MORNING_START = time(9, 30)
 A_SHARE_MORNING_END = time(11, 30)
@@ -32,6 +33,7 @@ class PaperTradingSummary(BaseModel):
     pending: int
     open: int
     closed: int
+    missed_entry_count: int
     target_hit_count: int
     stopped_count: int
     time_exit_count: int
@@ -55,6 +57,7 @@ class PaperLedgerSummary(BaseModel):
     pending_trades: int
     open_trades: int
     closed_trades: int
+    missed_entry_count: int
     target_hit_count: int
     stopped_count: int
     time_exit_count: int
@@ -165,6 +168,7 @@ class PaperValidationSummary(BaseModel):
     pending_trades: int
     open_trades: int
     closed_trades: int
+    missed_entry_count: int
     target_hit_count: int
     stopped_count: int
     time_exit_count: int
@@ -181,6 +185,7 @@ class PaperValidationWindow(BaseModel):
     window_days: int
     eligible_trades: int
     evaluated_trades: int
+    missed_entry_count: int
     pending_trades: int
     positive_trades: int
     negative_trades: int
@@ -237,6 +242,7 @@ class PaperValidationBatch(BaseModel):
     pending_trades: int
     open_trades: int
     closed_trades: int
+    missed_entry_count: int
     win_rate: float | None
     average_return_pct: float | None
     total_pnl: Decimal
@@ -619,7 +625,7 @@ def paper_execution_data_health(
 
 
 def summarize_paper_trades(trades: list[PaperTradeRecord]) -> PaperTradingSummary:
-    closed = [trade for trade in trades if trade.status in CLOSED_STATUSES]
+    closed = [trade for trade in trades if _is_executed_closed_trade(trade)]
     winning = [
         trade
         for trade in closed
@@ -640,6 +646,7 @@ def summarize_paper_trades(trades: list[PaperTradeRecord]) -> PaperTradingSummar
         pending=sum(1 for trade in trades if trade.status == "pending"),
         open=sum(1 for trade in trades if trade.status == "open"),
         closed=len(closed),
+        missed_entry_count=sum(1 for trade in trades if trade.status == "missed_entry"),
         target_hit_count=sum(1 for trade in trades if trade.status == "target_1_hit"),
         stopped_count=sum(1 for trade in trades if trade.status == "stopped"),
         time_exit_count=sum(1 for trade in trades if trade.status == "time_exit"),
@@ -696,7 +703,7 @@ def build_paper_ledger(
     closed_returns = [
         item.return_pct
         for item in items
-        if item.status in CLOSED_STATUSES and item.return_pct is not None
+        if _is_executed_closed_item(item) and item.return_pct is not None
     ]
     max_drawdown_pct = min((point.drawdown_pct for point in account["curve"]), default=0.0)
 
@@ -709,7 +716,8 @@ def build_paper_ledger(
             total_trades=len(trades),
             pending_trades=sum(1 for trade in trades if trade.status == "pending"),
             open_trades=sum(1 for trade in trades if trade.status == "open"),
-            closed_trades=sum(1 for trade in trades if trade.status in CLOSED_STATUSES),
+            closed_trades=sum(1 for trade in trades if _is_executed_closed_trade(trade)),
+            missed_entry_count=sum(1 for trade in trades if trade.status == "missed_entry"),
             target_hit_count=sum(1 for trade in trades if trade.status == "target_1_hit"),
             stopped_count=sum(1 for trade in trades if trade.status == "stopped"),
             time_exit_count=sum(1 for trade in trades if trade.status == "time_exit"),
@@ -810,7 +818,8 @@ def build_paper_validation(
             triggered_trades=sum(1 for item in items if item.entry_date is not None),
             pending_trades=sum(1 for trade in trades if trade.status == "pending"),
             open_trades=sum(1 for trade in trades if trade.status == "open"),
-            closed_trades=sum(1 for trade in trades if trade.status in CLOSED_STATUSES),
+            closed_trades=sum(1 for trade in trades if _is_executed_closed_trade(trade)),
+            missed_entry_count=sum(1 for trade in trades if trade.status == "missed_entry"),
             target_hit_count=ledger.summary.target_hit_count,
             stopped_count=ledger.summary.stopped_count,
             time_exit_count=ledger.summary.time_exit_count,
@@ -832,6 +841,8 @@ def build_paper_validation(
             **ledger.data_health,
             "validation_windows": ",".join(str(window) for window in windows),
             "validation_items": str(len(items)),
+            "validation_executed_items": str(sum(1 for item in items if item.entry_date is not None)),
+            "validation_missed_entries": str(sum(1 for item in items if item.status == "missed_entry")),
             "validation_batches": str(len(batches)),
             "validation_credibility": credibility.level,
             "validation_primary_window": str(windows[-1]),
@@ -971,12 +982,16 @@ def _paper_asset_group(
     *,
     allocation_per_trade: Decimal,
 ) -> PaperDailyAssetGroup:
-    returns = [item.return_pct for item in items if item.return_pct is not None]
-    closed = [item for item in items if item.status in CLOSED_STATUSES]
+    returns = [
+        item.return_pct
+        for item in items
+        if item.entry_date is not None and item.return_pct is not None
+    ]
+    closed = [item for item in items if _is_executed_closed_item(item)]
     positive = [value for value in returns if value > 0]
     negative = [value for value in returns if value < 0]
     total_pnl = _money(sum((item.total_pnl for item in items), Decimal("0")))
-    effective_items = [item for item in items if item.status != "pending"]
+    effective_items = [item for item in items if item.entry_date is not None]
     capital_base = allocation_per_trade * Decimal(len(effective_items))
     total_return_pct = (
         round(float(total_pnl / capital_base * Decimal("100")), 4)
@@ -1298,8 +1313,12 @@ def _paper_failure_group(
     items: list[PaperLedgerItem],
     allocation_per_trade: Decimal,
 ) -> PaperFailureAttributionItem:
-    evaluated = [item for item in items if item.status != "pending" and item.return_pct is not None]
-    closed = [item for item in items if item.status in CLOSED_STATUSES]
+    evaluated = [
+        item
+        for item in items
+        if item.entry_date is not None and item.return_pct is not None
+    ]
+    closed = [item for item in items if _is_executed_closed_item(item)]
     returns = [item.return_pct for item in evaluated if item.return_pct is not None]
     total_pnl = _money(sum((item.total_pnl for item in items), Decimal("0")))
     capital_base = allocation_per_trade * Decimal(str(len(evaluated)))
@@ -1779,15 +1798,18 @@ def _validation_window(
     evaluated = [
         item
         for item in items
-        if item.status in CLOSED_STATUSES or item.days_since_signal >= window_days
+        if item.entry_date is not None
+        and item.days_since_signal >= window_days
+        and item.return_pct is not None
     ]
-    returns = [item.return_pct if item.return_pct is not None else 0.0 for item in evaluated]
+    returns = [item.return_pct for item in evaluated if item.return_pct is not None]
     total_pnl = sum((item.pnl for item in evaluated), Decimal("0"))
     denominator = allocation_per_trade * Decimal(str(len(evaluated)))
     return PaperValidationWindow(
         window_days=window_days,
         eligible_trades=len(items),
         evaluated_trades=len(evaluated),
+        missed_entry_count=sum(1 for item in items if item.status == "missed_entry"),
         pending_trades=len(items) - len(evaluated),
         positive_trades=sum(1 for value in returns if value > 0),
         negative_trades=sum(1 for value in returns if value < 0),
@@ -1850,15 +1872,14 @@ def _validation_batches(
         grouped[item.signal_date].append(item)
     batches: list[PaperValidationBatch] = []
     for batch_date, batch_items in sorted(grouped.items(), reverse=True):
+        executed_items = [item for item in batch_items if item.entry_date is not None]
         returns = [
             item.return_pct
-            for item in batch_items
-            if item.return_pct is not None and (
-                item.status in CLOSED_STATUSES or item.days_since_signal >= windows[-1]
-            )
+            for item in executed_items
+            if item.return_pct is not None and item.days_since_signal >= windows[-1]
         ]
-        total_pnl = sum((item.pnl for item in batch_items), Decimal("0"))
-        denominator = allocation_per_trade * Decimal(str(max(len(batch_items), 1)))
+        total_pnl = sum((item.pnl for item in executed_items), Decimal("0"))
+        denominator = allocation_per_trade * Decimal(str(len(executed_items)))
         batch_windows = [
             _validation_window(
                 items=batch_items,
@@ -1877,7 +1898,8 @@ def _validation_batches(
                 triggered_trades=sum(1 for item in batch_items if item.entry_date is not None),
                 pending_trades=sum(1 for item in batch_items if item.status == "pending"),
                 open_trades=sum(1 for item in batch_items if item.status == "open"),
-                closed_trades=sum(1 for item in batch_items if item.status in CLOSED_STATUSES),
+                closed_trades=sum(1 for item in batch_items if _is_executed_closed_item(item)),
+                missed_entry_count=sum(1 for item in batch_items if item.status == "missed_entry"),
                 win_rate=round(sum(1 for value in returns if value > 0) / len(returns), 4)
                 if returns
                 else None,
@@ -1909,8 +1931,10 @@ def _validation_credibility(
             concentration_pct=None,
         )
 
-    closed_count = sum(1 for item in items if item.status in CLOSED_STATUSES)
-    sample_score = min(len(items) / 20, 1) * 0.25
+    executed_count = sum(1 for item in items if item.entry_date is not None)
+    missed_count = sum(1 for item in items if item.status == "missed_entry")
+    closed_count = sum(1 for item in items if _is_executed_closed_item(item))
+    sample_score = min(executed_count / 20, 1) * 0.25
     closed_score = min(closed_count / 10, 1) * 0.25
     maturity_score = min(sample_age.mature_10d / max(len(items), 1), 1) * 0.2
     drawdown_score = max(0.0, min(1.0, (12 + max_drawdown_pct) / 12)) * 0.15
@@ -1918,8 +1942,8 @@ def _validation_credibility(
     concentration_score = (1 - min((concentration_pct or 0) / 100, 1)) * 0.15
     score = round(sample_score + closed_score + maturity_score + drawdown_score + concentration_score, 4)
     warnings: list[str] = []
-    if len(items) < 20:
-        warnings.append("样本少于 20 笔，先看方向，不宜过度相信胜率。")
+    if executed_count < 20:
+        warnings.append("已成交样本少于 20 笔，先看方向，不宜过度相信胜率。")
     if sample_age.mature_10d < 5:
         warnings.append("10日成熟样本少于 5 笔，短期胜率还在积累。")
     if closed_count < 5:
@@ -1951,7 +1975,9 @@ def _validation_credibility(
         warnings=warnings,
         evidence=[
             f"模拟样本 {len(items)} 笔",
-            f"已闭环 {closed_count} 笔",
+            f"已成交 {executed_count} 笔",
+            f"成交后闭环 {closed_count} 笔",
+            f"错过买点 {missed_count} 笔",
             f"10日成熟样本 {sample_age.mature_10d} 笔",
             f"20日窗口可评价 {primary_window.evaluated_trades} 笔",
         ],
@@ -1963,7 +1989,9 @@ def _mature_count(items: list[PaperValidationItem], window_days: int) -> int:
     return sum(
         1
         for item in items
-        if item.status in CLOSED_STATUSES or item.days_since_signal >= window_days
+        if item.entry_date is not None
+        and item.return_pct is not None
+        and item.days_since_signal >= window_days
     )
 
 
@@ -1974,7 +2002,9 @@ def _days_to_next_mature(
     pending = [
         max(window_days - item.days_since_signal, 0)
         for item in items
-        if item.status not in CLOSED_STATUSES and item.days_since_signal < window_days
+        if item.entry_date is not None
+        and item.return_pct is not None
+        and item.days_since_signal < window_days
     ]
     return min(pending) if pending else None
 
@@ -1998,6 +2028,8 @@ def _validation_state(trade: PaperTradeRecord) -> str:
         return "waiting_entry"
     if trade.status == "open":
         return "open"
+    if trade.status == "missed_entry":
+        return "missed_entry"
     if trade.status == "time_exit" and trade.entry_date is None:
         return "expired"
     if trade.status in CLOSED_STATUSES:
@@ -2014,9 +2046,19 @@ def _validation_next_action(state: str, return_pct: float | None) -> str:
         return "重点检查止损价和仓位风险。"
     if state == "expired":
         return "买点未触发，作为无成交样本记录。"
+    if state == "missed_entry":
+        return "错过买点，仅计入触发率，不计入交易胜率。"
     if state == "closed":
         return "已闭环，纳入胜率、收益和回撤统计。"
     return "继续观察。"
+
+
+def _is_executed_closed_trade(trade: PaperTradeRecord) -> bool:
+    return trade.entry_date is not None and trade.status in EXECUTED_CLOSED_STATUSES
+
+
+def _is_executed_closed_item(item: PaperLedgerItem | PaperValidationItem) -> bool:
+    return item.entry_date is not None and item.status in EXECUTED_CLOSED_STATUSES
 
 
 def _validation_verdict(

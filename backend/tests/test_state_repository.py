@@ -11,6 +11,7 @@ from qagent.storage.repository import (
     QagentRepository,
     WatchlistCreate,
 )
+from qagent.strategy_data.models import FundamentalSnapshot
 
 
 def make_repo(tmp_path):
@@ -56,6 +57,44 @@ def test_repository_adds_and_lists_positions(tmp_path):
     assert position.instrument_id == "US:TEST"
     assert position.entry_price == Decimal("82.00")
     assert repo.list_positions()[0].strategy_tag == "breakout"
+
+
+def test_repository_upserts_and_filters_point_in_time_fundamentals(tmp_path):
+    repo = make_repo(tmp_path)
+    first = FundamentalSnapshot(
+        instrument_id="CN:000001",
+        as_of_date=date(2026, 3, 31),
+        pe_ratio=Decimal("8.0"),
+        market_cap=Decimal("90000000000"),
+        return_on_equity_pct=Decimal("17.5"),
+        provider="akshare_financials",
+    )
+    revised = first.model_copy(update={"pe_ratio": Decimal("7.8")})
+    future = first.model_copy(
+        update={
+            "as_of_date": date(2026, 6, 30),
+            "pe_ratio": Decimal("9.2"),
+        }
+    )
+
+    assert repo.upsert_fundamental_snapshots("free", [first, revised, future]) == 2
+
+    march = repo.list_fundamental_snapshots(
+        provider_mode="free",
+        instrument_ids=["CN:000001"],
+        end=date(2026, 5, 1),
+    )
+    all_rows = repo.list_fundamental_snapshots(
+        provider_mode="free",
+        instrument_ids=["CN:000001"],
+        start=date(2026, 1, 1),
+        end=date(2026, 12, 31),
+    )
+
+    assert len(march) == 1
+    assert march[0].as_of_date == date(2026, 3, 31)
+    assert march[0].pe_ratio == Decimal("7.800000")
+    assert [item.as_of_date for item in all_rows] == [date(2026, 3, 31), date(2026, 6, 30)]
 
 
 def test_create_db_engine_creates_sqlite_parent_directory(tmp_path):

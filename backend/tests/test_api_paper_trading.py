@@ -373,9 +373,17 @@ def test_paper_trade_auto_validation_reports_5_10_20_day_outcomes(tmp_path, monk
     assert body["summary"]["primary_window_days"] == 20
     assert body["summary"]["verdict"] in {"profitable", "risk", "building_sample", "no_data"}
     assert [window["window_days"] for window in body["windows"]] == [5, 10, 20]
-    assert body["windows"][0]["evaluated_trades"] == 1
+    assert body["windows"][0]["evaluated_trades"] == 0
+    assert body["windows"][1]["evaluated_trades"] == 0
+    assert body["windows"][2]["evaluated_trades"] == 0
     assert body["items"][0]["instrument_id"] == "US:TEST"
-    assert body["items"][0]["validation_state"] in {"closed", "open", "waiting_entry", "expired"}
+    assert body["items"][0]["validation_state"] in {
+        "closed",
+        "open",
+        "waiting_entry",
+        "expired",
+        "missed_entry",
+    }
     assert body["curve"]
     assert body["sample_age"]["average_days_since_signal"] >= 0
     assert body["sample_age"]["mature_5d"] >= 0

@@ -14,6 +14,10 @@ from qagent.monitoring.outcomes import (
 from qagent.providers.base import MarketDataProvider
 from qagent.storage.repository import OpportunitySnapshotRecord
 from qagent.strategy_data.providers import StrategyDataProvider
+from qagent.backtesting.temporal_validation import (
+    TemporalValidationResult,
+    build_temporal_validation,
+)
 
 
 class BacktestSignal(BaseModel):
@@ -78,6 +82,7 @@ class BacktestResult(BaseModel):
     signals: list[BacktestSignal]
     benchmark: BacktestBenchmarkComparison
     environment_breakdown: list[BacktestEnvironmentBreakdown]
+    temporal_validation: TemporalValidationResult
     data_health: dict[str, str]
 
 
@@ -164,6 +169,11 @@ def run_historical_backtest(
     benchmark_rows = _benchmark_rows(outcomes, all_outcome_bars, instrument_ids)
     benchmark = _benchmark_comparison(summary, benchmark_rows)
     environment_breakdown = _environment_breakdown(benchmark_rows)
+    temporal_validation = build_temporal_validation(
+        signals,
+        return_horizon_days=10,
+        embargo_days=10,
+    )
     data_health = {
         "provider": provider.name,
         "symbols": str(len(instrument_ids)),
@@ -173,6 +183,7 @@ def run_historical_backtest(
         "lookahead_guard": "bars_limited_to_scan_date",
         "benchmark": "equal_weight_scanned_universe",
         "environment_breakdown": str(len(environment_breakdown)),
+        **temporal_validation.data_health,
     }
     provider_errors = getattr(provider, "last_errors", [])
     if provider_errors:
@@ -184,6 +195,7 @@ def run_historical_backtest(
         signals=sorted(signals, key=lambda item: item.signal_date, reverse=True)[:max_signals],
         benchmark=benchmark,
         environment_breakdown=environment_breakdown,
+        temporal_validation=temporal_validation,
         data_health=data_health,
     )
 

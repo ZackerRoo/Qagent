@@ -360,6 +360,10 @@ def test_daily_scan_surfaces_strategy_data_counts_and_errors():
         strategy_data_provider=StrategyDataProviderWithRecords(),
     )
 
+    assert result.data_health["strategy_filings"] == "1"
+    assert result.data_health["strategy_announcements"] == "1"
+    assert result.data_health["strategy_data_errors"] == "fmp: rate limited"
+
 
 def _benchmark_bars(instrument_id: str, total_return: float) -> pd.DataFrame:
     start = date(2026, 1, 1)
@@ -379,11 +383,6 @@ def _benchmark_bars(instrument_id: str, total_return: float) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
-
-    assert result.data_health["strategy_filings"] == "1"
-    assert result.data_health["strategy_announcements"] == "1"
-    assert result.data_health["strategy_data_errors"] == "fmp: rate limited"
-
 
 class StrategyDataProviderWithOwnershipFilings:
     name = "ownership_records"

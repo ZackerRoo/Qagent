@@ -47,6 +47,16 @@ def test_run_historical_backtest_returns_signal_outcomes_and_strategy_performanc
     assert result.benchmark.excess_return_10d is not None
     assert result.benchmark.verdict in {"outperform", "inline", "underperform", "insufficient_sample"}
     assert result.environment_breakdown
+    assert result.temporal_validation.method == "chronological_50_25_25_with_embargo"
+    assert result.temporal_validation.return_horizon_days == 10
+    assert result.temporal_validation.embargo_days == 10
+    assert result.temporal_validation.verdict in {
+        "positive",
+        "negative",
+        "inconclusive",
+        "insufficient",
+    }
+    assert result.data_health["temporal_lookahead_guard"] == "chronological_split_with_embargo"
     assert {item.regime for item in result.environment_breakdown}.issubset({"up", "range", "down"})
     assert sum(item.sample_count for item in result.environment_breakdown) >= result.summary.completed_signals
     assert all(signal.signal_date <= date(2026, 3, 20) for signal in result.signals)

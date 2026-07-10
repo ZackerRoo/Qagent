@@ -147,4 +147,6 @@ cd backend
 
 ## Research Docs
 
+See `GOALS.md` for the active milestone roadmap and completion evidence.
+
 See `docs/research/` for product, market, strategy, data-source, GitHub, and compliance research.

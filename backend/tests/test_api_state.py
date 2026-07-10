@@ -459,6 +459,9 @@ def test_backtest_api_returns_fixture_validation(tmp_path, monkeypatch):
     assert body["benchmark"]["label"] == "Equal-weight scanned universe"
     assert body["benchmark"]["excess_return_10d"] is not None
     assert body["environment_breakdown"]
+    assert body["temporal_validation"]["method"] == "chronological_50_25_25_with_embargo"
+    assert body["temporal_validation"]["embargo_days"] == 10
+    assert body["temporal_validation"]["summary"]
     assert body["data_health"]["lookahead_guard"] == "bars_limited_to_scan_date"
 
 

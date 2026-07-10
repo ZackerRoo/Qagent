@@ -730,6 +730,75 @@ def test_paper_daily_report_summarizes_actions_and_benchmark_excess(tmp_path):
     assert any(item.instrument_id == target_trade.instrument_id for item in report.closed_today)
 
 
+def test_paper_validation_excludes_missed_entries_and_requires_horizon_age(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    stopped = paper_repo.create_trade(
+        source_snapshot_id="validation-stopped",
+        provider="free",
+        instrument_id="CN:560800",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 2),
+        trigger_price=Decimal("1.00"),
+        initial_stop=Decimal("0.95"),
+        target_1=Decimal("1.10"),
+        rank_score=Decimal("0.80"),
+    )
+    missed = paper_repo.create_trade(
+        source_snapshot_id="validation-missed",
+        provider="free",
+        instrument_id="CN:588850",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 2),
+        trigger_price=Decimal("2.00"),
+        initial_stop=Decimal("1.90"),
+        target_1=Decimal("2.20"),
+        rank_score=Decimal("0.75"),
+    )
+    paper_repo.update_trade(
+        stopped.trade_id,
+        status="stopped",
+        entry_date=date(2026, 7, 3),
+        entry_price=Decimal("1.00"),
+        exit_date=date(2026, 7, 6),
+        exit_price=Decimal("0.95"),
+        latest_date=date(2026, 7, 6),
+        latest_price=Decimal("0.95"),
+        realized_return_pct=Decimal("-5"),
+        holding_days=3,
+    )
+    paper_repo.update_trade(
+        missed.trade_id,
+        status="missed_entry",
+        exit_date=date(2026, 7, 2),
+        latest_date=date(2026, 7, 2),
+        latest_price=Decimal("2.30"),
+        holding_days=0,
+    )
+
+    trades = paper_repo.list_trades(limit=20)
+    ledger = build_paper_ledger(trades)
+    validation = build_paper_validation(trades, ledger, as_of=date(2026, 7, 10))
+    windows = {window.window_days: window for window in validation.windows}
+
+    assert validation.summary.total_trades == 2
+    assert validation.summary.triggered_trades == 1
+    assert validation.summary.closed_trades == 1
+    assert validation.summary.missed_entry_count == 1
+    assert windows[5].evaluated_trades == 1
+    assert windows[5].negative_trades == 1
+    assert windows[5].win_rate == 0.0
+    assert windows[10].evaluated_trades == 0
+    assert windows[20].evaluated_trades == 0
+    assert validation.sample_age.mature_5d == 1
+    assert validation.sample_age.mature_10d == 0
+    assert validation.sample_age.mature_20d == 0
+    assert validation.credibility.level != "high"
+    assert "已成交 1 笔" in validation.credibility.evidence
+    assert "错过买点 1 笔" in validation.credibility.evidence
+    assert validation.batches[0].total_return_pct == windows[5].total_return_pct
+
+
 def test_paper_daily_report_groups_stock_and_etf_performance(tmp_path):
     repo = make_repo(tmp_path)
     paper_repo = PaperTradingRepository(repo.session_factory)
@@ -1012,11 +1081,10 @@ def test_paper_daily_report_explains_recovery_market_context_and_trigger_quality
     assert report.trigger_quality.missed_entry_count == 1
     assert report.trigger_quality.pending_count == 1
     assert report.trigger_quality.verdict in {"needs_tighter_entry", "watch"}
-    assert report.risk_gate.action == "resume_probe_entries"
+    assert report.risk_gate.action == "allow_new_entries"
     assert report.risk_gate.can_add_entries is True
-    assert report.risk_gate.max_new_entries == 1
-    assert 0 < report.risk_gate.position_size_multiplier < 1
-    assert any("试单" in item for item in report.risk_gate.recovery_conditions)
+    assert report.risk_gate.max_new_entries == 3
+    assert report.risk_gate.position_size_multiplier == 1.0
 
 
 def _insert_cn_snapshot(

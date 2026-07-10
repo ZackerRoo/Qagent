@@ -17,6 +17,7 @@ from qagent.storage.tables import (
     BriefRunRow,
     DeliveryOutboxRow,
     FullMarketScanJobRow,
+    FundamentalSnapshotRow,
     OpportunitySnapshotRow,
     PositionRow,
     ScanResultCacheRow,
@@ -25,6 +26,7 @@ from qagent.storage.tables import (
     UniverseRow,
     WatchlistItemRow,
 )
+from qagent.strategy_data.models import FundamentalSnapshot
 
 
 class WatchlistCreate(BaseModel):
@@ -427,6 +429,69 @@ class QagentRepository:
             rows = [row for row in rows if row.asset_type.lower() in normalized_types]
         rows.sort(key=lambda row: (_asset_browse_rank(row.asset_type), row.symbol))
         return [self._tradable_instrument_from_row(row) for row in rows[: max(limit, 0)]]
+
+    def upsert_fundamental_snapshots(
+        self,
+        provider_mode: str,
+        snapshots: list[FundamentalSnapshot],
+    ) -> int:
+        normalized_mode = provider_mode.strip().lower()
+        deduplicated = {
+            (
+                normalized_mode,
+                snapshot.instrument_id,
+                snapshot.as_of_date,
+                snapshot.provider or "unknown",
+            ): snapshot
+            for snapshot in snapshots
+        }
+        if not deduplicated:
+            return 0
+        now = datetime.now(timezone.utc)
+        with self.session_factory() as session:
+            for key, snapshot in deduplicated.items():
+                row = session.get(FundamentalSnapshotRow, key)
+                if row is None:
+                    row = FundamentalSnapshotRow(
+                        provider_mode=key[0],
+                        instrument_id=key[1],
+                        as_of_date=key[2],
+                        source_provider=key[3],
+                    )
+                    session.add(row)
+                self._apply_fundamental_snapshot(row, snapshot, now)
+            session.commit()
+        return len(deduplicated)
+
+    def list_fundamental_snapshots(
+        self,
+        provider_mode: str,
+        instrument_ids: list[str] | None = None,
+        start: date | None = None,
+        end: date | None = None,
+        limit: int = 50_000,
+    ) -> list[FundamentalSnapshot]:
+        normalized_mode = provider_mode.strip().lower()
+        with self.session_factory() as session:
+            query = session.query(FundamentalSnapshotRow).filter(
+                FundamentalSnapshotRow.provider_mode == normalized_mode
+            )
+            if instrument_ids:
+                query = query.filter(FundamentalSnapshotRow.instrument_id.in_(instrument_ids))
+            if start is not None:
+                query = query.filter(FundamentalSnapshotRow.as_of_date >= start)
+            if end is not None:
+                query = query.filter(FundamentalSnapshotRow.as_of_date <= end)
+            rows = (
+                query.order_by(
+                    FundamentalSnapshotRow.as_of_date.asc(),
+                    FundamentalSnapshotRow.instrument_id.asc(),
+                    FundamentalSnapshotRow.source_provider.asc(),
+                )
+                .limit(max(limit, 0))
+                .all()
+            )
+            return [self._fundamental_snapshot_from_row(row) for row in rows]
 
     def save_scan_run(
         self,
@@ -1009,6 +1074,45 @@ class QagentRepository:
             source=row.source,
             tags=_parse_tags(row.tags),
             synced_at=row.synced_at,
+        )
+
+    @staticmethod
+    def _apply_fundamental_snapshot(
+        row: FundamentalSnapshotRow,
+        snapshot: FundamentalSnapshot,
+        now: datetime,
+    ) -> None:
+        row.revenue_growth_pct = snapshot.revenue_growth_pct
+        row.earnings_growth_pct = snapshot.earnings_growth_pct
+        row.gross_margin_pct = snapshot.gross_margin_pct
+        row.operating_margin_pct = snapshot.operating_margin_pct
+        row.net_margin_pct = snapshot.net_margin_pct
+        row.return_on_equity_pct = snapshot.return_on_equity_pct
+        row.market_cap = snapshot.market_cap
+        row.pe_ratio = snapshot.pe_ratio
+        row.forward_pe = snapshot.forward_pe
+        row.peg_ratio = snapshot.peg_ratio
+        row.price_to_sales = snapshot.price_to_sales
+        row.cached_at = now
+        row.updated_at = now
+
+    @staticmethod
+    def _fundamental_snapshot_from_row(row: FundamentalSnapshotRow) -> FundamentalSnapshot:
+        return FundamentalSnapshot(
+            instrument_id=row.instrument_id,
+            as_of_date=row.as_of_date,
+            revenue_growth_pct=row.revenue_growth_pct,
+            earnings_growth_pct=row.earnings_growth_pct,
+            gross_margin_pct=row.gross_margin_pct,
+            operating_margin_pct=row.operating_margin_pct,
+            net_margin_pct=row.net_margin_pct,
+            return_on_equity_pct=row.return_on_equity_pct,
+            market_cap=row.market_cap,
+            pe_ratio=row.pe_ratio,
+            forward_pe=row.forward_pe,
+            peg_ratio=row.peg_ratio,
+            price_to_sales=row.price_to_sales,
+            provider=row.source_provider,
         )
 
     @staticmethod

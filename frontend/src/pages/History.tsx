@@ -407,6 +407,7 @@ export function History({
               context={backtestRunContext}
               fallbackLabel={activeBacktestLabel}
             />
+            <TemporalValidationPanel backtest={backtest} />
             <BacktestInterpretation backtest={backtest} />
             {parameterSensitivityError && (
               <div className="empty-state error">{parameterSensitivityError}</div>
@@ -3488,6 +3489,74 @@ function BacktestResultSummary({
           ))}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function TemporalValidationPanel({ backtest }: { backtest: BacktestResponse }) {
+  const { language } = useI18n();
+  const validation = backtest.temporal_validation;
+  const verdictLabels = {
+    positive: language === "zh" ? "样本外为正" : "Positive OOS",
+    negative: language === "zh" ? "样本外为负" : "Negative OOS",
+    inconclusive: language === "zh" ? "优势未确认" : "Inconclusive",
+    insufficient: language === "zh" ? "样本不足" : "Insufficient",
+  };
+  const windowLabels = {
+    train: language === "zh" ? "训练期" : "Train",
+    validation: language === "zh" ? "验证期" : "Validation",
+    out_of_sample: language === "zh" ? "样本外" : "Out of sample",
+  };
+
+  return (
+    <div className={`temporal-validation-panel verdict-${validation.verdict}`}>
+      <header>
+        <div>
+          <span>{language === "zh" ? "严格样本外验证" : "Temporal holdout"}</span>
+          <strong>{verdictLabels[validation.verdict]}</strong>
+        </div>
+        <div className="temporal-verdict">
+          {language === "zh" ? "隔离期" : "Embargo"} {validation.embargo_days} {language === "zh" ? "天" : "days"}
+          <small>{validation.return_horizon_days}D</small>
+        </div>
+      </header>
+
+      <div className="temporal-window-grid">
+        {validation.windows.map((window) => (
+          <div className={`temporal-window-card window-${window.key}`} key={window.key}>
+            <div className="temporal-window-head">
+              <strong>{windowLabels[window.key]}</strong>
+              <span>{window.sample_count} {language === "zh" ? "样本" : "samples"}</span>
+            </div>
+            <p>{window.start_date} - {window.end_date}</p>
+            <div className="temporal-window-metrics">
+              <div>
+                <span>{language === "zh" ? "正收益" : "Positive"}</span>
+                <strong>{formatRatio(window.positive_rate)}</strong>
+              </div>
+              <div>
+                <span>{language === "zh" ? "均值" : "Mean"}</span>
+                <strong>{formatNumber(window.avg_return_pct, "%")}</strong>
+              </div>
+              <div>
+                <span>95% CI</span>
+                <strong>
+                  {formatNumber(window.confidence_low_pct, "%")} - {formatNumber(window.confidence_high_pct, "%")}
+                </strong>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <footer>
+        <p>
+          {language === "zh"
+            ? validation.summary
+            : `${validation.out_of_sample?.sample_count ?? 0} out-of-sample signals; the confidence interval determines whether the edge is stable.`}
+        </p>
+        {validation.warnings.length ? <span>{validation.warnings.slice(0, 2).join("；")}</span> : null}
+      </footer>
     </div>
   );
 }

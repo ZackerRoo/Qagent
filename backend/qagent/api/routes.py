@@ -678,15 +678,33 @@ def factor_backtest(
     start_date, end_date = _factor_backtest_dates(mode, start, end)
     market_provider = build_market_data_provider(mode)
     bars = market_provider.get_daily_bars(instrument_ids, start_date, end_date)
-    fundamentals: list[FundamentalSnapshot] = []
+    live_fundamentals: list[FundamentalSnapshot] = []
+    fundamental_errors: list[str] = []
     try:
-        fundamentals = build_strategy_data_provider(mode).get_fundamentals(
+        live_fundamentals = build_strategy_data_provider(mode).get_fundamentals(
             instrument_ids,
             start=start_date,
             end=end_date,
         )
-    except Exception:
-        fundamentals = []
+    except Exception as exc:
+        fundamental_errors.append(f"live fundamentals: {exc}")
+    repo = _repo()
+    if live_fundamentals:
+        try:
+            repo.upsert_fundamental_snapshots(mode, live_fundamentals)
+        except Exception as exc:
+            fundamental_errors.append(f"store fundamentals: {exc}")
+    try:
+        stored_fundamentals = repo.list_fundamental_snapshots(
+            provider_mode=mode,
+            instrument_ids=instrument_ids,
+            start=start_date,
+            end=end_date,
+        )
+    except Exception as exc:
+        stored_fundamentals = []
+        fundamental_errors.append(f"load fundamentals: {exc}")
+    fundamentals = _merge_fundamental_snapshots(stored_fundamentals, live_fundamentals)
     result = run_factor_backtest(
         bars,
         forward_days=forward_days,
@@ -696,8 +714,55 @@ def factor_backtest(
     )
     payload = result.model_dump(mode="json")
     payload["signals"] = [_attach_instrument_label(signal) for signal in payload.get("signals", [])]
-    payload["data_health"].update(resolved.data_health)
+    payload["data_health"].update(
+        {
+            **resolved.data_health,
+            "fundamental_live_rows": str(len(live_fundamentals)),
+            "fundamental_stored_rows": str(len(stored_fundamentals)),
+            "fundamental_point_in_time_rows": str(len(fundamentals)),
+            "fundamental_store": "sqlite",
+        }
+    )
+    if fundamental_errors:
+        payload["data_health"]["fundamental_errors"] = " | ".join(fundamental_errors[:3])
     return payload
+
+
+def _merge_fundamental_snapshots(
+    *groups: list[FundamentalSnapshot],
+) -> list[FundamentalSnapshot]:
+    by_point: dict[tuple[str, date], FundamentalSnapshot] = {}
+    for group in groups:
+        for snapshot in group:
+            key = (snapshot.instrument_id, snapshot.as_of_date)
+            current = by_point.get(key)
+            if current is None or _fundamental_completeness(snapshot) >= _fundamental_completeness(
+                current
+            ):
+                by_point[key] = snapshot
+    return sorted(
+        by_point.values(),
+        key=lambda item: (item.as_of_date, item.instrument_id, item.provider),
+    )
+
+
+def _fundamental_completeness(snapshot: FundamentalSnapshot) -> int:
+    return sum(
+        value is not None
+        for value in (
+            snapshot.revenue_growth_pct,
+            snapshot.earnings_growth_pct,
+            snapshot.gross_margin_pct,
+            snapshot.operating_margin_pct,
+            snapshot.net_margin_pct,
+            snapshot.return_on_equity_pct,
+            snapshot.market_cap,
+            snapshot.pe_ratio,
+            snapshot.forward_pe,
+            snapshot.peg_ratio,
+            snapshot.price_to_sales,
+        )
+    )
 
 
 @router.get("/overview")
@@ -2539,6 +2604,7 @@ def backtest(
         "environment_breakdown": [
             item.model_dump(mode="json") for item in result.environment_breakdown
         ],
+        "temporal_validation": result.temporal_validation.model_dump(mode="json"),
         "data_health": {**result.data_health, **resolved.data_health},
     }
 

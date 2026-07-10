@@ -1,6 +1,12 @@
+from datetime import date
+from decimal import Decimal
+
 from fastapi.testclient import TestClient
 
+from qagent.api import routes
 from qagent.app import create_app
+from qagent.strategy_data.models import FundamentalSnapshot
+from qagent.strategy_data.providers import EmptyStrategyDataProvider
 
 
 def test_factors_endpoint_returns_ranked_factor_scores():
@@ -30,3 +36,44 @@ def test_factor_backtest_endpoint_returns_validation_samples():
     assert body["signals"]
     assert body["data_health"]["factor_backtest"] in {"ok", "no_bars"}
     assert "min_history_days" in body["data_health"]
+
+
+def test_factor_backtest_uses_stored_point_in_time_fundamentals(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'factor-fundamental-history.db'}",
+    )
+    client = TestClient(create_app())
+    stored = [
+        FundamentalSnapshot(
+            instrument_id=instrument_id,
+            as_of_date=date(2026, 1, 10),
+            pe_ratio=pe_ratio,
+            market_cap=market_cap,
+            return_on_equity_pct=Decimal("18"),
+            gross_margin_pct=Decimal("35"),
+            revenue_growth_pct=Decimal("12"),
+            provider="stored_test",
+        )
+        for instrument_id, pe_ratio, market_cap in [
+            ("US:TEST", Decimal("12"), Decimal("50000000000")),
+            ("CN:000001", Decimal("8"), Decimal("90000000000")),
+        ]
+    ]
+    routes._repo().upsert_fundamental_snapshots("fixture", stored)
+    monkeypatch.setattr(
+        routes,
+        "build_strategy_data_provider",
+        lambda _mode: EmptyStrategyDataProvider(),
+    )
+
+    response = client.get(
+        "/api/factors/backtest?provider=fixture&forward_days=10&step_days=20&top_n=1"
+    )
+
+    assert response.status_code == 200
+    health = response.json()["data_health"]
+    assert health["fundamental_live_rows"] == "0"
+    assert health["fundamental_stored_rows"] == "2"
+    assert health["historical_fundamentals"] == "2"
+    assert health["fundamental_mode"] == "point_in_time"

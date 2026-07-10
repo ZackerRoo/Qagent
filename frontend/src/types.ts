@@ -1514,6 +1514,7 @@ export type PaperTradingSummary = {
   pending: number;
   open: number;
   closed: number;
+  missed_entry_count: number;
   target_hit_count: number;
   stopped_count: number;
   time_exit_count: number;
@@ -1537,6 +1538,7 @@ export type PaperLedgerSummary = {
   pending_trades: number;
   open_trades: number;
   closed_trades: number;
+  missed_entry_count: number;
   target_hit_count: number;
   stopped_count: number;
   time_exit_count: number;
@@ -1647,6 +1649,7 @@ export type PaperValidationSummary = {
   pending_trades: number;
   open_trades: number;
   closed_trades: number;
+  missed_entry_count: number;
   target_hit_count: number;
   stopped_count: number;
   time_exit_count: number;
@@ -1663,6 +1666,7 @@ export type PaperValidationWindow = {
   window_days: number;
   eligible_trades: number;
   evaluated_trades: number;
+  missed_entry_count: number;
   pending_trades: number;
   positive_trades: number;
   negative_trades: number;
@@ -1719,6 +1723,7 @@ export type PaperValidationBatch = {
   pending_trades: number;
   open_trades: number;
   closed_trades: number;
+  missed_entry_count: number;
   win_rate: number | null;
   average_return_pct: number | null;
   total_pnl: string;
@@ -2471,6 +2476,31 @@ export type BacktestEnvironmentBreakdown = {
   max_drawdown_pct: number | null;
 };
 
+export type TemporalValidationWindow = {
+  key: "train" | "validation" | "out_of_sample";
+  label: string;
+  start_date: string;
+  end_date: string;
+  sample_count: number;
+  positive_rate: number | null;
+  avg_return_pct: number | null;
+  confidence_low_pct: number | null;
+  confidence_high_pct: number | null;
+  max_loss_pct: number | null;
+};
+
+export type TemporalValidationResult = {
+  method: string;
+  return_horizon_days: number;
+  embargo_days: number;
+  windows: TemporalValidationWindow[];
+  out_of_sample: TemporalValidationWindow | null;
+  verdict: "positive" | "negative" | "inconclusive" | "insufficient";
+  summary: string;
+  warnings: string[];
+  data_health: Record<string, string>;
+};
+
 export type BacktestSignal = {
   snapshot_id: string;
   instrument_id: string;
@@ -2497,6 +2527,7 @@ export type BacktestResponse = {
   signals: BacktestSignal[];
   benchmark: BacktestBenchmarkComparison;
   environment_breakdown: BacktestEnvironmentBreakdown[];
+  temporal_validation: TemporalValidationResult;
   data_health: Record<string, string>;
 };
 
