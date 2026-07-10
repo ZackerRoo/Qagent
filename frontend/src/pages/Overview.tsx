@@ -1,5 +1,6 @@
 import { DataHealth } from "../components/DataHealth";
 import { MarketRotationRadarPanel } from "../components/MarketRotationRadar";
+import { MarketStructureRadarPanel } from "../components/MarketStructureRadar";
 import { MarketOpportunitySections } from "../components/MarketOpportunitySections";
 import { ResearchCommandCenterPanel } from "../components/ResearchCommandCenter";
 import { useI18n } from "../i18n";
@@ -40,6 +41,11 @@ export function Overview({ overview, radar, selectedCardId, onSelect }: Props) {
         </div>
       </section>
       <ResearchCommandCenterPanel center={overview?.research_center} compact />
+      <MarketStructureRadarPanel
+        cards={overview?.top_cards ?? []}
+        radar={overview?.rotation_radar}
+        sectorStrength={overview?.sector_strength ?? []}
+      />
       <MarketRotationRadarPanel
         radar={overview?.rotation_radar}
         cards={overview?.top_cards ?? []}

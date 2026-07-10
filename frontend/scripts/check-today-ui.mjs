@@ -11,12 +11,13 @@ const signalMonitorPath = resolve(__dirname, "../src/components/SignalMonitorCen
 const decisionQualityPath = resolve(__dirname, "../src/components/DecisionQualityCenter.tsx");
 const operationalReadinessPath = resolve(__dirname, "../src/components/OperationalReadinessCenter.tsx");
 const alphaQualityPath = resolve(__dirname, "../src/components/AlphaQualityCenter.tsx");
+const decisionAutomationPath = resolve(__dirname, "../src/components/DecisionAutomationCenter.tsx");
 const tablePath = resolve(__dirname, "../src/components/OpportunityTable.tsx");
 const detailPath = resolve(__dirname, "../src/components/OpportunityDetail.tsx");
 const stylesPath = resolve(__dirname, "../src/styles.css");
 const catalogPath = resolve(__dirname, "../src/i18n/catalog.ts");
 
-for (const path of [todayPath, manualActionPath, intelligencePath, followthroughPath, signalMonitorPath, decisionQualityPath, operationalReadinessPath, alphaQualityPath, tablePath, detailPath, stylesPath, catalogPath]) {
+for (const path of [todayPath, manualActionPath, intelligencePath, followthroughPath, signalMonitorPath, decisionQualityPath, operationalReadinessPath, alphaQualityPath, decisionAutomationPath, tablePath, detailPath, stylesPath, catalogPath]) {
   if (!existsSync(path)) {
     throw new Error(`missing ${path}`);
   }
@@ -30,6 +31,7 @@ const signalMonitor = readFileSync(signalMonitorPath, "utf8");
 const decisionQuality = readFileSync(decisionQualityPath, "utf8");
 const operationalReadiness = readFileSync(operationalReadinessPath, "utf8");
 const alphaQuality = readFileSync(alphaQualityPath, "utf8");
+const decisionAutomation = readFileSync(decisionAutomationPath, "utf8");
 const table = readFileSync(tablePath, "utf8");
 const detail = readFileSync(detailPath, "utf8");
 const styles = readFileSync(stylesPath, "utf8");
@@ -48,6 +50,7 @@ assert(today.includes("SignalCommandCenter"), "Today page must render the signal
 assert(today.includes("today-decision-page"), "Today page must expose the simplified decision page shell");
 assert(today.includes("TodayRouteCards"), "Today page must split deep analysis into destination shortcuts");
 assert(today.includes("TodayDecisionDesk"), "Today page must render a compact decision desk");
+assert(today.includes("DecisionAutomationCenterPanel"), "Today page must render the five-part decision automation center");
 assert(today.includes("TodayTradeTicket"), "Today page must render one selected opportunity ticket");
 assert(today.includes("TodayRecommendationKline"), "Today page must show the selected recommendation K-line on the home decision desk");
 assert(today.includes("fetchMarketBars"), "Today page must fetch market bars for the selected recommendation K-line");
@@ -136,6 +139,15 @@ assert(alphaQuality.includes("买入门槛"), "Alpha quality center must render 
 assert(alphaQuality.includes("首选复核"), "Alpha quality center must render current leader review");
 assert(alphaQuality.includes("策略权重"), "Alpha quality center must render strategy tuning");
 assert(alphaQuality.includes("主题确认"), "Alpha quality center must render theme confirmation");
+assert(decisionAutomation.includes("推荐闭环校准"), "Decision automation center must expose recommendation feedback calibration");
+assert(decisionAutomation.includes("模拟盘替补"), "Decision automation center must expose paper-trading replacement logic");
+assert(decisionAutomation.includes("市场环境分层"), "Decision automation center must expose market-regime layering");
+assert(decisionAutomation.includes("ETF/主题轮动"), "Decision automation center must expose ETF/theme rotation");
+assert(decisionAutomation.includes("交易前检查"), "Decision automation center must expose pre-trade checks");
+assert(decisionAutomation.includes("replacement_candidates"), "Decision automation center must use candidate-pool replacement data");
+assert(decisionAutomation.includes("market_environment"), "Decision automation center must use market environment data");
+assert(decisionAutomation.includes("rotation_radar"), "Decision automation center must use theme rotation data");
+assert(decisionAutomation.includes("pre_trade_risk"), "Decision automation center must use pre-trade risk data");
 assert(manualAction.includes("今日操作清单"), "Manual action center must show today's action list");
 assert(manualAction.includes("提醒闭环"), "Manual action center must show alert loop");
 assert(manualAction.includes("数据源升级路线"), "Manual action center must show data source roadmap");
@@ -143,6 +155,11 @@ assert(manualAction.includes("策略有效性"), "Manual action center must show
 assert(styles.includes(".signal-console"), "CSS must define signal-console layout");
 assert(styles.includes(".today-route-grid"), "CSS must define split destination cards");
 assert(styles.includes(".today-decision-desk"), "CSS must define compact decision desk");
+assert(styles.includes(".decision-automation-center"), "CSS must define five-part decision automation center");
+assert(styles.includes(".decision-automation-grid"), "CSS must define decision automation grid");
+assert(styles.includes(".automation-pillar-card"), "CSS must define decision automation pillar cards");
+assert(styles.includes(".automation-score-ring"), "CSS must define decision automation score rings");
+assert(styles.includes(".automation-action-strip"), "CSS must define decision automation action strip");
 assert(styles.includes(".today-trade-ticket"), "CSS must define selected opportunity ticket");
 assert(styles.includes(".today-validation-snapshot"), "CSS must define compact validation snapshot");
 assert(styles.includes(".today-risk-brief"), "CSS must define compact risk brief");

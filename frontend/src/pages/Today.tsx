@@ -17,11 +17,13 @@ import {
 } from "../api/client";
 import { ManualActionCenterPanel } from "../components/ManualActionCenter";
 import { MarketRotationRadarPanel } from "../components/MarketRotationRadar";
+import { MarketStructureRadarPanel } from "../components/MarketStructureRadar";
 import { MarketIntelligenceCenterPanel } from "../components/MarketIntelligenceCenter";
 import { RecommendationFollowThroughPanel } from "../components/RecommendationFollowThrough";
 import { OpportunityCandlestickChart } from "../components/OpportunityChart";
 import type { SignalMarker } from "../components/OpportunityChart";
 import { DecisionQualityCenterPanel } from "../components/DecisionQualityCenter";
+import { DecisionAutomationCenterPanel } from "../components/DecisionAutomationCenter";
 import { OperationalReadinessCenterPanel } from "../components/OperationalReadinessCenter";
 import { AlphaQualityCenterPanel } from "../components/AlphaQualityCenter";
 import { ResearchCommandCenterPanel } from "../components/ResearchCommandCenter";
@@ -342,6 +344,15 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onN
           onTrackTop={trackTopOpportunities}
           isBulkPaperTracking={isBulkPaperTracking}
           bulkPaperMessage={bulkPaperMessage}
+        />
+
+        <DecisionAutomationCenterPanel
+          cards={cards}
+          result={result}
+          followthrough={followthrough}
+          candidatePool={paperCandidatePool}
+          selectedCard={selectedCard}
+          onSelect={onSelect}
         />
 
         <div className="dashboard-secondary-grid">
@@ -939,6 +950,11 @@ function TodayAdvancedAnalysis({
         <RecommendationFollowThroughPanel center={followthrough} />
         <MarketIntelligenceCenterPanel center={result?.market_intelligence} />
         <ResearchCommandCenterPanel center={result?.research_center} />
+        <MarketStructureRadarPanel
+          cards={cards}
+          radar={result?.rotation_radar}
+          sectorStrength={result?.sector_strength ?? []}
+        />
         <MarketRotationRadarPanel
           radar={result?.rotation_radar}
           cards={cards}

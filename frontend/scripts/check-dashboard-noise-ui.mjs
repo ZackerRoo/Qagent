@@ -7,6 +7,7 @@ const files = {
   dataHealth: resolve(__dirname, "../src/components/DataHealth.tsx"),
   opportunityDetail: resolve(__dirname, "../src/components/OpportunityDetail.tsx"),
   opportunityChart: resolve(__dirname, "../src/components/OpportunityChart.tsx"),
+  marketStructure: resolve(__dirname, "../src/components/MarketStructureRadar.tsx"),
   today: resolve(__dirname, "../src/pages/Today.tsx"),
   brief: resolve(__dirname, "../src/pages/Brief.tsx"),
   app: resolve(__dirname, "../src/App.tsx"),
@@ -25,6 +26,7 @@ for (const path of Object.values(files)) {
 const dataHealth = readFileSync(files.dataHealth, "utf8");
 const opportunityDetail = readFileSync(files.opportunityDetail, "utf8");
 const opportunityChart = readFileSync(files.opportunityChart, "utf8");
+const marketStructure = readFileSync(files.marketStructure, "utf8");
 const today = readFileSync(files.today, "utf8");
 const brief = readFileSync(files.brief, "utf8");
 const app = readFileSync(files.app, "utf8");
@@ -49,6 +51,12 @@ assert(opportunityChart.includes("SignalMarker"), "K-line chart must support rec
 assert(opportunityChart.includes("signal-marker"), "K-line chart must render visible signal marker SVG groups");
 assert(opportunityDetail.includes("signalMarkersFromCard"), "Opportunity detail must pass signal markers into the K-line chart");
 assert(today.includes("signalMarkersFromTodayCard"), "Today page must pass signal markers into the K-line chart");
+assert(today.includes("MarketStructureRadarPanel"), "Today advanced analysis must render market structure radar");
+assert(overview.includes("MarketStructureRadarPanel"), "Overview must render market structure radar");
+assert(marketStructure.includes("MarketTemperatureTrend"), "Market structure radar must include a temperature trend chart");
+assert(marketStructure.includes("StyleDistributionChart"), "Market structure radar must include a style distribution chart");
+assert(marketStructure.includes("ThemeActionBoard"), "Market structure radar must include a theme action board");
+assert(marketStructure.includes("<svg"), "Market structure charts must use SVG visualizations");
 
 assert(brief.includes("BriefKlineFocus"), "Brief page must render a K-line focus panel for top opportunities");
 assert(brief.includes("fetchMarketBars"), "Brief page must fetch bars for the focus K-line");
@@ -85,5 +93,8 @@ assert(styles.includes(".brief-sync-banner"), "CSS must define same-source brief
 assert(styles.includes(".brief-theme-grid"), "CSS must define same-source theme cards");
 assert(styles.includes(".detail-kline-primary"), "CSS must define primary detail K-line layout");
 assert(styles.includes(".signal-marker"), "CSS must define K-line signal marker styling");
+assert(styles.includes(".market-structure-radar"), "CSS must define market structure radar layout");
+assert(styles.includes(".market-temperature-chart"), "CSS must define market temperature chart");
+assert(styles.includes(".style-distribution-chart"), "CSS must define style distribution chart");
 
 console.log("dashboard noise ui checks passed");

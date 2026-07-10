@@ -99,6 +99,8 @@ export function History({
   selectedCard?: OpportunityCard;
 }) {
   const { language, t } = useI18n();
+  const quickBacktestSymbols = "CN:000001";
+  const quickBacktestProvider: DataProviderMode = "fixture";
   const selectedBacktestSymbols = selectedCard?.instrument_id;
   const selectedBacktestLabel = selectedCard
     ? formatInstrumentDisplay(selectedCard.instrument_id, selectedCard.instrument_label)
@@ -179,17 +181,15 @@ export function History({
   }, [dataMode]);
 
   async function runBacktest() {
-    if (!selectedBacktestSymbols) {
-      setBacktestError(t("history.noSelectedBacktestScope"));
-      return;
-    }
+    const backtestProvider = selectedBacktestSymbols ? dataMode : quickBacktestProvider;
+    const backtestSymbols = selectedBacktestSymbols ?? quickBacktestSymbols;
     try {
       setIsBacktesting(true);
       setBacktestError("");
       setParameterSensitivityError("");
-      const result = await fetchBacktest(dataMode, selectedBacktestSymbols);
+      const result = await fetchBacktest(backtestProvider, backtestSymbols);
       setBacktest(result);
-      fetchParameterSensitivity(dataMode, selectedBacktestSymbols)
+      fetchParameterSensitivity(backtestProvider, backtestSymbols)
         .then(setParameterSensitivity)
         .catch((caught) => {
           setParameterSensitivityError(
@@ -198,8 +198,8 @@ export function History({
         });
       setBacktestRunContext({
         kind: "selected",
-        label: selectedBacktestLabel || formatInstrumentDisplay(selectedBacktestSymbols),
-        provider: dataMode,
+        label: selectedBacktestLabel || formatInstrumentDisplay(backtestSymbols),
+        provider: backtestProvider,
       });
     } catch (caught) {
       setBacktestError(caught instanceof Error ? caught.message : "Failed to run backtest");
@@ -385,9 +385,13 @@ export function History({
               className="icon-action"
               type="button"
               onClick={runBacktest}
-              disabled={isBacktesting || !selectedBacktestSymbols}
+              disabled={isBacktesting}
             >
-              {isBacktesting ? t("common.running") : t("history.runSelectedBacktest")}
+              {isBacktesting
+                ? t("common.running")
+                : selectedBacktestSymbols
+                  ? t("history.runSelectedBacktest")
+                  : t("history.runQuickSample")}
             </button>
           </div>
         </div>
@@ -2723,9 +2727,13 @@ function BacktestCommandCenter({
           className="icon-action"
           type="button"
           onClick={onRunSelected}
-          disabled={isBacktesting || !hasSelectedCard}
+          disabled={isBacktesting}
         >
-          {isBacktesting ? t("common.running") : t("history.runSelectedBacktest")}
+          {isBacktesting
+            ? t("common.running")
+            : hasSelectedCard
+              ? t("history.runSelectedBacktest")
+              : t("history.runQuickSample")}
         </button>
         <button
           className="icon-action secondary"
