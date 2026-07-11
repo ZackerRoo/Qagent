@@ -14,7 +14,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from qagent.db import Base
+from qagent.db import Base, SQLiteExactDecimal, UTCDateTime
 
 
 def utc_now() -> datetime:
@@ -227,17 +227,29 @@ class HistoricalReplayBarRow(Base):
     provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
     instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
     trade_date: Mapped[date] = mapped_column(Date, primary_key=True, index=True)
-    raw_open: Mapped[Decimal] = mapped_column(Numeric(20, 8))
-    raw_high: Mapped[Decimal] = mapped_column(Numeric(20, 8))
-    raw_low: Mapped[Decimal] = mapped_column(Numeric(20, 8))
-    raw_close: Mapped[Decimal] = mapped_column(Numeric(20, 8))
-    adjusted_open: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
-    adjusted_high: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
-    adjusted_low: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
-    adjusted_close: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
-    volume: Mapped[Decimal] = mapped_column(Numeric(28, 8))
-    turnover: Mapped[Decimal | None] = mapped_column(Numeric(28, 8), nullable=True)
-    adjustment_factor: Mapped[Decimal | None] = mapped_column(Numeric(24, 12), nullable=True)
+    raw_open: Mapped[Decimal] = mapped_column(SQLiteExactDecimal(20, 8))
+    raw_high: Mapped[Decimal] = mapped_column(SQLiteExactDecimal(20, 8))
+    raw_low: Mapped[Decimal] = mapped_column(SQLiteExactDecimal(20, 8))
+    raw_close: Mapped[Decimal] = mapped_column(SQLiteExactDecimal(20, 8))
+    adjusted_open: Mapped[Decimal | None] = mapped_column(
+        SQLiteExactDecimal(20, 8), nullable=True
+    )
+    adjusted_high: Mapped[Decimal | None] = mapped_column(
+        SQLiteExactDecimal(20, 8), nullable=True
+    )
+    adjusted_low: Mapped[Decimal | None] = mapped_column(
+        SQLiteExactDecimal(20, 8), nullable=True
+    )
+    adjusted_close: Mapped[Decimal | None] = mapped_column(
+        SQLiteExactDecimal(20, 8), nullable=True
+    )
+    volume: Mapped[Decimal] = mapped_column(SQLiteExactDecimal(28, 8))
+    turnover: Mapped[Decimal | None] = mapped_column(
+        SQLiteExactDecimal(28, 8), nullable=True
+    )
+    adjustment_factor: Mapped[Decimal | None] = mapped_column(
+        SQLiteExactDecimal(24, 12), nullable=True
+    )
     adjustment_mode: Mapped[str] = mapped_column(String(32))
     source_provider: Mapped[str] = mapped_column(String(64))
     dataset_revision: Mapped[int] = mapped_column(Integer, index=True)
@@ -246,23 +258,57 @@ class HistoricalReplayBarRow(Base):
 
 class HistoricalCorporateActionRow(Base):
     __tablename__ = "historical_corporate_actions"
+    __table_args__ = (
+        CheckConstraint(
+            "action_type IN ('cash_dividend', 'stock_split', 'bonus_share', 'rights_issue')",
+            name="ck_historical_corporate_actions_type",
+        ),
+        CheckConstraint(
+            "announcement_date IS NOT NULL "
+            "AND (ex_date IS NOT NULL OR effective_date IS NOT NULL OR payable_date IS NOT NULL) "
+            "AND ((action_type = 'cash_dividend' "
+            "AND record_date IS NOT NULL AND payable_date IS NOT NULL "
+            "AND cash_per_share IS NOT NULL AND CAST(cash_per_share AS NUMERIC) > 0) "
+            "OR (action_type IN ('stock_split', 'bonus_share') "
+            "AND record_date IS NOT NULL AND ex_date IS NOT NULL "
+            "AND effective_date IS NOT NULL "
+            "AND share_ratio IS NOT NULL AND CAST(share_ratio AS NUMERIC) > 0) "
+            "OR (action_type = 'rights_issue' "
+            "AND record_date IS NOT NULL AND ex_date IS NOT NULL "
+            "AND effective_date IS NOT NULL "
+            "AND rights_ratio IS NOT NULL AND CAST(rights_ratio AS NUMERIC) > 0 "
+            "AND subscription_price IS NOT NULL "
+            "AND CAST(subscription_price AS NUMERIC) > 0))",
+            name="ck_historical_corporate_actions_evidence",
+        ),
+    )
 
     provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
     instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
     action_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    announcement_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    announcement_date: Mapped[date] = mapped_column(Date)
     record_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     ex_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     effective_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     payable_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     action_type: Mapped[str] = mapped_column(String(64), index=True)
-    cash_per_share: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
-    share_ratio: Mapped[Decimal | None] = mapped_column(Numeric(24, 12), nullable=True)
-    rights_ratio: Mapped[Decimal | None] = mapped_column(Numeric(24, 12), nullable=True)
-    subscription_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
-    previous_raw_close: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    cash_per_share: Mapped[Decimal | None] = mapped_column(
+        SQLiteExactDecimal(20, 8), nullable=True
+    )
+    share_ratio: Mapped[Decimal | None] = mapped_column(
+        SQLiteExactDecimal(24, 12), nullable=True
+    )
+    rights_ratio: Mapped[Decimal | None] = mapped_column(
+        SQLiteExactDecimal(24, 12), nullable=True
+    )
+    subscription_price: Mapped[Decimal | None] = mapped_column(
+        SQLiteExactDecimal(20, 8), nullable=True
+    )
+    previous_raw_close: Mapped[Decimal | None] = mapped_column(
+        SQLiteExactDecimal(20, 8), nullable=True
+    )
     ex_right_reference_price: Mapped[Decimal | None] = mapped_column(
-        Numeric(20, 8), nullable=True
+        SQLiteExactDecimal(20, 8), nullable=True
     )
     source_provider: Mapped[str] = mapped_column(String(64))
     dataset_revision: Mapped[int] = mapped_column(Integer, index=True)
@@ -317,6 +363,12 @@ class HistoricalCorporateActionCoverageRow(Base):
             "status IN ('ready', 'ready_none', 'partial', 'unsupported')",
             name="ck_historical_corporate_action_coverage_status",
         ),
+        CheckConstraint(
+            "action_count >= 0 "
+            "AND (status != 'ready' OR action_count > 0) "
+            "AND (status != 'ready_none' OR action_count = 0)",
+            name="ck_historical_corporate_action_coverage_count",
+        ),
     )
 
     provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -334,14 +386,17 @@ class HistoricalTradingRuleRow(Base):
     __tablename__ = "historical_trading_rules"
 
     rule_set_version: Mapped[str] = mapped_column(String(64), primary_key=True)
-    market: Mapped[str] = mapped_column(String(16), primary_key=True)
-    board: Mapped[str] = mapped_column(String(32), primary_key=True)
-    is_st: Mapped[bool] = mapped_column(Boolean, primary_key=True)
-    security_type: Mapped[str] = mapped_column(String(32), primary_key=True)
+    limit_rule_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    market: Mapped[str] = mapped_column(String(16))
+    board: Mapped[str] = mapped_column(String(32))
+    is_st: Mapped[bool] = mapped_column(Boolean)
+    security_type: Mapped[str] = mapped_column(String(32))
     effective_from: Mapped[date] = mapped_column(Date, primary_key=True)
     effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
-    limit_pct: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
-    tick_size: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    limit_pct: Mapped[Decimal | None] = mapped_column(
+        SQLiteExactDecimal(18, 8), nullable=True
+    )
+    tick_size: Mapped[Decimal] = mapped_column(SQLiteExactDecimal(18, 8))
     board_lot: Mapped[int] = mapped_column(Integer)
     settlement_days: Mapped[int] = mapped_column(Integer)
     ipo_no_limit_sessions: Mapped[int] = mapped_column(Integer)
@@ -353,6 +408,8 @@ class HistoricalInstrumentRuleMetadataRow(Base):
     provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
     instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
     effective_from: Mapped[date] = mapped_column(Date, primary_key=True)
+    rule_set_version: Mapped[str] = mapped_column(String(64), primary_key=True)
+    fee_schedule_version: Mapped[str] = mapped_column(String(64), primary_key=True)
     effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
     security_type: Mapped[str] = mapped_column(String(32), index=True)
     market: Mapped[str] = mapped_column(String(16), index=True)
@@ -367,28 +424,49 @@ class HistoricalInstrumentRuleMetadataRow(Base):
 class HistoricalFeeRuleRow(Base):
     __tablename__ = "historical_fee_rules"
 
+    fee_schedule_version: Mapped[str] = mapped_column(String(64), primary_key=True)
     fee_rule_key: Mapped[str] = mapped_column(String(128), primary_key=True)
     effective_from: Mapped[date] = mapped_column(Date, primary_key=True)
     effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
     side: Mapped[str] = mapped_column(String(16), primary_key=True)
     security_type: Mapped[str] = mapped_column(String(32))
     exchange: Mapped[str] = mapped_column(String(16))
-    commission_bps: Mapped[Decimal] = mapped_column(Numeric(18, 8))
-    minimum_commission: Mapped[Decimal] = mapped_column(Numeric(20, 8))
-    stamp_duty_bps: Mapped[Decimal] = mapped_column(Numeric(18, 8))
-    transfer_fee_bps: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    commission_bps: Mapped[Decimal] = mapped_column(SQLiteExactDecimal(18, 8))
+    minimum_commission: Mapped[Decimal] = mapped_column(SQLiteExactDecimal(20, 8))
+    stamp_duty_bps: Mapped[Decimal] = mapped_column(SQLiteExactDecimal(18, 8))
+    transfer_fee_bps: Mapped[Decimal] = mapped_column(SQLiteExactDecimal(18, 8))
 
 
 class HistoricalTerminalSettlementRow(Base):
     __tablename__ = "historical_terminal_settlements"
+    __table_args__ = (
+        CheckConstraint(
+            "settlement_type IN ('cash', 'conversion')",
+            name="ck_historical_terminal_settlements_type",
+        ),
+        CheckConstraint(
+            "(settlement_type = 'cash' "
+            "AND cash_per_share IS NOT NULL AND CAST(cash_per_share AS NUMERIC) > 0) "
+            "OR (settlement_type = 'conversion' "
+            "AND conversion_instrument_id IS NOT NULL "
+            "AND length(trim(conversion_instrument_id)) > 0 "
+            "AND conversion_ratio IS NOT NULL "
+            "AND CAST(conversion_ratio AS NUMERIC) > 0)",
+            name="ck_historical_terminal_settlements_evidence",
+        ),
+    )
 
     provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
     instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
     effective_date: Mapped[date] = mapped_column(Date, primary_key=True)
     settlement_type: Mapped[str] = mapped_column(String(32), primary_key=True)
-    cash_per_share: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    cash_per_share: Mapped[Decimal | None] = mapped_column(
+        SQLiteExactDecimal(20, 8), nullable=True
+    )
     conversion_instrument_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    conversion_ratio: Mapped[Decimal | None] = mapped_column(Numeric(24, 12), nullable=True)
+    conversion_ratio: Mapped[Decimal | None] = mapped_column(
+        SQLiteExactDecimal(24, 12), nullable=True
+    )
     source_provider: Mapped[str] = mapped_column(String(64))
     dataset_revision: Mapped[int] = mapped_column(Integer, index=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -400,7 +478,7 @@ class HistoricalDataRevisionRow(Base):
     provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
     revision: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+        UTCDateTime(), default=utc_now, onupdate=utc_now
     )
 
 
@@ -410,8 +488,8 @@ class HistoricalDatasetLeaseRow(Base):
     provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
     owner_run_id: Mapped[str] = mapped_column(String(64), index=True)
     revision: Mapped[int] = mapped_column(Integer)
-    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    lease_expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+    heartbeat_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
 class AShareEnhancedCacheRow(Base):

@@ -1,7 +1,8 @@
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class HistoricalTradabilityPoint(BaseModel):
@@ -78,7 +79,7 @@ class HistoricalCorporateAction(BaseModel):
     ex_date: date | None = None
     effective_date: date | None = None
     payable_date: date | None = None
-    action_type: str
+    action_type: Literal["cash_dividend", "stock_split", "bonus_share", "rights_issue"]
     cash_per_share: Decimal | None = None
     share_ratio: Decimal | None = None
     rights_ratio: Decimal | None = None
@@ -88,6 +89,31 @@ class HistoricalCorporateAction(BaseModel):
     source_provider: str
     dataset_revision: int
     fetched_at: datetime
+
+    @model_validator(mode="after")
+    def validate_action_evidence(self) -> Self:
+        if self.announcement_date is None:
+            raise ValueError("corporate action requires announcement_date")
+        if not any((self.ex_date, self.effective_date, self.payable_date)):
+            raise ValueError("corporate action requires an effective or event date")
+        if self.action_type == "cash_dividend":
+            if self.record_date is None or self.payable_date is None:
+                raise ValueError("cash dividend requires record_date and payable_date")
+            if self.cash_per_share is None or self.cash_per_share <= 0:
+                raise ValueError("cash dividend requires positive cash_per_share")
+        elif self.action_type in {"stock_split", "bonus_share"}:
+            if self.record_date is None or self.ex_date is None or self.effective_date is None:
+                raise ValueError("split or bonus requires record, ex, and effective dates")
+            if self.share_ratio is None or self.share_ratio <= 0:
+                raise ValueError("split or bonus requires positive share_ratio")
+        else:
+            if self.record_date is None or self.ex_date is None or self.effective_date is None:
+                raise ValueError("rights issue requires record, ex, and effective dates")
+            if self.rights_ratio is None or self.rights_ratio <= 0:
+                raise ValueError("rights issue requires positive rights_ratio")
+            if self.subscription_price is None or self.subscription_price <= 0:
+                raise ValueError("rights issue requires positive subscription_price")
+        return self
 
 
 class HistoricalUniverseManifest(BaseModel):
@@ -114,6 +140,7 @@ class HistoricalLifecycleManifest(BaseModel):
 
 class HistoricalTradingRule(BaseModel):
     rule_set_version: str
+    limit_rule_key: str
     market: str
     board: str
     is_st: bool
@@ -136,13 +163,16 @@ class HistoricalInstrumentRuleMetadata(BaseModel):
     market: str
     board: str
     settlement_days: int
+    rule_set_version: str
     limit_rule_key: str
+    fee_schedule_version: str
     fee_rule_key: str
     source_provider: str
     fetched_at: datetime
 
 
 class HistoricalFeeRule(BaseModel):
+    fee_schedule_version: str
     fee_rule_key: str
     effective_from: date
     effective_to: date | None = None
@@ -159,13 +189,28 @@ class HistoricalTerminalSettlement(BaseModel):
     provider_mode: str
     instrument_id: str
     effective_date: date
-    settlement_type: str
+    settlement_type: Literal["cash", "conversion"]
     cash_per_share: Decimal | None = None
     conversion_instrument_id: str | None = None
     conversion_ratio: Decimal | None = None
     source_provider: str
     dataset_revision: int
     fetched_at: datetime
+
+    @model_validator(mode="after")
+    def validate_settlement_evidence(self) -> Self:
+        if self.settlement_type == "cash":
+            if self.cash_per_share is None or self.cash_per_share <= 0:
+                raise ValueError("cash settlement requires positive cash_per_share")
+        elif (
+            not self.conversion_instrument_id
+            or self.conversion_ratio is None
+            or self.conversion_ratio <= 0
+        ):
+            raise ValueError(
+                "conversion settlement requires conversion instrument and positive ratio"
+            )
+        return self
 
 
 class HistoricalEvidenceBundle(BaseModel):

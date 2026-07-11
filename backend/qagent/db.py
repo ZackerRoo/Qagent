@@ -1,17 +1,87 @@
 from collections.abc import Generator
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from threading import Lock
 
-from sqlalchemy import create_engine
+from sqlalchemy import DateTime, Numeric, String, create_engine
 from sqlalchemy import event, inspect, text
+from sqlalchemy.engine import Dialect
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.types import TypeDecorator
 
 from qagent.config import get_settings
 
 
 class Base(DeclarativeBase):
     pass
+
+
+class UTCDateTime(TypeDecorator[datetime]):
+    """Persist aware datetimes as UTC and restore aware UTC values on reads."""
+
+    impl = DateTime
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect: Dialect):
+        return dialect.type_descriptor(DateTime(timezone=dialect.name != "sqlite"))
+
+    def process_bind_param(self, value: datetime | None, dialect: Dialect):
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("UTCDateTime requires a timezone-aware datetime")
+        normalized = value.astimezone(timezone.utc)
+        if dialect.name == "sqlite":
+            return normalized.replace(tzinfo=None)
+        return normalized
+
+    def process_result_value(self, value: datetime | None, _dialect: Dialect):
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+
+class SQLiteExactDecimal(TypeDecorator[Decimal]):
+    """Use canonical decimal text on SQLite and native fixed precision elsewhere."""
+
+    impl = Numeric
+    cache_ok = True
+
+    def __init__(self, precision: int, scale: int):
+        self.precision = precision
+        self.scale = scale
+        super().__init__()
+
+    def load_dialect_impl(self, dialect: Dialect):
+        if dialect.name == "sqlite":
+            return dialect.type_descriptor(String(64))
+        return dialect.type_descriptor(Numeric(self.precision, self.scale, asdecimal=True))
+
+    def process_bind_param(self, value: Decimal | int | str | None, dialect: Dialect):
+        if value is None:
+            return None
+        decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
+        if not decimal_value.is_finite():
+            raise ValueError("SQLiteExactDecimal requires a finite value")
+        _, digits, exponent = decimal_value.as_tuple()
+        fractional_digits = max(-exponent, 0)
+        integer_digits = max(len(digits) + exponent, 0)
+        if fractional_digits > self.scale or integer_digits > self.precision - self.scale:
+            raise ValueError(
+                f"decimal value exceeds NUMERIC({self.precision}, {self.scale})"
+            )
+        if dialect.name == "sqlite":
+            return format(decimal_value, "f")
+        return decimal_value
+
+    def process_result_value(self, value, _dialect: Dialect):
+        if value is None:
+            return None
+        return value if isinstance(value, Decimal) else Decimal(str(value))
 
 
 _schema_lock = Lock()

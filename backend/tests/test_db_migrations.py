@@ -97,3 +97,9 @@ def test_initialize_database_adds_adjustment_columns_to_legacy_market_cache(tmp_
     assert market_row == ("legacy-provider", 10.2)
     assert universe_row == ("Legacy Bank", "legacy-catalog")
     assert "historical_replay_universe_members" in inspect(migrated).get_table_names()
+    assert inspect(migrated).get_pk_constraint("historical_trading_rules")[
+        "constrained_columns"
+    ] == ["rule_set_version", "limit_rule_key", "effective_from"]
+    assert inspect(migrated).get_pk_constraint("historical_fee_rules")[
+        "constrained_columns"
+    ] == ["fee_schedule_version", "fee_rule_key", "effective_from", "side"]
