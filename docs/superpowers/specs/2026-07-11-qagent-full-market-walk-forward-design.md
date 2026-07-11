@@ -131,7 +131,7 @@ Backfill fetches raw and adjusted series separately, reconciles dates, and deriv
 
 ## Dataset Completeness and Coverage Policy
 
-Historical absence is meaningful only when the source snapshot is known complete. Add provider-scoped universe snapshot manifests with snapshot date, source revision, status (`ready`, `partial`, `failed`), expected count, stored count, error, and fetched time. Historical universe rows include provider mode and revision. The repository exposes as-of readers for universe, lifecycle, tradability, industry, index membership, fundamentals, and replay bars; aggregate statistics are not used for decisions.
+Historical absence is meaningful only when the source snapshot is known complete. Add provider-scoped universe snapshot manifests with snapshot date, source revision, status (`ready`, `partial`, `failed`), expected count, stored count, error, and fetched time. Persist exact-date replay universe members under provider, snapshot date, source revision, and instrument without changing the incompatible M1 snapshot primary key. Persist per-instrument corporate-action coverage whose status distinguishes `ready`, `ready_none`, `partial`, and `unsupported`. The repository exposes as-of readers for universe, lifecycle, tradability, industry, index membership, fundamentals, actions, and replay bars; aggregate statistics are not used for decisions.
 
 Preflight evaluates every rebalance date and uses the complete provider manifest as the denominator. It blocks the run when any of these conditions fail:
 
@@ -142,6 +142,8 @@ Preflight evaluates every rebalance date and uses the complete provider manifest
 - stock industry coverage is below 95%;
 - stock point-in-time fundamental coverage is below 90%;
 - required benchmark session coverage is below 98%.
+
+`validated_core_v1` owns a minimum 252-XSHG-session research lookback. Backfill includes this warm-up before the first decision date. A later IPO without 252 prior sessions remains in the denominator but is a rule-based `insufficient_lookback` exclusion until mature.
 
 Recent IPOs with fewer than the configured minimum lookback sessions are rule-based exclusions, not missing-data exclusions, but they remain in the denominator and exclusion report. ETF fundamentals and stock-industry classification are not required for ETFs. Missing ETF classification or trading-rule metadata blocks that ETF rather than the whole run unless aggregate bar coverage then falls below 95%.
 
@@ -159,7 +161,8 @@ On each rebalance date:
 4. apply the same no-chase, volatility, data-quality, and risk blockers used by the live scan;
 5. record every included and excluded count by reason;
 6. rank the eligible set through the versioned live recommendation path;
-7. persist the Top 5 and Top 10 selections plus a bounded rejected-candidate audit list.
+7. before creating an order, require `ready` or `ready_none` corporate-action coverage from the decision date through the maximum possible holding date for every selected instrument; `partial` or `unsupported` makes the run `blocked_data`;
+8. persist the Top 5 and Top 10 selections plus a bounded rejected-candidate audit list.
 
 Universe snapshots are never backfilled from today's catalog inside a replay. If the required historical universe is unavailable, the run becomes `blocked_data` and returns a coverage report.
 
@@ -263,7 +266,15 @@ Entitlement is frozen from the position quantity held at the record-date close a
 
 ### Cost sensitivity
 
-The base replay is followed by deterministic low, base, and high cost scenarios using the same ordered selections and market observations. Each scenario independently re-simulates cash, quantities, fills, exits, and later capacity because different costs can change affordable quantity. Scenarios never rerank the universe. Scenario identity is part of every ledger key and result fingerprint.
+The base replay is followed by deterministic low, base, and high cost scenarios using the same ordered selections and market observations. Each scenario independently re-simulates cash, quantities, fills, exits, and later capacity because different costs can change affordable quantity. Scenarios never rerank the universe. Scenario identity and its complete parameters are persisted and included in every ledger key and result fingerprint.
+
+Statutory stamp duty and transfer fees remain unchanged across scenarios. Relative to request base values:
+
+- low: commission bps, minimum commission, and slippage bps are multiplied by `0.5`;
+- base: each uses multiplier `1.0`;
+- high: each uses multiplier `2.0`.
+
+All multiplied monetary/bps values use the canonical Decimal rounding policy. The request may override the three explicit parameter sets, but not leave one implicit.
 
 ## Benchmarks
 
@@ -328,28 +339,28 @@ Add normalized SQLite storage:
 
 ### `walk_forward_orders`
 
-- primary key `order_id`, with unique `(run_id, scenario, variant, decision_date, instrument_id, side, purpose)`;
+- primary key `order_id`, with unique `(run_id, scenario, variant, ledger_window, decision_date, instrument_id, side, purpose)`;
 - intent, lifetime, requested quantity, rank order, status, and skip reason.
 
 ### `walk_forward_events`
 
-- primary key `(run_id, scenario, variant, event_sequence)`;
+- primary key `(run_id, scenario, variant, ledger_window, event_sequence)`;
 - ordered order, fill, skip, fee, corporate-action, and ledger events.
 
 ### `walk_forward_trades`
 
-- primary key `(run_id, scenario, variant, trade_id)`;
+- primary key `(run_id, scenario, variant, ledger_window, trade_id)`;
 - instrument, signal and fill dates, quantities, prices, gross/net P&L, fee components, slippage, and exit reason.
 
 ### `walk_forward_session_checkpoints`
 
-- primary key `(run_id, scenario, variant, trade_date)`;
+- primary key `(run_id, scenario, variant, ledger_window, trade_date)`;
 - atomic end-of-session cash, positions, pending orders, event sequence, and ledger checksum.
 - Recovery resumes after the latest complete session, not only the latest rebalance.
 
 ### `walk_forward_equity_points`
 
-- primary key `(run_id, scenario, variant, trade_date)`;
+- primary key `(run_id, scenario, variant, ledger_window, trade_date)`;
 - cash, market value, gross and net equity, drawdown, turnover;
 - benchmark values and excess values for all required benchmarks.
 
@@ -357,13 +368,13 @@ Repository writes for one session are atomic and idempotent by the keys above. A
 
 ## Determinism and Recovery
 
-Historical writes increment a monotonic `historical_data_revision`. A persisted dataset lease prevents historical backfill or cache replacement while a walk-forward run owns a revision; backfill and replay are mutually exclusive. The engine verifies the revision before every checkpoint and at completion. A changed revision fails the run as an integrity error.
+Historical source writes increment a monotonic `historical_data_revision`. A persisted dataset lease prevents source backfill or cache replacement while a walk-forward run owns a revision; backfill and replay are mutually exclusive. In the same immediate transaction that acquires the revision lease, the owner may begin idempotently materializing exact-date universe rows derived only from that leased lifecycle inventory. These derived rows carry owner and source revision, do not increment the source revision, and may only be written by the lease owner. Recovery by the same run may resume them; another run cannot. The engine verifies the revision before every materialization/checkpoint and at completion. A changed revision fails the run as an integrity error.
 
 The request fingerprint combines normalized configuration, mandatory code/policy/version identifiers, and the leased data revision. Code revision is the Git commit plus a digest generated from a committed replay dependency manifest, or a packaged source digest when Git metadata is unavailable. The manifest covers every replay-affecting source: ranking, factors, strategies, risk gates, providers, universe construction, execution, corporate actions, metrics, temporal splitting, calendars, persistence serialization, schema/migrations, configuration defaults, Python version, and locked dependency versions. It is never optional.
 
 `reuse_key` is the request fingerprint for normal runs and the request fingerprint plus a random force nonce for forced runs. Creation occurs in one SQLite transaction under the unique constraint: concurrent normal requests either insert once or select the existing row. This applies to queued, preflight, running, and succeeded runs; obsolete results cannot be reused after a replay dependency or data revision changes.
 
-All hashes use SHA-256 over UTF-8 canonical JSON: sorted object keys, ISO dates, explicit nulls, fixed-scale decimal strings, and arrays sorted by deterministic semantic order. Before result hashing, records are projected to semantic fields and exclude run id, parent id, UUIDs, database sequence keys, creation/update times, worker/lease metadata, and force nonce. Event identity inside the projection uses deterministic scenario, variant, session, instrument, purpose, side, and local ordinal fields. The result fingerprint covers the full ordered rankings, selections, orders, events, trades, checkpoints, curves, and metrics. Two forced runs with identical evidence and semantics must produce equal result fingerprints.
+All hashes use SHA-256 over UTF-8 canonical JSON: sorted object keys, ISO dates, explicit nulls, fixed-scale decimal strings, and arrays sorted by deterministic semantic order. Before result hashing, records are projected to semantic fields and exclude run id, parent id, UUIDs, database sequence keys, creation/update times, worker/lease metadata, and force nonce. Event identity inside the projection uses deterministic scenario, variant, ledger window (`full`, `train`, `validation`, or `out_of_sample`), session, instrument, purpose, side, and local ordinal fields. The result fingerprint covers the full ordered rankings, selections, orders, events, trades, checkpoints, curves, and metrics. Two forced runs with identical evidence and semantics must produce equal result fingerprints.
 
 Status transitions are `queued -> preflight -> running -> succeeded`, with terminal alternatives `blocked_data`, `failed`, or `cancelled`. In one immediate SQLite transaction, a worker verifies the current historical revision and either inserts a five-minute dataset lease for its run or reenters the unexpired lease already owned by that same run. Another run cannot take the lease. The worker updates heartbeat at least every 30 seconds and after each session.
 
@@ -399,7 +410,7 @@ Returns paginated rebalance decisions and exclusion summaries with `variant`, da
 
 ### `GET /api/walk-forward/runs/{run_id}/trades`
 
-Returns paginated fills, skipped orders, exits, and costs with scenario, variant, instrument, status, date range, `limit` (1-500), and opaque cursor filters.
+Returns paginated fills, skipped orders, exits, and costs with scenario, variant, ledger window, instrument, status, date range, `limit` (1-500), and opaque cursor filters.
 
 ### `POST /api/walk-forward/runs/{run_id}/cancel`
 
