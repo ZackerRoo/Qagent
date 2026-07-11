@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel
-from sqlalchemy import delete, select, text
+from sqlalchemy import select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -62,6 +62,14 @@ class ReplayEvidenceUnavailable(RuntimeError):
     pass
 
 
+class ImmutableRevisionConflict(ValueError):
+    pass
+
+
+class DerivedUniverseOwnershipConflict(ValueError):
+    pass
+
+
 class DatasetLeaseRecord(BaseModel):
     provider_mode: str
     owner_run_id: str
@@ -84,6 +92,7 @@ class UniverseMemberRecord(BaseModel):
     snapshot_date: date
     source_revision: int
     instrument_id: str
+    owner_run_id: str
     security_type: str
     listing_date: date | None
     delisting_date: date | None
@@ -108,7 +117,7 @@ class ReplayEvidenceRepository:
         run_status_lookup: Callable[[str], str | None] | None = None,
     ) -> None:
         self.session_factory = session_factory
-        self.provider_mode = provider_mode.strip().lower()
+        self.provider_mode = _normalize_provider(provider_mode)
         self.owner_run_id = owner_run_id
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._run_status_lookup = run_status_lookup or (lambda _run_id: None)
@@ -124,18 +133,19 @@ class ReplayEvidenceRepository:
         *,
         revision: int | None = None,
     ) -> int:
-        records = {
-            (bar.instrument_id, bar.trade_date): {
+        records = [
+            {
                 **bar.model_dump(exclude={"provider_mode", "dataset_revision"}),
                 "provider_mode": self.provider_mode,
+                "source_provider": _normalize_provider(bar.source_provider),
             }
             for bar in bars
             if self._matches_provider(bar.provider_mode)
-        }
+        ]
         requested = self._model_revision(bars, revision)
         return self._write_source_rows(
             HistoricalReplayBarRow,
-            list(records.values()),
+            records,
             ["provider_mode", "instrument_id", "trade_date"],
             requested,
         )
@@ -146,18 +156,19 @@ class ReplayEvidenceRepository:
         *,
         revision: int | None = None,
     ) -> int:
-        records = {
-            (action.instrument_id, action.action_id): {
+        records = [
+            {
                 **action.model_dump(exclude={"provider_mode", "dataset_revision"}),
                 "provider_mode": self.provider_mode,
+                "source_provider": _normalize_provider(action.source_provider),
             }
             for action in actions
             if self._matches_provider(action.provider_mode)
-        }
+        ]
         requested = self._model_revision(actions, revision)
         return self._write_source_rows(
             HistoricalCorporateActionRow,
-            list(records.values()),
+            records,
             ["provider_mode", "instrument_id", "action_id"],
             requested,
         )
@@ -168,12 +179,12 @@ class ReplayEvidenceRepository:
         *,
         revision: int | None = None,
     ) -> int:
-        records = {
-            (item.instrument_id, item.as_of_date, item.provider or "unknown"): {
+        records = [
+            {
                 "provider_mode": self.provider_mode,
                 "instrument_id": item.instrument_id,
                 "as_of_date": item.as_of_date,
-                "source_provider": item.provider or "unknown",
+                "source_provider": _normalize_provider(item.provider or "unknown"),
                 "revenue_growth_pct": _decimal_or_none(item.revenue_growth_pct),
                 "earnings_growth_pct": _decimal_or_none(item.earnings_growth_pct),
                 "gross_margin_pct": _decimal_or_none(item.gross_margin_pct),
@@ -189,12 +200,13 @@ class ReplayEvidenceRepository:
                 "updated_at": self._now(),
             }
             for item in snapshots
-        }
+        ]
         return self._write_source_rows(
             FundamentalSnapshotRow,
-            list(records.values()),
+            records,
             ["provider_mode", "instrument_id", "as_of_date", "source_provider"],
             revision,
+            ignored_retry_fields={"cached_at", "updated_at"},
         )
 
     def upsert_point_in_time_evidence(
@@ -215,7 +227,7 @@ class ReplayEvidenceRepository:
                         "trading_status": item.trading_status,
                         "is_st": item.is_st,
                         "pct_change_pct": _decimal_or_none(item.pct_change_pct),
-                        "source_provider": item.provider,
+                        "source_provider": _normalize_provider(item.provider),
                         "fetched_at": now,
                     }
                     for item in bundle.tradability
@@ -233,7 +245,7 @@ class ReplayEvidenceRepository:
                         "delisting_date": item.delisting_date,
                         "security_type": item.security_type,
                         "listing_status": item.listing_status,
-                        "source_provider": item.provider,
+                        "source_provider": _normalize_provider(item.provider),
                         "fetched_at": now,
                     }
                     for item in bundle.profiles
@@ -252,7 +264,7 @@ class ReplayEvidenceRepository:
                         "provider_mode": self.provider_mode,
                         "instrument_id": item.instrument_id,
                         "snapshot_date": item.snapshot_date,
-                        "source_provider": item.provider,
+                        "source_provider": _normalize_provider(item.provider),
                         "industry": item.industry,
                         "classification": item.classification,
                         "fetched_at": now,
@@ -270,7 +282,7 @@ class ReplayEvidenceRepository:
                         "snapshot_date": item.snapshot_date,
                         "status": item.status,
                         "member_count": item.member_count,
-                        "source_provider": item.provider,
+                        "source_provider": _normalize_provider(item.provider),
                         "error": item.error,
                         "fetched_at": now,
                     }
@@ -286,7 +298,7 @@ class ReplayEvidenceRepository:
                         "index_id": item.index_id,
                         "snapshot_date": item.snapshot_date,
                         "instrument_id": item.instrument_id,
-                        "source_provider": item.provider,
+                        "source_provider": _normalize_provider(item.provider),
                         "fetched_at": now,
                     }
                     for item in bundle.index_memberships
@@ -295,7 +307,7 @@ class ReplayEvidenceRepository:
             ),
         ]
         with self._immediate_session() as session:
-            write_revision = self._prepare_source_write(session, revision)
+            write_revision, is_retry = self._prepare_source_write(session, revision)
             result: dict[str, int] = {}
             names = [
                 "tradability",
@@ -308,7 +320,17 @@ class ReplayEvidenceRepository:
                 for record in records:
                     record["dataset_revision"] = write_revision
                 deduplicated = _deduplicate(records, keys)
-                _upsert_chunks(session, model, deduplicated, keys)
+                if is_retry:
+                    _verify_immutable_rows(
+                        session,
+                        model,
+                        deduplicated,
+                        keys,
+                        write_revision,
+                        ignored_fields={"fetched_at"},
+                    )
+                else:
+                    _upsert_chunks(session, model, deduplicated, keys)
                 result[name] = len(deduplicated)
             return result
 
@@ -317,7 +339,7 @@ class ReplayEvidenceRepository:
         profiles: Sequence[HistoricalInstrumentProfile],
         manifest: HistoricalLifecycleManifest,
     ) -> int:
-        if manifest.provider_mode.strip().lower() != self.provider_mode:
+        if _normalize_provider(manifest.provider_mode) != self.provider_mode:
             raise ValueError("lifecycle manifest provider does not match repository")
         records = [
             {
@@ -328,13 +350,13 @@ class ReplayEvidenceRepository:
                 "delisting_date": item.delisting_date,
                 "security_type": item.security_type,
                 "listing_status": item.listing_status,
-                "source_provider": item.provider,
+                "source_provider": _normalize_provider(item.provider),
                 "fetched_at": manifest.fetched_at,
             }
             for item in profiles
         ]
         with self._immediate_session() as session:
-            write_revision = self._prepare_source_write(
+            write_revision, is_retry = self._prepare_source_write(
                 session, manifest.source_revision
             )
             for record in records:
@@ -346,18 +368,40 @@ class ReplayEvidenceRepository:
                 "dataset_revision",
             ]
             deduplicated = _deduplicate(records, profile_keys)
-            _upsert_chunks(
-                session,
-                HistoricalInstrumentProfileRow,
-                deduplicated,
-                profile_keys,
-            )
-            _upsert_chunks(
-                session,
-                HistoricalLifecycleManifestRow,
-                [manifest.model_dump()],
-                ["provider_mode", "source_revision"],
-            )
+            manifest_records = [
+                {
+                    **manifest.model_dump(exclude={"provider_mode"}),
+                    "provider_mode": self.provider_mode,
+                }
+            ]
+            if is_retry:
+                _verify_immutable_rows(
+                    session,
+                    HistoricalInstrumentProfileRow,
+                    deduplicated,
+                    profile_keys,
+                    write_revision,
+                )
+                _verify_immutable_rows(
+                    session,
+                    HistoricalLifecycleManifestRow,
+                    manifest_records,
+                    ["provider_mode", "source_revision"],
+                    write_revision,
+                )
+            else:
+                _upsert_chunks(
+                    session,
+                    HistoricalInstrumentProfileRow,
+                    deduplicated,
+                    profile_keys,
+                )
+                _upsert_chunks(
+                    session,
+                    HistoricalLifecycleManifestRow,
+                    manifest_records,
+                    ["provider_mode", "source_revision"],
+                )
         return len(deduplicated)
 
     def upsert_action_coverage(
@@ -371,6 +415,7 @@ class ReplayEvidenceRepository:
             {
                 "provider_mode": self.provider_mode,
                 **item.model_dump(),
+                "source_provider": _normalize_provider(item.source_provider),
                 "fetched_at": now,
             }
             for item in coverage
@@ -380,6 +425,7 @@ class ReplayEvidenceRepository:
             records,
             ["provider_mode", "instrument_id", "start_date", "end_date"],
             revision,
+            ignored_retry_fields={"fetched_at"},
         )
 
     def replay_bars(
@@ -589,14 +635,60 @@ class ReplayEvidenceRepository:
         revision: int,
     ) -> UniverseMaterialization:
         owner_run_id = self._require_owner()
-        now = self._now()
         with self._immediate_session() as session:
             self._verify_leased_revision(session, owner_run_id, revision)
             inventory = self._lifecycle_inventory(session, revision, decision_date)
+            missing_listing_dates = [
+                item.instrument_id for item in inventory if item.listing_date is None
+            ]
+            if missing_listing_dates:
+                raise ReplayEvidenceUnavailable(
+                    "lifecycle identity is incomplete; listing_date is missing for "
+                    + ", ".join(missing_listing_dates[:10])
+                )
+            missing_security_types = [
+                item.instrument_id for item in inventory if item.security_type is None
+            ]
+            if missing_security_types:
+                raise ReplayEvidenceUnavailable(
+                    "lifecycle identity is incomplete; security_type is missing for "
+                    + ", ".join(missing_security_types[:10])
+                )
+            identity = (self.provider_mode, decision_date, revision)
+            existing_manifest = session.get(HistoricalUniverseManifestRow, identity)
+            existing_members = list(
+                session.scalars(
+                    select(HistoricalReplayUniverseMemberRow)
+                    .where(
+                        HistoricalReplayUniverseMemberRow.provider_mode
+                        == self.provider_mode,
+                        HistoricalReplayUniverseMemberRow.snapshot_date
+                        == decision_date,
+                        HistoricalReplayUniverseMemberRow.source_revision == revision,
+                    )
+                    .order_by(HistoricalReplayUniverseMemberRow.instrument_id)
+                )
+            )
+            if (
+                existing_manifest is not None
+                and existing_manifest.owner_run_id != owner_run_id
+            ):
+                raise DerivedUniverseOwnershipConflict(
+                    f"derived universe is owned by {existing_manifest.owner_run_id}"
+                )
+            if existing_manifest is None and existing_members:
+                raise ReplayEvidenceUnavailable(
+                    "derived universe members exist without their manifest"
+                )
+            fetched_at = (
+                _as_utc_datetime(existing_manifest.fetched_at)
+                if existing_manifest is not None
+                else self._now()
+            )
             active = [
                 item
                 for item in inventory
-                if (item.listing_date is None or item.listing_date <= decision_date)
+                if item.listing_date <= decision_date
                 and (item.delisting_date is None or item.delisting_date > decision_date)
             ]
             records = [
@@ -605,45 +697,66 @@ class ReplayEvidenceRepository:
                     "snapshot_date": decision_date,
                     "source_revision": revision,
                     "instrument_id": item.instrument_id,
-                    "security_type": item.security_type or "unknown",
+                    "owner_run_id": owner_run_id,
+                    "security_type": item.security_type,
                     "listing_date": item.listing_date,
                     "delisting_date": item.delisting_date,
                     "active": True,
-                    "source_provider": item.provider,
-                    "fetched_at": now,
+                    "source_provider": _normalize_provider(item.provider),
+                    "fetched_at": fetched_at,
                 }
                 for item in active
             ]
-            session.execute(
-                delete(HistoricalReplayUniverseMemberRow).where(
-                    HistoricalReplayUniverseMemberRow.provider_mode
-                    == self.provider_mode,
-                    HistoricalReplayUniverseMemberRow.snapshot_date == decision_date,
-                    HistoricalReplayUniverseMemberRow.source_revision == revision,
-                )
-            )
-            _upsert_chunks(
-                session,
-                HistoricalReplayUniverseMemberRow,
-                records,
-                ["provider_mode", "snapshot_date", "source_revision", "instrument_id"],
-            )
             manifest_record = {
                 "provider_mode": self.provider_mode,
                 "snapshot_date": decision_date,
                 "source_revision": revision,
+                "owner_run_id": owner_run_id,
                 "status": "ready",
                 "expected_count": len(records),
                 "stored_count": len(records),
                 "error": None,
-                "fetched_at": now,
+                "fetched_at": fetched_at,
             }
-            _upsert_chunks(
-                session,
-                HistoricalUniverseManifestRow,
-                [manifest_record],
-                ["provider_mode", "snapshot_date", "source_revision"],
-            )
+            member_keys = [
+                "provider_mode",
+                "snapshot_date",
+                "source_revision",
+                "instrument_id",
+            ]
+            manifest_keys = ["provider_mode", "snapshot_date", "source_revision"]
+            if existing_manifest is not None:
+                if len(existing_members) != len(records):
+                    raise ImmutableRevisionConflict(
+                        "derived universe revision is immutable; member set differs"
+                    )
+                _verify_immutable_rows(
+                    session,
+                    HistoricalReplayUniverseMemberRow,
+                    records,
+                    member_keys,
+                    revision,
+                )
+                _verify_immutable_rows(
+                    session,
+                    HistoricalUniverseManifestRow,
+                    [manifest_record],
+                    manifest_keys,
+                    revision,
+                )
+            else:
+                _upsert_chunks(
+                    session,
+                    HistoricalReplayUniverseMemberRow,
+                    records,
+                    member_keys,
+                )
+                _upsert_chunks(
+                    session,
+                    HistoricalUniverseManifestRow,
+                    [manifest_record],
+                    manifest_keys,
+                )
         return UniverseMaterialization(
             manifest=HistoricalUniverseManifest(**manifest_record),
             members=[UniverseMemberRecord(**record) for record in records],
@@ -793,18 +906,32 @@ class ReplayEvidenceRepository:
         records: list[dict[str, object]],
         index_elements: list[str],
         revision: int | None,
+        *,
+        ignored_retry_fields: set[str] | None = None,
     ) -> int:
         if not records:
             return 0
         deduplicated = _deduplicate(records, index_elements)
         with self._immediate_session() as session:
-            write_revision = self._prepare_source_write(session, revision)
+            write_revision, is_retry = self._prepare_source_write(session, revision)
             for record in deduplicated:
                 record["dataset_revision"] = write_revision
-            _upsert_chunks(session, model, deduplicated, index_elements)
+            if is_retry:
+                _verify_immutable_rows(
+                    session,
+                    model,
+                    deduplicated,
+                    index_elements,
+                    write_revision,
+                    ignored_fields=ignored_retry_fields,
+                )
+            else:
+                _upsert_chunks(session, model, deduplicated, index_elements)
         return len(deduplicated)
 
-    def _prepare_source_write(self, session: Session, revision: int | None) -> int:
+    def _prepare_source_write(
+        self, session: Session, revision: int | None
+    ) -> tuple[int, bool]:
         lease = session.get(HistoricalDatasetLeaseRow, self.provider_mode)
         if lease is not None:
             raise SourceWriteBlocked(
@@ -817,10 +944,11 @@ class ReplayEvidenceRepository:
                 f"historical revision must be monotonic: current={row.revision}, "
                 f"requested={write_revision}"
             )
+        is_retry = write_revision == row.revision
         if write_revision > row.revision:
             row.revision = write_revision
             row.updated_at = self._now()
-        return write_revision
+        return write_revision, is_retry
 
     def _revision_row(self, session: Session) -> HistoricalDataRevisionRow:
         row = session.get(HistoricalDataRevisionRow, self.provider_mode)
@@ -924,7 +1052,7 @@ class ReplayEvidenceRepository:
         ]
 
     def _matches_provider(self, provider_mode: str) -> bool:
-        if provider_mode.strip().lower() != self.provider_mode:
+        if _normalize_provider(provider_mode) != self.provider_mode:
             raise ValueError("evidence provider does not match repository")
         return True
 
@@ -988,8 +1116,63 @@ def _deduplicate(
     deduplicated: dict[tuple[object, ...], dict[str, object]] = {}
     for record in records:
         key = tuple(record[column] for column in index_elements)
+        if key in deduplicated and not _records_match(deduplicated[key], record):
+            raise ImmutableRevisionConflict(
+                "source identity is immutable; duplicate batch payload differs"
+            )
         deduplicated[key] = record
     return list(deduplicated.values())
+
+
+def _records_match(
+    first: dict[str, object], second: dict[str, object]
+) -> bool:
+    if first.keys() != second.keys():
+        return False
+    return all(
+        _canonical_value(first[key]) == _canonical_value(second[key]) for key in first
+    )
+
+
+def _verify_immutable_rows(
+    session: Session,
+    model,
+    records: list[dict[str, object]],
+    index_elements: list[str],
+    revision: int,
+    *,
+    ignored_fields: set[str] | None = None,
+) -> None:
+    ignored = ignored_fields or set()
+    for record in records:
+        row = session.scalar(
+            select(model).where(
+                *(getattr(model, key) == record[key] for key in index_elements)
+            )
+        )
+        if row is None:
+            raise ImmutableRevisionConflict(
+                f"revision {revision} is immutable; identity does not exist"
+            )
+        for key, incoming in record.items():
+            if key in ignored:
+                continue
+            if _canonical_value(getattr(row, key)) != _canonical_value(incoming):
+                raise ImmutableRevisionConflict(
+                    f"revision {revision} is immutable; payload differs for {key}"
+                )
+
+
+def _canonical_value(value: object) -> object:
+    if isinstance(value, datetime):
+        return _as_utc_datetime(value)
+    return value
+
+
+def _as_utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _row_dict(row) -> dict[str, object]:
@@ -1027,3 +1210,7 @@ def _lease_from_row(row: HistoricalDatasetLeaseRow) -> DatasetLeaseRecord:
 
 def _decimal_or_none(value: object) -> Decimal | None:
     return None if value is None else Decimal(str(value))
+
+
+def _normalize_provider(value: str) -> str:
+    return value.strip().lower()

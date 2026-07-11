@@ -102,6 +102,7 @@ EXPECTED_TABLE_COLUMNS = {
         "provider_mode",
         "snapshot_date",
         "source_revision",
+        "owner_run_id",
         "status",
         "expected_count",
         "stored_count",
@@ -113,6 +114,7 @@ EXPECTED_TABLE_COLUMNS = {
         "snapshot_date",
         "source_revision",
         "instrument_id",
+        "owner_run_id",
         "security_type",
         "listing_date",
         "delisting_date",
@@ -290,6 +292,7 @@ def test_replay_models_preserve_decimal_and_evidence_metadata():
         provider_mode="free",
         snapshot_date=date(2025, 1, 2),
         source_revision=7,
+        owner_run_id="run-a",
         status="ready",
         expected_count=1,
         stored_count=1,
@@ -370,6 +373,7 @@ def test_replay_models_preserve_decimal_and_evidence_metadata():
     assert isinstance(corporate_action.cash_per_share, Decimal)
     assert isinstance(corporate_action.ex_right_reference_price, Decimal)
     assert universe_manifest.source_revision == 7
+    assert universe_manifest.owner_run_id == "run-a"
     assert lifecycle_manifest.effective_through == date(2025, 1, 2)
     assert isinstance(trading_rule.limit_pct, Decimal)
     assert isinstance(trading_rule.tick_size, Decimal)
@@ -698,6 +702,14 @@ def test_schema_declares_financial_types_nullability_indexes_and_constraints(tmp
         column["name"]: column
         for column in inspector.get_columns("historical_dataset_leases")
     }
+    manifest_columns = {
+        column["name"]: column
+        for column in inspector.get_columns("historical_universe_manifests")
+    }
+    universe_member_columns = {
+        column["name"]: column
+        for column in inspector.get_columns("historical_replay_universe_members")
+    }
 
     assert isinstance(replay_columns["raw_close"]["type"], BigInteger)
     assert isinstance(replay_columns["volume"]["type"], BigInteger)
@@ -721,6 +733,8 @@ def test_schema_declares_financial_types_nullability_indexes_and_constraints(tmp
     assert action_columns["cash_per_share"]["nullable"] is True
     assert lease_columns["lease_expires_at"]["nullable"] is False
     assert lease_columns["heartbeat_at"]["nullable"] is False
+    assert manifest_columns["owner_run_id"]["nullable"] is False
+    assert universe_member_columns["owner_run_id"]["nullable"] is False
 
     expected_indexes = {
         "historical_replay_bars": {

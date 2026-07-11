@@ -28,8 +28,10 @@ from qagent.storage.repository import QagentRepository
 from qagent.storage.tables import (
     HistoricalCorporateActionRow,
     HistoricalDataRevisionRow,
+    HistoricalLifecycleManifestRow,
     HistoricalReplayBarRow,
     HistoricalReplayUniverseMemberRow,
+    HistoricalTradabilityRow,
 )
 from qagent.strategy_data.models import FundamentalSnapshot
 
@@ -93,7 +95,9 @@ def _bar(*, revision: int = 1, close: str = "10.25") -> HistoricalReplayBar:
     )
 
 
-def _action(*, revision: int = 1) -> HistoricalCorporateAction:
+def _action(
+    *, revision: int = 1, cash_per_share: str = "0.25"
+) -> HistoricalCorporateAction:
     return HistoricalCorporateAction(
         provider_mode="free",
         instrument_id="CN:000001",
@@ -104,7 +108,7 @@ def _action(*, revision: int = 1) -> HistoricalCorporateAction:
         effective_date=date(2025, 1, 3),
         payable_date=date(2025, 1, 10),
         action_type="cash_dividend",
-        cash_per_share=Decimal("0.25"),
+        cash_per_share=Decimal(cash_per_share),
         source_provider="fixture",
         dataset_revision=revision,
         fetched_at=datetime(2024, 12, 20, 9, 0, tzinfo=timezone.utc),
@@ -114,9 +118,9 @@ def _action(*, revision: int = 1) -> HistoricalCorporateAction:
 def _profile(
     instrument_id: str,
     *,
-    listing_date: date = date(2020, 1, 1),
+    listing_date: date | None = date(2020, 1, 1),
     delisting_date: date | None = None,
-    security_type: str = "1",
+    security_type: str | None = "1",
 ) -> HistoricalInstrumentProfile:
     return HistoricalInstrumentProfile(
         instrument_id=instrument_id,
@@ -164,6 +168,101 @@ def test_bar_and_action_upserts_are_idempotent(storage):
     assert repo.replay_bars(
         ["CN:000001"], date(2025, 1, 1), date(2025, 1, 3), 2
     )[0].raw_close == Decimal("10.25000000")
+
+
+def test_same_revision_bar_payload_is_immutable(storage):
+    _, _, _, make_repo = storage
+    repo = make_repo()
+    repo.upsert_replay_bars([_bar(close="10")], revision=1)
+
+    with pytest.raises(ValueError, match="immutable"):
+        repo.upsert_replay_bars([_bar(close="11")], revision=1)
+
+    stored = repo.replay_bars(
+        ["CN:000001"], date(2025, 1, 2), date(2025, 1, 2), revision=1
+    )
+    assert stored[0].raw_close == Decimal("10.00000000")
+
+
+def test_conflicting_duplicate_identity_in_one_source_batch_is_rejected(storage):
+    session_factory, _, _, make_repo = storage
+    repo = make_repo()
+
+    with pytest.raises(ValueError, match="immutable"):
+        repo.upsert_replay_bars(
+            [_bar(close="10"), _bar(close="11")], revision=1
+        )
+
+    assert repo.current_revision() == 0
+    with session_factory() as session:
+        assert session.scalar(
+            select(func.count()).select_from(HistoricalReplayBarRow)
+        ) == 0
+
+
+def test_same_revision_action_payload_is_immutable(storage):
+    session_factory, _, _, make_repo = storage
+    repo = make_repo()
+    repo.upsert_corporate_actions([_action(cash_per_share="0.25")], revision=1)
+
+    with pytest.raises(ValueError, match="immutable"):
+        repo.upsert_corporate_actions(
+            [_action(cash_per_share="0.30")], revision=1
+        )
+
+    with session_factory() as session:
+        stored = session.scalar(select(HistoricalCorporateActionRow))
+    assert stored is not None
+    assert stored.cash_per_share == Decimal("0.25000000")
+
+
+def test_same_revision_generic_source_payload_is_immutable(storage):
+    _, _, _, make_repo = storage
+    repo = make_repo()
+    first = HistoricalEvidenceBundle(
+        tradability=[
+            HistoricalTradabilityPoint(
+                instrument_id="CN:000001",
+                trade_date=date(2025, 1, 2),
+                trading_status="trading",
+                provider="fixture",
+            )
+        ]
+    )
+    conflicting = first.model_copy(deep=True)
+    conflicting.tradability[0].trading_status = "suspended"
+    repo.upsert_point_in_time_evidence(first, revision=1)
+
+    with pytest.raises(ValueError, match="immutable"):
+        repo.upsert_point_in_time_evidence(conflicting, revision=1)
+
+    stored = repo.tradability_on(["CN:000001"], date(2025, 1, 2), revision=1)
+    assert stored["CN:000001"].trading_status == "trading"
+
+
+def test_same_revision_identical_generic_payload_is_idempotent(storage):
+    session_factory, clock, _, make_repo = storage
+    repo = make_repo()
+    bundle = HistoricalEvidenceBundle(
+        tradability=[
+            HistoricalTradabilityPoint(
+                instrument_id="CN:000001",
+                trade_date=date(2025, 1, 2),
+                trading_status="trading",
+                provider="fixture",
+            )
+        ]
+    )
+    repo.upsert_point_in_time_evidence(bundle, revision=1)
+    with session_factory() as session:
+        first_fetched_at = session.scalar(select(HistoricalTradabilityRow.fetched_at))
+    clock.advance(timedelta(minutes=1))
+
+    assert repo.upsert_point_in_time_evidence(bundle, revision=1)["tradability"] == 1
+
+    with session_factory() as session:
+        retried_fetched_at = session.scalar(select(HistoricalTradabilityRow.fetched_at))
+    assert retried_fetched_at == first_fetched_at
 
 
 def test_fundamental_as_of_never_returns_future_snapshot(storage):
@@ -458,6 +557,45 @@ def test_revisions_are_monotonic(storage):
     assert repo.current_revision() == 1
 
 
+def test_provider_identity_is_normalized_before_persistence_and_reads(storage):
+    session_factory, _, _, make_repo = storage
+    padded = make_repo(" FREE ")
+    padded.upsert_replay_bars(
+        [
+            _bar().model_copy(
+                update={
+                    "provider_mode": " FREE ",
+                    "source_provider": " FIXTURE ",
+                }
+            )
+        ],
+        revision=1,
+    )
+    padded.upsert_lifecycle_inventory(
+        [_profile("CN:000001")], _lifecycle_manifest(" FREE ", 2, 1)
+    )
+
+    normalized = make_repo("free")
+
+    assert normalized.replay_bars(
+        ["CN:000001"], date(2025, 1, 2), date(2025, 1, 2), revision=2
+    )
+    assert [item.instrument_id for item in normalized.lifecycle_inventory(2)] == [
+        "CN:000001"
+    ]
+    with session_factory() as session:
+        identities = {
+            session.scalar(select(HistoricalDataRevisionRow.provider_mode)),
+            session.scalar(select(HistoricalReplayBarRow.provider_mode)),
+            session.scalar(select(HistoricalLifecycleManifestRow.provider_mode)),
+        }
+        source_provider = session.scalar(
+            select(HistoricalReplayBarRow.source_provider)
+        )
+    assert identities == {"free"}
+    assert source_provider == "fixture"
+
+
 def test_source_writes_are_forbidden_under_an_active_lease(storage):
     _, _, _, make_repo = storage
     owner = make_repo(owner_run_id="run-a")
@@ -607,6 +745,53 @@ def test_nonowner_cannot_materialize_universe_under_lease(storage):
         )
 
 
+def test_derived_universe_owner_persists_after_lease_release(storage):
+    session_factory, _, _, make_repo = storage
+    source = make_repo()
+    source.upsert_lifecycle_inventory(
+        [_profile("CN:000001")], _lifecycle_manifest("free", 1, 1)
+    )
+    run_a = make_repo(owner_run_id="run-a")
+    run_a.acquire_dataset_lease()
+    run_a.materialize_universe(date(2025, 6, 30), revision=1)
+    run_a.release_dataset_lease()
+    run_b = make_repo(owner_run_id="run-b")
+    run_b.acquire_dataset_lease()
+
+    with pytest.raises(ValueError, match="owned by run-a"):
+        run_b.materialize_universe(date(2025, 6, 30), revision=1)
+
+    with session_factory() as session:
+        member = session.scalar(select(HistoricalReplayUniverseMemberRow))
+    assert member is not None
+    assert member.owner_run_id == "run-a"
+
+
+def test_same_owner_universe_materialization_is_strictly_idempotent(storage):
+    session_factory, clock, _, make_repo = storage
+    source = make_repo()
+    source.upsert_lifecycle_inventory(
+        [_profile("CN:000001")], _lifecycle_manifest("free", 1, 1)
+    )
+    owner = make_repo(owner_run_id="run-a")
+    owner.acquire_dataset_lease()
+    first = owner.materialize_universe(date(2025, 6, 30), revision=1)
+    with session_factory() as session:
+        first_fetched_at = session.scalar(
+            select(HistoricalReplayUniverseMemberRow.fetched_at)
+        )
+    clock.advance(timedelta(seconds=30))
+
+    second = owner.materialize_universe(date(2025, 6, 30), revision=1)
+
+    assert second == first
+    with session_factory() as session:
+        member = session.scalar(select(HistoricalReplayUniverseMemberRow))
+    assert member is not None
+    assert member.owner_run_id == "run-a"
+    assert member.fetched_at == first_fetched_at
+
+
 def test_materialize_universe_rejects_missing_lifecycle_inventory(storage):
     _, _, _, make_repo = storage
     owner = make_repo(owner_run_id="run-a")
@@ -614,3 +799,112 @@ def test_materialize_universe_rejects_missing_lifecycle_inventory(storage):
 
     with pytest.raises(ReplayEvidenceUnavailable, match="lifecycle"):
         owner.materialize_universe(date(2025, 6, 30), revision=0)
+
+
+def test_materialize_universe_rejects_unknown_listing_date(storage):
+    session_factory, _, _, make_repo = storage
+    source = make_repo()
+    source.upsert_lifecycle_inventory(
+        [_profile("CN:000001", listing_date=None)],
+        _lifecycle_manifest("free", 1, 1),
+    )
+    owner = make_repo(owner_run_id="run-a")
+    owner.acquire_dataset_lease()
+
+    with pytest.raises(ReplayEvidenceUnavailable, match="listing_date"):
+        owner.materialize_universe(date(2025, 6, 30), revision=1)
+
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(
+            HistoricalReplayUniverseMemberRow
+        )) == 0
+
+
+def test_materialize_universe_rejects_unknown_security_type(storage):
+    _, _, _, make_repo = storage
+    source = make_repo()
+    source.upsert_lifecycle_inventory(
+        [_profile("CN:000001", security_type=None)],
+        _lifecycle_manifest("free", 1, 1),
+    )
+    owner = make_repo(owner_run_id="run-a")
+    owner.acquire_dataset_lease()
+
+    with pytest.raises(ReplayEvidenceUnavailable, match="security_type"):
+        owner.materialize_universe(date(2025, 6, 30), revision=1)
+
+
+def test_legacy_derived_universe_rows_receive_explicit_owner(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'legacy-derived-universe.db'}"
+    engine = create_db_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE historical_universe_manifests (
+                    provider_mode VARCHAR(32) NOT NULL,
+                    snapshot_date DATE NOT NULL,
+                    source_revision INTEGER NOT NULL,
+                    status VARCHAR(32) NOT NULL,
+                    expected_count INTEGER,
+                    stored_count INTEGER NOT NULL,
+                    error TEXT,
+                    fetched_at DATETIME NOT NULL,
+                    PRIMARY KEY (provider_mode, snapshot_date, source_revision)
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE historical_replay_universe_members (
+                    provider_mode VARCHAR(32) NOT NULL,
+                    snapshot_date DATE NOT NULL,
+                    source_revision INTEGER NOT NULL,
+                    instrument_id VARCHAR(32) NOT NULL,
+                    security_type VARCHAR(32) NOT NULL,
+                    listing_date DATE,
+                    delisting_date DATE,
+                    active BOOLEAN NOT NULL,
+                    source_provider VARCHAR(64) NOT NULL,
+                    fetched_at DATETIME NOT NULL,
+                    PRIMARY KEY (
+                        provider_mode, snapshot_date, source_revision, instrument_id
+                    )
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO historical_universe_manifests VALUES (
+                    'free', '2025-06-30', 1, 'ready', 1, 1, NULL,
+                    '2025-06-30 08:00:00'
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO historical_replay_universe_members VALUES (
+                    'free', '2025-06-30', 1, 'CN:000001', '1', '2020-01-01',
+                    NULL, 1, 'legacy', '2025-06-30 08:00:00'
+                )
+                """
+            )
+        )
+
+    migrated = initialize_database(database_url)
+
+    with migrated.connect() as connection:
+        manifest_owner = connection.execute(
+            text("SELECT owner_run_id FROM historical_universe_manifests")
+        ).scalar_one()
+        member_owner = connection.execute(
+            text("SELECT owner_run_id FROM historical_replay_universe_members")
+        ).scalar_one()
+    assert manifest_owner == "legacy-unknown-owner"
+    assert member_owner == "legacy-unknown-owner"

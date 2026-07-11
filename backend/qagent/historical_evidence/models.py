@@ -113,6 +113,7 @@ class HistoricalUniverseManifest(BaseModel):
     provider_mode: str
     snapshot_date: date
     source_revision: int
+    owner_run_id: str
     status: str
     expected_count: int | None = None
     stored_count: int

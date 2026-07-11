@@ -166,6 +166,20 @@ def _apply_additive_migrations(engine: Engine) -> None:
                 table_name,
                 {"dataset_revision": "INTEGER NOT NULL DEFAULT 0"},
             )
+        for table_name in (
+            "historical_universe_manifests",
+            "historical_replay_universe_members",
+        ):
+            _add_missing_columns(
+                connection,
+                inspector,
+                table_name,
+                {
+                    "owner_run_id": (
+                        "VARCHAR(64) NOT NULL DEFAULT 'legacy-unknown-owner'"
+                    )
+                },
+            )
         _rebuild_revision_scoped_lifecycle_profiles(connection)
 
 

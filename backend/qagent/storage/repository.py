@@ -611,7 +611,17 @@ class QagentRepository:
         provider_mode: str,
         snapshots: list[FundamentalSnapshot],
     ) -> int:
-        return self.replay_evidence(provider_mode).upsert_fundamentals(snapshots)
+        deduplicated = {
+            (
+                snapshot.instrument_id,
+                snapshot.as_of_date,
+                (snapshot.provider or "unknown").strip().lower(),
+            ): snapshot
+            for snapshot in snapshots
+        }
+        return self.replay_evidence(provider_mode).upsert_fundamentals(
+            list(deduplicated.values())
+        )
 
     def list_fundamental_snapshots(
         self,
