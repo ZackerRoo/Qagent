@@ -3001,6 +3001,7 @@ def start_full_market_batch_scan(
     _validate_full_market_batch_scan_params(batch_size, max_symbols)
     repo = _repo()
     latest = repo.get_latest_full_market_scan_job(provider=mode)
+    latest = _reset_abandoned_full_market_job(repo, latest)
     if latest and latest.status in {"queued", "running"} and not force_restart:
         return _full_market_job_payload(latest)
 
@@ -3093,9 +3094,11 @@ def _historical_backfill_job_payload(job) -> dict[str, object]:
 
 @router.get("/full-market/batch-scan/latest")
 def latest_full_market_batch_scan(provider: str = "free") -> dict[str, object]:
-    job = _repo().get_latest_full_market_scan_job(provider=provider.strip().lower())
+    repo = _repo()
+    job = repo.get_latest_full_market_scan_job(provider=provider.strip().lower())
     if job is None:
         raise HTTPException(status_code=404, detail="full-market batch scan not found")
+    job = _reset_abandoned_full_market_job(repo, job)
     return _full_market_job_payload(job)
 
 
@@ -3104,8 +3107,11 @@ def latest_full_market_batch_scan_result(
     provider: str = "free",
     include_etfs: bool = True,
     cache_ttl_minutes: int = 7 * 24 * 60,
+    limit: int = 30,
 ) -> dict[str, object]:
     _validate_scan_cache_ttl(cache_ttl_minutes)
+    if limit <= 0 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
     mode = provider.strip().lower()
     repo = _repo()
     cached = repo.get_recent_scan_result_cache(
@@ -3115,12 +3121,32 @@ def latest_full_market_batch_scan_result(
     if cached is None:
         raise HTTPException(status_code=404, detail="full-market batch result not found")
     payload = deepcopy(cached.payload)
+    if isinstance(payload.get("cards"), list):
+        payload["cards"] = payload["cards"][:limit]
     _hydrate_full_market_batch_payload(payload, repo, mode, cache_ttl_minutes)
     data_health = payload.setdefault("data_health", {})
     if isinstance(data_health, dict):
         data_health["scan_result_cache"] = "hit"
         data_health["scan_result_cache_id"] = cached.cache_id
     return payload
+
+
+def _reset_abandoned_full_market_job(repo: QagentRepository, job):
+    if job is None or job.status not in {"queued", "running"}:
+        return job
+    updated_at = _as_utc_datetime(job.updated_at)
+    if datetime.now(timezone.utc) - updated_at <= timedelta(hours=4):
+        return job
+    return repo.update_full_market_scan_job(
+        job.job_id,
+        status="failed",
+        message="Stale full-market scan released after four hours without progress",
+        data_health={
+            **job.data_health,
+            "full_market_stale_reset": "true",
+            "full_market_stale_reset_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
 
 
 @router.get("/full-market/batch-scan/{job_id}")
@@ -3401,6 +3427,48 @@ def _recent_full_market_scan_payload(
         _attach_operational_readiness_payload(payload)
         _attach_alpha_quality_payload(payload)
         _attach_research_center_payload(payload)
+        return payload
+
+    repo = _repo()
+    batch_cached = repo.get_recent_scan_result_cache(
+        cache_key=full_market_batch_cache_key(mode, include_etfs),
+        max_age=timedelta(minutes=cache_ttl_minutes),
+    )
+    if batch_cached is not None:
+        payload = deepcopy(batch_cached.payload)
+        raw_cards = payload.get("cards")
+        if isinstance(raw_cards, list):
+            payload["cards"] = raw_cards[:max_symbols]
+        selected_symbols = list(
+            dict.fromkeys(
+                str(card.get("instrument_id"))
+                for card in payload.get("cards", [])
+                if isinstance(card, dict) and card.get("instrument_id")
+            )
+        )
+        selected_ids = set(selected_symbols)
+        payload["symbols"] = selected_symbols
+        raw_items = payload.get("items")
+        if isinstance(raw_items, list):
+            payload["items"] = [
+                item
+                for item in raw_items
+                if isinstance(item, dict) and item.get("instrument_id") in selected_ids
+            ]
+        _hydrate_full_market_batch_payload(payload, repo, mode, cache_ttl_minutes)
+        data_health = payload.setdefault("data_health", {})
+        if isinstance(data_health, dict):
+            data_health["scan_result_cache"] = "full_market_batch_fallback"
+            data_health["scan_result_cache_key"] = cache_key
+            data_health["scan_result_cache_id"] = batch_cached.cache_id
+            data_health["full_market_requested"] = str(max_symbols)
+        repo.save_scan_result_cache(
+            cache_key=cache_key,
+            provider=mode,
+            mode="today_scan_fallback",
+            symbols=[str(symbol) for symbol in payload.get("symbols", [])],
+            payload=payload,
+        )
         return payload
 
     payload = _recent_scan_run_fallback_payload(

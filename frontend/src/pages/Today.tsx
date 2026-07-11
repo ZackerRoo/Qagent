@@ -1244,7 +1244,7 @@ function SignalCommandCenter({
             {t("today.includeEtfs")}
           </label>
           <button className="icon-action" type="button" onClick={onRefresh} disabled={activeScan}>
-            {activeScan ? t("common.running") : t("today.rescan")}
+            {activeScan ? t("common.refreshing") : t("today.rescan")}
           </button>
           <button
             className="icon-action secondary"
@@ -1252,7 +1252,7 @@ function SignalCommandCenter({
             onClick={onStartFullScan}
             disabled={activeFullScan}
           >
-            {activeFullScan ? t("common.running") : t("today.fullScanStart")}
+            {activeFullScan ? t("today.fullScanRunning") : t("today.fullScanStart")}
           </button>
           <button
             className="icon-action secondary"

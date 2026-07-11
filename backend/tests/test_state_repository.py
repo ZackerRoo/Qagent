@@ -12,6 +12,7 @@ from qagent.storage.repository import (
     QagentRepository,
     WatchlistCreate,
 )
+from qagent.storage.tables import ScanResultCacheRow
 from qagent.strategy_data.models import FundamentalSnapshot
 
 
@@ -238,6 +239,34 @@ def test_repository_tracks_full_market_batch_scan_jobs(tmp_path):
     assert loaded.data_health["market_cache_hits"] == "2"
     assert latest is not None
     assert latest.job_id == job.job_id
+
+
+def test_scan_result_cache_retains_only_latest_versions_per_key(tmp_path):
+    repo = make_repo(tmp_path)
+
+    for index in range(5):
+        repo.save_scan_result_cache(
+            cache_key="full_market_batch:free:true",
+            provider="free",
+            mode="full_market_batch",
+            symbols=["CN:000001"],
+            payload={"version": index},
+        )
+
+    with repo.session_factory() as session:
+        rows = (
+            session.query(ScanResultCacheRow)
+            .filter(ScanResultCacheRow.cache_key == "full_market_batch:free:true")
+            .order_by(ScanResultCacheRow.created_at.desc())
+            .all()
+        )
+
+    assert len(rows) == 3
+    assert {row.payload_json for row in rows} == {
+        '{"version": 2}',
+        '{"version": 3}',
+        '{"version": 4}',
+    }
 
 
 def test_repository_tracks_historical_backfill_and_universe_snapshots(tmp_path):

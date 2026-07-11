@@ -66,6 +66,7 @@ import type {
 } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000/api";
+const latestBatchResultRequests = new Map<string, Promise<FullMarketScanResponse>>();
 
 type ScanParams = {
   provider?: DataProviderMode;
@@ -551,12 +552,25 @@ export async function fetchLatestFullMarketBatchScan(
 export async function fetchLatestFullMarketBatchResult(
   provider: DataProviderMode,
   includeEtfs = true,
+  cardLimit = 30,
 ): Promise<FullMarketScanResponse> {
-  return apiGet<FullMarketScanResponse>("/full-market/batch-scan/latest-result", {
+  const key = `${provider}:${includeEtfs}:${cardLimit}`;
+  const active = latestBatchResultRequests.get(key);
+  if (active) {
+    return active;
+  }
+  const request = apiGet<FullMarketScanResponse>("/full-market/batch-scan/latest-result", {
     provider,
     include_etfs: includeEtfs,
     cache_ttl_minutes: 7 * 24 * 60,
+    limit: cardLimit,
   });
+  latestBatchResultRequests.set(key, request);
+  request.then(
+    () => latestBatchResultRequests.delete(key),
+    () => latestBatchResultRequests.delete(key),
+  );
+  return request;
 }
 
 export async function startTodayScanTask(

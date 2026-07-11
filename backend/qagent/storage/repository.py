@@ -1045,6 +1045,24 @@ class QagentRepository:
                 payload_json=json.dumps(payload, sort_keys=True),
             )
             session.add(row)
+            session.flush()
+            stale_ids = [
+                cache_id
+                for (cache_id,) in (
+                    session.query(ScanResultCacheRow.cache_id)
+                    .filter(ScanResultCacheRow.cache_key == cache_key)
+                    .order_by(
+                        ScanResultCacheRow.created_at.desc(),
+                        ScanResultCacheRow.cache_id.desc(),
+                    )
+                    .offset(3)
+                    .all()
+                )
+            ]
+            if stale_ids:
+                session.query(ScanResultCacheRow).filter(
+                    ScanResultCacheRow.cache_id.in_(stale_ids)
+                ).delete(synchronize_session=False)
             session.commit()
             session.refresh(row)
             return self._scan_result_cache_from_row(row)

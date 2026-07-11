@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const todayPath = resolve(__dirname, "../src/pages/Today.tsx");
+const clientPath = resolve(__dirname, "../src/api/client.ts");
 const manualActionPath = resolve(__dirname, "../src/components/ManualActionCenter.tsx");
 const intelligencePath = resolve(__dirname, "../src/components/MarketIntelligenceCenter.tsx");
 const followthroughPath = resolve(__dirname, "../src/components/RecommendationFollowThrough.tsx");
@@ -17,13 +18,14 @@ const detailPath = resolve(__dirname, "../src/components/OpportunityDetail.tsx")
 const stylesPath = resolve(__dirname, "../src/styles.css");
 const catalogPath = resolve(__dirname, "../src/i18n/catalog.ts");
 
-for (const path of [todayPath, manualActionPath, intelligencePath, followthroughPath, signalMonitorPath, decisionQualityPath, operationalReadinessPath, alphaQualityPath, decisionAutomationPath, tablePath, detailPath, stylesPath, catalogPath]) {
+for (const path of [todayPath, clientPath, manualActionPath, intelligencePath, followthroughPath, signalMonitorPath, decisionQualityPath, operationalReadinessPath, alphaQualityPath, decisionAutomationPath, tablePath, detailPath, stylesPath, catalogPath]) {
   if (!existsSync(path)) {
     throw new Error(`missing ${path}`);
   }
 }
 
 const today = readFileSync(todayPath, "utf8");
+const client = readFileSync(clientPath, "utf8");
 const manualAction = readFileSync(manualActionPath, "utf8");
 const intelligence = readFileSync(intelligencePath, "utf8");
 const followthrough = readFileSync(followthroughPath, "utf8");
@@ -63,6 +65,10 @@ assert(today.includes("AutoPaperStatusStrip"), "Today page must render automatic
 assert(today.includes("fetchAutomationScheduler"), "Today page must load automation scheduler state");
 assert(today.includes("fetchPaperValidation"), "Today page must load paper validation state");
 assert(today.includes("fetchPaperCandidatePool"), "Today page must load paper-trading candidate admission state");
+assert(client.includes("latestBatchResultRequests"), "Latest batch snapshot requests must be shared across page consumers");
+assert(client.includes("limit: cardLimit"), "Latest batch snapshot requests must use a bounded card limit");
+assert(today.includes('activeScan ? t("common.refreshing")'), "Snapshot refresh must use a specific refreshing label");
+assert(today.includes('activeFullScan ? t("today.fullScanRunning")'), "Full scan must use a distinct background-scan label");
 assert(today.includes("TodayPaperAdmissionCard"), "Today page must explain whether the selected opportunity can enter paper trading");
 assert(today.includes("paperAdmissionShortLabel"), "Today opportunity rows must show compact paper admission labels");
 assert(today.includes("SignalDistribution"), "Today page must render signal distribution");

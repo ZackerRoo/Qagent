@@ -1,9 +1,10 @@
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 import time
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 import pandas as pd
+from sqlalchemy import text
 
 from qagent.app import create_app
 from qagent.api import routes
@@ -357,6 +358,46 @@ def test_today_scan_task_reuses_recent_scan_run_when_result_cache_is_empty(tmp_p
     assert recompute_calls == []
 
 
+def test_today_scan_task_reuses_latest_full_market_batch_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'today-batch-fallback.db'}")
+    scan = run_daily_scan(["US:TEST", "CN:000001"], FixtureMarketDataProvider())
+    routes._repo().save_scan_result_cache(
+        cache_key=routes.full_market_batch_cache_key("free", True),
+        provider="free",
+        mode="full_market_batch",
+        symbols=["US:TEST", "CN:000001"],
+        payload={
+            "symbols": ["US:TEST", "CN:000001"],
+            "cards": [card.model_dump(mode="json") for card in scan.cards],
+            "items": [item.model_dump(mode="json") for item in scan.items],
+            "strategy_health": [item.model_dump(mode="json") for item in scan.strategy_health],
+            "factor_rankings": [],
+            "sector_strength": [],
+            "portfolio_plan": scan.portfolio_plan.model_dump(mode="json"),
+            "data_health": {"provider": "free"},
+        },
+    )
+    recompute_calls = []
+
+    def unexpected_full_market_scan_payload(provider, max_symbols, include_etfs, sync_if_empty):
+        recompute_calls.append((provider, max_symbols, include_etfs, sync_if_empty))
+        return {}
+
+    monkeypatch.setattr(routes, "_full_market_scan_payload", unexpected_full_market_scan_payload)
+
+    response = TestClient(create_app()).post(
+        "/api/scan-tasks/today"
+        "?provider=free&max_symbols=1&include_etfs=true&cache_ttl_minutes=60"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "succeeded"
+    assert len(body["result"]["cards"]) == 1
+    assert body["result"]["data_health"]["scan_result_cache"] == "full_market_batch_fallback"
+    assert recompute_calls == []
+
+
 def test_full_market_batch_scan_endpoint_creates_background_job(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'full-batch-api.db'}")
     routes._repo().replace_tradable_instruments(
@@ -420,6 +461,36 @@ def test_full_market_batch_scan_endpoint_creates_background_job(tmp_path, monkey
     assert detail.json()["job_id"] == body["job_id"]
     assert latest.status_code == 200
     assert latest.json()["job_id"] == body["job_id"]
+
+
+def test_latest_full_market_scan_marks_abandoned_job_failed(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'stale-batch.db'}")
+    repo = routes._repo()
+    job = repo.create_full_market_scan_job(
+        provider="free",
+        symbols=["CN:000001"],
+        batch_size=1,
+        include_etfs=True,
+        sync_if_empty=False,
+    )
+    stale_at = datetime.now(timezone.utc) - timedelta(hours=8)
+    with repo.session_factory() as session:
+        session.execute(
+            text(
+                "UPDATE full_market_scan_jobs "
+                "SET created_at = :stale_at, updated_at = :stale_at WHERE job_id = :job_id"
+            ),
+            {"stale_at": stale_at, "job_id": job.job_id},
+        )
+        session.commit()
+
+    response = TestClient(create_app()).get(
+        "/api/full-market/batch-scan/latest?provider=free"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "failed"
+    assert response.json()["data_health"]["full_market_stale_reset"] == "true"
 
 
 def test_full_market_batch_latest_result_hydrates_legacy_cache(tmp_path, monkeypatch):
@@ -526,6 +597,36 @@ def test_full_market_batch_latest_result_hydrates_legacy_cache(tmp_path, monkeyp
     assert body["data_health"]["probability_calibration_cards"] == str(len(body["cards"]))
     assert body["data_health"]["recommendation_brief_cards"] == str(len(body["cards"]))
     assert body["data_health"]["cached_benchmark_comparison_cards"] == str(len(body["cards"]))
+
+
+def test_full_market_batch_latest_result_honors_card_limit(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'limited-batch.db'}")
+    repo = routes._repo()
+    scan = run_daily_scan(["US:TEST", "CN:000001"], FixtureMarketDataProvider())
+    repo.save_scan_result_cache(
+        cache_key=routes.full_market_batch_cache_key("fixture", True),
+        provider="fixture",
+        mode="full_market_batch",
+        symbols=["US:TEST", "CN:000001"],
+        payload={
+            "symbols": ["US:TEST", "CN:000001"],
+            "cards": [card.model_dump(mode="json") for card in scan.cards],
+            "items": [item.model_dump(mode="json") for item in scan.items],
+            "strategy_health": [item.model_dump(mode="json") for item in scan.strategy_health],
+            "factor_rankings": [],
+            "sector_strength": [],
+            "portfolio_plan": scan.portfolio_plan.model_dump(mode="json"),
+            "data_health": {"provider": "fixture"},
+        },
+    )
+
+    response = TestClient(create_app()).get(
+        "/api/full-market/batch-scan/latest-result"
+        "?provider=fixture&include_etfs=true&limit=1"
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()["cards"]) == 1
 
 
 def test_full_market_batch_latest_result_uses_card_calibration_when_no_health_cache(

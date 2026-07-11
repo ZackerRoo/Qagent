@@ -120,6 +120,11 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
     assert cached.payload["sector_strength"]
     assert cached.payload["data_health"]["sector_strength"] == str(len(cached.payload["sector_strength"]))
 
+    runs = repo.list_scan_runs(provider="fixture", limit=10)
+    assert len(runs) == 1
+    assert runs[0].mode == "full_market_batch"
+    assert runs[0].cards == len(cached.payload["cards"])
+
 
 def test_full_market_batch_job_caches_rejected_items_with_remediation(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'full-batch-rejected.db'}")

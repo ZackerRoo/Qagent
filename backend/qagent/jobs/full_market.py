@@ -211,12 +211,6 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
                 strategy_data_provider=EmptyStrategyDataProvider(),
                 recommendation_feedback_center=feedback_center,
             )
-            repo.save_scan_run(
-                provider=job.provider,
-                mode=f"batch:{job_id}",
-                symbols=batch,
-                result=scan,
-            )
             all_cards.extend(scan.cards)
             all_items.extend(scan.items)
             sector_strength_batches.extend(scan.sector_strength)
@@ -321,6 +315,12 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         "operational_readiness_center": operational_readiness_center.model_dump(mode="json"),
         "data_health": payload_data_health,
     }
+    repo.save_scan_run(
+        provider=job.provider,
+        mode="full_market_batch",
+        symbols=job.symbols,
+        result=DailyScanResult.model_validate(payload),
+    )
     repo.save_scan_result_cache(
         cache_key=cache_key,
         provider=job.provider,
