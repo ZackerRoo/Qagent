@@ -2,7 +2,7 @@ import { type CSSProperties, useMemo } from "react";
 
 import { useI18n } from "../i18n";
 import { formatInstrumentDisplay } from "../lib/instruments";
-import { localizeAction, localizeStrategy } from "../lib/localize";
+import { localizeAction, localizeReason, localizeStrategy } from "../lib/localize";
 import type {
   FullMarketScanResponse,
   MarketEnvironmentCenter,
@@ -228,10 +228,15 @@ function AutomationPreTradeChecklist({ card, language }: { card?: OpportunityCar
     },
     {
       label: language === "zh" ? "仓位" : "Size",
-      value: card.pre_trade_risk ? `${formatPercent(card.pre_trade_risk.max_position_pct)}` : "-",
+      value: card.pre_trade_risk ? formatPercentagePoints(card.pre_trade_risk.max_position_pct) : "-",
     },
   ];
   const blockers = card.pre_trade_risk?.checks.filter((check) => check.severity === "block" || check.severity === "risk") ?? [];
+  const checklistItem =
+    card.execution_plan?.next_checklist?.[0] ??
+    card.pre_trade_risk?.next_action ??
+    card.decision?.safety_note ??
+    card.thesis;
   return (
     <div className="automation-pretrade-card">
       <header>
@@ -249,7 +254,7 @@ function AutomationPreTradeChecklist({ card, language }: { card?: OpportunityCar
           </span>
         ))}
       </div>
-      <p>{card.execution_plan?.next_checklist?.[0] ?? card.pre_trade_risk?.next_action ?? card.decision?.safety_note ?? card.thesis}</p>
+      <p>{localizeReason(checklistItem, language)}</p>
       <div className="automation-risk-tags">
         {(blockers.length ? blockers : card.pre_trade_risk?.checks.slice(0, 2) ?? []).slice(0, 3).map((check) => (
           <em key={`${check.code}-${check.title}`}>{check.title}</em>
@@ -446,6 +451,11 @@ function percentScore(value: number) {
 function formatPercent(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
   return `${Math.round(value * 100)}%`;
+}
+
+function formatPercentagePoints(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+  return `${value.toFixed(2)}%`;
 }
 
 function formatNullablePercent(value: number | null | undefined) {

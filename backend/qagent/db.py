@@ -3,7 +3,7 @@ from pathlib import Path
 from threading import Lock
 
 from sqlalchemy import create_engine
-from sqlalchemy import event
+from sqlalchemy import event, inspect, text
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -50,6 +50,7 @@ def initialize_database(database_url: str | None = None):
     with _schema_lock:
         if url not in _initialized_urls:
             Base.metadata.create_all(engine)
+            _apply_additive_migrations(engine)
             _initialized_urls.add(url)
     return engine
 
@@ -62,3 +63,23 @@ def get_session() -> Generator[Session, None, None]:
     session_factory = create_session_factory()
     with session_factory() as session:
         yield session
+
+
+def _apply_additive_migrations(engine: Engine) -> None:
+    if not engine.dialect.name.startswith("sqlite"):
+        return
+    inspector = inspect(engine)
+    if not inspector.has_table("market_bar_cache"):
+        return
+    existing = {column["name"] for column in inspector.get_columns("market_bar_cache")}
+    additions = {
+        "adjusted_close": "NUMERIC(18, 6)",
+        "adjustment_factor": "NUMERIC(20, 10)",
+        "adjustment_type": "VARCHAR(32)",
+    }
+    with engine.begin() as connection:
+        for column, sql_type in additions.items():
+            if column not in existing:
+                connection.execute(
+                    text(f"ALTER TABLE market_bar_cache ADD COLUMN {column} {sql_type}")
+                )

@@ -1,0 +1,807 @@
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta, timezone
+from time import sleep
+
+import pandas as pd
+from pydantic import BaseModel, Field
+
+from qagent.historical_evidence.models import (
+    HistoricalEvidenceBundle,
+    HistoricalIndexCoverageStats,
+    HistoricalTradabilityPoint,
+)
+from qagent.historical_evidence.providers import (
+    INDEX_QUERIES,
+    HistoricalEvidenceProvider,
+    historical_snapshot_dates,
+)
+from qagent.market.calendars import trading_sessions_in_range
+from qagent.providers.base import MarketDataProvider
+from qagent.storage.market_cache import MarketDataCacheRepository
+from qagent.storage.repository import HistoricalBackfillJobRecord, QagentRepository
+from qagent.strategy_data.providers import StrategyDataProvider
+
+
+class HistoricalInstrumentCoverage(BaseModel):
+    instrument_id: str
+    asset_type: str
+    expected_sessions: int
+    bar_rows: int
+    bar_coverage_ratio: float
+    adjusted_rows: int
+    adjustment_coverage_ratio: float | None
+    adjustment_types: list[str] = Field(default_factory=list)
+    source_providers: list[str] = Field(default_factory=list)
+    first_trade_date: date | None
+    last_trade_date: date | None
+    fundamental_rows: int
+    first_fundamental_date: date | None
+    last_fundamental_date: date | None
+    universe_snapshot_rows: int
+    first_universe_date: date | None
+    last_universe_date: date | None
+    tradability_rows: int = 0
+    tradability_coverage_ratio: float = 0.0
+    first_tradability_date: date | None = None
+    last_tradability_date: date | None = None
+    suspended_rows: int = 0
+    st_rows: int = 0
+    profile_rows: int = 0
+    listing_date: date | None = None
+    delisting_date: date | None = None
+    listing_status: str | None = None
+    industry_rows: int = 0
+    industries: list[str] = Field(default_factory=list)
+    benchmark_membership_rows: int = 0
+    benchmark_ids: list[str] = Field(default_factory=list)
+    status: str
+    issues: list[str] = Field(default_factory=list)
+
+
+class HistoricalCoverageSummary(BaseModel):
+    total_instruments: int
+    ready_instruments: int
+    partial_instruments: int
+    missing_instruments: int
+    bar_ready_instruments: int
+    adjusted_ready_instruments: int
+    fundamental_ready_instruments: int
+    universe_ready_instruments: int
+    tradability_ready_instruments: int
+    profile_ready_instruments: int
+    industry_ready_instruments: int
+    benchmark_snapshot_rows: int
+    benchmark_ready_snapshots: int
+    benchmark_failed_snapshots: int
+    benchmark_coverage_ratio: float
+    average_bar_coverage_ratio: float
+    average_adjustment_coverage_ratio: float | None
+
+
+class HistoricalCoverageManifest(BaseModel):
+    provider_mode: str
+    start_date: date
+    end_date: date
+    generated_at: datetime
+    summary: HistoricalCoverageSummary
+    instruments: list[HistoricalInstrumentCoverage]
+    data_health: dict[str, str] = Field(default_factory=dict)
+
+
+class HistoricalBackfillResult(BaseModel):
+    job: HistoricalBackfillJobRecord
+    manifest: HistoricalCoverageManifest
+
+
+def run_historical_backfill(
+    *,
+    repo: QagentRepository,
+    cache: MarketDataCacheRepository,
+    provider: MarketDataProvider,
+    strategy_provider: StrategyDataProvider | None,
+    provider_mode: str,
+    instrument_ids: list[str],
+    start: date,
+    end: date,
+    job_id: str | None = None,
+    universe_as_of: date | None = None,
+    historical_evidence_provider: HistoricalEvidenceProvider | None = None,
+) -> HistoricalBackfillResult:
+    if start > end:
+        raise ValueError("start must be on or before end")
+    symbols = sorted(set(instrument_ids))
+    if not symbols:
+        raise ValueError("instrument_ids cannot be empty")
+    mode = provider_mode.strip().lower()
+    job = repo.get_historical_backfill_job(job_id) if job_id else None
+    if job is None:
+        job = repo.create_historical_backfill_job(mode, symbols, start, end)
+    elif (
+        job.provider,
+        sorted(set(job.symbols)),
+        job.start_date,
+        job.end_date,
+    ) != (
+        mode,
+        symbols,
+        start,
+        end,
+    ):
+        raise ValueError("resume job scope does not match requested backfill")
+
+    repo.capture_tradable_universe_snapshot(universe_as_of or date.today())
+    repo.update_historical_backfill_job(
+        job.job_id,
+        status="running",
+        data_health={"backfill_phase": "price_bars"},
+    )
+    processed = 0
+    succeeded = 0
+    failed = 0
+    cache_reused = 0
+    rows_written = 0
+    errors: list[str] = []
+
+    try:
+        for instrument_id in symbols:
+            require_adjusted = _requires_adjustment(instrument_id)
+            if cache.has_usable_coverage(
+                mode,
+                instrument_id,
+                start,
+                end,
+                require_adjusted=require_adjusted,
+                minimum_session_coverage=0.95,
+            ):
+                processed += 1
+                succeeded += 1
+                cache_reused += 1
+                repo.update_historical_backfill_job(
+                    job.job_id,
+                    processed_symbols=processed,
+                    succeeded_symbols=succeeded,
+                    failed_symbols=failed,
+                    rows_written=rows_written,
+                    current_instrument=instrument_id,
+                    errors=errors,
+                )
+                continue
+
+            bars, provider_errors = _fetch_uncached_daily_bars(
+                provider,
+                instrument_id,
+                start,
+                end,
+            )
+            saved = cache.save_daily_bars(mode, bars)
+            cache.record_coverage(mode, instrument_id, start, end, saved)
+            rows_written += saved
+            processed += 1
+            if saved > 0:
+                succeeded += 1
+            else:
+                failed += 1
+                detail = provider_errors[-1] if provider_errors else "no daily bars returned"
+                errors.append(f"{instrument_id}: {detail}")
+            repo.update_historical_backfill_job(
+                job.job_id,
+                processed_symbols=processed,
+                succeeded_symbols=succeeded,
+                failed_symbols=failed,
+                rows_written=rows_written,
+                current_instrument=instrument_id,
+                errors=errors[-100:],
+            )
+
+        fundamental_rows = 0
+        fundamental_cache_reused = 0
+        if strategy_provider is not None:
+            _set_backfill_phase(repo, job.job_id, "fundamentals")
+            fundamental_start = start - timedelta(days=400)
+            stock_symbols = [
+                symbol for symbol in symbols if _asset_type(symbol, None) == "stock"
+            ]
+            existing_fundamentals = repo.fundamental_snapshot_stats(
+                mode,
+                stock_symbols,
+                end,
+            )
+            freshness_cutoff = end - timedelta(days=180)
+            fundamental_symbols = []
+            for symbol in stock_symbols:
+                count, first_date, last_date = existing_fundamentals.get(
+                    symbol,
+                    (0, None, None),
+                )
+                if (
+                    count > 0
+                    and first_date is not None
+                    and first_date <= start
+                    and last_date is not None
+                    and last_date >= freshness_cutoff
+                ):
+                    fundamental_cache_reused += 1
+                else:
+                    fundamental_symbols.append(symbol)
+            if fundamental_symbols:
+                fundamentals = strategy_provider.get_fundamentals(
+                    fundamental_symbols,
+                    fundamental_start,
+                    end,
+                )
+                fundamental_rows = repo.upsert_fundamental_snapshots(
+                    mode,
+                    fundamentals,
+                )
+                errors.extend(getattr(strategy_provider, "last_errors", [])[:20])
+
+        evidence_data_health: dict[str, str] = {}
+        evidence_counts = {
+            "tradability": 0,
+            "profiles": 0,
+            "industries": 0,
+            "index_snapshots": 0,
+            "index_memberships": 0,
+            "universe_snapshots": 0,
+        }
+        if historical_evidence_provider is not None:
+            _set_backfill_phase(repo, job.job_id, "historical_evidence")
+            reuse_historical_evidence = _historical_evidence_cache_is_usable(
+                repo=repo,
+                provider_mode=mode,
+                instrument_ids=symbols,
+                start=start,
+                end=end,
+            )
+            if reuse_historical_evidence:
+                evidence_bundle = HistoricalEvidenceBundle(
+                    data_health={"historical_evidence_cache": "reused"}
+                )
+            else:
+                evidence_bundle = historical_evidence_provider.get_evidence(
+                    symbols,
+                    start,
+                    end,
+                )
+            _infer_etf_tradability_from_cached_bars(
+                cache=cache,
+                provider_mode=mode,
+                instrument_ids=symbols,
+                start=start,
+                end=end,
+                bundle=evidence_bundle,
+            )
+            evidence_counts = repo.upsert_historical_evidence(mode, evidence_bundle)
+            evidence_counts["universe_snapshots"] = 0
+            if not reuse_historical_evidence:
+                evidence_counts["universe_snapshots"] = (
+                    repo.upsert_historical_universe_snapshots(
+                        evidence_bundle.profiles,
+                        [start, *historical_snapshot_dates(start, end)],
+                    )
+                )
+            errors.extend(evidence_bundle.errors[:50])
+            evidence_data_health.update(evidence_bundle.data_health)
+            for key, value in evidence_counts.items():
+                evidence_data_health[f"historical_evidence_{key}"] = str(value)
+
+        _set_backfill_phase(repo, job.job_id, "coverage_manifest")
+        manifest = build_historical_coverage_manifest(
+            repo=repo,
+            cache=cache,
+            provider_mode=mode,
+            instrument_ids=symbols,
+            start=start,
+            end=end,
+        )
+        incomplete_price = [
+            item
+            for item in manifest.instruments
+            if item.bar_coverage_ratio < 0.95
+            or (
+                _requires_adjustment(item.instrument_id)
+                and (item.adjustment_coverage_ratio or 0) < 0.95
+            )
+        ]
+        incomplete_ids = {item.instrument_id for item in incomplete_price}
+        for item in incomplete_price:
+            if any(error.startswith(f"{item.instrument_id}:") for error in errors):
+                continue
+            errors.append(
+                f"{item.instrument_id}: price coverage incomplete "
+                f"(bars={item.bar_coverage_ratio:.1%}, "
+                f"adjusted={(item.adjustment_coverage_ratio or 0):.1%})"
+            )
+        processed = len(symbols)
+        succeeded = len(symbols) - len(incomplete_ids)
+        failed = len(incomplete_ids)
+        terminal_status = (
+            "succeeded"
+            if failed == 0 and not errors
+            else "succeeded_with_errors"
+        )
+        data_health = {
+            **manifest.data_health,
+            **evidence_data_health,
+            "backfill_phase": "complete",
+            "backfill_cache_reused": str(cache_reused),
+            "backfill_rows_written": str(rows_written),
+            "backfill_fundamental_rows": str(fundamental_rows),
+            "backfill_fundamental_cache_reused": str(
+                fundamental_cache_reused
+            ),
+            **{
+                f"backfill_evidence_{key}": str(value)
+                for key, value in evidence_counts.items()
+            },
+        }
+        completed = repo.update_historical_backfill_job(
+            job.job_id,
+            status=terminal_status,
+            processed_symbols=processed,
+            succeeded_symbols=succeeded,
+            failed_symbols=failed,
+            rows_written=rows_written,
+            fundamental_rows_written=fundamental_rows,
+            errors=errors[-100:],
+            data_health=data_health,
+        )
+        if completed is None:
+            raise RuntimeError(f"historical backfill job disappeared: {job.job_id}")
+        return HistoricalBackfillResult(job=completed, manifest=manifest)
+    except Exception as exc:
+        failed_job = repo.get_historical_backfill_job(job.job_id)
+        failed_health = dict(failed_job.data_health) if failed_job is not None else {}
+        failed_health["backfill_phase"] = "failed"
+        repo.update_historical_backfill_job(
+            job.job_id,
+            status="failed",
+            processed_symbols=processed,
+            succeeded_symbols=succeeded,
+            failed_symbols=max(failed, 1),
+            rows_written=rows_written,
+            errors=[*errors[-99:], str(exc)],
+            data_health=failed_health,
+        )
+        raise
+
+
+def _set_backfill_phase(
+    repo: QagentRepository,
+    job_id: str,
+    phase: str,
+) -> None:
+    job = repo.get_historical_backfill_job(job_id)
+    data_health = dict(job.data_health) if job is not None else {}
+    data_health["backfill_phase"] = phase
+    repo.update_historical_backfill_job(job_id, data_health=data_health)
+
+
+def _historical_evidence_cache_is_usable(
+    *,
+    repo: QagentRepository,
+    provider_mode: str,
+    instrument_ids: list[str],
+    start: date,
+    end: date,
+) -> bool:
+    snapshots = historical_snapshot_dates(start, end)
+    expected_index_snapshots = len(snapshots) * len(INDEX_QUERIES)
+    index_stats = repo.historical_index_snapshot_stats(provider_mode, start, end)
+    if (
+        expected_index_snapshots > 0
+        and index_stats.ready_snapshots < expected_index_snapshots
+    ):
+        return False
+    evidence = repo.historical_evidence_stats(
+        provider_mode,
+        instrument_ids,
+        start,
+        end,
+    )
+    universes = repo.tradable_universe_snapshot_stats(
+        instrument_ids,
+        start,
+        end,
+    )
+    expected_sessions = len(trading_sessions_in_range(start, end))
+    first_snapshot = snapshots[0] if snapshots else end
+    for instrument_id in instrument_ids:
+        item = evidence[instrument_id]
+        if item.profile_rows == 0:
+            return False
+        universe_count, first_universe, _ = universes.get(
+            instrument_id,
+            (0, None, None),
+        )
+        if universe_count == 0:
+            return False
+        if (
+            (item.listing_date is None or item.listing_date <= start)
+            and (first_universe is None or first_universe > start)
+        ):
+            return False
+        if _asset_type(instrument_id, None) != "stock":
+            continue
+        if _ratio(item.tradability_rows, expected_sessions) < 0.95:
+            return False
+        if (
+            item.industry_rows == 0
+            or item.first_industry_date is None
+            or item.first_industry_date > first_snapshot
+        ):
+            return False
+    return True
+
+
+def build_historical_coverage_manifest(
+    *,
+    repo: QagentRepository,
+    cache: MarketDataCacheRepository,
+    provider_mode: str,
+    instrument_ids: list[str],
+    start: date,
+    end: date,
+) -> HistoricalCoverageManifest:
+    mode = provider_mode.strip().lower()
+    symbols = sorted(set(instrument_ids))
+    sessions = trading_sessions_in_range(start, end)
+    expected_sessions = len(sessions)
+    bars = cache.load_daily_bars(mode, symbols, start, end)
+    fundamentals = repo.fundamental_snapshot_stats(mode, symbols, end)
+    universes = repo.tradable_universe_snapshot_stats(symbols, start, end)
+    evidence = repo.historical_evidence_stats(mode, symbols, start, end)
+    index_evidence = repo.historical_index_snapshot_stats(mode, start, end)
+    catalog = {
+        item.instrument_id: item
+        for item in repo.list_tradable_instruments(limit=max(len(symbols) * 2, 10_000))
+        if item.instrument_id in symbols
+    }
+    coverage: list[HistoricalInstrumentCoverage] = []
+
+    for instrument_id in symbols:
+        evidence_item = evidence[instrument_id]
+        active_dates = {
+            session
+            for session in sessions
+            if (evidence_item.listing_date is None or session >= evidence_item.listing_date)
+            and (
+                evidence_item.delisting_date is None
+                or session <= evidence_item.delisting_date
+            )
+        }
+        instrument_expected_sessions = len(active_dates)
+        group = bars[bars["instrument_id"].eq(instrument_id)].copy()
+        valid_group = group[group["trade_date"].isin(active_dates)]
+        trade_dates = sorted(set(valid_group["trade_date"].tolist()))
+        bar_rows = len(trade_dates)
+        bar_ratio = _ratio(bar_rows, instrument_expected_sessions)
+        adjusted_rows = _adjusted_session_count(valid_group)
+        adjustment_ratio = _ratio(adjusted_rows, bar_rows) if bar_rows else None
+        asset_type = _asset_type(instrument_id, catalog.get(instrument_id))
+        fundamental_count, first_fundamental, last_fundamental = fundamentals.get(
+            instrument_id,
+            (0, None, None),
+        )
+        universe_count, first_universe, last_universe = universes.get(
+            instrument_id,
+            (0, None, None),
+        )
+        issues = _coverage_issues(
+            instrument_id=instrument_id,
+            asset_type=asset_type,
+            bar_ratio=bar_ratio,
+            adjustment_ratio=adjustment_ratio,
+            fundamental_count=fundamental_count,
+            first_fundamental=first_fundamental,
+            first_universe=first_universe,
+            start=start,
+            unexpected_rows=max(len(group) - len(valid_group), 0),
+            expected_sessions=instrument_expected_sessions,
+            evidence_item=evidence_item,
+        )
+        status = "missing" if bar_rows == 0 else ("ready" if not issues else "partial")
+        coverage.append(
+            HistoricalInstrumentCoverage(
+                instrument_id=instrument_id,
+                asset_type=asset_type,
+                expected_sessions=instrument_expected_sessions,
+                bar_rows=bar_rows,
+                bar_coverage_ratio=bar_ratio,
+                adjusted_rows=adjusted_rows,
+                adjustment_coverage_ratio=adjustment_ratio,
+                adjustment_types=sorted(
+                    {
+                        str(value)
+                        for value in valid_group.get("adjustment_type", pd.Series(dtype=str))
+                        .dropna()
+                        .tolist()
+                        if str(value)
+                    }
+                ),
+                source_providers=sorted(
+                    {
+                        str(value)
+                        for value in valid_group.get("provider", pd.Series(dtype=str))
+                        .dropna()
+                        .tolist()
+                        if str(value)
+                    }
+                ),
+                first_trade_date=trade_dates[0] if trade_dates else None,
+                last_trade_date=trade_dates[-1] if trade_dates else None,
+                fundamental_rows=fundamental_count,
+                first_fundamental_date=first_fundamental,
+                last_fundamental_date=last_fundamental,
+                universe_snapshot_rows=universe_count,
+                first_universe_date=first_universe,
+                last_universe_date=last_universe,
+                tradability_rows=evidence_item.tradability_rows,
+                tradability_coverage_ratio=_ratio(
+                    evidence_item.tradability_rows,
+                    instrument_expected_sessions,
+                ),
+                first_tradability_date=evidence_item.first_tradability_date,
+                last_tradability_date=evidence_item.last_tradability_date,
+                suspended_rows=evidence_item.suspended_rows,
+                st_rows=evidence_item.st_rows,
+                profile_rows=evidence_item.profile_rows,
+                listing_date=evidence_item.listing_date,
+                delisting_date=evidence_item.delisting_date,
+                listing_status=evidence_item.listing_status,
+                industry_rows=evidence_item.industry_rows,
+                industries=evidence_item.industries,
+                benchmark_membership_rows=evidence_item.benchmark_membership_rows,
+                benchmark_ids=evidence_item.benchmark_ids,
+                status=status,
+                issues=issues,
+            )
+        )
+
+    expected_index_snapshots = len(historical_snapshot_dates(start, end)) * len(
+        INDEX_QUERIES
+    )
+    summary = _coverage_summary(
+        coverage,
+        index_evidence=index_evidence,
+        expected_index_snapshots=expected_index_snapshots,
+    )
+    return HistoricalCoverageManifest(
+        provider_mode=mode,
+        start_date=start,
+        end_date=end,
+        generated_at=datetime.now(timezone.utc),
+        summary=summary,
+        instruments=coverage,
+        data_health={
+            "historical_manifest": "ready",
+            "historical_expected_sessions": str(expected_sessions),
+            "historical_instruments": str(len(symbols)),
+            "historical_ready_instruments": str(summary.ready_instruments),
+            "historical_partial_instruments": str(summary.partial_instruments),
+            "historical_missing_instruments": str(summary.missing_instruments),
+            "historical_bar_coverage": f"{summary.average_bar_coverage_ratio:.4f}",
+            "historical_adjustment_coverage": (
+                f"{summary.average_adjustment_coverage_ratio:.4f}"
+                if summary.average_adjustment_coverage_ratio is not None
+                else "missing"
+            ),
+            "historical_tradability_ready": str(
+                summary.tradability_ready_instruments
+            ),
+            "historical_profile_ready": str(summary.profile_ready_instruments),
+            "historical_industry_ready": str(summary.industry_ready_instruments),
+            "historical_benchmark_snapshots": str(summary.benchmark_snapshot_rows),
+            "historical_benchmark_ready": str(summary.benchmark_ready_snapshots),
+            "historical_benchmark_failed": str(summary.benchmark_failed_snapshots),
+            "historical_benchmark_coverage": f"{summary.benchmark_coverage_ratio:.4f}",
+        },
+    )
+
+
+def _coverage_issues(
+    *,
+    instrument_id: str,
+    asset_type: str,
+    bar_ratio: float,
+    adjustment_ratio: float | None,
+    fundamental_count: int,
+    first_fundamental: date | None,
+    first_universe: date | None,
+    start: date,
+    unexpected_rows: int,
+    expected_sessions: int,
+    evidence_item,
+) -> list[str]:
+    issues: list[str] = []
+    if bar_ratio < 0.95:
+        issues.append("bar_coverage_below_95pct")
+    if _requires_adjustment(instrument_id) and (adjustment_ratio or 0) < 0.95:
+        issues.append("adjustment_coverage_below_95pct")
+    if asset_type == "stock" and fundamental_count == 0:
+        issues.append("fundamentals_missing")
+    elif asset_type == "stock" and (first_fundamental is None or first_fundamental > start):
+        issues.append("fundamental_history_incomplete")
+    if first_universe is None or first_universe > start:
+        issues.append("historical_universe_incomplete")
+    if _ratio(evidence_item.tradability_rows, expected_sessions) < 0.95:
+        issues.append("tradability_coverage_below_95pct")
+    if evidence_item.profile_rows == 0:
+        issues.append("instrument_profile_missing")
+    if asset_type == "stock" and evidence_item.industry_rows == 0:
+        issues.append("historical_industry_missing")
+    if unexpected_rows:
+        issues.append("non_session_bar_rows")
+    return issues
+
+
+def _coverage_summary(
+    items: list[HistoricalInstrumentCoverage],
+    *,
+    index_evidence: HistoricalIndexCoverageStats,
+    expected_index_snapshots: int,
+) -> HistoricalCoverageSummary:
+    adjustment_ratios = [
+        item.adjustment_coverage_ratio
+        for item in items
+        if item.adjustment_coverage_ratio is not None
+    ]
+    return HistoricalCoverageSummary(
+        total_instruments=len(items),
+        ready_instruments=sum(item.status == "ready" for item in items),
+        partial_instruments=sum(item.status == "partial" for item in items),
+        missing_instruments=sum(item.status == "missing" for item in items),
+        bar_ready_instruments=sum(item.bar_coverage_ratio >= 0.95 for item in items),
+        adjusted_ready_instruments=sum(
+            (item.adjustment_coverage_ratio or 0) >= 0.95 for item in items
+        ),
+        fundamental_ready_instruments=sum(item.fundamental_rows > 0 for item in items),
+        universe_ready_instruments=sum(
+            "historical_universe_incomplete" not in item.issues for item in items
+        ),
+        tradability_ready_instruments=sum(
+            item.tradability_coverage_ratio >= 0.95 for item in items
+        ),
+        profile_ready_instruments=sum(item.profile_rows > 0 for item in items),
+        industry_ready_instruments=sum(
+            item.asset_type != "stock" or item.industry_rows > 0 for item in items
+        ),
+        benchmark_snapshot_rows=index_evidence.total_snapshots,
+        benchmark_ready_snapshots=index_evidence.ready_snapshots,
+        benchmark_failed_snapshots=index_evidence.failed_snapshots,
+        benchmark_coverage_ratio=_ratio(
+            index_evidence.ready_snapshots,
+            expected_index_snapshots,
+        ),
+        average_bar_coverage_ratio=_average(
+            [item.bar_coverage_ratio for item in items]
+        ),
+        average_adjustment_coverage_ratio=(
+            _average(adjustment_ratios) if adjustment_ratios else None
+        ),
+    )
+
+
+def _adjusted_session_count(frame: pd.DataFrame) -> int:
+    if frame.empty or "adjusted_close" not in frame.columns:
+        return 0
+    adjusted = frame[
+        frame["adjusted_close"].notna()
+        & frame.get("adjustment_type", pd.Series(index=frame.index, dtype=object)).notna()
+    ]
+    return len(set(adjusted["trade_date"].tolist()))
+
+
+def _asset_type(instrument_id: str, catalog_item) -> str:
+    if catalog_item is not None:
+        return catalog_item.asset_type
+    symbol = instrument_id.split(":", 1)[-1]
+    if symbol.endswith(".IDX"):
+        return "index"
+    if symbol.startswith(("15", "16", "51", "52", "56", "58")):
+        return "etf"
+    return "stock"
+
+
+def _requires_adjustment(instrument_id: str) -> bool:
+    return instrument_id.startswith("CN:") and not instrument_id.endswith(".IDX")
+
+
+def _fetch_uncached_daily_bars(
+    provider: MarketDataProvider,
+    instrument_id: str,
+    start: date,
+    end: date,
+) -> tuple[pd.DataFrame, list[str]]:
+    # A backfill reaches this path only after rejecting the current cache span.
+    # Bypass a cache decorator so stale unadjusted rows cannot mask a required refresh.
+    source = getattr(provider, "provider", provider)
+    latest_errors: list[str] = []
+    bars = pd.DataFrame()
+    for attempt in range(1, 4):
+        bars = source.get_daily_bars([instrument_id], start, end)
+        latest_errors = list(getattr(source, "last_errors", []))
+        if _bar_result_covers_requested_sessions(
+            bars,
+            instrument_id,
+            start,
+            end,
+        ):
+            return bars, latest_errors
+        if bars.empty and not latest_errors:
+            return bars, latest_errors
+        if attempt < 3:
+            sleep(0.2 * attempt)
+    return bars, latest_errors
+
+
+def _bar_result_covers_requested_sessions(
+    bars: pd.DataFrame,
+    instrument_id: str,
+    start: date,
+    end: date,
+) -> bool:
+    if bars.empty:
+        return False
+    if not instrument_id.startswith("CN:"):
+        return True
+    expected_sessions = len(trading_sessions_in_range(start, end))
+    if expected_sessions <= 0:
+        return True
+    rows = bars[bars["instrument_id"].eq(instrument_id)]
+    session_rows = len(set(rows["trade_date"].tolist()))
+    if session_rows / expected_sessions < 0.95:
+        return False
+    if not _requires_adjustment(instrument_id):
+        return True
+    return _adjusted_session_count(rows) / expected_sessions >= 0.95
+
+
+def _infer_etf_tradability_from_cached_bars(
+    *,
+    cache: MarketDataCacheRepository,
+    provider_mode: str,
+    instrument_ids: list[str],
+    start: date,
+    end: date,
+    bundle: HistoricalEvidenceBundle,
+) -> None:
+    etf_ids = [
+        instrument_id
+        for instrument_id in instrument_ids
+        if _asset_type(instrument_id, None) == "etf"
+    ]
+    if not etf_ids:
+        return
+    bars = cache.load_daily_bars(provider_mode, etf_ids, start, end)
+    if bars.empty:
+        return
+    existing = {
+        (point.instrument_id, point.trade_date)
+        for point in bundle.tradability
+    }
+    for row in bars.itertuples(index=False):
+        key = (row.instrument_id, row.trade_date)
+        if key in existing:
+            continue
+        bundle.tradability.append(
+            HistoricalTradabilityPoint(
+                instrument_id=row.instrument_id,
+                trade_date=row.trade_date,
+                trading_status="trading",
+                is_st=False,
+                provider="market_bar_inference",
+            )
+        )
+        existing.add(key)
+
+
+def _ratio(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round(min(numerator / denominator, 1.0), 4)
+
+
+def _average(values: list[float]) -> float:
+    return round(sum(values) / len(values), 4) if values else 0.0

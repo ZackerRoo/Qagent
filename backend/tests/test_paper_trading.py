@@ -799,6 +799,40 @@ def test_paper_validation_excludes_missed_entries_and_requires_horizon_age(tmp_p
     assert validation.batches[0].total_return_pct == windows[5].total_return_pct
 
 
+def test_paper_validation_maturity_uses_a_share_trading_sessions(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    trade = paper_repo.create_trade(
+        source_snapshot_id="validation-holiday",
+        provider="free",
+        instrument_id="CN:000001",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 9, 30),
+        trigger_price=Decimal("10.00"),
+        initial_stop=Decimal("9.50"),
+        target_1=Decimal("11.00"),
+        rank_score=Decimal("0.80"),
+    )
+    paper_repo.update_trade(
+        trade.trade_id,
+        status="open",
+        entry_date=date(2026, 9, 30),
+        entry_price=Decimal("10.00"),
+        latest_date=date(2026, 10, 9),
+        latest_price=Decimal("10.10"),
+        unrealized_return_pct=Decimal("1"),
+        holding_days=2,
+    )
+
+    trades = paper_repo.list_trades(limit=10)
+    ledger = build_paper_ledger(trades)
+    validation = build_paper_validation(trades, ledger, as_of=date(2026, 10, 9))
+
+    assert validation.sample_age.oldest_days_since_signal == 2
+    assert validation.sample_age.mature_5d == 0
+    assert validation.sample_age.days_to_next_5d == 3
+
+
 def test_paper_daily_report_groups_stock_and_etf_performance(tmp_path):
     repo = make_repo(tmp_path)
     paper_repo = PaperTradingRepository(repo.session_factory)

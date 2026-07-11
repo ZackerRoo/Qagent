@@ -84,3 +84,28 @@ def test_cli_run_all_saves_research_artifacts(tmp_path, monkeypatch, capsys):
     assert repo.list_scan_runs(limit=5)
     assert repo.list_brief_runs(limit=5)
     assert repo.list_delivery_outbox(status="queued", limit=5)
+
+
+def test_cli_backfill_history_runs_bounded_fixture_job(tmp_path, monkeypatch, capsys):
+    database_url = f"sqlite:///{tmp_path / 'cli-history.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+
+    exit_code = main(
+        [
+            "backfill-history",
+            "--provider",
+            "fixture",
+            "--symbols",
+            "CN:000001",
+            "--start",
+            "2026-01-01",
+            "--end",
+            "2026-01-09",
+        ]
+    )
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "history-backfill status=succeeded" in output
+    assert "symbols=1" in output
+    assert "coverage=" in output

@@ -1,6 +1,5 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from contextlib import contextmanager
-from threading import RLock
 import math
 import socket
 
@@ -8,8 +7,13 @@ import akshare as ak
 import baostock as bs
 import pandas as pd
 import requests
+import yfinance as yf
 
 from qagent.providers.base import MINUTE_BAR_COLUMNS
+from qagent.providers.baostock_session import (
+    BAOSTOCK_SESSION_LOCK,
+    serialized_baostock_session,
+)
 
 BAR_COLUMNS = [
     "instrument_id",
@@ -26,7 +30,7 @@ BAR_COLUMNS = [
 ]
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 3
 DEFAULT_FAILURE_CIRCUIT_BREAKER_THRESHOLD = 3
-_NETWORK_TIMEOUT_LOCK = RLock()
+_NETWORK_TIMEOUT_LOCK = BAOSTOCK_SESSION_LOCK
 
 
 class FreeCnMarketDataProvider:
@@ -77,6 +81,24 @@ class FreeCnMarketDataProvider:
                     self.consecutive_source_failures += 1
                     self.last_errors.append(f"{instrument_id}: {'; '.join(source_errors)}")
                     continue
+                if _is_etf_symbol(symbol):
+                    try:
+                        normalized = self._load_yfinance_etf(
+                            symbol,
+                            start,
+                            end,
+                            self.request_timeout_seconds,
+                        )
+                    except Exception as yfinance_exc:
+                        source_errors.append(f"yfinance: {yfinance_exc}")
+                    else:
+                        self.consecutive_source_failures = 0
+                        normalized["instrument_id"] = instrument_id
+                        normalized["trade_date"] = pd.to_datetime(
+                            normalized["trade_date"]
+                        ).dt.date
+                        frames.append(normalized[BAR_COLUMNS])
+                        continue
                 try:
                     normalized = self._load_baostock(
                         symbol,
@@ -160,9 +182,9 @@ class FreeCnMarketDataProvider:
                     period="daily",
                     start_date=start.strftime("%Y%m%d"),
                     end_date=end.strftime("%Y%m%d"),
-                    adjust="",
+                    adjust="qfq",
                 )
-                provider_name = "akshare_etf"
+                provider_name = "akshare_etf_qfq"
             else:
                 raw = ak.stock_zh_a_hist(
                     symbol=symbol,
@@ -225,33 +247,71 @@ class FreeCnMarketDataProvider:
         end: date,
         request_timeout_seconds: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
     ) -> pd.DataFrame:
-        with _bounded_network_calls(request_timeout_seconds):
-            login = bs.login()
-        try:
-            if login.error_code != "0":
-                raise RuntimeError(login.error_msg)
+        with serialized_baostock_session():
             with _bounded_network_calls(request_timeout_seconds):
-                result = bs.query_history_k_data_plus(
-                    _to_baostock_symbol(symbol),
-                    "date,open,high,low,close,volume",
-                    start_date=start.isoformat(),
-                    end_date=end.isoformat(),
-                    frequency="d",
-                    adjustflag="2",
-                )
-            if result.error_code != "0":
-                raise RuntimeError(result.error_msg)
-            rows: list[list[str]] = []
-            while result.next():
-                rows.append(result.get_row_data())
-            raw = pd.DataFrame(rows, columns=result.fields)
-        finally:
-            bs.logout()
+                login = bs.login()
+            try:
+                if login.error_code != "0":
+                    raise RuntimeError(login.error_msg)
+                with _bounded_network_calls(request_timeout_seconds):
+                    result = bs.query_history_k_data_plus(
+                        _to_baostock_symbol(symbol),
+                        "date,open,high,low,close,volume",
+                        start_date=start.isoformat(),
+                        end_date=end.isoformat(),
+                        frequency="d",
+                        adjustflag="2",
+                    )
+                if result.error_code != "0":
+                    raise RuntimeError(result.error_msg)
+                rows: list[list[str]] = []
+                while result.next():
+                    rows.append(result.get_row_data())
+                raw = pd.DataFrame(rows, columns=result.fields)
+            finally:
+                bs.logout()
         if raw.empty:
             return pd.DataFrame(columns=BAR_COLUMNS)
         normalized = raw.rename(columns={"date": "trade_date"}).copy()
         normalized["provider"] = "baostock_qfq"
         normalized = _mark_adjusted(normalized, "qfq")
+        return _coerce_bar_types(normalized)
+
+    @staticmethod
+    def _load_yfinance_etf(
+        symbol: str,
+        start: date,
+        end: date,
+        request_timeout_seconds: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    ) -> pd.DataFrame:
+        ticker = f"{symbol}.SS" if symbol.startswith(("5", "6", "9")) else f"{symbol}.SZ"
+        raw = yf.download(
+            ticker,
+            start=start.isoformat(),
+            end=(end + timedelta(days=1)).isoformat(),
+            progress=False,
+            auto_adjust=True,
+            timeout=request_timeout_seconds,
+        )
+        if raw.empty:
+            raise RuntimeError("no adjusted ETF bars returned")
+        normalized = raw.copy()
+        if isinstance(normalized.columns, pd.MultiIndex):
+            normalized.columns = normalized.columns.get_level_values(0)
+        normalized = normalized.reset_index()
+        date_column = "Date" if "Date" in normalized.columns else normalized.columns[0]
+        normalized = normalized.rename(
+            columns={
+                date_column: "trade_date",
+                "Open": "open",
+                "High": "high",
+                "Low": "low",
+                "Close": "close",
+                "Volume": "volume",
+            }
+        )
+        normalized["provider"] = "yfinance_cn_etf_adjusted"
+        normalized = _mark_adjusted(normalized, "adjusted")
         return _coerce_bar_types(normalized)
 
     @staticmethod

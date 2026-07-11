@@ -101,6 +101,9 @@ class MarketBarCacheRow(Base):
     low: Mapped[Decimal] = mapped_column(Numeric(18, 6))
     close: Mapped[Decimal] = mapped_column(Numeric(18, 6))
     volume: Mapped[Decimal] = mapped_column(Numeric(24, 4))
+    adjusted_close: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    adjustment_factor: Mapped[Decimal | None] = mapped_column(Numeric(20, 10), nullable=True)
+    adjustment_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     cached_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
@@ -143,6 +146,69 @@ class FundamentalSnapshotRow(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
+
+
+class HistoricalTradabilityRow(Base):
+    __tablename__ = "historical_tradability"
+
+    provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
+    trade_date: Mapped[date] = mapped_column(Date, primary_key=True, index=True)
+    trading_status: Mapped[str] = mapped_column(String(32), index=True)
+    is_st: Mapped[bool | None] = mapped_column(Boolean, nullable=True, index=True)
+    pct_change_pct: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    source_provider: Mapped[str] = mapped_column(String(64))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class HistoricalInstrumentProfileRow(Base):
+    __tablename__ = "historical_instrument_profiles"
+
+    provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
+    snapshot_date: Mapped[date] = mapped_column(Date, primary_key=True, index=True)
+    listing_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    delisting_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    security_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    listing_status: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    source_provider: Mapped[str] = mapped_column(String(64))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class HistoricalIndustrySnapshotRow(Base):
+    __tablename__ = "historical_industry_snapshots"
+
+    provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
+    snapshot_date: Mapped[date] = mapped_column(Date, primary_key=True, index=True)
+    source_provider: Mapped[str] = mapped_column(String(64), primary_key=True)
+    industry: Mapped[str] = mapped_column(String(128), index=True)
+    classification: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class HistoricalIndexSnapshotRow(Base):
+    __tablename__ = "historical_index_snapshots"
+
+    provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
+    index_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
+    snapshot_date: Mapped[date] = mapped_column(Date, primary_key=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    member_count: Mapped[int] = mapped_column(Integer, default=0)
+    source_provider: Mapped[str] = mapped_column(String(64))
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class HistoricalIndexMembershipRow(Base):
+    __tablename__ = "historical_index_memberships"
+
+    provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
+    index_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
+    snapshot_date: Mapped[date] = mapped_column(Date, primary_key=True, index=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
+    source_provider: Mapped[str] = mapped_column(String(64))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class AShareEnhancedCacheRow(Base):
@@ -208,6 +274,46 @@ class FullMarketScanJobRow(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class HistoricalBackfillJobRow(Base):
+    __tablename__ = "historical_backfill_jobs"
+
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="queued")
+    start_date: Mapped[date] = mapped_column(Date)
+    end_date: Mapped[date] = mapped_column(Date)
+    symbols: Mapped[str] = mapped_column(Text, default="[]")
+    total_symbols: Mapped[int] = mapped_column(Integer, default=0)
+    processed_symbols: Mapped[int] = mapped_column(Integer, default=0)
+    succeeded_symbols: Mapped[int] = mapped_column(Integer, default=0)
+    failed_symbols: Mapped[int] = mapped_column(Integer, default=0)
+    rows_written: Mapped[int] = mapped_column(Integer, default=0)
+    fundamental_rows_written: Mapped[int] = mapped_column(Integer, default=0)
+    current_instrument: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    errors_json: Mapped[str] = mapped_column(Text, default="[]")
+    data_health: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TradableUniverseSnapshotRow(Base):
+    __tablename__ = "tradable_universe_snapshots"
+
+    as_of_date: Mapped[date] = mapped_column(Date, primary_key=True, index=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
+    symbol: Mapped[str] = mapped_column(String(16))
+    name: Mapped[str] = mapped_column(String(128))
+    asset_type: Mapped[str] = mapped_column(String(32), index=True)
+    exchange: Mapped[str] = mapped_column(String(16), index=True)
+    source: Mapped[str] = mapped_column(String(96), default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class AutomationSchedulerStateRow(Base):

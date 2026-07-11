@@ -49,7 +49,12 @@ class CachedMarketDataProvider:
     ) -> pd.DataFrame:
         frames: list[pd.DataFrame] = []
         for instrument_id in instrument_ids:
-            if self.cache.has_coverage(self.provider_mode, instrument_id, start, end):
+            if self.cache.has_usable_coverage(
+                self.provider_mode,
+                instrument_id,
+                start,
+                end,
+            ):
                 cached = self.cache.load_daily_bars(
                     self.provider_mode,
                     [instrument_id],
@@ -90,8 +95,15 @@ class CachedMarketDataProvider:
                     rows=len(fetched),
                 )
             )
-            if not fetched.empty:
-                frames.append(fetched)
+            if saved > 0:
+                persisted = self.cache.load_daily_bars(
+                    self.provider_mode,
+                    [instrument_id],
+                    start,
+                    end,
+                )
+                if not persisted.empty:
+                    frames.append(persisted)
         if not frames:
             return pd.DataFrame(columns=BAR_COLUMNS)
         return pd.concat(frames, ignore_index=True).sort_values(

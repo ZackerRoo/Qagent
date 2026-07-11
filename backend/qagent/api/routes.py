@@ -3,6 +3,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
 import math
+from threading import Lock
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException
@@ -22,6 +23,7 @@ from qagent.briefing.daily import DailyBrief, build_daily_brief
 from qagent.briefing.export import render_daily_brief_markdown
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
 from qagent.catalysts.providers import FreeCatalystProvider
+from qagent.data_management import build_historical_coverage_manifest
 from qagent.db import create_session_factory, initialize_database
 from qagent.domain.models import OpportunityCard, PortfolioPlan, SectorStrength
 from qagent.factors.backtest import run_factor_backtest
@@ -39,6 +41,7 @@ from qagent.jobs.full_market import (
     run_full_market_scan,
     sync_cn_tradable_catalog,
 )
+from qagent.jobs.historical_data import run_historical_backfill_job
 from qagent.jobs.alert_runner import run_alert_rules
 from qagent.jobs.intraday_check import evaluate_snapshot_alerts
 from qagent.jobs.task_manager import TaskManager
@@ -132,6 +135,9 @@ from qagent.strategies.models import StrategyHealth
 router = APIRouter()
 _task_manager = TaskManager()
 _task_executor = ThreadPoolExecutor(max_workers=2)
+_history_task_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="history-backfill")
+_historical_jobs_lock = Lock()
+_submitted_historical_jobs: set[str] = set()
 _automation_scheduler = AutomationScheduler()
 
 
@@ -181,6 +187,108 @@ def clear_data_cache(
         instrument_id=instrument_id.strip().upper() if instrument_id else None,
     )
     return {"deleted": deleted}
+
+
+@router.get("/historical-data/coverage")
+def historical_data_coverage(
+    start: date,
+    end: date,
+    provider: str = "free",
+    symbols: str | None = None,
+    max_symbols: int = 200,
+    include_etfs: bool = True,
+) -> dict[str, object]:
+    mode = _validate_historical_data_params(provider, start, end, max_symbols)
+    instrument_ids = _historical_data_symbols(
+        mode,
+        symbols,
+        max_symbols=max_symbols,
+        include_etfs=include_etfs,
+    )
+    manifest = build_historical_coverage_manifest(
+        repo=_repo(),
+        cache=_market_cache_repo(),
+        provider_mode=mode,
+        instrument_ids=instrument_ids,
+        start=start,
+        end=end,
+    )
+    return manifest.model_dump(mode="json")
+
+
+@router.post("/historical-data/backfill")
+def start_historical_data_backfill(
+    start: date,
+    end: date,
+    provider: str = "free",
+    symbols: str | None = None,
+    max_symbols: int = 200,
+    include_etfs: bool = True,
+    force_restart: bool = False,
+) -> dict[str, object]:
+    mode = _validate_historical_data_params(provider, start, end, max_symbols)
+    repo = _repo()
+    latest = repo.get_latest_historical_backfill_job(provider=mode)
+    if latest and latest.status in {"queued", "running"} and not force_restart:
+        return _historical_backfill_job_payload(latest)
+    instrument_ids = _historical_data_symbols(
+        mode,
+        symbols,
+        max_symbols=max_symbols,
+        include_etfs=include_etfs,
+    )
+    job = repo.create_historical_backfill_job(mode, instrument_ids, start, end)
+    _submit_historical_backfill(job.job_id)
+    return _historical_backfill_job_payload(job)
+
+
+@router.get("/historical-data/backfill/latest")
+def latest_historical_data_backfill(provider: str = "free") -> dict[str, object]:
+    job = _repo().get_latest_historical_backfill_job(provider=provider.strip().lower())
+    if job is None:
+        raise HTTPException(status_code=404, detail="historical backfill job not found")
+    return _historical_backfill_job_payload(job)
+
+
+@router.get("/historical-data/backfill/{job_id}")
+def historical_data_backfill_job(job_id: str) -> dict[str, object]:
+    job = _repo().get_historical_backfill_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="historical backfill job not found")
+    return _historical_backfill_job_payload(job)
+
+
+def restore_historical_backfill_from_storage() -> str | None:
+    job = _repo().get_latest_historical_backfill_job()
+    if job is None or job.status not in {"queued", "running"}:
+        return None
+    _submit_historical_backfill(job.job_id)
+    return job.job_id
+
+
+def _submit_historical_backfill(job_id: str) -> None:
+    with _historical_jobs_lock:
+        if job_id in _submitted_historical_jobs:
+            return
+        _submitted_historical_jobs.add(job_id)
+    _history_task_executor.submit(_run_historical_backfill_safely, job_id)
+
+
+def _run_historical_backfill_safely(job_id: str) -> None:
+    try:
+        run_historical_backfill_job(job_id)
+    except Exception as exc:
+        repo = _repo()
+        job = repo.get_historical_backfill_job(job_id)
+        if job is not None and job.status in {"queued", "running"}:
+            repo.update_historical_backfill_job(
+                job_id,
+                status="failed",
+                errors=[*job.errors[-99:], str(exc)],
+            )
+    finally:
+        with _historical_jobs_lock:
+            _submitted_historical_jobs.discard(job_id)
 
 
 def _parse_symbols(symbols: str | None, default_universe: list[str]) -> list[str]:
@@ -2930,6 +3038,57 @@ def _normalize_symbol_list(raw: str) -> list[str]:
             result.append(normalized)
             seen.add(normalized)
     return result
+
+
+def _validate_historical_data_params(
+    provider: str,
+    start: date,
+    end: date,
+    max_symbols: int,
+) -> str:
+    mode = provider.strip().lower()
+    if mode not in {"fixture", "free"}:
+        raise HTTPException(status_code=400, detail="provider must be fixture or free")
+    if start > end:
+        raise HTTPException(status_code=400, detail="start must be on or before end")
+    if max_symbols <= 0 or max_symbols > 10_000:
+        raise HTTPException(status_code=400, detail="max_symbols must be between 1 and 10000")
+    return mode
+
+
+def _historical_data_symbols(
+    provider: str,
+    raw_symbols: str | None,
+    *,
+    max_symbols: int,
+    include_etfs: bool,
+) -> list[str]:
+    if raw_symbols:
+        parsed = _normalize_symbol_list(raw_symbols)
+        resolved = resolve_symbol_tokens(parsed) if provider == "free" else ResolvedSymbols(symbols=parsed)
+        symbols = resolved.symbols[:max_symbols]
+    else:
+        asset_types = {"stock", "etf"} if include_etfs else {"stock"}
+        symbols = [
+            item.instrument_id
+            for item in _repo().list_tradable_instruments(
+                asset_types=asset_types,
+                limit=max_symbols,
+            )
+        ]
+    if not symbols:
+        raise HTTPException(status_code=400, detail="historical backfill symbol set is empty")
+    non_cn = [symbol for symbol in symbols if not symbol.startswith("CN:")]
+    if non_cn:
+        raise HTTPException(status_code=400, detail="historical backfill currently supports A shares only")
+    return symbols
+
+
+def _historical_backfill_job_payload(job) -> dict[str, object]:
+    payload = job.model_dump(mode="json")
+    payload["progress"] = job.progress
+    payload["phase"] = job.data_health.get("backfill_phase", job.status)
+    return payload
 
 
 @router.get("/full-market/batch-scan/latest")

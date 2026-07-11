@@ -6,10 +6,17 @@ from decimal import Decimal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
-from sqlalchemy import func
+from sqlalchemy import case, func
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.domain.models import OpportunityCard
+from qagent.historical_evidence.models import (
+    HistoricalEvidenceBundle,
+    HistoricalIndexCoverageStats,
+    HistoricalInstrumentProfile,
+    HistoricalInstrumentEvidenceStats,
+)
 from qagent.market.universes import UniverseCreate, UniverseRecord, normalize_symbols
 from qagent.storage.tables import (
     AlertRuleRow,
@@ -18,11 +25,18 @@ from qagent.storage.tables import (
     DeliveryOutboxRow,
     FullMarketScanJobRow,
     FundamentalSnapshotRow,
+    HistoricalBackfillJobRow,
+    HistoricalIndexMembershipRow,
+    HistoricalIndexSnapshotRow,
+    HistoricalIndustrySnapshotRow,
+    HistoricalInstrumentProfileRow,
+    HistoricalTradabilityRow,
     OpportunitySnapshotRow,
     PositionRow,
     ScanResultCacheRow,
     ScanRunRow,
     TradableInstrumentRow,
+    TradableUniverseSnapshotRow,
     UniverseRow,
     WatchlistItemRow,
 )
@@ -138,6 +152,34 @@ class FullMarketScanJobRecord(BaseModel):
         if self.status == "succeeded":
             return 100
         return max(0, min(99, int(self.scanned_symbols * 100 / self.total_symbols)))
+
+
+class HistoricalBackfillJobRecord(BaseModel):
+    job_id: str
+    provider: str
+    status: str
+    start_date: date
+    end_date: date
+    symbols: list[str]
+    total_symbols: int
+    processed_symbols: int
+    succeeded_symbols: int
+    failed_symbols: int
+    rows_written: int
+    fundamental_rows_written: int
+    current_instrument: str | None
+    errors: list[str]
+    data_health: dict[str, str]
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+    @property
+    def progress(self) -> int:
+        if self.total_symbols <= 0:
+            return 0
+        return max(0, min(100, int(self.processed_symbols * 100 / self.total_symbols)))
 
 
 class AutomationSchedulerStateRecord(BaseModel):
@@ -430,6 +472,124 @@ class QagentRepository:
         rows.sort(key=lambda row: (_asset_browse_rank(row.asset_type), row.symbol))
         return [self._tradable_instrument_from_row(row) for row in rows[: max(limit, 0)]]
 
+    def capture_tradable_universe_snapshot(self, as_of_date: date) -> int:
+        now = datetime.now(timezone.utc)
+        with self.session_factory() as session:
+            instruments = session.query(TradableInstrumentRow).all()
+            for instrument in instruments:
+                key = (as_of_date, instrument.instrument_id)
+                row = session.get(TradableUniverseSnapshotRow, key)
+                if row is None:
+                    row = TradableUniverseSnapshotRow(
+                        as_of_date=as_of_date,
+                        instrument_id=instrument.instrument_id,
+                    )
+                    session.add(row)
+                row.symbol = instrument.symbol
+                row.name = instrument.name
+                row.asset_type = instrument.asset_type
+                row.exchange = instrument.exchange
+                row.source = instrument.source
+                row.active = True
+                row.captured_at = now
+            session.commit()
+        return len(instruments)
+
+    def upsert_historical_universe_snapshots(
+        self,
+        profiles: list[HistoricalInstrumentProfile],
+        snapshot_dates: list[date],
+    ) -> int:
+        now = datetime.now(timezone.utc)
+        records: list[dict[str, object]] = []
+        for snapshot_date in sorted(set(snapshot_dates)):
+            for profile in profiles:
+                if profile.security_type not in {"1", "5"}:
+                    continue
+                if profile.listing_date is not None and profile.listing_date > snapshot_date:
+                    continue
+                if (
+                    profile.delisting_date is not None
+                    and profile.delisting_date < snapshot_date
+                ):
+                    continue
+                symbol = profile.instrument_id.split(":", 1)[-1]
+                records.append(
+                    {
+                        "as_of_date": snapshot_date,
+                        "instrument_id": profile.instrument_id,
+                        "symbol": symbol,
+                        "name": profile.name or symbol,
+                        "asset_type": (
+                            "stock" if profile.security_type == "1" else "etf"
+                        ),
+                        "exchange": (
+                            "SH" if symbol.startswith(("5", "6", "9")) else "SZ"
+                        ),
+                        "source": profile.provider,
+                        "active": True,
+                        "captured_at": now,
+                    }
+                )
+        with self.session_factory() as session:
+            _sqlite_upsert_chunks(
+                session,
+                TradableUniverseSnapshotRow,
+                records,
+                ["as_of_date", "instrument_id"],
+            )
+            session.commit()
+        return len(records)
+
+    def count_tradable_universe_snapshots(
+        self,
+        as_of_date: date | None = None,
+        instrument_ids: list[str] | None = None,
+        start: date | None = None,
+        end: date | None = None,
+    ) -> int:
+        with self.session_factory() as session:
+            query = session.query(TradableUniverseSnapshotRow)
+            if as_of_date is not None:
+                query = query.filter(TradableUniverseSnapshotRow.as_of_date == as_of_date)
+            if instrument_ids:
+                query = query.filter(
+                    TradableUniverseSnapshotRow.instrument_id.in_(instrument_ids)
+                )
+            if start is not None:
+                query = query.filter(TradableUniverseSnapshotRow.as_of_date >= start)
+            if end is not None:
+                query = query.filter(TradableUniverseSnapshotRow.as_of_date <= end)
+            return query.count()
+
+    def tradable_universe_snapshot_stats(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> dict[str, tuple[int, date | None, date | None]]:
+        if not instrument_ids:
+            return {}
+        with self.session_factory() as session:
+            rows = (
+                session.query(
+                    TradableUniverseSnapshotRow.instrument_id,
+                    func.count(TradableUniverseSnapshotRow.instrument_id),
+                    func.min(TradableUniverseSnapshotRow.as_of_date),
+                    func.max(TradableUniverseSnapshotRow.as_of_date),
+                )
+                .filter(
+                    TradableUniverseSnapshotRow.instrument_id.in_(instrument_ids),
+                    TradableUniverseSnapshotRow.as_of_date <= end,
+                )
+                .group_by(TradableUniverseSnapshotRow.instrument_id)
+                .all()
+            )
+        return {
+            instrument_id: (int(count), first_date, last_date)
+            for instrument_id, count, first_date, last_date in rows
+        }
+
     def upsert_fundamental_snapshots(
         self,
         provider_mode: str,
@@ -492,6 +652,339 @@ class QagentRepository:
                 .all()
             )
             return [self._fundamental_snapshot_from_row(row) for row in rows]
+
+    def fundamental_snapshot_stats(
+        self,
+        provider_mode: str,
+        instrument_ids: list[str],
+        end: date,
+    ) -> dict[str, tuple[int, date | None, date | None]]:
+        if not instrument_ids:
+            return {}
+        normalized_mode = provider_mode.strip().lower()
+        with self.session_factory() as session:
+            rows = (
+                session.query(
+                    FundamentalSnapshotRow.instrument_id,
+                    func.count(FundamentalSnapshotRow.instrument_id),
+                    func.min(FundamentalSnapshotRow.as_of_date),
+                    func.max(FundamentalSnapshotRow.as_of_date),
+                )
+                .filter(
+                    FundamentalSnapshotRow.provider_mode == normalized_mode,
+                    FundamentalSnapshotRow.instrument_id.in_(instrument_ids),
+                    FundamentalSnapshotRow.as_of_date <= end,
+                )
+                .group_by(FundamentalSnapshotRow.instrument_id)
+                .all()
+            )
+        return {
+            instrument_id: (int(count), first_date, last_date)
+            for instrument_id, count, first_date, last_date in rows
+        }
+
+    def upsert_historical_evidence(
+        self,
+        provider_mode: str,
+        bundle: HistoricalEvidenceBundle,
+    ) -> dict[str, int]:
+        mode = provider_mode.strip().lower()
+        now = datetime.now(timezone.utc)
+        records = {
+            "tradability": [
+                {
+                    "provider_mode": mode,
+                    "instrument_id": item.instrument_id,
+                    "trade_date": item.trade_date,
+                    "trading_status": item.trading_status,
+                    "is_st": item.is_st,
+                    "pct_change_pct": (
+                        Decimal(str(item.pct_change_pct))
+                        if item.pct_change_pct is not None
+                        else None
+                    ),
+                    "source_provider": item.provider,
+                    "fetched_at": now,
+                }
+                for item in bundle.tradability
+            ],
+            "profiles": [
+                {
+                    "provider_mode": mode,
+                    "instrument_id": item.instrument_id,
+                    "snapshot_date": item.snapshot_date,
+                    "listing_date": item.listing_date,
+                    "delisting_date": item.delisting_date,
+                    "security_type": item.security_type,
+                    "listing_status": item.listing_status,
+                    "source_provider": item.provider,
+                    "fetched_at": now,
+                }
+                for item in bundle.profiles
+            ],
+            "industries": [
+                {
+                    "provider_mode": mode,
+                    "instrument_id": item.instrument_id,
+                    "snapshot_date": item.snapshot_date,
+                    "source_provider": item.provider,
+                    "industry": item.industry,
+                    "classification": item.classification,
+                    "fetched_at": now,
+                }
+                for item in bundle.industries
+            ],
+            "index_snapshots": [
+                {
+                    "provider_mode": mode,
+                    "index_id": item.index_id,
+                    "snapshot_date": item.snapshot_date,
+                    "status": item.status,
+                    "member_count": item.member_count,
+                    "source_provider": item.provider,
+                    "error": item.error,
+                    "fetched_at": now,
+                }
+                for item in bundle.index_snapshots
+            ],
+            "index_memberships": [
+                {
+                    "provider_mode": mode,
+                    "index_id": item.index_id,
+                    "snapshot_date": item.snapshot_date,
+                    "instrument_id": item.instrument_id,
+                    "source_provider": item.provider,
+                    "fetched_at": now,
+                }
+                for item in bundle.index_memberships
+            ],
+        }
+        with self.session_factory() as session:
+            _sqlite_upsert_chunks(
+                session,
+                HistoricalTradabilityRow,
+                records["tradability"],
+                ["provider_mode", "instrument_id", "trade_date"],
+            )
+            _sqlite_upsert_chunks(
+                session,
+                HistoricalInstrumentProfileRow,
+                records["profiles"],
+                ["provider_mode", "instrument_id", "snapshot_date"],
+            )
+            _sqlite_upsert_chunks(
+                session,
+                HistoricalIndustrySnapshotRow,
+                records["industries"],
+                [
+                    "provider_mode",
+                    "instrument_id",
+                    "snapshot_date",
+                    "source_provider",
+                ],
+            )
+            _sqlite_upsert_chunks(
+                session,
+                HistoricalIndexSnapshotRow,
+                records["index_snapshots"],
+                ["provider_mode", "index_id", "snapshot_date"],
+            )
+            _sqlite_upsert_chunks(
+                session,
+                HistoricalIndexMembershipRow,
+                records["index_memberships"],
+                ["provider_mode", "index_id", "snapshot_date", "instrument_id"],
+            )
+            session.commit()
+        return {key: len(value) for key, value in records.items()}
+
+    def historical_evidence_stats(
+        self,
+        provider_mode: str,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> dict[str, HistoricalInstrumentEvidenceStats]:
+        if not instrument_ids:
+            return {}
+        mode = provider_mode.strip().lower()
+        result = {
+            instrument_id: HistoricalInstrumentEvidenceStats()
+            for instrument_id in instrument_ids
+        }
+        with self.session_factory() as session:
+            tradability_rows = (
+                session.query(
+                    HistoricalTradabilityRow.instrument_id,
+                    func.count(HistoricalTradabilityRow.trade_date),
+                    func.min(HistoricalTradabilityRow.trade_date),
+                    func.max(HistoricalTradabilityRow.trade_date),
+                    func.sum(
+                        case(
+                            (HistoricalTradabilityRow.trading_status == "suspended", 1),
+                            else_=0,
+                        )
+                    ),
+                    func.sum(
+                        case((HistoricalTradabilityRow.is_st.is_(True), 1), else_=0)
+                    ),
+                )
+                .filter(
+                    HistoricalTradabilityRow.provider_mode == mode,
+                    HistoricalTradabilityRow.instrument_id.in_(instrument_ids),
+                    HistoricalTradabilityRow.trade_date >= start,
+                    HistoricalTradabilityRow.trade_date <= end,
+                )
+                .group_by(HistoricalTradabilityRow.instrument_id)
+                .all()
+            )
+            profiles = (
+                session.query(HistoricalInstrumentProfileRow)
+                .filter(
+                    HistoricalInstrumentProfileRow.provider_mode == mode,
+                    HistoricalInstrumentProfileRow.instrument_id.in_(instrument_ids),
+                    HistoricalInstrumentProfileRow.snapshot_date >= start,
+                    HistoricalInstrumentProfileRow.snapshot_date <= end,
+                )
+                .order_by(HistoricalInstrumentProfileRow.snapshot_date.asc())
+                .all()
+            )
+            industry_rows = (
+                session.query(
+                    HistoricalIndustrySnapshotRow.instrument_id,
+                    func.count(HistoricalIndustrySnapshotRow.snapshot_date),
+                    func.min(HistoricalIndustrySnapshotRow.snapshot_date),
+                    func.max(HistoricalIndustrySnapshotRow.snapshot_date),
+                )
+                .filter(
+                    HistoricalIndustrySnapshotRow.provider_mode == mode,
+                    HistoricalIndustrySnapshotRow.instrument_id.in_(instrument_ids),
+                    HistoricalIndustrySnapshotRow.snapshot_date >= start,
+                    HistoricalIndustrySnapshotRow.snapshot_date <= end,
+                )
+                .group_by(HistoricalIndustrySnapshotRow.instrument_id)
+                .all()
+            )
+            industry_names = (
+                session.query(
+                    HistoricalIndustrySnapshotRow.instrument_id,
+                    HistoricalIndustrySnapshotRow.industry,
+                )
+                .filter(
+                    HistoricalIndustrySnapshotRow.provider_mode == mode,
+                    HistoricalIndustrySnapshotRow.instrument_id.in_(instrument_ids),
+                    HistoricalIndustrySnapshotRow.snapshot_date >= start,
+                    HistoricalIndustrySnapshotRow.snapshot_date <= end,
+                )
+                .distinct()
+                .all()
+            )
+            membership_rows = (
+                session.query(
+                    HistoricalIndexMembershipRow.instrument_id,
+                    func.count(HistoricalIndexMembershipRow.index_id),
+                )
+                .filter(
+                    HistoricalIndexMembershipRow.provider_mode == mode,
+                    HistoricalIndexMembershipRow.instrument_id.in_(instrument_ids),
+                    HistoricalIndexMembershipRow.snapshot_date >= start,
+                    HistoricalIndexMembershipRow.snapshot_date <= end,
+                )
+                .group_by(HistoricalIndexMembershipRow.instrument_id)
+                .all()
+            )
+            membership_ids = (
+                session.query(
+                    HistoricalIndexMembershipRow.instrument_id,
+                    HistoricalIndexMembershipRow.index_id,
+                )
+                .filter(
+                    HistoricalIndexMembershipRow.provider_mode == mode,
+                    HistoricalIndexMembershipRow.instrument_id.in_(instrument_ids),
+                    HistoricalIndexMembershipRow.snapshot_date >= start,
+                    HistoricalIndexMembershipRow.snapshot_date <= end,
+                )
+                .distinct()
+                .all()
+            )
+
+        for instrument_id, count, first_date, last_date, suspended, st_count in tradability_rows:
+            stats = result[instrument_id]
+            stats.tradability_rows = int(count)
+            stats.first_tradability_date = first_date
+            stats.last_tradability_date = last_date
+            stats.suspended_rows = int(suspended or 0)
+            stats.st_rows = int(st_count or 0)
+        for row in profiles:
+            stats = result[row.instrument_id]
+            stats.profile_rows += 1
+            stats.listing_date = row.listing_date
+            stats.delisting_date = row.delisting_date
+            stats.listing_status = row.listing_status
+        for instrument_id, count, first_date, last_date in industry_rows:
+            stats = result[instrument_id]
+            stats.industry_rows = int(count)
+            stats.first_industry_date = first_date
+            stats.last_industry_date = last_date
+        for instrument_id, industry in industry_names:
+            result[instrument_id].industries.append(industry)
+        for instrument_id, count in membership_rows:
+            result[instrument_id].benchmark_membership_rows = int(count)
+        for instrument_id, index_id in membership_ids:
+            result[instrument_id].benchmark_ids.append(index_id)
+        for stats in result.values():
+            stats.industries.sort()
+            stats.benchmark_ids.sort()
+        return result
+
+    def historical_index_snapshot_stats(
+        self,
+        provider_mode: str,
+        start: date,
+        end: date,
+    ) -> HistoricalIndexCoverageStats:
+        mode = provider_mode.strip().lower()
+        with self.session_factory() as session:
+            row = (
+                session.query(
+                    func.count(HistoricalIndexSnapshotRow.index_id),
+                    func.sum(
+                        case((HistoricalIndexSnapshotRow.status == "ready", 1), else_=0)
+                    ),
+                    func.sum(
+                        case((HistoricalIndexSnapshotRow.status == "failed", 1), else_=0)
+                    ),
+                    func.min(HistoricalIndexSnapshotRow.snapshot_date),
+                    func.max(HistoricalIndexSnapshotRow.snapshot_date),
+                )
+                .filter(
+                    HistoricalIndexSnapshotRow.provider_mode == mode,
+                    HistoricalIndexSnapshotRow.snapshot_date >= start,
+                    HistoricalIndexSnapshotRow.snapshot_date <= end,
+                )
+                .one()
+            )
+            index_ids = [
+                value
+                for (value,) in (
+                    session.query(HistoricalIndexSnapshotRow.index_id)
+                    .filter(
+                        HistoricalIndexSnapshotRow.provider_mode == mode,
+                        HistoricalIndexSnapshotRow.snapshot_date >= start,
+                        HistoricalIndexSnapshotRow.snapshot_date <= end,
+                    )
+                    .distinct()
+                    .all()
+                )
+            ]
+        return HistoricalIndexCoverageStats(
+            total_snapshots=int(row[0] or 0),
+            ready_snapshots=int(row[1] or 0),
+            failed_snapshots=int(row[2] or 0),
+            first_snapshot_date=row[3],
+            last_snapshot_date=row[4],
+            index_ids=sorted(index_ids),
+        )
 
     def save_scan_run(
         self,
@@ -741,6 +1234,107 @@ class QagentRepository:
             if row is None:
                 return None
             return self._full_market_scan_job_from_row(row)
+
+    def create_historical_backfill_job(
+        self,
+        provider: str,
+        symbols: list[str],
+        start: date,
+        end: date,
+    ) -> HistoricalBackfillJobRecord:
+        now = datetime.now(timezone.utc)
+        job_id = f"history-backfill-{now.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+        with self.session_factory() as session:
+            row = HistoricalBackfillJobRow(
+                job_id=job_id,
+                provider=provider,
+                status="queued",
+                start_date=start,
+                end_date=end,
+                symbols=json.dumps(symbols),
+                total_symbols=len(symbols),
+                processed_symbols=0,
+                succeeded_symbols=0,
+                failed_symbols=0,
+                rows_written=0,
+                fundamental_rows_written=0,
+                errors_json="[]",
+                data_health="{}",
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return self._historical_backfill_job_from_row(row)
+
+    def update_historical_backfill_job(
+        self,
+        job_id: str,
+        *,
+        status: str | None = None,
+        processed_symbols: int | None = None,
+        succeeded_symbols: int | None = None,
+        failed_symbols: int | None = None,
+        rows_written: int | None = None,
+        fundamental_rows_written: int | None = None,
+        current_instrument: str | None = None,
+        errors: list[str] | None = None,
+        data_health: dict[str, str] | None = None,
+    ) -> HistoricalBackfillJobRecord | None:
+        now = datetime.now(timezone.utc)
+        with self.session_factory() as session:
+            row = session.get(HistoricalBackfillJobRow, job_id)
+            if row is None:
+                return None
+            if status is not None:
+                row.status = status
+                if status == "running" and row.started_at is None:
+                    row.started_at = now
+                if status in {"succeeded", "succeeded_with_errors", "failed", "cancelled"}:
+                    row.finished_at = now
+            if processed_symbols is not None:
+                row.processed_symbols = processed_symbols
+            if succeeded_symbols is not None:
+                row.succeeded_symbols = succeeded_symbols
+            if failed_symbols is not None:
+                row.failed_symbols = failed_symbols
+            if rows_written is not None:
+                row.rows_written = rows_written
+            if fundamental_rows_written is not None:
+                row.fundamental_rows_written = fundamental_rows_written
+            if current_instrument is not None:
+                row.current_instrument = current_instrument
+            if errors is not None:
+                row.errors_json = json.dumps(errors)
+            if data_health is not None:
+                row.data_health = json.dumps(data_health, sort_keys=True)
+            row.updated_at = now
+            session.commit()
+            session.refresh(row)
+            return self._historical_backfill_job_from_row(row)
+
+    def get_historical_backfill_job(
+        self,
+        job_id: str,
+    ) -> HistoricalBackfillJobRecord | None:
+        with self.session_factory() as session:
+            row = session.get(HistoricalBackfillJobRow, job_id)
+            return self._historical_backfill_job_from_row(row) if row is not None else None
+
+    def get_latest_historical_backfill_job(
+        self,
+        provider: str | None = None,
+    ) -> HistoricalBackfillJobRecord | None:
+        with self.session_factory() as session:
+            query = session.query(HistoricalBackfillJobRow)
+            if provider:
+                query = query.filter(HistoricalBackfillJobRow.provider == provider)
+            row = query.order_by(
+                HistoricalBackfillJobRow.created_at.desc(),
+                HistoricalBackfillJobRow.job_id.desc(),
+            ).first()
+            return self._historical_backfill_job_from_row(row) if row is not None else None
 
     def list_opportunity_snapshots(
         self,
@@ -1193,6 +1787,32 @@ class QagentRepository:
         )
 
     @staticmethod
+    def _historical_backfill_job_from_row(
+        row: HistoricalBackfillJobRow,
+    ) -> HistoricalBackfillJobRecord:
+        return HistoricalBackfillJobRecord(
+            job_id=row.job_id,
+            provider=row.provider,
+            status=row.status,
+            start_date=row.start_date,
+            end_date=row.end_date,
+            symbols=json.loads(row.symbols or "[]"),
+            total_symbols=row.total_symbols,
+            processed_symbols=row.processed_symbols,
+            succeeded_symbols=row.succeeded_symbols,
+            failed_symbols=row.failed_symbols,
+            rows_written=row.rows_written,
+            fundamental_rows_written=row.fundamental_rows_written,
+            current_instrument=row.current_instrument,
+            errors=json.loads(row.errors_json or "[]"),
+            data_health=json.loads(row.data_health or "{}"),
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            started_at=row.started_at,
+            finished_at=row.finished_at,
+        )
+
+    @staticmethod
     def _opportunity_snapshot_from_row(row: OpportunitySnapshotRow) -> OpportunitySnapshotRecord:
         return OpportunitySnapshotRecord(
             snapshot_id=row.snapshot_id,
@@ -1344,6 +1964,26 @@ def _asset_sort_rank(asset_type: str) -> int:
 
 def _asset_browse_rank(asset_type: str) -> int:
     return {"stock": 0, "etf": 1}.get(asset_type, 2)
+
+
+def _sqlite_upsert_chunks(
+    session: Session,
+    model,
+    records: list[dict[str, object]],
+    index_elements: list[str],
+    chunk_size: int = 400,
+) -> None:
+    if not records:
+        return
+    update_columns = [key for key in records[0] if key not in index_elements]
+    for offset in range(0, len(records), chunk_size):
+        statement = sqlite_insert(model).values(records[offset : offset + chunk_size])
+        excluded = statement.excluded
+        statement = statement.on_conflict_do_update(
+            index_elements=[getattr(model, key) for key in index_elements],
+            set_={key: getattr(excluded, key) for key in update_columns},
+        )
+        session.execute(statement)
 
 
 def _dedupe_strings(values: list[str]) -> list[str]:

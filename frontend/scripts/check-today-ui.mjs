@@ -148,6 +148,14 @@ assert(decisionAutomation.includes("replacement_candidates"), "Decision automati
 assert(decisionAutomation.includes("market_environment"), "Decision automation center must use market environment data");
 assert(decisionAutomation.includes("rotation_radar"), "Decision automation center must use theme rotation data");
 assert(decisionAutomation.includes("pre_trade_risk"), "Decision automation center must use pre-trade risk data");
+assert(
+  decisionAutomation.includes("formatPercentagePoints(card.pre_trade_risk.max_position_pct)"),
+  "Decision automation center must display max position as percentage points without multiplying by 100",
+);
+assert(
+  decisionAutomation.includes("localizeReason(checklistItem, language)"),
+  "Decision automation center must localize dynamic pre-trade checklist text",
+);
 assert(manualAction.includes("今日操作清单"), "Manual action center must show today's action list");
 assert(manualAction.includes("提醒闭环"), "Manual action center must show alert loop");
 assert(manualAction.includes("数据源升级路线"), "Manual action center must show data source roadmap");

@@ -9,9 +9,22 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.storage.tables import MarketBarCacheRow, MarketDataCacheSpanRow
+from qagent.market.calendars import trading_sessions_in_range
 
 
-BAR_COLUMNS = ["instrument_id", "trade_date", "open", "high", "low", "close", "volume", "provider"]
+BAR_COLUMNS = [
+    "instrument_id",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "provider",
+    "adjusted_close",
+    "adjustment_factor",
+    "adjustment_type",
+]
 
 
 class MarketDataCacheSummary(BaseModel):
@@ -22,6 +35,8 @@ class MarketDataCacheSummary(BaseModel):
     last_trade_date: date | None
     last_cached_at: datetime | None
     source_providers: list[str] = Field(default_factory=list)
+    adjusted_rows: int = 0
+    adjustment_types: list[str] = Field(default_factory=list)
 
 
 class MarketDataCacheRepository:
@@ -46,6 +61,9 @@ class MarketDataCacheRepository:
                     "low": Decimal(str(row["low"])),
                     "close": Decimal(str(row["close"])),
                     "volume": Decimal(str(row["volume"])),
+                    "adjusted_close": _decimal_or_none(row.get("adjusted_close")),
+                    "adjustment_factor": _decimal_or_none(row.get("adjustment_factor")),
+                    "adjustment_type": _text_or_none(row.get("adjustment_type")),
                     "cached_at": cached_at,
                     "updated_at": cached_at,
                 }
@@ -68,6 +86,9 @@ class MarketDataCacheRepository:
                     "low": excluded.low,
                     "close": excluded.close,
                     "volume": excluded.volume,
+                    "adjusted_close": excluded.adjusted_close,
+                    "adjustment_factor": excluded.adjustment_factor,
+                    "adjustment_type": excluded.adjustment_type,
                     "cached_at": excluded.cached_at,
                     "updated_at": excluded.updated_at,
                 },
@@ -126,6 +147,76 @@ class MarketDataCacheRepository:
             )
             return span is not None
 
+    def has_usable_coverage(
+        self,
+        provider_mode: str,
+        instrument_id: str,
+        start: date,
+        end: date,
+        *,
+        require_adjusted: bool = False,
+        minimum_session_coverage: float | None = None,
+    ) -> bool:
+        with self.session_factory() as session:
+            span = (
+                session.query(MarketDataCacheSpanRow)
+                .filter(
+                    MarketDataCacheSpanRow.provider_mode == provider_mode,
+                    MarketDataCacheSpanRow.instrument_id == instrument_id,
+                    MarketDataCacheSpanRow.start_date <= start,
+                    MarketDataCacheSpanRow.end_date >= end,
+                    MarketDataCacheSpanRow.row_count > 0,
+                )
+                .order_by(MarketDataCacheSpanRow.cached_at.desc())
+                .first()
+            )
+            if span is None:
+                return False
+            total_rows = (
+                session.query(MarketBarCacheRow)
+                .filter(
+                    MarketBarCacheRow.provider_mode == provider_mode,
+                    MarketBarCacheRow.instrument_id == instrument_id,
+                    MarketBarCacheRow.trade_date >= start,
+                    MarketBarCacheRow.trade_date <= end,
+                )
+                .count()
+            )
+            if total_rows <= 0:
+                return False
+            expected_rows = total_rows
+            if (
+                minimum_session_coverage is not None
+                and provider_mode == "free"
+                and instrument_id.startswith("CN:")
+            ):
+                try:
+                    expected_rows = len(trading_sessions_in_range(start, end))
+                except ValueError:
+                    # Snapshot lookups intentionally use an open-ended historical range.
+                    expected_rows = total_rows
+                if (
+                    expected_rows > 0
+                    and total_rows / expected_rows < minimum_session_coverage
+                ):
+                    return False
+            if not require_adjusted:
+                return True
+            adjusted_rows = (
+                session.query(MarketBarCacheRow)
+                .filter(
+                    MarketBarCacheRow.provider_mode == provider_mode,
+                    MarketBarCacheRow.instrument_id == instrument_id,
+                    MarketBarCacheRow.trade_date >= start,
+                    MarketBarCacheRow.trade_date <= end,
+                    MarketBarCacheRow.adjusted_close.is_not(None),
+                    MarketBarCacheRow.adjustment_type.is_not(None),
+                )
+                .count()
+            )
+            denominator = expected_rows if expected_rows > 0 else total_rows
+            return adjusted_rows / denominator >= 0.95
+
     def load_daily_bars(
         self,
         provider_mode: str,
@@ -158,6 +249,9 @@ class MarketDataCacheRepository:
                     "close": row.close,
                     "volume": row.volume,
                     "provider": row.source_provider,
+                    "adjusted_close": row.adjusted_close,
+                    "adjustment_factor": row.adjustment_factor,
+                    "adjustment_type": row.adjustment_type,
                 }
                 for row in rows
             ],
@@ -204,6 +298,9 @@ class MarketDataCacheRepository:
                     "close": row.close,
                     "volume": row.volume,
                     "provider": row.source_provider,
+                    "adjusted_close": row.adjusted_close,
+                    "adjustment_factor": row.adjustment_factor,
+                    "adjustment_type": row.adjustment_type,
                 }
                 for row in latest_by_instrument.values()
             ],
@@ -239,6 +336,10 @@ class MarketDataCacheRepository:
                     source_providers=sorted(
                         {item.source_provider for item in items if item.source_provider}
                     ),
+                    adjusted_rows=sum(1 for item in items if item.adjusted_close is not None),
+                    adjustment_types=sorted(
+                        {item.adjustment_type for item in items if item.adjustment_type}
+                    ),
                 )
             )
         return summaries
@@ -270,6 +371,10 @@ def _normalize_bars(bars: pd.DataFrame) -> pd.DataFrame:
     normalized["trade_date"] = pd.to_datetime(normalized["trade_date"]).dt.date
     for column in ["open", "high", "low", "close"]:
         normalized[column] = _finite_numeric(normalized[column])
+    for column in ["adjusted_close", "adjustment_factor"]:
+        if column not in normalized.columns:
+            normalized[column] = None
+        normalized[column] = _finite_numeric(normalized[column])
     if "volume" not in normalized.columns:
         normalized["volume"] = 0
     volume = _finite_numeric(normalized["volume"]).fillna(0)
@@ -279,6 +384,8 @@ def _normalize_bars(bars: pd.DataFrame) -> pd.DataFrame:
         normalized["volume"] = volume
     if "provider" not in normalized.columns:
         normalized["provider"] = ""
+    if "adjustment_type" not in normalized.columns:
+        normalized["adjustment_type"] = None
     normalized = normalized.dropna(subset=["open", "high", "low", "close"])
     return normalized[BAR_COLUMNS].sort_values(["instrument_id", "trade_date"]).reset_index(drop=True)
 
@@ -287,3 +394,22 @@ def _finite_numeric(series: pd.Series) -> pd.Series:
     numeric = pd.to_numeric(series, errors="coerce")
     finite_mask = numeric.map(lambda value: pd.notna(value) and math.isfinite(float(value)))
     return numeric.where(finite_mask)
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    try:
+        if value is None or pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return Decimal(str(value))
+
+
+def _text_or_none(value: object) -> str | None:
+    try:
+        if value is None or pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        return None
+    text = str(value).strip()
+    return text or None

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date, timedelta
+from datetime import date
 import math
 import random
 
 from pydantic import BaseModel, Field
+
+from qagent.market.calendars import trading_sessions_elapsed
 
 
 class TemporalValidationWindow(BaseModel):
@@ -139,8 +141,11 @@ def _split_dates(
 
 
 def _after_embargo(values: list[date], boundary: date, embargo_days: int) -> list[date]:
-    earliest = boundary + timedelta(days=embargo_days)
-    return [value for value in values if value > earliest]
+    return [
+        value
+        for value in values
+        if trading_sessions_elapsed(boundary, value) > embargo_days
+    ]
 
 
 def _window(

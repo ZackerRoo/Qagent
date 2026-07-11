@@ -2,6 +2,7 @@ from datetime import date, timedelta
 from types import SimpleNamespace
 
 from qagent.backtesting.temporal_validation import build_temporal_validation
+from qagent.market.calendars import trading_sessions_elapsed
 
 
 def _signals(count: int, returns: list[float]):
@@ -39,8 +40,8 @@ def test_temporal_validation_uses_chronological_embargoed_windows_and_bootstrap_
     out_of_sample = windows["out_of_sample"]
     assert train.end_date < validation.start_date
     assert validation.end_date < out_of_sample.start_date
-    assert (validation.start_date - train.end_date).days > 5
-    assert (out_of_sample.start_date - validation.end_date).days > 5
+    assert trading_sessions_elapsed(train.end_date, validation.start_date) > 5
+    assert trading_sessions_elapsed(validation.end_date, out_of_sample.start_date) > 5
     assert out_of_sample.sample_count >= 10
     assert out_of_sample.confidence_low_pct is not None
     assert out_of_sample.confidence_low_pct > 0

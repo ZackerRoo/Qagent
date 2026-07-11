@@ -8,6 +8,7 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 
 - A-share-first scanning with fixture data and free providers.
 - Persistent market-data cache for fixture/free providers, with cache hit/miss data-health fields and Settings-page cache inspection.
+- Historical-data backfill jobs with persisted phase/progress, resumable adjusted-bar caching, announcement-date A-share fundamentals, lifecycle-derived tradable-universe snapshots, and a machine-readable coverage manifest.
 - Daily Brief page and `/api/daily-brief` research digest combining opportunities, entry levels, catalysts, portfolio risk, data caveats, and strategy validation.
 - Saved brief runs with history, detail retrieval, and Markdown export for push-ready workflows.
 - Delivery outbox for saved briefs and alert runs, with queued/sent status plus local Markdown-file and webhook sender adapters.
@@ -122,6 +123,9 @@ curl -X POST 'http://127.0.0.1:8000/api/alerts/run?provider=fixture&queue=true&r
 curl 'http://127.0.0.1:8000/api/provider-status'
 curl 'http://127.0.0.1:8000/api/data-cache?provider=free'
 curl -X DELETE 'http://127.0.0.1:8000/api/data-cache?provider=free'
+curl -X POST 'http://127.0.0.1:8000/api/historical-data/backfill?provider=free&symbols=CN:000001,CN:588000&start=2023-01-01&end=2026-07-10'
+curl 'http://127.0.0.1:8000/api/historical-data/backfill/latest?provider=free'
+curl 'http://127.0.0.1:8000/api/historical-data/coverage?provider=free&symbols=CN:000001,CN:588000&start=2023-01-01&end=2026-07-10'
 curl 'http://127.0.0.1:8000/api/catalysts?symbols=CN:000001&limit=5'
 curl 'http://127.0.0.1:8000/api/portfolio?provider=fixture'
 ```
@@ -143,7 +147,18 @@ cd backend
 .venv/bin/python -m qagent.cli daily-brief --provider fixture --no-news --save --queue --print-markdown
 .venv/bin/python -m qagent.cli run-all --provider free --symbols CN:000001,CN:600519 --no-news --queue-brief --run-backtest
 .venv/bin/python -m qagent.cli send-outbox --channel markdown --output-dir ../data/outbox
+.venv/bin/python -m qagent.cli backfill-history --provider free --symbols CN:000001,CN:588000 --start 2023-01-01 --end 2026-07-10
 ```
+
+## Historical Evidence
+
+`backfill-history` and `/api/historical-data/backfill` populate the same SQLite source of truth used by scans and backtests. The API starts a background job and returns immediately; use the latest/detail routes to read `phase`, progress, failed symbols, rows written, and data-health fields. Phases distinguish price bars, fundamentals, historical evidence, coverage-manifest generation, and completion. Re-running the same range is idempotent: a China-market cache span is reused only when it covers at least 95% of expected XSHG sessions and at least 95% of those sessions carry adjustment metadata. Explicit upstream errors receive a bounded three-attempt retry.
+
+Free A-share financial history uses BaoStock quarterly profit/growth records. A row becomes usable on its publication date, not its report-period end date; PE, PS, and market capitalization use the latest unadjusted close on or before that publication date. This prevents report and price lookahead. ETF history prefers AKShare forward-adjusted bars, then Yahoo adjusted OHLC, with BaoStock as the final fallback. ETF tradability is inferred only for dates with stored ETF bars because BaoStock exposes materially shorter ETF status history than stock history.
+
+The coverage manifest reports bar, adjustment, fundamental, universe, tradability, industry, and benchmark readiness separately for each instrument. `ready` means all enforced checks passed, `partial` means bars exist but one or more evidence classes are incomplete, and `missing` means no usable bars exist. Historical stock/ETF pools are reconstructed at the requested start date and quarter ends from BaoStock listing/delisting lifecycle records; today's catalog is not backdated.
+
+A-share holding periods and validation embargoes use XSHG trading sessions. Weekends and exchange holidays therefore do not count toward 5/10/20-day outcomes.
 
 ## Research Docs
 

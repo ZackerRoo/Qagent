@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from pydantic import BaseModel, Field
 
+from qagent.market.calendars import trading_sessions_elapsed
 from qagent.providers.base import MarketDataProvider
 from qagent.storage.paper import PaperTradeRecord, PaperTradeSourceContext, PaperTradingRepository
 from qagent.storage.repository import OpportunitySnapshotRecord
@@ -1779,7 +1780,7 @@ def _validation_item(
         entry_date=trade.entry_date,
         exit_date=trade.exit_date,
         latest_date=trade.latest_date,
-        days_since_signal=max((as_of - trade.signal_date).days, 0),
+        days_since_signal=max(trading_sessions_elapsed(trade.signal_date, as_of), 0),
         holding_days=trade.holding_days,
         return_pct=return_pct,
         pnl=_money(pnl),

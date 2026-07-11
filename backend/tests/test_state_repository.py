@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 from sqlalchemy import text
 
@@ -237,6 +238,52 @@ def test_repository_tracks_full_market_batch_scan_jobs(tmp_path):
     assert loaded.data_health["market_cache_hits"] == "2"
     assert latest is not None
     assert latest.job_id == job.job_id
+
+
+def test_repository_tracks_historical_backfill_and_universe_snapshots(tmp_path):
+    repo = make_repo(tmp_path)
+    repo.replace_tradable_instruments(
+        [
+            SimpleNamespace(
+                instrument_id="CN:000001",
+                symbol="000001",
+                name="平安银行",
+                label="平安银行 000001.SZ",
+                asset_type="stock",
+                exchange="SZ",
+                source="fixture_catalog",
+            )
+        ]
+    )
+
+    captured = repo.capture_tradable_universe_snapshot(date(2026, 1, 9))
+    job = repo.create_historical_backfill_job(
+        provider="free",
+        symbols=["CN:000001"],
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 9),
+    )
+    updated = repo.update_historical_backfill_job(
+        job.job_id,
+        status="running",
+        processed_symbols=1,
+        succeeded_symbols=1,
+        rows_written=6,
+        current_instrument="CN:000001",
+        data_health={"bar_coverage": "ready"},
+    )
+    finished = repo.update_historical_backfill_job(job.job_id, status="succeeded")
+
+    assert captured == 1
+    assert repo.count_tradable_universe_snapshots(date(2026, 1, 9), ["CN:000001"]) == 1
+    assert job.job_id.startswith("history-backfill-")
+    assert job.status == "queued"
+    assert updated is not None
+    assert updated.progress == 100
+    assert updated.rows_written == 6
+    assert finished is not None
+    assert finished.finished_at is not None
+    assert repo.get_historical_backfill_job(job.job_id) == finished
 
 
 def test_repository_filters_opportunity_snapshots_by_instrument(tmp_path):

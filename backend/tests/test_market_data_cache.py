@@ -38,6 +38,81 @@ def test_market_data_cache_saves_and_loads_daily_bars(tmp_path):
     assert summaries[0].source_providers == ["fixture"]
 
 
+def test_market_data_cache_preserves_adjustment_metadata(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "CN:000001",
+                "trade_date": date(2026, 1, 5),
+                "open": 10.0,
+                "high": 10.5,
+                "low": 9.9,
+                "close": 10.3,
+                "volume": 800_000,
+                "provider": "akshare_qfq",
+                "adjusted_close": 10.3,
+                "adjustment_factor": 1.0,
+                "adjustment_type": "qfq",
+            }
+        ]
+    )
+
+    repo.save_daily_bars("free", bars)
+    loaded = repo.load_daily_bars(
+        "free",
+        ["CN:000001"],
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+    summary = repo.list_summaries("free", "CN:000001")[0]
+
+    assert float(loaded.iloc[0]["adjusted_close"]) == 10.3
+    assert float(loaded.iloc[0]["adjustment_factor"]) == 1.0
+    assert loaded.iloc[0]["adjustment_type"] == "qfq"
+    assert summary.adjusted_rows == 1
+    assert summary.adjustment_types == ["qfq"]
+
+
+def test_market_data_cache_rejects_partial_cn_span_as_usable_coverage(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "CN:000001",
+                "trade_date": trade_date,
+                "open": 10.0,
+                "high": 10.5,
+                "low": 9.9,
+                "close": 10.3,
+                "volume": 800_000,
+                "provider": "akshare_qfq",
+                "adjusted_close": 10.3,
+                "adjustment_factor": 1.0,
+                "adjustment_type": "qfq",
+            }
+            for trade_date in [date(2026, 1, 5), date(2026, 1, 6)]
+        ]
+    )
+    repo.save_daily_bars("free", bars)
+    repo.record_coverage(
+        "free",
+        "CN:000001",
+        date(2026, 1, 1),
+        date(2026, 1, 9),
+        len(bars),
+    )
+
+    assert not repo.has_usable_coverage(
+        "free",
+        "CN:000001",
+        date(2026, 1, 1),
+        date(2026, 1, 9),
+        require_adjusted=True,
+        minimum_session_coverage=0.95,
+    )
+
+
 def test_market_data_cache_loads_latest_daily_bar_per_instrument(tmp_path):
     repo = make_cache_repo(tmp_path)
     provider = FixtureMarketDataProvider()

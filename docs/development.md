@@ -51,6 +51,43 @@ curl -X DELETE 'http://127.0.0.1:8000/api/data-cache?provider=free'
 
 Scan `data_health` includes `market_cache`, `market_cache_hits`, `market_cache_misses`, and `market_cache_rows` when the provider is cache-backed. The Settings page also shows cache summaries for the selected data mode.
 
+## Historical Data Backfill
+
+Run a bounded, synchronous backfill from the CLI:
+
+```bash
+cd backend
+.venv/bin/python -m qagent.cli backfill-history \
+  --provider free \
+  --symbols CN:000001,CN:588000 \
+  --start 2023-01-01 \
+  --end 2026-07-10
+```
+
+Start the same work as a background API job:
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/api/historical-data/backfill?provider=free&symbols=CN:000001,CN:588000&start=2023-01-01&end=2026-07-10'
+curl 'http://127.0.0.1:8000/api/historical-data/backfill/latest?provider=free'
+curl 'http://127.0.0.1:8000/api/historical-data/backfill/<job_id>'
+curl 'http://127.0.0.1:8000/api/historical-data/coverage?provider=free&symbols=CN:000001,CN:588000&start=2023-01-01&end=2026-07-10'
+```
+
+Operational rules:
+
+- Jobs persist their scope, phase, progress, current instrument, failures, row counts, and coverage health in SQLite. `phase` is one of `queued`, `price_bars`, `fundamentals`, `historical_evidence`, `coverage_manifest`, `complete`, or `failed`.
+- Re-running an interrupted job is safe because bar, fundamental, universe, and coverage-span writes are upserts.
+- A span with zero rows is never treated as a cache hit. China-market spans must cover at least 95% of expected XSHG sessions, and A-share stocks/ETFs require adjustment metadata for at least 95% of those sessions.
+- AKShare stock and ETF history is requested with `qfq`. If the Eastmoney ETF endpoint disconnects, Yahoo adjusted OHLC is the second ETF source; BaoStock forward-adjusted history remains the final fallback.
+- Explicit upstream failures are retried at most three times; legitimate empty responses are not retried.
+- A-share quarterly fundamentals use the publication date as `as_of_date`. Historical PE/PS/market cap use only unadjusted prices on or before that date.
+- Historical stock/ETF pools are reconstructed at the range start and quarter ends from BaoStock listing and delisting dates. Current catalog membership is never substituted for historical membership.
+- BaoStock ETF status history is shorter than its stock history. ETF tradability evidence is therefore added only for dates with stored ETF bars; missing dates remain missing.
+- Coverage is conservative. Missing fundamentals, tradability, industry, or benchmark snapshots remain `partial`.
+- Holding horizons and embargoes use XSHG sessions, not calendar days.
+
+Start with a small symbol set and inspect the coverage manifest before scaling. Free upstream sources can disconnect or rate-limit; failed symbols stay visible in the job and can be retried without deleting successful rows.
+
 ## Daily Brief
 
 The Brief page and `/api/daily-brief` provide the main daily research readout:

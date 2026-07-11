@@ -32,6 +32,7 @@ Qagent already has:
 - Automated research-only paper trading with A-share sessions, T+1 handling, costs, slippage, position limits, restart recovery, and daily reporting.
 - Recommendation follow-through, strategy diagnostics, factor validation, K-line review, alerts, and data-health surfaces.
 - Corrected paper-validation semantics, point-in-time fundamental persistence, and chronological out-of-sample validation implemented in the current working tree.
+- Historical backfill jobs, adjustment metadata, XSHG trading-session horizons, universe snapshots, and machine-readable coverage manifests implemented in the current working tree.
 
 The main product risk is no longer missing UI features. It is insufficient trustworthy historical evidence for deciding whether the recommendation engine has a repeatable edge.
 
@@ -186,15 +187,21 @@ Package Qagent as a reliable research preview with explicit limitations and repe
 ### What's done
 
 - Validation-integrity implementation is complete in the working tree.
-- Full backend suite passes with 305 tests; lint and frontend checks pass.
-- Live scheduler, paper validation, factor snapshot persistence, event backtest, and Chrome responsive checks have been verified.
+- Historical backfill core, API, CLI, SQLite progress, adjustment metadata, and coverage manifest are implemented in the working tree.
+- A-share and ETF free history requests forward-adjusted prices; partial session spans and stale unadjusted spans are rejected, and transient provider failures receive bounded retries.
+- Historical evidence now stores stock suspension/ST history, security lifecycle, quarterly industry, CSI 300/500 and SSE 50 membership, and lifecycle-derived stock/ETF universe snapshots.
+- Free A-share quarterly fundamentals are stored at publication date and joined only to valuation observations available by that date.
+- Historical jobs run on a dedicated executor, recover after restart, and expose persisted phase state so evidence work is not misreported as a stuck 100% price scan.
+- The three-year 20-instrument pilot is fully ready: average bar coverage 99.99%, adjustment coverage 99.94%, 10/10 stock fundamentals, 20/20 lifecycle/universe/tradability/industry coverage, and 39/39 benchmark snapshots.
+- Full backend verification passes with 333 tests; Ruff, frontend production build, and all 12 frontend contract checks pass.
+- Live scheduler recovery, paper ledger, Today, Backtest, Portfolio, desktop, and 811px browser checks pass without stuck loading, horizontal page overflow, or console errors.
 
 ### What's next
 
-- Publish the current validation-integrity changes.
-- Start M1 with the data manifest and resumable historical backfill.
+- Review the completed M1 diff and publish it after user approval.
+- Scale the validated dataset in bounded offline batches before beginning M2 walk-forward replay.
 
 ### Any blockers
 
-- No implementation blocker.
-- Historical free-source completeness remains an evidence question to resolve during the M1 pilot.
+- No M1 correctness blocker in the pilot scope.
+- BaoStock financial history is request-heavy because it is queried per stock, year, quarter, and metric family; full-market scale requires offline batching and persisted coverage reuse rather than synchronous scans.

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pandas as pd
 import requests
 
+import qagent.providers.free_cn as free_cn
 from qagent.providers.free_cn import FreeCnMarketDataProvider
 from qagent.providers.free_us import FreeUsMarketDataProvider
 
@@ -144,6 +145,7 @@ def test_free_cn_provider_uses_etf_history_for_etf_symbols(monkeypatch):
     def fake_fund_etf_hist(symbol, period, start_date, end_date, adjust):
         assert symbol == "588000"
         assert period == "daily"
+        assert adjust == "qfq"
         return pd.DataFrame(
             {
                 "日期": ["2026-01-02", "2026-01-05"],
@@ -165,8 +167,63 @@ def test_free_cn_provider_uses_etf_history_for_etf_symbols(monkeypatch):
     bars = provider.get_daily_bars(["CN:588000"], date(2026, 1, 1), date(2026, 1, 31))
 
     assert bars["instrument_id"].tolist() == ["CN:588000", "CN:588000"]
-    assert bars["provider"].eq("akshare_etf").all()
+    assert bars["provider"].eq("akshare_etf_qfq").all()
+    assert bars["adjustment_type"].eq("qfq").all()
     assert bars["close"].tolist() == [1.02, 1.04]
+
+
+def test_free_cn_provider_uses_adjusted_yfinance_etf_fallback(monkeypatch):
+    def failing_etf_history(*args, **kwargs):
+        raise ConnectionError("eastmoney disconnected")
+
+    columns = pd.MultiIndex.from_tuples(
+        [
+            ("Open", "159915.SZ"),
+            ("High", "159915.SZ"),
+            ("Low", "159915.SZ"),
+            ("Close", "159915.SZ"),
+            ("Volume", "159915.SZ"),
+        ]
+    )
+
+    def fake_download(tickers, start, end, progress, auto_adjust, timeout):
+        assert tickers == "159915.SZ"
+        assert auto_adjust is True
+        assert timeout == 3
+        return pd.DataFrame(
+            [[1.0, 1.1, 0.9, 1.05, 8_000_000]],
+            index=pd.to_datetime(["2026-01-05"]),
+            columns=columns,
+        )
+
+    monkeypatch.setattr(
+        free_cn,
+        "ak",
+        SimpleNamespace(fund_etf_hist_em=failing_etf_history),
+    )
+    monkeypatch.setattr(
+        free_cn,
+        "yf",
+        SimpleNamespace(download=fake_download),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        free_cn,
+        "bs",
+        SimpleNamespace(login=lambda: (_ for _ in ()).throw(AssertionError())),
+    )
+
+    provider = FreeCnMarketDataProvider()
+    bars = provider.get_daily_bars(
+        ["CN:159915"],
+        date(2026, 1, 1),
+        date(2026, 1, 9),
+    )
+
+    assert bars["instrument_id"].tolist() == ["CN:159915"]
+    assert bars["provider"].tolist() == ["yfinance_cn_etf_adjusted"]
+    assert bars["adjustment_type"].tolist() == ["adjusted"]
+    assert bars["adjusted_close"].tolist() == [1.05]
 
 
 def test_free_cn_provider_drops_nonfinite_ohlc_rows(monkeypatch):
