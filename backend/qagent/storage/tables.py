@@ -1,7 +1,17 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from qagent.db import Base
@@ -209,6 +219,199 @@ class HistoricalIndexMembershipRow(Base):
     instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
     source_provider: Mapped[str] = mapped_column(String(64))
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class HistoricalReplayBarRow(Base):
+    __tablename__ = "historical_replay_bars"
+
+    provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
+    trade_date: Mapped[date] = mapped_column(Date, primary_key=True, index=True)
+    raw_open: Mapped[Decimal] = mapped_column(Numeric(20, 8))
+    raw_high: Mapped[Decimal] = mapped_column(Numeric(20, 8))
+    raw_low: Mapped[Decimal] = mapped_column(Numeric(20, 8))
+    raw_close: Mapped[Decimal] = mapped_column(Numeric(20, 8))
+    adjusted_open: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    adjusted_high: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    adjusted_low: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    adjusted_close: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    volume: Mapped[Decimal] = mapped_column(Numeric(28, 8))
+    turnover: Mapped[Decimal | None] = mapped_column(Numeric(28, 8), nullable=True)
+    adjustment_factor: Mapped[Decimal | None] = mapped_column(Numeric(24, 12), nullable=True)
+    adjustment_mode: Mapped[str] = mapped_column(String(32))
+    source_provider: Mapped[str] = mapped_column(String(64))
+    dataset_revision: Mapped[int] = mapped_column(Integer, index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class HistoricalCorporateActionRow(Base):
+    __tablename__ = "historical_corporate_actions"
+
+    provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
+    action_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    announcement_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    record_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    ex_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    effective_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    payable_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    action_type: Mapped[str] = mapped_column(String(64), index=True)
+    cash_per_share: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    share_ratio: Mapped[Decimal | None] = mapped_column(Numeric(24, 12), nullable=True)
+    rights_ratio: Mapped[Decimal | None] = mapped_column(Numeric(24, 12), nullable=True)
+    subscription_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    previous_raw_close: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    ex_right_reference_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 8), nullable=True
+    )
+    source_provider: Mapped[str] = mapped_column(String(64))
+    dataset_revision: Mapped[int] = mapped_column(Integer, index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class HistoricalUniverseManifestRow(Base):
+    __tablename__ = "historical_universe_manifests"
+
+    provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
+    snapshot_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    source_revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    expected_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stored_count: Mapped[int] = mapped_column(Integer)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class HistoricalReplayUniverseMemberRow(Base):
+    __tablename__ = "historical_replay_universe_members"
+
+    provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
+    snapshot_date: Mapped[date] = mapped_column(Date, primary_key=True, index=True)
+    source_revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
+    security_type: Mapped[str] = mapped_column(String(32), index=True)
+    listing_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    delisting_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean)
+    source_provider: Mapped[str] = mapped_column(String(64))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class HistoricalLifecycleManifestRow(Base):
+    __tablename__ = "historical_lifecycle_manifests"
+
+    provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
+    source_revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    expected_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stored_count: Mapped[int] = mapped_column(Integer)
+    effective_through: Mapped[date] = mapped_column(Date)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class HistoricalCorporateActionCoverageRow(Base):
+    __tablename__ = "historical_corporate_action_coverage"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('ready', 'ready_none', 'partial', 'unsupported')",
+            name="ck_historical_corporate_action_coverage_status",
+        ),
+    )
+
+    provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
+    start_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    end_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    action_count: Mapped[int] = mapped_column(Integer)
+    source_provider: Mapped[str] = mapped_column(String(64))
+    dataset_revision: Mapped[int] = mapped_column(Integer, index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class HistoricalTradingRuleRow(Base):
+    __tablename__ = "historical_trading_rules"
+
+    rule_set_version: Mapped[str] = mapped_column(String(64), primary_key=True)
+    market: Mapped[str] = mapped_column(String(16), primary_key=True)
+    board: Mapped[str] = mapped_column(String(32), primary_key=True)
+    is_st: Mapped[bool] = mapped_column(Boolean, primary_key=True)
+    security_type: Mapped[str] = mapped_column(String(32), primary_key=True)
+    effective_from: Mapped[date] = mapped_column(Date, primary_key=True)
+    effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    limit_pct: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
+    tick_size: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    board_lot: Mapped[int] = mapped_column(Integer)
+    settlement_days: Mapped[int] = mapped_column(Integer)
+    ipo_no_limit_sessions: Mapped[int] = mapped_column(Integer)
+
+
+class HistoricalInstrumentRuleMetadataRow(Base):
+    __tablename__ = "historical_instrument_rule_metadata"
+
+    provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
+    effective_from: Mapped[date] = mapped_column(Date, primary_key=True)
+    effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    security_type: Mapped[str] = mapped_column(String(32), index=True)
+    market: Mapped[str] = mapped_column(String(16), index=True)
+    board: Mapped[str] = mapped_column(String(32))
+    settlement_days: Mapped[int] = mapped_column(Integer)
+    limit_rule_key: Mapped[str] = mapped_column(String(128), index=True)
+    fee_rule_key: Mapped[str] = mapped_column(String(128), index=True)
+    source_provider: Mapped[str] = mapped_column(String(64))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class HistoricalFeeRuleRow(Base):
+    __tablename__ = "historical_fee_rules"
+
+    fee_rule_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    effective_from: Mapped[date] = mapped_column(Date, primary_key=True)
+    effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    side: Mapped[str] = mapped_column(String(16), primary_key=True)
+    security_type: Mapped[str] = mapped_column(String(32))
+    exchange: Mapped[str] = mapped_column(String(16))
+    commission_bps: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    minimum_commission: Mapped[Decimal] = mapped_column(Numeric(20, 8))
+    stamp_duty_bps: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+    transfer_fee_bps: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+
+
+class HistoricalTerminalSettlementRow(Base):
+    __tablename__ = "historical_terminal_settlements"
+
+    provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
+    effective_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    settlement_type: Mapped[str] = mapped_column(String(32), primary_key=True)
+    cash_per_share: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    conversion_instrument_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    conversion_ratio: Mapped[Decimal | None] = mapped_column(Numeric(24, 12), nullable=True)
+    source_provider: Mapped[str] = mapped_column(String(64))
+    dataset_revision: Mapped[int] = mapped_column(Integer, index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class HistoricalDataRevisionRow(Base):
+    __tablename__ = "historical_data_revisions"
+
+    provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class HistoricalDatasetLeaseRow(Base):
+    __tablename__ = "historical_dataset_leases"
+
+    provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
+    owner_run_id: Mapped[str] = mapped_column(String(64), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class AShareEnhancedCacheRow(Base):
