@@ -141,17 +141,69 @@ def _apply_additive_migrations(engine: Engine) -> None:
     if not engine.dialect.name.startswith("sqlite"):
         return
     inspector = inspect(engine)
-    if not inspector.has_table("market_bar_cache"):
-        return
-    existing = {column["name"] for column in inspector.get_columns("market_bar_cache")}
-    additions = {
-        "adjusted_close": "NUMERIC(18, 6)",
-        "adjustment_factor": "NUMERIC(20, 10)",
-        "adjustment_type": "VARCHAR(32)",
-    }
     with engine.begin() as connection:
-        for column, sql_type in additions.items():
-            if column not in existing:
-                connection.execute(
-                    text(f"ALTER TABLE market_bar_cache ADD COLUMN {column} {sql_type}")
-                )
+        _add_missing_columns(
+            connection,
+            inspector,
+            "market_bar_cache",
+            {
+                "adjusted_close": "NUMERIC(18, 6)",
+                "adjustment_factor": "NUMERIC(20, 10)",
+                "adjustment_type": "VARCHAR(32)",
+            },
+        )
+        for table_name in (
+            "fundamental_snapshots",
+            "historical_tradability",
+            "historical_instrument_profiles",
+            "historical_industry_snapshots",
+            "historical_index_snapshots",
+            "historical_index_memberships",
+        ):
+            _add_missing_columns(
+                connection,
+                inspector,
+                table_name,
+                {"dataset_revision": "INTEGER NOT NULL DEFAULT 0"},
+            )
+        _rebuild_revision_scoped_lifecycle_profiles(connection)
+
+
+def _add_missing_columns(connection, inspector, table_name: str, additions) -> None:
+    if not inspector.has_table(table_name):
+        return
+    existing = {column["name"] for column in inspector.get_columns(table_name)}
+    for column, sql_type in additions.items():
+        if column not in existing:
+            connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column} {sql_type}"))
+
+
+def _rebuild_revision_scoped_lifecycle_profiles(connection) -> None:
+    table_name = "historical_instrument_profiles"
+    expected_key = [
+        "provider_mode",
+        "instrument_id",
+        "snapshot_date",
+        "dataset_revision",
+    ]
+    current_key = inspect(connection).get_pk_constraint(table_name)[
+        "constrained_columns"
+    ]
+    if current_key == expected_key:
+        return
+    table = Base.metadata.tables[table_name]
+    column_names = [column.name for column in table.columns]
+    columns_sql = ", ".join(column_names)
+    backup_name = f"{table_name}_migration_backup"
+    connection.execute(
+        text(f"CREATE TEMP TABLE {backup_name} AS SELECT {columns_sql} FROM {table_name}")
+    )
+    connection.execute(text(f"DROP TABLE {table_name}"))
+    table.create(connection)
+    connection.execute(
+        text(
+            f"INSERT INTO {table_name} ({columns_sql}) "
+            f"SELECT {columns_sql} FROM {backup_name}"
+        )
+    )
+    connection.execute(text(f"DROP TABLE {backup_name}"))

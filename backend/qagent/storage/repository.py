@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
@@ -18,6 +19,7 @@ from qagent.historical_evidence.models import (
     HistoricalInstrumentEvidenceStats,
 )
 from qagent.market.universes import UniverseCreate, UniverseRecord, normalize_symbols
+from qagent.storage.replay_evidence import ReplayEvidenceRepository
 from qagent.storage.tables import (
     AlertRuleRow,
     AutomationSchedulerStateRow,
@@ -276,6 +278,20 @@ def _parse_tags(value: str | None) -> list[str]:
 class QagentRepository:
     def __init__(self, session_factory: sessionmaker[Session]):
         self.session_factory = session_factory
+
+    def replay_evidence(
+        self,
+        provider_mode: str,
+        *,
+        owner_run_id: str | None = None,
+        run_status_lookup: Callable[[str], str | None] | None = None,
+    ) -> ReplayEvidenceRepository:
+        return ReplayEvidenceRepository(
+            self.session_factory,
+            provider_mode=provider_mode,
+            owner_run_id=owner_run_id,
+            run_status_lookup=run_status_lookup,
+        )
 
     def save_automation_scheduler_state(
         self,
@@ -595,33 +611,7 @@ class QagentRepository:
         provider_mode: str,
         snapshots: list[FundamentalSnapshot],
     ) -> int:
-        normalized_mode = provider_mode.strip().lower()
-        deduplicated = {
-            (
-                normalized_mode,
-                snapshot.instrument_id,
-                snapshot.as_of_date,
-                snapshot.provider or "unknown",
-            ): snapshot
-            for snapshot in snapshots
-        }
-        if not deduplicated:
-            return 0
-        now = datetime.now(timezone.utc)
-        with self.session_factory() as session:
-            for key, snapshot in deduplicated.items():
-                row = session.get(FundamentalSnapshotRow, key)
-                if row is None:
-                    row = FundamentalSnapshotRow(
-                        provider_mode=key[0],
-                        instrument_id=key[1],
-                        as_of_date=key[2],
-                        source_provider=key[3],
-                    )
-                    session.add(row)
-                self._apply_fundamental_snapshot(row, snapshot, now)
-            session.commit()
-        return len(deduplicated)
+        return self.replay_evidence(provider_mode).upsert_fundamentals(snapshots)
 
     def list_fundamental_snapshots(
         self,
@@ -688,115 +678,7 @@ class QagentRepository:
         provider_mode: str,
         bundle: HistoricalEvidenceBundle,
     ) -> dict[str, int]:
-        mode = provider_mode.strip().lower()
-        now = datetime.now(timezone.utc)
-        records = {
-            "tradability": [
-                {
-                    "provider_mode": mode,
-                    "instrument_id": item.instrument_id,
-                    "trade_date": item.trade_date,
-                    "trading_status": item.trading_status,
-                    "is_st": item.is_st,
-                    "pct_change_pct": (
-                        Decimal(str(item.pct_change_pct))
-                        if item.pct_change_pct is not None
-                        else None
-                    ),
-                    "source_provider": item.provider,
-                    "fetched_at": now,
-                }
-                for item in bundle.tradability
-            ],
-            "profiles": [
-                {
-                    "provider_mode": mode,
-                    "instrument_id": item.instrument_id,
-                    "snapshot_date": item.snapshot_date,
-                    "listing_date": item.listing_date,
-                    "delisting_date": item.delisting_date,
-                    "security_type": item.security_type,
-                    "listing_status": item.listing_status,
-                    "source_provider": item.provider,
-                    "fetched_at": now,
-                }
-                for item in bundle.profiles
-            ],
-            "industries": [
-                {
-                    "provider_mode": mode,
-                    "instrument_id": item.instrument_id,
-                    "snapshot_date": item.snapshot_date,
-                    "source_provider": item.provider,
-                    "industry": item.industry,
-                    "classification": item.classification,
-                    "fetched_at": now,
-                }
-                for item in bundle.industries
-            ],
-            "index_snapshots": [
-                {
-                    "provider_mode": mode,
-                    "index_id": item.index_id,
-                    "snapshot_date": item.snapshot_date,
-                    "status": item.status,
-                    "member_count": item.member_count,
-                    "source_provider": item.provider,
-                    "error": item.error,
-                    "fetched_at": now,
-                }
-                for item in bundle.index_snapshots
-            ],
-            "index_memberships": [
-                {
-                    "provider_mode": mode,
-                    "index_id": item.index_id,
-                    "snapshot_date": item.snapshot_date,
-                    "instrument_id": item.instrument_id,
-                    "source_provider": item.provider,
-                    "fetched_at": now,
-                }
-                for item in bundle.index_memberships
-            ],
-        }
-        with self.session_factory() as session:
-            _sqlite_upsert_chunks(
-                session,
-                HistoricalTradabilityRow,
-                records["tradability"],
-                ["provider_mode", "instrument_id", "trade_date"],
-            )
-            _sqlite_upsert_chunks(
-                session,
-                HistoricalInstrumentProfileRow,
-                records["profiles"],
-                ["provider_mode", "instrument_id", "snapshot_date"],
-            )
-            _sqlite_upsert_chunks(
-                session,
-                HistoricalIndustrySnapshotRow,
-                records["industries"],
-                [
-                    "provider_mode",
-                    "instrument_id",
-                    "snapshot_date",
-                    "source_provider",
-                ],
-            )
-            _sqlite_upsert_chunks(
-                session,
-                HistoricalIndexSnapshotRow,
-                records["index_snapshots"],
-                ["provider_mode", "index_id", "snapshot_date"],
-            )
-            _sqlite_upsert_chunks(
-                session,
-                HistoricalIndexMembershipRow,
-                records["index_memberships"],
-                ["provider_mode", "index_id", "snapshot_date", "instrument_id"],
-            )
-            session.commit()
-        return {key: len(value) for key, value in records.items()}
+        return self.replay_evidence(provider_mode).upsert_point_in_time_evidence(bundle)
 
     def historical_evidence_stats(
         self,
@@ -846,9 +728,16 @@ class QagentRepository:
                     HistoricalInstrumentProfileRow.snapshot_date >= start,
                     HistoricalInstrumentProfileRow.snapshot_date <= end,
                 )
-                .order_by(HistoricalInstrumentProfileRow.snapshot_date.asc())
+                .order_by(
+                    HistoricalInstrumentProfileRow.snapshot_date.asc(),
+                    HistoricalInstrumentProfileRow.dataset_revision.desc(),
+                )
                 .all()
             )
+            latest_profiles = {}
+            for row in profiles:
+                latest_profiles.setdefault((row.instrument_id, row.snapshot_date), row)
+            profiles = list(latest_profiles.values())
             industry_rows = (
                 session.query(
                     HistoricalIndustrySnapshotRow.instrument_id,
@@ -1687,26 +1576,6 @@ class QagentRepository:
             tags=_parse_tags(row.tags),
             synced_at=row.synced_at,
         )
-
-    @staticmethod
-    def _apply_fundamental_snapshot(
-        row: FundamentalSnapshotRow,
-        snapshot: FundamentalSnapshot,
-        now: datetime,
-    ) -> None:
-        row.revenue_growth_pct = snapshot.revenue_growth_pct
-        row.earnings_growth_pct = snapshot.earnings_growth_pct
-        row.gross_margin_pct = snapshot.gross_margin_pct
-        row.operating_margin_pct = snapshot.operating_margin_pct
-        row.net_margin_pct = snapshot.net_margin_pct
-        row.return_on_equity_pct = snapshot.return_on_equity_pct
-        row.market_cap = snapshot.market_cap
-        row.pe_ratio = snapshot.pe_ratio
-        row.forward_pe = snapshot.forward_pe
-        row.peg_ratio = snapshot.peg_ratio
-        row.price_to_sales = snapshot.price_to_sales
-        row.cached_at = now
-        row.updated_at = now
 
     @staticmethod
     def _fundamental_snapshot_from_row(row: FundamentalSnapshotRow) -> FundamentalSnapshot:
