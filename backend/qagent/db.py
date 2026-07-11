@@ -4,7 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from threading import Lock
 
-from sqlalchemy import DateTime, Numeric, String, create_engine
+from sqlalchemy import BigInteger, DateTime, Numeric, create_engine
 from sqlalchemy import event, inspect, text
 from sqlalchemy.engine import Dialect
 from sqlalchemy.engine import Engine, make_url
@@ -45,8 +45,8 @@ class UTCDateTime(TypeDecorator[datetime]):
         return value.astimezone(timezone.utc)
 
 
-class SQLiteExactDecimal(TypeDecorator[Decimal]):
-    """Use canonical decimal text on SQLite and native fixed precision elsewhere."""
+class SQLiteScaledDecimal(TypeDecorator[Decimal]):
+    """Use scaled integers on SQLite and native fixed precision elsewhere."""
 
     impl = Numeric
     cache_ok = True
@@ -58,7 +58,7 @@ class SQLiteExactDecimal(TypeDecorator[Decimal]):
 
     def load_dialect_impl(self, dialect: Dialect):
         if dialect.name == "sqlite":
-            return dialect.type_descriptor(String(64))
+            return dialect.type_descriptor(BigInteger())
         return dialect.type_descriptor(Numeric(self.precision, self.scale, asdecimal=True))
 
     def process_bind_param(self, value: Decimal | int | str | None, dialect: Dialect):
@@ -66,22 +66,24 @@ class SQLiteExactDecimal(TypeDecorator[Decimal]):
             return None
         decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
         if not decimal_value.is_finite():
-            raise ValueError("SQLiteExactDecimal requires a finite value")
-        _, digits, exponent = decimal_value.as_tuple()
-        fractional_digits = max(-exponent, 0)
-        integer_digits = max(len(digits) + exponent, 0)
-        if fractional_digits > self.scale or integer_digits > self.precision - self.scale:
-            raise ValueError(
-                f"decimal value exceeds NUMERIC({self.precision}, {self.scale})"
-            )
+            raise ValueError("SQLiteScaledDecimal requires a finite value")
+        scaled_value = decimal_value.scaleb(self.scale)
+        if scaled_value != scaled_value.to_integral_value():
+            raise ValueError(f"decimal value exceeds scale {self.scale}")
         if dialect.name == "sqlite":
-            return format(decimal_value, "f")
+            integer_value = int(scaled_value)
+            if not -(2**63) <= integer_value <= 2**63 - 1:
+                raise OverflowError("scaled decimal exceeds signed 64-bit SQLite range")
+            return integer_value
         return decimal_value
 
-    def process_result_value(self, value, _dialect: Dialect):
+    def process_result_value(self, value, dialect: Dialect):
         if value is None:
             return None
-        return value if isinstance(value, Decimal) else Decimal(str(value))
+        decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
+        if dialect.name == "sqlite":
+            return decimal_value.scaleb(-self.scale)
+        return decimal_value
 
 
 _schema_lock = Lock()

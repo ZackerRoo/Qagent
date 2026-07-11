@@ -74,12 +74,14 @@ class HistoricalCorporateAction(BaseModel):
     provider_mode: str
     instrument_id: str
     action_id: str
-    announcement_date: date | None = None
+    announcement_date: date
     record_date: date | None = None
     ex_date: date | None = None
     effective_date: date | None = None
     payable_date: date | None = None
-    action_type: Literal["cash_dividend", "stock_split", "bonus_share", "rights_issue"]
+    action_type: Literal[
+        "cash_dividend", "split", "bonus", "rights", "merger", "conversion", "other"
+    ]
     cash_per_share: Decimal | None = None
     share_ratio: Decimal | None = None
     rights_ratio: Decimal | None = None
@@ -92,8 +94,6 @@ class HistoricalCorporateAction(BaseModel):
 
     @model_validator(mode="after")
     def validate_action_evidence(self) -> Self:
-        if self.announcement_date is None:
-            raise ValueError("corporate action requires announcement_date")
         if not any((self.ex_date, self.effective_date, self.payable_date)):
             raise ValueError("corporate action requires an effective or event date")
         if self.action_type == "cash_dividend":
@@ -101,18 +101,11 @@ class HistoricalCorporateAction(BaseModel):
                 raise ValueError("cash dividend requires record_date and payable_date")
             if self.cash_per_share is None or self.cash_per_share <= 0:
                 raise ValueError("cash dividend requires positive cash_per_share")
-        elif self.action_type in {"stock_split", "bonus_share"}:
+        elif self.action_type in {"split", "bonus"}:
             if self.record_date is None or self.ex_date is None or self.effective_date is None:
                 raise ValueError("split or bonus requires record, ex, and effective dates")
             if self.share_ratio is None or self.share_ratio <= 0:
                 raise ValueError("split or bonus requires positive share_ratio")
-        else:
-            if self.record_date is None or self.ex_date is None or self.effective_date is None:
-                raise ValueError("rights issue requires record, ex, and effective dates")
-            if self.rights_ratio is None or self.rights_ratio <= 0:
-                raise ValueError("rights issue requires positive rights_ratio")
-            if self.subscription_price is None or self.subscription_price <= 0:
-                raise ValueError("rights issue requires positive subscription_price")
         return self
 
 

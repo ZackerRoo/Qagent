@@ -3,8 +3,8 @@ from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import DateTime, Integer, String, inspect, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import BigInteger, DateTime, Integer, inspect, select, text
+from sqlalchemy.exc import IntegrityError, StatementError
 
 from qagent import db
 from qagent.historical_evidence import models
@@ -395,7 +395,7 @@ def _corporate_action_data(**overrides):
         "ex_date": date(2025, 1, 3),
         "effective_date": date(2025, 1, 3),
         "payable_date": None,
-        "action_type": "stock_split",
+        "action_type": "split",
         "cash_per_share": None,
         "share_ratio": "1",
         "rights_ratio": None,
@@ -419,14 +419,8 @@ def _corporate_action_data(**overrides):
             "cash_per_share": "0.25",
             "share_ratio": None,
         },
-        {"action_type": "stock_split", "share_ratio": "1"},
-        {"action_type": "bonus_share", "share_ratio": "0.5"},
-        {
-            "action_type": "rights_issue",
-            "share_ratio": None,
-            "rights_ratio": "0.3",
-            "subscription_price": "7.50",
-        },
+        {"action_type": "split", "share_ratio": "1"},
+        {"action_type": "bonus", "share_ratio": "0.5"},
     ],
 )
 def test_corporate_action_accepts_supported_complete_types(overrides):
@@ -435,32 +429,68 @@ def test_corporate_action_accepts_supported_complete_types(overrides):
     assert action.action_type == overrides["action_type"]
 
 
+def test_corporate_action_declares_announcement_date_required():
+    schema = models.HistoricalCorporateAction.model_json_schema()
+
+    assert "announcement_date" in schema["required"]
+    assert models.HistoricalCorporateAction.model_fields["announcement_date"].is_required()
+
+
+@pytest.mark.parametrize("action_type", ["rights", "merger", "conversion", "other"])
+def test_unsupported_corporate_action_without_economics_persists(
+    tmp_path, action_type
+):
+    database_url = f"sqlite:///{tmp_path / f'unsupported-{action_type}.db'}"
+    db.initialize_database(database_url)
+    session_factory = db.create_session_factory(database_url)
+    action = models.HistoricalCorporateAction(
+        **_corporate_action_data(
+            action_id=f"{action_type}-1",
+            action_type=action_type,
+            record_date=None,
+            ex_date=None,
+            effective_date=date(2025, 1, 3),
+            share_ratio=None,
+            rights_ratio=None,
+            subscription_price=None,
+            previous_raw_close=None,
+            ex_right_reference_price=None,
+        )
+    )
+
+    with session_factory() as session:
+        session.add(_tables.HistoricalCorporateActionRow(**action.model_dump()))
+        session.commit()
+        stored = session.get(
+            _tables.HistoricalCorporateActionRow,
+            ("free", "CN:000001", f"{action_type}-1"),
+        )
+
+        assert stored is not None
+        assert stored.action_type == action_type
+        assert stored.cash_per_share is None
+        assert stored.share_ratio is None
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"action_type": "merger"},
+        {"action_type": "unknown"},
         {"announcement_date": None},
-        {"effective_date": None, "ex_date": None},
+        {
+            "action_type": "other",
+            "effective_date": None,
+            "ex_date": None,
+            "payable_date": None,
+        },
         {
             "action_type": "cash_dividend",
             "payable_date": date(2025, 1, 8),
             "cash_per_share": None,
             "share_ratio": None,
         },
-        {"action_type": "stock_split", "share_ratio": "0"},
-        {"action_type": "bonus_share", "record_date": None},
-        {
-            "action_type": "rights_issue",
-            "share_ratio": None,
-            "rights_ratio": None,
-            "subscription_price": "7.50",
-        },
-        {
-            "action_type": "rights_issue",
-            "share_ratio": None,
-            "rights_ratio": "0.3",
-            "subscription_price": "0",
-        },
+        {"action_type": "split", "share_ratio": "0"},
+        {"action_type": "bonus", "record_date": None},
     ],
 )
 def test_corporate_action_rejects_unsupported_or_incomplete_evidence(overrides):
@@ -669,21 +699,19 @@ def test_schema_declares_financial_types_nullability_indexes_and_constraints(tmp
         for column in inspector.get_columns("historical_dataset_leases")
     }
 
-    assert isinstance(replay_columns["raw_close"]["type"], String)
-    assert replay_columns["raw_close"]["type"].length == 64
-    assert isinstance(replay_columns["volume"]["type"], String)
-    assert replay_columns["volume"]["type"].length == 64
+    assert isinstance(replay_columns["raw_close"]["type"], BigInteger)
+    assert isinstance(replay_columns["volume"]["type"], BigInteger)
     declared_exact_decimals = {
         _tables.HistoricalReplayBarRow.__table__.c.raw_close.type: (20, 8),
-        _tables.HistoricalReplayBarRow.__table__.c.volume.type: (28, 8),
-        _tables.HistoricalReplayBarRow.__table__.c.turnover.type: (28, 8),
+        _tables.HistoricalReplayBarRow.__table__.c.volume.type: (28, 4),
+        _tables.HistoricalReplayBarRow.__table__.c.turnover.type: (28, 4),
         _tables.HistoricalCorporateActionRow.__table__.c.rights_ratio.type: (24, 12),
         _tables.HistoricalTradingRuleRow.__table__.c.tick_size.type: (18, 8),
         _tables.HistoricalFeeRuleRow.__table__.c.commission_bps.type: (18, 8),
         _tables.HistoricalTerminalSettlementRow.__table__.c.conversion_ratio.type: (24, 12),
     }
     for sql_type, precision_scale in declared_exact_decimals.items():
-        assert isinstance(sql_type, db.SQLiteExactDecimal)
+        assert isinstance(sql_type, db.SQLiteScaledDecimal)
         assert (sql_type.precision, sql_type.scale) == precision_scale
     assert isinstance(replay_columns["dataset_revision"]["type"], Integer)
     assert isinstance(lease_columns["lease_expires_at"]["type"], DateTime)
@@ -747,16 +775,16 @@ def test_realistic_financial_decimals_round_trip_exactly(tmp_path):
     db.initialize_database(database_url)
     session_factory = db.create_session_factory(database_url)
     trade_date = date(2025, 1, 2)
-    price = Decimal("19999.12345678")
-    volume = Decimal("9999999999.00000000")
-    turnover = Decimal("999999999999.12000000")
-    adjustment_factor = Decimal("12.123456789012")
-    share_ratio = Decimal("9.123456789012")
-    subscription_price = Decimal("9999.12345678")
-    commission_bps = Decimal("99.12345678")
-    minimum_commission = Decimal("999.12345678")
-    stamp_duty_bps = Decimal("10.12345678")
-    transfer_fee_bps = Decimal("1.12345678")
+    price = Decimal("99999999.12345678")
+    volume = Decimal("99999999999.1234")
+    turnover = Decimal("99999999999999.1234")
+    adjustment_factor = Decimal("999999.123456789012")
+    share_ratio = Decimal("999999.123456789012")
+    subscription_price = Decimal("99999999.12345678")
+    commission_bps = Decimal("999999.12345678")
+    minimum_commission = Decimal("999999.12345678")
+    stamp_duty_bps = Decimal("999999.12345678")
+    transfer_fee_bps = Decimal("999999.12345678")
 
     with session_factory() as session:
         session.add_all(
@@ -788,7 +816,7 @@ def test_realistic_financial_decimals_round_trip_exactly(tmp_path):
                     record_date=trade_date,
                     ex_date=date(2025, 1, 3),
                     effective_date=date(2025, 1, 3),
-                    action_type="rights_issue",
+                    action_type="rights",
                     rights_ratio=share_ratio,
                     subscription_price=subscription_price,
                     source_provider="exchange",
@@ -853,3 +881,74 @@ def test_realistic_financial_decimals_round_trip_exactly(tmp_path):
         assert fee.stamp_duty_bps == stamp_duty_bps
         assert fee.transfer_fee_bps == transfer_fee_bps
         assert settlement.conversion_ratio == share_ratio
+
+
+def _priced_replay_bar(trade_date, close):
+    return _tables.HistoricalReplayBarRow(
+        provider_mode="free",
+        instrument_id="CN:000001",
+        trade_date=trade_date,
+        raw_open=close,
+        raw_high=close,
+        raw_low=close,
+        raw_close=close,
+        volume=Decimal("1"),
+        adjustment_mode="raw",
+        source_provider="fixture",
+        dataset_revision=1,
+    )
+
+
+def test_scaled_decimals_preserve_sql_comparison_and_ordering(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'decimal-ordering.db'}"
+    db.initialize_database(database_url)
+    session_factory = db.create_session_factory(database_url)
+    values = [Decimal("9"), Decimal("9.5"), Decimal("10")]
+
+    with session_factory() as session:
+        session.add_all(
+            [
+                _priced_replay_bar(date(2025, 1, day), value)
+                for day, value in enumerate(values, start=1)
+            ]
+        )
+        session.commit()
+
+        greater = list(
+            session.scalars(
+                select(_tables.HistoricalReplayBarRow.raw_close)
+                .where(_tables.HistoricalReplayBarRow.raw_close > Decimal("9.5"))
+                .order_by(_tables.HistoricalReplayBarRow.raw_close)
+            )
+        )
+        lower = list(
+            session.scalars(
+                select(_tables.HistoricalReplayBarRow.raw_close)
+                .where(_tables.HistoricalReplayBarRow.raw_close < Decimal("9.5"))
+                .order_by(_tables.HistoricalReplayBarRow.raw_close)
+            )
+        )
+        ordered = list(
+            session.scalars(
+                select(_tables.HistoricalReplayBarRow.raw_close).order_by(
+                    _tables.HistoricalReplayBarRow.raw_close
+                )
+            )
+        )
+
+        assert greater == [Decimal("10")]
+        assert lower == [Decimal("9")]
+        assert ordered == values
+
+
+def test_scaled_decimal_rejects_sqlite_integer_overflow(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'decimal-overflow.db'}"
+    db.initialize_database(database_url)
+    session_factory = db.create_session_factory(database_url)
+    overflow_price = Decimal("100000000000.00000000")
+
+    with session_factory() as session, pytest.raises(
+        StatementError, match="signed 64-bit SQLite range"
+    ):
+        session.add(_priced_replay_bar(date(2025, 1, 1), overflow_price))
+        session.commit()
