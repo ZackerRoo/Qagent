@@ -90,6 +90,7 @@ def test_cli_backfill_history_runs_bounded_fixture_job(tmp_path, monkeypatch, ca
     database_url = f"sqlite:///{tmp_path / 'cli-history.db'}"
     monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
 
+    manifest_path = tmp_path / "history-manifest.json"
     exit_code = main(
         [
             "backfill-history",
@@ -101,6 +102,14 @@ def test_cli_backfill_history_runs_bounded_fixture_job(tmp_path, monkeypatch, ca
             "2026-01-01",
             "--end",
             "2026-01-09",
+            "--batch-size",
+            "25",
+            "--commission-bps",
+            "2.5",
+            "--minimum-commission",
+            "5",
+            "--manifest-output",
+            str(manifest_path),
         ]
     )
     output = capsys.readouterr().out
@@ -109,3 +118,4 @@ def test_cli_backfill_history_runs_bounded_fixture_job(tmp_path, monkeypatch, ca
     assert "history-backfill status=succeeded" in output
     assert "symbols=1" in output
     assert "coverage=" in output
+    assert '"provider_mode": "fixture"' in manifest_path.read_text()

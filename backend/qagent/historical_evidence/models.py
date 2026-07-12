@@ -225,6 +225,25 @@ class HistoricalCorporateAction(BaseModel):
         return self
 
 
+class HistoricalCorporateActionCoverage(BaseModel):
+    instrument_id: str
+    start_date: date
+    end_date: date
+    status: Literal["ready", "ready_none", "partial", "unsupported"]
+    action_count: int
+    source_provider: str
+
+
+class HistoricalCorporateActionBatch(BaseModel):
+    actions: list[HistoricalCorporateAction] = Field(default_factory=list)
+    coverage: list[HistoricalCorporateActionCoverage] = Field(default_factory=list)
+    terminal_settlements: list["HistoricalTerminalSettlement"] = Field(
+        default_factory=list
+    )
+    errors: list[str] = Field(default_factory=list)
+    data_health: dict[str, str] = Field(default_factory=dict)
+
+
 class HistoricalUniverseManifest(BaseModel):
     provider_mode: str
     snapshot_date: date

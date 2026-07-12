@@ -7,6 +7,9 @@ import pandas as pd
 from qagent.data_management import run_historical_backfill
 from qagent.db import Base, create_db_engine, create_session_factory
 from qagent.historical_evidence.models import (
+    HistoricalCorporateAction,
+    HistoricalCorporateActionBatch,
+    HistoricalCorporateActionCoverage,
     HistoricalEvidenceBundle,
     HistoricalInventoryManifest,
     HistoricalIndexMembership,
@@ -261,6 +264,45 @@ class ReplayInventoryEvidenceProvider(CompleteHistoricalEvidenceProvider):
         }
 
 
+class FullScopeActionEvidenceProvider(ReplayInventoryEvidenceProvider):
+    def __init__(self):
+        super().__init__()
+        self.action_calls = 0
+
+    def get_corporate_actions(self, instrument_ids, start, end):
+        self.action_calls += 1
+        fetched_at = datetime(2026, 1, 10, tzinfo=timezone.utc)
+        return HistoricalCorporateActionBatch(
+            actions=[
+                HistoricalCorporateAction(
+                    provider_mode="free",
+                    instrument_id="CN:000001",
+                    action_id="fixture-dividend",
+                    announcement_date=date(2025, 1, 2),
+                    record_date=date(2025, 1, 5),
+                    ex_date=date(2025, 1, 6),
+                    effective_date=date(2025, 1, 6),
+                    payable_date=date(2025, 1, 7),
+                    action_type="cash_dividend",
+                    cash_per_share="0.1",
+                    source_provider="fixture_actions",
+                    dataset_revision=0,
+                    fetched_at=fetched_at,
+                )
+            ],
+            coverage=[
+                HistoricalCorporateActionCoverage(
+                    instrument_id="CN:000001",
+                    start_date=start,
+                    end_date=end,
+                    status="ready",
+                    action_count=1,
+                    source_provider="fixture_actions",
+                )
+            ],
+        )
+
+
 class MissingBenchmarkEvidenceProvider(ReplayInventoryEvidenceProvider):
     def __init__(self):
         super().__init__()
@@ -440,6 +482,56 @@ def test_historical_backfill_persists_paired_replay_inventory_and_benchmarks(
     assert second.job.data_health["backfill_inventory_rows"] == "0"
     assert second.job.data_health["backfill_replay_rows"] == "0"
     assert second.job.data_health["backfill_benchmark_rows"] == "0"
+
+
+def test_full_scope_backfill_uses_historical_inventory_and_reuses_action_coverage(
+    tmp_path,
+):
+    repo, cache = make_repositories(tmp_path)
+    provider = FullScopeActionEvidenceProvider()
+    start = date(2025, 1, 1)
+    end = date(2025, 1, 9)
+
+    first = run_historical_backfill(
+        repo=repo,
+        cache=cache,
+        provider=AdjustedHistoryProvider(),
+        strategy_provider=None,
+        provider_mode="free",
+        instrument_ids=[],
+        start=start,
+        end=end,
+        scope="full-a-share",
+        batch_size=1,
+        historical_evidence_provider=provider,
+    )
+    second = run_historical_backfill(
+        repo=repo,
+        cache=cache,
+        provider=AdjustedHistoryProvider(),
+        strategy_provider=None,
+        provider_mode="free",
+        instrument_ids=[],
+        start=start,
+        end=end,
+        scope="full-a-share",
+        batch_size=1,
+        historical_evidence_provider=provider,
+    )
+    replay = repo.replay_evidence("free")
+    coverage = replay.action_coverage(
+        ["CN:000001"], start, end, replay.current_revision()
+    )
+    metadata = replay.instrument_rule_metadata_on("CN:000001", end)
+
+    assert first.job.total_symbols == 1
+    assert first.job.data_health["backfill_scope"] == "full-a-share"
+    assert first.job.data_health["backfill_corporate_action_rows"] == "1"
+    assert first.job.data_health["backfill_corporate_action_coverage_rows"] == "1"
+    assert second.job.data_health["corporate_action_cache_reused"] == "1"
+    assert provider.action_calls == 1
+    assert coverage["CN:000001"].status == "ready"
+    assert metadata.limit_rule_key == "szse-main-registration"
 
 
 def test_historical_backfill_reports_missing_required_benchmarks(tmp_path):

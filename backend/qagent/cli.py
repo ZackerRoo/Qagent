@@ -1,8 +1,10 @@
 import argparse
 from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 from qagent.backtesting.engine import run_historical_backtest
+from qagent.backtesting.a_share_rules import BrokerFeeRequest
 from qagent.briefing.daily import build_daily_brief
 from qagent.briefing.export import render_daily_brief_markdown
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
@@ -58,9 +60,19 @@ def main(argv: list[str] | None = None) -> int:
     run_all_parser.add_argument("--output-dir", default=None)
     history_parser = subparsers.add_parser("backfill-history")
     history_parser.add_argument("--provider", default="free", choices=["fixture", "free"])
-    history_parser.add_argument("--symbols", required=True)
+    history_parser.add_argument("--symbols", default=None)
+    history_parser.add_argument(
+        "--scope", default="symbols", choices=["symbols", "full-a-share"]
+    )
     history_parser.add_argument("--start", type=date.fromisoformat, required=True)
     history_parser.add_argument("--end", type=date.fromisoformat, required=True)
+    history_parser.add_argument("--batch-size", type=int, default=100)
+    history_parser.add_argument("--resume", default=None, metavar="JOB_ID")
+    history_parser.add_argument("--manifest-output", type=Path, default=None)
+    history_parser.add_argument("--commission-bps", type=Decimal, default=Decimal("3"))
+    history_parser.add_argument(
+        "--minimum-commission", type=Decimal, default=Decimal("5")
+    )
     args = parser.parse_args(argv)
 
     if args.command == "daily-brief":
@@ -221,14 +233,27 @@ def _daily_brief_command(args: argparse.Namespace) -> int:
 
 def _backfill_history_command(args: argparse.Namespace) -> int:
     mode = args.provider.strip().lower()
-    symbols = _resolve_symbols(mode, args.symbols).symbols
-    symbols = [symbol for symbol in symbols if symbol.startswith("CN:")]
-    if not symbols:
-        raise ValueError("backfill-history currently supports A-share symbols only")
+    if args.scope == "symbols" and not args.symbols and not args.resume:
+        raise ValueError("--symbols is required when --scope=symbols")
+    symbols = (
+        _resolve_symbols(mode, args.symbols).symbols
+        if args.scope == "symbols" and args.symbols
+        else []
+    )
     initialize_database()
     session_factory = create_session_factory()
+    repo = QagentRepository(session_factory)
+    if args.resume and args.scope == "symbols" and not symbols:
+        resumed = repo.get_historical_backfill_job(args.resume)
+        if resumed is None:
+            raise ValueError(f"historical backfill job not found: {args.resume}")
+        symbols = resumed.symbols
+    symbols = [symbol for symbol in symbols if symbol.startswith("CN:")]
+    if args.scope == "symbols" and not symbols:
+        raise ValueError("backfill-history currently supports A-share symbols only")
+    historical_evidence_provider = build_historical_evidence_provider(mode)
     result = run_historical_backfill(
-        repo=QagentRepository(session_factory),
+        repo=repo,
         cache=MarketDataCacheRepository(session_factory),
         provider=build_market_data_provider(mode),
         strategy_provider=(
@@ -239,8 +264,21 @@ def _backfill_history_command(args: argparse.Namespace) -> int:
         instrument_ids=symbols,
         start=args.start,
         end=args.end,
-        historical_evidence_provider=build_historical_evidence_provider(mode),
+        job_id=args.resume,
+        historical_evidence_provider=historical_evidence_provider,
+        scope=args.scope,
+        batch_size=args.batch_size,
+        broker_fee_request=BrokerFeeRequest(
+            commission_bps=args.commission_bps,
+            minimum_commission=args.minimum_commission,
+        ),
     )
+    if args.manifest_output is not None:
+        args.manifest_output.parent.mkdir(parents=True, exist_ok=True)
+        args.manifest_output.write_text(
+            result.manifest.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
     summary = result.manifest.summary
     print(
         f"history-backfill status={result.job.status} symbols={result.job.total_symbols} "

@@ -7,12 +7,19 @@ from time import sleep
 import pandas as pd
 from pydantic import BaseModel, Field
 
+from qagent.backtesting.a_share_rules import (
+    BrokerFeeRequest,
+    build_instrument_rule_metadata,
+    load_a_share_rule_schedule,
+)
 from qagent.historical_evidence.models import (
     HistoricalEvidenceBundle,
     HistoricalIndexCoverageStats,
+    HistoricalInstrumentProfile,
     HistoricalLifecycleManifest,
     HistoricalReplayBar,
     HistoricalTradabilityPoint,
+    normalize_historical_security_type,
 )
 from qagent.historical_evidence.providers import (
     INDEX_QUERIES,
@@ -115,9 +122,38 @@ def run_historical_backfill(
     job_id: str | None = None,
     universe_as_of: date | None = None,
     historical_evidence_provider: HistoricalEvidenceProvider | None = None,
+    scope: str = "symbols",
+    batch_size: int = 100,
+    broker_fee_request: BrokerFeeRequest | None = None,
 ) -> HistoricalBackfillResult:
     if start > end:
         raise ValueError("start must be on or before end")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    normalized_scope = scope.strip().lower()
+    if normalized_scope not in {"symbols", "full-a-share"}:
+        raise ValueError("scope must be symbols or full-a-share")
+    inventory_profiles: list[HistoricalInstrumentProfile] = []
+    provider_manifest = None
+    if normalized_scope == "full-a-share":
+        if historical_evidence_provider is None or not all(
+            hasattr(historical_evidence_provider, name)
+            for name in ("list_historical_instruments", "get_lifecycle_manifest")
+        ):
+            raise ValueError("full-a-share scope requires historical inventory support")
+        inventory_profiles = historical_evidence_provider.list_historical_instruments(end)
+        provider_manifest = historical_evidence_provider.get_lifecycle_manifest()
+        if provider_manifest.status != "ready":
+            raise ReplayEvidenceUnavailable(
+                "full A-share historical inventory is not ready: "
+                f"{provider_manifest.error or provider_manifest.status}"
+            )
+        instrument_ids = [
+            item.instrument_id
+            for item in inventory_profiles
+            if (item.listing_date is None or item.listing_date <= end)
+            and (item.delisting_date is None or item.delisting_date >= start)
+        ]
     symbols = sorted(set(instrument_ids))
     if not symbols:
         raise ValueError("instrument_ids cannot be empty")
@@ -154,6 +190,13 @@ def run_historical_backfill(
     cache_reused = 0
     rows_written = 0
     errors: list[str] = []
+    rule_rows = 0
+    fee_rule_rows = 0
+    instrument_rule_rows = 0
+    corporate_action_rows = 0
+    corporate_action_coverage_rows = 0
+    terminal_settlement_rows = 0
+    corporate_action_health: dict[str, str] = {}
 
     try:
         if historical_evidence_provider is not None and all(
@@ -173,8 +216,13 @@ def run_historical_backfill(
                 except ReplayEvidenceUnavailable:
                     inventory_reused = False
             if not inventory_reused:
-                profiles = historical_evidence_provider.list_historical_instruments(end)
-                provider_manifest = historical_evidence_provider.get_lifecycle_manifest()
+                profiles = inventory_profiles or (
+                    historical_evidence_provider.list_historical_instruments(end)
+                )
+                provider_manifest = provider_manifest or (
+                    historical_evidence_provider.get_lifecycle_manifest()
+                )
+                inventory_profiles = profiles
                 inventory_revision = replay_repo.current_revision() + 1
                 inventory_rows = replay_repo.upsert_lifecycle_inventory(
                     profiles,
@@ -191,6 +239,156 @@ def run_historical_backfill(
                 )
                 if provider_manifest.error:
                     errors.append(provider_manifest.error)
+            else:
+                inventory_profiles = existing_inventory
+
+        _set_backfill_phase(repo, job.job_id, "trading_rules")
+        schedule = load_a_share_rule_schedule()
+        fees = schedule.fee_rules(
+            broker_fee_request
+            or BrokerFeeRequest(commission_bps="3", minimum_commission="5")
+        )
+        rule_rows = replay_repo.upsert_trading_rules(schedule.trading_rules)
+        fee_rule_rows = replay_repo.upsert_fee_rules(fees)
+        profile_by_id = {item.instrument_id: item for item in inventory_profiles}
+        metadata = []
+        for instrument_id in symbols:
+            profile = profile_by_id.get(instrument_id)
+            canonical_type = (
+                normalize_historical_security_type(profile.security_type)
+                if profile is not None
+                else None
+            ) or _asset_type(instrument_id, None)
+            canonical_profile = HistoricalInstrumentProfile(
+                instrument_id=instrument_id,
+                snapshot_date=end,
+                listing_date=profile.listing_date if profile is not None else None,
+                delisting_date=profile.delisting_date if profile is not None else None,
+                security_type=canonical_type,
+                listing_status=(
+                    profile.listing_status if profile is not None else "active"
+                ),
+                provider=profile.provider if profile is not None else "symbol_scope",
+            )
+            effective_dates = {
+                max(
+                    start,
+                    schedule.valid_from,
+                    canonical_profile.listing_date or schedule.valid_from,
+                )
+            }
+            registration_date = date(2023, 4, 10)
+            if min(effective_dates) < registration_date <= end:
+                effective_dates.add(registration_date)
+            for effective_from in sorted(effective_dates):
+                if effective_from > min(end, schedule.valid_to):
+                    continue
+                item = build_instrument_rule_metadata(
+                    canonical_profile,
+                    effective_from=effective_from,
+                    schedule=schedule,
+                )
+                metadata.append(item.model_copy(update={"provider_mode": mode}))
+        instrument_rule_rows = replay_repo.upsert_instrument_rule_metadata(metadata)
+
+        if historical_evidence_provider is not None and hasattr(
+            historical_evidence_provider, "get_corporate_actions"
+        ):
+            _set_backfill_phase(repo, job.job_id, "corporate_actions")
+            current_revision = replay_repo.current_revision()
+            existing_action_coverage = replay_repo.action_coverage(
+                symbols,
+                start,
+                end,
+                current_revision,
+            )
+            pending_action_symbols = [
+                item
+                for item in symbols
+                if item not in existing_action_coverage
+                or existing_action_coverage[item].status == "partial"
+            ]
+            action_status_counts = {
+                "ready": 0,
+                "ready_none": 0,
+                "partial": 0,
+                "unsupported": 0,
+            }
+            for item in existing_action_coverage.values():
+                action_status_counts[item.status] += 1
+            for offset in range(0, len(pending_action_symbols), batch_size):
+                batch_symbols = pending_action_symbols[offset : offset + batch_size]
+                action_batch = historical_evidence_provider.get_corporate_actions(
+                    batch_symbols,
+                    start,
+                    end,
+                )
+                if action_batch.actions:
+                    revision = replay_repo.current_revision() + 1
+                    corporate_action_rows += replay_repo.upsert_corporate_actions(
+                        [
+                            item.model_copy(update={"dataset_revision": revision})
+                            for item in action_batch.actions
+                        ],
+                        revision=revision,
+                    )
+                if action_batch.coverage:
+                    revision = replay_repo.current_revision() + 1
+                    corporate_action_coverage_rows += (
+                        replay_repo.upsert_action_coverage(
+                            action_batch.coverage,
+                            revision=revision,
+                        )
+                    )
+                if action_batch.terminal_settlements:
+                    revision = replay_repo.current_revision() + 1
+                    terminal_settlement_rows += (
+                        replay_repo.upsert_terminal_settlements(
+                            [
+                                item.model_copy(update={"dataset_revision": revision})
+                                for item in action_batch.terminal_settlements
+                            ],
+                            revision=revision,
+                        )
+                    )
+                errors.extend(action_batch.errors[:50])
+                for item in action_batch.coverage:
+                    action_status_counts[item.status] += 1
+            corporate_action_health = {
+                "corporate_action_instruments": str(len(symbols)),
+                "corporate_action_cache_reused": str(
+                    len(symbols) - len(pending_action_symbols)
+                ),
+                "corporate_action_ready": str(
+                    action_status_counts["ready"]
+                    + action_status_counts["ready_none"]
+                ),
+                "corporate_action_partial": str(action_status_counts["partial"]),
+                "corporate_action_unsupported": str(
+                    action_status_counts["unsupported"]
+                ),
+            }
+
+        _set_backfill_phase(repo, job.job_id, "terminal_settlements")
+        unresolved_terminal = [
+            item.instrument_id
+            for item in inventory_profiles
+            if item.delisting_date is not None
+            and start <= item.delisting_date <= end
+            and not replay_repo.terminal_settlements(
+                [item.instrument_id],
+                start,
+                end,
+                replay_repo.current_revision(),
+            )
+        ]
+        corporate_action_health["terminal_settlement_unresolved"] = str(
+            len(unresolved_terminal)
+        )
+        errors.extend(
+            f"{instrument_id}: terminal settlement is unresolved"
+            for instrument_id in unresolved_terminal
+        )
 
         _set_backfill_phase(repo, job.job_id, "replay_prices")
         for instrument_id in symbols:
@@ -406,7 +604,7 @@ def run_historical_backfill(
             for key, value in evidence_counts.items():
                 evidence_data_health[f"historical_evidence_{key}"] = str(value)
 
-        _set_backfill_phase(repo, job.job_id, "price_coverage")
+        _set_backfill_phase(repo, job.job_id, "replay_coverage")
         manifest = build_historical_coverage_manifest(
             repo=repo,
             cache=cache,
@@ -444,6 +642,7 @@ def run_historical_backfill(
         data_health = {
             **manifest.data_health,
             **evidence_data_health,
+            **corporate_action_health,
             "backfill_phase": "complete",
             "backfill_cache_reused": str(cache_reused),
             "backfill_rows_written": str(rows_written),
@@ -454,6 +653,16 @@ def run_historical_backfill(
             "backfill_fundamental_cache_reused": str(
                 fundamental_cache_reused
             ),
+            "backfill_scope": normalized_scope,
+            "backfill_batch_size": str(batch_size),
+            "backfill_rule_rows": str(rule_rows),
+            "backfill_fee_rule_rows": str(fee_rule_rows),
+            "backfill_instrument_rule_rows": str(instrument_rule_rows),
+            "backfill_corporate_action_rows": str(corporate_action_rows),
+            "backfill_corporate_action_coverage_rows": str(
+                corporate_action_coverage_rows
+            ),
+            "backfill_terminal_settlement_rows": str(terminal_settlement_rows),
             **{
                 f"backfill_evidence_{key}": str(value)
                 for key, value in evidence_counts.items()

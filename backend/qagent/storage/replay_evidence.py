@@ -4,8 +4,6 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Literal
-
 from pydantic import BaseModel
 from sqlalchemy import func, select, text, tuple_
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -13,6 +11,7 @@ from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from qagent.historical_evidence.models import (
     HistoricalCorporateAction,
+    HistoricalCorporateActionCoverage,
     HistoricalEvidenceBundle,
     HistoricalFeeRule,
     HistoricalIndexMembership,
@@ -87,13 +86,7 @@ class DatasetLeaseRecord(BaseModel):
     heartbeat_at: datetime
 
 
-class ActionCoverageRecord(BaseModel):
-    instrument_id: str
-    start_date: date
-    end_date: date
-    status: Literal["ready", "ready_none", "partial", "unsupported"]
-    action_count: int
-    source_provider: str
+ActionCoverageRecord = HistoricalCorporateActionCoverage
 
 
 class UniverseMemberRecord(BaseModel):
@@ -560,7 +553,11 @@ class ReplayEvidenceRepository:
         ]
         with self._immediate_session() as session:
             return _write_immutable_reference_rows(
-                session, HistoricalInstrumentRuleMetadataRow, records, keys
+                session,
+                HistoricalInstrumentRuleMetadataRow,
+                records,
+                keys,
+                ignored_fields={"fetched_at"},
             )
 
     def upsert_fee_rules(self, rules: Sequence[HistoricalFeeRule]) -> int:
@@ -1508,6 +1505,8 @@ def _write_immutable_reference_rows(
     model,
     records: list[dict[str, object]],
     index_elements: list[str],
+    *,
+    ignored_fields: set[str] | None = None,
 ) -> int:
     deduplicated = _deduplicate(records, index_elements)
     if not deduplicated:
@@ -1526,6 +1525,7 @@ def _write_immutable_reference_rows(
             }
         )
     inserts = []
+    ignored = ignored_fields or set()
     for record in deduplicated:
         identity = tuple(record[key] for key in index_elements)
         row = existing.get(identity)
@@ -1533,6 +1533,8 @@ def _write_immutable_reference_rows(
             inserts.append(record)
             continue
         for key, incoming in record.items():
+            if key in ignored:
+                continue
             if _canonical_value(getattr(row, key)) != _canonical_value(incoming):
                 raise ImmutableRevisionConflict(
                     f"versioned reference data is immutable; payload differs for {key}"

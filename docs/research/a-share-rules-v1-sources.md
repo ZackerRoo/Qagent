@@ -22,3 +22,17 @@ Validation window: 2023-01-03 through 2025-12-31. The checked-in schedule is
 Broker commission and minimum commission are not exchange constants. Callers must
 provide them through `BrokerFeeRequest`; Qagent does not infer an account's negotiated
 rate.
+
+## Corporate actions
+
+- Stock cash dividends, bonus shares, capitalization shares, record dates, ex dates,
+  payment dates, and share-arrival dates use AKShare's documented CNInfo history
+  interface: [AKShare stock data documentation](https://akshare.akfamily.xyz/data/stock/stock.html#id178).
+- Rights issues use the same documentation's Sina rights-history interface. Rights
+  events are retained as `rights` even though the current replay engine does not
+  subscribe automatically.
+- An empty successful response is recorded as `ready_none`; malformed or failed source
+  evidence is `partial`; unsupported ETF action coverage is `unsupported`. Qagent does
+  not manufacture missing announcement, payment, merger, or conversion dates.
+- A delisted instrument without an authoritative cash or conversion settlement is
+  reported as unresolved. It is not silently valued at the last close or at zero.

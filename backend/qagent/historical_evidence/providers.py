@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import re
+from hashlib import sha256
 from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
 import baostock as bs
+import akshare as ak
 
 from qagent.historical_evidence.models import (
+    HistoricalCorporateAction,
+    HistoricalCorporateActionBatch,
+    HistoricalCorporateActionCoverage,
     HistoricalEvidenceBundle,
     HistoricalIndexMembership,
     HistoricalIndexSnapshot,
@@ -70,6 +75,14 @@ class HistoricalEvidenceProvider(Protocol):
     ) -> dict[str, Any]:
         ...
 
+    def get_corporate_actions(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> HistoricalCorporateActionBatch:
+        ...
+
 
 class BaoStockHistoricalEvidenceProvider:
     name = "baostock_historical_evidence"
@@ -80,6 +93,7 @@ class BaoStockHistoricalEvidenceProvider:
         request_timeout_seconds: int = 6,
         *,
         benchmark_provider=None,
+        corporate_action_client=ak,
         clock: Callable[[], datetime] | None = None,
     ):
         self.client = client
@@ -87,6 +101,7 @@ class BaoStockHistoricalEvidenceProvider:
         self.benchmark_provider = benchmark_provider or FreeCnMarketDataProvider(
             request_timeout_seconds=request_timeout_seconds
         )
+        self.corporate_action_client = corporate_action_client
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.last_errors: list[str] = []
         self._lifecycle_manifest = HistoricalInventoryManifest(
@@ -97,6 +112,106 @@ class BaoStockHistoricalEvidenceProvider:
             fetched_at=self._clock(),
             source_provider="baostock",
         )
+
+    def get_corporate_actions(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> HistoricalCorporateActionBatch:
+        if start > end:
+            raise ValueError("start must be on or before end")
+        batch = HistoricalCorporateActionBatch()
+        fetched_at = self._clock()
+        for instrument_id in sorted(set(instrument_ids)):
+            if not _is_stock_instrument(instrument_id):
+                batch.coverage.append(
+                    HistoricalCorporateActionCoverage(
+                        instrument_id=instrument_id,
+                        start_date=start,
+                        end_date=end,
+                        status="unsupported",
+                        action_count=0,
+                        source_provider="akshare_fund_actions_unavailable",
+                    )
+                )
+                continue
+            symbol = instrument_id.split(":", 1)[-1].split(".", 1)[0]
+            actions: list[HistoricalCorporateAction] = []
+            instrument_errors: list[str] = []
+            try:
+                frame = self.corporate_action_client.stock_dividend_cninfo(
+                    symbol=symbol
+                )
+                dividend_actions, parse_errors = _normalize_dividend_actions(
+                    frame,
+                    instrument_id=instrument_id,
+                    start=start,
+                    end=end,
+                    fetched_at=fetched_at,
+                )
+                actions.extend(dividend_actions)
+                instrument_errors.extend(parse_errors)
+            except Exception as exc:
+                instrument_errors.append(f"dividend source: {exc}")
+            try:
+                frame = self.corporate_action_client.stock_history_dividend_detail(
+                    symbol=symbol,
+                    indicator="配股",
+                )
+                rights_actions, parse_errors = _normalize_rights_actions(
+                    frame,
+                    instrument_id=instrument_id,
+                    start=start,
+                    end=end,
+                    fetched_at=fetched_at,
+                )
+                actions.extend(rights_actions)
+                instrument_errors.extend(parse_errors)
+            except Exception as exc:
+                instrument_errors.append(f"rights source: {exc}")
+            unique_actions = {
+                (item.instrument_id, item.action_id, item.source_provider): item
+                for item in actions
+            }
+            normalized_actions = sorted(
+                unique_actions.values(), key=lambda item: item.action_id
+            )
+            batch.actions.extend(normalized_actions)
+            status = (
+                "partial"
+                if instrument_errors
+                else "ready"
+                if normalized_actions
+                else "ready_none"
+            )
+            batch.coverage.append(
+                HistoricalCorporateActionCoverage(
+                    instrument_id=instrument_id,
+                    start_date=start,
+                    end_date=end,
+                    status=status,
+                    action_count=len(normalized_actions),
+                    source_provider="akshare_cninfo_sina_actions",
+                )
+            )
+            batch.errors.extend(
+                f"{instrument_id}: {error}" for error in instrument_errors
+            )
+        batch.data_health = {
+            "corporate_action_instruments": str(len(batch.coverage)),
+            "corporate_action_rows": str(len(batch.actions)),
+            "corporate_action_ready": str(
+                sum(item.status in {"ready", "ready_none"} for item in batch.coverage)
+            ),
+            "corporate_action_partial": str(
+                sum(item.status == "partial" for item in batch.coverage)
+            ),
+            "corporate_action_unsupported": str(
+                sum(item.status == "unsupported" for item in batch.coverage)
+            ),
+        }
+        return batch
 
     def list_historical_instruments(
         self,
@@ -615,12 +730,188 @@ def _from_baostock_code(value: object) -> str | None:
     return f"CN:{match.group(1)}" if match is not None else None
 
 
+def _normalize_dividend_actions(
+    frame,
+    *,
+    instrument_id: str,
+    start: date,
+    end: date,
+    fetched_at: datetime,
+) -> tuple[list[HistoricalCorporateAction], list[str]]:
+    actions: list[HistoricalCorporateAction] = []
+    errors: list[str] = []
+    for row_number, row in enumerate(_frame_records(frame), start=1):
+        announcement = _date(row.get("实施方案公告日期"))
+        record_date = _date(row.get("股权登记日"))
+        ex_date = _date(row.get("除权日"))
+        payable_date = _date(row.get("派息日"))
+        effective_date = _date(row.get("股份到账日")) or ex_date
+        cash = _per_share(row.get("派息比例"))
+        bonus = _per_share(row.get("送股比例"))
+        split = _per_share(row.get("转增比例"))
+        if not any(value is not None and value > 0 for value in (cash, bonus, split)):
+            continue
+        if not _event_overlaps(
+            start,
+            end,
+            announcement,
+            record_date,
+            ex_date,
+            payable_date,
+            effective_date,
+        ):
+            continue
+        if announcement is None:
+            errors.append(f"dividend row {row_number}: announcement date is missing")
+            continue
+        values = (
+            ("cash_dividend", cash),
+            ("bonus", bonus),
+            ("split", split),
+        )
+        for requested_type, value in values:
+            if value is None or value <= 0:
+                continue
+            complete = (
+                record_date is not None
+                and (
+                    requested_type == "cash_dividend"
+                    and payable_date is not None
+                    or requested_type in {"bonus", "split"}
+                    and ex_date is not None
+                    and effective_date is not None
+                )
+            )
+            action_type = requested_type if complete else "other"
+            if not complete:
+                errors.append(
+                    f"dividend row {row_number}: {requested_type} dates are incomplete"
+                )
+            action_id = _action_id(
+                instrument_id,
+                requested_type,
+                announcement,
+                row.get("报告时间"),
+                row_number,
+            )
+            actions.append(
+                HistoricalCorporateAction(
+                    provider_mode="free",
+                    instrument_id=instrument_id,
+                    action_id=action_id,
+                    announcement_date=announcement,
+                    record_date=record_date,
+                    ex_date=ex_date,
+                    effective_date=effective_date,
+                    payable_date=payable_date,
+                    action_type=action_type,
+                    cash_per_share=(
+                        value if requested_type == "cash_dividend" else None
+                    ),
+                    share_ratio=(
+                        value if requested_type in {"bonus", "split"} else None
+                    ),
+                    source_provider="akshare_cninfo_dividend",
+                    dataset_revision=0,
+                    fetched_at=fetched_at,
+                )
+            )
+    return actions, errors
+
+
+def _normalize_rights_actions(
+    frame,
+    *,
+    instrument_id: str,
+    start: date,
+    end: date,
+    fetched_at: datetime,
+) -> tuple[list[HistoricalCorporateAction], list[str]]:
+    actions: list[HistoricalCorporateAction] = []
+    errors: list[str] = []
+    for row_number, row in enumerate(_frame_records(frame), start=1):
+        announcement = _date(row.get("公告日期"))
+        record_date = _date(row.get("股权登记日"))
+        ex_date = _date(row.get("除权日"))
+        effective_date = _date(row.get("配股上市日"))
+        rights_ratio = _per_share(row.get("配股方案"))
+        subscription_price = _decimal(row.get("配股价格"))
+        if rights_ratio is None or rights_ratio <= 0:
+            continue
+        if not _event_overlaps(
+            start,
+            end,
+            announcement,
+            record_date,
+            ex_date,
+            effective_date,
+        ):
+            continue
+        if announcement is None or not any((ex_date, effective_date)):
+            errors.append(f"rights row {row_number}: required event dates are missing")
+            continue
+        if subscription_price is None or subscription_price <= 0:
+            errors.append(f"rights row {row_number}: subscription price is missing")
+        actions.append(
+            HistoricalCorporateAction(
+                provider_mode="free",
+                instrument_id=instrument_id,
+                action_id=_action_id(
+                    instrument_id,
+                    "rights",
+                    announcement,
+                    effective_date,
+                    row_number,
+                ),
+                announcement_date=announcement,
+                record_date=record_date,
+                ex_date=ex_date,
+                effective_date=effective_date,
+                action_type="rights",
+                rights_ratio=rights_ratio,
+                subscription_price=subscription_price,
+                source_provider="akshare_sina_rights",
+                dataset_revision=0,
+                fetched_at=fetched_at,
+            )
+        )
+    return actions, errors
+
+
+def _frame_records(frame) -> list[dict[str, object]]:
+    if frame is None or getattr(frame, "empty", False):
+        return []
+    if hasattr(frame, "to_dict"):
+        records = frame.to_dict(orient="records")
+        return [dict(item) for item in records]
+    raise TypeError("corporate action provider must return a DataFrame-like object")
+
+
+def _event_overlaps(start: date, end: date, *values: date | None) -> bool:
+    return any(value is not None and start <= value <= end for value in values)
+
+
+def _per_share(value: object) -> Decimal | None:
+    number = _decimal(value)
+    return number / Decimal("10") if number is not None else None
+
+
+def _action_id(instrument_id: str, *parts: object) -> str:
+    payload = "|".join([instrument_id, *(str(part) for part in parts)])
+    return sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
 def _date(value: object) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
     text = _text(value)
     if not text:
         return None
     try:
-        return date.fromisoformat(text)
+        parsed = date.fromisoformat(text[:10])
+        return None if parsed.year == 1900 else parsed
     except ValueError:
         return None
 
