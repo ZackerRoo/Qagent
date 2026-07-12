@@ -107,6 +107,11 @@ class FakeBaoStock:
         return FakeResult(["updateDate", "code", "code_name"], [])
 
 
+class ProfileTimeoutBaoStock(FakeBaoStock):
+    def query_stock_basic(self, code="", code_name=""):
+        raise TimeoutError("profile deadline exceeded")
+
+
 def test_baostock_historical_evidence_provider_normalizes_all_evidence_classes():
     client = FakeBaoStock()
     provider = BaoStockHistoricalEvidenceProvider(
@@ -144,3 +149,28 @@ def test_baostock_historical_evidence_provider_normalizes_all_evidence_classes()
     assert sum(item.status == "ready" for item in bundle.index_snapshots) == 2
     assert sum(item.status == "failed" for item in bundle.index_snapshots) == 1
     assert bundle.errors == ["index CN:000016.IDX 2026-01-09: empty membership snapshot"]
+
+
+def test_baostock_evidence_timeout_returns_partial_bundle_instead_of_raising():
+    client = ProfileTimeoutBaoStock()
+    provider = BaoStockHistoricalEvidenceProvider(
+        client=client,
+        request_timeout_seconds=1,
+    )
+
+    bundle = provider.get_evidence(
+        ["CN:000001"],
+        date(2026, 1, 1),
+        date(2026, 1, 9),
+    )
+
+    assert client.logged_out is True
+    assert len(bundle.tradability) == 2
+    assert bundle.profiles == []
+    assert bundle.industries == []
+    assert bundle.index_snapshots == []
+    assert bundle.errors == [
+        "historical evidence collection: profile deadline exceeded"
+    ]
+    assert bundle.data_health["historical_evidence_tradability"] == "2"
+    assert bundle.data_health["historical_evidence_errors"] == "1"

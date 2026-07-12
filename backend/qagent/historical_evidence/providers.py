@@ -376,35 +376,49 @@ class BaoStockHistoricalEvidenceProvider:
             return bundle
 
         with serialized_baostock_session():
-            login = self._call(self.client.login)
-            if getattr(login, "error_code", "1") != "0":
-                message = getattr(login, "error_msg", "login failed")
-                bundle.errors.append(f"baostock login: {message}")
-                self.last_errors = list(bundle.errors)
-                return bundle
+            logged_in = False
             try:
-                bundle.tradability.extend(
-                    self._load_tradability(instrument_id, start, end)
-                    for instrument_id in symbols
-                )
-                bundle.tradability = [
-                    point
-                    for group in bundle.tradability
-                    for point in (group if isinstance(group, list) else [group])
-                ]
-                bundle.profiles = self._load_profiles(end)
-                for snapshot_date in snapshot_dates:
-                    bundle.industries.extend(
-                        self._load_industries(selected, snapshot_date)
-                    )
-                    snapshots, memberships = self._load_index_snapshots(
-                        selected,
-                        snapshot_date,
-                    )
-                    bundle.index_snapshots.extend(snapshots)
-                    bundle.index_memberships.extend(memberships)
+                login = self._call(self.client.login)
+                if getattr(login, "error_code", "1") != "0":
+                    message = getattr(login, "error_msg", "login failed")
+                    self.last_errors.append(f"baostock login: {message}")
+                else:
+                    logged_in = True
+                    try:
+                        bundle.tradability.extend(
+                            self._load_tradability(instrument_id, start, end)
+                            for instrument_id in symbols
+                        )
+                        bundle.tradability = [
+                            point
+                            for group in bundle.tradability
+                            for point in (
+                                group if isinstance(group, list) else [group]
+                            )
+                        ]
+                        bundle.profiles = self._load_profiles(end)
+                        for snapshot_date in snapshot_dates:
+                            bundle.industries.extend(
+                                self._load_industries(selected, snapshot_date)
+                            )
+                            snapshots, memberships = self._load_index_snapshots(
+                                selected,
+                                snapshot_date,
+                            )
+                            bundle.index_snapshots.extend(snapshots)
+                            bundle.index_memberships.extend(memberships)
+                    except Exception as exc:
+                        self.last_errors.append(
+                            f"historical evidence collection: {exc}"
+                        )
+            except Exception as exc:
+                self.last_errors.append(f"baostock login: {exc}")
             finally:
-                self._call(self.client.logout)
+                if logged_in:
+                    try:
+                        self._call(self.client.logout)
+                    except Exception as exc:
+                        self.last_errors.append(f"baostock logout: {exc}")
 
         bundle.errors = list(self.last_errors)
         bundle.data_health = {
