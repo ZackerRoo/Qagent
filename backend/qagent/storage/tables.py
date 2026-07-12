@@ -580,6 +580,35 @@ class HistoricalBackfillJobRow(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class WalkForwardRunRow(Base):
+    __tablename__ = "walk_forward_runs"
+
+    run_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="succeeded")
+    start_date: Mapped[date] = mapped_column(Date)
+    end_date: Mapped[date] = mapped_column(Date)
+    dataset_revision: Mapped[int] = mapped_column(Integer)
+    rebalance_step_sessions: Mapped[int] = mapped_column(Integer)
+    lookback_days: Mapped[int] = mapped_column(Integer)
+    snapshot_count: Mapped[int] = mapped_column(Integer, default=0)
+    top_5_trade_count: Mapped[int] = mapped_column(Integer, default=0)
+    top_10_trade_count: Mapped[int] = mapped_column(Integer, default=0)
+    top_5_return_pct: Mapped[Decimal] = mapped_column(Numeric(20, 6))
+    top_10_return_pct: Mapped[Decimal] = mapped_column(Numeric(20, 6))
+    top_5_oos_trades: Mapped[int] = mapped_column(Integer, default=0)
+    top_10_oos_trades: Mapped[int] = mapped_column(Integer, default=0)
+    top_5_oos_gate: Mapped[str] = mapped_column(String(32), default="insufficient")
+    top_10_oos_gate: Mapped[str] = mapped_column(String(32), default="insufficient")
+    reproducibility_digest: Mapped[str] = mapped_column(String(64), index=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    data_health: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
 class TradableUniverseSnapshotRow(Base):
     __tablename__ = "tradable_universe_snapshots"
 

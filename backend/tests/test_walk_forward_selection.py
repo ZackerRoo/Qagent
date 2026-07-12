@@ -31,6 +31,7 @@ from qagent.historical_evidence.providers import REQUIRED_BENCHMARK_IDS
 from qagent.market.calendars import trading_sessions_in_range
 from qagent.storage import tables as _tables  # noqa: F401
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
+from qagent.storage.repository import QagentRepository
 from qagent.strategy_data.models import FundamentalSnapshot
 
 
@@ -248,3 +249,28 @@ def test_equal_weight_benchmark_uses_each_historical_eligible_universe(tmp_path)
 
     assert result is not None
     assert result > 0
+
+
+def test_walk_forward_result_persists_and_round_trips_complete_payload(tmp_path):
+    repository, decision_date = _replay_repository(tmp_path)
+    result = run_full_market_walk_forward_selection(
+        repository,
+        owner_run_id="persisted-walk-forward",
+        start=decision_date,
+        end=decision_date,
+        rebalance_step_sessions=1,
+    )
+    storage = QagentRepository(repository.session_factory)
+
+    saved = storage.save_walk_forward_run(result)
+    loaded = storage.get_walk_forward_run("persisted-walk-forward")
+    listed = storage.list_walk_forward_runs(provider="free", limit=5)
+
+    assert loaded is not None
+    assert loaded.run_id == saved.run_id
+    assert loaded.dataset_revision == result.dataset_revision
+    assert loaded.top_5_return_pct == result.top_5_metrics.total_return_pct
+    assert loaded.payload["reproducibility_digest"] == result.reproducibility_digest
+    assert loaded.payload["cost_sensitivity"]
+    assert loaded.data_health["walk_forward_top_5_oos_gate"] == "insufficient"
+    assert listed[0].run_id == "persisted-walk-forward"

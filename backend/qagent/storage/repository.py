@@ -42,6 +42,7 @@ from qagent.storage.tables import (
     TradableUniverseSnapshotRow,
     UniverseRow,
     WatchlistItemRow,
+    WalkForwardRunRow,
 )
 from qagent.strategy_data.models import FundamentalSnapshot
 
@@ -183,6 +184,31 @@ class HistoricalBackfillJobRecord(BaseModel):
         if self.total_symbols <= 0:
             return 0
         return max(0, min(100, int(self.processed_symbols * 100 / self.total_symbols)))
+
+
+class WalkForwardRunRecord(BaseModel):
+    run_id: str
+    provider: str
+    status: str
+    start_date: date
+    end_date: date
+    dataset_revision: int
+    rebalance_step_sessions: int
+    lookback_days: int
+    snapshot_count: int
+    top_5_trade_count: int
+    top_10_trade_count: int
+    top_5_return_pct: float
+    top_10_return_pct: float
+    top_5_oos_trades: int
+    top_10_oos_trades: int
+    top_5_oos_gate: str
+    top_10_oos_gate: str
+    reproducibility_digest: str
+    payload: dict[str, object]
+    data_health: dict[str, str]
+    created_at: datetime
+    updated_at: datetime
 
 
 class AutomationSchedulerStateRecord(BaseModel):
@@ -1334,6 +1360,85 @@ class QagentRepository:
             ).first()
             return self._historical_backfill_job_from_row(row) if row is not None else None
 
+    def save_walk_forward_run(
+        self,
+        result,
+        *,
+        status: str = "succeeded",
+    ) -> WalkForwardRunRecord:
+        payload = result.model_dump(mode="json")
+        data_health = dict(result.data_health)
+        now = datetime.now(timezone.utc)
+        with self.session_factory() as session:
+            row = session.get(WalkForwardRunRow, result.owner_run_id)
+            values = {
+                "provider": result.provider_mode,
+                "status": status,
+                "start_date": result.start_date,
+                "end_date": result.end_date,
+                "dataset_revision": result.dataset_revision,
+                "rebalance_step_sessions": result.rebalance_step_sessions,
+                "lookback_days": int(
+                    data_health.get("walk_forward_lookback_days", 0) or 0
+                ),
+                "snapshot_count": len(result.snapshots),
+                "top_5_trade_count": result.top_5_metrics.trade_count,
+                "top_10_trade_count": result.top_10_metrics.trade_count,
+                "top_5_return_pct": result.top_5_metrics.total_return_pct,
+                "top_10_return_pct": result.top_10_metrics.total_return_pct,
+                "top_5_oos_trades": int(
+                    data_health.get("walk_forward_top_5_oos_trades", 0) or 0
+                ),
+                "top_10_oos_trades": int(
+                    data_health.get("walk_forward_top_10_oos_trades", 0) or 0
+                ),
+                "top_5_oos_gate": data_health.get(
+                    "walk_forward_top_5_oos_gate", "insufficient"
+                ),
+                "top_10_oos_gate": data_health.get(
+                    "walk_forward_top_10_oos_gate", "insufficient"
+                ),
+                "reproducibility_digest": result.reproducibility_digest,
+                "payload_json": json.dumps(payload, ensure_ascii=True, sort_keys=True),
+                "data_health": json.dumps(data_health, ensure_ascii=True, sort_keys=True),
+                "updated_at": now,
+            }
+            if row is None:
+                row = WalkForwardRunRow(
+                    run_id=result.owner_run_id,
+                    created_at=now,
+                    **values,
+                )
+                session.add(row)
+            else:
+                for key, value in values.items():
+                    setattr(row, key, value)
+            session.commit()
+            session.refresh(row)
+            return self._walk_forward_run_from_row(row)
+
+    def get_walk_forward_run(self, run_id: str) -> WalkForwardRunRecord | None:
+        with self.session_factory() as session:
+            row = session.get(WalkForwardRunRow, run_id)
+            return self._walk_forward_run_from_row(row) if row is not None else None
+
+    def list_walk_forward_runs(
+        self,
+        *,
+        provider: str | None = None,
+        limit: int = 20,
+    ) -> list[WalkForwardRunRecord]:
+        bounded_limit = max(1, min(limit, 100))
+        with self.session_factory() as session:
+            query = session.query(WalkForwardRunRow)
+            if provider:
+                query = query.filter(WalkForwardRunRow.provider == provider)
+            rows = query.order_by(
+                WalkForwardRunRow.created_at.desc(),
+                WalkForwardRunRow.run_id.desc(),
+            ).limit(bounded_limit).all()
+            return [self._walk_forward_run_from_row(row) for row in rows]
+
     def list_opportunity_snapshots(
         self,
         instrument_id: str | None = None,
@@ -1788,6 +1893,33 @@ class QagentRepository:
             updated_at=row.updated_at,
             started_at=row.started_at,
             finished_at=row.finished_at,
+        )
+
+    @staticmethod
+    def _walk_forward_run_from_row(row: WalkForwardRunRow) -> WalkForwardRunRecord:
+        return WalkForwardRunRecord(
+            run_id=row.run_id,
+            provider=row.provider,
+            status=row.status,
+            start_date=row.start_date,
+            end_date=row.end_date,
+            dataset_revision=row.dataset_revision,
+            rebalance_step_sessions=row.rebalance_step_sessions,
+            lookback_days=row.lookback_days,
+            snapshot_count=row.snapshot_count,
+            top_5_trade_count=row.top_5_trade_count,
+            top_10_trade_count=row.top_10_trade_count,
+            top_5_return_pct=float(row.top_5_return_pct),
+            top_10_return_pct=float(row.top_10_return_pct),
+            top_5_oos_trades=row.top_5_oos_trades,
+            top_10_oos_trades=row.top_10_oos_trades,
+            top_5_oos_gate=row.top_5_oos_gate,
+            top_10_oos_gate=row.top_10_oos_gate,
+            reproducibility_digest=row.reproducibility_digest,
+            payload=json.loads(row.payload_json),
+            data_health=json.loads(row.data_health),
+            created_at=row.created_at,
+            updated_at=row.updated_at,
         )
 
     @staticmethod

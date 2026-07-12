@@ -318,6 +318,7 @@ def _walk_forward_command(args: argparse.Namespace) -> int:
         rebalance_step_sessions=args.step_sessions,
         lookback_days=args.lookback_days,
     )
+    stored = QagentRepository(repository.session_factory).save_walk_forward_run(result)
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(result.model_dump_json(indent=2), encoding="utf-8")
@@ -333,6 +334,7 @@ def _walk_forward_command(args: argparse.Namespace) -> int:
         f"stress_top5={result.data_health['walk_forward_stress_top_5_return_pct']}% "
         f"stress_top10={result.data_health['walk_forward_stress_top_10_return_pct']}% "
         f"equal_weight={result.data_health['walk_forward_equal_weight_benchmark']} "
+        f"persisted={stored.run_id} "
         f"digest={result.reproducibility_digest}"
     )
     return 0

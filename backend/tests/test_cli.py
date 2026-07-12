@@ -1,9 +1,18 @@
+from datetime import date
+
 from qagent.cli import main
 from qagent.db import create_session_factory, initialize_database
 from qagent.storage.repository import QagentRepository
 
 
 class _WalkForwardCliResult:
+    owner_run_id = "manual-validation-v1"
+    provider_mode = "free"
+    start_date = date(2023, 1, 3)
+    end_date = date(2025, 12, 31)
+    rebalance_step_sessions = 10
+    top_5_metrics = type("Metrics", (), {"trade_count": 3, "total_return_pct": 4.25})()
+    top_10_metrics = type("Metrics", (), {"trade_count": 5, "total_return_pct": 6.5})()
     dataset_revision = 7
     snapshots = [object(), object()]
     reproducibility_digest = "fixture-digest"
@@ -18,6 +27,7 @@ class _WalkForwardCliResult:
         {"summary": type("Summary", (), {"trade_count": 5, "total_return_pct": 6.5})()},
     )()
     data_health = {
+        "walk_forward_lookback_days": "400",
         "walk_forward_top_5_oos_trades": "32",
         "walk_forward_top_10_oos_trades": "35",
         "walk_forward_stress_top_5_return_pct": "2.1",
@@ -27,6 +37,21 @@ class _WalkForwardCliResult:
 
     def model_dump_json(self, indent=None):
         return '{"dataset_revision": 7}'
+
+    def model_dump(self, mode=None):
+        return {
+            "owner_run_id": self.owner_run_id,
+            "provider_mode": self.provider_mode,
+            "dataset_revision": self.dataset_revision,
+            "start_date": self.start_date.isoformat(),
+            "end_date": self.end_date.isoformat(),
+            "rebalance_step_sessions": self.rebalance_step_sessions,
+            "snapshots": [],
+            "top_5_metrics": {"trade_count": 3, "total_return_pct": 4.25},
+            "top_10_metrics": {"trade_count": 5, "total_return_pct": 6.5},
+            "reproducibility_digest": self.reproducibility_digest,
+            "data_health": self.data_health,
+        }
 
 
 def test_cli_daily_brief_can_save_queue_and_print_markdown(tmp_path, monkeypatch, capsys):
@@ -226,5 +251,6 @@ def test_cli_walk_forward_runs_manually_and_exports_result(tmp_path, monkeypatch
     assert "top5_oos=32/30" in output
     assert "stress_top5=2.1%" in output
     assert "equal_weight=ready" in output
+    assert "persisted=manual-validation-v1" in output
     assert "digest=fixture-digest" in output
     assert output_path.read_text() == '{"dataset_revision": 7}'

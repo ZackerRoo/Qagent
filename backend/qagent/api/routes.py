@@ -4,6 +4,7 @@ from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
 import math
 from threading import Lock
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException
@@ -19,6 +20,7 @@ from qagent.api.schemas import (
 from qagent.backtesting.engine import run_historical_backtest
 from qagent.backtesting.portfolio import run_portfolio_backtest
 from qagent.backtesting.sensitivity import build_parameter_sensitivity
+from qagent.backtesting.walk_forward import run_full_market_walk_forward_selection
 from qagent.briefing.daily import DailyBrief, build_daily_brief
 from qagent.briefing.export import render_daily_brief_markdown
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
@@ -128,6 +130,7 @@ from qagent.storage.repository import (
     WatchlistCreate,
 )
 from qagent.storage.market_cache import MarketDataCacheRepository
+from qagent.storage.replay_evidence import ReplayEvidenceRepository
 from qagent.strategy_data.models import FundamentalSnapshot
 from qagent.strategy_data.providers import EmptyStrategyDataProvider, build_strategy_data_provider
 from qagent.strategies.models import StrategyHealth
@@ -214,6 +217,75 @@ def historical_data_coverage(
         end=end,
     )
     return manifest.model_dump(mode="json")
+
+
+@router.post("/walk-forward/runs")
+def run_walk_forward(
+    start: date,
+    end: date,
+    provider: str = "free",
+    run_id: str | None = None,
+    step_sessions: int = 5,
+    lookback_days: int = 400,
+) -> dict[str, object]:
+    mode = provider.strip().lower()
+    if mode != "free":
+        raise HTTPException(status_code=400, detail="walk-forward only supports free A-share data")
+    if start > end:
+        raise HTTPException(status_code=400, detail="start must be on or before end")
+    if step_sessions <= 0 or lookback_days <= 0:
+        raise HTTPException(status_code=400, detail="step_sessions and lookback_days must be positive")
+    initialize_database()
+    repository = ReplayEvidenceRepository(create_session_factory(), mode)
+    owner_run_id = run_id or f"walk-forward-{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{uuid4().hex[:8]}"
+    try:
+        result = run_full_market_walk_forward_selection(
+            repository,
+            owner_run_id=owner_run_id,
+            start=start,
+            end=end,
+            rebalance_step_sessions=step_sessions,
+            lookback_days=lookback_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    record = _repo().save_walk_forward_run(result)
+    return record.model_dump(mode="json")
+
+
+@router.get("/walk-forward/runs")
+def list_walk_forward_runs(
+    provider: str = "free",
+    limit: int = 20,
+) -> dict[str, object]:
+    if limit <= 0:
+        raise HTTPException(status_code=400, detail="limit must be positive")
+    records = _repo().list_walk_forward_runs(
+        provider=provider.strip().lower(),
+        limit=limit,
+    )
+    return {"runs": [record.model_dump(mode="json") for record in records]}
+
+
+@router.get("/walk-forward/runs/latest")
+def latest_walk_forward_run(provider: str = "free") -> dict[str, object]:
+    records = _repo().list_walk_forward_runs(
+        provider=provider.strip().lower(),
+        limit=1,
+    )
+    if not records:
+        raise HTTPException(status_code=404, detail="walk-forward run not found")
+    return records[0].model_dump(mode="json")
+
+
+@router.get("/walk-forward/runs/{run_id}")
+def get_walk_forward_run(run_id: str) -> dict[str, object]:
+    record = _repo().get_walk_forward_run(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="walk-forward run not found")
+    return record.model_dump(mode="json")
 
 
 @router.post("/historical-data/backfill")

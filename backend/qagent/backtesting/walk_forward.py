@@ -290,6 +290,7 @@ def run_full_market_walk_forward_selection(
         data_health={
             "walk_forward_revision": str(revision),
             "walk_forward_snapshots": str(len(snapshots)),
+            "walk_forward_lookback_days": str(lookback_days),
             "walk_forward_scan_errors": str(len(scan_errors)),
             "walk_forward_future_data_guard": "revision_lease_and_decision_date_cutoff",
             "walk_forward_universe": "historical_lifecycle_per_rebalance_date",
