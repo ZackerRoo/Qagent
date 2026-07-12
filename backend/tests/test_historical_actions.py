@@ -57,6 +57,24 @@ class IncompleteCorporateActionClient(CorporateActionClient):
         )
 
 
+class NaTCorporateActionClient(CorporateActionClient):
+    def stock_dividend_cninfo(self, *, symbol):
+        return pd.DataFrame(
+            [
+                {
+                    "实施方案公告日期": "2024-06-01",
+                    "派息比例": 3,
+                    "股权登记日": pd.NaT,
+                    "除权日": "2024-06-11",
+                    "派息日": pd.NaT,
+                }
+            ]
+        )
+
+    def stock_history_dividend_detail(self, *, symbol, indicator):
+        return pd.DataFrame()
+
+
 def _provider(client):
     return BaoStockHistoricalEvidenceProvider(
         corporate_action_client=client,
@@ -103,3 +121,19 @@ def test_incomplete_action_rows_make_coverage_partial_without_fabricated_dates()
     assert batch.coverage[0].action_count == 1
     assert all(item.action_type == "rights" for item in batch.actions)
     assert any("announcement date is missing" in item for item in batch.errors)
+
+
+def test_nat_action_dates_stay_missing_without_breaking_coverage():
+    batch = _provider(NaTCorporateActionClient()).get_corporate_actions(
+        ["CN:000001"],
+        date(2024, 1, 1),
+        date(2024, 12, 31),
+    )
+
+    assert batch.coverage[0].status == "partial"
+    assert batch.coverage[0].action_count == 1
+    assert batch.actions[0].action_type == "other"
+    assert batch.actions[0].record_date is None
+    assert batch.actions[0].payable_date is None
+    assert any("dates are incomplete" in item for item in batch.errors)
+    assert all("Cannot compare NaT" not in item for item in batch.errors)

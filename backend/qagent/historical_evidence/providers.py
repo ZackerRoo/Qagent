@@ -917,13 +917,13 @@ def _action_id(instrument_id: str, *parts: object) -> str:
 
 
 def _date(value: object) -> date | None:
+    text = _text(value)
+    if text is None or text.lower() in {"nat", "nan", "none", "null"}:
+        return None
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
         return value
-    text = _text(value)
-    if not text:
-        return None
     try:
         parsed = date.fromisoformat(text[:10])
         return None if parsed.year == 1900 else parsed
