@@ -121,6 +121,51 @@ def run_portfolio_backtest(
         max_signals=500,
         strategy_data_provider=strategy_data_provider,
     )
+    result = run_signal_portfolio_backtest(
+        signals=signal_result.signals,
+        instrument_ids=instrument_ids,
+        provider=provider,
+        start=start,
+        end=end,
+        initial_capital=initial_capital,
+        risk_per_trade_pct=risk_per_trade_pct,
+        max_positions=max_positions,
+        transaction_cost_bps=transaction_cost_bps,
+        slippage_bps=slippage_bps,
+        max_entry_wait_days=max_entry_wait_days,
+        max_holding_days=max_holding_days,
+        execution_rule_resolver=execution_rule_resolver,
+    )
+    result.data_health["source_backtest_scans"] = str(
+        signal_result.summary.scan_count
+    )
+    return result
+
+
+def run_signal_portfolio_backtest(
+    *,
+    signals: list[BacktestSignal],
+    instrument_ids: list[str],
+    provider: MarketDataProvider,
+    start: date,
+    end: date,
+    initial_capital: Decimal = Decimal("100000"),
+    risk_per_trade_pct: Decimal = Decimal("1"),
+    max_positions: int = 5,
+    transaction_cost_bps: Decimal = Decimal("5"),
+    slippage_bps: Decimal = Decimal("5"),
+    max_entry_wait_days: int = 5,
+    max_holding_days: int = 20,
+    execution_rule_resolver: VersionedAshareExecutionResolver | None = None,
+) -> PortfolioBacktestResult:
+    if start > end:
+        raise ValueError("start must be on or before end")
+    if initial_capital <= 0:
+        raise ValueError("initial_capital must be positive")
+    if risk_per_trade_pct <= 0:
+        raise ValueError("risk_per_trade_pct must be positive")
+    if max_positions <= 0:
+        raise ValueError("max_positions must be positive")
     bars = provider.get_daily_bars(
         instrument_ids,
         start=start,
@@ -128,7 +173,7 @@ def run_portfolio_backtest(
     )
     bars = _normalize_bars(bars)
     candidates = _build_candidates(
-        signal_result.signals,
+        signals,
         bars,
         slippage_bps=slippage_bps,
         max_entry_wait_days=max_entry_wait_days,
@@ -155,7 +200,7 @@ def run_portfolio_backtest(
     data_health = {
         "provider": provider.name,
         "symbols": str(len(instrument_ids)),
-        "source_signals": str(len(signal_result.signals)),
+        "source_signals": str(len(signals)),
         "trade_candidates": str(len(candidates)),
         "trades": str(len(trades)),
         "lookahead_guard": "signals_generated_before_exits",
@@ -689,6 +734,8 @@ def _effective_limit_pct(
     if rule.listing_date is None or rule.ipo_no_limit_sessions <= 0:
         return rule.limit_pct
     if trade_date < rule.listing_date:
+        return rule.limit_pct
+    if (trade_date - rule.listing_date).days > 30:
         return rule.limit_pct
     sessions = trading_sessions_in_range(rule.listing_date, trade_date)
     if 0 < len(sessions) <= rule.ipo_no_limit_sessions:

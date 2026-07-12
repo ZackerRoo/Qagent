@@ -7,6 +7,12 @@ from decimal import Decimal
 
 from pydantic import BaseModel, Field
 
+from qagent.backtesting.engine import BacktestSignal
+from qagent.backtesting.execution import VersionedAshareExecutionResolver
+from qagent.backtesting.portfolio import (
+    PortfolioBacktestResult,
+    run_signal_portfolio_backtest,
+)
 from qagent.backtesting.replay_provider import (
     ReplayMarketDataProvider,
     ReplayStrategyDataProvider,
@@ -51,6 +57,8 @@ class WalkForwardSelectionResult(BaseModel):
     end_date: date
     rebalance_step_sessions: int
     snapshots: list[WalkForwardSnapshot]
+    top_5_portfolio: PortfolioBacktestResult
+    top_10_portfolio: PortfolioBacktestResult
     reproducibility_digest: str
     data_health: dict[str, str] = Field(default_factory=dict)
 
@@ -147,9 +155,42 @@ def run_full_market_walk_forward_selection(
                     top_10=selections[:10],
                 )
             )
+        execution_resolver = VersionedAshareExecutionResolver(
+            owner_repository,
+            dataset_revision=revision,
+        )
+        top_5_signals = _signals(snapshots, size=5)
+        top_10_signals = _signals(snapshots, size=10)
+        top_5_portfolio = run_signal_portfolio_backtest(
+            signals=top_5_signals,
+            instrument_ids=sorted(
+                {item.instrument_id for item in top_5_signals}
+            ),
+            provider=market_provider,
+            start=start,
+            end=end,
+            max_positions=5,
+            execution_rule_resolver=execution_resolver,
+        )
+        top_10_portfolio = run_signal_portfolio_backtest(
+            signals=top_10_signals,
+            instrument_ids=sorted(
+                {item.instrument_id for item in top_10_signals}
+            ),
+            provider=market_provider,
+            start=start,
+            end=end,
+            max_positions=10,
+            execution_rule_resolver=execution_resolver,
+        )
     finally:
         owner_repository.release_dataset_lease()
-    digest = _selection_digest(snapshots, revision)
+    digest = _selection_digest(
+        snapshots,
+        revision,
+        top_5_portfolio,
+        top_10_portfolio,
+    )
     return WalkForwardSelectionResult(
         owner_run_id=owner_run_id,
         provider_mode=repository.provider_mode,
@@ -158,6 +199,8 @@ def run_full_market_walk_forward_selection(
         end_date=end,
         rebalance_step_sessions=rebalance_step_sessions,
         snapshots=snapshots,
+        top_5_portfolio=top_5_portfolio,
+        top_10_portfolio=top_10_portfolio,
         reproducibility_digest=digest,
         data_health={
             "walk_forward_revision": str(revision),
@@ -166,6 +209,12 @@ def run_full_market_walk_forward_selection(
             "walk_forward_future_data_guard": "revision_lease_and_decision_date_cutoff",
             "walk_forward_universe": "historical_lifecycle_per_rebalance_date",
             "walk_forward_st_policy": "excluded",
+            "walk_forward_top_5_trades": str(
+                top_5_portfolio.summary.trade_count
+            ),
+            "walk_forward_top_10_trades": str(
+                top_10_portfolio.summary.trade_count
+            ),
             "walk_forward_digest": digest,
             **(
                 {"walk_forward_error_samples": " | ".join(scan_errors[:3])}
@@ -188,12 +237,44 @@ def _selection(card) -> WalkForwardSelection:
     )
 
 
+def _signals(
+    snapshots: list[WalkForwardSnapshot], *, size: int
+) -> list[BacktestSignal]:
+    result = []
+    for snapshot in snapshots:
+        selections = snapshot.top_5 if size == 5 else snapshot.top_10
+        result.extend(
+            BacktestSignal(
+                snapshot_id=(
+                    f"walk-forward-{size}-{snapshot.decision_date:%Y%m%d}:"
+                    f"{item.instrument_id}"
+                ),
+                instrument_id=item.instrument_id,
+                signal_date=snapshot.decision_date,
+                primary_strategy_id=item.primary_strategy_id,
+                status=item.status,
+                rank_score=item.rank_score,
+                trigger_price=item.trigger_price,
+                initial_stop=item.initial_stop,
+                target_1=item.target_1,
+                outcome_status="pending",
+            )
+            for item in selections
+        )
+    return result
+
+
 def _selection_digest(
-    snapshots: list[WalkForwardSnapshot], revision: int
+    snapshots: list[WalkForwardSnapshot],
+    revision: int,
+    top_5_portfolio: PortfolioBacktestResult,
+    top_10_portfolio: PortfolioBacktestResult,
 ) -> str:
     payload = {
         "dataset_revision": revision,
         "snapshots": [item.model_dump(mode="json") for item in snapshots],
+        "top_5_portfolio": top_5_portfolio.model_dump(mode="json"),
+        "top_10_portfolio": top_10_portfolio.model_dump(mode="json"),
     }
     encoded = json.dumps(
         payload,

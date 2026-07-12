@@ -3,6 +3,11 @@ from decimal import Decimal
 
 from sqlalchemy.orm import sessionmaker
 
+from qagent.backtesting.a_share_rules import (
+    BrokerFeeRequest,
+    build_instrument_rule_metadata,
+    load_a_share_rule_schedule,
+)
 from qagent.backtesting.replay_provider import (
     ReplayMarketDataProvider,
     ReplayStrategyDataProvider,
@@ -109,6 +114,22 @@ def _replay_repository(tmp_path):
         ),
         revision=4,
     )
+    schedule = load_a_share_rule_schedule()
+    repository.upsert_trading_rules(schedule.trading_rules)
+    repository.upsert_fee_rules(
+        schedule.fee_rules(
+            BrokerFeeRequest(commission_bps="3", minimum_commission="5")
+        )
+    )
+    repository.upsert_instrument_rule_metadata(
+        [
+            build_instrument_rule_metadata(
+                profile,
+                effective_from=date(2023, 4, 10),
+                schedule=schedule,
+            )
+        ]
+    )
     return repository, decision_date
 
 
@@ -156,6 +177,8 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert first.snapshots[0].eligible_size == 1
     assert first.reproducibility_digest == second.reproducibility_digest
     assert first.snapshots == second.snapshots
+    assert first.top_5_portfolio == second.top_5_portfolio
+    assert first.top_10_portfolio == second.top_10_portfolio
     assert (
         first.data_health["walk_forward_future_data_guard"]
         == "revision_lease_and_decision_date_cutoff"
