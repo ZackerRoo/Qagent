@@ -1,5 +1,7 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from threading import Barrier
 
 import pytest
 from sqlalchemy import delete, event, func, inspect, select, text, update
@@ -1329,6 +1331,31 @@ def test_competing_owner_cannot_acquire_live_lease(storage):
         make_repo(owner_run_id="run-b").acquire_dataset_lease()
 
 
+def test_concurrent_lease_acquire_has_one_success_and_one_busy(storage):
+    session_factory, _, statuses, make_repo = storage
+    statuses.update({"run-a": "running", "run-b": "running"})
+    start = Barrier(2)
+
+    def acquire(owner_run_id: str) -> tuple[str, str]:
+        repo = make_repo(owner_run_id=owner_run_id)
+        start.wait(timeout=5)
+        try:
+            lease = repo.acquire_dataset_lease()
+        except DatasetLeaseBusy:
+            return "busy", owner_run_id
+        return "success", lease.owner_run_id
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(acquire, ("run-a", "run-b")))
+
+    assert sorted(status for status, _ in outcomes) == ["busy", "success"]
+    successful_owner = next(owner for status, owner in outcomes if status == "success")
+    with session_factory() as session:
+        leases = list(session.scalars(select(HistoricalDatasetLeaseRow)))
+    assert len(leases) == 1
+    assert leases[0].owner_run_id == successful_owner
+
+
 def test_original_run_reenters_stale_lease(storage):
     _, clock, statuses, make_repo = storage
     statuses["run-a"] = "running"
@@ -1378,6 +1405,45 @@ def test_terminal_run_cannot_acquire_without_existing_lease(storage, terminal_st
     with session_factory() as session:
         assert session.scalar(
             select(func.count()).select_from(HistoricalDatasetLeaseRow)
+        ) == 0
+
+
+def test_terminal_status_check_runs_inside_immediate_transaction(storage):
+    session_factory, clock, _, _ = storage
+    engine = session_factory.kw["bind"]
+    immediate_started = False
+    lookup_observations: list[bool] = []
+
+    def observe_begin(_conn, _cursor, statement, _parameters, _context, _executemany):
+        nonlocal immediate_started
+        if statement.strip() == "BEGIN IMMEDIATE":
+            immediate_started = True
+
+    def terminal_status(_run_id):
+        lookup_observations.append(immediate_started)
+        return "failed"
+
+    repo = ReplayEvidenceRepository(
+        session_factory,
+        provider_mode="free",
+        owner_run_id="run-a",
+        clock=clock,
+        run_status_lookup=terminal_status,
+    )
+    event.listen(engine, "before_cursor_execute", observe_begin)
+    try:
+        with pytest.raises(DatasetLeaseBusy, match="terminal"):
+            repo.acquire_dataset_lease()
+    finally:
+        event.remove(engine, "before_cursor_execute", observe_begin)
+
+    assert lookup_observations == [True]
+    with session_factory() as session:
+        assert session.scalar(
+            select(func.count()).select_from(HistoricalDatasetLeaseRow)
+        ) == 0
+        assert session.scalar(
+            select(func.count()).select_from(HistoricalDataRevisionRow)
         ) == 0
 
 

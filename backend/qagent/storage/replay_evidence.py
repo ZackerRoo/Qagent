@@ -1005,9 +1005,9 @@ class ReplayEvidenceRepository:
         self, owner_run_id: str | None = None
     ) -> DatasetLeaseRecord:
         owner = owner_run_id or self._require_owner()
-        self._ensure_run_active(owner)
         now = self._now()
         with self._immediate_session() as session:
+            self._ensure_run_active(owner)
             revision = self._revision_row(session).revision
             lease = session.get(HistoricalDatasetLeaseRow, self.provider_mode)
             if lease is not None:
