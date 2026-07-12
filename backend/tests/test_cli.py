@@ -17,6 +17,13 @@ class _WalkForwardCliResult:
         (),
         {"summary": type("Summary", (), {"trade_count": 5, "total_return_pct": 6.5})()},
     )()
+    data_health = {
+        "walk_forward_top_5_oos_trades": "32",
+        "walk_forward_top_10_oos_trades": "35",
+        "walk_forward_stress_top_5_return_pct": "2.1",
+        "walk_forward_stress_top_10_return_pct": "1.8",
+        "walk_forward_equal_weight_benchmark": "ready",
+    }
 
     def model_dump_json(self, indent=None):
         return '{"dataset_revision": 7}'
@@ -216,5 +223,8 @@ def test_cli_walk_forward_runs_manually_and_exports_result(tmp_path, monkeypatch
     assert captured["owner_run_id"] == "manual-validation-v1"
     assert captured["rebalance_step_sessions"] == 10
     assert "top5_trades=3" in output
+    assert "top5_oos=32/30" in output
+    assert "stress_top5=2.1%" in output
+    assert "equal_weight=ready" in output
     assert "digest=fixture-digest" in output
     assert output_path.read_text() == '{"dataset_revision": 7}'

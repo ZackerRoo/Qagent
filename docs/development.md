@@ -124,6 +124,15 @@ Top 5/Top 10 portfolio simulation:
   --output ../data/walk-forward-v1.json
 ```
 
+The command summary reports Top 5/Top 10 trades and returns, completed
+out-of-sample trades against the 30-trade evidence gate, stress-cost returns,
+the historical eligible-universe equal-weight benchmark status, and a
+reproducibility digest. The JSON output also contains chronological
+50/25/25 train/validation/out-of-sample windows with a 20-session embargo,
+three fee/slippage scenarios, four index comparisons, and the point-in-time
+eligible-universe comparison. A positive full-period return is not sufficient
+for validation when the out-of-sample gate or benchmark evidence is missing.
+
 The command leases one immutable dataset revision, rebuilds the lifecycle universe at
 each rebalance date, excludes missing tradability, suspension, and ST samples, and uses
 only point-in-time bars and fundamentals. It reports a reproducibility digest and uses

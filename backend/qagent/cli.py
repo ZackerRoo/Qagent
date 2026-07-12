@@ -328,6 +328,11 @@ def _walk_forward_command(args: argparse.Namespace) -> int:
         f"top5_return={result.top_5_portfolio.summary.total_return_pct:.2f}% "
         f"top10_trades={result.top_10_portfolio.summary.trade_count} "
         f"top10_return={result.top_10_portfolio.summary.total_return_pct:.2f}% "
+        f"top5_oos={result.data_health['walk_forward_top_5_oos_trades']}/30 "
+        f"top10_oos={result.data_health['walk_forward_top_10_oos_trades']}/30 "
+        f"stress_top5={result.data_health['walk_forward_stress_top_5_return_pct']}% "
+        f"stress_top10={result.data_health['walk_forward_stress_top_10_return_pct']}% "
+        f"equal_weight={result.data_health['walk_forward_equal_weight_benchmark']} "
         f"digest={result.reproducibility_digest}"
     )
     return 0
