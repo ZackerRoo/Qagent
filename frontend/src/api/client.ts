@@ -63,6 +63,8 @@ import type {
   UniversesResponse,
   WatchlistItem,
   WatchlistResponse,
+  WalkForwardRun,
+  WalkForwardRunsResponse,
 } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000/api";
@@ -77,6 +79,8 @@ type ScanParams = {
   start?: string;
   end?: string;
   step_days?: number;
+  step_sessions?: number;
+  lookback_days?: number;
   include_news?: boolean;
   queue_brief?: boolean;
   run_alerts?: boolean;
@@ -143,6 +147,12 @@ function queryString(params?: ScanParams): string {
   }
   if (params.step_days) {
     search.set("step_days", String(params.step_days));
+  }
+  if (params.step_sessions) {
+    search.set("step_sessions", String(params.step_sessions));
+  }
+  if (params.lookback_days) {
+    search.set("lookback_days", String(params.lookback_days));
   }
   if (params.include_news !== undefined) {
     search.set("include_news", String(params.include_news));
@@ -708,6 +718,36 @@ export async function fetchPortfolioBacktest(
     slippage_bps: 5,
     scan_limit: provider === "free" ? 30 : undefined,
   });
+}
+
+export async function fetchWalkForwardRuns(
+  provider: DataProviderMode = "free",
+  limit = 20,
+): Promise<WalkForwardRunsResponse> {
+  return apiGet<WalkForwardRunsResponse>("/walk-forward/runs", { provider, limit });
+}
+
+export async function fetchLatestWalkForwardRun(
+  provider: DataProviderMode = "free",
+): Promise<WalkForwardRun> {
+  return apiGet<WalkForwardRun>("/walk-forward/runs/latest", { provider });
+}
+
+export async function runWalkForward(
+  start: string,
+  end: string,
+  provider: DataProviderMode = "free",
+): Promise<WalkForwardRun> {
+  return apiPost<WalkForwardRun>(
+    `/walk-forward/runs${queryString({
+      provider,
+      start,
+      end,
+      step_sessions: 10,
+      lookback_days: 400,
+    })}`,
+    {},
+  );
 }
 
 export async function fetchDailyBrief(

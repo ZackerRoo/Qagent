@@ -2817,3 +2817,118 @@ export type PortfolioBacktestResponse = {
   monthly_returns: PortfolioMonthlyReturn[];
   data_health: Record<string, string>;
 };
+
+export type WalkForwardWindow = {
+  key: string;
+  label: string;
+  start_date: string;
+  end_date: string;
+  sample_count: number;
+  positive_rate: number | null;
+  avg_return_pct: number | null;
+  confidence_low_pct: number | null;
+  confidence_high_pct: number | null;
+  max_loss_pct: number | null;
+};
+
+export type WalkForwardTemporalValidation = {
+  method: string;
+  return_horizon_days: number;
+  embargo_days: number;
+  windows: WalkForwardWindow[];
+  out_of_sample: WalkForwardWindow | null;
+  verdict: string;
+  summary: string;
+  warnings: string[];
+  data_health: Record<string, string>;
+};
+
+export type WalkForwardPortfolioMetrics = {
+  trade_count: number;
+  total_return_pct: number;
+  annualized_return_pct: number | null;
+  max_drawdown_pct: number;
+  win_rate: number | null;
+  avg_trade_return_pct: number | null;
+  trade_return_sharpe: number | null;
+  turnover_pct: number;
+  max_consecutive_losses: number;
+  total_costs: string;
+};
+
+export type WalkForwardBenchmarkComparison = {
+  benchmark_id: string;
+  status: string;
+  benchmark_return_pct: number | null;
+  top_5_excess_return_pct: number | null;
+  top_10_excess_return_pct: number | null;
+};
+
+export type WalkForwardCostScenario = {
+  key: string;
+  label: string;
+  slippage_bps: string;
+  fee_multiplier: string;
+  top_5_return_pct: number;
+  top_10_return_pct: number;
+  top_5_max_drawdown_pct: number;
+  top_10_max_drawdown_pct: number;
+  top_5_total_costs: string;
+  top_10_total_costs: string;
+};
+
+export type WalkForwardPortfolioPayload = {
+  summary: {
+    final_equity: string;
+    total_return_pct: number;
+    max_drawdown_pct: number;
+    trade_count: number;
+    win_rate: number | null;
+  };
+  equity_curve: Array<{
+    date: string;
+    equity: string;
+    drawdown_pct: number;
+  }>;
+};
+
+export type WalkForwardPayload = {
+  top_5_portfolio: WalkForwardPortfolioPayload;
+  top_10_portfolio: WalkForwardPortfolioPayload;
+  top_5_metrics: WalkForwardPortfolioMetrics;
+  top_10_metrics: WalkForwardPortfolioMetrics;
+  top_5_temporal_validation: WalkForwardTemporalValidation;
+  top_10_temporal_validation: WalkForwardTemporalValidation;
+  benchmarks: WalkForwardBenchmarkComparison[];
+  cost_sensitivity: WalkForwardCostScenario[];
+  snapshots: Array<Record<string, unknown>>;
+};
+
+export type WalkForwardRun = {
+  run_id: string;
+  provider: DataProviderMode;
+  status: string;
+  start_date: string;
+  end_date: string;
+  dataset_revision: number;
+  rebalance_step_sessions: number;
+  lookback_days: number;
+  snapshot_count: number;
+  top_5_trade_count: number;
+  top_10_trade_count: number;
+  top_5_return_pct: number;
+  top_10_return_pct: number;
+  top_5_oos_trades: number;
+  top_10_oos_trades: number;
+  top_5_oos_gate: string;
+  top_10_oos_gate: string;
+  reproducibility_digest: string;
+  payload: WalkForwardPayload;
+  data_health: Record<string, string>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WalkForwardRunsResponse = {
+  runs: WalkForwardRun[];
+};

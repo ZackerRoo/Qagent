@@ -10,9 +10,11 @@ import {
   fetchPortfolioBacktest,
   fetchRecommendationCalibration,
   fetchRecommendationClosure,
+  fetchLatestWalkForwardRun,
   fetchScanRuns,
   fetchStrategyDiagnostics,
   fetchStrategyPerformance,
+  runWalkForward,
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
 import { OpportunityCandlestickChart, type SignalMarker } from "../components/OpportunityChart";
@@ -49,6 +51,7 @@ import type {
   ScanRunsResponse,
   StrategyDiagnosticsResponse,
   StrategyPerformanceResponse,
+  WalkForwardRun,
 } from "../types";
 
 function formatNumber(value: number | null, suffix = "") {
@@ -119,6 +122,7 @@ export function History({
   const [calibration, setCalibration] = useState<RecommendationCalibrationResponse>();
   const [performance, setPerformance] = useState<StrategyPerformanceResponse>();
   const [diagnostics, setDiagnostics] = useState<StrategyDiagnosticsResponse>();
+  const [walkForward, setWalkForward] = useState<WalkForwardRun>();
   const [error, setError] = useState("");
   const [isHistoryLoading, setIsHistoryLoading] = useState(true);
   const [backtestError, setBacktestError] = useState("");
@@ -128,6 +132,8 @@ export function History({
   const [isBacktesting, setIsBacktesting] = useState(false);
   const [isFactorBacktesting, setIsFactorBacktesting] = useState(false);
   const [isPortfolioBacktesting, setIsPortfolioBacktesting] = useState(false);
+  const [isWalkForwardRunning, setIsWalkForwardRunning] = useState(false);
+  const [walkForwardError, setWalkForwardError] = useState("");
   const [backtestRunContext, setBacktestRunContext] = useState<BacktestRunContext>();
   const autoBacktestKeyRef = useRef("");
 
@@ -174,11 +180,43 @@ export function History({
     void loadOne("recommendation calibration", fetchRecommendationCalibration(dataMode), setCalibration);
     void loadOne("strategy performance", fetchStrategyPerformance(dataMode), setPerformance);
     void loadOne("strategy diagnostics", fetchStrategyDiagnostics(dataMode), setDiagnostics);
+    if (dataMode === "free") {
+      void fetchLatestWalkForwardRun(dataMode)
+        .then((result) => {
+          if (!cancelled) {
+            setWalkForward(result);
+          }
+        })
+        .catch((caught) => {
+          const message = caught instanceof Error ? caught.message : "failed";
+          if (!cancelled && !message.includes("404")) {
+            setWalkForwardError(message);
+          }
+        });
+    }
 
     return () => {
       cancelled = true;
     };
   }, [dataMode]);
+
+  async function runFullMarketWalkForward() {
+    if (dataMode !== "free") {
+      setWalkForwardError(language === "zh" ? "全市场验证只使用 A 股免费历史数据。" : "Walk-forward uses free A-share historical data only.");
+      return;
+    }
+    const end = new Date().toISOString().slice(0, 10);
+    try {
+      setIsWalkForwardRunning(true);
+      setWalkForwardError("");
+      const result = await runWalkForward("2023-01-03", end, dataMode);
+      setWalkForward(result);
+    } catch (caught) {
+      setWalkForwardError(caught instanceof Error ? caught.message : "Failed to run walk-forward validation");
+    } finally {
+      setIsWalkForwardRunning(false);
+    }
+  }
 
   async function runBacktest() {
     const backtestProvider = selectedBacktestSymbols ? dataMode : quickBacktestProvider;
@@ -302,6 +340,13 @@ export function History({
         hasSelectedCard={Boolean(selectedBacktestSymbols)}
       />
       {error && <div className="empty-state error history-load-warning">{error}</div>}
+
+      <WalkForwardValidationCenter
+        run={walkForward}
+        error={walkForwardError}
+        isRunning={isWalkForwardRunning}
+        onRun={runFullMarketWalkForward}
+      />
 
       <BacktestCommandCenter
         backtest={backtest}
@@ -1038,6 +1083,138 @@ export function History({
         </div>
       </details>
     </div>
+  );
+}
+
+function WalkForwardValidationCenter({
+  run,
+  error,
+  isRunning,
+  onRun,
+}: {
+  run?: WalkForwardRun;
+  error: string;
+  isRunning: boolean;
+  onRun: () => void;
+}) {
+  const { language } = useI18n();
+  const zh = language === "zh";
+  const payload = run?.payload;
+  const benchmarks = payload?.benchmarks ?? [];
+  const costScenarios = payload?.cost_sensitivity ?? [];
+  const top5Validation = payload?.top_5_temporal_validation;
+  const top10Validation = payload?.top_10_temporal_validation;
+  const top5Oos = top5Validation?.out_of_sample;
+  const top10Oos = top10Validation?.out_of_sample;
+  const benchmarkLabel = (id: string) => {
+    const labels: Record<string, string> = {
+      "CN:000300.IDX": zh ? "沪深300" : "CSI 300",
+      "CN:000905.IDX": zh ? "中证500" : "CSI 500",
+      "CN:399006.IDX": zh ? "创业板指" : "ChiNext",
+      "CN:000688.IDX": zh ? "科创50" : "STAR 50",
+      "CN:EQUAL_WEIGHT_ELIGIBLE": zh ? "历史可交易池等权" : "Historical eligible equal-weight",
+    };
+    return labels[id] ?? id;
+  };
+
+  return (
+    <section className="panel walk-forward-center">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">{zh ? "历史验证" : "Historical validation"}</p>
+          <h2>{zh ? "Walk-forward 全市场验证" : "Full-market walk-forward"}</h2>
+          <p className="brief-headline">
+            {zh
+              ? "按每个历史日期重建股票池和推荐，样本外至少 30 笔才进入有效性判断。"
+              : "Rebuilds the historical universe and recommendations date by date; 30 out-of-sample trades are required before validation."}
+          </p>
+        </div>
+        <button className="icon-action" type="button" onClick={onRun} disabled={isRunning}>
+          {isRunning ? (zh ? "验证运行中" : "Running") : (zh ? "运行全市场验证" : "Run validation")}
+        </button>
+      </div>
+      {error ? <div className="empty-state error">{error}</div> : null}
+      {!run ? (
+        <div className="walk-forward-empty">
+          <strong>{zh ? "还没有保存的 Walk-forward 结果" : "No saved walk-forward result"}</strong>
+          <p>
+            {zh
+              ? "这和单只股票回测不同：它会使用历史股票池、复权行情、财务快照、交易规则和成本重新生成推荐。"
+              : "This is different from a single-stock backtest: it rebuilds recommendations from historical universes, adjusted prices, fundamentals, execution rules, and costs."}
+          </p>
+        </div>
+      ) : (
+        <div className="stack">
+          <div className="walk-forward-run-meta">
+            <span>{run.start_date} - {run.end_date}</span>
+            <span>{zh ? "数据版本" : "Dataset"} {run.dataset_revision}</span>
+            <span>{zh ? "再平衡" : "Rebalance"} {run.rebalance_step_sessions} {zh ? "交易日" : "sessions"}</span>
+            <span className={`status status-${run.status}`}>{run.status}</span>
+          </div>
+          <div className="metric-grid walk-forward-kpis">
+            <div><span>{zh ? "Top 5 收益" : "Top 5 return"}</span><strong>{formatNumber(run.top_5_return_pct, "%")}</strong></div>
+            <div><span>{zh ? "Top 10 收益" : "Top 10 return"}</span><strong>{formatNumber(run.top_10_return_pct, "%")}</strong></div>
+            <div><span>{zh ? "Top 5 样本外" : "Top 5 OOS"}</span><strong>{run.top_5_oos_trades}/30</strong></div>
+            <div><span>{zh ? "Top 10 样本外" : "Top 10 OOS"}</span><strong>{run.top_10_oos_trades}/30</strong></div>
+            <div><span>{zh ? "历史股票池基准" : "Eligible benchmark"}</span><strong>{run.data_health.walk_forward_equal_weight_benchmark ?? "-"}</strong></div>
+            <div><span>{zh ? "再平衡快照" : "Rebalance snapshots"}</span><strong>{run.snapshot_count}</strong></div>
+          </div>
+          <div className="walk-forward-gate-note">
+            {zh
+              ? `当前结论：Top 5 ${run.top_5_oos_gate === "ready" ? "达到" : "未达到"} 30 笔样本外门槛，Top 10 ${run.top_10_oos_gate === "ready" ? "达到" : "未达到"} 30 笔门槛。门槛未达到时只能观察，不能称为策略有效。`
+              : `Gate: Top 5 is ${run.top_5_oos_gate === "ready" ? "ready" : "below"} and Top 10 is ${run.top_10_oos_gate === "ready" ? "ready" : "below"} the 30-trade out-of-sample threshold. Below the gate is observation, not validation.`}
+          </div>
+          <div className="walk-forward-chart-grid">
+            <LineValidationChart
+              title={zh ? "Top 5 权益曲线" : "Top 5 equity curve"}
+              tone="equity"
+              points={(payload?.top_5_portfolio.equity_curve ?? []).map((point) => ({ label: point.date, value: numberFromDecimalText(point.equity) }))}
+              valueFormatter={(value) => value.toFixed(0)}
+            />
+            <LineValidationChart
+              title={zh ? "Top 10 权益曲线" : "Top 10 equity curve"}
+              tone="equity"
+              points={(payload?.top_10_portfolio.equity_curve ?? []).map((point) => ({ label: point.date, value: numberFromDecimalText(point.equity) }))}
+              valueFormatter={(value) => value.toFixed(0)}
+            />
+          </div>
+          <div className="walk-forward-table-grid">
+            <div className="table-shell">
+              <table>
+                <thead><tr><th>{zh ? "组合" : "Portfolio"}</th><th>{zh ? "交易数" : "Trades"}</th><th>{zh ? "收益" : "Return"}</th><th>{zh ? "最大回撤" : "Max DD"}</th><th>{zh ? "样本外" : "OOS"}</th><th>{zh ? "门槛" : "Gate"}</th></tr></thead>
+                <tbody>
+                  <tr><td>Top 5</td><td>{run.top_5_trade_count}</td><td>{formatNumber(run.top_5_return_pct, "%")}</td><td>{formatNumber(payload?.top_5_metrics.max_drawdown_pct ?? null, "%")}</td><td>{top5Oos?.sample_count ?? 0}</td><td>{run.top_5_oos_gate}</td></tr>
+                  <tr><td>Top 10</td><td>{run.top_10_trade_count}</td><td>{formatNumber(run.top_10_return_pct, "%")}</td><td>{formatNumber(payload?.top_10_metrics.max_drawdown_pct ?? null, "%")}</td><td>{top10Oos?.sample_count ?? 0}</td><td>{run.top_10_oos_gate}</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div className="table-shell">
+              <table>
+                <thead><tr><th>{zh ? "基准" : "Benchmark"}</th><th>{zh ? "基准收益" : "Benchmark"}</th><th>Top 5</th><th>Top 10</th><th>{zh ? "状态" : "Status"}</th></tr></thead>
+                <tbody>{benchmarks.map((item) => <tr key={item.benchmark_id}><td>{benchmarkLabel(item.benchmark_id)}</td><td>{formatNumber(item.benchmark_return_pct, "%")}</td><td>{formatNumber(item.top_5_excess_return_pct, "%")}</td><td>{formatNumber(item.top_10_excess_return_pct, "%")}</td><td>{item.status}</td></tr>)}</tbody>
+              </table>
+            </div>
+          </div>
+          <div className="walk-forward-table-grid">
+            <div className="table-shell">
+              <table>
+                <thead><tr><th>{zh ? "成本场景" : "Cost scenario"}</th><th>{zh ? "滑点" : "Slippage"}</th><th>{zh ? "费率倍数" : "Fee x"}</th><th>Top 5</th><th>Top 10</th></tr></thead>
+                <tbody>{costScenarios.map((item) => <tr key={item.key}><td>{item.label}</td><td>{item.slippage_bps} bp</td><td>{item.fee_multiplier}x</td><td>{formatNumber(item.top_5_return_pct, "%")}</td><td>{formatNumber(item.top_10_return_pct, "%")}</td></tr>)}</tbody>
+              </table>
+            </div>
+            <div className="walk-forward-windows">
+              {[top5Validation, top10Validation].map((validation, index) => (
+                <div className="walk-forward-window-card" key={index}>
+                  <strong>{index === 0 ? "Top 5" : "Top 10"} {zh ? "样本外" : "out-of-sample"}</strong>
+                  <span>{validation?.out_of_sample?.start_date ?? "-"} - {validation?.out_of_sample?.end_date ?? "-"}</span>
+                  <span>{validation?.out_of_sample?.sample_count ?? 0} {zh ? "笔 · " : "trades · "}{validation?.verdict ?? "insufficient"}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 
