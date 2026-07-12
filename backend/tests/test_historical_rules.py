@@ -9,6 +9,7 @@ from qagent.backtesting.a_share_rules import (
     build_instrument_rule_metadata,
     load_a_share_rule_schedule,
 )
+from qagent.backtesting.execution import VersionedAshareExecutionResolver
 from qagent.db import Base, create_db_engine
 from qagent.historical_evidence.models import (
     HistoricalInstrumentProfile,
@@ -174,6 +175,34 @@ def test_rule_repository_is_idempotent_and_resolves_date_specific_rules(tmp_path
     changed = schedule.trading_rules[0].model_copy(update={"limit_pct": Decimal("11")})
     with pytest.raises(ImmutableRevisionConflict):
         repo.upsert_trading_rules([changed])
+
+
+def test_execution_resolver_selects_st_rule_and_date_specific_stamp_duty(tmp_path):
+    repo = _repository(tmp_path)
+    schedule = load_a_share_rule_schedule()
+    repo.upsert_trading_rules(schedule.trading_rules)
+    repo.upsert_fee_rules(
+        schedule.fee_rules(
+            BrokerFeeRequest(commission_bps="3", minimum_commission="5")
+        )
+    )
+    repo.upsert_instrument_rule_metadata(
+        [
+            build_instrument_rule_metadata(
+                _profile("CN:000001"),
+                effective_from=date(2023, 4, 10),
+                schedule=schedule,
+            )
+        ]
+    )
+    resolver = VersionedAshareExecutionResolver(repo)
+
+    before = resolver.resolve("CN:000001", date(2023, 8, 27), is_st=True)
+    after = resolver.resolve("CN:000001", date(2023, 8, 28), is_st=True)
+
+    assert before.limit_pct == Decimal("5")
+    assert before.sell_fee.stamp_duty_bps == Decimal("10")
+    assert after.sell_fee.stamp_duty_bps == Decimal("5")
 
 
 def test_terminal_settlements_are_revision_scoped(tmp_path):

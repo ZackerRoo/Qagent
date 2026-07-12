@@ -624,6 +624,44 @@ class ReplayEvidenceRepository:
             )
         return HistoricalTradingRule.model_validate(_row_dict(row))
 
+    def trading_rule_for(
+        self,
+        *,
+        rule_set_version: str,
+        market: str,
+        board: str,
+        security_type: str,
+        is_st: bool,
+        trade_date: date,
+    ) -> HistoricalTradingRule:
+        with self.session_factory() as session:
+            rows = list(
+                session.scalars(
+                    select(HistoricalTradingRuleRow)
+                    .where(
+                        HistoricalTradingRuleRow.rule_set_version
+                        == rule_set_version,
+                        HistoricalTradingRuleRow.market == market,
+                        HistoricalTradingRuleRow.board == board,
+                        HistoricalTradingRuleRow.security_type == security_type,
+                        HistoricalTradingRuleRow.is_st == is_st,
+                        HistoricalTradingRuleRow.effective_from <= trade_date,
+                        (
+                            HistoricalTradingRuleRow.effective_to.is_(None)
+                            | (HistoricalTradingRuleRow.effective_to >= trade_date)
+                        ),
+                    )
+                    .order_by(HistoricalTradingRuleRow.effective_from.desc())
+                )
+            )
+        if len(rows) != 1:
+            raise ReplayEvidenceUnavailable(
+                "expected one trading rule for "
+                f"{rule_set_version}/{market}/{board}/{security_type}/st={is_st} "
+                f"on {trade_date.isoformat()}, found {len(rows)}"
+            )
+        return HistoricalTradingRule.model_validate(_row_dict(rows[0]))
+
     def fee_rules_on(
         self,
         *,

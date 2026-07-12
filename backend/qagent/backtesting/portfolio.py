@@ -6,6 +6,13 @@ import pandas as pd
 from pydantic import BaseModel
 
 from qagent.backtesting.engine import BacktestSignal, run_historical_backtest
+from qagent.backtesting.execution import (
+    HistoricalExecutionRule,
+    VersionedAshareExecutionResolver,
+    calculate_round_trip_fees,
+    round_order_quantity,
+)
+from qagent.market.calendars import trading_sessions_in_range
 from qagent.providers.base import MarketDataProvider
 from qagent.strategy_data.providers import StrategyDataProvider
 
@@ -76,6 +83,8 @@ class _TradeCandidate:
     exit_price: Decimal
     stop_price: Decimal
     holding_days: int
+    execution_rule: HistoricalExecutionRule | None = None
+    exit_execution_rule: HistoricalExecutionRule | None = None
 
 
 def run_portfolio_backtest(
@@ -92,6 +101,7 @@ def run_portfolio_backtest(
     max_entry_wait_days: int = 5,
     max_holding_days: int = 20,
     strategy_data_provider: StrategyDataProvider | None = None,
+    execution_rule_resolver: VersionedAshareExecutionResolver | None = None,
 ) -> PortfolioBacktestResult:
     if start > end:
         raise ValueError("start must be on or before end")
@@ -123,6 +133,7 @@ def run_portfolio_backtest(
         slippage_bps=slippage_bps,
         max_entry_wait_days=max_entry_wait_days,
         max_holding_days=max_holding_days,
+        execution_rule_resolver=execution_rule_resolver,
     )
     trades, equity_curve = _simulate_portfolio(
         candidates,
@@ -150,7 +161,11 @@ def run_portfolio_backtest(
         "lookahead_guard": "signals_generated_before_exits",
         "portfolio_model": "fixed_risk_stop_target_time_exit",
         "execution_rules": "fees_slippage,t_plus_one,limit_price_guard,round_lot_100",
-        "cn_execution_rules": "enabled",
+        "cn_execution_rules": (
+            "versioned_replay_evidence"
+            if execution_rule_resolver is not None
+            else "legacy_symbol_fallback"
+        ),
         "max_positions": str(max_positions),
         "risk_per_trade_pct": str(risk_per_trade_pct),
     }
@@ -181,6 +196,7 @@ def _build_candidates(
     slippage_bps: Decimal,
     max_entry_wait_days: int,
     max_holding_days: int,
+    execution_rule_resolver: VersionedAshareExecutionResolver | None = None,
 ) -> list[_TradeCandidate]:
     candidates: list[_TradeCandidate] = []
     sorted_signals = sorted(
@@ -195,6 +211,7 @@ def _build_candidates(
             slippage_bps=slippage_bps,
             max_entry_wait_days=max_entry_wait_days,
             max_holding_days=max_holding_days,
+            execution_rule_resolver=execution_rule_resolver,
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -207,6 +224,7 @@ def _candidate_from_signal(
     slippage_bps: Decimal,
     max_entry_wait_days: int,
     max_holding_days: int,
+    execution_rule_resolver: VersionedAshareExecutionResolver | None = None,
 ) -> _TradeCandidate | None:
     if bars.empty or signal.trigger_price is None:
         return None
@@ -223,12 +241,34 @@ def _candidate_from_signal(
         return None
 
     entry_index = None
+    entry_rule = None
     for index, row in future.head(max_entry_wait_days).iterrows():
         previous = ordered.iloc[index - 1] if index > 0 else None
-        if _is_cn(signal.instrument_id) and _is_limit_up_day(row, previous, signal.instrument_id):
+        row_rule = (
+            execution_rule_resolver.resolve(
+                signal.instrument_id,
+                row["trade_date"],
+                is_st=_row_is_st(row),
+            )
+            if execution_rule_resolver is not None and _is_cn(signal.instrument_id)
+            else None
+        )
+        row_limit_pct = (
+            _effective_limit_pct(row_rule, row["trade_date"])
+            if row_rule is not None
+            else None
+        )
+        limit_up_blocked = (
+            row_limit_pct is not None
+            and _is_limit_day(row, previous, row_limit_pct, up=True)
+            if row_rule is not None
+            else _is_limit_up_day(row, previous, signal.instrument_id)
+        )
+        if _is_cn(signal.instrument_id) and limit_up_blocked:
             continue
         if Decimal(str(row["high"])) >= trigger:
             entry_index = index
+            entry_rule = row_rule
             break
     if entry_index is None:
         return None
@@ -237,34 +277,70 @@ def _candidate_from_signal(
     entry_price = _money(trigger * (Decimal("1") + slip))
     exit_price = None
     exit_date = None
+    selected_exit_rule = None
     exit_reason = "time_exit"
     exit_window = ordered.iloc[entry_index : entry_index + max_holding_days].reset_index(drop=True)
     entry_date = exit_window.iloc[0]["trade_date"]
 
-    for _, row in exit_window.iterrows():
+    settlement_days = entry_rule.settlement_days if entry_rule is not None else 1
+    for session_offset, (_, row) in enumerate(exit_window.iterrows()):
         trade_date = row["trade_date"]
-        if _is_cn(signal.instrument_id) and trade_date == entry_date:
+        if _is_cn(signal.instrument_id) and session_offset < settlement_days:
             continue
         low = Decimal(str(row["low"]))
         high = Decimal(str(row["high"]))
         previous = _previous_row(ordered, row)
+        exit_rule = (
+            execution_rule_resolver.resolve(
+                signal.instrument_id,
+                trade_date,
+                is_st=_row_is_st(row),
+            )
+            if execution_rule_resolver is not None and _is_cn(signal.instrument_id)
+            else None
+        )
         if low <= stop:
-            if _is_cn(signal.instrument_id) and _is_limit_down_day(row, previous, signal.instrument_id):
+            exit_limit_pct = (
+                _effective_limit_pct(exit_rule, trade_date)
+                if exit_rule is not None
+                else None
+            )
+            limit_down_blocked = (
+                exit_limit_pct is not None
+                and _is_limit_day(row, previous, exit_limit_pct, up=False)
+                if exit_rule is not None
+                else _is_limit_down_day(row, previous, signal.instrument_id)
+            )
+            if _is_cn(signal.instrument_id) and limit_down_blocked:
                 continue
             exit_date = trade_date
             exit_price = _money(stop * (Decimal("1") - slip))
             exit_reason = "stopped"
+            selected_exit_rule = exit_rule
             break
         if target is not None and high >= target:
             exit_date = trade_date
             exit_price = _money(target * (Decimal("1") - slip))
             exit_reason = "target_1_hit"
+            selected_exit_rule = exit_rule
             break
 
     if exit_price is None:
-        final_row = exit_window.iloc[-1]
+        eligible_exit_window = exit_window.iloc[settlement_days:]
+        if eligible_exit_window.empty:
+            return None
+        final_row = eligible_exit_window.iloc[-1]
         exit_date = final_row["trade_date"]
         exit_price = _money(Decimal(str(final_row["close"])) * (Decimal("1") - slip))
+        selected_exit_rule = (
+            execution_rule_resolver.resolve(
+                signal.instrument_id,
+                exit_date,
+                is_st=_row_is_st(final_row),
+            )
+            if execution_rule_resolver is not None and _is_cn(signal.instrument_id)
+            else None
+        )
 
     return _TradeCandidate(
         signal=signal,
@@ -275,6 +351,8 @@ def _candidate_from_signal(
         exit_price=exit_price,
         stop_price=stop,
         holding_days=max((exit_date - entry_date).days, 0),
+        execution_rule=entry_rule,
+        exit_execution_rule=selected_exit_rule,
     )
 
 
@@ -397,13 +475,30 @@ def _size_trade(
     capital_budget = equity / Decimal(max_positions)
     shares_by_risk = risk_budget / per_share_risk
     shares_by_capital = capital_budget / candidate.entry_price
-    shares = _shares(min(shares_by_risk, shares_by_capital), candidate.signal.instrument_id)
+    shares = _shares(
+        min(shares_by_risk, shares_by_capital),
+        candidate.signal.instrument_id,
+        execution_rule=candidate.execution_rule,
+    )
     if shares <= 0:
         return None
 
     gross_pnl = _money((candidate.exit_price - candidate.entry_price) * shares)
-    traded_value = (candidate.entry_price + candidate.exit_price) * shares
-    costs = _money(traded_value * (transaction_cost_bps / Decimal("10000")))
+    entry_value = candidate.entry_price * shares
+    exit_value = candidate.exit_price * shares
+    costs = (
+        calculate_round_trip_fees(
+            candidate.execution_rule,
+            entry_value=entry_value,
+            exit_value=exit_value,
+            exit_rule=candidate.exit_execution_rule,
+        )
+        if candidate.execution_rule is not None
+        else _money(
+            (entry_value + exit_value)
+            * (transaction_cost_bps / Decimal("10000"))
+        )
+    )
     net_pnl = _money(gross_pnl - costs)
     denominator = candidate.entry_price * shares
     return_pct = _pct(net_pnl / denominator) if denominator else 0.0
@@ -511,7 +606,14 @@ def _money(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def _shares(value: Decimal, instrument_id: str | None = None) -> Decimal:
+def _shares(
+    value: Decimal,
+    instrument_id: str | None = None,
+    *,
+    execution_rule: HistoricalExecutionRule | None = None,
+) -> Decimal:
+    if execution_rule is not None:
+        return round_order_quantity(value, execution_rule)
     if instrument_id and _is_cn(instrument_id):
         lots = (value / Decimal("100")).to_integral_value(rounding=ROUND_DOWN)
         return lots * Decimal("100")
@@ -530,13 +632,25 @@ def _is_cn(instrument_id: str) -> bool:
     return instrument_id.startswith("CN:")
 
 
-def _is_limit_up_day(row, previous, instrument_id: str) -> bool:
-    limit_pct = _limit_pct(instrument_id)
+def _is_limit_up_day(
+    row,
+    previous,
+    instrument_id: str,
+    *,
+    limit_pct: Decimal | None = None,
+) -> bool:
+    limit_pct = limit_pct if limit_pct is not None else _limit_pct(instrument_id)
     return _is_limit_day(row, previous, limit_pct, up=True)
 
 
-def _is_limit_down_day(row, previous, instrument_id: str) -> bool:
-    limit_pct = _limit_pct(instrument_id)
+def _is_limit_down_day(
+    row,
+    previous,
+    instrument_id: str,
+    *,
+    limit_pct: Decimal | None = None,
+) -> bool:
+    limit_pct = limit_pct if limit_pct is not None else _limit_pct(instrument_id)
     return _is_limit_day(row, previous, limit_pct, up=False)
 
 
@@ -562,3 +676,21 @@ def _limit_pct(instrument_id: str) -> Decimal:
     if symbol.startswith(("4", "8", "920")):
         return Decimal("30")
     return Decimal("10")
+
+
+def _row_is_st(row) -> bool:
+    value = row.get("is_st", False)
+    return value is True or str(value).strip().lower() in {"1", "true", "yes"}
+
+
+def _effective_limit_pct(
+    rule: HistoricalExecutionRule, trade_date: date
+) -> Decimal | None:
+    if rule.listing_date is None or rule.ipo_no_limit_sessions <= 0:
+        return rule.limit_pct
+    if trade_date < rule.listing_date:
+        return rule.limit_pct
+    sessions = trading_sessions_in_range(rule.listing_date, trade_date)
+    if 0 < len(sessions) <= rule.ipo_no_limit_sessions:
+        return None
+    return rule.limit_pct
