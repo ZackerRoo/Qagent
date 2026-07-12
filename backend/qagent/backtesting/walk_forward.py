@@ -72,6 +72,7 @@ class WalkForwardSelectionResult(BaseModel):
     top_5_temporal_validation: TemporalValidationResult
     top_10_temporal_validation: TemporalValidationResult
     benchmarks: list["WalkForwardBenchmarkComparison"]
+    cost_sensitivity: list["WalkForwardCostScenario"]
     reproducibility_digest: str
     data_health: dict[str, str] = Field(default_factory=dict)
 
@@ -95,6 +96,19 @@ class WalkForwardBenchmarkComparison(BaseModel):
     benchmark_return_pct: float | None
     top_5_excess_return_pct: float | None
     top_10_excess_return_pct: float | None
+
+
+class WalkForwardCostScenario(BaseModel):
+    key: str
+    label: str
+    slippage_bps: Decimal
+    fee_multiplier: Decimal
+    top_5_return_pct: float
+    top_10_return_pct: float
+    top_5_max_drawdown_pct: float
+    top_10_max_drawdown_pct: float
+    top_5_total_costs: Decimal
+    top_10_total_costs: Decimal
 
 
 def run_full_market_walk_forward_selection(
@@ -225,6 +239,16 @@ def run_full_market_walk_forward_selection(
         top_10_temporal_validation = _trade_temporal_validation(
             top_10_portfolio.trades
         )
+        cost_sensitivity = _cost_sensitivity(
+            top_5_signals=top_5_signals,
+            top_10_signals=top_10_signals,
+            top_5_portfolio=top_5_portfolio,
+            top_10_portfolio=top_10_portfolio,
+            market_provider=market_provider,
+            execution_resolver=execution_resolver,
+            start=start,
+            end=end,
+        )
         benchmarks = _benchmark_comparisons(
             market_provider,
             start=start,
@@ -240,6 +264,7 @@ def run_full_market_walk_forward_selection(
         top_5_portfolio,
         top_10_portfolio,
         benchmarks,
+        cost_sensitivity,
     )
     return WalkForwardSelectionResult(
         owner_run_id=owner_run_id,
@@ -256,6 +281,7 @@ def run_full_market_walk_forward_selection(
         top_5_temporal_validation=top_5_temporal_validation,
         top_10_temporal_validation=top_10_temporal_validation,
         benchmarks=benchmarks,
+        cost_sensitivity=cost_sensitivity,
         reproducibility_digest=digest,
         data_health={
             "walk_forward_revision": str(revision),
@@ -286,6 +312,13 @@ def run_full_market_walk_forward_selection(
             "walk_forward_benchmarks_ready": (
                 f"{sum(item.status == 'ready' for item in benchmarks)}/"
                 f"{len(benchmarks)}"
+            ),
+            "walk_forward_cost_scenarios": str(len(cost_sensitivity)),
+            "walk_forward_stress_top_5_return_pct": str(
+                cost_sensitivity[-1].top_5_return_pct
+            ),
+            "walk_forward_stress_top_10_return_pct": str(
+                cost_sensitivity[-1].top_10_return_pct
             ),
             "walk_forward_digest": digest,
             **(
@@ -342,6 +375,7 @@ def _selection_digest(
     top_5_portfolio: PortfolioBacktestResult,
     top_10_portfolio: PortfolioBacktestResult,
     benchmarks: list[WalkForwardBenchmarkComparison],
+    cost_sensitivity: list[WalkForwardCostScenario],
 ) -> str:
     payload = {
         "dataset_revision": revision,
@@ -355,6 +389,9 @@ def _selection_digest(
             top_10_portfolio.trades
         ).model_dump(mode="json"),
         "benchmarks": [item.model_dump(mode="json") for item in benchmarks],
+        "cost_sensitivity": [
+            item.model_dump(mode="json") for item in cost_sensitivity
+        ],
     }
     encoded = json.dumps(
         payload,
@@ -380,6 +417,75 @@ def _trade_temporal_validation(trades) -> TemporalValidationResult:
         bootstrap_samples=1000,
         seed=42,
     )
+
+
+def _cost_sensitivity(
+    *,
+    top_5_signals: list[BacktestSignal],
+    top_10_signals: list[BacktestSignal],
+    top_5_portfolio: PortfolioBacktestResult,
+    top_10_portfolio: PortfolioBacktestResult,
+    market_provider: ReplayMarketDataProvider,
+    execution_resolver: VersionedAshareExecutionResolver,
+    start: date,
+    end: date,
+) -> list[WalkForwardCostScenario]:
+    scenarios = [
+        ("base", "基准成本", Decimal("5"), Decimal("1")),
+        ("elevated", "较高成本", Decimal("10"), Decimal("1.5")),
+        ("stress", "压力成本", Decimal("20"), Decimal("2")),
+    ]
+    results: list[WalkForwardCostScenario] = []
+    for key, label, slippage_bps, fee_multiplier in scenarios:
+        if key == "base":
+            top_5 = top_5_portfolio
+            top_10 = top_10_portfolio
+        else:
+            top_5 = run_signal_portfolio_backtest(
+                signals=top_5_signals,
+                instrument_ids=sorted(
+                    {item.instrument_id for item in top_5_signals}
+                ),
+                provider=market_provider,
+                start=start,
+                end=end,
+                max_positions=5,
+                slippage_bps=slippage_bps,
+                fee_multiplier=fee_multiplier,
+                execution_rule_resolver=execution_resolver,
+            )
+            top_10 = run_signal_portfolio_backtest(
+                signals=top_10_signals,
+                instrument_ids=sorted(
+                    {item.instrument_id for item in top_10_signals}
+                ),
+                provider=market_provider,
+                start=start,
+                end=end,
+                max_positions=10,
+                slippage_bps=slippage_bps,
+                fee_multiplier=fee_multiplier,
+                execution_rule_resolver=execution_resolver,
+            )
+        results.append(
+            WalkForwardCostScenario(
+                key=key,
+                label=label,
+                slippage_bps=slippage_bps,
+                fee_multiplier=fee_multiplier,
+                top_5_return_pct=top_5.summary.total_return_pct,
+                top_10_return_pct=top_10.summary.total_return_pct,
+                top_5_max_drawdown_pct=top_5.summary.max_drawdown_pct,
+                top_10_max_drawdown_pct=top_10.summary.max_drawdown_pct,
+                top_5_total_costs=sum(
+                    (item.costs for item in top_5.trades), Decimal("0")
+                ),
+                top_10_total_costs=sum(
+                    (item.costs for item in top_10.trades), Decimal("0")
+                ),
+            )
+        )
+    return results
 
 
 def _oos_sample_count(validation: TemporalValidationResult) -> int:

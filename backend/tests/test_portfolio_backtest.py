@@ -43,6 +43,30 @@ def test_run_portfolio_backtest_returns_trades_equity_and_summary():
     assert result.data_health["portfolio_model"] == "fixed_risk_stop_target_time_exit"
 
 
+def test_portfolio_fee_multiplier_reduces_returns_under_cost_stress():
+    common = {
+        "instrument_ids": ["US:TEST", "CN:000001"],
+        "provider": FixtureMarketDataProvider(),
+        "start": date(2026, 1, 30),
+        "end": date(2026, 3, 20),
+        "step_days": 5,
+        "initial_capital": Decimal("100000"),
+        "max_positions": 2,
+        "slippage_bps": Decimal("5"),
+    }
+
+    base = run_portfolio_backtest(**common, fee_multiplier=Decimal("1"))
+    stress = run_portfolio_backtest(**common, fee_multiplier=Decimal("2"))
+
+    assert base.trades
+    assert stress.trades
+    assert sum(item.costs for item in stress.trades) > sum(
+        item.costs for item in base.trades
+    )
+    assert stress.summary.total_return_pct < base.summary.total_return_pct
+    assert stress.data_health["fee_multiplier"] == "2"
+
+
 def test_cn_portfolio_candidate_skips_limit_up_entry_and_applies_t_plus_one_exit():
     signal = BacktestSignal(
         snapshot_id="test-cn",

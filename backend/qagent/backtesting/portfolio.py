@@ -98,6 +98,7 @@ def run_portfolio_backtest(
     max_positions: int = 5,
     transaction_cost_bps: Decimal = Decimal("5"),
     slippage_bps: Decimal = Decimal("5"),
+    fee_multiplier: Decimal = Decimal("1"),
     max_entry_wait_days: int = 5,
     max_holding_days: int = 20,
     strategy_data_provider: StrategyDataProvider | None = None,
@@ -132,6 +133,7 @@ def run_portfolio_backtest(
         max_positions=max_positions,
         transaction_cost_bps=transaction_cost_bps,
         slippage_bps=slippage_bps,
+        fee_multiplier=fee_multiplier,
         max_entry_wait_days=max_entry_wait_days,
         max_holding_days=max_holding_days,
         execution_rule_resolver=execution_rule_resolver,
@@ -154,6 +156,7 @@ def run_signal_portfolio_backtest(
     max_positions: int = 5,
     transaction_cost_bps: Decimal = Decimal("5"),
     slippage_bps: Decimal = Decimal("5"),
+    fee_multiplier: Decimal = Decimal("1"),
     max_entry_wait_days: int = 5,
     max_holding_days: int = 20,
     execution_rule_resolver: VersionedAshareExecutionResolver | None = None,
@@ -166,6 +169,8 @@ def run_signal_portfolio_backtest(
         raise ValueError("risk_per_trade_pct must be positive")
     if max_positions <= 0:
         raise ValueError("max_positions must be positive")
+    if fee_multiplier <= 0:
+        raise ValueError("fee_multiplier must be positive")
     bars = provider.get_daily_bars(
         instrument_ids,
         start=start,
@@ -187,6 +192,7 @@ def run_signal_portfolio_backtest(
         risk_per_trade_pct=risk_per_trade_pct,
         max_positions=max_positions,
         transaction_cost_bps=transaction_cost_bps,
+        fee_multiplier=fee_multiplier,
     )
     summary = _build_summary(
         provider_name=provider.name,
@@ -213,6 +219,8 @@ def run_signal_portfolio_backtest(
         ),
         "max_positions": str(max_positions),
         "risk_per_trade_pct": str(risk_per_trade_pct),
+        "fee_multiplier": str(fee_multiplier),
+        "slippage_bps": str(slippage_bps),
     }
     provider_errors = getattr(provider, "last_errors", [])
     if provider_errors:
@@ -408,6 +416,7 @@ def _simulate_portfolio(
     risk_per_trade_pct: Decimal,
     max_positions: int,
     transaction_cost_bps: Decimal,
+    fee_multiplier: Decimal,
 ) -> tuple[list[PortfolioBacktestTrade], list[PortfolioEquityPoint]]:
     equity = initial_capital
     peak = equity
@@ -447,6 +456,7 @@ def _simulate_portfolio(
             risk_per_trade_pct=risk_per_trade_pct,
             max_positions=max_positions,
             transaction_cost_bps=transaction_cost_bps,
+            fee_multiplier=fee_multiplier,
         )
         if trade is not None:
             open_trades.append(trade)
@@ -512,6 +522,7 @@ def _size_trade(
     risk_per_trade_pct: Decimal,
     max_positions: int,
     transaction_cost_bps: Decimal,
+    fee_multiplier: Decimal = Decimal("1"),
 ) -> PortfolioBacktestTrade | None:
     per_share_risk = max(candidate.entry_price - candidate.stop_price, candidate.entry_price * Decimal("0.01"))
     if per_share_risk <= 0:
@@ -531,7 +542,7 @@ def _size_trade(
     gross_pnl = _money((candidate.exit_price - candidate.entry_price) * shares)
     entry_value = candidate.entry_price * shares
     exit_value = candidate.exit_price * shares
-    costs = (
+    base_costs = (
         calculate_round_trip_fees(
             candidate.execution_rule,
             entry_value=entry_value,
@@ -539,11 +550,10 @@ def _size_trade(
             exit_rule=candidate.exit_execution_rule,
         )
         if candidate.execution_rule is not None
-        else _money(
-            (entry_value + exit_value)
-            * (transaction_cost_bps / Decimal("10000"))
-        )
+        else (entry_value + exit_value)
+        * (transaction_cost_bps / Decimal("10000"))
     )
+    costs = _money(base_costs * fee_multiplier)
     net_pnl = _money(gross_pnl - costs)
     denominator = candidate.entry_price * shares
     return_pct = _pct(net_pnl / denominator) if denominator else 0.0

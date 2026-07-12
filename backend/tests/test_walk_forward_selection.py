@@ -192,6 +192,14 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert first.top_5_temporal_validation.return_horizon_days == 20
     assert first.top_5_temporal_validation.embargo_days == 20
     assert first.data_health["walk_forward_top_5_oos_gate"] == "insufficient"
+    assert [item.key for item in first.cost_sensitivity] == [
+        "base",
+        "elevated",
+        "stress",
+    ]
+    assert first.cost_sensitivity[-1].slippage_bps == Decimal("20")
+    assert first.cost_sensitivity[-1].fee_multiplier == Decimal("2")
+    assert first.data_health["walk_forward_cost_scenarios"] == "3"
     assert first.data_health["walk_forward_benchmarks_ready"] == "4/4"
     assert (
         first.data_health["walk_forward_future_data_guard"]
