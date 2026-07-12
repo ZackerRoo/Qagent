@@ -109,6 +109,12 @@ class HistoricalBackfillResult(BaseModel):
     manifest: HistoricalCoverageManifest
 
 
+class HistoricalBackfillFailed(RuntimeError):
+    def __init__(self, result: HistoricalBackfillResult, message: str):
+        super().__init__(message)
+        self.result = result
+
+
 def run_historical_backfill(
     *,
     repo: QagentRepository,
@@ -686,17 +692,39 @@ def run_historical_backfill(
         failed_job = repo.get_historical_backfill_job(job.job_id)
         failed_health = dict(failed_job.data_health) if failed_job is not None else {}
         failed_health["backfill_phase"] = "failed"
-        repo.update_historical_backfill_job(
+        failed_job = repo.update_historical_backfill_job(
             job.job_id,
             status="failed",
             processed_symbols=processed,
             succeeded_symbols=succeeded,
-            failed_symbols=max(failed, 1),
+            failed_symbols=max(failed, len(symbols) - succeeded),
             rows_written=rows_written,
             errors=[*errors[-99:], str(exc)],
             data_health=failed_health,
         )
-        raise
+        if failed_job is None:
+            raise RuntimeError(
+                f"historical backfill job disappeared: {job.job_id}"
+            ) from exc
+        manifest = build_historical_coverage_manifest(
+            repo=repo,
+            cache=cache,
+            provider_mode=mode,
+            instrument_ids=symbols,
+            start=start,
+            end=end,
+        )
+        manifest.data_health.update(
+            {
+                "backfill_job_status": "failed",
+                "backfill_phase": "failed",
+                "backfill_error": str(exc),
+            }
+        )
+        raise HistoricalBackfillFailed(
+            HistoricalBackfillResult(job=failed_job, manifest=manifest),
+            str(exc),
+        ) from exc
 
 
 def _set_backfill_phase(

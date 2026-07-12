@@ -3,8 +3,9 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
-from qagent.data_management import run_historical_backfill
+from qagent.data_management import HistoricalBackfillFailed, run_historical_backfill
 from qagent.db import Base, create_db_engine, create_session_factory
 from qagent.historical_evidence.models import (
     HistoricalCorporateAction,
@@ -358,6 +359,13 @@ class UnexpectedHistoricalEvidenceProvider:
 
     def get_evidence(self, instrument_ids, start, end):
         raise AssertionError("complete historical evidence must be reused")
+
+
+class FailingHistoricalEvidenceProvider:
+    name = "failing_evidence_fixture"
+
+    def get_evidence(self, instrument_ids, start, end):
+        raise TimeoutError("historical evidence provider timed out")
 
 
 def test_historical_backfill_is_idempotent_and_emits_coverage_manifest(tmp_path):
@@ -768,6 +776,40 @@ def test_historical_backfill_reports_evidence_errors_in_terminal_status(tmp_path
     assert result.job.status == "succeeded_with_errors"
     assert result.job.errors == ["index snapshot unavailable"]
     assert result.job.data_health["backfill_phase"] == "complete"
+
+
+def test_historical_backfill_failure_carries_persisted_job_and_partial_manifest(
+    tmp_path,
+):
+    repo, cache = make_repositories(tmp_path)
+
+    with pytest.raises(HistoricalBackfillFailed) as raised:
+        run_historical_backfill(
+            repo=repo,
+            cache=cache,
+            provider=AdjustedHistoryProvider(),
+            strategy_provider=None,
+            historical_evidence_provider=FailingHistoricalEvidenceProvider(),
+            provider_mode="free",
+            instrument_ids=["CN:000001"],
+            start=date(2026, 1, 1),
+            end=date(2026, 1, 9),
+            universe_as_of=date(2026, 1, 9),
+        )
+
+    result = raised.value.result
+    assert result.job.status == "failed"
+    assert result.job.data_health["backfill_phase"] == "failed"
+    assert result.job.errors[-1] == "historical evidence provider timed out"
+    assert result.job.succeeded_symbols == 1
+    assert result.job.failed_symbols == 0
+    assert result.job.succeeded_symbols + result.job.failed_symbols <= 1
+    assert result.manifest.instruments[0].bar_coverage_ratio == 1.0
+    assert result.manifest.data_health["backfill_job_status"] == "failed"
+    assert (
+        result.manifest.data_health["backfill_error"]
+        == "historical evidence provider timed out"
+    )
 
 
 def test_historical_backfill_exposes_evidence_phase_while_running(tmp_path):

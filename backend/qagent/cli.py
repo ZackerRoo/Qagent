@@ -10,7 +10,7 @@ from qagent.briefing.daily import build_daily_brief
 from qagent.briefing.export import render_daily_brief_markdown
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
 from qagent.catalysts.providers import FreeCatalystProvider
-from qagent.data_management import run_historical_backfill
+from qagent.data_management import HistoricalBackfillFailed, run_historical_backfill
 from qagent.delivery.senders import send_pending_deliveries
 from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.automation import run_research_automation
@@ -264,27 +264,30 @@ def _backfill_history_command(args: argparse.Namespace) -> int:
     if args.scope == "symbols" and not symbols:
         raise ValueError("backfill-history currently supports A-share symbols only")
     historical_evidence_provider = build_historical_evidence_provider(mode)
-    result = run_historical_backfill(
-        repo=repo,
-        cache=MarketDataCacheRepository(session_factory),
-        provider=build_market_data_provider(mode),
-        strategy_provider=(
-            build_historical_fundamental_provider(mode)
-            or build_strategy_data_provider(mode)
-        ),
-        provider_mode=mode,
-        instrument_ids=symbols,
-        start=args.start,
-        end=args.end,
-        job_id=args.resume,
-        historical_evidence_provider=historical_evidence_provider,
-        scope=args.scope,
-        batch_size=args.batch_size,
-        broker_fee_request=BrokerFeeRequest(
-            commission_bps=args.commission_bps,
-            minimum_commission=args.minimum_commission,
-        ),
-    )
+    try:
+        result = run_historical_backfill(
+            repo=repo,
+            cache=MarketDataCacheRepository(session_factory),
+            provider=build_market_data_provider(mode),
+            strategy_provider=(
+                build_historical_fundamental_provider(mode)
+                or build_strategy_data_provider(mode)
+            ),
+            provider_mode=mode,
+            instrument_ids=symbols,
+            start=args.start,
+            end=args.end,
+            job_id=args.resume,
+            historical_evidence_provider=historical_evidence_provider,
+            scope=args.scope,
+            batch_size=args.batch_size,
+            broker_fee_request=BrokerFeeRequest(
+                commission_bps=args.commission_bps,
+                minimum_commission=args.minimum_commission,
+            ),
+        )
+    except HistoricalBackfillFailed as exc:
+        result = exc.result
     if args.manifest_output is not None:
         args.manifest_output.parent.mkdir(parents=True, exist_ok=True)
         args.manifest_output.write_text(

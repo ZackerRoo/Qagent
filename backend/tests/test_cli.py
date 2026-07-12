@@ -140,6 +140,45 @@ def test_cli_backfill_history_runs_bounded_fixture_job(tmp_path, monkeypatch, ca
     assert '"provider_mode": "fixture"' in manifest_path.read_text()
 
 
+def test_cli_backfill_history_reports_provider_failure_without_traceback(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    class FailingEvidenceProvider:
+        def get_evidence(self, instrument_ids, start, end):
+            raise TimeoutError("provider deadline exceeded")
+
+    database_url = f"sqlite:///{tmp_path / 'cli-history-failed.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    monkeypatch.setattr(
+        "qagent.cli.build_historical_evidence_provider",
+        lambda _mode: FailingEvidenceProvider(),
+    )
+    manifest_path = tmp_path / "failed-manifest.json"
+
+    exit_code = main(
+        [
+            "backfill-history",
+            "--provider",
+            "fixture",
+            "--symbols",
+            "CN:000001",
+            "--start",
+            "2026-01-01",
+            "--end",
+            "2026-01-09",
+            "--manifest-output",
+            str(manifest_path),
+        ]
+    )
+    output = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert "history-backfill status=failed" in output
+    assert "provider deadline exceeded" in manifest_path.read_text()
+
+
 def test_cli_walk_forward_runs_manually_and_exports_result(tmp_path, monkeypatch, capsys):
     database_url = f"sqlite:///{tmp_path / 'cli-walk-forward.db'}"
     monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
