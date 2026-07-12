@@ -4,6 +4,7 @@ from decimal import Decimal
 from sqlalchemy import inspect, text
 from sqlalchemy.schema import CreateTable
 
+from qagent import db
 from qagent.db import Base, create_db_engine, initialize_database
 from qagent.storage import tables as _tables  # noqa: F401
 
@@ -16,6 +17,11 @@ REVISION_SCOPED_LEGACY_KEYS = {
         "source_provider",
     ],
     "historical_tradability": ["provider_mode", "instrument_id", "trade_date"],
+    "historical_instrument_profiles": [
+        "provider_mode",
+        "instrument_id",
+        "snapshot_date",
+    ],
     "historical_industry_snapshots": [
         "provider_mode",
         "instrument_id",
@@ -341,3 +347,145 @@ def test_legacy_row_without_revision_inherits_current_provider_revision(tmp_path
         "source_provider",
         "dataset_revision",
     ]
+
+
+def test_revision_zero_rows_survive_repeated_initialize_after_revision_one_append(
+    tmp_path,
+):
+    database_url = f"sqlite:///{tmp_path / 'restart-safe-replay-migration.db'}"
+    engine = create_db_engine(database_url)
+    now = datetime(2025, 1, 3, tzinfo=timezone.utc)
+    legacy_rows = {
+        "fundamental_snapshots": {
+            "provider_mode": "free",
+            "instrument_id": "CN:000001",
+            "as_of_date": date(2025, 1, 2),
+            "source_provider": "legacy",
+            "dataset_revision": 0,
+            "cached_at": now,
+            "updated_at": now,
+        },
+        "historical_tradability": {
+            "provider_mode": "free",
+            "instrument_id": "CN:000001",
+            "trade_date": date(2025, 1, 2),
+            "trading_status": "trading",
+            "source_provider": "legacy",
+            "dataset_revision": 0,
+            "fetched_at": now,
+        },
+        "historical_instrument_profiles": {
+            "provider_mode": "free",
+            "instrument_id": "CN:000001",
+            "snapshot_date": date(2025, 1, 2),
+            "listing_date": date(1991, 4, 3),
+            "security_type": "stock",
+            "source_provider": "legacy",
+            "dataset_revision": 0,
+            "fetched_at": now,
+        },
+        "historical_industry_snapshots": {
+            "provider_mode": "free",
+            "instrument_id": "CN:000001",
+            "snapshot_date": date(2025, 1, 2),
+            "source_provider": "legacy",
+            "industry": "Banking",
+            "dataset_revision": 0,
+            "fetched_at": now,
+        },
+        "historical_index_snapshots": {
+            "provider_mode": "free",
+            "index_id": "CN:000300.IDX",
+            "snapshot_date": date(2025, 1, 2),
+            "status": "ready",
+            "member_count": 1,
+            "source_provider": "legacy",
+            "dataset_revision": 0,
+            "fetched_at": now,
+        },
+        "historical_index_memberships": {
+            "provider_mode": "free",
+            "index_id": "CN:000300.IDX",
+            "snapshot_date": date(2025, 1, 2),
+            "instrument_id": "CN:000001",
+            "source_provider": "legacy",
+            "dataset_revision": 0,
+            "fetched_at": now,
+        },
+        "historical_replay_bars": {
+            "provider_mode": "free",
+            "instrument_id": "CN:000001",
+            "trade_date": date(2025, 1, 2),
+            "raw_open": Decimal("10"),
+            "raw_high": Decimal("10"),
+            "raw_low": Decimal("10"),
+            "raw_close": Decimal("10"),
+            "volume": Decimal("1000"),
+            "adjustment_mode": "none",
+            "source_provider": "legacy",
+            "dataset_revision": 0,
+            "fetched_at": now,
+        },
+        "historical_corporate_actions": {
+            "provider_mode": "free",
+            "instrument_id": "CN:000001",
+            "action_id": "cash-2025",
+            "announcement_date": date(2024, 12, 20),
+            "record_date": date(2025, 1, 2),
+            "ex_date": date(2025, 1, 3),
+            "effective_date": date(2025, 1, 3),
+            "payable_date": date(2025, 1, 10),
+            "action_type": "cash_dividend",
+            "cash_per_share": Decimal("0.25"),
+            "source_provider": "legacy",
+            "dataset_revision": 0,
+            "fetched_at": now,
+        },
+        "historical_corporate_action_coverage": {
+            "provider_mode": "free",
+            "instrument_id": "CN:000001",
+            "start_date": date(2025, 1, 1),
+            "end_date": date(2025, 12, 31),
+            "status": "ready",
+            "action_count": 1,
+            "source_provider": "legacy",
+            "dataset_revision": 0,
+            "fetched_at": now,
+        },
+    }
+    with engine.begin() as connection:
+        Base.metadata.create_all(connection)
+        _downgrade_revision_primary_keys(connection)
+        for table_name, row in legacy_rows.items():
+            connection.execute(Base.metadata.tables[table_name].insert().values(row))
+
+    first = initialize_database(database_url)
+    with first.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO historical_data_revisions "
+                "(provider_mode, revision, updated_at) "
+                "VALUES ('free', 1, '2025-01-04 00:00:00')"
+            )
+        )
+        for table_name, legacy_row in legacy_rows.items():
+            revision_one = {**legacy_row, "dataset_revision": 1}
+            connection.execute(
+                Base.metadata.tables[table_name].insert().values(revision_one)
+            )
+
+    for _ in range(2):
+        db._initialized_urls.discard(database_url)
+        initialize_database(database_url)
+
+    with create_db_engine(database_url).connect() as connection:
+        for table_name in legacy_rows:
+            revisions = list(
+                connection.execute(
+                    text(
+                        f"SELECT dataset_revision FROM {table_name} "
+                        "WHERE provider_mode = 'free' ORDER BY dataset_revision"
+                    )
+                ).scalars()
+            )
+            assert revisions == [0, 1], table_name

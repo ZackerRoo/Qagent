@@ -30,6 +30,7 @@ from qagent.storage.tables import (
     HistoricalCorporateActionCoverageRow,
     HistoricalCorporateActionRow,
     HistoricalDataRevisionRow,
+    HistoricalDatasetLeaseRow,
     HistoricalIndexMembershipRow,
     HistoricalIndexSnapshotRow,
     HistoricalIndustrySnapshotRow,
@@ -1354,13 +1355,30 @@ def test_different_run_cannot_take_stale_nonterminal_lease(storage):
 
 def test_terminal_orphan_lease_is_released(storage):
     _, clock, statuses, make_repo = storage
-    statuses["run-a"] = "succeeded"
+    statuses["run-a"] = "running"
     make_repo(owner_run_id="run-a").acquire_dataset_lease()
+    statuses["run-a"] = "succeeded"
     clock.advance(timedelta(minutes=11))
 
     lease = make_repo(owner_run_id="run-b").acquire_dataset_lease()
 
     assert lease.owner_run_id == "run-b"
+
+
+@pytest.mark.parametrize(
+    "terminal_status", ["succeeded", "blocked_data", "failed", "cancelled"]
+)
+def test_terminal_run_cannot_acquire_without_existing_lease(storage, terminal_status):
+    session_factory, _, statuses, make_repo = storage
+    statuses["run-a"] = terminal_status
+
+    with pytest.raises(DatasetLeaseBusy, match="terminal"):
+        make_repo(owner_run_id="run-a").acquire_dataset_lease()
+
+    with session_factory() as session:
+        assert session.scalar(
+            select(func.count()).select_from(HistoricalDatasetLeaseRow)
+        ) == 0
 
 
 def test_terminal_owner_cannot_reenter_or_renew_its_stale_lease(storage):

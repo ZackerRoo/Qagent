@@ -163,13 +163,14 @@ def _apply_additive_migrations(engine: Engine) -> None:
             "historical_corporate_actions",
             "historical_corporate_action_coverage",
         ):
-            _add_missing_columns(
+            added_columns = _add_missing_columns(
                 connection,
                 inspector,
                 table_name,
                 {"dataset_revision": "INTEGER NOT NULL DEFAULT 0"},
             )
-            _backfill_dataset_revision(connection, table_name)
+            if "dataset_revision" in added_columns:
+                _backfill_dataset_revision(connection, table_name)
         for table_name in (
             "historical_universe_manifests",
             "historical_replay_universe_members",
@@ -188,13 +189,16 @@ def _apply_additive_migrations(engine: Engine) -> None:
         _create_missing_metadata_indexes(connection)
 
 
-def _add_missing_columns(connection, inspector, table_name: str, additions) -> None:
+def _add_missing_columns(connection, inspector, table_name: str, additions) -> set[str]:
     if not inspector.has_table(table_name):
-        return
+        return set()
     existing = {column["name"] for column in inspector.get_columns(table_name)}
+    added = set()
     for column, sql_type in additions.items():
         if column not in existing:
             connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column} {sql_type}"))
+            added.add(column)
+    return added
 
 
 def _backfill_dataset_revision(connection, table_name: str) -> None:

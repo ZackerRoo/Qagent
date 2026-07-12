@@ -1005,16 +1005,13 @@ class ReplayEvidenceRepository:
         self, owner_run_id: str | None = None
     ) -> DatasetLeaseRecord:
         owner = owner_run_id or self._require_owner()
+        self._ensure_run_active(owner)
         now = self._now()
         with self._immediate_session() as session:
             revision = self._revision_row(session).revision
             lease = session.get(HistoricalDatasetLeaseRow, self.provider_mode)
             if lease is not None:
                 owner_status = self._run_status_lookup(lease.owner_run_id)
-                if lease.owner_run_id == owner and owner_status in TERMINAL_RUN_STATUSES:
-                    raise DatasetLeaseBusy(
-                        f"terminal run {owner} cannot renew the {self.provider_mode} lease"
-                    )
             if lease is not None and lease.owner_run_id != owner:
                 stale = lease.heartbeat_at <= now - STALE_AFTER
                 if stale and owner_status in TERMINAL_RUN_STATUSES:
@@ -1159,10 +1156,7 @@ class ReplayEvidenceRepository:
             raise DatasetLeaseBusy(
                 f"run {owner_run_id} does not own the {self.provider_mode} lease"
             )
-        if self._run_status_lookup(owner_run_id) in TERMINAL_RUN_STATUSES:
-            raise DatasetLeaseBusy(
-                f"terminal run {owner_run_id} cannot renew the {self.provider_mode} lease"
-            )
+        self._ensure_run_active(owner_run_id)
         if lease.lease_expires_at <= self._now():
             raise DatasetLeaseBusy(
                 f"dataset lease for {self.provider_mode} expired; reacquire it"
@@ -1174,6 +1168,13 @@ class ReplayEvidenceRepository:
                 f"revision {current}"
             )
         return lease
+
+    def _ensure_run_active(self, owner_run_id: str) -> None:
+        if self._run_status_lookup(owner_run_id) in TERMINAL_RUN_STATUSES:
+            raise DatasetLeaseBusy(
+                f"terminal run {owner_run_id} cannot acquire or renew the "
+                f"{self.provider_mode} lease"
+            )
 
     def _lifecycle_inventory(
         self,
