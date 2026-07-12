@@ -388,6 +388,7 @@ class ReplayEvidenceRepository:
     ) -> int:
         if _normalize_provider(manifest.provider_mode) != self.provider_mode:
             raise ValueError("lifecycle manifest provider does not match repository")
+        identity_errors: list[str] = []
         records = [
             {
                 "provider_mode": self.provider_mode,
@@ -406,6 +407,17 @@ class ReplayEvidenceRepository:
             }
             for item in profiles
         ]
+        for item in profiles:
+            if not item.instrument_id.strip():
+                identity_errors.append("instrument_id is missing")
+            if item.listing_date is None:
+                identity_errors.append(f"{item.instrument_id}: listing_date is missing")
+            if not item.security_type or not item.security_type.strip():
+                identity_errors.append(f"{item.instrument_id}: security_type is missing")
+            if not item.listing_status or not item.listing_status.strip():
+                identity_errors.append(f"{item.instrument_id}: listing_status is missing")
+            if not item.provider.strip():
+                identity_errors.append(f"{item.instrument_id}: source provider is missing")
         with self._immediate_session() as session:
             write_revision, is_retry = self._prepare_source_write(
                 session, manifest.source_revision
@@ -419,25 +431,12 @@ class ReplayEvidenceRepository:
                 "dataset_revision",
             ]
             deduplicated = _deduplicate(records, profile_keys)
-            manifest_records = [
-                {
-                    **manifest.model_dump(exclude={"provider_mode"}),
-                    "provider_mode": self.provider_mode,
-                }
-            ]
             if is_retry:
                 _verify_immutable_rows(
                     session,
                     HistoricalInstrumentProfileRow,
                     deduplicated,
                     profile_keys,
-                    write_revision,
-                )
-                _verify_immutable_rows(
-                    session,
-                    HistoricalLifecycleManifestRow,
-                    manifest_records,
-                    ["provider_mode", "source_revision"],
                     write_revision,
                 )
             else:
@@ -447,6 +446,48 @@ class ReplayEvidenceRepository:
                     deduplicated,
                     profile_keys,
                 )
+            stored_count = session.scalar(
+                select(func.count(func.distinct(HistoricalInstrumentProfileRow.instrument_id)))
+                .where(
+                    HistoricalInstrumentProfileRow.provider_mode == self.provider_mode,
+                    HistoricalInstrumentProfileRow.dataset_revision == write_revision,
+                )
+            ) or 0
+            errors = [manifest.error] if manifest.error else []
+            if manifest.status.strip().lower() != "ready" and not manifest.error:
+                errors.append(f"provider manifest status is {manifest.status}")
+            if manifest.expected_count is None:
+                errors.append("expected_count is unknown")
+            elif manifest.expected_count <= 0:
+                errors.append("expected_count must be positive")
+            elif manifest.expected_count != stored_count:
+                errors.append(
+                    "count mismatch: "
+                    f"expected={manifest.expected_count}, stored={stored_count}"
+                )
+            errors.extend(identity_errors)
+            normalized_errors = list(dict.fromkeys(errors))
+            status = "ready" if not normalized_errors else "partial"
+            manifest_records = [
+                {
+                    **manifest.model_dump(
+                        exclude={"provider_mode", "status", "stored_count", "error"}
+                    ),
+                    "provider_mode": self.provider_mode,
+                    "status": status,
+                    "stored_count": stored_count,
+                    "error": "; ".join(normalized_errors) or None,
+                }
+            ]
+            if is_retry:
+                _verify_immutable_rows(
+                    session,
+                    HistoricalLifecycleManifestRow,
+                    manifest_records,
+                    ["provider_mode", "source_revision"],
+                    write_revision,
+                )
+            else:
                 _upsert_chunks(
                     session,
                     HistoricalLifecycleManifestRow,
@@ -1186,7 +1227,6 @@ class ReplayEvidenceRepository:
             select(HistoricalLifecycleManifestRow)
             .where(
                 HistoricalLifecycleManifestRow.provider_mode == self.provider_mode,
-                HistoricalLifecycleManifestRow.status == "ready",
                 HistoricalLifecycleManifestRow.source_revision <= revision,
             )
             .order_by(HistoricalLifecycleManifestRow.source_revision.desc())
@@ -1195,6 +1235,12 @@ class ReplayEvidenceRepository:
         if manifest is None:
             raise ReplayEvidenceUnavailable(
                 f"ready lifecycle inventory is missing for revision {revision}"
+            )
+        if manifest.status != "ready":
+            detail = manifest.error or "manifest is not ready"
+            raise ReplayEvidenceUnavailable(
+                "lifecycle inventory is incomplete for revision "
+                f"{manifest.source_revision}: {detail}"
             )
         if (
             manifest.expected_count is None

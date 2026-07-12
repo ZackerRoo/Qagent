@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from collections.abc import Callable
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Protocol
+from typing import Any, Protocol
 
 import baostock as bs
 
@@ -11,12 +12,13 @@ from qagent.historical_evidence.models import (
     HistoricalIndexMembership,
     HistoricalIndexSnapshot,
     HistoricalIndustrySnapshot,
+    HistoricalInventoryManifest,
     HistoricalInstrumentProfile,
     HistoricalTradabilityPoint,
 )
 from qagent.market.calendars import trading_sessions_in_range
 from qagent.providers.baostock_session import serialized_baostock_session
-from qagent.providers.free_cn import _bounded_network_calls
+from qagent.providers.free_cn import FreeCnMarketDataProvider, _bounded_network_calls
 from qagent.strategy_data.models import FundamentalSnapshot
 from qagent.strategy_data.providers import BaseStrategyDataProvider
 
@@ -26,6 +28,15 @@ INDEX_QUERIES = {
     "CN:000300.IDX": "query_hs300_stocks",
     "CN:000905.IDX": "query_zz500_stocks",
 }
+REQUIRED_BENCHMARK_IDS = (
+    "CN:000300.IDX",
+    "CN:000905.IDX",
+    "CN:399006.IDX",
+    "CN:000688.IDX",
+)
+BAOSTOCK_INVENTORY_TYPES = {"1": "stock", "5": "etf"}
+BAOSTOCK_NON_INVENTORY_TYPES = {"2", "3", "4"}
+BAOSTOCK_LISTING_STATUSES = {"0": "delisted", "1": "listed"}
 
 
 class HistoricalEvidenceProvider(Protocol):
@@ -40,14 +51,180 @@ class HistoricalEvidenceProvider(Protocol):
     ) -> HistoricalEvidenceBundle:
         ...
 
+    def list_historical_instruments(
+        self,
+        effective_through: date,
+    ) -> list[HistoricalInstrumentProfile]:
+        ...
+
+    def get_lifecycle_manifest(self) -> HistoricalInventoryManifest:
+        ...
+
+    def get_benchmark_series(
+        self,
+        ids: list[str],
+        start: date,
+        end: date,
+    ) -> dict[str, Any]:
+        ...
+
 
 class BaoStockHistoricalEvidenceProvider:
     name = "baostock_historical_evidence"
 
-    def __init__(self, client=bs, request_timeout_seconds: int = 6):
+    def __init__(
+        self,
+        client=bs,
+        request_timeout_seconds: int = 6,
+        *,
+        benchmark_provider=None,
+        clock: Callable[[], datetime] | None = None,
+    ):
         self.client = client
         self.request_timeout_seconds = request_timeout_seconds
+        self.benchmark_provider = benchmark_provider or FreeCnMarketDataProvider(
+            request_timeout_seconds=request_timeout_seconds
+        )
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.last_errors: list[str] = []
+        self._lifecycle_manifest = HistoricalInventoryManifest(
+            status="partial",
+            expected_count=None,
+            effective_through=date.min,
+            error="historical inventory has not been requested",
+            fetched_at=self._clock(),
+            source_provider="baostock",
+        )
+
+    def list_historical_instruments(
+        self,
+        effective_through: date,
+    ) -> list[HistoricalInstrumentProfile]:
+        fetched_at = self._clock()
+        self.last_errors = []
+        rows: list[dict[str, str]] = []
+        response_complete = False
+        logged_in = False
+        with serialized_baostock_session():
+            try:
+                login = self._call(self.client.login)
+                if getattr(login, "error_code", "1") != "0":
+                    self.last_errors.append(
+                        "baostock inventory login: "
+                        f"{getattr(login, 'error_msg', 'login failed')}"
+                    )
+                else:
+                    logged_in = True
+                    result = self._call(
+                        self.client.query_stock_basic,
+                        code="",
+                        code_name="",
+                    )
+                    response_complete = getattr(result, "error_code", "1") == "0"
+                    rows = self._rows(result, "historical inventory")
+            except Exception as exc:
+                self.last_errors.append(f"historical inventory: {exc}")
+            finally:
+                if logged_in:
+                    try:
+                        self._call(self.client.logout)
+                    except Exception as exc:
+                        self.last_errors.append(f"baostock inventory logout: {exc}")
+
+        profiles: list[HistoricalInstrumentProfile] = []
+        expected_count = 0 if response_complete else None
+        for row_number, row in enumerate(rows, start=1):
+            raw_security_type = _text(row.get("type"))
+            if raw_security_type in BAOSTOCK_NON_INVENTORY_TYPES:
+                continue
+            if raw_security_type not in BAOSTOCK_INVENTORY_TYPES:
+                expected_count = None
+                self.last_errors.append(
+                    f"historical inventory row {row_number}: unknown security type"
+                )
+                continue
+            if expected_count is not None:
+                expected_count += 1
+            instrument_id = _from_baostock_code(row.get("code"))
+            if instrument_id is None:
+                self.last_errors.append(
+                    f"historical inventory row {row_number}: invalid instrument code"
+                )
+                continue
+            listing_date = _date(row.get("ipoDate"))
+            raw_listing_status = _text(row.get("status"))
+            listing_status = BAOSTOCK_LISTING_STATUSES.get(raw_listing_status or "")
+            delisting_date = _date(row.get("outDate"))
+            if listing_date is None:
+                self.last_errors.append(
+                    f"historical inventory {instrument_id}: unknown listing date"
+                )
+            if listing_status is None:
+                self.last_errors.append(
+                    f"historical inventory {instrument_id}: unknown listing status"
+                )
+            if listing_status == "delisted" and delisting_date is None:
+                self.last_errors.append(
+                    f"historical inventory {instrument_id}: unknown delisting date"
+                )
+            profiles.append(
+                HistoricalInstrumentProfile(
+                    instrument_id=instrument_id,
+                    name=_text(row.get("code_name")),
+                    snapshot_date=effective_through,
+                    listing_date=listing_date,
+                    delisting_date=delisting_date,
+                    security_type=BAOSTOCK_INVENTORY_TYPES[raw_security_type],
+                    listing_status=listing_status,
+                    provider="baostock",
+                )
+            )
+
+        if expected_count == 0:
+            self.last_errors.append("historical inventory: empty provider response")
+        if expected_count is not None and len(profiles) != expected_count:
+            self.last_errors.append(
+                "historical inventory count mismatch: "
+                f"expected={expected_count}, normalized={len(profiles)}"
+            )
+        error = "; ".join(dict.fromkeys(self.last_errors)) or None
+        status = (
+            "ready"
+            if expected_count is not None
+            and expected_count > 0
+            and len(profiles) == expected_count
+            and error is None
+            else "partial"
+        )
+        self._lifecycle_manifest = HistoricalInventoryManifest(
+            status=status,
+            expected_count=expected_count,
+            effective_through=effective_through,
+            error=error,
+            fetched_at=fetched_at,
+            source_provider="baostock",
+        )
+        return profiles
+
+    def get_lifecycle_manifest(self) -> HistoricalInventoryManifest:
+        return self._lifecycle_manifest
+
+    def get_benchmark_series(
+        self,
+        ids: list[str],
+        start: date,
+        end: date,
+    ) -> dict[str, Any]:
+        del ids
+        series: dict[str, Any] = {}
+        for index_id in REQUIRED_BENCHMARK_IDS:
+            try:
+                series[index_id] = self.benchmark_provider.get_daily_bars(
+                    [index_id], start, end
+                )
+            except Exception as exc:
+                self.last_errors.append(f"benchmark {index_id}: {exc}")
+        return series
 
     def get_evidence(
         self,

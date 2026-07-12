@@ -25,6 +25,27 @@ class HistoricalInstrumentProfile(BaseModel):
     provider: str
 
 
+class HistoricalInventoryManifest(BaseModel):
+    status: Literal["ready", "partial"]
+    expected_count: int | None = None
+    effective_through: date
+    error: str | None = None
+    fetched_at: datetime
+    source_provider: str
+
+    @model_validator(mode="after")
+    def validate_ready_inventory(self) -> Self:
+        if self.status == "ready" and (
+            self.expected_count is None
+            or self.expected_count <= 0
+            or self.error is not None
+        ):
+            raise ValueError(
+                "ready inventory requires a positive expected_count and no error"
+            )
+        return self
+
+
 class HistoricalIndustrySnapshot(BaseModel):
     instrument_id: str
     snapshot_date: date
