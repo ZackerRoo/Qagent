@@ -34,6 +34,7 @@ from qagent.storage.replay_evidence import ReplayEvidenceRepository
 EXCLUDED_STATUSES = frozenset(
     {"risk_elevated", "invalidated", "closed", "postmortem_done"}
 )
+ELIGIBLE_UNIVERSE_BENCHMARK_ID = "CN:EQUAL_WEIGHT_ELIGIBLE"
 
 
 class WalkForwardSelection(BaseModel):
@@ -141,6 +142,7 @@ def run_full_market_walk_forward_selection(
     market_provider = ReplayMarketDataProvider(owner_repository, revision)
     strategy_provider = ReplayStrategyDataProvider(owner_repository, revision)
     snapshots: list[WalkForwardSnapshot] = []
+    eligible_universes: list[tuple[date, list[str]]] = []
     scan_errors: list[str] = []
     try:
         sessions = trading_sessions_in_range(start, end)[::rebalance_step_sessions]
@@ -174,6 +176,7 @@ def run_full_market_walk_forward_selection(
                     st_excluded_count += 1
                     continue
                 eligible.append(instrument_id)
+            eligible_universes.append((decision_date, sorted(eligible)))
             scan = run_daily_scan(
                 eligible,
                 market_provider,
@@ -255,6 +258,7 @@ def run_full_market_walk_forward_selection(
             end=end,
             top_5_return=top_5_metrics.total_return_pct,
             top_10_return=top_10_metrics.total_return_pct,
+            eligible_universes=eligible_universes,
         )
     finally:
         owner_repository.release_dataset_lease()
@@ -312,6 +316,11 @@ def run_full_market_walk_forward_selection(
             "walk_forward_benchmarks_ready": (
                 f"{sum(item.status == 'ready' for item in benchmarks)}/"
                 f"{len(benchmarks)}"
+            ),
+            "walk_forward_equal_weight_benchmark": next(
+                item.status
+                for item in benchmarks
+                if item.benchmark_id == ELIGIBLE_UNIVERSE_BENCHMARK_ID
             ),
             "walk_forward_cost_scenarios": str(len(cost_sensitivity)),
             "walk_forward_stress_top_5_return_pct": str(
@@ -547,6 +556,7 @@ def _benchmark_comparisons(
     end: date,
     top_5_return: float,
     top_10_return: float,
+    eligible_universes: list[tuple[date, list[str]]],
 ) -> list[WalkForwardBenchmarkComparison]:
     bars = provider.get_daily_bars(list(REQUIRED_BENCHMARK_IDS), start, end)
     comparisons = []
@@ -585,4 +595,75 @@ def _benchmark_comparisons(
                 ),
             )
         )
+    equal_weight_return = _equal_weight_eligible_return(
+        provider,
+        eligible_universes,
+        end=end,
+    )
+    comparisons.append(
+        WalkForwardBenchmarkComparison(
+            benchmark_id=ELIGIBLE_UNIVERSE_BENCHMARK_ID,
+            status="ready" if equal_weight_return is not None else "missing",
+            benchmark_return_pct=equal_weight_return,
+            top_5_excess_return_pct=(
+                round(top_5_return - equal_weight_return, 4)
+                if equal_weight_return is not None
+                else None
+            ),
+            top_10_excess_return_pct=(
+                round(top_10_return - equal_weight_return, 4)
+                if equal_weight_return is not None
+                else None
+            ),
+        )
+    )
     return comparisons
+
+
+def _equal_weight_eligible_return(
+    provider: ReplayMarketDataProvider,
+    eligible_universes: list[tuple[date, list[str]]],
+    *,
+    end: date,
+) -> float | None:
+    instrument_ids = sorted(
+        {
+            instrument_id
+            for _, members in eligible_universes
+            for instrument_id in members
+        }
+    )
+    if not instrument_ids:
+        return None
+    first_date = eligible_universes[0][0]
+    bars = provider.get_daily_bars(instrument_ids, first_date, end)
+    if bars.empty:
+        return None
+    compounded = 1.0
+    completed_periods = 0
+    for index, (decision_date, members) in enumerate(eligible_universes):
+        period_end = (
+            eligible_universes[index + 1][0]
+            if index + 1 < len(eligible_universes)
+            else end
+        )
+        if period_end <= decision_date:
+            continue
+        returns = []
+        for instrument_id in members:
+            frame = bars.loc[
+                bars["instrument_id"].eq(instrument_id)
+                & bars["trade_date"].gt(decision_date)
+                & bars["trade_date"].le(period_end)
+            ].sort_values("trade_date")
+            if len(frame) < 2:
+                continue
+            first = float(frame.iloc[0]["adjusted_close"])
+            last = float(frame.iloc[-1]["adjusted_close"])
+            if first > 0:
+                returns.append(last / first - 1)
+        if not returns:
+            continue
+        compounded *= 1 + statistics.mean(returns)
+        completed_periods += 1
+    return round((compounded - 1) * 100, 4) if completed_periods else None

@@ -14,6 +14,8 @@ from qagent.backtesting.replay_provider import (
     ReplayStrategyDataProvider,
 )
 from qagent.backtesting.walk_forward import (
+    ELIGIBLE_UNIVERSE_BENCHMARK_ID,
+    _equal_weight_eligible_return,
     _trade_temporal_validation,
     run_full_market_walk_forward_selection,
 )
@@ -187,8 +189,10 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert first.snapshots == second.snapshots
     assert first.top_5_portfolio == second.top_5_portfolio
     assert first.top_10_portfolio == second.top_10_portfolio
-    assert len(first.benchmarks) == 4
-    assert all(item.status == "ready" for item in first.benchmarks)
+    assert len(first.benchmarks) == 5
+    assert all(item.status == "ready" for item in first.benchmarks[:4])
+    assert first.benchmarks[-1].benchmark_id == ELIGIBLE_UNIVERSE_BENCHMARK_ID
+    assert first.benchmarks[-1].status == "missing"
     assert first.top_5_temporal_validation.return_horizon_days == 20
     assert first.top_5_temporal_validation.embargo_days == 20
     assert first.data_health["walk_forward_top_5_oos_gate"] == "insufficient"
@@ -200,7 +204,8 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert first.cost_sensitivity[-1].slippage_bps == Decimal("20")
     assert first.cost_sensitivity[-1].fee_multiplier == Decimal("2")
     assert first.data_health["walk_forward_cost_scenarios"] == "3"
-    assert first.data_health["walk_forward_benchmarks_ready"] == "4/4"
+    assert first.data_health["walk_forward_benchmarks_ready"] == "4/5"
+    assert first.data_health["walk_forward_equal_weight_benchmark"] == "missing"
     assert (
         first.data_health["walk_forward_future_data_guard"]
         == "revision_lease_and_decision_date_cutoff"
@@ -226,3 +231,20 @@ def test_walk_forward_trade_validation_uses_embargoed_chronological_windows():
     assert windows["validation"].end_date < windows["out_of_sample"].start_date
     assert windows["out_of_sample"].sample_count >= 30
     assert first.model_dump() == second.model_dump()
+
+
+def test_equal_weight_benchmark_uses_each_historical_eligible_universe(tmp_path):
+    repository, _ = _replay_repository(tmp_path)
+    provider = ReplayMarketDataProvider(repository, repository.current_revision())
+
+    result = _equal_weight_eligible_return(
+        provider,
+        [
+            (date(2025, 1, 2), ["CN:000001"]),
+            (date(2025, 1, 8), ["CN:000001"]),
+        ],
+        end=date(2025, 1, 13),
+    )
+
+    assert result is not None
+    assert result > 0
