@@ -166,7 +166,7 @@ class CompleteHistoricalEvidenceProvider:
                     index_id=index_id,
                     snapshot_date=snapshot_date,
                     status="ready",
-                    member_count=1,
+                    member_count=1 if index_id == "CN:000300.IDX" else 0,
                     provider=self.name,
                 )
                 for index_id in [
@@ -571,6 +571,7 @@ def test_historical_backfill_reuses_complete_historical_evidence(tmp_path):
         end=end,
         universe_as_of=start,
     )
+    revision_before_reuse = repo.replay_evidence("free").current_revision()
     result = run_historical_backfill(
         repo=repo,
         cache=cache,
@@ -586,3 +587,4 @@ def test_historical_backfill_reuses_complete_historical_evidence(tmp_path):
 
     assert result.job.status == "succeeded"
     assert result.job.data_health["historical_evidence_cache"] == "reused"
+    assert repo.replay_evidence("free").current_revision() == revision_before_reuse

@@ -152,7 +152,9 @@ class FundamentalSnapshotRow(Base):
     forward_pe: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
     peg_ratio: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
     price_to_sales: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
-    dataset_revision: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    dataset_revision: Mapped[int] = mapped_column(
+        Integer, primary_key=True, default=0, index=True
+    )
     cached_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
@@ -168,8 +170,10 @@ class HistoricalTradabilityRow(Base):
     trading_status: Mapped[str] = mapped_column(String(32), index=True)
     is_st: Mapped[bool | None] = mapped_column(Boolean, nullable=True, index=True)
     pct_change_pct: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
-    source_provider: Mapped[str] = mapped_column(String(64))
-    dataset_revision: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    source_provider: Mapped[str] = mapped_column(String(64), primary_key=True)
+    dataset_revision: Mapped[int] = mapped_column(
+        Integer, primary_key=True, default=0, index=True
+    )
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -199,7 +203,9 @@ class HistoricalIndustrySnapshotRow(Base):
     source_provider: Mapped[str] = mapped_column(String(64), primary_key=True)
     industry: Mapped[str] = mapped_column(String(128), index=True)
     classification: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    dataset_revision: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    dataset_revision: Mapped[int] = mapped_column(
+        Integer, primary_key=True, default=0, index=True
+    )
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -211,9 +217,11 @@ class HistoricalIndexSnapshotRow(Base):
     snapshot_date: Mapped[date] = mapped_column(Date, primary_key=True, index=True)
     status: Mapped[str] = mapped_column(String(32), index=True)
     member_count: Mapped[int] = mapped_column(Integer, default=0)
-    source_provider: Mapped[str] = mapped_column(String(64))
+    source_provider: Mapped[str] = mapped_column(String(64), primary_key=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    dataset_revision: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    dataset_revision: Mapped[int] = mapped_column(
+        Integer, primary_key=True, default=0, index=True
+    )
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -224,8 +232,10 @@ class HistoricalIndexMembershipRow(Base):
     index_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
     snapshot_date: Mapped[date] = mapped_column(Date, primary_key=True, index=True)
     instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
-    source_provider: Mapped[str] = mapped_column(String(64))
-    dataset_revision: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    source_provider: Mapped[str] = mapped_column(String(64), primary_key=True)
+    dataset_revision: Mapped[int] = mapped_column(
+        Integer, primary_key=True, default=0, index=True
+    )
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -259,8 +269,8 @@ class HistoricalReplayBarRow(Base):
         SQLiteScaledDecimal(24, 12), nullable=True
     )
     adjustment_mode: Mapped[str] = mapped_column(String(32))
-    source_provider: Mapped[str] = mapped_column(String(64))
-    dataset_revision: Mapped[int] = mapped_column(Integer, index=True)
+    source_provider: Mapped[str] = mapped_column(String(64), primary_key=True)
+    dataset_revision: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -314,8 +324,8 @@ class HistoricalCorporateActionRow(Base):
     ex_right_reference_price: Mapped[Decimal | None] = mapped_column(
         SQLiteScaledDecimal(20, 8), nullable=True
     )
-    source_provider: Mapped[str] = mapped_column(String(64))
-    dataset_revision: Mapped[int] = mapped_column(Integer, index=True)
+    source_provider: Mapped[str] = mapped_column(String(64), primary_key=True)
+    dataset_revision: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -383,8 +393,8 @@ class HistoricalCorporateActionCoverageRow(Base):
     end_date: Mapped[date] = mapped_column(Date, primary_key=True)
     status: Mapped[str] = mapped_column(String(32), index=True)
     action_count: Mapped[int] = mapped_column(Integer)
-    source_provider: Mapped[str] = mapped_column(String(64))
-    dataset_revision: Mapped[int] = mapped_column(Integer, index=True)
+    source_provider: Mapped[str] = mapped_column(String(64), primary_key=True)
+    dataset_revision: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 

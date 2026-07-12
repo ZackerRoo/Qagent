@@ -1,7 +1,63 @@
-from sqlalchemy import inspect, text
+from datetime import date, datetime, timezone
+from decimal import Decimal
 
-from qagent.db import create_db_engine, initialize_database
+from sqlalchemy import inspect, text
+from sqlalchemy.schema import CreateTable
+
+from qagent.db import Base, create_db_engine, initialize_database
 from qagent.storage import tables as _tables  # noqa: F401
+
+
+REVISION_SCOPED_LEGACY_KEYS = {
+    "fundamental_snapshots": [
+        "provider_mode",
+        "instrument_id",
+        "as_of_date",
+        "source_provider",
+    ],
+    "historical_tradability": ["provider_mode", "instrument_id", "trade_date"],
+    "historical_industry_snapshots": [
+        "provider_mode",
+        "instrument_id",
+        "snapshot_date",
+        "source_provider",
+    ],
+    "historical_index_snapshots": ["provider_mode", "index_id", "snapshot_date"],
+    "historical_index_memberships": [
+        "provider_mode",
+        "index_id",
+        "snapshot_date",
+        "instrument_id",
+    ],
+    "historical_replay_bars": ["provider_mode", "instrument_id", "trade_date"],
+    "historical_corporate_actions": ["provider_mode", "instrument_id", "action_id"],
+    "historical_corporate_action_coverage": [
+        "provider_mode",
+        "instrument_id",
+        "start_date",
+        "end_date",
+    ],
+}
+
+
+def _replace_primary_key(ddl: str, current: list[str], legacy: list[str]) -> str:
+    current_sql = "PRIMARY KEY (" + ", ".join(current) + ")"
+    legacy_sql = "PRIMARY KEY (" + ", ".join(legacy) + ")"
+    assert current_sql in ddl
+    return ddl.replace(current_sql, legacy_sql)
+
+
+def _downgrade_revision_primary_keys(connection) -> None:
+    inspector = inspect(connection)
+    for table_name, legacy_key in REVISION_SCOPED_LEGACY_KEYS.items():
+        table = Base.metadata.tables[table_name]
+        current_key = inspector.get_pk_constraint(table_name)["constrained_columns"]
+        ddl = str(CreateTable(table).compile(dialect=connection.dialect))
+        legacy_ddl = _replace_primary_key(ddl, current_key, legacy_key)
+        backup = f"{table_name}_current_schema"
+        connection.execute(text(f"ALTER TABLE {table_name} RENAME TO {backup}"))
+        connection.execute(text(legacy_ddl))
+        connection.execute(text(f"DROP TABLE {backup}"))
 
 
 def test_initialize_database_adds_adjustment_columns_to_legacy_market_cache(tmp_path):
@@ -103,3 +159,185 @@ def test_initialize_database_adds_adjustment_columns_to_legacy_market_cache(tmp_
     assert inspect(migrated).get_pk_constraint("historical_fee_rules")[
         "constrained_columns"
     ] == ["fee_schedule_version", "fee_rule_key", "effective_from", "side"]
+
+
+def test_initialize_database_rebuilds_revision_scoped_tables_without_data_loss(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'legacy-replay-revisions.db'}"
+    engine = create_db_engine(database_url)
+    now = datetime(2025, 1, 3, tzinfo=timezone.utc)
+    with engine.begin() as connection:
+        Base.metadata.create_all(connection)
+        _downgrade_revision_primary_keys(connection)
+        rows = {
+            "fundamental_snapshots": {
+                "provider_mode": "free",
+                "instrument_id": "CN:000001",
+                "as_of_date": date(2025, 1, 2),
+                "source_provider": "legacy",
+                "dataset_revision": 7,
+                "cached_at": now,
+                "updated_at": now,
+            },
+            "historical_tradability": {
+                "provider_mode": "free",
+                "instrument_id": "CN:000001",
+                "trade_date": date(2025, 1, 2),
+                "trading_status": "trading",
+                "source_provider": "legacy",
+                "dataset_revision": 7,
+                "fetched_at": now,
+            },
+            "historical_industry_snapshots": {
+                "provider_mode": "free",
+                "instrument_id": "CN:000001",
+                "snapshot_date": date(2025, 1, 2),
+                "source_provider": "legacy",
+                "industry": "Banking",
+                "dataset_revision": 7,
+                "fetched_at": now,
+            },
+            "historical_index_snapshots": {
+                "provider_mode": "free",
+                "index_id": "CN:000300.IDX",
+                "snapshot_date": date(2025, 1, 2),
+                "status": "ready",
+                "member_count": 1,
+                "source_provider": "legacy",
+                "dataset_revision": 7,
+                "fetched_at": now,
+            },
+            "historical_index_memberships": {
+                "provider_mode": "free",
+                "index_id": "CN:000300.IDX",
+                "snapshot_date": date(2025, 1, 2),
+                "instrument_id": "CN:000001",
+                "source_provider": "legacy",
+                "dataset_revision": 7,
+                "fetched_at": now,
+            },
+            "historical_replay_bars": {
+                "provider_mode": "free",
+                "instrument_id": "CN:000001",
+                "trade_date": date(2025, 1, 2),
+                "raw_open": Decimal("10"),
+                "raw_high": Decimal("10"),
+                "raw_low": Decimal("10"),
+                "raw_close": Decimal("10"),
+                "volume": Decimal("1000"),
+                "adjustment_mode": "none",
+                "source_provider": "legacy",
+                "dataset_revision": 7,
+                "fetched_at": now,
+            },
+            "historical_corporate_actions": {
+                "provider_mode": "free",
+                "instrument_id": "CN:000001",
+                "action_id": "cash-2025",
+                "announcement_date": date(2024, 12, 20),
+                "record_date": date(2025, 1, 2),
+                "ex_date": date(2025, 1, 3),
+                "effective_date": date(2025, 1, 3),
+                "payable_date": date(2025, 1, 10),
+                "action_type": "cash_dividend",
+                "cash_per_share": Decimal("0.25"),
+                "source_provider": "legacy",
+                "dataset_revision": 7,
+                "fetched_at": now,
+            },
+            "historical_corporate_action_coverage": {
+                "provider_mode": "free",
+                "instrument_id": "CN:000001",
+                "start_date": date(2025, 1, 1),
+                "end_date": date(2025, 12, 31),
+                "status": "ready",
+                "action_count": 1,
+                "source_provider": "legacy",
+                "dataset_revision": 7,
+                "fetched_at": now,
+            },
+        }
+        for table_name, row in rows.items():
+            connection.execute(Base.metadata.tables[table_name].insert().values(row))
+
+    migrated = initialize_database(database_url)
+    inspector = inspect(migrated)
+
+    for table_name, row in rows.items():
+        expected_key = list(REVISION_SCOPED_LEGACY_KEYS[table_name]) + [
+            column
+            for column in ("source_provider", "dataset_revision")
+            if column not in REVISION_SCOPED_LEGACY_KEYS[table_name]
+        ]
+        assert inspector.get_pk_constraint(table_name)["constrained_columns"] == expected_key
+        assert f"ix_{table_name}_dataset_revision" in {
+            index["name"] for index in inspector.get_indexes(table_name)
+        }
+        with migrated.connect() as connection:
+            stored = connection.execute(
+                text(
+                    f"SELECT source_provider, dataset_revision FROM {table_name} "
+                    "WHERE provider_mode = 'free'"
+                )
+            ).one()
+        assert stored == (row["source_provider"], row["dataset_revision"])
+
+    for table_name in (
+        "historical_universe_manifests",
+        "historical_replay_universe_members",
+    ):
+        assert f"ix_{table_name}_owner_run_id" in {
+            index["name"] for index in inspector.get_indexes(table_name)
+        }
+    assert {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints(
+            "historical_corporate_action_coverage"
+        )
+    } == {
+        "ck_historical_corporate_action_coverage_count",
+        "ck_historical_corporate_action_coverage_status",
+    }
+
+
+def test_legacy_row_without_revision_inherits_current_provider_revision(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'legacy-revision-backfill.db'}"
+    engine = create_db_engine(database_url)
+    with engine.begin() as connection:
+        Base.metadata.create_all(connection)
+        _downgrade_revision_primary_keys(connection)
+        connection.execute(
+            text("ALTER TABLE historical_tradability DROP COLUMN dataset_revision")
+        )
+        connection.execute(
+            text(
+                "INSERT INTO historical_data_revisions "
+                "(provider_mode, revision, updated_at) "
+                "VALUES ('free', 9, '2025-01-03 00:00:00')"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO historical_tradability "
+                "(provider_mode, instrument_id, trade_date, trading_status, "
+                "source_provider, fetched_at) VALUES "
+                "('free', 'CN:000001', '2025-01-02', 'trading', "
+                "'legacy', '2025-01-03 00:00:00')"
+            )
+        )
+
+    migrated = initialize_database(database_url)
+
+    with migrated.connect() as connection:
+        revision = connection.execute(
+            text("SELECT dataset_revision FROM historical_tradability")
+        ).scalar_one()
+    assert revision == 9
+    assert inspect(migrated).get_pk_constraint("historical_tradability")[
+        "constrained_columns"
+    ] == [
+        "provider_mode",
+        "instrument_id",
+        "trade_date",
+        "source_provider",
+        "dataset_revision",
+    ]

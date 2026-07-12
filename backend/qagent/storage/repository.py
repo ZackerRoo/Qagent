@@ -7,9 +7,9 @@ from decimal import Decimal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
-from sqlalchemy import case, func
+from sqlalchemy import case, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from qagent.domain.models import OpportunityCard
 from qagent.historical_evidence.models import (
@@ -633,20 +633,25 @@ class QagentRepository:
     ) -> list[FundamentalSnapshot]:
         normalized_mode = provider_mode.strip().lower()
         with self.session_factory() as session:
-            query = session.query(FundamentalSnapshotRow).filter(
-                FundamentalSnapshotRow.provider_mode == normalized_mode
+            row_alias, revision_rank = _latest_revision_alias(
+                FundamentalSnapshotRow,
+                ("provider_mode", "instrument_id", "as_of_date", "source_provider"),
+            )
+            query = session.query(row_alias).filter(
+                row_alias.provider_mode == normalized_mode,
+                revision_rank == 1,
             )
             if instrument_ids:
-                query = query.filter(FundamentalSnapshotRow.instrument_id.in_(instrument_ids))
+                query = query.filter(row_alias.instrument_id.in_(instrument_ids))
             if start is not None:
-                query = query.filter(FundamentalSnapshotRow.as_of_date >= start)
+                query = query.filter(row_alias.as_of_date >= start)
             if end is not None:
-                query = query.filter(FundamentalSnapshotRow.as_of_date <= end)
+                query = query.filter(row_alias.as_of_date <= end)
             rows = (
                 query.order_by(
-                    FundamentalSnapshotRow.as_of_date.asc(),
-                    FundamentalSnapshotRow.instrument_id.asc(),
-                    FundamentalSnapshotRow.source_provider.asc(),
+                    row_alias.as_of_date.asc(),
+                    row_alias.instrument_id.asc(),
+                    row_alias.source_provider.asc(),
                 )
                 .limit(max(limit, 0))
                 .all()
@@ -663,19 +668,24 @@ class QagentRepository:
             return {}
         normalized_mode = provider_mode.strip().lower()
         with self.session_factory() as session:
+            row_alias, revision_rank = _latest_revision_alias(
+                FundamentalSnapshotRow,
+                ("provider_mode", "instrument_id", "as_of_date", "source_provider"),
+            )
             rows = (
                 session.query(
-                    FundamentalSnapshotRow.instrument_id,
-                    func.count(FundamentalSnapshotRow.instrument_id),
-                    func.min(FundamentalSnapshotRow.as_of_date),
-                    func.max(FundamentalSnapshotRow.as_of_date),
+                    row_alias.instrument_id,
+                    func.count(row_alias.instrument_id),
+                    func.min(row_alias.as_of_date),
+                    func.max(row_alias.as_of_date),
                 )
                 .filter(
-                    FundamentalSnapshotRow.provider_mode == normalized_mode,
-                    FundamentalSnapshotRow.instrument_id.in_(instrument_ids),
-                    FundamentalSnapshotRow.as_of_date <= end,
+                    row_alias.provider_mode == normalized_mode,
+                    row_alias.instrument_id.in_(instrument_ids),
+                    row_alias.as_of_date <= end,
+                    revision_rank == 1,
                 )
-                .group_by(FundamentalSnapshotRow.instrument_id)
+                .group_by(row_alias.instrument_id)
                 .all()
             )
         return {
@@ -705,29 +715,34 @@ class QagentRepository:
             for instrument_id in instrument_ids
         }
         with self.session_factory() as session:
+            tradability_alias, tradability_rank = _latest_revision_alias(
+                HistoricalTradabilityRow,
+                ("provider_mode", "instrument_id", "trade_date", "source_provider"),
+            )
             tradability_rows = (
                 session.query(
-                    HistoricalTradabilityRow.instrument_id,
-                    func.count(HistoricalTradabilityRow.trade_date),
-                    func.min(HistoricalTradabilityRow.trade_date),
-                    func.max(HistoricalTradabilityRow.trade_date),
+                    tradability_alias.instrument_id,
+                    func.count(tradability_alias.trade_date),
+                    func.min(tradability_alias.trade_date),
+                    func.max(tradability_alias.trade_date),
                     func.sum(
                         case(
-                            (HistoricalTradabilityRow.trading_status == "suspended", 1),
+                            (tradability_alias.trading_status == "suspended", 1),
                             else_=0,
                         )
                     ),
                     func.sum(
-                        case((HistoricalTradabilityRow.is_st.is_(True), 1), else_=0)
+                        case((tradability_alias.is_st.is_(True), 1), else_=0)
                     ),
                 )
                 .filter(
-                    HistoricalTradabilityRow.provider_mode == mode,
-                    HistoricalTradabilityRow.instrument_id.in_(instrument_ids),
-                    HistoricalTradabilityRow.trade_date >= start,
-                    HistoricalTradabilityRow.trade_date <= end,
+                    tradability_alias.provider_mode == mode,
+                    tradability_alias.instrument_id.in_(instrument_ids),
+                    tradability_alias.trade_date >= start,
+                    tradability_alias.trade_date <= end,
+                    tradability_rank == 1,
                 )
-                .group_by(HistoricalTradabilityRow.instrument_id)
+                .group_by(tradability_alias.instrument_id)
                 .all()
             )
             profiles = (
@@ -748,46 +763,81 @@ class QagentRepository:
             for row in profiles:
                 latest_profiles.setdefault((row.instrument_id, row.snapshot_date), row)
             profiles = list(latest_profiles.values())
+            industry_alias, industry_rank = _latest_revision_alias(
+                HistoricalIndustrySnapshotRow,
+                ("provider_mode", "instrument_id", "snapshot_date", "source_provider"),
+            )
             industry_rows = (
                 session.query(
-                    HistoricalIndustrySnapshotRow.instrument_id,
-                    func.count(HistoricalIndustrySnapshotRow.snapshot_date),
-                    func.min(HistoricalIndustrySnapshotRow.snapshot_date),
-                    func.max(HistoricalIndustrySnapshotRow.snapshot_date),
+                    industry_alias.instrument_id,
+                    func.count(industry_alias.snapshot_date),
+                    func.min(industry_alias.snapshot_date),
+                    func.max(industry_alias.snapshot_date),
                 )
                 .filter(
-                    HistoricalIndustrySnapshotRow.provider_mode == mode,
-                    HistoricalIndustrySnapshotRow.instrument_id.in_(instrument_ids),
-                    HistoricalIndustrySnapshotRow.snapshot_date >= start,
-                    HistoricalIndustrySnapshotRow.snapshot_date <= end,
+                    industry_alias.provider_mode == mode,
+                    industry_alias.instrument_id.in_(instrument_ids),
+                    industry_alias.snapshot_date >= start,
+                    industry_alias.snapshot_date <= end,
+                    industry_rank == 1,
                 )
-                .group_by(HistoricalIndustrySnapshotRow.instrument_id)
+                .group_by(industry_alias.instrument_id)
                 .all()
             )
             industry_names = (
                 session.query(
-                    HistoricalIndustrySnapshotRow.instrument_id,
-                    HistoricalIndustrySnapshotRow.industry,
+                    industry_alias.instrument_id,
+                    industry_alias.industry,
                 )
                 .filter(
-                    HistoricalIndustrySnapshotRow.provider_mode == mode,
-                    HistoricalIndustrySnapshotRow.instrument_id.in_(instrument_ids),
-                    HistoricalIndustrySnapshotRow.snapshot_date >= start,
-                    HistoricalIndustrySnapshotRow.snapshot_date <= end,
+                    industry_alias.provider_mode == mode,
+                    industry_alias.instrument_id.in_(instrument_ids),
+                    industry_alias.snapshot_date >= start,
+                    industry_alias.snapshot_date <= end,
+                    industry_rank == 1,
                 )
                 .distinct()
                 .all()
+            )
+            membership_snapshot_alias, membership_snapshot_rank = _latest_revision_alias(
+                HistoricalIndexSnapshotRow,
+                ("provider_mode", "index_id", "snapshot_date", "source_provider"),
             )
             membership_rows = (
                 session.query(
                     HistoricalIndexMembershipRow.instrument_id,
                     func.count(HistoricalIndexMembershipRow.index_id),
                 )
+                .join(
+                    membership_snapshot_alias,
+                    (
+                        HistoricalIndexMembershipRow.provider_mode
+                        == membership_snapshot_alias.provider_mode
+                    )
+                    & (
+                        HistoricalIndexMembershipRow.index_id
+                        == membership_snapshot_alias.index_id
+                    )
+                    & (
+                        HistoricalIndexMembershipRow.snapshot_date
+                        == membership_snapshot_alias.snapshot_date
+                    )
+                    & (
+                        HistoricalIndexMembershipRow.source_provider
+                        == membership_snapshot_alias.source_provider
+                    )
+                    & (
+                        HistoricalIndexMembershipRow.dataset_revision
+                        == membership_snapshot_alias.dataset_revision
+                    ),
+                )
                 .filter(
                     HistoricalIndexMembershipRow.provider_mode == mode,
                     HistoricalIndexMembershipRow.instrument_id.in_(instrument_ids),
                     HistoricalIndexMembershipRow.snapshot_date >= start,
                     HistoricalIndexMembershipRow.snapshot_date <= end,
+                    membership_snapshot_alias.status == "ready",
+                    membership_snapshot_rank == 1,
                 )
                 .group_by(HistoricalIndexMembershipRow.instrument_id)
                 .all()
@@ -797,11 +847,36 @@ class QagentRepository:
                     HistoricalIndexMembershipRow.instrument_id,
                     HistoricalIndexMembershipRow.index_id,
                 )
+                .join(
+                    membership_snapshot_alias,
+                    (
+                        HistoricalIndexMembershipRow.provider_mode
+                        == membership_snapshot_alias.provider_mode
+                    )
+                    & (
+                        HistoricalIndexMembershipRow.index_id
+                        == membership_snapshot_alias.index_id
+                    )
+                    & (
+                        HistoricalIndexMembershipRow.snapshot_date
+                        == membership_snapshot_alias.snapshot_date
+                    )
+                    & (
+                        HistoricalIndexMembershipRow.source_provider
+                        == membership_snapshot_alias.source_provider
+                    )
+                    & (
+                        HistoricalIndexMembershipRow.dataset_revision
+                        == membership_snapshot_alias.dataset_revision
+                    ),
+                )
                 .filter(
                     HistoricalIndexMembershipRow.provider_mode == mode,
                     HistoricalIndexMembershipRow.instrument_id.in_(instrument_ids),
                     HistoricalIndexMembershipRow.snapshot_date >= start,
                     HistoricalIndexMembershipRow.snapshot_date <= end,
+                    membership_snapshot_alias.status == "ready",
+                    membership_snapshot_rank == 1,
                 )
                 .distinct()
                 .all()
@@ -844,33 +919,39 @@ class QagentRepository:
     ) -> HistoricalIndexCoverageStats:
         mode = provider_mode.strip().lower()
         with self.session_factory() as session:
+            snapshot_alias, snapshot_rank = _latest_revision_alias(
+                HistoricalIndexSnapshotRow,
+                ("provider_mode", "index_id", "snapshot_date", "source_provider"),
+            )
             row = (
                 session.query(
-                    func.count(HistoricalIndexSnapshotRow.index_id),
+                    func.count(snapshot_alias.index_id),
                     func.sum(
-                        case((HistoricalIndexSnapshotRow.status == "ready", 1), else_=0)
+                        case((snapshot_alias.status == "ready", 1), else_=0)
                     ),
                     func.sum(
-                        case((HistoricalIndexSnapshotRow.status == "failed", 1), else_=0)
+                        case((snapshot_alias.status == "failed", 1), else_=0)
                     ),
-                    func.min(HistoricalIndexSnapshotRow.snapshot_date),
-                    func.max(HistoricalIndexSnapshotRow.snapshot_date),
+                    func.min(snapshot_alias.snapshot_date),
+                    func.max(snapshot_alias.snapshot_date),
                 )
                 .filter(
-                    HistoricalIndexSnapshotRow.provider_mode == mode,
-                    HistoricalIndexSnapshotRow.snapshot_date >= start,
-                    HistoricalIndexSnapshotRow.snapshot_date <= end,
+                    snapshot_alias.provider_mode == mode,
+                    snapshot_alias.snapshot_date >= start,
+                    snapshot_alias.snapshot_date <= end,
+                    snapshot_rank == 1,
                 )
                 .one()
             )
             index_ids = [
                 value
                 for (value,) in (
-                    session.query(HistoricalIndexSnapshotRow.index_id)
+                    session.query(snapshot_alias.index_id)
                     .filter(
-                        HistoricalIndexSnapshotRow.provider_mode == mode,
-                        HistoricalIndexSnapshotRow.snapshot_date >= start,
-                        HistoricalIndexSnapshotRow.snapshot_date <= end,
+                        snapshot_alias.provider_mode == mode,
+                        snapshot_alias.snapshot_date >= start,
+                        snapshot_alias.snapshot_date <= end,
+                        snapshot_rank == 1,
                     )
                     .distinct()
                     .all()
@@ -1861,6 +1942,19 @@ def _asset_sort_rank(asset_type: str) -> int:
 
 def _asset_browse_rank(asset_type: str) -> int:
     return {"stock": 0, "etf": 1}.get(asset_type, 2)
+
+
+def _latest_revision_alias(model, identity_columns: tuple[str, ...]):
+    ranked = select(
+        model,
+        func.row_number()
+        .over(
+            partition_by=tuple(getattr(model, key) for key in identity_columns),
+            order_by=model.dataset_revision.desc(),
+        )
+        .label("revision_rank"),
+    ).subquery()
+    return aliased(model, ranked), ranked.c.revision_rank
 
 
 def _sqlite_upsert_chunks(

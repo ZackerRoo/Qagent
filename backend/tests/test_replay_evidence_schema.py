@@ -12,8 +12,56 @@ from qagent.storage import tables as _tables
 
 
 EXPECTED_TABLE_KEYS = {
-    "historical_replay_bars": ["provider_mode", "instrument_id", "trade_date"],
-    "historical_corporate_actions": ["provider_mode", "instrument_id", "action_id"],
+    "fundamental_snapshots": [
+        "provider_mode",
+        "instrument_id",
+        "as_of_date",
+        "source_provider",
+        "dataset_revision",
+    ],
+    "historical_tradability": [
+        "provider_mode",
+        "instrument_id",
+        "trade_date",
+        "source_provider",
+        "dataset_revision",
+    ],
+    "historical_industry_snapshots": [
+        "provider_mode",
+        "instrument_id",
+        "snapshot_date",
+        "source_provider",
+        "dataset_revision",
+    ],
+    "historical_index_snapshots": [
+        "provider_mode",
+        "index_id",
+        "snapshot_date",
+        "source_provider",
+        "dataset_revision",
+    ],
+    "historical_index_memberships": [
+        "provider_mode",
+        "index_id",
+        "snapshot_date",
+        "instrument_id",
+        "source_provider",
+        "dataset_revision",
+    ],
+    "historical_replay_bars": [
+        "provider_mode",
+        "instrument_id",
+        "trade_date",
+        "source_provider",
+        "dataset_revision",
+    ],
+    "historical_corporate_actions": [
+        "provider_mode",
+        "instrument_id",
+        "action_id",
+        "source_provider",
+        "dataset_revision",
+    ],
     "historical_universe_manifests": ["provider_mode", "snapshot_date", "source_revision"],
     "historical_replay_universe_members": [
         "provider_mode",
@@ -27,6 +75,8 @@ EXPECTED_TABLE_KEYS = {
         "instrument_id",
         "start_date",
         "end_date",
+        "source_provider",
+        "dataset_revision",
     ],
     "historical_trading_rules": [
         "rule_set_version",
@@ -467,7 +517,7 @@ def test_unsupported_corporate_action_without_economics_persists(
         session.commit()
         stored = session.get(
             _tables.HistoricalCorporateActionRow,
-            ("free", "CN:000001", f"{action_type}-1"),
+            ("free", "CN:000001", f"{action_type}-1", "exchange", 7),
         )
 
         assert stored is not None
@@ -864,11 +914,12 @@ def test_realistic_financial_decimals_round_trip_exactly(tmp_path):
         session.expire_all()
 
         bar = session.get(
-            _tables.HistoricalReplayBarRow, ("free", "CN:000001", trade_date)
+            _tables.HistoricalReplayBarRow,
+            ("free", "CN:000001", trade_date, "akshare", 7),
         )
         action = session.get(
             _tables.HistoricalCorporateActionRow,
-            ("free", "CN:000001", "rights-1"),
+            ("free", "CN:000001", "rights-1", "exchange", 7),
         )
         fee = session.get(
             _tables.HistoricalFeeRuleRow,

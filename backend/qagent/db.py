@@ -159,6 +159,9 @@ def _apply_additive_migrations(engine: Engine) -> None:
             "historical_industry_snapshots",
             "historical_index_snapshots",
             "historical_index_memberships",
+            "historical_replay_bars",
+            "historical_corporate_actions",
+            "historical_corporate_action_coverage",
         ):
             _add_missing_columns(
                 connection,
@@ -166,6 +169,7 @@ def _apply_additive_migrations(engine: Engine) -> None:
                 table_name,
                 {"dataset_revision": "INTEGER NOT NULL DEFAULT 0"},
             )
+            _backfill_dataset_revision(connection, table_name)
         for table_name in (
             "historical_universe_manifests",
             "historical_replay_universe_members",
@@ -180,7 +184,8 @@ def _apply_additive_migrations(engine: Engine) -> None:
                     )
                 },
             )
-        _rebuild_revision_scoped_lifecycle_profiles(connection)
+        _rebuild_revision_scoped_tables(connection)
+        _create_missing_metadata_indexes(connection)
 
 
 def _add_missing_columns(connection, inspector, table_name: str, additions) -> None:
@@ -192,17 +197,97 @@ def _add_missing_columns(connection, inspector, table_name: str, additions) -> N
             connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column} {sql_type}"))
 
 
-def _rebuild_revision_scoped_lifecycle_profiles(connection) -> None:
-    table_name = "historical_instrument_profiles"
-    expected_key = [
-        "provider_mode",
-        "instrument_id",
-        "snapshot_date",
-        "dataset_revision",
-    ]
-    current_key = inspect(connection).get_pk_constraint(table_name)[
-        "constrained_columns"
-    ]
+def _backfill_dataset_revision(connection, table_name: str) -> None:
+    if not inspect(connection).has_table(table_name):
+        return
+    connection.execute(
+        text(
+            f"UPDATE {table_name} SET dataset_revision = COALESCE(("
+            "SELECT revision FROM historical_data_revisions "
+            f"WHERE historical_data_revisions.provider_mode = {table_name}.provider_mode"
+            "), 0) WHERE dataset_revision = 0"
+        )
+    )
+
+
+def _rebuild_revision_scoped_tables(connection) -> None:
+    expected_keys = {
+        "fundamental_snapshots": [
+            "provider_mode",
+            "instrument_id",
+            "as_of_date",
+            "source_provider",
+            "dataset_revision",
+        ],
+        "historical_tradability": [
+            "provider_mode",
+            "instrument_id",
+            "trade_date",
+            "source_provider",
+            "dataset_revision",
+        ],
+        "historical_instrument_profiles": [
+            "provider_mode",
+            "instrument_id",
+            "snapshot_date",
+            "dataset_revision",
+        ],
+        "historical_industry_snapshots": [
+            "provider_mode",
+            "instrument_id",
+            "snapshot_date",
+            "source_provider",
+            "dataset_revision",
+        ],
+        "historical_index_snapshots": [
+            "provider_mode",
+            "index_id",
+            "snapshot_date",
+            "source_provider",
+            "dataset_revision",
+        ],
+        "historical_index_memberships": [
+            "provider_mode",
+            "index_id",
+            "snapshot_date",
+            "instrument_id",
+            "source_provider",
+            "dataset_revision",
+        ],
+        "historical_replay_bars": [
+            "provider_mode",
+            "instrument_id",
+            "trade_date",
+            "source_provider",
+            "dataset_revision",
+        ],
+        "historical_corporate_actions": [
+            "provider_mode",
+            "instrument_id",
+            "action_id",
+            "source_provider",
+            "dataset_revision",
+        ],
+        "historical_corporate_action_coverage": [
+            "provider_mode",
+            "instrument_id",
+            "start_date",
+            "end_date",
+            "source_provider",
+            "dataset_revision",
+        ],
+    }
+    for table_name, expected_key in expected_keys.items():
+        _rebuild_table_primary_key(connection, table_name, expected_key)
+
+
+def _rebuild_table_primary_key(
+    connection, table_name: str, expected_key: list[str]
+) -> None:
+    inspector = inspect(connection)
+    if not inspector.has_table(table_name):
+        return
+    current_key = inspector.get_pk_constraint(table_name)["constrained_columns"]
     if current_key == expected_key:
         return
     table = Base.metadata.tables[table_name]
@@ -221,3 +306,12 @@ def _rebuild_revision_scoped_lifecycle_profiles(connection) -> None:
         )
     )
     connection.execute(text(f"DROP TABLE {backup_name}"))
+
+
+def _create_missing_metadata_indexes(connection) -> None:
+    inspector = inspect(connection)
+    for table in Base.metadata.sorted_tables:
+        if not inspector.has_table(table.name):
+            continue
+        for index in table.indexes:
+            index.create(connection, checkfirst=True)
