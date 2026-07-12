@@ -17,6 +17,7 @@ from qagent.historical_evidence.models import (
     HistoricalIndexCoverageStats,
     HistoricalInstrumentProfile,
     HistoricalInstrumentEvidenceStats,
+    normalize_historical_security_type,
 )
 from qagent.market.universes import UniverseCreate, UniverseRecord, normalize_symbols
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
@@ -520,7 +521,8 @@ class QagentRepository:
         records: list[dict[str, object]] = []
         for snapshot_date in sorted(set(snapshot_dates)):
             for profile in profiles:
-                if profile.security_type not in {"1", "5"}:
+                asset_type = normalize_historical_security_type(profile.security_type)
+                if asset_type is None:
                     continue
                 if profile.listing_date is not None and profile.listing_date > snapshot_date:
                     continue
@@ -536,9 +538,7 @@ class QagentRepository:
                         "instrument_id": profile.instrument_id,
                         "symbol": symbol,
                         "name": profile.name or symbol,
-                        "asset_type": (
-                            "stock" if profile.security_type == "1" else "etf"
-                        ),
+                        "asset_type": asset_type,
                         "exchange": (
                             "SH" if symbol.startswith(("5", "6", "9")) else "SZ"
                         ),

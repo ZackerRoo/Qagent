@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -15,6 +16,7 @@ from qagent.historical_evidence.models import (
     HistoricalInventoryManifest,
     HistoricalInstrumentProfile,
     HistoricalTradabilityPoint,
+    normalize_and_validate_historical_profile,
 )
 from qagent.market.calendars import trading_sessions_in_range
 from qagent.providers.baostock_session import serialized_baostock_session
@@ -36,7 +38,7 @@ REQUIRED_BENCHMARK_IDS = (
 )
 BAOSTOCK_INVENTORY_TYPES = {"1": "stock", "5": "etf"}
 BAOSTOCK_NON_INVENTORY_TYPES = {"2", "3", "4"}
-BAOSTOCK_LISTING_STATUSES = {"0": "delisted", "1": "listed"}
+BAOSTOCK_LISTING_STATUSES = {"0": "delisted", "1": "active"}
 
 
 class HistoricalEvidenceProvider(Protocol):
@@ -167,7 +169,7 @@ class BaoStockHistoricalEvidenceProvider:
                 self.last_errors.append(
                     f"historical inventory {instrument_id}: unknown delisting date"
                 )
-            profiles.append(
+            profile, profile_errors = normalize_and_validate_historical_profile(
                 HistoricalInstrumentProfile(
                     instrument_id=instrument_id,
                     name=_text(row.get("code_name")),
@@ -177,8 +179,14 @@ class BaoStockHistoricalEvidenceProvider:
                     security_type=BAOSTOCK_INVENTORY_TYPES[raw_security_type],
                     listing_status=listing_status,
                     provider="baostock",
-                )
+                ),
+                effective_through,
             )
+            self.last_errors.extend(
+                f"historical inventory {error}" for error in profile_errors
+            )
+            if not profile_errors:
+                profiles.append(profile)
 
         if expected_count == 0:
             self.last_errors.append("historical inventory: empty provider response")
@@ -215,9 +223,18 @@ class BaoStockHistoricalEvidenceProvider:
         start: date,
         end: date,
     ) -> dict[str, Any]:
-        del ids
+        normalized_ids = list(dict.fromkeys(item.strip().upper() for item in ids))
+        unsupported = [
+            index_id
+            for index_id in normalized_ids
+            if index_id not in REQUIRED_BENCHMARK_IDS
+        ]
+        if unsupported:
+            raise ValueError(
+                "unsupported benchmark ID: " + ", ".join(unsupported)
+            )
         series: dict[str, Any] = {}
-        for index_id in REQUIRED_BENCHMARK_IDS:
+        for index_id in normalized_ids:
             try:
                 series[index_id] = self.benchmark_provider.get_daily_bars(
                     [index_id], start, end
@@ -592,9 +609,10 @@ def _to_baostock_code(instrument_id: str) -> str:
 
 def _from_baostock_code(value: object) -> str | None:
     text = _text(value)
-    if not text or "." not in text:
+    if not text:
         return None
-    return f"CN:{text.split('.', 1)[1]}"
+    match = re.fullmatch(r"(?:sh|sz|bj)\.(\d{6})", text.lower())
+    return f"CN:{match.group(1)}" if match is not None else None
 
 
 def _date(value: object) -> date | None:

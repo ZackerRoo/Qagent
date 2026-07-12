@@ -21,6 +21,7 @@ from qagent.historical_evidence.models import (
     HistoricalReplayBar,
     HistoricalTradabilityPoint,
     HistoricalUniverseManifest,
+    normalize_and_validate_historical_profile,
 )
 from qagent.storage.tables import (
     FundamentalSnapshotRow,
@@ -389,6 +390,15 @@ class ReplayEvidenceRepository:
         if _normalize_provider(manifest.provider_mode) != self.provider_mode:
             raise ValueError("lifecycle manifest provider does not match repository")
         identity_errors: list[str] = []
+        normalized_profiles: list[HistoricalInstrumentProfile] = []
+        for item in profiles:
+            normalized, errors = normalize_and_validate_historical_profile(
+                item,
+                manifest.effective_through,
+            )
+            identity_errors.extend(errors)
+            if not errors:
+                normalized_profiles.append(normalized)
         records = [
             {
                 "provider_mode": self.provider_mode,
@@ -405,19 +415,8 @@ class ReplayEvidenceRepository:
                 "source_provider": _normalize_provider(item.provider),
                 "fetched_at": manifest.fetched_at,
             }
-            for item in profiles
+            for item in normalized_profiles
         ]
-        for item in profiles:
-            if not item.instrument_id.strip():
-                identity_errors.append("instrument_id is missing")
-            if item.listing_date is None:
-                identity_errors.append(f"{item.instrument_id}: listing_date is missing")
-            if not item.security_type or not item.security_type.strip():
-                identity_errors.append(f"{item.instrument_id}: security_type is missing")
-            if not item.listing_status or not item.listing_status.strip():
-                identity_errors.append(f"{item.instrument_id}: listing_status is missing")
-            if not item.provider.strip():
-                identity_errors.append(f"{item.instrument_id}: source provider is missing")
         with self._immediate_session() as session:
             write_revision, is_retry = self._prepare_source_write(
                 session, manifest.source_revision

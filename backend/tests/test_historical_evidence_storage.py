@@ -115,3 +115,45 @@ def test_repository_persists_and_summarizes_historical_evidence(tmp_path):
         date(2026, 1, 1),
         date(2026, 1, 9),
     )["CN:000001"] == (2, date(2026, 1, 1), date(2026, 1, 9))
+
+
+def test_historical_universe_snapshots_accept_canonical_asset_types(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'canonical-historical-universe.db'}"
+    engine = create_db_engine(database_url)
+    Base.metadata.create_all(engine)
+    repo = QagentRepository(create_session_factory(database_url))
+    profiles = [
+        HistoricalInstrumentProfile(
+            instrument_id="CN:000001",
+            name="平安银行",
+            snapshot_date=date(2026, 1, 9),
+            listing_date=date(1991, 4, 3),
+            security_type="stock",
+            listing_status="active",
+            provider="baostock",
+        ),
+        HistoricalInstrumentProfile(
+            instrument_id="CN:510300",
+            name="沪深300ETF",
+            snapshot_date=date(2026, 1, 9),
+            listing_date=date(2012, 5, 28),
+            security_type="etf",
+            listing_status="active",
+            provider="baostock",
+        ),
+    ]
+
+    inserted = repo.upsert_historical_universe_snapshots(
+        profiles,
+        [date(2026, 1, 9)],
+    )
+
+    assert inserted == 2
+    assert repo.tradable_universe_snapshot_stats(
+        ["CN:000001", "CN:510300"],
+        date(2026, 1, 9),
+        date(2026, 1, 9),
+    ) == {
+        "CN:000001": (1, date(2026, 1, 9), date(2026, 1, 9)),
+        "CN:510300": (1, date(2026, 1, 9), date(2026, 1, 9)),
+    }

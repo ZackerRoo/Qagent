@@ -1624,14 +1624,14 @@ def test_lifecycle_security_type_is_normalized_before_storage(storage):
     session_factory, _, _, make_repo = storage
     source = make_repo()
     source.upsert_lifecycle_inventory(
-        [_profile("CN:000001", security_type="  ETF  ")],
+        [_profile("CN:510300", security_type="  ETF  ")],
         _lifecycle_manifest("free", 1, 1),
     )
 
     with session_factory() as session:
         stored = session.scalar(select(HistoricalInstrumentProfileRow))
     assert stored is not None
-    assert stored.security_type == "ETF"
+    assert stored.security_type == "etf"
 
 
 def test_legacy_derived_universe_rows_receive_explicit_owner(tmp_path):

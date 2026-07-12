@@ -1,3 +1,4 @@
+import re
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal, Self
@@ -23,6 +24,116 @@ class HistoricalInstrumentProfile(BaseModel):
     security_type: str | None = None
     listing_status: str | None = None
     provider: str
+
+
+CANONICAL_HISTORICAL_SECURITY_TYPES = frozenset({"stock", "etf"})
+CANONICAL_HISTORICAL_LISTING_STATUSES = frozenset({"active", "delisted"})
+_SECURITY_TYPE_ALIASES = {
+    "1": "stock",
+    "5": "etf",
+    "stock": "stock",
+    "etf": "etf",
+}
+_LISTING_STATUS_ALIASES = {
+    "0": "delisted",
+    "1": "active",
+    "active": "active",
+    "listed": "active",
+    "delisted": "delisted",
+}
+_STOCK_SYMBOL_PREFIXES = (
+    "000",
+    "001",
+    "002",
+    "003",
+    "300",
+    "301",
+    "600",
+    "601",
+    "603",
+    "605",
+    "688",
+    "4",
+    "8",
+    "920",
+)
+_ETF_SYMBOL_PREFIXES = ("15", "16", "51", "52", "56", "58")
+
+
+def normalize_historical_security_type(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return _SECURITY_TYPE_ALIASES.get(value.strip().lower())
+
+
+def normalize_historical_listing_status(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return _LISTING_STATUS_ALIASES.get(value.strip().lower())
+
+
+def normalize_and_validate_historical_profile(
+    profile: HistoricalInstrumentProfile,
+    effective_through: date,
+) -> tuple[HistoricalInstrumentProfile, list[str]]:
+    security_type = normalize_historical_security_type(profile.security_type)
+    listing_status = normalize_historical_listing_status(profile.listing_status)
+    normalized = profile.model_copy(
+        update={
+            "security_type": security_type,
+            "listing_status": listing_status,
+        }
+    )
+    errors: list[str] = []
+    instrument_id = profile.instrument_id.strip()
+    match = re.fullmatch(r"CN:(\d{6})", instrument_id)
+    if match is None:
+        errors.append(f"{profile.instrument_id}: instrument_id is not canonical CN:######")
+    if security_type not in CANONICAL_HISTORICAL_SECURITY_TYPES:
+        errors.append(
+            f"{profile.instrument_id}: security_type is not canonical stock/etf"
+        )
+    elif match is not None:
+        symbol = match.group(1)
+        prefixes = (
+            _STOCK_SYMBOL_PREFIXES
+            if security_type == "stock"
+            else _ETF_SYMBOL_PREFIXES
+        )
+        if not symbol.startswith(prefixes):
+            errors.append(
+                f"{profile.instrument_id}: security_type {security_type} "
+                "does not match instrument_id"
+            )
+    if listing_status not in CANONICAL_HISTORICAL_LISTING_STATUSES:
+        errors.append(
+            f"{profile.instrument_id}: listing_status is not canonical active/delisted"
+        )
+    if profile.listing_date is None:
+        errors.append(f"{profile.instrument_id}: listing_date is missing")
+    elif profile.listing_date > effective_through:
+        errors.append(
+            f"{profile.instrument_id}: listing_date is after effective_through"
+        )
+    if listing_status == "delisted" and profile.delisting_date is None:
+        errors.append(f"{profile.instrument_id}: delisting_date is required for delisted")
+    if (
+        profile.listing_date is not None
+        and profile.delisting_date is not None
+        and profile.delisting_date < profile.listing_date
+    ):
+        errors.append(f"{profile.instrument_id}: delisting_date is before listing_date")
+    if (
+        listing_status == "delisted"
+        and profile.delisting_date is not None
+        and profile.delisting_date > effective_through
+    ):
+        errors.append(
+            f"{profile.instrument_id}: delisting_date is after effective_through"
+        )
+    if not profile.provider.strip():
+        errors.append(f"{profile.instrument_id}: source provider is missing")
+    return normalized, errors
 
 
 class HistoricalInventoryManifest(BaseModel):
