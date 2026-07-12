@@ -5,6 +5,7 @@ from pathlib import Path
 
 from qagent.backtesting.engine import run_historical_backtest
 from qagent.backtesting.a_share_rules import BrokerFeeRequest
+from qagent.backtesting.walk_forward import run_full_market_walk_forward_selection
 from qagent.briefing.daily import build_daily_brief
 from qagent.briefing.export import render_daily_brief_markdown
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
@@ -24,6 +25,7 @@ from qagent.providers.factory import build_market_data_provider
 from qagent.providers.status import build_provider_status
 from qagent.storage.repository import QagentRepository
 from qagent.storage.market_cache import MarketDataCacheRepository
+from qagent.storage.replay_evidence import ReplayEvidenceRepository
 from qagent.strategy_data.providers import EmptyStrategyDataProvider, build_strategy_data_provider
 
 
@@ -73,6 +75,14 @@ def main(argv: list[str] | None = None) -> int:
     history_parser.add_argument(
         "--minimum-commission", type=Decimal, default=Decimal("5")
     )
+    walk_parser = subparsers.add_parser("walk-forward")
+    walk_parser.add_argument("--provider", default="free", choices=["free"])
+    walk_parser.add_argument("--start", type=date.fromisoformat, required=True)
+    walk_parser.add_argument("--end", type=date.fromisoformat, required=True)
+    walk_parser.add_argument("--step-sessions", type=int, default=5)
+    walk_parser.add_argument("--lookback-days", type=int, default=400)
+    walk_parser.add_argument("--run-id", required=True)
+    walk_parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args(argv)
 
     if args.command == "daily-brief":
@@ -83,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_all_command(args)
     if args.command == "backfill-history":
         return _backfill_history_command(args)
+    if args.command == "walk-forward":
+        return _walk_forward_command(args)
 
     result = run_daily_scan(DEFAULT_DEV_UNIVERSE, build_market_data_provider("fixture"))
     for card in result.cards:
@@ -287,6 +299,35 @@ def _backfill_history_command(args: argparse.Namespace) -> int:
         f"missing={summary.missing_instruments}"
     )
     return 0 if result.job.status in {"succeeded", "succeeded_with_errors"} else 1
+
+
+def _walk_forward_command(args: argparse.Namespace) -> int:
+    initialize_database()
+    repository = ReplayEvidenceRepository(
+        create_session_factory(),
+        args.provider,
+    )
+    result = run_full_market_walk_forward_selection(
+        repository,
+        owner_run_id=args.run_id,
+        start=args.start,
+        end=args.end,
+        rebalance_step_sessions=args.step_sessions,
+        lookback_days=args.lookback_days,
+    )
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+    print(
+        f"walk-forward revision={result.dataset_revision} "
+        f"snapshots={len(result.snapshots)} "
+        f"top5_trades={result.top_5_portfolio.summary.trade_count} "
+        f"top5_return={result.top_5_portfolio.summary.total_return_pct:.2f}% "
+        f"top10_trades={result.top_10_portfolio.summary.trade_count} "
+        f"top10_return={result.top_10_portfolio.summary.total_return_pct:.2f}% "
+        f"digest={result.reproducibility_digest}"
+    )
+    return 0
 
 
 def _parse_symbols(symbols: str | None, default_universe: list[str]) -> list[str]:

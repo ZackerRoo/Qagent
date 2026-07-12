@@ -88,6 +88,48 @@ Operational rules:
 
 Start with a small symbol set and inspect the coverage manifest before scaling. Free upstream sources can disconnect or rate-limit; failed symbols stay visible in the job and can be retried without deleting successful rows.
 
+For the checked validation window, run a provider-owned full A-share inventory backfill
+and export its manifest:
+
+```bash
+.venv/bin/python -m qagent.cli backfill-history \
+  --provider free \
+  --scope full-a-share \
+  --start 2023-01-03 \
+  --end 2025-12-31 \
+  --batch-size 100 \
+  --commission-bps 3 \
+  --minimum-commission 5 \
+  --manifest-output ../data/a-share-history-manifest.json
+```
+
+Resume an interrupted job with `--resume <job_id>`. Full scope is resolved from the
+historical BaoStock lifecycle inventory, not today's catalog. The extended phases are
+`inventory`, `trading_rules`, `corporate_actions`, `terminal_settlements`,
+`replay_prices`, `benchmark_prices`, `fundamentals`, `historical_evidence`, and
+`replay_coverage`. Corporate-action coverage explicitly distinguishes `ready`,
+`ready_none`, `partial`, and `unsupported`.
+
+After the manifest is acceptable, run the manual full-market walk-forward selection and
+Top 5/Top 10 portfolio simulation:
+
+```bash
+.venv/bin/python -m qagent.cli walk-forward \
+  --provider free \
+  --start 2023-01-03 \
+  --end 2025-12-31 \
+  --step-sessions 5 \
+  --lookback-days 400 \
+  --run-id manual-validation-v1 \
+  --output ../data/walk-forward-v1.json
+```
+
+The command leases one immutable dataset revision, rebuilds the lifecycle universe at
+each rebalance date, excludes missing tradability, suspension, and ST samples, and uses
+only point-in-time bars and fundamentals. It reports a reproducibility digest and uses
+the versioned A-share limit, lot, T+0/T+1, commission, stamp-duty, and transfer-fee rules
+for simulated fills.
+
 ## Daily Brief
 
 The Brief page and `/api/daily-brief` provide the main daily research readout:
