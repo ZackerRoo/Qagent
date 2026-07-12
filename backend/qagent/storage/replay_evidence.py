@@ -179,6 +179,7 @@ class ReplayEvidenceRepository:
         *,
         revision: int | None = None,
     ) -> int:
+        now = self._now()
         records = [
             {
                 "provider_mode": self.provider_mode,
@@ -196,8 +197,8 @@ class ReplayEvidenceRepository:
                 "forward_pe": _decimal_or_none(item.forward_pe),
                 "peg_ratio": _decimal_or_none(item.peg_ratio),
                 "price_to_sales": _decimal_or_none(item.price_to_sales),
-                "cached_at": self._now(),
-                "updated_at": self._now(),
+                "cached_at": now,
+                "updated_at": now,
             }
             for item in snapshots
         ]
@@ -348,7 +349,11 @@ class ReplayEvidenceRepository:
                 "snapshot_date": item.snapshot_date,
                 "listing_date": item.listing_date,
                 "delisting_date": item.delisting_date,
-                "security_type": item.security_type,
+                "security_type": (
+                    item.security_type.strip()
+                    if item.security_type is not None
+                    else None
+                ),
                 "listing_status": item.listing_status,
                 "source_provider": _normalize_provider(item.provider),
                 "fetched_at": manifest.fetched_at,
@@ -647,7 +652,9 @@ class ReplayEvidenceRepository:
                     + ", ".join(missing_listing_dates[:10])
                 )
             missing_security_types = [
-                item.instrument_id for item in inventory if item.security_type is None
+                item.instrument_id
+                for item in inventory
+                if not item.security_type or not item.security_type.strip()
             ]
             if missing_security_types:
                 raise ReplayEvidenceUnavailable(

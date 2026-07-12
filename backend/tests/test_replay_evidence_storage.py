@@ -26,8 +26,10 @@ from qagent.storage.replay_evidence import (
 )
 from qagent.storage.repository import QagentRepository
 from qagent.storage.tables import (
+    FundamentalSnapshotRow,
     HistoricalCorporateActionRow,
     HistoricalDataRevisionRow,
+    HistoricalInstrumentProfileRow,
     HistoricalLifecycleManifestRow,
     HistoricalReplayBarRow,
     HistoricalReplayUniverseMemberRow,
@@ -263,6 +265,60 @@ def test_same_revision_identical_generic_payload_is_idempotent(storage):
     with session_factory() as session:
         retried_fetched_at = session.scalar(select(HistoricalTradabilityRow.fetched_at))
     assert retried_fetched_at == first_fetched_at
+
+
+def test_identical_fundamental_retry_batch_is_idempotent(storage):
+    session_factory, clock, _, _ = storage
+
+    def advancing_clock():
+        value = clock()
+        clock.advance(timedelta(microseconds=1))
+        return value
+
+    repo = ReplayEvidenceRepository(session_factory, clock=advancing_clock)
+    snapshot = FundamentalSnapshot(
+        instrument_id="CN:000001",
+        as_of_date=date(2025, 3, 31),
+        pe_ratio=Decimal("8.5"),
+        provider="fixture",
+    )
+    repo.upsert_fundamentals([snapshot], revision=1)
+    with session_factory() as session:
+        first = session.scalar(select(FundamentalSnapshotRow))
+        assert first is not None
+        first_cached_at = first.cached_at
+        first_updated_at = first.updated_at
+    clock.advance(timedelta(minutes=1))
+
+    assert repo.upsert_fundamentals([snapshot, snapshot], revision=1) == 1
+
+    with session_factory() as session:
+        retried = session.scalar(select(FundamentalSnapshotRow))
+        assert retried is not None
+        assert retried.pe_ratio == Decimal("8.500000")
+        assert retried.cached_at == first_cached_at
+        assert retried.updated_at == first_updated_at
+
+
+def test_conflicting_fundamental_retry_batch_is_rejected(storage):
+    session_factory, _, _, make_repo = storage
+    repo = make_repo()
+    first = FundamentalSnapshot(
+        instrument_id="CN:000001",
+        as_of_date=date(2025, 3, 31),
+        pe_ratio=Decimal("8.5"),
+        provider="fixture",
+    )
+    conflicting = first.model_copy(update={"pe_ratio": Decimal("9.5")})
+    repo.upsert_fundamentals([first], revision=1)
+
+    with pytest.raises(ValueError, match="immutable"):
+        repo.upsert_fundamentals([first, conflicting], revision=1)
+
+    with session_factory() as session:
+        stored = session.scalar(select(FundamentalSnapshotRow))
+        assert stored is not None
+        assert stored.pe_ratio == Decimal("8.500000")
 
 
 def test_fundamental_as_of_never_returns_future_snapshot(storage):
@@ -832,6 +888,35 @@ def test_materialize_universe_rejects_unknown_security_type(storage):
 
     with pytest.raises(ReplayEvidenceUnavailable, match="security_type"):
         owner.materialize_universe(date(2025, 6, 30), revision=1)
+
+
+@pytest.mark.parametrize("security_type", ["", "   "])
+def test_materialize_universe_rejects_blank_security_type(storage, security_type):
+    _, _, _, make_repo = storage
+    source = make_repo()
+    source.upsert_lifecycle_inventory(
+        [_profile("CN:000001", security_type=security_type)],
+        _lifecycle_manifest("free", 1, 1),
+    )
+    owner = make_repo(owner_run_id="run-a")
+    owner.acquire_dataset_lease()
+
+    with pytest.raises(ReplayEvidenceUnavailable, match="security_type"):
+        owner.materialize_universe(date(2025, 6, 30), revision=1)
+
+
+def test_lifecycle_security_type_is_normalized_before_storage(storage):
+    session_factory, _, _, make_repo = storage
+    source = make_repo()
+    source.upsert_lifecycle_inventory(
+        [_profile("CN:000001", security_type="  ETF  ")],
+        _lifecycle_manifest("free", 1, 1),
+    )
+
+    with session_factory() as session:
+        stored = session.scalar(select(HistoricalInstrumentProfileRow))
+    assert stored is not None
+    assert stored.security_type == "ETF"
 
 
 def test_legacy_derived_universe_rows_receive_explicit_owner(tmp_path):
