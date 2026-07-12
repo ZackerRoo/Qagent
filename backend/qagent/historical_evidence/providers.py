@@ -24,7 +24,10 @@ from qagent.historical_evidence.models import (
     normalize_and_validate_historical_profile,
 )
 from qagent.market.calendars import trading_sessions_in_range
-from qagent.providers.baostock_session import serialized_baostock_session
+from qagent.providers.baostock_session import (
+    baostock_call_deadline,
+    serialized_baostock_session,
+)
 from qagent.providers.free_cn import FreeCnMarketDataProvider, _bounded_network_calls
 from qagent.strategy_data.models import FundamentalSnapshot
 from qagent.strategy_data.providers import BaseStrategyDataProvider
@@ -567,14 +570,20 @@ class BaoStockHistoricalEvidenceProvider:
             return []
         fields = list(getattr(result, "fields", []) or [])
         rows: list[dict[str, str]] = []
-        with _bounded_network_calls(self.request_timeout_seconds):
+        with (
+            baostock_call_deadline(self.request_timeout_seconds),
+            _bounded_network_calls(self.request_timeout_seconds),
+        ):
             while result.next():
                 values = result.get_row_data()
                 rows.append(dict(zip(fields, values, strict=False)))
         return rows
 
     def _call(self, fn, *args, **kwargs):
-        with _bounded_network_calls(self.request_timeout_seconds):
+        with (
+            baostock_call_deadline(self.request_timeout_seconds),
+            _bounded_network_calls(self.request_timeout_seconds),
+        ):
             return fn(*args, **kwargs)
 
 
@@ -684,7 +693,10 @@ class BaoStockHistoricalFundamentalProvider(BaseStrategyDataProvider):
     def _rows(self, result) -> list[dict[str, str]]:
         fields = list(getattr(result, "fields", []) or [])
         rows: list[dict[str, str]] = []
-        with _bounded_network_calls(self.request_timeout_seconds):
+        with (
+            baostock_call_deadline(self.request_timeout_seconds),
+            _bounded_network_calls(self.request_timeout_seconds),
+        ):
             while result.next():
                 rows.append(
                     dict(zip(fields, result.get_row_data(), strict=False))
@@ -692,7 +704,10 @@ class BaoStockHistoricalFundamentalProvider(BaseStrategyDataProvider):
         return rows
 
     def _call(self, fn, *args, **kwargs):
-        with _bounded_network_calls(self.request_timeout_seconds):
+        with (
+            baostock_call_deadline(self.request_timeout_seconds),
+            _bounded_network_calls(self.request_timeout_seconds),
+        ):
             return fn(*args, **kwargs)
 
 
