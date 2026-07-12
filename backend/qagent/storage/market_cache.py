@@ -20,7 +20,11 @@ BAR_COLUMNS = [
     "low",
     "close",
     "volume",
+    "turnover",
     "provider",
+    "adjusted_open",
+    "adjusted_high",
+    "adjusted_low",
     "adjusted_close",
     "adjustment_factor",
     "adjustment_type",
@@ -61,6 +65,10 @@ class MarketDataCacheRepository:
                     "low": Decimal(str(row["low"])),
                     "close": Decimal(str(row["close"])),
                     "volume": Decimal(str(row["volume"])),
+                    "turnover": _decimal_or_none(row.get("turnover")),
+                    "adjusted_open": _decimal_or_none(row.get("adjusted_open")),
+                    "adjusted_high": _decimal_or_none(row.get("adjusted_high")),
+                    "adjusted_low": _decimal_or_none(row.get("adjusted_low")),
                     "adjusted_close": _decimal_or_none(row.get("adjusted_close")),
                     "adjustment_factor": _decimal_or_none(row.get("adjustment_factor")),
                     "adjustment_type": _text_or_none(row.get("adjustment_type")),
@@ -86,6 +94,10 @@ class MarketDataCacheRepository:
                     "low": excluded.low,
                     "close": excluded.close,
                     "volume": excluded.volume,
+                    "turnover": excluded.turnover,
+                    "adjusted_open": excluded.adjusted_open,
+                    "adjusted_high": excluded.adjusted_high,
+                    "adjusted_low": excluded.adjusted_low,
                     "adjusted_close": excluded.adjusted_close,
                     "adjustment_factor": excluded.adjustment_factor,
                     "adjustment_type": excluded.adjustment_type,
@@ -248,7 +260,11 @@ class MarketDataCacheRepository:
                     "low": row.low,
                     "close": row.close,
                     "volume": row.volume,
+                    "turnover": row.turnover,
                     "provider": row.source_provider,
+                    "adjusted_open": row.adjusted_open,
+                    "adjusted_high": row.adjusted_high,
+                    "adjusted_low": row.adjusted_low,
                     "adjusted_close": row.adjusted_close,
                     "adjustment_factor": row.adjustment_factor,
                     "adjustment_type": row.adjustment_type,
@@ -297,7 +313,11 @@ class MarketDataCacheRepository:
                     "low": row.low,
                     "close": row.close,
                     "volume": row.volume,
+                    "turnover": row.turnover,
                     "provider": row.source_provider,
+                    "adjusted_open": row.adjusted_open,
+                    "adjusted_high": row.adjusted_high,
+                    "adjusted_low": row.adjusted_low,
                     "adjusted_close": row.adjusted_close,
                     "adjustment_factor": row.adjustment_factor,
                     "adjustment_type": row.adjustment_type,
@@ -371,7 +391,14 @@ def _normalize_bars(bars: pd.DataFrame) -> pd.DataFrame:
     normalized["trade_date"] = pd.to_datetime(normalized["trade_date"]).dt.date
     for column in ["open", "high", "low", "close"]:
         normalized[column] = _finite_numeric(normalized[column])
-    for column in ["adjusted_close", "adjustment_factor"]:
+    for column in [
+        "turnover",
+        "adjusted_open",
+        "adjusted_high",
+        "adjusted_low",
+        "adjusted_close",
+        "adjustment_factor",
+    ]:
         if column not in normalized.columns:
             normalized[column] = None
         normalized[column] = _finite_numeric(normalized[column])

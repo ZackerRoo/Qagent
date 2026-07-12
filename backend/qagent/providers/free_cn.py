@@ -23,7 +23,11 @@ BAR_COLUMNS = [
     "low",
     "close",
     "volume",
+    "turnover",
     "provider",
+    "adjusted_open",
+    "adjusted_high",
+    "adjusted_low",
     "adjusted_close",
     "adjustment_factor",
     "adjustment_type",
@@ -177,39 +181,28 @@ class FreeCnMarketDataProvider:
     ) -> pd.DataFrame:
         with _bounded_network_calls(request_timeout_seconds):
             if _is_etf_symbol(symbol):
-                raw = ak.fund_etf_hist_em(
-                    symbol=symbol,
-                    period="daily",
-                    start_date=start.strftime("%Y%m%d"),
-                    end_date=end.strftime("%Y%m%d"),
-                    adjust="qfq",
-                )
-                provider_name = "akshare_etf_qfq"
+                loader = ak.fund_etf_hist_em
+                provider_name = "akshare_etf_paired"
             else:
-                raw = ak.stock_zh_a_hist(
+                loader = ak.stock_zh_a_hist
+                provider_name = "akshare_stock_paired"
+            raw = loader(
+                symbol=symbol,
+                period="daily",
+                start_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"),
+                adjust="",
+            )
+            adjusted = loader(
                     symbol=symbol,
                     period="daily",
                     start_date=start.strftime("%Y%m%d"),
                     end_date=end.strftime("%Y%m%d"),
                     adjust="qfq",
                 )
-                provider_name = "akshare_qfq"
         if raw.empty:
             return pd.DataFrame(columns=BAR_COLUMNS)
-        normalized = raw.rename(
-            columns={
-                "日期": "trade_date",
-                "开盘": "open",
-                "最高": "high",
-                "最低": "low",
-                "收盘": "close",
-                "成交量": "volume",
-            }
-        ).copy()
-        normalized["provider"] = provider_name
-        if provider_name.endswith("qfq"):
-            normalized = _mark_adjusted(normalized, "qfq")
-        return _coerce_bar_types(normalized)
+        return _merge_raw_adjusted_frames(raw, adjusted, provider_name)
 
     @staticmethod
     def _load_akshare_index(
@@ -235,9 +228,14 @@ class FreeCnMarketDataProvider:
                 "最低": "low",
                 "收盘": "close",
                 "成交量": "volume",
+                "成交额": "turnover",
             }
         ).copy()
         normalized["provider"] = "akshare_index"
+        for column in ("open", "high", "low", "close"):
+            normalized[f"adjusted_{column}"] = normalized[column]
+        normalized["adjustment_factor"] = 1.0
+        normalized["adjustment_type"] = "none"
         return _coerce_bar_types(normalized)
 
     @staticmethod
@@ -253,29 +251,33 @@ class FreeCnMarketDataProvider:
             try:
                 if login.error_code != "0":
                     raise RuntimeError(login.error_msg)
-                with _bounded_network_calls(request_timeout_seconds):
-                    result = bs.query_history_k_data_plus(
-                        _to_baostock_symbol(symbol),
-                        "date,open,high,low,close,volume",
-                        start_date=start.isoformat(),
-                        end_date=end.isoformat(),
-                        frequency="d",
-                        adjustflag="2",
-                    )
-                if result.error_code != "0":
-                    raise RuntimeError(result.error_msg)
-                rows: list[list[str]] = []
-                while result.next():
-                    rows.append(result.get_row_data())
-                raw = pd.DataFrame(rows, columns=result.fields)
+                frames = []
+                for adjustflag in ("3", "2"):
+                    with _bounded_network_calls(request_timeout_seconds):
+                        result = bs.query_history_k_data_plus(
+                            _to_baostock_symbol(symbol),
+                            "date,open,high,low,close,volume,amount",
+                            start_date=start.isoformat(),
+                            end_date=end.isoformat(),
+                            frequency="d",
+                            adjustflag=adjustflag,
+                        )
+                    if result.error_code != "0":
+                        raise RuntimeError(result.error_msg)
+                    rows: list[list[str]] = []
+                    while result.next():
+                        rows.append(result.get_row_data())
+                    frames.append(pd.DataFrame(rows, columns=result.fields))
             finally:
                 bs.logout()
+        raw, adjusted = frames
         if raw.empty:
             return pd.DataFrame(columns=BAR_COLUMNS)
-        normalized = raw.rename(columns={"date": "trade_date"}).copy()
-        normalized["provider"] = "baostock_qfq"
-        normalized = _mark_adjusted(normalized, "qfq")
-        return _coerce_bar_types(normalized)
+        return _merge_raw_adjusted_frames(
+            raw.rename(columns={"date": "trade_date", "amount": "turnover"}),
+            adjusted.rename(columns={"date": "trade_date"}),
+            "baostock_paired",
+        )
 
     @staticmethod
     def _load_yfinance_etf(
@@ -290,7 +292,7 @@ class FreeCnMarketDataProvider:
             start=start.isoformat(),
             end=(end + timedelta(days=1)).isoformat(),
             progress=False,
-            auto_adjust=True,
+            auto_adjust=False,
             timeout=request_timeout_seconds,
         )
         if raw.empty:
@@ -307,11 +309,20 @@ class FreeCnMarketDataProvider:
                 "High": "high",
                 "Low": "low",
                 "Close": "close",
+                "Adj Close": "adjusted_close",
                 "Volume": "volume",
             }
         )
-        normalized["provider"] = "yfinance_cn_etf_adjusted"
-        normalized = _mark_adjusted(normalized, "adjusted")
+        normalized["provider"] = "yfinance_cn_etf_paired"
+        close = _finite_numeric(normalized["close"])
+        adjusted_close = _finite_numeric(normalized["adjusted_close"])
+        factor = adjusted_close.div(close.where(close.ne(0)))
+        normalized["adjustment_factor"] = factor
+        for column in ("open", "high", "low"):
+            normalized[f"adjusted_{column}"] = _finite_numeric(
+                normalized[column]
+            ).mul(factor)
+        normalized["adjustment_type"] = "qfq"
         return _coerce_bar_types(normalized)
 
     @staticmethod
@@ -395,7 +406,14 @@ def _coerce_bar_types(frame: pd.DataFrame) -> pd.DataFrame:
     normalized = frame.copy()
     for column in ["open", "high", "low", "close", "volume"]:
         normalized[column] = _finite_numeric(normalized[column])
-    for column in ["adjusted_close", "adjustment_factor"]:
+    for column in [
+        "turnover",
+        "adjusted_open",
+        "adjusted_high",
+        "adjusted_low",
+        "adjusted_close",
+        "adjustment_factor",
+    ]:
         if column in normalized.columns:
             normalized[column] = _finite_numeric(normalized[column])
     normalized["volume"] = normalized["volume"].fillna(0)
@@ -405,13 +423,66 @@ def _coerce_bar_types(frame: pd.DataFrame) -> pd.DataFrame:
     return normalized.dropna(subset=["open", "high", "low", "close"])
 
 
-def _mark_adjusted(frame: pd.DataFrame, adjustment_type: str) -> pd.DataFrame:
-    normalized = frame.copy()
-    close = _finite_numeric(normalized["close"])
-    normalized["adjusted_close"] = close
-    normalized["adjustment_factor"] = 1.0
-    normalized["adjustment_type"] = adjustment_type
-    return normalized
+def _merge_raw_adjusted_frames(
+    raw: pd.DataFrame,
+    adjusted: pd.DataFrame,
+    provider_name: str,
+) -> pd.DataFrame:
+    rename = {
+        "日期": "trade_date",
+        "开盘": "open",
+        "最高": "high",
+        "最低": "low",
+        "收盘": "close",
+        "成交量": "volume",
+        "成交额": "turnover",
+    }
+    raw_frame = raw.rename(columns=rename).copy()
+    adjusted_frame = adjusted.rename(columns=rename).copy()
+    raw_frame["trade_date"] = pd.to_datetime(
+        raw_frame["trade_date"], errors="coerce"
+    ).dt.date
+    if "trade_date" not in adjusted_frame.columns:
+        adjusted_frame["trade_date"] = pd.Series(dtype=object)
+    adjusted_frame["trade_date"] = pd.to_datetime(
+        adjusted_frame["trade_date"], errors="coerce"
+    ).dt.date
+    adjusted_source_columns = ["trade_date", "open", "high", "low", "close"]
+    if all(column in adjusted_frame.columns for column in adjusted_source_columns):
+        adjusted_columns = adjusted_frame[adjusted_source_columns].rename(
+            columns={
+                "open": "adjusted_open",
+                "high": "adjusted_high",
+                "low": "adjusted_low",
+                "close": "adjusted_close",
+            }
+        )
+    else:
+        adjusted_columns = pd.DataFrame(
+            columns=[
+                "trade_date",
+                "adjusted_open",
+                "adjusted_high",
+                "adjusted_low",
+                "adjusted_close",
+            ]
+        )
+    merged = raw_frame.merge(
+        adjusted_columns,
+        on="trade_date",
+        how="left",
+        validate="one_to_one",
+    )
+    raw_close = _finite_numeric(merged["close"])
+    adjusted_close = _finite_numeric(merged["adjusted_close"])
+    merged["adjustment_factor"] = adjusted_close.div(
+        raw_close.where(raw_close.ne(0))
+    )
+    merged["adjustment_type"] = merged["adjusted_close"].map(
+        lambda value: "qfq" if pd.notna(value) else None
+    )
+    merged["provider"] = provider_name
+    return _coerce_bar_types(merged)
 
 
 def _coerce_minute_bar_types(frame: pd.DataFrame) -> pd.DataFrame:

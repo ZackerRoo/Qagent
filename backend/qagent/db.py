@@ -147,6 +147,10 @@ def _apply_additive_migrations(engine: Engine) -> None:
             inspector,
             "market_bar_cache",
             {
+                "turnover": "NUMERIC(28, 4)",
+                "adjusted_open": "NUMERIC(18, 6)",
+                "adjusted_high": "NUMERIC(18, 6)",
+                "adjusted_low": "NUMERIC(18, 6)",
                 "adjusted_close": "NUMERIC(18, 6)",
                 "adjustment_factor": "NUMERIC(20, 10)",
                 "adjustment_type": "VARCHAR(32)",

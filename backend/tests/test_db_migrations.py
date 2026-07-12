@@ -138,7 +138,15 @@ def test_initialize_database_adds_adjustment_columns_to_legacy_market_cache(tmp_
     migrated = initialize_database(database_url)
     columns = {column["name"] for column in inspect(migrated).get_columns("market_bar_cache")}
 
-    assert {"adjusted_close", "adjustment_factor", "adjustment_type"}.issubset(columns)
+    assert {
+        "turnover",
+        "adjusted_open",
+        "adjusted_high",
+        "adjusted_low",
+        "adjusted_close",
+        "adjustment_factor",
+        "adjustment_type",
+    }.issubset(columns)
     assert inspect(migrated).get_pk_constraint("tradable_universe_snapshots")[
         "constrained_columns"
     ] == ["as_of_date", "instrument_id"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from time import sleep
 
 import pandas as pd
@@ -9,16 +10,23 @@ from pydantic import BaseModel, Field
 from qagent.historical_evidence.models import (
     HistoricalEvidenceBundle,
     HistoricalIndexCoverageStats,
+    HistoricalLifecycleManifest,
+    HistoricalReplayBar,
     HistoricalTradabilityPoint,
 )
 from qagent.historical_evidence.providers import (
     INDEX_QUERIES,
+    REQUIRED_BENCHMARK_IDS,
     HistoricalEvidenceProvider,
     historical_snapshot_dates,
 )
 from qagent.market.calendars import trading_sessions_in_range
 from qagent.providers.base import MarketDataProvider
 from qagent.storage.market_cache import MarketDataCacheRepository
+from qagent.storage.replay_evidence import (
+    ReplayEvidenceRepository,
+    ReplayEvidenceUnavailable,
+)
 from qagent.storage.repository import HistoricalBackfillJobRecord, QagentRepository
 from qagent.strategy_data.providers import StrategyDataProvider
 
@@ -131,10 +139,14 @@ def run_historical_backfill(
         raise ValueError("resume job scope does not match requested backfill")
 
     repo.capture_tradable_universe_snapshot(universe_as_of or date.today())
+    replay_repo = ReplayEvidenceRepository(repo.session_factory, mode)
+    inventory_rows = 0
+    benchmark_rows = 0
+    replay_rows = 0
     repo.update_historical_backfill_job(
         job.job_id,
         status="running",
-        data_health={"backfill_phase": "price_bars"},
+        data_health={"backfill_phase": "inventory"},
     )
     processed = 0
     succeeded = 0
@@ -144,6 +156,43 @@ def run_historical_backfill(
     errors: list[str] = []
 
     try:
+        if historical_evidence_provider is not None and all(
+            hasattr(historical_evidence_provider, name)
+            for name in ("list_historical_instruments", "get_lifecycle_manifest")
+        ):
+            inventory_reused = False
+            current_revision = replay_repo.current_revision()
+            if current_revision > 0:
+                try:
+                    existing_inventory = replay_repo.lifecycle_inventory(
+                        current_revision
+                    )
+                    inventory_reused = bool(existing_inventory) and all(
+                        item.snapshot_date >= end for item in existing_inventory
+                    )
+                except ReplayEvidenceUnavailable:
+                    inventory_reused = False
+            if not inventory_reused:
+                profiles = historical_evidence_provider.list_historical_instruments(end)
+                provider_manifest = historical_evidence_provider.get_lifecycle_manifest()
+                inventory_revision = replay_repo.current_revision() + 1
+                inventory_rows = replay_repo.upsert_lifecycle_inventory(
+                    profiles,
+                    HistoricalLifecycleManifest(
+                        provider_mode=mode,
+                        source_revision=inventory_revision,
+                        status=provider_manifest.status,
+                        expected_count=provider_manifest.expected_count,
+                        stored_count=0,
+                        effective_through=provider_manifest.effective_through,
+                        error=provider_manifest.error,
+                        fetched_at=provider_manifest.fetched_at,
+                    ),
+                )
+                if provider_manifest.error:
+                    errors.append(provider_manifest.error)
+
+        _set_backfill_phase(repo, job.job_id, "replay_prices")
         for instrument_id in symbols:
             require_adjusted = _requires_adjustment(instrument_id)
             if cache.has_usable_coverage(
@@ -154,6 +203,13 @@ def run_historical_backfill(
                 require_adjusted=require_adjusted,
                 minimum_session_coverage=0.95,
             ):
+                cached_bars = cache.load_daily_bars(
+                    mode,
+                    [instrument_id],
+                    start,
+                    end,
+                )
+                replay_rows += _persist_replay_frame(replay_repo, cached_bars)
                 processed += 1
                 succeeded += 1
                 cache_reused += 1
@@ -176,6 +232,7 @@ def run_historical_backfill(
             )
             saved = cache.save_daily_bars(mode, bars)
             cache.record_coverage(mode, instrument_id, start, end, saved)
+            replay_rows += _persist_replay_frame(replay_repo, bars)
             rows_written += saved
             processed += 1
             if saved > 0:
@@ -193,6 +250,69 @@ def run_historical_backfill(
                 current_instrument=instrument_id,
                 errors=errors[-100:],
             )
+
+        if historical_evidence_provider is not None and hasattr(
+            historical_evidence_provider,
+            "get_benchmark_series",
+        ):
+            _set_backfill_phase(repo, job.job_id, "benchmark_prices")
+            benchmark_ids = [
+                benchmark_id
+                for benchmark_id in REQUIRED_BENCHMARK_IDS
+                if not cache.has_usable_coverage(
+                    mode,
+                    benchmark_id,
+                    start,
+                    end,
+                    require_adjusted=False,
+                    minimum_session_coverage=0.95,
+                )
+            ]
+            benchmark_series = (
+                historical_evidence_provider.get_benchmark_series(
+                    benchmark_ids,
+                    start,
+                    end,
+                )
+                if benchmark_ids
+                else {}
+            )
+            missing_benchmark_ids = [
+                item for item in benchmark_ids if item not in benchmark_series
+            ]
+            errors.extend(
+                f"{item}: no benchmark bars returned"
+                for item in missing_benchmark_ids
+            )
+            errors.extend(
+                str(error)
+                for error in getattr(historical_evidence_provider, "last_errors", [])
+                if str(error) not in errors
+            )
+            for benchmark_id, frame in benchmark_series.items():
+                if not isinstance(frame, pd.DataFrame) or frame.empty:
+                    errors.append(f"{benchmark_id}: no benchmark bars returned")
+                    continue
+                normalized = frame.copy()
+                if "instrument_id" not in normalized.columns:
+                    normalized["instrument_id"] = benchmark_id
+                saved = cache.save_daily_bars(mode, normalized)
+                cache.record_coverage(mode, benchmark_id, start, end, saved)
+                benchmark_rows += saved
+                replay_rows += _persist_replay_frame(replay_repo, normalized)
+            reused_benchmark_ids = [
+                item for item in REQUIRED_BENCHMARK_IDS if item not in benchmark_ids
+            ]
+            if reused_benchmark_ids:
+                replay_rows += _persist_replay_frame(
+                    replay_repo,
+                    cache.load_daily_bars(
+                        mode,
+                        reused_benchmark_ids,
+                        start,
+                        end,
+                    ),
+                )
 
         fundamental_rows = 0
         fundamental_cache_reused = 0
@@ -286,7 +406,7 @@ def run_historical_backfill(
             for key, value in evidence_counts.items():
                 evidence_data_health[f"historical_evidence_{key}"] = str(value)
 
-        _set_backfill_phase(repo, job.job_id, "coverage_manifest")
+        _set_backfill_phase(repo, job.job_id, "price_coverage")
         manifest = build_historical_coverage_manifest(
             repo=repo,
             cache=cache,
@@ -327,6 +447,9 @@ def run_historical_backfill(
             "backfill_phase": "complete",
             "backfill_cache_reused": str(cache_reused),
             "backfill_rows_written": str(rows_written),
+            "backfill_inventory_rows": str(inventory_rows),
+            "backfill_replay_rows": str(replay_rows),
+            "backfill_benchmark_rows": str(benchmark_rows),
             "backfill_fundamental_rows": str(fundamental_rows),
             "backfill_fundamental_cache_reused": str(
                 fundamental_cache_reused
@@ -449,6 +572,12 @@ def build_historical_coverage_manifest(
     sessions = trading_sessions_in_range(start, end)
     expected_sessions = len(sessions)
     bars = cache.load_daily_bars(mode, symbols, start, end)
+    benchmark_bars = cache.load_daily_bars(
+        mode,
+        list(REQUIRED_BENCHMARK_IDS),
+        start,
+        end,
+    )
     fundamentals = repo.fundamental_snapshot_stats(mode, symbols, end)
     universes = repo.tradable_universe_snapshot_stats(symbols, start, end)
     evidence = repo.historical_evidence_stats(mode, symbols, start, end)
@@ -567,6 +696,22 @@ def build_historical_coverage_manifest(
         index_evidence=index_evidence,
         expected_index_snapshots=expected_index_snapshots,
     )
+    benchmark_price_rows = len(benchmark_bars)
+    benchmark_price_ready = sum(
+        _ratio(
+            len(
+                set(
+                    benchmark_bars.loc[
+                        benchmark_bars["instrument_id"].eq(benchmark_id),
+                        "trade_date",
+                    ].tolist()
+                )
+            ),
+            expected_sessions,
+        )
+        >= 0.95
+        for benchmark_id in REQUIRED_BENCHMARK_IDS
+    )
     return HistoricalCoverageManifest(
         provider_mode=mode,
         start_date=start,
@@ -596,6 +741,13 @@ def build_historical_coverage_manifest(
             "historical_benchmark_ready": str(summary.benchmark_ready_snapshots),
             "historical_benchmark_failed": str(summary.benchmark_failed_snapshots),
             "historical_benchmark_coverage": f"{summary.benchmark_coverage_ratio:.4f}",
+            "historical_benchmark_price_rows": str(benchmark_price_rows),
+            "historical_benchmark_price_ready": (
+                f"{benchmark_price_ready}/{len(REQUIRED_BENCHMARK_IDS)}"
+            ),
+            "historical_benchmark_price_coverage": (
+                f"{benchmark_price_ready / len(REQUIRED_BENCHMARK_IDS):.4f}"
+            ),
         },
     )
 
@@ -706,6 +858,109 @@ def _asset_type(instrument_id: str, catalog_item) -> str:
 
 def _requires_adjustment(instrument_id: str) -> bool:
     return instrument_id.startswith("CN:") and not instrument_id.endswith(".IDX")
+
+
+def _persist_replay_frame(
+    repository: ReplayEvidenceRepository,
+    frame: pd.DataFrame,
+) -> int:
+    if frame.empty:
+        return 0
+    revision = repository.current_revision()
+    bars = _replay_bars_from_frame(frame, repository.provider_mode, revision + 1)
+    if not bars:
+        return 0
+    instrument_ids = sorted({item.instrument_id for item in bars})
+    start = min(item.trade_date for item in bars)
+    end = max(item.trade_date for item in bars)
+    existing = repository.replay_bars(instrument_ids, start, end, revision)
+    if _replay_bar_semantics(existing) == _replay_bar_semantics(bars):
+        return 0
+    repository.upsert_replay_bars(bars, revision=revision + 1)
+    return len(bars)
+
+
+def _replay_bars_from_frame(
+    frame: pd.DataFrame,
+    provider_mode: str,
+    revision: int,
+) -> list[HistoricalReplayBar]:
+    fetched_at = datetime.now(timezone.utc)
+    result: list[HistoricalReplayBar] = []
+    for row in frame.to_dict(orient="records"):
+        raw_open = _decimal_value(row.get("open"), scale=8)
+        raw_high = _decimal_value(row.get("high"), scale=8)
+        raw_low = _decimal_value(row.get("low"), scale=8)
+        raw_close = _decimal_value(row.get("close"), scale=8)
+        volume = _decimal_value(row.get("volume"), scale=4)
+        if None in (raw_open, raw_high, raw_low, raw_close, volume):
+            continue
+        adjusted_close = _decimal_value(row.get("adjusted_close"), scale=8)
+        factor = _decimal_value(row.get("adjustment_factor"), scale=12)
+        if factor is None and adjusted_close is not None and raw_close != 0:
+            factor = (adjusted_close / raw_close).quantize(Decimal("0.000000000001"))
+
+        def adjusted_price(name: str, raw_value: Decimal) -> Decimal | None:
+            explicit = _decimal_value(row.get(name), scale=8)
+            if explicit is not None:
+                return explicit
+            if factor is None or adjusted_close is None:
+                return None
+            return (raw_value * factor).quantize(Decimal("0.00000001"))
+
+        instrument_id = str(row.get("instrument_id") or "").strip()
+        trade_date = pd.to_datetime(row.get("trade_date"), errors="coerce")
+        if not instrument_id or pd.isna(trade_date):
+            continue
+        result.append(
+            HistoricalReplayBar(
+                provider_mode=provider_mode,
+                instrument_id=instrument_id,
+                trade_date=trade_date.date(),
+                raw_open=raw_open,
+                raw_high=raw_high,
+                raw_low=raw_low,
+                raw_close=raw_close,
+                adjusted_open=adjusted_price("adjusted_open", raw_open),
+                adjusted_high=adjusted_price("adjusted_high", raw_high),
+                adjusted_low=adjusted_price("adjusted_low", raw_low),
+                adjusted_close=adjusted_close,
+                volume=volume,
+                turnover=_decimal_value(row.get("turnover"), scale=4),
+                adjustment_factor=factor,
+                adjustment_mode=str(row.get("adjustment_type") or "unadjusted"),
+                source_provider=str(row.get("provider") or provider_mode).strip().lower(),
+                dataset_revision=revision,
+                fetched_at=fetched_at,
+            )
+        )
+    return result
+
+
+def _replay_bar_semantics(bars: list[HistoricalReplayBar]) -> list[dict[str, object]]:
+    return sorted(
+        (
+            item.model_dump(exclude={"dataset_revision", "fetched_at"})
+            for item in bars
+        ),
+        key=lambda item: (
+            str(item["instrument_id"]),
+            str(item["trade_date"]),
+            str(item["source_provider"]),
+        ),
+    )
+
+
+def _decimal_value(value: object, *, scale: int) -> Decimal | None:
+    try:
+        if value is None or pd.isna(value):
+            return None
+        decimal_value = Decimal(str(value))
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+    if not decimal_value.is_finite():
+        return None
+    return decimal_value.quantize(Decimal(1).scaleb(-scale))
 
 
 def _fetch_uncached_daily_bars(

@@ -50,9 +50,13 @@ def test_market_data_cache_preserves_adjustment_metadata(tmp_path):
                 "low": 9.9,
                 "close": 10.3,
                 "volume": 800_000,
-                "provider": "akshare_qfq",
-                "adjusted_close": 10.3,
-                "adjustment_factor": 1.0,
+                "turnover": 8_000_000,
+                "provider": "akshare_stock_paired",
+                "adjusted_open": 5.0,
+                "adjusted_high": 5.25,
+                "adjusted_low": 4.95,
+                "adjusted_close": 5.15,
+                "adjustment_factor": 0.5,
                 "adjustment_type": "qfq",
             }
         ]
@@ -67,8 +71,12 @@ def test_market_data_cache_preserves_adjustment_metadata(tmp_path):
     )
     summary = repo.list_summaries("free", "CN:000001")[0]
 
-    assert float(loaded.iloc[0]["adjusted_close"]) == 10.3
-    assert float(loaded.iloc[0]["adjustment_factor"]) == 1.0
+    assert float(loaded.iloc[0]["turnover"]) == 8_000_000
+    assert float(loaded.iloc[0]["adjusted_open"]) == 5.0
+    assert float(loaded.iloc[0]["adjusted_high"]) == 5.25
+    assert float(loaded.iloc[0]["adjusted_low"]) == 4.95
+    assert float(loaded.iloc[0]["adjusted_close"]) == 5.15
+    assert float(loaded.iloc[0]["adjustment_factor"]) == 0.5
     assert loaded.iloc[0]["adjustment_type"] == "qfq"
     assert summary.adjusted_rows == 1
     assert summary.adjustment_types == ["qfq"]

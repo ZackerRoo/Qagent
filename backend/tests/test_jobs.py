@@ -2,7 +2,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from qagent.jobs.daily_scan import run_daily_scan
+from qagent.jobs.daily_scan import _research_price_bars, run_daily_scan
 from qagent.jobs import full_market
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.db import create_session_factory, initialize_database
@@ -49,6 +49,67 @@ def test_daily_scan_returns_cards_for_fixture_universe():
     assert len(result.operational_readiness_center.checks) == 6
     assert result.operational_readiness_center.user_questions
     assert result.data_health["operational_readiness_checks"] == "6"
+
+
+def test_research_bars_use_adjusted_prices_without_changing_raw_frame():
+    raw = pd.DataFrame(
+        [
+            {
+                "trade_date": date(2026, 1, 5),
+                "open": 10.0,
+                "high": 10.5,
+                "low": 9.8,
+                "close": 10.2,
+                "adjusted_open": 5.0,
+                "adjusted_high": 5.25,
+                "adjusted_low": 4.9,
+                "adjusted_close": 5.1,
+                "adjustment_factor": 0.5,
+            },
+            {
+                "trade_date": date(2026, 1, 6),
+                "open": 10.3,
+                "high": 10.6,
+                "low": 10.1,
+                "close": 10.4,
+                "adjusted_close": None,
+                "adjustment_factor": None,
+            },
+        ]
+    )
+
+    research = _research_price_bars(raw)
+
+    assert research["trade_date"].tolist() == [date(2026, 1, 5)]
+    assert research.iloc[0]["close"] == 5.1
+    assert research.iloc[0]["open"] == 5.0
+    assert raw.iloc[0]["close"] == 10.2
+
+
+def test_research_bars_derive_adjusted_ohlc_from_legacy_factor():
+    raw = pd.DataFrame(
+        [
+            {
+                "trade_date": date(2026, 1, 5),
+                "open": 10.0,
+                "high": 10.5,
+                "low": 9.8,
+                "close": 10.2,
+                "adjusted_open": None,
+                "adjusted_high": None,
+                "adjusted_low": None,
+                "adjusted_close": 5.1,
+                "adjustment_factor": 0.5,
+            }
+        ]
+    )
+
+    research = _research_price_bars(raw)
+
+    assert research.iloc[0]["open"] == 5.0
+    assert research.iloc[0]["high"] == 5.25
+    assert research.iloc[0]["low"] == 4.9
+    assert research.iloc[0]["close"] == 5.1
 
 
 def test_daily_scan_adds_benchmark_comparison_and_quick_brief():

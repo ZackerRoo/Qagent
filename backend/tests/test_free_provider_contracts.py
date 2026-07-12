@@ -1,7 +1,9 @@
 from datetime import date
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 import requests
 
 import qagent.providers.free_cn as free_cn
@@ -82,16 +84,21 @@ def test_free_us_provider_flattens_yfinance_multi_index_columns(monkeypatch):
 
 
 def test_free_cn_provider_normalizes_akshare_daily(monkeypatch):
+    calls = []
+
     def fake_zh_a_hist(symbol, period, start_date, end_date, adjust):
         assert symbol == "000001"
+        calls.append(adjust)
+        scale = 0.5 if adjust == "qfq" else 1.0
         return pd.DataFrame(
             {
                 "日期": ["2026-01-02", "2026-01-05"],
-                "开盘": [10.0, 10.2],
-                "最高": [10.4, 10.5],
-                "最低": [9.9, 10.1],
-                "收盘": [10.3, 10.4],
+                "开盘": [10.0 * scale, 10.2 * scale],
+                "最高": [10.4 * scale, 10.5 * scale],
+                "最低": [9.9 * scale, 10.1 * scale],
+                "收盘": [10.3 * scale, 10.4 * scale],
                 "成交量": [800_000, 820_000],
+                "成交额": [8_000_000, 8_200_000],
             }
         )
 
@@ -102,9 +109,79 @@ def test_free_cn_provider_normalizes_akshare_daily(monkeypatch):
     bars = provider.get_daily_bars(["CN:000001"], date(2026, 1, 1), date(2026, 1, 31))
 
     assert bars["instrument_id"].tolist() == ["CN:000001", "CN:000001"]
-    assert bars["provider"].eq("akshare_qfq").all()
+    assert calls == ["", "qfq"]
+    assert bars["provider"].eq("akshare_stock_paired").all()
     assert bars["adjustment_type"].eq("qfq").all()
+    assert bars["close"].tolist() == [10.3, 10.4]
+    assert bars["adjusted_close"].tolist() == [5.15, 5.2]
+    assert bars["adjustment_factor"].tolist() == [0.5, 0.5]
+    assert bars["turnover"].tolist() == [8_000_000, 8_200_000]
     assert bars["volume"].tolist() == [800_000, 820_000]
+
+
+def test_free_cn_provider_keeps_raw_dates_without_fabricating_adjusted_rows(
+    monkeypatch,
+):
+    def fake_zh_a_hist(symbol, period, start_date, end_date, adjust):
+        dates = ["2026-01-02"] if adjust == "qfq" else ["2026-01-02", "2026-01-05"]
+        return pd.DataFrame(
+            {
+                "日期": dates,
+                "开盘": [5.0] if adjust == "qfq" else [10.0, 10.2],
+                "最高": [5.2] if adjust == "qfq" else [10.4, 10.5],
+                "最低": [4.95] if adjust == "qfq" else [9.9, 10.1],
+                "收盘": [5.15] if adjust == "qfq" else [10.3, 10.4],
+                "成交量": [800_000] if adjust == "qfq" else [800_000, 820_000],
+            }
+        )
+
+    monkeypatch.setattr(
+        "qagent.providers.free_cn.ak",
+        SimpleNamespace(stock_zh_a_hist=fake_zh_a_hist),
+    )
+
+    bars = FreeCnMarketDataProvider().get_daily_bars(
+        ["CN:000001"],
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+    assert bars["trade_date"].tolist() == [date(2026, 1, 2), date(2026, 1, 5)]
+    assert bars["close"].tolist() == [10.3, 10.4]
+    assert bars.iloc[0]["adjusted_close"] == 5.15
+    assert pd.isna(bars.iloc[1]["adjusted_close"])
+    assert pd.isna(bars.iloc[1]["adjustment_factor"])
+    assert pd.isna(bars.iloc[1]["adjustment_type"])
+
+
+def test_free_cn_provider_keeps_raw_rows_when_adjusted_source_is_empty(monkeypatch):
+    def fake_zh_a_hist(symbol, period, start_date, end_date, adjust):
+        if adjust == "qfq":
+            return pd.DataFrame()
+        return pd.DataFrame(
+            {
+                "日期": ["2026-01-02"],
+                "开盘": [10.0],
+                "最高": [10.4],
+                "最低": [9.9],
+                "收盘": [10.3],
+                "成交量": [800_000],
+            }
+        )
+
+    monkeypatch.setattr(
+        "qagent.providers.free_cn.ak",
+        SimpleNamespace(stock_zh_a_hist=fake_zh_a_hist),
+    )
+
+    bars = FreeCnMarketDataProvider().get_daily_bars(
+        ["CN:000001"], date(2026, 1, 1), date(2026, 1, 31)
+    )
+
+    assert bars["close"].tolist() == [10.3]
+    assert bars["provider"].tolist() == ["akshare_stock_paired"]
+    assert pd.isna(bars.iloc[0]["adjusted_close"])
+    assert pd.isna(bars.iloc[0]["adjustment_factor"])
 
 
 def test_free_cn_provider_applies_timeout_to_akshare_requests(monkeypatch):
@@ -135,7 +212,7 @@ def test_free_cn_provider_applies_timeout_to_akshare_requests(monkeypatch):
     bars = provider.get_daily_bars(["CN:000001"], date(2026, 1, 1), date(2026, 1, 31))
 
     assert bars["instrument_id"].tolist() == ["CN:000001"]
-    assert captured_timeouts == [(2, 2)]
+    assert captured_timeouts == [(2, 2), (2, 2)]
 
 
 def test_free_cn_provider_uses_etf_history_for_etf_symbols(monkeypatch):
@@ -145,14 +222,15 @@ def test_free_cn_provider_uses_etf_history_for_etf_symbols(monkeypatch):
     def fake_fund_etf_hist(symbol, period, start_date, end_date, adjust):
         assert symbol == "588000"
         assert period == "daily"
-        assert adjust == "qfq"
+        assert adjust in {"", "qfq"}
+        scale = 0.8 if adjust == "qfq" else 1.0
         return pd.DataFrame(
             {
                 "日期": ["2026-01-02", "2026-01-05"],
-                "开盘": [1.0, 1.02],
-                "最高": [1.03, 1.05],
-                "最低": [0.99, 1.01],
-                "收盘": [1.02, 1.04],
+                "开盘": [1.0 * scale, 1.02 * scale],
+                "最高": [1.03 * scale, 1.05 * scale],
+                "最低": [0.99 * scale, 1.01 * scale],
+                "收盘": [1.02 * scale, 1.04 * scale],
                 "成交量": [8_000_000, 8_200_000],
             }
         )
@@ -167,9 +245,10 @@ def test_free_cn_provider_uses_etf_history_for_etf_symbols(monkeypatch):
     bars = provider.get_daily_bars(["CN:588000"], date(2026, 1, 1), date(2026, 1, 31))
 
     assert bars["instrument_id"].tolist() == ["CN:588000", "CN:588000"]
-    assert bars["provider"].eq("akshare_etf_qfq").all()
+    assert bars["provider"].eq("akshare_etf_paired").all()
     assert bars["adjustment_type"].eq("qfq").all()
     assert bars["close"].tolist() == [1.02, 1.04]
+    assert bars["adjusted_close"].tolist() == [pytest.approx(0.816), pytest.approx(0.832)]
 
 
 def test_free_cn_provider_uses_adjusted_yfinance_etf_fallback(monkeypatch):
@@ -182,16 +261,17 @@ def test_free_cn_provider_uses_adjusted_yfinance_etf_fallback(monkeypatch):
             ("High", "159915.SZ"),
             ("Low", "159915.SZ"),
             ("Close", "159915.SZ"),
+            ("Adj Close", "159915.SZ"),
             ("Volume", "159915.SZ"),
         ]
     )
 
     def fake_download(tickers, start, end, progress, auto_adjust, timeout):
         assert tickers == "159915.SZ"
-        assert auto_adjust is True
+        assert auto_adjust is False
         assert timeout == 3
         return pd.DataFrame(
-            [[1.0, 1.1, 0.9, 1.05, 8_000_000]],
+            [[1.0, 1.1, 0.9, 1.05, 0.84, 8_000_000]],
             index=pd.to_datetime(["2026-01-05"]),
             columns=columns,
         )
@@ -221,9 +301,11 @@ def test_free_cn_provider_uses_adjusted_yfinance_etf_fallback(monkeypatch):
     )
 
     assert bars["instrument_id"].tolist() == ["CN:159915"]
-    assert bars["provider"].tolist() == ["yfinance_cn_etf_adjusted"]
-    assert bars["adjustment_type"].tolist() == ["adjusted"]
-    assert bars["adjusted_close"].tolist() == [1.05]
+    assert bars["provider"].tolist() == ["yfinance_cn_etf_paired"]
+    assert bars["adjustment_type"].tolist() == ["qfq"]
+    assert bars["close"].tolist() == [1.05]
+    assert bars["adjusted_close"].tolist() == [0.84]
+    assert bars["adjustment_factor"].tolist() == [pytest.approx(0.8)]
 
 
 def test_free_cn_provider_drops_nonfinite_ohlc_rows(monkeypatch):
@@ -309,10 +391,19 @@ def test_free_cn_provider_falls_back_to_baostock(monkeypatch):
     class FakeQueryResult:
         error_code = "0"
         error_msg = "success"
-        fields = ["date", "open", "high", "low", "close", "volume"]
+        fields = ["date", "open", "high", "low", "close", "volume", "amount"]
 
-        def __init__(self):
-            self.rows = [["2026-01-05", "11.42", "11.51", "11.41", "11.50", "87549118"]]
+        def __init__(self, adjustflag):
+            scale = Decimal("0.8") if adjustflag == "2" else Decimal("1")
+            self.rows = [[
+                "2026-01-05",
+                str(Decimal("11.42") * scale),
+                str(Decimal("11.51") * scale),
+                str(Decimal("11.41") * scale),
+                str(Decimal("11.50") * scale),
+                "87549118",
+                "1000000000",
+            ]]
             self.index = -1
 
         def next(self):
@@ -324,8 +415,9 @@ def test_free_cn_provider_falls_back_to_baostock(monkeypatch):
 
     def fake_query_history_k_data_plus(code, fields, start_date, end_date, frequency, adjustflag):
         assert code == "sz.000001"
-        assert fields == "date,open,high,low,close,volume"
-        return FakeQueryResult()
+        assert fields == "date,open,high,low,close,volume,amount"
+        assert adjustflag in {"2", "3"}
+        return FakeQueryResult(adjustflag)
 
     fake_ak = SimpleNamespace(stock_zh_a_hist=fake_zh_a_hist)
     fake_bs = SimpleNamespace(
@@ -340,7 +432,8 @@ def test_free_cn_provider_falls_back_to_baostock(monkeypatch):
     bars = provider.get_daily_bars(["CN:000001"], date(2026, 1, 1), date(2026, 1, 31))
 
     assert bars["instrument_id"].tolist() == ["CN:000001"]
-    assert bars["provider"].tolist() == ["baostock_qfq"]
+    assert bars["provider"].tolist() == ["baostock_paired"]
     assert bars["adjustment_type"].tolist() == ["qfq"]
     assert bars.iloc[0]["close"] == 11.5
+    assert bars.iloc[0]["adjusted_close"] == 9.2
     assert provider.last_errors == []

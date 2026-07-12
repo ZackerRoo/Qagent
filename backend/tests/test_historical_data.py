@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -8,16 +8,21 @@ from qagent.data_management import run_historical_backfill
 from qagent.db import Base, create_db_engine, create_session_factory
 from qagent.historical_evidence.models import (
     HistoricalEvidenceBundle,
+    HistoricalInventoryManifest,
     HistoricalIndexMembership,
     HistoricalIndexSnapshot,
     HistoricalIndustrySnapshot,
     HistoricalInstrumentProfile,
     HistoricalTradabilityPoint,
 )
-from qagent.historical_evidence.providers import historical_snapshot_dates
+from qagent.historical_evidence.providers import (
+    REQUIRED_BENCHMARK_IDS,
+    historical_snapshot_dates,
+)
 from qagent.market.calendars import trading_sessions_in_range
 from qagent.storage.market_cache import MarketDataCacheRepository
 from qagent.storage.repository import QagentRepository
+from qagent.storage.replay_evidence import ReplayEvidenceRepository
 from qagent.strategy_data.models import FundamentalSnapshot
 from qagent.strategy_data.providers import BaseStrategyDataProvider
 
@@ -189,6 +194,84 @@ class CompleteHistoricalEvidenceProvider:
         )
 
 
+class ReplayInventoryEvidenceProvider(CompleteHistoricalEvidenceProvider):
+    def __init__(self):
+        self.inventory_calls = 0
+        self.benchmark_calls = []
+        self._manifest = HistoricalInventoryManifest(
+            status="partial",
+            expected_count=None,
+            effective_through=date.min,
+            error="not requested",
+            fetched_at=datetime(2026, 1, 10, tzinfo=timezone.utc),
+            source_provider="fixture_inventory",
+        )
+
+    def list_historical_instruments(self, effective_through):
+        self.inventory_calls += 1
+        self._manifest = HistoricalInventoryManifest(
+            status="ready",
+            expected_count=1,
+            effective_through=effective_through,
+            fetched_at=datetime(2026, 1, 10, tzinfo=timezone.utc),
+            source_provider="fixture_inventory",
+        )
+        return [
+            HistoricalInstrumentProfile(
+                instrument_id="CN:000001",
+                name="平安银行",
+                snapshot_date=effective_through,
+                listing_date=date(1991, 4, 3),
+                security_type="stock",
+                listing_status="active",
+                provider="fixture_inventory",
+            )
+        ]
+
+    def get_lifecycle_manifest(self):
+        return self._manifest
+
+    def get_benchmark_series(self, ids, start, end):
+        self.benchmark_calls.append(list(ids))
+        sessions = trading_sessions_in_range(start, end)
+        return {
+            benchmark_id: pd.DataFrame(
+                [
+                    {
+                        "instrument_id": benchmark_id,
+                        "trade_date": trade_date,
+                        "open": 100 + index,
+                        "high": 101 + index,
+                        "low": 99 + index,
+                        "close": 100.5 + index,
+                        "volume": 10_000_000,
+                        "turnover": 1_000_000_000,
+                        "provider": "fixture_benchmark_paired",
+                        "adjusted_open": 100 + index,
+                        "adjusted_high": 101 + index,
+                        "adjusted_low": 99 + index,
+                        "adjusted_close": 100.5 + index,
+                        "adjustment_factor": 1.0,
+                        "adjustment_type": "none",
+                    }
+                    for index, trade_date in enumerate(sessions)
+                ]
+            )
+            for benchmark_id in ids
+        }
+
+
+class MissingBenchmarkEvidenceProvider(ReplayInventoryEvidenceProvider):
+    def __init__(self):
+        super().__init__()
+        self.last_errors = []
+
+    def get_benchmark_series(self, ids, start, end):
+        self.benchmark_calls.append(list(ids))
+        self.last_errors = ["benchmark source unavailable"]
+        return {}
+
+
 class ErrorHistoricalEvidenceProvider:
     name = "evidence_error_fixture"
 
@@ -290,6 +373,99 @@ def test_historical_backfill_is_idempotent_and_emits_coverage_manifest(tmp_path)
     assert second.job.rows_written == 0
     assert second.job.data_health["backfill_cache_reused"] == "1"
     assert provider.calls == 1
+
+
+def test_historical_backfill_persists_paired_replay_inventory_and_benchmarks(
+    tmp_path,
+):
+    repo, cache = make_repositories(tmp_path)
+    market_provider = AdjustedHistoryProvider()
+    evidence_provider = ReplayInventoryEvidenceProvider()
+    start = date(2026, 1, 1)
+    end = date(2026, 1, 9)
+
+    first = run_historical_backfill(
+        repo=repo,
+        cache=cache,
+        provider=market_provider,
+        strategy_provider=None,
+        provider_mode="free",
+        instrument_ids=["CN:000001"],
+        start=start,
+        end=end,
+        universe_as_of=end,
+        historical_evidence_provider=evidence_provider,
+    )
+    replay = ReplayEvidenceRepository(repo.session_factory, "free")
+    first_revision = replay.current_revision()
+    instruments = ["CN:000001", *REQUIRED_BENCHMARK_IDS]
+    bars = replay.replay_bars(instruments, start, end, first_revision)
+    by_instrument = {
+        instrument_id: [item for item in bars if item.instrument_id == instrument_id]
+        for instrument_id in instruments
+    }
+
+    assert evidence_provider.inventory_calls == 1
+    assert evidence_provider.benchmark_calls == [list(REQUIRED_BENCHMARK_IDS)]
+    assert len(replay.lifecycle_inventory(first_revision)) == 1
+    assert all(by_instrument.values())
+    stock = by_instrument["CN:000001"][0]
+    assert stock.raw_close == Decimal("10.20000000")
+    assert stock.adjusted_open == Decimal("10.00000000")
+    assert stock.adjusted_close == Decimal("10.20000000")
+    assert stock.adjustment_factor == Decimal("1.000000000000")
+    assert first.job.data_health["backfill_inventory_rows"] == "1"
+    assert int(first.job.data_health["backfill_replay_rows"]) > 0
+    assert int(first.job.data_health["backfill_benchmark_rows"]) > 0
+    assert first.manifest.data_health["historical_benchmark_price_ready"] == "4/4"
+    assert first.manifest.data_health["historical_benchmark_price_coverage"] == "1.0000"
+
+    second = run_historical_backfill(
+        repo=repo,
+        cache=cache,
+        provider=market_provider,
+        strategy_provider=None,
+        provider_mode="free",
+        instrument_ids=["CN:000001"],
+        start=start,
+        end=end,
+        job_id=first.job.job_id,
+        universe_as_of=end,
+        historical_evidence_provider=evidence_provider,
+    )
+
+    assert replay.current_revision() == first_revision
+    assert evidence_provider.inventory_calls == 1
+    assert evidence_provider.benchmark_calls == [list(REQUIRED_BENCHMARK_IDS)]
+    assert second.job.data_health["backfill_inventory_rows"] == "0"
+    assert second.job.data_health["backfill_replay_rows"] == "0"
+    assert second.job.data_health["backfill_benchmark_rows"] == "0"
+
+
+def test_historical_backfill_reports_missing_required_benchmarks(tmp_path):
+    repo, cache = make_repositories(tmp_path)
+    evidence_provider = MissingBenchmarkEvidenceProvider()
+
+    result = run_historical_backfill(
+        repo=repo,
+        cache=cache,
+        provider=AdjustedHistoryProvider(),
+        strategy_provider=None,
+        provider_mode="free",
+        instrument_ids=["CN:000001"],
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 9),
+        universe_as_of=date(2026, 1, 9),
+        historical_evidence_provider=evidence_provider,
+    )
+
+    assert result.job.status == "succeeded_with_errors"
+    assert evidence_provider.benchmark_calls == [list(REQUIRED_BENCHMARK_IDS)]
+    assert "benchmark source unavailable" in result.job.errors
+    assert all(
+        f"{benchmark_id}: no benchmark bars returned" in result.job.errors
+        for benchmark_id in REQUIRED_BENCHMARK_IDS
+    )
 
 
 def test_historical_backfill_preserves_underlying_provider_errors(tmp_path):

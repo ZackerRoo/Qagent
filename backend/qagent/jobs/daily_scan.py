@@ -165,6 +165,7 @@ def run_daily_scan(
                 start=start,
                 end=end,
             )
+            research_bars = _research_price_bars(bars)
             earnings_events = strategy_provider.get_earnings_events(
                 instrument_ids=[instrument_id],
                 start=start,
@@ -194,15 +195,15 @@ def run_daily_scan(
             strategy_announcements_count += len(announcements)
             strategy_fundamentals_count += len(fundamentals)
             strategy_analyst_insights_count += len(analyst_insights)
-            bars_by_instrument[instrument_id] = bars
+            bars_by_instrument[instrument_id] = research_bars
             latest_fundamental = _latest_fundamental(fundamentals)
             if latest_fundamental is not None:
                 fundamentals_by_instrument[instrument_id] = latest_fundamental
-            signals = signal_engine.generate(instrument_id, bars)
+            signals = signal_engine.generate(instrument_id, research_bars)
             strategy_evaluations = strategy_evaluator.evaluate(
                 instrument_id,
                 signals,
-                bars,
+                research_bars,
                 context={
                     "earnings_events": earnings_events,
                     "filings": filings,
@@ -711,6 +712,29 @@ def _bars_have_adjusted_price(bars) -> bool:
         "后复权收盘",
     }
     return any(column in bars.columns for column in adjusted_columns)
+
+
+def _research_price_bars(bars):
+    if bars.empty or "adjusted_close" not in bars.columns:
+        return bars
+    adjusted = bars[bars["adjusted_close"].notna()].copy()
+    if adjusted.empty:
+        return bars
+    for column in ("open", "high", "low", "close"):
+        adjusted_column = f"adjusted_{column}"
+        fallback = adjusted[column]
+        if "adjustment_factor" in adjusted.columns:
+            fallback = adjusted[column] * adjusted["adjustment_factor"]
+        if adjusted_column in adjusted.columns:
+            adjusted[column] = adjusted[adjusted_column].where(
+                adjusted[adjusted_column].notna(),
+                fallback,
+            )
+        elif column == "close":
+            adjusted[column] = adjusted["adjusted_close"]
+        elif "adjustment_factor" in adjusted.columns:
+            adjusted[column] = adjusted[column] * adjusted["adjustment_factor"]
+    return adjusted
 
 
 def _adjusted_bar_health(bars_by_instrument: dict[str, object]) -> dict[str, str]:
