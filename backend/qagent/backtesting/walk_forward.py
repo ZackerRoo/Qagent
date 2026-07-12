@@ -6,6 +6,7 @@ import math
 import statistics
 from datetime import date, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 from pydantic import BaseModel, Field
 
@@ -18,6 +19,10 @@ from qagent.backtesting.portfolio import (
 from qagent.backtesting.replay_provider import (
     ReplayMarketDataProvider,
     ReplayStrategyDataProvider,
+)
+from qagent.backtesting.temporal_validation import (
+    TemporalValidationResult,
+    build_temporal_validation,
 )
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.market.astock_enhanced import EmptyAShareEnhancedDataProvider
@@ -64,6 +69,8 @@ class WalkForwardSelectionResult(BaseModel):
     top_10_portfolio: PortfolioBacktestResult
     top_5_metrics: "WalkForwardPortfolioMetrics"
     top_10_metrics: "WalkForwardPortfolioMetrics"
+    top_5_temporal_validation: TemporalValidationResult
+    top_10_temporal_validation: TemporalValidationResult
     benchmarks: list["WalkForwardBenchmarkComparison"]
     reproducibility_digest: str
     data_health: dict[str, str] = Field(default_factory=dict)
@@ -212,6 +219,12 @@ def run_full_market_walk_forward_selection(
         )
         top_5_metrics = _portfolio_metrics(top_5_portfolio, start, end)
         top_10_metrics = _portfolio_metrics(top_10_portfolio, start, end)
+        top_5_temporal_validation = _trade_temporal_validation(
+            top_5_portfolio.trades
+        )
+        top_10_temporal_validation = _trade_temporal_validation(
+            top_10_portfolio.trades
+        )
         benchmarks = _benchmark_comparisons(
             market_provider,
             start=start,
@@ -240,6 +253,8 @@ def run_full_market_walk_forward_selection(
         top_10_portfolio=top_10_portfolio,
         top_5_metrics=top_5_metrics,
         top_10_metrics=top_10_metrics,
+        top_5_temporal_validation=top_5_temporal_validation,
+        top_10_temporal_validation=top_10_temporal_validation,
         benchmarks=benchmarks,
         reproducibility_digest=digest,
         data_health={
@@ -254,6 +269,19 @@ def run_full_market_walk_forward_selection(
             ),
             "walk_forward_top_10_trades": str(
                 top_10_portfolio.summary.trade_count
+            ),
+            "walk_forward_oos_minimum_trades": "30",
+            "walk_forward_top_5_oos_trades": str(
+                _oos_sample_count(top_5_temporal_validation)
+            ),
+            "walk_forward_top_10_oos_trades": str(
+                _oos_sample_count(top_10_temporal_validation)
+            ),
+            "walk_forward_top_5_oos_gate": _oos_gate(
+                top_5_temporal_validation
+            ),
+            "walk_forward_top_10_oos_gate": _oos_gate(
+                top_10_temporal_validation
             ),
             "walk_forward_benchmarks_ready": (
                 f"{sum(item.status == 'ready' for item in benchmarks)}/"
@@ -320,6 +348,12 @@ def _selection_digest(
         "snapshots": [item.model_dump(mode="json") for item in snapshots],
         "top_5_portfolio": top_5_portfolio.model_dump(mode="json"),
         "top_10_portfolio": top_10_portfolio.model_dump(mode="json"),
+        "top_5_temporal_validation": _trade_temporal_validation(
+            top_5_portfolio.trades
+        ).model_dump(mode="json"),
+        "top_10_temporal_validation": _trade_temporal_validation(
+            top_10_portfolio.trades
+        ).model_dump(mode="json"),
         "benchmarks": [item.model_dump(mode="json") for item in benchmarks],
     }
     encoded = json.dumps(
@@ -329,6 +363,31 @@ def _selection_digest(
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _trade_temporal_validation(trades) -> TemporalValidationResult:
+    rows = [
+        SimpleNamespace(
+            signal_date=trade.signal_date,
+            return_20d=trade.return_pct,
+        )
+        for trade in trades
+    ]
+    return build_temporal_validation(
+        rows,
+        return_horizon_days=20,
+        embargo_days=20,
+        bootstrap_samples=1000,
+        seed=42,
+    )
+
+
+def _oos_sample_count(validation: TemporalValidationResult) -> int:
+    return validation.out_of_sample.sample_count if validation.out_of_sample else 0
+
+
+def _oos_gate(validation: TemporalValidationResult) -> str:
+    return "ready" if _oos_sample_count(validation) >= 30 else "insufficient"
 
 
 def _portfolio_metrics(

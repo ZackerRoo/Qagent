@@ -1,5 +1,6 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 from sqlalchemy.orm import sessionmaker
 
@@ -12,7 +13,10 @@ from qagent.backtesting.replay_provider import (
     ReplayMarketDataProvider,
     ReplayStrategyDataProvider,
 )
-from qagent.backtesting.walk_forward import run_full_market_walk_forward_selection
+from qagent.backtesting.walk_forward import (
+    _trade_temporal_validation,
+    run_full_market_walk_forward_selection,
+)
 from qagent.db import Base, create_db_engine
 from qagent.historical_evidence.models import (
     HistoricalEvidenceBundle,
@@ -185,8 +189,32 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert first.top_10_portfolio == second.top_10_portfolio
     assert len(first.benchmarks) == 4
     assert all(item.status == "ready" for item in first.benchmarks)
+    assert first.top_5_temporal_validation.return_horizon_days == 20
+    assert first.top_5_temporal_validation.embargo_days == 20
+    assert first.data_health["walk_forward_top_5_oos_gate"] == "insufficient"
     assert first.data_health["walk_forward_benchmarks_ready"] == "4/4"
     assert (
         first.data_health["walk_forward_future_data_guard"]
         == "revision_lease_and_decision_date_cutoff"
     )
+
+
+def test_walk_forward_trade_validation_uses_embargoed_chronological_windows():
+    start = date(2024, 1, 1)
+    trades = [
+        SimpleNamespace(
+            signal_date=start + timedelta(days=index),
+            return_pct=1.0 if index % 3 else -0.5,
+        )
+        for index in range(240)
+    ]
+
+    first = _trade_temporal_validation(trades)
+    second = _trade_temporal_validation(trades)
+    windows = {window.key: window for window in first.windows}
+
+    assert set(windows) == {"train", "validation", "out_of_sample"}
+    assert windows["train"].end_date < windows["validation"].start_date
+    assert windows["validation"].end_date < windows["out_of_sample"].start_date
+    assert windows["out_of_sample"].sample_count >= 30
+    assert first.model_dump() == second.model_dump()
