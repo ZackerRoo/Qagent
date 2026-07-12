@@ -205,6 +205,8 @@ EXPECTED_TABLE_COLUMNS = {
         "limit_pct",
         "tick_size",
         "board_lot",
+        "minimum_order_quantity",
+        "quantity_step",
         "settlement_days",
         "ipo_no_limit_sessions",
     },
@@ -217,6 +219,9 @@ EXPECTED_TABLE_COLUMNS = {
         "market",
         "board",
         "settlement_days",
+        "board_lot",
+        "minimum_order_quantity",
+        "quantity_step",
         "rule_set_version",
         "limit_rule_key",
         "fee_schedule_version",
@@ -268,8 +273,9 @@ def test_fresh_database_contains_replay_evidence_tables_columns_and_keys(tmp_pat
     for table_name, expected_columns in EXPECTED_TABLE_COLUMNS.items():
         columns = {column["name"] for column in inspector.get_columns(table_name)}
         assert columns == expected_columns
-        assert inspector.get_pk_constraint(table_name)["constrained_columns"] == (
-            EXPECTED_TABLE_KEYS[table_name]
+        assert (
+            inspector.get_pk_constraint(table_name)["constrained_columns"]
+            == (EXPECTED_TABLE_KEYS[table_name])
         )
 
 
@@ -491,9 +497,7 @@ def test_corporate_action_declares_announcement_date_required():
 
 
 @pytest.mark.parametrize("action_type", ["rights", "merger", "conversion", "other"])
-def test_unsupported_corporate_action_without_economics_persists(
-    tmp_path, action_type
-):
+def test_unsupported_corporate_action_without_economics_persists(tmp_path, action_type):
     database_url = f"sqlite:///{tmp_path / f'unsupported-{action_type}.db'}"
     db.initialize_database(database_url)
     session_factory = db.create_session_factory(database_url)
@@ -678,9 +682,7 @@ def test_database_rejects_invalid_corporate_action_coverage_semantics(
     ("status", "action_count"),
     [("ready", 1), ("ready_none", 0), ("partial", 0), ("unsupported", 0)],
 )
-def test_database_accepts_valid_corporate_action_coverage_semantics(
-    tmp_path, status, action_count
-):
+def test_database_accepts_valid_corporate_action_coverage_semantics(tmp_path, status, action_count):
     engine = db.initialize_database(f"sqlite:///{tmp_path / f'valid-{status}.db'}")
 
     with engine.begin() as connection:
@@ -745,16 +747,13 @@ def test_schema_declares_financial_types_nullability_indexes_and_constraints(tmp
         column["name"]: column for column in inspector.get_columns("historical_replay_bars")
     }
     action_columns = {
-        column["name"]: column
-        for column in inspector.get_columns("historical_corporate_actions")
+        column["name"]: column for column in inspector.get_columns("historical_corporate_actions")
     }
     lease_columns = {
-        column["name"]: column
-        for column in inspector.get_columns("historical_dataset_leases")
+        column["name"]: column for column in inspector.get_columns("historical_dataset_leases")
     }
     manifest_columns = {
-        column["name"]: column
-        for column in inspector.get_columns("historical_universe_manifests")
+        column["name"]: column for column in inspector.get_columns("historical_universe_manifests")
     }
     universe_member_columns = {
         column["name"]: column
@@ -807,9 +806,7 @@ def test_schema_declares_financial_types_nullability_indexes_and_constraints(tmp
         "historical_dataset_leases": {("owner_run_id",), ("lease_expires_at",)},
     }
     for table_name, expected in expected_indexes.items():
-        indexes = {
-            tuple(index["column_names"]) for index in inspector.get_indexes(table_name)
-        }
+        indexes = {tuple(index["column_names"]) for index in inspector.get_indexes(table_name)}
         assert expected <= indexes
         assert all(not index["unique"] for index in inspector.get_indexes(table_name))
 
@@ -1012,8 +1009,9 @@ def test_scaled_decimal_rejects_sqlite_integer_overflow(tmp_path):
     session_factory = db.create_session_factory(database_url)
     overflow_price = Decimal("100000000000.00000000")
 
-    with session_factory() as session, pytest.raises(
-        StatementError, match="signed 64-bit SQLite range"
+    with (
+        session_factory() as session,
+        pytest.raises(StatementError, match="signed 64-bit SQLite range"),
     ):
         session.add(_priced_replay_bar(date(2025, 1, 1), overflow_price))
         session.commit()

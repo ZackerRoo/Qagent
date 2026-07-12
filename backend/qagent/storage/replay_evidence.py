@@ -14,12 +14,16 @@ from sqlalchemy.orm import Session, aliased, sessionmaker
 from qagent.historical_evidence.models import (
     HistoricalCorporateAction,
     HistoricalEvidenceBundle,
+    HistoricalFeeRule,
     HistoricalIndexMembership,
     HistoricalIndustrySnapshot,
     HistoricalInstrumentProfile,
+    HistoricalInstrumentRuleMetadata,
     HistoricalLifecycleManifest,
     HistoricalReplayBar,
+    HistoricalTerminalSettlement,
     HistoricalTradabilityPoint,
+    HistoricalTradingRule,
     HistoricalUniverseManifest,
     normalize_and_validate_historical_profile,
 )
@@ -33,10 +37,14 @@ from qagent.storage.tables import (
     HistoricalIndexSnapshotRow,
     HistoricalIndustrySnapshotRow,
     HistoricalInstrumentProfileRow,
+    HistoricalInstrumentRuleMetadataRow,
     HistoricalLifecycleManifestRow,
     HistoricalReplayBarRow,
     HistoricalReplayUniverseMemberRow,
+    HistoricalFeeRuleRow,
+    HistoricalTerminalSettlementRow,
     HistoricalTradabilityRow,
+    HistoricalTradingRuleRow,
     HistoricalUniverseManifestRow,
 )
 from qagent.strategy_data.models import FundamentalSnapshot
@@ -407,9 +415,7 @@ class ReplayEvidenceRepository:
                 "listing_date": item.listing_date,
                 "delisting_date": item.delisting_date,
                 "security_type": (
-                    item.security_type.strip()
-                    if item.security_type is not None
-                    else None
+                    item.security_type.strip() if item.security_type is not None else None
                 ),
                 "listing_status": item.listing_status,
                 "source_provider": _normalize_provider(item.provider),
@@ -418,9 +424,7 @@ class ReplayEvidenceRepository:
             for item in normalized_profiles
         ]
         with self._immediate_session() as session:
-            write_revision, is_retry = self._prepare_source_write(
-                session, manifest.source_revision
-            )
+            write_revision, is_retry = self._prepare_source_write(session, manifest.source_revision)
             for record in records:
                 record["dataset_revision"] = write_revision
             profile_keys = [
@@ -445,13 +449,17 @@ class ReplayEvidenceRepository:
                     deduplicated,
                     profile_keys,
                 )
-            stored_count = session.scalar(
-                select(func.count(func.distinct(HistoricalInstrumentProfileRow.instrument_id)))
-                .where(
-                    HistoricalInstrumentProfileRow.provider_mode == self.provider_mode,
-                    HistoricalInstrumentProfileRow.dataset_revision == write_revision,
+            stored_count = (
+                session.scalar(
+                    select(
+                        func.count(func.distinct(HistoricalInstrumentProfileRow.instrument_id))
+                    ).where(
+                        HistoricalInstrumentProfileRow.provider_mode == self.provider_mode,
+                        HistoricalInstrumentProfileRow.dataset_revision == write_revision,
+                    )
                 )
-            ) or 0
+                or 0
+            )
             errors = [manifest.error] if manifest.error else []
             if manifest.status.strip().lower() != "ready" and not manifest.error:
                 errors.append(f"provider manifest status is {manifest.status}")
@@ -461,8 +469,7 @@ class ReplayEvidenceRepository:
                 errors.append("expected_count must be positive")
             elif manifest.expected_count != stored_count:
                 errors.append(
-                    "count mismatch: "
-                    f"expected={manifest.expected_count}, stored={stored_count}"
+                    f"count mismatch: expected={manifest.expected_count}, stored={stored_count}"
                 )
             errors.extend(identity_errors)
             normalized_errors = list(dict.fromkeys(errors))
@@ -525,6 +532,198 @@ class ReplayEvidenceRepository:
             revision,
             ignored_retry_fields={"fetched_at"},
         )
+
+    def upsert_trading_rules(self, rules: Sequence[HistoricalTradingRule]) -> int:
+        records = [item.model_dump() for item in rules]
+        keys = ["rule_set_version", "limit_rule_key", "effective_from"]
+        with self._immediate_session() as session:
+            return _write_immutable_reference_rows(session, HistoricalTradingRuleRow, records, keys)
+
+    def upsert_instrument_rule_metadata(
+        self, metadata: Sequence[HistoricalInstrumentRuleMetadata]
+    ) -> int:
+        records = [
+            {
+                **item.model_dump(exclude={"provider_mode", "source_provider"}),
+                "provider_mode": self.provider_mode,
+                "source_provider": _normalize_provider(item.source_provider),
+            }
+            for item in metadata
+            if self._matches_provider(item.provider_mode)
+        ]
+        keys = [
+            "provider_mode",
+            "instrument_id",
+            "effective_from",
+            "rule_set_version",
+            "fee_schedule_version",
+        ]
+        with self._immediate_session() as session:
+            return _write_immutable_reference_rows(
+                session, HistoricalInstrumentRuleMetadataRow, records, keys
+            )
+
+    def upsert_fee_rules(self, rules: Sequence[HistoricalFeeRule]) -> int:
+        records = [item.model_dump() for item in rules]
+        keys = ["fee_schedule_version", "fee_rule_key", "effective_from", "side"]
+        with self._immediate_session() as session:
+            return _write_immutable_reference_rows(session, HistoricalFeeRuleRow, records, keys)
+
+    def upsert_terminal_settlements(
+        self,
+        settlements: Sequence[HistoricalTerminalSettlement],
+        *,
+        revision: int | None = None,
+    ) -> int:
+        records = [
+            {
+                **item.model_dump(exclude={"provider_mode", "dataset_revision"}),
+                "provider_mode": self.provider_mode,
+                "source_provider": _normalize_provider(item.source_provider),
+            }
+            for item in settlements
+            if self._matches_provider(item.provider_mode)
+        ]
+        requested = self._model_revision(settlements, revision)
+        return self._write_source_rows(
+            HistoricalTerminalSettlementRow,
+            records,
+            [
+                "provider_mode",
+                "instrument_id",
+                "effective_date",
+                "settlement_type",
+            ],
+            requested,
+            ignored_retry_fields={"fetched_at"},
+        )
+
+    def trading_rule_on(
+        self,
+        *,
+        rule_set_version: str,
+        limit_rule_key: str,
+        trade_date: date,
+    ) -> HistoricalTradingRule:
+        with self.session_factory() as session:
+            row = session.scalar(
+                select(HistoricalTradingRuleRow)
+                .where(
+                    HistoricalTradingRuleRow.rule_set_version == rule_set_version,
+                    HistoricalTradingRuleRow.limit_rule_key == limit_rule_key,
+                    HistoricalTradingRuleRow.effective_from <= trade_date,
+                    (
+                        HistoricalTradingRuleRow.effective_to.is_(None)
+                        | (HistoricalTradingRuleRow.effective_to >= trade_date)
+                    ),
+                )
+                .order_by(HistoricalTradingRuleRow.effective_from.desc())
+                .limit(1)
+            )
+        if row is None:
+            raise ReplayEvidenceUnavailable(
+                f"trading rule {rule_set_version}/{limit_rule_key} is missing on "
+                f"{trade_date.isoformat()}"
+            )
+        return HistoricalTradingRule.model_validate(_row_dict(row))
+
+    def fee_rules_on(
+        self,
+        *,
+        fee_schedule_version: str,
+        fee_rule_key: str,
+        trade_date: date,
+    ) -> list[HistoricalFeeRule]:
+        with self.session_factory() as session:
+            rows = list(
+                session.scalars(
+                    select(HistoricalFeeRuleRow)
+                    .where(
+                        HistoricalFeeRuleRow.fee_schedule_version == fee_schedule_version,
+                        HistoricalFeeRuleRow.fee_rule_key == fee_rule_key,
+                        HistoricalFeeRuleRow.effective_from <= trade_date,
+                        (
+                            HistoricalFeeRuleRow.effective_to.is_(None)
+                            | (HistoricalFeeRuleRow.effective_to >= trade_date)
+                        ),
+                    )
+                    .order_by(HistoricalFeeRuleRow.side)
+                )
+            )
+        if not rows:
+            raise ReplayEvidenceUnavailable(
+                f"fee rule {fee_schedule_version}/{fee_rule_key} is missing on "
+                f"{trade_date.isoformat()}"
+            )
+        return [HistoricalFeeRule.model_validate(_row_dict(row)) for row in rows]
+
+    def instrument_rule_metadata_on(
+        self, instrument_id: str, trade_date: date
+    ) -> HistoricalInstrumentRuleMetadata:
+        with self.session_factory() as session:
+            row = session.scalar(
+                select(HistoricalInstrumentRuleMetadataRow)
+                .where(
+                    HistoricalInstrumentRuleMetadataRow.provider_mode == self.provider_mode,
+                    HistoricalInstrumentRuleMetadataRow.instrument_id == instrument_id,
+                    HistoricalInstrumentRuleMetadataRow.effective_from <= trade_date,
+                    (
+                        HistoricalInstrumentRuleMetadataRow.effective_to.is_(None)
+                        | (HistoricalInstrumentRuleMetadataRow.effective_to >= trade_date)
+                    ),
+                )
+                .order_by(HistoricalInstrumentRuleMetadataRow.effective_from.desc())
+                .limit(1)
+            )
+        if row is None:
+            raise ReplayEvidenceUnavailable(
+                f"instrument rule metadata is missing for {instrument_id} on "
+                f"{trade_date.isoformat()}"
+            )
+        return HistoricalInstrumentRuleMetadata.model_validate(_row_dict(row))
+
+    def terminal_settlements(
+        self,
+        instrument_ids: Sequence[str],
+        start: date,
+        end: date,
+        revision: int,
+    ) -> list[HistoricalTerminalSettlement]:
+        if not instrument_ids:
+            return []
+        with self.session_factory() as session:
+            ranked = (
+                select(
+                    HistoricalTerminalSettlementRow,
+                    func.row_number()
+                    .over(
+                        partition_by=(
+                            HistoricalTerminalSettlementRow.instrument_id,
+                            HistoricalTerminalSettlementRow.effective_date,
+                            HistoricalTerminalSettlementRow.settlement_type,
+                        ),
+                        order_by=HistoricalTerminalSettlementRow.dataset_revision.desc(),
+                    )
+                    .label("revision_rank"),
+                )
+                .where(
+                    HistoricalTerminalSettlementRow.provider_mode == self.provider_mode,
+                    HistoricalTerminalSettlementRow.instrument_id.in_(instrument_ids),
+                    HistoricalTerminalSettlementRow.effective_date >= start,
+                    HistoricalTerminalSettlementRow.effective_date <= end,
+                    HistoricalTerminalSettlementRow.dataset_revision <= revision,
+                )
+                .subquery()
+            )
+            row_alias = aliased(HistoricalTerminalSettlementRow, ranked)
+            rows = list(
+                session.scalars(
+                    select(row_alias)
+                    .where(ranked.c.revision_rank == 1)
+                    .order_by(row_alias.effective_date, row_alias.instrument_id)
+                )
+            )
+        return [HistoricalTerminalSettlement.model_validate(_row_dict(row)) for row in rows]
 
     def replay_bars(
         self,
@@ -603,11 +802,7 @@ class ReplayEvidenceRepository:
                 .subquery()
             )
             row_alias = aliased(FundamentalSnapshotRow, ranked)
-            rows = list(
-                session.scalars(
-                    select(row_alias).where(ranked.c.revision_rank == 1)
-                )
-            )
+            rows = list(session.scalars(select(row_alias).where(ranked.c.revision_rank == 1)))
         return {row.instrument_id: _fundamental_from_row(row) for row in rows}
 
     def industries_as_of(
@@ -642,11 +837,7 @@ class ReplayEvidenceRepository:
                 .subquery()
             )
             row_alias = aliased(HistoricalIndustrySnapshotRow, ranked)
-            rows = list(
-                session.scalars(
-                    select(row_alias).where(ranked.c.revision_rank == 1)
-                )
-            )
+            rows = list(session.scalars(select(row_alias).where(ranked.c.revision_rank == 1)))
         result: dict[str, HistoricalIndustrySnapshot] = {}
         for row in rows:
             result.setdefault(
@@ -731,8 +922,7 @@ class ReplayEvidenceRepository:
                         for index_id, snapshot_date, source_provider, dataset_revision, count in session.execute(
                             select(*identity_columns, func.count())
                             .where(
-                                HistoricalIndexMembershipRow.provider_mode
-                                == self.provider_mode,
+                                HistoricalIndexMembershipRow.provider_mode == self.provider_mode,
                                 tuple_(*identity_columns).in_(identity_chunk),
                             )
                             .group_by(*identity_columns)
@@ -755,12 +945,9 @@ class ReplayEvidenceRepository:
                         session.scalars(
                             select(HistoricalIndexMembershipRow)
                             .where(
-                                HistoricalIndexMembershipRow.provider_mode
-                                == self.provider_mode,
+                                HistoricalIndexMembershipRow.provider_mode == self.provider_mode,
                                 tuple_(*identity_columns).in_(identity_chunk),
-                                HistoricalIndexMembershipRow.instrument_id.in_(
-                                    instrument_chunk
-                                ),
+                                HistoricalIndexMembershipRow.instrument_id.in_(instrument_chunk),
                             )
                             .order_by(
                                 HistoricalIndexMembershipRow.instrument_id,
@@ -812,11 +999,7 @@ class ReplayEvidenceRepository:
                 .subquery()
             )
             row_alias = aliased(HistoricalTradabilityRow, ranked)
-            rows = list(
-                session.scalars(
-                    select(row_alias).where(ranked.c.revision_rank == 1)
-                )
-            )
+            rows = list(session.scalars(select(row_alias).where(ranked.c.revision_rank == 1)))
         return {
             row.instrument_id: HistoricalTradabilityPoint(
                 instrument_id=row.instrument_id,
@@ -868,19 +1051,14 @@ class ReplayEvidenceRepository:
                 session.scalars(
                     select(HistoricalReplayUniverseMemberRow)
                     .where(
-                        HistoricalReplayUniverseMemberRow.provider_mode
-                        == self.provider_mode,
-                        HistoricalReplayUniverseMemberRow.snapshot_date
-                        == decision_date,
+                        HistoricalReplayUniverseMemberRow.provider_mode == self.provider_mode,
+                        HistoricalReplayUniverseMemberRow.snapshot_date == decision_date,
                         HistoricalReplayUniverseMemberRow.source_revision == revision,
                     )
                     .order_by(HistoricalReplayUniverseMemberRow.instrument_id)
                 )
             )
-            if (
-                existing_manifest is not None
-                and existing_manifest.owner_run_id != owner_run_id
-            ):
+            if existing_manifest is not None and existing_manifest.owner_run_id != owner_run_id:
                 raise DerivedUniverseOwnershipConflict(
                     f"derived universe is owned by {existing_manifest.owner_run_id}"
                 )
@@ -980,8 +1158,7 @@ class ReplayEvidenceRepository:
                 session.scalars(
                     select(HistoricalReplayUniverseMemberRow)
                     .where(
-                        HistoricalReplayUniverseMemberRow.provider_mode
-                        == self.provider_mode,
+                        HistoricalReplayUniverseMemberRow.provider_mode == self.provider_mode,
                         HistoricalReplayUniverseMemberRow.snapshot_date == decision_date,
                         HistoricalReplayUniverseMemberRow.source_revision == revision,
                     )
@@ -1014,8 +1191,7 @@ class ReplayEvidenceRepository:
                     .label("revision_rank"),
                 )
                 .where(
-                    HistoricalCorporateActionCoverageRow.provider_mode
-                    == self.provider_mode,
+                    HistoricalCorporateActionCoverageRow.provider_mode == self.provider_mode,
                     HistoricalCorporateActionCoverageRow.instrument_id.in_(instrument_ids),
                     HistoricalCorporateActionCoverageRow.start_date == start,
                     HistoricalCorporateActionCoverageRow.end_date == end,
@@ -1024,11 +1200,7 @@ class ReplayEvidenceRepository:
                 .subquery()
             )
             row_alias = aliased(HistoricalCorporateActionCoverageRow, ranked)
-            rows = list(
-                session.scalars(
-                    select(row_alias).where(ranked.c.revision_rank == 1)
-                )
-            )
+            rows = list(session.scalars(select(row_alias).where(ranked.c.revision_rank == 1)))
         return {
             row.instrument_id: ActionCoverageRecord(
                 instrument_id=row.instrument_id,
@@ -1041,9 +1213,7 @@ class ReplayEvidenceRepository:
             for row in rows
         }
 
-    def acquire_dataset_lease(
-        self, owner_run_id: str | None = None
-    ) -> DatasetLeaseRecord:
+    def acquire_dataset_lease(self, owner_run_id: str | None = None) -> DatasetLeaseRecord:
         owner = owner_run_id or self._require_owner()
         now = self._now()
         with self._immediate_session() as session:
@@ -1060,8 +1230,7 @@ class ReplayEvidenceRepository:
                     lease = None
                 else:
                     raise DatasetLeaseBusy(
-                        f"dataset lease for {self.provider_mode} is owned by "
-                        f"{lease.owner_run_id}"
+                        f"dataset lease for {self.provider_mode} is owned by {lease.owner_run_id}"
                     )
             if lease is not None and lease.revision != revision:
                 raise StaleCheckpointRevision(
@@ -1082,9 +1251,7 @@ class ReplayEvidenceRepository:
             session.flush()
             return _lease_from_row(lease)
 
-    def renew_dataset_lease(
-        self, owner_run_id: str | None = None
-    ) -> DatasetLeaseRecord:
+    def renew_dataset_lease(self, owner_run_id: str | None = None) -> DatasetLeaseRecord:
         owner = owner_run_id or self._require_owner()
         now = self._now()
         with self._immediate_session() as session:
@@ -1102,8 +1269,7 @@ class ReplayEvidenceRepository:
                 return False
             if lease.owner_run_id != owner:
                 raise DatasetLeaseBusy(
-                    f"dataset lease for {self.provider_mode} is owned by "
-                    f"{lease.owner_run_id}"
+                    f"dataset lease for {self.provider_mode} is owned by {lease.owner_run_id}"
                 )
             session.delete(lease)
             return True
@@ -1151,9 +1317,7 @@ class ReplayEvidenceRepository:
                 _upsert_chunks(session, model, deduplicated, index_elements)
         return len(deduplicated)
 
-    def _prepare_source_write(
-        self, session: Session, revision: int | None
-    ) -> tuple[int, bool]:
+    def _prepare_source_write(self, session: Session, revision: int | None) -> tuple[int, bool]:
         lease = session.get(HistoricalDatasetLeaseRow, self.provider_mode)
         if lease is not None:
             raise SourceWriteBlocked(
@@ -1198,14 +1362,11 @@ class ReplayEvidenceRepository:
             )
         self._ensure_run_active(owner_run_id)
         if lease.lease_expires_at <= self._now():
-            raise DatasetLeaseBusy(
-                f"dataset lease for {self.provider_mode} expired; reacquire it"
-            )
+            raise DatasetLeaseBusy(f"dataset lease for {self.provider_mode} expired; reacquire it")
         expected = lease.revision if revision is None else revision
         if lease.revision != expected or current != expected:
             raise StaleCheckpointRevision(
-                f"leased revision {lease.revision} no longer matches current "
-                f"revision {current}"
+                f"leased revision {lease.revision} no longer matches current revision {current}"
             )
         return lease
 
@@ -1241,10 +1402,7 @@ class ReplayEvidenceRepository:
                 "lifecycle inventory is incomplete for revision "
                 f"{manifest.source_revision}: {detail}"
             )
-        if (
-            manifest.expected_count is None
-            or manifest.expected_count != manifest.stored_count
-        ):
+        if manifest.expected_count is None or manifest.expected_count != manifest.stored_count:
             raise ReplayEvidenceUnavailable(
                 f"lifecycle inventory is incomplete for revision {manifest.source_revision}"
             )
@@ -1257,8 +1415,7 @@ class ReplayEvidenceRepository:
                 select(HistoricalInstrumentProfileRow)
                 .where(
                     HistoricalInstrumentProfileRow.provider_mode == self.provider_mode,
-                    HistoricalInstrumentProfileRow.dataset_revision
-                    == manifest.source_revision,
+                    HistoricalInstrumentProfileRow.dataset_revision == manifest.source_revision,
                 )
                 .order_by(
                     HistoricalInstrumentProfileRow.instrument_id,
@@ -1346,6 +1503,44 @@ def _upsert_chunks(
         )
 
 
+def _write_immutable_reference_rows(
+    session: Session,
+    model,
+    records: list[dict[str, object]],
+    index_elements: list[str],
+) -> int:
+    deduplicated = _deduplicate(records, index_elements)
+    if not deduplicated:
+        return 0
+    identities = [tuple(item[key] for key in index_elements) for item in deduplicated]
+    identity_columns = tuple(getattr(model, key) for key in index_elements)
+    existing = {}
+    chunk_size = max(1, 900 // len(index_elements))
+    for identity_chunk in _chunks(identities, chunk_size):
+        existing.update(
+            {
+                tuple(getattr(row, key) for key in index_elements): row
+                for row in session.scalars(
+                    select(model).where(tuple_(*identity_columns).in_(identity_chunk))
+                )
+            }
+        )
+    inserts = []
+    for record in deduplicated:
+        identity = tuple(record[key] for key in index_elements)
+        row = existing.get(identity)
+        if row is None:
+            inserts.append(record)
+            continue
+        for key, incoming in record.items():
+            if _canonical_value(getattr(row, key)) != _canonical_value(incoming):
+                raise ImmutableRevisionConflict(
+                    f"versioned reference data is immutable; payload differs for {key}"
+                )
+    _upsert_chunks(session, model, inserts, index_elements)
+    return len(deduplicated)
+
+
 def _deduplicate(
     records: list[dict[str, object]], index_elements: list[str]
 ) -> list[dict[str, object]]:
@@ -1365,14 +1560,10 @@ def _chunks(values: Sequence, chunk_size: int) -> Iterator[Sequence]:
         yield values[offset : offset + chunk_size]
 
 
-def _records_match(
-    first: dict[str, object], second: dict[str, object]
-) -> bool:
+def _records_match(first: dict[str, object], second: dict[str, object]) -> bool:
     if first.keys() != second.keys():
         return False
-    return all(
-        _canonical_value(first[key]) == _canonical_value(second[key]) for key in first
-    )
+    return all(_canonical_value(first[key]) == _canonical_value(second[key]) for key in first)
 
 
 def _verify_immutable_rows(
@@ -1385,22 +1576,15 @@ def _verify_immutable_rows(
     ignored_fields: set[str] | None = None,
 ) -> None:
     ignored = ignored_fields or set()
-    identities = [
-        tuple(record[key] for key in index_elements) for record in records
-    ]
+    identities = [tuple(record[key] for key in index_elements) for record in records]
     rows_by_identity = {}
     chunk_size = max(1, 900 // len(index_elements))
     identity_columns = tuple(getattr(model, key) for key in index_elements)
     for offset in range(0, len(identities), chunk_size):
         chunk = identities[offset : offset + chunk_size]
-        rows = session.scalars(
-            select(model).where(tuple_(*identity_columns).in_(chunk))
-        )
+        rows = session.scalars(select(model).where(tuple_(*identity_columns).in_(chunk)))
         rows_by_identity.update(
-            {
-                tuple(getattr(row, key) for key in index_elements): row
-                for row in rows
-            }
+            {tuple(getattr(row, key) for key in index_elements): row for row in rows}
         )
     for record in records:
         identity = tuple(record[key] for key in index_elements)

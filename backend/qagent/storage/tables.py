@@ -156,9 +156,7 @@ class FundamentalSnapshotRow(Base):
     forward_pe: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
     peg_ratio: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
     price_to_sales: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
-    dataset_revision: Mapped[int] = mapped_column(
-        Integer, primary_key=True, default=0, index=True
-    )
+    dataset_revision: Mapped[int] = mapped_column(Integer, primary_key=True, default=0, index=True)
     cached_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
@@ -175,9 +173,7 @@ class HistoricalTradabilityRow(Base):
     is_st: Mapped[bool | None] = mapped_column(Boolean, nullable=True, index=True)
     pct_change_pct: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
     source_provider: Mapped[str] = mapped_column(String(64), primary_key=True)
-    dataset_revision: Mapped[int] = mapped_column(
-        Integer, primary_key=True, default=0, index=True
-    )
+    dataset_revision: Mapped[int] = mapped_column(Integer, primary_key=True, default=0, index=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -192,9 +188,7 @@ class HistoricalInstrumentProfileRow(Base):
     security_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     listing_status: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     source_provider: Mapped[str] = mapped_column(String(64))
-    dataset_revision: Mapped[int] = mapped_column(
-        Integer, primary_key=True, default=0, index=True
-    )
+    dataset_revision: Mapped[int] = mapped_column(Integer, primary_key=True, default=0, index=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -207,9 +201,7 @@ class HistoricalIndustrySnapshotRow(Base):
     source_provider: Mapped[str] = mapped_column(String(64), primary_key=True)
     industry: Mapped[str] = mapped_column(String(128), index=True)
     classification: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    dataset_revision: Mapped[int] = mapped_column(
-        Integer, primary_key=True, default=0, index=True
-    )
+    dataset_revision: Mapped[int] = mapped_column(Integer, primary_key=True, default=0, index=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -223,9 +215,7 @@ class HistoricalIndexSnapshotRow(Base):
     member_count: Mapped[int] = mapped_column(Integer, default=0)
     source_provider: Mapped[str] = mapped_column(String(64), primary_key=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    dataset_revision: Mapped[int] = mapped_column(
-        Integer, primary_key=True, default=0, index=True
-    )
+    dataset_revision: Mapped[int] = mapped_column(Integer, primary_key=True, default=0, index=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -237,9 +227,7 @@ class HistoricalIndexMembershipRow(Base):
     snapshot_date: Mapped[date] = mapped_column(Date, primary_key=True, index=True)
     instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
     source_provider: Mapped[str] = mapped_column(String(64), primary_key=True)
-    dataset_revision: Mapped[int] = mapped_column(
-        Integer, primary_key=True, default=0, index=True
-    )
+    dataset_revision: Mapped[int] = mapped_column(Integer, primary_key=True, default=0, index=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -253,22 +241,14 @@ class HistoricalReplayBarRow(Base):
     raw_high: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(20, 8))
     raw_low: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(20, 8))
     raw_close: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(20, 8))
-    adjusted_open: Mapped[Decimal | None] = mapped_column(
-        SQLiteScaledDecimal(20, 8), nullable=True
-    )
-    adjusted_high: Mapped[Decimal | None] = mapped_column(
-        SQLiteScaledDecimal(20, 8), nullable=True
-    )
-    adjusted_low: Mapped[Decimal | None] = mapped_column(
-        SQLiteScaledDecimal(20, 8), nullable=True
-    )
+    adjusted_open: Mapped[Decimal | None] = mapped_column(SQLiteScaledDecimal(20, 8), nullable=True)
+    adjusted_high: Mapped[Decimal | None] = mapped_column(SQLiteScaledDecimal(20, 8), nullable=True)
+    adjusted_low: Mapped[Decimal | None] = mapped_column(SQLiteScaledDecimal(20, 8), nullable=True)
     adjusted_close: Mapped[Decimal | None] = mapped_column(
         SQLiteScaledDecimal(20, 8), nullable=True
     )
     volume: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(28, 4))
-    turnover: Mapped[Decimal | None] = mapped_column(
-        SQLiteScaledDecimal(28, 4), nullable=True
-    )
+    turnover: Mapped[Decimal | None] = mapped_column(SQLiteScaledDecimal(28, 4), nullable=True)
     adjustment_factor: Mapped[Decimal | None] = mapped_column(
         SQLiteScaledDecimal(24, 12), nullable=True
     )
@@ -313,12 +293,8 @@ class HistoricalCorporateActionRow(Base):
     cash_per_share: Mapped[Decimal | None] = mapped_column(
         SQLiteScaledDecimal(20, 8), nullable=True
     )
-    share_ratio: Mapped[Decimal | None] = mapped_column(
-        SQLiteScaledDecimal(24, 12), nullable=True
-    )
-    rights_ratio: Mapped[Decimal | None] = mapped_column(
-        SQLiteScaledDecimal(24, 12), nullable=True
-    )
+    share_ratio: Mapped[Decimal | None] = mapped_column(SQLiteScaledDecimal(24, 12), nullable=True)
+    rights_ratio: Mapped[Decimal | None] = mapped_column(SQLiteScaledDecimal(24, 12), nullable=True)
     subscription_price: Mapped[Decimal | None] = mapped_column(
         SQLiteScaledDecimal(20, 8), nullable=True
     )
@@ -413,11 +389,11 @@ class HistoricalTradingRuleRow(Base):
     security_type: Mapped[str] = mapped_column(String(32))
     effective_from: Mapped[date] = mapped_column(Date, primary_key=True)
     effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
-    limit_pct: Mapped[Decimal | None] = mapped_column(
-        SQLiteScaledDecimal(18, 8), nullable=True
-    )
+    limit_pct: Mapped[Decimal | None] = mapped_column(SQLiteScaledDecimal(18, 8), nullable=True)
     tick_size: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(18, 8))
     board_lot: Mapped[int] = mapped_column(Integer)
+    minimum_order_quantity: Mapped[int] = mapped_column(Integer, default=100)
+    quantity_step: Mapped[int] = mapped_column(Integer, default=100)
     settlement_days: Mapped[int] = mapped_column(Integer)
     ipo_no_limit_sessions: Mapped[int] = mapped_column(Integer)
 
@@ -435,6 +411,9 @@ class HistoricalInstrumentRuleMetadataRow(Base):
     market: Mapped[str] = mapped_column(String(16), index=True)
     board: Mapped[str] = mapped_column(String(32))
     settlement_days: Mapped[int] = mapped_column(Integer)
+    board_lot: Mapped[int] = mapped_column(Integer, default=100)
+    minimum_order_quantity: Mapped[int] = mapped_column(Integer, default=100)
+    quantity_step: Mapped[int] = mapped_column(Integer, default=100)
     limit_rule_key: Mapped[str] = mapped_column(String(128), index=True)
     fee_rule_key: Mapped[str] = mapped_column(String(128), index=True)
     source_provider: Mapped[str] = mapped_column(String(64))
@@ -497,9 +476,7 @@ class HistoricalDataRevisionRow(Base):
 
     provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
     revision: Mapped[int] = mapped_column(Integer, default=0)
-    updated_at: Mapped[datetime] = mapped_column(
-        UTCDateTime(), default=utc_now, onupdate=utc_now
-    )
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
 
 
 class HistoricalDatasetLeaseRow(Base):
@@ -670,9 +647,7 @@ class OpportunitySnapshotRow(Base):
     __tablename__ = "opportunity_snapshots"
 
     snapshot_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    run_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("scan_runs.run_id"), index=True
-    )
+    run_id: Mapped[str] = mapped_column(String(64), ForeignKey("scan_runs.run_id"), index=True)
     card_id: Mapped[str] = mapped_column(String(128), index=True)
     instrument_id: Mapped[str] = mapped_column(String(32), index=True)
     market: Mapped[str] = mapped_column(String(8))

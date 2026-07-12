@@ -94,7 +94,11 @@ def create_db_engine(database_url: str | None = None):
     settings = get_settings()
     url = database_url or settings.database_url
     parsed = make_url(url)
-    is_file_sqlite = parsed.drivername.startswith("sqlite") and parsed.database not in (None, "", ":memory:")
+    is_file_sqlite = parsed.drivername.startswith("sqlite") and parsed.database not in (
+        None,
+        "",
+        ":memory:",
+    )
     engine_kwargs = {}
     if is_file_sqlite:
         Path(parsed.database).expanduser().parent.mkdir(parents=True, exist_ok=True)
@@ -156,6 +160,25 @@ def _apply_additive_migrations(engine: Engine) -> None:
                 "adjustment_type": "VARCHAR(32)",
             },
         )
+        _add_missing_columns(
+            connection,
+            inspector,
+            "historical_trading_rules",
+            {
+                "minimum_order_quantity": "INTEGER NOT NULL DEFAULT 100",
+                "quantity_step": "INTEGER NOT NULL DEFAULT 100",
+            },
+        )
+        _add_missing_columns(
+            connection,
+            inspector,
+            "historical_instrument_rule_metadata",
+            {
+                "board_lot": "INTEGER NOT NULL DEFAULT 100",
+                "minimum_order_quantity": "INTEGER NOT NULL DEFAULT 100",
+                "quantity_step": "INTEGER NOT NULL DEFAULT 100",
+            },
+        )
         for table_name in (
             "fundamental_snapshots",
             "historical_tradability",
@@ -183,11 +206,7 @@ def _apply_additive_migrations(engine: Engine) -> None:
                 connection,
                 inspector,
                 table_name,
-                {
-                    "owner_run_id": (
-                        "VARCHAR(64) NOT NULL DEFAULT 'legacy-unknown-owner'"
-                    )
-                },
+                {"owner_run_id": ("VARCHAR(64) NOT NULL DEFAULT 'legacy-unknown-owner'")},
             )
         _rebuild_revision_scoped_tables(connection)
         _create_missing_metadata_indexes(connection)
@@ -289,9 +308,7 @@ def _rebuild_revision_scoped_tables(connection) -> None:
         _rebuild_table_primary_key(connection, table_name, expected_key)
 
 
-def _rebuild_table_primary_key(
-    connection, table_name: str, expected_key: list[str]
-) -> None:
+def _rebuild_table_primary_key(connection, table_name: str, expected_key: list[str]) -> None:
     inspector = inspect(connection)
     if not inspector.has_table(table_name):
         return
@@ -308,10 +325,7 @@ def _rebuild_table_primary_key(
     connection.execute(text(f"DROP TABLE {table_name}"))
     table.create(connection)
     connection.execute(
-        text(
-            f"INSERT INTO {table_name} ({columns_sql}) "
-            f"SELECT {columns_sql} FROM {backup_name}"
-        )
+        text(f"INSERT INTO {table_name} ({columns_sql}) SELECT {columns_sql} FROM {backup_name}")
     )
     connection.execute(text(f"DROP TABLE {backup_name}"))
 

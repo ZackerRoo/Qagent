@@ -90,31 +90,21 @@ def normalize_and_validate_historical_profile(
     if match is None:
         errors.append(f"{profile.instrument_id}: instrument_id is not canonical CN:######")
     if security_type not in CANONICAL_HISTORICAL_SECURITY_TYPES:
-        errors.append(
-            f"{profile.instrument_id}: security_type is not canonical stock/etf"
-        )
+        errors.append(f"{profile.instrument_id}: security_type is not canonical stock/etf")
     elif match is not None:
         symbol = match.group(1)
-        prefixes = (
-            _STOCK_SYMBOL_PREFIXES
-            if security_type == "stock"
-            else _ETF_SYMBOL_PREFIXES
-        )
+        prefixes = _STOCK_SYMBOL_PREFIXES if security_type == "stock" else _ETF_SYMBOL_PREFIXES
         if not symbol.startswith(prefixes):
             errors.append(
                 f"{profile.instrument_id}: security_type {security_type} "
                 "does not match instrument_id"
             )
     if listing_status not in CANONICAL_HISTORICAL_LISTING_STATUSES:
-        errors.append(
-            f"{profile.instrument_id}: listing_status is not canonical active/delisted"
-        )
+        errors.append(f"{profile.instrument_id}: listing_status is not canonical active/delisted")
     if profile.listing_date is None:
         errors.append(f"{profile.instrument_id}: listing_date is missing")
     elif profile.listing_date > effective_through:
-        errors.append(
-            f"{profile.instrument_id}: listing_date is after effective_through"
-        )
+        errors.append(f"{profile.instrument_id}: listing_date is after effective_through")
     if listing_status == "delisted" and profile.delisting_date is None:
         errors.append(f"{profile.instrument_id}: delisting_date is required for delisted")
     if (
@@ -128,9 +118,7 @@ def normalize_and_validate_historical_profile(
         and profile.delisting_date is not None
         and profile.delisting_date > effective_through
     ):
-        errors.append(
-            f"{profile.instrument_id}: delisting_date is after effective_through"
-        )
+        errors.append(f"{profile.instrument_id}: delisting_date is after effective_through")
     if not profile.provider.strip():
         errors.append(f"{profile.instrument_id}: source provider is missing")
     return normalized, errors
@@ -147,13 +135,9 @@ class HistoricalInventoryManifest(BaseModel):
     @model_validator(mode="after")
     def validate_ready_inventory(self) -> Self:
         if self.status == "ready" and (
-            self.expected_count is None
-            or self.expected_count <= 0
-            or self.error is not None
+            self.expected_count is None or self.expected_count <= 0 or self.error is not None
         ):
-            raise ValueError(
-                "ready inventory requires a positive expected_count and no error"
-            )
+            raise ValueError("ready inventory requires a positive expected_count and no error")
         return self
 
 
@@ -276,6 +260,8 @@ class HistoricalTradingRule(BaseModel):
     limit_pct: Decimal | None = None
     tick_size: Decimal
     board_lot: int
+    minimum_order_quantity: int = 100
+    quantity_step: int = 100
     settlement_days: int
     ipo_no_limit_sessions: int
 
@@ -289,6 +275,9 @@ class HistoricalInstrumentRuleMetadata(BaseModel):
     market: str
     board: str
     settlement_days: int
+    board_lot: int = 100
+    minimum_order_quantity: int = 100
+    quantity_step: int = 100
     rule_set_version: str
     limit_rule_key: str
     fee_schedule_version: str
