@@ -21,6 +21,7 @@ from qagent.historical_evidence.models import (
     HistoricalReplayBar,
     HistoricalTradabilityPoint,
 )
+from qagent.historical_evidence.providers import REQUIRED_BENCHMARK_IDS
 from qagent.market.calendars import trading_sessions_in_range
 from qagent.storage import tables as _tables  # noqa: F401
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
@@ -59,7 +60,7 @@ def _replay_repository(tmp_path):
         [
             HistoricalReplayBar(
                 provider_mode="free",
-                instrument_id="CN:000001",
+                instrument_id=instrument_id,
                 trade_date=trade_date,
                 raw_open=Decimal("10") + Decimal(index) / Decimal("100"),
                 raw_high=Decimal("10.2") + Decimal(index) / Decimal("100"),
@@ -72,11 +73,14 @@ def _replay_repository(tmp_path):
                 volume=Decimal("1000000"),
                 turnover=Decimal("10000000"),
                 adjustment_factor=Decimal("1"),
-                adjustment_mode="qfq",
+                adjustment_mode=(
+                    "qfq" if instrument_id == "CN:000001" else "none"
+                ),
                 source_provider="fixture_paired",
                 dataset_revision=2,
                 fetched_at=fetched_at,
             )
+            for instrument_id in ["CN:000001", *REQUIRED_BENCHMARK_IDS]
             for index, trade_date in enumerate(sessions)
         ],
         revision=2,
@@ -179,6 +183,9 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert first.snapshots == second.snapshots
     assert first.top_5_portfolio == second.top_5_portfolio
     assert first.top_10_portfolio == second.top_10_portfolio
+    assert len(first.benchmarks) == 4
+    assert all(item.status == "ready" for item in first.benchmarks)
+    assert first.data_health["walk_forward_benchmarks_ready"] == "4/4"
     assert (
         first.data_health["walk_forward_future_data_guard"]
         == "revision_lease_and_decision_date_cutoff"

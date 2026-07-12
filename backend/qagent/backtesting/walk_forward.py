@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import statistics
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -20,6 +22,7 @@ from qagent.backtesting.replay_provider import (
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.market.astock_enhanced import EmptyAShareEnhancedDataProvider
 from qagent.market.calendars import trading_sessions_in_range
+from qagent.historical_evidence.providers import REQUIRED_BENCHMARK_IDS
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
 
 
@@ -59,8 +62,32 @@ class WalkForwardSelectionResult(BaseModel):
     snapshots: list[WalkForwardSnapshot]
     top_5_portfolio: PortfolioBacktestResult
     top_10_portfolio: PortfolioBacktestResult
+    top_5_metrics: "WalkForwardPortfolioMetrics"
+    top_10_metrics: "WalkForwardPortfolioMetrics"
+    benchmarks: list["WalkForwardBenchmarkComparison"]
     reproducibility_digest: str
     data_health: dict[str, str] = Field(default_factory=dict)
+
+
+class WalkForwardPortfolioMetrics(BaseModel):
+    trade_count: int
+    total_return_pct: float
+    annualized_return_pct: float | None
+    max_drawdown_pct: float
+    win_rate: float | None
+    avg_trade_return_pct: float | None
+    trade_return_sharpe: float | None
+    turnover_pct: float
+    max_consecutive_losses: int
+    total_costs: Decimal
+
+
+class WalkForwardBenchmarkComparison(BaseModel):
+    benchmark_id: str
+    status: str
+    benchmark_return_pct: float | None
+    top_5_excess_return_pct: float | None
+    top_10_excess_return_pct: float | None
 
 
 def run_full_market_walk_forward_selection(
@@ -183,6 +210,15 @@ def run_full_market_walk_forward_selection(
             max_positions=10,
             execution_rule_resolver=execution_resolver,
         )
+        top_5_metrics = _portfolio_metrics(top_5_portfolio, start, end)
+        top_10_metrics = _portfolio_metrics(top_10_portfolio, start, end)
+        benchmarks = _benchmark_comparisons(
+            market_provider,
+            start=start,
+            end=end,
+            top_5_return=top_5_metrics.total_return_pct,
+            top_10_return=top_10_metrics.total_return_pct,
+        )
     finally:
         owner_repository.release_dataset_lease()
     digest = _selection_digest(
@@ -190,6 +226,7 @@ def run_full_market_walk_forward_selection(
         revision,
         top_5_portfolio,
         top_10_portfolio,
+        benchmarks,
     )
     return WalkForwardSelectionResult(
         owner_run_id=owner_run_id,
@@ -201,6 +238,9 @@ def run_full_market_walk_forward_selection(
         snapshots=snapshots,
         top_5_portfolio=top_5_portfolio,
         top_10_portfolio=top_10_portfolio,
+        top_5_metrics=top_5_metrics,
+        top_10_metrics=top_10_metrics,
+        benchmarks=benchmarks,
         reproducibility_digest=digest,
         data_health={
             "walk_forward_revision": str(revision),
@@ -214,6 +254,10 @@ def run_full_market_walk_forward_selection(
             ),
             "walk_forward_top_10_trades": str(
                 top_10_portfolio.summary.trade_count
+            ),
+            "walk_forward_benchmarks_ready": (
+                f"{sum(item.status == 'ready' for item in benchmarks)}/"
+                f"{len(benchmarks)}"
             ),
             "walk_forward_digest": digest,
             **(
@@ -269,12 +313,14 @@ def _selection_digest(
     revision: int,
     top_5_portfolio: PortfolioBacktestResult,
     top_10_portfolio: PortfolioBacktestResult,
+    benchmarks: list[WalkForwardBenchmarkComparison],
 ) -> str:
     payload = {
         "dataset_revision": revision,
         "snapshots": [item.model_dump(mode="json") for item in snapshots],
         "top_5_portfolio": top_5_portfolio.model_dump(mode="json"),
         "top_10_portfolio": top_10_portfolio.model_dump(mode="json"),
+        "benchmarks": [item.model_dump(mode="json") for item in benchmarks],
     }
     encoded = json.dumps(
         payload,
@@ -283,3 +329,95 @@ def _selection_digest(
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _portfolio_metrics(
+    portfolio: PortfolioBacktestResult,
+    start: date,
+    end: date,
+) -> WalkForwardPortfolioMetrics:
+    trades = portfolio.trades
+    returns = [item.return_pct for item in trades]
+    annualized = None
+    elapsed_days = max((end - start).days, 0)
+    if elapsed_days > 0 and portfolio.summary.initial_capital > 0:
+        ratio = portfolio.summary.final_equity / portfolio.summary.initial_capital
+        if ratio > 0:
+            annualized = round((float(ratio) ** (365 / elapsed_days) - 1) * 100, 4)
+    sharpe = None
+    if len(returns) >= 2:
+        deviation = statistics.stdev(returns)
+        if deviation > 0:
+            sharpe = round(statistics.mean(returns) / deviation * math.sqrt(len(returns)), 4)
+    turnover = sum(
+        float(item.entry_price * item.shares) for item in trades
+    ) / float(portfolio.summary.initial_capital) * 100
+    return WalkForwardPortfolioMetrics(
+        trade_count=len(trades),
+        total_return_pct=portfolio.summary.total_return_pct,
+        annualized_return_pct=annualized,
+        max_drawdown_pct=portfolio.summary.max_drawdown_pct,
+        win_rate=portfolio.summary.win_rate,
+        avg_trade_return_pct=portfolio.summary.avg_trade_return_pct,
+        trade_return_sharpe=sharpe,
+        turnover_pct=round(turnover, 4),
+        max_consecutive_losses=_max_consecutive_losses(returns),
+        total_costs=sum((item.costs for item in trades), Decimal("0")),
+    )
+
+
+def _max_consecutive_losses(returns: list[float]) -> int:
+    maximum = 0
+    current = 0
+    for value in returns:
+        current = current + 1 if value < 0 else 0
+        maximum = max(maximum, current)
+    return maximum
+
+
+def _benchmark_comparisons(
+    provider: ReplayMarketDataProvider,
+    *,
+    start: date,
+    end: date,
+    top_5_return: float,
+    top_10_return: float,
+) -> list[WalkForwardBenchmarkComparison]:
+    bars = provider.get_daily_bars(list(REQUIRED_BENCHMARK_IDS), start, end)
+    comparisons = []
+    for benchmark_id in REQUIRED_BENCHMARK_IDS:
+        frame = bars.loc[bars["instrument_id"] == benchmark_id].sort_values(
+            "trade_date"
+        ) if not bars.empty else bars
+        if frame.empty:
+            comparisons.append(
+                WalkForwardBenchmarkComparison(
+                    benchmark_id=benchmark_id,
+                    status="missing",
+                    benchmark_return_pct=None,
+                    top_5_excess_return_pct=None,
+                    top_10_excess_return_pct=None,
+                )
+            )
+            continue
+        first = float(frame.iloc[0]["adjusted_close"])
+        last = float(frame.iloc[-1]["adjusted_close"])
+        benchmark_return = round((last / first - 1) * 100, 4) if first else None
+        comparisons.append(
+            WalkForwardBenchmarkComparison(
+                benchmark_id=benchmark_id,
+                status="ready" if benchmark_return is not None else "missing",
+                benchmark_return_pct=benchmark_return,
+                top_5_excess_return_pct=(
+                    round(top_5_return - benchmark_return, 4)
+                    if benchmark_return is not None
+                    else None
+                ),
+                top_10_excess_return_pct=(
+                    round(top_10_return - benchmark_return, 4)
+                    if benchmark_return is not None
+                    else None
+                ),
+            )
+        )
+    return comparisons
