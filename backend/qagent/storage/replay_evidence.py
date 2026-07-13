@@ -1053,6 +1053,61 @@ class ReplayEvidenceRepository:
         with self.session_factory() as session:
             return self._lifecycle_inventory(session, revision)
 
+    def recoverable_lifecycle_profiles(
+        self,
+        effective_through: date,
+    ) -> list[HistoricalInstrumentProfile]:
+        """Return validated BaoStock lifecycle facts left by an older revision.
+
+        These rows contain listing identity, not historical recommendations. They are
+        revalidated as of the requested cutoff before a new immutable manifest is
+        created, so current listing status is never backdated unchanged.
+        """
+        with self.session_factory() as session:
+            rows = list(
+                session.scalars(
+                    select(HistoricalInstrumentProfileRow)
+                    .where(
+                        HistoricalInstrumentProfileRow.provider_mode
+                        == self.provider_mode,
+                        HistoricalInstrumentProfileRow.source_provider
+                        == "baostock",
+                    )
+                    .order_by(
+                        HistoricalInstrumentProfileRow.dataset_revision.desc(),
+                        HistoricalInstrumentProfileRow.snapshot_date.desc(),
+                    )
+                )
+            )
+        latest_rows = {}
+        for row in rows:
+            latest_rows.setdefault(row.instrument_id, row)
+        recovered = []
+        for row in latest_rows.values():
+            if row.listing_date is None or row.listing_date > effective_through:
+                continue
+            delisted_by_cutoff = (
+                row.delisting_date is not None
+                and row.delisting_date <= effective_through
+            )
+            profile, errors = normalize_and_validate_historical_profile(
+                HistoricalInstrumentProfile(
+                    instrument_id=row.instrument_id,
+                    snapshot_date=effective_through,
+                    listing_date=row.listing_date,
+                    delisting_date=(
+                        row.delisting_date if delisted_by_cutoff else None
+                    ),
+                    security_type=row.security_type,
+                    listing_status="delisted" if delisted_by_cutoff else "active",
+                    provider="baostock_cached_lifecycle_recovery",
+                ),
+                effective_through,
+            )
+            if not errors:
+                recovered.append(profile)
+        return sorted(recovered, key=lambda item: item.instrument_id)
+
     def materialize_universe(
         self,
         decision_date: date,

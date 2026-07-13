@@ -1133,6 +1133,47 @@ def test_lifecycle_inventory_uses_latest_ready_manifest_at_revision(storage):
     ]
 
 
+def test_recoverable_lifecycle_profiles_revalidates_legacy_baostock_rows(storage):
+    session_factory, _, _, make_repo = storage
+    with session_factory() as session:
+        session.add_all(
+            [
+                HistoricalInstrumentProfileRow(
+                    provider_mode="free",
+                    instrument_id="CN:000001",
+                    snapshot_date=date(2026, 7, 1),
+                    listing_date=date(1991, 4, 3),
+                    delisting_date=date(2026, 6, 30),
+                    security_type="1",
+                    listing_status="0",
+                    source_provider="baostock",
+                    dataset_revision=0,
+                    fetched_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                ),
+                HistoricalInstrumentProfileRow(
+                    provider_mode="free",
+                    instrument_id="CN:001999",
+                    snapshot_date=date(2026, 7, 1),
+                    listing_date=date(2026, 1, 2),
+                    security_type="1",
+                    listing_status="1",
+                    source_provider="baostock",
+                    dataset_revision=0,
+                    fetched_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                ),
+            ]
+        )
+        session.commit()
+
+    profiles = make_repo().recoverable_lifecycle_profiles(date(2025, 12, 31))
+
+    assert len(profiles) == 1
+    assert profiles[0].instrument_id == "CN:000001"
+    assert profiles[0].listing_status == "active"
+    assert profiles[0].delisting_date is None
+    assert profiles[0].provider == "baostock_cached_lifecycle_recovery"
+
+
 def test_legacy_lifecycle_profiles_migrate_to_revision_scoped_identity(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'legacy-lifecycle.db'}"
     engine = create_db_engine(database_url)

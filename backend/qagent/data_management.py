@@ -183,6 +183,7 @@ def run_historical_backfill(
     repo.capture_tradable_universe_snapshot(universe_as_of or date.today())
     replay_repo = ReplayEvidenceRepository(repo.session_factory, mode)
     inventory_rows = 0
+    inventory_recovered = False
     benchmark_rows = 0
     replay_rows = 0
     repo.update_historical_backfill_job(
@@ -228,6 +229,18 @@ def run_historical_backfill(
                 provider_manifest = provider_manifest or (
                     historical_evidence_provider.get_lifecycle_manifest()
                 )
+                if provider_manifest.status != "ready" or not profiles:
+                    recovered_profiles = (
+                        replay_repo.recoverable_lifecycle_profiles(end)
+                    )
+                    if recovered_profiles:
+                        profiles = recovered_profiles
+                        inventory_recovered = True
+                        if provider_manifest.error:
+                            errors.append(
+                                f"{provider_manifest.error}; recovered lifecycle "
+                                "identity from validated BaoStock cache"
+                            )
                 inventory_profiles = profiles
                 inventory_revision = replay_repo.current_revision() + 1
                 inventory_rows = replay_repo.upsert_lifecycle_inventory(
@@ -235,15 +248,29 @@ def run_historical_backfill(
                     HistoricalLifecycleManifest(
                         provider_mode=mode,
                         source_revision=inventory_revision,
-                        status=provider_manifest.status,
-                        expected_count=provider_manifest.expected_count,
+                        status=(
+                            "ready" if inventory_recovered else provider_manifest.status
+                        ),
+                        expected_count=(
+                            len(profiles)
+                            if inventory_recovered
+                            else provider_manifest.expected_count
+                        ),
                         stored_count=0,
-                        effective_through=provider_manifest.effective_through,
-                        error=provider_manifest.error,
-                        fetched_at=provider_manifest.fetched_at,
+                        effective_through=(
+                            end
+                            if inventory_recovered
+                            else provider_manifest.effective_through
+                        ),
+                        error=None if inventory_recovered else provider_manifest.error,
+                        fetched_at=(
+                            datetime.now(timezone.utc)
+                            if inventory_recovered
+                            else provider_manifest.fetched_at
+                        ),
                     ),
                 )
-                if provider_manifest.error:
+                if provider_manifest.error and not inventory_recovered:
                     errors.append(provider_manifest.error)
             else:
                 inventory_profiles = existing_inventory
@@ -653,6 +680,7 @@ def run_historical_backfill(
             "backfill_cache_reused": str(cache_reused),
             "backfill_rows_written": str(rows_written),
             "backfill_inventory_rows": str(inventory_rows),
+            "backfill_inventory_recovered": str(inventory_recovered).lower(),
             "backfill_replay_rows": str(replay_rows),
             "backfill_benchmark_rows": str(benchmark_rows),
             "backfill_fundamental_rows": str(fundamental_rows),

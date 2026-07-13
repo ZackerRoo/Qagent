@@ -27,6 +27,7 @@ from qagent.market.calendars import trading_sessions_in_range
 from qagent.storage.market_cache import MarketDataCacheRepository
 from qagent.storage.repository import QagentRepository
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
+from qagent.storage.tables import HistoricalInstrumentProfileRow
 from qagent.strategy_data.models import FundamentalSnapshot
 from qagent.strategy_data.providers import BaseStrategyDataProvider
 
@@ -265,6 +266,20 @@ class ReplayInventoryEvidenceProvider(CompleteHistoricalEvidenceProvider):
         }
 
 
+class UnavailableInventoryEvidenceProvider(ReplayInventoryEvidenceProvider):
+    def list_historical_instruments(self, effective_through):
+        self.inventory_calls += 1
+        self._manifest = HistoricalInventoryManifest(
+            status="partial",
+            expected_count=None,
+            effective_through=effective_through,
+            error="fixture inventory timeout",
+            fetched_at=datetime(2026, 1, 10, tzinfo=timezone.utc),
+            source_provider="fixture_inventory",
+        )
+        return []
+
+
 class FullScopeActionEvidenceProvider(ReplayInventoryEvidenceProvider):
     def __init__(self):
         super().__init__()
@@ -490,6 +505,45 @@ def test_historical_backfill_persists_paired_replay_inventory_and_benchmarks(
     assert second.job.data_health["backfill_inventory_rows"] == "0"
     assert second.job.data_health["backfill_replay_rows"] == "0"
     assert second.job.data_health["backfill_benchmark_rows"] == "0"
+
+
+def test_historical_backfill_recovers_validated_baostock_lifecycle_cache(tmp_path):
+    repo, cache = make_repositories(tmp_path)
+    with repo.session_factory() as session:
+        session.add(
+            HistoricalInstrumentProfileRow(
+                provider_mode="free",
+                instrument_id="CN:000001",
+                snapshot_date=date(2026, 7, 1),
+                listing_date=date(1991, 4, 3),
+                security_type="1",
+                listing_status="1",
+                source_provider="baostock",
+                dataset_revision=0,
+                fetched_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            )
+        )
+        session.commit()
+    evidence_provider = UnavailableInventoryEvidenceProvider()
+
+    result = run_historical_backfill(
+        repo=repo,
+        cache=cache,
+        provider=AdjustedHistoryProvider(),
+        strategy_provider=None,
+        provider_mode="free",
+        instrument_ids=["CN:000001"],
+        start=date(2025, 1, 2),
+        end=date(2025, 1, 9),
+        universe_as_of=date(2025, 1, 9),
+        historical_evidence_provider=evidence_provider,
+    )
+    replay = ReplayEvidenceRepository(repo.session_factory, "free")
+    inventory = replay.lifecycle_inventory(replay.current_revision())
+
+    assert result.job.data_health["backfill_inventory_recovered"] == "true"
+    assert inventory[0].instrument_id == "CN:000001"
+    assert inventory[0].provider == "baostock_cached_lifecycle_recovery"
 
 
 def test_full_scope_backfill_uses_historical_inventory_and_reuses_action_coverage(
