@@ -1421,6 +1421,16 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 max_active_trades=effective_active_limit,
                 max_signal_age_days=None,
                 signal_date_override=tracking_signal_date,
+                notes=(
+                    "风控恢复探针：本轮最多 1 笔，完成后下一交易日重新评估。"
+                    if risk_gate_health.get("paper_risk_gate_action") == "resume_probe_entries"
+                    else ""
+                ),
+                allocation_multiplier=(
+                    Decimal("0.35")
+                    if risk_gate_health.get("paper_risk_gate_action") == "resume_probe_entries"
+                    else Decimal("1.0")
+                ),
             )
             paper_created += seed_result.created
             data_health["automation_seed_snapshots"] = str(len(snapshots))

@@ -175,6 +175,19 @@ def test_initialize_database_adds_adjustment_columns_to_legacy_market_cache(tmp_
     ] == ["fee_schedule_version", "fee_rule_key", "effective_from", "side"]
 
 
+def test_initialize_database_adds_paper_probe_allocation_column(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'legacy-paper-probe.db'}"
+    engine = create_db_engine(database_url)
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE paper_trades DROP COLUMN allocation_multiplier"))
+
+    migrated = initialize_database(database_url)
+    columns = {column["name"] for column in inspect(migrated).get_columns("paper_trades")}
+
+    assert "allocation_multiplier" in columns
+
+
 def test_initialize_database_rebuilds_revision_scoped_tables_without_data_loss(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'legacy-replay-revisions.db'}"
     engine = create_db_engine(database_url)

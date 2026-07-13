@@ -543,7 +543,7 @@ def test_automation_scheduler_backfills_closed_paper_slot_from_deeper_cache_cand
     assert active == {"CN:688002", "CN:688003"}
 
 
-def test_automation_scheduler_pauses_new_paper_entries_when_ledger_drawdown_is_high(
+def test_automation_scheduler_allows_one_recovery_probe_when_ledger_drawdown_is_high(
     tmp_path,
     monkeypatch,
 ):
@@ -632,11 +632,23 @@ def test_automation_scheduler_pauses_new_paper_entries_when_ledger_drawdown_is_h
     assert response.status_code == 200
     body = response.json()
     health = body["last_result"]["data_health"]
-    assert body["last_result"]["paper_created"] == 0
-    assert health["paper_risk_gate_action"] == "pause_new_entries"
-    assert health["automation_seed_skipped_by_risk_gate"] == "true"
+    assert body["last_result"]["paper_created"] == 1
+    assert health["paper_risk_gate_action"] == "resume_probe_entries"
+    assert health["paper_risk_gate_max_new_entries"] == "1"
     trades = client.get("/api/paper-trades?provider=free&limit=20").json()["trades"]
-    assert "CN:688999" not in {trade["instrument_id"] for trade in trades}
+    probe = next(trade for trade in trades if trade["instrument_id"] == "CN:688999")
+    assert "风控恢复探针" in probe["notes"]
+
+    second = client.post(
+        "/api/automation/scheduler/run-once"
+        "?provider=free&include_etfs=true&run_scan=false&run_alerts=false"
+        "&update_paper=false&seed_paper=true&seed_limit=1"
+    )
+    assert second.status_code == 200
+    second_result = second.json()["last_result"]
+    assert second_result["paper_created"] == 0
+    assert second_result["data_health"]["paper_risk_gate_action"] == "pause_new_entries"
+    assert second_result["data_health"]["automation_seed_skipped_by_risk_gate"] == "true"
 
 
 def test_automation_scheduler_replaces_stale_pending_with_strong_candidate(

@@ -708,6 +708,9 @@ class PaperTradeRow(Base):
     initial_stop: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
     target_1: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
     rank_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    allocation_multiplier: Mapped[Decimal] = mapped_column(
+        Numeric(8, 4), default=Decimal("1.0"), nullable=False
+    )
     entry_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     entry_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
     exit_date: Mapped[date | None] = mapped_column(Date, nullable=True)

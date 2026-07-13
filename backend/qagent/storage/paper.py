@@ -26,6 +26,7 @@ class PaperTradeRecord(BaseModel):
     initial_stop: Decimal | None
     target_1: Decimal | None
     rank_score: Decimal | None
+    allocation_multiplier: Decimal = Decimal("1.0")
     entry_date: date | None
     entry_price: Decimal | None
     exit_date: date | None
@@ -73,6 +74,7 @@ class PaperTradingRepository:
         initial_stop: Decimal | None,
         target_1: Decimal | None,
         rank_score: Decimal | None = None,
+        allocation_multiplier: Decimal = Decimal("1.0"),
         notes: str = "",
     ) -> PaperTradeRecord:
         with self.session_factory() as session:
@@ -95,6 +97,7 @@ class PaperTradingRepository:
                 initial_stop=initial_stop,
                 target_1=target_1,
                 rank_score=rank_score,
+                allocation_multiplier=allocation_multiplier,
                 notes=notes,
             )
             session.add(row)
@@ -242,6 +245,7 @@ class PaperTradingRepository:
             initial_stop=row.initial_stop,
             target_1=row.target_1,
             rank_score=row.rank_score,
+            allocation_multiplier=row.allocation_multiplier or Decimal("1.0"),
             entry_date=row.entry_date,
             entry_price=row.entry_price,
             exit_date=row.exit_date,

@@ -21,6 +21,7 @@ A_SHARE_MORNING_START = time(9, 30)
 A_SHARE_MORNING_END = time(11, 30)
 A_SHARE_AFTERNOON_START = time(13, 0)
 A_SHARE_AFTERNOON_END = time(15, 0)
+PAPER_RISK_PROBE_NOTE = "风控恢复探针"
 
 
 class PaperSeedResult(BaseModel):
@@ -451,7 +452,11 @@ def seed_paper_trades_from_snapshots(
     max_signal_age_days: int | None = None,
     as_of: datetime | None = None,
     signal_date_override: date | None = None,
+    notes: str = "",
+    allocation_multiplier: Decimal = Decimal("1.0"),
 ) -> PaperSeedResult:
+    if allocation_multiplier <= 0 or allocation_multiplier > 1:
+        raise ValueError("allocation_multiplier must be between 0 and 1")
     created = 0
     skipped = 0
     existing_trades = repo.list_trades(limit=1000, provider=provider)
@@ -494,6 +499,8 @@ def seed_paper_trades_from_snapshots(
             initial_stop=snapshot.initial_stop,
             target_1=snapshot.target_1,
             rank_score=snapshot.rank_score,
+            notes=notes,
+            allocation_multiplier=allocation_multiplier,
         )
         created += 1
         active_instruments.add(snapshot.instrument_id)
@@ -686,9 +693,10 @@ def build_paper_ledger(
     planned_capital = Decimal("0")
 
     for trade in trades:
-        item = _ledger_item(trade, allocation_per_trade)
+        trade_allocation = _trade_allocation(trade, allocation_per_trade)
+        item = _ledger_item(trade, trade_allocation)
         items.append(item)
-        planned_capital += allocation_per_trade if trade.status == "pending" else Decimal("0")
+        planned_capital += trade_allocation if trade.status == "pending" else Decimal("0")
 
     account = _build_account_ledger(
         trades=trades,
@@ -993,7 +1001,7 @@ def _paper_asset_group(
     negative = [value for value in returns if value < 0]
     total_pnl = _money(sum((item.total_pnl for item in items), Decimal("0")))
     effective_items = [item for item in items if item.entry_date is not None]
-    capital_base = allocation_per_trade * Decimal(len(effective_items))
+    capital_base = sum((item.capital_allocated for item in effective_items), Decimal("0"))
     total_return_pct = (
         round(float(total_pnl / capital_base * Decimal("100")), 4)
         if capital_base > 0
@@ -1200,22 +1208,52 @@ def _paper_risk_gate_status(
         )
 
     if severe and recovery_score < 0.45:
+        probe_state, probe_date = _paper_risk_probe_state(ledger)
+        if probe_state == "active":
+            return PaperRiskGateStatus(
+                action="pause_new_entries",
+                can_add_entries=False,
+                title="恢复探针验证中",
+                reason="；".join(reasons) + "；已有恢复探针，等待其完成后再评估",
+                reasons=reasons + ["恢复探针尚未完成"],
+                recovery_conditions=[
+                    "等待当前恢复探针完成买入、止盈、止损或时间退出",
+                    "探针完成后下一交易日重新评估",
+                ],
+                recovery_state="probing",
+                recovery_score=recovery_score,
+                max_new_entries=0,
+                position_size_multiplier=0.0,
+            )
+        if probe_state == "cooldown":
+            return PaperRiskGateStatus(
+                action="pause_new_entries",
+                can_add_entries=False,
+                title="恢复探针冷却中",
+                reason="；".join(reasons) + "；上一笔恢复探针刚完成，下一交易日再评估",
+                reasons=reasons + ["恢复探针当日冷却"],
+                recovery_conditions=["下一交易日根据探针结果决定是否继续试单"],
+                recovery_state="paused",
+                recovery_score=recovery_score,
+                max_new_entries=0,
+                position_size_multiplier=0.0,
+            )
         return PaperRiskGateStatus(
-            action="pause_new_entries",
-            can_add_entries=False,
-            title="暂停新增模拟单",
-            reason="；".join(reasons),
+            action="resume_probe_entries",
+            can_add_entries=True,
+            title="恢复小仓位试单",
+            reason="；".join(reasons) + "。当前没有进行中的恢复探针，允许 1 笔新机会试单，避免风控永久锁死。",
             reasons=reasons,
             recovery_conditions=[
-                "总收益回到 -2% 以上",
-                "最大回撤收敛到 -2% 以内",
-                "闭环胜率回到 25% 以上",
-                "出现目标命中或连续止损减少",
+                "本轮最多允许 1 笔恢复探针",
+                "探针完成后下一交易日再评估",
+                "若探针止损，继续保持单笔试单而不恢复批量买入",
+                "若收益、回撤和胜率恢复，再切回正常新增",
             ],
-            recovery_state="paused",
+            recovery_state="probing",
             recovery_score=recovery_score,
-            max_new_entries=0,
-            position_size_multiplier=0.0,
+            max_new_entries=1,
+            position_size_multiplier=0.35,
         )
 
     return PaperRiskGateStatus(
@@ -1262,6 +1300,38 @@ def _paper_recovery_score(
         elif trigger_quality.verdict in {"needs_tighter_entry", "stop_rules_weak"}:
             score -= 0.08
     return round(max(0.0, min(1.0, score)), 4)
+
+
+def _paper_risk_probe_state(ledger: PaperLedger) -> tuple[str, date | None]:
+    """Return whether a recovery probe is active or cooling down.
+
+    The gate is evaluated before the paper update in an automation cycle. A
+    probe therefore needs an explicit marker so the next cycle does not keep
+    adding one new trade while the first probe is still being evaluated.
+    """
+    probes = [item for item in ledger.items if PAPER_RISK_PROBE_NOTE in item.notes]
+    if not probes:
+        return "none", None
+    if any(item.status in OPEN_STATUSES for item in probes):
+        return "active", None
+
+    completed_dates = [
+        item.exit_date or item.latest_date
+        for item in probes
+        if item.status in CLOSED_STATUSES and (item.exit_date or item.latest_date) is not None
+    ]
+    if not completed_dates:
+        return "none", None
+    last_completed = max(completed_dates)
+    reference_dates = [
+        item.latest_date or item.exit_date or item.entry_date or item.signal_date
+        for item in ledger.items
+        if (item.latest_date or item.exit_date or item.entry_date or item.signal_date) is not None
+    ]
+    reference_date = max(reference_dates, default=last_completed)
+    if reference_date <= last_completed:
+        return "cooldown", last_completed
+    return "ready", last_completed
 
 
 def _paper_risk_gate_is_severe(summary: PaperLedgerSummary) -> bool:
@@ -1322,7 +1392,7 @@ def _paper_failure_group(
     closed = [item for item in items if _is_executed_closed_item(item)]
     returns = [item.return_pct for item in evaluated if item.return_pct is not None]
     total_pnl = _money(sum((item.total_pnl for item in items), Decimal("0")))
-    capital_base = allocation_per_trade * Decimal(str(len(evaluated)))
+    capital_base = sum((item.capital_allocated for item in evaluated), Decimal("0"))
     total_return_pct = _pct(total_pnl, capital_base) if capital_base > 0 else None
     win_rate = (
         round(sum(1 for value in returns if value > 0) / len(returns), 4)
@@ -1665,7 +1735,7 @@ def _build_account_ledger(
             buy = _buy_lot(
                 trade=trade,
                 cash=cash,
-                allocation_per_trade=allocation_per_trade,
+                allocation_per_trade=_trade_allocation(trade, allocation_per_trade),
                 fee_rate=fee_rate,
                 slippage_rate=slippage_rate,
             )
@@ -1761,7 +1831,11 @@ def _validation_item(
         if trade.realized_return_pct is not None
         else trade.unrealized_return_pct
     )
-    capital_allocated = allocation_per_trade if trade.entry_date is not None else Decimal("0")
+    capital_allocated = (
+        _trade_allocation(trade, allocation_per_trade)
+        if trade.entry_date is not None
+        else Decimal("0")
+    )
     pnl = Decimal("0")
     outcome = _outcome_label(trade.status, return_pct)
     if ledger_item is not None:
@@ -1805,7 +1879,7 @@ def _validation_window(
     ]
     returns = [item.return_pct for item in evaluated if item.return_pct is not None]
     total_pnl = sum((item.pnl for item in evaluated), Decimal("0"))
-    denominator = allocation_per_trade * Decimal(str(len(evaluated)))
+    denominator = sum((item.capital_allocated for item in evaluated), Decimal("0"))
     return PaperValidationWindow(
         window_days=window_days,
         eligible_trades=len(items),
@@ -1880,7 +1954,7 @@ def _validation_batches(
             if item.return_pct is not None and item.days_since_signal >= windows[-1]
         ]
         total_pnl = sum((item.pnl for item in executed_items), Decimal("0"))
-        denominator = allocation_per_trade * Decimal(str(len(executed_items)))
+        denominator = sum((item.capital_allocated for item in executed_items), Decimal("0"))
         batch_windows = [
             _validation_window(
                 items=batch_items,
@@ -2265,6 +2339,7 @@ def _ledger_item(
 
     if trade.entry_price and trade.entry_price > 0:
         shares = (allocation_per_trade / trade.entry_price).quantize(Decimal("0.0001"))
+        capital_allocated = allocation_per_trade
         if trade.status in CLOSED_STATUSES and trade.exit_price is not None:
             exit_value = shares * trade.exit_price
             realized_pnl = exit_value - allocation_per_trade
@@ -2274,7 +2349,6 @@ def _ledger_item(
             market_value = shares * latest_price
             unrealized_pnl = market_value - allocation_per_trade
             return_pct = _return_pct(trade.entry_price, latest_price)
-            capital_allocated = allocation_per_trade
 
     risk_pct = (
         _signed_return_pct(trade.trigger_price, trade.initial_stop)
@@ -2314,6 +2388,14 @@ def _ledger_item(
         holding_days=trade.holding_days,
         notes=trade.notes,
     )
+
+
+def _trade_allocation(
+    trade: PaperTradeRecord,
+    allocation_per_trade: Decimal,
+) -> Decimal:
+    multiplier = trade.allocation_multiplier or Decimal("1.0")
+    return _money(allocation_per_trade * multiplier)
 
 
 def _ledger_curve(

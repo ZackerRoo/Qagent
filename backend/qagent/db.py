@@ -163,6 +163,14 @@ def _apply_additive_migrations(engine: Engine) -> None:
         _add_missing_columns(
             connection,
             inspector,
+            "paper_trades",
+            {
+                "allocation_multiplier": "NUMERIC(8, 4) NOT NULL DEFAULT 1.0",
+            },
+        )
+        _add_missing_columns(
+            connection,
+            inspector,
             "historical_trading_rules",
             {
                 "minimum_order_quantity": "INTEGER NOT NULL DEFAULT 100",

@@ -974,6 +974,7 @@ def test_paper_daily_report_explains_risk_gate_failures_and_event_timeline(tmp_p
         latest_price=Decimal("2.12"),
         unrealized_return_pct=Decimal("-3.64"),
         holding_days=1,
+        notes="风控恢复探针：本轮最多 1 笔。",
     )
 
     trades = paper_repo.list_trades(limit=20)
