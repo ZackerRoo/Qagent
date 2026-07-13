@@ -669,9 +669,9 @@ def test_automation_scheduler_replaces_stale_pending_with_strong_candidate(
                 run_id="scan-replacement",
                 provider="free",
                 mode="full_market",
-                symbols=json.dumps(["CN:588000", "CN:159558"]),
-                scanned=2,
-                cards=2,
+                symbols=json.dumps(["CN:588000", "CN:588770", "CN:159558"]),
+                scanned=3,
+                cards=3,
                 data_health="{}",
                 created_at=now,
             )
@@ -699,6 +699,36 @@ def test_automation_scheduler_replaces_stale_pending_with_strong_candidate(
                         "instrument_id": "CN:588000",
                         "instrument_label": "科创50ETF华夏 588000.SH",
                         "entry_plan": {"trigger_price": "2.22"},
+                        "decision": {"risk_status": "clear", "action": "watch_trigger"},
+                    },
+                    sort_keys=True,
+                ),
+                created_at=now,
+            )
+        )
+        session.add(
+            OpportunitySnapshotRow(
+                snapshot_id="scan-replacement:588770",
+                run_id="scan-replacement",
+                card_id="card-588770",
+                instrument_id="CN:588770",
+                market="CN",
+                status="setup_ready",
+                signal_date=today,
+                latest_close=Decimal("1.20"),
+                primary_strategy_id="trend_momentum_stage2",
+                score=Decimal("0.99"),
+                strategy_score=Decimal("0.99"),
+                rank_score=Decimal("0.99"),
+                trigger_price=None,
+                initial_stop=None,
+                target_1=None,
+                card_json=json.dumps(
+                    {
+                        "card_id": "card-588770",
+                        "instrument_id": "CN:588770",
+                        "instrument_label": "科创信息ETF摩根 588770.SH",
+                        "entry_plan": {},
                         "decision": {"risk_status": "clear", "action": "watch_trigger"},
                     },
                     sort_keys=True,
@@ -831,6 +861,7 @@ def test_automation_scheduler_replaces_stale_pending_with_strong_candidate(
     health = body["last_result"]["data_health"]
     assert body["last_result"]["paper_created"] == 1
     assert health["paper_replacement_action"] == "replaced_pending"
+    assert health["paper_replacement_candidate"] == "CN:588000"
     assert health["paper_candidate_pool_waiting_count"] == "1"
     pool_response = client.get(
         "/api/paper-trades/candidate-pool?provider=free&include_etfs=true&limit=10"

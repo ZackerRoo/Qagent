@@ -1811,6 +1811,8 @@ def _maybe_replace_pending_paper_trade_for_candidate(
         if snapshot.instrument_id not in active_instruments
         and snapshot.instrument_id not in recently_released
         and snapshot.snapshot_id not in existing_sources
+        and snapshot.signal_date is not None
+        and snapshot.trigger_price is not None
     ]
     if not candidates:
         return {
