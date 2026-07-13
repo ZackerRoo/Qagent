@@ -11,10 +11,12 @@ import {
   fetchRecommendationCalibration,
   fetchRecommendationClosure,
   fetchLatestWalkForwardRun,
+  fetchLatestWalkForwardJob,
+  fetchWalkForwardJob,
   fetchScanRuns,
   fetchStrategyDiagnostics,
   fetchStrategyPerformance,
-  runWalkForward,
+  startWalkForwardJob,
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
 import { OpportunityCandlestickChart, type SignalMarker } from "../components/OpportunityChart";
@@ -52,6 +54,7 @@ import type {
   StrategyDiagnosticsResponse,
   StrategyPerformanceResponse,
   WalkForwardRun,
+  WalkForwardJob,
 } from "../types";
 
 function formatNumber(value: number | null, suffix = "") {
@@ -123,6 +126,7 @@ export function History({
   const [performance, setPerformance] = useState<StrategyPerformanceResponse>();
   const [diagnostics, setDiagnostics] = useState<StrategyDiagnosticsResponse>();
   const [walkForward, setWalkForward] = useState<WalkForwardRun>();
+  const [walkForwardJob, setWalkForwardJob] = useState<WalkForwardJob>();
   const [error, setError] = useState("");
   const [isHistoryLoading, setIsHistoryLoading] = useState(true);
   const [backtestError, setBacktestError] = useState("");
@@ -193,6 +197,22 @@ export function History({
             setWalkForwardError(message);
           }
         });
+      void fetchLatestWalkForwardJob(dataMode)
+        .then((job) => {
+          if (!cancelled) {
+            setWalkForwardJob(job);
+            setIsWalkForwardRunning(job.status === "queued" || job.status === "running");
+            if (job.status === "failed" && job.error) {
+              setWalkForwardError(job.error);
+            }
+          }
+        })
+        .catch((caught) => {
+          const message = caught instanceof Error ? caught.message : "failed";
+          if (!cancelled && !message.includes("404")) {
+            setWalkForwardError(message);
+          }
+        });
     }
 
     return () => {
@@ -200,20 +220,55 @@ export function History({
     };
   }, [dataMode]);
 
+  useEffect(() => {
+    if (!walkForwardJob || !["queued", "running"].includes(walkForwardJob.status)) {
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const job = await fetchWalkForwardJob(walkForwardJob.job_id);
+        if (cancelled) {
+          return;
+        }
+        setWalkForwardJob(job);
+        if (job.status === "succeeded" && job.result_run_id) {
+          const result = await fetchLatestWalkForwardRun(dataMode);
+          if (!cancelled) {
+            setWalkForward(result);
+            setIsWalkForwardRunning(false);
+          }
+        } else if (job.status === "failed") {
+          setIsWalkForwardRunning(false);
+          setWalkForwardError(job.error ?? "Walk-forward validation failed");
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setIsWalkForwardRunning(false);
+          setWalkForwardError(caught instanceof Error ? caught.message : "Failed to load validation task");
+        }
+      }
+    };
+    const interval = window.setInterval(() => void poll(), 2000);
+    void poll();
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [dataMode, walkForwardJob?.job_id, walkForwardJob?.status]);
+
   async function runFullMarketWalkForward() {
     if (dataMode !== "free") {
       setWalkForwardError(language === "zh" ? "全市场验证只使用 A 股免费历史数据。" : "Walk-forward uses free A-share historical data only.");
       return;
     }
-    const end = new Date().toISOString().slice(0, 10);
     try {
       setIsWalkForwardRunning(true);
       setWalkForwardError("");
-      const result = await runWalkForward("2023-01-03", end, dataMode);
-      setWalkForward(result);
+      const job = await startWalkForwardJob("2023-01-03", "2025-12-31", dataMode);
+      setWalkForwardJob(job);
     } catch (caught) {
       setWalkForwardError(caught instanceof Error ? caught.message : "Failed to run walk-forward validation");
-    } finally {
       setIsWalkForwardRunning(false);
     }
   }
@@ -343,6 +398,7 @@ export function History({
 
       <WalkForwardValidationCenter
         run={walkForward}
+        job={walkForwardJob}
         error={walkForwardError}
         isRunning={isWalkForwardRunning}
         onRun={runFullMarketWalkForward}
@@ -1088,11 +1144,13 @@ export function History({
 
 function WalkForwardValidationCenter({
   run,
+  job,
   error,
   isRunning,
   onRun,
 }: {
   run?: WalkForwardRun;
+  job?: WalkForwardJob;
   error: string;
   isRunning: boolean;
   onRun: () => void;
@@ -1106,6 +1164,15 @@ function WalkForwardValidationCenter({
   const top10Validation = payload?.top_10_temporal_validation;
   const top5Oos = top5Validation?.out_of_sample;
   const top10Oos = top10Validation?.out_of_sample;
+  const activeJob = job && ["queued", "running"].includes(job.status) ? job : undefined;
+  const phaseLabels: Record<string, string> = {
+    queued: zh ? "等待后台执行" : "Queued",
+    historical_replay: zh ? "逐日重放历史推荐" : "Replaying historical recommendations",
+    portfolio_simulation: zh ? "模拟 Top 5 / Top 10 组合" : "Simulating Top 5 / Top 10 portfolios",
+    validation_and_benchmarks: zh ? "计算样本外与基准结果" : "Calculating OOS and benchmarks",
+    completed: zh ? "验证完成" : "Completed",
+    failed: zh ? "验证失败" : "Failed",
+  };
   const benchmarkLabel = (id: string) => {
     const labels: Record<string, string> = {
       "CN:000300.IDX": zh ? "沪深300" : "CSI 300",
@@ -1134,6 +1201,25 @@ function WalkForwardValidationCenter({
         </button>
       </div>
       {error ? <div className="empty-state error">{error}</div> : null}
+      {activeJob ? (
+        <div className="walk-forward-job-progress">
+          <div>
+            <strong>{phaseLabels[activeJob.phase] ?? activeJob.phase}</strong>
+            <span>
+              {activeJob.current_date
+                ? `${zh ? "已处理至" : "Processed through"} ${activeJob.current_date}`
+                : (zh ? "任务已经保存，可以安全刷新页面。" : "The task is persisted; refreshing is safe.")}
+            </span>
+          </div>
+          <div className="walk-forward-progress-value">
+            <strong>{activeJob.progress}%</strong>
+            <span>{activeJob.processed_snapshots}/{activeJob.total_snapshots}</span>
+          </div>
+          <div className="walk-forward-progress-track" aria-label={zh ? "验证进度" : "Validation progress"}>
+            <span style={{ width: `${activeJob.progress}%` }} />
+          </div>
+        </div>
+      ) : null}
       {!run ? (
         <div className="walk-forward-empty">
           <strong>{zh ? "还没有保存的 Walk-forward 结果" : "No saved walk-forward result"}</strong>
@@ -1150,6 +1236,8 @@ function WalkForwardValidationCenter({
             <span>{zh ? "数据版本" : "Dataset"} {run.dataset_revision}</span>
             <span>{zh ? "再平衡" : "Rebalance"} {run.rebalance_step_sessions} {zh ? "交易日" : "sessions"}</span>
             <span className={`status status-${run.status}`}>{run.status}</span>
+            <span>{zh ? "实验" : "Experiment"} {payload?.experiment_manifest?.experiment_digest.slice(0, 8) ?? "-"}</span>
+            <span>{zh ? "代码" : "Code"} {payload?.experiment_manifest?.code_revision.slice(0, 8) ?? "-"}</span>
           </div>
           <div className="metric-grid walk-forward-kpis">
             <div><span>{zh ? "Top 5 收益" : "Top 5 return"}</span><strong>{formatNumber(run.top_5_return_pct, "%")}</strong></div>

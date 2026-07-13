@@ -18,9 +18,17 @@ from qagent.api.schemas import (
     PaperTradeFromOpportunityRequest,
 )
 from qagent.backtesting.engine import run_historical_backtest
+from qagent.backtesting.experiment import (
+    WalkForwardExperimentManifest,
+    build_walk_forward_experiment_manifest,
+)
 from qagent.backtesting.portfolio import run_portfolio_backtest
 from qagent.backtesting.sensitivity import build_parameter_sensitivity
-from qagent.backtesting.walk_forward import run_full_market_walk_forward_selection
+from qagent.backtesting.walk_forward import (
+    WalkForwardProgress,
+    WalkForwardSnapshot,
+    run_full_market_walk_forward_selection,
+)
 from qagent.briefing.daily import DailyBrief, build_daily_brief
 from qagent.briefing.export import render_daily_brief_markdown
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
@@ -58,6 +66,7 @@ from qagent.market.tradable import search_cn_tradable_instruments
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE, DEFAULT_FREE_UNIVERSE
 from qagent.market.universes import UniverseCreate, builtin_universes, merge_universes
 from qagent.market.indicators import add_moving_averages, add_volume_ratio, percent_distance
+from qagent.market.calendars import trading_sessions_in_range
 from qagent.market.benchmarks import (
     benchmark_ids,
     benchmark_proxy_ids,
@@ -145,6 +154,12 @@ _task_executor = ThreadPoolExecutor(max_workers=2)
 _history_task_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="history-backfill")
 _historical_jobs_lock = Lock()
 _submitted_historical_jobs: set[str] = set()
+_walk_forward_task_executor = ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="walk-forward",
+)
+_walk_forward_jobs_lock = Lock()
+_submitted_walk_forward_jobs: set[str] = set()
 _automation_scheduler = AutomationScheduler()
 
 
@@ -259,6 +274,96 @@ def run_walk_forward(
     return record.model_dump(mode="json")
 
 
+@router.post("/walk-forward/jobs")
+def start_walk_forward_job(
+    start: date,
+    end: date,
+    provider: str = "free",
+    step_sessions: int = 5,
+    lookback_days: int = 400,
+) -> dict[str, object]:
+    mode = _validate_walk_forward_params(
+        provider,
+        start,
+        end,
+        step_sessions,
+        lookback_days,
+    )
+    repo = _repo()
+    active = next(
+        (
+            job
+            for job in repo.list_walk_forward_jobs(provider=mode, limit=10)
+            if job.status in {"queued", "running"}
+        ),
+        None,
+    )
+    if active is not None:
+        return _walk_forward_job_payload(active)
+    replay_repository = ReplayEvidenceRepository(repo.session_factory, mode)
+    revision = replay_repository.current_revision()
+    if revision <= 0:
+        raise HTTPException(status_code=400, detail="historical replay dataset is empty")
+    sessions = trading_sessions_in_range(start, end)[::step_sessions]
+    if not sessions:
+        raise HTTPException(status_code=400, detail="validation range has no trading sessions")
+    job_id = f"walk-forward-{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{uuid4().hex[:8]}"
+    manifest = build_walk_forward_experiment_manifest(
+        provider_mode=mode,
+        dataset_revision=revision,
+        start_date=start,
+        end_date=end,
+        rebalance_step_sessions=step_sessions,
+        lookback_days=lookback_days,
+    )
+    job = repo.create_walk_forward_job(
+        job_id=job_id,
+        provider=mode,
+        start=start,
+        end=end,
+        dataset_revision=revision,
+        rebalance_step_sessions=step_sessions,
+        lookback_days=lookback_days,
+        total_snapshots=len(sessions),
+        experiment_manifest=manifest.model_dump(mode="json"),
+    )
+    _submit_walk_forward_job(job.job_id)
+    return _walk_forward_job_payload(job)
+
+
+@router.get("/walk-forward/jobs")
+def list_walk_forward_jobs(
+    provider: str = "free",
+    limit: int = 20,
+) -> dict[str, object]:
+    if limit <= 0 or limit > 100:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
+    jobs = _repo().list_walk_forward_jobs(
+        provider=provider.strip().lower(),
+        limit=limit,
+    )
+    return {"jobs": [_walk_forward_job_payload(job) for job in jobs]}
+
+
+@router.get("/walk-forward/jobs/latest")
+def latest_walk_forward_job(provider: str = "free") -> dict[str, object]:
+    jobs = _repo().list_walk_forward_jobs(
+        provider=provider.strip().lower(),
+        limit=1,
+    )
+    if not jobs:
+        raise HTTPException(status_code=404, detail="walk-forward job not found")
+    return _walk_forward_job_payload(jobs[0])
+
+
+@router.get("/walk-forward/jobs/{job_id}")
+def get_walk_forward_job(job_id: str) -> dict[str, object]:
+    job = _repo().get_walk_forward_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="walk-forward job not found")
+    return _walk_forward_job_payload(job)
+
+
 @router.get("/walk-forward/runs")
 def list_walk_forward_runs(
     provider: str = "free",
@@ -290,6 +395,133 @@ def get_walk_forward_run(run_id: str) -> dict[str, object]:
     if record is None:
         raise HTTPException(status_code=404, detail="walk-forward run not found")
     return record.model_dump(mode="json")
+
+
+def restore_walk_forward_job_from_storage() -> str | None:
+    active = next(
+        (
+            job
+            for job in _repo().list_walk_forward_jobs(limit=20)
+            if job.status in {"queued", "running"}
+        ),
+        None,
+    )
+    if active is None:
+        return None
+    _submit_walk_forward_job(active.job_id)
+    return active.job_id
+
+
+def _validate_walk_forward_params(
+    provider: str,
+    start: date,
+    end: date,
+    step_sessions: int,
+    lookback_days: int,
+) -> str:
+    mode = provider.strip().lower()
+    if mode != "free":
+        raise HTTPException(
+            status_code=400,
+            detail="walk-forward only supports free A-share data",
+        )
+    if start > end:
+        raise HTTPException(status_code=400, detail="start must be on or before end")
+    if step_sessions <= 0 or lookback_days <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="step_sessions and lookback_days must be positive",
+        )
+    return mode
+
+
+def _submit_walk_forward_job(job_id: str) -> None:
+    with _walk_forward_jobs_lock:
+        if job_id in _submitted_walk_forward_jobs:
+            return
+        _submitted_walk_forward_jobs.add(job_id)
+    _walk_forward_task_executor.submit(_run_walk_forward_job_safely, job_id)
+
+
+def _run_walk_forward_job_safely(job_id: str) -> None:
+    repo = _repo()
+    try:
+        job = repo.get_walk_forward_job(job_id)
+        if job is None:
+            return
+        replay_repository = ReplayEvidenceRepository(repo.session_factory, job.provider)
+        if replay_repository.current_revision() != job.dataset_revision:
+            raise RuntimeError(
+                "historical dataset revision changed; start a new validation job"
+            )
+        manifest = WalkForwardExperimentManifest.model_validate(
+            job.experiment_manifest
+        )
+        checkpoint_by_date = {
+            item["decision_date"]: item for item in job.checkpoints
+        }
+        repo.update_walk_forward_job(
+            job_id,
+            status="running",
+            phase="historical_replay",
+            started_at=job.started_at or datetime.now(timezone.utc),
+        )
+
+        def on_progress(progress: WalkForwardProgress) -> None:
+            if progress.snapshot is not None:
+                snapshot_payload = progress.snapshot.model_dump(mode="json")
+                checkpoint_by_date[snapshot_payload["decision_date"]] = snapshot_payload
+            repo.update_walk_forward_job(
+                job_id,
+                status="running",
+                phase=progress.phase,
+                processed_snapshots=progress.processed_snapshots,
+                current_date=progress.current_date,
+                checkpoints=list(checkpoint_by_date.values()),
+            )
+
+        result = run_full_market_walk_forward_selection(
+            replay_repository,
+            owner_run_id=job_id,
+            start=job.start_date,
+            end=job.end_date,
+            rebalance_step_sessions=job.rebalance_step_sessions,
+            lookback_days=job.lookback_days,
+            experiment_manifest=manifest,
+            resume_snapshots=[
+                WalkForwardSnapshot.model_validate(item) for item in job.checkpoints
+            ],
+            progress_callback=on_progress,
+        )
+        stored = repo.save_walk_forward_run(result)
+        repo.update_walk_forward_job(
+            job_id,
+            status="succeeded",
+            phase="completed",
+            processed_snapshots=job.total_snapshots,
+            result_run_id=stored.run_id,
+            finished_at=datetime.now(timezone.utc),
+        )
+    except Exception as exc:
+        current = repo.get_walk_forward_job(job_id)
+        if current is not None:
+            repo.update_walk_forward_job(
+                job_id,
+                status="failed",
+                phase="failed",
+                error=str(exc),
+                finished_at=datetime.now(timezone.utc),
+            )
+    finally:
+        with _walk_forward_jobs_lock:
+            _submitted_walk_forward_jobs.discard(job_id)
+
+
+def _walk_forward_job_payload(job) -> dict[str, object]:
+    payload = job.model_dump(mode="json", exclude={"checkpoints"})
+    payload["progress"] = job.progress
+    payload["checkpoint_count"] = len(job.checkpoints)
+    return payload
 
 
 @router.post("/historical-data/backfill")

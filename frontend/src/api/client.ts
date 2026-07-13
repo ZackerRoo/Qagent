@@ -65,6 +65,8 @@ import type {
   WatchlistItem,
   WatchlistResponse,
   WalkForwardRun,
+  WalkForwardJob,
+  WalkForwardJobsResponse,
   WalkForwardRunsResponse,
 } from "../types";
 
@@ -760,6 +762,40 @@ export async function runWalkForward(
     })}`,
     {},
   );
+}
+
+export async function startWalkForwardJob(
+  start: string,
+  end: string,
+  provider: DataProviderMode = "free",
+): Promise<WalkForwardJob> {
+  return apiPost<WalkForwardJob>(
+    `/walk-forward/jobs${queryString({
+      provider,
+      start,
+      end,
+      step_sessions: 5,
+      lookback_days: 400,
+    })}`,
+    {},
+  );
+}
+
+export async function fetchWalkForwardJobs(
+  provider: DataProviderMode = "free",
+  limit = 20,
+): Promise<WalkForwardJobsResponse> {
+  return apiGet<WalkForwardJobsResponse>("/walk-forward/jobs", { provider, limit });
+}
+
+export async function fetchLatestWalkForwardJob(
+  provider: DataProviderMode = "free",
+): Promise<WalkForwardJob> {
+  return apiGet<WalkForwardJob>("/walk-forward/jobs/latest", { provider });
+}
+
+export async function fetchWalkForwardJob(jobId: string): Promise<WalkForwardJob> {
+  return apiGet<WalkForwardJob>(`/walk-forward/jobs/${jobId}`);
 }
 
 export async function fetchDailyBrief(

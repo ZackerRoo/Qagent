@@ -12951,6 +12951,43 @@ td {
   margin: 0;
 }
 
+.walk-forward-job-progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px 20px;
+  padding: 16px;
+  border: 1px solid rgba(244, 197, 66, 0.32);
+  background: rgba(244, 197, 66, 0.06);
+}
+
+.walk-forward-job-progress > div:first-child,
+.walk-forward-progress-value {
+  display: grid;
+  gap: 4px;
+}
+
+.walk-forward-job-progress span {
+  color: var(--text-muted);
+}
+
+.walk-forward-progress-value {
+  justify-items: end;
+}
+
+.walk-forward-progress-track {
+  grid-column: 1 / -1;
+  height: 6px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.walk-forward-progress-track > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 180ms ease;
+}
+
 .walk-forward-chart-grid,
 .walk-forward-table-grid {
   display: grid;

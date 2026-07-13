@@ -43,6 +43,7 @@ from qagent.storage.tables import (
     UniverseRow,
     WatchlistItemRow,
     WalkForwardRunRow,
+    WalkForwardJobRow,
 )
 from qagent.strategy_data.models import FundamentalSnapshot
 
@@ -209,6 +210,48 @@ class WalkForwardRunRecord(BaseModel):
     data_health: dict[str, str]
     created_at: datetime
     updated_at: datetime
+
+
+class WalkForwardJobRecord(BaseModel):
+    job_id: str
+    provider: str
+    status: str
+    phase: str
+    start_date: date
+    end_date: date
+    dataset_revision: int
+    rebalance_step_sessions: int
+    lookback_days: int
+    total_snapshots: int
+    processed_snapshots: int
+    current_date: date | None
+    checkpoints: list[dict[str, object]]
+    experiment_manifest: dict[str, object]
+    result_run_id: str | None
+    error: str | None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+    @property
+    def progress(self) -> int:
+        if self.status == "succeeded":
+            return 100
+        if self.status == "failed":
+            return max(
+                0,
+                min(
+                    100,
+                    int(self.processed_snapshots * 100 / self.total_snapshots),
+                ),
+            ) if self.total_snapshots else 0
+        if self.total_snapshots <= 0:
+            return 0
+        return max(
+            0,
+            min(99, int(self.processed_snapshots * 100 / self.total_snapshots)),
+        )
 
 
 class AutomationSchedulerStateRecord(BaseModel):
@@ -1417,6 +1460,111 @@ class QagentRepository:
             session.refresh(row)
             return self._walk_forward_run_from_row(row)
 
+    def create_walk_forward_job(
+        self,
+        *,
+        job_id: str,
+        provider: str,
+        start: date,
+        end: date,
+        dataset_revision: int,
+        rebalance_step_sessions: int,
+        lookback_days: int,
+        total_snapshots: int,
+        experiment_manifest: dict[str, object],
+    ) -> WalkForwardJobRecord:
+        now = datetime.now(timezone.utc)
+        with self.session_factory() as session:
+            row = WalkForwardJobRow(
+                job_id=job_id,
+                provider=provider,
+                status="queued",
+                phase="queued",
+                start_date=start,
+                end_date=end,
+                dataset_revision=dataset_revision,
+                rebalance_step_sessions=rebalance_step_sessions,
+                lookback_days=lookback_days,
+                total_snapshots=total_snapshots,
+                processed_snapshots=0,
+                checkpoints_json="[]",
+                experiment_manifest_json=json.dumps(
+                    experiment_manifest,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return self._walk_forward_job_from_row(row)
+
+    def update_walk_forward_job(
+        self,
+        job_id: str,
+        *,
+        status: str | None = None,
+        phase: str | None = None,
+        processed_snapshots: int | None = None,
+        current_date: date | None = None,
+        checkpoints: list[dict[str, object]] | None = None,
+        result_run_id: str | None = None,
+        error: str | None = None,
+        started_at: datetime | None = None,
+        finished_at: datetime | None = None,
+    ) -> WalkForwardJobRecord:
+        with self.session_factory() as session:
+            row = session.get(WalkForwardJobRow, job_id)
+            if row is None:
+                raise ValueError(f"walk-forward job not found: {job_id}")
+            values = {
+                "status": status,
+                "phase": phase,
+                "processed_snapshots": processed_snapshots,
+                "current_date": current_date,
+                "result_run_id": result_run_id,
+                "error": error,
+                "started_at": started_at,
+                "finished_at": finished_at,
+            }
+            for key, value in values.items():
+                if value is not None:
+                    setattr(row, key, value)
+            if checkpoints is not None:
+                row.checkpoints_json = json.dumps(
+                    checkpoints,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                )
+            row.updated_at = datetime.now(timezone.utc)
+            session.commit()
+            session.refresh(row)
+            return self._walk_forward_job_from_row(row)
+
+    def get_walk_forward_job(self, job_id: str) -> WalkForwardJobRecord | None:
+        with self.session_factory() as session:
+            row = session.get(WalkForwardJobRow, job_id)
+            return self._walk_forward_job_from_row(row) if row is not None else None
+
+    def list_walk_forward_jobs(
+        self,
+        *,
+        provider: str | None = None,
+        limit: int = 20,
+    ) -> list[WalkForwardJobRecord]:
+        bounded_limit = max(1, min(limit, 100))
+        with self.session_factory() as session:
+            query = session.query(WalkForwardJobRow)
+            if provider:
+                query = query.filter(WalkForwardJobRow.provider == provider)
+            rows = query.order_by(
+                WalkForwardJobRow.created_at.desc(),
+                WalkForwardJobRow.job_id.desc(),
+            ).limit(bounded_limit).all()
+            return [self._walk_forward_job_from_row(row) for row in rows]
+
     def get_walk_forward_run(self, run_id: str) -> WalkForwardRunRecord | None:
         with self.session_factory() as session:
             row = session.get(WalkForwardRunRow, run_id)
@@ -1996,6 +2144,31 @@ class QagentRepository:
             data_health=json.loads(row.data_health),
             created_at=row.created_at,
             updated_at=row.updated_at,
+        )
+
+    @staticmethod
+    def _walk_forward_job_from_row(row: WalkForwardJobRow) -> WalkForwardJobRecord:
+        return WalkForwardJobRecord(
+            job_id=row.job_id,
+            provider=row.provider,
+            status=row.status,
+            phase=row.phase,
+            start_date=row.start_date,
+            end_date=row.end_date,
+            dataset_revision=row.dataset_revision,
+            rebalance_step_sessions=row.rebalance_step_sessions,
+            lookback_days=row.lookback_days,
+            total_snapshots=row.total_snapshots,
+            processed_snapshots=row.processed_snapshots,
+            current_date=row.current_date,
+            checkpoints=json.loads(row.checkpoints_json or "[]"),
+            experiment_manifest=json.loads(row.experiment_manifest_json or "{}"),
+            result_run_id=row.result_run_id,
+            error=row.error,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            started_at=row.started_at,
+            finished_at=row.finished_at,
         )
 
     @staticmethod

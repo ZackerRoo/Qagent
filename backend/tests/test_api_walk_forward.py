@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from qagent.api import routes
 from qagent.app import create_app
-from qagent.storage.tables import WalkForwardRunRow
+from qagent.storage.tables import HistoricalDataRevisionRow, WalkForwardRunRow
 
 
 def test_walk_forward_run_queries_return_latest_and_complete_payload(tmp_path, monkeypatch):
@@ -67,3 +67,80 @@ def test_walk_forward_run_queries_return_latest_and_complete_payload(tmp_path, m
     assert detail.json()["payload"]["cost_sensitivity"][0]["key"] == "stress"
     assert detail.json()["data_health"]["walk_forward_equal_weight_benchmark"] == "ready"
     assert missing.status_code == 404
+
+
+def test_walk_forward_job_is_persisted_and_submitted_in_background(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'walk-forward-job-api.db'}",
+    )
+    submitted = []
+
+    class FakeExecutor:
+        def submit(self, fn, *args, **kwargs):
+            submitted.append((fn, args, kwargs))
+
+    monkeypatch.setattr(routes, "_walk_forward_task_executor", FakeExecutor())
+    routes._submitted_walk_forward_jobs.clear()
+    repo = routes._repo()
+    with repo.session_factory() as session:
+        session.add(HistoricalDataRevisionRow(provider_mode="free", revision=7))
+        session.commit()
+
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/walk-forward/jobs"
+        "?provider=free&start=2025-01-02&end=2025-03-31"
+        "&step_sessions=5&lookback_days=400"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "queued"
+    assert body["phase"] == "queued"
+    assert body["dataset_revision"] == 7
+    assert body["progress"] == 0
+    assert body["total_snapshots"] > 0
+    assert body["experiment_manifest"]["strategy_registry_digest"]
+    assert body["experiment_manifest"]["execution_rule_set_version"]
+    assert submitted[0][1] == (body["job_id"],)
+
+    detail = client.get(f"/api/walk-forward/jobs/{body['job_id']}")
+    latest = client.get("/api/walk-forward/jobs/latest?provider=free")
+
+    assert detail.status_code == 200
+    assert detail.json()["checkpoint_count"] == 0
+    assert latest.status_code == 200
+    assert latest.json()["job_id"] == body["job_id"]
+
+
+def test_walk_forward_restore_resubmits_persisted_job(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'walk-forward-restore-api.db'}",
+    )
+    submitted = []
+
+    class FakeExecutor:
+        def submit(self, fn, *args, **kwargs):
+            submitted.append((fn, args, kwargs))
+
+    monkeypatch.setattr(routes, "_walk_forward_task_executor", FakeExecutor())
+    routes._submitted_walk_forward_jobs.clear()
+    repo = routes._repo()
+    job = repo.create_walk_forward_job(
+        job_id="walk-forward-resume",
+        provider="free",
+        start=date(2025, 1, 2),
+        end=date(2025, 3, 31),
+        dataset_revision=9,
+        rebalance_step_sessions=5,
+        lookback_days=400,
+        total_snapshots=12,
+        experiment_manifest={"dataset_revision": 9},
+    )
+
+    restored = routes.restore_walk_forward_job_from_storage()
+
+    assert restored == job.job_id
+    assert submitted[0][1] == (job.job_id,)

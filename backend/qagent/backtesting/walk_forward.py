@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import statistics
+from collections.abc import Callable
 from datetime import date, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -11,6 +12,10 @@ from types import SimpleNamespace
 from pydantic import BaseModel, Field
 
 from qagent.backtesting.engine import BacktestSignal
+from qagent.backtesting.experiment import (
+    WalkForwardExperimentManifest,
+    build_walk_forward_experiment_manifest,
+)
 from qagent.backtesting.execution import VersionedAshareExecutionResolver
 from qagent.backtesting.portfolio import (
     PortfolioBacktestResult,
@@ -74,6 +79,7 @@ class WalkForwardSelectionResult(BaseModel):
     top_10_temporal_validation: TemporalValidationResult
     benchmarks: list["WalkForwardBenchmarkComparison"]
     cost_sensitivity: list["WalkForwardCostScenario"]
+    experiment_manifest: WalkForwardExperimentManifest
     reproducibility_digest: str
     data_health: dict[str, str] = Field(default_factory=dict)
 
@@ -112,6 +118,14 @@ class WalkForwardCostScenario(BaseModel):
     top_10_total_costs: Decimal
 
 
+class WalkForwardProgress(BaseModel):
+    phase: str
+    processed_snapshots: int
+    total_snapshots: int
+    current_date: date | None = None
+    snapshot: WalkForwardSnapshot | None = None
+
+
 def run_full_market_walk_forward_selection(
     repository: ReplayEvidenceRepository,
     *,
@@ -120,6 +134,9 @@ def run_full_market_walk_forward_selection(
     end: date,
     rebalance_step_sessions: int = 5,
     lookback_days: int = 400,
+    experiment_manifest: WalkForwardExperimentManifest | None = None,
+    resume_snapshots: list[WalkForwardSnapshot] | None = None,
+    progress_callback: Callable[[WalkForwardProgress], None] | None = None,
 ) -> WalkForwardSelectionResult:
     if start > end:
         raise ValueError("start must be on or before end")
@@ -130,6 +147,16 @@ def run_full_market_walk_forward_selection(
     revision = repository.current_revision()
     if revision <= 0:
         raise ValueError("historical replay dataset is empty")
+    experiment_manifest = experiment_manifest or build_walk_forward_experiment_manifest(
+        provider_mode=repository.provider_mode,
+        dataset_revision=revision,
+        start_date=start,
+        end_date=end,
+        rebalance_step_sessions=rebalance_step_sessions,
+        lookback_days=lookback_days,
+    )
+    if experiment_manifest.dataset_revision != revision:
+        raise RuntimeError("experiment dataset revision no longer matches replay data")
     owner_repository = ReplayEvidenceRepository(
         repository.session_factory,
         repository.provider_mode,
@@ -146,7 +173,17 @@ def run_full_market_walk_forward_selection(
     scan_errors: list[str] = []
     try:
         sessions = trading_sessions_in_range(start, end)[::rebalance_step_sessions]
-        for decision_date in sessions:
+        resumed = {item.decision_date: item for item in (resume_snapshots or [])}
+        unexpected_dates = set(resumed).difference(sessions)
+        if unexpected_dates:
+            raise ValueError("resume snapshots do not match the requested validation window")
+        _report_progress(
+            progress_callback,
+            phase="historical_replay",
+            processed_snapshots=0,
+            total_snapshots=len(sessions),
+        )
+        for index, decision_date in enumerate(sessions, start=1):
             owner_repository.renew_dataset_lease()
             members = owner_repository.universe_members_on(decision_date, revision)
             if not members:
@@ -177,25 +214,26 @@ def run_full_market_walk_forward_selection(
                     continue
                 eligible.append(instrument_id)
             eligible_universes.append((decision_date, sorted(eligible)))
-            scan = run_daily_scan(
-                eligible,
-                market_provider,
-                mode="historical_replay",
-                strategy_data_provider=strategy_provider,
-                a_share_enhanced_provider=EmptyAShareEnhancedDataProvider(),
-                start=decision_date - timedelta(days=lookback_days),
-                end=decision_date,
-            )
-            scan_errors.extend(
-                item.reason for item in scan.items if item.status == "error"
-            )
-            selections = [
-                _selection(card)
-                for card in scan.cards
-                if card.status.value not in EXCLUDED_STATUSES
-            ]
-            snapshots.append(
-                WalkForwardSnapshot(
+            snapshot = resumed.get(decision_date)
+            if snapshot is None:
+                scan = run_daily_scan(
+                    eligible,
+                    market_provider,
+                    mode="historical_replay",
+                    strategy_data_provider=strategy_provider,
+                    a_share_enhanced_provider=EmptyAShareEnhancedDataProvider(),
+                    start=decision_date - timedelta(days=lookback_days),
+                    end=decision_date,
+                )
+                scan_errors.extend(
+                    item.reason for item in scan.items if item.status == "error"
+                )
+                selections = [
+                    _selection(card)
+                    for card in scan.cards
+                    if card.status.value not in EXCLUDED_STATUSES
+                ]
+                snapshot = WalkForwardSnapshot(
                     decision_date=decision_date,
                     historical_universe_size=len(instrument_ids),
                     eligible_size=len(eligible),
@@ -205,7 +243,21 @@ def run_full_market_walk_forward_selection(
                     top_5=selections[:5],
                     top_10=selections[:10],
                 )
+            snapshots.append(snapshot)
+            _report_progress(
+                progress_callback,
+                phase="historical_replay",
+                processed_snapshots=index,
+                total_snapshots=len(sessions),
+                current_date=decision_date,
+                snapshot=snapshot,
             )
+        _report_progress(
+            progress_callback,
+            phase="portfolio_simulation",
+            processed_snapshots=len(snapshots),
+            total_snapshots=len(sessions),
+        )
         execution_resolver = VersionedAshareExecutionResolver(
             owner_repository,
             dataset_revision=revision,
@@ -242,6 +294,12 @@ def run_full_market_walk_forward_selection(
         top_10_temporal_validation = _trade_temporal_validation(
             top_10_portfolio.trades
         )
+        _report_progress(
+            progress_callback,
+            phase="validation_and_benchmarks",
+            processed_snapshots=len(snapshots),
+            total_snapshots=len(sessions),
+        )
         cost_sensitivity = _cost_sensitivity(
             top_5_signals=top_5_signals,
             top_10_signals=top_10_signals,
@@ -270,7 +328,7 @@ def run_full_market_walk_forward_selection(
         benchmarks,
         cost_sensitivity,
     )
-    return WalkForwardSelectionResult(
+    result = WalkForwardSelectionResult(
         owner_run_id=owner_run_id,
         provider_mode=repository.provider_mode,
         dataset_revision=revision,
@@ -286,6 +344,7 @@ def run_full_market_walk_forward_selection(
         top_10_temporal_validation=top_10_temporal_validation,
         benchmarks=benchmarks,
         cost_sensitivity=cost_sensitivity,
+        experiment_manifest=experiment_manifest,
         reproducibility_digest=digest,
         data_health={
             "walk_forward_revision": str(revision),
@@ -331,12 +390,46 @@ def run_full_market_walk_forward_selection(
                 cost_sensitivity[-1].top_10_return_pct
             ),
             "walk_forward_digest": digest,
+            "walk_forward_experiment_digest": experiment_manifest.experiment_digest,
+            "walk_forward_code_revision": experiment_manifest.code_revision,
+            "walk_forward_strategy_registry_digest": (
+                experiment_manifest.strategy_registry_digest
+            ),
             **(
                 {"walk_forward_error_samples": " | ".join(scan_errors[:3])}
                 if scan_errors
                 else {}
             ),
         },
+    )
+    _report_progress(
+        progress_callback,
+        phase="completed",
+        processed_snapshots=len(snapshots),
+        total_snapshots=len(snapshots),
+    )
+    return result
+
+
+def _report_progress(
+    callback: Callable[[WalkForwardProgress], None] | None,
+    *,
+    phase: str,
+    processed_snapshots: int,
+    total_snapshots: int,
+    current_date: date | None = None,
+    snapshot: WalkForwardSnapshot | None = None,
+) -> None:
+    if callback is None:
+        return
+    callback(
+        WalkForwardProgress(
+            phase=phase,
+            processed_snapshots=processed_snapshots,
+            total_snapshots=total_snapshots,
+            current_date=current_date,
+            snapshot=snapshot,
+        )
     )
 
 

@@ -2974,6 +2974,28 @@ export type WalkForwardPayload = {
   benchmarks: WalkForwardBenchmarkComparison[];
   cost_sensitivity: WalkForwardCostScenario[];
   snapshots: Array<Record<string, unknown>>;
+  experiment_manifest: WalkForwardExperimentManifest;
+};
+
+export type WalkForwardExperimentManifest = {
+  schema_version: string;
+  experiment_digest: string;
+  created_at: string;
+  code_revision: string;
+  code_dirty: boolean;
+  python_version: string;
+  provider_mode: string;
+  dataset_revision: number;
+  start_date: string;
+  end_date: string;
+  rebalance_step_sessions: number;
+  lookback_days: number;
+  selection_algorithm_version: string;
+  strategy_registry_digest: string;
+  strategy_ids: string[];
+  execution_rule_set_version: string;
+  fee_schedule_version: string;
+  execution_rules_digest: string;
 };
 
 export type WalkForwardRun = {
@@ -3003,4 +3025,32 @@ export type WalkForwardRun = {
 
 export type WalkForwardRunsResponse = {
   runs: WalkForwardRun[];
+};
+
+export type WalkForwardJob = {
+  job_id: string;
+  provider: DataProviderMode;
+  status: "queued" | "running" | "succeeded" | "failed";
+  phase: string;
+  start_date: string;
+  end_date: string;
+  dataset_revision: number;
+  rebalance_step_sessions: number;
+  lookback_days: number;
+  total_snapshots: number;
+  processed_snapshots: number;
+  current_date: string | null;
+  experiment_manifest: WalkForwardExperimentManifest;
+  result_run_id: string | null;
+  error: string | null;
+  progress: number;
+  checkpoint_count: number;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+export type WalkForwardJobsResponse = {
+  jobs: WalkForwardJob[];
 };

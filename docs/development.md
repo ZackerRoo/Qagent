@@ -139,6 +139,19 @@ only point-in-time bars and fundamentals. It reports a reproducibility digest an
 the versioned A-share limit, lot, T+0/T+1, commission, stamp-duty, and transfer-fee rules
 for simulated fills.
 
+For browser-driven validation, start the persisted background job instead:
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/api/walk-forward/jobs?provider=free&start=2023-01-03&end=2025-12-31&step_sessions=5&lookback_days=400'
+curl 'http://127.0.0.1:8000/api/walk-forward/jobs/latest?provider=free'
+```
+
+The job reports `phase`, `progress`, `processed_snapshots`, `current_date`, and the
+resulting run ID. Rebalance snapshots are checkpointed after each historical decision
+date. A service restart resubmits the same job and reuses those checkpoints under the
+original immutable dataset revision. If the source revision changed, the job fails
+explicitly and requires a new run instead of mixing data revisions.
+
 ## Daily Brief
 
 The Brief page and `/api/daily-brief` provide the main daily research readout:

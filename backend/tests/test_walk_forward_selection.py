@@ -187,6 +187,8 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert first.snapshots[0].historical_universe_size == 1
     assert first.snapshots[0].eligible_size == 1
     assert first.reproducibility_digest == second.reproducibility_digest
+    assert first.experiment_manifest.dataset_revision == repository.current_revision()
+    assert first.experiment_manifest.strategy_registry_digest
     assert first.snapshots == second.snapshots
     assert first.top_5_portfolio == second.top_5_portfolio
     assert first.top_10_portfolio == second.top_10_portfolio
@@ -211,6 +213,38 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
         first.data_health["walk_forward_future_data_guard"]
         == "revision_lease_and_decision_date_cutoff"
     )
+
+
+def test_walk_forward_resumes_saved_rebalance_snapshots(tmp_path, monkeypatch):
+    repository, decision_date = _replay_repository(tmp_path)
+    progress = []
+    first = run_full_market_walk_forward_selection(
+        repository,
+        owner_run_id="walk-forward-checkpoint-source",
+        start=decision_date,
+        end=decision_date,
+        rebalance_step_sessions=1,
+        progress_callback=progress.append,
+    )
+    snapshots = [item.snapshot for item in progress if item.snapshot is not None]
+    assert len(snapshots) == 1
+
+    def unexpected_scan(*args, **kwargs):
+        raise AssertionError("completed rebalance snapshot should not be rescanned")
+
+    monkeypatch.setattr("qagent.backtesting.walk_forward.run_daily_scan", unexpected_scan)
+    resumed = run_full_market_walk_forward_selection(
+        repository,
+        owner_run_id="walk-forward-checkpoint-resume",
+        start=decision_date,
+        end=decision_date,
+        rebalance_step_sessions=1,
+        experiment_manifest=first.experiment_manifest,
+        resume_snapshots=snapshots,
+    )
+
+    assert resumed.snapshots == first.snapshots
+    assert resumed.reproducibility_digest == first.reproducibility_digest
 
 
 def test_walk_forward_trade_validation_uses_embargoed_chronological_windows():

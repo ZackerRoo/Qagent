@@ -609,6 +609,33 @@ class WalkForwardRunRow(Base):
     )
 
 
+class WalkForwardJobRow(Base):
+    __tablename__ = "walk_forward_jobs"
+
+    job_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="queued")
+    phase: Mapped[str] = mapped_column(String(64), default="queued")
+    start_date: Mapped[date] = mapped_column(Date)
+    end_date: Mapped[date] = mapped_column(Date)
+    dataset_revision: Mapped[int] = mapped_column(Integer)
+    rebalance_step_sessions: Mapped[int] = mapped_column(Integer)
+    lookback_days: Mapped[int] = mapped_column(Integer)
+    total_snapshots: Mapped[int] = mapped_column(Integer, default=0)
+    processed_snapshots: Mapped[int] = mapped_column(Integer, default=0)
+    current_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    checkpoints_json: Mapped[str] = mapped_column(Text, default="[]")
+    experiment_manifest_json: Mapped[str] = mapped_column(Text, default="{}")
+    result_run_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class TradableUniverseSnapshotRow(Base):
     __tablename__ = "tradable_universe_snapshots"
 

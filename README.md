@@ -9,6 +9,7 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - A-share-first scanning with fixture data and free providers.
 - Persistent market-data cache for fixture/free providers, with cache hit/miss data-health fields and Settings-page cache inspection.
 - Historical-data backfill jobs with persisted phase/progress, resumable adjusted-bar caching, announcement-date A-share fundamentals, lifecycle-derived tradable-universe snapshots, and a machine-readable coverage manifest.
+- Persistent background Walk-forward jobs with per-rebalance checkpoints, restart recovery, progress polling, immutable dataset leases, and experiment manifests that record code, strategy, data, and execution-rule versions.
 - Daily Brief page and `/api/daily-brief` research digest combining opportunities, entry levels, catalysts, portfolio risk, data caveats, and strategy validation.
 - Saved brief runs with history, detail retrieval, and Markdown export for push-ready workflows.
 - Delivery outbox for saved briefs and alert runs, with queued/sent status plus local Markdown-file and webhook sender adapters.
@@ -126,6 +127,8 @@ curl -X DELETE 'http://127.0.0.1:8000/api/data-cache?provider=free'
 curl -X POST 'http://127.0.0.1:8000/api/historical-data/backfill?provider=free&symbols=CN:000001,CN:588000&start=2023-01-01&end=2026-07-10'
 curl 'http://127.0.0.1:8000/api/historical-data/backfill/latest?provider=free'
 curl 'http://127.0.0.1:8000/api/historical-data/coverage?provider=free&symbols=CN:000001,CN:588000&start=2023-01-01&end=2026-07-10'
+curl -X POST 'http://127.0.0.1:8000/api/walk-forward/jobs?provider=free&start=2023-01-03&end=2025-12-31&step_sessions=5&lookback_days=400'
+curl 'http://127.0.0.1:8000/api/walk-forward/jobs/latest?provider=free'
 curl 'http://127.0.0.1:8000/api/catalysts?symbols=CN:000001&limit=5'
 curl 'http://127.0.0.1:8000/api/portfolio?provider=fixture'
 ```
