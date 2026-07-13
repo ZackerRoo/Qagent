@@ -40,6 +40,7 @@ EXCLUDED_STATUSES = frozenset(
     {"risk_elevated", "invalidated", "closed", "postmortem_done"}
 )
 ELIGIBLE_UNIVERSE_BENCHMARK_ID = "CN:EQUAL_WEIGHT_ELIGIBLE"
+MIN_FULL_MARKET_COVERAGE_RATIO = 0.90
 
 
 class WalkForwardSelection(BaseModel):
@@ -328,6 +329,14 @@ def run_full_market_walk_forward_selection(
         benchmarks,
         cost_sensitivity,
     )
+    coverage = _cross_section_coverage(snapshots)
+    market_coverage_gate = (
+        "ready"
+        if coverage["ratio"] >= MIN_FULL_MARKET_COVERAGE_RATIO
+        else "insufficient"
+    )
+    top_5_sample_gate = _oos_gate(top_5_temporal_validation)
+    top_10_sample_gate = _oos_gate(top_10_temporal_validation)
     result = WalkForwardSelectionResult(
         owner_run_id=owner_run_id,
         provider_mode=repository.provider_mode,
@@ -354,6 +363,22 @@ def run_full_market_walk_forward_selection(
             "walk_forward_future_data_guard": "revision_lease_and_decision_date_cutoff",
             "walk_forward_universe": "historical_lifecycle_per_rebalance_date",
             "walk_forward_st_policy": "excluded",
+            "walk_forward_validation_scope": (
+                "full_market" if market_coverage_gate == "ready" else "pilot"
+            ),
+            "walk_forward_market_coverage_gate": market_coverage_gate,
+            "walk_forward_minimum_market_coverage_pct": str(
+                MIN_FULL_MARKET_COVERAGE_RATIO * 100
+            ),
+            "walk_forward_cross_section_coverage_pct": str(
+                round(coverage["ratio"] * 100, 4)
+            ),
+            "walk_forward_median_covered_instruments": str(
+                coverage["median_covered"]
+            ),
+            "walk_forward_median_historical_universe": str(
+                coverage["median_universe"]
+            ),
             "walk_forward_top_5_trades": str(
                 top_5_portfolio.summary.trade_count
             ),
@@ -367,11 +392,15 @@ def run_full_market_walk_forward_selection(
             "walk_forward_top_10_oos_trades": str(
                 _oos_sample_count(top_10_temporal_validation)
             ),
-            "walk_forward_top_5_oos_gate": _oos_gate(
-                top_5_temporal_validation
+            "walk_forward_top_5_oos_gate": top_5_sample_gate,
+            "walk_forward_top_10_oos_gate": top_10_sample_gate,
+            "walk_forward_top_5_validation_gate": _combined_validation_gate(
+                top_5_sample_gate,
+                market_coverage_gate,
             ),
-            "walk_forward_top_10_oos_gate": _oos_gate(
-                top_10_temporal_validation
+            "walk_forward_top_10_validation_gate": _combined_validation_gate(
+                top_10_sample_gate,
+                market_coverage_gate,
             ),
             "walk_forward_benchmarks_ready": (
                 f"{sum(item.status == 'ready' for item in benchmarks)}/"
@@ -409,6 +438,29 @@ def run_full_market_walk_forward_selection(
         total_snapshots=len(snapshots),
     )
     return result
+
+
+def _cross_section_coverage(
+    snapshots: list[WalkForwardSnapshot],
+) -> dict[str, float | int]:
+    universe_sizes = [item.historical_universe_size for item in snapshots]
+    covered_sizes = [
+        max(0, item.historical_universe_size - item.missing_tradability_count)
+        for item in snapshots
+    ]
+    total_universe = sum(universe_sizes)
+    ratio = sum(covered_sizes) / total_universe if total_universe else 0.0
+    return {
+        "ratio": ratio,
+        "median_covered": int(statistics.median(covered_sizes)) if covered_sizes else 0,
+        "median_universe": int(statistics.median(universe_sizes)) if universe_sizes else 0,
+    }
+
+
+def _combined_validation_gate(sample_gate: str, market_coverage_gate: str) -> str:
+    if market_coverage_gate != "ready":
+        return "insufficient_market_coverage"
+    return sample_gate
 
 
 def _report_progress(

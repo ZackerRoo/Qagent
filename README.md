@@ -161,6 +161,8 @@ Free A-share financial history uses BaoStock quarterly profit/growth records. A 
 
 The coverage manifest reports bar, adjustment, fundamental, universe, tradability, industry, and benchmark readiness separately for each instrument. `ready` means all enforced checks passed, `partial` means bars exist but one or more evidence classes are incomplete, and `missing` means no usable bars exist. Historical stock/ETF pools are reconstructed at the requested start date and quarter ends from BaoStock listing/delisting lifecycle records; today's catalog is not backdated.
 
+Walk-forward validation applies separate sample and market-coverage gates. At least 30 embargoed out-of-sample trades are required for the sample gate, while historical tradability evidence must cover at least 90% of each reconstructed market cross-section before a result can be labelled full-market validation. Lower-coverage runs remain visible as pilots, including their returns and drawdowns, but cannot be used as proof of full-market stock-selection effectiveness.
+
 A-share holding periods and validation embargoes use XSHG trading sessions. Weekends and exchange holidays therefore do not count toward 5/10/20-day outcomes.
 
 ## Research Docs

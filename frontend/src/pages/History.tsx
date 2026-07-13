@@ -259,7 +259,7 @@ export function History({
 
   async function runFullMarketWalkForward() {
     if (dataMode !== "free") {
-      setWalkForwardError(language === "zh" ? "全市场验证只使用 A 股免费历史数据。" : "Walk-forward uses free A-share historical data only.");
+      setWalkForwardError(language === "zh" ? "历史验证只使用 A 股免费历史数据。" : "Walk-forward uses free A-share historical data only.");
       return;
     }
     try {
@@ -1164,6 +1164,51 @@ function WalkForwardValidationCenter({
   const top10Validation = payload?.top_10_temporal_validation;
   const top5Oos = top5Validation?.out_of_sample;
   const top10Oos = top10Validation?.out_of_sample;
+  const snapshots = payload?.snapshots ?? [];
+  const totalHistoricalUniverse = snapshots.reduce(
+    (sum, item) => sum + item.historical_universe_size,
+    0,
+  );
+  const totalCoveredUniverse = snapshots.reduce(
+    (sum, item) => sum + Math.max(0, item.historical_universe_size - item.missing_tradability_count),
+    0,
+  );
+  const calculatedCoveragePct = totalHistoricalUniverse > 0
+    ? (totalCoveredUniverse / totalHistoricalUniverse) * 100
+    : Number.NaN;
+  const storedCoveragePct = Number(run?.data_health.walk_forward_cross_section_coverage_pct);
+  const coveragePct = Number.isFinite(storedCoveragePct) ? storedCoveragePct : calculatedCoveragePct;
+  const marketCoverageReady = Number.isFinite(coveragePct) && coveragePct >= 90;
+  const coveredCounts = snapshots
+    .map((item) => Math.max(0, item.historical_universe_size - item.missing_tradability_count))
+    .sort((left, right) => left - right);
+  const medianCovered = Number(
+    run?.data_health.walk_forward_median_covered_instruments
+      ?? coveredCounts[Math.floor(coveredCounts.length / 2)]
+      ?? 0,
+  );
+  const validationScope = marketCoverageReady ? "full_market" : "pilot";
+  const top5Gate = run?.data_health.walk_forward_top_5_validation_gate
+    ?? (marketCoverageReady ? run?.top_5_oos_gate : "insufficient_market_coverage");
+  const top10Gate = run?.data_health.walk_forward_top_10_validation_gate
+    ?? (marketCoverageReady ? run?.top_10_oos_gate : "insufficient_market_coverage");
+  const gateLabel = (gate: string | undefined) => {
+    if (gate === "ready") return zh ? "验证通过" : "Ready";
+    if (gate === "insufficient_market_coverage") return zh ? "覆盖不足" : "Coverage low";
+    return zh ? "样本不足" : "Samples low";
+  };
+  const runStatusLabel = (status: string) => {
+    if (!zh) return status;
+    return ({ succeeded: "已完成", running: "运行中", queued: "等待中", failed: "失败" } as Record<string, string>)[status] ?? status;
+  };
+  const dataStatusLabel = (status: string) => {
+    if (!zh) return status;
+    return status === "ready" ? "可用" : status === "missing" ? "缺失" : status;
+  };
+  const verdictLabel = (verdict: string | undefined) => {
+    if (!zh) return verdict ?? "insufficient";
+    return ({ positive: "正向", negative: "负向", mixed: "观察", insufficient: "样本不足" } as Record<string, string>)[verdict ?? "insufficient"] ?? verdict;
+  };
   const activeJob = job && ["queued", "running"].includes(job.status) ? job : undefined;
   const phaseLabels: Record<string, string> = {
     queued: zh ? "等待后台执行" : "Queued",
@@ -1189,15 +1234,15 @@ function WalkForwardValidationCenter({
       <div className="panel-heading">
         <div>
           <p className="eyebrow">{zh ? "历史验证" : "Historical validation"}</p>
-          <h2>{zh ? "Walk-forward 全市场验证" : "Full-market walk-forward"}</h2>
+          <h2>{zh ? "Walk-forward 历史验证" : "Walk-forward historical validation"}</h2>
           <p className="brief-headline">
             {zh
-              ? "按每个历史日期重建股票池和推荐，样本外至少 30 笔才进入有效性判断。"
-              : "Rebuilds the historical universe and recommendations date by date; 30 out-of-sample trades are required before validation."}
+              ? "逐日重建当时可见的股票池和推荐；市场证据覆盖至少 90%、样本外至少 30 笔，才进入有效性判断。"
+              : "Rebuilds each historical universe and recommendation; validation requires 90% market evidence coverage and 30 out-of-sample trades."}
           </p>
         </div>
         <button className="icon-action" type="button" onClick={onRun} disabled={isRunning}>
-          {isRunning ? (zh ? "验证运行中" : "Running") : (zh ? "运行全市场验证" : "Run validation")}
+          {isRunning ? (zh ? "验证运行中" : "Running") : (zh ? "运行历史验证" : "Run validation")}
         </button>
       </div>
       {error ? <div className="empty-state error">{error}</div> : null}
@@ -1235,22 +1280,27 @@ function WalkForwardValidationCenter({
             <span>{run.start_date} - {run.end_date}</span>
             <span>{zh ? "数据版本" : "Dataset"} {run.dataset_revision}</span>
             <span>{zh ? "再平衡" : "Rebalance"} {run.rebalance_step_sessions} {zh ? "交易日" : "sessions"}</span>
-            <span className={`status status-${run.status}`}>{run.status}</span>
+            <span className={`status status-${run.status}`}>{runStatusLabel(run.status)}</span>
             <span>{zh ? "实验" : "Experiment"} {payload?.experiment_manifest?.experiment_digest.slice(0, 8) ?? "-"}</span>
             <span>{zh ? "代码" : "Code"} {payload?.experiment_manifest?.code_revision.slice(0, 8) ?? "-"}</span>
+            <span>{validationScope === "full_market" ? (zh ? "全市场" : "Full market") : (zh ? `${medianCovered} 标的试点` : `${medianCovered}-instrument pilot`)}</span>
           </div>
           <div className="metric-grid walk-forward-kpis">
-            <div><span>{zh ? "Top 5 收益" : "Top 5 return"}</span><strong>{formatNumber(run.top_5_return_pct, "%")}</strong></div>
-            <div><span>{zh ? "Top 10 收益" : "Top 10 return"}</span><strong>{formatNumber(run.top_10_return_pct, "%")}</strong></div>
+            <div><span>{zh ? `${validationScope === "pilot" ? "试点 " : ""}Top 5 收益` : "Top 5 return"}</span><strong>{formatNumber(run.top_5_return_pct, "%")}</strong></div>
+            <div><span>{zh ? `${validationScope === "pilot" ? "试点 " : ""}Top 10 收益` : "Top 10 return"}</span><strong>{formatNumber(run.top_10_return_pct, "%")}</strong></div>
+            <div><span>{zh ? "市场证据覆盖" : "Market coverage"}</span><strong>{formatNumber(Number.isFinite(coveragePct) ? coveragePct : null, "%")}</strong></div>
+            <div><span>{zh ? "每期覆盖标的" : "Covered per date"}</span><strong>{medianCovered || "-"}</strong></div>
             <div><span>{zh ? "Top 5 样本外" : "Top 5 OOS"}</span><strong>{run.top_5_oos_trades}/30</strong></div>
             <div><span>{zh ? "Top 10 样本外" : "Top 10 OOS"}</span><strong>{run.top_10_oos_trades}/30</strong></div>
-            <div><span>{zh ? "历史股票池基准" : "Eligible benchmark"}</span><strong>{run.data_health.walk_forward_equal_weight_benchmark ?? "-"}</strong></div>
-            <div><span>{zh ? "再平衡快照" : "Rebalance snapshots"}</span><strong>{run.snapshot_count}</strong></div>
           </div>
-          <div className="walk-forward-gate-note">
-            {zh
-              ? `当前结论：Top 5 ${run.top_5_oos_gate === "ready" ? "达到" : "未达到"} 30 笔样本外门槛，Top 10 ${run.top_10_oos_gate === "ready" ? "达到" : "未达到"} 30 笔门槛。门槛未达到时只能观察，不能称为策略有效。`
-              : `Gate: Top 5 is ${run.top_5_oos_gate === "ready" ? "ready" : "below"} and Top 10 is ${run.top_10_oos_gate === "ready" ? "ready" : "below"} the 30-trade out-of-sample threshold. Below the gate is observation, not validation.`}
+          <div className={`walk-forward-gate-note ${marketCoverageReady ? "" : "coverage-warning"}`}>
+            {marketCoverageReady
+              ? (zh
+                ? `市场覆盖已达门槛；Top 5 ${run.top_5_oos_gate === "ready" ? "达到" : "未达到"} 30 笔样本外门槛，Top 10 ${run.top_10_oos_gate === "ready" ? "达到" : "未达到"}。`
+                : `Market coverage is ready. Top 5 is ${run.top_5_oos_gate} and Top 10 is ${run.top_10_oos_gate} against the 30-trade OOS gate.`)
+              : (zh
+                ? `当前仅是 ${medianCovered} 标的试点：历史横截面证据覆盖 ${formatNumber(Number.isFinite(coveragePct) ? coveragePct : null, "%")}（门槛 90%）。收益和胜率只能说明这组试点表现，不能称为全市场选股有效。`
+                : `This is a ${medianCovered}-instrument pilot with ${formatNumber(Number.isFinite(coveragePct) ? coveragePct : null, "%")} historical market coverage (90% required). Returns do not validate full-market selection.`)}
           </div>
           <div className="walk-forward-chart-grid">
             <LineValidationChart
@@ -1271,15 +1321,15 @@ function WalkForwardValidationCenter({
               <table>
                 <thead><tr><th>{zh ? "组合" : "Portfolio"}</th><th>{zh ? "交易数" : "Trades"}</th><th>{zh ? "收益" : "Return"}</th><th>{zh ? "最大回撤" : "Max DD"}</th><th>{zh ? "样本外" : "OOS"}</th><th>{zh ? "门槛" : "Gate"}</th></tr></thead>
                 <tbody>
-                  <tr><td>Top 5</td><td>{run.top_5_trade_count}</td><td>{formatNumber(run.top_5_return_pct, "%")}</td><td>{formatNumber(payload?.top_5_metrics.max_drawdown_pct ?? null, "%")}</td><td>{top5Oos?.sample_count ?? 0}</td><td>{run.top_5_oos_gate}</td></tr>
-                  <tr><td>Top 10</td><td>{run.top_10_trade_count}</td><td>{formatNumber(run.top_10_return_pct, "%")}</td><td>{formatNumber(payload?.top_10_metrics.max_drawdown_pct ?? null, "%")}</td><td>{top10Oos?.sample_count ?? 0}</td><td>{run.top_10_oos_gate}</td></tr>
+                  <tr><td>Top 5</td><td>{run.top_5_trade_count}</td><td>{formatNumber(run.top_5_return_pct, "%")}</td><td>{formatNumber(payload?.top_5_metrics.max_drawdown_pct ?? null, "%")}</td><td>{top5Oos?.sample_count ?? 0}</td><td>{gateLabel(top5Gate)}</td></tr>
+                  <tr><td>Top 10</td><td>{run.top_10_trade_count}</td><td>{formatNumber(run.top_10_return_pct, "%")}</td><td>{formatNumber(payload?.top_10_metrics.max_drawdown_pct ?? null, "%")}</td><td>{top10Oos?.sample_count ?? 0}</td><td>{gateLabel(top10Gate)}</td></tr>
                 </tbody>
               </table>
             </div>
             <div className="table-shell">
               <table>
                 <thead><tr><th>{zh ? "基准" : "Benchmark"}</th><th>{zh ? "基准收益" : "Benchmark"}</th><th>Top 5</th><th>Top 10</th><th>{zh ? "状态" : "Status"}</th></tr></thead>
-                <tbody>{benchmarks.map((item) => <tr key={item.benchmark_id}><td>{benchmarkLabel(item.benchmark_id)}</td><td>{formatNumber(item.benchmark_return_pct, "%")}</td><td>{formatNumber(item.top_5_excess_return_pct, "%")}</td><td>{formatNumber(item.top_10_excess_return_pct, "%")}</td><td>{item.status}</td></tr>)}</tbody>
+                <tbody>{benchmarks.map((item) => <tr key={item.benchmark_id}><td>{benchmarkLabel(item.benchmark_id)}</td><td>{formatNumber(item.benchmark_return_pct, "%")}</td><td>{formatNumber(item.top_5_excess_return_pct, "%")}</td><td>{formatNumber(item.top_10_excess_return_pct, "%")}</td><td>{dataStatusLabel(item.status)}</td></tr>)}</tbody>
               </table>
             </div>
           </div>
@@ -1295,7 +1345,7 @@ function WalkForwardValidationCenter({
                 <div className="walk-forward-window-card" key={index}>
                   <strong>{index === 0 ? "Top 5" : "Top 10"} {zh ? "样本外" : "out-of-sample"}</strong>
                   <span>{validation?.out_of_sample?.start_date ?? "-"} - {validation?.out_of_sample?.end_date ?? "-"}</span>
-                  <span>{validation?.out_of_sample?.sample_count ?? 0} {zh ? "笔 · " : "trades · "}{validation?.verdict ?? "insufficient"}</span>
+                  <span>{validation?.out_of_sample?.sample_count ?? 0} {zh ? "笔 · " : "trades · "}{verdictLabel(validation?.verdict)}</span>
                 </div>
               ))}
             </div>

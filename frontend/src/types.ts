@@ -2964,6 +2964,15 @@ export type WalkForwardPortfolioPayload = {
   }>;
 };
 
+export type WalkForwardSnapshotPayload = {
+  decision_date: string;
+  historical_universe_size: number;
+  eligible_size: number;
+  suspended_count: number;
+  st_excluded_count: number;
+  missing_tradability_count: number;
+};
+
 export type WalkForwardPayload = {
   top_5_portfolio: WalkForwardPortfolioPayload;
   top_10_portfolio: WalkForwardPortfolioPayload;
@@ -2973,7 +2982,7 @@ export type WalkForwardPayload = {
   top_10_temporal_validation: WalkForwardTemporalValidation;
   benchmarks: WalkForwardBenchmarkComparison[];
   cost_sensitivity: WalkForwardCostScenario[];
-  snapshots: Array<Record<string, unknown>>;
+  snapshots: WalkForwardSnapshotPayload[];
   experiment_manifest: WalkForwardExperimentManifest;
 };
 

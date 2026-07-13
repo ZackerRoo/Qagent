@@ -15,6 +15,9 @@ from qagent.backtesting.replay_provider import (
 )
 from qagent.backtesting.walk_forward import (
     ELIGIBLE_UNIVERSE_BENCHMARK_ID,
+    WalkForwardSnapshot,
+    _combined_validation_gate,
+    _cross_section_coverage,
     _equal_weight_eligible_return,
     _trade_temporal_validation,
     run_full_market_walk_forward_selection,
@@ -199,6 +202,10 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert first.top_5_temporal_validation.return_horizon_days == 20
     assert first.top_5_temporal_validation.embargo_days == 20
     assert first.data_health["walk_forward_top_5_oos_gate"] == "insufficient"
+    assert first.data_health["walk_forward_validation_scope"] == "full_market"
+    assert first.data_health["walk_forward_market_coverage_gate"] == "ready"
+    assert first.data_health["walk_forward_cross_section_coverage_pct"] == "100.0"
+    assert first.data_health["walk_forward_top_5_validation_gate"] == "insufficient"
     assert [item.key for item in first.cost_sensitivity] == [
         "base",
         "elevated",
@@ -212,6 +219,28 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert (
         first.data_health["walk_forward_future_data_guard"]
         == "revision_lease_and_decision_date_cutoff"
+    )
+
+
+def test_walk_forward_market_coverage_gate_marks_small_replay_as_pilot():
+    coverage = _cross_section_coverage(
+        [
+            WalkForwardSnapshot(
+                decision_date=date(2025, 1, 10),
+                historical_universe_size=5600,
+                eligible_size=20,
+                suspended_count=0,
+                st_excluded_count=0,
+                missing_tradability_count=5580,
+            )
+        ]
+    )
+
+    assert round(float(coverage["ratio"]) * 100, 2) == 0.36
+    assert coverage["median_covered"] == 20
+    assert coverage["median_universe"] == 5600
+    assert _combined_validation_gate("ready", "insufficient") == (
+        "insufficient_market_coverage"
     )
 
 

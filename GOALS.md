@@ -186,22 +186,25 @@ Package Qagent as a reliable research preview with explicit limitations and repe
 
 ### What's done
 
-- Validation-integrity implementation is complete in the working tree.
-- Historical backfill core, API, CLI, SQLite progress, adjustment metadata, and coverage manifest are implemented in the working tree.
-- A-share and ETF free history requests forward-adjusted prices; partial session spans and stale unadjusted spans are rejected, and transient provider failures receive bounded retries.
-- Historical evidence now stores stock suspension/ST history, security lifecycle, quarterly industry, CSI 300/500 and SSE 50 membership, and lifecycle-derived stock/ETF universe snapshots.
-- Free A-share quarterly fundamentals are stored at publication date and joined only to valuation observations available by that date.
-- Historical jobs run on a dedicated executor, recover after restart, and expose persisted phase state so evidence work is not misreported as a stuck 100% price scan.
-- The three-year 20-instrument pilot is fully ready: average bar coverage 99.99%, adjustment coverage 99.94%, 10/10 stock fundamentals, 20/20 lifecycle/universe/tradability/industry coverage, and 39/39 benchmark snapshots.
-- Full backend verification passes with 333 tests; Ruff, frontend production build, and all 12 frontend contract checks pass.
-- Live scheduler recovery, paper ledger, Today, Backtest, Portfolio, desktop, and 811px browser checks pass without stuck loading, horizontal page overflow, or console errors.
+- Historical backfill and Walk-forward jobs are persisted in SQLite, report phase/date progress, recover after backend restart, and reuse completed rebalance checkpoints.
+- Every Walk-forward run records the Git revision and dirty state, Python version, dataset revision, strategy-registry digest, execution-rule digest, date range, lookback, and rebalance frequency.
+- A strict lifecycle-cache recovery path revalidates legacy BaoStock listing identity at the requested historical cutoff instead of copying current listing status backward.
+- A real three-year pilot completed successfully on dataset revision 40: 146/146 rebalance snapshots, 328 Top-5 trades, 612 Top-10 trades, and 146 persisted checkpoints.
+- The pilot uses 20 instruments with 99.99% bar coverage and 99.94% adjustment coverage. It has only 0.33% cross-sectional market-evidence coverage, so the UI labels it a pilot rather than full-market validation.
+- Validation now has two independent gates: at least 30 out-of-sample trades and at least 90% historical market-evidence coverage. Passing the sample gate alone cannot label a strategy fully validated.
+- The Backtest page shows the pilot scope, coverage percentage, covered-instrument count, equity curves, cost sensitivity, benchmark availability, and localized gate reasons without horizontal overflow or console errors.
+- Full backend verification passes with 503 tests; Ruff, frontend production build, backtest UI checks, and i18n checks pass.
 
 ### What's next
 
-- Review the completed M1 diff and publish it after user approval.
-- Scale the validated dataset in bounded offline batches before beginning M2 walk-forward replay.
+- Scale historical adjusted bars and daily tradability evidence from the 20-instrument pilot toward at least 90% of each historical A-share cross-section using bounded, restart-safe batches.
+- Add reliable CSI 300, CSI 500, ChiNext, and STAR 50 benchmark price history; retain the eligible-universe equal-weight benchmark as a fallback comparison, not a replacement.
+- Resolve or explicitly exclude historical delisted instruments whose terminal settlement evidence is unavailable before any full-market portfolio claim.
+- Rerun the versioned Walk-forward experiment after each coverage milestone and begin strategy-weight governance only after the market-coverage gate passes.
 
 ### Any blockers
 
-- No M1 correctness blocker in the pilot scope.
-- BaoStock financial history is request-heavy because it is queried per stock, year, quarter, and metric family; full-market scale requires offline batching and persisted coverage reuse rather than synchronous scans.
+- No blocker for the current pilot or paper-trading workflow.
+- The free provider timed out on live lifecycle inventory and returned no price bars for four index benchmarks; lifecycle identity was recovered from validated BaoStock cache, while benchmark prices remain explicitly missing.
+- 127 historical delisted instruments still lack terminal-settlement evidence and must not be silently assigned synthetic exit prices.
+- Full-market scale remains an offline data-engineering task; it must not run as a synchronous page request.

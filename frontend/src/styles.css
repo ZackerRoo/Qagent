@@ -12951,6 +12951,12 @@ td {
   margin: 0;
 }
 
+.walk-forward-gate-note.coverage-warning {
+  border-color: rgba(244, 197, 66, 0.42);
+  background: rgba(244, 197, 66, 0.08);
+  color: var(--terminal-text);
+}
+
 .walk-forward-job-progress {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
