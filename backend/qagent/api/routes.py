@@ -1899,6 +1899,11 @@ def _paper_pending_replacement_pressure(trade: PaperTradeRecord) -> float:
         pressure += 0.18
     if gap >= 0.15:
         pressure += 0.25
+    if gap >= 0.30:
+        # A pending breakout that is this far from the live price is usually
+        # stale or based on an inconsistent adjustment basis. Do not let it
+        # occupy a paper-trading slot for the full waiting window.
+        pressure += 0.35
     if _float_value(trade.rank_score) < 0.7:
         pressure += 0.12
     return round(min(1.0, pressure), 4)

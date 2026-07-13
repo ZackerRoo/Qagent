@@ -662,6 +662,7 @@ def test_automation_scheduler_replaces_stale_pending_with_strong_candidate(
     initialize_database(database_url)
     session_factory = create_session_factory(database_url)
     now = datetime.now(timezone.utc)
+    today = routes._a_share_today()
     with session_factory() as session:
         session.add(
             ScanRunRow(
@@ -767,13 +768,13 @@ def test_automation_scheduler_replaces_stale_pending_with_strong_candidate(
             instrument_id="CN:159558",
             strategy_id="trend_momentum_stage2",
             status="pending",
-            signal_date=date(2026, 7, 1),
+            signal_date=today,
             trigger_price=Decimal("4.15"),
             initial_stop=Decimal("3.98"),
             target_1=Decimal("4.49"),
-            rank_score=Decimal("0.62"),
-            latest_date=date(2026, 7, 9),
-            latest_price=Decimal("1.55"),
+            rank_score=Decimal("0.75"),
+            latest_date=today,
+            latest_price=Decimal("1.35"),
             notes="等待触发",
         )
         open_trade = PaperTradeRow(
