@@ -11099,6 +11099,266 @@ td {
   border-color: rgba(255, 92, 122, 0.35);
 }
 
+.paper-dual-track {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  border: 1px solid rgba(77, 212, 255, 0.32);
+  border-radius: 8px;
+  padding: 14px;
+  background: #0a1016;
+}
+
+.paper-dual-track.tone-good {
+  border-color: rgba(57, 217, 138, 0.38);
+}
+
+.paper-dual-track.tone-risk {
+  border-color: rgba(255, 92, 122, 0.4);
+}
+
+.paper-dual-track-hero,
+.paper-dual-track-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(230px, 0.34fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.paper-dual-track-hero h3 {
+  margin: 5px 0 6px;
+  color: var(--terminal-text);
+  font-size: 24px;
+}
+
+.paper-dual-track-hero p,
+.paper-dual-track-table .paper-ledger-card-header p {
+  margin: 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.48;
+}
+
+.paper-dual-track-verdict {
+  display: grid;
+  align-content: center;
+  gap: 5px;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(4, 8, 12, 0.5);
+}
+
+.paper-dual-track-verdict span,
+.paper-dual-track-verdict small,
+.paper-dual-track-kpis span,
+.paper-dual-track-kpis small {
+  color: var(--terminal-muted-2);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.paper-dual-track-verdict strong {
+  color: var(--terminal-cyan);
+  font-size: 19px;
+}
+
+.paper-dual-track.tone-good .paper-dual-track-verdict strong {
+  color: var(--terminal-green);
+}
+
+.paper-dual-track.tone-risk .paper-dual-track-verdict strong {
+  color: var(--terminal-red);
+}
+
+.paper-dual-track-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.paper-dual-track-kpis > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(9, 14, 20, 0.72);
+}
+
+.paper-dual-track-kpis strong {
+  color: var(--terminal-text);
+  font-size: 22px;
+}
+
+.paper-dual-track-chart-card,
+.paper-dual-track-table {
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(9, 14, 20, 0.74);
+}
+
+.dual-track-chart-wrap {
+  min-height: 280px;
+  margin-top: 8px;
+}
+
+.dual-track-chart-wrap svg {
+  display: block;
+  width: 100%;
+  min-height: 250px;
+  overflow: visible;
+}
+
+.dual-track-chart-wrap text {
+  fill: var(--terminal-muted-2);
+  font-size: 11px;
+}
+
+.dual-track-grid,
+.dual-track-zero {
+  stroke: rgba(126, 150, 172, 0.16);
+  stroke-width: 1;
+}
+
+.dual-track-zero {
+  stroke: rgba(244, 197, 66, 0.4);
+  stroke-dasharray: 5 5;
+}
+
+.dual-track-series polyline {
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.dual-track-series circle {
+  stroke: #081017;
+  stroke-width: 2;
+}
+
+.dual-track-series.is-selection polyline,
+.dual-track-series.is-selection circle {
+  stroke: var(--terminal-cyan);
+  fill: var(--terminal-cyan);
+}
+
+.dual-track-series.is-execution polyline,
+.dual-track-series.is-execution circle {
+  stroke: var(--terminal-yellow);
+  fill: var(--terminal-yellow);
+}
+
+.dual-track-series.is-hs300 polyline,
+.dual-track-series.is-hs300 circle {
+  stroke: var(--terminal-green);
+  fill: var(--terminal-green);
+}
+
+.dual-track-series.is-star50 polyline,
+.dual-track-series.is-star50 circle {
+  stroke: var(--terminal-red);
+  fill: var(--terminal-red);
+}
+
+.dual-track-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 0 6px;
+}
+
+.dual-track-legend span {
+  color: var(--terminal-muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.dual-track-legend span::before {
+  display: inline-block;
+  width: 16px;
+  height: 3px;
+  margin-right: 6px;
+  vertical-align: middle;
+  border-radius: 2px;
+  background: currentColor;
+  content: "";
+}
+
+.dual-track-legend .is-selection { color: var(--terminal-cyan); }
+.dual-track-legend .is-execution { color: var(--terminal-yellow); }
+.dual-track-legend .is-hs300 { color: var(--terminal-green); }
+.dual-track-legend .is-star50 { color: var(--terminal-red); }
+
+.paper-dual-track-window-list {
+  display: grid;
+  gap: 9px;
+}
+
+.dual-track-window {
+  display: grid;
+  grid-template-columns: auto repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  align-items: stretch;
+  min-width: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(4, 8, 12, 0.5);
+}
+
+.dual-track-window.tone-good { border-color: rgba(57, 217, 138, 0.28); }
+.dual-track-window.tone-risk { border-color: rgba(255, 92, 122, 0.3); }
+
+.dual-track-window header,
+.dual-track-window > div {
+  display: grid;
+  align-content: center;
+  gap: 3px;
+  min-width: 0;
+}
+
+.dual-track-window header strong {
+  color: var(--terminal-yellow);
+  font-size: 19px;
+}
+
+.dual-track-window header span,
+.dual-track-window > div span,
+.dual-track-window > div small,
+.dual-track-window footer span {
+  color: var(--terminal-muted-2);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.dual-track-window > div strong {
+  color: var(--terminal-text);
+  font-size: 16px;
+}
+
+.dual-track-window footer {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 1px solid var(--terminal-border-soft);
+  padding-top: 7px;
+}
+
+.paper-dual-track-table {
+  display: grid;
+  gap: 10px;
+}
+
+.paper-dual-track-table .ticker {
+  max-width: 210px;
+  white-space: normal;
+}
+
 .paper-review-dashboard {
   display: grid;
   gap: 12px;
@@ -12551,6 +12811,8 @@ td {
   .paper-risk-gate,
   .paper-review-hero,
   .paper-review-main,
+  .paper-dual-track-hero,
+  .paper-dual-track-main,
   .paper-review-lists,
   .paper-control-insights,
   .paper-candidate-summary,
@@ -12617,6 +12879,7 @@ td {
   .today-risk-grid,
   .auto-paper-status-grid,
   .auto-paper-age-strip,
+  .paper-dual-track-kpis,
   .paper-risk-gate-metrics,
   .paper-control-stats,
   .paper-candidate-metrics,
@@ -12628,6 +12891,14 @@ td {
   .theme-action-board,
   .opportunities-page .signal-hub-components {
     grid-template-columns: 1fr;
+  }
+
+  .dual-track-window {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .dual-track-window header {
+    grid-column: 1 / -1;
   }
 
   .style-row {

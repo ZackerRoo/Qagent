@@ -31,6 +31,7 @@ import type {
   OutcomesResponse,
   PaperCandidatePoolResponse,
   PaperDailyReportResponse,
+  PaperDualTrackResponse,
   PaperLedgerResponse,
   PaperSeedResponse,
   PaperSessionResponse,
@@ -107,6 +108,7 @@ type ScanParams = {
   slippage_bps?: string | number;
   take_profit_pct?: string | number;
   days?: number;
+  top_n?: number;
   asset_type?: string;
   include_full_etfs?: boolean;
   include_etfs?: boolean;
@@ -388,6 +390,16 @@ export async function fetchPaperDailyReport(
   return apiGet<PaperDailyReportResponse>("/paper-trades/daily-report", {
     provider,
     limit: 500,
+  });
+}
+
+export async function fetchPaperDualTrack(
+  provider: DataProviderMode,
+): Promise<PaperDualTrackResponse> {
+  return apiGet<PaperDualTrackResponse>("/paper-trades/dual-track", {
+    provider,
+    days: 180,
+    top_n: 5,
   });
 }
 

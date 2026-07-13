@@ -4,6 +4,7 @@ import {
   deletePaperTrade,
   fetchPaperCandidatePool,
   fetchPaperDailyReport,
+  fetchPaperDualTrack,
   fetchPaperLedger,
   fetchPaperSession,
   fetchPaperTrades,
@@ -23,6 +24,7 @@ import { localizeAction, localizeStatus, localizeStrategy } from "../lib/localiz
 import type {
   DataProviderMode,
   PaperCandidatePoolResponse,
+  PaperDualTrackResponse,
   PaperLedgerItem,
   PaperDailyReportResponse,
   PaperLedgerPosition,
@@ -69,6 +71,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [ledger, setLedger] = useState<PaperLedgerResponse>();
   const [dailyReport, setDailyReport] = useState<PaperDailyReportResponse>();
   const [candidatePool, setCandidatePool] = useState<PaperCandidatePoolResponse>();
+  const [dualTrack, setDualTrack] = useState<PaperDualTrackResponse>();
   const [validation, setValidation] = useState<PaperValidationResponse>();
   const [paperSession, setPaperSession] = useState<PaperSessionResponse>();
   const [paperExecutionHealth, setPaperExecutionHealth] = useState<Record<string, string>>({});
@@ -88,6 +91,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       validationResult,
       dailyReportResult,
       candidatePoolResult,
+      dualTrackResult,
     ] = await Promise.all([
       fetchPortfolio({ provider: dataMode }),
       fetchPaperTrades(dataMode),
@@ -96,6 +100,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchPaperValidation(dataMode),
       fetchPaperDailyReport(dataMode),
       fetchPaperCandidatePool(dataMode),
+      fetchPaperDualTrack(dataMode),
     ]);
     setPortfolio(result);
     setPositions(result.positions);
@@ -107,6 +112,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     setValidation(validationResult);
     setDailyReport(dailyReportResult);
     setCandidatePool(candidatePoolResult);
+    setDualTrack(dualTrackResult);
   }
 
   useEffect(() => {
@@ -137,33 +143,37 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     );
     setPaperExecutionHealth(result.data_health);
     setPaper({ summary: result.summary, trades: result.trades, data_health: result.data_health });
-    const [ledgerResult, validationResult, dailyReportResult, candidatePoolResult] = await Promise.all([
+    const [ledgerResult, validationResult, dailyReportResult, candidatePoolResult, dualTrackResult] = await Promise.all([
       fetchPaperLedger({ provider: dataMode }),
       fetchPaperValidation(dataMode),
       fetchPaperDailyReport(dataMode),
       fetchPaperCandidatePool(dataMode),
+      fetchPaperDualTrack(dataMode),
     ]);
     setLedger(ledgerResult);
     setValidation(validationResult);
     setDailyReport(dailyReportResult);
     setCandidatePool(candidatePoolResult);
+    setDualTrack(dualTrackResult);
   }
 
   async function runValidationNow() {
     try {
       setIsRunningValidation(true);
       const validationResult = await runPaperValidation(dataMode);
-      const [paperResult, ledgerResult, dailyReportResult, candidatePoolResult] = await Promise.all([
+      const [paperResult, ledgerResult, dailyReportResult, candidatePoolResult, dualTrackResult] = await Promise.all([
         fetchPaperTrades(dataMode),
         fetchPaperLedger({ provider: dataMode }),
         fetchPaperDailyReport(dataMode),
         fetchPaperCandidatePool(dataMode),
+        fetchPaperDualTrack(dataMode),
       ]);
       setValidation(validationResult);
       setPaper(paperResult);
       setLedger(ledgerResult);
       setDailyReport(dailyReportResult);
       setCandidatePool(candidatePoolResult);
+      setDualTrack(dualTrackResult);
       setPaperMessage(
         language === "zh"
           ? `已完成自动模拟验证：${validationResult.summary.total_trades} 笔，${validationResult.summary.closed_trades} 笔已闭环`
@@ -219,6 +229,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
         ) : (
           <div className="empty-state">{t("portfolio.noLedger")}</div>
         )}
+        <PaperDualTrackPanel report={dualTrack} language={language} />
         <PaperReviewDashboard
           report={dailyReport}
           ledger={ledger}
@@ -436,6 +447,299 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       </details>
     </div>
   );
+}
+
+function PaperDualTrackPanel({
+  report,
+  language,
+}: {
+  report?: PaperDualTrackResponse;
+  language: Language;
+}) {
+  if (!report) {
+    return (
+      <section className="paper-dual-track">
+        <div className="mini-curve-empty">
+          {language === "zh" ? "正在加载选股与择时双轨验证。" : "Loading dual-track validation."}
+        </div>
+      </section>
+    );
+  }
+  const summary = report.summary;
+  const primary = report.windows.find((item) => item.window_days === summary.primary_window_days)
+    ?? report.windows[0];
+  const tone = dualTrackTone(summary.verdict);
+  return (
+    <section className={`paper-dual-track tone-${tone}`}>
+      <div className="paper-dual-track-hero">
+        <div>
+          <span className="eyebrow">{language === "zh" ? "双轨模拟验证" : "Dual-track validation"}</span>
+          <h3>{language === "zh" ? summary.headline : dualTrackHeadline(summary.verdict)}</h3>
+          <p>
+            {language === "zh"
+              ? summary.explanation
+              : "Selection buys the next trading-day open; execution follows trigger, stop, target, costs, and T+1 rules."}
+          </p>
+        </div>
+        <div className="paper-dual-track-verdict">
+          <span>{language === "zh" ? "当前归因" : "Attribution"}</span>
+          <strong>{primary ? dualTrackVerdictLabel(primary.verdict, language) : "-"}</strong>
+          <small>{report.as_of}</small>
+        </div>
+      </div>
+
+      <div className="paper-dual-track-kpis">
+        <div>
+          <span>{language === "zh" ? "推荐样本" : "Recommendations"}</span>
+          <strong>{summary.recommendations}</strong>
+          <small>{summary.recommendation_days} {language === "zh" ? "个推荐日" : "signal days"}</small>
+        </div>
+        <div>
+          <span>{language === "zh" ? "选股轨已入场" : "Selection entries"}</span>
+          <strong>{summary.selection_started}/{summary.recommendations}</strong>
+          <small>
+            {language === "zh"
+              ? `${Math.max(summary.recommendations - summary.selection_started, 0)} 条等待次日行情`
+              : `${Math.max(summary.recommendations - summary.selection_started, 0)} awaiting next-session bars`}
+          </small>
+        </div>
+        <div>
+          <span>{language === "zh" ? "择时已成交" : "Execution filled"}</span>
+          <strong>{summary.execution_filled}/{summary.execution_admitted}</strong>
+          <small>{language === "zh" ? "触发后才成交" : "Only after trigger"}</small>
+        </div>
+        <div>
+          <span>{language === "zh" ? "成交率" : "Fill rate"}</span>
+          <strong>{formatRate(summary.execution_fill_rate)}</strong>
+          <small>{language === "zh" ? "不把等待单算买入" : "Pending is not a fill"}</small>
+        </div>
+      </div>
+
+      <div className="paper-dual-track-main">
+        <div className="paper-dual-track-chart-card">
+          <div className="paper-ledger-card-header">
+            <div>
+              <h3>{language === "zh" ? "5 / 10 / 20 日收益对比" : "5 / 10 / 20 day comparison"}</h3>
+              <p>
+                {language === "zh"
+                  ? "同一批推荐比较直接持有、按买点执行和指数表现。"
+                  : "Compares direct holding, rule-based execution, and benchmarks for the same signals."}
+              </p>
+            </div>
+            <strong>{primary ? formatPct(primary.timing_effect_pct) : "-"}</strong>
+          </div>
+          <DualTrackComparisonChart windows={report.windows} language={language} />
+        </div>
+
+        <div className="paper-dual-track-window-list">
+          {report.windows.map((window) => {
+            const benchmark = window.benchmarks.find((item) => item.name === "沪深300");
+            return (
+              <article key={window.window_days} className={`dual-track-window tone-${dualTrackTone(window.verdict)}`}>
+                <header>
+                  <strong>{window.window_days}D</strong>
+                  <span>{dualTrackVerdictLabel(window.verdict, language)}</span>
+                </header>
+                <div>
+                  <span>{language === "zh" ? "选股盘" : "Selection"}</span>
+                  <strong>{formatPct(window.selection.average_return_pct)}</strong>
+                  <small>{window.selection.evaluated_count} {language === "zh" ? "样本" : "samples"} · {formatRate(window.selection.win_rate)}</small>
+                </div>
+                <div>
+                  <span>{language === "zh" ? "择时盘" : "Execution"}</span>
+                  <strong>{formatPct(window.execution.average_return_pct)}</strong>
+                  <small>{window.execution.evaluated_count} {language === "zh" ? "成交样本" : "filled"}</small>
+                </div>
+                <footer>
+                  <span>
+                    {language === "zh" ? "择时贡献" : "Timing"} {formatPct(window.timing_effect_pct)}
+                    {window.timing_sample_count > 0 ? ` · n=${window.timing_sample_count}` : ""}
+                  </span>
+                  <span>{language === "zh" ? "超额" : "Excess"} {formatPct(benchmark?.selection_excess_pct ?? null)}</span>
+                </footer>
+              </article>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="paper-dual-track-table">
+        <div className="paper-ledger-card-header">
+          <div>
+            <h3>{language === "zh" ? "同批推荐逐只归因" : "Signal-level attribution"}</h3>
+            <p>
+              {language === "zh"
+                ? "选股盘有收益但择时盘未成交，说明不是选股失败，而是买点尚未触发。"
+                : "A selection result without an execution fill means timing is still waiting, not that selection failed."}
+            </p>
+          </div>
+          <strong>{report.samples.length}</strong>
+        </div>
+        <div className="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>{language === "zh" ? "推荐" : "Signal"}</th>
+                <th>{language === "zh" ? "信号日" : "Date"}</th>
+                <th>{language === "zh" ? "选股 5D" : "Select 5D"}</th>
+                <th>{language === "zh" ? "选股 10D" : "Select 10D"}</th>
+                <th>{language === "zh" ? "选股 20D" : "Select 20D"}</th>
+                <th>{language === "zh" ? "择时状态" : "Execution"}</th>
+                <th>{language === "zh" ? "择时 10D" : "Execute 10D"}</th>
+                <th>{language === "zh" ? "结论" : "Attribution"}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.samples.slice(0, 10).map((sample) => (
+                <tr key={sample.snapshot_id}>
+                  <td className="ticker" title={sample.instrument_label}>{sample.instrument_label}</td>
+                  <td>{sample.signal_date}</td>
+                  <td>{formatPct(sample.selection_return_5d)}</td>
+                  <td>{formatPct(sample.selection_return_10d)}</td>
+                  <td>{formatPct(sample.selection_return_20d)}</td>
+                  <td>{dualTrackExecutionLabel(sample.execution_status, language)}</td>
+                  <td>{formatPct(sample.execution_return_10d)}</td>
+                  <td className="reason-cell">{language === "zh" ? sample.attribution : dualTrackAttribution(sample.attribution)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function DualTrackComparisonChart({
+  windows,
+  language,
+}: {
+  windows: PaperDualTrackResponse["windows"];
+  language: Language;
+}) {
+  const width = 720;
+  const height = 270;
+  const left = 58;
+  const right = 24;
+  const top = 24;
+  const bottom = 44;
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
+  const series = [
+    { key: "selection", label: language === "zh" ? "选股盘" : "Selection", className: "is-selection", values: windows.map((item) => item.selection.average_return_pct) },
+    { key: "execution", label: language === "zh" ? "择时盘" : "Execution", className: "is-execution", values: windows.map((item) => item.execution.average_return_pct) },
+    { key: "hs300", label: "沪深300", className: "is-hs300", values: windows.map((item) => item.benchmarks.find((benchmark) => benchmark.name === "沪深300")?.selection_return_pct ?? null) },
+    { key: "star50", label: "科创50", className: "is-star50", values: windows.map((item) => item.benchmarks.find((benchmark) => benchmark.name === "科创50")?.selection_return_pct ?? null) },
+  ];
+  const numeric = series.flatMap((item) => item.values).filter((value): value is number => value != null && Number.isFinite(value));
+  const extent = Math.max(2, ...numeric.map((value) => Math.abs(value))) * 1.2;
+  const x = (index: number) => left + (windows.length <= 1 ? plotWidth / 2 : (index / (windows.length - 1)) * plotWidth);
+  const y = (value: number) => top + ((extent - value) / (extent * 2)) * plotHeight;
+  const ticks = [extent, extent / 2, 0, -extent / 2, -extent];
+  return (
+    <div className="dual-track-chart-wrap">
+      {numeric.length === 0 ? (
+        <div className="mini-curve-empty">
+          {language === "zh" ? "等待 5/10/20 日样本成熟后生成曲线。" : "Waiting for mature 5/10/20 day samples."}
+        </div>
+      ) : (
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={language === "zh" ? "双轨收益比较曲线" : "Dual-track return chart"}>
+          {ticks.map((tick) => (
+            <g key={tick}>
+              <line className={tick === 0 ? "dual-track-zero" : "dual-track-grid"} x1={left} x2={width - right} y1={y(tick)} y2={y(tick)} />
+              <text x={left - 10} y={y(tick) + 4} textAnchor="end">{tick.toFixed(1)}%</text>
+            </g>
+          ))}
+          {windows.map((window, index) => (
+            <text key={window.window_days} x={x(index)} y={height - 14} textAnchor="middle">{window.window_days}D</text>
+          ))}
+          {series.map((item) => {
+            const points = item.values
+              .map((value, index) => value == null ? null : `${x(index)},${y(value)}`)
+              .filter((value): value is string => value !== null)
+              .join(" ");
+            return points ? (
+              <g key={item.key} className={`dual-track-series ${item.className}`}>
+                <polyline points={points} fill="none" />
+                {item.values.map((value, index) => value == null ? null : (
+                  <circle key={`${item.key}-${windows[index].window_days}`} cx={x(index)} cy={y(value)} r="4">
+                    <title>{item.label} {windows[index].window_days}D {formatPct(value)}</title>
+                  </circle>
+                ))}
+              </g>
+            ) : null;
+          })}
+        </svg>
+      )}
+      <div className="dual-track-legend">
+        {series.map((item) => <span key={item.key} className={item.className}>{item.label}</span>)}
+      </div>
+    </div>
+  );
+}
+
+function dualTrackTone(verdict: string) {
+  if (["selection_effective", "timing_helped"].includes(verdict)) return "good";
+  if (["selection_weak", "timing_drag"].includes(verdict)) return "risk";
+  return "watch";
+}
+
+function dualTrackVerdictLabel(verdict: string, language: Language) {
+  const labels: Record<string, { zh: string; en: string }> = {
+    selection_weak: { zh: "选股偏弱", en: "Selection weak" },
+    selection_warning: { zh: "短期偏弱预警", en: "Early selection warning" },
+    selection_only: { zh: "选股已验证，等待成交", en: "Selection ready, execution waiting" },
+    timing_drag: { zh: "择时拖累", en: "Timing drag" },
+    timing_helped: { zh: "择时增益", en: "Timing helped" },
+    selection_effective: { zh: "选股有效", en: "Selection effective" },
+    aligned: { zh: "表现接近", en: "Aligned" },
+    waiting: { zh: "等待成熟", en: "Waiting" },
+  };
+  return labels[verdict]?.[language === "zh" ? "zh" : "en"] ?? verdict;
+}
+
+function dualTrackHeadline(verdict: string) {
+  const labels: Record<string, string> = {
+    selection_weak: "Selection needs adjustment",
+    selection_warning: "Early selection results are weak",
+    selection_only: "Selection is measurable; execution is waiting",
+    timing_drag: "Selection works, timing drags",
+    timing_helped: "Timing adds value",
+    selection_effective: "Recommendations show excess return",
+    aligned: "Selection and timing are aligned",
+    waiting: "Waiting for mature samples",
+  };
+  return labels[verdict] ?? "Dual-track validation";
+}
+
+function dualTrackExecutionLabel(status: string, language: Language) {
+  const labels: Record<string, { zh: string; en: string }> = {
+    not_admitted: { zh: "未进入择时盘", en: "Not admitted" },
+    pending: { zh: "等待买点", en: "Waiting trigger" },
+    open: { zh: "已成交持有", en: "Filled and open" },
+    target_1_hit: { zh: "止盈", en: "Target hit" },
+    stopped: { zh: "止损", en: "Stopped" },
+    time_exit: { zh: "时间退出", en: "Time exit" },
+    missed_entry: { zh: "错过买点", en: "Missed entry" },
+  };
+  return labels[status]?.[language === "zh" ? "zh" : "en"] ?? status;
+}
+
+function dualTrackAttribution(value: string) {
+  const labels: Record<string, string> = {
+    "等待选股窗口成熟": "Waiting for selection window",
+    "推荐未进入择时模拟盘": "Not admitted to execution track",
+    "选股已开始验证，买点尚未触发": "Selection started; trigger not hit",
+    "已成交，等待择时窗口成熟": "Filled; execution window pending",
+    "择时提升收益": "Timing improved return",
+    "择时拖累收益": "Timing reduced return",
+    "选股与择时接近": "Selection and timing aligned",
+  };
+  return labels[value] ?? value;
+}
+
+function formatRate(value: number | null | undefined) {
+  return value == null || Number.isNaN(value) ? "-" : `${(value * 100).toFixed(1)}%`;
 }
 
 function PaperExecutionStatus({

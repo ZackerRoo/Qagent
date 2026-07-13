@@ -1462,6 +1462,82 @@ class QagentRepository:
             )
             return [self._opportunity_snapshot_from_row(row) for row in rows]
 
+    def list_top_daily_opportunity_snapshots(
+        self,
+        *,
+        start: date,
+        end: date,
+        top_n: int = 5,
+        provider: str | None = None,
+    ) -> list[OpportunitySnapshotRecord]:
+        bounded_top_n = max(1, min(top_n, 20))
+        with self.session_factory() as session:
+            per_instrument = session.query(
+                OpportunitySnapshotRow.snapshot_id.label("snapshot_id"),
+                OpportunitySnapshotRow.signal_date.label("signal_date"),
+                OpportunitySnapshotRow.instrument_id.label("instrument_id"),
+                OpportunitySnapshotRow.rank_score.label("rank_score"),
+                OpportunitySnapshotRow.strategy_score.label("strategy_score"),
+                OpportunitySnapshotRow.score.label("score"),
+                OpportunitySnapshotRow.created_at.label("created_at"),
+                func.row_number()
+                .over(
+                    partition_by=(
+                        OpportunitySnapshotRow.signal_date,
+                        OpportunitySnapshotRow.instrument_id,
+                    ),
+                    order_by=(
+                        OpportunitySnapshotRow.rank_score.desc(),
+                        OpportunitySnapshotRow.strategy_score.desc(),
+                        OpportunitySnapshotRow.score.desc(),
+                        OpportunitySnapshotRow.created_at.desc(),
+                        OpportunitySnapshotRow.snapshot_id.desc(),
+                    ),
+                )
+                .label("instrument_rank"),
+            ).filter(
+                OpportunitySnapshotRow.signal_date.isnot(None),
+                OpportunitySnapshotRow.signal_date >= start,
+                OpportunitySnapshotRow.signal_date <= end,
+            )
+            if provider:
+                per_instrument = per_instrument.join(
+                    ScanRunRow,
+                    OpportunitySnapshotRow.run_id == ScanRunRow.run_id,
+                ).filter(ScanRunRow.provider == provider)
+            unique_instruments = per_instrument.subquery()
+            per_day = (
+                session.query(
+                    unique_instruments.c.snapshot_id,
+                    unique_instruments.c.signal_date,
+                    func.row_number()
+                    .over(
+                        partition_by=unique_instruments.c.signal_date,
+                        order_by=(
+                            unique_instruments.c.rank_score.desc(),
+                            unique_instruments.c.strategy_score.desc(),
+                            unique_instruments.c.score.desc(),
+                            unique_instruments.c.created_at.desc(),
+                            unique_instruments.c.snapshot_id.desc(),
+                        ),
+                    )
+                    .label("daily_rank"),
+                )
+                .filter(unique_instruments.c.instrument_rank == 1)
+                .subquery()
+            )
+            rows = (
+                session.query(OpportunitySnapshotRow)
+                .join(per_day, OpportunitySnapshotRow.snapshot_id == per_day.c.snapshot_id)
+                .filter(per_day.c.daily_rank <= bounded_top_n)
+                .order_by(
+                    OpportunitySnapshotRow.signal_date.desc(),
+                    OpportunitySnapshotRow.rank_score.desc(),
+                )
+                .all()
+            )
+            return [self._opportunity_snapshot_from_row(row) for row in rows]
+
     def list_latest_signal_opportunity_snapshots(
         self,
         limit: int = 50,

@@ -90,6 +90,10 @@ from qagent.paper_trading.engine import (
     update_paper_trades,
     summarize_paper_trades,
 )
+from qagent.paper_trading.dual_track import (
+    build_dual_track_report,
+    select_daily_top_recommendations,
+)
 from qagent.providers.factory import build_market_data_provider
 from qagent.providers.status import build_provider_status
 from qagent.recommendations.enrichment import enrich_opportunity_card
@@ -2445,6 +2449,74 @@ def paper_trade_daily_report(provider: str = "fixture", limit: int = 500) -> dic
             "paper_daily_benchmarks_source": "market_cache_only",
             "paper_daily_benchmark_rows": str(benchmark_rows),
             **risk_gate_health,
+        }
+    )
+    return report.model_dump(mode="json")
+
+
+@router.get("/paper-trades/dual-track")
+def paper_trade_dual_track(
+    provider: str = "free",
+    days: int = 180,
+    top_n: int = 5,
+) -> dict[str, object]:
+    if days <= 0 or days > 730:
+        raise HTTPException(status_code=400, detail="days must be between 1 and 730")
+    if top_n <= 0 or top_n > 20:
+        raise HTTPException(status_code=400, detail="top_n must be between 1 and 20")
+    mode = provider.strip().lower()
+    as_of = _a_share_today()
+    snapshot_start = as_of - timedelta(days=days)
+    snapshots = _repo().list_top_daily_opportunity_snapshots(
+        start=snapshot_start,
+        end=as_of,
+        top_n=top_n,
+        provider=mode,
+    )
+    selected = select_daily_top_recommendations(snapshots, top_n=top_n, as_of=as_of)
+    trades = _paper_repo().list_trades(limit=1000, provider=mode)
+    account = _paper_repo().get_account_settings()
+    start = min(
+        (snapshot.signal_date for snapshot in selected if snapshot.signal_date is not None),
+        default=snapshot_start,
+    ) - timedelta(days=7)
+    selected_ids = sorted({snapshot.instrument_id for snapshot in selected})
+    cached_benchmark_ids = benchmark_ids() + benchmark_proxy_ids()
+    cached = _market_cache_repo().load_daily_bars(
+        mode,
+        sorted(set(selected_ids + cached_benchmark_ids)),
+        start,
+        as_of,
+    )
+    if cached.empty:
+        instrument_bars = cached
+        benchmark_bars = cached
+    else:
+        instrument_bars = cached.loc[cached["instrument_id"].isin(selected_ids)].copy()
+        benchmark_bars = cached.loc[
+            cached["instrument_id"].isin(cached_benchmark_ids)
+        ].copy()
+    report = build_dual_track_report(
+        snapshots=selected,
+        trades=trades,
+        instrument_bars=instrument_bars,
+        benchmark_bars=benchmark_bars,
+        as_of=as_of,
+        top_n=top_n,
+        transaction_cost_bps=float(account.transaction_cost_bps),
+        slippage_bps=float(account.slippage_bps),
+    )
+    adjusted_rows = 0
+    if not instrument_bars.empty and "adjusted_close" in instrument_bars.columns:
+        adjusted_rows = int(instrument_bars["adjusted_close"].notna().sum())
+    report.data_health.update(
+        {
+            "dual_track_provider": mode,
+            "dual_track_snapshot_rows": str(len(snapshots)),
+            "dual_track_snapshot_start": snapshot_start.isoformat(),
+            "dual_track_cache_source": "sqlite_only",
+            "dual_track_instruments": str(len(selected_ids)),
+            "dual_track_adjusted_rows": str(adjusted_rows),
         }
     )
     return report.model_dump(mode="json")

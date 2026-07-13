@@ -1901,6 +1901,78 @@ export type PaperDailyReportResponse = {
   data_health: Record<string, string>;
 };
 
+export type PaperDualTrackMetric = {
+  sample_count: number;
+  evaluated_count: number;
+  win_count: number;
+  win_rate: number | null;
+  average_return_pct: number | null;
+  best_return_pct: number | null;
+  worst_return_pct: number | null;
+};
+
+export type PaperDualTrackBenchmark = {
+  benchmark_id: string;
+  name: string;
+  selection_sample_count: number;
+  selection_return_pct: number | null;
+  selection_excess_pct: number | null;
+  execution_sample_count: number;
+  execution_return_pct: number | null;
+  execution_excess_pct: number | null;
+};
+
+export type PaperDualTrackWindow = {
+  window_days: number;
+  selection: PaperDualTrackMetric;
+  execution: PaperDualTrackMetric;
+  benchmarks: PaperDualTrackBenchmark[];
+  timing_sample_count: number;
+  timing_effect_pct: number | null;
+  verdict: string;
+  explanation: string;
+};
+
+export type PaperDualTrackSample = {
+  snapshot_id: string;
+  instrument_id: string;
+  instrument_label: string;
+  signal_date: string;
+  strategy_id: string | null;
+  rank_score: number;
+  selection_entry_date: string | null;
+  selection_entry_price: string | null;
+  selection_return_5d: number | null;
+  selection_return_10d: number | null;
+  selection_return_20d: number | null;
+  execution_status: string;
+  execution_entry_date: string | null;
+  execution_entry_price: string | null;
+  execution_return_5d: number | null;
+  execution_return_10d: number | null;
+  execution_return_20d: number | null;
+  attribution: string;
+};
+
+export type PaperDualTrackResponse = {
+  as_of: string;
+  summary: {
+    recommendation_days: number;
+    recommendations: number;
+    selection_started: number;
+    execution_admitted: number;
+    execution_filled: number;
+    execution_fill_rate: number | null;
+    primary_window_days: number;
+    verdict: string;
+    headline: string;
+    explanation: string;
+  };
+  windows: PaperDualTrackWindow[];
+  samples: PaperDualTrackSample[];
+  data_health: Record<string, string>;
+};
+
 export type PaperCandidatePoolItem = {
   snapshot_id: string;
   instrument_id: string;
