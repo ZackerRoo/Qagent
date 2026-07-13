@@ -257,7 +257,9 @@ def test_today_scan_task_endpoint_returns_pollable_result(monkeypatch):
     monkeypatch.setattr(routes, "_full_market_scan_payload", fake_full_market_scan_payload)
     client = TestClient(create_app())
 
-    response = client.post("/api/scan-tasks/today?provider=free&max_symbols=1&include_etfs=true")
+    response = client.post(
+        "/api/scan-tasks/today?provider=free&max_symbols=1&include_etfs=true&force_refresh=true"
+    )
 
     assert response.status_code == 200
     task_id = response.json()["task_id"]

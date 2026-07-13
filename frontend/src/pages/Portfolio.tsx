@@ -987,16 +987,16 @@ function PaperRiskGatePanel({
 }) {
   const fallback = paperRiskGateCopy(health, language);
   const paused = riskGate ? !riskGate.can_add_entries : fallback.paused;
-  const probing = riskGate?.action === "resume_probe_entries";
+  const throttled = riskGate?.action === "throttle_new_entries";
   const title = riskGate?.title ?? fallback.title;
   const reason = riskGate?.reason ?? fallback.reason;
   const reasons = (riskGate?.reasons ?? []).filter((item) => item !== "within_limits" && item !== "no_paper_history");
   const recovery = riskGate?.recovery_conditions ?? [];
-  const badge = probing
-    ? language === "zh" ? "恢复试单" : "Probe"
-    : paused ? language === "zh" ? "暂停新增" : "Paused" : language === "zh" ? "允许新增" : "Allowed";
+  const badge = throttled
+    ? language === "zh" ? "小仓位" : "Reduced size"
+    : paused ? language === "zh" ? "暂不新增" : "Paused" : language === "zh" ? "允许新增" : "Allowed";
   return (
-    <section className={`paper-risk-gate-panel ${paused ? "is-paused" : probing ? "is-probing" : "is-allowed"}`}>
+    <section className={`paper-risk-gate-panel ${paused ? "is-paused" : throttled ? "is-throttled" : "is-allowed"}`}>
       <div className="paper-risk-gate-head">
         <div>
           <span>{language === "zh" ? "自动开仓风控" : "Auto-entry risk gate"}</span>
@@ -1399,21 +1399,26 @@ function PaperEventTimelinePanel({
 function paperRiskGateCopy(health: Record<string, string>, language: Language) {
   const action = health.paper_risk_gate_action;
   const paused = action === "pause_new_entries";
+  const throttled = action === "throttle_new_entries";
   const rawReason = health.paper_risk_gate_reason || "";
   if (language === "zh") {
     return {
       paused,
-      title: paused ? "暂停新增模拟单" : "允许新增模拟单",
+      title: paused ? "暂停新增模拟单" : throttled ? "风险收缩，允许小仓位新增" : "允许新增模拟单",
       reason: paused
         ? `当前模拟盘触发风控：${localizeRiskGateReason(rawReason)}。已有持仓继续更新。`
+        : throttled
+        ? `当前模拟盘有回撤或胜率警报，但不会停止捕捉机会：新单限制数量并使用较小仓位。`
         : "当前回撤和胜率还在允许范围内，系统可以继续接收新机会。",
     };
   }
   return {
     paused,
-    title: paused ? "New entries paused" : "New entries allowed",
+    title: paused ? "New entries paused" : throttled ? "Risk reduced, small entries allowed" : "New entries allowed",
     reason: paused
       ? `Risk gate triggered: ${rawReason || "paper ledger under pressure"}. Existing positions still update.`
+      : throttled
+      ? "The paper ledger is under pressure, but opportunities remain eligible with fewer and smaller entries."
       : "Drawdown and win rate are within limits; new opportunities can still enter the ledger.",
   };
 }
@@ -1467,8 +1472,8 @@ function paperRecommendationState(riskGate: PaperDailyReportResponse["risk_gate"
   if (riskGate.action === "pause_new_entries") {
     return language === "zh" ? "今天只跟踪，不新增" : "Track only";
   }
-  if (riskGate.action === "resume_probe_entries") {
-    return language === "zh" ? "只允许最高质量试单" : "Best ideas only";
+  if (riskGate.action === "throttle_new_entries") {
+    return language === "zh" ? "风险收缩，小仓位接收" : "Reduced-size intake";
   }
   return language === "zh" ? "可正常接收新推荐" : "Normal intake";
 }

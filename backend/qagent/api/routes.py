@@ -1353,6 +1353,11 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
 
     allow_seed_paper, risk_gate_health = _paper_seed_risk_gate(paper_repo, mode)
     data_health.update(risk_gate_health)
+    # A full book still needs to evaluate replacement candidates. The risk
+    # gate may prevent direct admission, but it must not bypass the
+    # low-quality pending-order replacement path.
+    if risk_gate_health.get("paper_risk_gate_action") == "capacity_full":
+        allow_seed_paper = True
 
     if settings.seed_paper and mode != "fixture" and allow_seed_paper:
         try:
@@ -1422,14 +1427,14 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 max_signal_age_days=None,
                 signal_date_override=tracking_signal_date,
                 notes=(
-                    "风控恢复探针：本轮最多 1 笔，完成后下一交易日重新评估。"
-                    if risk_gate_health.get("paper_risk_gate_action") == "resume_probe_entries"
+                    "风控恢复探针；风险收缩小仓位：本轮最多 1 笔，收益回撤改善后恢复正常额度。"
+                    if risk_gate_health.get("paper_risk_gate_action") == "throttle_new_entries"
                     else ""
                 ),
-                allocation_multiplier=(
-                    Decimal("0.35")
-                    if risk_gate_health.get("paper_risk_gate_action") == "resume_probe_entries"
-                    else Decimal("1.0")
+                allocation_multiplier=Decimal(
+                    risk_gate_health.get("paper_risk_gate_position_size_multiplier", "1.0")
+                    if risk_gate_health.get("paper_risk_gate_action") == "throttle_new_entries"
+                    else "1.0"
                 ),
             )
             paper_created += seed_result.created
@@ -1552,7 +1557,10 @@ def _paper_seed_limit_from_risk_gate(
     configured_limit: int,
     risk_gate_health: dict[str, str],
 ) -> int:
-    if risk_gate_health.get("paper_risk_gate_action") != "resume_probe_entries":
+    if risk_gate_health.get("paper_risk_gate_action") not in {
+        "throttle_new_entries",
+        "capacity_full",
+    }:
         return configured_limit
     try:
         max_new = int(risk_gate_health.get("paper_risk_gate_max_new_entries", "1"))
@@ -1566,7 +1574,10 @@ def _paper_seed_active_limit_from_risk_gate(
     configured_limit: int,
     risk_gate_health: dict[str, str],
 ) -> int:
-    if risk_gate_health.get("paper_risk_gate_action") != "resume_probe_entries":
+    if risk_gate_health.get("paper_risk_gate_action") not in {
+        "throttle_new_entries",
+        "capacity_full",
+    }:
         return configured_limit
     account = paper_repo.get_account_settings()
     return max(1, account.max_positions)

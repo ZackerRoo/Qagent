@@ -11231,6 +11231,13 @@ td {
     rgba(9, 14, 20, 0.78);
 }
 
+.paper-risk-gate-panel.is-throttled {
+  border-color: rgba(77, 212, 255, 0.38);
+  background:
+    linear-gradient(135deg, rgba(77, 212, 255, 0.12), rgba(244, 197, 66, 0.05)),
+    rgba(9, 14, 20, 0.78);
+}
+
 .paper-risk-gate-head {
   display: flex;
   align-items: flex-start;
@@ -11272,6 +11279,11 @@ td {
 .paper-risk-gate-panel.is-probing .paper-risk-gate-head em {
   background: rgba(244, 197, 66, 0.16);
   color: var(--terminal-yellow);
+}
+
+.paper-risk-gate-panel.is-throttled .paper-risk-gate-head em {
+  background: rgba(77, 212, 255, 0.14);
+  color: var(--terminal-cyan);
 }
 
 .paper-risk-gate-panel p,

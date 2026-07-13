@@ -1207,71 +1207,58 @@ def _paper_risk_gate_status(
             position_size_multiplier=1.0,
         )
 
-    if severe and recovery_score < 0.45:
-        probe_state, probe_date = _paper_risk_probe_state(ledger)
-        if probe_state == "active":
-            return PaperRiskGateStatus(
-                action="pause_new_entries",
-                can_add_entries=False,
-                title="恢复探针验证中",
-                reason="；".join(reasons) + "；已有恢复探针，等待其完成后再评估",
-                reasons=reasons + ["恢复探针尚未完成"],
-                recovery_conditions=[
-                    "等待当前恢复探针完成买入、止盈、止损或时间退出",
-                    "探针完成后下一交易日重新评估",
-                ],
-                recovery_state="probing",
-                recovery_score=recovery_score,
-                max_new_entries=0,
-                position_size_multiplier=0.0,
-            )
-        if probe_state == "cooldown":
-            return PaperRiskGateStatus(
-                action="pause_new_entries",
-                can_add_entries=False,
-                title="恢复探针冷却中",
-                reason="；".join(reasons) + "；上一笔恢复探针刚完成，下一交易日再评估",
-                reasons=reasons + ["恢复探针当日冷却"],
-                recovery_conditions=["下一交易日根据探针结果决定是否继续试单"],
-                recovery_state="paused",
-                recovery_score=recovery_score,
-                max_new_entries=0,
-                position_size_multiplier=0.0,
-            )
+    # Performance deterioration should reduce risk exposure, not make the
+    # signal engine blind. Mature paper brokers keep accepting orders while
+    # risk models adjust target weights or enforce a small admission budget.
+    # A hard stop is reserved for operational constraints such as no slot or
+    # missing market data, not for a single return threshold.
+    probe_state, _ = _paper_risk_probe_state(ledger)
+    available_slots = max(
+        summary.max_positions - summary.open_trades - summary.pending_trades,
+        0,
+    )
+    if available_slots <= 0:
         return PaperRiskGateStatus(
-            action="resume_probe_entries",
-            can_add_entries=True,
-            title="恢复小仓位试单",
-            reason="；".join(reasons) + "。当前没有进行中的恢复探针，允许 1 笔新机会试单，避免风控永久锁死。",
-            reasons=reasons,
+            action="capacity_full",
+            can_add_entries=False,
+            title="模拟盘已满",
+            reason="；".join(reasons) + "；当前没有可用仓位，等待退出或候补替换。",
+            reasons=reasons + ["达到最大持仓数"],
             recovery_conditions=[
-                "本轮最多允许 1 笔恢复探针",
-                "探针完成后下一交易日再评估",
-                "若探针止损，继续保持单笔试单而不恢复批量买入",
-                "若收益、回撤和胜率恢复，再切回正常新增",
+                "等待持仓止盈、止损或时间退出",
+                "若出现更高质量候选，比较后替换低质量等待单",
             ],
-            recovery_state="probing",
+            recovery_state="capacity_full",
             recovery_score=recovery_score,
-            max_new_entries=1,
-            position_size_multiplier=0.35,
+            max_new_entries=0,
+            position_size_multiplier=0.0,
         )
 
+    max_new_entries = min(available_slots, 1)
+    position_size_multiplier = 0.35 if severe or recovery_score < 0.45 else 0.5
+    probe_note = (
+        "已有恢复探针，继续允许新候选以小仓位进入"
+        if probe_state == "active"
+        else "上一笔恢复探针已完成，当前交易日仍允许小仓位验证"
+        if probe_state == "cooldown"
+        else "当前没有恢复探针，先用小仓位验证新机会"
+    )
     return PaperRiskGateStatus(
-        action="resume_probe_entries",
+        action="throttle_new_entries",
         can_add_entries=True,
-        title="恢复小仓位试单",
-        reason="；".join(reasons) + "。风控尚未完全恢复，但允许 1 笔高质量新机会试单，避免错过强信号。",
+        title="风险收缩，允许小仓位新增",
+        reason="；".join(reasons) + f"；{probe_note}，不会因收益回撤永久停止买入。",
         reasons=reasons,
         recovery_conditions=[
-            "恢复期只允许 1 笔试单，且必须来自当前最高质量推荐",
-            "试单后继续观察总收益、最大回撤和止损次数",
-            "若再次触发止损或跑输指数扩大，会重新暂停新增",
-            "若胜率和收益恢复，再切回正常新增",
+            f"每轮最多新增 {max_new_entries} 笔，优先当前最高质量机会",
+            f"新增仓位按正常额度的 {position_size_multiplier:.0%} 执行",
+            "已有持仓继续按止损、止盈和 T+1 规则更新",
+            "收益、回撤和触发质量恢复后，再切回正常新增额度",
         ],
-        recovery_state="probing",
+        recovery_state="throttled",
         recovery_score=recovery_score,
-        max_new_entries=1,
-        position_size_multiplier=0.35,
+        max_new_entries=max_new_entries,
+        position_size_multiplier=position_size_multiplier,
     )
 
 

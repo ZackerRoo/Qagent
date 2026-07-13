@@ -493,6 +493,9 @@ function replacementAction(summary: PaperCandidatePoolResponse["summary"] | unde
   if (summary.risk_action === "pause_new_entries") {
     return language === "zh" ? "风控暂停新增，只跟踪已有模拟单。" : "Risk gate pauses new entries.";
   }
+  if (summary.risk_action === "throttle_new_entries") {
+    return language === "zh" ? "风险收缩，但仍以小仓位接收新机会。" : "Risk is reduced, but smaller new entries remain eligible.";
+  }
   if (candidate?.replacement_target) {
     return `${language === "zh" ? "候补优先替换" : "Replace pending"} ${formatInstrumentDisplay(candidate.replacement_target)}`;
   }
@@ -506,6 +509,7 @@ function paperActionLabel(action: string, language: "zh" | "en") {
   const zh: Record<string, string> = {
     normal: "正常候补",
     pause_new_entries: "暂停新增",
+    throttle_new_entries: "风险收缩",
     recovery_probe_only: "恢复期试单",
   };
   return language === "zh" ? zh[action] ?? action : action.replace(/_/g, " ");
