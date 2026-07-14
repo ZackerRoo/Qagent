@@ -199,6 +199,8 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert first.data_health["walk_forward_validation_scope"] == "full_market"
     assert first.data_health["walk_forward_market_coverage_gate"] == "ready"
     assert first.data_health["walk_forward_cross_section_coverage_pct"] == "100.0"
+    assert first.data_health["walk_forward_fundamental_coverage_gate"] == "ready"
+    assert first.data_health["walk_forward_fundamental_coverage_pct"] == "100.0"
     assert first.data_health["walk_forward_top_5_validation_gate"] == "insufficient"
     assert [item.key for item in first.cost_sensitivity] == [
         "base",
@@ -217,6 +219,7 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert first.strategy_validation.status == "insufficient"
     assert {item.key for item in first.strategy_validation.criteria} == {
         "market_coverage",
+        "fundamental_coverage",
         "out_of_sample_count",
         "out_of_sample_return",
         "benchmark_excess",

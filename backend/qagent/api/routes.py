@@ -531,20 +531,52 @@ def start_historical_data_backfill(
     symbols: str | None = None,
     max_symbols: int = 200,
     include_etfs: bool = True,
+    scope: str = "symbols",
+    batch_size: int = 50,
     force_restart: bool = False,
 ) -> dict[str, object]:
     mode = _validate_historical_data_params(provider, start, end, max_symbols)
+    normalized_scope = scope.strip().lower()
+    if normalized_scope not in {"symbols", "full-a-share"}:
+        raise HTTPException(status_code=400, detail="scope must be symbols or full-a-share")
+    if batch_size <= 0 or batch_size > 500:
+        raise HTTPException(status_code=400, detail="batch_size must be between 1 and 500")
+    if normalized_scope == "full-a-share" and symbols:
+        raise HTTPException(
+            status_code=400,
+            detail="symbols cannot be combined with full-a-share scope",
+        )
     repo = _repo()
     latest = repo.get_latest_historical_backfill_job(provider=mode)
-    if latest and latest.status in {"queued", "running"} and not force_restart:
-        return _historical_backfill_job_payload(latest)
-    instrument_ids = _historical_data_symbols(
-        mode,
-        symbols,
-        max_symbols=max_symbols,
-        include_etfs=include_etfs,
+    if latest and latest.status in {"queued", "running"}:
+        active_scope = latest.data_health.get("backfill_scope", "symbols")
+        if active_scope == normalized_scope and not force_restart:
+            return _historical_backfill_job_payload(latest)
+        raise HTTPException(
+            status_code=409,
+            detail=f"a {active_scope} historical backfill is already running",
+        )
+    instrument_ids = (
+        []
+        if normalized_scope == "full-a-share"
+        else _historical_data_symbols(
+            mode,
+            symbols,
+            max_symbols=max_symbols,
+            include_etfs=include_etfs,
+        )
     )
-    job = repo.create_historical_backfill_job(mode, instrument_ids, start, end)
+    job = repo.create_historical_backfill_job(
+        mode,
+        instrument_ids,
+        start,
+        end,
+        data_health={
+            "backfill_scope": normalized_scope,
+            "backfill_batch_size": str(batch_size),
+            "backfill_phase": "queued",
+        },
+    )
     _submit_historical_backfill(job.job_id)
     return _historical_backfill_job_payload(job)
 
@@ -3656,6 +3688,11 @@ def _historical_data_symbols(
 
 def _historical_backfill_job_payload(job) -> dict[str, object]:
     payload = job.model_dump(mode="json")
+    if len(job.symbols) > 100:
+        payload["symbols"] = job.symbols[:20]
+        payload["symbols_truncated"] = True
+    else:
+        payload["symbols_truncated"] = False
     payload["progress"] = job.progress
     payload["phase"] = job.data_health.get("backfill_phase", job.status)
     return payload

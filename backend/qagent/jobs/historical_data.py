@@ -17,6 +17,8 @@ def run_historical_backfill_job(job_id: str) -> HistoricalBackfillResult:
     job = repo.get_historical_backfill_job(job_id)
     if job is None:
         raise ValueError(f"historical backfill job not found: {job_id}")
+    scope = job.data_health.get("backfill_scope", "symbols")
+    batch_size = int(job.data_health.get("backfill_batch_size", "100") or 100)
     return run_historical_backfill(
         repo=repo,
         cache=MarketDataCacheRepository(session_factory),
@@ -31,4 +33,6 @@ def run_historical_backfill_job(job_id: str) -> HistoricalBackfillResult:
         end=job.end_date,
         job_id=job.job_id,
         historical_evidence_provider=build_historical_evidence_provider(job.provider),
+        scope=scope,
+        batch_size=batch_size,
     )

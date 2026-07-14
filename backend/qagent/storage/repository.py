@@ -184,7 +184,39 @@ class HistoricalBackfillJobRecord(BaseModel):
     def progress(self) -> int:
         if self.total_symbols <= 0:
             return 0
-        return max(0, min(100, int(self.processed_symbols * 100 / self.total_symbols)))
+        if "backfill_phase" not in self.data_health:
+            return max(
+                0,
+                min(100, int(self.processed_symbols * 100 / self.total_symbols)),
+            )
+        phase = self.data_health.get("backfill_phase", self.status)
+        if phase == "complete" or self.status in {"succeeded", "succeeded_with_errors"}:
+            return 100
+        price_ratio = min(max(self.processed_symbols / self.total_symbols, 0), 1)
+        fundamental_processed = int(
+            self.data_health.get("backfill_fundamental_processed", "0") or 0
+        )
+        evidence_processed = int(
+            self.data_health.get("backfill_evidence_processed", "0") or 0
+        )
+        phase_progress = {
+            "queued": 0,
+            "inventory": 1,
+            "trading_rules": 2,
+            "corporate_actions": 3,
+            "terminal_settlements": 4,
+            "replay_prices": int(5 + price_ratio * 55),
+            "benchmark_prices": 61,
+            "fundamentals": int(
+                62 + min(max(fundamental_processed / self.total_symbols, 0), 1) * 18
+            ),
+            "historical_evidence": int(
+                81 + min(max(evidence_processed / self.total_symbols, 0), 1) * 16
+            ),
+            "replay_coverage": 98,
+            "failed": int(5 + price_ratio * 55),
+        }
+        return max(0, min(99, phase_progress.get(phase, int(price_ratio * 60))))
 
 
 class WalkForwardRunRecord(BaseModel):
@@ -1308,6 +1340,8 @@ class QagentRepository:
         symbols: list[str],
         start: date,
         end: date,
+        *,
+        data_health: dict[str, str] | None = None,
     ) -> HistoricalBackfillJobRecord:
         now = datetime.now(timezone.utc)
         job_id = f"history-backfill-{now.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
@@ -1326,7 +1360,7 @@ class QagentRepository:
                 rows_written=0,
                 fundamental_rows_written=0,
                 errors_json="[]",
-                data_health="{}",
+                data_health=json.dumps(data_health or {}, sort_keys=True),
                 created_at=now,
                 updated_at=now,
             )
@@ -1346,6 +1380,8 @@ class QagentRepository:
         rows_written: int | None = None,
         fundamental_rows_written: int | None = None,
         current_instrument: str | None = None,
+        symbols: list[str] | None = None,
+        total_symbols: int | None = None,
         errors: list[str] | None = None,
         data_health: dict[str, str] | None = None,
     ) -> HistoricalBackfillJobRecord | None:
@@ -1372,6 +1408,10 @@ class QagentRepository:
                 row.fundamental_rows_written = fundamental_rows_written
             if current_instrument is not None:
                 row.current_instrument = current_instrument
+            if symbols is not None:
+                row.symbols = json.dumps(symbols)
+            if total_symbols is not None:
+                row.total_symbols = total_symbols
             if errors is not None:
                 row.errors_json = json.dumps(errors)
             if data_health is not None:

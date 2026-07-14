@@ -139,6 +139,8 @@ def run_historical_backfill(
     normalized_scope = scope.strip().lower()
     if normalized_scope not in {"symbols", "full-a-share"}:
         raise ValueError("scope must be symbols or full-a-share")
+    mode = provider_mode.strip().lower()
+    replay_repo = ReplayEvidenceRepository(repo.session_factory, mode)
     inventory_profiles: list[HistoricalInstrumentProfile] = []
     provider_manifest = None
     if normalized_scope == "full-a-share":
@@ -147,13 +149,26 @@ def run_historical_backfill(
             for name in ("list_historical_instruments", "get_lifecycle_manifest")
         ):
             raise ValueError("full-a-share scope requires historical inventory support")
-        inventory_profiles = historical_evidence_provider.list_historical_instruments(end)
-        provider_manifest = historical_evidence_provider.get_lifecycle_manifest()
-        if provider_manifest.status != "ready":
-            raise ReplayEvidenceUnavailable(
-                "full A-share historical inventory is not ready: "
-                f"{provider_manifest.error or provider_manifest.status}"
-            )
+        current_revision = replay_repo.current_revision()
+        if current_revision > 0:
+            try:
+                cached_inventory = replay_repo.lifecycle_inventory(current_revision)
+                if cached_inventory and all(
+                    item.snapshot_date >= end for item in cached_inventory
+                ):
+                    inventory_profiles = cached_inventory
+            except ReplayEvidenceUnavailable:
+                inventory_profiles = []
+        if not inventory_profiles:
+            inventory_profiles = historical_evidence_provider.list_historical_instruments(end)
+            provider_manifest = historical_evidence_provider.get_lifecycle_manifest()
+            if provider_manifest.status != "ready" or not inventory_profiles:
+                inventory_profiles = replay_repo.recoverable_lifecycle_profiles(end)
+            if not inventory_profiles:
+                raise ReplayEvidenceUnavailable(
+                    "full A-share historical inventory is not ready: "
+                    f"{provider_manifest.error or provider_manifest.status}"
+                )
         instrument_ids = [
             item.instrument_id
             for item in inventory_profiles
@@ -163,10 +178,19 @@ def run_historical_backfill(
     symbols = sorted(set(instrument_ids))
     if not symbols:
         raise ValueError("instrument_ids cannot be empty")
-    mode = provider_mode.strip().lower()
     job = repo.get_historical_backfill_job(job_id) if job_id else None
     if job is None:
-        job = repo.create_historical_backfill_job(mode, symbols, start, end)
+        job = repo.create_historical_backfill_job(
+            mode,
+            symbols,
+            start,
+            end,
+            data_health={
+                "backfill_scope": normalized_scope,
+                "backfill_batch_size": str(batch_size),
+                "backfill_phase": "queued",
+            },
+        )
     elif (
         job.provider,
         sorted(set(job.symbols)),
@@ -177,26 +201,50 @@ def run_historical_backfill(
         symbols,
         start,
         end,
+    ) and not (
+        normalized_scope == "full-a-share"
+        and job.provider == mode
+        and not job.symbols
+        and job.start_date == start
+        and job.end_date == end
     ):
         raise ValueError("resume job scope does not match requested backfill")
 
+    if job.symbols != symbols or job.total_symbols != len(symbols):
+        updated = repo.update_historical_backfill_job(
+            job.job_id,
+            symbols=symbols,
+            total_symbols=len(symbols),
+        )
+        if updated is None:
+            raise RuntimeError(f"historical backfill job disappeared: {job.job_id}")
+        job = updated
+
     repo.capture_tradable_universe_snapshot(universe_as_of or date.today())
-    replay_repo = ReplayEvidenceRepository(repo.session_factory, mode)
     inventory_rows = 0
     inventory_recovered = False
     benchmark_rows = 0
     replay_rows = 0
+    initial_health = dict(job.data_health)
+    initial_health.update(
+        {
+            "backfill_scope": normalized_scope,
+            "backfill_batch_size": str(batch_size),
+            "backfill_phase": "inventory",
+        }
+    )
+    was_running = job.status == "running"
     repo.update_historical_backfill_job(
         job.job_id,
         status="running",
-        data_health={"backfill_phase": "inventory"},
+        data_health=initial_health,
     )
-    processed = 0
-    succeeded = 0
-    failed = 0
+    processed = min(job.processed_symbols, len(symbols)) if was_running else 0
+    succeeded = min(job.succeeded_symbols, processed) if was_running else 0
+    failed = min(job.failed_symbols, processed) if was_running else 0
     cache_reused = 0
-    rows_written = 0
-    errors: list[str] = []
+    rows_written = job.rows_written if was_running else 0
+    errors: list[str] = list(job.errors[-100:]) if was_running else []
     rule_rows = 0
     fee_rule_rows = 0
     instrument_rule_rows = 0
@@ -328,16 +376,25 @@ def run_historical_backfill(
             historical_evidence_provider, "get_corporate_actions"
         ):
             _set_backfill_phase(repo, job.job_id, "corporate_actions")
+            action_scope_symbols = symbols
+            if normalized_scope == "full-a-share" and len(symbols) > 500:
+                action_scope_symbols = [
+                    item.instrument_id
+                    for item in inventory_profiles
+                    if item.instrument_id in symbols
+                    and item.delisting_date is not None
+                    and start <= item.delisting_date <= end
+                ]
             current_revision = replay_repo.current_revision()
             existing_action_coverage = replay_repo.action_coverage(
-                symbols,
+                action_scope_symbols,
                 start,
                 end,
                 current_revision,
             )
             pending_action_symbols = [
                 item
-                for item in symbols
+                for item in action_scope_symbols
                 if item not in existing_action_coverage
                 or existing_action_coverage[item].status == "partial"
             ]
@@ -388,9 +445,17 @@ def run_historical_backfill(
                 for item in action_batch.coverage:
                     action_status_counts[item.status] += 1
             corporate_action_health = {
-                "corporate_action_instruments": str(len(symbols)),
+                "corporate_action_instruments": str(len(action_scope_symbols)),
                 "corporate_action_cache_reused": str(
-                    len(symbols) - len(pending_action_symbols)
+                    len(action_scope_symbols) - len(pending_action_symbols)
+                ),
+                "corporate_action_deferred_instruments": str(
+                    len(symbols) - len(action_scope_symbols)
+                ),
+                "corporate_action_scope": (
+                    "delisted_in_window"
+                    if normalized_scope == "full-a-share" and len(symbols) > 500
+                    else "requested_symbols"
                 ),
                 "corporate_action_ready": str(
                     action_status_counts["ready"]
@@ -418,13 +483,20 @@ def run_historical_backfill(
         corporate_action_health["terminal_settlement_unresolved"] = str(
             len(unresolved_terminal)
         )
-        errors.extend(
-            f"{instrument_id}: terminal settlement is unresolved"
-            for instrument_id in unresolved_terminal
-        )
+        if unresolved_terminal:
+            if normalized_scope == "full-a-share":
+                errors.append(
+                    f"{len(unresolved_terminal)} delisted instruments have unresolved "
+                    "terminal settlements"
+                )
+            else:
+                errors.extend(
+                    f"{instrument_id}: terminal settlement is unresolved"
+                    for instrument_id in unresolved_terminal
+                )
 
         _set_backfill_phase(repo, job.job_id, "replay_prices")
-        for instrument_id in symbols:
+        for instrument_id in symbols[processed:]:
             require_adjusted = _requires_adjustment(instrument_id)
             if cache.has_usable_coverage(
                 mode,
@@ -576,16 +648,49 @@ def run_historical_backfill(
                 else:
                     fundamental_symbols.append(symbol)
             if fundamental_symbols:
-                fundamentals = strategy_provider.get_fundamentals(
-                    fundamental_symbols,
-                    fundamental_start,
-                    end,
+                fundamental_batches = (
+                    [fundamental_symbols]
+                    if normalized_scope == "symbols"
+                    else [
+                        fundamental_symbols[offset : offset + batch_size]
+                        for offset in range(0, len(fundamental_symbols), batch_size)
+                    ]
                 )
-                fundamental_rows = repo.upsert_fundamental_snapshots(
-                    mode,
-                    fundamentals,
+                fundamental_processed = fundamental_cache_reused
+                for batch_symbols in fundamental_batches:
+                    try:
+                        fundamentals = strategy_provider.get_fundamentals(
+                            batch_symbols,
+                            fundamental_start,
+                            end,
+                        )
+                        fundamental_rows += repo.upsert_fundamental_snapshots(
+                            mode,
+                            fundamentals,
+                        )
+                        errors.extend(
+                            getattr(strategy_provider, "last_errors", [])[-20:]
+                        )
+                    except Exception as exc:
+                        if normalized_scope == "symbols":
+                            raise
+                        errors.append(
+                            f"fundamental batch {batch_symbols[0]}..{batch_symbols[-1]}: {exc}"
+                        )
+                    fundamental_processed += len(batch_symbols)
+                    _update_backfill_health(
+                        repo,
+                        job.job_id,
+                        backfill_fundamental_processed=str(fundamental_processed),
+                        backfill_fundamental_total=str(len(stock_symbols)),
+                    )
+            else:
+                _update_backfill_health(
+                    repo,
+                    job.job_id,
+                    backfill_fundamental_processed=str(len(stock_symbols)),
+                    backfill_fundamental_total=str(len(stock_symbols)),
                 )
-                errors.extend(getattr(strategy_provider, "last_errors", [])[:20])
 
         evidence_data_health: dict[str, str] = {}
         evidence_counts = {
@@ -609,6 +714,65 @@ def run_historical_backfill(
                 evidence_bundle = HistoricalEvidenceBundle(
                     data_health={"historical_evidence_cache": "reused"}
                 )
+                _update_backfill_health(
+                    repo,
+                    job.job_id,
+                    backfill_evidence_processed=str(len(symbols)),
+                    backfill_evidence_total=str(len(symbols)),
+                )
+            elif normalized_scope == "full-a-share" and all(
+                hasattr(historical_evidence_provider, method)
+                for method in ("get_tradability_evidence", "get_reference_evidence")
+            ):
+                evidence_bundle = historical_evidence_provider.get_reference_evidence(
+                    symbols,
+                    start,
+                    end,
+                )
+                if not evidence_bundle.profiles:
+                    evidence_bundle.profiles = inventory_profiles
+                existing_evidence = repo.historical_evidence_stats(
+                    mode,
+                    symbols,
+                    start,
+                    end,
+                )
+                profile_by_id = {item.instrument_id: item for item in inventory_profiles}
+                pending_tradability: list[str] = []
+                for symbol in symbols:
+                    if _asset_type(symbol, None) != "stock":
+                        continue
+                    profile = profile_by_id.get(symbol)
+                    symbol_start = max(
+                        start,
+                        profile.listing_date if profile and profile.listing_date else start,
+                    )
+                    symbol_end = min(
+                        end,
+                        profile.delisting_date if profile and profile.delisting_date else end,
+                    )
+                    expected = len(trading_sessions_in_range(symbol_start, symbol_end))
+                    if _ratio(existing_evidence[symbol].tradability_rows, expected) < 0.95:
+                        pending_tradability.append(symbol)
+                evidence_processed = len(symbols) - len(pending_tradability)
+                for offset in range(0, len(pending_tradability), batch_size):
+                    batch_symbols = pending_tradability[offset : offset + batch_size]
+                    batch_bundle = historical_evidence_provider.get_tradability_evidence(
+                        batch_symbols,
+                        start,
+                        end,
+                    )
+                    batch_counts = repo.upsert_historical_evidence(mode, batch_bundle)
+                    for key, value in batch_counts.items():
+                        evidence_counts[key] += value
+                    errors.extend(batch_bundle.errors[-20:])
+                    evidence_processed += len(batch_symbols)
+                    _update_backfill_health(
+                        repo,
+                        job.job_id,
+                        backfill_evidence_processed=str(evidence_processed),
+                        backfill_evidence_total=str(len(symbols)),
+                    )
             else:
                 evidence_bundle = historical_evidence_provider.get_evidence(
                     symbols,
@@ -623,7 +787,9 @@ def run_historical_backfill(
                 end=end,
                 bundle=evidence_bundle,
             )
-            evidence_counts = repo.upsert_historical_evidence(mode, evidence_bundle)
+            bundle_counts = repo.upsert_historical_evidence(mode, evidence_bundle)
+            for key, value in bundle_counts.items():
+                evidence_counts[key] += value
             evidence_counts["universe_snapshots"] = 0
             if not reuse_historical_evidence:
                 evidence_counts["universe_snapshots"] = (
@@ -672,7 +838,10 @@ def run_historical_backfill(
             if failed == 0 and not errors
             else "succeeded_with_errors"
         )
+        current_job = repo.get_historical_backfill_job(job.job_id)
+        checkpoint_health = dict(current_job.data_health) if current_job else {}
         data_health = {
+            **checkpoint_health,
             **manifest.data_health,
             **evidence_data_health,
             **corporate_action_health,
@@ -766,6 +935,17 @@ def _set_backfill_phase(
     repo.update_historical_backfill_job(job_id, data_health=data_health)
 
 
+def _update_backfill_health(
+    repo: QagentRepository,
+    job_id: str,
+    **values: str,
+) -> None:
+    job = repo.get_historical_backfill_job(job_id)
+    data_health = dict(job.data_health) if job is not None else {}
+    data_health.update(values)
+    repo.update_historical_backfill_job(job_id, data_health=data_health)
+
+
 def _historical_evidence_cache_is_usable(
     *,
     repo: QagentRepository,
@@ -836,7 +1016,6 @@ def build_historical_coverage_manifest(
     symbols = sorted(set(instrument_ids))
     sessions = trading_sessions_in_range(start, end)
     expected_sessions = len(sessions)
-    bars = cache.load_daily_bars(mode, symbols, start, end)
     benchmark_bars = cache.load_daily_bars(
         mode,
         list(REQUIRED_BENCHMARK_IDS),
@@ -866,7 +1045,12 @@ def build_historical_coverage_manifest(
             )
         }
         instrument_expected_sessions = len(active_dates)
-        group = bars[bars["instrument_id"].eq(instrument_id)].copy()
+        group = cache.load_daily_bars(
+            mode,
+            [instrument_id],
+            start,
+            end,
+        )
         valid_group = group[group["trade_date"].isin(active_dates)]
         trade_dates = sorted(set(valid_group["trade_date"].tolist()))
         bar_rows = len(trade_dates)

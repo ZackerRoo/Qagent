@@ -3004,6 +3004,8 @@ export type WalkForwardSnapshotPayload = {
   suspended_count: number;
   st_excluded_count: number;
   missing_tradability_count: number;
+  fundamental_universe_size?: number;
+  fundamental_covered_count?: number;
 };
 
 export type WalkForwardGateCriterion = {
@@ -3101,6 +3103,31 @@ export type WalkForwardRun = {
 
 export type WalkForwardRunsResponse = {
   runs: WalkForwardRun[];
+};
+
+export type HistoricalBackfillJob = {
+  job_id: string;
+  provider: DataProviderMode;
+  status: "queued" | "running" | "succeeded" | "succeeded_with_errors" | "failed" | "cancelled";
+  start_date: string;
+  end_date: string;
+  symbols: string[];
+  total_symbols: number;
+  processed_symbols: number;
+  succeeded_symbols: number;
+  failed_symbols: number;
+  rows_written: number;
+  fundamental_rows_written: number;
+  current_instrument: string | null;
+  errors: string[];
+  data_health: Record<string, string>;
+  progress: number;
+  phase: string;
+  symbols_truncated?: boolean;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  finished_at: string | null;
 };
 
 export type WalkForwardJob = {

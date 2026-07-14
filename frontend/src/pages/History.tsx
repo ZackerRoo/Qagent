@@ -12,11 +12,14 @@ import {
   fetchRecommendationClosure,
   fetchLatestWalkForwardRun,
   fetchLatestWalkForwardJob,
+  fetchLatestHistoricalBackfillJob,
+  fetchHistoricalBackfillJob,
   fetchWalkForwardJob,
   fetchScanRuns,
   fetchStrategyDiagnostics,
   fetchStrategyPerformance,
   startWalkForwardJob,
+  startFullMarketHistoricalBackfill,
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
 import { OpportunityCandlestickChart, type SignalMarker } from "../components/OpportunityChart";
@@ -37,6 +40,7 @@ import type {
   FactorExposureInformationCoefficient,
   FactorQuantileBucket,
   FactorRankBucket,
+  HistoricalBackfillJob,
   MarketBarsResponse,
   OpportunityOutcome,
   OpportunityHistoryResponse,
@@ -128,6 +132,7 @@ export function History({
   const [diagnostics, setDiagnostics] = useState<StrategyDiagnosticsResponse>();
   const [walkForward, setWalkForward] = useState<WalkForwardRun>();
   const [walkForwardJob, setWalkForwardJob] = useState<WalkForwardJob>();
+  const [historicalBackfillJob, setHistoricalBackfillJob] = useState<HistoricalBackfillJob>();
   const [error, setError] = useState("");
   const [isHistoryLoading, setIsHistoryLoading] = useState(true);
   const [backtestError, setBacktestError] = useState("");
@@ -139,6 +144,8 @@ export function History({
   const [isPortfolioBacktesting, setIsPortfolioBacktesting] = useState(false);
   const [isWalkForwardRunning, setIsWalkForwardRunning] = useState(false);
   const [walkForwardError, setWalkForwardError] = useState("");
+  const [isHistoricalBackfillRunning, setIsHistoricalBackfillRunning] = useState(false);
+  const [historicalBackfillError, setHistoricalBackfillError] = useState("");
   const [backtestRunContext, setBacktestRunContext] = useState<BacktestRunContext>();
   const autoBacktestKeyRef = useRef("");
 
@@ -214,6 +221,22 @@ export function History({
             setWalkForwardError(message);
           }
         });
+      void fetchLatestHistoricalBackfillJob(dataMode)
+        .then((job) => {
+          if (!cancelled) {
+            setHistoricalBackfillJob(job);
+            setIsHistoricalBackfillRunning(job.status === "queued" || job.status === "running");
+            if (job.status === "failed") {
+              setHistoricalBackfillError(job.errors[job.errors.length - 1] ?? "Historical backfill failed");
+            }
+          }
+        })
+        .catch((caught) => {
+          const message = caught instanceof Error ? caught.message : "failed";
+          if (!cancelled && !message.includes("404")) {
+            setHistoricalBackfillError(message);
+          }
+        });
     }
 
     return () => {
@@ -258,6 +281,39 @@ export function History({
     };
   }, [dataMode, walkForwardJob?.job_id, walkForwardJob?.status]);
 
+  useEffect(() => {
+    if (!historicalBackfillJob || !["queued", "running"].includes(historicalBackfillJob.status)) {
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const job = await fetchHistoricalBackfillJob(historicalBackfillJob.job_id);
+        if (cancelled) return;
+        setHistoricalBackfillJob(job);
+        if (!["queued", "running"].includes(job.status)) {
+          setIsHistoricalBackfillRunning(false);
+          if (job.status === "failed") {
+            setHistoricalBackfillError(job.errors[job.errors.length - 1] ?? "Historical backfill failed");
+          }
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setIsHistoricalBackfillRunning(false);
+          setHistoricalBackfillError(
+            caught instanceof Error ? caught.message : "Failed to load historical data task",
+          );
+        }
+      }
+    };
+    const interval = window.setInterval(() => void poll(), 3000);
+    void poll();
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [historicalBackfillJob?.job_id, historicalBackfillJob?.status]);
+
   async function runFullMarketWalkForward() {
     if (dataMode !== "free") {
       setWalkForwardError(language === "zh" ? "历史验证只使用 A 股免费历史数据。" : "Walk-forward uses free A-share historical data only.");
@@ -271,6 +327,30 @@ export function History({
     } catch (caught) {
       setWalkForwardError(caught instanceof Error ? caught.message : "Failed to run walk-forward validation");
       setIsWalkForwardRunning(false);
+    }
+  }
+
+  async function runFullMarketHistoricalBackfill() {
+    if (dataMode !== "free") {
+      setHistoricalBackfillError(
+        language === "zh" ? "全 A 历史数据补齐只支持免费 A 股数据。" : "Full A-share history uses the free provider.",
+      );
+      return;
+    }
+    try {
+      setIsHistoricalBackfillRunning(true);
+      setHistoricalBackfillError("");
+      const job = await startFullMarketHistoricalBackfill(
+        "2021-11-01",
+        "2025-12-31",
+        dataMode,
+      );
+      setHistoricalBackfillJob(job);
+    } catch (caught) {
+      setIsHistoricalBackfillRunning(false);
+      setHistoricalBackfillError(
+        caught instanceof Error ? caught.message : "Failed to start historical backfill",
+      );
     }
   }
 
@@ -400,9 +480,13 @@ export function History({
       <WalkForwardValidationCenter
         run={walkForward}
         job={walkForwardJob}
+        backfillJob={historicalBackfillJob}
         error={walkForwardError}
+        backfillError={historicalBackfillError}
         isRunning={isWalkForwardRunning}
+        isBackfillRunning={isHistoricalBackfillRunning}
         onRun={runFullMarketWalkForward}
+        onBackfill={runFullMarketHistoricalBackfill}
       />
 
       <BacktestCommandCenter
@@ -1146,15 +1230,23 @@ export function History({
 function WalkForwardValidationCenter({
   run,
   job,
+  backfillJob,
   error,
+  backfillError,
   isRunning,
+  isBackfillRunning,
   onRun,
+  onBackfill,
 }: {
   run?: WalkForwardRun;
   job?: WalkForwardJob;
+  backfillJob?: HistoricalBackfillJob;
   error: string;
+  backfillError: string;
   isRunning: boolean;
+  isBackfillRunning: boolean;
   onRun: () => void;
+  onBackfill: () => void;
 }) {
   const { language } = useI18n();
   const zh = language === "zh";
@@ -1179,6 +1271,7 @@ function WalkForwardValidationCenter({
     : Number.NaN;
   const storedCoveragePct = Number(run?.data_health.walk_forward_cross_section_coverage_pct);
   const coveragePct = Number.isFinite(storedCoveragePct) ? storedCoveragePct : calculatedCoveragePct;
+  const fundamentalCoveragePct = Number(run?.data_health.walk_forward_fundamental_coverage_pct);
   const marketCoverageReady = Number.isFinite(coveragePct) && coveragePct >= 90;
   const coveredCounts = snapshots
     .map((item) => Math.max(0, item.historical_universe_size - item.missing_tradability_count))
@@ -1196,6 +1289,7 @@ function WalkForwardValidationCenter({
   const gateLabel = (gate: string | undefined) => {
     if (gate === "ready") return zh ? "验证通过" : "Ready";
     if (gate === "insufficient_market_coverage") return zh ? "覆盖不足" : "Coverage low";
+    if (gate === "insufficient_fundamental_coverage") return zh ? "财务覆盖不足" : "Fundamentals low";
     return zh ? "样本不足" : "Samples low";
   };
   const runStatusLabel = (status: string) => {
@@ -1211,6 +1305,16 @@ function WalkForwardValidationCenter({
     return ({ positive: "正向", negative: "负向", mixed: "观察", insufficient: "样本不足" } as Record<string, string>)[verdict ?? "insufficient"] ?? verdict;
   };
   const activeJob = job && ["queued", "running"].includes(job.status) ? job : undefined;
+  const isFullMarketBackfill = backfillJob?.data_health.backfill_scope === "full-a-share";
+  const backfillSuccessRatio = backfillJob && backfillJob.total_symbols > 0
+    ? backfillJob.succeeded_symbols / backfillJob.total_symbols
+    : 0;
+  const backfillReady = Boolean(
+    isFullMarketBackfill
+    && backfillJob
+    && ["succeeded", "succeeded_with_errors"].includes(backfillJob.status)
+    && backfillSuccessRatio >= 0.9,
+  );
   const phaseLabels: Record<string, string> = {
     queued: zh ? "等待后台执行" : "Queued",
     historical_replay: zh ? "逐日重放历史推荐" : "Replaying historical recommendations",
@@ -1218,6 +1322,21 @@ function WalkForwardValidationCenter({
     validation_and_benchmarks: zh ? "计算样本外与基准结果" : "Calculating OOS and benchmarks",
     completed: zh ? "验证完成" : "Completed",
     failed: zh ? "验证失败" : "Failed",
+  };
+  const backfillPhaseLabels: Record<string, string> = {
+    queued: zh ? "等待后台补齐" : "Queued",
+    inventory: zh ? "核对历史股票池" : "Loading historical universe",
+    trading_rules: zh ? "写入交易规则" : "Writing trading rules",
+    corporate_actions: zh ? "补齐退市与企业行动" : "Loading corporate actions",
+    terminal_settlements: zh ? "核对退市结算" : "Checking terminal settlements",
+    replay_prices: zh ? "补齐复权日线" : "Loading adjusted daily bars",
+    benchmark_prices: zh ? "补齐指数基准" : "Loading benchmarks",
+    fundamentals: zh ? "补齐历史财务快照" : "Loading point-in-time fundamentals",
+    historical_evidence: zh ? "补齐交易状态与行业" : "Loading tradability and industries",
+    replay_coverage: zh ? "核验全市场覆盖" : "Auditing market coverage",
+    complete: zh ? "历史证据已补齐" : "Historical evidence completed",
+    cancelled: zh ? "任务已取消" : "Cancelled",
+    failed: zh ? "历史补齐失败" : "Historical backfill failed",
   };
   const benchmarkLabel = (id: string) => {
     const labels: Record<string, string> = {
@@ -1242,11 +1361,58 @@ function WalkForwardValidationCenter({
               : "Rebuilds each historical universe and recommendation; validation requires 90% market evidence coverage and 30 out-of-sample trades."}
           </p>
         </div>
-        <button className="icon-action" type="button" onClick={onRun} disabled={isRunning}>
-          {isRunning ? (zh ? "验证运行中" : "Running") : (zh ? "运行历史验证" : "Run validation")}
-        </button>
+        <div className="brief-actions">
+          <button className="icon-action secondary" type="button" onClick={onBackfill} disabled={isBackfillRunning}>
+            {isBackfillRunning
+              ? (zh ? "历史数据补齐中" : "Backfilling")
+              : backfillReady
+                ? (zh ? "重新核验历史数据" : "Recheck history")
+                : (zh ? "补齐全A历史数据" : "Backfill full market")}
+          </button>
+          <button className="icon-action" type="button" onClick={onRun} disabled={isRunning || isBackfillRunning || !backfillReady}>
+            {isRunning
+              ? (zh ? "验证运行中" : "Running")
+              : !backfillReady
+                ? (zh ? "等待历史数据" : "Waiting for data")
+                : (zh ? "运行历史验证" : "Run validation")}
+          </button>
+        </div>
       </div>
       {error ? <div className="empty-state error">{error}</div> : null}
+      {backfillError ? <div className="empty-state error">{backfillError}</div> : null}
+      {backfillJob ? (
+        <div className={`historical-backfill-status ${backfillReady ? "is-ready" : ""}`}>
+          <div className="historical-backfill-head">
+            <div>
+              <span>{zh ? "全市场历史证据" : "Full-market historical evidence"}</span>
+              <strong>{backfillPhaseLabels[backfillJob.phase] ?? backfillJob.phase}</strong>
+            </div>
+            <strong>{backfillJob.progress}%</strong>
+          </div>
+          <div className="walk-forward-progress-track" aria-label={zh ? "历史数据补齐进度" : "Historical backfill progress"}>
+            <span style={{ width: `${backfillJob.progress}%` }} />
+          </div>
+          <div className="historical-backfill-metrics">
+            <span>{zh ? "范围" : "Scope"}<strong>{isFullMarketBackfill ? (zh ? "全A股/ETF" : "All A-shares/ETFs") : (zh ? "试点标的" : "Pilot")}</strong></span>
+            <span>{zh ? "已处理" : "Processed"}<strong>{backfillJob.processed_symbols}/{backfillJob.total_symbols || "-"}</strong></span>
+            <span>{zh ? "成功" : "Ready"}<strong>{backfillJob.succeeded_symbols}</strong></span>
+            <span>{zh ? "失败" : "Failed"}<strong>{backfillJob.failed_symbols}</strong></span>
+          </div>
+          <p>
+            {backfillReady
+              ? (zh ? "行情成功覆盖已达到 90%，可以运行全市场 Walk-forward。" : "Price coverage is above 90%; full-market walk-forward is available.")
+              : isBackfillRunning
+                ? `${backfillJob.current_instrument ? `${zh ? "当前" : "Current"} ${formatInstrumentDisplay(backfillJob.current_instrument)} · ` : ""}${zh ? "任务已持久化，刷新或重启后会继续。" : "The task is persisted and resumes after refresh or restart."}`
+                : (zh ? "当前结果仍是小范围试点。先补齐复权行情、财务快照和历史交易状态。" : "Current results are still a pilot. Backfill adjusted prices, fundamentals, and tradability first.")}
+          </p>
+        </div>
+      ) : (
+        <div className="walk-forward-gate-note coverage-warning">
+          {zh
+            ? "尚未建立全 A 股历史证据任务。先补齐数据，再运行 Walk-forward。"
+            : "No full-market evidence task exists. Backfill data before walk-forward validation."}
+        </div>
+      )}
       {activeJob ? (
         <div className="walk-forward-job-progress">
           <div>
@@ -1290,6 +1456,7 @@ function WalkForwardValidationCenter({
             <div><span>{zh ? `${validationScope === "pilot" ? "试点 " : ""}Top 5 收益` : "Top 5 return"}</span><strong>{formatNumber(run.top_5_return_pct, "%")}</strong></div>
             <div><span>{zh ? `${validationScope === "pilot" ? "试点 " : ""}Top 10 收益` : "Top 10 return"}</span><strong>{formatNumber(run.top_10_return_pct, "%")}</strong></div>
             <div><span>{zh ? "市场证据覆盖" : "Market coverage"}</span><strong>{formatNumber(Number.isFinite(coveragePct) ? coveragePct : null, "%")}</strong></div>
+            <div><span>{zh ? "历史财务覆盖" : "Fundamental coverage"}</span><strong>{formatNumber(Number.isFinite(fundamentalCoveragePct) ? fundamentalCoveragePct : null, "%")}</strong></div>
             <div><span>{zh ? "每期覆盖标的" : "Covered per date"}</span><strong>{medianCovered || "-"}</strong></div>
             <div><span>{zh ? "Top 5 样本外" : "Top 5 OOS"}</span><strong>{run.top_5_oos_trades}/30</strong></div>
             <div><span>{zh ? "Top 10 样本外" : "Top 10 OOS"}</span><strong>{run.top_10_oos_trades}/30</strong></div>

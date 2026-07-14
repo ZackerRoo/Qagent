@@ -434,6 +434,118 @@ class BaoStockHistoricalEvidenceProvider:
         }
         return bundle
 
+    def get_tradability_evidence(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> HistoricalEvidenceBundle:
+        """Load per-symbol tradability in restartable batches.
+
+        Full-market backfills call this method with bounded symbol batches so one
+        slow BaoStock response does not discard the rest of the market evidence.
+        """
+        symbols = sorted({item for item in instrument_ids if item.startswith("CN:")})
+        bundle = HistoricalEvidenceBundle()
+        self.last_errors = []
+        if not symbols:
+            return bundle
+        with serialized_baostock_session():
+            logged_in = False
+            try:
+                login = self._call(self.client.login)
+                if getattr(login, "error_code", "1") != "0":
+                    self.last_errors.append(
+                        "baostock tradability login: "
+                        f"{getattr(login, 'error_msg', 'login failed')}"
+                    )
+                else:
+                    logged_in = True
+                    for instrument_id in symbols:
+                        try:
+                            bundle.tradability.extend(
+                                self._load_tradability(instrument_id, start, end)
+                            )
+                        except Exception as exc:
+                            self.last_errors.append(f"{instrument_id}: tradability: {exc}")
+            except Exception as exc:
+                self.last_errors.append(f"baostock tradability login: {exc}")
+            finally:
+                if logged_in:
+                    try:
+                        self._call(self.client.logout)
+                    except Exception as exc:
+                        self.last_errors.append(f"baostock tradability logout: {exc}")
+        bundle.errors = list(self.last_errors)
+        bundle.data_health = {
+            "historical_evidence_provider": self.name,
+            "historical_evidence_tradability": str(len(bundle.tradability)),
+            "historical_evidence_errors": str(len(bundle.errors)),
+        }
+        return bundle
+
+    def get_reference_evidence(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> HistoricalEvidenceBundle:
+        """Load profiles, industries, and index membership once per backfill."""
+        symbols = sorted({item for item in instrument_ids if item.startswith("CN:")})
+        selected = set(symbols)
+        snapshot_dates = historical_snapshot_dates(start, end)
+        bundle = HistoricalEvidenceBundle()
+        self.last_errors = []
+        if not symbols:
+            return bundle
+        with serialized_baostock_session():
+            logged_in = False
+            try:
+                login = self._call(self.client.login)
+                if getattr(login, "error_code", "1") != "0":
+                    self.last_errors.append(
+                        "baostock reference login: "
+                        f"{getattr(login, 'error_msg', 'login failed')}"
+                    )
+                else:
+                    logged_in = True
+                    bundle.profiles = self._load_profiles(end)
+                    for snapshot_date in snapshot_dates:
+                        try:
+                            bundle.industries.extend(
+                                self._load_industries(selected, snapshot_date)
+                            )
+                            snapshots, memberships = self._load_index_snapshots(
+                                selected,
+                                snapshot_date,
+                            )
+                            bundle.index_snapshots.extend(snapshots)
+                            bundle.index_memberships.extend(memberships)
+                        except Exception as exc:
+                            self.last_errors.append(
+                                f"reference {snapshot_date.isoformat()}: {exc}"
+                            )
+            except Exception as exc:
+                self.last_errors.append(f"baostock reference login: {exc}")
+            finally:
+                if logged_in:
+                    try:
+                        self._call(self.client.logout)
+                    except Exception as exc:
+                        self.last_errors.append(f"baostock reference logout: {exc}")
+        bundle.errors = list(self.last_errors)
+        bundle.data_health = {
+            "historical_evidence_provider": self.name,
+            "historical_evidence_profiles": str(len(bundle.profiles)),
+            "historical_evidence_industries": str(len(bundle.industries)),
+            "historical_evidence_index_snapshots": str(len(bundle.index_snapshots)),
+            "historical_evidence_index_memberships": str(
+                len(bundle.index_memberships)
+            ),
+            "historical_evidence_errors": str(len(bundle.errors)),
+        }
+        return bundle
+
     def _load_tradability(
         self,
         instrument_id: str,

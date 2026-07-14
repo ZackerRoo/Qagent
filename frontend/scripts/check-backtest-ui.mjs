@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 const root = process.cwd();
 const files = {
+  client: readFileSync(join(root, "src/api/client.ts"), "utf8"),
   history: readFileSync(join(root, "src/pages/History.tsx"), "utf8"),
   localize: readFileSync(join(root, "src/lib/localize.ts"), "utf8"),
   styles: readFileSync(join(root, "src/styles.css"), "utf8"),
@@ -33,6 +34,8 @@ const checks = [
   ["history renders calibration signal effects", files.history.includes("calibration-signal-effects")],
   ["history renders a dedicated drawdown risk chart", files.history.includes("DrawdownRiskChart")],
   ["history hides detailed evidence in a drawer", files.history.includes("history-detail-drawer")],
+  ["historical backfill serializes full-market scope", files.client.includes('search.set("scope", params.scope)')],
+  ["historical backfill requests full A-share scope", files.client.includes('scope: "full-a-share"')],
   ["styles include command center layout", files.styles.includes(".backtest-command-center")],
   ["styles include temporal validation layout", files.styles.includes(".temporal-validation-panel")],
   ["styles include verdict grid", files.styles.includes(".backtest-verdict-grid")],

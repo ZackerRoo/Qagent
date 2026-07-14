@@ -39,6 +39,7 @@ from qagent.storage.replay_evidence import ReplayEvidenceRepository
 EXCLUDED_STATUSES = frozenset({"risk_elevated", "invalidated", "closed", "postmortem_done"})
 ELIGIBLE_UNIVERSE_BENCHMARK_ID = "CN:EQUAL_WEIGHT_ELIGIBLE"
 MIN_FULL_MARKET_COVERAGE_RATIO = 0.90
+MIN_FUNDAMENTAL_COVERAGE_RATIO = 0.80
 
 
 class WalkForwardSelection(BaseModel):
@@ -59,6 +60,8 @@ class WalkForwardSnapshot(BaseModel):
     suspended_count: int
     st_excluded_count: int
     missing_tradability_count: int
+    fundamental_universe_size: int = 0
+    fundamental_covered_count: int = 0
     top_5: list[WalkForwardSelection] = Field(default_factory=list)
     top_10: list[WalkForwardSelection] = Field(default_factory=list)
 
@@ -248,6 +251,21 @@ def run_full_market_walk_forward_selection(
                     continue
                 eligible.append(instrument_id)
             eligible_universes.append((decision_date, sorted(eligible)))
+            stock_ids = {
+                item.instrument_id
+                for item in members
+                if item.active and item.security_type in {"stock", "1"}
+            }
+            eligible_stocks = [item for item in eligible if item in stock_ids]
+            fundamental_evidence = owner_repository.fundamentals_as_of(
+                eligible_stocks,
+                decision_date,
+                revision,
+            )
+            fundamental_covered_count = sum(
+                _has_usable_fundamental(item)
+                for item in fundamental_evidence.values()
+            )
             snapshot = resumed.get(decision_date)
             if snapshot is None:
                 scan = run_daily_scan(
@@ -272,6 +290,8 @@ def run_full_market_walk_forward_selection(
                     suspended_count=suspended_count,
                     st_excluded_count=st_excluded_count,
                     missing_tradability_count=missing_tradability_count,
+                    fundamental_universe_size=len(eligible_stocks),
+                    fundamental_covered_count=fundamental_covered_count,
                     top_5=selections[:5],
                     top_10=selections[:10],
                 )
@@ -353,8 +373,14 @@ def run_full_market_walk_forward_selection(
         cost_sensitivity,
     )
     coverage = _cross_section_coverage(snapshots)
+    fundamental_coverage = _fundamental_coverage(snapshots)
     market_coverage_gate = (
         "ready" if coverage["ratio"] >= MIN_FULL_MARKET_COVERAGE_RATIO else "insufficient"
+    )
+    fundamental_coverage_gate = (
+        "ready"
+        if fundamental_coverage >= MIN_FUNDAMENTAL_COVERAGE_RATIO
+        else "insufficient"
     )
     top_5_sample_gate = _oos_gate(top_5_temporal_validation)
     top_10_sample_gate = _oos_gate(top_10_temporal_validation)
@@ -365,6 +391,7 @@ def run_full_market_walk_forward_selection(
         benchmarks=benchmarks,
         cost_sensitivity=cost_sensitivity,
         market_coverage_ratio=coverage["ratio"],
+        fundamental_coverage_ratio=fundamental_coverage,
         metrics=top_5_metrics,
     )
     result = WalkForwardSelectionResult(
@@ -402,6 +429,13 @@ def run_full_market_walk_forward_selection(
             "walk_forward_cross_section_coverage_pct": str(round(coverage["ratio"] * 100, 4)),
             "walk_forward_median_covered_instruments": str(coverage["median_covered"]),
             "walk_forward_median_historical_universe": str(coverage["median_universe"]),
+            "walk_forward_fundamental_coverage_pct": str(
+                round(fundamental_coverage * 100, 4)
+            ),
+            "walk_forward_fundamental_coverage_gate": fundamental_coverage_gate,
+            "walk_forward_minimum_fundamental_coverage_pct": str(
+                MIN_FUNDAMENTAL_COVERAGE_RATIO * 100
+            ),
             "walk_forward_top_5_trades": str(top_5_portfolio.summary.trade_count),
             "walk_forward_top_10_trades": str(top_10_portfolio.summary.trade_count),
             "walk_forward_oos_minimum_trades": "30",
@@ -412,10 +446,12 @@ def run_full_market_walk_forward_selection(
             "walk_forward_top_5_validation_gate": _combined_validation_gate(
                 top_5_sample_gate,
                 market_coverage_gate,
+                fundamental_coverage_gate,
             ),
             "walk_forward_top_10_validation_gate": _combined_validation_gate(
                 top_10_sample_gate,
                 market_coverage_gate,
+                fundamental_coverage_gate,
             ),
             "walk_forward_benchmarks_ready": (
                 f"{sum(item.status == 'ready' for item in benchmarks)}/{len(benchmarks)}"
@@ -467,9 +503,34 @@ def _cross_section_coverage(
     }
 
 
-def _combined_validation_gate(sample_gate: str, market_coverage_gate: str) -> str:
+def _fundamental_coverage(snapshots: list[WalkForwardSnapshot]) -> float:
+    total = sum(item.fundamental_universe_size for item in snapshots)
+    covered = sum(item.fundamental_covered_count for item in snapshots)
+    return covered / total if total else 1.0
+
+
+def _has_usable_fundamental(snapshot: object) -> bool:
+    return any(
+        getattr(snapshot, field, None) is not None
+        for field in (
+            "market_cap",
+            "pe_ratio",
+            "return_on_equity_pct",
+            "revenue_growth_pct",
+            "earnings_growth_pct",
+        )
+    )
+
+
+def _combined_validation_gate(
+    sample_gate: str,
+    market_coverage_gate: str,
+    fundamental_coverage_gate: str = "ready",
+) -> str:
     if market_coverage_gate != "ready":
         return "insufficient_market_coverage"
+    if fundamental_coverage_gate != "ready":
+        return "insufficient_fundamental_coverage"
     return sample_gate
 
 
@@ -481,6 +542,7 @@ def _build_strategy_validation_center(
     benchmarks: list[WalkForwardBenchmarkComparison],
     cost_sensitivity: list[WalkForwardCostScenario],
     market_coverage_ratio: float,
+    fundamental_coverage_ratio: float,
     metrics: WalkForwardPortfolioMetrics,
 ) -> WalkForwardValidationCenter:
     selection_by_key = {
@@ -526,6 +588,14 @@ def _build_strategy_validation_center(
             insufficient=market_coverage_ratio < MIN_FULL_MARKET_COVERAGE_RATIO,
             value=f"{market_coverage_ratio:.1%}",
             requirement=f">= {MIN_FULL_MARKET_COVERAGE_RATIO:.0%}",
+        ),
+        _gate_criterion(
+            key="fundamental_coverage",
+            label="历史财务覆盖",
+            ready=fundamental_coverage_ratio >= MIN_FUNDAMENTAL_COVERAGE_RATIO,
+            insufficient=fundamental_coverage_ratio < MIN_FUNDAMENTAL_COVERAGE_RATIO,
+            value=f"{fundamental_coverage_ratio:.1%}",
+            requirement=f">= {MIN_FUNDAMENTAL_COVERAGE_RATIO:.0%}",
         ),
         _gate_criterion(
             key="out_of_sample_count",

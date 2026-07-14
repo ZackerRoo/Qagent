@@ -596,6 +596,43 @@ def test_full_scope_backfill_uses_historical_inventory_and_reuses_action_coverag
     assert metadata.limit_rule_key == "szse-main-registration"
 
 
+def test_full_scope_background_job_expands_and_persists_inventory_symbols(tmp_path):
+    repo, cache = make_repositories(tmp_path)
+    start = date(2025, 1, 1)
+    end = date(2025, 1, 9)
+    job = repo.create_historical_backfill_job(
+        "free",
+        [],
+        start,
+        end,
+        data_health={
+            "backfill_scope": "full-a-share",
+            "backfill_batch_size": "1",
+            "backfill_phase": "queued",
+        },
+    )
+
+    result = run_historical_backfill(
+        repo=repo,
+        cache=cache,
+        provider=AdjustedHistoryProvider(),
+        strategy_provider=None,
+        provider_mode="free",
+        instrument_ids=job.symbols,
+        start=start,
+        end=end,
+        job_id=job.job_id,
+        scope="full-a-share",
+        batch_size=1,
+        historical_evidence_provider=ReplayInventoryEvidenceProvider(),
+    )
+
+    assert result.job.symbols == ["CN:000001"]
+    assert result.job.total_symbols == 1
+    assert result.job.processed_symbols == 1
+    assert result.job.progress == 100
+
+
 def test_historical_backfill_reports_missing_required_benchmarks(tmp_path):
     repo, cache = make_repositories(tmp_path)
     evidence_provider = MissingBenchmarkEvidenceProvider()

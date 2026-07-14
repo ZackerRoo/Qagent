@@ -22,6 +22,7 @@ import type {
   FactorBacktestResponse,
   FullMarketBatchScanJob,
   FullMarketScanResponse,
+  HistoricalBackfillJob,
   InstrumentSearchResponse,
   IntradayRadarResponse,
   MarketBarsResponse,
@@ -98,6 +99,7 @@ type ScanParams = {
   scan_max_age_minutes?: number;
   sync_if_empty?: boolean;
   seed_paper?: boolean;
+  scope?: string;
   seed_limit?: number;
   update_paper?: boolean;
   initial_capital?: string | number;
@@ -172,6 +174,9 @@ function queryString(params?: ScanParams): string {
   }
   if (params.run_backtest !== undefined) {
     search.set("run_backtest", String(params.run_backtest));
+  }
+  if (params.scope) {
+    search.set("scope", params.scope);
   }
   if (params.status) {
     search.set("status", params.status);
@@ -796,6 +801,33 @@ export async function fetchLatestWalkForwardJob(
 
 export async function fetchWalkForwardJob(jobId: string): Promise<WalkForwardJob> {
   return apiGet<WalkForwardJob>(`/walk-forward/jobs/${jobId}`);
+}
+
+export async function startFullMarketHistoricalBackfill(
+  start: string,
+  end: string,
+  provider: DataProviderMode = "free",
+): Promise<HistoricalBackfillJob> {
+  return apiPost<HistoricalBackfillJob>(
+    `/historical-data/backfill${queryString({
+      provider,
+      start,
+      end,
+      scope: "full-a-share",
+      batch_size: 25,
+    })}`,
+    {},
+  );
+}
+
+export async function fetchLatestHistoricalBackfillJob(
+  provider: DataProviderMode = "free",
+): Promise<HistoricalBackfillJob> {
+  return apiGet<HistoricalBackfillJob>("/historical-data/backfill/latest", { provider });
+}
+
+export async function fetchHistoricalBackfillJob(jobId: string): Promise<HistoricalBackfillJob> {
+  return apiGet<HistoricalBackfillJob>(`/historical-data/backfill/${jobId}`);
 }
 
 export async function fetchDailyBrief(
