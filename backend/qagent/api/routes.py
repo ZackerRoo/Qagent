@@ -1697,6 +1697,18 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 data_health["paper_recently_released_blocked"] = str(
                     before_release_filter - len(snapshots)
                 )
+            before_price_filter = len(snapshots)
+            snapshots = [
+                snapshot
+                for snapshot in snapshots
+                if _paper_candidate_price_basis_is_consistent(
+                    snapshot,
+                    latest_value=snapshot.latest_close,
+                )
+            ]
+            data_health["paper_missing_or_inconsistent_price_blocked"] = str(
+                before_price_filter - len(snapshots)
+            )
             tracking_signal_date = (
                 _a_share_today()
                 if seed_health.get("automation_seed_source") == "latest_recommendation_cache"
@@ -2022,11 +2034,11 @@ def _paper_candidate_price_basis_is_consistent(
     latest_value: Decimal | None,
     max_gap_ratio: Decimal = Decimal("0.45"),
 ) -> bool:
-    if not paper_snapshot_price_basis_is_consistent(snapshot, max_gap_ratio=max_gap_ratio):
-        return False
     trigger = snapshot.trigger_price
     if trigger is None or latest_value is None or trigger <= 0 or latest_value <= 0:
-        return True
+        return False
+    if not paper_snapshot_price_basis_is_consistent(snapshot, max_gap_ratio=max_gap_ratio):
+        return False
     return abs(trigger - latest_value) / trigger <= max_gap_ratio
 
 
@@ -2084,8 +2096,10 @@ def _paper_candidate_pool_health(
         if snapshot.instrument_id not in active_instruments
         and snapshot.instrument_id not in recently_released
         and snapshot.snapshot_id not in existing_sources
-        and snapshot.trigger_price is not None
-        and paper_snapshot_price_basis_is_consistent(snapshot)
+        and _paper_candidate_price_basis_is_consistent(
+            snapshot,
+            latest_value=snapshot.latest_close,
+        )
     ]
     boosted = [snapshot for snapshot in snapshots if _paper_theme_boost(snapshot) > 0]
     top = waiting[0] if waiting else None
@@ -2133,9 +2147,12 @@ def _maybe_replace_pending_paper_trade_for_candidate(
         if snapshot.instrument_id not in active_instruments
         and snapshot.instrument_id not in recently_released
         and snapshot.snapshot_id not in existing_sources
-        and snapshot.trigger_price is not None
-        and paper_snapshot_price_basis_is_consistent(snapshot)
+        and _paper_candidate_price_basis_is_consistent(
+            snapshot,
+            latest_value=snapshot.latest_close,
+        )
     ]
+    candidates.sort(key=_paper_snapshot_priority_score, reverse=True)
     if not candidates:
         return {
             "paper_replacement_action": "no_new_candidate",

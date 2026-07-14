@@ -43,6 +43,21 @@ def test_automation_reuses_same_market_day_cache_after_ttl(monkeypatch):
     assert repo.max_ages == [timedelta(hours=4), timedelta(days=1)]
 
 
+def test_paper_candidate_requires_latest_price_for_entry_validation():
+    snapshot = SimpleNamespace(
+        trigger_price=Decimal("2.90"),
+        latest_close=None,
+    )
+
+    assert (
+        routes._paper_candidate_price_basis_is_consistent(
+            snapshot,
+            latest_value=None,
+        )
+        is False
+    )
+
+
 def test_automation_run_api_saves_brief_and_queues_delivery(tmp_path, monkeypatch):
     database_url = f"sqlite:///{tmp_path / 'automation.db'}"
     monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
