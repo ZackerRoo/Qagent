@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from qagent.api import routes
 from qagent.app import create_app
+from qagent.storage.tables import HistoricalDataRevisionRow
 
 
 def test_historical_backfill_api_creates_background_job(tmp_path, monkeypatch):
@@ -87,7 +88,116 @@ def test_full_market_historical_backfill_persists_scope_without_eager_symbols(
     assert body["total_symbols"] == 0
     assert body["data_health"]["backfill_scope"] == "full-a-share"
     assert body["data_health"]["backfill_batch_size"] == "25"
+    assert body["data_health"]["backfill_auto_validate"] == "true"
     assert submitted[0][1] == (body["job_id"],)
+
+
+def test_completed_full_market_backfill_queues_walk_forward_when_coverage_is_ready(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'historical-validation-pipeline.db'}",
+    )
+    submitted = []
+
+    class FakeExecutor:
+        def submit(self, fn, *args, **kwargs):
+            submitted.append((fn, args, kwargs))
+
+    monkeypatch.setattr(routes, "_walk_forward_task_executor", FakeExecutor())
+    routes._submitted_walk_forward_jobs.clear()
+    repo = routes._repo()
+    job = repo.create_historical_backfill_job(
+        "free",
+        ["CN:000001"],
+        start=routes.date(2025, 1, 2),
+        end=routes.date(2025, 3, 31),
+        data_health={
+            "backfill_scope": "full-a-share",
+            "backfill_auto_validate": "true",
+        },
+    )
+    job = repo.update_historical_backfill_job(job.job_id, status="succeeded")
+    with repo.session_factory() as session:
+        session.add(HistoricalDataRevisionRow(provider_mode="free", revision=11))
+        session.commit()
+    item = SimpleNamespace(
+        asset_type="stock",
+        bar_coverage_ratio=1.0,
+        adjustment_coverage_ratio=1.0,
+        tradability_coverage_ratio=1.0,
+        universe_snapshot_rows=4,
+        profile_rows=1,
+        fundamental_rows=4,
+    )
+    result = SimpleNamespace(
+        job=job,
+        manifest=SimpleNamespace(
+            instruments=[item],
+            data_health={"historical_benchmark_price_ready": "4/4"},
+        ),
+    )
+
+    state = routes._continue_validation_pipeline(result)
+    stored = repo.get_historical_backfill_job(job.job_id)
+    walk_jobs = repo.list_walk_forward_jobs(provider="free", limit=5)
+
+    assert state == "walk_forward_queued"
+    assert stored.data_health["validation_pipeline_gate"] == "ready"
+    assert stored.data_health["validation_pipeline_state"] == "walk_forward_queued"
+    assert stored.data_health["validation_pipeline_blockers"] == ""
+    assert walk_jobs[0].dataset_revision == 11
+    assert submitted[0][1] == (walk_jobs[0].job_id,)
+
+
+def test_completed_full_market_backfill_blocks_validation_on_missing_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'historical-validation-blocked.db'}",
+    )
+    repo = routes._repo()
+    job = repo.create_historical_backfill_job(
+        "free",
+        ["CN:000001"],
+        start=routes.date(2025, 1, 2),
+        end=routes.date(2025, 3, 31),
+        data_health={
+            "backfill_scope": "full-a-share",
+            "backfill_auto_validate": "true",
+        },
+    )
+    job = repo.update_historical_backfill_job(job.job_id, status="succeeded_with_errors")
+    item = SimpleNamespace(
+        asset_type="stock",
+        bar_coverage_ratio=1.0,
+        adjustment_coverage_ratio=1.0,
+        tradability_coverage_ratio=0.0,
+        universe_snapshot_rows=0,
+        profile_rows=1,
+        fundamental_rows=0,
+    )
+    result = SimpleNamespace(
+        job=job,
+        manifest=SimpleNamespace(
+            instruments=[item],
+            data_health={"historical_benchmark_price_ready": "2/4"},
+        ),
+    )
+
+    state = routes._continue_validation_pipeline(result)
+    stored = repo.get_historical_backfill_job(job.job_id)
+
+    assert state == "blocked_data_coverage"
+    assert stored.data_health["validation_pipeline_gate"] == "insufficient"
+    assert "tradability<90%" in stored.data_health["validation_pipeline_blockers"]
+    assert "fundamental<80%" in stored.data_health["validation_pipeline_blockers"]
+    assert "benchmarks<100%" in stored.data_health["validation_pipeline_blockers"]
+    assert repo.list_walk_forward_jobs(provider="free", limit=5) == []
 
 
 def test_full_market_historical_backfill_rejects_explicit_symbols(tmp_path, monkeypatch):

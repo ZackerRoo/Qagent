@@ -25,6 +25,8 @@ from qagent.backtesting.experiment import (
 from qagent.backtesting.portfolio import run_portfolio_backtest
 from qagent.backtesting.sensitivity import build_parameter_sensitivity
 from qagent.backtesting.walk_forward import (
+    MIN_FULL_MARKET_COVERAGE_RATIO,
+    MIN_FUNDAMENTAL_COVERAGE_RATIO,
     WalkForwardProgress,
     WalkForwardSnapshot,
     run_full_market_walk_forward_selection,
@@ -297,18 +299,38 @@ def start_walk_forward_job(
         step_sessions,
         lookback_days,
     )
-    repo = _repo()
+    return _walk_forward_job_payload(
+        _create_or_get_walk_forward_job(
+            repo=_repo(),
+            provider=mode,
+            start=start,
+            end=end,
+            step_sessions=step_sessions,
+            lookback_days=lookback_days,
+        )
+    )
+
+
+def _create_or_get_walk_forward_job(
+    *,
+    repo: QagentRepository,
+    provider: str,
+    start: date,
+    end: date,
+    step_sessions: int,
+    lookback_days: int,
+):
     active = next(
         (
             job
-            for job in repo.list_walk_forward_jobs(provider=mode, limit=10)
+            for job in repo.list_walk_forward_jobs(provider=provider, limit=10)
             if job.status in {"queued", "running"}
         ),
         None,
     )
     if active is not None:
-        return _walk_forward_job_payload(active)
-    replay_repository = ReplayEvidenceRepository(repo.session_factory, mode)
+        return active
+    replay_repository = ReplayEvidenceRepository(repo.session_factory, provider)
     revision = replay_repository.current_revision()
     if revision <= 0:
         raise HTTPException(status_code=400, detail="historical replay dataset is empty")
@@ -317,7 +339,7 @@ def start_walk_forward_job(
         raise HTTPException(status_code=400, detail="validation range has no trading sessions")
     job_id = f"walk-forward-{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{uuid4().hex[:8]}"
     manifest = build_walk_forward_experiment_manifest(
-        provider_mode=mode,
+        provider_mode=provider,
         dataset_revision=revision,
         start_date=start,
         end_date=end,
@@ -326,7 +348,7 @@ def start_walk_forward_job(
     )
     job = repo.create_walk_forward_job(
         job_id=job_id,
-        provider=mode,
+        provider=provider,
         start=start,
         end=end,
         dataset_revision=revision,
@@ -336,7 +358,7 @@ def start_walk_forward_job(
         experiment_manifest=manifest.model_dump(mode="json"),
     )
     _submit_walk_forward_job(job.job_id)
-    return _walk_forward_job_payload(job)
+    return job
 
 
 @router.get("/walk-forward/jobs")
@@ -535,6 +557,7 @@ def start_historical_data_backfill(
     scope: str = "symbols",
     batch_size: int = 50,
     force_restart: bool = False,
+    auto_validate: bool = True,
 ) -> dict[str, object]:
     mode = _validate_historical_data_params(provider, start, end, max_symbols)
     normalized_scope = scope.strip().lower()
@@ -576,6 +599,9 @@ def start_historical_data_backfill(
             "backfill_scope": normalized_scope,
             "backfill_batch_size": str(batch_size),
             "backfill_phase": "queued",
+            "backfill_auto_validate": str(
+                auto_validate and normalized_scope == "full-a-share"
+            ).lower(),
         },
     )
     _submit_historical_backfill(job.job_id)
@@ -616,7 +642,8 @@ def _submit_historical_backfill(job_id: str) -> None:
 
 def _run_historical_backfill_safely(job_id: str) -> None:
     try:
-        run_historical_backfill_job(job_id)
+        result = run_historical_backfill_job(job_id)
+        _continue_validation_pipeline(result)
     except Exception as exc:
         repo = _repo()
         job = repo.get_historical_backfill_job(job_id)
@@ -629,6 +656,118 @@ def _run_historical_backfill_safely(job_id: str) -> None:
     finally:
         with _historical_jobs_lock:
             _submitted_historical_jobs.discard(job_id)
+
+
+def _continue_validation_pipeline(result) -> str:
+    repo = _repo()
+    job = repo.get_historical_backfill_job(result.job.job_id) or result.job
+    default_enabled = job.data_health.get("backfill_scope") == "full-a-share"
+    enabled = job.data_health.get(
+        "backfill_auto_validate",
+        str(default_enabled).lower(),
+    ).lower() == "true"
+    readiness = _historical_validation_readiness(result.manifest)
+    health = {
+        **job.data_health,
+        **readiness,
+        "validation_pipeline_auto": str(enabled).lower(),
+    }
+    if not enabled:
+        health["validation_pipeline_state"] = "manual"
+        repo.update_historical_backfill_job(job.job_id, data_health=health)
+        return "manual"
+    if readiness["validation_pipeline_gate"] != "ready":
+        health["validation_pipeline_state"] = "blocked_data_coverage"
+        repo.update_historical_backfill_job(job.job_id, data_health=health)
+        return "blocked_data_coverage"
+
+    latest_runs = repo.list_walk_forward_runs(provider=job.provider, limit=1)
+    revision = ReplayEvidenceRepository(repo.session_factory, job.provider).current_revision()
+    if (
+        latest_runs
+        and latest_runs[0].dataset_revision == revision
+        and latest_runs[0].start_date == job.start_date
+        and latest_runs[0].end_date == job.end_date
+    ):
+        health["validation_pipeline_state"] = "already_validated"
+        health["validation_pipeline_walk_forward_run_id"] = latest_runs[0].run_id
+        repo.update_historical_backfill_job(job.job_id, data_health=health)
+        return "already_validated"
+
+    walk_job = _create_or_get_walk_forward_job(
+        repo=repo,
+        provider=job.provider,
+        start=job.start_date,
+        end=job.end_date,
+        step_sessions=5,
+        lookback_days=400,
+    )
+    health["validation_pipeline_state"] = "walk_forward_queued"
+    health["validation_pipeline_walk_forward_job_id"] = walk_job.job_id
+    health["validation_pipeline_dataset_revision"] = str(walk_job.dataset_revision)
+    repo.update_historical_backfill_job(job.job_id, data_health=health)
+    return "walk_forward_queued"
+
+
+def _historical_validation_readiness(manifest) -> dict[str, str]:
+    instruments = list(manifest.instruments)
+    stocks = [item for item in instruments if item.asset_type == "stock"]
+    adjusted = [item for item in instruments if item.asset_type in {"stock", "etf"}]
+    total = max(len(instruments), 1)
+    stock_total = max(len(stocks), 1)
+    adjusted_total = max(len(adjusted), 1)
+
+    ratios = {
+        "market": sum(item.bar_coverage_ratio >= 0.95 for item in instruments) / total,
+        "adjusted": sum(
+            (item.adjustment_coverage_ratio or 0) >= 0.95 for item in adjusted
+        )
+        / adjusted_total,
+        "tradability": sum(
+            item.tradability_coverage_ratio >= 0.95 for item in instruments
+        )
+        / total,
+        "universe": sum(item.universe_snapshot_rows > 0 for item in instruments) / total,
+        "profile": sum(item.profile_rows > 0 for item in instruments) / total,
+        "fundamental": sum(item.fundamental_rows > 0 for item in stocks) / stock_total,
+    }
+    benchmark_ready, benchmark_total = _fraction_value(
+        manifest.data_health.get("historical_benchmark_price_ready", "0/4")
+    )
+    benchmark_ratio = benchmark_ready / max(benchmark_total, 1)
+    blockers = []
+    requirements = {
+        "market": MIN_FULL_MARKET_COVERAGE_RATIO,
+        "adjusted": MIN_FULL_MARKET_COVERAGE_RATIO,
+        "tradability": MIN_FULL_MARKET_COVERAGE_RATIO,
+        "universe": MIN_FULL_MARKET_COVERAGE_RATIO,
+        "profile": MIN_FULL_MARKET_COVERAGE_RATIO,
+        "fundamental": MIN_FUNDAMENTAL_COVERAGE_RATIO,
+    }
+    for key, minimum in requirements.items():
+        if ratios[key] < minimum:
+            blockers.append(f"{key}<{minimum:.0%}")
+    if benchmark_ratio < 1:
+        blockers.append("benchmarks<100%")
+    return {
+        "validation_pipeline_gate": "ready" if not blockers else "insufficient",
+        "validation_pipeline_blockers": ",".join(blockers),
+        "validation_pipeline_market_coverage": f"{ratios['market']:.4f}",
+        "validation_pipeline_adjusted_coverage": f"{ratios['adjusted']:.4f}",
+        "validation_pipeline_tradability_coverage": f"{ratios['tradability']:.4f}",
+        "validation_pipeline_universe_coverage": f"{ratios['universe']:.4f}",
+        "validation_pipeline_profile_coverage": f"{ratios['profile']:.4f}",
+        "validation_pipeline_fundamental_coverage": f"{ratios['fundamental']:.4f}",
+        "validation_pipeline_benchmark_coverage": f"{benchmark_ratio:.4f}",
+    }
+
+
+def _fraction_value(value: str) -> tuple[int, int]:
+    try:
+        numerator, denominator = value.split("/", 1)
+        return int(numerator), int(denominator)
+    except (AttributeError, TypeError, ValueError):
+        return 0, 0
 
 
 def _parse_symbols(symbols: str | None, default_universe: list[str]) -> list[str]:

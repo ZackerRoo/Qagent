@@ -118,6 +118,7 @@ type ScanParams = {
   include_etfs?: boolean;
   force_refresh?: boolean;
   force_restart?: boolean;
+  auto_validate?: boolean;
   cache_ttl_minutes?: number;
 };
 
@@ -228,6 +229,9 @@ function queryString(params?: ScanParams): string {
   }
   if (params.force_restart !== undefined) {
     search.set("force_restart", String(params.force_restart));
+  }
+  if (params.auto_validate !== undefined) {
+    search.set("auto_validate", String(params.auto_validate));
   }
   if (params.cache_ttl_minutes !== undefined) {
     search.set("cache_ttl_minutes", String(params.cache_ttl_minutes));
@@ -815,6 +819,7 @@ export async function startFullMarketHistoricalBackfill(
       end,
       scope: "full-a-share",
       batch_size: 25,
+      auto_validate: true,
     })}`,
     {},
   );

@@ -282,7 +282,18 @@ export function History({
   }, [dataMode, walkForwardJob?.job_id, walkForwardJob?.status]);
 
   useEffect(() => {
-    if (!historicalBackfillJob || !["queued", "running"].includes(historicalBackfillJob.status)) {
+    const pipelineState = historicalBackfillJob?.data_health.validation_pipeline_state;
+    const autoValidationPending = Boolean(
+      historicalBackfillJob
+      && historicalBackfillJob.data_health.backfill_scope === "full-a-share"
+      && historicalBackfillJob.data_health.backfill_auto_validate !== "false"
+      && ["succeeded", "succeeded_with_errors"].includes(historicalBackfillJob.status)
+      && !pipelineState,
+    );
+    if (
+      !historicalBackfillJob
+      || (!["queued", "running"].includes(historicalBackfillJob.status) && !autoValidationPending)
+    ) {
       return;
     }
     let cancelled = false;
@@ -291,6 +302,13 @@ export function History({
         const job = await fetchHistoricalBackfillJob(historicalBackfillJob.job_id);
         if (cancelled) return;
         setHistoricalBackfillJob(job);
+        if (job.data_health.validation_pipeline_state === "walk_forward_queued") {
+          const validationJob = await fetchLatestWalkForwardJob(dataMode);
+          if (!cancelled) {
+            setWalkForwardJob(validationJob);
+            setIsWalkForwardRunning(["queued", "running"].includes(validationJob.status));
+          }
+        }
         if (!["queued", "running"].includes(job.status)) {
           setIsHistoricalBackfillRunning(false);
           if (job.status === "failed") {
@@ -312,7 +330,12 @@ export function History({
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [historicalBackfillJob?.job_id, historicalBackfillJob?.status]);
+  }, [
+    dataMode,
+    historicalBackfillJob?.job_id,
+    historicalBackfillJob?.status,
+    historicalBackfillJob?.data_health.validation_pipeline_state,
+  ]);
 
   async function runFullMarketWalkForward() {
     if (dataMode !== "free") {
@@ -1306,20 +1329,31 @@ function WalkForwardValidationCenter({
   };
   const activeJob = job && ["queued", "running"].includes(job.status) ? job : undefined;
   const isFullMarketBackfill = backfillJob?.data_health.backfill_scope === "full-a-share";
-  const backfillSuccessRatio = backfillJob && backfillJob.total_symbols > 0
-    ? backfillJob.succeeded_symbols / backfillJob.total_symbols
-    : 0;
+  const pipelineGate = backfillJob?.data_health.validation_pipeline_gate;
+  const pipelineState = backfillJob?.data_health.validation_pipeline_state;
+  const pipelineBlockers = (backfillJob?.data_health.validation_pipeline_blockers ?? "")
+    .split(",")
+    .filter(Boolean);
   const backfillReady = Boolean(
     isFullMarketBackfill
     && backfillJob
     && ["succeeded", "succeeded_with_errors"].includes(backfillJob.status)
-    && backfillSuccessRatio >= 0.9,
+    && pipelineGate === "ready",
   );
   const backfillPriceHealth = backfillJob?.data_health ?? {};
   const backfillCacheReused = Number(backfillPriceHealth.backfill_price_cache_reused ?? 0);
   const backfillNetworkSucceeded = Number(backfillPriceHealth.backfill_price_network_succeeded ?? 0);
   const backfillRetryableFailed = Number(backfillPriceHealth.backfill_price_retryable_failed ?? 0);
   const backfillPermanentFailed = Number(backfillPriceHealth.backfill_price_permanent_failed ?? 0);
+  const backfillRetryUnresolved = Number(backfillPriceHealth.backfill_price_retry_unresolved ?? 0);
+  const coverageMetrics = [
+    [zh ? "价格" : "Prices", backfillPriceHealth.validation_pipeline_market_coverage],
+    [zh ? "复权" : "Adjusted", backfillPriceHealth.validation_pipeline_adjusted_coverage],
+    [zh ? "交易状态" : "Tradability", backfillPriceHealth.validation_pipeline_tradability_coverage],
+    [zh ? "历史股票池" : "Universe", backfillPriceHealth.validation_pipeline_universe_coverage],
+    [zh ? "财务快照" : "Fundamentals", backfillPriceHealth.validation_pipeline_fundamental_coverage],
+    [zh ? "指数基准" : "Benchmarks", backfillPriceHealth.validation_pipeline_benchmark_coverage],
+  ] as const;
   const phaseLabels: Record<string, string> = {
     queued: zh ? "等待后台执行" : "Queued",
     historical_replay: zh ? "逐日重放历史推荐" : "Replaying historical recommendations",
@@ -1335,6 +1369,7 @@ function WalkForwardValidationCenter({
     corporate_actions: zh ? "补齐退市与企业行动" : "Loading corporate actions",
     terminal_settlements: zh ? "核对退市结算" : "Checking terminal settlements",
     replay_prices: zh ? "补齐复权日线" : "Loading adjusted daily bars",
+    price_retry: zh ? "重试临时失败标的" : "Retrying transient failures",
     benchmark_prices: zh ? "补齐指数基准" : "Loading benchmarks",
     fundamentals: zh ? "补齐历史财务快照" : "Loading point-in-time fundamentals",
     historical_evidence: zh ? "补齐交易状态与行业" : "Loading tradability and industries",
@@ -1407,17 +1442,34 @@ function WalkForwardValidationCenter({
             <div className="historical-backfill-metrics">
               <span>{zh ? "缓存复用" : "From cache"}<strong>{backfillCacheReused}</strong></span>
               <span>{zh ? "联网补齐" : "Fetched"}<strong>{backfillNetworkSucceeded}</strong></span>
-              <span>{zh ? "稍后重试" : "Retryable"}<strong>{backfillRetryableFailed}</strong></span>
+              <span>{zh ? "累计临时失败" : "Transient failures"}<strong>{backfillRetryableFailed}</strong></span>
+              <span>{zh ? "仍待重试" : "Retry pending"}<strong>{backfillRetryUnresolved}</strong></span>
               <span>{zh ? "确认缺失" : "Unavailable"}<strong>{backfillPermanentFailed}</strong></span>
+            </div>
+          ) : null}
+          {coverageMetrics.some(([, value]) => value !== undefined) ? (
+            <div className="historical-backfill-metrics historical-coverage-metrics">
+              {coverageMetrics.map(([label, value]) => (
+                <span key={label}>
+                  {label}
+                  <strong>{value === undefined ? "-" : `${(Number(value) * 100).toFixed(0)}%`}</strong>
+                </span>
+              ))}
             </div>
           ) : null}
           <p>
             {backfillReady
-              ? (zh ? "行情成功覆盖已达到 90%，可以运行全市场 Walk-forward。" : "Price coverage is above 90%; full-market walk-forward is available.")
+              ? pipelineState === "walk_forward_queued"
+                ? (zh ? "六项数据门槛均已通过，系统已自动排队运行全市场 Walk-forward。" : "All six data gates passed; full-market walk-forward has been queued automatically.")
+                : pipelineState === "already_validated"
+                  ? (zh ? "六项数据门槛均已通过，当前数据版本已经完成验证。" : "All six data gates passed and this dataset revision is already validated.")
+                  : (zh ? "六项数据门槛均已通过，可以运行全市场 Walk-forward。" : "All six data gates passed; full-market walk-forward is available.")
               : isBackfillRunning
                 ? `${backfillJob.current_instrument ? `${zh ? "当前" : "Current"} ${formatInstrumentDisplay(backfillJob.current_instrument)} · ` : ""}${zh ? "已缓存的行情直接复用；临时网络失败会在冷却后重试，刷新或重启不会丢失进度。" : "Cached bars are reused; temporary network failures retry after cooldown, and refresh or restart preserves progress."}`
-                : backfillRetryableFailed > 0
-                  ? (zh ? `有 ${backfillRetryableFailed} 个标的因临时数据源错误待重试，已成功数据不会重新下载。` : `${backfillRetryableFailed} instruments await retry after temporary source errors; successful data will not be downloaded again.`)
+                : pipelineBlockers.length > 0
+                  ? (zh ? `历史验证尚未启动，未达标项：${pipelineBlockers.join("、")}。` : `Validation is blocked by: ${pipelineBlockers.join(", ")}.`)
+                  : backfillRetryUnresolved > 0
+                    ? (zh ? `仍有 ${backfillRetryUnresolved} 个标的因临时数据源错误待重试，已成功数据不会重新下载。` : `${backfillRetryUnresolved} instruments still await retry; successful data will not be downloaded again.`)
                   : (zh ? "当前结果仍是小范围试点。先补齐复权行情、财务快照和历史交易状态。" : "Current results are still a pilot. Backfill adjusted prices, fundamentals, and tradability first.")}
           </p>
         </div>
