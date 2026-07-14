@@ -15,10 +15,12 @@ from qagent.backtesting.replay_provider import (
 )
 from qagent.backtesting.walk_forward import (
     ELIGIBLE_UNIVERSE_BENCHMARK_ID,
+    WalkForwardEvidenceMetric,
     WalkForwardSnapshot,
     _combined_validation_gate,
     _cross_section_coverage,
     _equal_weight_eligible_return,
+    _enforce_release_gate_on_positive_evidence,
     _trade_temporal_validation,
     run_full_market_walk_forward_selection,
 )
@@ -248,6 +250,31 @@ def test_walk_forward_market_coverage_gate_marks_small_replay_as_pilot():
     assert coverage["median_covered"] == 20
     assert coverage["median_universe"] == 5600
     assert _combined_validation_gate("ready", "insufficient") == ("insufficient_market_coverage")
+
+
+def test_walk_forward_positive_evidence_waits_for_overall_release_gate():
+    metric = WalkForwardEvidenceMetric(
+        dimension="factor",
+        key="momentum",
+        label="动量",
+        trade_count=120,
+        out_of_sample_count=40,
+        win_rate=0.58,
+        average_return_pct=2.1,
+        worst_return_pct=-4.2,
+        profit_factor=1.8,
+        max_consecutive_losses=5,
+        out_of_sample_verdict="positive",
+        action="increase",
+        suggested_weight_delta=0.04,
+        reason="样本外结果为正。",
+    )
+
+    _enforce_release_gate_on_positive_evidence([metric], release_status="insufficient")
+
+    assert metric.action == "observe"
+    assert metric.suggested_weight_delta == 0.0
+    assert "整体上线门禁尚未通过" in metric.reason
 
 
 def test_walk_forward_resumes_saved_rebalance_snapshots(tmp_path, monkeypatch):

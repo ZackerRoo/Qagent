@@ -589,6 +589,10 @@ def _build_strategy_validation_center(
     else:
         status = "accepted"
         headline = "历史验证通过：允许进入小仓位前向模拟，不代表可直接实盘。"
+    _enforce_release_gate_on_positive_evidence(
+        [*strategies, *factors],
+        release_status=status,
+    )
     return WalkForwardValidationCenter(
         status=status,
         headline=headline,
@@ -596,6 +600,21 @@ def _build_strategy_validation_center(
         strategies=strategies,
         factors=factors,
     )
+
+
+def _enforce_release_gate_on_positive_evidence(
+    metrics: list[WalkForwardEvidenceMetric],
+    *,
+    release_status: str,
+) -> None:
+    if release_status == "accepted":
+        return
+    for metric in metrics:
+        if metric.action != "increase":
+            continue
+        metric.action = "observe"
+        metric.suggested_weight_delta = 0.0
+        metric.reason = "局部样本外结果为正，但整体上线门禁尚未通过，仅观察，不调整推荐权重。"
 
 
 def _walk_forward_evidence_metric(
