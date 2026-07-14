@@ -1703,7 +1703,7 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 for snapshot in snapshots
                 if _paper_candidate_price_basis_is_consistent(
                     snapshot,
-                    latest_value=snapshot.latest_close,
+                    latest_value=_paper_snapshot_latest_value(snapshot),
                 )
             ]
             data_health["paper_missing_or_inconsistent_price_blocked"] = str(
@@ -1916,11 +1916,7 @@ def _paper_candidate_pool_snapshot_items(
         reference_trade = active_trade or recently_released_by_instrument.get(
             snapshot.instrument_id
         )
-        latest_value = (
-            reference_trade.latest_price
-            if reference_trade is not None and reference_trade.latest_price is not None
-            else snapshot.latest_close
-        )
+        latest_value = _paper_snapshot_latest_value(snapshot, reference_trade)
         entry_gap_pct = _paper_entry_gap_pct(snapshot, latest_value=latest_value)
         price_basis_consistent = _paper_candidate_price_basis_is_consistent(
             snapshot,
@@ -2042,6 +2038,24 @@ def _paper_candidate_price_basis_is_consistent(
     return abs(trigger - latest_value) / trigger <= max_gap_ratio
 
 
+def _paper_snapshot_latest_value(
+    snapshot: OpportunitySnapshotRecord,
+    reference_trade: PaperTradeRecord | None = None,
+) -> Decimal | None:
+    if reference_trade is not None and reference_trade.latest_price is not None:
+        return reference_trade.latest_price
+    if snapshot.latest_close is not None:
+        return snapshot.latest_close
+    trading_status = snapshot.card.get("trading_status")
+    if not isinstance(trading_status, dict):
+        return None
+    try:
+        latest = _decimal_or_none(trading_status.get("latest_close"))
+    except (ArithmeticError, ValueError):
+        return None
+    return latest if latest is not None and latest > 0 else None
+
+
 def _paper_candidate_reason(
     snapshot: OpportunitySnapshotRecord,
     theme_boost: float,
@@ -2098,7 +2112,7 @@ def _paper_candidate_pool_health(
         and snapshot.snapshot_id not in existing_sources
         and _paper_candidate_price_basis_is_consistent(
             snapshot,
-            latest_value=snapshot.latest_close,
+            latest_value=_paper_snapshot_latest_value(snapshot),
         )
     ]
     boosted = [snapshot for snapshot in snapshots if _paper_theme_boost(snapshot) > 0]
@@ -2149,7 +2163,7 @@ def _maybe_replace_pending_paper_trade_for_candidate(
         and snapshot.snapshot_id not in existing_sources
         and _paper_candidate_price_basis_is_consistent(
             snapshot,
-            latest_value=snapshot.latest_close,
+            latest_value=_paper_snapshot_latest_value(snapshot),
         )
     ]
     candidates.sort(key=_paper_snapshot_priority_score, reverse=True)
@@ -2432,6 +2446,9 @@ def _paper_seed_snapshots_from_latest_cache(
             snapshot = snapshots_by_instrument.get(_string_value(card.get("instrument_id")))
         if snapshot is None or snapshot.snapshot_id in seen_snapshot_ids:
             continue
+        cached_latest = _paper_card_latest_value(card)
+        if snapshot.latest_close is None and cached_latest is not None:
+            snapshot = snapshot.model_copy(update={"latest_close": cached_latest})
         selected.append(snapshot)
         seen_snapshot_ids.add(snapshot.snapshot_id)
     if not selected:
@@ -2451,6 +2468,17 @@ def _is_trackable_cached_paper_card(card: dict[str, object]) -> bool:
     risk_status = decision.get("risk_status") if isinstance(decision, dict) else None
     action = decision.get("action") if isinstance(decision, dict) else None
     return bool(trigger_price) and risk_status != "blocked" and action != "avoid"
+
+
+def _paper_card_latest_value(card: dict[str, object]) -> Decimal | None:
+    trading_status = card.get("trading_status")
+    if not isinstance(trading_status, dict):
+        return None
+    try:
+        latest = _decimal_or_none(trading_status.get("latest_close"))
+    except (ArithmeticError, ValueError):
+        return None
+    return latest if latest is not None and latest > 0 else None
 
 
 def _balanced_cached_card_score(card: dict[str, object]) -> float:

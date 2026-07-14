@@ -47,6 +47,7 @@ def test_paper_candidate_requires_latest_price_for_entry_validation():
     snapshot = SimpleNamespace(
         trigger_price=Decimal("2.90"),
         latest_close=None,
+        card={},
     )
 
     assert (
@@ -56,6 +57,16 @@ def test_paper_candidate_requires_latest_price_for_entry_validation():
         )
         is False
     )
+
+
+def test_paper_candidate_recovers_latest_price_from_card():
+    snapshot = SimpleNamespace(
+        latest_close=None,
+        card={"trading_status": {"latest_close": "2.92"}},
+    )
+
+    assert routes._paper_snapshot_latest_value(snapshot) == Decimal("2.92")
+    assert routes._paper_card_latest_value(snapshot.card) == Decimal("2.92")
 
 
 def test_automation_run_api_saves_brief_and_queues_delivery(tmp_path, monkeypatch):
