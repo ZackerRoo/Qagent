@@ -22,7 +22,7 @@ Qagent is research software. It does not guarantee returns and does not place li
 
 ## Current State
 
-Last audited: 2026-07-10
+Last audited: 2026-07-15
 
 Qagent already has:
 
@@ -186,25 +186,25 @@ Package Qagent as a reliable research preview with explicit limitations and repe
 
 ### What's done
 
-- Historical backfill and Walk-forward jobs are persisted in SQLite, report phase/date progress, recover after backend restart, and reuse completed rebalance checkpoints.
-- Every Walk-forward run records the Git revision and dirty state, Python version, dataset revision, strategy-registry digest, execution-rule digest, date range, lookback, and rebalance frequency.
-- A strict lifecycle-cache recovery path revalidates legacy BaoStock listing identity at the requested historical cutoff instead of copying current listing status backward.
-- A real three-year pilot completed successfully on dataset revision 40: 146/146 rebalance snapshots, 328 Top-5 trades, 612 Top-10 trades, and 146 persisted checkpoints.
-- The pilot uses 20 instruments with 99.99% bar coverage and 99.94% adjustment coverage. It has only 0.33% cross-sectional market-evidence coverage, so the UI labels it a pilot rather than full-market validation.
-- Validation now has two independent gates: at least 30 out-of-sample trades and at least 90% historical market-evidence coverage. Passing the sample gate alone cannot label a strategy fully validated.
-- The Backtest page shows the pilot scope, coverage percentage, covered-instrument count, equity curves, cost sensitivity, benchmark availability, and localized gate reasons without horizontal overflow or console errors.
-- Full backend verification passes with 503 tests; Ruff, frontend production build, backtest UI checks, and i18n checks pass.
+- Historical backfill and Walk-forward jobs persist in SQLite, expose phase progress, resume from checkpoints, and run outside synchronous page requests.
+- The full-A-share backfill for 2021-11-01 through 2025-12-31 is actively processing 6,706 instruments. At this audit it had processed 4,669 instruments; 1,325 unresolved price fetches remained retryable and zero were classified as permanent failures.
+- Historical fundamentals use conservative point-in-time availability dates and cached unadjusted bars to derive market cap, PE/PS, growth, margin, and ROE snapshots without one request per report date.
+- Walk-forward replay now prefetches rolling cross-sectional bars and fundamentals, avoiding per-instrument SQLite scans during each rebalance.
+- Walk-forward jobs only reuse an active job when dataset revision, date range, rebalance interval, lookback, and experiment digest all match. Distinct experiments queue sequentially, every unfinished job is restored after restart, and stale code/strategy/rule manifests are rejected.
+- Completed runs only satisfy automatic validation when their experiment digest matches the current code, strategy registry, execution rules, parameters, and dataset revision.
+- A real three-year pilot on dataset revision 40 remains available: 146 snapshots, 328 Top-5 trades, and 612 Top-10 trades. Its 0.33% cross-sectional evidence coverage keeps it labelled as a pilot, not validated full-market evidence.
+- Paper trading is active with A-share sessions, T+1, costs, slippage, candidate replacement, five validation slots, and restart-safe scheduling. Current evidence is negative and remains visible: 23 eligible samples, 10 triggered, 9 stopped, 9 missed entries, 0% closed win rate, and -4.55% account return as of 2026-07-14.
+- Full verification passes with 551 backend tests, Ruff, and the frontend production build.
 
 ### What's next
 
-- Scale historical adjusted bars and daily tradability evidence from the 20-instrument pilot toward at least 90% of each historical A-share cross-section using bounded, restart-safe batches.
-- Add reliable CSI 300, CSI 500, ChiNext, and STAR 50 benchmark price history; retain the eligible-universe equal-weight benchmark as a fallback comparison, not a replacement.
-- Resolve or explicitly exclude historical delisted instruments whose terminal settlement evidence is unavailable before any full-market portfolio claim.
-- Rerun the versioned Walk-forward experiment after each coverage milestone and begin strategy-weight governance only after the market-coverage gate passes.
+- Let the current full-market backfill finish its primary and retry phases, then inspect the generated coverage manifest instead of assuming provider success.
+- Run the versioned full-market Walk-forward experiment only if market, adjustment, tradability, universe, fundamentals, and four benchmark gates pass.
+- Publish negative as well as positive out-of-sample results, including costs, drawdown, benchmark excess, and regime attribution; do not increase strategy weights before the release gate passes.
+- Continue forward paper evidence to the 20-, 40-, and 60-trading-day checkpoints while preserving the current losses and missed entries as calibration evidence.
 
 ### Any blockers
 
-- No blocker for the current pilot or paper-trading workflow.
-- The free provider timed out on live lifecycle inventory and returned no price bars for four index benchmarks; lifecycle identity was recovered from validated BaoStock cache, while benchmark prices remain explicitly missing.
-- 127 historical delisted instruments still lack terminal-settlement evidence and must not be silently assigned synthetic exit prices.
-- Full-market scale remains an offline data-engineering task; it must not run as a synchronous page request.
+- No software blocker is preventing the current backfill or paper scheduler from running.
+- Free providers remain operationally unreliable. Retryable fetch failures, benchmark availability, historical delist settlement evidence, and true point-in-time corporate metadata must be measured by the final manifest.
+- The product is not ready for real-money use: full-market Walk-forward evidence has not passed the release gates and current paper evidence is loss-making with an immature sample.

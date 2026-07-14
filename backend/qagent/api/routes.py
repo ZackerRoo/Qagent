@@ -320,16 +320,6 @@ def _create_or_get_walk_forward_job(
     step_sessions: int,
     lookback_days: int,
 ):
-    active = next(
-        (
-            job
-            for job in repo.list_walk_forward_jobs(provider=provider, limit=10)
-            if job.status in {"queued", "running"}
-        ),
-        None,
-    )
-    if active is not None:
-        return active
     replay_repository = ReplayEvidenceRepository(repo.session_factory, provider)
     revision = replay_repository.current_revision()
     if revision <= 0:
@@ -346,6 +336,23 @@ def _create_or_get_walk_forward_job(
         rebalance_step_sessions=step_sessions,
         lookback_days=lookback_days,
     )
+    active = next(
+        (
+            job
+            for job in repo.list_walk_forward_jobs(provider=provider, limit=100)
+            if job.status in {"queued", "running"}
+            and job.dataset_revision == revision
+            and job.start_date == start
+            and job.end_date == end
+            and job.rebalance_step_sessions == step_sessions
+            and job.lookback_days == lookback_days
+            and job.experiment_manifest.get("experiment_digest")
+            == manifest.experiment_digest
+        ),
+        None,
+    )
+    if active is not None:
+        return active
     job = repo.create_walk_forward_job(
         job_id=job_id,
         provider=provider,
@@ -359,6 +366,20 @@ def _create_or_get_walk_forward_job(
     )
     _submit_walk_forward_job(job.job_id)
     return job
+
+
+def _walk_forward_run_matches_manifest(run, manifest: WalkForwardExperimentManifest) -> bool:
+    stored_manifest = run.payload.get("experiment_manifest")
+    if not isinstance(stored_manifest, dict):
+        return False
+    return bool(
+        run.dataset_revision == manifest.dataset_revision
+        and run.start_date == manifest.start_date
+        and run.end_date == manifest.end_date
+        and run.rebalance_step_sessions == manifest.rebalance_step_sessions
+        and run.lookback_days == manifest.lookback_days
+        and stored_manifest.get("experiment_digest") == manifest.experiment_digest
+    )
 
 
 @router.get("/walk-forward/jobs")
@@ -428,18 +449,16 @@ def get_walk_forward_run(run_id: str) -> dict[str, object]:
 
 
 def restore_walk_forward_job_from_storage() -> str | None:
-    active = next(
-        (
-            job
-            for job in _repo().list_walk_forward_jobs(limit=20)
-            if job.status in {"queued", "running"}
-        ),
-        None,
-    )
-    if active is None:
+    active = [
+        job
+        for job in reversed(_repo().list_walk_forward_jobs(limit=100))
+        if job.status in {"queued", "running"}
+    ]
+    if not active:
         return None
-    _submit_walk_forward_job(active.job_id)
-    return active.job_id
+    for job in active:
+        _submit_walk_forward_job(job.job_id)
+    return active[0].job_id
 
 
 def _validate_walk_forward_params(
@@ -483,6 +502,18 @@ def _run_walk_forward_job_safely(job_id: str) -> None:
         if replay_repository.current_revision() != job.dataset_revision:
             raise RuntimeError("historical dataset revision changed; start a new validation job")
         manifest = WalkForwardExperimentManifest.model_validate(job.experiment_manifest)
+        current_manifest = build_walk_forward_experiment_manifest(
+            provider_mode=job.provider,
+            dataset_revision=job.dataset_revision,
+            start_date=job.start_date,
+            end_date=job.end_date,
+            rebalance_step_sessions=job.rebalance_step_sessions,
+            lookback_days=job.lookback_days,
+        )
+        if current_manifest.experiment_digest != manifest.experiment_digest:
+            raise RuntimeError(
+                "walk-forward experiment definition changed; start a new validation job"
+            )
         checkpoint_by_date = {item["decision_date"]: item for item in job.checkpoints}
         repo.update_walk_forward_job(
             job_id,
@@ -726,16 +757,25 @@ def _continue_validation_pipeline(result) -> str:
         repo.update_historical_backfill_job(job.job_id, data_health=health)
         return "blocked_data_coverage"
 
-    latest_runs = repo.list_walk_forward_runs(provider=job.provider, limit=1)
     revision = ReplayEvidenceRepository(repo.session_factory, job.provider).current_revision()
-    if (
-        latest_runs
-        and latest_runs[0].dataset_revision == revision
-        and latest_runs[0].start_date == job.start_date
-        and latest_runs[0].end_date == job.end_date
+    current_manifest = build_walk_forward_experiment_manifest(
+        provider_mode=job.provider,
+        dataset_revision=revision,
+        start_date=job.start_date,
+        end_date=job.end_date,
+        rebalance_step_sessions=5,
+        lookback_days=400,
+    )
+    latest_runs = repo.list_walk_forward_runs(provider=job.provider, limit=1)
+    if latest_runs and _walk_forward_run_matches_manifest(
+        latest_runs[0],
+        current_manifest,
     ):
         health["validation_pipeline_state"] = "already_validated"
         health["validation_pipeline_walk_forward_run_id"] = latest_runs[0].run_id
+        health["validation_pipeline_experiment_digest"] = (
+            current_manifest.experiment_digest
+        )
         repo.update_historical_backfill_job(job.job_id, data_health=health)
         return "already_validated"
 
@@ -750,6 +790,9 @@ def _continue_validation_pipeline(result) -> str:
     health["validation_pipeline_state"] = "walk_forward_queued"
     health["validation_pipeline_walk_forward_job_id"] = walk_job.job_id
     health["validation_pipeline_dataset_revision"] = str(walk_job.dataset_revision)
+    health["validation_pipeline_experiment_digest"] = (
+        walk_job.experiment_manifest.get("experiment_digest", "")
+    )
     repo.update_historical_backfill_job(job.job_id, data_health=health)
     return "walk_forward_queued"
 

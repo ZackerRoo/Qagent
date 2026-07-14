@@ -1,6 +1,7 @@
 import json
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -144,3 +145,170 @@ def test_walk_forward_restore_resubmits_persisted_job(tmp_path, monkeypatch):
 
     assert restored == job.job_id
     assert submitted[0][1] == (job.job_id,)
+
+
+def test_walk_forward_restore_resubmits_every_persisted_job(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'walk-forward-restore-all-api.db'}",
+    )
+    submitted = []
+
+    class FakeExecutor:
+        def submit(self, fn, *args, **kwargs):
+            submitted.append((fn, args, kwargs))
+
+    monkeypatch.setattr(routes, "_walk_forward_task_executor", FakeExecutor())
+    routes._submitted_walk_forward_jobs.clear()
+    repo = routes._repo()
+    first = repo.create_walk_forward_job(
+        job_id="walk-forward-resume-first",
+        provider="free",
+        start=date(2025, 1, 2),
+        end=date(2025, 3, 31),
+        dataset_revision=9,
+        rebalance_step_sessions=5,
+        lookback_days=400,
+        total_snapshots=12,
+        experiment_manifest={"dataset_revision": 9},
+    )
+    second = repo.create_walk_forward_job(
+        job_id="walk-forward-resume-second",
+        provider="free",
+        start=date(2025, 4, 1),
+        end=date(2025, 6, 30),
+        dataset_revision=9,
+        rebalance_step_sessions=5,
+        lookback_days=400,
+        total_snapshots=12,
+        experiment_manifest={"dataset_revision": 9},
+    )
+
+    restored = routes.restore_walk_forward_job_from_storage()
+
+    assert restored == first.job_id
+    assert [item[1] for item in submitted] == [(first.job_id,), (second.job_id,)]
+
+
+def test_walk_forward_job_only_reuses_identical_active_experiment(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'walk-forward-active-identity-api.db'}",
+    )
+    submitted = []
+
+    class FakeExecutor:
+        def submit(self, fn, *args, **kwargs):
+            submitted.append((fn, args, kwargs))
+
+    monkeypatch.setattr(routes, "_walk_forward_task_executor", FakeExecutor())
+    routes._submitted_walk_forward_jobs.clear()
+    repo = routes._repo()
+    with repo.session_factory() as session:
+        session.add(HistoricalDataRevisionRow(provider_mode="free", revision=7))
+        session.commit()
+
+    first = routes._create_or_get_walk_forward_job(
+        repo=repo,
+        provider="free",
+        start=date(2025, 1, 2),
+        end=date(2025, 3, 31),
+        step_sessions=5,
+        lookback_days=400,
+    )
+    reused = routes._create_or_get_walk_forward_job(
+        repo=repo,
+        provider="free",
+        start=date(2025, 1, 2),
+        end=date(2025, 3, 31),
+        step_sessions=5,
+        lookback_days=400,
+    )
+    second = routes._create_or_get_walk_forward_job(
+        repo=repo,
+        provider="free",
+        start=date(2025, 1, 2),
+        end=date(2025, 6, 30),
+        step_sessions=5,
+        lookback_days=400,
+    )
+
+    assert reused.job_id == first.job_id
+    assert second.job_id != first.job_id
+    assert len(repo.list_walk_forward_jobs(provider="free", limit=10)) == 2
+    assert [item[1] for item in submitted] == [(first.job_id,), (second.job_id,)]
+
+
+def test_walk_forward_completed_run_requires_matching_experiment_digest():
+    manifest = routes.build_walk_forward_experiment_manifest(
+        provider_mode="free",
+        dataset_revision=7,
+        start_date=date(2025, 1, 2),
+        end_date=date(2025, 3, 31),
+        rebalance_step_sessions=5,
+        lookback_days=400,
+    )
+    run = SimpleNamespace(
+        dataset_revision=7,
+        start_date=date(2025, 1, 2),
+        end_date=date(2025, 3, 31),
+        rebalance_step_sessions=5,
+        lookback_days=400,
+        payload={
+            "experiment_manifest": {
+                "experiment_digest": manifest.experiment_digest,
+            }
+        },
+    )
+
+    assert routes._walk_forward_run_matches_manifest(run, manifest) is True
+
+    run.payload["experiment_manifest"]["experiment_digest"] = "stale-definition"
+
+    assert routes._walk_forward_run_matches_manifest(run, manifest) is False
+
+
+def test_walk_forward_runner_rejects_stale_experiment_definition(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'walk-forward-stale-definition-api.db'}",
+    )
+    repo = routes._repo()
+    with repo.session_factory() as session:
+        session.add(HistoricalDataRevisionRow(provider_mode="free", revision=7))
+        session.commit()
+    manifest = routes.build_walk_forward_experiment_manifest(
+        provider_mode="free",
+        dataset_revision=7,
+        start_date=date(2025, 1, 2),
+        end_date=date(2025, 3, 31),
+        rebalance_step_sessions=5,
+        lookback_days=400,
+    ).model_dump(mode="json")
+    manifest["experiment_digest"] = "stale-definition"
+    job = repo.create_walk_forward_job(
+        job_id="walk-forward-stale-definition",
+        provider="free",
+        start=date(2025, 1, 2),
+        end=date(2025, 3, 31),
+        dataset_revision=7,
+        rebalance_step_sessions=5,
+        lookback_days=400,
+        total_snapshots=12,
+        experiment_manifest=manifest,
+    )
+    called = False
+
+    def fail_if_called(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("stale experiment must not run")
+
+    monkeypatch.setattr(routes, "run_full_market_walk_forward_selection", fail_if_called)
+
+    routes._run_walk_forward_job_safely(job.job_id)
+
+    stored = repo.get_walk_forward_job(job.job_id)
+    assert stored.status == "failed"
+    assert "experiment definition changed" in stored.error
+    assert called is False
