@@ -1286,6 +1286,8 @@ class QagentRepository:
                 return None
             if status is not None:
                 row.status = status
+                if status in {"queued", "running"}:
+                    row.finished_at = None
                 if status == "running" and row.started_at is None:
                     row.started_at = now
                 if status in {"succeeded", "failed", "cancelled"}:

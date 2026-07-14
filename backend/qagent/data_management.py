@@ -225,6 +225,10 @@ def run_historical_backfill(
     inventory_recovered = False
     benchmark_rows = 0
     replay_rows = 0
+    resume_requested = (
+        job.status == "running"
+        or job.data_health.get("backfill_resume_requested", "false").lower() == "true"
+    )
     initial_health = dict(job.data_health)
     initial_health.update(
         {
@@ -232,17 +236,17 @@ def run_historical_backfill(
             "backfill_batch_size": str(batch_size),
             "backfill_price_network_batch_size": str(min(batch_size, 5)),
             "backfill_phase": "inventory",
+            "backfill_resume_requested": "false",
         }
     )
-    was_running = job.status == "running"
     repo.update_historical_backfill_job(
         job.job_id,
         status="running",
         data_health=initial_health,
     )
-    processed = min(job.processed_symbols, len(symbols)) if was_running else 0
-    succeeded = min(job.succeeded_symbols, processed) if was_running else 0
-    failed = min(job.failed_symbols, processed) if was_running else 0
+    processed = min(job.processed_symbols, len(symbols)) if resume_requested else 0
+    succeeded = min(job.succeeded_symbols, processed) if resume_requested else 0
+    failed = min(job.failed_symbols, processed) if resume_requested else 0
     cache_reused = int(job.data_health.get("backfill_price_cache_reused", "0") or 0)
     network_succeeded = int(
         job.data_health.get("backfill_price_network_succeeded", "0") or 0
@@ -260,8 +264,8 @@ def run_historical_backfill(
     retry_recovered = int(
         job.data_health.get("backfill_price_retry_recovered", "0") or 0
     )
-    rows_written = job.rows_written if was_running else 0
-    errors: list[str] = list(job.errors[-100:]) if was_running else []
+    rows_written = job.rows_written if resume_requested else 0
+    errors: list[str] = list(job.errors[-100:]) if resume_requested else []
     rule_rows = 0
     fee_rule_rows = 0
     instrument_rule_rows = 0
@@ -993,7 +997,7 @@ def run_historical_backfill(
             status="failed",
             processed_symbols=processed,
             succeeded_symbols=succeeded,
-            failed_symbols=max(failed, len(symbols) - succeeded),
+            failed_symbols=max(failed, processed - succeeded),
             rows_written=rows_written,
             errors=[*errors[-99:], str(exc)],
             data_health=failed_health,
@@ -1634,8 +1638,14 @@ def _historical_price_batches(
         fetched = pd.DataFrame()
         batch_errors: list[str] = []
         if missing and batch_getter is not None:
-            fetched = batch_getter(missing, start, end)
-            batch_errors = list(getattr(source, "last_errors", []))
+            try:
+                fetched = batch_getter(missing, start, end)
+                batch_errors = list(getattr(source, "last_errors", []))
+            except Exception as exc:
+                batch_errors = [
+                    f"{instrument_id}: historical batch: {exc}"
+                    for instrument_id in missing
+                ]
 
         for instrument_id in batch:
             if instrument_id in cached:

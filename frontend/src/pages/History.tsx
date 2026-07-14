@@ -14,6 +14,7 @@ import {
   fetchLatestWalkForwardJob,
   fetchLatestHistoricalBackfillJob,
   fetchHistoricalBackfillJob,
+  retryHistoricalBackfillJob,
   fetchWalkForwardJob,
   fetchScanRuns,
   fetchStrategyDiagnostics,
@@ -363,11 +364,13 @@ export function History({
     try {
       setIsHistoricalBackfillRunning(true);
       setHistoricalBackfillError("");
-      const job = await startFullMarketHistoricalBackfill(
-        "2021-11-01",
-        "2025-12-31",
-        dataMode,
-      );
+      const job = historicalBackfillJob?.status === "failed"
+        ? await retryHistoricalBackfillJob(historicalBackfillJob.job_id)
+        : await startFullMarketHistoricalBackfill(
+          "2021-11-01",
+          "2025-12-31",
+          dataMode,
+        );
       setHistoricalBackfillJob(job);
     } catch (caught) {
       setIsHistoricalBackfillRunning(false);
@@ -1405,6 +1408,8 @@ function WalkForwardValidationCenter({
           <button className="icon-action secondary" type="button" onClick={onBackfill} disabled={isBackfillRunning}>
             {isBackfillRunning
               ? (zh ? "历史数据补齐中" : "Backfilling")
+              : backfillJob?.status === "failed"
+                ? (zh ? "保留缓存继续" : "Resume from cache")
               : backfillReady
                 ? (zh ? "重新核验历史数据" : "Recheck history")
                 : (zh ? "补齐全A历史数据" : "Backfill full market")}

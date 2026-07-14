@@ -636,3 +636,64 @@ def test_free_cn_historical_batch_defers_remaining_symbols_after_broken_session(
         "CN:000002: baostock historical batch: socket timed out",
         "CN:000003: baostock historical batch deferred after session failure",
     ]
+
+
+def test_free_cn_historical_batch_converts_login_timeout_to_symbol_errors(monkeypatch):
+    monkeypatch.setattr(
+        "qagent.providers.free_cn.bs",
+        SimpleNamespace(
+            login=lambda: (_ for _ in ()).throw(TimeoutError("login timed out")),
+            logout=lambda: None,
+        ),
+    )
+
+    provider = FreeCnMarketDataProvider()
+    bars = provider.get_historical_daily_bars(
+        ["CN:000001", "CN:000002"],
+        date(2026, 1, 1),
+        date(2026, 1, 9),
+    )
+
+    assert bars.empty
+    assert provider.last_errors == [
+        "CN:000001: baostock batch login: login timed out",
+        "CN:000002: baostock batch login: login timed out",
+    ]
+
+
+def test_free_cn_historical_batch_ignores_logout_timeout_after_valid_rows(monkeypatch):
+    class FakeQueryResult:
+        error_code = "0"
+        error_msg = "success"
+        fields = ["date", "open", "high", "low", "close", "volume", "amount"]
+
+        def __init__(self):
+            self.pending = True
+
+        def next(self):
+            if self.pending:
+                self.pending = False
+                return True
+            return False
+
+        def get_row_data(self):
+            return ["2026-01-05", "10", "10", "10", "10", "1000", "10000"]
+
+    monkeypatch.setattr(
+        "qagent.providers.free_cn.bs",
+        SimpleNamespace(
+            login=lambda: SimpleNamespace(error_code="0", error_msg="success"),
+            logout=lambda: (_ for _ in ()).throw(TimeoutError("logout timed out")),
+            query_history_k_data_plus=lambda *args, **kwargs: FakeQueryResult(),
+        ),
+    )
+
+    provider = FreeCnMarketDataProvider()
+    bars = provider.get_historical_daily_bars(
+        ["CN:000001"],
+        date(2026, 1, 1),
+        date(2026, 1, 9),
+    )
+
+    assert not bars.empty
+    assert provider.last_errors == ["baostock batch logout: logout timed out"]

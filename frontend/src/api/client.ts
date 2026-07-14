@@ -835,6 +835,10 @@ export async function fetchHistoricalBackfillJob(jobId: string): Promise<Histori
   return apiGet<HistoricalBackfillJob>(`/historical-data/backfill/${jobId}`);
 }
 
+export async function retryHistoricalBackfillJob(jobId: string): Promise<HistoricalBackfillJob> {
+  return apiPost<HistoricalBackfillJob>(`/historical-data/backfill/${jobId}/retry`, {});
+}
+
 export async function fetchDailyBrief(
   provider: DataProviderMode,
   symbols?: string,

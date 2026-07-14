@@ -139,6 +139,11 @@ class BatchHistoryProvider(AdjustedHistoryProvider):
         return super().get_daily_bars(instrument_ids, start, end)
 
 
+class BatchTimeoutHistoryProvider(AdjustedHistoryProvider):
+    def get_historical_daily_bars(self, instrument_ids, start, end):
+        raise TimeoutError("historical batch timed out")
+
+
 class PartialHistoryProvider(AdjustedHistoryProvider):
     def get_daily_bars(self, instrument_ids, start, end):
         return super().get_daily_bars(instrument_ids, start, end).head(2)
@@ -869,6 +874,33 @@ def test_historical_backfill_uses_batched_historical_price_provider(tmp_path):
     assert result.job.succeeded_symbols == len(symbols)
     assert provider.batch_calls == [symbols[:5], symbols[5:]]
     assert provider.calls == 2
+
+
+def test_historical_backfill_defers_batch_level_timeout_instead_of_failing_job(
+    tmp_path,
+    monkeypatch,
+):
+    repo, cache = make_repositories(tmp_path)
+    monkeypatch.setattr("qagent.data_management.sleep", lambda _: None)
+
+    result = run_historical_backfill(
+        repo=repo,
+        cache=cache,
+        provider=BatchTimeoutHistoryProvider(),
+        strategy_provider=None,
+        provider_mode="free",
+        instrument_ids=["CN:000001"],
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 9),
+        universe_as_of=date(2026, 1, 9),
+        batch_size=25,
+    )
+
+    assert result.job.status == "succeeded"
+    assert result.job.succeeded_symbols == 1
+    assert result.job.failed_symbols == 0
+    assert result.job.data_health["backfill_price_retry_attempted"] == "1"
+    assert result.job.data_health["backfill_price_retry_recovered"] == "1"
 
 
 def test_historical_backfill_marks_nonempty_partial_price_span_as_failed(tmp_path):

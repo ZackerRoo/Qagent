@@ -624,6 +624,38 @@ def historical_data_backfill_job(job_id: str) -> dict[str, object]:
     return _historical_backfill_job_payload(job)
 
 
+@router.post("/historical-data/backfill/{job_id}/retry")
+def retry_historical_data_backfill(job_id: str) -> dict[str, object]:
+    repo = _repo()
+    job = repo.get_historical_backfill_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="historical backfill job not found")
+    if job.status in {"queued", "running"}:
+        _submit_historical_backfill(job.job_id)
+        return _historical_backfill_job_payload(job)
+    if job.status not in {"failed", "cancelled"}:
+        raise HTTPException(
+            status_code=409,
+            detail=f"historical backfill job cannot resume from {job.status}",
+        )
+    retry_count = int(job.data_health.get("backfill_resume_count", "0") or 0) + 1
+    resumed = repo.update_historical_backfill_job(
+        job.job_id,
+        status="queued",
+        failed_symbols=max(job.processed_symbols - job.succeeded_symbols, 0),
+        data_health={
+            **job.data_health,
+            "backfill_phase": "queued",
+            "backfill_resume_requested": "true",
+            "backfill_resume_count": str(retry_count),
+        },
+    )
+    if resumed is None:
+        raise HTTPException(status_code=404, detail="historical backfill job not found")
+    _submit_historical_backfill(resumed.job_id)
+    return _historical_backfill_job_payload(resumed)
+
+
 def restore_historical_backfill_from_storage() -> str | None:
     job = _repo().get_latest_historical_backfill_job()
     if job is None or job.status not in {"queued", "running"}:

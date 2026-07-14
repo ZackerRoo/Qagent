@@ -155,11 +155,19 @@ class FreeCnMarketDataProvider:
             return pd.DataFrame(columns=BAR_COLUMNS)
         frames: list[pd.DataFrame] = []
         with serialized_baostock_session():
-            with (
-                baostock_call_deadline(self.request_timeout_seconds),
-                _bounded_network_calls(self.request_timeout_seconds),
-            ):
-                login = bs.login()
+            try:
+                with (
+                    baostock_call_deadline(self.request_timeout_seconds),
+                    _bounded_network_calls(self.request_timeout_seconds),
+                ):
+                    login = bs.login()
+            except Exception as exc:
+                self.last_errors.extend(
+                    f"{instrument_id}: baostock batch login: {exc}"
+                    for instrument_id, _ in symbols
+                )
+                self._record_source_failure()
+                return pd.DataFrame(columns=BAR_COLUMNS)
             try:
                 if login.error_code != "0":
                     message = login.error_msg or "login failed"
@@ -199,11 +207,15 @@ class FreeCnMarketDataProvider:
                     ).dt.date
                     frames.append(normalized[BAR_COLUMNS])
             finally:
-                with (
-                    baostock_call_deadline(self.request_timeout_seconds),
-                    _bounded_network_calls(self.request_timeout_seconds),
-                ):
-                    bs.logout()
+                try:
+                    with (
+                        baostock_call_deadline(self.request_timeout_seconds),
+                        _bounded_network_calls(self.request_timeout_seconds),
+                    ):
+                        bs.logout()
+                except Exception as exc:
+                    self.last_errors.append(f"baostock batch logout: {exc}")
+                    self._record_source_failure()
         if not frames:
             return pd.DataFrame(columns=BAR_COLUMNS)
         return pd.concat(frames, ignore_index=True)

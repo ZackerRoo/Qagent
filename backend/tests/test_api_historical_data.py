@@ -297,6 +297,52 @@ def test_historical_backfill_restore_resubmits_interrupted_job(tmp_path, monkeyp
     assert submitted[0][1] == (job.job_id,)
 
 
+def test_failed_historical_backfill_can_resume_from_saved_checkpoint(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'historical-retry-api.db'}",
+    )
+    repo = routes._repo()
+    job = repo.create_historical_backfill_job(
+        "free",
+        ["CN:000001", "CN:000002"],
+        start=routes.date(2026, 1, 1),
+        end=routes.date(2026, 1, 9),
+        data_health={"backfill_scope": "symbols", "backfill_phase": "failed"},
+    )
+    repo.update_historical_backfill_job(
+        job.job_id,
+        status="failed",
+        processed_symbols=1,
+        succeeded_symbols=1,
+        failed_symbols=1,
+    )
+    submitted = []
+
+    class FakeExecutor:
+        def submit(self, fn, *args, **kwargs):
+            submitted.append((fn, args, kwargs))
+
+    monkeypatch.setattr(routes, "_history_task_executor", FakeExecutor())
+    routes._submitted_historical_jobs.clear()
+    client = TestClient(create_app())
+
+    response = client.post(f"/api/historical-data/backfill/{job.job_id}/retry")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "queued"
+    assert body["processed_symbols"] == 1
+    assert body["succeeded_symbols"] == 1
+    assert body["failed_symbols"] == 0
+    assert body["data_health"]["backfill_resume_requested"] == "true"
+    assert body["data_health"]["backfill_resume_count"] == "1"
+    assert submitted[0][1] == (job.job_id,)
+
+
 def test_historical_coverage_api_reports_missing_evidence(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "QAGENT_DATABASE_URL",
