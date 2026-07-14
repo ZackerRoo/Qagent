@@ -194,7 +194,8 @@ Package Qagent as a reliable research preview with explicit limitations and repe
 - Completed runs only satisfy automatic validation when their experiment digest matches the current code, strategy registry, execution rules, parameters, and dataset revision.
 - A real three-year pilot on dataset revision 40 remains available: 146 snapshots, 328 Top-5 trades, and 612 Top-10 trades. Its 0.33% cross-sectional evidence coverage keeps it labelled as a pilot, not validated full-market evidence.
 - Paper trading is active with A-share sessions, T+1, costs, slippage, candidate replacement, five validation slots, and restart-safe scheduling. Current evidence is negative and remains visible: 23 eligible samples, 10 triggered, 9 stopped, 9 missed entries, 0% closed win rate, and -4.55% account return as of 2026-07-14.
-- Full verification passes with 551 backend tests, Ruff, and the frontend production build.
+- Coverage reporting is listing-aware: post-start IPOs are not penalized for impossible pre-listing fundamentals or universe membership.
+- Full verification passes with 552 backend tests, Ruff, and the frontend production build.
 
 ### What's next
 

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from qagent import data_management
 from qagent.data_management import HistoricalBackfillFailed, run_historical_backfill
 from qagent.db import Base, create_db_engine, create_session_factory
 from qagent.historical_evidence.models import (
@@ -1282,6 +1283,30 @@ def test_historical_backfill_manifest_includes_tradability_and_reference_evidenc
     assert result.job.data_health["historical_evidence_tradability"] == str(
         item.expected_sessions
     )
+
+
+def test_coverage_issues_do_not_require_pre_listing_fundamentals_or_universe():
+    issues = data_management._coverage_issues(
+        instrument_id="CN:001999",
+        asset_type="stock",
+        bar_ratio=1.0,
+        adjustment_ratio=1.0,
+        fundamental_count=2,
+        first_fundamental=date(2025, 4, 30),
+        first_universe=date(2025, 2, 28),
+        start=date(2025, 1, 2),
+        unexpected_rows=0,
+        expected_sessions=20,
+        evidence_item=SimpleNamespace(
+            listing_date=date(2025, 2, 10),
+            tradability_rows=20,
+            profile_rows=1,
+            industry_rows=1,
+        ),
+    )
+
+    assert "fundamental_history_incomplete" not in issues
+    assert "historical_universe_incomplete" not in issues
 
 
 def test_historical_backfill_reports_evidence_errors_in_terminal_status(tmp_path):

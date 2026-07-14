@@ -1645,15 +1645,22 @@ def _coverage_issues(
     evidence_item,
 ) -> list[str]:
     issues: list[str] = []
+    listed_after_start = bool(
+        evidence_item.listing_date and evidence_item.listing_date > start
+    )
     if bar_ratio < 0.95:
         issues.append("bar_coverage_below_95pct")
     if _requires_adjustment(instrument_id) and (adjustment_ratio or 0) < 0.95:
         issues.append("adjustment_coverage_below_95pct")
     if asset_type == "stock" and fundamental_count == 0:
         issues.append("fundamentals_missing")
-    elif asset_type == "stock" and (first_fundamental is None or first_fundamental > start):
+    elif (
+        asset_type == "stock"
+        and not listed_after_start
+        and (first_fundamental is None or first_fundamental > start)
+    ):
         issues.append("fundamental_history_incomplete")
-    if first_universe is None or first_universe > start:
+    if first_universe is None or (first_universe > start and not listed_after_start):
         issues.append("historical_universe_incomplete")
     if _ratio(evidence_item.tradability_rows, expected_sessions) < 0.95:
         issues.append("tradability_coverage_below_95pct")
