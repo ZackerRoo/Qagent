@@ -805,6 +805,32 @@ class ReplayEvidenceRepository:
             )
         return [HistoricalReplayBar.model_validate(_row_dict(row)) for row in rows]
 
+    def replay_instrument_ids(
+        self,
+        instrument_ids: Sequence[str],
+        start: date,
+        end: date,
+        revision: int,
+    ) -> set[str]:
+        available: set[str] = set()
+        symbols = list(dict.fromkeys(instrument_ids))
+        with self.session_factory() as session:
+            for offset in range(0, len(symbols), 500):
+                batch = symbols[offset : offset + 500]
+                rows = session.execute(
+                    select(HistoricalReplayBarRow.instrument_id)
+                    .distinct()
+                    .where(
+                        HistoricalReplayBarRow.provider_mode == self.provider_mode,
+                        HistoricalReplayBarRow.instrument_id.in_(batch),
+                        HistoricalReplayBarRow.trade_date >= start,
+                        HistoricalReplayBarRow.trade_date <= end,
+                        HistoricalReplayBarRow.dataset_revision <= revision,
+                    )
+                )
+                available.update(str(row[0]) for row in rows)
+        return available
+
     def fundamentals_as_of(
         self,
         instrument_ids: Sequence[str],

@@ -249,6 +249,9 @@ def run_historical_backfill(
         job.status == "running"
         or job.data_health.get("backfill_resume_requested", "false").lower() == "true"
     )
+    listing_aware_checkpoint = (
+        job.data_health.get("backfill_price_range_semantics") == "listing_aware_v1"
+    )
     initial_health = dict(job.data_health)
     initial_health.update(
         {
@@ -259,6 +262,8 @@ def run_historical_backfill(
             "backfill_resume_requested": "false",
         }
     )
+    if not resume_requested:
+        initial_health["backfill_price_range_semantics"] = "listing_aware_v1"
     repo.update_historical_backfill_job(
         job.job_id,
         status="running",
@@ -287,7 +292,21 @@ def run_historical_backfill(
     ]
     retryable_symbols = _restored_retryable_symbols(job)
     if resume_requested:
+        processed_prefix = set(symbols[:processed])
+        retryable_symbols = [
+            item for item in retryable_symbols if item in processed_prefix
+        ]
+        permanent_symbols = [
+            item for item in permanent_symbols if item in processed_prefix
+        ]
+    if resume_requested and not listing_aware_checkpoint:
         ready_prefix = 0
+        replay_instruments = replay_repo.replay_instrument_ids(
+            symbols[:processed],
+            start,
+            end,
+            replay_repo.current_revision(),
+        )
         for instrument_id in symbols[:processed]:
             symbol_start, symbol_end = active_price_ranges[instrument_id]
             if cache.has_usable_coverage(
@@ -298,15 +317,16 @@ def run_historical_backfill(
                 require_adjusted=_requires_adjustment(instrument_id),
                 minimum_session_coverage=0.95,
             ):
-                replay_rows += _persist_replay_frame(
-                    replay_repo,
-                    cache.load_daily_bars(
-                        mode,
-                        [instrument_id],
-                        symbol_start,
-                        symbol_end,
-                    ),
-                )
+                if instrument_id not in replay_instruments:
+                    replay_rows += _persist_replay_frame(
+                        replay_repo,
+                        cache.load_daily_bars(
+                            mode,
+                            [instrument_id],
+                            symbol_start,
+                            symbol_end,
+                        ),
+                    )
                 ready_prefix += 1
                 if instrument_id in retryable_symbols:
                     retryable_symbols.remove(instrument_id)
@@ -322,6 +342,21 @@ def run_historical_backfill(
         failed = processed - succeeded
         retryable_failed = max(retryable_failed, len(retryable_symbols))
         permanent_failed = len(permanent_symbols)
+        _update_backfill_health(
+            repo,
+            job.job_id,
+            backfill_price_range_semantics="listing_aware_v1",
+            backfill_price_retryable_failed=str(retryable_failed),
+            backfill_price_retryable_symbols=",".join(retryable_symbols),
+            backfill_price_retry_unresolved=str(len(retryable_symbols)),
+            backfill_price_permanent_failed=str(permanent_failed),
+            backfill_price_permanent_symbols=",".join(permanent_symbols),
+        )
+        repo.update_historical_backfill_job(
+            job.job_id,
+            succeeded_symbols=succeeded,
+            failed_symbols=failed,
+        )
     retry_attempted = int(
         job.data_health.get("backfill_price_retry_attempted", "0") or 0
     )

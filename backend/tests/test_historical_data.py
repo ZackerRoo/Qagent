@@ -561,6 +561,44 @@ def test_historical_backfill_is_idempotent_and_emits_coverage_manifest(tmp_path)
     assert provider.calls == 1
 
 
+def test_listing_aware_checkpoint_skips_completed_prefix_reconciliation(tmp_path):
+    repo, cache = make_repositories(tmp_path)
+    provider = AdjustedHistoryProvider()
+    start = date(2026, 1, 1)
+    end = date(2026, 1, 9)
+
+    first = run_historical_backfill(
+        repo=repo,
+        cache=cache,
+        provider=provider,
+        strategy_provider=None,
+        provider_mode="free",
+        instrument_ids=["CN:000001"],
+        start=start,
+        end=end,
+        universe_as_of=end,
+    )
+    repo.update_historical_backfill_job(first.job.job_id, status="running")
+
+    resumed = run_historical_backfill(
+        repo=repo,
+        cache=cache,
+        provider=provider,
+        strategy_provider=None,
+        provider_mode="free",
+        instrument_ids=["CN:000001"],
+        start=start,
+        end=end,
+        job_id=first.job.job_id,
+        universe_as_of=end,
+    )
+
+    assert resumed.job.status == "succeeded"
+    assert resumed.job.succeeded_symbols == 1
+    assert resumed.job.data_health["backfill_price_range_semantics"] == "listing_aware_v1"
+    assert provider.calls == 1
+
+
 def test_historical_backfill_persists_paired_replay_inventory_and_benchmarks(
     tmp_path,
 ):
