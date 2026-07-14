@@ -143,6 +143,7 @@ from qagent.storage.repository import (
     OpportunitySnapshotRecord,
     PositionCreate,
     QagentRepository,
+    ScanResultCacheRecord,
     WatchlistCreate,
 )
 from qagent.storage.market_cache import MarketDataCacheRepository
@@ -2371,7 +2372,8 @@ def _paper_seed_snapshots_from_latest_cache(
     max_age: timedelta,
     limit: int,
 ) -> tuple[list, dict[str, str]]:
-    cached = repo.get_recent_scan_result_cache(
+    cached, cache_freshness = _automation_scan_result_cache(
+        repo,
         cache_key=full_market_batch_cache_key(mode, include_etfs),
         max_age=max_age,
     )
@@ -2420,6 +2422,7 @@ def _paper_seed_snapshots_from_latest_cache(
     return selected, {
         "automation_seed_source": "latest_recommendation_cache",
         "automation_seed_cache_id": cached.cache_id,
+        "automation_seed_cache_freshness": cache_freshness,
         "automation_seed_rank_profile": "balanced",
     }
 
@@ -2463,6 +2466,33 @@ def _a_share_today() -> date:
     return datetime.now(ZoneInfo("Asia/Shanghai")).date()
 
 
+def _automation_scan_result_cache(
+    repo: QagentRepository,
+    *,
+    cache_key: str,
+    max_age: timedelta,
+) -> tuple[ScanResultCacheRecord | None, str]:
+    cached = repo.get_recent_scan_result_cache(cache_key=cache_key, max_age=max_age)
+    if cached is not None:
+        return cached, "age_window"
+
+    # A scan produced after the current A-share session remains the latest
+    # actionable evidence for that entire local date. Do not fall back to a
+    # previous signal day merely because the wall-clock TTL expires at night.
+    market_day_cache = repo.get_recent_scan_result_cache(
+        cache_key=cache_key,
+        max_age=max(max_age, timedelta(days=1)),
+    )
+    if market_day_cache is None:
+        return None, "missing"
+    created_at = market_day_cache.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    if created_at.astimezone(ZoneInfo("Asia/Shanghai")).date() == _a_share_today():
+        return market_day_cache, "same_market_day"
+    return None, "expired"
+
+
 def _maybe_start_automatic_full_scan(
     repo: QagentRepository,
     settings: AutoProcessingSettings,
@@ -2482,7 +2512,8 @@ def _maybe_start_automatic_full_scan(
                 "full_market_stale_reset_at": datetime.now(timezone.utc).isoformat(),
             },
         )
-    cached = repo.get_recent_scan_result_cache(
+    cached, _ = _automation_scan_result_cache(
+        repo,
         cache_key=full_market_batch_cache_key(mode, settings.include_etfs),
         max_age=timedelta(minutes=settings.scan_max_age_minutes),
     )

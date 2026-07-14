@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -11,6 +12,35 @@ from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.automation_scheduler import AutomationScheduler, AutoProcessingSettings
 from qagent.storage.repository import QagentRepository
 from qagent.storage.tables import OpportunitySnapshotRow, PaperTradeRow, ScanRunRow
+
+
+def test_automation_reuses_same_market_day_cache_after_ttl(monkeypatch):
+    now = datetime.now(timezone.utc)
+    stale_same_day = now - timedelta(hours=6)
+    market_day = stale_same_day.astimezone(ZoneInfo("Asia/Shanghai")).date()
+    cache = SimpleNamespace(created_at=stale_same_day)
+
+    class StubRepo:
+        def __init__(self):
+            self.max_ages: list[timedelta] = []
+
+        def get_recent_scan_result_cache(self, *, cache_key, max_age):
+            assert cache_key == "full_market_batch:free:true"
+            self.max_ages.append(max_age)
+            return cache if max_age >= timedelta(hours=6) else None
+
+    repo = StubRepo()
+    monkeypatch.setattr(routes, "_a_share_today", lambda: market_day)
+
+    result, freshness = routes._automation_scan_result_cache(
+        repo,
+        cache_key="full_market_batch:free:true",
+        max_age=timedelta(hours=4),
+    )
+
+    assert result is cache
+    assert freshness == "same_market_day"
+    assert repo.max_ages == [timedelta(hours=4), timedelta(days=1)]
 
 
 def test_automation_run_api_saves_brief_and_queues_delivery(tmp_path, monkeypatch):
