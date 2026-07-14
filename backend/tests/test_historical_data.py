@@ -144,6 +144,24 @@ class BatchTimeoutHistoryProvider(AdjustedHistoryProvider):
         raise TimeoutError("historical batch timed out")
 
 
+class EmptyBatchHistoryProvider(AdjustedHistoryProvider):
+    def get_historical_daily_bars(self, instrument_ids, start, end):
+        return pd.DataFrame()
+
+
+class EmptyBatchAndFallbackHistoryProvider:
+    name = "empty_batch_fixture"
+    last_errors: list[str] = []
+
+    def get_historical_daily_bars(self, instrument_ids, start, end):
+        self.last_errors = []
+        return pd.DataFrame()
+
+    def get_daily_bars(self, instrument_ids, start, end):
+        self.last_errors = []
+        return pd.DataFrame()
+
+
 class PartialHistoryProvider(AdjustedHistoryProvider):
     def get_daily_bars(self, instrument_ids, start, end):
         return super().get_daily_bars(instrument_ids, start, end).head(2)
@@ -901,6 +919,50 @@ def test_historical_backfill_defers_batch_level_timeout_instead_of_failing_job(
     assert result.job.failed_symbols == 0
     assert result.job.data_health["backfill_price_retry_attempted"] == "1"
     assert result.job.data_health["backfill_price_retry_recovered"] == "1"
+
+
+def test_historical_backfill_retries_empty_batch_with_regular_provider(tmp_path):
+    repo, cache = make_repositories(tmp_path)
+
+    result = run_historical_backfill(
+        repo=repo,
+        cache=cache,
+        provider=EmptyBatchHistoryProvider(),
+        strategy_provider=None,
+        provider_mode="free",
+        instrument_ids=["CN:159862"],
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 9),
+        universe_as_of=date(2026, 1, 9),
+    )
+
+    assert result.job.status == "succeeded"
+    assert result.job.succeeded_symbols == 1
+    assert result.job.data_health["backfill_price_retry_attempted"] == "1"
+    assert result.job.data_health["backfill_price_retry_recovered"] == "1"
+    assert result.job.data_health["backfill_price_retry_unresolved"] == "0"
+
+
+def test_historical_backfill_marks_empty_fallback_as_permanently_unavailable(tmp_path):
+    repo, cache = make_repositories(tmp_path)
+
+    result = run_historical_backfill(
+        repo=repo,
+        cache=cache,
+        provider=EmptyBatchAndFallbackHistoryProvider(),
+        strategy_provider=None,
+        provider_mode="free",
+        instrument_ids=["CN:159862"],
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 9),
+        universe_as_of=date(2026, 1, 9),
+    )
+
+    assert result.job.status == "succeeded_with_errors"
+    assert result.job.failed_symbols == 1
+    assert result.job.data_health["backfill_price_retry_attempted"] == "1"
+    assert result.job.data_health["backfill_price_retry_unresolved"] == "0"
+    assert result.job.data_health["backfill_price_permanent_failed"] == "1"
 
 
 def test_historical_backfill_marks_nonempty_partial_price_span_as_failed(tmp_path):

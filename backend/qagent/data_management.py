@@ -258,6 +258,15 @@ def run_historical_backfill(
         job.data_health.get("backfill_price_permanent_failed", "0") or 0
     )
     retryable_symbols = _restored_retryable_symbols(job)
+    if resume_requested:
+        for instrument_id in symbols[:processed]:
+            if instrument_id in retryable_symbols:
+                continue
+            cached_rows = cache.load_daily_bars(mode, [instrument_id], start, end)
+            if cached_rows.empty:
+                retryable_symbols.append(instrument_id)
+        retryable_failed = max(retryable_failed, len(retryable_symbols))
+        permanent_failed = max(failed - len(retryable_symbols), 0)
     retry_attempted = int(
         job.data_health.get("backfill_price_retry_attempted", "0") or 0
     )
@@ -626,6 +635,9 @@ def run_historical_backfill(
                     )
                     errors = _without_instrument_errors(errors, instrument_id)
                     errors.append(f"{instrument_id}: {detail}")
+                    if not _is_retryable_provider_failure(provider_errors):
+                        retryable_symbols.remove(instrument_id)
+                        permanent_failed += 1
                 _update_backfill_health(
                     repo,
                     job.job_id,
@@ -633,6 +645,7 @@ def run_historical_backfill(
                     backfill_price_retry_attempted=str(retry_attempted),
                     backfill_price_retry_recovered=str(retry_recovered),
                     backfill_price_retry_unresolved=str(len(retryable_symbols)),
+                    backfill_price_permanent_failed=str(permanent_failed),
                     backfill_price_retryable_symbols=",".join(retryable_symbols),
                     backfill_price_retry_progress=(
                         f"{retry_index}/{len(pending_retry_symbols)}"
@@ -1072,6 +1085,7 @@ def _checkpoint_price_backfill_health(
         backfill_price_network_succeeded=str(network_succeeded),
         backfill_price_retryable_failed=str(retryable_failed),
         backfill_price_permanent_failed=str(permanent_failed),
+        backfill_price_retry_unresolved=str(len(retryable_symbols)),
         backfill_price_retryable_symbols=",".join(retryable_symbols),
         backfill_price_remaining=str(max(total - processed, 0)),
     )
@@ -1116,6 +1130,7 @@ def _is_retryable_provider_failure(errors: list[str]) -> bool:
             "deadline",
             "disconnect",
             "disconnected",
+            "fallback",
             "login failed",
             "network",
             "codec",
@@ -1668,12 +1683,20 @@ def _historical_price_batches(
                     batch_errors,
                     instrument_id,
                 )
+                if bars.empty and not provider_errors:
+                    provider_errors = [
+                        "batch provider returned no rows; retry with provider fallback"
+                    ]
             yield instrument_id, bars, provider_errors, False
 
 
 def _errors_for_instrument(errors: list[str], instrument_id: str) -> list[str]:
     prefix = f"{instrument_id}:"
-    return [error for error in errors if error.startswith(prefix)]
+    return [
+        error[len(prefix) :].strip()
+        for error in errors
+        if error.startswith(prefix)
+    ]
 
 
 def _fetch_uncached_daily_bars(
