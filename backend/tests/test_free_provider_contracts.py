@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
@@ -474,3 +475,50 @@ def test_free_cn_provider_falls_back_to_baostock(monkeypatch):
     assert bars.iloc[0]["close"] == 11.5
     assert bars.iloc[0]["adjusted_close"] == 9.2
     assert provider.last_errors == []
+
+
+def test_free_cn_provider_bounds_complete_baostock_history_reads(monkeypatch):
+    deadlines: list[int] = []
+
+    @contextmanager
+    def fake_deadline(timeout_seconds):
+        deadlines.append(timeout_seconds)
+        yield
+
+    class FakeQueryResult:
+        error_code = "0"
+        error_msg = "success"
+        fields = ["date", "open", "high", "low", "close", "volume", "amount"]
+
+        def __init__(self):
+            self.pending = True
+
+        def next(self):
+            if self.pending:
+                self.pending = False
+                return True
+            return False
+
+        def get_row_data(self):
+            return ["2026-01-05", "10", "11", "9", "10.5", "1000", "10000"]
+
+    fake_bs = SimpleNamespace(
+        login=lambda: SimpleNamespace(error_code="0", error_msg="success"),
+        query_history_k_data_plus=lambda *args, **kwargs: FakeQueryResult(),
+        logout=lambda: None,
+    )
+    monkeypatch.setattr("qagent.providers.free_cn.bs", fake_bs)
+    monkeypatch.setattr(
+        "qagent.providers.free_cn.baostock_call_deadline",
+        fake_deadline,
+    )
+
+    bars = FreeCnMarketDataProvider._load_baostock(
+        "000001",
+        date(2026, 1, 1),
+        date(2026, 1, 9),
+        request_timeout_seconds=3,
+    )
+
+    assert not bars.empty
+    assert deadlines == [3, 15, 15, 3]

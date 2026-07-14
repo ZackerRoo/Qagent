@@ -13,6 +13,7 @@ import yfinance as yf
 from qagent.providers.base import MINUTE_BAR_COLUMNS
 from qagent.providers.baostock_session import (
     BAOSTOCK_SESSION_LOCK,
+    baostock_call_deadline,
     serialized_baostock_session,
 )
 
@@ -279,15 +280,22 @@ class FreeCnMarketDataProvider:
         end: date,
         request_timeout_seconds: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
     ) -> pd.DataFrame:
+        history_deadline_seconds = max(15, request_timeout_seconds * 4)
         with serialized_baostock_session():
-            with _bounded_network_calls(request_timeout_seconds):
+            with (
+                baostock_call_deadline(request_timeout_seconds),
+                _bounded_network_calls(request_timeout_seconds),
+            ):
                 login = bs.login()
             try:
                 if login.error_code != "0":
                     raise RuntimeError(login.error_msg)
                 frames = []
                 for adjustflag in ("3", "2"):
-                    with _bounded_network_calls(request_timeout_seconds):
+                    with (
+                        baostock_call_deadline(history_deadline_seconds),
+                        _bounded_network_calls(request_timeout_seconds),
+                    ):
                         result = bs.query_history_k_data_plus(
                             _to_baostock_symbol(symbol),
                             "date,open,high,low,close,volume,amount",
@@ -296,14 +304,18 @@ class FreeCnMarketDataProvider:
                             frequency="d",
                             adjustflag=adjustflag,
                         )
-                    if result.error_code != "0":
-                        raise RuntimeError(result.error_msg)
-                    rows: list[list[str]] = []
-                    while result.next():
-                        rows.append(result.get_row_data())
+                        if result.error_code != "0":
+                            raise RuntimeError(result.error_msg)
+                        rows: list[list[str]] = []
+                        while result.next():
+                            rows.append(result.get_row_data())
                     frames.append(pd.DataFrame(rows, columns=result.fields))
             finally:
-                bs.logout()
+                with (
+                    baostock_call_deadline(request_timeout_seconds),
+                    _bounded_network_calls(request_timeout_seconds),
+                ):
+                    bs.logout()
         raw, adjusted = frames
         if raw.empty:
             return pd.DataFrame(columns=BAR_COLUMNS)
