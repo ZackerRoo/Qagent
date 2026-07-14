@@ -137,6 +137,70 @@ class FreeCnMarketDataProvider:
             return pd.DataFrame(columns=BAR_COLUMNS)
         return pd.concat(frames, ignore_index=True)
 
+    def get_historical_daily_bars(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> pd.DataFrame:
+        """Load an adjusted history batch through one BaoStock session."""
+        self.last_errors = []
+        symbols = [
+            (instrument_id, instrument_id.split(":", 1)[1])
+            for instrument_id in dict.fromkeys(instrument_ids)
+            if instrument_id.startswith("CN:")
+            and not _is_index_symbol(instrument_id.split(":", 1)[1])
+        ]
+        if not symbols:
+            return pd.DataFrame(columns=BAR_COLUMNS)
+        frames: list[pd.DataFrame] = []
+        with serialized_baostock_session():
+            with (
+                baostock_call_deadline(self.request_timeout_seconds),
+                _bounded_network_calls(self.request_timeout_seconds),
+            ):
+                login = bs.login()
+            try:
+                if login.error_code != "0":
+                    message = login.error_msg or "login failed"
+                    self.last_errors.extend(
+                        f"{instrument_id}: baostock batch login: {message}"
+                        for instrument_id, _ in symbols
+                    )
+                    self._record_source_failure()
+                    return pd.DataFrame(columns=BAR_COLUMNS)
+                for instrument_id, symbol in symbols:
+                    try:
+                        normalized = self._load_baostock_logged_in(
+                            symbol,
+                            start,
+                            end,
+                            self.request_timeout_seconds,
+                        )
+                    except Exception as exc:
+                        self.last_errors.append(
+                            f"{instrument_id}: baostock historical batch: {exc}"
+                        )
+                        self._record_source_failure()
+                        continue
+                    self._record_source_success()
+                    if normalized.empty:
+                        continue
+                    normalized["instrument_id"] = instrument_id
+                    normalized["trade_date"] = pd.to_datetime(
+                        normalized["trade_date"]
+                    ).dt.date
+                    frames.append(normalized[BAR_COLUMNS])
+            finally:
+                with (
+                    baostock_call_deadline(self.request_timeout_seconds),
+                    _bounded_network_calls(self.request_timeout_seconds),
+                ):
+                    bs.logout()
+        if not frames:
+            return pd.DataFrame(columns=BAR_COLUMNS)
+        return pd.concat(frames, ignore_index=True)
+
     def get_snapshot(self, instrument_ids: list[str]) -> pd.DataFrame:
         bars = self.get_daily_bars(instrument_ids, date(1900, 1, 1), date.today())
         if bars.empty:
@@ -280,7 +344,6 @@ class FreeCnMarketDataProvider:
         end: date,
         request_timeout_seconds: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
     ) -> pd.DataFrame:
-        history_deadline_seconds = max(15, request_timeout_seconds * 4)
         with serialized_baostock_session():
             with (
                 baostock_call_deadline(request_timeout_seconds),
@@ -290,32 +353,47 @@ class FreeCnMarketDataProvider:
             try:
                 if login.error_code != "0":
                     raise RuntimeError(login.error_msg)
-                frames = []
-                for adjustflag in ("3", "2"):
-                    with (
-                        baostock_call_deadline(history_deadline_seconds),
-                        _bounded_network_calls(request_timeout_seconds),
-                    ):
-                        result = bs.query_history_k_data_plus(
-                            _to_baostock_symbol(symbol),
-                            "date,open,high,low,close,volume,amount",
-                            start_date=start.isoformat(),
-                            end_date=end.isoformat(),
-                            frequency="d",
-                            adjustflag=adjustflag,
-                        )
-                        if result.error_code != "0":
-                            raise RuntimeError(result.error_msg)
-                        rows: list[list[str]] = []
-                        while result.next():
-                            rows.append(result.get_row_data())
-                    frames.append(pd.DataFrame(rows, columns=result.fields))
+                return FreeCnMarketDataProvider._load_baostock_logged_in(
+                    symbol,
+                    start,
+                    end,
+                    request_timeout_seconds,
+                )
             finally:
                 with (
                     baostock_call_deadline(request_timeout_seconds),
                     _bounded_network_calls(request_timeout_seconds),
                 ):
                     bs.logout()
+
+    @staticmethod
+    def _load_baostock_logged_in(
+        symbol: str,
+        start: date,
+        end: date,
+        request_timeout_seconds: int,
+    ) -> pd.DataFrame:
+        history_deadline_seconds = max(15, request_timeout_seconds * 4)
+        frames = []
+        for adjustflag in ("3", "2"):
+            with (
+                baostock_call_deadline(history_deadline_seconds),
+                _bounded_network_calls(request_timeout_seconds),
+            ):
+                result = bs.query_history_k_data_plus(
+                    _to_baostock_symbol(symbol),
+                    "date,open,high,low,close,volume,amount",
+                    start_date=start.isoformat(),
+                    end_date=end.isoformat(),
+                    frequency="d",
+                    adjustflag=adjustflag,
+                )
+                if result.error_code != "0":
+                    raise RuntimeError(result.error_msg)
+                rows: list[list[str]] = []
+                while result.next():
+                    rows.append(result.get_row_data())
+            frames.append(pd.DataFrame(rows, columns=result.fields))
         raw, adjusted = frames
         if raw.empty:
             return pd.DataFrame(columns=BAR_COLUMNS)
@@ -402,7 +480,13 @@ class FreeCnMarketDataProvider:
 
 
 def _to_baostock_symbol(symbol: str) -> str:
-    prefix = "sh" if symbol.startswith(("5", "6", "9")) else "sz"
+    prefix = (
+        "bj"
+        if symbol.startswith(("4", "8", "92"))
+        else "sh"
+        if symbol.startswith(("5", "6", "9"))
+        else "sz"
+    )
     return f"{prefix}.{symbol}"
 
 

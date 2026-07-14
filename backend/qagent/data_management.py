@@ -511,23 +511,17 @@ def run_historical_backfill(
                 )
 
         _set_backfill_phase(repo, job.job_id, "replay_prices")
-        for instrument_id in symbols[processed:]:
-            require_adjusted = _requires_adjustment(instrument_id)
-            if cache.has_usable_coverage(
-                mode,
-                instrument_id,
-                start,
-                end,
-                require_adjusted=require_adjusted,
-                minimum_session_coverage=0.95,
-            ):
-                cached_bars = cache.load_daily_bars(
-                    mode,
-                    [instrument_id],
-                    start,
-                    end,
-                )
-                replay_rows += _persist_replay_frame(replay_repo, cached_bars)
+        for instrument_id, bars, provider_errors, cache_hit in _historical_price_batches(
+            provider=provider,
+            cache=cache,
+            provider_mode=mode,
+            instrument_ids=symbols[processed:],
+            start=start,
+            end=end,
+            batch_size=batch_size,
+        ):
+            if cache_hit:
+                replay_rows += _persist_replay_frame(replay_repo, bars)
                 processed += 1
                 succeeded += 1
                 cache_reused += 1
@@ -554,12 +548,6 @@ def run_historical_backfill(
                 )
                 continue
 
-            bars, provider_errors = _fetch_uncached_daily_bars(
-                provider,
-                instrument_id,
-                start,
-                end,
-            )
             saved = cache.save_daily_bars(mode, bars)
             cache.record_coverage(mode, instrument_id, start, end, saved)
             replay_rows += _persist_replay_frame(replay_repo, bars)
@@ -1602,6 +1590,75 @@ def _decimal_value(value: object, *, scale: int) -> Decimal | None:
     if not decimal_value.is_finite():
         return None
     return decimal_value.quantize(Decimal(1).scaleb(-scale))
+
+
+def _historical_price_batches(
+    *,
+    provider: MarketDataProvider,
+    cache: MarketDataCacheRepository,
+    provider_mode: str,
+    instrument_ids: list[str],
+    start: date,
+    end: date,
+    batch_size: int,
+):
+    source = getattr(provider, "provider", provider)
+    batch_getter = getattr(source, "get_historical_daily_bars", None)
+    for offset in range(0, len(instrument_ids), max(1, batch_size)):
+        batch = instrument_ids[offset : offset + max(1, batch_size)]
+        cached: dict[str, pd.DataFrame] = {}
+        missing: list[str] = []
+        for instrument_id in batch:
+            if cache.has_usable_coverage(
+                provider_mode,
+                instrument_id,
+                start,
+                end,
+                require_adjusted=_requires_adjustment(instrument_id),
+                minimum_session_coverage=0.95,
+            ):
+                cached[instrument_id] = cache.load_daily_bars(
+                    provider_mode,
+                    [instrument_id],
+                    start,
+                    end,
+                )
+            else:
+                missing.append(instrument_id)
+
+        fetched = pd.DataFrame()
+        batch_errors: list[str] = []
+        if missing and batch_getter is not None:
+            fetched = batch_getter(missing, start, end)
+            batch_errors = list(getattr(source, "last_errors", []))
+
+        for instrument_id in batch:
+            if instrument_id in cached:
+                yield instrument_id, cached[instrument_id], [], True
+                continue
+            if batch_getter is None:
+                bars, provider_errors = _fetch_uncached_daily_bars(
+                    provider,
+                    instrument_id,
+                    start,
+                    end,
+                )
+            else:
+                bars = (
+                    fetched.loc[fetched["instrument_id"].eq(instrument_id)].copy()
+                    if not fetched.empty and "instrument_id" in fetched.columns
+                    else pd.DataFrame()
+                )
+                provider_errors = _errors_for_instrument(
+                    batch_errors,
+                    instrument_id,
+                )
+            yield instrument_id, bars, provider_errors, False
+
+
+def _errors_for_instrument(errors: list[str], instrument_id: str) -> list[str]:
+    prefix = f"{instrument_id}:"
+    return [error for error in errors if error.startswith(prefix)]
 
 
 def _fetch_uncached_daily_bars(

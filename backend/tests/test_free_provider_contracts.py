@@ -522,3 +522,64 @@ def test_free_cn_provider_bounds_complete_baostock_history_reads(monkeypatch):
 
     assert not bars.empty
     assert deadlines == [3, 15, 15, 3]
+
+
+def test_free_cn_historical_batch_reuses_one_baostock_session(monkeypatch):
+    calls = {"login": 0, "logout": 0, "queries": []}
+
+    class FakeQueryResult:
+        error_code = "0"
+        error_msg = "success"
+        fields = ["date", "open", "high", "low", "close", "volume", "amount"]
+
+        def __init__(self, code, adjustflag):
+            close = "20" if code == "sh.600519" else "10"
+            if adjustflag == "2":
+                close = str(Decimal(close) * Decimal("0.9"))
+            self.rows = [["2026-01-05", close, close, close, close, "1000", "10000"]]
+            self.index = -1
+
+        def next(self):
+            self.index += 1
+            return self.index < len(self.rows)
+
+        def get_row_data(self):
+            return self.rows[self.index]
+
+    def fake_login():
+        calls["login"] += 1
+        return SimpleNamespace(error_code="0", error_msg="success")
+
+    def fake_logout():
+        calls["logout"] += 1
+
+    def fake_query(code, fields, start_date, end_date, frequency, adjustflag):
+        calls["queries"].append((code, adjustflag))
+        return FakeQueryResult(code, adjustflag)
+
+    monkeypatch.setattr(
+        "qagent.providers.free_cn.bs",
+        SimpleNamespace(
+            login=fake_login,
+            logout=fake_logout,
+            query_history_k_data_plus=fake_query,
+        ),
+    )
+
+    provider = FreeCnMarketDataProvider()
+    bars = provider.get_historical_daily_bars(
+        ["CN:000001", "CN:600519"],
+        date(2026, 1, 1),
+        date(2026, 1, 9),
+    )
+
+    assert calls["login"] == 1
+    assert calls["logout"] == 1
+    assert calls["queries"] == [
+        ("sz.000001", "3"),
+        ("sz.000001", "2"),
+        ("sh.600519", "3"),
+        ("sh.600519", "2"),
+    ]
+    assert sorted(bars["instrument_id"].unique()) == ["CN:000001", "CN:600519"]
+    assert provider.last_errors == []

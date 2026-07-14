@@ -42,6 +42,29 @@ class CompositeMarketDataProvider:
             return pd.DataFrame(columns=BAR_COLUMNS)
         return pd.concat(frames, ignore_index=True)
 
+    def get_historical_daily_bars(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> pd.DataFrame:
+        self.last_errors = []
+        frames: list[pd.DataFrame] = []
+        for market, market_instruments in self._group_by_market(instrument_ids).items():
+            provider = self._provider_for_market(market)
+            getter = getattr(provider, "get_historical_daily_bars", None)
+            bars = (
+                getter(market_instruments, start, end)
+                if getter is not None
+                else provider.get_daily_bars(market_instruments, start, end)
+            )
+            self.last_errors.extend(getattr(provider, "last_errors", []))
+            if not bars.empty:
+                frames.append(bars)
+        if not frames:
+            return pd.DataFrame(columns=BAR_COLUMNS)
+        return pd.concat(frames, ignore_index=True)
+
     def get_minute_bars(
         self,
         instrument_ids: list[str],
