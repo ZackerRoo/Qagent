@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 
@@ -15,16 +15,95 @@ class ReplayMarketDataProvider:
         self.repository = repository
         self.revision = revision
         self.last_errors: list[str] = []
+        self._bars_by_instrument: dict[str, pd.DataFrame] = {}
+        self._coverage: dict[str, tuple[date, date]] = {}
+        self._pruned_through: date | None = None
+        self.query_count = 0
+        self.full_window_queries = 0
+        self.incremental_queries = 0
+        self.rows_loaded = 0
 
     def get_daily_bars(
         self, instrument_ids: list[str], start: date, end: date
     ) -> pd.DataFrame:
-        rows = self.repository.replay_bars(
-            instrument_ids,
-            start,
-            end,
-            self.revision,
-        )
+        if start > end:
+            raise ValueError("start must be on or before end")
+        requested = sorted(set(instrument_ids))
+        if not requested:
+            return pd.DataFrame()
+        self._prune_before(start)
+        self._ensure_coverage(requested, start, end)
+        frames = []
+        for instrument_id in requested:
+            frame = self._bars_by_instrument.get(instrument_id)
+            if frame is None or frame.empty:
+                continue
+            frames.append(
+                frame.loc[
+                    (frame["trade_date"] >= start)
+                    & (frame["trade_date"] <= end)
+                ]
+            )
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    def prefetch_daily_bars(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> None:
+        if start > end:
+            raise ValueError("start must be on or before end")
+        requested = sorted(set(instrument_ids))
+        if not requested:
+            return
+        self._prune_before(start)
+        self._ensure_coverage(requested, start, end)
+
+    def _ensure_coverage(
+        self,
+        requested: list[str],
+        start: date,
+        end: date,
+    ) -> None:
+        query_groups: dict[tuple[date, date], list[str]] = {}
+        for instrument_id in requested:
+            coverage = self._coverage.get(instrument_id)
+            if coverage is None:
+                query_groups.setdefault((start, end), []).append(instrument_id)
+                continue
+            covered_start, covered_end = coverage
+            if start < covered_start:
+                query_groups.setdefault(
+                    (start, covered_start - timedelta(days=1)),
+                    [],
+                ).append(instrument_id)
+            if end > covered_end:
+                query_groups.setdefault(
+                    (covered_end + timedelta(days=1), end),
+                    [],
+                ).append(instrument_id)
+        for (query_start, query_end), query_ids in query_groups.items():
+            rows = self.repository.replay_bars(
+                query_ids,
+                query_start,
+                query_end,
+                self.revision,
+            )
+            self.query_count += 1
+            if query_start == start and query_end == end:
+                self.full_window_queries += 1
+            else:
+                self.incremental_queries += 1
+            self._append_rows(rows)
+            for instrument_id in query_ids:
+                previous = self._coverage.get(instrument_id)
+                self._coverage[instrument_id] = (
+                    min(previous[0], query_start) if previous else query_start,
+                    max(previous[1], query_end) if previous else query_end,
+                )
+
+    def _append_rows(self, rows) -> None:
         records = []
         for item in rows:
             adjusted = all(
@@ -82,7 +161,40 @@ class ReplayMarketDataProvider:
                     "adjustment_type": item.adjustment_mode,
                 }
             )
-        return pd.DataFrame.from_records(records)
+        self.rows_loaded += len(records)
+        if not records:
+            return
+        incoming = pd.DataFrame.from_records(records)
+        for instrument_id, frame in incoming.groupby("instrument_id", sort=False):
+            existing = self._bars_by_instrument.get(str(instrument_id))
+            combined = (
+                pd.concat([existing, frame], ignore_index=True)
+                if existing is not None
+                else frame.copy()
+            )
+            self._bars_by_instrument[str(instrument_id)] = (
+                combined.drop_duplicates(subset=["trade_date"], keep="last")
+                .sort_values("trade_date")
+                .reset_index(drop=True)
+            )
+
+    def _prune_before(self, start: date) -> None:
+        if self._pruned_through is not None and start <= self._pruned_through:
+            return
+        for instrument_id, frame in list(self._bars_by_instrument.items()):
+            retained = frame.loc[frame["trade_date"] >= start].reset_index(drop=True)
+            if retained.empty:
+                del self._bars_by_instrument[instrument_id]
+            else:
+                self._bars_by_instrument[instrument_id] = retained
+        for instrument_id, (covered_start, covered_end) in list(
+            self._coverage.items()
+        ):
+            if covered_end < start:
+                del self._coverage[instrument_id]
+            elif covered_start < start:
+                self._coverage[instrument_id] = (start, covered_end)
+        self._pruned_through = start
 
     def get_snapshot(self, instrument_ids: list[str]) -> pd.DataFrame:
         return pd.DataFrame()
@@ -103,13 +215,44 @@ class ReplayStrategyDataProvider(BaseStrategyDataProvider):
         super().__init__()
         self.repository = repository
         self.revision = revision
+        self._prefetched_ids: set[str] = set()
+        self._prefetched_as_of: date | None = None
+        self._fundamental_cache = {}
+        self.query_count = 0
+        self.prefetch_count = 0
+
+    def prefetch_fundamentals(self, instrument_ids, end, snapshots=None) -> None:
+        requested = sorted(set(instrument_ids))
+        self._fundamental_cache = (
+            dict(snapshots)
+            if snapshots is not None
+            else self.repository.fundamentals_as_of(
+                requested,
+                end,
+                self.revision,
+            )
+        )
+        self._prefetched_ids = set(requested)
+        self._prefetched_as_of = end
+        self.prefetch_count += 1
+        if snapshots is None:
+            self.query_count += 1
 
     def get_fundamentals(self, instrument_ids, start, end):
-        snapshots = self.repository.fundamentals_as_of(
-            instrument_ids,
-            end,
-            self.revision,
-        )
+        requested = set(instrument_ids)
+        if self._prefetched_as_of == end and requested.issubset(self._prefetched_ids):
+            snapshots = {
+                instrument_id: self._fundamental_cache[instrument_id]
+                for instrument_id in requested
+                if instrument_id in self._fundamental_cache
+            }
+        else:
+            snapshots = self.repository.fundamentals_as_of(
+                instrument_ids,
+                end,
+                self.revision,
+            )
+            self.query_count += 1
         return [
             item
             for item in snapshots.values()

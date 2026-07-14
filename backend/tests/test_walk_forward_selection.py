@@ -161,6 +161,69 @@ def test_replay_adapters_enforce_date_cutoffs(tmp_path):
     assert fundamentals[0].pe_ratio == Decimal("10")
 
 
+def test_replay_market_provider_reuses_rolling_window(tmp_path, monkeypatch):
+    repository, _ = _replay_repository(tmp_path)
+    revision = repository.current_revision()
+    provider = ReplayMarketDataProvider(repository, revision)
+    original = repository.replay_bars
+    calls = []
+
+    def tracked_replay_bars(instrument_ids, start, end, dataset_revision):
+        calls.append((list(instrument_ids), start, end, dataset_revision))
+        return original(instrument_ids, start, end, dataset_revision)
+
+    monkeypatch.setattr(repository, "replay_bars", tracked_replay_bars)
+
+    first = provider.get_daily_bars(
+        ["CN:000001"],
+        date(2024, 1, 2),
+        date(2025, 1, 6),
+    )
+    second = provider.get_daily_bars(
+        ["CN:000001"],
+        date(2024, 1, 8),
+        date(2025, 1, 10),
+    )
+
+    assert len(calls) == 2
+    assert calls[0][1:3] == (date(2024, 1, 2), date(2025, 1, 6))
+    assert calls[1][1:3] == (date(2025, 1, 7), date(2025, 1, 10))
+    assert min(second["trade_date"]) >= date(2024, 1, 8)
+    assert max(second["trade_date"]) == date(2025, 1, 10)
+    assert len(second) < len(first) + len(calls)
+    assert provider.full_window_queries == 1
+    assert provider.incremental_queries == 1
+
+
+def test_replay_market_prefetch_avoids_per_instrument_queries(tmp_path, monkeypatch):
+    repository, _ = _replay_repository(tmp_path)
+    provider = ReplayMarketDataProvider(repository, repository.current_revision())
+    original = repository.replay_bars
+    calls = []
+
+    def tracked_replay_bars(instrument_ids, start, end, dataset_revision):
+        calls.append(list(instrument_ids))
+        return original(instrument_ids, start, end, dataset_revision)
+
+    monkeypatch.setattr(repository, "replay_bars", tracked_replay_bars)
+    instrument_ids = ["CN:000001", "CN:000300.IDX"]
+    provider.prefetch_daily_bars(
+        instrument_ids,
+        date(2024, 1, 2),
+        date(2025, 1, 10),
+    )
+
+    for instrument_id in instrument_ids:
+        frame = provider.get_daily_bars(
+            [instrument_id],
+            date(2024, 1, 2),
+            date(2025, 1, 10),
+        )
+        assert not frame.empty
+
+    assert calls == [instrument_ids]
+
+
 def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     repository, decision_date = _replay_repository(tmp_path)
 
@@ -188,6 +251,8 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert first.experiment_manifest.strategy_registry_digest
     assert first.snapshots == second.snapshots
     assert first.top_5_portfolio == second.top_5_portfolio
+    assert first.data_health["walk_forward_fundamental_fallback_queries"] == "0"
+    assert first.data_health["walk_forward_fundamental_prefetches"] == "1"
     assert first.top_10_portfolio == second.top_10_portfolio
     assert len(first.benchmarks) == 5
     assert all(item.status == "ready" for item in first.benchmarks[:4])

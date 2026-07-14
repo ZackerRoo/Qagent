@@ -268,13 +268,24 @@ def run_full_market_walk_forward_selection(
             )
             snapshot = resumed.get(decision_date)
             if snapshot is None:
+                window_start = decision_date - timedelta(days=lookback_days)
+                market_provider.prefetch_daily_bars(
+                    eligible,
+                    window_start,
+                    decision_date,
+                )
+                strategy_provider.prefetch_fundamentals(
+                    eligible,
+                    decision_date,
+                    snapshots=fundamental_evidence,
+                )
                 scan = run_daily_scan(
                     eligible,
                     market_provider,
                     mode="historical_replay",
                     strategy_data_provider=strategy_provider,
                     a_share_enhanced_provider=EmptyAShareEnhancedDataProvider(),
-                    start=decision_date - timedelta(days=lookback_days),
+                    start=window_start,
                     end=decision_date,
                 )
                 scan_errors.extend(item.reason for item in scan.items if item.status == "error")
@@ -462,6 +473,20 @@ def run_full_market_walk_forward_selection(
                 if item.benchmark_id == ELIGIBLE_UNIVERSE_BENCHMARK_ID
             ),
             "walk_forward_cost_scenarios": str(len(cost_sensitivity)),
+            "walk_forward_replay_cache_queries": str(market_provider.query_count),
+            "walk_forward_replay_cache_full_queries": str(
+                market_provider.full_window_queries
+            ),
+            "walk_forward_replay_cache_incremental_queries": str(
+                market_provider.incremental_queries
+            ),
+            "walk_forward_replay_cache_rows_loaded": str(market_provider.rows_loaded),
+            "walk_forward_fundamental_prefetches": str(
+                strategy_provider.prefetch_count
+            ),
+            "walk_forward_fundamental_fallback_queries": str(
+                strategy_provider.query_count
+            ),
             "walk_forward_release_gate": strategy_validation.status,
             "walk_forward_enabled_strategies": str(
                 sum(item.action == "increase" for item in strategy_validation.strategies)
