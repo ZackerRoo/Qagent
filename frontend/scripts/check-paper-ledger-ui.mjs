@@ -35,6 +35,7 @@ const checks = [
   ["portfolio renders structured risk gate", files.portfolio.includes("PaperRiskGatePanel")],
   ["portfolio renders failure attribution", files.portfolio.includes("PaperFailureAttributionPanel")],
   ["portfolio renders event timeline", files.portfolio.includes("PaperEventTimelinePanel")],
+  ["portfolio tolerates legacy dual-track payloads", files.portfolio.includes("item.calibrated?.average_return_pct")],
   ["portfolio renders daily decision strip", files.portfolio.includes("PaperDailyDecisionStrip")],
   ["portfolio daily strip explains next action", files.portfolio.includes("等待买点，不追高")],
   ["types expose report risk gate", files.portfolio.includes("report.risk_gate")],

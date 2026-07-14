@@ -110,8 +110,10 @@ from qagent.recommendations.enrichment import enrich_opportunity_card
 from qagent.recommendations.brief import apply_recommendation_briefs
 from qagent.recommendations.feedback import (
     apply_paper_trading_feedback,
+    apply_walk_forward_validation_feedback,
     build_recent_recommendation_feedback_center,
     paper_trading_feedback_data_health,
+    walk_forward_feedback_data_health,
 )
 from qagent.recommendations.portfolio import build_portfolio_plan
 from qagent.recommendations.probability import (
@@ -2733,6 +2735,11 @@ def paper_trade_daily_report(provider: str = "fixture", limit: int = 500) -> dic
     account = repo.get_account_settings()
     trades = repo.list_trades(limit=limit, provider=mode)
     asset_type_by_instrument = _paper_asset_types_for_trades(trades)
+    source_context_by_trade = {
+        trade.trade_id: context
+        for trade in trades
+        if (context := repo.get_trade_source_context(trade.source_snapshot_id)) is not None
+    }
     ledger = build_paper_ledger(
         trades,
         initial_capital=account.initial_capital,
@@ -2776,12 +2783,14 @@ def paper_trade_daily_report(provider: str = "fixture", limit: int = 500) -> dic
         as_of=report_date,
         benchmark_items=benchmark_items,
         asset_type_by_instrument=asset_type_by_instrument,
+        source_context_by_trade=source_context_by_trade,
     )
     _, risk_gate_health = _paper_seed_risk_gate(repo, mode)
     report.data_health.update(
         {
             "paper_daily_benchmarks_source": "market_cache_only",
             "paper_daily_benchmark_rows": str(benchmark_rows),
+            "paper_daily_source_contexts": str(len(source_context_by_trade)),
             **risk_gate_health,
         }
     )
@@ -4218,9 +4227,10 @@ def _attach_card_briefs_and_cached_benchmarks(
         data_health = {}
         payload["data_health"] = data_health
 
-    data_health.update(apply_recommendation_briefs(cards))
     data_health.update(_apply_cached_benchmark_comparisons(cards, provider))
     data_health.update(_apply_live_paper_trading_feedback(cards, provider))
+    data_health.update(_apply_latest_walk_forward_feedback(cards, provider))
+    data_health.update(apply_recommendation_briefs(cards))
     payload["cards"] = [card.model_dump(mode="json") for card in cards]
 
 
@@ -4250,6 +4260,25 @@ def _apply_live_paper_trading_feedback(
     health = paper_trading_feedback_data_health(cards)
     health["paper_feedback_source"] = "paper_daily_report"
     return health
+
+
+def _apply_latest_walk_forward_feedback(
+    cards: list[OpportunityCard],
+    provider: str | None,
+) -> dict[str, str]:
+    validation = None
+    if provider:
+        records = _repo().list_walk_forward_runs(
+            provider=provider.strip().lower(),
+            limit=1,
+        )
+        if records:
+            payload = records[0].payload
+            raw_validation = payload.get("strategy_validation")
+            if isinstance(raw_validation, dict):
+                validation = raw_validation
+    apply_walk_forward_validation_feedback(cards, validation)
+    return walk_forward_feedback_data_health(cards, validation)
 
 
 def _apply_cached_benchmark_comparisons(

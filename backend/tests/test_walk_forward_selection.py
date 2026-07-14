@@ -83,9 +83,7 @@ def _replay_repository(tmp_path):
                 volume=Decimal("1000000"),
                 turnover=Decimal("10000000"),
                 adjustment_factor=Decimal("1"),
-                adjustment_mode=(
-                    "qfq" if instrument_id == "CN:000001" else "none"
-                ),
+                adjustment_mode=("qfq" if instrument_id == "CN:000001" else "none"),
                 source_provider="fixture_paired",
                 dataset_revision=2,
                 fetched_at=fetched_at,
@@ -131,9 +129,7 @@ def _replay_repository(tmp_path):
     schedule = load_a_share_rule_schedule()
     repository.upsert_trading_rules(schedule.trading_rules)
     repository.upsert_fee_rules(
-        schedule.fee_rules(
-            BrokerFeeRequest(commission_bps="3", minimum_commission="5")
-        )
+        schedule.fee_rules(BrokerFeeRequest(commission_bps="3", minimum_commission="5"))
     )
     repository.upsert_instrument_rule_metadata(
         [
@@ -153,12 +149,8 @@ def test_replay_adapters_enforce_date_cutoffs(tmp_path):
     market = ReplayMarketDataProvider(repository, revision)
     strategy = ReplayStrategyDataProvider(repository, revision)
 
-    bars = market.get_daily_bars(
-        ["CN:000001"], date(2024, 1, 1), decision_date
-    )
-    fundamentals = strategy.get_fundamentals(
-        ["CN:000001"], date(2024, 1, 1), decision_date
-    )
+    bars = market.get_daily_bars(["CN:000001"], date(2024, 1, 1), decision_date)
+    fundamentals = strategy.get_fundamentals(["CN:000001"], date(2024, 1, 1), decision_date)
 
     assert max(bars["trade_date"]) == decision_date
     assert bars.iloc[-1]["adjusted_close"] is not None
@@ -220,6 +212,22 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
         first.data_health["walk_forward_future_data_guard"]
         == "revision_lease_and_decision_date_cutoff"
     )
+    assert first.strategy_validation.status == "insufficient"
+    assert {item.key for item in first.strategy_validation.criteria} == {
+        "market_coverage",
+        "out_of_sample_count",
+        "out_of_sample_return",
+        "benchmark_excess",
+        "cost_stress",
+        "max_drawdown",
+    }
+    assert all(
+        item.action == "observe"
+        for item in [
+            *first.strategy_validation.strategies,
+            *first.strategy_validation.factors,
+        ]
+    )
 
 
 def test_walk_forward_market_coverage_gate_marks_small_replay_as_pilot():
@@ -239,9 +247,7 @@ def test_walk_forward_market_coverage_gate_marks_small_replay_as_pilot():
     assert round(float(coverage["ratio"]) * 100, 2) == 0.36
     assert coverage["median_covered"] == 20
     assert coverage["median_universe"] == 5600
-    assert _combined_validation_gate("ready", "insufficient") == (
-        "insufficient_market_coverage"
-    )
+    assert _combined_validation_gate("ready", "insufficient") == ("insufficient_market_coverage")
 
 
 def test_walk_forward_resumes_saved_rebalance_snapshots(tmp_path, monkeypatch):

@@ -170,6 +170,37 @@ def test_dual_track_keeps_untriggered_recommendation_out_of_execution_returns():
     assert report.samples[0].attribution == "选股已开始验证，买点尚未触发"
 
 
+def test_dual_track_quality_filter_uses_only_signal_date_snapshot_fields():
+    clean = _snapshot("snapshot-clean", "CN:000001", date(2026, 1, 2), "0.90")
+    overheated = _snapshot("snapshot-hot", "CN:000002", date(2026, 1, 2), "0.88")
+    overheated.card["factor_flags"] = ["high_volatility", "overextended"]
+    bars = pd.concat(
+        [
+            _bars(clean.instrument_id, base=100),
+            _bars(overheated.instrument_id, base=120),
+        ],
+        ignore_index=True,
+    )
+
+    report = build_dual_track_report(
+        snapshots=[clean, overheated],
+        trades=[],
+        instrument_bars=bars,
+        benchmark_bars=pd.DataFrame(),
+        as_of=date(2026, 2, 6),
+    )
+
+    samples = {sample.instrument_id: sample for sample in report.samples}
+    assert samples[clean.instrument_id].calibrated_eligible is True
+    assert samples[overheated.instrument_id].calibrated_eligible is False
+    assert samples[overheated.instrument_id].calibrated_reason == "高波动与短线过热同时出现"
+    assert report.summary.recommendations == 2
+    assert report.summary.calibrated_admitted == 1
+    assert report.summary.calibrated_filter_rate == 0.5
+    assert report.windows[0].selection.sample_count == 2
+    assert report.windows[0].calibrated.sample_count == 1
+
+
 def test_repository_selects_unique_daily_top_recommendations_per_provider(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'dual-track.db'}"
     engine = create_db_engine(database_url)

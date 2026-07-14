@@ -18,11 +18,13 @@ from qagent.paper_trading.engine import (
     PaperRiskGateStatus,
 )
 from qagent.recommendations.feedback import (
+    apply_walk_forward_validation_feedback,
     apply_recommendation_feedback_calibration,
     apply_recommendation_feedback_quality_gate,
     apply_paper_trading_feedback,
     paper_trading_feedback_data_health,
     recommendation_feedback_data_health,
+    walk_forward_feedback_data_health,
 )
 from qagent.recommendations.quality_gate import apply_recommendation_quality_gate
 
@@ -133,7 +135,9 @@ def test_recommendation_feedback_blocks_signals_with_bad_followthrough():
     assert card.decision.risk_status == "blocked"
     assert card.recommendation_quality is not None
     assert card.recommendation_quality.tier == "risk_filtered"
-    assert any(check.code == "feedback_quality_gate" for check in card.recommendation_quality.checks)
+    assert any(
+        check.code == "feedback_quality_gate" for check in card.recommendation_quality.checks
+    )
     assert card.pre_trade_risk is not None
     assert card.pre_trade_risk.can_buy is False
     health = recommendation_feedback_data_health([card])
@@ -235,6 +239,76 @@ def test_paper_trading_feedback_promotes_contributing_strategy():
     assert any("模拟盘反馈加权" in reason for reason in winner.rank_reasons)
     health = paper_trading_feedback_data_health([winner, unrelated])
     assert health["paper_feedback_adjusted"] == "1"
+
+
+def test_walk_forward_feedback_requires_mature_out_of_sample_evidence():
+    blocked = _card("CN:002747", "埃斯顿 002747.SZ", 0.74, ["trend_momentum"])
+    blocked.primary_strategy_id = "trend_momentum_stage2"
+    immature = _card("CN:688981", "中芯国际 688981.SH", 0.74, ["quality_factor"])
+    immature.primary_strategy_id = "quality_compounder"
+    apply_recommendation_quality_gate([blocked, immature])
+    validation = {
+        "status": "rejected",
+        "strategies": [
+            {
+                "dimension": "strategy",
+                "key": "trend_momentum_stage2",
+                "label": "二阶段趋势动量",
+                "out_of_sample_count": 36,
+                "action": "disable",
+                "suggested_weight_delta": -0.10,
+            },
+            {
+                "dimension": "strategy",
+                "key": "quality_compounder",
+                "label": "质量因子",
+                "out_of_sample_count": 12,
+                "action": "disable",
+                "suggested_weight_delta": -0.10,
+            },
+        ],
+        "factors": [],
+    }
+
+    before_immature = immature.rank_score
+    apply_walk_forward_validation_feedback([blocked, immature], validation)
+
+    assert blocked.decision is not None
+    assert blocked.decision.action == "avoid"
+    assert blocked.pre_trade_risk is not None
+    assert blocked.pre_trade_risk.can_buy is False
+    assert blocked.rank_score <= 0.35
+    assert immature.rank_score == before_immature
+    assert not any("样本外门禁" in reason for reason in immature.rank_reasons)
+    health = walk_forward_feedback_data_health([blocked, immature], validation)
+    assert health["walk_forward_feedback_blocked"] == "1"
+
+
+def test_walk_forward_positive_weight_requires_accepted_release_gate():
+    card = _card("CN:688981", "中芯国际 688981.SH", 0.70, ["quality_factor"])
+    validation = {
+        "status": "insufficient",
+        "strategies": [],
+        "factors": [
+            {
+                "dimension": "factor",
+                "key": "quality_factor",
+                "label": "质量因子",
+                "out_of_sample_count": 40,
+                "action": "increase",
+                "suggested_weight_delta": 0.04,
+            }
+        ],
+    }
+    before = card.rank_score
+
+    apply_walk_forward_validation_feedback([card], validation)
+    assert card.rank_score == before
+
+    validation["status"] = "accepted"
+    apply_walk_forward_validation_feedback([card], validation)
+    assert card.rank_score > before
+    assert any("样本外校准" in reason for reason in card.rank_reasons)
 
 
 def _card(instrument_id: str, label: str, score: float, flags: list[str]):

@@ -16,7 +16,7 @@ from qagent.paper_trading.engine import (
 from qagent.providers.cached import CachedMarketDataProvider
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.storage.market_cache import MarketDataCacheRepository
-from qagent.storage.paper import PaperTradingRepository
+from qagent.storage.paper import PaperTradeSourceContext, PaperTradingRepository
 from qagent.storage.repository import OpportunitySnapshotRecord
 from qagent.storage.tables import OpportunitySnapshotRow, ScanRunRow
 
@@ -1126,6 +1126,110 @@ def test_paper_daily_report_explains_risk_gate_failures_and_event_timeline(tmp_p
     assert any(
         item.trade_id == stopped.trade_id and item.event_type == "exit"
         for item in report.event_timeline
+    )
+
+
+def test_paper_daily_report_attributes_overheated_high_volatility_stop(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    stopped = paper_repo.create_trade(
+        source_snapshot_id="diagnostic-risk-filter",
+        provider="fixture",
+        instrument_id="CN:688981",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("100"),
+        initial_stop=Decimal("95"),
+        target_1=Decimal("110"),
+        rank_score=Decimal("0.86"),
+    )
+    paper_repo.update_trade(
+        stopped.trade_id,
+        status="stopped",
+        entry_date=date(2026, 7, 2),
+        entry_price=Decimal("100"),
+        exit_date=date(2026, 7, 4),
+        exit_price=Decimal("95"),
+        latest_date=date(2026, 7, 4),
+        latest_price=Decimal("95"),
+        realized_return_pct=Decimal("-5"),
+        holding_days=2,
+    )
+    trades = paper_repo.list_trades(limit=10)
+    ledger = build_paper_ledger(trades)
+    validation = build_paper_validation(trades, ledger, as_of=date(2026, 7, 4))
+    report = build_paper_daily_report(
+        trades=trades,
+        ledger=ledger,
+        validation=validation,
+        as_of=date(2026, 7, 4),
+        source_context_by_trade={
+            stopped.trade_id: PaperTradeSourceContext(
+                source_snapshot_id=stopped.source_snapshot_id,
+                created_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                latest_close=Decimal("99"),
+                card={
+                    "instrument_label": "中芯国际 688981.SH",
+                    "factor_flags": ["high_volatility", "overextended"],
+                },
+            )
+        },
+    )
+
+    diagnostic = report.trade_diagnostics[0]
+    assert diagnostic.instrument_label == "中芯国际 688981.SH"
+    assert diagnostic.root_cause == "risk_filter_failure"
+    assert diagnostic.severity == "critical"
+    assert diagnostic.factor_signals == ["high_volatility", "overextended"]
+    assert any(
+        item.dimension == "cause" and item.key == "risk_filter_failure"
+        for item in report.failure_attribution
+    )
+    assert any(
+        item.dimension == "signal" and item.key == "high_volatility"
+        for item in report.failure_attribution
+    )
+
+
+def test_paper_daily_report_does_not_diagnose_pending_trade_as_failure(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    pending = paper_repo.create_trade(
+        source_snapshot_id="diagnostic-pending",
+        provider="fixture",
+        instrument_id="CN:588200",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("5"),
+        initial_stop=Decimal("4.8"),
+        target_1=Decimal("5.5"),
+        rank_score=Decimal("0.80"),
+    )
+    trades = paper_repo.list_trades(limit=10)
+    ledger = build_paper_ledger(trades)
+    validation = build_paper_validation(trades, ledger, as_of=date(2026, 7, 2))
+    report = build_paper_daily_report(
+        trades=trades,
+        ledger=ledger,
+        validation=validation,
+        as_of=date(2026, 7, 2),
+        source_context_by_trade={
+            pending.trade_id: PaperTradeSourceContext(
+                source_snapshot_id=pending.source_snapshot_id,
+                created_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                latest_close=Decimal("4.95"),
+                card={
+                    "instrument_label": "科创芯片ETF嘉实 588200.SH",
+                    "factor_flags": ["overextended"],
+                },
+            )
+        },
+    )
+
+    assert report.trade_diagnostics == []
+    assert not any(
+        item.dimension == "cause" and item.key == "chasing_entry"
+        for item in report.failure_attribution
     )
 
 

@@ -402,6 +402,21 @@ class PaperFailureAttributionItem(BaseModel):
     note: str
 
 
+class PaperTradeDiagnostic(BaseModel):
+    trade_id: str
+    instrument_id: str
+    instrument_label: str
+    strategy_id: str | None
+    status: str
+    return_pct: float | None
+    root_cause: str
+    root_cause_label: str
+    severity: str
+    factor_signals: list[str]
+    evidence: list[str]
+    action: str
+
+
 class PaperEventTimelineItem(BaseModel):
     event_id: str
     trade_id: str
@@ -448,6 +463,7 @@ class PaperDailyReport(BaseModel):
         )
     )
     failure_attribution: list[PaperFailureAttributionItem]
+    trade_diagnostics: list[PaperTradeDiagnostic] = Field(default_factory=list)
     event_timeline: list[PaperEventTimelineItem]
     new_opportunities: list[PaperDailyReportItem]
     triggered_today: list[PaperDailyReportItem]
@@ -935,6 +951,7 @@ def build_paper_daily_report(
     as_of: date | None = None,
     benchmark_items: list[Mapping[str, object]] | None = None,
     asset_type_by_instrument: Mapping[str, str] | None = None,
+    source_context_by_trade: Mapping[str, PaperTradeSourceContext] | None = None,
 ) -> PaperDailyReport:
     report_date = as_of or _validation_as_of(trades)
     ledger_by_id = {item.trade_id: item for item in ledger.items}
@@ -965,6 +982,12 @@ def build_paper_daily_report(
     )
     market_context = _paper_market_context(benchmark)
     trigger_quality = _paper_trigger_quality(trades)
+    source_contexts = source_context_by_trade or {}
+    trade_diagnostics = _paper_trade_diagnostics(
+        ledger.items,
+        market_context=market_context,
+        source_context_by_trade=source_contexts,
+    )
     return PaperDailyReport(
         report_date=report_date,
         summary=PaperDailyReportSummary(
@@ -993,7 +1016,10 @@ def build_paper_daily_report(
             ledger.items,
             asset_type_by_instrument=asset_type_by_instrument or {},
             allocation_per_trade=ledger.summary.allocation_per_trade,
+            source_context_by_trade=source_contexts,
+            trade_diagnostics=trade_diagnostics,
         ),
+        trade_diagnostics=trade_diagnostics,
         event_timeline=_paper_event_timeline(
             trades=trades,
             ledger_by_id=ledger_by_id,
@@ -1416,6 +1442,8 @@ def _paper_failure_attribution(
     *,
     asset_type_by_instrument: Mapping[str, str],
     allocation_per_trade: Decimal,
+    source_context_by_trade: Mapping[str, PaperTradeSourceContext],
+    trade_diagnostics: list[PaperTradeDiagnostic],
 ) -> list[PaperFailureAttributionItem]:
     grouped: dict[tuple[str, str, str], list[PaperLedgerItem]] = defaultdict(list)
     for item in items:
@@ -1427,6 +1455,22 @@ def _paper_failure_attribution(
             ("strategy", item.strategy_id or "unknown", item.strategy_id or "未分类策略")
         ].append(item)
         grouped[("status", item.status, _paper_status_label(item.status))].append(item)
+        context = source_context_by_trade.get(item.trade_id)
+        for signal in _paper_source_signals(context.card if context else {}):
+            grouped[("signal", signal, _paper_signal_label(signal))].append(item)
+
+    item_by_id = {item.trade_id: item for item in items}
+    for diagnostic in trade_diagnostics:
+        item = item_by_id.get(diagnostic.trade_id)
+        if item is None or item.status in {"replaced", "invalidated"}:
+            continue
+        grouped[
+            (
+                "cause",
+                diagnostic.root_cause,
+                diagnostic.root_cause_label,
+            )
+        ].append(item)
 
     attribution = [
         _paper_failure_group(
@@ -1442,6 +1486,186 @@ def _paper_failure_attribution(
         attribution,
         key=lambda item: (item.total_pnl, -item.evaluated_trades, item.dimension, item.key),
     )[:12]
+
+
+def _paper_trade_diagnostics(
+    items: list[PaperLedgerItem],
+    *,
+    market_context: PaperMarketContext,
+    source_context_by_trade: Mapping[str, PaperTradeSourceContext],
+) -> list[PaperTradeDiagnostic]:
+    diagnostics = []
+    for item in items:
+        if item.status == "replaced":
+            continue
+        context = source_context_by_trade.get(item.trade_id)
+        source_card = context.card if context else {}
+        signals = _paper_source_signals(source_card)
+        cause, label, severity, evidence, action = _paper_trade_root_cause(
+            item,
+            signals=signals,
+            market_context=market_context,
+        )
+        if cause == "waiting":
+            continue
+        diagnostics.append(
+            PaperTradeDiagnostic(
+                trade_id=item.trade_id,
+                instrument_id=item.instrument_id,
+                instrument_label=str(source_card.get("instrument_label") or item.instrument_id),
+                strategy_id=item.strategy_id,
+                status=item.status,
+                return_pct=item.return_pct,
+                root_cause=cause,
+                root_cause_label=label,
+                severity=severity,
+                factor_signals=signals,
+                evidence=evidence,
+                action=action,
+            )
+        )
+    severity_rank = {"critical": 0, "warning": 1, "watch": 2, "positive": 3}
+    return sorted(
+        diagnostics,
+        key=lambda item: (
+            severity_rank.get(item.severity, 9),
+            item.return_pct if item.return_pct is not None else 0,
+            item.trade_id,
+        ),
+    )[:20]
+
+
+def _paper_trade_root_cause(
+    item: PaperLedgerItem,
+    *,
+    signals: list[str],
+    market_context: PaperMarketContext,
+) -> tuple[str, str, str, list[str], str]:
+    signal_labels = [_paper_signal_label(signal) for signal in signals]
+    signal_evidence = [f"推荐时包含{label}" for label in signal_labels[:3]]
+    if item.status == "invalidated":
+        return (
+            "data_quality",
+            "数据口径异常",
+            "critical",
+            ["行情价格与推荐价格基准不连续"],
+            "作废该样本，修复复权或代码映射后再验证。",
+        )
+    if item.status == "missed_entry":
+        return (
+            "entry_timing",
+            "买点没有成交",
+            "watch",
+            ["价格未按触发与禁追规则形成可成交买点"],
+            "保留选股样本，但重新校准触发价和等待期限。",
+        )
+    if item.status == "target_1_hit":
+        return (
+            "validated_success",
+            "信号与执行有效",
+            "positive",
+            [f"按计划命中目标，收益 {item.return_pct:+.2f}%"]
+            if item.return_pct is not None
+            else ["按计划命中目标"],
+            "保留该类信号权重，继续检查更大样本是否稳定。",
+        )
+    if item.status == "pending":
+        return ("waiting", "等待买点", "watch", [], "继续等待触发或按禁追规则释放。")
+    if item.status == "open" and (item.return_pct is None or item.return_pct > -2):
+        return ("waiting", "等待结果", "watch", [], "继续按原计划跟踪。")
+
+    stop_distance = None
+    if item.entry_price and item.entry_price > 0 and item.risk_pct is not None:
+        stop_distance = abs(item.risk_pct)
+    if "overextended" in signals and "high_volatility" in signals:
+        return (
+            "risk_filter_failure",
+            "过热且高波动",
+            "critical" if item.status == "stopped" else "warning",
+            signal_evidence + ["过热与高波动同时出现，止损容易被噪声触发"],
+            "该组合信号进入门禁；等待回踩和波动收敛后再考虑。",
+        )
+    if "overextended" in signals:
+        return (
+            "chasing_entry",
+            "入场位置偏高",
+            "warning",
+            signal_evidence + ["推荐时价格偏离趋势支撑"],
+            "提高回踩确认要求，不在过热状态触发买入。",
+        )
+    if "high_volatility" in signals:
+        return (
+            "volatility_stop",
+            "高波动触发止损",
+            "warning",
+            signal_evidence + ["近期波动较高，固定止损容易被日内噪声击穿"],
+            "降低仓位，并使用波动率校准后的止损距离。",
+        )
+    if stop_distance is not None and stop_distance <= 2.5:
+        return (
+            "tight_stop",
+            "止损距离过窄",
+            "warning",
+            [f"计划风险距离仅 {stop_distance:.2f}%"],
+            "按 ATR/波动率重新设置止损，并同步降低仓位。",
+        )
+    if market_context.regime == "market_drag":
+        return (
+            "market_regime",
+            "市场环境拖累",
+            "watch",
+            [market_context.summary],
+            "弱市降低总仓位，只保留相对强度最高的机会。",
+        )
+    if item.status == "time_exit":
+        return (
+            "weak_followthrough",
+            "信号缺少跟随",
+            "warning" if (item.return_pct or 0) < 0 else "watch",
+            ["持有窗口内没有命中目标或形成持续趋势"] + signal_evidence,
+            "降低无跟随信号权重，并缩短失效确认周期。",
+        )
+    return (
+        "selection_quality",
+        "选股信号失效",
+        "critical" if item.status == "stopped" else "warning",
+        ["触发后走势未按推荐方向延续"] + signal_evidence,
+        "降低对应策略和因子权重，等待样本外重新验证。",
+    )
+
+
+def _paper_source_signals(card: Mapping[str, object]) -> list[str]:
+    signals: list[str] = []
+    raw_flags = card.get("factor_flags")
+    if isinstance(raw_flags, list):
+        signals.extend(str(value) for value in raw_flags if value)
+    raw_exposures = card.get("factor_exposures")
+    if isinstance(raw_exposures, list):
+        for exposure in raw_exposures:
+            if not isinstance(exposure, Mapping):
+                continue
+            factor_id = exposure.get("factor_id")
+            score = _float_mapping_value(exposure, "score")
+            if factor_id and score is not None and (score >= 0.75 or score <= 0.25):
+                signals.append(str(factor_id))
+    return sorted(set(signals))
+
+
+def _paper_signal_label(signal: str) -> str:
+    return {
+        "high_volatility": "高波动",
+        "overextended": "短线过热",
+        "insufficient_history": "历史不足",
+        "low_liquidity": "流动性偏弱",
+        "momentum": "动量",
+        "trend_quality": "趋势质量",
+        "liquidity": "流动性",
+        "low_risk": "低波动",
+        "reversal": "反转/回踩",
+        "valuation": "估值",
+        "quality": "质量",
+        "size": "市值",
+    }.get(signal, signal)
 
 
 def _paper_failure_group(

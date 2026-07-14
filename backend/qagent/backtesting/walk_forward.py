@@ -36,9 +36,7 @@ from qagent.historical_evidence.providers import REQUIRED_BENCHMARK_IDS
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
 
 
-EXCLUDED_STATUSES = frozenset(
-    {"risk_elevated", "invalidated", "closed", "postmortem_done"}
-)
+EXCLUDED_STATUSES = frozenset({"risk_elevated", "invalidated", "closed", "postmortem_done"})
 ELIGIBLE_UNIVERSE_BENCHMARK_ID = "CN:EQUAL_WEIGHT_ELIGIBLE"
 MIN_FULL_MARKET_COVERAGE_RATIO = 0.90
 
@@ -51,6 +49,7 @@ class WalkForwardSelection(BaseModel):
     trigger_price: Decimal | None
     initial_stop: Decimal | None
     target_1: Decimal | None
+    factor_signals: list[str] = Field(default_factory=list)
 
 
 class WalkForwardSnapshot(BaseModel):
@@ -62,6 +61,39 @@ class WalkForwardSnapshot(BaseModel):
     missing_tradability_count: int
     top_5: list[WalkForwardSelection] = Field(default_factory=list)
     top_10: list[WalkForwardSelection] = Field(default_factory=list)
+
+
+class WalkForwardGateCriterion(BaseModel):
+    key: str
+    label: str
+    status: str
+    value: str
+    requirement: str
+
+
+class WalkForwardEvidenceMetric(BaseModel):
+    dimension: str
+    key: str
+    label: str
+    trade_count: int
+    out_of_sample_count: int
+    win_rate: float | None
+    average_return_pct: float | None
+    worst_return_pct: float | None
+    profit_factor: float | None
+    max_consecutive_losses: int
+    out_of_sample_verdict: str
+    action: str
+    suggested_weight_delta: float
+    reason: str
+
+
+class WalkForwardValidationCenter(BaseModel):
+    status: str
+    headline: str
+    criteria: list[WalkForwardGateCriterion] = Field(default_factory=list)
+    strategies: list[WalkForwardEvidenceMetric] = Field(default_factory=list)
+    factors: list[WalkForwardEvidenceMetric] = Field(default_factory=list)
 
 
 class WalkForwardSelectionResult(BaseModel):
@@ -80,6 +112,7 @@ class WalkForwardSelectionResult(BaseModel):
     top_10_temporal_validation: TemporalValidationResult
     benchmarks: list["WalkForwardBenchmarkComparison"]
     cost_sensitivity: list["WalkForwardCostScenario"]
+    strategy_validation: WalkForwardValidationCenter
     experiment_manifest: WalkForwardExperimentManifest
     reproducibility_digest: str
     data_health: dict[str, str] = Field(default_factory=dict)
@@ -226,9 +259,7 @@ def run_full_market_walk_forward_selection(
                     start=decision_date - timedelta(days=lookback_days),
                     end=decision_date,
                 )
-                scan_errors.extend(
-                    item.reason for item in scan.items if item.status == "error"
-                )
+                scan_errors.extend(item.reason for item in scan.items if item.status == "error")
                 selections = [
                     _selection(card)
                     for card in scan.cards
@@ -267,9 +298,7 @@ def run_full_market_walk_forward_selection(
         top_10_signals = _signals(snapshots, size=10)
         top_5_portfolio = run_signal_portfolio_backtest(
             signals=top_5_signals,
-            instrument_ids=sorted(
-                {item.instrument_id for item in top_5_signals}
-            ),
+            instrument_ids=sorted({item.instrument_id for item in top_5_signals}),
             provider=market_provider,
             start=start,
             end=end,
@@ -278,9 +307,7 @@ def run_full_market_walk_forward_selection(
         )
         top_10_portfolio = run_signal_portfolio_backtest(
             signals=top_10_signals,
-            instrument_ids=sorted(
-                {item.instrument_id for item in top_10_signals}
-            ),
+            instrument_ids=sorted({item.instrument_id for item in top_10_signals}),
             provider=market_provider,
             start=start,
             end=end,
@@ -289,12 +316,8 @@ def run_full_market_walk_forward_selection(
         )
         top_5_metrics = _portfolio_metrics(top_5_portfolio, start, end)
         top_10_metrics = _portfolio_metrics(top_10_portfolio, start, end)
-        top_5_temporal_validation = _trade_temporal_validation(
-            top_5_portfolio.trades
-        )
-        top_10_temporal_validation = _trade_temporal_validation(
-            top_10_portfolio.trades
-        )
+        top_5_temporal_validation = _trade_temporal_validation(top_5_portfolio.trades)
+        top_10_temporal_validation = _trade_temporal_validation(top_10_portfolio.trades)
         _report_progress(
             progress_callback,
             phase="validation_and_benchmarks",
@@ -331,12 +354,19 @@ def run_full_market_walk_forward_selection(
     )
     coverage = _cross_section_coverage(snapshots)
     market_coverage_gate = (
-        "ready"
-        if coverage["ratio"] >= MIN_FULL_MARKET_COVERAGE_RATIO
-        else "insufficient"
+        "ready" if coverage["ratio"] >= MIN_FULL_MARKET_COVERAGE_RATIO else "insufficient"
     )
     top_5_sample_gate = _oos_gate(top_5_temporal_validation)
     top_10_sample_gate = _oos_gate(top_10_temporal_validation)
+    strategy_validation = _build_strategy_validation_center(
+        snapshots=snapshots,
+        portfolio=top_5_portfolio,
+        temporal_validation=top_5_temporal_validation,
+        benchmarks=benchmarks,
+        cost_sensitivity=cost_sensitivity,
+        market_coverage_ratio=coverage["ratio"],
+        metrics=top_5_metrics,
+    )
     result = WalkForwardSelectionResult(
         owner_run_id=owner_run_id,
         provider_mode=repository.provider_mode,
@@ -353,6 +383,7 @@ def run_full_market_walk_forward_selection(
         top_10_temporal_validation=top_10_temporal_validation,
         benchmarks=benchmarks,
         cost_sensitivity=cost_sensitivity,
+        strategy_validation=strategy_validation,
         experiment_manifest=experiment_manifest,
         reproducibility_digest=digest,
         data_health={
@@ -367,31 +398,15 @@ def run_full_market_walk_forward_selection(
                 "full_market" if market_coverage_gate == "ready" else "pilot"
             ),
             "walk_forward_market_coverage_gate": market_coverage_gate,
-            "walk_forward_minimum_market_coverage_pct": str(
-                MIN_FULL_MARKET_COVERAGE_RATIO * 100
-            ),
-            "walk_forward_cross_section_coverage_pct": str(
-                round(coverage["ratio"] * 100, 4)
-            ),
-            "walk_forward_median_covered_instruments": str(
-                coverage["median_covered"]
-            ),
-            "walk_forward_median_historical_universe": str(
-                coverage["median_universe"]
-            ),
-            "walk_forward_top_5_trades": str(
-                top_5_portfolio.summary.trade_count
-            ),
-            "walk_forward_top_10_trades": str(
-                top_10_portfolio.summary.trade_count
-            ),
+            "walk_forward_minimum_market_coverage_pct": str(MIN_FULL_MARKET_COVERAGE_RATIO * 100),
+            "walk_forward_cross_section_coverage_pct": str(round(coverage["ratio"] * 100, 4)),
+            "walk_forward_median_covered_instruments": str(coverage["median_covered"]),
+            "walk_forward_median_historical_universe": str(coverage["median_universe"]),
+            "walk_forward_top_5_trades": str(top_5_portfolio.summary.trade_count),
+            "walk_forward_top_10_trades": str(top_10_portfolio.summary.trade_count),
             "walk_forward_oos_minimum_trades": "30",
-            "walk_forward_top_5_oos_trades": str(
-                _oos_sample_count(top_5_temporal_validation)
-            ),
-            "walk_forward_top_10_oos_trades": str(
-                _oos_sample_count(top_10_temporal_validation)
-            ),
+            "walk_forward_top_5_oos_trades": str(_oos_sample_count(top_5_temporal_validation)),
+            "walk_forward_top_10_oos_trades": str(_oos_sample_count(top_10_temporal_validation)),
             "walk_forward_top_5_oos_gate": top_5_sample_gate,
             "walk_forward_top_10_oos_gate": top_10_sample_gate,
             "walk_forward_top_5_validation_gate": _combined_validation_gate(
@@ -403,8 +418,7 @@ def run_full_market_walk_forward_selection(
                 market_coverage_gate,
             ),
             "walk_forward_benchmarks_ready": (
-                f"{sum(item.status == 'ready' for item in benchmarks)}/"
-                f"{len(benchmarks)}"
+                f"{sum(item.status == 'ready' for item in benchmarks)}/{len(benchmarks)}"
             ),
             "walk_forward_equal_weight_benchmark": next(
                 item.status
@@ -412,23 +426,20 @@ def run_full_market_walk_forward_selection(
                 if item.benchmark_id == ELIGIBLE_UNIVERSE_BENCHMARK_ID
             ),
             "walk_forward_cost_scenarios": str(len(cost_sensitivity)),
-            "walk_forward_stress_top_5_return_pct": str(
-                cost_sensitivity[-1].top_5_return_pct
+            "walk_forward_release_gate": strategy_validation.status,
+            "walk_forward_enabled_strategies": str(
+                sum(item.action == "increase" for item in strategy_validation.strategies)
             ),
-            "walk_forward_stress_top_10_return_pct": str(
-                cost_sensitivity[-1].top_10_return_pct
+            "walk_forward_disabled_strategies": str(
+                sum(item.action == "disable" for item in strategy_validation.strategies)
             ),
+            "walk_forward_stress_top_5_return_pct": str(cost_sensitivity[-1].top_5_return_pct),
+            "walk_forward_stress_top_10_return_pct": str(cost_sensitivity[-1].top_10_return_pct),
             "walk_forward_digest": digest,
             "walk_forward_experiment_digest": experiment_manifest.experiment_digest,
             "walk_forward_code_revision": experiment_manifest.code_revision,
-            "walk_forward_strategy_registry_digest": (
-                experiment_manifest.strategy_registry_digest
-            ),
-            **(
-                {"walk_forward_error_samples": " | ".join(scan_errors[:3])}
-                if scan_errors
-                else {}
-            ),
+            "walk_forward_strategy_registry_digest": (experiment_manifest.strategy_registry_digest),
+            **({"walk_forward_error_samples": " | ".join(scan_errors[:3])} if scan_errors else {}),
         },
     )
     _report_progress(
@@ -445,8 +456,7 @@ def _cross_section_coverage(
 ) -> dict[str, float | int]:
     universe_sizes = [item.historical_universe_size for item in snapshots]
     covered_sizes = [
-        max(0, item.historical_universe_size - item.missing_tradability_count)
-        for item in snapshots
+        max(0, item.historical_universe_size - item.missing_tradability_count) for item in snapshots
     ]
     total_universe = sum(universe_sizes)
     ratio = sum(covered_sizes) / total_universe if total_universe else 0.0
@@ -461,6 +471,232 @@ def _combined_validation_gate(sample_gate: str, market_coverage_gate: str) -> st
     if market_coverage_gate != "ready":
         return "insufficient_market_coverage"
     return sample_gate
+
+
+def _build_strategy_validation_center(
+    *,
+    snapshots: list[WalkForwardSnapshot],
+    portfolio: PortfolioBacktestResult,
+    temporal_validation: TemporalValidationResult,
+    benchmarks: list[WalkForwardBenchmarkComparison],
+    cost_sensitivity: list[WalkForwardCostScenario],
+    market_coverage_ratio: float,
+    metrics: WalkForwardPortfolioMetrics,
+) -> WalkForwardValidationCenter:
+    selection_by_key = {
+        (snapshot.decision_date, item.instrument_id): item
+        for snapshot in snapshots
+        for item in snapshot.top_5
+    }
+    strategy_groups: dict[str, list[object]] = {}
+    factor_groups: dict[str, list[object]] = {}
+    for trade in portfolio.trades:
+        selection = selection_by_key.get((trade.signal_date, trade.instrument_id))
+        strategy_key = trade.strategy_id or "unknown"
+        strategy_groups.setdefault(strategy_key, []).append(trade)
+        if selection is not None:
+            for factor in selection.factor_signals:
+                factor_groups.setdefault(factor, []).append(trade)
+
+    strategies = [
+        _walk_forward_evidence_metric("strategy", key, trades)
+        for key, trades in strategy_groups.items()
+    ]
+    factors = [
+        _walk_forward_evidence_metric("factor", key, trades)
+        for key, trades in factor_groups.items()
+    ]
+    strategies.sort(key=_evidence_sort_key)
+    factors.sort(key=_evidence_sort_key)
+
+    eligible_benchmark = next(
+        (item for item in benchmarks if item.benchmark_id == ELIGIBLE_UNIVERSE_BENCHMARK_ID),
+        None,
+    )
+    stress = next(
+        (item for item in cost_sensitivity if item.key == "stress"),
+        cost_sensitivity[-1] if cost_sensitivity else None,
+    )
+    oos = temporal_validation.out_of_sample
+    criteria = [
+        _gate_criterion(
+            key="market_coverage",
+            label="历史市场覆盖",
+            ready=market_coverage_ratio >= MIN_FULL_MARKET_COVERAGE_RATIO,
+            insufficient=market_coverage_ratio < MIN_FULL_MARKET_COVERAGE_RATIO,
+            value=f"{market_coverage_ratio:.1%}",
+            requirement=f">= {MIN_FULL_MARKET_COVERAGE_RATIO:.0%}",
+        ),
+        _gate_criterion(
+            key="out_of_sample_count",
+            label="样本外交易数",
+            ready=bool(oos and oos.sample_count >= 30),
+            insufficient=not oos or oos.sample_count < 30,
+            value=str(oos.sample_count if oos else 0),
+            requirement=">= 30",
+        ),
+        _gate_criterion(
+            key="out_of_sample_return",
+            label="样本外收益置信度",
+            ready=temporal_validation.verdict == "positive",
+            insufficient=not oos or oos.sample_count < 30,
+            value=(
+                f"{oos.avg_return_pct:+.2f}% / {temporal_validation.verdict}"
+                if oos and oos.avg_return_pct is not None
+                else "-"
+            ),
+            requirement="均值为正且 95% 区间不跨 0",
+        ),
+        _gate_criterion(
+            key="benchmark_excess",
+            label="历史可交易池超额",
+            ready=bool(
+                eligible_benchmark
+                and eligible_benchmark.status == "ready"
+                and (eligible_benchmark.top_5_excess_return_pct or 0) > 0
+            ),
+            insufficient=not eligible_benchmark or eligible_benchmark.status != "ready",
+            value=(
+                f"{eligible_benchmark.top_5_excess_return_pct:+.2f}%"
+                if eligible_benchmark and eligible_benchmark.top_5_excess_return_pct is not None
+                else "-"
+            ),
+            requirement="> 0%",
+        ),
+        _gate_criterion(
+            key="cost_stress",
+            label="压力成本后收益",
+            ready=bool(stress and stress.top_5_return_pct > 0),
+            insufficient=stress is None,
+            value=f"{stress.top_5_return_pct:+.2f}%" if stress else "-",
+            requirement="> 0%",
+        ),
+        _gate_criterion(
+            key="max_drawdown",
+            label="最大回撤",
+            ready=metrics.max_drawdown_pct >= -15,
+            insufficient=False,
+            value=f"{metrics.max_drawdown_pct:+.2f}%",
+            requirement=">= -15%",
+        ),
+    ]
+    if any(item.status == "insufficient" for item in criteria):
+        status = "insufficient"
+        headline = "历史证据不足：继续补齐全市场覆盖和样本外交易。"
+    elif any(item.status == "fail" for item in criteria):
+        status = "rejected"
+        headline = "历史验证未通过：已知结果存在失败项，暂不提升自动推荐权重。"
+    else:
+        status = "accepted"
+        headline = "历史验证通过：允许进入小仓位前向模拟，不代表可直接实盘。"
+    return WalkForwardValidationCenter(
+        status=status,
+        headline=headline,
+        criteria=criteria,
+        strategies=strategies,
+        factors=factors,
+    )
+
+
+def _walk_forward_evidence_metric(
+    dimension: str,
+    key: str,
+    trades: list[object],
+) -> WalkForwardEvidenceMetric:
+    returns = [float(trade.return_pct) for trade in trades]
+    validation = _trade_temporal_validation(trades)
+    oos = validation.out_of_sample
+    oos_count = oos.sample_count if oos else 0
+    wins = [value for value in returns if value > 0]
+    losses = [value for value in returns if value < 0]
+    profit_factor = round(sum(wins) / abs(sum(losses)), 4) if wins and losses else None
+    average_return = round(statistics.mean(returns), 4) if returns else None
+    win_rate = round(len(wins) / len(returns), 4) if returns else None
+    if oos_count < 30:
+        action = "observe"
+        delta = 0.0
+        reason = f"样本外只有 {oos_count} 笔，未达到 30 笔准入门槛。"
+    elif validation.verdict == "positive" and (oos.avg_return_pct or 0) > 0:
+        action = "increase"
+        delta = 0.04
+        reason = "样本外均值为正且置信区间不跨 0，可小幅提高权重。"
+    elif validation.verdict == "negative" or (
+        oos.avg_return_pct is not None and oos.avg_return_pct <= -1
+    ):
+        action = "disable"
+        delta = -0.10
+        reason = "样本外表现为负，停止进入可买候选，等待重新验证。"
+    elif (average_return or 0) <= 0 or (profit_factor is not None and profit_factor < 1):
+        action = "reduce"
+        delta = -0.03
+        reason = "总体均值或利润因子没有优势，降低权重继续观察。"
+    else:
+        action = "maintain"
+        delta = 0.0
+        reason = "历史结果尚未形成显著优势或劣势，保持当前权重。"
+    return WalkForwardEvidenceMetric(
+        dimension=dimension,
+        key=key,
+        label=_walk_forward_evidence_label(key),
+        trade_count=len(returns),
+        out_of_sample_count=oos_count,
+        win_rate=win_rate,
+        average_return_pct=average_return,
+        worst_return_pct=min(returns) if returns else None,
+        profit_factor=profit_factor,
+        max_consecutive_losses=_max_consecutive_losses(returns),
+        out_of_sample_verdict=validation.verdict,
+        action=action,
+        suggested_weight_delta=delta,
+        reason=reason,
+    )
+
+
+def _gate_criterion(
+    *,
+    key: str,
+    label: str,
+    ready: bool,
+    insufficient: bool,
+    value: str,
+    requirement: str,
+) -> WalkForwardGateCriterion:
+    status = "pass" if ready else "insufficient" if insufficient else "fail"
+    return WalkForwardGateCriterion(
+        key=key,
+        label=label,
+        status=status,
+        value=value,
+        requirement=requirement,
+    )
+
+
+def _evidence_sort_key(item: WalkForwardEvidenceMetric) -> tuple[int, int, str]:
+    action_rank = {"disable": 0, "reduce": 1, "increase": 2, "maintain": 3, "observe": 4}
+    return (action_rank.get(item.action, 9), -item.trade_count, item.key)
+
+
+def _walk_forward_evidence_label(key: str) -> str:
+    return {
+        "trend_momentum_stage2": "二阶段趋势动量",
+        "breakout_volume_confirmation": "放量突破确认",
+        "factor_rotation_watch": "因子轮动观察",
+        "healthy_pullback": "健康回调",
+        "short_squeeze_risk": "逼空风险监控",
+        "momentum": "动量",
+        "trend_quality": "趋势质量",
+        "liquidity": "流动性",
+        "low_risk": "低波动",
+        "reversal": "反转/回踩",
+        "valuation": "估值",
+        "quality": "质量",
+        "size": "市值",
+        "high_volatility": "高波动",
+        "overextended": "短线过热",
+        "insufficient_history": "历史不足",
+        "low_liquidity": "流动性偏弱",
+        "unknown": "未分类策略",
+    }.get(key, key)
 
 
 def _report_progress(
@@ -494,20 +730,26 @@ def _selection(card) -> WalkForwardSelection:
         trigger_price=card.entry_plan.trigger_price,
         initial_stop=card.exit_plan.initial_stop,
         target_1=card.exit_plan.target_1,
+        factor_signals=_selection_factor_signals(card),
     )
 
 
-def _signals(
-    snapshots: list[WalkForwardSnapshot], *, size: int
-) -> list[BacktestSignal]:
+def _selection_factor_signals(card) -> list[str]:
+    signals = [str(value) for value in card.factor_flags if value]
+    for exposure in card.factor_exposures:
+        if exposure.score >= 0.65:
+            signals.append(exposure.factor_id)
+    return sorted(set(signals))
+
+
+def _signals(snapshots: list[WalkForwardSnapshot], *, size: int) -> list[BacktestSignal]:
     result = []
     for snapshot in snapshots:
         selections = snapshot.top_5 if size == 5 else snapshot.top_10
         result.extend(
             BacktestSignal(
                 snapshot_id=(
-                    f"walk-forward-{size}-{snapshot.decision_date:%Y%m%d}:"
-                    f"{item.instrument_id}"
+                    f"walk-forward-{size}-{snapshot.decision_date:%Y%m%d}:{item.instrument_id}"
                 ),
                 instrument_id=item.instrument_id,
                 signal_date=snapshot.decision_date,
@@ -537,16 +779,14 @@ def _selection_digest(
         "snapshots": [item.model_dump(mode="json") for item in snapshots],
         "top_5_portfolio": top_5_portfolio.model_dump(mode="json"),
         "top_10_portfolio": top_10_portfolio.model_dump(mode="json"),
-        "top_5_temporal_validation": _trade_temporal_validation(
-            top_5_portfolio.trades
-        ).model_dump(mode="json"),
+        "top_5_temporal_validation": _trade_temporal_validation(top_5_portfolio.trades).model_dump(
+            mode="json"
+        ),
         "top_10_temporal_validation": _trade_temporal_validation(
             top_10_portfolio.trades
         ).model_dump(mode="json"),
         "benchmarks": [item.model_dump(mode="json") for item in benchmarks],
-        "cost_sensitivity": [
-            item.model_dump(mode="json") for item in cost_sensitivity
-        ],
+        "cost_sensitivity": [item.model_dump(mode="json") for item in cost_sensitivity],
     }
     encoded = json.dumps(
         payload,
@@ -598,9 +838,7 @@ def _cost_sensitivity(
         else:
             top_5 = run_signal_portfolio_backtest(
                 signals=top_5_signals,
-                instrument_ids=sorted(
-                    {item.instrument_id for item in top_5_signals}
-                ),
+                instrument_ids=sorted({item.instrument_id for item in top_5_signals}),
                 provider=market_provider,
                 start=start,
                 end=end,
@@ -611,9 +849,7 @@ def _cost_sensitivity(
             )
             top_10 = run_signal_portfolio_backtest(
                 signals=top_10_signals,
-                instrument_ids=sorted(
-                    {item.instrument_id for item in top_10_signals}
-                ),
+                instrument_ids=sorted({item.instrument_id for item in top_10_signals}),
                 provider=market_provider,
                 start=start,
                 end=end,
@@ -632,12 +868,8 @@ def _cost_sensitivity(
                 top_10_return_pct=top_10.summary.total_return_pct,
                 top_5_max_drawdown_pct=top_5.summary.max_drawdown_pct,
                 top_10_max_drawdown_pct=top_10.summary.max_drawdown_pct,
-                top_5_total_costs=sum(
-                    (item.costs for item in top_5.trades), Decimal("0")
-                ),
-                top_10_total_costs=sum(
-                    (item.costs for item in top_10.trades), Decimal("0")
-                ),
+                top_5_total_costs=sum((item.costs for item in top_5.trades), Decimal("0")),
+                top_10_total_costs=sum((item.costs for item in top_10.trades), Decimal("0")),
             )
         )
     return results
@@ -669,9 +901,11 @@ def _portfolio_metrics(
         deviation = statistics.stdev(returns)
         if deviation > 0:
             sharpe = round(statistics.mean(returns) / deviation * math.sqrt(len(returns)), 4)
-    turnover = sum(
-        float(item.entry_price * item.shares) for item in trades
-    ) / float(portfolio.summary.initial_capital) * 100
+    turnover = (
+        sum(float(item.entry_price * item.shares) for item in trades)
+        / float(portfolio.summary.initial_capital)
+        * 100
+    )
     return WalkForwardPortfolioMetrics(
         trade_count=len(trades),
         total_return_pct=portfolio.summary.total_return_pct,
@@ -707,9 +941,11 @@ def _benchmark_comparisons(
     bars = provider.get_daily_bars(list(REQUIRED_BENCHMARK_IDS), start, end)
     comparisons = []
     for benchmark_id in REQUIRED_BENCHMARK_IDS:
-        frame = bars.loc[bars["instrument_id"] == benchmark_id].sort_values(
-            "trade_date"
-        ) if not bars.empty else bars
+        frame = (
+            bars.loc[bars["instrument_id"] == benchmark_id].sort_values("trade_date")
+            if not bars.empty
+            else bars
+        )
         if frame.empty:
             comparisons.append(
                 WalkForwardBenchmarkComparison(
@@ -773,11 +1009,7 @@ def _equal_weight_eligible_return(
     end: date,
 ) -> float | None:
     instrument_ids = sorted(
-        {
-            instrument_id
-            for _, members in eligible_universes
-            for instrument_id in members
-        }
+        {instrument_id for _, members in eligible_universes for instrument_id in members}
     )
     if not instrument_ids:
         return None
@@ -789,9 +1021,7 @@ def _equal_weight_eligible_return(
     completed_periods = 0
     for index, (decision_date, members) in enumerate(eligible_universes):
         period_end = (
-            eligible_universes[index + 1][0]
-            if index + 1 < len(eligible_universes)
-            else end
+            eligible_universes[index + 1][0] if index + 1 < len(eligible_universes) else end
         )
         if period_end <= decision_date:
             continue

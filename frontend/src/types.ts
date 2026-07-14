@@ -1874,6 +1874,21 @@ export type PaperFailureAttributionItem = {
   note: string;
 };
 
+export type PaperTradeDiagnostic = {
+  trade_id: string;
+  instrument_id: string;
+  instrument_label: string;
+  strategy_id: string | null;
+  status: string;
+  return_pct: number | null;
+  root_cause: string;
+  root_cause_label: string;
+  severity: string;
+  factor_signals: string[];
+  evidence: string[];
+  action: string;
+};
+
 export type PaperEventTimelineItem = {
   event_id: string;
   trade_id: string;
@@ -1897,6 +1912,7 @@ export type PaperDailyReportResponse = {
   market_context: PaperMarketContext;
   trigger_quality: PaperTriggerQualitySummary;
   failure_attribution: PaperFailureAttributionItem[];
+  trade_diagnostics: PaperTradeDiagnostic[];
   event_timeline: PaperEventTimelineItem[];
   new_opportunities: PaperDailyReportItem[];
   triggered_today: PaperDailyReportItem[];
@@ -1923,6 +1939,9 @@ export type PaperDualTrackBenchmark = {
   selection_sample_count: number;
   selection_return_pct: number | null;
   selection_excess_pct: number | null;
+  calibrated_sample_count?: number;
+  calibrated_return_pct?: number | null;
+  calibrated_excess_pct?: number | null;
   execution_sample_count: number;
   execution_return_pct: number | null;
   execution_excess_pct: number | null;
@@ -1931,10 +1950,12 @@ export type PaperDualTrackBenchmark = {
 export type PaperDualTrackWindow = {
   window_days: number;
   selection: PaperDualTrackMetric;
+  calibrated?: PaperDualTrackMetric;
   execution: PaperDualTrackMetric;
   benchmarks: PaperDualTrackBenchmark[];
   timing_sample_count: number;
   timing_effect_pct: number | null;
+  calibration_effect_pct?: number | null;
   verdict: string;
   explanation: string;
 };
@@ -1946,6 +1967,8 @@ export type PaperDualTrackSample = {
   signal_date: string;
   strategy_id: string | null;
   rank_score: number;
+  calibrated_eligible?: boolean;
+  calibrated_reason?: string;
   selection_entry_date: string | null;
   selection_entry_price: string | null;
   selection_return_5d: number | null;
@@ -1966,9 +1989,12 @@ export type PaperDualTrackResponse = {
     recommendation_days: number;
     recommendations: number;
     selection_started: number;
+    calibrated_admitted?: number;
+    calibrated_filter_rate?: number | null;
     execution_admitted: number;
     execution_filled: number;
     execution_fill_rate: number | null;
+    calibration_effect_pct?: number | null;
     primary_window_days: number;
     verdict: string;
     headline: string;
@@ -2980,6 +3006,39 @@ export type WalkForwardSnapshotPayload = {
   missing_tradability_count: number;
 };
 
+export type WalkForwardGateCriterion = {
+  key: string;
+  label: string;
+  status: string;
+  value: string;
+  requirement: string;
+};
+
+export type WalkForwardEvidenceMetric = {
+  dimension: string;
+  key: string;
+  label: string;
+  trade_count: number;
+  out_of_sample_count: number;
+  win_rate: number | null;
+  average_return_pct: number | null;
+  worst_return_pct: number | null;
+  profit_factor: number | null;
+  max_consecutive_losses: number;
+  out_of_sample_verdict: string;
+  action: string;
+  suggested_weight_delta: number;
+  reason: string;
+};
+
+export type WalkForwardValidationCenter = {
+  status: string;
+  headline: string;
+  criteria: WalkForwardGateCriterion[];
+  strategies: WalkForwardEvidenceMetric[];
+  factors: WalkForwardEvidenceMetric[];
+};
+
 export type WalkForwardPayload = {
   top_5_portfolio: WalkForwardPortfolioPayload;
   top_10_portfolio: WalkForwardPortfolioPayload;
@@ -2989,6 +3048,7 @@ export type WalkForwardPayload = {
   top_10_temporal_validation: WalkForwardTemporalValidation;
   benchmarks: WalkForwardBenchmarkComparison[];
   cost_sensitivity: WalkForwardCostScenario[];
+  strategy_validation?: WalkForwardValidationCenter;
   snapshots: WalkForwardSnapshotPayload[];
   experiment_manifest: WalkForwardExperimentManifest;
 };

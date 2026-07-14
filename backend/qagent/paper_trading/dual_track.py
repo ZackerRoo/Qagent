@@ -29,6 +29,9 @@ class DualTrackBenchmarkMetric(BaseModel):
     selection_sample_count: int
     selection_return_pct: float | None
     selection_excess_pct: float | None
+    calibrated_sample_count: int
+    calibrated_return_pct: float | None
+    calibrated_excess_pct: float | None
     execution_sample_count: int
     execution_return_pct: float | None
     execution_excess_pct: float | None
@@ -37,10 +40,12 @@ class DualTrackBenchmarkMetric(BaseModel):
 class DualTrackWindow(BaseModel):
     window_days: int
     selection: DualTrackMetric
+    calibrated: DualTrackMetric
     execution: DualTrackMetric
     benchmarks: list[DualTrackBenchmarkMetric]
     timing_sample_count: int
     timing_effect_pct: float | None
+    calibration_effect_pct: float | None
     verdict: str
     explanation: str
 
@@ -52,6 +57,8 @@ class DualTrackSample(BaseModel):
     signal_date: date
     strategy_id: str | None
     rank_score: float
+    calibrated_eligible: bool
+    calibrated_reason: str
     selection_entry_date: date | None
     selection_entry_price: Decimal | None
     selection_return_5d: float | None
@@ -70,9 +77,12 @@ class DualTrackSummary(BaseModel):
     recommendation_days: int
     recommendations: int
     selection_started: int
+    calibrated_admitted: int
+    calibrated_filter_rate: float | None
     execution_admitted: int
     execution_filled: int
     execution_fill_rate: float | None
+    calibration_effect_pct: float | None
     primary_window_days: int
     verdict: str
     headline: str
@@ -150,6 +160,9 @@ def build_dual_track_report(
     execution_benchmarks: dict[int, dict[str, list[tuple[float, float]]]] = {
         horizon: defaultdict(list) for horizon in horizons
     }
+    calibrated_benchmarks: dict[int, dict[str, list[tuple[float, float]]]] = {
+        horizon: defaultdict(list) for horizon in horizons
+    }
     for snapshot in selected:
         frame = frames.get(snapshot.instrument_id, pd.DataFrame())
         selection_entry_date, selection_entry_price, selection_returns = _selection_track_returns(
@@ -165,6 +178,7 @@ def build_dual_track_report(
             horizons=horizons,
             round_trip_cost_pct=round_trip_cost_pct,
         )
+        calibrated_eligible, calibrated_reason = _calibrated_snapshot_eligibility(snapshot)
         for horizon in horizons:
             selection_return = selection_returns.get(horizon)
             if selection_return is not None:
@@ -179,6 +193,10 @@ def build_dual_track_report(
                         selection_benchmarks[horizon][definition.benchmark_id].append(
                             (selection_return, value)
                         )
+                        if calibrated_eligible:
+                            calibrated_benchmarks[horizon][definition.benchmark_id].append(
+                                (selection_return, value)
+                            )
             execution_return = execution_returns.get(horizon)
             if trade and trade.entry_date and execution_return is not None:
                 for definition in CN_BENCHMARKS:
@@ -200,6 +218,8 @@ def build_dual_track_report(
                 "selection_entry_date": selection_entry_date,
                 "selection_entry_price": selection_entry_price,
                 "selection_returns": selection_returns,
+                "calibrated_eligible": calibrated_eligible,
+                "calibrated_reason": calibrated_reason,
                 "execution_returns": execution_returns,
             }
         )
@@ -216,7 +236,14 @@ def build_dual_track_report(
             for item in raw_samples
             if (value := item["execution_returns"].get(horizon)) is not None
         ]
+        calibrated_items = [item for item in raw_samples if item["calibrated_eligible"]]
+        calibrated_values = [
+            value
+            for item in calibrated_items
+            if (value := item["selection_returns"].get(horizon)) is not None
+        ]
         selection_metric = _metric(len(raw_samples), selection_values)
+        calibrated_metric = _metric(len(calibrated_items), calibrated_values)
         admitted = sum(1 for item in raw_samples if item["trade"] is not None)
         execution_metric = _metric(admitted, execution_values)
         timing_pairs = [
@@ -232,6 +259,7 @@ def build_dual_track_report(
         for definition in CN_BENCHMARKS:
             selection_pairs = selection_benchmarks[horizon].get(definition.benchmark_id, [])
             execution_pairs = execution_benchmarks[horizon].get(definition.benchmark_id, [])
+            calibrated_pairs = calibrated_benchmarks[horizon].get(definition.benchmark_id, [])
             selection_benchmark = _average([benchmark for _, benchmark in selection_pairs])
             execution_benchmark = _average([benchmark for _, benchmark in execution_pairs])
             benchmark_metrics.append(
@@ -243,6 +271,13 @@ def build_dual_track_report(
                     selection_excess_pct=_average(
                         [selection - benchmark for selection, benchmark in selection_pairs]
                     ),
+                    calibrated_sample_count=len(calibrated_pairs),
+                    calibrated_return_pct=_average(
+                        [benchmark for _, benchmark in calibrated_pairs]
+                    ),
+                    calibrated_excess_pct=_average(
+                        [selection - benchmark for selection, benchmark in calibrated_pairs]
+                    ),
                     execution_sample_count=len(execution_pairs),
                     execution_return_pct=execution_benchmark,
                     execution_excess_pct=_average(
@@ -252,6 +287,7 @@ def build_dual_track_report(
             )
         verdict, explanation = _window_verdict(
             selection_metric,
+            calibrated_metric,
             execution_metric,
             benchmark_metrics,
         )
@@ -259,10 +295,15 @@ def build_dual_track_report(
             DualTrackWindow(
                 window_days=horizon,
                 selection=selection_metric,
+                calibrated=calibrated_metric,
                 execution=execution_metric,
                 benchmarks=benchmark_metrics,
                 timing_sample_count=len(timing_pairs),
                 timing_effect_pct=timing_effect,
+                calibration_effect_pct=_difference(
+                    calibrated_metric.average_return_pct,
+                    selection_metric.average_return_pct,
+                ),
                 verdict=verdict,
                 explanation=explanation,
             )
@@ -270,8 +311,7 @@ def build_dual_track_report(
 
     primary = _primary_window(windows)
     samples = [
-        _sample_payload(item, horizons=horizons, primary_window=primary)
-        for item in raw_samples
+        _sample_payload(item, horizons=horizons, primary_window=primary) for item in raw_samples
     ]
     samples.sort(
         key=lambda item: (
@@ -297,9 +337,15 @@ def build_dual_track_report(
             selection_started=sum(
                 1 for item in raw_samples if item["selection_entry_date"] is not None
             ),
+            calibrated_admitted=sum(1 for item in raw_samples if item["calibrated_eligible"]),
+            calibrated_filter_rate=_ratio(
+                sum(1 for item in raw_samples if not item["calibrated_eligible"]),
+                len(raw_samples),
+            ),
             execution_admitted=execution_admitted,
             execution_filled=execution_filled,
             execution_fill_rate=_ratio(execution_filled, execution_admitted),
+            calibration_effect_pct=primary.calibration_effect_pct if primary else None,
             primary_window_days=primary.window_days if primary else 10,
             verdict=summary_verdict,
             headline=headline,
@@ -311,6 +357,7 @@ def build_dual_track_report(
             "dual_track_source": "recommendation_snapshots_and_paper_ledger",
             "dual_track_entry_rule": "next_trading_day_open",
             "dual_track_execution_rule": "paper_trigger_stop_target_t1",
+            "dual_track_calibrated_rule": "point_in_time_quality_and_risk_filter",
             "dual_track_top_n_per_day": str(top_n),
             "dual_track_horizons": ",".join(str(value) for value in horizons),
             "dual_track_selected": str(len(selected)),
@@ -468,7 +515,9 @@ def _sample_payload(
     selection = raw["selection_returns"]
     execution = raw["execution_returns"]
     primary_days = primary_window.window_days if primary_window else 10
-    attribution = _sample_attribution(selection.get(primary_days), execution.get(primary_days), trade)
+    attribution = _sample_attribution(
+        selection.get(primary_days), execution.get(primary_days), trade
+    )
     return DualTrackSample(
         snapshot_id=snapshot.snapshot_id,
         instrument_id=snapshot.instrument_id,
@@ -476,6 +525,8 @@ def _sample_payload(
         signal_date=snapshot.signal_date,
         strategy_id=snapshot.primary_strategy_id,
         rank_score=_number(snapshot.rank_score),
+        calibrated_eligible=bool(raw["calibrated_eligible"]),
+        calibrated_reason=str(raw["calibrated_reason"]),
         selection_entry_date=raw["selection_entry_date"],
         selection_entry_price=raw["selection_entry_price"],
         selection_return_5d=selection.get(5),
@@ -493,11 +544,21 @@ def _sample_payload(
 
 def _window_verdict(
     selection: DualTrackMetric,
+    calibrated: DualTrackMetric,
     execution: DualTrackMetric,
     benchmarks: list[DualTrackBenchmarkMetric],
 ) -> tuple[str, str]:
     if selection.evaluated_count < 5:
         return "waiting", "选股轨道尚未形成至少 5 个成熟样本。"
+    calibration_effect = _difference(
+        calibrated.average_return_pct,
+        selection.average_return_pct,
+    )
+    if calibrated.evaluated_count >= 5 and calibration_effect is not None:
+        if calibration_effect >= 1:
+            return "calibration_helped", "质量与风险过滤版明显优于原始推荐，应该继续保留过滤门槛。"
+        if calibration_effect <= -1:
+            return "calibration_hurt", "质量过滤版反而落后，当前过滤条件需要重新校准。"
     primary_benchmark = benchmarks[0] if benchmarks else None
     selection_excess = primary_benchmark.selection_excess_pct if primary_benchmark else None
     if selection.average_return_pct is not None and selection.average_return_pct < 0:
@@ -528,6 +589,8 @@ def _summary_verdict(
         "timing_drag": "选股有效，择时拖累",
         "timing_helped": "择时产生正贡献",
         "selection_effective": "推荐存在超额收益",
+        "calibration_helped": "质量过滤改善推荐",
+        "calibration_hurt": "过滤条件需要调整",
         "aligned": "选股与择时基本一致",
         "waiting": "等待双轨样本成熟",
     }
@@ -538,7 +601,11 @@ def _primary_window(windows: list[DualTrackWindow]) -> DualTrackWindow | None:
     if not windows:
         return None
     return next(
-        (item for item in windows if item.window_days == 10 and item.selection.evaluated_count >= 5),
+        (
+            item
+            for item in windows
+            if item.window_days == 10 and item.selection.evaluated_count >= 5
+        ),
         max(windows, key=lambda item: item.selection.evaluated_count),
     )
 
@@ -562,6 +629,60 @@ def _sample_attribution(
     if difference <= -1:
         return "择时拖累收益"
     return "选股与择时接近"
+
+
+def _calibrated_snapshot_eligibility(
+    snapshot: OpportunitySnapshotRecord,
+) -> tuple[bool, str]:
+    if snapshot.status in {"risk_elevated", "invalidated", "closed", "postmortem_done"}:
+        return False, "推荐当时已被风险状态阻断"
+    if _number(snapshot.rank_score) < 0.55:
+        return False, "推荐总分低于 55%"
+
+    card = snapshot.card if isinstance(snapshot.card, dict) else {}
+    quality = card.get("recommendation_quality")
+    if isinstance(quality, dict) and quality.get("tier") in {
+        "risk_filtered",
+        "low_quality",
+    }:
+        return False, "推荐质量门禁未通过"
+
+    decision = card.get("decision")
+    if isinstance(decision, dict):
+        if decision.get("action") in {"avoid", "no_trade", "blocked"}:
+            return False, "当时决策不允许买入"
+        if decision.get("risk_status") in {"blocked", "veto"}:
+            return False, "盘前风险检查阻断"
+
+    flags = {str(value) for value in card.get("factor_flags", []) if isinstance(value, str)}
+    hard_flags = {
+        "low_liquidity",
+        "liquidity_risk",
+        "deep_drawdown_risk",
+        "price_limit_risk",
+    }
+    if flags.intersection(hard_flags):
+        return False, "流动性或极端风险因子未通过"
+    if {"high_volatility", "overextended"}.issubset(flags):
+        return False, "高波动与短线过热同时出现"
+
+    calibration = card.get("strategy_calibration")
+    if isinstance(calibration, dict):
+        sample_count = _optional_number(calibration.get("sample_count")) or 0
+        win_rate = _optional_number(calibration.get("win_rate_10d"))
+        average_return = _optional_number(calibration.get("avg_return_10d"))
+        if sample_count >= 20 and (
+            (win_rate is not None and win_rate < 45)
+            or (average_return is not None and average_return < 0)
+        ):
+            return False, "策略历史胜率或平均收益未通过"
+
+    data_quality = card.get("data_quality")
+    if isinstance(data_quality, dict):
+        quality_score = _optional_number(data_quality.get("score"))
+        if quality_score is not None and quality_score < 0.5:
+            return False, "当时数据质量低于 50%"
+    return True, "通过当时可见的质量、风险和策略门禁"
 
 
 def _frames_by_instrument(frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
@@ -597,6 +718,15 @@ def _snapshot_label(snapshot: OpportunitySnapshotRecord) -> str:
 
 def _number(value: Decimal | float | int | None) -> float:
     return float(value or 0)
+
+
+def _optional_number(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _average(values: list[float]) -> float | None:

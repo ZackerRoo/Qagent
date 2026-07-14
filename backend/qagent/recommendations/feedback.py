@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date
 
 from qagent.domain.models import (
@@ -95,9 +96,7 @@ def apply_recommendation_feedback_quality_gate(
     if center is None or not center.signal_effects:
         return cards
     weak_effects = {
-        effect.signal_key: effect
-        for effect in center.signal_effects
-        if _is_blocking_effect(effect)
+        effect.signal_key: effect for effect in center.signal_effects if _is_blocking_effect(effect)
     }
     if not weak_effects:
         return cards
@@ -111,14 +110,10 @@ def apply_recommendation_feedback_quality_gate(
 
 def recommendation_feedback_data_health(cards: list[OpportunityCard]) -> dict[str, str]:
     adjusted = sum(
-        1
-        for card in cards
-        if any("推荐反馈校准" in reason for reason in card.rank_reasons)
+        1 for card in cards if any("推荐反馈校准" in reason for reason in card.rank_reasons)
     )
     blocked = sum(
-        1
-        for card in cards
-        if any("推荐反馈门禁" in reason for reason in card.rank_reasons)
+        1 for card in cards if any("推荐反馈门禁" in reason for reason in card.rank_reasons)
     )
     return {
         "recommendation_feedback_cards": str(len(cards)),
@@ -149,7 +144,10 @@ def apply_paper_trading_feedback(
                 card.recommendation_score.summary = (
                     f"推荐分 {card.rank_score:.0%}：已纳入模拟盘闭环反馈 {delta:+.1%}。"
                 )
-            labels = "、".join(str(getattr(effect, "label", getattr(effect, "key", ""))) for effect in matched_drags[:3])
+            labels = "、".join(
+                str(getattr(effect, "label", getattr(effect, "key", "")))
+                for effect in matched_drags[:3]
+            )
             note = f"模拟盘反馈降权：{labels} 在模拟盘中近期拖累收益，推荐分调整 {delta:+.1%}。"
             if note not in card.rank_reasons:
                 card.rank_reasons.append(note)
@@ -160,7 +158,9 @@ def apply_paper_trading_feedback(
         matched_contributors = _matched_paper_effects(card, contributor_effects)
         if not matched_contributors:
             continue
-        raw_delta = sum(_paper_contributor_strength(effect, paused) for effect in matched_contributors)
+        raw_delta = sum(
+            _paper_contributor_strength(effect, paused) for effect in matched_contributors
+        )
         delta = _clamp(raw_delta, 0.015, 0.06)
         card.rank_score = round(_clamp(card.rank_score + delta, 0.0, 1.0), 4)
         card.dynamic_score = card.rank_score
@@ -169,7 +169,10 @@ def apply_paper_trading_feedback(
             card.recommendation_score.summary = (
                 f"推荐分 {card.rank_score:.0%}：已纳入模拟盘闭环反馈 {delta:+.1%}。"
             )
-        labels = "、".join(str(getattr(effect, "label", getattr(effect, "key", ""))) for effect in matched_contributors[:3])
+        labels = "、".join(
+            str(getattr(effect, "label", getattr(effect, "key", "")))
+            for effect in matched_contributors[:3]
+        )
         note = f"模拟盘反馈加权：{labels} 在模拟盘中近期贡献收益，推荐分调整 {delta:+.1%}。"
         if note not in card.rank_reasons:
             card.rank_reasons.append(note)
@@ -182,17 +185,87 @@ def paper_trading_feedback_data_health(cards: list[OpportunityCard]) -> dict[str
     adjusted = sum(
         1
         for card in cards
-        if any("模拟盘反馈降权" in reason or "模拟盘反馈加权" in reason for reason in card.rank_reasons)
+        if any(
+            "模拟盘反馈降权" in reason or "模拟盘反馈加权" in reason for reason in card.rank_reasons
+        )
     )
     blocked = sum(
-        1
-        for card in cards
-        if any("模拟盘反馈门禁" in reason for reason in card.rank_reasons)
+        1 for card in cards if any("模拟盘反馈门禁" in reason for reason in card.rank_reasons)
     )
     return {
         "paper_feedback_cards": str(len(cards)),
         "paper_feedback_adjusted": str(adjusted),
         "paper_feedback_blocked": str(blocked),
+    }
+
+
+def apply_walk_forward_validation_feedback(
+    cards: list[OpportunityCard],
+    validation: Mapping[str, object] | None,
+) -> list[OpportunityCard]:
+    if not validation:
+        return cards
+    center_status = str(validation.get("status", "insufficient"))
+    raw_metrics = [
+        *list(validation.get("strategies", []) or []),
+        *list(validation.get("factors", []) or []),
+    ]
+    metrics = [
+        item
+        for item in raw_metrics
+        if isinstance(item, Mapping)
+        and int(item.get("out_of_sample_count", 0) or 0) >= 30
+        and str(item.get("action", "observe")) != "observe"
+    ]
+    if not metrics:
+        return cards
+    for card in cards:
+        matched = _matched_walk_forward_metrics(card, metrics)
+        if not matched:
+            continue
+        disabled = [item for item in matched if str(item.get("action")) == "disable"]
+        if disabled:
+            labels = "、".join(str(item.get("label") or item.get("key")) for item in disabled[:3])
+            _apply_walk_forward_block(card, labels)
+            continue
+        raw_delta = sum(float(item.get("suggested_weight_delta", 0) or 0) for item in matched)
+        if center_status != "accepted":
+            raw_delta = min(raw_delta, 0.0)
+        delta = _clamp(raw_delta, -0.10, 0.06)
+        if abs(delta) < 0.001:
+            continue
+        card.rank_score = round(_clamp(card.rank_score + delta), 4)
+        card.dynamic_score = card.rank_score
+        if card.recommendation_score is not None:
+            card.recommendation_score.final_score = card.rank_score
+            card.recommendation_score.summary = (
+                f"推荐分 {card.rank_score:.0%}：已纳入全市场样本外验证 {delta:+.1%}。"
+            )
+        labels = "、".join(str(item.get("label") or item.get("key")) for item in matched[:3])
+        note = f"样本外校准：{labels} 根据 walk-forward 结果调整 {delta:+.1%}。"
+        if note not in card.rank_reasons:
+            card.rank_reasons.append(note)
+        if note not in card.calibration_notes:
+            card.calibration_notes.append(note)
+    return cards
+
+
+def walk_forward_feedback_data_health(
+    cards: list[OpportunityCard],
+    validation: Mapping[str, object] | None,
+) -> dict[str, str]:
+    adjusted = sum(
+        1 for card in cards if any("样本外校准" in reason for reason in card.rank_reasons)
+    )
+    blocked = sum(
+        1 for card in cards if any("样本外门禁" in reason for reason in card.rank_reasons)
+    )
+    return {
+        "walk_forward_feedback_source": "latest_saved_validation" if validation else "missing",
+        "walk_forward_feedback_gate": str((validation or {}).get("status", "missing")),
+        "walk_forward_feedback_cards": str(len(cards)),
+        "walk_forward_feedback_adjusted": str(adjusted),
+        "walk_forward_feedback_blocked": str(blocked),
     }
 
 
@@ -299,6 +372,64 @@ def _matched_paper_effects(
     return unique
 
 
+def _matched_walk_forward_metrics(
+    card: OpportunityCard,
+    metrics: list[Mapping[str, object]],
+) -> list[Mapping[str, object]]:
+    strategy_id = card.primary_strategy_id
+    signal_keys = set(_card_signal_keys(card))
+    matched = []
+    for item in metrics:
+        dimension = str(item.get("dimension", ""))
+        key = str(item.get("key", ""))
+        if dimension == "strategy" and strategy_id == key:
+            matched.append(item)
+        elif dimension == "factor" and key in signal_keys:
+            matched.append(item)
+    return matched
+
+
+def _apply_walk_forward_block(card: OpportunityCard, labels: str) -> None:
+    detail = f"{labels} 的全市场样本外验证为负，达到停用门槛。"
+    check = RecommendationQualityCheck(
+        code="walk_forward_validation_gate",
+        status="block",
+        label="样本外验证未通过",
+        detail=detail,
+        score_impact=-0.30,
+    )
+    if card.recommendation_quality is not None:
+        checks = [
+            item for item in card.recommendation_quality.checks if item.code != check.code
+        ] + [check]
+        card.recommendation_quality.checks = checks
+        card.recommendation_quality.block_count = sum(
+            1 for item in checks if item.status == "block"
+        )
+        card.recommendation_quality.warn_count = sum(1 for item in checks if item.status == "warn")
+        card.recommendation_quality.pass_count = sum(1 for item in checks if item.status == "pass")
+        card.recommendation_quality.score = round(
+            _clamp(card.recommendation_quality.score - 0.20), 4
+        )
+        card.recommendation_quality.tier = "risk_filtered"
+        card.recommendation_quality.summary = "风险过滤：全市场样本外验证未通过。"
+    card.rank_score = round(min(card.rank_score, 0.35), 4)
+    card.dynamic_score = card.rank_score
+    if card.recommendation_score is not None:
+        card.recommendation_score.final_score = card.rank_score
+        card.recommendation_score.tier = "risk_filtered"
+        card.recommendation_score.summary = (
+            f"推荐分 {card.rank_score:.0%}：样本外验证为负，已停止进入买入候选。"
+        )
+    _block_pre_trade_risk(card, detail)
+    _block_decision(card, detail)
+    note = f"样本外门禁：{labels} 未通过全市场历史验证，暂不进入买入候选。"
+    if note not in card.rank_reasons:
+        card.rank_reasons.append(note)
+    if note not in card.calibration_notes:
+        card.calibration_notes.append(note)
+
+
 def _card_asset_key(card: OpportunityCard) -> str:
     symbol = card.instrument_id.split(":", 1)[-1].split(".", 1)[0]
     if card.instrument_id.startswith("CN:") and symbol.startswith(("15", "16", "51", "56", "58")):
@@ -383,10 +514,14 @@ def _apply_feedback_block(card: OpportunityCard, effects: list[object]) -> None:
         ]
         checks.append(check)
         card.recommendation_quality.checks = checks
-        card.recommendation_quality.block_count = sum(1 for item in checks if item.status == "block")
+        card.recommendation_quality.block_count = sum(
+            1 for item in checks if item.status == "block"
+        )
         card.recommendation_quality.warn_count = sum(1 for item in checks if item.status == "warn")
         card.recommendation_quality.pass_count = sum(1 for item in checks if item.status == "pass")
-        card.recommendation_quality.score = round(_clamp(card.recommendation_quality.score - 0.18), 4)
+        card.recommendation_quality.score = round(
+            _clamp(card.recommendation_quality.score - 0.18), 4
+        )
         card.recommendation_quality.tier = "risk_filtered"
         card.recommendation_quality.summary = "风险过滤：推荐后验证转弱，暂不进入买入候选。"
     card.rank_score = round(min(card.rank_score, 0.38), 4)

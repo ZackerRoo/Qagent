@@ -55,6 +55,7 @@ import type {
   StrategyPerformanceResponse,
   WalkForwardRun,
   WalkForwardJob,
+  WalkForwardValidationCenter,
 } from "../types";
 
 function formatNumber(value: number | null, suffix = "") {
@@ -1302,6 +1303,15 @@ function WalkForwardValidationCenter({
                 ? `当前仅是 ${medianCovered} 标的试点：历史横截面证据覆盖 ${formatNumber(Number.isFinite(coveragePct) ? coveragePct : null, "%")}（门槛 90%）。收益和胜率只能说明这组试点表现，不能称为全市场选股有效。`
                 : `This is a ${medianCovered}-instrument pilot with ${formatNumber(Number.isFinite(coveragePct) ? coveragePct : null, "%")} historical market coverage (90% required). Returns do not validate full-market selection.`)}
           </div>
+          {payload?.strategy_validation ? (
+            <WalkForwardStrategyGate center={payload.strategy_validation} language={language} />
+          ) : (
+            <div className="walk-forward-gate-note coverage-warning">
+              {zh
+                ? "这是旧版历史验证结果。重新运行一次后，会生成六项准入门槛以及策略/因子淘汰表。"
+                : "This is a legacy validation result. Run it again to generate release criteria and strategy/factor gates."}
+            </div>
+          )}
           <div className="walk-forward-chart-grid">
             <LineValidationChart
               title={zh ? "Top 5 权益曲线" : "Top 5 equity curve"}
@@ -1352,6 +1362,87 @@ function WalkForwardValidationCenter({
           </div>
         </div>
       )}
+    </section>
+  );
+}
+
+function WalkForwardStrategyGate({
+  center,
+  language,
+}: {
+  center: WalkForwardValidationCenter;
+  language: "zh" | "en";
+}) {
+  const zh = language === "zh";
+  const actionLabel = (action: string) => ({
+    increase: zh ? "提高" : "Increase",
+    maintain: zh ? "保持" : "Maintain",
+    reduce: zh ? "降低" : "Reduce",
+    disable: zh ? "停用" : "Disable",
+    observe: zh ? "观察" : "Observe",
+  } as Record<string, string>)[action] ?? action;
+  const statusLabel = (status: string) => ({
+    accepted: zh ? "通过" : "Accepted",
+    rejected: zh ? "未通过" : "Rejected",
+    insufficient: zh ? "证据不足" : "Insufficient",
+  } as Record<string, string>)[status] ?? status;
+  const tables = [
+    { title: zh ? "策略准入" : "Strategy admission", rows: center.strategies },
+    { title: zh ? "因子准入" : "Factor admission", rows: center.factors },
+  ];
+  return (
+    <section className={`walk-forward-release-gate gate-${center.status}`}>
+      <div className="walk-forward-release-head">
+        <div>
+          <span>{zh ? "上线门禁" : "Release gate"}</span>
+          <h3>{statusLabel(center.status)}</h3>
+          <p>{center.headline}</p>
+        </div>
+        <strong>{center.criteria.filter((item) => item.status === "pass").length}/{center.criteria.length}</strong>
+      </div>
+      <div className="walk-forward-criteria-grid">
+        {center.criteria.map((item) => (
+          <div key={item.key} className={`criterion-${item.status}`}>
+            <span>{item.label}</span>
+            <strong>{item.value}</strong>
+            <small>{zh ? "门槛" : "Required"} {item.requirement}</small>
+          </div>
+        ))}
+      </div>
+      <div className="walk-forward-evidence-grid">
+        {tables.map((table) => (
+          <div className="table-shell" key={table.title}>
+            <div className="walk-forward-evidence-title">
+              <strong>{table.title}</strong>
+              <span>{table.rows.length}</span>
+            </div>
+            <table>
+              <thead>
+                <tr>
+                  <th>{zh ? "名称" : "Name"}</th>
+                  <th>{zh ? "样本外" : "OOS"}</th>
+                  <th>{zh ? "胜率" : "Win"}</th>
+                  <th>{zh ? "均值" : "Average"}</th>
+                  <th>PF</th>
+                  <th>{zh ? "动作" : "Action"}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {table.rows.slice(0, 8).map((item) => (
+                  <tr key={`${item.dimension}:${item.key}`} title={item.reason}>
+                    <td>{item.label}</td>
+                    <td>{item.out_of_sample_count}/30</td>
+                    <td>{formatRatio(item.win_rate)}</td>
+                    <td>{formatNumber(item.average_return_pct, "%")}</td>
+                    <td>{formatMultiple(item.profit_factor)}</td>
+                    <td><span className={`status evidence-${item.action}`}>{actionLabel(item.action)}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ))}
+      </div>
     </section>
   );
 }

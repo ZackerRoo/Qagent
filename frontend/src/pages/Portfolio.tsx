@@ -468,12 +468,14 @@ function PaperDualTrackPanel({
   const summary = report.summary;
   const primary = report.windows.find((item) => item.window_days === summary.primary_window_days)
     ?? report.windows[0];
+  const hasCalibration = summary.calibrated_admitted != null
+    && report.windows.some((item) => item.calibrated != null);
   const tone = dualTrackTone(summary.verdict);
   return (
     <section className={`paper-dual-track tone-${tone}`}>
       <div className="paper-dual-track-hero">
         <div>
-          <span className="eyebrow">{language === "zh" ? "双轨模拟验证" : "Dual-track validation"}</span>
+          <span className="eyebrow">{language === "zh" ? "三轨模拟验证" : "Three-track validation"}</span>
           <h3>{language === "zh" ? summary.headline : dualTrackHeadline(summary.verdict)}</h3>
           <p>
             {language === "zh"
@@ -504,6 +506,17 @@ function PaperDualTrackPanel({
           </small>
         </div>
         <div>
+          <span>{language === "zh" ? "质量过滤保留" : "Quality-filtered"}</span>
+          <strong>{hasCalibration ? `${summary.calibrated_admitted}/${summary.recommendations}` : "-"}</strong>
+          <small>
+            {!hasCalibration
+              ? (language === "zh" ? "旧结果需重新运行" : "Rerun legacy result")
+              : language === "zh"
+                ? `过滤 ${formatRate(summary.calibrated_filter_rate ?? null)}`
+                : `${formatRate(summary.calibrated_filter_rate ?? null)} filtered`}
+          </small>
+        </div>
+        <div>
           <span>{language === "zh" ? "择时已成交" : "Execution filled"}</span>
           <strong>{summary.execution_filled}/{summary.execution_admitted}</strong>
           <small>{language === "zh" ? "触发后才成交" : "Only after trigger"}</small>
@@ -522,11 +535,11 @@ function PaperDualTrackPanel({
               <h3>{language === "zh" ? "5 / 10 / 20 日收益对比" : "5 / 10 / 20 day comparison"}</h3>
               <p>
                 {language === "zh"
-                  ? "同一批推荐比较直接持有、按买点执行和指数表现。"
-                  : "Compares direct holding, rule-based execution, and benchmarks for the same signals."}
+                  ? "同一批推荐比较原始选股、质量过滤、按买点执行和指数表现。"
+                  : "Compares raw selection, quality filters, execution rules, and benchmarks."}
               </p>
             </div>
-            <strong>{primary ? formatPct(primary.timing_effect_pct) : "-"}</strong>
+            <strong>{primary ? formatPct(primary.calibration_effect_pct ?? null) : "-"}</strong>
           </div>
           <DualTrackComparisonChart windows={report.windows} language={language} />
         </div>
@@ -534,6 +547,7 @@ function PaperDualTrackPanel({
         <div className="paper-dual-track-window-list">
           {report.windows.map((window) => {
             const benchmark = window.benchmarks.find((item) => item.name === "沪深300");
+            const calibrated = window.calibrated;
             return (
               <article key={window.window_days} className={`dual-track-window tone-${dualTrackTone(window.verdict)}`}>
                 <header>
@@ -546,16 +560,20 @@ function PaperDualTrackPanel({
                   <small>{window.selection.evaluated_count} {language === "zh" ? "样本" : "samples"} · {formatRate(window.selection.win_rate)}</small>
                 </div>
                 <div>
+                  <span>{language === "zh" ? "过滤版" : "Filtered"}</span>
+                  <strong>{formatPct(calibrated?.average_return_pct ?? null)}</strong>
+                  <small>{calibrated?.evaluated_count ?? 0} {language === "zh" ? "样本" : "samples"} · {formatRate(calibrated?.win_rate ?? null)}</small>
+                </div>
+                <div>
                   <span>{language === "zh" ? "择时盘" : "Execution"}</span>
                   <strong>{formatPct(window.execution.average_return_pct)}</strong>
                   <small>{window.execution.evaluated_count} {language === "zh" ? "成交样本" : "filled"}</small>
                 </div>
                 <footer>
                   <span>
-                    {language === "zh" ? "择时贡献" : "Timing"} {formatPct(window.timing_effect_pct)}
-                    {window.timing_sample_count > 0 ? ` · n=${window.timing_sample_count}` : ""}
+                    {language === "zh" ? "过滤贡献" : "Filter"} {formatPct(window.calibration_effect_pct ?? null)}
                   </span>
-                  <span>{language === "zh" ? "超额" : "Excess"} {formatPct(benchmark?.selection_excess_pct ?? null)}</span>
+                  <span>{language === "zh" ? "过滤后超额" : "Filtered excess"} {formatPct(benchmark?.calibrated_excess_pct ?? null)}</span>
                 </footer>
               </article>
             );
@@ -584,6 +602,7 @@ function PaperDualTrackPanel({
                 <th>{language === "zh" ? "选股 5D" : "Select 5D"}</th>
                 <th>{language === "zh" ? "选股 10D" : "Select 10D"}</th>
                 <th>{language === "zh" ? "选股 20D" : "Select 20D"}</th>
+                <th>{language === "zh" ? "质量过滤" : "Quality filter"}</th>
                 <th>{language === "zh" ? "择时状态" : "Execution"}</th>
                 <th>{language === "zh" ? "择时 10D" : "Execute 10D"}</th>
                 <th>{language === "zh" ? "结论" : "Attribution"}</th>
@@ -597,6 +616,15 @@ function PaperDualTrackPanel({
                   <td>{formatPct(sample.selection_return_5d)}</td>
                   <td>{formatPct(sample.selection_return_10d)}</td>
                   <td>{formatPct(sample.selection_return_20d)}</td>
+                  <td title={sample.calibrated_reason ?? ""}>
+                    <span className={`status ${sample.calibrated_eligible == null ? "status-watch" : sample.calibrated_eligible ? "status-ready" : "status-blocked"}`}>
+                      {sample.calibrated_eligible == null
+                        ? (language === "zh" ? "旧样本" : "Legacy")
+                        : sample.calibrated_eligible
+                          ? (language === "zh" ? "保留" : "Keep")
+                          : (language === "zh" ? "过滤" : "Filter")}
+                    </span>
+                  </td>
                   <td>{dualTrackExecutionLabel(sample.execution_status, language)}</td>
                   <td>{formatPct(sample.execution_return_10d)}</td>
                   <td className="reason-cell">{language === "zh" ? sample.attribution : dualTrackAttribution(sample.attribution)}</td>
@@ -627,6 +655,7 @@ function DualTrackComparisonChart({
   const plotHeight = height - top - bottom;
   const series = [
     { key: "selection", label: language === "zh" ? "选股盘" : "Selection", className: "is-selection", values: windows.map((item) => item.selection.average_return_pct) },
+    { key: "calibrated", label: language === "zh" ? "质量过滤" : "Quality filter", className: "is-calibrated", values: windows.map((item) => item.calibrated?.average_return_pct ?? null) },
     { key: "execution", label: language === "zh" ? "择时盘" : "Execution", className: "is-execution", values: windows.map((item) => item.execution.average_return_pct) },
     { key: "hs300", label: "沪深300", className: "is-hs300", values: windows.map((item) => item.benchmarks.find((benchmark) => benchmark.name === "沪深300")?.selection_return_pct ?? null) },
     { key: "star50", label: "科创50", className: "is-star50", values: windows.map((item) => item.benchmarks.find((benchmark) => benchmark.name === "科创50")?.selection_return_pct ?? null) },
@@ -679,8 +708,8 @@ function DualTrackComparisonChart({
 }
 
 function dualTrackTone(verdict: string) {
-  if (["selection_effective", "timing_helped"].includes(verdict)) return "good";
-  if (["selection_weak", "timing_drag"].includes(verdict)) return "risk";
+  if (["selection_effective", "timing_helped", "calibration_helped"].includes(verdict)) return "good";
+  if (["selection_weak", "timing_drag", "calibration_hurt"].includes(verdict)) return "risk";
   return "watch";
 }
 
@@ -692,6 +721,8 @@ function dualTrackVerdictLabel(verdict: string, language: Language) {
     timing_drag: { zh: "择时拖累", en: "Timing drag" },
     timing_helped: { zh: "择时增益", en: "Timing helped" },
     selection_effective: { zh: "选股有效", en: "Selection effective" },
+    calibration_helped: { zh: "过滤有效", en: "Filtering helped" },
+    calibration_hurt: { zh: "过滤需调整", en: "Filtering hurt" },
     aligned: { zh: "表现接近", en: "Aligned" },
     waiting: { zh: "等待成熟", en: "Waiting" },
   };
@@ -706,6 +737,8 @@ function dualTrackHeadline(verdict: string) {
     timing_drag: "Selection works, timing drags",
     timing_helped: "Timing adds value",
     selection_effective: "Recommendations show excess return",
+    calibration_helped: "Quality filtering improves selection",
+    calibration_hurt: "Quality filters need adjustment",
     aligned: "Selection and timing are aligned",
     waiting: "Waiting for mature samples",
   };
@@ -1153,6 +1186,7 @@ function PaperReviewDashboard({
       <PaperPostRecommendationLeaderboard report={report} language={language} />
       <PaperAssetGroupCards groups={assetGroups} language={language} />
       <PaperFailureAttributionPanel items={report.failure_attribution} language={language} />
+      <PaperTradeDiagnosticsPanel items={report.trade_diagnostics ?? []} language={language} />
 
       <div className="paper-review-main">
         <div className="paper-ledger-card">
@@ -1658,6 +1692,51 @@ function PaperFailureAttributionPanel({
   );
 }
 
+function PaperTradeDiagnosticsPanel({
+  items,
+  language,
+}: {
+  items: PaperDailyReportResponse["trade_diagnostics"];
+  language: Language;
+}) {
+  if (!items.length) {
+    return null;
+  }
+  return (
+    <section className="paper-diagnostics-panel">
+      <div className="paper-ledger-card-header">
+        <div>
+          <h3>{language === "zh" ? "逐笔根因诊断" : "Trade root-cause review"}</h3>
+          <p>
+            {language === "zh"
+              ? "每笔失败只给一个主因，并列出当时证据和下一次应该改变什么。"
+              : "Assigns one primary cause to each result, with point-in-time evidence and a next action."}
+          </p>
+        </div>
+        <strong>{items.length}</strong>
+      </div>
+      <div className="paper-diagnostics-list">
+        {items.slice(0, 10).map((item) => (
+          <article key={item.trade_id} className={`paper-diagnostic-row severity-${item.severity}`}>
+            <div className="paper-diagnostic-symbol">
+              <strong>{formatInstrumentDisplay(item.instrument_label)}</strong>
+              <span>{localizeStrategy(item.strategy_id, language)}</span>
+            </div>
+            <div className="paper-diagnostic-cause">
+              <span>{item.root_cause_label}</span>
+              <strong>{formatPct(item.return_pct)}</strong>
+            </div>
+            <div className="paper-diagnostic-evidence">
+              <p>{item.evidence.slice(0, 2).join("；")}</p>
+              <small>{item.action}</small>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function PaperEventTimelinePanel({
   items,
   language,
@@ -1799,6 +1878,8 @@ function attributionDimensionLabel(value: string, language: Language) {
     strategy: { zh: "策略", en: "Strategy" },
     asset: { zh: "资产", en: "Asset" },
     status: { zh: "状态", en: "Status" },
+    signal: { zh: "因子/风险", en: "Factor / risk" },
+    cause: { zh: "根因", en: "Root cause" },
   };
   return labels[value]?.[zh ? "zh" : "en"] ?? value;
 }
