@@ -206,6 +206,7 @@ class HistoricalBackfillJobRecord(BaseModel):
             "corporate_actions": 3,
             "terminal_settlements": 4,
             "replay_prices": int(5 + price_ratio * 55),
+            "price_retry": 60,
             "benchmark_prices": 61,
             "fundamentals": int(
                 62 + min(max(fundamental_processed / self.total_symbols, 0), 1) * 18

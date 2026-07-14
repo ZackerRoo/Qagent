@@ -252,6 +252,13 @@ def run_historical_backfill(
     permanent_failed = int(
         job.data_health.get("backfill_price_permanent_failed", "0") or 0
     )
+    retryable_symbols = _restored_retryable_symbols(job)
+    retry_attempted = int(
+        job.data_health.get("backfill_price_retry_attempted", "0") or 0
+    )
+    retry_recovered = int(
+        job.data_health.get("backfill_price_retry_recovered", "0") or 0
+    )
     rows_written = job.rows_written if was_running else 0
     errors: list[str] = list(job.errors[-100:]) if was_running else []
     rule_rows = 0
@@ -543,6 +550,7 @@ def run_historical_backfill(
                     network_succeeded=network_succeeded,
                     retryable_failed=retryable_failed,
                     permanent_failed=permanent_failed,
+                    retryable_symbols=retryable_symbols,
                 )
                 continue
 
@@ -566,6 +574,8 @@ def run_historical_backfill(
                 errors.append(f"{instrument_id}: {detail}")
                 if _is_retryable_provider_failure(provider_errors):
                     retryable_failed += 1
+                    if instrument_id not in retryable_symbols:
+                        retryable_symbols.append(instrument_id)
                 else:
                     permanent_failed += 1
             repo.update_historical_backfill_job(
@@ -587,7 +597,62 @@ def run_historical_backfill(
                 network_succeeded=network_succeeded,
                 retryable_failed=retryable_failed,
                 permanent_failed=permanent_failed,
+                retryable_symbols=retryable_symbols,
             )
+
+        if retryable_symbols:
+            _set_backfill_phase(repo, job.job_id, "price_retry")
+            pending_retry_symbols = list(dict.fromkeys(retryable_symbols))
+            for retry_index, instrument_id in enumerate(
+                pending_retry_symbols,
+                start=1,
+            ):
+                retry_attempted += 1
+                bars, provider_errors = _fetch_uncached_daily_bars(
+                    provider,
+                    instrument_id,
+                    start,
+                    end,
+                )
+                saved = cache.save_daily_bars(mode, bars)
+                cache.record_coverage(mode, instrument_id, start, end, saved)
+                replay_rows += _persist_replay_frame(replay_repo, bars)
+                rows_written += saved
+                if saved > 0:
+                    retry_recovered += 1
+                    network_succeeded += 1
+                    succeeded += 1
+                    failed = max(failed - 1, 0)
+                    retryable_symbols.remove(instrument_id)
+                    errors = _without_instrument_errors(errors, instrument_id)
+                else:
+                    detail = (
+                        provider_errors[-1]
+                        if provider_errors
+                        else "no daily bars returned after deferred retry"
+                    )
+                    errors = _without_instrument_errors(errors, instrument_id)
+                    errors.append(f"{instrument_id}: {detail}")
+                _update_backfill_health(
+                    repo,
+                    job.job_id,
+                    backfill_price_retry_mode="deferred_transient_failures",
+                    backfill_price_retry_attempted=str(retry_attempted),
+                    backfill_price_retry_recovered=str(retry_recovered),
+                    backfill_price_retry_unresolved=str(len(retryable_symbols)),
+                    backfill_price_retryable_symbols=",".join(retryable_symbols),
+                    backfill_price_retry_progress=(
+                        f"{retry_index}/{len(pending_retry_symbols)}"
+                    ),
+                )
+                repo.update_historical_backfill_job(
+                    job.job_id,
+                    succeeded_symbols=min(succeeded, len(symbols)),
+                    failed_symbols=failed,
+                    rows_written=rows_written,
+                    current_instrument=instrument_id,
+                    errors=errors[-100:],
+                )
 
         if historical_evidence_provider is not None and hasattr(
             historical_evidence_provider,
@@ -887,6 +952,10 @@ def run_historical_backfill(
             "backfill_price_network_succeeded": str(network_succeeded),
             "backfill_price_retryable_failed": str(retryable_failed),
             "backfill_price_permanent_failed": str(permanent_failed),
+            "backfill_price_retry_attempted": str(retry_attempted),
+            "backfill_price_retry_recovered": str(retry_recovered),
+            "backfill_price_retry_unresolved": str(len(retryable_symbols)),
+            "backfill_price_retryable_symbols": ",".join(retryable_symbols),
             "backfill_price_remaining": "0",
             "backfill_rows_written": str(rows_written),
             "backfill_inventory_rows": str(inventory_rows),
@@ -998,6 +1067,7 @@ def _checkpoint_price_backfill_health(
     network_succeeded: int,
     retryable_failed: int,
     permanent_failed: int,
+    retryable_symbols: list[str],
 ) -> None:
     if processed < total and processed % max(1, batch_size) != 0:
         return
@@ -1009,8 +1079,35 @@ def _checkpoint_price_backfill_health(
         backfill_price_network_succeeded=str(network_succeeded),
         backfill_price_retryable_failed=str(retryable_failed),
         backfill_price_permanent_failed=str(permanent_failed),
+        backfill_price_retryable_symbols=",".join(retryable_symbols),
         backfill_price_remaining=str(max(total - processed, 0)),
     )
+
+
+def _restored_retryable_symbols(job: HistoricalBackfillJobRecord) -> list[str]:
+    persisted = [
+        item.strip()
+        for item in job.data_health.get(
+            "backfill_price_retryable_symbols",
+            "",
+        ).split(",")
+        if item.strip()
+    ]
+    for error in job.errors:
+        instrument_id, separator, detail = error.partition(": ")
+        if (
+            separator
+            and instrument_id.startswith("CN:")
+            and _is_retryable_provider_failure([detail])
+            and instrument_id not in persisted
+        ):
+            persisted.append(instrument_id)
+    return persisted
+
+
+def _without_instrument_errors(errors: list[str], instrument_id: str) -> list[str]:
+    prefix = f"{instrument_id}:"
+    return [error for error in errors if not error.startswith(prefix)]
 
 
 def _is_retryable_provider_failure(errors: list[str]) -> bool:
@@ -1024,6 +1121,7 @@ def _is_retryable_provider_failure(errors: list[str]) -> bool:
             "circuit",
             "connection",
             "deadline",
+            "disconnect",
             "disconnected",
             "login failed",
             "network",
@@ -1031,6 +1129,7 @@ def _is_retryable_provider_failure(errors: list[str]) -> bool:
             "remote",
             "skipped after",
             "source unavailable",
+            "temporary",
             "temporarily",
             "timed out",
             "timeout",
