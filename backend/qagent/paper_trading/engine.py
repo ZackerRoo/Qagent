@@ -14,7 +14,14 @@ from qagent.storage.repository import OpportunitySnapshotRecord
 
 
 OPEN_STATUSES = {"pending", "open"}
-CLOSED_STATUSES = {"target_1_hit", "stopped", "time_exit", "missed_entry"}
+CLOSED_STATUSES = {
+    "target_1_hit",
+    "stopped",
+    "time_exit",
+    "missed_entry",
+    "replaced",
+    "invalidated",
+}
 EXECUTED_CLOSED_STATUSES = {"target_1_hit", "stopped", "time_exit"}
 A_SHARE_TZ = ZoneInfo("Asia/Shanghai")
 A_SHARE_MORNING_START = time(9, 30)
@@ -36,6 +43,8 @@ class PaperTradingSummary(BaseModel):
     open: int
     closed: int
     missed_entry_count: int
+    replaced_count: int
+    invalidated_count: int
     target_hit_count: int
     stopped_count: int
     time_exit_count: int
@@ -60,6 +69,8 @@ class PaperLedgerSummary(BaseModel):
     open_trades: int
     closed_trades: int
     missed_entry_count: int
+    replaced_count: int
+    invalidated_count: int
     target_hit_count: int
     stopped_count: int
     time_exit_count: int
@@ -348,6 +359,8 @@ class PaperTriggerQualitySummary(BaseModel):
     pending_count: int
     triggered_count: int
     missed_entry_count: int
+    replaced_count: int
+    invalidated_count: int
     no_chase_missed_count: int
     stopped_count: int
     target_hit_count: int
@@ -422,6 +435,8 @@ class PaperDailyReport(BaseModel):
             pending_count=0,
             triggered_count=0,
             missed_entry_count=0,
+            replaced_count=0,
+            invalidated_count=0,
             no_chase_missed_count=0,
             stopped_count=0,
             target_hit_count=0,
@@ -483,6 +498,9 @@ def seed_paper_trades_from_snapshots(
         if signal_date is None or snapshot.trigger_price is None:
             skipped += 1
             continue
+        if not paper_snapshot_price_basis_is_consistent(snapshot):
+            skipped += 1
+            continue
         if (
             max_signal_age_days is not None
             and (current_date - signal_date).days > max_signal_age_days
@@ -507,6 +525,18 @@ def seed_paper_trades_from_snapshots(
     return PaperSeedResult(scanned=len(snapshots), created=created, skipped=skipped)
 
 
+def paper_snapshot_price_basis_is_consistent(
+    snapshot: OpportunitySnapshotRecord,
+    *,
+    max_gap_ratio: Decimal = Decimal("0.45"),
+) -> bool:
+    trigger = snapshot.trigger_price
+    latest = snapshot.latest_close
+    if trigger is None or latest is None or trigger <= 0 or latest <= 0:
+        return True
+    return abs(trigger - latest) / trigger <= max_gap_ratio
+
+
 def update_paper_trades(
     repo: PaperTradingRepository,
     provider: MarketDataProvider,
@@ -516,6 +546,9 @@ def update_paper_trades(
     as_of: datetime | None = None,
 ) -> PaperUpdateResult:
     trades = repo.list_trades(limit=1000, provider=provider_mode)
+    repaired_replaced_statuses = _repair_replaced_trade_statuses(repo, trades)
+    if repaired_replaced_statuses:
+        trades = repo.list_trades(limit=1000, provider=provider_mode)
     repaired_invalid_dates = _repair_impossible_trade_dates(repo, trades)
     if repaired_invalid_dates:
         trades = repo.list_trades(limit=1000, provider=provider_mode)
@@ -551,12 +584,14 @@ def update_paper_trades(
         daily_fallback_rows += len(bars)
         if bars.empty:
             continue
+        source_context = repo.get_trade_source_context(trade.source_snapshot_id)
         updated, deferred = _evaluate_trade(
             trade,
             bars,
             max_holding_days,
             max_entry_wait_days,
             as_of=execution_time,
+            source_latest_close=source_context.latest_close if source_context else None,
         )
         fills_deferred += deferred
         repo.update_trade(trade.trade_id, **updated)
@@ -577,6 +612,7 @@ def update_paper_trades(
         "paper_daily_fallback_checked": str(daily_fallback_checked),
         "paper_daily_fallback_rows": str(daily_fallback_rows),
         "paper_repaired_invalid_dates": str(repaired_invalid_dates),
+        "paper_repaired_replaced_statuses": str(repaired_replaced_statuses),
     }
     if provider_errors:
         data_health["errors"] = " | ".join(provider_errors[:3])
@@ -585,6 +621,23 @@ def update_paper_trades(
         trades=refreshed,
         data_health=data_health,
     )
+
+
+def _repair_replaced_trade_statuses(
+    repo: PaperTradingRepository,
+    trades: list[PaperTradeRecord],
+) -> int:
+    repaired = 0
+    for trade in trades:
+        if trade.status != "missed_entry" or "候补替换" not in trade.notes:
+            continue
+        repo.update_trade(
+            trade.trade_id,
+            status="replaced",
+            realized_return_pct=None,
+        )
+        repaired += 1
+    return repaired
 
 
 def _repair_impossible_trade_dates(
@@ -640,9 +693,7 @@ def summarize_paper_trades(trades: list[PaperTradeRecord]) -> PaperTradingSummar
         if trade.realized_return_pct is not None and trade.realized_return_pct > 0
     ]
     realized = [
-        trade.realized_return_pct
-        for trade in closed
-        if trade.realized_return_pct is not None
+        trade.realized_return_pct for trade in closed if trade.realized_return_pct is not None
     ]
     unrealized = [
         trade.unrealized_return_pct
@@ -655,13 +706,13 @@ def summarize_paper_trades(trades: list[PaperTradeRecord]) -> PaperTradingSummar
         open=sum(1 for trade in trades if trade.status == "open"),
         closed=len(closed),
         missed_entry_count=sum(1 for trade in trades if trade.status == "missed_entry"),
+        replaced_count=sum(1 for trade in trades if trade.status == "replaced"),
+        invalidated_count=sum(1 for trade in trades if trade.status == "invalidated"),
         target_hit_count=sum(1 for trade in trades if trade.status == "target_1_hit"),
         stopped_count=sum(1 for trade in trades if trade.status == "stopped"),
         time_exit_count=sum(1 for trade in trades if trade.status == "time_exit"),
         win_rate=round(len(winning) / len(closed), 4) if closed else None,
-        average_realized_return_pct=round(sum(realized) / len(realized), 4)
-        if realized
-        else None,
+        average_realized_return_pct=round(sum(realized) / len(realized), 4) if realized else None,
         average_unrealized_return_pct=round(sum(unrealized) / len(unrealized), 4)
         if unrealized
         else None,
@@ -727,6 +778,8 @@ def build_paper_ledger(
             open_trades=sum(1 for trade in trades if trade.status == "open"),
             closed_trades=sum(1 for trade in trades if _is_executed_closed_trade(trade)),
             missed_entry_count=sum(1 for trade in trades if trade.status == "missed_entry"),
+            replaced_count=sum(1 for trade in trades if trade.status == "replaced"),
+            invalidated_count=sum(1 for trade in trades if trade.status == "invalidated"),
             target_hit_count=sum(1 for trade in trades if trade.status == "target_1_hit"),
             stopped_count=sum(1 for trade in trades if trade.status == "stopped"),
             time_exit_count=sum(1 for trade in trades if trade.status == "time_exit"),
@@ -782,6 +835,9 @@ def build_paper_validation(
     if not windows:
         raise ValueError("windows must not be empty")
     as_of = as_of or _validation_as_of(trades)
+    validation_trades = [
+        trade for trade in trades if trade.status not in {"replaced", "invalidated"}
+    ]
     ledger_items = {item.trade_id: item for item in ledger.items}
     items = [
         _validation_item(
@@ -790,7 +846,7 @@ def build_paper_validation(
             allocation_per_trade=ledger.summary.allocation_per_trade,
             as_of=as_of,
         )
-        for trade in trades
+        for trade in validation_trades
     ]
     window_results = [
         _validation_window(
@@ -825,10 +881,12 @@ def build_paper_validation(
         summary=PaperValidationSummary(
             total_trades=len(items),
             triggered_trades=sum(1 for item in items if item.entry_date is not None),
-            pending_trades=sum(1 for trade in trades if trade.status == "pending"),
-            open_trades=sum(1 for trade in trades if trade.status == "open"),
-            closed_trades=sum(1 for trade in trades if _is_executed_closed_trade(trade)),
-            missed_entry_count=sum(1 for trade in trades if trade.status == "missed_entry"),
+            pending_trades=sum(1 for trade in validation_trades if trade.status == "pending"),
+            open_trades=sum(1 for trade in validation_trades if trade.status == "open"),
+            closed_trades=sum(1 for trade in validation_trades if _is_executed_closed_trade(trade)),
+            missed_entry_count=sum(
+                1 for trade in validation_trades if trade.status == "missed_entry"
+            ),
             target_hit_count=ledger.summary.target_hit_count,
             stopped_count=ledger.summary.stopped_count,
             time_exit_count=ledger.summary.time_exit_count,
@@ -850,8 +908,18 @@ def build_paper_validation(
             **ledger.data_health,
             "validation_windows": ",".join(str(window) for window in windows),
             "validation_items": str(len(items)),
-            "validation_executed_items": str(sum(1 for item in items if item.entry_date is not None)),
-            "validation_missed_entries": str(sum(1 for item in items if item.status == "missed_entry")),
+            "validation_executed_items": str(
+                sum(1 for item in items if item.entry_date is not None)
+            ),
+            "validation_missed_entries": str(
+                sum(1 for item in items if item.status == "missed_entry")
+            ),
+            "validation_replaced_excluded": str(
+                sum(1 for trade in trades if trade.status == "replaced")
+            ),
+            "validation_invalidated_excluded": str(
+                sum(1 for trade in trades if trade.status == "invalidated")
+            ),
             "validation_batches": str(len(batches)),
             "validation_credibility": credibility.level,
             "validation_primary_window": str(windows[-1]),
@@ -874,7 +942,7 @@ def build_paper_daily_report(
     new_opportunities = [
         _daily_report_item(trade, ledger_by_id, validation_by_id)
         for trade in trades
-        if trade.signal_date == report_date
+        if trade.signal_date == report_date and trade.status not in {"replaced", "invalidated"}
     ]
     triggered_today = [
         _daily_report_item(trade, ledger_by_id, validation_by_id)
@@ -889,7 +957,7 @@ def build_paper_daily_report(
     closed_today = [
         _daily_report_item(trade, ledger_by_id, validation_by_id)
         for trade in trades
-        if trade.exit_date == report_date and trade.status in CLOSED_STATUSES
+        if trade.exit_date == report_date and _is_executed_closed_trade(trade)
     ]
     benchmark = _paper_daily_benchmark(
         total_return_pct=ledger.summary.total_return_pct,
@@ -900,7 +968,9 @@ def build_paper_daily_report(
     return PaperDailyReport(
         report_date=report_date,
         summary=PaperDailyReportSummary(
-            total_trades=len(trades),
+            total_trades=sum(
+                1 for trade in trades if trade.status not in {"replaced", "invalidated"}
+            ),
             new_opportunities=len(new_opportunities),
             triggered_today=len(triggered_today),
             open_positions=len(holdings),
@@ -975,6 +1045,8 @@ def _paper_asset_groups(
 ) -> list[PaperDailyAssetGroup]:
     grouped: dict[str, list[PaperLedgerItem]] = defaultdict(list)
     for item in items:
+        if item.status in {"replaced", "invalidated"}:
+            continue
         grouped[_paper_asset_type(item.instrument_id, asset_type_by_instrument)].append(item)
     return [
         _paper_asset_group(asset_type, group_items, allocation_per_trade=allocation_per_trade)
@@ -1003,9 +1075,7 @@ def _paper_asset_group(
     effective_items = [item for item in items if item.entry_date is not None]
     capital_base = sum((item.capital_allocated for item in effective_items), Decimal("0"))
     total_return_pct = (
-        round(float(total_pnl / capital_base * Decimal("100")), 4)
-        if capital_base > 0
-        else None
+        round(float(total_pnl / capital_base * Decimal("100")), 4) if capital_base > 0 else None
     )
     return PaperDailyAssetGroup(
         asset_type=asset_type,
@@ -1106,17 +1176,23 @@ def _paper_market_context(benchmark: PaperDailyBenchmark) -> PaperMarketContext:
 
 
 def _paper_trigger_quality(trades: list[PaperTradeRecord]) -> PaperTriggerQualitySummary:
-    total = len(trades)
-    pending = sum(1 for trade in trades if trade.status == "pending")
-    triggered = sum(1 for trade in trades if trade.entry_date is not None)
-    missed = sum(1 for trade in trades if trade.status == "missed_entry")
+    evaluated_trades = [
+        trade for trade in trades if trade.status not in {"replaced", "invalidated"}
+    ]
+    total = len(evaluated_trades)
+    replaced = sum(1 for trade in trades if trade.status == "replaced")
+    invalidated = sum(1 for trade in trades if trade.status == "invalidated")
+    pending = sum(1 for trade in evaluated_trades if trade.status == "pending")
+    triggered = sum(1 for trade in evaluated_trades if trade.entry_date is not None)
+    missed = sum(1 for trade in evaluated_trades if trade.status == "missed_entry")
     no_chase_missed = sum(
         1
-        for trade in trades
-        if trade.status == "missed_entry" and ("追高" in trade.notes or "no-chase" in trade.notes.lower())
+        for trade in evaluated_trades
+        if trade.status == "missed_entry"
+        and ("追高" in trade.notes or "no-chase" in trade.notes.lower())
     )
-    stopped = sum(1 for trade in trades if trade.status == "stopped")
-    target_hit = sum(1 for trade in trades if trade.status == "target_1_hit")
+    stopped = sum(1 for trade in evaluated_trades if trade.status == "stopped")
+    target_hit = sum(1 for trade in evaluated_trades if trade.status == "target_1_hit")
     trigger_rate = round(triggered / total, 4) if total else None
     miss_rate = round(missed / total, 4) if total else None
     stop_after_trigger_rate = round(stopped / triggered, 4) if triggered else None
@@ -1145,6 +1221,8 @@ def _paper_trigger_quality(trades: list[PaperTradeRecord]) -> PaperTriggerQualit
         pending_count=pending,
         triggered_count=triggered,
         missed_entry_count=missed,
+        replaced_count=replaced,
+        invalidated_count=invalidated,
         no_chase_missed_count=no_chase_missed,
         stopped_count=stopped,
         target_hit_count=target_hit,
@@ -1168,11 +1246,7 @@ def _paper_risk_gate_status(
         reasons.append(f"总收益 {summary.total_return_pct:.2f}% 低于 -2.00%")
     if summary.total_trades >= 5 and summary.max_drawdown_pct <= -2.0:
         reasons.append(f"最大回撤 {summary.max_drawdown_pct:.2f}% 低于 -2.00%")
-    if (
-        summary.closed_trades >= 3
-        and summary.win_rate is not None
-        and summary.win_rate <= 0.25
-    ):
+    if summary.closed_trades >= 3 and summary.win_rate is not None and summary.win_rate <= 0.25:
         reasons.append(f"闭环胜率 {summary.win_rate:.0%} 低于 25%")
     if summary.stopped_count >= 3 and summary.target_hit_count == 0:
         reasons.append("止损次数较多且尚无止盈")
@@ -1203,7 +1277,9 @@ def _paper_risk_gate_status(
             recovery_conditions=["继续按最大持仓上限执行，不追高。"],
             recovery_state="normal",
             recovery_score=recovery_score,
-            max_new_entries=max(summary.max_positions - summary.open_trades - summary.pending_trades, 0),
+            max_new_entries=max(
+                summary.max_positions - summary.open_trades - summary.pending_trades, 0
+            ),
             position_size_multiplier=1.0,
         )
 
@@ -1305,7 +1381,8 @@ def _paper_risk_probe_state(ledger: PaperLedger) -> tuple[str, date | None]:
     completed_dates = [
         item.exit_date or item.latest_date
         for item in probes
-        if item.status in CLOSED_STATUSES and (item.exit_date or item.latest_date) is not None
+        if item.status in EXECUTED_CLOSED_STATUSES
+        and (item.exit_date or item.latest_date) is not None
     ]
     if not completed_dates:
         return "none", None
@@ -1342,9 +1419,13 @@ def _paper_failure_attribution(
 ) -> list[PaperFailureAttributionItem]:
     grouped: dict[tuple[str, str, str], list[PaperLedgerItem]] = defaultdict(list)
     for item in items:
+        if item.status in {"replaced", "invalidated"}:
+            continue
         asset_type = _paper_asset_type(item.instrument_id, asset_type_by_instrument)
         grouped[("asset", asset_type, _paper_asset_label(asset_type))].append(item)
-        grouped[("strategy", item.strategy_id or "unknown", item.strategy_id or "未分类策略")].append(item)
+        grouped[
+            ("strategy", item.strategy_id or "unknown", item.strategy_id or "未分类策略")
+        ].append(item)
         grouped[("status", item.status, _paper_status_label(item.status))].append(item)
 
     attribution = [
@@ -1372,9 +1453,7 @@ def _paper_failure_group(
     allocation_per_trade: Decimal,
 ) -> PaperFailureAttributionItem:
     evaluated = [
-        item
-        for item in items
-        if item.entry_date is not None and item.return_pct is not None
+        item for item in items if item.entry_date is not None and item.return_pct is not None
     ]
     closed = [item for item in items if _is_executed_closed_item(item)]
     returns = [item.return_pct for item in evaluated if item.return_pct is not None]
@@ -1382,9 +1461,7 @@ def _paper_failure_group(
     capital_base = sum((item.capital_allocated for item in evaluated), Decimal("0"))
     total_return_pct = _pct(total_pnl, capital_base) if capital_base > 0 else None
     win_rate = (
-        round(sum(1 for value in returns if value > 0) / len(returns), 4)
-        if returns
-        else None
+        round(sum(1 for value in returns if value > 0) / len(returns), 4) if returns else None
     )
     average_return_pct = round(sum(returns) / len(returns), 4) if returns else None
     worst_return_pct = round(min(returns), 4) if returns else None
@@ -1424,6 +1501,8 @@ def _paper_status_label(status: str) -> str:
         "stopped": "止损",
         "time_exit": "时间退出",
         "missed_entry": "错过买点",
+        "replaced": "候补换出",
+        "invalidated": "数据作废",
     }.get(status, status)
 
 
@@ -1470,7 +1549,9 @@ def _paper_event_timeline(
                     return_pct=ledger_item.return_pct if ledger_item is not None else None,
                 )
             )
-        if trade.exit_date is not None and trade.exit_price is not None:
+        if trade.exit_date is not None and (
+            trade.exit_price is not None or trade.status in {"replaced", "invalidated"}
+        ):
             events.append(
                 PaperEventTimelineItem(
                     event_id=f"{trade.trade_id}:exit",
@@ -1480,9 +1561,11 @@ def _paper_event_timeline(
                     event_date=trade.exit_date,
                     event_type="exit",
                     title=_paper_exit_title(trade.status),
-                    description=validation_item.next_action if validation_item is not None else _paper_next_action(trade),
+                    description=validation_item.next_action
+                    if validation_item is not None
+                    else _paper_next_action(trade),
                     status=trade.status,
-                    price=trade.exit_price,
+                    price=trade.exit_price or trade.latest_price,
                     pnl=ledger_item.total_pnl if ledger_item is not None else Decimal("0"),
                     return_pct=ledger_item.return_pct if ledger_item is not None else None,
                 )
@@ -1497,7 +1580,9 @@ def _paper_event_timeline(
                     event_date=trade.latest_date,
                     event_type="mark",
                     title="更新估值" if trade.status == "open" else "继续等待",
-                    description=validation_item.next_action if validation_item is not None else _paper_next_action(trade),
+                    description=validation_item.next_action
+                    if validation_item is not None
+                    else _paper_next_action(trade),
                     status=trade.status,
                     price=trade.latest_price,
                     pnl=ledger_item.total_pnl if ledger_item is not None else Decimal("0"),
@@ -1518,6 +1603,8 @@ def _paper_exit_title(status: str) -> str:
         "stopped": "触发止损",
         "time_exit": "时间退出",
         "missed_entry": "错过买点",
+        "replaced": "候补换出",
+        "invalidated": "数据作废",
     }.get(status, "结束跟踪")
 
 
@@ -1544,7 +1631,9 @@ def _daily_report_item(
             else trade.unrealized_return_pct
         ),
         pnl=ledger_item.total_pnl if ledger_item is not None else Decimal("0"),
-        next_action=validation_item.next_action if validation_item is not None else _paper_next_action(trade),
+        next_action=validation_item.next_action
+        if validation_item is not None
+        else _paper_next_action(trade),
         notes=trade.notes,
     )
 
@@ -1561,7 +1650,9 @@ def _paper_daily_benchmark(
         excess_return_pct = _float_mapping_value(raw, "excess_return_pct")
         items.append(
             PaperDailyBenchmarkItem(
-                benchmark_id=str(raw.get("benchmark_id")) if raw.get("benchmark_id") is not None else None,
+                benchmark_id=str(raw.get("benchmark_id"))
+                if raw.get("benchmark_id") is not None
+                else None,
                 name=name,
                 return_pct=return_pct,
                 excess_return_pct=excess_return_pct,
@@ -1618,6 +1709,10 @@ def _paper_next_action(trade: PaperTradeRecord) -> str:
         return "等待触发价。"
     if trade.status == "open":
         return "跟踪止损和目标价。"
+    if trade.status == "replaced":
+        return "已由更高优先级候选替换，不计入成交胜率或错过率。"
+    if trade.status == "invalidated":
+        return "价格口径不一致，记录已作废并排除出绩效统计。"
     if trade.status in CLOSED_STATUSES:
         return "已闭环，纳入统计。"
     return "继续观察。"
@@ -1652,11 +1747,7 @@ def _build_account_ledger(
     total_slippage = Decimal("0")
     turnover = Decimal("0")
     realized_pnl = Decimal("0")
-    dates = {
-        trade.signal_date
-        for trade in trades
-        if trade.signal_date is not None
-    }
+    dates = {trade.signal_date for trade in trades if trade.signal_date is not None}
     for trade in trades:
         if trade.entry_date is not None:
             dates.add(trade.entry_date)
@@ -1781,7 +1872,9 @@ def _build_account_ledger(
         )
 
     return {
-        "allocated_capital": _money(sum((position.cost_basis for position in positions), Decimal("0"))),
+        "allocated_capital": _money(
+            sum((position.cost_basis for position in positions), Decimal("0"))
+        ),
         "market_value": _money(final_market_value),
         "cash_available": _money(cash),
         "total_equity": total_equity,
@@ -2002,7 +2095,9 @@ def _validation_credibility(
     drawdown_score = max(0.0, min(1.0, (12 + max_drawdown_pct) / 12)) * 0.15
     concentration_pct = _pnl_concentration(items)
     concentration_score = (1 - min((concentration_pct or 0) / 100, 1)) * 0.15
-    score = round(sample_score + closed_score + maturity_score + drawdown_score + concentration_score, 4)
+    score = round(
+        sample_score + closed_score + maturity_score + drawdown_score + concentration_score, 4
+    )
     warnings: list[str] = []
     if executed_count < 20:
         warnings.append("已成交样本少于 20 笔，先看方向，不宜过度相信胜率。")
@@ -2092,6 +2187,10 @@ def _validation_state(trade: PaperTradeRecord) -> str:
         return "open"
     if trade.status == "missed_entry":
         return "missed_entry"
+    if trade.status == "replaced":
+        return "replaced"
+    if trade.status == "invalidated":
+        return "invalidated"
     if trade.status == "time_exit" and trade.entry_date is None:
         return "expired"
     if trade.status in CLOSED_STATUSES:
@@ -2110,6 +2209,10 @@ def _validation_next_action(state: str, return_pct: float | None) -> str:
         return "买点未触发，作为无成交样本记录。"
     if state == "missed_entry":
         return "错过买点，仅计入触发率，不计入交易胜率。"
+    if state == "replaced":
+        return "候补轮换退出，保留审计记录，不计入成交胜率或错过率。"
+    if state == "invalidated":
+        return "价格口径不一致，样本作废，不计入交易或推荐绩效。"
     if state == "closed":
         return "已闭环，纳入胜率、收益和回撤统计。"
     return "继续观察。"
@@ -2297,7 +2400,11 @@ def _active_lot_market_value(
 def _lot_mark_price(lot: dict[str, object], current_date: date) -> Decimal:
     latest_date = lot.get("latest_date")
     latest_price = lot.get("latest_price")
-    if isinstance(latest_date, date) and latest_date <= current_date and isinstance(latest_price, Decimal):
+    if (
+        isinstance(latest_date, date)
+        and latest_date <= current_date
+        and isinstance(latest_price, Decimal)
+    ):
         return latest_price
     return Decimal(str(lot["entry_price"]))
 
@@ -2415,11 +2522,7 @@ def _ledger_curve(
         running_unrealized += event["unrealized"]
         equity = initial_capital + running_realized + running_unrealized
         high_watermark = max(high_watermark, equity)
-        drawdown_pct = (
-            _pct(equity - high_watermark, high_watermark)
-            if high_watermark > 0
-            else 0.0
-        )
+        drawdown_pct = _pct(equity - high_watermark, high_watermark) if high_watermark > 0 else 0.0
         points.append(
             PaperLedgerPoint(
                 date=event_date,
@@ -2550,6 +2653,7 @@ def _evaluate_trade(
     max_holding_days: int,
     max_entry_wait_days: int,
     as_of: datetime | None = None,
+    source_latest_close: Decimal | None = None,
 ) -> tuple[dict[str, object], int]:
     ordered = bars.sort_values("trade_date").reset_index(drop=True)
     if pd.api.types.is_datetime64_any_dtype(ordered["trade_date"]):
@@ -2559,6 +2663,27 @@ def _evaluate_trade(
     status = trade.status
     notes = trade.notes
     deferred_fills = 0
+
+    if status == "pending":
+        post_signal = ordered[ordered["trade_date"] > trade.signal_date]
+        if not post_signal.empty:
+            first = post_signal.iloc[0]
+            observed = Decimal(str(first["open"]))
+            if _paper_price_basis_discontinuous(
+                source_latest_close or trade.trigger_price,
+                observed,
+            ):
+                latest = ordered.iloc[-1]
+                latest_date = latest["trade_date"]
+                latest_price = Decimal(str(latest["close"]))
+                return (
+                    _invalidated_price_basis_update(
+                        trade,
+                        latest_date=latest_date,
+                        latest_price=latest_price,
+                    ),
+                    deferred_fills,
+                )
 
     for _, row in ordered.iterrows():
         trade_date = row["trade_date"]
@@ -2735,6 +2860,7 @@ def _try_evaluate_trade_with_minutes(
         max_entry_wait_days=max_entry_wait_days,
         signal_datetime=signal_datetime,
         no_chase_above=_trade_no_chase_above(trade, source_context),
+        source_latest_close=source_context.latest_close,
     )
     return update, 1, len(minute_bars)
 
@@ -2747,6 +2873,7 @@ def _evaluate_trade_with_minutes(
     max_entry_wait_days: int,
     signal_datetime: datetime,
     no_chase_above: Decimal | None,
+    source_latest_close: Decimal | None = None,
 ) -> dict[str, object]:
     ordered = minute_bars.sort_values("timestamp").reset_index(drop=True)
     ordered["timestamp"] = pd.to_datetime(ordered["timestamp"], errors="coerce")
@@ -2758,6 +2885,18 @@ def _evaluate_trade_with_minutes(
             "holding_days": trade.holding_days,
             "notes": _append_note(trade.notes, "分钟数据尚未覆盖推荐后的交易时间。"),
         }
+    first = ordered.iloc[0]
+    first_open = Decimal(str(first["open"]))
+    if trade.status == "pending" and _paper_price_basis_discontinuous(
+        source_latest_close or trade.trigger_price,
+        first_open,
+    ):
+        latest = ordered.iloc[-1]
+        return _invalidated_price_basis_update(
+            trade,
+            latest_date=latest["timestamp"].date(),
+            latest_price=Decimal(str(latest["close"])),
+        )
     entry_date = trade.entry_date
     entry_price = trade.entry_price
     status = trade.status
@@ -2877,6 +3016,43 @@ def _evaluate_trade_with_minutes(
         "latest_price": latest_price,
         "holding_days": 0,
         "notes": _append_note(notes, "分钟线未到触发价，继续等待。"),
+    }
+
+
+def _paper_price_basis_discontinuous(
+    reference_price: Decimal | None,
+    observed_price: Decimal | None,
+    *,
+    max_gap_ratio: Decimal = Decimal("0.45"),
+) -> bool:
+    if (
+        reference_price is None
+        or observed_price is None
+        or reference_price <= 0
+        or observed_price <= 0
+    ):
+        return False
+    return abs(observed_price - reference_price) / reference_price > max_gap_ratio
+
+
+def _invalidated_price_basis_update(
+    trade: PaperTradeRecord,
+    *,
+    latest_date: date,
+    latest_price: Decimal,
+) -> dict[str, object]:
+    return {
+        "status": "invalidated",
+        "latest_date": latest_date,
+        "latest_price": latest_price,
+        "exit_date": latest_date,
+        "exit_price": None,
+        "realized_return_pct": None,
+        "holding_days": 0,
+        "notes": _append_note(
+            trade.notes,
+            "推荐快照与首个盘中价格口径跳变超过 45%，样本作废并释放名额。",
+        ),
     }
 
 

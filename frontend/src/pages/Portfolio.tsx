@@ -721,6 +721,8 @@ function dualTrackExecutionLabel(status: string, language: Language) {
     stopped: { zh: "止损", en: "Stopped" },
     time_exit: { zh: "时间退出", en: "Time exit" },
     missed_entry: { zh: "错过买点", en: "Missed entry" },
+    replaced: { zh: "候补换出", en: "Rotated out" },
+    invalidated: { zh: "数据作废", en: "Invalid data" },
   };
   return labels[status]?.[language === "zh" ? "zh" : "en"] ?? status;
 }
@@ -1384,6 +1386,8 @@ function PaperControlInsightGrid({
           <small>{language === "zh" ? "触发" : "Triggered"} <b>{trigger.triggered_count}</b></small>
           <small>{language === "zh" ? "等待" : "Pending"} <b>{trigger.pending_count}</b></small>
           <small>{language === "zh" ? "错过" : "Missed"} <b>{trigger.missed_entry_count}</b></small>
+          <small>{language === "zh" ? "换出" : "Rotated"} <b>{trigger.replaced_count}</b></small>
+          <small>{language === "zh" ? "作废" : "Invalid"} <b>{trigger.invalidated_count}</b></small>
           <small>{language === "zh" ? "止损" : "Stopped"} <b>{trigger.stopped_count}</b></small>
         </div>
       </div>
@@ -1749,6 +1753,7 @@ function paperCandidateStatusLabel(status: string, language: Language) {
     waiting: { zh: "排队", en: "Waiting" },
     tracked_before: { zh: "已跟踪过", en: "Tracked" },
     paused_by_risk: { zh: "风控暂停", en: "Risk paused" },
+    blocked_by_data: { zh: "数据阻断", en: "Data blocked" },
   };
   return labels[status]?.[zh ? "zh" : "en"] ?? status;
 }
@@ -1773,11 +1778,17 @@ function paperMarketAdaptiveLabel(action: string, language: Language) {
 }
 
 function paperRecommendationState(riskGate: PaperDailyReportResponse["risk_gate"], language: Language) {
+  if (riskGate.action === "capacity_full") {
+    return language === "zh" ? "模拟盘已满，等待退出或替换" : "Full; wait or replace";
+  }
   if (riskGate.action === "pause_new_entries") {
     return language === "zh" ? "今天只跟踪，不新增" : "Track only";
   }
   if (riskGate.action === "throttle_new_entries") {
     return language === "zh" ? "风险收缩，小仓位接收" : "Reduced-size intake";
+  }
+  if (riskGate.action === "recovery_probe_only") {
+    return language === "zh" ? "恢复期，仅接收小仓位试单" : "Recovery probes only";
   }
   return language === "zh" ? "可正常接收新推荐" : "Normal intake";
 }
@@ -2692,6 +2703,8 @@ function localizeValidationState(state: string, language: string): string {
     closed: "已经闭环",
     expired: "买点过期",
     tracked: "跟踪中",
+    replaced: "候补换出",
+    invalidated: "数据作废",
   };
   const en: Record<string, string> = {
     waiting_entry: "Waiting entry",
@@ -2699,6 +2712,8 @@ function localizeValidationState(state: string, language: string): string {
     closed: "Closed",
     expired: "Expired",
     tracked: "Tracked",
+    replaced: "Rotated out",
+    invalidated: "Invalid data",
   };
   return (language === "zh" ? zh : en)[state] ?? state;
 }
@@ -2716,6 +2731,12 @@ function paperNextAction(trade: PaperTrade, language: string): string {
     }
     if (trade.status === "missed_entry") {
       return "已错过买点并释放名额；下一轮自动补入新机会。";
+    }
+    if (trade.status === "replaced") {
+      return "已被更高优先级机会替换；保留审计记录，但不计入错过率或胜率。";
+    }
+    if (trade.status === "invalidated") {
+      return "价格口径不一致，样本已作废并释放名额，不计入绩效。";
     }
     if (trade.status === "target_1_hit") {
       return "已止盈闭环；进入胜率和收益统计。";
@@ -2738,6 +2759,12 @@ function paperNextAction(trade: PaperTrade, language: string): string {
   }
   if (trade.status === "missed_entry") {
     return "Entry was missed; release the slot and backfill a new candidate.";
+  }
+  if (trade.status === "replaced") {
+    return "Rotated out for a higher-priority candidate; excluded from miss and win-rate statistics.";
+  }
+  if (trade.status === "invalidated") {
+    return "Invalidated due to a price-basis mismatch; excluded from performance statistics.";
   }
   if (trade.status === "target_1_hit") {
     return "Closed at target; include in win-rate and return stats.";

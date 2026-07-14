@@ -17,6 +17,7 @@ from qagent.providers.cached import CachedMarketDataProvider
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.storage.market_cache import MarketDataCacheRepository
 from qagent.storage.paper import PaperTradingRepository
+from qagent.storage.repository import OpportunitySnapshotRecord
 from qagent.storage.tables import OpportunitySnapshotRow, ScanRunRow
 
 from test_state_repository import make_repo
@@ -95,6 +96,76 @@ def test_paper_trading_seeds_unique_trades_from_opportunity_snapshots(tmp_path):
     assert trades[0].trigger_price == Decimal("83.2000")
     assert trades[0].initial_stop == Decimal("80.9000")
     assert trades[0].target_1 == Decimal("89.7600")
+
+
+def test_paper_trading_rejects_snapshot_with_inconsistent_price_basis(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    snapshot = OpportunitySnapshotRecord(
+        snapshot_id="price-basis-mismatch",
+        run_id="run-price-basis",
+        card_id="card-price-basis",
+        instrument_id="CN:159558",
+        market="CN",
+        status="setup_ready",
+        signal_date=date(2026, 7, 13),
+        latest_close=Decimal("1.351"),
+        primary_strategy_id="trend_momentum_stage2",
+        score=Decimal("0.90"),
+        strategy_score=Decimal("0.90"),
+        rank_score=Decimal("0.90"),
+        trigger_price=Decimal("4.15"),
+        initial_stop=Decimal("3.98"),
+        target_1=Decimal("4.49"),
+        card={"instrument_label": "半导体设备ETF易方达 159558.SZ"},
+    )
+
+    result = seed_paper_trades_from_snapshots(
+        paper_repo,
+        [snapshot],
+        provider="free",
+    )
+
+    assert result.created == 0
+    assert result.skipped == 1
+    assert paper_repo.list_trades() == []
+
+
+def test_paper_update_repairs_legacy_replacement_status(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    trade = paper_repo.create_trade(
+        source_snapshot_id="legacy-replacement",
+        provider="free",
+        instrument_id="CN:588850",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 10),
+        trigger_price=Decimal("2.20"),
+        initial_stop=Decimal("2.10"),
+        target_1=Decimal("2.40"),
+        rank_score=Decimal("0.70"),
+        notes="候补替换：原单转入已跟踪，不再占用活跃名额。",
+    )
+    paper_repo.update_trade(
+        trade.trade_id,
+        status="missed_entry",
+        exit_date=date(2026, 7, 11),
+        realized_return_pct=Decimal("0"),
+    )
+
+    result = update_paper_trades(
+        paper_repo,
+        provider=EmptyMinuteAndDailyProvider(),
+        provider_mode="free",
+        as_of=datetime(2026, 7, 14, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    repaired = paper_repo.list_trades()[0]
+
+    assert result.data_health["paper_repaired_replaced_statuses"] == "1"
+    assert result.summary.missed_entry_count == 0
+    assert result.summary.replaced_count == 1
+    assert repaired.status == "replaced"
+    assert repaired.realized_return_pct is None
 
 
 def test_a_share_paper_trade_does_not_backfill_entry_on_signal_date(tmp_path):
@@ -236,6 +307,56 @@ def test_a_share_paper_trade_marks_missed_when_minute_price_gaps_above_chase_lim
     assert trade.entry_date is None
     assert trade.realized_return_pct == 0.0
     assert "超过追高上限" in trade.notes
+
+
+def test_a_share_paper_trade_invalidates_discontinuous_price_basis(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    snapshot_id = _insert_cn_snapshot(
+        repo,
+        instrument_id="CN:159558",
+        created_at=datetime(2026, 7, 13, 8, 0, tzinfo=timezone.utc),
+        trigger_price=Decimal("4.15"),
+        no_chase_above=Decimal("4.28"),
+    )
+    paper_repo.create_trade(
+        source_snapshot_id=snapshot_id,
+        provider="free",
+        instrument_id="CN:159558",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 13),
+        trigger_price=Decimal("4.15"),
+        initial_stop=Decimal("3.98"),
+        target_1=Decimal("4.49"),
+        rank_score=Decimal("0.90"),
+    )
+    provider = MinuteCnProvider(
+        [
+            {
+                "instrument_id": "CN:159558",
+                "timestamp": datetime(2026, 7, 14, 9, 31),
+                "open": Decimal("1.35"),
+                "high": Decimal("1.36"),
+                "low": Decimal("1.34"),
+                "close": Decimal("1.35"),
+                "volume": 1000,
+                "provider": "test_minute",
+            }
+        ]
+    )
+
+    result = update_paper_trades(
+        paper_repo,
+        provider=provider,
+        as_of=datetime(2026, 7, 14, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    trade = paper_repo.list_trades()[0]
+
+    assert trade.status == "invalidated"
+    assert trade.entry_date is None
+    assert trade.realized_return_pct is None
+    assert result.summary.invalidated_count == 1
+    assert "价格口径跳变超过 45%" in trade.notes
 
 
 def test_update_paper_trades_uses_cached_daily_bars_when_minute_source_is_empty(
@@ -994,13 +1115,18 @@ def test_paper_daily_report_explains_risk_gate_failures_and_event_timeline(tmp_p
     assert report.risk_gate.position_size_multiplier == 0.35
     assert report.risk_gate.reasons
     assert any(item.dimension == "strategy" for item in report.failure_attribution)
-    assert any(item.dimension == "asset" and item.key == "etf" for item in report.failure_attribution)
+    assert any(
+        item.dimension == "asset" and item.key == "etf" for item in report.failure_attribution
+    )
     worst = report.failure_attribution[0]
     assert worst.total_pnl < 0
     assert worst.note
     event_types = {item.event_type for item in report.event_timeline}
     assert {"signal", "entry", "exit"}.issubset(event_types)
-    assert any(item.trade_id == stopped.trade_id and item.event_type == "exit" for item in report.event_timeline)
+    assert any(
+        item.trade_id == stopped.trade_id and item.event_type == "exit"
+        for item in report.event_timeline
+    )
 
 
 def test_paper_daily_report_explains_recovery_market_context_and_trigger_quality(tmp_path):

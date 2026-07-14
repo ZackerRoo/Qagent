@@ -26,6 +26,10 @@ def test_paper_trade_from_opportunity_creates_once_and_rejects_blocked(tmp_path,
 
     created = client.post("/api/paper-trades/from-opportunity", json=opportunity)
     duplicate = client.post("/api/paper-trades/from-opportunity", json=opportunity)
+    duplicate_instrument = client.post(
+        "/api/paper-trades/from-opportunity",
+        json={**opportunity, "card_id": "card_test_0002"},
+    )
     blocked = client.post(
         "/api/paper-trades/from-opportunity",
         json={**opportunity, "card_id": "card_blocked", "risk_status": "blocked"},
@@ -38,8 +42,133 @@ def test_paper_trade_from_opportunity_creates_once_and_rejects_blocked(tmp_path,
     assert duplicate.status_code == 200
     assert duplicate.json()["created"] is False
     assert duplicate.json()["trade"]["trade_id"] == created.json()["trade"]["trade_id"]
+    assert duplicate_instrument.status_code == 200
+    assert duplicate_instrument.json()["created"] is False
+    assert duplicate_instrument.json()["message"] == "already_tracking_instrument"
+    assert duplicate_instrument.json()["trade"]["trade_id"] == created.json()["trade"]["trade_id"]
     assert blocked.status_code == 400
     assert listed.json()["summary"]["total"] == 1
+
+
+def test_paper_trade_from_opportunity_rejects_recently_invalidated_price_data(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'paper-invalidated-card.db'}",
+    )
+    client = TestClient(create_app())
+    payload = {
+        "card_id": "card_invalidated_0001",
+        "provider": "free",
+        "instrument_id": "CN:159516",
+        "strategy_id": "trend_momentum_stage2",
+        "trigger_price": "1.75",
+        "initial_stop": "1.68",
+        "target_1": "1.90",
+        "rank_score": 0.82,
+        "action": "watch_trigger",
+        "risk_status": "clear",
+    }
+    created = client.post("/api/paper-trades/from-opportunity", json=payload)
+    trade_id = created.json()["trade"]["trade_id"]
+    routes._paper_repo().update_trade(
+        trade_id,
+        status="invalidated",
+        exit_date=date.today(),
+        latest_date=date.today(),
+        latest_price=Decimal("0.85"),
+        notes="推荐快照与首个盘中价格口径跳变超过 45%，样本作废并释放名额。",
+    )
+
+    response = client.post(
+        "/api/paper-trades/from-opportunity",
+        json={**payload, "card_id": "card_invalidated_0002"},
+    )
+
+    assert response.status_code == 400
+    assert "price data was invalidated" in response.json()["detail"]
+
+
+def test_paper_trade_from_opportunity_enforces_account_capacity(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'paper-card-capacity.db'}",
+    )
+    client = TestClient(create_app())
+    client.post(
+        "/api/paper-trades/session/start",
+        json={
+            "label": "单仓测试",
+            "reset_existing": True,
+            "initial_capital": "100000",
+            "allocation_per_trade_pct": "10",
+            "max_positions": 1,
+            "transaction_cost_bps": "5",
+            "slippage_bps": "5",
+            "take_profit_pct": "50",
+        },
+    )
+    base = {
+        "provider": "fixture",
+        "strategy_id": "trend_momentum_stage2",
+        "trigger_price": "12.00",
+        "initial_stop": "11.40",
+        "target_1": "13.20",
+        "rank_score": 0.82,
+        "action": "watch_trigger",
+        "risk_status": "clear",
+    }
+
+    first = client.post(
+        "/api/paper-trades/from-opportunity",
+        json={**base, "card_id": "capacity_1", "instrument_id": "US:ONE"},
+    )
+    second = client.post(
+        "/api/paper-trades/from-opportunity",
+        json={**base, "card_id": "capacity_2", "instrument_id": "US:TWO"},
+    )
+
+    assert first.status_code == 200
+    assert first.json()["created"] is True
+    assert second.status_code == 409
+    assert second.json()["detail"] == "paper portfolio is full (1/1)"
+
+
+def test_paper_candidate_pool_blocks_recently_invalidated_price_basis(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'paper-invalidated-candidate.db'}",
+    )
+    client = TestClient(create_app())
+    client.get("/api/opportunities?provider=fixture&symbols=US:TEST")
+    seeded = client.post("/api/paper-trades/seed?provider=fixture&limit=1")
+    assert seeded.status_code == 200
+    trade = client.get("/api/paper-trades?provider=fixture").json()["trades"][0]
+    trigger = Decimal(trade["trigger_price"])
+    routes._paper_repo().update_trade(
+        trade["trade_id"],
+        status="invalidated",
+        exit_date=date.today(),
+        latest_date=date.today(),
+        latest_price=trigger * Decimal("0.40"),
+        notes="推荐快照与首个盘中价格口径跳变超过 45%，样本作废并释放名额。",
+    )
+
+    response = client.get(
+        "/api/paper-trades/candidate-pool?provider=fixture&include_etfs=true&limit=10"
+    )
+
+    assert response.status_code == 200
+    item = next(
+        candidate
+        for candidate in response.json()["items"]
+        if candidate["instrument_id"] == "US:TEST"
+    )
+    assert item["status"] == "blocked_by_data"
+    assert item["price_basis_consistent"] is False
+    assert item["action"] == "价格基准不一致"
 
 
 def test_paper_trade_api_deletes_trade(tmp_path, monkeypatch):
@@ -197,7 +326,9 @@ def test_paper_trade_api_returns_daily_report(tmp_path, monkeypatch):
 
 
 def test_paper_trade_daily_report_uses_cached_benchmarks_only(tmp_path, monkeypatch):
-    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-daily-report-cache.db'}")
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-daily-report-cache.db'}"
+    )
     client = TestClient(create_app())
     client.post(
         "/api/paper-trades/from-opportunity",
@@ -230,7 +361,9 @@ def test_paper_trade_daily_report_uses_cached_benchmarks_only(tmp_path, monkeypa
 
 
 def test_paper_trade_daily_report_uses_cached_etf_proxy_benchmarks(tmp_path, monkeypatch):
-    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-daily-report-proxy.db'}")
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-daily-report-proxy.db'}"
+    )
     client = TestClient(create_app())
     trade = routes._paper_repo().create_trade(
         source_snapshot_id="opportunity:card_report_proxy_0001",
@@ -298,7 +431,9 @@ def test_paper_trade_daily_report_uses_cached_etf_proxy_benchmarks(tmp_path, mon
 
 
 def test_paper_trade_daily_report_falls_back_to_recent_cached_benchmarks(tmp_path, monkeypatch):
-    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-daily-report-recent-proxy.db'}")
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-daily-report-recent-proxy.db'}"
+    )
     client = TestClient(create_app())
     trade = routes._paper_repo().create_trade(
         source_snapshot_id="opportunity:card_report_recent_proxy_0001",

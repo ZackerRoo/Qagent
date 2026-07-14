@@ -92,7 +92,19 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onN
     () => applyResearchProfile(result?.cards ?? [], profile),
     [profile, result],
   );
-  const actionable = cards.filter((card) => card.decision?.risk_status !== "blocked");
+  const paperByInstrument = useMemo(
+    () => paperAdmissionMap(paperCandidatePool),
+    [paperCandidatePool],
+  );
+  const decisionCards = useMemo(
+    () => cards.filter(
+      (card) => paperByInstrument.get(card.instrument_id)?.status !== "blocked_by_data",
+    ),
+    [cards, paperByInstrument],
+  );
+  const safeSelectedCard =
+    decisionCards.find((card) => card.card_id === selectedCard?.card_id) ?? decisionCards[0];
+  const actionable = decisionCards.filter((card) => card.decision?.risk_status !== "blocked");
   const blocked = cards.length - actionable.length;
   const etfCount = result?.symbols.filter((symbol) => isEtfSymbol(symbol)).length ?? 0;
   const scannedCount = result ? scanCount(result) : null;
@@ -213,7 +225,13 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onN
   }
 
   async function trackTopOpportunities() {
-    const candidates = cards.filter(isTrackablePaperCard).slice(0, 5);
+    const candidates = decisionCards
+      .filter(
+        (card) =>
+          isTrackablePaperCard(card) &&
+          paperByInstrument.get(card.instrument_id)?.status === "ready_to_add",
+      )
+      .slice(0, 5);
     if (!candidates.length) {
       setBulkPaperMessage(t("today.trackTopEmpty"));
       return;
@@ -298,11 +316,20 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onN
     };
   }, [dataMode, includeEtfs]);
 
+  useEffect(() => {
+    if (!paperCandidatePool || !decisionCards.length) {
+      return;
+    }
+    if (!selectedCard || selectedCard.card_id !== safeSelectedCard?.card_id) {
+      onSelect(decisionCards[0]);
+    }
+  }, [decisionCards, onSelect, paperCandidatePool, safeSelectedCard?.card_id, selectedCard]);
+
   return (
     <div className="stack today-decision-page">
         <SignalCommandCenter
-          cards={cards}
-          selectedCard={selectedCard}
+          cards={decisionCards}
+          selectedCard={safeSelectedCard}
           scannedCount={scannedCount}
           actionableCount={actionable.length}
           blockedCount={blocked}
@@ -327,7 +354,7 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onN
 
         <TodayRouteCards
           cards={cards}
-          selectedCard={selectedCard}
+          selectedCard={safeSelectedCard}
           paperValidation={paperValidation}
           fullScanJob={fullScanJob}
           language={language}
@@ -335,8 +362,8 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onN
         />
 
         <TodayDecisionDesk
-          cards={cards.slice(0, 5)}
-          selectedCard={selectedCard}
+          cards={decisionCards.slice(0, 5)}
+          selectedCard={safeSelectedCard}
           dataMode={dataMode}
           language={language}
           paperCandidatePool={paperCandidatePool}
@@ -347,11 +374,11 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onN
         />
 
         <DecisionAutomationCenterPanel
-          cards={cards}
+          cards={decisionCards}
           result={result}
           followthrough={followthrough}
           candidatePool={paperCandidatePool}
-          selectedCard={selectedCard}
+          selectedCard={safeSelectedCard}
           onSelect={onSelect}
         />
 
@@ -371,7 +398,7 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onN
           />
 
           <TodayRiskBrief
-            cards={cards}
+            cards={decisionCards}
             result={result}
             language={language}
             onNavigate={onNavigate}
@@ -379,11 +406,11 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onN
         </div>
 
         <TodayAdvancedAnalysis
-          cards={cards}
+          cards={decisionCards}
           actionableCount={actionable.length}
           followthrough={followthrough}
           result={result}
-          selectedCard={selectedCard}
+          selectedCard={safeSelectedCard}
           dataMode={dataMode}
           onSelect={onSelect}
         />
@@ -504,7 +531,12 @@ function TodayDecisionDesk({
           className="icon-action"
           type="button"
           onClick={onTrackTop}
-          disabled={isBulkPaperTracking || !cards.length}
+          disabled={
+            isBulkPaperTracking ||
+            !cards.some(
+              (card) => paperByInstrument.get(card.instrument_id)?.status === "ready_to_add",
+            )
+          }
         >
           {isBulkPaperTracking
             ? language === "zh" ? "处理中" : "Running"
@@ -575,13 +607,23 @@ function TodayTradeTicket({
   }
 
   const activeCard = card;
-  const canTrack = isTrackablePaperCard(activeCard);
+  const dataBlocked = paperAdmission?.status === "blocked_by_data";
+  const canTrack =
+    isTrackablePaperCard(activeCard) && paperAdmission?.status === "ready_to_add";
   const headline = activeCard.recommendation_summary?.headline ?? activeCard.thesis;
   const confidence = activeCard.confidence_explanation?.score ?? activeCard.decision?.conviction_score ?? null;
 
   async function addPaperTracking() {
     if (!canTrack) {
-      setPaperMessage(language === "zh" ? "该机会被风险阻断，不能加入模拟跟踪。" : "This setup is blocked.");
+      setPaperMessage(
+        dataBlocked
+          ? language === "zh"
+            ? "推荐价格与盘中价格口径不一致，已禁止加入模拟盘。"
+            : "Recommendation and live-price bases disagree; paper admission is blocked."
+          : language === "zh"
+            ? "该机会被风险阻断，不能加入模拟跟踪。"
+            : "This setup is blocked.",
+      );
       return;
     }
     try {
@@ -668,7 +710,13 @@ function TodayTradeTicket({
         >
           {isAddingPaper
             ? language === "zh" ? "处理中" : "Running"
-            : language === "zh" ? "加入模拟盘" : "Track paper"}
+            : paperAdmission?.status === "active_in_paper"
+              ? language === "zh" ? "已在模拟盘" : "In paper"
+              : paperAdmission?.status === "waiting_for_slot" || paperAdmission?.status === "replace_candidate"
+                ? language === "zh" ? "等待空位" : "Waiting for slot"
+                : dataBlocked
+                  ? language === "zh" ? "数据阻断" : "Data blocked"
+                  : language === "zh" ? "加入模拟盘" : "Track paper"}
         </button>
         {paperMessage && <span>{paperMessage}</span>}
       </div>
@@ -1500,6 +1548,7 @@ function paperAdmissionLabel(status: string, language: "zh" | "en") {
     waiting: { zh: "排队", en: "Queued" },
     tracked_before: { zh: "已跟踪/冷却", en: "Cooling" },
     paused_by_risk: { zh: "风控暂停", en: "Risk paused" },
+    blocked_by_data: { zh: "数据阻断", en: "Data blocked" },
     not_in_pool: { zh: "未入候补", en: "Not queued" },
     unknown: { zh: "待判断", en: "Pending" },
   };
@@ -1520,6 +1569,11 @@ function paperAdmissionExplanation(
     return language === "zh"
       ? "已经在模拟盘跟踪，后续只更新触发、止损、止盈和收益。"
       : "Already tracked in paper; future cycles update fills, stops, targets, and PnL.";
+  }
+  if (admission.status === "blocked_by_data") {
+    return language === "zh"
+      ? "推荐快照与盘中价格口径不一致，禁止加入模拟盘；等待数据源修复或新快照。"
+      : "Recommendation and live-price bases disagree; wait for corrected data or a new snapshot.";
   }
   if (admission.status === "waiting_for_slot") {
     return language === "zh"

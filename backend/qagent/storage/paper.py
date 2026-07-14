@@ -56,6 +56,7 @@ class PaperAccountSettings(BaseModel):
 class PaperTradeSourceContext(BaseModel):
     source_snapshot_id: str
     created_at: datetime
+    latest_close: Decimal | None = None
     card: dict[str, object]
 
 
@@ -132,6 +133,7 @@ class PaperTradingRepository:
             return PaperTradeSourceContext(
                 source_snapshot_id=source_snapshot_id,
                 created_at=row.created_at,
+                latest_close=row.latest_close,
                 card=card if isinstance(card, dict) else {},
             )
 

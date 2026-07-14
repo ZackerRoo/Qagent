@@ -1886,7 +1886,8 @@ details.compact-data-health:not([open]) > .data-health-details {
 }
 
 .today-paper-admission-mini.status-tracked_before,
-.today-paper-admission-mini.status-paused_by_risk {
+.today-paper-admission-mini.status-paused_by_risk,
+.today-paper-admission-mini.status-blocked_by_data {
   border-color: rgba(255, 92, 122, 0.24);
   background: rgba(255, 92, 122, 0.1);
   color: var(--terminal-red);
@@ -1981,7 +1982,8 @@ details.compact-data-health:not([open]) > .data-health-details {
 }
 
 .today-paper-admission-card.status-tracked_before,
-.today-paper-admission-card.status-paused_by_risk {
+.today-paper-admission-card.status-paused_by_risk,
+.today-paper-admission-card.status-blocked_by_data {
   border-color: rgba(255, 92, 122, 0.26);
 }
 
@@ -11730,7 +11732,8 @@ td {
   border-color: rgba(57, 217, 138, 0.32);
 }
 
-.paper-candidate-item.status-paused_by_risk {
+.paper-candidate-item.status-paused_by_risk,
+.paper-candidate-item.status-blocked_by_data {
   border-color: rgba(255, 92, 122, 0.32);
 }
 

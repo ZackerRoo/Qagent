@@ -95,6 +95,7 @@ from qagent.paper_trading.engine import (
     build_paper_ledger,
     build_paper_validation,
     paper_execution_data_health,
+    paper_snapshot_price_basis_is_consistent,
     seed_paper_trades_from_snapshots,
     update_paper_trades,
     summarize_paper_trades,
@@ -253,10 +254,14 @@ def run_walk_forward(
     if start > end:
         raise HTTPException(status_code=400, detail="start must be on or before end")
     if step_sessions <= 0 or lookback_days <= 0:
-        raise HTTPException(status_code=400, detail="step_sessions and lookback_days must be positive")
+        raise HTTPException(
+            status_code=400, detail="step_sessions and lookback_days must be positive"
+        )
     initialize_database()
     repository = ReplayEvidenceRepository(create_session_factory(), mode)
-    owner_run_id = run_id or f"walk-forward-{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{uuid4().hex[:8]}"
+    owner_run_id = (
+        run_id or f"walk-forward-{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{uuid4().hex[:8]}"
+    )
     try:
         result = run_full_market_walk_forward_selection(
             repository,
@@ -451,15 +456,9 @@ def _run_walk_forward_job_safely(job_id: str) -> None:
             return
         replay_repository = ReplayEvidenceRepository(repo.session_factory, job.provider)
         if replay_repository.current_revision() != job.dataset_revision:
-            raise RuntimeError(
-                "historical dataset revision changed; start a new validation job"
-            )
-        manifest = WalkForwardExperimentManifest.model_validate(
-            job.experiment_manifest
-        )
-        checkpoint_by_date = {
-            item["decision_date"]: item for item in job.checkpoints
-        }
+            raise RuntimeError("historical dataset revision changed; start a new validation job")
+        manifest = WalkForwardExperimentManifest.model_validate(job.experiment_manifest)
+        checkpoint_by_date = {item["decision_date"]: item for item in job.checkpoints}
         repo.update_walk_forward_job(
             job_id,
             status="running",
@@ -488,9 +487,7 @@ def _run_walk_forward_job_safely(job_id: str) -> None:
             rebalance_step_sessions=job.rebalance_step_sessions,
             lookback_days=job.lookback_days,
             experiment_manifest=manifest,
-            resume_snapshots=[
-                WalkForwardSnapshot.model_validate(item) for item in job.checkpoints
-            ],
+            resume_snapshots=[WalkForwardSnapshot.model_validate(item) for item in job.checkpoints],
             progress_callback=on_progress,
         )
         stored = repo.save_walk_forward_run(result)
@@ -653,6 +650,13 @@ def _scan(provider_mode: str = "fixture", symbols: str | None = None):
             strategy_data_provider=strategy_data_provider,
             recommendation_feedback_center=feedback_center,
         )
+        invalidated = _paper_recent_invalidated_instruments(mode)
+        if invalidated:
+            original_count = len(result.cards)
+            result.cards = [card for card in result.cards if card.instrument_id not in invalidated]
+            result.data_health["paper_invalidated_cards_filtered"] = str(
+                original_count - len(result.cards)
+            )
         result.data_health.update(resolved.data_health)
         if resolved.is_dynamic:
             result.data_health["strategy_data_skipped"] = "true"
@@ -768,7 +772,9 @@ def _radar_item(instrument_id: str, bars, card, scan_item) -> dict[str, object]:
     volume_ratio = _clean_float(latest.get("volume_ratio"))
 
     if card is None:
-        reason = scan_item.reason if scan_item is not None else "Signal stack did not meet threshold."
+        reason = (
+            scan_item.reason if scan_item is not None else "Signal stack did not meet threshold."
+        )
         return _radar_payload(
             instrument_id=instrument_id,
             latest=latest,
@@ -1040,9 +1046,13 @@ def intraday_radar(provider: str = "fixture", symbols: str | None = None) -> dic
     for instrument in instrument_ids:
         bars = market_provider.get_daily_bars([instrument], start=start_date, end=end_date)
         radar_items.append(
-            _radar_item(instrument, bars, cards_by_id.get(instrument), scan_items_by_id.get(instrument))
+            _radar_item(
+                instrument, bars, cards_by_id.get(instrument), scan_items_by_id.get(instrument)
+            )
         )
-    radar_items.sort(key=lambda item: (_radar_severity_rank(item["severity"]), item["score"]), reverse=True)
+    radar_items.sort(
+        key=lambda item: (_radar_severity_rank(item["severity"]), item["score"]), reverse=True
+    )
     provider_errors = getattr(market_provider, "last_errors", [])
     data_health = {
         "provider": mode,
@@ -1629,7 +1639,10 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             )
             data_health.update(replacement_health)
             replaced_instrument = replacement_health.get("paper_replacement_replacee")
-            if replacement_health.get("paper_replacement_action") == "replaced_pending" and replaced_instrument:
+            if (
+                replacement_health.get("paper_replacement_action") == "replaced_pending"
+                and replaced_instrument
+            ):
                 snapshots = [
                     snapshot
                     for snapshot in snapshots
@@ -1680,9 +1693,9 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             data_health["automation_seed_candidate_pool_limit"] = str(candidate_pool_limit)
             data_health.update(seed_health)
             if snapshots and snapshots[0].signal_date is not None:
-                data_health["automation_seed_latest_signal_date"] = (
-                    snapshots[0].signal_date.isoformat()
-                )
+                data_health["automation_seed_latest_signal_date"] = snapshots[
+                    0
+                ].signal_date.isoformat()
         except Exception as exc:
             errors.append(f"paper_seed: {exc}")
     elif settings.seed_paper and mode != "fixture":
@@ -1837,9 +1850,7 @@ def _paper_candidate_pool_snapshot_items(
     active_by_instrument = {trade.instrument_id: trade for trade in active}
     existing_sources = {trade.source_snapshot_id for trade in trades}
     recently_released_by_instrument = {
-        trade.instrument_id: trade
-        for trade in trades
-        if _paper_trade_recently_released(trade)
+        trade.instrument_id: trade for trade in trades if _paper_trade_recently_released(trade)
     }
     recently_released = set(recently_released_by_instrument)
     active_count = len(active)
@@ -1849,24 +1860,33 @@ def _paper_candidate_pool_snapshot_items(
     risk_action = risk_gate_health.get("paper_risk_gate_action", "")
     replacement_used = False
     items: list[dict[str, object]] = []
-    for snapshot in sorted(snapshots, key=_paper_snapshot_priority_score, reverse=True):
+    for snapshot in snapshots:
         if len(items) >= limit:
             break
         score = _paper_snapshot_priority_score(snapshot)
         theme_boost = _paper_theme_boost(snapshot)
         active_trade = active_by_instrument.get(snapshot.instrument_id)
-        reference_trade = active_trade or recently_released_by_instrument.get(snapshot.instrument_id)
+        reference_trade = active_trade or recently_released_by_instrument.get(
+            snapshot.instrument_id
+        )
         latest_value = (
             reference_trade.latest_price
             if reference_trade is not None and reference_trade.latest_price is not None
             else snapshot.latest_close
         )
         entry_gap_pct = _paper_entry_gap_pct(snapshot, latest_value=latest_value)
+        price_basis_consistent = _paper_candidate_price_basis_is_consistent(
+            snapshot,
+            latest_value=latest_value,
+        )
         status = "waiting"
         action = "等待下一轮"
         replacement_target = None
         replacement_pressure = None
-        if active_trade is not None:
+        if not price_basis_consistent:
+            status = "blocked_by_data"
+            action = "价格基准不一致"
+        elif active_trade is not None:
             status = "active_in_paper"
             action = "已在模拟盘"
         elif snapshot.instrument_id in recently_released:
@@ -1909,7 +1929,10 @@ def _paper_candidate_pool_snapshot_items(
                 "priority_score": score,
                 "market_theme_boost": theme_boost,
                 "entry_gap_pct": entry_gap_pct,
-                "trigger_price": str(snapshot.trigger_price) if snapshot.trigger_price is not None else None,
+                "price_basis_consistent": price_basis_consistent,
+                "trigger_price": str(snapshot.trigger_price)
+                if snapshot.trigger_price is not None
+                else None,
                 "latest_close": str(latest_value) if latest_value is not None else None,
                 "status": status,
                 "action": action,
@@ -1918,7 +1941,11 @@ def _paper_candidate_pool_snapshot_items(
                 "reason": _paper_candidate_reason(snapshot, theme_boost, entry_gap_pct),
             }
         )
-    waiting_count = sum(1 for item in items if item["status"] in {"waiting", "waiting_for_slot", "replace_candidate", "ready_to_add"})
+    waiting_count = sum(
+        1
+        for item in items
+        if item["status"] in {"waiting", "waiting_for_slot", "replace_candidate", "ready_to_add"}
+    )
     replacement_candidates = sum(1 for item in items if item["status"] == "replace_candidate")
     summary = {
         "total_candidates": len(snapshots),
@@ -1952,6 +1979,20 @@ def _paper_entry_gap_pct(
     if not snapshot.trigger_price or not latest or snapshot.trigger_price <= 0:
         return None
     return round(float((snapshot.trigger_price - latest) / snapshot.trigger_price * 100), 2)
+
+
+def _paper_candidate_price_basis_is_consistent(
+    snapshot: OpportunitySnapshotRecord,
+    *,
+    latest_value: Decimal | None,
+    max_gap_ratio: Decimal = Decimal("0.45"),
+) -> bool:
+    if not paper_snapshot_price_basis_is_consistent(snapshot, max_gap_ratio=max_gap_ratio):
+        return False
+    trigger = snapshot.trigger_price
+    if trigger is None or latest_value is None or trigger <= 0 or latest_value <= 0:
+        return True
+    return abs(trigger - latest_value) / trigger <= max_gap_ratio
 
 
 def _paper_candidate_reason(
@@ -1997,20 +2038,30 @@ def _paper_candidate_pool_health(
     risk_gate_health: dict[str, str],
 ) -> dict[str, str]:
     trades = paper_repo.list_trades(limit=1000, provider=provider)
-    active_instruments = {trade.instrument_id for trade in trades if trade.status in {"pending", "open"}}
+    active_instruments = {
+        trade.instrument_id for trade in trades if trade.status in {"pending", "open"}
+    }
+    existing_sources = {trade.source_snapshot_id for trade in trades}
+    recently_released = _paper_recently_released_instruments(trades)
     waiting = [
         snapshot
         for snapshot in snapshots
         if snapshot.instrument_id not in active_instruments
+        and snapshot.instrument_id not in recently_released
+        and snapshot.snapshot_id not in existing_sources
+        and snapshot.trigger_price is not None
+        and paper_snapshot_price_basis_is_consistent(snapshot)
     ]
     boosted = [snapshot for snapshot in snapshots if _paper_theme_boost(snapshot) > 0]
-    top = waiting[0] if waiting else snapshots[0] if snapshots else None
+    top = waiting[0] if waiting else None
     return {
         "paper_candidate_pool_total": str(len(snapshots)),
         "paper_candidate_pool_waiting_count": str(len(waiting)),
         "paper_candidate_pool_active_count": str(len(active_instruments)),
         "paper_candidate_pool_top": top.instrument_id if top else "",
-        "paper_candidate_pool_top_score": f"{_paper_snapshot_priority_score(top):.4f}" if top else "",
+        "paper_candidate_pool_top_score": f"{_paper_snapshot_priority_score(top):.4f}"
+        if top
+        else "",
         "paper_market_adaptive_theme_boosted": str(len(boosted)),
         "paper_candidate_pool_risk_action": risk_gate_health.get("paper_risk_gate_action", ""),
     }
@@ -2043,12 +2094,12 @@ def _maybe_replace_pending_paper_trade_for_candidate(
     recently_released = _paper_recently_released_instruments(trades)
     candidates = [
         snapshot
-        for snapshot in sorted(snapshots, key=_paper_snapshot_priority_score, reverse=True)
+        for snapshot in snapshots
         if snapshot.instrument_id not in active_instruments
         and snapshot.instrument_id not in recently_released
         and snapshot.snapshot_id not in existing_sources
-        and snapshot.signal_date is not None
         and snapshot.trigger_price is not None
+        and paper_snapshot_price_basis_is_consistent(snapshot)
     ]
     if not candidates:
         return {
@@ -2090,11 +2141,11 @@ def _maybe_replace_pending_paper_trade_for_candidate(
     )
     paper_repo.update_trade(
         replacee.trade_id,
-        status="missed_entry",
+        status="replaced",
         exit_date=today,
         latest_date=replacee.latest_date or today,
         latest_price=replacee.latest_price,
-        realized_return_pct=Decimal("0"),
+        realized_return_pct=None,
         notes=note,
     )
     return {
@@ -2165,7 +2216,11 @@ def _paper_candidate_should_replace(
 def _paper_snapshot_priority_score(snapshot: OpportunitySnapshotRecord | None) -> float:
     if snapshot is None:
         return 0.0
-    base = _float_value(snapshot.rank_score) * 0.72 + _float_value(snapshot.strategy_score) * 0.18 + _float_value(snapshot.score) * 0.1
+    base = (
+        _float_value(snapshot.rank_score) * 0.72
+        + _float_value(snapshot.strategy_score) * 0.18
+        + _float_value(snapshot.score) * 0.1
+    )
     theme_boost = _paper_theme_boost(snapshot)
     freshness_boost = 0.02 if snapshot.signal_date == _a_share_today() else 0.0
     return round(max(0.0, min(1.0, base + theme_boost + freshness_boost)), 4)
@@ -2202,12 +2257,51 @@ def _paper_recently_released_instruments(trades: list[PaperTradeRecord]) -> set[
     return {trade.instrument_id for trade in trades if _paper_trade_recently_released(trade)}
 
 
+def _paper_recent_invalidated_instruments(provider: str) -> set[str]:
+    try:
+        trades = _paper_repo().list_trades(limit=1000, provider=provider)
+    except Exception:
+        return set()
+    return {
+        trade.instrument_id
+        for trade in trades
+        if trade.status == "invalidated" and _paper_trade_recently_released(trade)
+    }
+
+
+def _filter_recent_invalidated_payload_cards(
+    payload: dict[str, object],
+    *,
+    provider: str,
+    cards_key: str = "cards",
+) -> int:
+    raw_cards = payload.get(cards_key)
+    if not isinstance(raw_cards, list):
+        return 0
+    invalidated = _paper_recent_invalidated_instruments(provider)
+    if not invalidated:
+        return 0
+    filtered = [
+        card
+        for card in raw_cards
+        if not isinstance(card, dict) or card.get("instrument_id") not in invalidated
+    ]
+    removed = len(raw_cards) - len(filtered)
+    payload[cards_key] = filtered
+    return removed
+
+
 def _paper_trade_recently_released(trade: PaperTradeRecord) -> bool:
     today = _a_share_today()
-    if trade.status != "missed_entry" or "候补替换" not in trade.notes:
-        return False
     release_date = trade.exit_date or trade.latest_date or trade.signal_date
-    return release_date is not None and 0 <= (today - release_date).days <= 3
+    if release_date is None:
+        return False
+    age_days = (today - release_date).days
+    if trade.status == "invalidated":
+        return 0 <= age_days <= 7
+    if trade.status in {"replaced", "missed_entry"} and "候补替换" in trade.notes:
+        return 0 <= age_days <= 3
+    return False
 
 
 def _paper_seed_snapshots_from_recommendations(
@@ -2435,12 +2529,20 @@ def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, o
         max_age=timedelta(days=7),
         limit=limit,
     )
+    paper_repo = _paper_repo()
+    recently_released = _paper_recently_released_instruments(
+        paper_repo.list_trades(limit=1000, provider=mode)
+    )
+    snapshots = [
+        snapshot for snapshot in snapshots if snapshot.instrument_id not in recently_released
+    ]
+    account = paper_repo.get_account_settings()
     result = seed_paper_trades_from_snapshots(
-        _paper_repo(),
+        paper_repo,
         snapshots,
         provider=mode,
         max_created=limit,
-        max_active_trades=limit,
+        max_active_trades=account.max_positions,
         max_signal_age_days=None,
         signal_date_override=_a_share_today() if mode != "fixture" else None,
     )
@@ -2725,9 +2827,7 @@ def paper_trade_dual_track(
         benchmark_bars = cached
     else:
         instrument_bars = cached.loc[cached["instrument_id"].isin(selected_ids)].copy()
-        benchmark_bars = cached.loc[
-            cached["instrument_id"].isin(cached_benchmark_ids)
-        ].copy()
+        benchmark_bars = cached.loc[cached["instrument_id"].isin(cached_benchmark_ids)].copy()
     report = build_dual_track_report(
         snapshots=selected,
         trades=trades,
@@ -2830,6 +2930,8 @@ def create_paper_trade_from_opportunity(
     if not request.trigger_price:
         raise HTTPException(status_code=400, detail="trigger_price is required")
 
+    mode = request.provider.strip().lower()
+    instrument_id = request.instrument_id.strip()
     source_snapshot_id = f"opportunity:{request.card_id.strip()}"
     repo = _paper_repo()
     existing = repo.get_trade_by_source_snapshot_id(source_snapshot_id)
@@ -2840,12 +2942,50 @@ def create_paper_trade_from_opportunity(
             "message": "already_tracking",
         }
 
+    trades = repo.list_trades(limit=1000, provider=mode)
+    active_same_instrument = next(
+        (
+            trade
+            for trade in trades
+            if trade.instrument_id == instrument_id and trade.status in {"pending", "open"}
+        ),
+        None,
+    )
+    if active_same_instrument is not None:
+        return {
+            "created": False,
+            "trade": active_same_instrument.model_dump(mode="json"),
+            "message": "already_tracking_instrument",
+        }
+    invalidated_same_instrument = next(
+        (
+            trade
+            for trade in trades
+            if trade.instrument_id == instrument_id
+            and trade.status == "invalidated"
+            and _paper_trade_recently_released(trade)
+        ),
+        None,
+    )
+    if invalidated_same_instrument is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="instrument price data was invalidated; wait for a corrected snapshot",
+        )
+    active_count = sum(1 for trade in trades if trade.status in {"pending", "open"})
+    account = repo.get_account_settings()
+    if active_count >= account.max_positions:
+        raise HTTPException(
+            status_code=409,
+            detail=f"paper portfolio is full ({active_count}/{account.max_positions})",
+        )
+
     trade = repo.create_trade(
         source_snapshot_id=source_snapshot_id,
-        provider=request.provider.strip().lower(),
-        instrument_id=request.instrument_id.strip(),
+        provider=mode,
+        instrument_id=instrument_id,
         strategy_id=request.strategy_id,
-        signal_date=date.today(),
+        signal_date=_a_share_today() if instrument_id.startswith("CN:") else date.today(),
         trigger_price=Decimal(str(request.trigger_price)),
         initial_stop=_decimal_or_none(request.initial_stop),
         target_1=_decimal_or_none(request.target_1),
@@ -2924,6 +3064,15 @@ def _build_daily_brief_response(
         cached = _cached_daily_scan_for_brief(mode)
         if cached is not None:
             scan_result, cached_symbols, cached_health = cached
+            invalidated = _paper_recent_invalidated_instruments(mode)
+            if invalidated:
+                original_count = len(scan_result.cards)
+                scan_result.cards = [
+                    card for card in scan_result.cards if card.instrument_id not in invalidated
+                ]
+                cached_health["paper_invalidated_cards_filtered"] = str(
+                    original_count - len(scan_result.cards)
+                )
             brief_health = {
                 "brief_provider": mode,
                 "brief_symbols": str(len(cached_symbols)),
@@ -2992,7 +3141,9 @@ def _build_daily_brief_response(
     if resolved.is_dynamic:
         brief_health["strategy_data_skipped"] = "true"
     if include_news:
-        news_symbols = [card.instrument_id for card in scan_result.cards[:limit]] or instrument_ids[:limit]
+        news_symbols = [card.instrument_id for card in scan_result.cards[:limit]] or instrument_ids[
+            :limit
+        ]
         catalyst_provider = FreeCatalystProvider()
         news = catalyst_provider.get_news(news_symbols, limit=limit)
         catalyst_hypotheses = build_catalyst_hypotheses(news)
@@ -3051,7 +3202,9 @@ def _cached_daily_scan_for_brief(
         if isinstance(payload.get("manual_action_center"), dict)
         else None,
         "portfolio_plan": payload.get("portfolio_plan"),
-        "data_health": payload.get("data_health") if isinstance(payload.get("data_health"), dict) else {},
+        "data_health": payload.get("data_health")
+        if isinstance(payload.get("data_health"), dict)
+        else {},
     }
     if not isinstance(normalized["portfolio_plan"], dict):
         normalized["portfolio_plan"] = build_portfolio_plan(
@@ -3232,8 +3385,7 @@ def _position_risks(provider: str):
     market_provider = build_market_data_provider(provider)
     snapshot = market_provider.get_snapshot([position.instrument_id for position in positions])
     latest_prices = {
-        row["instrument_id"]: Decimal(str(row["close"]))
-        for _, row in snapshot.iterrows()
+        row["instrument_id"]: Decimal(str(row["close"])) for _, row in snapshot.iterrows()
     }
     risks = []
     for position in positions:
@@ -3470,7 +3622,9 @@ def _historical_data_symbols(
 ) -> list[str]:
     if raw_symbols:
         parsed = _normalize_symbol_list(raw_symbols)
-        resolved = resolve_symbol_tokens(parsed) if provider == "free" else ResolvedSymbols(symbols=parsed)
+        resolved = (
+            resolve_symbol_tokens(parsed) if provider == "free" else ResolvedSymbols(symbols=parsed)
+        )
         symbols = resolved.symbols[:max_symbols]
     else:
         asset_types = {"stock", "etf"} if include_etfs else {"stock"}
@@ -3485,7 +3639,9 @@ def _historical_data_symbols(
         raise HTTPException(status_code=400, detail="historical backfill symbol set is empty")
     non_cn = [symbol for symbol in symbols if not symbol.startswith("CN:")]
     if non_cn:
-        raise HTTPException(status_code=400, detail="historical backfill currently supports A shares only")
+        raise HTTPException(
+            status_code=400, detail="historical backfill currently supports A shares only"
+        )
     return symbols
 
 
@@ -3525,6 +3681,10 @@ def latest_full_market_batch_scan_result(
     if cached is None:
         raise HTTPException(status_code=404, detail="full-market batch result not found")
     payload = deepcopy(cached.payload)
+    invalidated_filtered = _filter_recent_invalidated_payload_cards(
+        payload,
+        provider=mode,
+    )
     if isinstance(payload.get("cards"), list):
         payload["cards"] = payload["cards"][:limit]
     _hydrate_full_market_batch_payload(payload, repo, mode, cache_ttl_minutes)
@@ -3532,6 +3692,7 @@ def latest_full_market_batch_scan_result(
     if isinstance(data_health, dict):
         data_health["scan_result_cache"] = "hit"
         data_health["scan_result_cache_id"] = cached.cache_id
+        data_health["paper_invalidated_cards_filtered"] = str(invalidated_filtered)
     return payload
 
 
@@ -3680,16 +3841,18 @@ def _full_market_scan_payload(
         include_etfs=include_etfs,
         sync_if_empty=sync_if_empty,
     )
+    invalidated = _paper_recent_invalidated_instruments(mode)
+    cards = [card for card in result.scan.cards if card.instrument_id not in invalidated]
     _repo().save_scan_run(provider=mode, mode=mode, symbols=result.symbols, result=result.scan)
     payload = {
         "symbols": result.symbols,
-        "cards": [card.model_dump(mode="json") for card in result.scan.cards],
+        "cards": [card.model_dump(mode="json") for card in cards],
         "items": [item.model_dump(mode="json") for item in result.scan.items],
         "strategy_health": [item.model_dump(mode="json") for item in result.scan.strategy_health],
         "factor_rankings": [item.model_dump(mode="json") for item in result.scan.factor_rankings],
         "sector_strength": [item.model_dump(mode="json") for item in result.scan.sector_strength],
         "rotation_radar": _rotation_radar_payload(
-            result.scan.cards,
+            cards,
             result.scan.sector_strength,
         ),
         "portfolio_plan": result.scan.portfolio_plan.model_dump(mode="json"),
@@ -3705,11 +3868,16 @@ def _full_market_scan_payload(
         "decision_quality_center": result.scan.decision_quality_center.model_dump(mode="json")
         if result.scan.decision_quality_center
         else None,
-        "operational_readiness_center": result.scan.operational_readiness_center.model_dump(mode="json")
+        "operational_readiness_center": result.scan.operational_readiness_center.model_dump(
+            mode="json"
+        )
         if result.scan.operational_readiness_center
         else None,
         "data_health": result.data_health,
     }
+    payload["data_health"]["paper_invalidated_cards_filtered"] = str(
+        len(result.scan.cards) - len(cards)
+    )
     _relabel_instrument_payload(payload)
     _attach_signal_hub_payload(payload)
     _attach_market_intelligence_payload(payload)
@@ -4312,7 +4480,9 @@ def _attach_probability_forecast_payload(
             payload_data_health.update(probability_calibration_data_health(cards))
         return
 
-    apply_probability_calibration(cards, _strategy_health_from_payload(payload.get("strategy_health")))
+    apply_probability_calibration(
+        cards, _strategy_health_from_payload(payload.get("strategy_health"))
+    )
     cards = sort_recommendation_cards(cards)
     payload[cards_key] = [card.model_dump(mode="json") for card in cards]
     payload_data_health = payload.setdefault("data_health", {})
@@ -4454,7 +4624,9 @@ def _attach_decision_quality_payload(
         portfolio_plan=_portfolio_plan_from_payload(payload.get("portfolio_plan")),
         signal_monitor=_signal_monitor_from_payload(payload.get("signal_monitor")),
         strategy_health=_strategy_health_from_payload(payload.get("strategy_health")),
-        data_health=payload.get("data_health") if isinstance(payload.get("data_health"), dict) else {},
+        data_health=payload.get("data_health")
+        if isinstance(payload.get("data_health"), dict)
+        else {},
     )
     payload["decision_quality_center"] = center.model_dump(mode="json")
     payload_data_health = payload.setdefault("data_health", {})
@@ -4503,7 +4675,9 @@ def _attach_operational_readiness_payload(
         ),
         signal_monitor=_signal_monitor_from_payload(payload.get("signal_monitor")),
         strategy_health=_strategy_health_from_payload(payload.get("strategy_health")),
-        data_health=payload.get("data_health") if isinstance(payload.get("data_health"), dict) else {},
+        data_health=payload.get("data_health")
+        if isinstance(payload.get("data_health"), dict)
+        else {},
         alert_rules_count=alert_rules_count,
     )
     payload["operational_readiness_center"] = center.model_dump(mode="json")
@@ -4554,7 +4728,9 @@ def _attach_alpha_quality_payload(
         cards=cards,
         rotation_radar=_rotation_radar_from_payload(payload.get("rotation_radar")),
         strategy_health=_strategy_health_from_payload(payload.get("strategy_health")),
-        data_health=payload.get("data_health") if isinstance(payload.get("data_health"), dict) else {},
+        data_health=payload.get("data_health")
+        if isinstance(payload.get("data_health"), dict)
+        else {},
     )
     payload["alpha_quality_center"] = center.model_dump(mode="json")
     payload_data_health = payload.setdefault("data_health", {})
@@ -4690,9 +4866,7 @@ def _card_rotation_score(
         leader_ids = set()
         if isinstance(leaders, list):
             leader_ids = {
-                str(leader.get("instrument_id"))
-                for leader in leaders
-                if isinstance(leader, dict)
+                str(leader.get("instrument_id")) for leader in leaders if isinstance(leader, dict)
             }
         if card.instrument_id in leader_ids or name in card_keys:
             matched.append((float(score), name))
@@ -5247,7 +5421,9 @@ def _replay_snapshot_outcome_pairs(
 
 
 def _snapshot_replay_window(snapshots) -> tuple[date, date]:
-    signal_dates = [snapshot.signal_date for snapshot in snapshots if snapshot.signal_date is not None]
+    signal_dates = [
+        snapshot.signal_date for snapshot in snapshots if snapshot.signal_date is not None
+    ]
     if not signal_dates:
         today = date.today()
         return today, today
@@ -5307,8 +5483,7 @@ def portfolio(provider: str = "fixture") -> dict[str, object]:
             instrument_ids = [position.instrument_id for position in positions]
             snapshot = market_provider.get_snapshot(instrument_ids)
             latest_prices = {
-                row["instrument_id"]: Decimal(str(row["close"]))
-                for _, row in snapshot.iterrows()
+                row["instrument_id"]: Decimal(str(row["close"])) for _, row in snapshot.iterrows()
             }
             for position in positions:
                 latest_price = latest_prices.get(position.instrument_id)
@@ -5346,7 +5521,9 @@ def upsert_watchlist_item(item: WatchlistCreate) -> dict[str, object]:
 
 @router.get("/positions")
 def positions() -> dict[str, list[object]]:
-    return {"positions": [position.model_dump(mode="json") for position in _repo().list_positions()]}
+    return {
+        "positions": [position.model_dump(mode="json") for position in _repo().list_positions()]
+    }
 
 
 @router.post("/positions")
@@ -5360,7 +5537,9 @@ def agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
     result, mode, _ = _scan(request.provider, request.symbols)
     selected = None
     if request.instrument_id:
-        selected = next((card for card in result.cards if card.instrument_id == request.instrument_id), None)
+        selected = next(
+            (card for card in result.cards if card.instrument_id == request.instrument_id), None
+        )
     if selected is None and result.cards:
         selected = result.cards[0]
     if selected is None:
@@ -5376,7 +5555,8 @@ def agent_query(request: AgentQueryRequest) -> AgentQueryResponse:
         request.question,
         context={
             "instrument_id": selected.instrument_id,
-            "instrument_label": selected.instrument_label or format_instrument_label(selected.instrument_id),
+            "instrument_label": selected.instrument_label
+            or format_instrument_label(selected.instrument_id),
             "status": selected.status.value,
             "score": selected.score,
             "initial_stop": str(selected.exit_plan.initial_stop),
@@ -5428,11 +5608,15 @@ def _agent_card_summary(card) -> dict[str, object]:
         "factor_flags": card.factor_flags,
         "action": decision.action if decision else "watch",
         "conviction_score": decision.conviction_score if decision else None,
-        "trigger_price": str(card.entry_plan.trigger_price) if card.entry_plan.trigger_price else None,
+        "trigger_price": str(card.entry_plan.trigger_price)
+        if card.entry_plan.trigger_price
+        else None,
         "initial_stop": str(card.exit_plan.initial_stop) if card.exit_plan.initial_stop else None,
         "target_1": str(card.exit_plan.target_1) if card.exit_plan.target_1 else None,
         "target_2": str(card.exit_plan.target_2) if card.exit_plan.target_2 else None,
-        "no_chase_above": str(card.entry_plan.no_chase_above) if card.entry_plan.no_chase_above else None,
+        "no_chase_above": str(card.entry_plan.no_chase_above)
+        if card.entry_plan.no_chase_above
+        else None,
         "risk_reward": card.risk_reward,
         "primary_strategy_id": card.primary_strategy_id,
         "data_caveats": card.data_caveats,

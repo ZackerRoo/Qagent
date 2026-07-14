@@ -313,7 +313,10 @@ def test_automation_scheduler_seeds_from_cached_recommendation_order(tmp_path, m
     assert response.status_code == 200
     body = response.json()
     assert body["last_result"]["paper_created"] == 2
-    assert body["last_result"]["data_health"]["automation_seed_source"] == "latest_recommendation_cache"
+    assert (
+        body["last_result"]["data_health"]["automation_seed_source"]
+        == "latest_recommendation_cache"
+    )
 
     trades = client.get("/api/paper-trades?limit=10").json()["trades"]
     assert {trade["instrument_id"] for trade in trades} == {"CN:002747", "CN:688052"}
@@ -523,9 +526,7 @@ def test_automation_scheduler_backfills_closed_paper_slot_from_deeper_cache_cand
 
     with session_factory() as session:
         first_trade = (
-            session.query(PaperTradeRow)
-            .filter(PaperTradeRow.instrument_id == "CN:688001")
-            .one()
+            session.query(PaperTradeRow).filter(PaperTradeRow.instrument_id == "CN:688001").one()
         )
         first_trade.status = "missed_entry"
         session.commit()
@@ -876,13 +877,12 @@ def test_automation_scheduler_replaces_stale_pending_with_strong_candidate(
         and item["market_theme_boost"] > 0
         for item in pool["items"]
     )
-    post_stale_item = next(
-        item for item in pool["items"] if item["instrument_id"] == "CN:159558"
-    )
-    assert post_stale_item["status"] == "tracked_before"
+    post_stale_item = next(item for item in pool["items"] if item["instrument_id"] == "CN:159558")
+    assert post_stale_item["status"] == "blocked_by_data"
+    assert post_stale_item["price_basis_consistent"] is False
     trades = client.get("/api/paper-trades?provider=free&limit=20").json()["trades"]
     by_id = {trade["trade_id"]: trade for trade in trades}
-    assert by_id["paper-stale-pending"]["status"] == "missed_entry"
+    assert by_id["paper-stale-pending"]["status"] == "replaced"
     assert "候补替换" in by_id["paper-stale-pending"]["notes"]
     assert "CN:588000" in {trade["instrument_id"] for trade in trades}
 

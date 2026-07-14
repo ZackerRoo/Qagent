@@ -1515,6 +1515,8 @@ export type PaperTradingSummary = {
   open: number;
   closed: number;
   missed_entry_count: number;
+  replaced_count: number;
+  invalidated_count: number;
   target_hit_count: number;
   stopped_count: number;
   time_exit_count: number;
@@ -1539,6 +1541,8 @@ export type PaperLedgerSummary = {
   open_trades: number;
   closed_trades: number;
   missed_entry_count: number;
+  replaced_count: number;
+  invalidated_count: number;
   target_hit_count: number;
   stopped_count: number;
   time_exit_count: number;
@@ -1827,6 +1831,8 @@ export type PaperTriggerQualitySummary = {
   pending_count: number;
   triggered_count: number;
   missed_entry_count: number;
+  replaced_count: number;
+  invalidated_count: number;
   no_chase_missed_count: number;
   stopped_count: number;
   target_hit_count: number;
@@ -1983,6 +1989,7 @@ export type PaperCandidatePoolItem = {
   priority_score: number;
   market_theme_boost: number;
   entry_gap_pct: number | null;
+  price_basis_consistent: boolean;
   trigger_price: string | null;
   latest_close: string | null;
   status: string;

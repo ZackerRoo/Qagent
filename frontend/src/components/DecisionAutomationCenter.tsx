@@ -47,8 +47,15 @@ export function DecisionAutomationCenterPanel({
   const primaryWindow = useMemo(() => primaryFollowthroughWindow(followthrough), [followthrough]);
   const replacementCandidate = useMemo(() => findCandidate(candidatePool?.items, "replace_candidate"), [candidatePool]);
   const readyCandidate = useMemo(() => findCandidate(candidatePool?.items, "ready_to_add"), [candidatePool]);
-  const waitingCandidate = useMemo(() => findCandidate(candidatePool?.items, "waiting_for_trigger"), [candidatePool]);
-  const bestCandidate = replacementCandidate ?? readyCandidate ?? waitingCandidate ?? candidatePool?.items?.[0];
+  const waitingCandidate = useMemo(
+    () => findCandidate(candidatePool?.items, "waiting_for_slot") ?? findCandidate(candidatePool?.items, "waiting"),
+    [candidatePool],
+  );
+  const bestCandidate =
+    replacementCandidate ??
+    readyCandidate ??
+    waitingCandidate ??
+    candidatePool?.items?.find(isEligibleCandidate);
   const market = result?.market_intelligence?.market_environment;
   const topTheme = result?.rotation_radar?.themes?.[0];
   const pillars = buildPillars({
@@ -160,7 +167,7 @@ function AutomationCandidateQueue({
   language: "zh" | "en";
 }) {
   const cardByInstrument = new Map(cards.map((card) => [card.instrument_id, card]));
-  const visible = items.slice(0, 4);
+  const visible = items.filter(isEligibleCandidate).slice(0, 4);
   return (
     <div className="automation-queue-card">
       <header>
@@ -440,6 +447,10 @@ function findCandidate(items: PaperCandidatePoolItem[] | undefined, status: stri
   return items?.find((item) => item.status === status);
 }
 
+function isEligibleCandidate(item: PaperCandidatePoolItem) {
+  return !["blocked_by_data", "tracked_before", "active_in_paper", "paused_by_risk"].includes(item.status);
+}
+
 function isActionReady(card: OpportunityCard) {
   return card.decision?.action === "candidate_entry" || card.decision?.action === "watch_trigger" || card.status === "setup_ready";
 }
@@ -519,10 +530,12 @@ function candidateStatusLabel(status: string, language: "zh" | "en") {
   const zh: Record<string, string> = {
     ready_to_add: "可加入",
     replace_candidate: "可替补",
-    waiting_for_trigger: "等待触发",
-    already_active: "已在模拟盘",
-    risk_paused: "风控暂停",
-    weak_priority: "优先级弱",
+    waiting_for_slot: "满额等待",
+    waiting: "等待下一轮",
+    active_in_paper: "已在模拟盘",
+    paused_by_risk: "风控暂停",
+    tracked_before: "已跟踪/冷却",
+    blocked_by_data: "数据阻断",
   };
   return language === "zh" ? zh[status] ?? status : status.replace(/_/g, " ");
 }
