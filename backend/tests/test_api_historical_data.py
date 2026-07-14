@@ -129,8 +129,10 @@ def test_completed_full_market_backfill_queues_walk_forward_when_coverage_is_rea
         adjustment_coverage_ratio=1.0,
         tradability_coverage_ratio=1.0,
         universe_snapshot_rows=4,
+        first_universe_date=routes.date(2025, 1, 2),
         profile_rows=1,
         fundamental_rows=4,
+        first_fundamental_date=routes.date(2024, 12, 31),
     )
     result = SimpleNamespace(
         job=job,
@@ -178,8 +180,10 @@ def test_completed_full_market_backfill_blocks_validation_on_missing_evidence(
         adjustment_coverage_ratio=1.0,
         tradability_coverage_ratio=0.0,
         universe_snapshot_rows=0,
+        first_universe_date=None,
         profile_rows=1,
         fundamental_rows=0,
+        first_fundamental_date=None,
     )
     result = SimpleNamespace(
         job=job,
@@ -197,6 +201,55 @@ def test_completed_full_market_backfill_blocks_validation_on_missing_evidence(
     assert "tradability<90%" in stored.data_health["validation_pipeline_blockers"]
     assert "fundamental<80%" in stored.data_health["validation_pipeline_blockers"]
     assert "benchmarks<100%" in stored.data_health["validation_pipeline_blockers"]
+    assert repo.list_walk_forward_jobs(provider="free", limit=5) == []
+
+
+def test_completed_full_market_backfill_blocks_recent_only_history(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'historical-recent-only.db'}",
+    )
+    repo = routes._repo()
+    start = routes.date(2025, 1, 2)
+    job = repo.create_historical_backfill_job(
+        "free",
+        ["CN:000001"],
+        start=start,
+        end=routes.date(2025, 3, 31),
+        data_health={
+            "backfill_scope": "full-a-share",
+            "backfill_auto_validate": "true",
+        },
+    )
+    job = repo.update_historical_backfill_job(job.job_id, status="succeeded")
+    item = SimpleNamespace(
+        asset_type="stock",
+        bar_coverage_ratio=1.0,
+        adjustment_coverage_ratio=1.0,
+        tradability_coverage_ratio=1.0,
+        universe_snapshot_rows=4,
+        first_universe_date=routes.date(2025, 2, 1),
+        profile_rows=1,
+        fundamental_rows=4,
+        first_fundamental_date=routes.date(2025, 2, 1),
+    )
+    result = SimpleNamespace(
+        job=job,
+        manifest=SimpleNamespace(
+            instruments=[item],
+            data_health={"historical_benchmark_price_ready": "4/4"},
+        ),
+    )
+
+    state = routes._continue_validation_pipeline(result)
+    stored = repo.get_historical_backfill_job(job.job_id)
+
+    assert state == "blocked_data_coverage"
+    assert "universe<90%" in stored.data_health["validation_pipeline_blockers"]
+    assert "fundamental<80%" in stored.data_health["validation_pipeline_blockers"]
     assert repo.list_walk_forward_jobs(provider="free", limit=5) == []
 
 

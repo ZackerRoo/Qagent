@@ -842,6 +842,15 @@ def test_historical_backfill_defers_and_recovers_transient_failures(
 def test_historical_backfill_uses_batched_historical_price_provider(tmp_path):
     repo, cache = make_repositories(tmp_path)
     provider = BatchHistoryProvider()
+    symbols = [
+        "CN:000001",
+        "CN:000002",
+        "CN:000003",
+        "CN:000004",
+        "CN:000005",
+        "CN:000006",
+        "CN:600519",
+    ]
 
     result = run_historical_backfill(
         repo=repo,
@@ -849,7 +858,7 @@ def test_historical_backfill_uses_batched_historical_price_provider(tmp_path):
         provider=provider,
         strategy_provider=None,
         provider_mode="free",
-        instrument_ids=["CN:000001", "CN:600519"],
+        instrument_ids=symbols,
         start=date(2026, 1, 1),
         end=date(2026, 1, 9),
         universe_as_of=date(2026, 1, 9),
@@ -857,9 +866,9 @@ def test_historical_backfill_uses_batched_historical_price_provider(tmp_path):
     )
 
     assert result.job.status == "succeeded"
-    assert result.job.succeeded_symbols == 2
-    assert provider.batch_calls == [["CN:000001", "CN:600519"]]
-    assert provider.calls == 1
+    assert result.job.succeeded_symbols == len(symbols)
+    assert provider.batch_calls == [symbols[:5], symbols[5:]]
+    assert provider.calls == 2
 
 
 def test_historical_backfill_marks_nonempty_partial_price_span_as_failed(tmp_path):

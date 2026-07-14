@@ -169,7 +169,7 @@ class FreeCnMarketDataProvider:
                     )
                     self._record_source_failure()
                     return pd.DataFrame(columns=BAR_COLUMNS)
-                for instrument_id, symbol in symbols:
+                for index, (instrument_id, symbol) in enumerate(symbols):
                     try:
                         normalized = self._load_baostock_logged_in(
                             symbol,
@@ -182,6 +182,13 @@ class FreeCnMarketDataProvider:
                             f"{instrument_id}: baostock historical batch: {exc}"
                         )
                         self._record_source_failure()
+                        if _baostock_session_is_unusable(exc):
+                            self.last_errors.extend(
+                                f"{pending_id}: baostock historical batch deferred "
+                                "after session failure"
+                                for pending_id, _ in symbols[index + 1 :]
+                            )
+                            break
                         continue
                     self._record_source_success()
                     if normalized.empty:
@@ -488,6 +495,23 @@ def _to_baostock_symbol(symbol: str) -> str:
         else "sz"
     )
     return f"{prefix}.{symbol}"
+
+
+def _baostock_session_is_unusable(exc: Exception) -> bool:
+    detail = str(exc).lower()
+    return isinstance(exc, (ConnectionError, TimeoutError, UnicodeError)) or any(
+        token in detail
+        for token in (
+            "codec",
+            "decode",
+            "network",
+            "socket",
+            "timed out",
+            "timeout",
+            "接收数据异常",
+            "网络",
+        )
+    )
 
 
 def _to_sina_symbol(symbol: str) -> str:

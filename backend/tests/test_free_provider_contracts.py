@@ -583,3 +583,56 @@ def test_free_cn_historical_batch_reuses_one_baostock_session(monkeypatch):
     ]
     assert sorted(bars["instrument_id"].unique()) == ["CN:000001", "CN:600519"]
     assert provider.last_errors == []
+
+
+def test_free_cn_historical_batch_defers_remaining_symbols_after_broken_session(
+    monkeypatch,
+):
+    class FakeQueryResult:
+        error_code = "0"
+        error_msg = "success"
+        fields = ["date", "open", "high", "low", "close", "volume", "amount"]
+
+        def __init__(self):
+            self.pending = True
+
+        def next(self):
+            if self.pending:
+                self.pending = False
+                return True
+            return False
+
+        def get_row_data(self):
+            return ["2026-01-05", "10", "10", "10", "10", "1000", "10000"]
+
+    query_count = 0
+
+    def fake_query(*args, **kwargs):
+        nonlocal query_count
+        query_count += 1
+        if query_count == 3:
+            raise TimeoutError("socket timed out")
+        return FakeQueryResult()
+
+    monkeypatch.setattr(
+        "qagent.providers.free_cn.bs",
+        SimpleNamespace(
+            login=lambda: SimpleNamespace(error_code="0", error_msg="success"),
+            logout=lambda: None,
+            query_history_k_data_plus=fake_query,
+        ),
+    )
+
+    provider = FreeCnMarketDataProvider()
+    bars = provider.get_historical_daily_bars(
+        ["CN:000001", "CN:000002", "CN:000003"],
+        date(2026, 1, 1),
+        date(2026, 1, 9),
+    )
+
+    assert bars["instrument_id"].unique().tolist() == ["CN:000001"]
+    assert query_count == 3
+    assert provider.last_errors == [
+        "CN:000002: baostock historical batch: socket timed out",
+        "CN:000003: baostock historical batch deferred after session failure",
+    ]

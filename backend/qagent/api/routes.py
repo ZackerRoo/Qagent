@@ -653,6 +653,16 @@ def _run_historical_backfill_safely(job_id: str) -> None:
                 status="failed",
                 errors=[*job.errors[-99:], str(exc)],
             )
+        elif job is not None:
+            repo.update_historical_backfill_job(
+                job_id,
+                errors=[*job.errors[-99:], f"validation pipeline: {exc}"],
+                data_health={
+                    **job.data_health,
+                    "validation_pipeline_state": "failed",
+                    "validation_pipeline_error": str(exc),
+                },
+            )
     finally:
         with _historical_jobs_lock:
             _submitted_historical_jobs.discard(job_id)
@@ -666,7 +676,10 @@ def _continue_validation_pipeline(result) -> str:
         "backfill_auto_validate",
         str(default_enabled).lower(),
     ).lower() == "true"
-    readiness = _historical_validation_readiness(result.manifest)
+    readiness = _historical_validation_readiness(
+        result.manifest,
+        start=job.start_date,
+    )
     health = {
         **job.data_health,
         **readiness,
@@ -709,7 +722,7 @@ def _continue_validation_pipeline(result) -> str:
     return "walk_forward_queued"
 
 
-def _historical_validation_readiness(manifest) -> dict[str, str]:
+def _historical_validation_readiness(manifest, *, start: date) -> dict[str, str]:
     instruments = list(manifest.instruments)
     stocks = [item for item in instruments if item.asset_type == "stock"]
     adjusted = [item for item in instruments if item.asset_type in {"stock", "etf"}]
@@ -727,9 +740,21 @@ def _historical_validation_readiness(manifest) -> dict[str, str]:
             item.tradability_coverage_ratio >= 0.95 for item in instruments
         )
         / total,
-        "universe": sum(item.universe_snapshot_rows > 0 for item in instruments) / total,
+        "universe": sum(
+            item.universe_snapshot_rows > 0
+            and item.first_universe_date is not None
+            and item.first_universe_date <= start
+            for item in instruments
+        )
+        / total,
         "profile": sum(item.profile_rows > 0 for item in instruments) / total,
-        "fundamental": sum(item.fundamental_rows > 0 for item in stocks) / stock_total,
+        "fundamental": sum(
+            item.fundamental_rows > 0
+            and item.first_fundamental_date is not None
+            and item.first_fundamental_date <= start
+            for item in stocks
+        )
+        / stock_total,
     }
     benchmark_ready, benchmark_total = _fraction_value(
         manifest.data_health.get("historical_benchmark_price_ready", "0/4")

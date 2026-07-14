@@ -230,6 +230,7 @@ def run_historical_backfill(
         {
             "backfill_scope": normalized_scope,
             "backfill_batch_size": str(batch_size),
+            "backfill_price_network_batch_size": str(min(batch_size, 5)),
             "backfill_phase": "inventory",
         }
     )
@@ -1113,6 +1114,7 @@ def _is_retryable_provider_failure(errors: list[str]) -> bool:
             "disconnected",
             "login failed",
             "network",
+            "codec",
             "rate limit",
             "remote",
             "skipped after",
@@ -1122,6 +1124,8 @@ def _is_retryable_provider_failure(errors: list[str]) -> bool:
             "timed out",
             "timeout",
             "too many requests",
+            "接收数据异常",
+            "网络",
         )
     )
 
@@ -1604,8 +1608,9 @@ def _historical_price_batches(
 ):
     source = getattr(provider, "provider", provider)
     batch_getter = getattr(source, "get_historical_daily_bars", None)
-    for offset in range(0, len(instrument_ids), max(1, batch_size)):
-        batch = instrument_ids[offset : offset + max(1, batch_size)]
+    network_batch_size = min(max(1, batch_size), 5)
+    for offset in range(0, len(instrument_ids), network_batch_size):
+        batch = instrument_ids[offset : offset + network_batch_size]
         cached: dict[str, pd.DataFrame] = {}
         missing: list[str] = []
         for instrument_id in batch:
