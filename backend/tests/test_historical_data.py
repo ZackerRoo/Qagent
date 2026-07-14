@@ -180,6 +180,29 @@ class UnexpectedFundamentalHistoryProvider(BaseStrategyDataProvider):
         raise AssertionError("complete historical fundamentals must be reused")
 
 
+class CachedBarFundamentalHistoryProvider(BaseStrategyDataProvider):
+    name = "cached_bar_fundamental_fixture"
+
+    def __init__(self):
+        self.calls = []
+
+    def get_fundamentals(self, instrument_ids, start, end):
+        raise AssertionError("cached-bar historical path must be used")
+
+    def get_fundamentals_from_cached_bars(self, instrument_ids, start, end, bars):
+        self.calls.append((list(instrument_ids), start, end, bars.copy()))
+        return [
+            FundamentalSnapshot(
+                instrument_id=instrument_id,
+                as_of_date=end,
+                market_cap=Decimal("10000000000"),
+                pe_ratio=Decimal("12"),
+                provider=self.name,
+            )
+            for instrument_id in instrument_ids
+        ]
+
+
 class CompleteHistoricalEvidenceProvider:
     name = "evidence_fixture"
     last_errors: list[str] = []
@@ -1168,6 +1191,31 @@ def test_historical_backfill_reuses_complete_fundamental_history(tmp_path):
     assert result.job.status == "succeeded"
     assert result.job.fundamental_rows_written == 0
     assert result.job.data_health["backfill_fundamental_cache_reused"] == "1"
+
+
+def test_historical_backfill_joins_fundamentals_to_cached_raw_bars(tmp_path):
+    repo, cache = make_repositories(tmp_path)
+    strategy_provider = CachedBarFundamentalHistoryProvider()
+
+    result = run_historical_backfill(
+        repo=repo,
+        cache=cache,
+        provider=AdjustedHistoryProvider(),
+        strategy_provider=strategy_provider,
+        provider_mode="free",
+        instrument_ids=["CN:000001"],
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 9),
+        universe_as_of=date(2026, 1, 9),
+    )
+
+    assert result.job.status == "succeeded"
+    assert len(strategy_provider.calls) == 1
+    assert not strategy_provider.calls[0][3].empty
+    assert set(strategy_provider.calls[0][3]["instrument_id"]) == {"CN:000001"}
+    assert result.job.data_health["backfill_fundamental_source"] == (
+        "cached_bar_fundamental_fixture"
+    )
 
 
 def test_historical_backfill_resume_accepts_original_symbol_order(tmp_path):

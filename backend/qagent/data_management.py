@@ -875,19 +875,21 @@ def run_historical_backfill(
                 stock_symbols,
                 end,
             )
-            freshness_cutoff = end - timedelta(days=180)
             fundamental_symbols = []
             for symbol in stock_symbols:
                 count, first_date, last_date = existing_fundamentals.get(
                     symbol,
                     (0, None, None),
                 )
-                if (
-                    count > 0
-                    and first_date is not None
-                    and first_date <= start
-                    and last_date is not None
-                    and last_date >= freshness_cutoff
+                profile = inventory_profile_by_id.get(symbol)
+                if _fundamental_history_is_usable(
+                    count=count,
+                    first_date=first_date,
+                    last_date=last_date,
+                    start=start,
+                    end=end,
+                    listing_date=profile.listing_date if profile else None,
+                    delisting_date=profile.delisting_date if profile else None,
                 ):
                     fundamental_cache_reused += 1
                 else:
@@ -904,11 +906,30 @@ def run_historical_backfill(
                 fundamental_processed = fundamental_cache_reused
                 for batch_symbols in fundamental_batches:
                     try:
-                        fundamentals = strategy_provider.get_fundamentals(
-                            batch_symbols,
-                            fundamental_start,
-                            end,
-                        )
+                        if hasattr(
+                            strategy_provider,
+                            "get_fundamentals_from_cached_bars",
+                        ):
+                            cached_bars = cache.load_daily_bars(
+                                mode,
+                                batch_symbols,
+                                fundamental_start,
+                                end,
+                            )
+                            fundamentals = (
+                                strategy_provider.get_fundamentals_from_cached_bars(
+                                    batch_symbols,
+                                    fundamental_start,
+                                    end,
+                                    cached_bars,
+                                )
+                            )
+                        else:
+                            fundamentals = strategy_provider.get_fundamentals(
+                                batch_symbols,
+                                fundamental_start,
+                                end,
+                            )
                         fundamental_rows += repo.upsert_fundamental_snapshots(
                             mode,
                             fundamentals,
@@ -936,6 +957,48 @@ def run_historical_backfill(
                     backfill_fundamental_processed=str(len(stock_symbols)),
                     backfill_fundamental_total=str(len(stock_symbols)),
                 )
+            final_fundamental_stats = repo.fundamental_snapshot_stats(
+                mode,
+                stock_symbols,
+                end,
+            )
+            fundamental_ready = 0
+            fundamental_missing: list[str] = []
+            for symbol in stock_symbols:
+                count, first_date, last_date = final_fundamental_stats.get(
+                    symbol,
+                    (0, None, None),
+                )
+                profile = inventory_profile_by_id.get(symbol)
+                if _fundamental_history_is_usable(
+                    count=count,
+                    first_date=first_date,
+                    last_date=last_date,
+                    start=start,
+                    end=end,
+                    listing_date=profile.listing_date if profile else None,
+                    delisting_date=profile.delisting_date if profile else None,
+                ):
+                    fundamental_ready += 1
+                else:
+                    fundamental_missing.append(symbol)
+            _update_backfill_health(
+                repo,
+                job.job_id,
+                backfill_fundamental_source=getattr(
+                    strategy_provider,
+                    "historical_source_name",
+                    getattr(strategy_provider, "name", "unknown"),
+                ),
+                backfill_fundamental_point_in_time=(
+                    "conservative_disclosure_deadline"
+                ),
+                backfill_fundamental_ready=str(fundamental_ready),
+                backfill_fundamental_missing=str(len(fundamental_missing)),
+                backfill_fundamental_missing_symbols=",".join(
+                    fundamental_missing[:200]
+                ),
+            )
 
         evidence_data_health: dict[str, str] = {}
         evidence_counts = {
@@ -1289,6 +1352,27 @@ def _is_retryable_provider_failure(errors: list[str]) -> bool:
             "网络",
         )
     )
+
+
+def _fundamental_history_is_usable(
+    *,
+    count: int,
+    first_date: date | None,
+    last_date: date | None,
+    start: date,
+    end: date,
+    listing_date: date | None,
+    delisting_date: date | None,
+) -> bool:
+    if count <= 0 or first_date is None or last_date is None:
+        return False
+    active_start = max(start, listing_date or start)
+    active_end = min(end, delisting_date or end)
+    if active_end < active_start:
+        return True
+    first_cutoff = start if listing_date is None or listing_date <= start else active_end
+    freshness_cutoff = active_end - timedelta(days=180)
+    return first_date <= first_cutoff and last_date >= freshness_cutoff
 
 
 def _historical_evidence_cache_is_usable(

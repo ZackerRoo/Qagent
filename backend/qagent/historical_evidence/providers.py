@@ -717,11 +717,75 @@ class BaoStockHistoricalEvidenceProvider:
 
 class BaoStockHistoricalFundamentalProvider(BaseStrategyDataProvider):
     name = "baostock_point_in_time"
+    historical_source_name = "akshare_ths_em_conservative_pit"
 
-    def __init__(self, client=bs, request_timeout_seconds: int = 6):
+    def __init__(
+        self,
+        client=bs,
+        request_timeout_seconds: int = 6,
+        *,
+        financial_client=ak,
+        share_structure_client=ak,
+    ):
         super().__init__()
         self.client = client
         self.request_timeout_seconds = request_timeout_seconds
+        self.financial_client = financial_client
+        self.share_structure_client = share_structure_client
+
+    def get_fundamentals_from_cached_bars(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+        bars,
+    ) -> list[FundamentalSnapshot]:
+        """Build conservative point-in-time fundamentals with two calls per stock."""
+        stocks = sorted(
+            instrument_id
+            for instrument_id in set(instrument_ids)
+            if _is_stock_instrument(instrument_id)
+        )
+        self.last_errors = []
+        snapshots: list[FundamentalSnapshot] = []
+        for instrument_id in stocks:
+            symbol = instrument_id.split(":", 1)[-1].split(".", 1)[0]
+            try:
+                with _bounded_network_calls(self.request_timeout_seconds):
+                    financial_frame = self.financial_client.stock_financial_abstract_ths(
+                        symbol=symbol,
+                        indicator="按报告期",
+                    )
+            except Exception as exc:
+                self.last_errors.append(
+                    f"{instrument_id}: historical financial summary: {exc}"
+                )
+                continue
+            try:
+                with _bounded_network_calls(self.request_timeout_seconds):
+                    share_frame = self.share_structure_client.stock_zh_a_gbjg_em(
+                        symbol=_to_eastmoney_symbol(instrument_id)
+                    )
+            except Exception as exc:
+                self.last_errors.append(
+                    f"{instrument_id}: historical share structure: {exc}"
+                )
+                share_frame = None
+            instrument_snapshots = _conservative_fundamental_snapshots(
+                instrument_id=instrument_id,
+                financial_rows=_frame_records(financial_frame),
+                share_rows=_frame_records(share_frame),
+                price_rows=_instrument_frame_records(bars, instrument_id),
+                start=start,
+                end=end,
+            )
+            if not instrument_snapshots:
+                self.last_errors.append(
+                    f"{instrument_id}: no historical financial snapshots in range"
+                )
+                continue
+            snapshots.extend(instrument_snapshots)
+        return sorted(snapshots, key=lambda item: (item.instrument_id, item.as_of_date))
 
     def get_fundamentals(
         self,
@@ -863,6 +927,17 @@ def _to_baostock_code(instrument_id: str) -> str:
     symbol = instrument_id.split(":", 1)[-1].split(".", 1)[0]
     prefix = "sh" if symbol.startswith(("5", "6", "9")) else "sz"
     return f"{prefix}.{symbol}"
+
+
+def _to_eastmoney_symbol(instrument_id: str) -> str:
+    symbol = instrument_id.split(":", 1)[-1].split(".", 1)[0]
+    if symbol.startswith(("4", "8")):
+        suffix = "BJ"
+    elif symbol.startswith(("5", "6", "9")):
+        suffix = "SH"
+    else:
+        suffix = "SZ"
+    return f"{symbol}.{suffix}"
 
 
 def _from_baostock_code(value: object) -> str | None:
@@ -1030,6 +1105,14 @@ def _frame_records(frame) -> list[dict[str, object]]:
     raise TypeError("corporate action provider must return a DataFrame-like object")
 
 
+def _instrument_frame_records(frame, instrument_id: str) -> list[dict[str, object]]:
+    return [
+        row
+        for row in _frame_records(frame)
+        if _text(row.get("instrument_id")) == instrument_id
+    ]
+
+
 def _event_overlaps(start: date, end: date, *values: date | None) -> bool:
     return any(value is not None and start <= value <= end for value in values)
 
@@ -1168,6 +1251,138 @@ def _fundamental_snapshots_from_rows(
             )
         )
     return snapshots
+
+
+def _conservative_fundamental_snapshots(
+    *,
+    instrument_id: str,
+    financial_rows: list[dict[str, object]],
+    share_rows: list[dict[str, object]],
+    price_rows: list[dict[str, object]],
+    start: date,
+    end: date,
+) -> list[FundamentalSnapshot]:
+    reports = {
+        report_date: row
+        for row in financial_rows
+        if (report_date := _date(row.get("报告期"))) is not None
+    }
+    shares = sorted(
+        (change_date, _amount_decimal(row.get("总股本")))
+        for row in share_rows
+        if (change_date := _date(row.get("变更日期"))) is not None
+    )
+    prices = sorted(
+        (trade_date, _decimal(row.get("close")))
+        for row in price_rows
+        if (trade_date := _date(row.get("trade_date") or row.get("date")))
+        is not None
+    )
+    snapshots_by_as_of: dict[date, FundamentalSnapshot] = {}
+    for report_date, row in sorted(reports.items()):
+        as_of_date = _conservative_publication_date(report_date)
+        if not start <= as_of_date <= end:
+            continue
+        close = _latest_value_on_or_before(prices, as_of_date)
+        total_shares = _latest_value_on_or_before(shares, as_of_date)
+        market_cap = (
+            close * total_shares
+            if close is not None and total_shares is not None and total_shares > 0
+            else None
+        )
+        ttm_profit = _trailing_twelve_month_amount(reports, report_date, "净利润")
+        ttm_revenue = _trailing_twelve_month_amount(
+            reports,
+            report_date,
+            "营业总收入",
+        )
+        # Annual reports and Q1 reports share the same conservative deadline.
+        # Keep Q1 because it is the newer report-period snapshot on that date.
+        snapshots_by_as_of[as_of_date] = FundamentalSnapshot(
+            instrument_id=instrument_id,
+            as_of_date=as_of_date,
+            revenue_growth_pct=_metric_decimal(row.get("营业总收入同比增长率")),
+            earnings_growth_pct=_metric_decimal(row.get("净利润同比增长率")),
+            gross_margin_pct=_metric_decimal(row.get("销售毛利率")),
+            net_margin_pct=_metric_decimal(row.get("销售净利率")),
+            return_on_equity_pct=_metric_decimal(row.get("净资产收益率")),
+            market_cap=market_cap,
+            pe_ratio=_positive_ratio(market_cap, ttm_profit),
+            price_to_sales=_positive_ratio(market_cap, ttm_revenue),
+            provider=BaoStockHistoricalFundamentalProvider.historical_source_name,
+        )
+    return list(snapshots_by_as_of.values())
+
+
+def _conservative_publication_date(report_date: date) -> date:
+    if report_date.month == 3:
+        return date(report_date.year, 4, 30)
+    if report_date.month == 6:
+        return date(report_date.year, 8, 31)
+    if report_date.month == 9:
+        return date(report_date.year, 10, 31)
+    return date(report_date.year + 1, 4, 30)
+
+
+def _trailing_twelve_month_amount(
+    reports: dict[date, dict[str, object]],
+    report_date: date,
+    field: str,
+) -> Decimal | None:
+    current = _amount_decimal(reports.get(report_date, {}).get(field))
+    if current is None:
+        return None
+    if report_date.month == 12:
+        return current
+    previous_annual = _amount_decimal(
+        reports.get(date(report_date.year - 1, 12, 31), {}).get(field)
+    )
+    previous_period = _amount_decimal(
+        reports.get(_same_period_previous_year(report_date), {}).get(field)
+    )
+    if previous_annual is None or previous_period is None:
+        return None
+    return current + previous_annual - previous_period
+
+
+def _latest_value_on_or_before(
+    rows: list[tuple[date, Decimal | None]],
+    cutoff: date,
+) -> Decimal | None:
+    eligible = [value for effective_date, value in rows if effective_date <= cutoff]
+    return next((value for value in reversed(eligible) if value is not None), None)
+
+
+def _positive_ratio(
+    numerator: Decimal | None,
+    denominator: Decimal | None,
+) -> Decimal | None:
+    if numerator is None or denominator is None or denominator <= 0:
+        return None
+    return numerator / denominator
+
+
+def _metric_decimal(value: object) -> Decimal | None:
+    text = _text(value)
+    if not text or text.lower() in {"false", "nan", "none", "null", "--"}:
+        return None
+    return _decimal(text.replace(",", "").replace("%", ""))
+
+
+def _amount_decimal(value: object) -> Decimal | None:
+    text = _text(value)
+    if not text or text.lower() in {"false", "nan", "none", "null", "--"}:
+        return None
+    normalized = text.replace(",", "").strip()
+    multiplier = Decimal("1")
+    if normalized.endswith("亿"):
+        normalized = normalized[:-1]
+        multiplier = Decimal("100000000")
+    elif normalized.endswith("万"):
+        normalized = normalized[:-1]
+        multiplier = Decimal("10000")
+    number = _decimal(normalized)
+    return number * multiplier if number is not None else None
 
 
 def _same_period_previous_year(value: date) -> date:

@@ -783,7 +783,11 @@ def _historical_validation_readiness(manifest, *, start: date) -> dict[str, str]
         "fundamental": sum(
             item.fundamental_rows > 0
             and item.first_fundamental_date is not None
-            and item.first_fundamental_date <= start
+            and (
+                getattr(item, "listing_date", None) is not None
+                and item.listing_date > start
+                or item.first_fundamental_date <= start
+            )
             for item in stocks
         )
         / stock_total,

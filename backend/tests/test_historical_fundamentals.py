@@ -2,6 +2,8 @@ from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pandas as pd
+
 from qagent.historical_evidence import providers as historical_providers
 from qagent.db import create_session_factory, initialize_database
 from qagent.jobs import historical_data as historical_job
@@ -140,6 +142,111 @@ def test_baostock_historical_fundamentals_are_point_in_time_and_skip_etfs():
     assert latest.price_to_sales == Decimal("3")
     assert latest.provider == "baostock_point_in_time"
     assert all(call[1] == "sh.600519" for call in client.financial_calls)
+
+
+class FakeFinancialSummaryClient:
+    def __init__(self):
+        self.calls = []
+
+    def stock_financial_abstract_ths(self, symbol, indicator):
+        self.calls.append((symbol, indicator))
+        return pd.DataFrame(
+            [
+                {
+                    "报告期": "2023-03-31",
+                    "净利润": "10亿",
+                    "营业总收入": "100亿",
+                },
+                {
+                    "报告期": "2023-12-31",
+                    "净利润": "50亿",
+                    "营业总收入": "500亿",
+                },
+                {
+                    "报告期": "2024-03-31",
+                    "净利润": "20亿",
+                    "净利润同比增长率": "100%",
+                    "营业总收入": "120亿",
+                    "营业总收入同比增长率": "20%",
+                    "销售毛利率": "45%",
+                    "销售净利率": "16.67%",
+                    "净资产收益率": "8%",
+                },
+                {
+                    "报告期": "2024-12-31",
+                    "净利润": "80亿",
+                    "净利润同比增长率": "60%",
+                    "营业总收入": "600亿",
+                    "营业总收入同比增长率": "20%",
+                    "销售毛利率": "48%",
+                    "销售净利率": "13.33%",
+                    "净资产收益率": "22%",
+                },
+            ]
+        )
+
+
+class FakeShareStructureClient:
+    def __init__(self):
+        self.calls = []
+
+    def stock_zh_a_gbjg_em(self, symbol):
+        self.calls.append(symbol)
+        return pd.DataFrame(
+            [
+                {"变更日期": "2020-01-01", "总股本": "100000000"},
+                {"变更日期": "2025-05-01", "总股本": "200000000"},
+            ]
+        )
+
+
+def test_fast_historical_fundamentals_join_cached_prices_without_lookahead():
+    financial_client = FakeFinancialSummaryClient()
+    share_client = FakeShareStructureClient()
+    provider = historical_providers.BaoStockHistoricalFundamentalProvider(
+        client=FakeBaoStockFundamentalClient(),
+        request_timeout_seconds=1,
+        financial_client=financial_client,
+        share_structure_client=share_client,
+    )
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "CN:600519",
+                "trade_date": date(2024, 4, 29),
+                "close": Decimal("12"),
+            },
+            {
+                "instrument_id": "CN:600519",
+                "trade_date": date(2024, 5, 6),
+                "close": Decimal("99"),
+            },
+            {
+                "instrument_id": "CN:600519",
+                "trade_date": date(2025, 4, 30),
+                "close": Decimal("16"),
+            },
+        ]
+    )
+
+    snapshots = provider.get_fundamentals_from_cached_bars(
+        ["CN:600519", "CN:510300"],
+        date(2024, 1, 1),
+        date(2025, 12, 31),
+        bars,
+    )
+
+    q1 = next(item for item in snapshots if item.as_of_date == date(2024, 4, 30))
+    annual = next(item for item in snapshots if item.as_of_date == date(2025, 4, 30))
+    assert q1.market_cap == Decimal("1200000000")
+    assert q1.pe_ratio == Decimal("0.2")
+    assert q1.price_to_sales == Decimal("0.02307692307692307692307692308")
+    assert q1.earnings_growth_pct == Decimal("100")
+    assert q1.provider == "akshare_ths_em_conservative_pit"
+    assert annual.market_cap == Decimal("1600000000")
+    assert annual.pe_ratio == Decimal("0.2")
+    assert financial_client.calls == [("600519", "按报告期")]
+    assert share_client.calls == ["600519.SH"]
 
 
 def test_historical_job_uses_dedicated_point_in_time_fundamental_provider(

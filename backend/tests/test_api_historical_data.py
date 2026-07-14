@@ -253,6 +253,31 @@ def test_completed_full_market_backfill_blocks_recent_only_history(
     assert repo.list_walk_forward_jobs(provider="free", limit=5) == []
 
 
+def test_validation_readiness_accepts_post_start_listing_fundamentals():
+    start = routes.date(2023, 1, 3)
+    item = SimpleNamespace(
+        asset_type="stock",
+        bar_coverage_ratio=1.0,
+        adjustment_coverage_ratio=1.0,
+        tradability_coverage_ratio=1.0,
+        universe_snapshot_rows=4,
+        first_universe_date=start,
+        profile_rows=1,
+        listing_date=routes.date(2024, 2, 1),
+        fundamental_rows=3,
+        first_fundamental_date=routes.date(2024, 4, 30),
+    )
+    manifest = SimpleNamespace(
+        instruments=[item],
+        data_health={"historical_benchmark_price_ready": "4/4"},
+    )
+
+    readiness = routes._historical_validation_readiness(manifest, start=start)
+
+    assert readiness["validation_pipeline_gate"] == "ready"
+    assert readiness["validation_pipeline_fundamental_coverage"] == "1.0000"
+
+
 def test_full_market_historical_backfill_rejects_explicit_symbols(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "QAGENT_DATABASE_URL",
