@@ -36,6 +36,7 @@ const checks = [
   ["history hides detailed evidence in a drawer", files.history.includes("history-detail-drawer")],
   ["historical backfill serializes full-market scope", files.client.includes('search.set("scope", params.scope)')],
   ["historical backfill requests full A-share scope", files.client.includes('scope: "full-a-share"')],
+  ["historical backfill separates cache and retry outcomes", files.history.includes("backfill_price_retryable_failed") && files.history.includes("缓存复用")],
   ["styles include command center layout", files.styles.includes(".backtest-command-center")],
   ["styles include temporal validation layout", files.styles.includes(".temporal-validation-panel")],
   ["styles include verdict grid", files.styles.includes(".backtest-verdict-grid")],

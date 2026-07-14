@@ -2,6 +2,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pandas as pd
+import requests
 
 from qagent.historical_evidence.providers import BaoStockHistoricalEvidenceProvider
 
@@ -137,3 +138,38 @@ def test_nat_action_dates_stay_missing_without_breaking_coverage():
     assert batch.actions[0].payable_date is None
     assert any("dates are incomplete" in item for item in batch.errors)
     assert all("Cannot compare NaT" not in item for item in batch.errors)
+
+
+def test_corporate_action_provider_applies_network_timeout(monkeypatch):
+    captured_timeouts = []
+
+    def fake_request(self, method, url, **kwargs):
+        captured_timeouts.append(kwargs.get("timeout"))
+        return object()
+
+    class RequestingCorporateActionClient(CorporateActionClient):
+        def stock_dividend_cninfo(self, *, symbol):
+            requests.Session().request("GET", "https://example.test/dividend")
+            return super().stock_dividend_cninfo(symbol=symbol)
+
+        def stock_history_dividend_detail(self, *, symbol, indicator):
+            requests.Session().request("GET", "https://example.test/rights")
+            return super().stock_history_dividend_detail(
+                symbol=symbol,
+                indicator=indicator,
+            )
+
+    monkeypatch.setattr(requests.sessions.Session, "request", fake_request)
+
+    provider = BaoStockHistoricalEvidenceProvider(
+        corporate_action_client=RequestingCorporateActionClient(),
+        request_timeout_seconds=2,
+        clock=lambda: datetime(2025, 1, 1, tzinfo=timezone.utc),
+    )
+    provider.get_corporate_actions(
+        ["CN:000001"],
+        date(2024, 1, 1),
+        date(2024, 12, 31),
+    )
+
+    assert captured_timeouts == [(2, 2), (2, 2)]

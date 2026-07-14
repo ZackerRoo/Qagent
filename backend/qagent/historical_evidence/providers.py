@@ -143,9 +143,10 @@ class BaoStockHistoricalEvidenceProvider:
             actions: list[HistoricalCorporateAction] = []
             instrument_errors: list[str] = []
             try:
-                frame = self.corporate_action_client.stock_dividend_cninfo(
-                    symbol=symbol
-                )
+                with _bounded_network_calls(self.request_timeout_seconds):
+                    frame = self.corporate_action_client.stock_dividend_cninfo(
+                        symbol=symbol
+                    )
                 dividend_actions, parse_errors = _normalize_dividend_actions(
                     frame,
                     instrument_id=instrument_id,
@@ -158,10 +159,11 @@ class BaoStockHistoricalEvidenceProvider:
             except Exception as exc:
                 instrument_errors.append(f"dividend source: {exc}")
             try:
-                frame = self.corporate_action_client.stock_history_dividend_detail(
-                    symbol=symbol,
-                    indicator="配股",
-                )
+                with _bounded_network_calls(self.request_timeout_seconds):
+                    frame = self.corporate_action_client.stock_history_dividend_detail(
+                        symbol=symbol,
+                        indicator="配股",
+                    )
                 rights_actions, parse_errors = _normalize_rights_actions(
                     frame,
                     instrument_id=instrument_id,

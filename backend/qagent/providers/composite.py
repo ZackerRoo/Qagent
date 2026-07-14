@@ -63,6 +63,14 @@ class CompositeMarketDataProvider:
             return pd.DataFrame(columns=MINUTE_BAR_COLUMNS)
         return pd.concat(frames, ignore_index=True)
 
+    def source_circuit_retry_after_seconds(self, instrument_id: str) -> float:
+        market = instrument_id.split(":", 1)[0].upper()
+        provider = self._provider_for_market(market)
+        retry_after = getattr(provider, "source_circuit_retry_after_seconds", None)
+        if retry_after is None:
+            return 0.0
+        return max(0.0, float(retry_after(instrument_id)))
+
     def _provider_for_market(self, market: str) -> MarketDataProvider:
         provider = self.providers_by_market.get(market)
         if provider is None:

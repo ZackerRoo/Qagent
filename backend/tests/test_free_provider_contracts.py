@@ -384,6 +384,43 @@ def test_free_cn_provider_circuit_breaker_skips_after_consecutive_source_failure
     assert "skipped after 2 consecutive source failures" in provider.last_errors[-1]
 
 
+def test_free_cn_provider_circuit_breaker_half_opens_after_cooldown(monkeypatch):
+    stock_calls: list[str] = []
+    login_calls: list[str] = []
+
+    def fake_zh_a_hist(symbol, period, start_date, end_date, adjust):
+        stock_calls.append(symbol)
+        raise ConnectionError("source closed connection")
+
+    fake_bs = SimpleNamespace(
+        login=lambda: login_calls.append("login") or SimpleNamespace(
+            error_code="1",
+            error_msg="login failed",
+        ),
+        logout=lambda: None,
+    )
+    monkeypatch.setattr(
+        "qagent.providers.free_cn.ak",
+        SimpleNamespace(stock_zh_a_hist=fake_zh_a_hist),
+    )
+    monkeypatch.setattr("qagent.providers.free_cn.bs", fake_bs)
+
+    provider = FreeCnMarketDataProvider(
+        failure_circuit_breaker_threshold=2,
+        failure_circuit_breaker_cooldown_seconds=0,
+    )
+    bars = provider.get_daily_bars(
+        ["CN:000001", "CN:000002", "CN:000003"],
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+    assert bars.empty
+    assert stock_calls == ["000001", "000002", "000003"]
+    assert len(login_calls) == 3
+    assert "skipped after" not in provider.last_errors[-1]
+
+
 def test_free_cn_provider_falls_back_to_baostock(monkeypatch):
     def fake_zh_a_hist(symbol, period, start_date, end_date, adjust):
         raise ConnectionError("source closed connection")

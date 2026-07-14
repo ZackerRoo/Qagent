@@ -2,6 +2,7 @@ from datetime import date, datetime, timedelta
 from contextlib import contextmanager
 import math
 import socket
+from time import monotonic
 
 import akshare as ak
 import baostock as bs
@@ -34,6 +35,7 @@ BAR_COLUMNS = [
 ]
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 3
 DEFAULT_FAILURE_CIRCUIT_BREAKER_THRESHOLD = 3
+DEFAULT_FAILURE_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 1.0
 _NETWORK_TIMEOUT_LOCK = BAOSTOCK_SESSION_LOCK
 
 
@@ -44,11 +46,19 @@ class FreeCnMarketDataProvider:
         self,
         request_timeout_seconds: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         failure_circuit_breaker_threshold: int = DEFAULT_FAILURE_CIRCUIT_BREAKER_THRESHOLD,
+        failure_circuit_breaker_cooldown_seconds: float = (
+            DEFAULT_FAILURE_CIRCUIT_BREAKER_COOLDOWN_SECONDS
+        ),
     ):
         self.last_errors: list[str] = []
         self.request_timeout_seconds = request_timeout_seconds
         self.failure_circuit_breaker_threshold = max(1, failure_circuit_breaker_threshold)
+        self.failure_circuit_breaker_cooldown_seconds = max(
+            0.0,
+            failure_circuit_breaker_cooldown_seconds,
+        )
         self.consecutive_source_failures = 0
+        self.source_circuit_open_until = 0.0
 
     def get_daily_bars(
         self, instrument_ids: list[str], start: date, end: date
@@ -60,7 +70,8 @@ class FreeCnMarketDataProvider:
             if self._source_circuit_open():
                 self.last_errors.append(
                     f"{instrument_id}: skipped after "
-                    f"{self.consecutive_source_failures} consecutive source failures"
+                    f"{self.consecutive_source_failures} consecutive source failures; "
+                    f"retry in {self.source_circuit_retry_after_seconds():.2f}s"
                 )
                 continue
             source_errors: list[str] = []
@@ -82,7 +93,7 @@ class FreeCnMarketDataProvider:
             except Exception as exc:
                 source_errors.append(f"akshare: {exc}")
                 if _is_index_symbol(symbol):
-                    self.consecutive_source_failures += 1
+                    self._record_source_failure()
                     self.last_errors.append(f"{instrument_id}: {'; '.join(source_errors)}")
                     continue
                 if _is_etf_symbol(symbol):
@@ -96,7 +107,7 @@ class FreeCnMarketDataProvider:
                     except Exception as yfinance_exc:
                         source_errors.append(f"yfinance: {yfinance_exc}")
                     else:
-                        self.consecutive_source_failures = 0
+                        self._record_source_success()
                         normalized["instrument_id"] = instrument_id
                         normalized["trade_date"] = pd.to_datetime(
                             normalized["trade_date"]
@@ -112,10 +123,10 @@ class FreeCnMarketDataProvider:
                     )
                 except Exception as fallback_exc:
                     source_errors.append(f"baostock: {fallback_exc}")
-                    self.consecutive_source_failures += 1
+                    self._record_source_failure()
                     self.last_errors.append(f"{instrument_id}: {'; '.join(source_errors)}")
                     continue
-            self.consecutive_source_failures = 0
+            self._record_source_success()
             if normalized.empty:
                 continue
             normalized["instrument_id"] = instrument_id
@@ -146,7 +157,8 @@ class FreeCnMarketDataProvider:
             if self._source_circuit_open():
                 self.last_errors.append(
                     f"{instrument_id}: skipped minute data after "
-                    f"{self.consecutive_source_failures} consecutive source failures"
+                    f"{self.consecutive_source_failures} consecutive source failures; "
+                    f"retry in {self.source_circuit_retry_after_seconds():.2f}s"
                 )
                 continue
             try:
@@ -157,10 +169,10 @@ class FreeCnMarketDataProvider:
                     self.request_timeout_seconds,
                 )
             except Exception as exc:
-                self.consecutive_source_failures += 1
+                self._record_source_failure()
                 self.last_errors.append(f"{instrument_id}: akshare_sina_minute: {exc}")
                 continue
-            self.consecutive_source_failures = 0
+            self._record_source_success()
             if normalized.empty:
                 continue
             normalized["instrument_id"] = instrument_id
@@ -170,7 +182,29 @@ class FreeCnMarketDataProvider:
         return pd.concat(frames, ignore_index=True)
 
     def _source_circuit_open(self) -> bool:
-        return self.consecutive_source_failures >= self.failure_circuit_breaker_threshold
+        if self.consecutive_source_failures < self.failure_circuit_breaker_threshold:
+            return False
+        if self.source_circuit_retry_after_seconds() <= 0:
+            self._record_source_success()
+            return False
+        return True
+
+    def source_circuit_retry_after_seconds(self, instrument_id: str | None = None) -> float:
+        del instrument_id
+        if self.consecutive_source_failures < self.failure_circuit_breaker_threshold:
+            return 0.0
+        return max(0.0, self.source_circuit_open_until - monotonic())
+
+    def _record_source_failure(self) -> None:
+        self.consecutive_source_failures += 1
+        if self.consecutive_source_failures >= self.failure_circuit_breaker_threshold:
+            self.source_circuit_open_until = (
+                monotonic() + self.failure_circuit_breaker_cooldown_seconds
+            )
+
+    def _record_source_success(self) -> None:
+        self.consecutive_source_failures = 0
+        self.source_circuit_open_until = 0.0
 
     @staticmethod
     def _load_akshare(

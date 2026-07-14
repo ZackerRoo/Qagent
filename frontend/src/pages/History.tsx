@@ -1315,6 +1315,11 @@ function WalkForwardValidationCenter({
     && ["succeeded", "succeeded_with_errors"].includes(backfillJob.status)
     && backfillSuccessRatio >= 0.9,
   );
+  const backfillPriceHealth = backfillJob?.data_health ?? {};
+  const backfillCacheReused = Number(backfillPriceHealth.backfill_price_cache_reused ?? 0);
+  const backfillNetworkSucceeded = Number(backfillPriceHealth.backfill_price_network_succeeded ?? 0);
+  const backfillRetryableFailed = Number(backfillPriceHealth.backfill_price_retryable_failed ?? 0);
+  const backfillPermanentFailed = Number(backfillPriceHealth.backfill_price_permanent_failed ?? 0);
   const phaseLabels: Record<string, string> = {
     queued: zh ? "等待后台执行" : "Queued",
     historical_replay: zh ? "逐日重放历史推荐" : "Replaying historical recommendations",
@@ -1398,12 +1403,22 @@ function WalkForwardValidationCenter({
             <span>{zh ? "成功" : "Ready"}<strong>{backfillJob.succeeded_symbols}</strong></span>
             <span>{zh ? "失败" : "Failed"}<strong>{backfillJob.failed_symbols}</strong></span>
           </div>
+          {backfillPriceHealth.backfill_price_retry_mode ? (
+            <div className="historical-backfill-metrics">
+              <span>{zh ? "缓存复用" : "From cache"}<strong>{backfillCacheReused}</strong></span>
+              <span>{zh ? "联网补齐" : "Fetched"}<strong>{backfillNetworkSucceeded}</strong></span>
+              <span>{zh ? "稍后重试" : "Retryable"}<strong>{backfillRetryableFailed}</strong></span>
+              <span>{zh ? "确认缺失" : "Unavailable"}<strong>{backfillPermanentFailed}</strong></span>
+            </div>
+          ) : null}
           <p>
             {backfillReady
               ? (zh ? "行情成功覆盖已达到 90%，可以运行全市场 Walk-forward。" : "Price coverage is above 90%; full-market walk-forward is available.")
               : isBackfillRunning
-                ? `${backfillJob.current_instrument ? `${zh ? "当前" : "Current"} ${formatInstrumentDisplay(backfillJob.current_instrument)} · ` : ""}${zh ? "任务已持久化，刷新或重启后会继续。" : "The task is persisted and resumes after refresh or restart."}`
-                : (zh ? "当前结果仍是小范围试点。先补齐复权行情、财务快照和历史交易状态。" : "Current results are still a pilot. Backfill adjusted prices, fundamentals, and tradability first.")}
+                ? `${backfillJob.current_instrument ? `${zh ? "当前" : "Current"} ${formatInstrumentDisplay(backfillJob.current_instrument)} · ` : ""}${zh ? "已缓存的行情直接复用；临时网络失败会在冷却后重试，刷新或重启不会丢失进度。" : "Cached bars are reused; temporary network failures retry after cooldown, and refresh or restart preserves progress."}`
+                : backfillRetryableFailed > 0
+                  ? (zh ? `有 ${backfillRetryableFailed} 个标的因临时数据源错误待重试，已成功数据不会重新下载。` : `${backfillRetryableFailed} instruments await retry after temporary source errors; successful data will not be downloaded again.`)
+                  : (zh ? "当前结果仍是小范围试点。先补齐复权行情、财务快照和历史交易状态。" : "Current results are still a pilot. Backfill adjusted prices, fundamentals, and tradability first.")}
           </p>
         </div>
       ) : (

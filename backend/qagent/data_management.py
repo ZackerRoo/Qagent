@@ -242,7 +242,16 @@ def run_historical_backfill(
     processed = min(job.processed_symbols, len(symbols)) if was_running else 0
     succeeded = min(job.succeeded_symbols, processed) if was_running else 0
     failed = min(job.failed_symbols, processed) if was_running else 0
-    cache_reused = 0
+    cache_reused = int(job.data_health.get("backfill_price_cache_reused", "0") or 0)
+    network_succeeded = int(
+        job.data_health.get("backfill_price_network_succeeded", "0") or 0
+    )
+    retryable_failed = int(
+        job.data_health.get("backfill_price_retryable_failed", "0") or 0
+    )
+    permanent_failed = int(
+        job.data_health.get("backfill_price_permanent_failed", "0") or 0
+    )
     rows_written = job.rows_written if was_running else 0
     errors: list[str] = list(job.errors[-100:]) if was_running else []
     rule_rows = 0
@@ -396,7 +405,6 @@ def run_historical_backfill(
                 item
                 for item in action_scope_symbols
                 if item not in existing_action_coverage
-                or existing_action_coverage[item].status == "partial"
             ]
             action_status_counts = {
                 "ready": 0,
@@ -525,6 +533,17 @@ def run_historical_backfill(
                     current_instrument=instrument_id,
                     errors=errors,
                 )
+                _checkpoint_price_backfill_health(
+                    repo=repo,
+                    job_id=job.job_id,
+                    processed=processed,
+                    total=len(symbols),
+                    batch_size=batch_size,
+                    cache_reused=cache_reused,
+                    network_succeeded=network_succeeded,
+                    retryable_failed=retryable_failed,
+                    permanent_failed=permanent_failed,
+                )
                 continue
 
             bars, provider_errors = _fetch_uncached_daily_bars(
@@ -540,10 +559,15 @@ def run_historical_backfill(
             processed += 1
             if saved > 0:
                 succeeded += 1
+                network_succeeded += 1
             else:
                 failed += 1
                 detail = provider_errors[-1] if provider_errors else "no daily bars returned"
                 errors.append(f"{instrument_id}: {detail}")
+                if _is_retryable_provider_failure(provider_errors):
+                    retryable_failed += 1
+                else:
+                    permanent_failed += 1
             repo.update_historical_backfill_job(
                 job.job_id,
                 processed_symbols=processed,
@@ -552,6 +576,17 @@ def run_historical_backfill(
                 rows_written=rows_written,
                 current_instrument=instrument_id,
                 errors=errors[-100:],
+            )
+            _checkpoint_price_backfill_health(
+                repo=repo,
+                job_id=job.job_id,
+                processed=processed,
+                total=len(symbols),
+                batch_size=batch_size,
+                cache_reused=cache_reused,
+                network_succeeded=network_succeeded,
+                retryable_failed=retryable_failed,
+                permanent_failed=permanent_failed,
             )
 
         if historical_evidence_provider is not None and hasattr(
@@ -847,6 +882,12 @@ def run_historical_backfill(
             **corporate_action_health,
             "backfill_phase": "complete",
             "backfill_cache_reused": str(cache_reused),
+            "backfill_price_retry_mode": "missing_only",
+            "backfill_price_cache_reused": str(cache_reused),
+            "backfill_price_network_succeeded": str(network_succeeded),
+            "backfill_price_retryable_failed": str(retryable_failed),
+            "backfill_price_permanent_failed": str(permanent_failed),
+            "backfill_price_remaining": "0",
             "backfill_rows_written": str(rows_written),
             "backfill_inventory_rows": str(inventory_rows),
             "backfill_inventory_recovered": str(inventory_recovered).lower(),
@@ -944,6 +985,58 @@ def _update_backfill_health(
     data_health = dict(job.data_health) if job is not None else {}
     data_health.update(values)
     repo.update_historical_backfill_job(job_id, data_health=data_health)
+
+
+def _checkpoint_price_backfill_health(
+    *,
+    repo: QagentRepository,
+    job_id: str,
+    processed: int,
+    total: int,
+    batch_size: int,
+    cache_reused: int,
+    network_succeeded: int,
+    retryable_failed: int,
+    permanent_failed: int,
+) -> None:
+    if processed < total and processed % max(1, batch_size) != 0:
+        return
+    _update_backfill_health(
+        repo,
+        job_id,
+        backfill_price_retry_mode="missing_only",
+        backfill_price_cache_reused=str(cache_reused),
+        backfill_price_network_succeeded=str(network_succeeded),
+        backfill_price_retryable_failed=str(retryable_failed),
+        backfill_price_permanent_failed=str(permanent_failed),
+        backfill_price_remaining=str(max(total - processed, 0)),
+    )
+
+
+def _is_retryable_provider_failure(errors: list[str]) -> bool:
+    detail = " ".join(errors).lower()
+    if not detail:
+        return False
+    return any(
+        token in detail
+        for token in (
+            "aborted",
+            "circuit",
+            "connection",
+            "deadline",
+            "disconnected",
+            "login failed",
+            "network",
+            "rate limit",
+            "remote",
+            "skipped after",
+            "source unavailable",
+            "temporarily",
+            "timed out",
+            "timeout",
+            "too many requests",
+        )
+    )
 
 
 def _historical_evidence_cache_is_usable(
@@ -1423,7 +1516,8 @@ def _fetch_uncached_daily_bars(
     source = getattr(provider, "provider", provider)
     latest_errors: list[str] = []
     bars = pd.DataFrame()
-    for attempt in range(1, 4):
+    maximum_attempts = 4
+    for attempt in range(1, maximum_attempts + 1):
         bars = source.get_daily_bars([instrument_id], start, end)
         latest_errors = list(getattr(source, "last_errors", []))
         if _bar_result_covers_requested_sessions(
@@ -1435,9 +1529,20 @@ def _fetch_uncached_daily_bars(
             return bars, latest_errors
         if bars.empty and not latest_errors:
             return bars, latest_errors
-        if attempt < 3:
-            sleep(0.2 * attempt)
+        if attempt < maximum_attempts:
+            retry_after = _provider_retry_delay_seconds(source, instrument_id)
+            sleep(max(0.2 * attempt, retry_after + 0.05))
     return bars, latest_errors
+
+
+def _provider_retry_delay_seconds(source: object, instrument_id: str) -> float:
+    retry_after = getattr(source, "source_circuit_retry_after_seconds", None)
+    if retry_after is None:
+        return 0.0
+    try:
+        return min(max(float(retry_after(instrument_id)), 0.0), 2.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _bar_result_covers_requested_sessions(

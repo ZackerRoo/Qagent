@@ -107,6 +107,17 @@ class FlakyHistoryProvider(AdjustedHistoryProvider):
         return super().get_daily_bars(instrument_ids, start, end)
 
 
+class FourthAttemptHistoryProvider(AdjustedHistoryProvider):
+    def get_daily_bars(self, instrument_ids, start, end):
+        self.calls += 1
+        if self.calls < 4:
+            self.last_errors = ["temporary upstream disconnect"]
+            return pd.DataFrame()
+        self.calls -= 1
+        self.last_errors = []
+        return super().get_daily_bars(instrument_ids, start, end)
+
+
 class PartialHistoryProvider(AdjustedHistoryProvider):
     def get_daily_bars(self, instrument_ids, start, end):
         return super().get_daily_bars(instrument_ids, start, end).head(2)
@@ -316,6 +327,25 @@ class FullScopeActionEvidenceProvider(ReplayInventoryEvidenceProvider):
                     source_provider="fixture_actions",
                 )
             ],
+        )
+
+
+class PartialActionEvidenceProvider(FullScopeActionEvidenceProvider):
+    def get_corporate_actions(self, instrument_ids, start, end):
+        self.action_calls += 1
+        return HistoricalCorporateActionBatch(
+            coverage=[
+                HistoricalCorporateActionCoverage(
+                    instrument_id=instrument_id,
+                    start_date=start,
+                    end_date=end,
+                    status="partial",
+                    action_count=0,
+                    source_provider="fixture_partial_actions",
+                )
+                for instrument_id in instrument_ids
+            ],
+            errors=["fixture action source unavailable"],
         )
 
 
@@ -596,6 +626,34 @@ def test_full_scope_backfill_uses_historical_inventory_and_reuses_action_coverag
     assert metadata.limit_rule_key == "szse-main-registration"
 
 
+def test_full_scope_backfill_reuses_partial_action_coverage(tmp_path):
+    repo, cache = make_repositories(tmp_path)
+    provider = PartialActionEvidenceProvider()
+    start = date(2025, 1, 1)
+    end = date(2025, 1, 9)
+
+    for _ in range(2):
+        run_historical_backfill(
+            repo=repo,
+            cache=cache,
+            provider=AdjustedHistoryProvider(),
+            strategy_provider=None,
+            provider_mode="free",
+            instrument_ids=[],
+            start=start,
+            end=end,
+            scope="full-a-share",
+            batch_size=1,
+            historical_evidence_provider=provider,
+        )
+
+    latest = repo.get_latest_historical_backfill_job(provider="free")
+    assert latest is not None
+    assert latest.data_health["corporate_action_cache_reused"] == "1"
+    assert latest.data_health["corporate_action_partial"] == "1"
+    assert provider.action_calls == 1
+
+
 def test_full_scope_background_job_expands_and_persists_inventory_symbols(tmp_path):
     repo, cache = make_repositories(tmp_path)
     start = date(2025, 1, 1)
@@ -701,6 +759,32 @@ def test_historical_backfill_retries_transient_provider_errors(tmp_path):
     assert result.job.status == "succeeded"
     assert result.job.succeeded_symbols == 1
     assert provider.calls == 2
+
+
+def test_historical_backfill_retries_after_circuit_breaker_cooldown(
+    tmp_path,
+    monkeypatch,
+):
+    repo, cache = make_repositories(tmp_path)
+    provider = FourthAttemptHistoryProvider()
+    monkeypatch.setattr("qagent.data_management.sleep", lambda _: None)
+
+    result = run_historical_backfill(
+        repo=repo,
+        cache=cache,
+        provider=provider,
+        strategy_provider=None,
+        provider_mode="free",
+        instrument_ids=["CN:000001"],
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 9),
+        universe_as_of=date(2026, 1, 9),
+    )
+
+    assert result.job.status == "succeeded"
+    assert result.job.succeeded_symbols == 1
+    assert provider.calls == 4
+    assert result.job.data_health["backfill_price_network_succeeded"] == "1"
 
 
 def test_historical_backfill_marks_nonempty_partial_price_span_as_failed(tmp_path):
