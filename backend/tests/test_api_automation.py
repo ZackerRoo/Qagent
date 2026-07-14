@@ -69,6 +69,25 @@ def test_paper_candidate_recovers_latest_price_from_card():
     assert routes._paper_card_latest_value(snapshot.card) == Decimal("2.92")
 
 
+def test_replacement_candidate_is_seeded_before_other_waiting_items():
+    snapshots = [
+        SimpleNamespace(instrument_id="CN:159560"),
+        SimpleNamespace(instrument_id="CN:588080"),
+        SimpleNamespace(instrument_id="CN:159599"),
+    ]
+
+    ordered = routes._prioritize_paper_replacement_candidate(
+        snapshots,
+        "CN:588080",
+    )
+
+    assert [snapshot.instrument_id for snapshot in ordered] == [
+        "CN:588080",
+        "CN:159560",
+        "CN:159599",
+    ]
+
+
 def test_automation_run_api_saves_brief_and_queues_delivery(tmp_path, monkeypatch):
     database_url = f"sqlite:///{tmp_path / 'automation.db'}"
     monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)

@@ -1684,6 +1684,17 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                     if snapshot.instrument_id != replaced_instrument
                 ]
                 data_health["paper_replacement_excluded_replacee"] = replaced_instrument
+                replacement_candidate = replacement_health.get(
+                    "paper_replacement_candidate"
+                )
+                if replacement_candidate:
+                    snapshots = _prioritize_paper_replacement_candidate(
+                        snapshots,
+                        replacement_candidate,
+                    )
+                    data_health["paper_replacement_seed_priority"] = str(
+                        replacement_candidate
+                    )
             recently_released = _paper_recently_released_instruments(
                 paper_repo.list_trades(limit=1000, provider=mode)
             )
@@ -2277,6 +2288,16 @@ def _paper_candidate_should_replace(
     if replacee_pressure >= 0.75 and candidate_score >= 0.7:
         return True
     return candidate_score >= replacee_score + 0.12
+
+
+def _prioritize_paper_replacement_candidate(
+    snapshots: list[OpportunitySnapshotRecord],
+    instrument_id: str,
+) -> list[OpportunitySnapshotRecord]:
+    return sorted(
+        snapshots,
+        key=lambda snapshot: snapshot.instrument_id != instrument_id,
+    )
 
 
 def _paper_snapshot_priority_score(snapshot: OpportunitySnapshotRecord | None) -> float:
