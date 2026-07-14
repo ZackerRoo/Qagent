@@ -321,6 +321,53 @@ class ReplayInventoryEvidenceProvider(CompleteHistoricalEvidenceProvider):
         }
 
 
+class MidWindowListingEvidenceProvider(ReplayInventoryEvidenceProvider):
+    def get_evidence(self, instrument_ids, start, end):
+        bundle = super().get_evidence(instrument_ids, start, end)
+        bundle.tradability = [
+            item for item in bundle.tradability if item.trade_date >= date(2025, 1, 6)
+        ]
+        bundle.profiles = [
+            HistoricalInstrumentProfile(
+                instrument_id="CN:159862",
+                name="中途上市ETF",
+                snapshot_date=end,
+                listing_date=date(2025, 1, 6),
+                security_type="etf",
+                listing_status="active",
+                provider="fixture_inventory",
+            )
+        ]
+        return bundle
+
+    def list_historical_instruments(self, effective_through):
+        self.inventory_calls += 1
+        self._manifest = HistoricalInventoryManifest(
+            status="ready",
+            expected_count=1,
+            effective_through=effective_through,
+            fetched_at=datetime(2026, 1, 10, tzinfo=timezone.utc),
+            source_provider="fixture_inventory",
+        )
+        return [
+            HistoricalInstrumentProfile(
+                instrument_id="CN:159862",
+                name="中途上市ETF",
+                snapshot_date=effective_through,
+                listing_date=date(2025, 1, 6),
+                security_type="etf",
+                listing_status="active",
+                provider="fixture_inventory",
+            )
+        ]
+
+
+class MidWindowListingHistoryProvider(AdjustedHistoryProvider):
+    def get_daily_bars(self, instrument_ids, start, end):
+        frame = super().get_daily_bars(instrument_ids, start, end)
+        return frame.loc[frame["trade_date"].ge(date(2025, 1, 6))].reset_index(drop=True)
+
+
 class UnavailableInventoryEvidenceProvider(ReplayInventoryEvidenceProvider):
     def list_historical_instruments(self, effective_through):
         self.inventory_calls += 1
@@ -733,6 +780,47 @@ def test_full_scope_background_job_expands_and_persists_inventory_symbols(tmp_pa
     assert result.job.total_symbols == 1
     assert result.job.processed_symbols == 1
     assert result.job.progress == 100
+
+
+def test_full_scope_backfill_reuses_listing_aware_price_coverage(tmp_path):
+    repo, cache = make_repositories(tmp_path)
+    market_provider = MidWindowListingHistoryProvider()
+    start = date(2025, 1, 1)
+    end = date(2025, 1, 9)
+
+    first = run_historical_backfill(
+        repo=repo,
+        cache=cache,
+        provider=market_provider,
+        strategy_provider=None,
+        provider_mode="free",
+        instrument_ids=[],
+        start=start,
+        end=end,
+        scope="full-a-share",
+        historical_evidence_provider=MidWindowListingEvidenceProvider(),
+    )
+    second = run_historical_backfill(
+        repo=repo,
+        cache=cache,
+        provider=market_provider,
+        strategy_provider=None,
+        provider_mode="free",
+        instrument_ids=[],
+        start=start,
+        end=end,
+        scope="full-a-share",
+        historical_evidence_provider=MidWindowListingEvidenceProvider(),
+    )
+
+    assert first.job.status == "succeeded"
+    assert first.job.succeeded_symbols == 1, first.job.errors
+    assert first.job.failed_symbols == 0
+    assert first.manifest.instruments[0].bar_coverage_ratio == 1.0
+    assert second.job.status == "succeeded"
+    assert second.job.failed_symbols == 0
+    assert second.job.data_health["backfill_price_cache_reused"] == "1"
+    assert market_provider.calls == 1
 
 
 def test_historical_backfill_reports_missing_required_benchmarks(tmp_path):

@@ -178,6 +178,26 @@ def run_historical_backfill(
     symbols = sorted(set(instrument_ids))
     if not symbols:
         raise ValueError("instrument_ids cannot be empty")
+    inventory_profile_by_id = {
+        item.instrument_id: item for item in inventory_profiles
+    }
+    active_price_ranges = {
+        instrument_id: (
+            max(
+                start,
+                inventory_profile_by_id[instrument_id].listing_date or start,
+            )
+            if instrument_id in inventory_profile_by_id
+            else start,
+            min(
+                end,
+                inventory_profile_by_id[instrument_id].delisting_date or end,
+            )
+            if instrument_id in inventory_profile_by_id
+            else end,
+        )
+        for instrument_id in symbols
+    }
     job = repo.get_historical_backfill_job(job_id) if job_id else None
     if job is None:
         job = repo.create_historical_backfill_job(
@@ -257,16 +277,51 @@ def run_historical_backfill(
     permanent_failed = int(
         job.data_health.get("backfill_price_permanent_failed", "0") or 0
     )
+    permanent_symbols = [
+        item.strip()
+        for item in job.data_health.get(
+            "backfill_price_permanent_symbols",
+            "",
+        ).split(",")
+        if item.strip()
+    ]
     retryable_symbols = _restored_retryable_symbols(job)
     if resume_requested:
+        ready_prefix = 0
         for instrument_id in symbols[:processed]:
-            if instrument_id in retryable_symbols:
+            symbol_start, symbol_end = active_price_ranges[instrument_id]
+            if cache.has_usable_coverage(
+                mode,
+                instrument_id,
+                symbol_start,
+                symbol_end,
+                require_adjusted=_requires_adjustment(instrument_id),
+                minimum_session_coverage=0.95,
+            ):
+                replay_rows += _persist_replay_frame(
+                    replay_repo,
+                    cache.load_daily_bars(
+                        mode,
+                        [instrument_id],
+                        symbol_start,
+                        symbol_end,
+                    ),
+                )
+                ready_prefix += 1
+                if instrument_id in retryable_symbols:
+                    retryable_symbols.remove(instrument_id)
+                if instrument_id in permanent_symbols:
+                    permanent_symbols.remove(instrument_id)
                 continue
-            cached_rows = cache.load_daily_bars(mode, [instrument_id], start, end)
-            if cached_rows.empty:
+            if (
+                instrument_id not in retryable_symbols
+                and instrument_id not in permanent_symbols
+            ):
                 retryable_symbols.append(instrument_id)
+        succeeded = ready_prefix
+        failed = processed - succeeded
         retryable_failed = max(retryable_failed, len(retryable_symbols))
-        permanent_failed = max(failed - len(retryable_symbols), 0)
+        permanent_failed = len(permanent_symbols)
     retry_attempted = int(
         job.data_health.get("backfill_price_retry_attempted", "0") or 0
     )
@@ -533,6 +588,7 @@ def run_historical_backfill(
             start=start,
             end=end,
             batch_size=batch_size,
+            active_ranges=active_price_ranges,
         ):
             if cache_hit:
                 replay_rows += _persist_replay_frame(replay_repo, bars)
@@ -559,20 +615,44 @@ def run_historical_backfill(
                     retryable_failed=retryable_failed,
                     permanent_failed=permanent_failed,
                     retryable_symbols=retryable_symbols,
+                    permanent_symbols=permanent_symbols,
                 )
                 continue
 
+            symbol_start, symbol_end = active_price_ranges[instrument_id]
             saved = cache.save_daily_bars(mode, bars)
-            cache.record_coverage(mode, instrument_id, start, end, saved)
+            cache.record_coverage(
+                mode,
+                instrument_id,
+                symbol_start,
+                symbol_end,
+                saved,
+            )
             replay_rows += _persist_replay_frame(replay_repo, bars)
             rows_written += saved
             processed += 1
-            if saved > 0:
+            price_ready = cache.has_usable_coverage(
+                mode,
+                instrument_id,
+                symbol_start,
+                symbol_end,
+                require_adjusted=_requires_adjustment(instrument_id),
+                minimum_session_coverage=0.95,
+            )
+            if price_ready:
                 succeeded += 1
                 network_succeeded += 1
             else:
                 failed += 1
-                detail = provider_errors[-1] if provider_errors else "no daily bars returned"
+                detail = (
+                    provider_errors[-1]
+                    if provider_errors
+                    else (
+                        "price coverage incomplete"
+                        if saved > 0
+                        else "no daily bars returned"
+                    )
+                )
                 errors.append(f"{instrument_id}: {detail}")
                 if _is_retryable_provider_failure(provider_errors):
                     retryable_failed += 1
@@ -580,6 +660,8 @@ def run_historical_backfill(
                         retryable_symbols.append(instrument_id)
                 else:
                     permanent_failed += 1
+                    if instrument_id not in permanent_symbols:
+                        permanent_symbols.append(instrument_id)
             repo.update_historical_backfill_job(
                 job.job_id,
                 processed_symbols=processed,
@@ -600,6 +682,7 @@ def run_historical_backfill(
                 retryable_failed=retryable_failed,
                 permanent_failed=permanent_failed,
                 retryable_symbols=retryable_symbols,
+                permanent_symbols=permanent_symbols,
             )
 
         if retryable_symbols:
@@ -610,22 +693,40 @@ def run_historical_backfill(
                 start=1,
             ):
                 retry_attempted += 1
+                symbol_start, symbol_end = active_price_ranges[instrument_id]
                 bars, provider_errors = _fetch_uncached_daily_bars(
                     provider,
                     instrument_id,
-                    start,
-                    end,
+                    symbol_start,
+                    symbol_end,
                 )
                 saved = cache.save_daily_bars(mode, bars)
-                cache.record_coverage(mode, instrument_id, start, end, saved)
+                cache.record_coverage(
+                    mode,
+                    instrument_id,
+                    symbol_start,
+                    symbol_end,
+                    saved,
+                )
                 replay_rows += _persist_replay_frame(replay_repo, bars)
                 rows_written += saved
-                if saved > 0:
+                price_ready = cache.has_usable_coverage(
+                    mode,
+                    instrument_id,
+                    symbol_start,
+                    symbol_end,
+                    require_adjusted=_requires_adjustment(instrument_id),
+                    minimum_session_coverage=0.95,
+                )
+                if price_ready:
                     retry_recovered += 1
                     network_succeeded += 1
                     succeeded += 1
                     failed = max(failed - 1, 0)
                     retryable_symbols.remove(instrument_id)
+                    if instrument_id in permanent_symbols:
+                        permanent_symbols.remove(instrument_id)
+                        permanent_failed = max(permanent_failed - 1, 0)
                     errors = _without_instrument_errors(errors, instrument_id)
                 else:
                     detail = (
@@ -638,6 +739,8 @@ def run_historical_backfill(
                     if not _is_retryable_provider_failure(provider_errors):
                         retryable_symbols.remove(instrument_id)
                         permanent_failed += 1
+                        if instrument_id not in permanent_symbols:
+                            permanent_symbols.append(instrument_id)
                 _update_backfill_health(
                     repo,
                     job.job_id,
@@ -646,6 +749,7 @@ def run_historical_backfill(
                     backfill_price_retry_recovered=str(retry_recovered),
                     backfill_price_retry_unresolved=str(len(retryable_symbols)),
                     backfill_price_permanent_failed=str(permanent_failed),
+                    backfill_price_permanent_symbols=",".join(permanent_symbols),
                     backfill_price_retryable_symbols=",".join(retryable_symbols),
                     backfill_price_retry_progress=(
                         f"{retry_index}/{len(pending_retry_symbols)}"
@@ -958,6 +1062,7 @@ def run_historical_backfill(
             "backfill_price_network_succeeded": str(network_succeeded),
             "backfill_price_retryable_failed": str(retryable_failed),
             "backfill_price_permanent_failed": str(permanent_failed),
+            "backfill_price_permanent_symbols": ",".join(permanent_symbols),
             "backfill_price_retry_attempted": str(retry_attempted),
             "backfill_price_retry_recovered": str(retry_recovered),
             "backfill_price_retry_unresolved": str(len(retryable_symbols)),
@@ -1074,6 +1179,7 @@ def _checkpoint_price_backfill_health(
     retryable_failed: int,
     permanent_failed: int,
     retryable_symbols: list[str],
+    permanent_symbols: list[str],
 ) -> None:
     if processed < total and processed % max(1, batch_size) != 0:
         return
@@ -1085,6 +1191,7 @@ def _checkpoint_price_backfill_health(
         backfill_price_network_succeeded=str(network_succeeded),
         backfill_price_retryable_failed=str(retryable_failed),
         backfill_price_permanent_failed=str(permanent_failed),
+        backfill_price_permanent_symbols=",".join(permanent_symbols),
         backfill_price_retry_unresolved=str(len(retryable_symbols)),
         backfill_price_retryable_symbols=",".join(retryable_symbols),
         backfill_price_remaining=str(max(total - processed, 0)),
@@ -1624,6 +1731,7 @@ def _historical_price_batches(
     start: date,
     end: date,
     batch_size: int,
+    active_ranges: dict[str, tuple[date, date]],
 ):
     source = getattr(provider, "provider", provider)
     batch_getter = getattr(source, "get_historical_daily_bars", None)
@@ -1633,19 +1741,23 @@ def _historical_price_batches(
         cached: dict[str, pd.DataFrame] = {}
         missing: list[str] = []
         for instrument_id in batch:
+            symbol_start, symbol_end = active_ranges.get(
+                instrument_id,
+                (start, end),
+            )
             if cache.has_usable_coverage(
                 provider_mode,
                 instrument_id,
-                start,
-                end,
+                symbol_start,
+                symbol_end,
                 require_adjusted=_requires_adjustment(instrument_id),
                 minimum_session_coverage=0.95,
             ):
                 cached[instrument_id] = cache.load_daily_bars(
                     provider_mode,
                     [instrument_id],
-                    start,
-                    end,
+                    symbol_start,
+                    symbol_end,
                 )
             else:
                 missing.append(instrument_id)
@@ -1666,12 +1778,16 @@ def _historical_price_batches(
             if instrument_id in cached:
                 yield instrument_id, cached[instrument_id], [], True
                 continue
+            symbol_start, symbol_end = active_ranges.get(
+                instrument_id,
+                (start, end),
+            )
             if batch_getter is None:
                 bars, provider_errors = _fetch_uncached_daily_bars(
                     provider,
                     instrument_id,
-                    start,
-                    end,
+                    symbol_start,
+                    symbol_end,
                 )
             else:
                 bars = (
