@@ -14,7 +14,8 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - Saved brief runs with history, detail retrieval, and Markdown export for push-ready workflows.
 - Delivery outbox for saved briefs and alert runs, with queued/sent status plus local Markdown-file and webhook sender adapters.
 - One-command automation runner for scan history, daily brief save/queue, optional alerts, optional backtest validation, and optional outbox sending.
-- A-share free market data via `akshare`, with `baostock` fallback.
+- A-share free market data via `akshare`, with `baostock` fallback and no-key
+  TickFlow daily bars as the final whole-instrument fallback.
 - Local A-share tradable catalog sync backed by free `akshare` stock and ETF directories; current free sync covers A-share stocks plus listed ETFs and stores them in SQLite for search and scan sampling.
 - US free market data via `yfinance` remains available for explicit symbols, but is not the default dashboard route.
 - Strategy registry covering trend momentum, breakout + volume, healthy pullback, GF-DMA health, catalyst transmission, PEAD, analyst revisions, TAM-adjusted PEG, Bayesian growth valuation, sector regime, short squeeze risk, options flow, and insider/institutional confirmation.
@@ -138,6 +139,13 @@ curl 'http://127.0.0.1:8000/api/portfolio?provider=fixture'
 The opportunity scan also returns `factor_rankings`. This is a cross-sectional factor layer for the scanned A-share universe. It does not claim a stock will rise tomorrow; it ranks candidates by price-action factors that are available from free daily bars: momentum, trend quality, liquidity, low-risk behavior, and short-term reversal. Cards expose `factor_score`, `factor_rank`, `factor_flags`, and factor exposures so the dashboard can explain whether a candidate is strong, overextended, illiquid, volatile, or missing history. `/api/factors/backtest` validates those rankings historically by selecting top-ranked names at each historical scan date and measuring forward returns.
 
 Market-data provider calls are cached in SQLite by provider mode, symbol, and date. Scan `data_health` includes `market_cache`, hit/miss counts, and returned cache rows. `/api/data-cache` lists cached date ranges and source providers; `DELETE /api/data-cache` clears all or filtered cache rows.
+
+The free China provider keeps TickFlow at the end of the daily-data chain. It is
+called only when the existing AKShare/BaoStock path returns no rows for an
+instrument. TickFlow Free requires no API key and is never used for minute bars
+or simulated intraday fills. Recovered rows retain `tickflow_free_paired` or
+`tickflow_free_index` as their source provider, and scans expose the recovered
+instrument count in `data_health`.
 
 `/api/daily-brief` is the daily readout. It composes the current scan, entry watch levels, optional news catalysts, position risk, provider caveats, and backtest validation. `/api/daily-brief/runs` saves and lists generated briefs; `/api/daily-brief/runs/{brief_id}/markdown` exports a saved brief as Markdown; `/api/daily-brief/runs/{brief_id}/deliveries` queues a saved brief in the local delivery outbox. `/api/opportunities` also records a scan run. `/api/scan-runs`, `/api/opportunity-history`, `/api/outcomes`, and `/api/strategy-performance` expose the saved research trail, daily-bar outcome replay, and strategy-level replay summary. `/api/backtest` runs event-level historical validation without saving records. `/api/portfolio-backtest` simulates account-level trades from historical signals. `/api/alert-suggestions` turns saved opportunity trigger/stop/target levels into draft alert rules.
 

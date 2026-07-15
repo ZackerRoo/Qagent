@@ -334,6 +334,14 @@ def run_daily_scan(
     if provider_errors:
         data_health["provider_error_count"] = str(len(provider_errors))
         data_health["errors"] = " | ".join(provider_errors[:3])
+    fallback_instruments = list(
+        dict.fromkeys(getattr(provider, "last_fallback_instruments", []))
+    )
+    if fallback_instruments:
+        data_health["tickflow_fallback_count"] = str(len(fallback_instruments))
+        data_health["tickflow_fallback_instruments"] = ",".join(
+            fallback_instruments[:10]
+        )
     strategy_provider_errors = getattr(strategy_provider, "last_errors", [])
     if strategy_provider_errors:
         data_health["strategy_data_errors"] = " | ".join(strategy_provider_errors[:3])

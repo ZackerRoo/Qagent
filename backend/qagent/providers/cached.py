@@ -29,10 +29,12 @@ class CachedMarketDataProvider:
         self.name = provider.name
         self.last_errors: list[str] = []
         self.last_cache_events: list[MarketDataCacheEvent] = []
+        self.last_fallback_instruments: list[str] = []
 
     def reset_cache_stats(self) -> None:
         self.last_cache_events = []
         self.last_errors = []
+        self.last_fallback_instruments = []
 
     def cache_stats(self) -> dict[str, int]:
         return {
@@ -77,6 +79,9 @@ class CachedMarketDataProvider:
 
             fetched = self.provider.get_daily_bars([instrument_id], start, end)
             self.last_errors.extend(getattr(self.provider, "last_errors", []))
+            self.last_fallback_instruments.extend(
+                getattr(self.provider, "last_fallback_instruments", [])
+            )
             saved = self.cache.save_daily_bars(self.provider_mode, fetched)
             self.cache.record_coverage(
                 self.provider_mode,

@@ -2,9 +2,11 @@ from qagent.db import create_session_factory, initialize_database
 from qagent.providers.base import MarketDataProvider
 from qagent.providers.cached import CachedMarketDataProvider
 from qagent.providers.composite import CompositeMarketDataProvider
+from qagent.providers.daily_fallback import DailyFallbackMarketDataProvider
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.providers.free_cn import FreeCnMarketDataProvider
 from qagent.providers.free_us import FreeUsMarketDataProvider
+from qagent.providers.tickflow_free import TickFlowFreeDailyProvider
 from qagent.storage.market_cache import MarketDataCacheRepository
 
 
@@ -17,7 +19,11 @@ def build_market_data_provider(provider_mode: str) -> MarketDataProvider:
             CompositeMarketDataProvider(
                 {
                     "US": FreeUsMarketDataProvider(),
-                    "CN": FreeCnMarketDataProvider(),
+                    "CN": DailyFallbackMarketDataProvider(
+                        FreeCnMarketDataProvider(),
+                        TickFlowFreeDailyProvider(),
+                        name="free_cn",
+                    ),
                 },
                 name="free",
             ),

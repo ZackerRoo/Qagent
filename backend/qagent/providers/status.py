@@ -35,6 +35,13 @@ def build_provider_status(settings: Settings | None = None) -> list[ProviderStat
             capabilities=["cn_daily_ohlcv", "snapshots", "limit_status"],
             notes="Free A-share market data with provider-dependent coverage.",
         ),
+        ProviderStatus(
+            provider_id="tickflow_free",
+            name="TickFlow 免费日线",
+            status="ready",
+            capabilities=["cn_daily_ohlcv_fallback", "adjusted_daily_ohlcv"],
+            notes="无需 API Key；仅在主数据源无日线时兜底，不提供实时或分钟行情。",
+        ),
         _keyed_status(
             provider_id="alpha_vantage",
             name="Alpha Vantage",

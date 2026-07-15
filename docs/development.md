@@ -35,7 +35,7 @@ The dashboard runs at `http://127.0.0.1:5173`.
 The system supports two market-data modes:
 
 - `fixture`: deterministic local bars for `US:TEST` and `CN:000001`.
-- `free`: `yfinance` for US stocks and `akshare` with `baostock` fallback for China A-shares.
+- `free`: `yfinance` for US stocks and `akshare` with `baostock` fallback for China A-shares. If the China chain returns no daily rows for an instrument, the no-key TickFlow Free REST service is the final daily-only fallback.
 
 Fixture data keeps tests stable. Free providers are implemented behind adapter contracts and are mocked in unit tests.
 
@@ -79,6 +79,7 @@ Operational rules:
 - Re-running an interrupted job is safe because bar, fundamental, universe, and coverage-span writes are upserts.
 - A span with zero rows is never treated as a cache hit. China-market spans must cover at least 95% of expected XSHG sessions, and A-share stocks/ETFs require adjustment metadata for at least 95% of those sessions.
 - AKShare stock and ETF history is requested with `qfq`. If the Eastmoney ETF endpoint disconnects, Yahoo adjusted OHLC is the second ETF source; BaoStock forward-adjusted history remains the final fallback.
+- TickFlow Free is requested only after the existing China daily chain returns no rows. Qagent fetches raw and proportional forward-adjusted daily bars separately, records `tickflow_free_*` provenance, and never uses the free service for minute fills or real-time claims.
 - Explicit upstream failures are retried at most three times; legitimate empty responses are not retried.
 - A-share quarterly fundamentals use the publication date as `as_of_date`. Historical PE/PS/market cap use only unadjusted prices on or before that date.
 - Historical stock/ETF pools are reconstructed at the range start and quarter ends from BaoStock listing and delisting dates. Current catalog membership is never substituted for historical membership.

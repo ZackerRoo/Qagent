@@ -33,6 +33,7 @@ Qagent already has:
 - Recommendation follow-through, strategy diagnostics, factor validation, K-line review, alerts, and data-health surfaces.
 - Corrected paper-validation semantics, point-in-time fundamental persistence, and chronological out-of-sample validation implemented in the current working tree.
 - Historical backfill jobs, adjustment metadata, XSHG trading-session horizons, universe snapshots, and machine-readable coverage manifests implemented in the current working tree.
+- No-key TickFlow historical daily bars are available as a final whole-instrument fallback after the existing AKShare/BaoStock China data chain, without changing minute-fill behavior.
 
 The main product risk is no longer missing UI features. It is insufficient trustworthy historical evidence for deciding whether the recommendation engine has a repeatable edge.
 
@@ -195,7 +196,8 @@ Package Qagent as a reliable research preview with explicit limitations and repe
 - A real three-year pilot on dataset revision 40 remains available: 146 snapshots, 328 Top-5 trades, and 612 Top-10 trades. Its 0.33% cross-sectional evidence coverage keeps it labelled as a pilot, not validated full-market evidence.
 - Paper trading is active with A-share sessions, T+1, costs, slippage, candidate replacement, five validation slots, and restart-safe scheduling. Current evidence is negative and remains visible: 23 eligible samples, 10 triggered, 9 stopped, 9 missed entries, 0% closed win rate, and -4.55% account return as of 2026-07-14.
 - Coverage reporting is listing-aware: post-start IPOs are not penalized for impossible pre-listing fundamentals or universe membership.
-- Full verification passes with 552 backend tests, Ruff, and the frontend production build.
+- Full verification passes with 571 backend tests, Ruff, and the frontend production build.
+- TickFlow Free daily fallback preserves raw and forward-adjusted price provenance, remains disabled for minute fills, and passed a live no-key stock/index smoke test.
 
 ### What's next
 

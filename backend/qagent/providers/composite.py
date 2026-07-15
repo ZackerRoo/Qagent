@@ -13,16 +13,21 @@ class CompositeMarketDataProvider:
         self.providers_by_market = providers_by_market
         self.name = name
         self.last_errors: list[str] = []
+        self.last_fallback_instruments: list[str] = []
 
     def get_daily_bars(
         self, instrument_ids: list[str], start: date, end: date
     ) -> pd.DataFrame:
         self.last_errors = []
+        self.last_fallback_instruments = []
         frames: list[pd.DataFrame] = []
         for market, market_instruments in self._group_by_market(instrument_ids).items():
             provider = self._provider_for_market(market)
             bars = provider.get_daily_bars(market_instruments, start, end)
             self.last_errors.extend(getattr(provider, "last_errors", []))
+            self.last_fallback_instruments.extend(
+                getattr(provider, "last_fallback_instruments", [])
+            )
             if not bars.empty:
                 frames.append(bars)
         if not frames:
@@ -31,11 +36,15 @@ class CompositeMarketDataProvider:
 
     def get_snapshot(self, instrument_ids: list[str]) -> pd.DataFrame:
         self.last_errors = []
+        self.last_fallback_instruments = []
         frames: list[pd.DataFrame] = []
         for market, market_instruments in self._group_by_market(instrument_ids).items():
             provider = self._provider_for_market(market)
             snapshot = provider.get_snapshot(market_instruments)
             self.last_errors.extend(getattr(provider, "last_errors", []))
+            self.last_fallback_instruments.extend(
+                getattr(provider, "last_fallback_instruments", [])
+            )
             if not snapshot.empty:
                 frames.append(snapshot)
         if not frames:
@@ -49,6 +58,7 @@ class CompositeMarketDataProvider:
         end: date,
     ) -> pd.DataFrame:
         self.last_errors = []
+        self.last_fallback_instruments = []
         frames: list[pd.DataFrame] = []
         for market, market_instruments in self._group_by_market(instrument_ids).items():
             provider = self._provider_for_market(market)
@@ -59,6 +69,9 @@ class CompositeMarketDataProvider:
                 else provider.get_daily_bars(market_instruments, start, end)
             )
             self.last_errors.extend(getattr(provider, "last_errors", []))
+            self.last_fallback_instruments.extend(
+                getattr(provider, "last_fallback_instruments", [])
+            )
             if not bars.empty:
                 frames.append(bars)
         if not frames:
@@ -72,6 +85,7 @@ class CompositeMarketDataProvider:
         end: datetime,
     ) -> pd.DataFrame:
         self.last_errors = []
+        self.last_fallback_instruments = []
         frames: list[pd.DataFrame] = []
         for market, market_instruments in self._group_by_market(instrument_ids).items():
             provider = self._provider_for_market(market)
