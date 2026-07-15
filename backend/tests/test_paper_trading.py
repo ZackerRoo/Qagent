@@ -10,6 +10,7 @@ from qagent.paper_trading.engine import (
     build_paper_daily_report,
     build_paper_ledger,
     build_paper_validation,
+    paper_snapshot_price_basis_is_consistent,
     seed_paper_trades_from_snapshots,
     update_paper_trades,
 )
@@ -129,6 +130,57 @@ def test_paper_trading_rejects_snapshot_with_inconsistent_price_basis(tmp_path):
     assert result.created == 0
     assert result.skipped == 1
     assert paper_repo.list_trades() == []
+
+
+def test_paper_price_basis_uses_card_latest_close_when_row_is_missing():
+    snapshot = OpportunitySnapshotRecord(
+        snapshot_id="card-price-basis",
+        run_id="run-card-price-basis",
+        card_id="card-card-price-basis",
+        instrument_id="CN:159560",
+        market="CN",
+        status="setup_ready",
+        signal_date=date(2026, 7, 14),
+        latest_close=None,
+        primary_strategy_id="trend_momentum_stage2",
+        score=Decimal("0.90"),
+        strategy_score=Decimal("0.90"),
+        rank_score=Decimal("0.90"),
+        trigger_price=Decimal("2.50"),
+        initial_stop=Decimal("2.40"),
+        target_1=Decimal("2.75"),
+        card={"trading_status": {"latest_close": "2.92"}},
+    )
+
+    assert not paper_snapshot_price_basis_is_consistent(snapshot)
+
+
+def test_paper_price_basis_respects_a_share_board_limits():
+    common = {
+        "snapshot_id": "board-price-basis",
+        "run_id": "run-board-price-basis",
+        "card_id": "card-board-price-basis",
+        "market": "CN",
+        "status": "setup_ready",
+        "signal_date": date(2026, 7, 14),
+        "latest_close": Decimal("8.50"),
+        "primary_strategy_id": "trend_momentum_stage2",
+        "score": Decimal("0.90"),
+        "strategy_score": Decimal("0.90"),
+        "rank_score": Decimal("0.90"),
+        "trigger_price": Decimal("10.00"),
+        "initial_stop": Decimal("9.50"),
+        "target_1": Decimal("11.00"),
+        "card": {},
+    }
+    main_board = OpportunitySnapshotRecord(instrument_id="CN:600000", **common)
+    star_board = OpportunitySnapshotRecord(
+        instrument_id="CN:688052",
+        **{**common, "snapshot_id": "star-price-basis"},
+    )
+
+    assert not paper_snapshot_price_basis_is_consistent(main_board)
+    assert paper_snapshot_price_basis_is_consistent(star_board)
 
 
 def test_paper_update_repairs_legacy_replacement_status(tmp_path):
@@ -356,7 +408,57 @@ def test_a_share_paper_trade_invalidates_discontinuous_price_basis(tmp_path):
     assert trade.entry_date is None
     assert trade.realized_return_pct is None
     assert result.summary.invalidated_count == 1
-    assert "价格口径跳变超过 45%" in trade.notes
+    assert result.data_health["paper_price_basis_invalidated"] == "1"
+    assert "价格口径跳变超过12%" in trade.notes
+
+
+def test_a_share_paper_trade_uses_card_price_basis_for_minute_fill(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    snapshot_id = _insert_cn_snapshot(
+        repo,
+        instrument_id="CN:600000",
+        created_at=datetime(2026, 7, 13, 8, 0, tzinfo=timezone.utc),
+        trigger_price=Decimal("10.00"),
+        no_chase_above=Decimal("10.30"),
+        store_latest_close_in_row=False,
+        card_latest_close=Decimal("11.20"),
+    )
+    paper_repo.create_trade(
+        source_snapshot_id=snapshot_id,
+        provider="free",
+        instrument_id="CN:600000",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 13),
+        trigger_price=Decimal("10.00"),
+        initial_stop=Decimal("9.50"),
+        target_1=Decimal("11.00"),
+        rank_score=Decimal("0.90"),
+    )
+    provider = MinuteCnProvider(
+        [
+            {
+                "instrument_id": "CN:600000",
+                "timestamp": datetime(2026, 7, 14, 9, 31),
+                "open": Decimal("9.00"),
+                "high": Decimal("9.20"),
+                "low": Decimal("8.95"),
+                "close": Decimal("9.10"),
+                "volume": 1000,
+                "provider": "test_minute",
+            }
+        ]
+    )
+
+    update_paper_trades(
+        paper_repo,
+        provider=provider,
+        as_of=datetime(2026, 7, 14, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    trade = paper_repo.list_trades()[0]
+
+    assert trade.status == "invalidated"
+    assert "价格口径跳变超过12%" in trade.notes
 
 
 def test_update_paper_trades_uses_cached_daily_bars_when_minute_source_is_empty(
@@ -1361,6 +1463,8 @@ def _insert_cn_snapshot(
     created_at: datetime,
     trigger_price: Decimal,
     no_chase_above: Decimal,
+    store_latest_close_in_row: bool = True,
+    card_latest_close: Decimal | None = None,
 ) -> str:
     snapshot_id = f"scan-minute:{instrument_id}"
     card = {
@@ -1369,6 +1473,9 @@ def _insert_cn_snapshot(
         "entry_plan": {
             "trigger_price": str(trigger_price),
             "no_chase_above": str(no_chase_above),
+        },
+        "trading_status": {
+            "latest_close": str(card_latest_close or trigger_price),
         },
     }
     with repo.session_factory() as session:
@@ -1393,7 +1500,7 @@ def _insert_cn_snapshot(
                 market="CN",
                 status="setup_ready",
                 signal_date=date(2026, 7, 2),
-                latest_close=trigger_price,
+                latest_close=(trigger_price if store_latest_close_in_row else None),
                 primary_strategy_id="trend_momentum_stage2",
                 score=Decimal("0.90"),
                 strategy_score=Decimal("0.90"),

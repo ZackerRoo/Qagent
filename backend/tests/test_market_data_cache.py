@@ -82,6 +82,40 @@ def test_market_data_cache_preserves_adjustment_metadata(tmp_path):
     assert summary.adjustment_types == ["qfq"]
 
 
+def test_market_data_cache_clears_invalid_adjusted_ohlc(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "CN:601288",
+                "trade_date": date(2014, 7, 24),
+                "open": 2.41,
+                "high": 2.46,
+                "low": 2.40,
+                "close": 2.45,
+                "volume": 800_000,
+                "provider": "akshare_stock_paired",
+                "adjusted_open": -0.03,
+                "adjusted_high": 0.02,
+                "adjusted_low": -0.03,
+                "adjusted_close": 0.01,
+                "adjustment_factor": 0.004,
+                "adjustment_type": "qfq",
+            }
+        ]
+    )
+
+    assert repo.save_daily_bars("free", bars) == 1
+    loaded = repo.load_daily_bars(
+        "free", ["CN:601288"], date(2014, 7, 24), date(2014, 7, 24)
+    )
+
+    assert loaded.iloc[0]["close"] == 2.45
+    assert pd.isna(loaded.iloc[0]["adjusted_close"])
+    assert pd.isna(loaded.iloc[0]["adjustment_factor"])
+    assert pd.isna(loaded.iloc[0]["adjustment_type"])
+
+
 def test_market_data_cache_rejects_partial_cn_span_as_usable_coverage(tmp_path):
     repo = make_cache_repo(tmp_path)
     bars = pd.DataFrame(
@@ -198,6 +232,73 @@ def test_market_data_cache_drops_nonfinite_ohlc_rows(tmp_path):
 
     assert saved == 1
     assert loaded["trade_date"].tolist() == [date(2026, 1, 2)]
+
+
+def test_market_data_cache_drops_structurally_invalid_ohlc_rows(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "CN:159560",
+                "trade_date": date(2026, 7, 14),
+                "open": 2.82,
+                "high": 2.93,
+                "low": 2.80,
+                "close": 2.89,
+                "volume": 8_000_000,
+                "provider": "yfinance_cn_etf_paired",
+            },
+            {
+                "instrument_id": "CN:159560",
+                "trade_date": date(2026, 7, 15),
+                "open": 3.22,
+                "high": 2.91,
+                "low": 2.70,
+                "close": 2.89,
+                "volume": 9_000_000,
+                "provider": "yfinance_cn_etf_paired",
+            },
+        ]
+    )
+
+    saved = repo.save_daily_bars("free", bars)
+    loaded = repo.load_daily_bars(
+        "free", ["CN:159560"], date(2026, 7, 14), date(2026, 7, 15)
+    )
+
+    assert saved == 1
+    assert loaded["trade_date"].tolist() == [date(2026, 7, 14)]
+
+
+def test_market_data_cache_rejects_stale_cn_trailing_coverage(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "CN:159582",
+                "trade_date": trade_date,
+                "open": 4.60,
+                "high": 4.72,
+                "low": 4.55,
+                "close": 4.66,
+                "volume": 8_000_000,
+                "provider": "akshare_etf_paired",
+            }
+            for trade_date in [date(2026, 7, 1), date(2026, 7, 2)]
+        ]
+    )
+    repo.save_daily_bars("free", bars)
+    repo.record_coverage(
+        "free", "CN:159582", date(2026, 7, 1), date(2026, 7, 8), len(bars)
+    )
+
+    assert not repo.has_usable_coverage(
+        "free",
+        "CN:159582",
+        date(2026, 7, 1),
+        date(2026, 7, 8),
+        maximum_trailing_session_gap=1,
+    )
 
 
 def test_market_data_cache_records_coverage_idempotently_under_concurrency(tmp_path):

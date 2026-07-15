@@ -619,7 +619,9 @@ def _coerce_bar_types(frame: pd.DataFrame) -> pd.DataFrame:
     for column in BAR_COLUMNS:
         if column not in normalized.columns:
             normalized[column] = None
-    return normalized.dropna(subset=["open", "high", "low", "close"])
+    normalized = normalized.dropna(subset=["open", "high", "low", "close"])
+    normalized = _clear_invalid_adjusted_ohlc(normalized)
+    return normalized[_valid_ohlc_mask(normalized)]
 
 
 def _merge_raw_adjusted_frames(
@@ -689,7 +691,49 @@ def _coerce_minute_bar_types(frame: pd.DataFrame) -> pd.DataFrame:
     for column in ["open", "high", "low", "close", "volume"]:
         normalized[column] = _finite_numeric(normalized[column])
     normalized["volume"] = normalized["volume"].fillna(0)
-    return normalized.dropna(subset=["timestamp", "open", "high", "low", "close"])
+    normalized = normalized.dropna(
+        subset=["timestamp", "open", "high", "low", "close"]
+    )
+    return normalized[_valid_ohlc_mask(normalized)]
+
+
+def _valid_ohlc_mask(frame: pd.DataFrame) -> pd.Series:
+    return (
+        frame["open"].gt(0)
+        & frame["high"].gt(0)
+        & frame["low"].gt(0)
+        & frame["close"].gt(0)
+        & frame["high"].ge(frame["open"])
+        & frame["high"].ge(frame["close"])
+        & frame["high"].ge(frame["low"])
+        & frame["low"].le(frame["open"])
+        & frame["low"].le(frame["close"])
+    )
+
+
+def _clear_invalid_adjusted_ohlc(frame: pd.DataFrame) -> pd.DataFrame:
+    adjusted_columns = [
+        "adjusted_open",
+        "adjusted_high",
+        "adjusted_low",
+        "adjusted_close",
+    ]
+    if not all(column in frame.columns for column in adjusted_columns):
+        return frame
+    adjusted = frame[adjusted_columns].rename(
+        columns={column: column.removeprefix("adjusted_") for column in adjusted_columns}
+    )
+    has_adjusted_value = adjusted.notna().any(axis=1)
+    complete = adjusted.notna().all(axis=1)
+    valid = adjusted["close"].gt(0) & (~complete | _valid_ohlc_mask(adjusted))
+    invalid = has_adjusted_value & ~valid
+    if not invalid.any():
+        return frame
+    normalized = frame.copy()
+    normalized.loc[invalid, adjusted_columns] = None
+    normalized.loc[invalid, "adjustment_factor"] = None
+    normalized.loc[invalid, "adjustment_type"] = None
+    return normalized
 
 
 def _finite_numeric(series: pd.Series) -> pd.Series:

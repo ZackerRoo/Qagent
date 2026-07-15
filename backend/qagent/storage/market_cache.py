@@ -1,10 +1,10 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import math
 
 import pandas as pd
 from pydantic import BaseModel, Field
-from sqlalchemy import delete
+from sqlalchemy import delete, func
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -168,6 +168,7 @@ class MarketDataCacheRepository:
         *,
         require_adjusted: bool = False,
         minimum_session_coverage: float | None = None,
+        maximum_trailing_session_gap: int | None = None,
     ) -> bool:
         with self.session_factory() as session:
             span = (
@@ -184,18 +185,40 @@ class MarketDataCacheRepository:
             )
             if span is None:
                 return False
-            total_rows = (
-                session.query(MarketBarCacheRow)
+            total_rows, latest_trade_date = (
+                session.query(
+                    func.count(MarketBarCacheRow.trade_date),
+                    func.max(MarketBarCacheRow.trade_date),
+                )
                 .filter(
                     MarketBarCacheRow.provider_mode == provider_mode,
                     MarketBarCacheRow.instrument_id == instrument_id,
                     MarketBarCacheRow.trade_date >= start,
                     MarketBarCacheRow.trade_date <= end,
+                    *_valid_cached_ohlc_filters(),
                 )
-                .count()
+                .one()
             )
             if total_rows <= 0:
                 return False
+            if (
+                maximum_trailing_session_gap is not None
+                and provider_mode == "free"
+                and instrument_id.startswith("CN:")
+                and latest_trade_date is not None
+            ):
+                effective_end = min(end, date.today())
+                try:
+                    missing_tail = len(
+                        trading_sessions_in_range(
+                            latest_trade_date + timedelta(days=1),
+                            effective_end,
+                        )
+                    )
+                except ValueError:
+                    missing_tail = 0
+                if missing_tail > maximum_trailing_session_gap:
+                    return False
             expected_rows = total_rows
             if (
                 minimum_session_coverage is not None
@@ -222,7 +245,11 @@ class MarketDataCacheRepository:
                     MarketBarCacheRow.trade_date >= start,
                     MarketBarCacheRow.trade_date <= end,
                     MarketBarCacheRow.adjusted_close.is_not(None),
+                    MarketBarCacheRow.adjusted_close > 0,
+                    MarketBarCacheRow.adjustment_factor.is_not(None),
+                    MarketBarCacheRow.adjustment_factor > 0,
                     MarketBarCacheRow.adjustment_type.is_not(None),
+                    *_valid_cached_ohlc_filters(),
                 )
                 .count()
             )
@@ -289,6 +316,7 @@ class MarketDataCacheRepository:
                 .filter(
                     MarketBarCacheRow.provider_mode == provider_mode,
                     MarketBarCacheRow.instrument_id.in_(unique_ids),
+                    *_valid_cached_ohlc_filters(),
                 )
                 .order_by(
                     MarketBarCacheRow.instrument_id,
@@ -335,6 +363,7 @@ class MarketDataCacheRepository:
     ) -> list[MarketDataCacheSummary]:
         with self.session_factory() as session:
             query = session.query(MarketBarCacheRow)
+            query = query.filter(*_valid_cached_ohlc_filters())
             if provider_mode:
                 query = query.filter(MarketBarCacheRow.provider_mode == provider_mode)
             if instrument_id:
@@ -414,7 +443,60 @@ def _normalize_bars(bars: pd.DataFrame) -> pd.DataFrame:
     if "adjustment_type" not in normalized.columns:
         normalized["adjustment_type"] = None
     normalized = normalized.dropna(subset=["open", "high", "low", "close"])
+    normalized = _clear_invalid_adjusted_ohlc(normalized)
+    normalized = normalized[_valid_ohlc_mask(normalized)]
     return normalized[BAR_COLUMNS].sort_values(["instrument_id", "trade_date"]).reset_index(drop=True)
+
+
+def _valid_ohlc_mask(frame: pd.DataFrame) -> pd.Series:
+    return (
+        frame["open"].gt(0)
+        & frame["high"].gt(0)
+        & frame["low"].gt(0)
+        & frame["close"].gt(0)
+        & frame["high"].ge(frame["open"])
+        & frame["high"].ge(frame["close"])
+        & frame["high"].ge(frame["low"])
+        & frame["low"].le(frame["open"])
+        & frame["low"].le(frame["close"])
+    )
+
+
+def _clear_invalid_adjusted_ohlc(frame: pd.DataFrame) -> pd.DataFrame:
+    adjusted_columns = [
+        "adjusted_open",
+        "adjusted_high",
+        "adjusted_low",
+        "adjusted_close",
+    ]
+    adjusted = frame[adjusted_columns].rename(
+        columns={column: column.removeprefix("adjusted_") for column in adjusted_columns}
+    )
+    has_adjusted_value = adjusted.notna().any(axis=1)
+    complete = adjusted.notna().all(axis=1)
+    valid = adjusted["close"].gt(0) & (~complete | _valid_ohlc_mask(adjusted))
+    invalid = has_adjusted_value & ~valid
+    if not invalid.any():
+        return frame
+    normalized = frame.copy()
+    normalized.loc[invalid, adjusted_columns] = None
+    normalized.loc[invalid, "adjustment_factor"] = None
+    normalized.loc[invalid, "adjustment_type"] = None
+    return normalized
+
+
+def _valid_cached_ohlc_filters() -> tuple[object, ...]:
+    return (
+        MarketBarCacheRow.open > 0,
+        MarketBarCacheRow.high > 0,
+        MarketBarCacheRow.low > 0,
+        MarketBarCacheRow.close > 0,
+        MarketBarCacheRow.high >= MarketBarCacheRow.open,
+        MarketBarCacheRow.high >= MarketBarCacheRow.close,
+        MarketBarCacheRow.high >= MarketBarCacheRow.low,
+        MarketBarCacheRow.low <= MarketBarCacheRow.open,
+        MarketBarCacheRow.low <= MarketBarCacheRow.close,
+    )
 
 
 def _finite_numeric(series: pd.Series) -> pd.Series:

@@ -97,6 +97,7 @@ from qagent.paper_trading.engine import (
     build_paper_ledger,
     build_paper_validation,
     paper_execution_data_health,
+    paper_price_basis_gap_limit,
     paper_snapshot_price_basis_is_consistent,
     seed_paper_trades_from_snapshots,
     update_paper_trades,
@@ -2340,14 +2341,17 @@ def _paper_candidate_price_basis_is_consistent(
     snapshot: OpportunitySnapshotRecord,
     *,
     latest_value: Decimal | None,
-    max_gap_ratio: Decimal = Decimal("0.45"),
+    max_gap_ratio: Decimal | None = None,
 ) -> bool:
     trigger = snapshot.trigger_price
     if trigger is None or latest_value is None or trigger <= 0 or latest_value <= 0:
         return False
     if not paper_snapshot_price_basis_is_consistent(snapshot, max_gap_ratio=max_gap_ratio):
         return False
-    return abs(trigger - latest_value) / trigger <= max_gap_ratio
+    gap_limit = max_gap_ratio or paper_price_basis_gap_limit(
+        getattr(snapshot, "instrument_id", "")
+    )
+    return abs(trigger - latest_value) / trigger <= gap_limit
 
 
 def _paper_snapshot_latest_value(

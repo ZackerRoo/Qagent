@@ -56,6 +56,9 @@ class CachedMarketDataProvider:
                 instrument_id,
                 start,
                 end,
+                maximum_trailing_session_gap=(
+                    1 if instrument_id.startswith("CN:") else None
+                ),
             ):
                 cached = self.cache.load_daily_bars(
                     self.provider_mode,

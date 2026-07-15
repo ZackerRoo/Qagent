@@ -544,13 +544,28 @@ def seed_paper_trades_from_snapshots(
 def paper_snapshot_price_basis_is_consistent(
     snapshot: OpportunitySnapshotRecord,
     *,
-    max_gap_ratio: Decimal = Decimal("0.45"),
+    max_gap_ratio: Decimal | None = None,
 ) -> bool:
-    trigger = snapshot.trigger_price
-    latest = snapshot.latest_close
-    if trigger is None or latest is None or trigger <= 0 or latest <= 0:
-        return True
-    return abs(trigger - latest) / trigger <= max_gap_ratio
+    trigger = getattr(snapshot, "trigger_price", None)
+    latest = _snapshot_reference_price(snapshot)
+    instrument_id = str(getattr(snapshot, "instrument_id", ""))
+    if trigger is None or trigger <= 0:
+        return False
+    if latest is None or latest <= 0:
+        return not instrument_id.startswith("CN:")
+    gap_limit = max_gap_ratio or paper_price_basis_gap_limit(instrument_id)
+    return abs(trigger - latest) / trigger <= gap_limit
+
+
+def paper_price_basis_gap_limit(instrument_id: str) -> Decimal:
+    if not instrument_id.startswith("CN:"):
+        return Decimal("0.45")
+    code = instrument_id.split(":", 1)[1].split(".", 1)[0]
+    if code.startswith(("4", "8", "92")):
+        return Decimal("0.32")
+    if code.startswith(("300", "301", "688", "689")):
+        return Decimal("0.22")
+    return Decimal("0.12")
 
 
 def update_paper_trades(
@@ -562,6 +577,7 @@ def update_paper_trades(
     as_of: datetime | None = None,
 ) -> PaperUpdateResult:
     trades = repo.list_trades(limit=1000, provider=provider_mode)
+    invalidated_before = sum(1 for trade in trades if trade.status == "invalidated")
     repaired_replaced_statuses = _repair_replaced_trade_statuses(repo, trades)
     if repaired_replaced_statuses:
         trades = repo.list_trades(limit=1000, provider=provider_mode)
@@ -607,7 +623,7 @@ def update_paper_trades(
             max_holding_days,
             max_entry_wait_days,
             as_of=execution_time,
-            source_latest_close=source_context.latest_close if source_context else None,
+            source_latest_close=_source_context_latest_close(source_context),
         )
         fills_deferred += deferred
         repo.update_trade(trade.trade_id, **updated)
@@ -629,6 +645,13 @@ def update_paper_trades(
         "paper_daily_fallback_rows": str(daily_fallback_rows),
         "paper_repaired_invalid_dates": str(repaired_invalid_dates),
         "paper_repaired_replaced_statuses": str(repaired_replaced_statuses),
+        "paper_price_basis_invalidated": str(
+            max(
+                sum(1 for trade in refreshed if trade.status == "invalidated")
+                - invalidated_before,
+                0,
+            )
+        ),
     }
     if provider_errors:
         data_health["errors"] = " | ".join(provider_errors[:3])
@@ -2894,6 +2917,7 @@ def _evaluate_trade(
             first = post_signal.iloc[0]
             observed = Decimal(str(first["open"]))
             if _paper_price_basis_discontinuous(
+                trade.instrument_id,
                 source_latest_close or trade.trigger_price,
                 observed,
             ):
@@ -3084,7 +3108,7 @@ def _try_evaluate_trade_with_minutes(
         max_entry_wait_days=max_entry_wait_days,
         signal_datetime=signal_datetime,
         no_chase_above=_trade_no_chase_above(trade, source_context),
-        source_latest_close=source_context.latest_close,
+        source_latest_close=_source_context_latest_close(source_context),
     )
     return update, 1, len(minute_bars)
 
@@ -3112,6 +3136,7 @@ def _evaluate_trade_with_minutes(
     first = ordered.iloc[0]
     first_open = Decimal(str(first["open"]))
     if trade.status == "pending" and _paper_price_basis_discontinuous(
+        trade.instrument_id,
         source_latest_close or trade.trigger_price,
         first_open,
     ):
@@ -3244,10 +3269,11 @@ def _evaluate_trade_with_minutes(
 
 
 def _paper_price_basis_discontinuous(
+    instrument_id: str,
     reference_price: Decimal | None,
     observed_price: Decimal | None,
     *,
-    max_gap_ratio: Decimal = Decimal("0.45"),
+    max_gap_ratio: Decimal | None = None,
 ) -> bool:
     if (
         reference_price is None
@@ -3256,7 +3282,8 @@ def _paper_price_basis_discontinuous(
         or observed_price <= 0
     ):
         return False
-    return abs(observed_price - reference_price) / reference_price > max_gap_ratio
+    gap_limit = max_gap_ratio or paper_price_basis_gap_limit(instrument_id)
+    return abs(observed_price - reference_price) / reference_price > gap_limit
 
 
 def _invalidated_price_basis_update(
@@ -3275,9 +3302,49 @@ def _invalidated_price_basis_update(
         "holding_days": 0,
         "notes": _append_note(
             trade.notes,
-            "推荐快照与首个盘中价格口径跳变超过 45%，样本作废并释放名额。",
+            (
+                "推荐快照与首个盘中价格口径跳变超过"
+                f"{int(paper_price_basis_gap_limit(trade.instrument_id) * 100)}%，"
+                "样本作废并释放名额。"
+            ),
         ),
     }
+
+
+def _snapshot_reference_price(
+    snapshot: OpportunitySnapshotRecord,
+) -> Decimal | None:
+    latest = _positive_decimal_or_none(getattr(snapshot, "latest_close", None))
+    if latest is not None:
+        return latest
+    raw_card = getattr(snapshot, "card", {})
+    card = raw_card if isinstance(raw_card, dict) else {}
+    trading_status = card.get("trading_status")
+    if not isinstance(trading_status, dict):
+        return None
+    return _positive_decimal_or_none(trading_status.get("latest_close"))
+
+
+def _source_context_latest_close(
+    source_context: PaperTradeSourceContext | None,
+) -> Decimal | None:
+    if source_context is None:
+        return None
+    latest = _positive_decimal_or_none(source_context.latest_close)
+    if latest is not None:
+        return latest
+    trading_status = source_context.card.get("trading_status")
+    if not isinstance(trading_status, dict):
+        return None
+    return _positive_decimal_or_none(trading_status.get("latest_close"))
+
+
+def _positive_decimal_or_none(value: object) -> Decimal | None:
+    try:
+        parsed = Decimal(str(value))
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+    return parsed if parsed.is_finite() and parsed > 0 else None
 
 
 def _trade_signal_datetime(

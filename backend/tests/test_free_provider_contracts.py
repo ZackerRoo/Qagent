@@ -349,6 +349,58 @@ def test_free_cn_provider_uses_adjusted_yfinance_etf_fallback(monkeypatch):
     assert bars["adjustment_factor"].tolist() == [pytest.approx(0.8)]
 
 
+def test_free_cn_provider_drops_impossible_yfinance_etf_ohlc(monkeypatch):
+    def failing_etf_history(*args, **kwargs):
+        raise ConnectionError("eastmoney disconnected")
+
+    columns = pd.MultiIndex.from_tuples(
+        [
+            ("Open", "159560.SZ"),
+            ("High", "159560.SZ"),
+            ("Low", "159560.SZ"),
+            ("Close", "159560.SZ"),
+            ("Adj Close", "159560.SZ"),
+            ("Volume", "159560.SZ"),
+        ]
+    )
+
+    def fake_download(tickers, start, end, progress, auto_adjust, timeout):
+        return pd.DataFrame(
+            [
+                [2.82, 2.93, 2.80, 2.89, 2.89, 8_000_000],
+                [3.22, 2.91, 2.70, 2.89, 2.89, 9_000_000],
+            ],
+            index=pd.to_datetime(["2026-07-14", "2026-07-15"]),
+            columns=columns,
+        )
+
+    monkeypatch.setattr(
+        free_cn,
+        "ak",
+        SimpleNamespace(fund_etf_hist_em=failing_etf_history),
+    )
+    monkeypatch.setattr(
+        free_cn,
+        "yf",
+        SimpleNamespace(download=fake_download),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        free_cn,
+        "bs",
+        SimpleNamespace(login=lambda: (_ for _ in ()).throw(AssertionError())),
+    )
+
+    bars = FreeCnMarketDataProvider().get_daily_bars(
+        ["CN:159560"],
+        date(2026, 7, 14),
+        date(2026, 7, 15),
+    )
+
+    assert bars["trade_date"].tolist() == [date(2026, 7, 14)]
+    assert bars["open"].tolist() == [2.82]
+
+
 def test_free_cn_provider_drops_nonfinite_ohlc_rows(monkeypatch):
     def fake_zh_a_hist(symbol, period, start_date, end_date, adjust):
         return pd.DataFrame(
