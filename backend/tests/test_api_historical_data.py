@@ -204,6 +204,33 @@ def test_completed_full_market_backfill_blocks_validation_on_missing_evidence(
     assert repo.list_walk_forward_jobs(provider="free", limit=5) == []
 
 
+def test_validation_readiness_accepts_listing_aware_universe_history():
+    start = routes.date(2025, 1, 2)
+    item = SimpleNamespace(
+        asset_type="stock",
+        bar_coverage_ratio=1.0,
+        adjustment_coverage_ratio=1.0,
+        tradability_coverage_ratio=1.0,
+        universe_snapshot_rows=3,
+        first_universe_date=routes.date(2025, 2, 10),
+        profile_rows=1,
+        listing_date=routes.date(2025, 2, 7),
+        fundamental_rows=2,
+        first_fundamental_date=routes.date(2025, 2, 7),
+    )
+
+    readiness = routes._historical_validation_readiness(
+        SimpleNamespace(
+            instruments=[item],
+            data_health={"historical_benchmark_price_ready": "4/4"},
+        ),
+        start=start,
+    )
+
+    assert readiness["validation_pipeline_gate"] == "ready"
+    assert readiness["validation_pipeline_universe_coverage"] == "1.0000"
+
+
 def test_completed_full_market_backfill_blocks_recent_only_history(
     tmp_path,
     monkeypatch,
@@ -365,6 +392,50 @@ def test_failed_historical_backfill_can_resume_from_saved_checkpoint(
     assert body["failed_symbols"] == 0
     assert body["data_health"]["backfill_resume_requested"] == "true"
     assert body["data_health"]["backfill_resume_count"] == "1"
+    assert submitted[0][1] == (job.job_id,)
+
+
+def test_incomplete_historical_backfill_can_retry_blocked_validation(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'historical-retry-blocked-api.db'}",
+    )
+    repo = routes._repo()
+    job = repo.create_historical_backfill_job(
+        "free",
+        ["CN:000001"],
+        start=routes.date(2026, 1, 1),
+        end=routes.date(2026, 1, 9),
+        data_health={
+            "backfill_scope": "full-a-share",
+            "validation_pipeline_state": "blocked_data_coverage",
+        },
+    )
+    repo.update_historical_backfill_job(
+        job.job_id,
+        status="succeeded_with_errors",
+        processed_symbols=1,
+        succeeded_symbols=0,
+        failed_symbols=1,
+    )
+    submitted = []
+
+    class FakeExecutor:
+        def submit(self, fn, *args, **kwargs):
+            submitted.append((fn, args, kwargs))
+
+    monkeypatch.setattr(routes, "_history_task_executor", FakeExecutor())
+    routes._submitted_historical_jobs.clear()
+    client = TestClient(create_app())
+
+    response = client.post(f"/api/historical-data/backfill/{job.job_id}/retry")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+    assert response.json()["data_health"]["backfill_resume_count"] == "1"
     assert submitted[0][1] == (job.job_id,)
 
 

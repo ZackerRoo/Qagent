@@ -329,17 +329,38 @@ class FreeCnMarketDataProvider:
         end: date,
         request_timeout_seconds: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
     ) -> pd.DataFrame:
-        with _bounded_network_calls(request_timeout_seconds):
-            raw = ak.index_zh_a_hist(
-                symbol=symbol,
-                period="daily",
-                start_date=start.strftime("%Y%m%d"),
-                end_date=end.strftime("%Y%m%d"),
-            )
+        primary_error: Exception | None = None
+        try:
+            with _bounded_network_calls(request_timeout_seconds):
+                raw = ak.index_zh_a_hist(
+                    symbol=symbol,
+                    period="daily",
+                    start_date=start.strftime("%Y%m%d"),
+                    end_date=end.strftime("%Y%m%d"),
+                )
+        except Exception as exc:
+            primary_error = exc
+            raw = pd.DataFrame()
+        provider_name = "akshare_index"
+        if raw.empty:
+            try:
+                with _bounded_network_calls(request_timeout_seconds):
+                    raw = ak.stock_zh_index_daily(
+                        symbol=_to_sina_index_symbol(symbol)
+                    )
+            except Exception as fallback_exc:
+                if primary_error is not None:
+                    raise RuntimeError(
+                        f"eastmoney index: {primary_error}; "
+                        f"sina index: {fallback_exc}"
+                    ) from fallback_exc
+                raise
+            provider_name = "akshare_sina_index"
         if raw.empty:
             return pd.DataFrame(columns=BAR_COLUMNS)
         normalized = raw.rename(
             columns={
+                "date": "trade_date",
                 "日期": "trade_date",
                 "开盘": "open",
                 "最高": "high",
@@ -349,7 +370,13 @@ class FreeCnMarketDataProvider:
                 "成交额": "turnover",
             }
         ).copy()
-        normalized["provider"] = "akshare_index"
+        normalized["trade_date"] = pd.to_datetime(
+            normalized["trade_date"], errors="coerce"
+        ).dt.date
+        normalized = normalized.loc[
+            normalized["trade_date"].between(start, end)
+        ].copy()
+        normalized["provider"] = provider_name
         for column in ("open", "high", "low", "close"):
             normalized[f"adjusted_{column}"] = normalized[column]
         normalized["adjustment_factor"] = 1.0
@@ -566,6 +593,12 @@ def _is_index_symbol(symbol: str) -> bool:
 
 def _index_code(symbol: str) -> str:
     return symbol.split(".", 1)[0]
+
+
+def _to_sina_index_symbol(symbol: str) -> str:
+    code = _index_code(symbol)
+    exchange = "sz" if code.startswith("399") else "sh"
+    return f"{exchange}{code}"
 
 
 def _coerce_bar_types(frame: pd.DataFrame) -> pd.DataFrame:

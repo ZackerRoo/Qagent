@@ -1391,6 +1391,16 @@ def _historical_evidence_cache_is_usable(
         and index_stats.ready_snapshots < expected_index_snapshots
     ):
         return False
+    replay_repo = ReplayEvidenceRepository(repo.session_factory, provider_mode)
+    revision = replay_repo.current_revision()
+    if revision > 0:
+        try:
+            replay_repo.memberships_as_of(instrument_ids[:1], end, revision)
+        except ReplayEvidenceUnavailable:
+            # A previous interrupted reference-data write can leave a ready
+            # snapshot whose declared membership count does not match storage.
+            # Force a fresh reference snapshot instead of reusing corrupt data.
+            return False
     evidence = repo.historical_evidence_stats(
         provider_mode,
         instrument_ids,

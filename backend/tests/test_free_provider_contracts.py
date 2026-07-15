@@ -120,6 +120,46 @@ def test_free_cn_provider_normalizes_akshare_daily(monkeypatch):
     assert bars["volume"].tolist() == [800_000, 820_000]
 
 
+def test_free_cn_provider_falls_back_to_sina_for_index_history(monkeypatch):
+    calls = []
+
+    def unavailable_eastmoney(**kwargs):
+        raise ConnectionError("upstream disconnected")
+
+    def sina_index(symbol):
+        calls.append(symbol)
+        return pd.DataFrame(
+            {
+                "date": pd.to_datetime(
+                    ["2025-12-31", "2026-01-02", "2026-01-05", "2026-02-02"]
+                ).date,
+                "open": [990.0, 1000.0, 1010.0, 1020.0],
+                "high": [995.0, 1008.0, 1018.0, 1028.0],
+                "low": [985.0, 998.0, 1008.0, 1018.0],
+                "close": [992.0, 1005.0, 1015.0, 1025.0],
+                "volume": [90, 100, 110, 120],
+            }
+        )
+
+    monkeypatch.setattr(
+        "qagent.providers.free_cn.ak",
+        SimpleNamespace(
+            index_zh_a_hist=unavailable_eastmoney,
+            stock_zh_index_daily=sina_index,
+        ),
+    )
+
+    bars = FreeCnMarketDataProvider().get_daily_bars(
+        ["CN:000688.IDX"], date(2026, 1, 1), date(2026, 1, 31)
+    )
+
+    assert calls == ["sh000688"]
+    assert bars["trade_date"].tolist() == [date(2026, 1, 2), date(2026, 1, 5)]
+    assert bars["instrument_id"].eq("CN:000688.IDX").all()
+    assert bars["provider"].eq("akshare_sina_index").all()
+    assert bars["adjusted_close"].tolist() == [1005.0, 1015.0]
+
+
 def test_free_cn_provider_keeps_raw_dates_without_fabricating_adjusted_rows(
     monkeypatch,
 ):

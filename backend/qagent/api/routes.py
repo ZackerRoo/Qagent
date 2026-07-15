@@ -664,7 +664,12 @@ def retry_historical_data_backfill(job_id: str) -> dict[str, object]:
     if job.status in {"queued", "running"}:
         _submit_historical_backfill(job.job_id)
         return _historical_backfill_job_payload(job)
-    if job.status not in {"failed", "cancelled"}:
+    validation_state = job.data_health.get("validation_pipeline_state")
+    retryable_completed = (
+        job.status == "succeeded_with_errors"
+        and validation_state in {"blocked_data_coverage", "failed"}
+    )
+    if job.status not in {"failed", "cancelled"} and not retryable_completed:
         raise HTTPException(
             status_code=409,
             detail=f"historical backfill job cannot resume from {job.status}",
@@ -818,7 +823,11 @@ def _historical_validation_readiness(manifest, *, start: date) -> dict[str, str]
         "universe": sum(
             item.universe_snapshot_rows > 0
             and item.first_universe_date is not None
-            and item.first_universe_date <= start
+            and (
+                getattr(item, "listing_date", None) is not None
+                and item.listing_date > start
+                or item.first_universe_date <= start
+            )
             for item in instruments
         )
         / total,

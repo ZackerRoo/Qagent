@@ -654,12 +654,21 @@ class BaoStockHistoricalEvidenceProvider:
             error = None if error_code == "0" else getattr(result, "error_msg", "query failed")
             if error is None and not rows:
                 error = "empty membership snapshot"
+            selected_rows = [
+                row
+                for row in rows
+                if _from_baostock_code(row.get("code")) in selected
+            ]
             snapshots.append(
                 HistoricalIndexSnapshot(
                     index_id=index_id,
                     snapshot_date=snapshot_date,
                     status="ready" if error is None else "failed",
-                    member_count=len(rows),
+                    # Membership evidence is deliberately scoped to the
+                    # requested replay universe.  The declared count must use
+                    # the same scope or a valid snapshot can look truncated
+                    # when the provider returns an out-of-universe constituent.
+                    member_count=len(selected_rows),
                     provider="baostock",
                     error=error,
                 )
@@ -669,10 +678,8 @@ class BaoStockHistoricalEvidenceProvider:
                     f"index {index_id} {snapshot_date.isoformat()}: {error}"
                 )
                 continue
-            for row in rows:
+            for row in selected_rows:
                 instrument_id = _from_baostock_code(row.get("code"))
-                if instrument_id not in selected:
-                    continue
                 memberships.append(
                     HistoricalIndexMembership(
                         index_id=index_id,

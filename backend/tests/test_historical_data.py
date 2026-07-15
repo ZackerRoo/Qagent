@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
+from sqlalchemy import delete
 
 from qagent import data_management
 from qagent.data_management import HistoricalBackfillFailed, run_historical_backfill
@@ -28,7 +29,10 @@ from qagent.market.calendars import trading_sessions_in_range
 from qagent.storage.market_cache import MarketDataCacheRepository
 from qagent.storage.repository import QagentRepository
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
-from qagent.storage.tables import HistoricalInstrumentProfileRow
+from qagent.storage.tables import (
+    HistoricalIndexMembershipRow,
+    HistoricalInstrumentProfileRow,
+)
 from qagent.strategy_data.models import FundamentalSnapshot
 from qagent.strategy_data.providers import BaseStrategyDataProvider
 
@@ -1450,3 +1454,33 @@ def test_historical_backfill_reuses_complete_historical_evidence(tmp_path):
     assert result.job.status == "succeeded"
     assert result.job.data_health["historical_evidence_cache"] == "reused"
     assert repo.replay_evidence("free").current_revision() == revision_before_reuse
+
+
+def test_historical_evidence_cache_rejects_incomplete_index_snapshot(tmp_path):
+    repo, cache = make_repositories(tmp_path)
+    start = date(2026, 1, 1)
+    end = date(2026, 1, 9)
+
+    run_historical_backfill(
+        repo=repo,
+        cache=cache,
+        provider=AdjustedHistoryProvider(),
+        strategy_provider=None,
+        historical_evidence_provider=CompleteHistoricalEvidenceProvider(),
+        provider_mode="free",
+        instrument_ids=["CN:000001"],
+        start=start,
+        end=end,
+        universe_as_of=start,
+    )
+    with repo.session_factory() as session:
+        session.execute(delete(HistoricalIndexMembershipRow))
+        session.commit()
+
+    assert data_management._historical_evidence_cache_is_usable(
+        repo=repo,
+        provider_mode="free",
+        instrument_ids=["CN:000001"],
+        start=start,
+        end=end,
+    ) is False

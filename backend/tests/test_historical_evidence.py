@@ -148,6 +148,16 @@ def test_baostock_historical_evidence_provider_normalizes_all_evidence_classes()
     assert len(bundle.index_memberships) == 2
     assert sum(item.status == "ready" for item in bundle.index_snapshots) == 2
     assert sum(item.status == "failed" for item in bundle.index_snapshots) == 1
+    membership_counts = {}
+    for membership in bundle.index_memberships:
+        membership_counts[membership.index_id] = (
+            membership_counts.get(membership.index_id, 0) + 1
+        )
+    assert all(
+        snapshot.member_count == membership_counts.get(snapshot.index_id, 0)
+        for snapshot in bundle.index_snapshots
+        if snapshot.status == "ready"
+    )
     assert bundle.errors == ["index CN:000016.IDX 2026-01-09: empty membership snapshot"]
 
 
