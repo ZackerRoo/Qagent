@@ -218,7 +218,13 @@ def run_daily_scan(
                     ),
                 },
             )
-            card = card_generator.generate(instrument_id, signals, bars, strategy_evaluations)
+            card = card_generator.generate(
+                instrument_id,
+                signals,
+                bars,
+                strategy_evaluations,
+                volatility_bars=research_bars,
+            )
             instrument_label = format_instrument_label(instrument_id)
             trading_constraints = build_trading_constraints(instrument_id, instrument_label)
             trading_status = evaluate_trading_status(instrument_id, bars, trading_constraints)

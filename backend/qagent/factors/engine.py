@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from qagent.factors.models import FactorExposure, FactorRanking
+from qagent.market.indicators import regression_quality_momentum
 from qagent.strategy_data.models import FundamentalSnapshot
 
 
@@ -123,7 +124,8 @@ def _raw_factors(
     fundamental: FundamentalSnapshot | None = None,
 ) -> _RawFactors:
     ordered = bars.sort_values("trade_date").copy()
-    close = pd.to_numeric(ordered["close"], errors="coerce").dropna()
+    raw_close = pd.to_numeric(ordered["close"], errors="coerce")
+    close = raw_close.dropna()
     volume = pd.to_numeric(ordered["volume"], errors="coerce").dropna()
     missing: list[str] = []
     flags: list[str] = []
@@ -142,6 +144,9 @@ def _raw_factors(
         missing.append("60d_return")
     if len(close) < 120:
         missing.append("120d_return")
+    regression_momentum = regression_quality_momentum(raw_close, window=29)
+    if regression_momentum.status != "available":
+        missing.append("29d_trend_regression")
     if len(close) < 120:
         flags.append("insufficient_history")
 
@@ -167,7 +172,9 @@ def _raw_factors(
     if ma50 and ma100:
         alignment += 1.0 if ma50 >= ma100 else 0.0
         alignment_inputs += 1
-    trend_quality_raw = alignment / alignment_inputs if alignment_inputs else None
+    alignment_score = alignment / alignment_inputs if alignment_inputs else None
+    regression_score = _squash_signed(regression_momentum.quality_score)
+    trend_quality_raw = _weighted_available([(alignment_score, 0.35), (regression_score, 0.65)])
 
     avg_volume_20 = float(volume.tail(20).mean()) if len(volume) >= 20 else None
     avg_volume_5 = float(volume.tail(5).mean()) if len(volume) >= 5 else None
@@ -328,12 +335,12 @@ def _risk_filter_raw(
 
 def _data_completeness(missing: list[str]) -> float:
     technical_missing = sum(
-        1 for key in {"20d_return", "60d_return", "120d_return"} if key in missing
+        1
+        for key in {"20d_return", "60d_return", "120d_return", "29d_trend_regression"}
+        if key in missing
     )
     fundamental_missing = sum(
-        1
-        for key in {"valuation_ep", "market_cap", "quality_fundamentals"}
-        if key in missing
+        1 for key in {"valuation_ep", "market_cap", "quality_fundamentals"} if key in missing
     )
     return _clamp(1.0 - technical_missing * 0.10 - fundamental_missing * 0.06)
 
@@ -378,8 +385,7 @@ def _rank_scores(values: dict[str, float | None]) -> dict[str, float]:
         ranked = {sorted_items[0][0]: 0.5}
     else:
         ranked = {
-            key: index / (len(sorted_items) - 1)
-            for index, (key, _) in enumerate(sorted_items)
+            key: index / (len(sorted_items) - 1) for index, (key, _) in enumerate(sorted_items)
         }
     return {key: round(ranked.get(key, 0.35), 4) for key in values}
 
@@ -480,11 +486,11 @@ def _exposures(
         ),
         FactorExposure(
             factor_id="trend_quality",
-            label="Trend quality",
+            label="Regression trend quality",
             raw_value=item.trend_quality_raw,
             score=scores["trend_quality"][item.instrument_id],
             weight=weights["trend_quality"],
-            explanation="Moving-average alignment and distance from 20DMA.",
+            explanation="29-day log-price regression momentum weighted by R-squared, combined with moving-average alignment and distance from 20DMA.",
         ),
         FactorExposure(
             factor_id="liquidity",
@@ -518,7 +524,7 @@ def _exposures(
             weight=weights["reversal"],
             explanation="Short-term pullback pressure inside an intact trend.",
         ),
-]
+    ]
 
 
 def _bounded_score(value: float, low: float, high: float) -> float:
@@ -535,6 +541,12 @@ def _float_or_none(value: object) -> float | None:
     if pd.isna(result):
         return None
     return result
+
+
+def _squash_signed(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return 0.5 + 0.5 * value / (1 + abs(value))
 
 
 def _is_a_share(instrument_id: str) -> bool:

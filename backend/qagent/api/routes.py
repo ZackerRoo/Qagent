@@ -3354,6 +3354,25 @@ def _paper_asset_types_for_trades(trades) -> dict[str, str]:
     }
 
 
+@router.get("/paper-trades/{trade_id}/events")
+def paper_trade_events(trade_id: str) -> dict[str, object]:
+    repo = _paper_repo()
+    trade = repo.get_trade(trade_id)
+    events = repo.list_trade_events(trade_id)
+    if trade is None and not events:
+        raise HTTPException(status_code=404, detail="paper trade not found")
+    return {
+        "trade_id": trade_id,
+        "instrument_id": trade.instrument_id if trade is not None else events[-1].instrument_id,
+        "status": trade.status if trade is not None else events[-1].to_status,
+        "events": [event.model_dump(mode="json") for event in events],
+        "data_health": {
+            "paper_event_ledger": "append_only",
+            "paper_event_count": str(len(events)),
+        },
+    }
+
+
 @router.delete("/paper-trades/{trade_id}")
 def delete_paper_trade(trade_id: str) -> dict[str, object]:
     deleted = _paper_repo().delete_trade(trade_id)

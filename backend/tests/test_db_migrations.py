@@ -170,9 +170,12 @@ def test_initialize_database_adds_adjustment_columns_to_legacy_market_cache(tmp_
     assert inspect(migrated).get_pk_constraint("historical_trading_rules")[
         "constrained_columns"
     ] == ["rule_set_version", "limit_rule_key", "effective_from"]
-    assert inspect(migrated).get_pk_constraint("historical_fee_rules")[
-        "constrained_columns"
-    ] == ["fee_schedule_version", "fee_rule_key", "effective_from", "side"]
+    assert inspect(migrated).get_pk_constraint("historical_fee_rules")["constrained_columns"] == [
+        "fee_schedule_version",
+        "fee_rule_key",
+        "effective_from",
+        "side",
+    ]
 
 
 def test_initialize_database_adds_paper_probe_allocation_column(tmp_path):
@@ -186,6 +189,59 @@ def test_initialize_database_adds_paper_probe_allocation_column(tmp_path):
     columns = {column["name"] for column in inspect(migrated).get_columns("paper_trades")}
 
     assert "allocation_multiplier" in columns
+
+
+def test_initialize_database_backfills_legacy_paper_event_instrument_id(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'legacy-paper-events.db'}"
+    engine = create_db_engine(database_url)
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(text("DROP INDEX ix_paper_trade_events_instrument_id"))
+        connection.execute(text("ALTER TABLE paper_trade_events DROP COLUMN instrument_id"))
+        connection.execute(
+            text(
+                """
+                INSERT INTO paper_trades (
+                    trade_id, source_snapshot_id, provider, instrument_id, status,
+                    signal_date, trigger_price, allocation_multiplier, holding_days,
+                    notes, created_at, updated_at
+                ) VALUES (
+                    'paper-legacy', 'snapshot-legacy', 'free', 'CN:000001', 'pending',
+                    '2025-01-02', 10.0, 1.0, 0, '', '2025-01-02', '2025-01-02'
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO paper_trade_events (
+                    event_id, trade_id, sequence, idempotency_key, event_type,
+                    from_status, to_status, occurred_at, trade_date, price,
+                    reason_code, note, source, created_at
+                ) VALUES (
+                    'event-legacy', 'paper-legacy', 1, 'legacy-key', 'created',
+                    NULL, 'pending', '2025-01-02', '2025-01-02', 10.0,
+                    'paper_trade.created.pending', '', 'legacy', '2025-01-02'
+                )
+                """
+            )
+        )
+
+    migrated = initialize_database(database_url)
+    inspector = inspect(migrated)
+
+    assert "instrument_id" in {
+        column["name"] for column in inspector.get_columns("paper_trade_events")
+    }
+    assert "ix_paper_trade_events_instrument_id" in {
+        index["name"] for index in inspector.get_indexes("paper_trade_events")
+    }
+    with migrated.connect() as connection:
+        instrument_id = connection.execute(
+            text("SELECT instrument_id FROM paper_trade_events WHERE event_id = 'event-legacy'")
+        ).scalar_one()
+    assert instrument_id == "CN:000001"
 
 
 def test_initialize_database_rebuilds_revision_scoped_tables_without_data_loss(tmp_path):
@@ -317,9 +373,7 @@ def test_initialize_database_rebuilds_revision_scoped_tables_without_data_loss(t
         }
     assert {
         constraint["name"]
-        for constraint in inspector.get_check_constraints(
-            "historical_corporate_action_coverage"
-        )
+        for constraint in inspector.get_check_constraints("historical_corporate_action_coverage")
     } == {
         "ck_historical_corporate_action_coverage_count",
         "ck_historical_corporate_action_coverage_status",
@@ -332,9 +386,7 @@ def test_legacy_row_without_revision_inherits_current_provider_revision(tmp_path
     with engine.begin() as connection:
         Base.metadata.create_all(connection)
         _downgrade_revision_primary_keys(connection)
-        connection.execute(
-            text("ALTER TABLE historical_tradability DROP COLUMN dataset_revision")
-        )
+        connection.execute(text("ALTER TABLE historical_tradability DROP COLUMN dataset_revision"))
         connection.execute(
             text(
                 "INSERT INTO historical_data_revisions "
@@ -359,9 +411,7 @@ def test_legacy_row_without_revision_inherits_current_provider_revision(tmp_path
             text("SELECT dataset_revision FROM historical_tradability")
         ).scalar_one()
     assert revision == 9
-    assert inspect(migrated).get_pk_constraint("historical_tradability")[
-        "constrained_columns"
-    ] == [
+    assert inspect(migrated).get_pk_constraint("historical_tradability")["constrained_columns"] == [
         "provider_mode",
         "instrument_id",
         "trade_date",
@@ -491,9 +541,7 @@ def test_revision_zero_rows_survive_repeated_initialize_after_revision_one_appen
         )
         for table_name, legacy_row in legacy_rows.items():
             revision_one = {**legacy_row, "dataset_revision": 1}
-            connection.execute(
-                Base.metadata.tables[table_name].insert().values(revision_one)
-            )
+            connection.execute(Base.metadata.tables[table_name].insert().values(revision_one))
 
     for _ in range(2):
         db._initialized_urls.discard(database_url)

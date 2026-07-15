@@ -49,6 +49,21 @@ def test_paper_trade_from_opportunity_creates_once_and_rejects_blocked(tmp_path,
     assert blocked.status_code == 400
     assert listed.json()["summary"]["total"] == 1
 
+    events = client.get(f"/api/paper-trades/{created.json()['trade']['trade_id']}/events")
+    assert events.status_code == 200
+    assert events.json()["data_health"]["paper_event_ledger"] == "append_only"
+    assert events.json()["events"][0]["event_type"] == "created"
+
+
+def test_paper_trade_events_return_not_found_for_unknown_trade(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-events.db'}")
+    client = TestClient(create_app())
+
+    response = client.get("/api/paper-trades/missing/events")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "paper trade not found"
+
 
 def test_paper_trade_from_opportunity_rejects_recently_invalidated_price_data(
     tmp_path,
@@ -191,6 +206,7 @@ def test_paper_trade_api_deletes_trade(tmp_path, monkeypatch):
     trade_id = created.json()["trade"]["trade_id"]
     deleted = client.delete(f"/api/paper-trades/{trade_id}")
     listed = client.get("/api/paper-trades")
+    events = client.get(f"/api/paper-trades/{trade_id}/events")
     deleted_again = client.delete(f"/api/paper-trades/{trade_id}")
 
     assert created.status_code == 200
@@ -198,6 +214,9 @@ def test_paper_trade_api_deletes_trade(tmp_path, monkeypatch):
     assert deleted.json()["deleted"] is True
     assert deleted.json()["trade_id"] == trade_id
     assert listed.json()["summary"]["total"] == 0
+    assert events.status_code == 200
+    assert events.json()["status"] == "deleted"
+    assert events.json()["events"][-1]["event_type"] == "deleted"
     assert deleted_again.status_code == 404
 
 

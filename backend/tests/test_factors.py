@@ -125,3 +125,39 @@ def test_factor_engine_penalizes_overheated_high_volatility_low_liquidity_names(
     assert "low_liquidity" in risky.flags
     assert risky.risk_filter_score < by_symbol["CN:000001"].risk_filter_score
     assert risky.execution_penalty > by_symbol["CN:000001"].execution_penalty
+
+
+def test_factor_engine_rewards_smooth_regression_momentum_over_noisy_path():
+    smooth = [10 * (1.004**index) for index in range(140)]
+    noisy = [10 * (1.004**index) * (1.12 if index % 2 else 0.88) for index in range(140)]
+    bars = pd.concat(
+        [
+            _bars("CN:000001", smooth, volume=2_000_000),
+            _bars("CN:000002", noisy, volume=2_000_000),
+        ],
+        ignore_index=True,
+    )
+
+    rankings = build_factor_rankings(bars)
+    by_symbol = {ranking.instrument_id: ranking for ranking in rankings}
+
+    assert by_symbol["CN:000001"].trend_quality_score > by_symbol["CN:000002"].trend_quality_score
+    trend_exposure = next(
+        exposure
+        for exposure in by_symbol["CN:000001"].factor_exposures
+        if exposure.factor_id == "trend_quality"
+    )
+    assert "R-squared" in trend_exposure.explanation
+
+
+def test_factor_engine_does_not_hide_missing_close_inside_regression_window():
+    bars = _bars(
+        "CN:000001",
+        [10 * (1.003**index) for index in range(60)],
+        volume=2_000_000,
+    )
+    bars.loc[bars.index[-10], "close"] = None
+
+    [ranking] = build_factor_rankings(bars)
+
+    assert "29d_trend_regression" in ranking.missing_data

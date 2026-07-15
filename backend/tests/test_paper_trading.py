@@ -96,7 +96,7 @@ def test_paper_trading_seeds_unique_trades_from_opportunity_snapshots(tmp_path):
     assert trades[0].status == "pending"
     assert trades[0].trigger_price == Decimal("83.2000")
     assert trades[0].initial_stop == Decimal("80.9000")
-    assert trades[0].target_1 == Decimal("89.7600")
+    assert trades[0].target_1 == Decimal("88.7600")
 
 
 def test_paper_trading_rejects_snapshot_with_inconsistent_price_basis(tmp_path):

@@ -57,6 +57,17 @@ class SignalSnapshot(BaseModel):
     evidence: dict[str, object] = Field(default_factory=dict)
 
 
+class SignalConsensus(BaseModel):
+    bullish_support: float = Field(ge=0.0, le=1.0)
+    bearish_pressure: float = Field(ge=0.0, le=1.0)
+    neutral_weight: float = Field(ge=0.0, le=1.0)
+    agreement: float = Field(ge=0.0, le=1.0)
+    conflict: float = Field(ge=0.0, le=1.0)
+    net_score: float = Field(ge=0.0, le=1.0)
+    dominant_direction: Direction
+    signal_count: int = Field(ge=0)
+
+
 class EntryPlan(BaseModel):
     entry_type: str
     confirmation: str
@@ -543,6 +554,7 @@ class OpportunityCard(BaseModel):
     risk_reward: float | None = None
     scenario: TradeScenario
     signals: list[SignalSnapshot] = Field(default_factory=list)
+    signal_consensus: SignalConsensus | None = None
     strategy_evaluations: list[StrategyEvaluation] = Field(default_factory=list)
     primary_strategy_id: str | None = None
     strategy_score: float = Field(default=0.0, ge=0.0, le=1.0)

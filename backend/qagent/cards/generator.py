@@ -5,9 +5,10 @@ import pandas as pd
 
 from qagent.cards.entry_exit import build_breakout_plan, build_pead_plan, build_pullback_plan
 from qagent.cards.ranking import rank_opportunity
-from qagent.cards.scoring import aggregate_score
+from qagent.cards.scoring import calculate_signal_consensus
 from qagent.domain.enums import Market, OpportunityStatus
-from qagent.domain.models import OpportunityCard, Signal, SignalSnapshot
+from qagent.domain.models import OpportunityCard, Signal, SignalConsensus, SignalSnapshot
+from qagent.market.indicators import wilder_atr
 from qagent.market.instruments import format_instrument_label
 from qagent.recommendations.decision import build_research_decision
 from qagent.recommendations.enrichment import enrich_opportunity_card
@@ -29,7 +30,9 @@ def _data_caveats(bars: pd.DataFrame) -> list[str]:
 
 class OpportunityCardGenerator:
     def __init__(self, strategy_evaluator: StrategyEvaluator | None = None):
-        self.strategy_evaluator = strategy_evaluator or StrategyEvaluator(default_strategy_registry())
+        self.strategy_evaluator = strategy_evaluator or StrategyEvaluator(
+            default_strategy_registry()
+        )
 
     def generate(
         self,
@@ -37,20 +40,35 @@ class OpportunityCardGenerator:
         signals: list[Signal],
         bars: pd.DataFrame,
         strategy_evaluations: list[StrategyEvaluation] | None = None,
+        *,
+        volatility_bars: pd.DataFrame | None = None,
     ) -> OpportunityCard | None:
         if not signals or bars.empty:
             return None
 
-        latest = bars.sort_values("trade_date").iloc[-1]
+        ordered_bars = bars.sort_values("trade_date")
+        latest = ordered_bars.iloc[-1]
         close = Decimal(str(round(float(latest["close"]), 2)))
-        atr = Decimal(str(round(max(float(close) * 0.04, 0.01), 2)))
-        score = aggregate_score(signals)
+        atr_source = volatility_bars if volatility_bars is not None else ordered_bars
+        atr, atr_fallback = _latest_atr(atr_source, close)
+        consensus = calculate_signal_consensus(signals)
+        score = consensus.net_score
         evaluations = strategy_evaluations or self.strategy_evaluator.evaluate(
             instrument_id, signals, bars
         )
         primary = _primary_strategy(evaluations)
         plan = _trade_plan(primary, close, atr)
-        strategy_score = round(max([score, *[item.score for item in evaluations]]), 4)
+        evaluated_score = max([score, *[item.score for item in evaluations]])
+        if consensus.bullish_support <= consensus.bearish_pressure:
+            strategy_score = score
+        else:
+            strategy_score = round(
+                max(
+                    score,
+                    evaluated_score * (1 - consensus.conflict) * (1 - consensus.bearish_pressure),
+                ),
+                4,
+            )
         rank = rank_opportunity(primary, evaluations, strategy_score, plan.risk_reward)
         market = Market.US if instrument_id.startswith("US:") else Market.CN
 
@@ -59,7 +77,9 @@ class OpportunityCardGenerator:
             instrument_id=instrument_id,
             instrument_label=format_instrument_label(instrument_id),
             market=market,
-            status=OpportunityStatus.SETUP_READY if strategy_score >= 0.5 else OpportunityStatus.WATCH,
+            status=OpportunityStatus.SETUP_READY
+            if strategy_score >= 0.5
+            else OpportunityStatus.WATCH,
             thesis=_thesis(primary),
             score=score,
             entry_plan=plan.entry_plan,
@@ -67,12 +87,25 @@ class OpportunityCardGenerator:
             risk_reward=plan.risk_reward,
             scenario=plan.scenario,
             signals=_signal_snapshots(signals),
+            signal_consensus=SignalConsensus(
+                bullish_support=consensus.bullish_support,
+                bearish_pressure=consensus.bearish_pressure,
+                neutral_weight=consensus.neutral_weight,
+                agreement=consensus.agreement,
+                conflict=consensus.conflict,
+                net_score=consensus.net_score,
+                dominant_direction=consensus.dominant_direction,
+                signal_count=consensus.signal_count,
+            ),
             strategy_evaluations=evaluations,
             primary_strategy_id=primary.strategy_id if primary else None,
             strategy_score=strategy_score,
             rank_score=rank.rank_score,
             rank_reasons=rank.rank_reasons,
-            data_caveats=_data_caveats(bars),
+            data_caveats=[
+                *_data_caveats(bars),
+                *(["atr: fallback_4pct_insufficient_history"] if atr_fallback else []),
+            ],
         )
         card.decision = build_research_decision(card)
         enrich_opportunity_card(card)
@@ -90,6 +123,21 @@ def _signal_snapshots(signals: list[Signal]) -> list[SignalSnapshot]:
         )
         for signal in signals
     ]
+
+
+def _latest_atr(bars: pd.DataFrame, close: Decimal) -> tuple[Decimal, bool]:
+    ordered = bars.sort_values("trade_date")
+    atr_series = wilder_atr(ordered, period=14)
+    latest_atr = atr_series.iloc[-1] if not atr_series.empty else None
+    if latest_atr is None or pd.isna(latest_atr) or float(latest_atr) <= 0:
+        latest_atr = max(float(close) * 0.04, 0.01)
+        return Decimal(str(round(float(latest_atr), 4))), True
+    volatility_close = float(ordered.iloc[-1]["close"])
+    if volatility_close <= 0 or pd.isna(volatility_close):
+        fallback = max(float(close) * 0.04, 0.01)
+        return Decimal(str(round(fallback, 4))), True
+    price_atr = float(close) * float(latest_atr) / volatility_close
+    return Decimal(str(round(max(price_atr, 0.0001), 4))), False
 
 
 def _primary_strategy(evaluations: list[StrategyEvaluation]) -> StrategyEvaluation | None:

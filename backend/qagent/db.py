@@ -168,6 +168,16 @@ def _apply_additive_migrations(engine: Engine) -> None:
                 "allocation_multiplier": "NUMERIC(8, 4) NOT NULL DEFAULT 1.0",
             },
         )
+        added_event_columns = _add_missing_columns(
+            connection,
+            inspector,
+            "paper_trade_events",
+            {
+                "instrument_id": "VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN'",
+            },
+        )
+        if "instrument_id" in added_event_columns:
+            _backfill_paper_trade_event_instrument_ids(connection)
         _add_missing_columns(
             connection,
             inspector,
@@ -241,6 +251,20 @@ def _backfill_dataset_revision(connection, table_name: str) -> None:
             "SELECT revision FROM historical_data_revisions "
             f"WHERE historical_data_revisions.provider_mode = {table_name}.provider_mode"
             "), 0) WHERE dataset_revision = 0"
+        )
+    )
+
+
+def _backfill_paper_trade_event_instrument_ids(connection) -> None:
+    inspector = inspect(connection)
+    if not inspector.has_table("paper_trade_events") or not inspector.has_table("paper_trades"):
+        return
+    connection.execute(
+        text(
+            "UPDATE paper_trade_events SET instrument_id = COALESCE(("
+            "SELECT paper_trades.instrument_id FROM paper_trades "
+            "WHERE paper_trades.trade_id = paper_trade_events.trade_id"
+            "), 'UNKNOWN') WHERE instrument_id IS NULL OR instrument_id = 'UNKNOWN'"
         )
     )
 

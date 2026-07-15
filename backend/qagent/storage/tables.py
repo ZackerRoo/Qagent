@@ -11,6 +11,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -752,6 +753,33 @@ class PaperTradeRow(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
+
+
+class PaperTradeEventRow(Base):
+    __tablename__ = "paper_trade_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "trade_id",
+            "sequence",
+            name="uq_paper_trade_events_trade_sequence",
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    trade_id: Mapped[str] = mapped_column(String(96), index=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
+    event_type: Mapped[str] = mapped_column(String(64), index=True)
+    from_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    to_status: Mapped[str] = mapped_column(String(32))
+    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    trade_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+    source: Mapped[str] = mapped_column(String(64), default="paper_repository")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
 
 
 class PaperAccountSettingsRow(Base):
