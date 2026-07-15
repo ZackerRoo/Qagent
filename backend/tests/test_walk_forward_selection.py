@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from threading import Event
 from types import SimpleNamespace
 
 from sqlalchemy.orm import sessionmaker
@@ -17,6 +18,7 @@ from qagent.backtesting.walk_forward import (
     ELIGIBLE_UNIVERSE_BENCHMARK_ID,
     WalkForwardEvidenceMetric,
     WalkForwardSnapshot,
+    _DatasetLeaseHeartbeat,
     _combined_validation_gate,
     _cross_section_coverage,
     _equal_weight_eligible_return,
@@ -38,6 +40,30 @@ from qagent.storage import tables as _tables  # noqa: F401
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
 from qagent.storage.repository import QagentRepository
 from qagent.strategy_data.models import FundamentalSnapshot
+
+
+def test_dataset_lease_heartbeat_renews_during_long_snapshot():
+    renewed = Event()
+
+    class FakeRepository:
+        provider_mode = "free"
+
+        def renew_dataset_lease(self):
+            renewed.set()
+
+        def acquire_dataset_lease(self):
+            raise AssertionError("healthy heartbeat must not reacquire")
+
+    heartbeat = _DatasetLeaseHeartbeat(
+        FakeRepository(),
+        interval_seconds=0.01,
+    )
+    heartbeat.start()
+    try:
+        assert renewed.wait(timeout=0.5)
+        heartbeat.raise_if_failed()
+    finally:
+        heartbeat.stop()
 
 
 def _replay_repository(tmp_path):

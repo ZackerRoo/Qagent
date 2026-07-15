@@ -1557,6 +1557,7 @@ class QagentRepository:
         error: str | None = None,
         started_at: datetime | None = None,
         finished_at: datetime | None = None,
+        clear_terminal_state: bool = False,
     ) -> WalkForwardJobRecord:
         with self.session_factory() as session:
             row = session.get(WalkForwardJobRow, job_id)
@@ -1575,6 +1576,10 @@ class QagentRepository:
             for key, value in values.items():
                 if value is not None:
                     setattr(row, key, value)
+            if clear_terminal_state:
+                row.result_run_id = None
+                row.error = None
+                row.finished_at = None
             if checkpoints is not None:
                 row.checkpoints_json = json.dumps(
                     checkpoints,

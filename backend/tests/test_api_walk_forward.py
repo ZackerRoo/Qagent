@@ -147,6 +147,99 @@ def test_walk_forward_restore_resubmits_persisted_job(tmp_path, monkeypatch):
     assert submitted[0][1] == (job.job_id,)
 
 
+def test_failed_walk_forward_job_retries_from_persisted_checkpoints(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'walk-forward-retry-api.db'}",
+    )
+    submitted = []
+
+    class FakeExecutor:
+        def submit(self, fn, *args, **kwargs):
+            submitted.append((fn, args, kwargs))
+
+    monkeypatch.setattr(routes, "_walk_forward_task_executor", FakeExecutor())
+    routes._submitted_walk_forward_jobs.clear()
+    repo = routes._repo()
+    with repo.session_factory() as session:
+        session.add(HistoricalDataRevisionRow(provider_mode="free", revision=9))
+        session.commit()
+    manifest = routes.build_walk_forward_experiment_manifest(
+        provider_mode="free",
+        dataset_revision=9,
+        start_date=date(2025, 1, 2),
+        end_date=date(2025, 3, 31),
+        rebalance_step_sessions=5,
+        lookback_days=400,
+    )
+    job = repo.create_walk_forward_job(
+        job_id="walk-forward-retry",
+        provider="free",
+        start=date(2025, 1, 2),
+        end=date(2025, 3, 31),
+        dataset_revision=9,
+        rebalance_step_sessions=5,
+        lookback_days=400,
+        total_snapshots=12,
+        experiment_manifest=manifest.model_dump(mode="json"),
+    )
+    checkpoint = {"decision_date": "2025-01-02"}
+    repo.update_walk_forward_job(
+        job.job_id,
+        status="failed",
+        phase="failed",
+        processed_snapshots=1,
+        checkpoints=[checkpoint],
+        error="lease expired",
+        finished_at=datetime.now(timezone.utc),
+    )
+    client = TestClient(create_app())
+
+    response = client.post(f"/api/walk-forward/jobs/{job.job_id}/retry")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+    assert response.json()["checkpoint_count"] == 1
+    assert response.json()["error"] is None
+    assert response.json()["finished_at"] is None
+    assert submitted[0][1] == (job.job_id,)
+
+
+def test_failed_walk_forward_retry_rejects_changed_experiment(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'walk-forward-retry-stale-api.db'}",
+    )
+    repo = routes._repo()
+    with repo.session_factory() as session:
+        session.add(HistoricalDataRevisionRow(provider_mode="free", revision=9))
+        session.commit()
+    job = repo.create_walk_forward_job(
+        job_id="walk-forward-retry-stale",
+        provider="free",
+        start=date(2025, 1, 2),
+        end=date(2025, 3, 31),
+        dataset_revision=9,
+        rebalance_step_sessions=5,
+        lookback_days=400,
+        total_snapshots=12,
+        experiment_manifest={"experiment_digest": "old-definition"},
+    )
+    repo.update_walk_forward_job(job.job_id, status="failed", phase="failed")
+    client = TestClient(create_app())
+
+    response = client.post(f"/api/walk-forward/jobs/{job.job_id}/retry")
+
+    assert response.status_code == 409
+    assert "experiment definition changed" in response.json()["detail"]
+
+
 def test_walk_forward_restore_resubmits_every_persisted_job(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "QAGENT_DATABASE_URL",

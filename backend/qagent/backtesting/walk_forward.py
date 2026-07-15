@@ -7,6 +7,7 @@ import statistics
 from collections.abc import Callable
 from datetime import date, timedelta
 from decimal import Decimal
+from threading import Event, Thread
 from types import SimpleNamespace
 
 from pydantic import BaseModel, Field
@@ -33,13 +34,59 @@ from qagent.jobs.daily_scan import run_daily_scan
 from qagent.market.astock_enhanced import EmptyAShareEnhancedDataProvider
 from qagent.market.calendars import trading_sessions_in_range
 from qagent.historical_evidence.providers import REQUIRED_BENCHMARK_IDS
-from qagent.storage.replay_evidence import ReplayEvidenceRepository
+from qagent.storage.replay_evidence import LEASE_DURATION, ReplayEvidenceRepository
 
 
 EXCLUDED_STATUSES = frozenset({"risk_elevated", "invalidated", "closed", "postmortem_done"})
 ELIGIBLE_UNIVERSE_BENCHMARK_ID = "CN:EQUAL_WEIGHT_ELIGIBLE"
 MIN_FULL_MARKET_COVERAGE_RATIO = 0.90
 MIN_FUNDAMENTAL_COVERAGE_RATIO = 0.80
+
+
+class _DatasetLeaseHeartbeat:
+    def __init__(
+        self,
+        repository: ReplayEvidenceRepository,
+        *,
+        interval_seconds: float | None = None,
+    ):
+        self.repository = repository
+        self.interval_seconds = interval_seconds or max(
+            1.0,
+            LEASE_DURATION.total_seconds() / 3,
+        )
+        self._stop = Event()
+        self._failure: Exception | None = None
+        self._thread = Thread(
+            target=self._run,
+            name=f"dataset-lease-{repository.provider_mode}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=max(1.0, self.interval_seconds + 1.0))
+
+    def raise_if_failed(self) -> None:
+        if self._failure is not None:
+            raise RuntimeError(
+                f"dataset lease heartbeat failed: {self._failure}"
+            ) from self._failure
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            try:
+                self.repository.renew_dataset_lease()
+            except Exception:
+                try:
+                    # The same active run may reacquire its own expired lease.
+                    self.repository.acquire_dataset_lease()
+                except Exception as reacquire_error:
+                    self._failure = reacquire_error
+                    return
 
 
 class WalkForwardSelection(BaseModel):
@@ -205,6 +252,8 @@ def run_full_market_walk_forward_selection(
         raise RuntimeError("dataset revision changed while acquiring replay lease")
     market_provider = ReplayMarketDataProvider(owner_repository, revision)
     strategy_provider = ReplayStrategyDataProvider(owner_repository, revision)
+    lease_heartbeat = _DatasetLeaseHeartbeat(owner_repository)
+    lease_heartbeat.start()
     snapshots: list[WalkForwardSnapshot] = []
     eligible_universes: list[tuple[date, list[str]]] = []
     scan_errors: list[str] = []
@@ -221,6 +270,7 @@ def run_full_market_walk_forward_selection(
             total_snapshots=len(sessions),
         )
         for index, decision_date in enumerate(sessions, start=1):
+            lease_heartbeat.raise_if_failed()
             owner_repository.renew_dataset_lease()
             members = owner_repository.universe_members_on(decision_date, revision)
             if not members:
@@ -288,6 +338,7 @@ def run_full_market_walk_forward_selection(
                     start=window_start,
                     end=decision_date,
                 )
+                lease_heartbeat.raise_if_failed()
                 scan_errors.extend(item.reason for item in scan.items if item.status == "error")
                 selections = [
                     _selection(card)
@@ -321,6 +372,7 @@ def run_full_market_walk_forward_selection(
             processed_snapshots=len(snapshots),
             total_snapshots=len(sessions),
         )
+        lease_heartbeat.raise_if_failed()
         execution_resolver = VersionedAshareExecutionResolver(
             owner_repository,
             dataset_revision=revision,
@@ -373,7 +425,9 @@ def run_full_market_walk_forward_selection(
             top_10_return=top_10_metrics.total_return_pct,
             eligible_universes=eligible_universes,
         )
+        lease_heartbeat.raise_if_failed()
     finally:
+        lease_heartbeat.stop()
         owner_repository.release_dataset_lease()
     digest = _selection_digest(
         snapshots,

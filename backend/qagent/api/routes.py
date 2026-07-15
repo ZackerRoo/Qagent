@@ -415,6 +415,55 @@ def get_walk_forward_job(job_id: str) -> dict[str, object]:
     return _walk_forward_job_payload(job)
 
 
+@router.post("/walk-forward/jobs/{job_id}/retry")
+def retry_walk_forward_job(job_id: str) -> dict[str, object]:
+    repo = _repo()
+    job = repo.get_walk_forward_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="walk-forward job not found")
+    if job.status in {"queued", "running"}:
+        _submit_walk_forward_job(job.job_id)
+        return _walk_forward_job_payload(job)
+    if job.status not in {"failed", "cancelled"}:
+        raise HTTPException(
+            status_code=409,
+            detail=f"walk-forward job cannot resume from {job.status}",
+        )
+    revision = ReplayEvidenceRepository(
+        repo.session_factory,
+        job.provider,
+    ).current_revision()
+    if revision != job.dataset_revision:
+        raise HTTPException(
+            status_code=409,
+            detail="historical dataset revision changed; start a new validation job",
+        )
+    current_manifest = build_walk_forward_experiment_manifest(
+        provider_mode=job.provider,
+        dataset_revision=job.dataset_revision,
+        start_date=job.start_date,
+        end_date=job.end_date,
+        rebalance_step_sessions=job.rebalance_step_sessions,
+        lookback_days=job.lookback_days,
+    )
+    if (
+        current_manifest.experiment_digest
+        != job.experiment_manifest.get("experiment_digest")
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="walk-forward experiment definition changed; start a new validation job",
+        )
+    resumed = repo.update_walk_forward_job(
+        job.job_id,
+        status="queued",
+        phase="queued",
+        clear_terminal_state=True,
+    )
+    _submit_walk_forward_job(resumed.job_id)
+    return _walk_forward_job_payload(resumed)
+
+
 @router.get("/walk-forward/runs")
 def list_walk_forward_runs(
     provider: str = "free",
