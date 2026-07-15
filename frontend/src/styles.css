@@ -13135,6 +13135,22 @@ td {
   color: var(--terminal-cyan);
 }
 
+.walk-forward-metric-stack {
+  min-width: 88px;
+}
+
+.walk-forward-metric-stack > span,
+.walk-forward-metric-stack > small {
+  display: block;
+}
+
+.walk-forward-metric-stack > small {
+  margin-top: 3px;
+  color: var(--terminal-muted-2);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
 .status.evidence-increase { color: var(--terminal-green); }
 .status.evidence-reduce,
 .status.evidence-disable { color: var(--terminal-red); }

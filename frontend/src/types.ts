@@ -3028,6 +3028,15 @@ export type WalkForwardEvidenceMetric = {
   profit_factor: number | null;
   max_consecutive_losses: number;
   out_of_sample_verdict: string;
+  statistical_method?: string;
+  statistical_sample_count?: number;
+  statistical_cluster_count?: number;
+  confidence_low_pct?: number | null;
+  confidence_high_pct?: number | null;
+  positive_edge_p_value?: number | null;
+  negative_edge_p_value?: number | null;
+  false_discovery_rate?: number | null;
+  statistical_verdict?: string;
   action: string;
   suggested_weight_delta: number;
   reason: string;

@@ -15,6 +15,8 @@ const checks = [
   ["history renders portfolio validation visuals", files.history.includes("PortfolioBacktestVisuals")],
   ["history renders parameter sensitivity sheet", files.history.includes("ParameterSensitivityPanel")],
   ["history renders temporal out-of-sample validation", files.history.includes("TemporalValidationPanel")],
+  ["history renders clustered statistical validation", files.history.includes("统计检验") && files.history.includes("statistical_cluster_count")],
+  ["history renders false discovery control", files.history.includes("false_discovery_rate") && files.history.includes("FDR")],
   ["history reads temporal validation API evidence", files.history.includes("backtest.temporal_validation")],
   ["history renders factor tear sheet", files.history.includes("FactorTearSheet")],
   ["history renders performance tear sheet", files.history.includes("PerformanceTearSheet")],

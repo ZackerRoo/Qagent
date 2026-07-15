@@ -188,26 +188,28 @@ Package Qagent as a reliable research preview with explicit limitations and repe
 ### What's done
 
 - Historical backfill and Walk-forward jobs persist in SQLite, expose phase progress, resume from checkpoints, and run outside synchronous page requests.
-- The full-A-share backfill for 2021-11-01 through 2025-12-31 is actively processing 6,706 instruments. At this audit it had processed 4,669 instruments; 1,325 unresolved price fetches remained retryable and zero were classified as permanent failures.
+- The full-A-share backfill for 2021-11-01 through 2025-12-31 completed all 6,706 instruments with 6,685 price successes, 21 permanent no-bar results, 4,724,724 stored rows, 99.80% bar coverage, and 99.76% adjustment coverage. The job remains labelled `succeeded_with_errors` because uncovered evidence is preserved rather than hidden.
 - Historical fundamentals use conservative point-in-time availability dates and cached unadjusted bars to derive market cap, PE/PS, growth, margin, and ROE snapshots without one request per report date.
 - Walk-forward replay now prefetches rolling cross-sectional bars and fundamentals, avoiding per-instrument SQLite scans during each rebalance.
 - Walk-forward jobs only reuse an active job when dataset revision, date range, rebalance interval, lookback, and experiment digest all match. Distinct experiments queue sequentially, every unfinished job is restored after restart, and stale code/strategy/rule manifests are rejected.
 - Completed runs only satisfy automatic validation when their experiment digest matches the current code, strategy registry, execution rules, parameters, and dataset revision.
 - A real three-year pilot on dataset revision 40 remains available: 146 snapshots, 328 Top-5 trades, and 612 Top-10 trades. Its 0.33% cross-sectional evidence coverage keeps it labelled as a pilot, not validated full-market evidence.
+- The versioned full-market Walk-forward experiment on dataset revision 8,939 is running from persisted checkpoints. At this audit it had completed 32 of 203 rebalance snapshots through 2022-06-22 without an error.
+- New Walk-forward experiments treat each signal date as the independent statistical unit, use date-cluster Bootstrap confidence intervals and seeded sign-flip tests, and apply Benjamini-Hochberg false-discovery-rate control before any positive evidence can request a weight increase. The already-running experiment remains pinned to its original manifest and code revision.
 - Paper trading is active with A-share sessions, T+1, costs, slippage, candidate replacement, five validation slots, and restart-safe scheduling. Current evidence is negative and remains visible: 23 eligible samples, 10 triggered, 9 stopped, 9 missed entries, 0% closed win rate, and -4.55% account return as of 2026-07-14.
 - Coverage reporting is listing-aware: post-start IPOs are not penalized for impossible pre-listing fundamentals or universe membership.
-- Full verification passes with 571 backend tests, Ruff, and the frontend production build.
+- Full verification passes with 578 backend tests, Ruff, all 12 frontend contract checks, and the frontend production build.
 - TickFlow Free daily fallback preserves raw and forward-adjusted price provenance, remains disabled for minute fills, and passed a live no-key stock/index smoke test.
 
 ### What's next
 
-- Let the current full-market backfill finish its primary and retry phases, then inspect the generated coverage manifest instead of assuming provider success.
-- Run the versioned full-market Walk-forward experiment only if market, adjustment, tradability, universe, fundamentals, and four benchmark gates pass.
+- Let the current versioned full-market Walk-forward experiment finish, then inspect its market, adjustment, tradability, universe, fundamentals, benchmark, clustered-significance, and FDR gates instead of promoting a strategy from headline return alone.
+- Resolve or explicitly accept the remaining coverage gaps: 21 no-bar instruments, 170 delisted instruments without terminal settlements, partial historical benchmark membership coverage, and limited point-in-time financial snapshots.
 - Publish negative as well as positive out-of-sample results, including costs, drawdown, benchmark excess, and regime attribution; do not increase strategy weights before the release gate passes.
 - Continue forward paper evidence to the 20-, 40-, and 60-trading-day checkpoints while preserving the current losses and missed entries as calibration evidence.
 
 ### Any blockers
 
-- No software blocker is preventing the current backfill or paper scheduler from running.
-- Free providers remain operationally unreliable. Retryable fetch failures, benchmark availability, historical delist settlement evidence, and true point-in-time corporate metadata must be measured by the final manifest.
+- No software blocker is preventing the current Walk-forward experiment or paper scheduler from running.
+- Free providers remain operationally unreliable. The final backfill manifest confirms incomplete historical delist settlements, partial benchmark membership history, and limited true point-in-time corporate metadata even though price coverage is high.
 - The product is not ready for real-money use: full-market Walk-forward evidence has not passed the release gates and current paper evidence is loss-making with an immature sample.

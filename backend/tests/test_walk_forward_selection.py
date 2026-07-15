@@ -309,6 +309,7 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     )
     assert first.strategy_validation.status == "insufficient"
     assert {item.key for item in first.strategy_validation.criteria} == {
+        "statistical_control",
         "market_coverage",
         "fundamental_coverage",
         "out_of_sample_count",

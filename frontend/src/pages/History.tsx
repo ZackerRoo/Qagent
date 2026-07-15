@@ -1625,6 +1625,12 @@ function WalkForwardStrategyGate({
     rejected: zh ? "未通过" : "Rejected",
     insufficient: zh ? "证据不足" : "Insufficient",
   } as Record<string, string>)[status] ?? status;
+  const statisticalLabel = (status?: string) => ({
+    positive: zh ? "显著为正" : "Positive",
+    negative: zh ? "显著为负" : "Negative",
+    inconclusive: zh ? "未确认" : "Inconclusive",
+    insufficient: zh ? "独立样本不足" : "Insufficient",
+  } as Record<string, string>)[status ?? ""] ?? (zh ? "待检验" : "Pending");
   const tables = [
     { title: zh ? "策略准入" : "Strategy admission", rows: center.strategies },
     { title: zh ? "因子准入" : "Factor admission", rows: center.factors },
@@ -1660,6 +1666,7 @@ function WalkForwardStrategyGate({
                 <tr>
                   <th>{zh ? "名称" : "Name"}</th>
                   <th>{zh ? "样本外" : "OOS"}</th>
+                  <th>{zh ? "统计检验" : "Inference"}</th>
                   <th>{zh ? "胜率" : "Win"}</th>
                   <th>{zh ? "均值" : "Average"}</th>
                   <th>PF</th>
@@ -1670,7 +1677,18 @@ function WalkForwardStrategyGate({
                 {table.rows.slice(0, 8).map((item) => (
                   <tr key={`${item.dimension}:${item.key}`} title={item.reason}>
                     <td>{item.label}</td>
-                    <td>{item.out_of_sample_count}/30</td>
+                    <td className="walk-forward-metric-stack">
+                      <span>{item.out_of_sample_count}/30</span>
+                      {typeof item.statistical_cluster_count === "number" ? (
+                        <small>{item.statistical_cluster_count} {zh ? "个调仓日" : "rebalance dates"}</small>
+                      ) : null}
+                    </td>
+                    <td className="walk-forward-metric-stack">
+                      <span>{statisticalLabel(item.statistical_verdict)}</span>
+                      {item.false_discovery_rate != null ? (
+                        <small>FDR {formatRatio(item.false_discovery_rate)}</small>
+                      ) : null}
+                    </td>
                     <td>{formatRatio(item.win_rate)}</td>
                     <td>{formatNumber(item.average_return_pct, "%")}</td>
                     <td>{formatMultiple(item.profit_factor)}</td>

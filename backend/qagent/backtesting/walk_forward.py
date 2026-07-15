@@ -26,6 +26,10 @@ from qagent.backtesting.replay_provider import (
     ReplayMarketDataProvider,
     ReplayStrategyDataProvider,
 )
+from qagent.backtesting.statistical_validation import (
+    benjamini_hochberg,
+    clustered_return_inference,
+)
 from qagent.backtesting.temporal_validation import (
     TemporalValidationResult,
     build_temporal_validation,
@@ -133,6 +137,15 @@ class WalkForwardEvidenceMetric(BaseModel):
     profit_factor: float | None
     max_consecutive_losses: int
     out_of_sample_verdict: str
+    statistical_method: str = "signal_date_cluster_bootstrap_sign_flip"
+    statistical_sample_count: int = 0
+    statistical_cluster_count: int = 0
+    confidence_low_pct: float | None = None
+    confidence_high_pct: float | None = None
+    positive_edge_p_value: float | None = None
+    negative_edge_p_value: float | None = None
+    false_discovery_rate: float | None = None
+    statistical_verdict: str = "insufficient"
     action: str
     suggested_weight_delta: float
     reason: str
@@ -429,14 +442,6 @@ def run_full_market_walk_forward_selection(
     finally:
         lease_heartbeat.stop()
         owner_repository.release_dataset_lease()
-    digest = _selection_digest(
-        snapshots,
-        revision,
-        top_5_portfolio,
-        top_10_portfolio,
-        benchmarks,
-        cost_sensitivity,
-    )
     coverage = _cross_section_coverage(snapshots)
     fundamental_coverage = _fundamental_coverage(snapshots)
     market_coverage_gate = (
@@ -458,6 +463,15 @@ def run_full_market_walk_forward_selection(
         market_coverage_ratio=coverage["ratio"],
         fundamental_coverage_ratio=fundamental_coverage,
         metrics=top_5_metrics,
+    )
+    digest = _selection_digest(
+        snapshots,
+        revision,
+        top_5_portfolio,
+        top_10_portfolio,
+        benchmarks,
+        cost_sensitivity,
+        strategy_validation,
     )
     result = WalkForwardSelectionResult(
         owner_run_id=owner_run_id,
@@ -542,6 +556,11 @@ def run_full_market_walk_forward_selection(
                 strategy_provider.query_count
             ),
             "walk_forward_release_gate": strategy_validation.status,
+            "walk_forward_statistical_unit": "signal_date_cluster",
+            "walk_forward_statistical_test": "cluster_bootstrap_sign_flip",
+            "walk_forward_multiple_testing": "benjamini_hochberg",
+            "walk_forward_significance_level": "0.05",
+            "walk_forward_false_discovery_rate": "0.10",
             "walk_forward_enabled_strategies": str(
                 sum(item.action == "increase" for item in strategy_validation.strategies)
             ),
@@ -647,6 +666,7 @@ def _build_strategy_validation_center(
         _walk_forward_evidence_metric("factor", key, trades)
         for key, trades in factor_groups.items()
     ]
+    _apply_multiple_testing_control([*strategies, *factors])
     strategies.sort(key=_evidence_sort_key)
     factors.sort(key=_evidence_sort_key)
 
@@ -660,6 +680,14 @@ def _build_strategy_validation_center(
     )
     oos = temporal_validation.out_of_sample
     criteria = [
+        _gate_criterion(
+            key="statistical_control",
+            label="统计显著性控制",
+            ready=True,
+            insufficient=False,
+            value="日期聚类 + FDR",
+            requirement="聚类检验并控制多重比较",
+        ),
         _gate_criterion(
             key="market_coverage",
             label="历史市场覆盖",
@@ -775,33 +803,45 @@ def _walk_forward_evidence_metric(
     validation = _trade_temporal_validation(trades)
     oos = validation.out_of_sample
     oos_count = oos.sample_count if oos else 0
+    oos_trades = [
+        trade
+        for trade in trades
+        if oos is not None and oos.start_date <= trade.signal_date <= oos.end_date
+    ]
+    inference = clustered_return_inference(
+        [(trade.signal_date, float(trade.return_pct)) for trade in oos_trades],
+        seed=_stable_inference_seed(dimension, key),
+    )
     wins = [value for value in returns if value > 0]
     losses = [value for value in returns if value < 0]
     profit_factor = round(sum(wins) / abs(sum(losses)), 4) if wins and losses else None
     average_return = round(statistics.mean(returns), 4) if returns else None
     win_rate = round(len(wins) / len(returns), 4) if returns else None
-    if oos_count < 30:
+    if oos_count < 30 or inference.verdict == "insufficient":
         action = "observe"
         delta = 0.0
-        reason = f"样本外只有 {oos_count} 笔，未达到 30 笔准入门槛。"
-    elif validation.verdict == "positive" and (oos.avg_return_pct or 0) > 0:
+        reason = (
+            f"样本外 {oos_count} 笔、{inference.cluster_count} 个独立调仓日，"
+            "未达到 30 笔且至少 10 个调仓日的准入门槛。"
+        )
+    elif inference.verdict == "positive":
         action = "increase"
         delta = 0.04
-        reason = "样本外均值为正且置信区间不跨 0，可小幅提高权重。"
+        reason = "样本外日期聚类置信区间为正，待通过多重检验后再提高权重。"
+    elif inference.verdict == "negative":
+        action = "disable"
+        delta = -0.10
+        reason = "样本外日期聚类结果显著为负，停止进入可买候选，等待重新验证。"
     elif validation.verdict == "negative" or (
         oos.avg_return_pct is not None and oos.avg_return_pct <= -1
     ):
-        action = "disable"
-        delta = -0.10
-        reason = "样本外表现为负，停止进入可买候选，等待重新验证。"
-    elif (average_return or 0) <= 0 or (profit_factor is not None and profit_factor < 1):
         action = "reduce"
         delta = -0.03
-        reason = "总体均值或利润因子没有优势，降低权重继续观察。"
+        reason = "样本外均值偏弱，但聚类检验尚未确认显著为负，先降权观察。"
     else:
         action = "maintain"
         delta = 0.0
-        reason = "历史结果尚未形成显著优势或劣势，保持当前权重。"
+        reason = "样本外聚类结果尚未形成显著优势或劣势，保持当前权重。"
     return WalkForwardEvidenceMetric(
         dimension=dimension,
         key=key,
@@ -814,10 +854,47 @@ def _walk_forward_evidence_metric(
         profit_factor=profit_factor,
         max_consecutive_losses=_max_consecutive_losses(returns),
         out_of_sample_verdict=validation.verdict,
+        statistical_method=inference.method,
+        statistical_sample_count=inference.sample_count,
+        statistical_cluster_count=inference.cluster_count,
+        confidence_low_pct=inference.confidence_low_pct,
+        confidence_high_pct=inference.confidence_high_pct,
+        positive_edge_p_value=inference.positive_edge_p_value,
+        negative_edge_p_value=inference.negative_edge_p_value,
+        statistical_verdict=inference.verdict,
         action=action,
         suggested_weight_delta=delta,
         reason=reason,
     )
+
+
+def _apply_multiple_testing_control(metrics: list[WalkForwardEvidenceMetric]) -> None:
+    adjusted = benjamini_hochberg(
+        [
+            item.positive_edge_p_value
+            if item.statistical_verdict != "insufficient"
+            else None
+            for item in metrics
+        ]
+    )
+    for metric, false_discovery_rate in zip(metrics, adjusted, strict=True):
+        metric.false_discovery_rate = false_discovery_rate
+        if metric.action != "increase":
+            continue
+        if false_discovery_rate is not None and false_discovery_rate <= 0.10:
+            metric.reason = (
+                "样本外日期聚类结果为正，且多重检验后的 FDR 不高于 10%，"
+                "可在整体上线门禁通过后小幅提高权重。"
+            )
+            continue
+        metric.action = "observe"
+        metric.suggested_weight_delta = 0.0
+        metric.reason = "局部结果为正，但未通过 10% FDR 多重检验，仅观察。"
+
+
+def _stable_inference_seed(dimension: str, key: str) -> int:
+    payload = f"{dimension}:{key}".encode("utf-8")
+    return int.from_bytes(hashlib.sha256(payload).digest()[:4], "big")
 
 
 def _gate_criterion(
@@ -941,6 +1018,7 @@ def _selection_digest(
     top_10_portfolio: PortfolioBacktestResult,
     benchmarks: list[WalkForwardBenchmarkComparison],
     cost_sensitivity: list[WalkForwardCostScenario],
+    strategy_validation: WalkForwardValidationCenter,
 ) -> str:
     payload = {
         "dataset_revision": revision,
@@ -955,6 +1033,7 @@ def _selection_digest(
         ).model_dump(mode="json"),
         "benchmarks": [item.model_dump(mode="json") for item in benchmarks],
         "cost_sensitivity": [item.model_dump(mode="json") for item in cost_sensitivity],
+        "strategy_validation": strategy_validation.model_dump(mode="json"),
     }
     encoded = json.dumps(
         payload,
