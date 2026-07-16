@@ -1,5 +1,6 @@
 from datetime import date, timedelta
 from decimal import Decimal
+import math
 
 import pandas as pd
 from pydantic import BaseModel
@@ -12,25 +13,14 @@ def compute_forward_returns(
     signal_date: date,
     horizons: tuple[int, ...] = (1, 5, 10, 20, 60),
 ) -> dict[str, float | None]:
-    ordered = bars.sort_values("trade_date").reset_index(drop=True)
-    matches = ordered.index[ordered["trade_date"] == signal_date].tolist()
-    if not matches:
-        raise ValueError("signal_date not found in bars")
-
-    base_index = matches[0]
-    base_close = float(ordered.loc[base_index, "close"])
-    result: dict[str, float | None] = {}
-
-    for horizon in horizons:
-        target_index = base_index + horizon
-        key = f"return_{horizon}d"
-        if target_index >= len(ordered):
-            result[key] = None
-        else:
-            future_close = float(ordered.loc[target_index, "close"])
-            result[key] = round((future_close / base_close - 1) * 100, 4)
-
-    return result
+    ordered, base_index, issue = _prepare_outcome_bars(
+        bars,
+        signal_date=signal_date,
+        max_horizon=max(horizons, default=0),
+    )
+    if issue:
+        return {f"return_{horizon}d": None for horizon in horizons}
+    return _forward_returns_from_ordered(ordered, base_index, horizons)
 
 
 class OpportunityOutcome(BaseModel):
@@ -51,6 +41,7 @@ class OpportunityOutcome(BaseModel):
     trigger_price: Decimal | None = None
     initial_stop: Decimal | None = None
     target_1: Decimal | None = None
+    data_quality_issue: str | None = None
 
 
 class StrategyPerformance(BaseModel):
@@ -127,24 +118,28 @@ def compute_opportunity_outcome(
     if snapshot.signal_date is None or bars.empty:
         return _pending_outcome(snapshot)
 
-    ordered = bars.sort_values("trade_date").reset_index(drop=True)
-    matches = ordered.index[ordered["trade_date"] == snapshot.signal_date].tolist()
-    if not matches:
+    try:
+        ordered, base_index, issue = _prepare_outcome_bars(
+            bars,
+            signal_date=snapshot.signal_date,
+            anchor_price=snapshot.trigger_price or snapshot.latest_close,
+            max_horizon=max(horizons),
+        )
+    except ValueError:
         return _pending_outcome(snapshot)
-
-    base_index = matches[0]
+    if issue:
+        return _pending_outcome(snapshot, data_quality_issue=issue)
     max_horizon = max(horizons)
     future = ordered.iloc[base_index + 1 : min(base_index + max_horizon + 1, len(ordered))]
     if future.empty:
         return _pending_outcome(snapshot)
 
-    returns = compute_forward_returns(ordered, snapshot.signal_date, horizons)
+    returns = _forward_returns_from_ordered(ordered, base_index, horizons)
     base_close = float(ordered.loc[base_index, "close"])
     max_drawdown_pct = round((float(future["low"].min()) / base_close - 1) * 100, 4)
     max_runup_pct = round((float(future["high"].max()) / base_close - 1) * 100, 4)
-    triggered = (
-        snapshot.trigger_price is not None
-        and bool((future["high"] >= float(snapshot.trigger_price)).any())
+    triggered = snapshot.trigger_price is not None and bool(
+        (future["high"] >= float(snapshot.trigger_price)).any()
     )
     target_hit = snapshot.target_1 is not None and bool(
         (future["high"] >= float(snapshot.target_1)).any()
@@ -175,7 +170,11 @@ def compute_opportunity_outcome(
     )
 
 
-def _pending_outcome(snapshot: OpportunitySnapshotRecord) -> OpportunityOutcome:
+def _pending_outcome(
+    snapshot: OpportunitySnapshotRecord,
+    *,
+    data_quality_issue: str | None = None,
+) -> OpportunityOutcome:
     return OpportunityOutcome(
         snapshot_id=snapshot.snapshot_id,
         run_id=snapshot.run_id,
@@ -188,7 +187,96 @@ def _pending_outcome(snapshot: OpportunitySnapshotRecord) -> OpportunityOutcome:
         trigger_price=snapshot.trigger_price,
         initial_stop=snapshot.initial_stop,
         target_1=snapshot.target_1,
+        data_quality_issue=data_quality_issue,
     )
+
+
+def _prepare_outcome_bars(
+    bars: pd.DataFrame,
+    *,
+    signal_date: date,
+    anchor_price: Decimal | None = None,
+    max_horizon: int,
+) -> tuple[pd.DataFrame, int, str | None]:
+    ordered = bars.sort_values("trade_date").reset_index(drop=True).copy()
+    matches = ordered.index[ordered["trade_date"] == signal_date].tolist()
+    if not matches:
+        raise ValueError("signal_date not found in bars")
+    base_index = matches[0]
+
+    if "adjusted_close" in ordered.columns:
+        adjusted_signal = _positive_float(ordered.loc[base_index, "adjusted_close"])
+        raw_signal = _positive_float(ordered.loc[base_index, "close"])
+        if adjusted_signal is not None:
+            scale = _adjusted_price_scale(
+                raw_signal=raw_signal,
+                adjusted_signal=adjusted_signal,
+                anchor_price=anchor_price,
+            )
+            adjusted_rows = ordered["adjusted_close"].notna()
+            for column in ("open", "high", "low", "close"):
+                adjusted_column = f"adjusted_{column}"
+                if adjusted_column in ordered.columns:
+                    values = ordered[adjusted_column]
+                elif column == "close":
+                    values = ordered["adjusted_close"]
+                elif "adjustment_factor" in ordered.columns:
+                    values = ordered[column] * ordered["adjustment_factor"]
+                else:
+                    continue
+                usable = adjusted_rows & values.notna()
+                ordered.loc[usable, column] = values.loc[usable] * scale
+
+    segment_end = min(base_index + max(max_horizon, 1) + 1, len(ordered))
+    segment = ordered.iloc[base_index:segment_end]
+    closes = segment["close"].astype(float)
+    if len(closes) >= 2 and bool(closes.pct_change().abs().gt(0.60).any()):
+        return ordered, base_index, "price_discontinuity"
+    return ordered, base_index, None
+
+
+def _adjusted_price_scale(
+    *,
+    raw_signal: float | None,
+    adjusted_signal: float,
+    anchor_price: Decimal | None,
+) -> float:
+    if raw_signal is None or anchor_price is None:
+        return 1.0
+    anchor = _positive_float(anchor_price)
+    if anchor is None:
+        return 1.0
+    raw_gap = abs(math.log(anchor / raw_signal))
+    adjusted_gap = abs(math.log(anchor / adjusted_signal))
+    return raw_signal / adjusted_signal if raw_gap <= adjusted_gap else 1.0
+
+
+def _positive_float(value) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric) or numeric <= 0:
+        return None
+    return numeric
+
+
+def _forward_returns_from_ordered(
+    ordered: pd.DataFrame,
+    base_index: int,
+    horizons: tuple[int, ...],
+) -> dict[str, float | None]:
+    base_close = float(ordered.loc[base_index, "close"])
+    result: dict[str, float | None] = {}
+    for horizon in horizons:
+        target_index = base_index + horizon
+        key = f"return_{horizon}d"
+        if target_index >= len(ordered):
+            result[key] = None
+        else:
+            future_close = float(ordered.loc[target_index, "close"])
+            result[key] = round((future_close / base_close - 1) * 100, 4)
+    return result
 
 
 def _outcome_status(
@@ -244,7 +332,9 @@ def summarize_strategy_performance(
                 target_hit_count=target_hit_count,
                 stopped_count=sum(1 for item in completed if item.outcome_status == "stopped"),
                 target_hit_rate=_ratio(target_hit_count, len(completed)),
-                positive_rate_10d=_ratio(sum(1 for value in return_10d if value > 0), len(return_10d)),
+                positive_rate_10d=_ratio(
+                    sum(1 for value in return_10d if value > 0), len(return_10d)
+                ),
                 avg_return_5d=_average(return_5d),
                 avg_return_10d=_average(return_10d),
                 avg_return_20d=_average(return_20d),
@@ -252,7 +342,9 @@ def summarize_strategy_performance(
                 max_runup_pct=max(runups) if runups else None,
             )
         )
-    return sorted(rows, key=lambda item: (item.target_hit_rate or 0, item.sample_count), reverse=True)
+    return sorted(
+        rows, key=lambda item: (item.target_hit_rate or 0, item.sample_count), reverse=True
+    )
 
 
 def diagnose_strategy_performance(
@@ -279,7 +371,9 @@ def summarize_recommendation_closure(
 ) -> RecommendationClosureSummary:
     dated = [outcome for outcome in outcomes if outcome.signal_date is not None]
     if as_of is None:
-        as_of = max((outcome.signal_date for outcome in dated if outcome.signal_date), default=date.today())
+        as_of = max(
+            (outcome.signal_date for outcome in dated if outcome.signal_date), default=date.today()
+        )
 
     sorted_outcomes = sorted(
         dated,
@@ -300,7 +394,11 @@ def summarize_recommendation_closure(
         as_of=as_of,
         windows=[
             _summarize_closure_window(
-                [outcome for outcome in sorted_outcomes if _is_in_window(outcome, as_of, window_days)],
+                [
+                    outcome
+                    for outcome in sorted_outcomes
+                    if _is_in_window(outcome, as_of, window_days)
+                ],
                 window_days,
             )
             for window_days in windows
@@ -515,9 +613,8 @@ def _max_consecutive_losses(outcomes: list[OpportunityOutcome]) -> int:
     longest = 0
     current = 0
     for outcome in ordered:
-        is_loss = (
-            outcome.outcome_status == "stopped"
-            or (outcome.return_10d is not None and outcome.return_10d < 0)
+        is_loss = outcome.outcome_status == "stopped" or (
+            outcome.return_10d is not None and outcome.return_10d < 0
         )
         if is_loss:
             current += 1

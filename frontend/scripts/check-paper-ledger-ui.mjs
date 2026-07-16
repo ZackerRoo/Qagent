@@ -28,6 +28,8 @@ const checks = [
   ["styles include validation batches", files.styles.includes(".paper-validation-batches")],
   ["styles include validation credibility", files.styles.includes(".paper-validation-credibility")],
   ["portfolio loads paper ledger", files.portfolio.includes("fetchPaperLedger")],
+  ["portfolio refreshes paper runtime", files.portfolio.includes("PAPER_REFRESH_INTERVAL_MS")],
+  ["portfolio isolates partial refresh failures", files.portfolio.includes("Promise.allSettled")],
   ["portfolio renders equity curve", files.portfolio.includes("paper-ledger-curve")],
   ["portfolio renders return bars", files.portfolio.includes("paper-return-bars")],
   ["portfolio renders transaction ledger", files.portfolio.includes("PaperTransactionsPanel")],

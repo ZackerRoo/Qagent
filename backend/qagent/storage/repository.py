@@ -1074,9 +1074,11 @@ class QagentRepository:
         mode: str,
         symbols: list[str],
         result,
+        snapshot_items: list[object] | None = None,
     ) -> ScanRunRecord:
         run_id = f"scan-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
-        item_by_instrument = {item.instrument_id: item for item in result.items}
+        item_source = snapshot_items if snapshot_items is not None else result.items
+        item_by_instrument = {item.instrument_id: item for item in item_source}
         with self.session_factory() as session:
             run_row = ScanRunRow(
                 run_id=run_id,
@@ -1640,11 +1642,14 @@ class QagentRepository:
         instrument_id: str | None = None,
         limit: int = 50,
         provider: str | None = None,
+        require_signal_date: bool = False,
     ) -> list[OpportunitySnapshotRecord]:
         with self.session_factory() as session:
             query = session.query(OpportunitySnapshotRow)
             if instrument_id:
                 query = query.filter(OpportunitySnapshotRow.instrument_id == instrument_id)
+            if require_signal_date:
+                query = query.filter(OpportunitySnapshotRow.signal_date.isnot(None))
             if provider:
                 query = query.join(ScanRunRow, OpportunitySnapshotRow.run_id == ScanRunRow.run_id)
                 query = query.filter(ScanRunRow.provider == provider)

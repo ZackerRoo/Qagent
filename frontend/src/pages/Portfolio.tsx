@@ -63,6 +63,8 @@ const defaultPaperSessionForm: PaperSessionStartPayload = {
   take_profit_pct: "50",
 };
 
+const PAPER_REFRESH_INTERVAL_MS = 30_000;
+
 export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const { language, t } = useI18n();
   const [positions, setPositions] = useState<Position[]>([]);
@@ -83,16 +85,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [deletingPaperTradeId, setDeletingPaperTradeId] = useState("");
 
   async function load() {
-    const [
-      result,
-      paperResult,
-      paperSessionResult,
-      ledgerResult,
-      validationResult,
-      dailyReportResult,
-      candidatePoolResult,
-      dualTrackResult,
-    ] = await Promise.all([
+    const results = await Promise.allSettled([
       fetchPortfolio({ provider: dataMode }),
       fetchPaperTrades(dataMode),
       fetchPaperSession(dataMode),
@@ -102,21 +95,75 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchPaperCandidatePool(dataMode),
       fetchPaperDualTrack(dataMode),
     ]);
-    setPortfolio(result);
-    setPositions(result.positions);
-    setPaper(paperResult);
-    setPaperExecutionHealth(paperResult.data_health);
-    setPaperSession(paperSessionResult);
-    setPaperSessionForm(formFromPaperSession(paperSessionResult));
-    setLedger(ledgerResult);
-    setValidation(validationResult);
-    setDailyReport(dailyReportResult);
-    setCandidatePool(candidatePoolResult);
-    setDualTrack(dualTrackResult);
+    const [
+      result,
+      paperResult,
+      paperSessionResult,
+      ledgerResult,
+      validationResult,
+      dailyReportResult,
+      candidatePoolResult,
+      dualTrackResult,
+    ] = results;
+    if (result.status === "fulfilled") {
+      setPortfolio(result.value);
+      setPositions(result.value.positions);
+    }
+    if (paperResult.status === "fulfilled") {
+      setPaper(paperResult.value);
+      setPaperExecutionHealth(paperResult.value.data_health);
+    }
+    if (paperSessionResult.status === "fulfilled") {
+      setPaperSession(paperSessionResult.value);
+      setPaperSessionForm(formFromPaperSession(paperSessionResult.value));
+    }
+    if (ledgerResult.status === "fulfilled") setLedger(ledgerResult.value);
+    if (validationResult.status === "fulfilled") setValidation(validationResult.value);
+    if (dailyReportResult.status === "fulfilled") setDailyReport(dailyReportResult.value);
+    if (candidatePoolResult.status === "fulfilled") setCandidatePool(candidatePoolResult.value);
+    if (dualTrackResult.status === "fulfilled") setDualTrack(dualTrackResult.value);
+    const failed = results.filter((item) => item.status === "rejected");
+    if (failed.length) {
+      setPaperMessage(
+        language === "zh"
+          ? `部分模拟盘数据暂未更新（${failed.length} 项），其余数据已正常显示。`
+          : `${failed.length} paper-trading sections could not refresh; available data is still shown.`,
+      );
+    }
+  }
+
+  async function refreshPaperRuntime() {
+    const results = await Promise.allSettled([
+      fetchPaperTrades(dataMode),
+      fetchPaperLedger({ provider: dataMode }),
+      fetchPaperValidation(dataMode),
+      fetchPaperDailyReport(dataMode),
+      fetchPaperCandidatePool(dataMode),
+      fetchPaperDualTrack(dataMode),
+    ]);
+    const [paperResult, ledgerResult, validationResult, dailyReportResult, candidatePoolResult, dualTrackResult] = results;
+    if (paperResult.status === "fulfilled") {
+      setPaper(paperResult.value);
+      setPaperExecutionHealth(paperResult.value.data_health);
+    }
+    if (ledgerResult.status === "fulfilled") setLedger(ledgerResult.value);
+    if (validationResult.status === "fulfilled") setValidation(validationResult.value);
+    if (dailyReportResult.status === "fulfilled") setDailyReport(dailyReportResult.value);
+    if (candidatePoolResult.status === "fulfilled") setCandidatePool(candidatePoolResult.value);
+    if (dualTrackResult.status === "fulfilled") setDualTrack(dualTrackResult.value);
   }
 
   useEffect(() => {
     void load();
+    let refreshInFlight = false;
+    const refreshTimer = window.setInterval(() => {
+      if (refreshInFlight || document.visibilityState !== "visible") return;
+      refreshInFlight = true;
+      void refreshPaperRuntime().finally(() => {
+        refreshInFlight = false;
+      });
+    }, PAPER_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(refreshTimer);
   }, [dataMode]);
 
   async function submit() {

@@ -2102,6 +2102,17 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
         except Exception as exc:
             errors.append(f"alerts: {exc}")
 
+    # Seeding and price updates can change active capacity. Keep the gate that
+    # governed this cycle for auditability, then publish the post-cycle gate as
+    # the current state consumed by the dashboard and the next scheduler run.
+    applied_risk_gate_health = dict(risk_gate_health)
+    _, final_risk_gate_health = _paper_seed_risk_gate(paper_repo, mode)
+    if final_risk_gate_health != applied_risk_gate_health:
+        for key, value in applied_risk_gate_health.items():
+            suffix = key.removeprefix("paper_risk_gate_")
+            data_health[f"paper_risk_gate_applied_{suffix}"] = value
+    data_health.update(final_risk_gate_health)
+
     finished_at = datetime.now(timezone.utc)
     data_health.update(
         {
@@ -5707,10 +5718,11 @@ def outcomes(
 
 def _replay_outcomes(provider: str, instrument_id: str | None, limit: int):
     repo = _repo()
-    snapshots = repo.list_opportunity_snapshots(
+    snapshots, sample_selection = _validation_snapshots(
+        repo,
+        provider=provider,
         instrument_id=instrument_id,
         limit=limit,
-        provider=provider,
     )
     dated_snapshots = [snapshot for snapshot in snapshots if snapshot.signal_date is not None]
     if not dated_snapshots:
@@ -5720,16 +5732,13 @@ def _replay_outcomes(provider: str, instrument_id: str | None, limit: int):
             "snapshots": str(len(snapshots)),
             "outcomes": str(len(replayed)),
             "bar_window": "none",
+            "sample_selection": sample_selection,
         }
-    try:
-        market_provider = build_market_data_provider(provider)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
     instrument_ids = list(dict.fromkeys(snapshot.instrument_id for snapshot in dated_snapshots))
     start, end = _snapshot_replay_window(dated_snapshots)
-    all_bars = market_provider.get_daily_bars(
-        instrument_ids,
+    all_bars, bar_health = _validation_market_bars(
+        provider=provider,
+        instrument_ids=instrument_ids,
         start=start,
         end=end,
     )
@@ -5750,10 +5759,12 @@ def _replay_outcomes(provider: str, instrument_id: str | None, limit: int):
         "outcomes": str(len(replayed)),
         "bar_window": f"{start}:{end}",
         "bar_instruments": str(len(instrument_ids)),
+        "sample_selection": sample_selection,
+        **bar_health,
+        "invalid_price_outcomes": str(
+            sum(1 for outcome in replayed if outcome.data_quality_issue is not None)
+        ),
     }
-    provider_errors = getattr(market_provider, "last_errors", [])
-    if provider_errors:
-        data_health["errors"] = " | ".join(provider_errors[:3])
     return replayed, data_health
 
 
@@ -5864,10 +5875,11 @@ def _replay_snapshot_outcome_pairs(
     limit: int,
 ):
     repo = _repo()
-    snapshots = repo.list_opportunity_snapshots(
+    snapshots, sample_selection = _validation_snapshots(
+        repo,
+        provider=provider,
         instrument_id=instrument_id,
         limit=limit,
-        provider=provider,
     )
     dated_snapshots = [snapshot for snapshot in snapshots if snapshot.signal_date is not None]
     if not dated_snapshots:
@@ -5877,16 +5889,13 @@ def _replay_snapshot_outcome_pairs(
             "snapshots": str(len(snapshots)),
             "outcomes": str(len(pairs)),
             "bar_window": "none",
+            "sample_selection": sample_selection,
         }
-    try:
-        market_provider = build_market_data_provider(provider)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
     instrument_ids = list(dict.fromkeys(snapshot.instrument_id for snapshot in dated_snapshots))
     start, end = _snapshot_replay_window(dated_snapshots)
-    all_bars = market_provider.get_daily_bars(
-        instrument_ids,
+    all_bars, bar_health = _validation_market_bars(
+        provider=provider,
+        instrument_ids=instrument_ids,
         start=start,
         end=end,
     )
@@ -5907,11 +5916,74 @@ def _replay_snapshot_outcome_pairs(
         "outcomes": str(len(pairs)),
         "bar_window": f"{start}:{end}",
         "bar_instruments": str(len(instrument_ids)),
+        "sample_selection": sample_selection,
+        **bar_health,
+        "invalid_price_outcomes": str(
+            sum(1 for _, outcome in pairs if outcome.data_quality_issue is not None)
+        ),
+    }
+    return pairs, data_health
+
+
+def _validation_snapshots(
+    repo: QagentRepository,
+    *,
+    provider: str,
+    instrument_id: str | None,
+    limit: int,
+) -> tuple[list[OpportunitySnapshotRecord], str]:
+    if instrument_id:
+        return (
+            repo.list_opportunity_snapshots(
+                instrument_id=instrument_id,
+                limit=limit,
+                provider=provider,
+                require_signal_date=True,
+            ),
+            "dated_instrument_history",
+        )
+
+    # Validation needs independent recommendation dates, not hundreds of
+    # cards emitted by a single full-market scan. Five top-ranked names per
+    # signal day give the requested limit temporal breadth and exclude legacy
+    # snapshots that cannot be replayed because their signal date is missing.
+    end = _a_share_today() if provider.strip().lower() == "free" else date.today()
+    snapshots = repo.list_top_daily_opportunity_snapshots(
+        start=end - timedelta(days=730),
+        end=end,
+        top_n=5,
+        provider=provider,
+    )
+    return snapshots[: max(limit, 0)], "daily_top_5_dated"
+
+
+def _validation_market_bars(
+    *,
+    provider: str,
+    instrument_ids: list[str],
+    start: date,
+    end: date,
+):
+    mode = provider.strip().lower()
+    if mode == "free":
+        bars = _market_cache_repo().load_daily_bars(mode, instrument_ids, start, end)
+        return bars, {
+            "bar_source": "sqlite_market_cache",
+            "bar_rows": str(len(bars)),
+        }
+    try:
+        market_provider = build_market_data_provider(mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    bars = market_provider.get_daily_bars(instrument_ids, start=start, end=end)
+    health = {
+        "bar_source": getattr(market_provider, "name", mode),
+        "bar_rows": str(len(bars)),
     }
     provider_errors = getattr(market_provider, "last_errors", [])
     if provider_errors:
-        data_health["errors"] = " | ".join(provider_errors[:3])
-    return pairs, data_health
+        health["errors"] = " | ".join(provider_errors[:3])
+    return bars, health
 
 
 def _snapshot_replay_window(snapshots) -> tuple[date, date]:

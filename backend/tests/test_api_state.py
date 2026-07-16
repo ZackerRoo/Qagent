@@ -226,6 +226,27 @@ def test_recommendation_closure_api_summarizes_seeded_snapshots(tmp_path, monkey
                     created_at=now,
                 )
             )
+        session.add(
+            OpportunitySnapshotRow(
+                snapshot_id="scan-closure:legacy-undated",
+                run_id="scan-closure",
+                card_id="legacy-undated",
+                instrument_id="CN:000001",
+                market="CN",
+                status="setup_ready",
+                signal_date=None,
+                latest_close=Decimal("10.60"),
+                primary_strategy_id="breakout_volume_confirmation",
+                score=Decimal("0.99"),
+                strategy_score=Decimal("0.99"),
+                rank_score=Decimal("0.99"),
+                trigger_price=Decimal("10.60"),
+                initial_stop=Decimal("10.00"),
+                target_1=Decimal("11.00"),
+                card_json=json.dumps({"instrument_id": "CN:000001"}),
+                created_at=now,
+            )
+        )
         session.commit()
 
     client = TestClient(create_app())
@@ -244,6 +265,8 @@ def test_recommendation_closure_api_summarizes_seeded_snapshots(tmp_path, monkey
     assert len(closure["completed_outcomes"]) == 2
     assert closure["completed_outcomes"][0]["return_10d"] is not None
     assert closure["data_health"]["closure_windows"] == "30,60,90"
+    assert closure["data_health"]["sample_selection"] == "daily_top_5_dated"
+    assert closure["data_health"]["snapshots"] == "2"
 
 
 def test_recommendation_followthrough_api_returns_user_facing_health_center(

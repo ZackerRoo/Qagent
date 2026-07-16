@@ -248,6 +248,10 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     ranked_cards = sort_recommendation_cards(all_cards)
     visible_cards = ranked_cards[:top_cards_limit]
     visible_items = _visible_rejected_items(all_items, limit=500)
+    visible_card_instruments = {card.instrument_id for card in visible_cards}
+    snapshot_items = [
+        item for item in all_items if item.instrument_id in visible_card_instruments
+    ]
     sector_strength = _merge_sector_strength(sector_strength_batches)[:12]
     portfolio_plan = build_portfolio_plan(visible_cards)
     cache_key = _full_market_batch_cache_key(job.provider, job.include_etfs)
@@ -266,6 +270,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
             len([item for item in all_items if _is_rejected_item(item)])
         ),
         "full_market_items_returned": str(len(visible_items)),
+        "full_market_snapshot_items": str(len(snapshot_items)),
         "sector_strength": str(len(sector_strength)),
         "scanned": str(scanned_symbols),
         "cards": str(len(visible_cards)),
@@ -320,6 +325,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         mode="full_market_batch",
         symbols=job.symbols,
         result=DailyScanResult.model_validate(payload),
+        snapshot_items=snapshot_items,
     )
     repo.save_scan_result_cache(
         cache_key=cache_key,

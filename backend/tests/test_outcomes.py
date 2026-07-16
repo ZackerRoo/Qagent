@@ -1,6 +1,8 @@
 from datetime import date
 from decimal import Decimal
 
+import pandas as pd
+
 from qagent.monitoring.outcomes import (
     OpportunityOutcome,
     compute_forward_returns,
@@ -27,6 +29,54 @@ def test_compute_forward_returns_uses_none_when_horizon_unavailable():
     bars = provider.get_daily_bars(["US:TEST"], date(2026, 1, 1), date(2026, 3, 31))
     result = compute_forward_returns(bars, signal_date=bars["trade_date"].iloc[-1], horizons=(1,))
     assert result["return_1d"] is None
+
+
+def test_compute_forward_returns_normalizes_adjusted_split_prices():
+    dates = pd.bdate_range("2026-01-02", periods=7).date
+    bars = pd.DataFrame(
+        {
+            "trade_date": dates,
+            "open": [5.0, 5.1, 1.02, 1.03, 1.04, 1.05, 1.06],
+            "high": [5.1, 5.2, 1.03, 1.04, 1.05, 1.06, 1.07],
+            "low": [4.9, 5.0, 1.01, 1.02, 1.03, 1.04, 1.05],
+            "close": [5.0, 5.1, 1.02, 1.03, 1.04, 1.05, 1.06],
+            "adjusted_open": [1.0, 1.02, 1.02, 1.03, 1.04, 1.05, 1.06],
+            "adjusted_high": [1.02, 1.04, 1.03, 1.04, 1.05, 1.06, 1.07],
+            "adjusted_low": [0.98, 1.0, 1.01, 1.02, 1.03, 1.04, 1.05],
+            "adjusted_close": [1.0, 1.02, 1.02, 1.03, 1.04, 1.05, 1.06],
+            "adjustment_factor": [0.2, 0.2, 1.0, 1.0, 1.0, 1.0, 1.0],
+        }
+    )
+
+    result = compute_forward_returns(bars, signal_date=dates[1], horizons=(1, 5))
+
+    assert result["return_1d"] == 0.0
+    assert result["return_5d"] == 3.9216
+
+
+def test_compute_opportunity_outcome_rejects_impossible_price_discontinuity():
+    dates = pd.bdate_range("2026-01-02", periods=7).date
+    bars = pd.DataFrame(
+        {
+            "trade_date": dates,
+            "open": [1.0, 1.02, 3.0, 1.04, 1.05, 1.06, 1.07],
+            "high": [1.01, 1.03, 3.1, 1.05, 1.06, 1.07, 1.08],
+            "low": [0.99, 1.01, 2.9, 1.03, 1.04, 1.05, 1.06],
+            "close": [1.0, 1.02, 3.0, 1.04, 1.05, 1.06, 1.07],
+            "adjusted_close": [1.0, 1.02, 3.0, 1.04, 1.05, 1.06, 1.07],
+        }
+    )
+    snapshot = _snapshot(dates[0]).model_copy(
+        update={
+            "trigger_price": Decimal("1.00"),
+            "latest_close": Decimal("1.00"),
+        }
+    )
+
+    outcome = compute_opportunity_outcome(snapshot, bars, horizons=(5,))
+
+    assert outcome.outcome_status == "pending"
+    assert outcome.data_quality_issue == "price_discontinuity"
 
 
 def test_analyze_position_risk_inside_plan():

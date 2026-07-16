@@ -49,7 +49,6 @@ def test_paper_candidate_requires_latest_price_for_entry_validation():
         latest_close=None,
         card={},
     )
-
     assert (
         routes._paper_candidate_price_basis_is_consistent(
             snapshot,
@@ -57,6 +56,47 @@ def test_paper_candidate_requires_latest_price_for_entry_validation():
         )
         is False
     )
+
+
+def test_automation_cycle_publishes_post_cycle_risk_gate(monkeypatch):
+    paper_repo = SimpleNamespace(list_trades=lambda **_: [])
+    gates = iter(
+        [
+            (
+                False,
+                {
+                    "paper_risk_gate_action": "capacity_full",
+                    "paper_risk_gate_reason": "本轮开始时仓位已满",
+                    "paper_risk_gate_max_new_entries": "0",
+                },
+            ),
+            (
+                True,
+                {
+                    "paper_risk_gate_action": "throttle_new_entries",
+                    "paper_risk_gate_reason": "更新后释放一个名额",
+                    "paper_risk_gate_max_new_entries": "1",
+                },
+            ),
+        ]
+    )
+    monkeypatch.setattr(routes, "_repo", lambda: SimpleNamespace())
+    monkeypatch.setattr(routes, "_paper_repo", lambda: paper_repo)
+    monkeypatch.setattr(routes, "_paper_seed_risk_gate", lambda *_: next(gates))
+
+    result = routes._run_auto_processing_cycle(
+        AutoProcessingSettings(
+            run_scan=False,
+            seed_paper=False,
+            update_paper=False,
+            run_alerts=False,
+        )
+    )
+
+    assert result.data_health["paper_risk_gate_action"] == "throttle_new_entries"
+    assert result.data_health["paper_risk_gate_max_new_entries"] == "1"
+    assert result.data_health["paper_risk_gate_applied_action"] == "capacity_full"
+    assert result.data_health["paper_risk_gate_applied_max_new_entries"] == "0"
 
 
 def test_paper_candidate_recovers_latest_price_from_card():

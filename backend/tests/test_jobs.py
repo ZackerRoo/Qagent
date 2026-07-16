@@ -180,11 +180,21 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
     assert cached.payload["data_health"]["probability_calibration_cards"] == str(len(cached.payload["cards"]))
     assert cached.payload["sector_strength"]
     assert cached.payload["data_health"]["sector_strength"] == str(len(cached.payload["sector_strength"]))
+    assert cached.payload["data_health"]["full_market_snapshot_items"] == str(
+        len(cached.payload["cards"])
+    )
 
     runs = repo.list_scan_runs(provider="fixture", limit=10)
     assert len(runs) == 1
     assert runs[0].mode == "full_market_batch"
     assert runs[0].cards == len(cached.payload["cards"])
+    snapshots = repo.list_opportunity_snapshots(
+        provider="fixture",
+        limit=10,
+        require_signal_date=True,
+    )
+    assert len(snapshots) == len(cached.payload["cards"])
+    assert all(snapshot.latest_close is not None for snapshot in snapshots)
 
 
 def test_full_market_batch_job_caches_rejected_items_with_remediation(tmp_path, monkeypatch):
