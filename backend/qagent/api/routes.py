@@ -1,8 +1,9 @@
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import math
+from multiprocessing import get_context
 from threading import Lock
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -161,9 +162,9 @@ _task_executor = ThreadPoolExecutor(max_workers=2)
 _history_task_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="history-backfill")
 _historical_jobs_lock = Lock()
 _submitted_historical_jobs: set[str] = set()
-_walk_forward_task_executor = ThreadPoolExecutor(
+_walk_forward_task_executor = ProcessPoolExecutor(
     max_workers=1,
-    thread_name_prefix="walk-forward",
+    mp_context=get_context("spawn"),
 )
 _walk_forward_jobs_lock = Lock()
 _submitted_walk_forward_jobs: set[str] = set()
@@ -539,7 +540,14 @@ def _submit_walk_forward_job(job_id: str) -> None:
         if job_id in _submitted_walk_forward_jobs:
             return
         _submitted_walk_forward_jobs.add(job_id)
-    _walk_forward_task_executor.submit(_run_walk_forward_job_safely, job_id)
+    future = _walk_forward_task_executor.submit(_run_walk_forward_job_safely, job_id)
+    if future is not None and hasattr(future, "add_done_callback"):
+        future.add_done_callback(lambda _future: _release_walk_forward_submission(job_id))
+
+
+def _release_walk_forward_submission(job_id: str) -> None:
+    with _walk_forward_jobs_lock:
+        _submitted_walk_forward_jobs.discard(job_id)
 
 
 def _run_walk_forward_job_safely(job_id: str) -> None:
@@ -616,8 +624,7 @@ def _run_walk_forward_job_safely(job_id: str) -> None:
                 finished_at=datetime.now(timezone.utc),
             )
     finally:
-        with _walk_forward_jobs_lock:
-            _submitted_walk_forward_jobs.discard(job_id)
+        _release_walk_forward_submission(job_id)
 
 
 def _walk_forward_job_payload(job) -> dict[str, object]:

@@ -147,6 +147,28 @@ def test_walk_forward_restore_resubmits_persisted_job(tmp_path, monkeypatch):
     assert submitted[0][1] == (job.job_id,)
 
 
+def test_walk_forward_submission_is_released_when_worker_finishes(monkeypatch):
+    callbacks = []
+
+    class FakeFuture:
+        def add_done_callback(self, callback):
+            callbacks.append(callback)
+
+    class FakeExecutor:
+        def submit(self, _fn, *_args, **_kwargs):
+            return FakeFuture()
+
+    monkeypatch.setattr(routes, "_walk_forward_task_executor", FakeExecutor())
+    routes._submitted_walk_forward_jobs.clear()
+
+    routes._submit_walk_forward_job("walk-forward-process-test")
+
+    assert "walk-forward-process-test" in routes._submitted_walk_forward_jobs
+    assert len(callbacks) == 1
+    callbacks[0](None)
+    assert "walk-forward-process-test" not in routes._submitted_walk_forward_jobs
+
+
 def test_failed_walk_forward_job_retries_from_persisted_checkpoints(
     tmp_path,
     monkeypatch,
