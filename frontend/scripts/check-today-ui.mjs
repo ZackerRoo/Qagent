@@ -53,6 +53,10 @@ assert(today.includes("today-decision-page"), "Today page must expose the simpli
 assert(today.includes("TodayRouteCards"), "Today page must split deep analysis into destination shortcuts");
 assert(today.includes("TodayDecisionDesk"), "Today page must render a compact decision desk");
 assert(today.includes("DecisionAutomationCenterPanel"), "Today page must render the five-part decision automation center");
+assert(
+  decisionAutomation.includes("formatPercentagePoints(primaryWindow?.avg_return_10d)"),
+  "Recommendation average return must be rendered as percentage points",
+);
 assert(today.includes("TodayTradeTicket"), "Today page must render one selected opportunity ticket");
 assert(today.includes("TodayRecommendationKline"), "Today page must show the selected recommendation K-line on the home decision desk");
 assert(today.includes("fetchMarketBars"), "Today page must fetch market bars for the selected recommendation K-line");

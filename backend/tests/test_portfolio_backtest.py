@@ -4,7 +4,12 @@ from decimal import Decimal
 import pandas as pd
 
 from qagent.backtesting.engine import BacktestSignal
-from qagent.backtesting.portfolio import _candidate_from_signal, _size_trade, run_portfolio_backtest
+from qagent.backtesting.portfolio import (
+    _candidate_from_signal,
+    _size_trade,
+    run_portfolio_backtest,
+    run_signal_portfolio_backtest,
+)
 from qagent.backtesting.sensitivity import build_parameter_sensitivity
 from qagent.providers.fixtures import FixtureMarketDataProvider
 
@@ -196,6 +201,103 @@ def test_cn_portfolio_sizing_uses_round_lots():
 
     assert trade is not None
     assert trade.shares % Decimal("100") == 0
+
+
+def test_portfolio_marks_to_market_daily_and_captures_open_position_drawdown():
+    class DailyFrameProvider:
+        name = "daily-frame"
+
+        def __init__(self, frame):
+            self.frame = frame
+
+        def get_daily_bars(self, instrument_ids, start, end):
+            return self.frame.loc[
+                self.frame["instrument_id"].isin(instrument_ids)
+                & (self.frame["trade_date"] >= start)
+                & (self.frame["trade_date"] <= end)
+            ].copy()
+
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "US:TEST",
+                "trade_date": date(2026, 1, 1),
+                "open": 9,
+                "high": 9,
+                "low": 9,
+                "close": 9,
+                "volume": 10_000,
+            },
+            {
+                "instrument_id": "US:TEST",
+                "trade_date": date(2026, 1, 2),
+                "open": 10,
+                "high": 10.5,
+                "low": 9.5,
+                "close": 10,
+                "volume": 10_000,
+            },
+            {
+                "instrument_id": "US:TEST",
+                "trade_date": date(2026, 1, 5),
+                "open": 8,
+                "high": 8.5,
+                "low": 7,
+                "close": 8,
+                "volume": 10_000,
+            },
+            {
+                "instrument_id": "US:TEST",
+                "trade_date": date(2026, 1, 6),
+                "open": 12,
+                "high": 12,
+                "low": 11,
+                "close": 12,
+                "volume": 10_000,
+            },
+        ]
+    )
+    signal = BacktestSignal(
+        snapshot_id="daily-mark",
+        instrument_id="US:TEST",
+        signal_date=date(2026, 1, 1),
+        primary_strategy_id="trend_momentum_stage2",
+        status="setup_ready",
+        rank_score=Decimal("0.9"),
+        trigger_price=Decimal("10"),
+        initial_stop=Decimal("5"),
+        target_1=None,
+        outcome_status="pending",
+    )
+
+    result = run_signal_portfolio_backtest(
+        signals=[signal],
+        instrument_ids=["US:TEST"],
+        provider=DailyFrameProvider(bars),
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 6),
+        initial_capital=Decimal("10000"),
+        risk_per_trade_pct=Decimal("10"),
+        max_positions=1,
+        transaction_cost_bps=Decimal("0"),
+        slippage_bps=Decimal("0"),
+        max_holding_days=3,
+    )
+
+    points = {point.date: point for point in result.equity_curve}
+    drawdown = points[date(2026, 1, 5)]
+    assert [point.date for point in result.equity_curve] == list(bars["trade_date"])
+    assert all(
+        point.cash + point.market_value == point.equity
+        for point in result.equity_curve
+    )
+    assert drawdown.cash == Decimal("8000.00")
+    assert drawdown.market_value == Decimal("1600.00")
+    assert drawdown.equity == Decimal("9600.00")
+    assert drawdown.drawdown_pct == -4.0
+    assert result.summary.max_drawdown_pct == -4.0
+    assert result.summary.final_equity == Decimal("10400.00")
+    assert result.equity_curve[-1].market_value == Decimal("0.00")
 
 
 def test_parameter_sensitivity_scores_stop_target_and_holding_grid():

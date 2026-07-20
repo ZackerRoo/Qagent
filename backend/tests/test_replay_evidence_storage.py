@@ -1350,6 +1350,39 @@ def test_lease_renews_before_expiry(storage):
     assert renewed.lease_expires_at > lease.lease_expires_at
 
 
+def test_lease_maintenance_atomically_recovers_expired_owner(storage):
+    _, clock, statuses, make_repo = storage
+    statuses["run-a"] = "running"
+    repo = make_repo(owner_run_id="run-a")
+    lease = repo.acquire_dataset_lease()
+    clock.advance(timedelta(minutes=6))
+
+    maintained = repo.maintain_dataset_lease(expected_revision=lease.revision)
+
+    assert maintained.action == "expired_reacquired"
+    assert maintained.lease.owner_run_id == "run-a"
+    assert maintained.lease.revision == lease.revision
+    assert maintained.lease.heartbeat_at == clock.now
+    assert maintained.lease.lease_expires_at > clock.now
+
+
+def test_lease_maintenance_rejects_changed_dataset_revision(storage):
+    session_factory, _, statuses, make_repo = storage
+    statuses["run-a"] = "running"
+    repo = make_repo(owner_run_id="run-a")
+    lease = repo.acquire_dataset_lease()
+    with session_factory() as session:
+        session.execute(
+            update(HistoricalDataRevisionRow)
+            .where(HistoricalDataRevisionRow.provider_mode == "free")
+            .values(revision=lease.revision + 1)
+        )
+        session.commit()
+
+    with pytest.raises(StaleCheckpointRevision, match="expected revision"):
+        repo.maintain_dataset_lease(expected_revision=lease.revision)
+
+
 def test_expired_owner_must_reenter_before_checkpoint_write(storage):
     _, clock, _, make_repo = storage
     repo = make_repo(owner_run_id="run-a")

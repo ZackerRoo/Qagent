@@ -152,9 +152,10 @@ def test_daily_scan_returns_portfolio_plan_and_tradability():
     )
 
     assert result.portfolio_plan.eligible_count >= 1
-    assert result.portfolio_plan.allocations
-    assert result.portfolio_plan.allocations[0].instrument_id == "CN:000001"
-    assert result.portfolio_plan.allocations[0].weight_pct > 0
+    assert result.portfolio_plan.allocations == []
+    assert result.portfolio_plan.watchlist
+    assert result.portfolio_plan.watchlist[0].instrument_id == "CN:000001"
+    assert result.portfolio_plan.watchlist[0].weight_pct == 0
     assert result.cards[0].tradability is not None
     assert result.cards[0].tradability.can_open is True
     assert result.items[0].tradability is not None

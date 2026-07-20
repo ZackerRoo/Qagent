@@ -1,31 +1,50 @@
+from datetime import date, timedelta
+
 from pydantic import BaseModel, Field
 
 from qagent.db import create_session_factory, initialize_database
 from qagent.domain.models import OpportunityCard, SectorStrength
+from qagent.factors.engine import build_factor_feature_snapshot, rerank_factor_rankings
+from qagent.factors.models import FactorRanking
+from qagent.features import FeatureSnapshot, feature_snapshot_data_health
 from qagent.jobs.daily_scan import DailyScanResult, ScanItem, run_daily_scan
+from qagent.market.a_share_state import (
+    AShareMarketState,
+    AShareStateObservation,
+    AShareStateSnapshot,
+    advance_a_share_state,
+)
 from qagent.market.tradable import load_cn_tradable_instruments
+from qagent.monitoring.drift import (
+    DriftSnapshotMetadata,
+    compare_feature_snapshots,
+)
 from qagent.monitoring.signal_monitor import build_signal_monitor_center
+from qagent.paper_trading.engine import (
+    build_paper_daily_report,
+    build_paper_ledger,
+    build_paper_validation,
+)
 from qagent.providers.factory import build_market_data_provider
 from qagent.recommendations.portfolio import build_portfolio_plan
 from qagent.recommendations.brief import apply_recommendation_briefs
 from qagent.recommendations.feedback import (
-    apply_recommendation_feedback_calibration,
     build_recent_recommendation_feedback_center,
     recommendation_feedback_data_health,
 )
-from qagent.recommendations.probability import (
-    apply_probability_calibration,
-    probability_calibration_data_health,
+from qagent.recommendations.governance import (
+    CardStrategyGovernance,
+    governed_card_payloads,
+    load_latest_walk_forward_validation,
+    load_strategy_governance_context,
+    recommendation_policy_data_health,
 )
-from qagent.recommendations.quality_gate import (
-    apply_recommendation_quality_gate,
-    recommendation_quality_data_health,
-)
+from qagent.recommendations.probability import probability_calibration_data_health
+from qagent.recommendations.quality_gate import recommendation_quality_data_health
 from qagent.recommendations.rotation import sort_recommendation_cards
 from qagent.research.action_center import build_manual_action_center
 from qagent.research.decision_quality import build_decision_quality_center
 from qagent.research.market_intelligence import (
-    apply_market_intelligence_to_cards,
     build_market_intelligence_center,
 )
 from qagent.research.operational_readiness import build_operational_readiness_center
@@ -33,6 +52,7 @@ from qagent.storage.repository import (
     QagentRepository,
     TradableCatalogSummary,
 )
+from qagent.storage.paper import PaperTradingRepository
 from qagent.strategies.models import StrategyHealth, StrategyHealthPoint
 from qagent.strategy_data.providers import EmptyStrategyDataProvider
 
@@ -144,12 +164,19 @@ def run_full_market_scan(
         provider=provider_mode,
         market_provider=provider,
     )
+    governance_context, walk_forward_validation, paper_report = _final_policy_inputs(
+        repo,
+        provider_mode,
+    )
     scan = run_daily_scan(
         symbols,
         provider,
         mode=provider_mode,
         strategy_data_provider=EmptyStrategyDataProvider(),
         recommendation_feedback_center=feedback_center,
+        paper_trading_report=paper_report,
+        walk_forward_validation=walk_forward_validation,
+        strategy_governance_context=governance_context,
     )
     scan.data_health.update(
         {
@@ -172,17 +199,34 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     job = repo.get_full_market_scan_job(job_id)
     if job is None:
         return
+    repo.update_full_market_scan_job(
+        job_id,
+        status="running",
+        message="Preparing full-market scan inputs",
+        data_health={
+            **job.data_health,
+            "full_market_worker_phase": "preparing_inputs",
+        },
+    )
     provider = build_market_data_provider(job.provider)
     feedback_center = build_recent_recommendation_feedback_center(
         repo=repo,
         provider=job.provider,
         market_provider=provider,
     )
+    governance_context, walk_forward_validation, paper_report = _final_policy_inputs(
+        repo,
+        job.provider,
+    )
     all_cards: list[OpportunityCard] = []
     all_items: list[ScanItem] = []
+    all_factor_rankings: list[FactorRanking] = []
+    feature_dataset_revisions: set[str] = set()
     sector_strength_batches: list[SectorStrength] = []
     strategy_health_batches: list[list[StrategyHealth]] = []
+    all_governance: list[CardStrategyGovernance] = []
     aggregate_health: dict[str, str] = {
+        **job.data_health,
         "provider": job.provider,
         "full_market_scan_mode": "batch",
         "full_market_total_symbols": str(job.total_symbols),
@@ -194,6 +238,29 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     completed_batches = 0
     error_count = 0
 
+    if job.completed_batches > 0 and _load_full_market_batch_checkpoint(
+        repo,
+        job_id=job.job_id,
+        batch_index=1,
+        symbols=job.symbols[: job.batch_size],
+    ) is None:
+        aggregate_health.update(
+            {
+                "full_market_restart_recovery": "restart_from_batch_1",
+                "full_market_restart_reason": "legacy_job_without_batch_checkpoints",
+            }
+        )
+        job = repo.update_full_market_scan_job(
+            job_id,
+            status="queued",
+            scanned_symbols=0,
+            completed_batches=0,
+            cards=0,
+            errors=0,
+            message="Restart recovery: rebuilding from batch 1",
+            data_health=aggregate_health,
+        ) or job
+
     repo.update_full_market_scan_job(
         job_id,
         status="running",
@@ -201,25 +268,65 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         data_health=aggregate_health,
     )
 
-    for batch in _chunks(job.symbols, job.batch_size):
-        completed_batches += 1
-        try:
-            scan = run_daily_scan(
-                batch,
-                provider,
-                mode=job.provider,
-                strategy_data_provider=EmptyStrategyDataProvider(),
-                recommendation_feedback_center=feedback_center,
+    restored_batches = 0
+    for batch_index, batch in enumerate(_chunks(job.symbols, job.batch_size), start=1):
+        completed_batches = batch_index
+        checkpoint = _load_full_market_batch_checkpoint(
+            repo,
+            job_id=job.job_id,
+            batch_index=batch_index,
+            symbols=batch,
+        )
+        scan = checkpoint[0] if checkpoint is not None else None
+        batch_errors = checkpoint[1] if checkpoint is not None else 0
+        batch_error_message = checkpoint[2] if checkpoint is not None else None
+        if checkpoint is not None:
+            restored_batches += 1
+            aggregate_health["full_market_restart_recovery"] = "batch_checkpoint_resume"
+            aggregate_health["full_market_checkpoint_batches_restored"] = str(
+                restored_batches
             )
+        else:
+            try:
+                scan = run_daily_scan(
+                    batch,
+                    provider,
+                    mode=job.provider,
+                    strategy_data_provider=EmptyStrategyDataProvider(),
+                    recommendation_feedback_center=feedback_center,
+                    paper_trading_report=paper_report,
+                    walk_forward_validation=walk_forward_validation,
+                    strategy_governance_context=governance_context,
+                )
+            except Exception as exc:
+                batch_errors = len(batch)
+                batch_error_message = str(exc)[:500]
+            _save_full_market_batch_checkpoint(
+                repo,
+                job_id=job.job_id,
+                provider=job.provider,
+                batch_index=batch_index,
+                symbols=batch,
+                scan=scan,
+                error_count=batch_errors,
+                error_message=batch_error_message,
+            )
+
+        if scan is not None:
             all_cards.extend(scan.cards)
             all_items.extend(scan.items)
+            all_factor_rankings.extend(scan.factor_rankings)
+            feature_dataset_revisions.update(_scan_dataset_revisions(scan.data_health))
             sector_strength_batches.extend(scan.sector_strength)
             strategy_health_batches.append(scan.strategy_health)
+            all_governance.extend(scan.strategy_governance)
             _merge_health(aggregate_health, scan.data_health)
             error_count += _int_health(scan.data_health, "scan_errors")
-        except Exception as exc:
-            error_count += len(batch)
-            aggregate_health[f"batch_{completed_batches}_error"] = str(exc)[:500]
+        if batch_errors:
+            error_count += batch_errors
+            aggregate_health[f"batch_{batch_index}_error"] = (
+                batch_error_message or "batch checkpoint recorded an unknown error"
+            )
         scanned_symbols += len(batch)
         repo.update_full_market_scan_job(
             job_id,
@@ -232,6 +339,56 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
             data_health=aggregate_health,
         )
 
+    card_universe = sorted({card.instrument_id for card in all_cards})
+    global_factor_rankings = rerank_factor_rankings(
+        all_factor_rankings,
+        instrument_ids=card_universe,
+    )
+    _apply_global_factor_rankings(all_cards, all_items, global_factor_rankings)
+    feature_as_of = _feature_snapshot_as_of(
+        all_items,
+        instrument_ids=set(card_universe),
+        fallback=job.created_at.date(),
+    )
+    feature_snapshot = build_factor_feature_snapshot(
+        global_factor_rankings,
+        as_of=feature_as_of,
+        dataset_revision=_feature_dataset_revision(
+            feature_dataset_revisions,
+            provider=job.provider,
+            as_of=feature_as_of,
+        ),
+        instrument_ids=card_universe,
+    )
+    aggregate_health.update(feature_snapshot_data_health(feature_snapshot))
+    aggregate_health.update(
+        {
+            "factor_rankings": str(len(global_factor_rankings)),
+            "factor_ranking_scope": "full_card_universe",
+            "factor_ranking_normalization": "global_second_pass",
+            "factor_ranking_tie_breaker": "instrument_id_asc",
+            "dynamic_calibration_merge_policy": "preserve_batch_result_without_reapply",
+        }
+    )
+
+    cache_key = _full_market_batch_cache_key(job.provider, job.include_etfs)
+    previous_cache = repo.get_recent_scan_result_cache(
+        cache_key=cache_key,
+        max_age=timedelta(days=90),
+    )
+    previous_payload = previous_cache.payload if previous_cache is not None else {}
+    feature_drift = _feature_drift_payload(
+        previous_payload,
+        feature_snapshot,
+        current_metadata=_feature_drift_metadata(
+            global_factor_rankings,
+            all_cards,
+            all_items,
+            provider=job.provider,
+        ),
+    )
+    aggregate_health.update(_feature_drift_data_health(feature_drift))
+
     strategy_health = _merge_strategy_health(strategy_health_batches)
     market_intelligence = build_market_intelligence_center(
         cards=all_cards,
@@ -240,27 +397,40 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         strategy_health=strategy_health,
         data_health=aggregate_health,
     )
-    apply_market_intelligence_to_cards(all_cards, market_intelligence)
-    apply_recommendation_quality_gate(all_cards)
-    apply_probability_calibration(all_cards, strategy_health)
-    apply_recommendation_feedback_calibration(all_cards, feedback_center)
+    market_state = _build_a_share_market_state(
+        previous_payload,
+        market_intelligence=market_intelligence,
+        as_of=feature_as_of,
+        expected_count=len(card_universe),
+    )
+    aggregate_health.update(_a_share_market_state_data_health(market_state))
     brief_health = apply_recommendation_briefs(all_cards)
-    ranked_cards = sort_recommendation_cards(all_cards)
+    ranked_cards = sort_recommendation_cards(
+        sorted(all_cards, key=lambda card: card.instrument_id)
+    )
     visible_cards = ranked_cards[:top_cards_limit]
+    visible_card_ids = {card.card_id for card in visible_cards}
+    visible_governance = [
+        audit for audit in all_governance if audit.card_id in visible_card_ids
+    ]
     visible_items = _visible_rejected_items(all_items, limit=500)
     visible_card_instruments = {card.instrument_id for card in visible_cards}
     snapshot_items = [
         item for item in all_items if item.instrument_id in visible_card_instruments
     ]
     sector_strength = _merge_sector_strength(sector_strength_batches)[:12]
-    portfolio_plan = build_portfolio_plan(visible_cards)
-    cache_key = _full_market_batch_cache_key(job.provider, job.include_etfs)
+    portfolio_plan = build_portfolio_plan(
+        visible_cards,
+        market_state=market_state.state.value,
+        market_state_multiplier=_a_share_market_state_multiplier(market_state.state),
+    )
     payload_data_health = {
         **aggregate_health,
         **market_intelligence.data_health,
         **recommendation_quality_data_health(visible_cards),
         **probability_calibration_data_health(visible_cards),
         **recommendation_feedback_data_health(visible_cards),
+        **recommendation_policy_data_health(visible_governance),
         **brief_health,
         "scan_result_cache": "full_market_batch",
         "scan_result_cache_key": cache_key,
@@ -307,10 +477,12 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     payload_data_health.update(operational_readiness_center.data_health)
     payload = {
         "symbols": job.symbols,
-        "cards": [card.model_dump(mode="json") for card in visible_cards],
+        "cards": governed_card_payloads(visible_cards, visible_governance),
         "items": [item.model_dump(mode="json") for item in visible_items],
         "strategy_health": [item.model_dump(mode="json") for item in strategy_health],
-        "factor_rankings": [],
+        "factor_rankings": [
+            ranking.model_dump(mode="json") for ranking in global_factor_rankings
+        ],
         "sector_strength": [item.model_dump(mode="json") for item in sector_strength],
         "portfolio_plan": portfolio_plan.model_dump(mode="json"),
         "market_intelligence": market_intelligence.model_dump(mode="json"),
@@ -318,6 +490,12 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         "signal_monitor": signal_monitor.model_dump(mode="json"),
         "decision_quality_center": decision_quality_center.model_dump(mode="json"),
         "operational_readiness_center": operational_readiness_center.model_dump(mode="json"),
+        "strategy_governance": [
+            audit.model_dump(mode="json") for audit in visible_governance
+        ],
+        "feature_snapshot": feature_snapshot.model_dump(mode="json"),
+        "feature_drift": feature_drift,
+        "a_share_market_state": market_state.model_dump(mode="json"),
         "data_health": payload_data_health,
     }
     repo.save_scan_run(
@@ -351,9 +529,392 @@ def full_market_batch_cache_key(provider: str, include_etfs: bool = True) -> str
     return _full_market_batch_cache_key(provider, include_etfs)
 
 
+def _full_market_batch_checkpoint_key(job_id: str, batch_index: int) -> str:
+    return f"full_market_batch_checkpoint:{job_id}:{batch_index}"
+
+
+def _save_full_market_batch_checkpoint(
+    repo: QagentRepository,
+    *,
+    job_id: str,
+    provider: str,
+    batch_index: int,
+    symbols: list[str],
+    scan: DailyScanResult | None,
+    error_count: int,
+    error_message: str | None,
+) -> None:
+    repo.save_scan_result_cache(
+        cache_key=_full_market_batch_checkpoint_key(job_id, batch_index),
+        provider=provider,
+        mode="full_market_batch_checkpoint",
+        symbols=symbols,
+        payload={
+            "job_id": job_id,
+            "batch_index": batch_index,
+            "symbols": symbols,
+            "scan": scan.model_dump(mode="json") if scan is not None else None,
+            "error_count": error_count,
+            "error_message": error_message,
+        },
+    )
+
+
+def _load_full_market_batch_checkpoint(
+    repo: QagentRepository,
+    *,
+    job_id: str,
+    batch_index: int,
+    symbols: list[str],
+) -> tuple[DailyScanResult | None, int, str | None] | None:
+    cached = repo.get_recent_scan_result_cache(
+        cache_key=_full_market_batch_checkpoint_key(job_id, batch_index),
+        max_age=timedelta(days=14),
+    )
+    if cached is None:
+        return None
+    payload = cached.payload
+    if (
+        payload.get("job_id") != job_id
+        or payload.get("batch_index") != batch_index
+        or payload.get("symbols") != symbols
+    ):
+        return None
+    raw_scan = payload.get("scan")
+    try:
+        scan = DailyScanResult.model_validate(raw_scan) if isinstance(raw_scan, dict) else None
+        error_count = int(payload.get("error_count", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    error_message = payload.get("error_message")
+    return scan, max(error_count, 0), str(error_message) if error_message else None
+
+
 def _repo() -> QagentRepository:
     initialize_database()
     return QagentRepository(create_session_factory())
+
+
+def _apply_global_factor_rankings(
+    cards: list[OpportunityCard],
+    items: list[ScanItem],
+    rankings: list[FactorRanking],
+) -> None:
+    ranking_by_id = {ranking.instrument_id: ranking for ranking in rankings}
+    for card in cards:
+        ranking = ranking_by_id.get(card.instrument_id)
+        card.rank_reasons = [
+            reason
+            for reason in card.rank_reasons
+            if not reason.startswith(("factor flag: ", "因子排名第 "))
+        ]
+        if ranking is None:
+            card.factor_score = 0.0
+            card.factor_rank = None
+            card.factor_percentile = 0.0
+            card.factor_flags = []
+            card.factor_exposures = []
+            continue
+        card.factor_score = ranking.factor_score
+        card.factor_rank = ranking.factor_rank
+        card.factor_percentile = ranking.percentile
+        card.factor_flags = list(ranking.flags)
+        card.factor_exposures = [
+            exposure.model_copy(deep=True) for exposure in ranking.factor_exposures
+        ]
+        if card.primary_strategy_id == "factor_rotation_watch":
+            card.rank_reasons.insert(0, f"因子排名第 {ranking.factor_rank}")
+            _update_factor_watch_evidence(card, ranking)
+        card.rank_reasons.extend(
+            f"factor flag: {flag}" for flag in ranking.flags
+        )
+
+    for item in items:
+        ranking = ranking_by_id.get(item.instrument_id)
+        if ranking is None:
+            item.factor_score = None
+            item.factor_rank = None
+            item.factor_flags = []
+            continue
+        item.factor_score = ranking.factor_score
+        item.factor_rank = ranking.factor_rank
+        item.factor_flags = list(ranking.flags)
+
+
+def _update_factor_watch_evidence(
+    card: OpportunityCard,
+    ranking: FactorRanking,
+) -> None:
+    for evaluation in card.strategy_evaluations:
+        if evaluation.strategy_id != "factor_rotation_watch":
+            continue
+        evaluation.evidence.update(
+            {
+                "factor_rank": ranking.factor_rank,
+                "factor_score": ranking.factor_score,
+                "percentile": ranking.percentile,
+                "flags": list(ranking.flags),
+            }
+        )
+        evaluation.score_components.update(
+            {
+                "factor_score": ranking.factor_score,
+                "valuation": ranking.valuation_score,
+                "size": ranking.size_score,
+                "quality": ranking.quality_score,
+                "trend_quality": ranking.trend_quality_score,
+                "liquidity": ranking.liquidity_score,
+                "low_risk": ranking.low_risk_score,
+                "risk_filter": ranking.risk_filter_score,
+            }
+        )
+
+
+def _feature_snapshot_as_of(
+    items: list[ScanItem],
+    *,
+    instrument_ids: set[str],
+    fallback: date,
+) -> date:
+    trade_dates = [
+        item.latest_trade_date
+        for item in items
+        if item.instrument_id in instrument_ids and item.latest_trade_date is not None
+    ]
+    return max(trade_dates, default=fallback)
+
+
+def _feature_dataset_revision(
+    revisions: set[str],
+    *,
+    provider: str,
+    as_of: date,
+) -> int | str:
+    if len(revisions) == 1:
+        return next(iter(revisions))
+    if revisions:
+        return f"mixed:{'|'.join(sorted(revisions))}"
+    return f"{provider.strip().lower()}:{as_of.isoformat()}"
+
+
+def _scan_dataset_revisions(data_health: dict[str, str]) -> set[str]:
+    return {
+        revision
+        for key in ("dataset_revision", "market_dataset_revision", "replay_dataset_revision")
+        if (revision := data_health.get(key))
+    }
+
+
+def _feature_drift_payload(
+    previous_payload: dict[str, object],
+    current_snapshot: FeatureSnapshot,
+    *,
+    current_metadata: DriftSnapshotMetadata,
+) -> dict[str, object]:
+    raw_previous = previous_payload.get("feature_snapshot")
+    if not isinstance(raw_previous, dict):
+        return {
+            "status": "insufficient",
+            "reason": "尚无同版本上一期特征快照，当前结果仅建立漂移基线。",
+            "reference_version": None,
+            "current_version": current_snapshot.feature_set_version,
+            "auto_adjust_weights": False,
+            "weight_action": "none",
+        }
+    try:
+        previous_snapshot = FeatureSnapshot.model_validate(raw_previous)
+        previous_metadata = _feature_drift_metadata_from_payload(previous_payload)
+        report = compare_feature_snapshots(
+            previous_snapshot,
+            current_snapshot,
+            reference_metadata=previous_metadata,
+            current_metadata=current_metadata,
+        )
+    except (TypeError, ValueError):
+        return {
+            "status": "insufficient",
+            "reason": "上一期特征快照无法按当前契约读取，未据此调整任何权重。",
+            "reference_version": None,
+            "current_version": current_snapshot.feature_set_version,
+            "auto_adjust_weights": False,
+            "weight_action": "none",
+        }
+    return report.model_dump(mode="json")
+
+
+def _feature_drift_metadata(
+    rankings: list[FactorRanking],
+    cards: list[OpportunityCard],
+    items: list[ScanItem],
+    *,
+    provider: str,
+) -> DriftSnapshotMetadata:
+    ordered = sorted(rankings, key=lambda item: (item.factor_rank, item.instrument_id))
+    card_by_id = {card.instrument_id: card for card in cards}
+    return DriftSnapshotMetadata(
+        sources={ranking.instrument_id: provider for ranking in rankings},
+        flags={ranking.instrument_id: tuple(ranking.flags) for ranking in rankings},
+        top_n=tuple(ranking.instrument_id for ranking in ordered[:20]),
+        industries={
+            instrument_id: card.market_context.industry
+            for instrument_id, card in card_by_id.items()
+            if card.market_context is not None and card.market_context.industry
+        },
+        rejection_reasons={
+            item.instrument_id: tuple(
+                value
+                for value in (item.status, item.rejection_category)
+                if value
+            )
+            for item in items
+            if _is_rejected_item(item)
+        },
+    )
+
+
+def _feature_drift_metadata_from_payload(
+    payload: dict[str, object],
+) -> DriftSnapshotMetadata:
+    raw_rankings = payload.get("factor_rankings")
+    rankings: list[FactorRanking] = []
+    if isinstance(raw_rankings, list):
+        for value in raw_rankings:
+            if not isinstance(value, dict):
+                continue
+            try:
+                rankings.append(FactorRanking.model_validate(value))
+            except ValueError:
+                continue
+    raw_cards = payload.get("cards")
+    industries: dict[str, str] = {}
+    if isinstance(raw_cards, list):
+        for card in raw_cards:
+            if not isinstance(card, dict):
+                continue
+            instrument_id = str(card.get("instrument_id") or "")
+            context = card.get("market_context")
+            if instrument_id and isinstance(context, dict) and context.get("industry"):
+                industries[instrument_id] = str(context["industry"])
+    raw_items = payload.get("items")
+    rejections: dict[str, tuple[str, ...]] = {}
+    if isinstance(raw_items, list):
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            instrument_id = str(item.get("instrument_id") or "")
+            values = tuple(
+                str(value)
+                for value in (item.get("status"), item.get("rejection_category"))
+                if value
+            )
+            if instrument_id and values:
+                rejections[instrument_id] = values
+    provider = str(
+        (payload.get("data_health") or {}).get("provider", "unknown")
+        if isinstance(payload.get("data_health"), dict)
+        else "unknown"
+    )
+    ordered = sorted(rankings, key=lambda item: (item.factor_rank, item.instrument_id))
+    return DriftSnapshotMetadata(
+        sources={ranking.instrument_id: provider for ranking in rankings},
+        flags={ranking.instrument_id: tuple(ranking.flags) for ranking in rankings},
+        top_n=tuple(ranking.instrument_id for ranking in ordered[:20]),
+        industries=industries,
+        rejection_reasons=rejections,
+    )
+
+
+def _feature_drift_data_health(payload: dict[str, object]) -> dict[str, str]:
+    return {
+        "feature_drift_status": str(payload.get("status", "insufficient")),
+        "feature_drift_reason": str(payload.get("reason", "")),
+        "feature_drift_auto_weight_change": str(
+            bool(payload.get("auto_adjust_weights", False))
+        ).lower(),
+    }
+
+
+def _build_a_share_market_state(
+    previous_payload: dict[str, object],
+    *,
+    market_intelligence,
+    as_of: date,
+    expected_count: int,
+) -> AShareStateSnapshot:
+    environment = market_intelligence.market_environment
+    observed_state = _observed_a_share_market_state(environment)
+    breadth = environment.breadth
+    expected = max(expected_count, breadth.sample_count, 1)
+    missing_rate = round(max(0.0, 1.0 - min(1.0, breadth.sample_count / expected)), 4)
+    confidence = round(
+        min(0.95, 0.45 + min(0.35, breadth.sample_count / 100) + abs(environment.score - 0.5) * 0.3),
+        4,
+    )
+    observation = AShareStateObservation(
+        as_of=as_of,
+        state=observed_state,
+        confidence=confidence,
+        missing_rate=missing_rate,
+        reason=(
+            f"市场环境代理：regime={environment.regime}, score={environment.score:.2f}, "
+            f"breadth={breadth.sample_count}"
+        ),
+    )
+    raw_previous = previous_payload.get("a_share_market_state")
+    previous = None
+    if isinstance(raw_previous, dict):
+        try:
+            previous = AShareStateSnapshot.model_validate(raw_previous)
+        except ValueError:
+            previous = None
+    if previous is not None and observation.as_of <= previous.as_of:
+        return previous.model_copy(
+            update={
+                "observed_state": observation.state,
+                "confidence": observation.confidence,
+                "missing_rate": observation.missing_rate,
+                "observation_reason": observation.reason,
+            }
+        )
+    return advance_a_share_state(previous, observation)
+
+
+def _observed_a_share_market_state(environment) -> AShareMarketState:
+    breadth = environment.breadth
+    if breadth.sample_count <= 0:
+        return AShareMarketState.UNKNOWN
+    downside_ratio = breadth.limit_down_count / max(breadth.sample_count, 1)
+    if environment.score < 0.25 or downside_ratio >= 0.05:
+        return AShareMarketState.STRESS
+    if environment.regime in {"risk_off", "thin"} or environment.score < 0.42:
+        return AShareMarketState.WEAK
+    if environment.regime == "risk_on" or environment.score >= 0.68:
+        return AShareMarketState.STRONG
+    if environment.regime == "constructive" or environment.score >= 0.56:
+        return AShareMarketState.CONSTRUCTIVE
+    return AShareMarketState.MIXED
+
+
+def _a_share_market_state_multiplier(state: AShareMarketState) -> float:
+    return {
+        AShareMarketState.STRONG: 1.1,
+        AShareMarketState.CONSTRUCTIVE: 1.0,
+        AShareMarketState.MIXED: 0.75,
+        AShareMarketState.WEAK: 0.5,
+        AShareMarketState.STRESS: 0.0,
+        AShareMarketState.UNKNOWN: 0.5,
+    }[state]
+
+
+def _a_share_market_state_data_health(state: AShareStateSnapshot) -> dict[str, str]:
+    return {
+        "a_share_market_state": state.state.value,
+        "a_share_market_state_observed": state.observed_state.value,
+        "a_share_market_state_transition": state.transition_reason.value,
+        "a_share_market_state_confidence": f"{state.confidence:.4f}",
+        "a_share_market_state_missing_rate": f"{state.missing_rate:.4f}",
+        "a_share_market_state_risk_multiplier": f"{_a_share_market_state_multiplier(state.state):.2f}",
+    }
 
 
 def _visible_rejected_items(items: list[ScanItem], limit: int = 500) -> list[ScanItem]:
@@ -385,7 +946,9 @@ def _chunks(items: list[str], size: int):
 def _merge_health(target: dict[str, str], source: dict[str, str]) -> None:
     for key, value in source.items():
         current = target.get(key)
-        if current is not None and str(current).isdigit() and str(value).isdigit():
+        if key == "dynamic_calibration_passes":
+            target[key] = "1"
+        elif current is not None and str(current).isdigit() and str(value).isdigit():
             target[key] = str(int(current) + int(str(value)))
         elif key == "errors" and current:
             target[key] = f"{current} | {value}"
@@ -568,3 +1131,62 @@ def _int_health(source: dict[str, str], key: str) -> int:
 
 def _full_market_batch_cache_key(provider: str, include_etfs: bool) -> str:
     return f"full_market_batch:{provider.strip().lower()}:{str(include_etfs).lower()}"
+
+
+def _final_policy_inputs(
+    repo: QagentRepository,
+    provider: str,
+):
+    return (
+        load_strategy_governance_context(repo),
+        load_latest_walk_forward_validation(repo, provider),
+        _load_paper_feedback_report(repo, provider),
+    )
+
+
+def _load_paper_feedback_report(
+    repo: QagentRepository,
+    provider: str,
+):
+    try:
+        paper_repo = PaperTradingRepository(repo.session_factory)
+        trades = paper_repo.list_trades(limit=500, provider=provider.strip().lower())
+        if not trades:
+            return None
+        account = paper_repo.get_account_settings()
+        ledger = build_paper_ledger(
+            trades,
+            initial_capital=account.initial_capital,
+            allocation_per_trade_pct=account.allocation_per_trade_pct,
+            max_positions=account.max_positions,
+            transaction_cost_bps=account.transaction_cost_bps,
+            slippage_bps=account.slippage_bps,
+            take_profit_pct=account.take_profit_pct,
+        )
+        validation = build_paper_validation(trades, ledger)
+        report_date = max(
+            value
+            for trade in trades
+            for value in (
+                trade.latest_date,
+                trade.exit_date,
+                trade.entry_date,
+                trade.signal_date,
+            )
+            if value is not None
+        )
+        instrument_ids = {trade.instrument_id for trade in trades}
+        asset_types = {
+            item.instrument_id: item.asset_type
+            for item in repo.list_tradable_instruments(limit=20_000)
+            if item.instrument_id in instrument_ids
+        }
+        return build_paper_daily_report(
+            trades=trades,
+            ledger=ledger,
+            validation=validation,
+            as_of=report_date,
+            asset_type_by_instrument=asset_types,
+        )
+    except Exception:
+        return None

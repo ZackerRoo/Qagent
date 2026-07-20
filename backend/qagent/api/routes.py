@@ -17,6 +17,7 @@ from qagent.api.schemas import (
     AlertEvaluationRequest,
     PaperSessionStartRequest,
     PaperTradeFromOpportunityRequest,
+    StrategyGovernanceResponse,
 )
 from qagent.backtesting.engine import run_historical_backtest
 from qagent.backtesting.experiment import (
@@ -113,11 +114,15 @@ from qagent.providers.status import build_provider_status
 from qagent.recommendations.enrichment import enrich_opportunity_card
 from qagent.recommendations.brief import apply_recommendation_briefs
 from qagent.recommendations.feedback import (
-    apply_paper_trading_feedback,
-    apply_walk_forward_validation_feedback,
     build_recent_recommendation_feedback_center,
-    paper_trading_feedback_data_health,
-    walk_forward_feedback_data_health,
+)
+from qagent.recommendations.governance import (
+    CardStrategyGovernance,
+    apply_final_recommendation_policy,
+    build_strategy_governance_status,
+    governed_card_payloads,
+    load_latest_walk_forward_validation,
+    load_strategy_governance_context,
 )
 from qagent.recommendations.portfolio import build_portfolio_plan
 from qagent.recommendations.probability import (
@@ -162,13 +167,100 @@ _task_executor = ThreadPoolExecutor(max_workers=2)
 _history_task_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="history-backfill")
 _historical_jobs_lock = Lock()
 _submitted_historical_jobs: set[str] = set()
-_walk_forward_task_executor = ProcessPoolExecutor(
-    max_workers=1,
-    mp_context=get_context("spawn"),
-)
+_full_market_jobs_lock = Lock()
+_submitted_full_market_jobs: set[str] = set()
+_walk_forward_task_executor: ProcessPoolExecutor | None = None
 _walk_forward_jobs_lock = Lock()
 _submitted_walk_forward_jobs: set[str] = set()
 _automation_scheduler = AutomationScheduler()
+
+
+def _walk_forward_executor() -> ProcessPoolExecutor:
+    """Create the isolated worker only when a walk-forward job is submitted."""
+
+    global _walk_forward_task_executor
+    if _walk_forward_task_executor is None:
+        _walk_forward_task_executor = ProcessPoolExecutor(
+            max_workers=1,
+            mp_context=get_context("spawn"),
+        )
+    return _walk_forward_task_executor
+
+
+def _submit_full_market_scan_job(job_id: str) -> bool:
+    with _full_market_jobs_lock:
+        if job_id in _submitted_full_market_jobs:
+            return False
+        _submitted_full_market_jobs.add(job_id)
+    repo = _repo()
+    job = repo.get_full_market_scan_job(job_id)
+    if job is not None:
+        repo.update_full_market_scan_job(
+            job_id,
+            data_health={
+                **job.data_health,
+                "full_market_worker_submitted": "true",
+                "full_market_worker_submitted_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    try:
+        _task_executor.submit(_run_submitted_full_market_scan_job, job_id)
+    except Exception:
+        with _full_market_jobs_lock:
+            _submitted_full_market_jobs.discard(job_id)
+        raise
+    return True
+
+
+def _run_submitted_full_market_scan_job(job_id: str) -> None:
+    try:
+        run_full_market_batch_scan_job(job_id)
+    except Exception as exc:
+        repo = _repo()
+        job = repo.get_full_market_scan_job(job_id)
+        if job is not None:
+            repo.update_full_market_scan_job(
+                job_id,
+                status="failed",
+                message=f"Full-market worker failed: {str(exc)[:400]}",
+                data_health={
+                    **job.data_health,
+                    "full_market_worker_failed": "true",
+                    "full_market_worker_error": str(exc)[:500],
+                    "full_market_worker_failed_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+    finally:
+        with _full_market_jobs_lock:
+            _submitted_full_market_jobs.discard(job_id)
+
+
+def restore_full_market_scan_job_from_storage() -> list[str]:
+    repo = _repo()
+    restored: list[str] = []
+    for provider in ("free", "fixture"):
+        job = repo.get_latest_full_market_scan_job(provider=provider)
+        if job is None:
+            continue
+        recoverable = job.status == "running" or (
+            job.status == "queued"
+            and job.data_health.get("full_market_worker_submitted") == "true"
+        )
+        if not recoverable:
+            continue
+        repo.update_full_market_scan_job(
+            job.job_id,
+            status="queued",
+            message="Restoring full-market scan after service restart",
+            data_health={
+                **job.data_health,
+                "full_market_restart_recovery": "queued_for_checkpoint_resume",
+                "full_market_restart_recovery_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        if _submit_full_market_scan_job(job.job_id):
+            restored.append(job.job_id)
+    return restored
 
 
 def _signal_summary(card) -> str:
@@ -540,7 +632,7 @@ def _submit_walk_forward_job(job_id: str) -> None:
         if job_id in _submitted_walk_forward_jobs:
             return
         _submitted_walk_forward_jobs.add(job_id)
-    future = _walk_forward_task_executor.submit(_run_walk_forward_job_safely, job_id)
+    future = _walk_forward_executor().submit(_run_walk_forward_job_safely, job_id)
     if future is not None and hasattr(future, "add_done_callback"):
         future.add_done_callback(lambda _future: _release_walk_forward_submission(job_id))
 
@@ -590,7 +682,22 @@ def _run_walk_forward_job_safely(job_id: str) -> None:
                 phase=progress.phase,
                 processed_snapshots=progress.processed_snapshots,
                 current_date=progress.current_date,
+                lease_maintenance_count=progress.lease_maintenance_count,
+                lease_recovery_count=progress.lease_recovery_count,
+                last_lease_heartbeat_at=progress.last_lease_heartbeat_at,
                 checkpoints=list(checkpoint_by_date.values()),
+            )
+
+        def on_lease_maintenance(
+            maintenance_count: int,
+            recovery_count: int,
+            heartbeat_at: datetime,
+        ) -> None:
+            repo.update_walk_forward_job(
+                job_id,
+                lease_maintenance_count=maintenance_count,
+                lease_recovery_count=recovery_count,
+                last_lease_heartbeat_at=heartbeat_at,
             )
 
         result = run_full_market_walk_forward_selection(
@@ -603,6 +710,10 @@ def _run_walk_forward_job_safely(job_id: str) -> None:
             experiment_manifest=manifest,
             resume_snapshots=[WalkForwardSnapshot.model_validate(item) for item in job.checkpoints],
             progress_callback=on_progress,
+            lease_maintenance_callback=on_lease_maintenance,
+            initial_lease_maintenance_count=job.lease_maintenance_count,
+            initial_lease_recovery_count=job.lease_recovery_count,
+            initial_lease_heartbeat_at=job.last_lease_heartbeat_at,
         )
         stored = repo.save_walk_forward_run(result)
         repo.update_walk_forward_job(
@@ -981,9 +1092,10 @@ def _scan(provider_mode: str = "fixture", symbols: str | None = None):
     instrument_ids = resolved.symbols
     try:
         provider = build_market_data_provider(mode)
+        repo = _repo()
         strategy_data_provider = EmptyStrategyDataProvider() if resolved.is_dynamic else None
         feedback_center = build_recent_recommendation_feedback_center(
-            repo=_repo(),
+            repo=repo,
             provider=mode,
             market_provider=provider,
         )
@@ -993,6 +1105,9 @@ def _scan(provider_mode: str = "fixture", symbols: str | None = None):
             mode=mode,
             strategy_data_provider=strategy_data_provider,
             recommendation_feedback_center=feedback_center,
+            paper_trading_report=_latest_paper_feedback_report(mode),
+            walk_forward_validation=load_latest_walk_forward_validation(repo, mode),
+            strategy_governance_context=load_strategy_governance_context(repo),
         )
         invalidated = _paper_recent_invalidated_instruments(mode)
         if invalidated:
@@ -1280,12 +1395,21 @@ def _paper_repo() -> PaperTradingRepository:
     return PaperTradingRepository(create_session_factory())
 
 
+def _scan_policy_kwargs(provider: str) -> dict[str, object]:
+    repo = _repo()
+    return {
+        "paper_trading_report": _latest_paper_feedback_report(provider),
+        "walk_forward_validation": load_latest_walk_forward_validation(repo, provider),
+        "strategy_governance_context": load_strategy_governance_context(repo),
+    }
+
+
 @router.get("/opportunities")
 def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict[str, object]:
     result, mode, instrument_ids = _scan(provider, symbols)
     _repo().save_scan_run(provider=mode, mode=mode, symbols=instrument_ids, result=result)
     payload = {
-        "cards": [card.model_dump(mode="json") for card in result.cards],
+        "cards": governed_card_payloads(result.cards, result.strategy_governance),
         "items": [item.model_dump(mode="json") for item in result.items],
         "strategy_health": [item.model_dump(mode="json") for item in result.strategy_health],
         "factor_rankings": [item.model_dump(mode="json") for item in result.factor_rankings],
@@ -1307,13 +1431,17 @@ def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict
         "operational_readiness_center": result.operational_readiness_center.model_dump(mode="json")
         if result.operational_readiness_center
         else None,
+        "strategy_governance": [
+            audit.model_dump(mode="json") for audit in result.strategy_governance
+        ],
         "data_health": result.data_health,
     }
-    _attach_card_briefs_and_cached_benchmarks(payload, mode)
     _attach_signal_hub_payload(payload)
     _attach_market_intelligence_payload(payload)
     _attach_recommendation_quality_payload(payload)
     _attach_probability_forecast_payload(payload)
+    if not _restore_governance_card_payload(payload):
+        _attach_card_briefs_and_cached_benchmarks(payload, mode)
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)
@@ -1349,7 +1477,12 @@ def market_bars(
         raise HTTPException(status_code=404, detail="market bars not found")
     enriched = add_moving_averages(bars.sort_values("trade_date"), windows=(20, 50, 100, 200))
     visible = enriched.tail(days)
-    scan_result = run_daily_scan([instrument], market_provider, mode=mode)
+    scan_result = run_daily_scan(
+        [instrument],
+        market_provider,
+        mode=mode,
+        **_scan_policy_kwargs(mode),
+    )
     card = next((item for item in scan_result.cards if item.instrument_id == instrument), None)
     provider_errors = getattr(market_provider, "last_errors", [])
     data_health = {
@@ -1379,6 +1512,7 @@ def intraday_radar(provider: str = "fixture", symbols: str | None = None) -> dic
             market_provider,
             mode=mode,
             strategy_data_provider=EmptyStrategyDataProvider() if resolved.is_dynamic else None,
+            **_scan_policy_kwargs(mode),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2729,14 +2863,75 @@ def _paper_seed_snapshots_from_recommendations(
         max_age=max_age,
         limit=limit,
     )
+    snapshots, cache_blocked = _filter_governed_paper_snapshots(repo, snapshots)
     if snapshots:
-        return snapshots, health
+        return snapshots, {
+            **health,
+            "paper_strategy_governance_blocked": str(cache_blocked),
+        }
 
     fallback = repo.list_latest_signal_opportunity_snapshots(limit=limit, provider=mode)
+    fallback, fallback_blocked = _filter_governed_paper_snapshots(repo, fallback)
     return fallback, {
         "automation_seed_source": "latest_signal_day",
         "automation_seed_rank_profile": "rank_score",
+        "paper_strategy_governance_blocked": str(cache_blocked + fallback_blocked),
     }
+
+
+def _filter_governed_paper_snapshots(
+    repo: QagentRepository,
+    snapshots: list,
+) -> tuple[list, int]:
+    context = load_strategy_governance_context(repo)
+    allowed = []
+    blocked = 0
+    for snapshot in snapshots:
+        card = snapshot.card if isinstance(snapshot.card, dict) else {}
+        governance = card.get("strategy_governance")
+        gate = governance.get("gate_decision") if isinstance(governance, dict) else None
+        if isinstance(gate, dict) and gate.get("paper_candidate_eligible") is False:
+            blocked += 1
+            continue
+        decision = card.get("decision")
+        if isinstance(decision, dict) and (
+            decision.get("risk_status") in {"blocked", "veto"}
+            or decision.get("action") in {"avoid", "blocked", "no_trade"}
+        ):
+            blocked += 1
+            continue
+        runtime = context.strategies.get(snapshot.primary_strategy_id or "")
+        if runtime is not None and runtime.state in {"research", "disabled"}:
+            blocked += 1
+            continue
+        allowed.append(snapshot)
+    return allowed, blocked
+
+
+def _paper_strategy_governance_block_reason(
+    strategy_id: str | None,
+    *,
+    provider: str,
+    card_id: str,
+) -> str | None:
+    repo = _repo()
+    resolved_strategy_id = strategy_id
+    if not resolved_strategy_id and card_id.strip():
+        snapshots = repo.list_latest_opportunity_snapshots_by_card_ids(
+            [card_id.strip()],
+            provider=provider,
+        )
+        if snapshots:
+            resolved_strategy_id = snapshots[0].primary_strategy_id
+    if not resolved_strategy_id:
+        return None
+    runtime = load_strategy_governance_context(repo).strategies.get(resolved_strategy_id)
+    if runtime is None or runtime.state not in {"research", "disabled"}:
+        return None
+    return (
+        f"strategy {resolved_strategy_id} is {runtime.state} under policy "
+        f"{runtime.policy_version} and is not eligible for paper trading"
+    )
 
 
 def _paper_seed_snapshots_from_latest_cache(
@@ -2926,7 +3121,7 @@ def _maybe_start_automatic_full_scan(
         include_etfs=settings.include_etfs,
         sync_if_empty=settings.sync_if_empty,
     )
-    _task_executor.submit(run_full_market_batch_scan_job, job.job_id)
+    _submit_full_market_scan_job(job.job_id)
     return "queued", True, job.job_id
 
 
@@ -3411,6 +3606,13 @@ def create_paper_trade_from_opportunity(
         raise HTTPException(status_code=400, detail="trigger_price is required")
 
     mode = request.provider.strip().lower()
+    governance_reason = _paper_strategy_governance_block_reason(
+        request.strategy_id,
+        provider=mode,
+        card_id=request.card_id,
+    )
+    if governance_reason is not None:
+        raise HTTPException(status_code=400, detail=governance_reason)
     instrument_id = request.instrument_id.strip()
     source_snapshot_id = f"opportunity:{request.card_id.strip()}"
     repo = _paper_repo()
@@ -3591,6 +3793,7 @@ def _build_daily_brief_response(
             market_provider,
             mode=mode,
             strategy_data_provider=EmptyStrategyDataProvider() if resolved.is_dynamic else None,
+            **_scan_policy_kwargs(mode),
         )
         if skip_backtest:
             backtest_result = None
@@ -4058,7 +4261,7 @@ def start_full_market_batch_scan(
         include_etfs=include_etfs,
         sync_if_empty=sync_if_empty,
     )
-    _task_executor.submit(run_full_market_batch_scan_job, job.job_id)
+    _submit_full_market_scan_job(job.job_id)
     return _full_market_job_payload(job)
 
 
@@ -4296,12 +4499,13 @@ def _enrich_scan_task_result(payload: dict[str, object]) -> dict[str, object]:
         return payload
     _relabel_instrument_payload(result)
     _hydrate_legacy_opportunity_cards(result)
-    _attach_card_briefs_and_cached_benchmarks(result, _payload_provider_mode(result))
     _attach_rotation_radar_payload(result)
     _attach_signal_hub_payload(result)
     _attach_market_intelligence_payload(result)
     _attach_recommendation_quality_payload(result)
     _attach_probability_forecast_payload(result)
+    if not _restore_governance_card_payload(result):
+        _attach_card_briefs_and_cached_benchmarks(result, _payload_provider_mode(result))
     _attach_manual_action_center_payload(result)
     _attach_signal_monitor_payload(result)
     _attach_decision_quality_payload(result)
@@ -4328,10 +4532,16 @@ def _full_market_scan_payload(
     )
     invalidated = _paper_recent_invalidated_instruments(mode)
     cards = [card for card in result.scan.cards if card.instrument_id not in invalidated]
+    visible_card_ids = {card.card_id for card in cards}
+    governance_audits = [
+        audit
+        for audit in result.scan.strategy_governance
+        if audit.card_id in visible_card_ids
+    ]
     _repo().save_scan_run(provider=mode, mode=mode, symbols=result.symbols, result=result.scan)
     payload = {
         "symbols": result.symbols,
-        "cards": [card.model_dump(mode="json") for card in cards],
+        "cards": governed_card_payloads(cards, governance_audits),
         "items": [item.model_dump(mode="json") for item in result.scan.items],
         "strategy_health": [item.model_dump(mode="json") for item in result.scan.strategy_health],
         "factor_rankings": [item.model_dump(mode="json") for item in result.scan.factor_rankings],
@@ -4358,6 +4568,9 @@ def _full_market_scan_payload(
         )
         if result.scan.operational_readiness_center
         else None,
+        "strategy_governance": [
+            audit.model_dump(mode="json") for audit in governance_audits
+        ],
         "data_health": result.data_health,
     }
     payload["data_health"]["paper_invalidated_cards_filtered"] = str(
@@ -4368,6 +4581,8 @@ def _full_market_scan_payload(
     _attach_market_intelligence_payload(payload)
     _attach_recommendation_quality_payload(payload)
     _attach_probability_forecast_payload(payload)
+    if not _restore_governance_card_payload(payload):
+        _attach_card_briefs_and_cached_benchmarks(payload, mode)
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)
@@ -4473,6 +4688,7 @@ def _recent_full_market_scan_payload(
         _attach_market_intelligence_payload(payload)
         _attach_recommendation_quality_payload(payload)
         _attach_probability_forecast_payload(payload)
+        _attach_card_briefs_and_cached_benchmarks(payload, mode)
         data_health = payload.setdefault("data_health", {})
         if isinstance(data_health, dict):
             data_health["scan_result_cache"] = "hit"
@@ -4543,6 +4759,7 @@ def _recent_full_market_scan_payload(
     _attach_market_intelligence_payload(payload)
     _attach_recommendation_quality_payload(payload)
     _attach_probability_forecast_payload(payload)
+    _attach_card_briefs_and_cached_benchmarks(payload, mode)
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)
@@ -4602,6 +4819,7 @@ def _recent_scan_run_fallback_payload(
     _attach_market_intelligence_payload(payload)
     _attach_recommendation_quality_payload(payload)
     _attach_probability_forecast_payload(payload)
+    _attach_card_briefs_and_cached_benchmarks(payload, provider)
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)
@@ -4625,7 +4843,6 @@ def _hydrate_full_market_batch_payload(
     hydrated_cards = _hydrate_legacy_opportunity_cards(payload)
     if hydrated_cards:
         data_health["legacy_cards_hydrated"] = str(hydrated_cards)
-    _attach_card_briefs_and_cached_benchmarks(payload, provider)
     if not payload.get("strategy_health"):
         recent = repo.get_latest_scan_result_cache_by_modes(
             provider=provider,
@@ -4648,6 +4865,7 @@ def _hydrate_full_market_batch_payload(
     _attach_market_intelligence_payload(payload)
     _attach_recommendation_quality_payload(payload)
     _attach_probability_forecast_payload(payload)
+    _attach_card_briefs_and_cached_benchmarks(payload, provider)
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)
@@ -4704,57 +4922,58 @@ def _attach_card_briefs_and_cached_benchmarks(
         payload["data_health"] = data_health
 
     data_health.update(_apply_cached_benchmark_comparisons(cards, provider))
-    data_health.update(_apply_live_paper_trading_feedback(cards, provider))
-    data_health.update(_apply_latest_walk_forward_feedback(cards, provider))
+    repo = _repo()
+    final_policy = apply_final_recommendation_policy(
+        cards,
+        paper_report=_latest_paper_feedback_report(provider),
+        walk_forward_validation=(
+            load_latest_walk_forward_validation(repo, provider) if provider else None
+        ),
+        governance_context=load_strategy_governance_context(repo),
+    )
+    cards = sort_recommendation_cards(final_policy.cards)
+    data_health.update(final_policy.data_health)
     data_health.update(apply_recommendation_briefs(cards))
-    payload["cards"] = [card.model_dump(mode="json") for card in cards]
+    payload["cards"] = governed_card_payloads(cards, final_policy.audits)
+    payload["strategy_governance"] = [
+        audit.model_dump(mode="json") for audit in final_policy.audits
+    ]
 
 
-def _apply_live_paper_trading_feedback(
-    cards: list[OpportunityCard],
+def _restore_governance_card_payload(payload: dict[str, object]) -> bool:
+    raw_cards = payload.get("cards")
+    raw_audits = payload.get("strategy_governance")
+    if not isinstance(raw_cards, list) or not isinstance(raw_audits, list):
+        return False
+    cards = _cards_from_payload(raw_cards)
+    audits = []
+    for raw_audit in raw_audits:
+        try:
+            audits.append(CardStrategyGovernance.model_validate(raw_audit))
+        except Exception:
+            continue
+    card_ids = {card.card_id for card in cards}
+    audits = [audit for audit in audits if audit.card_id in card_ids]
+    if not cards or {audit.card_id for audit in audits} != card_ids:
+        return False
+    payload["cards"] = governed_card_payloads(cards, audits)
+    payload["strategy_governance"] = [
+        audit.model_dump(mode="json") for audit in audits
+    ]
+    return True
+
+
+def _latest_paper_feedback_report(
     provider: str | None,
-) -> dict[str, str]:
+) -> PaperDailyReport | None:
     if not provider:
-        return {
-            "paper_feedback_cards": str(len(cards)),
-            "paper_feedback_adjusted": "0",
-            "paper_feedback_blocked": "0",
-            "paper_feedback_source": "missing_provider",
-        }
+        return None
     try:
-        report = PaperDailyReport.model_validate(
+        return PaperDailyReport.model_validate(
             paper_trade_daily_report(provider=provider, limit=500)
         )
     except Exception:
-        return {
-            "paper_feedback_cards": str(len(cards)),
-            "paper_feedback_adjusted": "0",
-            "paper_feedback_blocked": "0",
-            "paper_feedback_source": "unavailable",
-        }
-    apply_paper_trading_feedback(cards, report)
-    health = paper_trading_feedback_data_health(cards)
-    health["paper_feedback_source"] = "paper_daily_report"
-    return health
-
-
-def _apply_latest_walk_forward_feedback(
-    cards: list[OpportunityCard],
-    provider: str | None,
-) -> dict[str, str]:
-    validation = None
-    if provider:
-        records = _repo().list_walk_forward_runs(
-            provider=provider.strip().lower(),
-            limit=1,
-        )
-        if records:
-            payload = records[0].payload
-            raw_validation = payload.get("strategy_validation")
-            if isinstance(raw_validation, dict):
-                validation = raw_validation
-    apply_walk_forward_validation_feedback(cards, validation)
-    return walk_forward_feedback_data_health(cards, validation)
+        return None
 
 
 def _apply_cached_benchmark_comparisons(
@@ -4926,12 +5145,17 @@ def _attach_market_intelligence_payload(
         strategy_health=strategy_health,
         data_health=data_health,
     )
-    apply_market_intelligence_to_cards(cards, center)
+    already_calibrated = str(data_health.get("dynamic_calibration_passes", "0")) == "1"
+    if not already_calibrated:
+        apply_market_intelligence_to_cards(cards, center)
     payload[cards_key] = [card.model_dump(mode="json") for card in cards]
     payload["market_intelligence"] = center.model_dump(mode="json")
     payload_data_health = payload.setdefault("data_health", {})
     if isinstance(payload_data_health, dict):
         payload_data_health.update(center.data_health)
+        payload_data_health["dynamic_calibration_reapplied"] = str(
+            not already_calibrated
+        ).lower()
 
 
 def _attach_recommendation_quality_payload(
@@ -5781,6 +6005,25 @@ def strategy_performance(
         ],
         "data_health": data_health,
     }
+
+
+@router.get("/strategy-governance", response_model=StrategyGovernanceResponse)
+def strategy_governance(
+    strategy_id: str | None = None,
+    event_limit: int = 50,
+) -> StrategyGovernanceResponse:
+    if event_limit <= 0 or event_limit > 500:
+        raise HTTPException(status_code=400, detail="event_limit must be between 1 and 500")
+    normalized_strategy_id = strategy_id.strip() if strategy_id else None
+    if strategy_id is not None and not normalized_strategy_id:
+        raise HTTPException(status_code=400, detail="strategy_id must not be blank")
+    return StrategyGovernanceResponse.model_validate(
+        build_strategy_governance_status(
+            _repo(),
+            strategy_id=normalized_strategy_id,
+            event_limit=event_limit,
+        )
+    )
 
 
 @router.get("/strategy-diagnostics")

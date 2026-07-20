@@ -1,6 +1,12 @@
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
+from decimal import (
+    Decimal,
+    ROUND_CEILING,
+    ROUND_DOWN,
+    ROUND_FLOOR,
+    ROUND_HALF_UP,
+)
 
 import pandas as pd
 from pydantic import BaseModel
@@ -9,9 +15,19 @@ from qagent.backtesting.engine import BacktestSignal, run_historical_backtest
 from qagent.backtesting.execution import (
     HistoricalExecutionRule,
     VersionedAshareExecutionResolver,
-    calculate_round_trip_fees,
+    execute_daily_bar_order,
+    execution_rules_from_historical,
     round_order_quantity,
 )
+from qagent.execution import (
+    AShareExecutionRules,
+    OrderSide,
+    OrderType,
+    fee_breakdown,
+    participation_capacity,
+    round_to_tick,
+)
+from qagent.domain.enums import Market
 from qagent.market.calendars import trading_sessions_in_range
 from qagent.providers.base import MarketDataProvider
 from qagent.strategy_data.providers import StrategyDataProvider
@@ -38,6 +54,7 @@ class PortfolioEquityPoint(BaseModel):
     date: date
     equity: Decimal
     cash: Decimal
+    market_value: Decimal = Decimal("0")
     open_positions: int
     drawdown_pct: float
 
@@ -85,6 +102,14 @@ class _TradeCandidate:
     holding_days: int
     execution_rule: HistoricalExecutionRule | None = None
     exit_execution_rule: HistoricalExecutionRule | None = None
+    max_executable_shares: Decimal | None = None
+
+
+@dataclass
+class _OpenPortfolioPosition:
+    trade: PortfolioBacktestTrade
+    entry_costs: Decimal
+    exit_costs: Decimal
 
 
 def run_portfolio_backtest(
@@ -188,6 +213,8 @@ def run_signal_portfolio_backtest(
     trades, equity_curve = _simulate_portfolio(
         candidates,
         start=start,
+        end=end,
+        bars=bars,
         initial_capital=initial_capital,
         risk_per_trade_pct=risk_per_trade_pct,
         max_positions=max_positions,
@@ -211,7 +238,10 @@ def run_signal_portfolio_backtest(
         "trades": str(len(trades)),
         "lookahead_guard": "signals_generated_before_exits",
         "portfolio_model": "fixed_risk_stop_target_time_exit",
-        "execution_rules": "fees_slippage,t_plus_one,limit_price_guard,round_lot_100",
+        "execution_rules": (
+            "unified_execution_kernel:gap,suspension,zero_volume,"
+            "one_price_limit,tick,round_lot,fees"
+        ),
         "cn_execution_rules": (
             "versioned_replay_evidence"
             if execution_rule_resolver is not None
@@ -283,7 +313,11 @@ def _candidate_from_signal(
         return None
 
     trigger = Decimal(signal.trigger_price)
-    stop = Decimal(signal.initial_stop) if signal.initial_stop is not None else trigger * Decimal("0.95")
+    stop = (
+        Decimal(signal.initial_stop)
+        if signal.initial_stop is not None
+        else trigger * Decimal("0.95")
+    )
     target = Decimal(signal.target_1) if signal.target_1 is not None else None
     if trigger <= 0 or stop <= 0:
         return None
@@ -293,107 +327,158 @@ def _candidate_from_signal(
     if future.empty:
         return None
 
-    entry_index = None
-    entry_rule = None
+    entry_index: int | None = None
+    entry_rule: HistoricalExecutionRule | None = None
+    entry_price: Decimal | None = None
+    entry_capacity = 0
+    entry_triggered = False
     for index, row in future.head(max_entry_wait_days).iterrows():
         previous = ordered.iloc[index - 1] if index > 0 else None
-        row_rule = (
-            execution_rule_resolver.resolve(
-                signal.instrument_id,
-                row["trade_date"],
-                is_st=_row_is_st(row),
+        row_rule = _resolve_execution_rule(
+            execution_rule_resolver,
+            signal.instrument_id,
+            row,
+        )
+        rules = _execution_rules_for_row(
+            signal.instrument_id,
+            row["trade_date"],
+            row_rule,
+            side=OrderSide.BUY,
+            slippage_bps=slippage_bps,
+        )
+        trigger_order_price = round_to_tick(
+            trigger,
+            rules.tick_size,
+            rounding=ROUND_CEILING,
+        )
+        probe_quantity = _execution_probe_quantity(row_rule, rules)
+        fill = execute_daily_bar_order(
+            instrument_id=signal.instrument_id,
+            row=row,
+            previous=previous,
+            side=OrderSide.BUY,
+            quantity=probe_quantity,
+            order_type=(OrderType.MARKET if entry_triggered else OrderType.STOP),
+            rules=rules,
+            stop_price=None if entry_triggered else trigger_order_price,
+            intent_id=f"{signal.snapshot_id}:entry:{row['trade_date']}",
+        )
+        touched = (
+            _row_has_trades(row)
+            and (
+                Decimal(str(row["open"])) >= trigger_order_price
+                or Decimal(str(row["high"])) >= trigger_order_price
             )
-            if execution_rule_resolver is not None and _is_cn(signal.instrument_id)
-            else None
         )
-        row_limit_pct = (
-            _effective_limit_pct(row_rule, row["trade_date"])
-            if row_rule is not None
-            else None
-        )
-        limit_up_blocked = (
-            row_limit_pct is not None
-            and _is_limit_day(row, previous, row_limit_pct, up=True)
-            if row_rule is not None
-            else _is_limit_up_day(row, previous, signal.instrument_id)
-        )
-        if _is_cn(signal.instrument_id) and limit_up_blocked:
-            continue
-        if Decimal(str(row["high"])) >= trigger:
+        if fill is not None and fill.quantity == probe_quantity:
             entry_index = index
             entry_rule = row_rule
+            entry_price = fill.price
+            entry_capacity = participation_capacity(_row_volume(row), rules)
             break
-    if entry_index is None:
+        if touched:
+            entry_triggered = True
+    if entry_index is None or entry_price is None:
         return None
 
-    slip = slippage_bps / Decimal("10000")
-    entry_price = _money(trigger * (Decimal("1") + slip))
-    exit_price = None
-    exit_date = None
-    selected_exit_rule = None
-    exit_reason = "time_exit"
-    exit_window = ordered.iloc[entry_index : entry_index + max_holding_days].reset_index(drop=True)
-    entry_date = exit_window.iloc[0]["trade_date"]
+    entry_date = ordered.iloc[entry_index]["trade_date"]
+    settlement_days = (
+        entry_rule.settlement_days
+        if entry_rule is not None
+        else (1 if _is_cn(signal.instrument_id) else 0)
+    )
+    if max_holding_days <= settlement_days:
+        return None
 
-    settlement_days = entry_rule.settlement_days if entry_rule is not None else 1
-    for session_offset, (_, row) in enumerate(exit_window.iterrows()):
+    exit_price: Decimal | None = None
+    exit_date: date | None = None
+    selected_exit_rule: HistoricalExecutionRule | None = None
+    exit_reason: str | None = None
+    exit_order_type: OrderType | None = None
+    exit_order_price: Decimal | None = None
+    exit_capacity = 0
+    exit_rows = ordered.iloc[entry_index:]
+    for session_offset, (row_index, row) in enumerate(exit_rows.iterrows()):
         trade_date = row["trade_date"]
-        if _is_cn(signal.instrument_id) and session_offset < settlement_days:
+        if session_offset < settlement_days:
             continue
-        low = Decimal(str(row["low"]))
-        high = Decimal(str(row["high"]))
-        previous = _previous_row(ordered, row)
-        exit_rule = (
-            execution_rule_resolver.resolve(
-                signal.instrument_id,
-                trade_date,
-                is_st=_row_is_st(row),
-            )
-            if execution_rule_resolver is not None and _is_cn(signal.instrument_id)
-            else None
+        previous = ordered.iloc[row_index - 1] if row_index > 0 else None
+        exit_rule = _resolve_execution_rule(
+            execution_rule_resolver,
+            signal.instrument_id,
+            row,
         )
-        if low <= stop:
-            exit_limit_pct = (
-                _effective_limit_pct(exit_rule, trade_date)
-                if exit_rule is not None
-                else None
-            )
-            limit_down_blocked = (
-                exit_limit_pct is not None
-                and _is_limit_day(row, previous, exit_limit_pct, up=False)
-                if exit_rule is not None
-                else _is_limit_down_day(row, previous, signal.instrument_id)
-            )
-            if _is_cn(signal.instrument_id) and limit_down_blocked:
+        rules = _execution_rules_for_row(
+            signal.instrument_id,
+            trade_date,
+            exit_rule,
+            side=OrderSide.SELL,
+            slippage_bps=slippage_bps,
+        )
+        pending_before_session = exit_order_type is not None
+        if (
+            pending_before_session
+            and exit_order_type == OrderType.LIMIT
+            and session_offset >= max_holding_days - 1
+        ):
+            exit_reason = "time_exit"
+            exit_order_type = OrderType.MARKET
+            exit_order_price = None
+        if exit_order_type is None:
+            low = Decimal(str(row["low"]))
+            high = Decimal(str(row["high"]))
+            if _row_has_trades(row) and low <= stop:
+                exit_reason = "stopped"
+                exit_order_type = OrderType.STOP
+                exit_order_price = round_to_tick(
+                    stop,
+                    rules.tick_size,
+                    rounding=ROUND_FLOOR,
+                )
+            elif _row_has_trades(row) and target is not None and high >= target:
+                exit_reason = "target_1_hit"
+                exit_order_type = OrderType.LIMIT
+                exit_order_price = round_to_tick(
+                    target,
+                    rules.tick_size,
+                    rounding=ROUND_CEILING,
+                )
+            elif session_offset >= max_holding_days - 1:
+                exit_reason = "time_exit"
+                exit_order_type = OrderType.MARKET
+            else:
                 continue
-            exit_date = trade_date
-            exit_price = _money(stop * (Decimal("1") - slip))
-            exit_reason = "stopped"
-            selected_exit_rule = exit_rule
-            break
-        if target is not None and high >= target:
-            exit_date = trade_date
-            exit_price = _money(target * (Decimal("1") - slip))
-            exit_reason = "target_1_hit"
-            selected_exit_rule = exit_rule
-            break
 
-    if exit_price is None:
-        eligible_exit_window = exit_window.iloc[settlement_days:]
-        if eligible_exit_window.empty:
-            return None
-        final_row = eligible_exit_window.iloc[-1]
-        exit_date = final_row["trade_date"]
-        exit_price = _money(Decimal(str(final_row["close"])) * (Decimal("1") - slip))
-        selected_exit_rule = (
-            execution_rule_resolver.resolve(
-                signal.instrument_id,
-                exit_date,
-                is_st=_row_is_st(final_row),
-            )
-            if execution_rule_resolver is not None and _is_cn(signal.instrument_id)
-            else None
+        probe_quantity = _execution_probe_quantity(exit_rule, rules)
+        fill = execute_daily_bar_order(
+            instrument_id=signal.instrument_id,
+            row=row,
+            previous=previous,
+            side=OrderSide.SELL,
+            quantity=probe_quantity,
+            order_type=exit_order_type,
+            rules=rules,
+            limit_price=(
+                exit_order_price if exit_order_type == OrderType.LIMIT else None
+            ),
+            stop_price=(
+                exit_order_price if exit_order_type == OrderType.STOP else None
+            ),
+            intent_id=f"{signal.snapshot_id}:exit:{trade_date}",
         )
+        if fill is not None and fill.quantity == probe_quantity:
+            exit_date = trade_date
+            exit_price = fill.price
+            selected_exit_rule = exit_rule
+            exit_capacity = participation_capacity(_row_volume(row), rules)
+            break
+        if exit_order_type == OrderType.STOP:
+            # A triggered stop remains executable after a blocked daily bar.
+            exit_order_type = OrderType.MARKET
+            exit_order_price = None
+
+    if exit_price is None or exit_date is None or exit_reason is None:
+        return None
 
     return _TradeCandidate(
         signal=signal,
@@ -406,6 +491,7 @@ def _candidate_from_signal(
         holding_days=max((exit_date - entry_date).days, 0),
         execution_rule=entry_rule,
         exit_execution_rule=selected_exit_rule,
+        max_executable_shares=Decimal(min(entry_capacity, exit_capacity)),
     )
 
 
@@ -417,21 +503,16 @@ def _simulate_portfolio(
     max_positions: int,
     transaction_cost_bps: Decimal,
     fee_multiplier: Decimal,
+    bars: pd.DataFrame | None = None,
+    end: date | None = None,
 ) -> tuple[list[PortfolioBacktestTrade], list[PortfolioEquityPoint]]:
-    equity = initial_capital
-    peak = equity
-    open_trades: list[PortfolioBacktestTrade] = []
+    cash = _money(initial_capital)
+    peak = cash
+    open_positions: list[_OpenPortfolioPosition] = []
     closed_trades: list[PortfolioBacktestTrade] = []
-    curve = [
-        PortfolioEquityPoint(
-            date=start,
-            equity=equity,
-            cash=equity,
-            open_positions=0,
-            drawdown_pct=0.0,
-        )
-    ]
-
+    curve: list[PortfolioEquityPoint] = []
+    latest_prices: dict[str, Decimal] = {}
+    candidates_by_date: dict[date, list[_TradeCandidate]] = {}
     for candidate in sorted(
         candidates,
         key=lambda item: (
@@ -440,53 +521,122 @@ def _simulate_portfolio(
             item.signal.instrument_id,
         ),
     ):
-        equity, peak = _close_due_trades(
-            candidate.entry_date,
-            open_trades,
-            closed_trades,
-            curve,
-            equity,
-            peak,
-        )
-        if len(open_trades) >= max_positions:
-            continue
-        trade = _size_trade(
-            candidate,
-            equity=equity,
-            risk_per_trade_pct=risk_per_trade_pct,
-            max_positions=max_positions,
-            transaction_cost_bps=transaction_cost_bps,
-            fee_multiplier=fee_multiplier,
-        )
-        if trade is not None:
-            open_trades.append(trade)
+        candidates_by_date.setdefault(candidate.entry_date, []).append(candidate)
 
-    remaining_trades = sorted(open_trades, key=lambda item: (item.exit_date, item.instrument_id))
-    for index, trade in enumerate(remaining_trades):
-        equity = _money(equity + trade.net_pnl)
+    final_date = max(
+        [end or start, *(candidate.exit_date for candidate in candidates)],
+    )
+    trading_dates = {start, *candidates_by_date}
+    trading_dates.update(candidate.exit_date for candidate in candidates)
+    rows_by_date: dict[date, pd.DataFrame] = {}
+    if bars is not None and not bars.empty:
+        relevant = bars.loc[
+            (bars["trade_date"] >= start) & (bars["trade_date"] <= final_date)
+        ]
+        for trade_date, frame in relevant.groupby("trade_date", sort=True):
+            rows_by_date[trade_date] = frame
+            trading_dates.add(trade_date)
+    symbols = {candidate.signal.instrument_id for candidate in candidates}
+    if bars is not None and not bars.empty:
+        symbols.update(str(value) for value in bars["instrument_id"].unique())
+    if any(_is_cn(symbol) for symbol in symbols):
+        trading_dates.update(
+            trading_sessions_in_range(start, final_date, market=Market.CN)
+        )
+    if any(not _is_cn(symbol) for symbol in symbols):
+        trading_dates.update(
+            trading_sessions_in_range(start, final_date, market=Market.US)
+        )
+
+    for current_date in sorted(trading_dates):
+        due = [
+            position
+            for position in open_positions
+            if position.trade.exit_date <= current_date
+        ]
+        for position in sorted(
+            due,
+            key=lambda item: (item.trade.exit_date, item.trade.instrument_id),
+        ):
+            trade = position.trade
+            proceeds = trade.exit_price * trade.shares - position.exit_costs
+            cash = _money(cash + proceeds)
+            open_positions.remove(position)
+            closed_trades.append(trade)
+
+        sizing_equity = _money(
+            cash + _open_market_value(open_positions, latest_prices)
+        )
+        for candidate in candidates_by_date.get(current_date, []):
+            if len(open_positions) >= max_positions:
+                continue
+            trade = _size_trade(
+                candidate,
+                equity=sizing_equity,
+                cash=cash,
+                risk_per_trade_pct=risk_per_trade_pct,
+                max_positions=max_positions,
+                transaction_cost_bps=transaction_cost_bps,
+                fee_multiplier=fee_multiplier,
+            )
+            if trade is None:
+                continue
+            entry_costs, exit_costs = _trade_cost_breakdown(
+                candidate,
+                trade.shares,
+                transaction_cost_bps,
+                fee_multiplier,
+            )
+            entry_outlay = trade.entry_price * trade.shares + entry_costs
+            if entry_outlay > cash:
+                continue
+            cash = _money(cash - entry_outlay)
+            latest_prices[trade.instrument_id] = trade.entry_price
+            position = _OpenPortfolioPosition(
+                trade=trade,
+                entry_costs=entry_costs,
+                exit_costs=exit_costs,
+            )
+            if trade.exit_date <= current_date:
+                cash = _money(
+                    cash + trade.exit_price * trade.shares - exit_costs
+                )
+                closed_trades.append(trade)
+            else:
+                open_positions.append(position)
+            sizing_equity = _money(
+                cash + _open_market_value(open_positions, latest_prices)
+            )
+
+        for _, row in rows_by_date.get(current_date, pd.DataFrame()).iterrows():
+            latest_prices[str(row["instrument_id"])] = Decimal(str(row["close"]))
+        market_value = _money(_open_market_value(open_positions, latest_prices))
+        equity = _money(cash + market_value)
         peak = max(peak, equity)
-        closed_trades.append(trade)
+        point_cash = cash
+        point_market_value = market_value
+        point_equity = equity
+        if (
+            current_date == start
+            and not open_positions
+            and not closed_trades
+            and cash == initial_capital
+        ):
+            point_cash = initial_capital
+            point_market_value = Decimal("0")
+            point_equity = initial_capital
         curve.append(
             PortfolioEquityPoint(
-                date=trade.exit_date,
-                equity=equity,
-                cash=equity,
-                open_positions=len(remaining_trades) - index - 1,
+                date=current_date,
+                equity=point_equity,
+                cash=point_cash,
+                market_value=point_market_value,
+                open_positions=len(open_positions),
                 drawdown_pct=_pct((equity - peak) / peak) if peak else 0.0,
             )
         )
 
     closed_trades.sort(key=lambda item: (item.exit_date, item.instrument_id))
-    if curve[-1].equity != equity:
-        curve.append(
-            PortfolioEquityPoint(
-                date=closed_trades[-1].exit_date if closed_trades else start,
-                equity=equity,
-                cash=equity,
-                open_positions=0,
-                drawdown_pct=_pct((equity - peak) / peak) if peak else 0.0,
-            )
-        )
     return closed_trades, curve
 
 
@@ -523,37 +673,46 @@ def _size_trade(
     max_positions: int,
     transaction_cost_bps: Decimal,
     fee_multiplier: Decimal = Decimal("1"),
+    cash: Decimal | None = None,
 ) -> PortfolioBacktestTrade | None:
-    per_share_risk = max(candidate.entry_price - candidate.stop_price, candidate.entry_price * Decimal("0.01"))
+    per_share_risk = max(
+        candidate.entry_price - candidate.stop_price,
+        candidate.entry_price * Decimal("0.01"),
+    )
     if per_share_risk <= 0:
         return None
     risk_budget = equity * (risk_per_trade_pct / Decimal("100"))
     capital_budget = equity / Decimal(max_positions)
     shares_by_risk = risk_budget / per_share_risk
     shares_by_capital = capital_budget / candidate.entry_price
+    desired_shares = min(shares_by_risk, shares_by_capital)
+    if candidate.max_executable_shares is not None:
+        desired_shares = min(desired_shares, candidate.max_executable_shares)
     shares = _shares(
-        min(shares_by_risk, shares_by_capital),
+        desired_shares,
         candidate.signal.instrument_id,
         execution_rule=candidate.execution_rule,
     )
+    shares = _round_for_exit_rule(shares, candidate.exit_execution_rule)
+    if cash is not None:
+        shares = _fit_shares_to_cash(
+            candidate,
+            shares,
+            cash,
+            transaction_cost_bps,
+            fee_multiplier,
+        )
     if shares <= 0:
         return None
 
     gross_pnl = _money((candidate.exit_price - candidate.entry_price) * shares)
-    entry_value = candidate.entry_price * shares
-    exit_value = candidate.exit_price * shares
-    base_costs = (
-        calculate_round_trip_fees(
-            candidate.execution_rule,
-            entry_value=entry_value,
-            exit_value=exit_value,
-            exit_rule=candidate.exit_execution_rule,
-        )
-        if candidate.execution_rule is not None
-        else (entry_value + exit_value)
-        * (transaction_cost_bps / Decimal("10000"))
+    entry_costs, exit_costs = _trade_cost_breakdown(
+        candidate,
+        shares,
+        transaction_cost_bps,
+        fee_multiplier,
     )
-    costs = _money(base_costs * fee_multiplier)
+    costs = _money(entry_costs + exit_costs)
     net_pnl = _money(gross_pnl - costs)
     denominator = candidate.entry_price * shares
     return_pct = _pct(net_pnl / denominator) if denominator else 0.0
@@ -572,6 +731,117 @@ def _size_trade(
         net_pnl=net_pnl,
         return_pct=return_pct,
         holding_days=candidate.holding_days,
+    )
+
+
+def _trade_cost_breakdown(
+    candidate: _TradeCandidate,
+    shares: Decimal,
+    transaction_cost_bps: Decimal,
+    fee_multiplier: Decimal,
+) -> tuple[Decimal, Decimal]:
+    entry_value = candidate.entry_price * shares
+    exit_value = candidate.exit_price * shares
+    if candidate.execution_rule is None:
+        rate = transaction_cost_bps / Decimal("10000")
+        entry_base = entry_value * rate
+        exit_base = exit_value * rate
+    else:
+        entry_rules = execution_rules_from_historical(
+            candidate.execution_rule,
+            side=OrderSide.BUY,
+        )
+        exit_rule = candidate.exit_execution_rule or candidate.execution_rule
+        exit_rules = execution_rules_from_historical(
+            exit_rule,
+            side=OrderSide.SELL,
+        )
+        entry_base = fee_breakdown(
+            OrderSide.BUY,
+            entry_value,
+            entry_rules,
+        ).total
+        exit_base = fee_breakdown(
+            OrderSide.SELL,
+            exit_value,
+            exit_rules,
+        ).total
+    return _money(entry_base * fee_multiplier), _money(exit_base * fee_multiplier)
+
+
+def _fit_shares_to_cash(
+    candidate: _TradeCandidate,
+    shares: Decimal,
+    cash: Decimal,
+    transaction_cost_bps: Decimal,
+    fee_multiplier: Decimal,
+) -> Decimal:
+    for _ in range(8):
+        if shares <= 0:
+            return Decimal("0")
+        entry_costs, _ = _trade_cost_breakdown(
+            candidate,
+            shares,
+            transaction_cost_bps,
+            fee_multiplier,
+        )
+        if candidate.entry_price * shares + entry_costs <= cash:
+            return shares
+        affordable_value = max(cash - entry_costs, Decimal("0"))
+        adjusted = _shares(
+            affordable_value / candidate.entry_price,
+            candidate.signal.instrument_id,
+            execution_rule=candidate.execution_rule,
+        )
+        adjusted = _round_for_exit_rule(
+            min(shares, adjusted),
+            candidate.exit_execution_rule,
+        )
+        if adjusted >= shares:
+            adjusted = _shares(
+                shares - _share_step(candidate),
+                candidate.signal.instrument_id,
+                execution_rule=candidate.execution_rule,
+            )
+            adjusted = _round_for_exit_rule(
+                adjusted,
+                candidate.exit_execution_rule,
+            )
+        shares = adjusted
+    return Decimal("0")
+
+
+def _round_for_exit_rule(
+    shares: Decimal,
+    exit_rule: HistoricalExecutionRule | None,
+) -> Decimal:
+    if exit_rule is None:
+        return shares
+    return min(shares, round_order_quantity(shares, exit_rule))
+
+
+def _share_step(candidate: _TradeCandidate) -> Decimal:
+    if candidate.execution_rule is not None:
+        return Decimal(candidate.execution_rule.quantity_step)
+    if _is_cn(candidate.signal.instrument_id):
+        return Decimal("100")
+    return Decimal("0.0001")
+
+
+def _open_market_value(
+    positions: list[_OpenPortfolioPosition],
+    latest_prices: dict[str, Decimal],
+) -> Decimal:
+    return sum(
+        (
+            position.trade.shares
+            * latest_prices.get(
+                position.trade.instrument_id,
+                position.trade.entry_price,
+            )
+            for position in positions
+        ),
+        Decimal("0"),
     )
 
 
@@ -673,6 +943,103 @@ def _shares(
         lots = (value / Decimal("100")).to_integral_value(rounding=ROUND_DOWN)
         return lots * Decimal("100")
     return value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+
+
+def _resolve_execution_rule(
+    resolver: VersionedAshareExecutionResolver | None,
+    instrument_id: str,
+    row,
+) -> HistoricalExecutionRule | None:
+    if resolver is None or not _is_cn(instrument_id):
+        return None
+    return resolver.resolve(
+        instrument_id,
+        row["trade_date"],
+        is_st=_row_is_st(row),
+    )
+
+
+def _execution_rules_for_row(
+    instrument_id: str,
+    trade_date: date,
+    historical_rule: HistoricalExecutionRule | None,
+    *,
+    side: OrderSide,
+    slippage_bps: Decimal,
+) -> AShareExecutionRules:
+    if historical_rule is not None:
+        rules = execution_rules_from_historical(
+            historical_rule,
+            side=side,
+            slippage_bps=slippage_bps,
+        )
+        effective_limit = _effective_limit_pct(historical_rule, trade_date)
+        return rules.model_copy(
+            update={
+                "price_limit_rate": (
+                    effective_limit / Decimal("100")
+                    if effective_limit is not None
+                    else None
+                )
+            }
+        )
+
+    is_cn = _is_cn(instrument_id)
+    return AShareExecutionRules(
+        rules_version=(
+            "portfolio-cn-legacy-v1" if is_cn else "portfolio-generic-v1"
+        ),
+        fee_schedule_version="portfolio-cost-model-v1",
+        tick_size=Decimal("0.01") if is_cn else Decimal("0.0001"),
+        lot_size=100 if is_cn else 1,
+        settlement_days=1 if is_cn else 0,
+        price_limit_rate=(
+            _limit_pct(instrument_id) / Decimal("100") if is_cn else None
+        ),
+        volume_participation_rate=Decimal("1"),
+        commission_bps=Decimal("0"),
+        minimum_commission=Decimal("0"),
+        stamp_duty_bps=Decimal("0"),
+        transfer_fee_bps=Decimal("0"),
+        slippage_bps=slippage_bps,
+    )
+
+
+def _execution_probe_quantity(
+    historical_rule: HistoricalExecutionRule | None,
+    rules: AShareExecutionRules,
+) -> int:
+    minimum = (
+        historical_rule.minimum_order_quantity
+        if historical_rule is not None
+        else rules.lot_size
+    )
+    remainder = minimum % rules.lot_size
+    return minimum if remainder == 0 else minimum + rules.lot_size - remainder
+
+
+def _row_volume(row) -> int:
+    value = row.get("volume", 0)
+    if value is None or pd.isna(value):
+        return 0
+    return max(int(Decimal(str(value)).to_integral_value(rounding=ROUND_DOWN)), 0)
+
+
+def _row_has_trades(row) -> bool:
+    if _row_volume(row) <= 0:
+        return False
+    if _truthy(row.get("suspended", False)) or _truthy(
+        row.get("is_suspended", False)
+    ):
+        return False
+    status = row.get("trading_status", "trading")
+    if status is None or pd.isna(status):
+        return True
+    return str(status).strip().lower() in {"", "trading", "normal", "active"}
+
+
+def _truthy(value) -> bool:
+    return value is True or str(value).strip().lower() in {"1", "true", "yes"}
 
 
 def _previous_row(ordered: pd.DataFrame, row) -> object | None:

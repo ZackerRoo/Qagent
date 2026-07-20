@@ -4,7 +4,13 @@ from decimal import Decimal
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from qagent.storage.paper import PaperTradeEventMetadata, PaperTradingRepository
+from qagent.execution import AShareExecutionRules, OrderSide
+from qagent.storage.paper import (
+    PaperExecutionFacts,
+    PaperExecutionLegFacts,
+    PaperTradeEventMetadata,
+    PaperTradingRepository,
+)
 from qagent.storage.tables import PaperTradeEventRow
 
 from test_state_repository import make_repo
@@ -83,6 +89,54 @@ def test_legal_update_appends_event_with_explicit_metadata(tmp_path):
     assert event.reason_code == "trigger_filled"
     assert event.note == "fixture fill"
     assert event.source == "test_engine"
+
+
+def test_execution_facts_are_embedded_in_event_note_and_hydrated_from_ledger(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    trade = _create_trade(paper_repo)
+    facts = PaperExecutionFacts(
+        allocation=Decimal("1000"),
+        rules=AShareExecutionRules(
+            commission_bps=Decimal("10"),
+            minimum_commission=Decimal("0"),
+            stamp_duty_bps=Decimal("0"),
+            transfer_fee_bps=Decimal("0"),
+            slippage_bps=Decimal("10"),
+        ),
+        entry=PaperExecutionLegFacts(
+            market_event_id="paper-market:event-facts",
+            side=OrderSide.BUY,
+            trade_date=date(2026, 7, 11),
+            base_price=Decimal("10.00"),
+            price=Decimal("10.01"),
+            quantity=100,
+            gross_amount=Decimal("1001.00"),
+            commission=Decimal("1.00"),
+            slippage=Decimal("1.00"),
+            cash_flow=Decimal("-1002.00"),
+        ),
+    )
+
+    updated = paper_repo.update_trade(
+        trade.trade_id,
+        status="open",
+        entry_date=date(2026, 7, 11),
+        entry_price=Decimal("10.01"),
+        event_metadata=PaperTradeEventMetadata(
+            note="immutable fill evidence",
+            source="unified_execution",
+            execution_facts=facts,
+        ),
+    )
+    event = paper_repo.list_trade_events(trade.trade_id)[-1]
+    reloaded = paper_repo.get_trade(trade.trade_id)
+
+    assert updated is not None and updated.execution_facts == facts
+    assert reloaded is not None and reloaded.execution_facts == facts
+    assert event.execution_facts == facts
+    assert "[paper_execution_facts:v1]" in event.note
+    assert "execution_facts" not in reloaded.model_dump()
 
 
 def test_repeated_same_value_update_does_not_append_event(tmp_path):

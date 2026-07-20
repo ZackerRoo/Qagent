@@ -121,6 +121,9 @@ def _configure_sqlite_pragmas(engine: Engine) -> None:
 
 
 def initialize_database(database_url: str | None = None):
+    # Import table mappings before create_all so direct db initialization sees every table.
+    from qagent.storage import tables as _tables  # noqa: F401
+
     url = database_url or get_settings().database_url
     engine = create_db_engine(url)
     with _schema_lock:
@@ -166,6 +169,16 @@ def _apply_additive_migrations(engine: Engine) -> None:
             "paper_trades",
             {
                 "allocation_multiplier": "NUMERIC(8, 4) NOT NULL DEFAULT 1.0",
+            },
+        )
+        _add_missing_columns(
+            connection,
+            inspector,
+            "walk_forward_jobs",
+            {
+                "lease_maintenance_count": "INTEGER NOT NULL DEFAULT 0",
+                "lease_recovery_count": "INTEGER NOT NULL DEFAULT 0",
+                "last_lease_heartbeat_at": "DATETIME",
             },
         )
         added_event_columns = _add_missing_columns(
@@ -226,8 +239,11 @@ def _apply_additive_migrations(engine: Engine) -> None:
                 table_name,
                 {"owner_run_id": ("VARCHAR(64) NOT NULL DEFAULT 'legacy-unknown-owner'")},
             )
+        _add_strategy_governance_columns(connection, inspector)
         _rebuild_revision_scoped_tables(connection)
         _create_missing_metadata_indexes(connection)
+        _create_strategy_governance_indexes(connection)
+        _create_immutable_strategy_governance_triggers(connection)
 
 
 def _add_missing_columns(connection, inspector, table_name: str, additions) -> set[str]:
@@ -267,6 +283,131 @@ def _backfill_paper_trade_event_instrument_ids(connection) -> None:
             "), 'UNKNOWN') WHERE instrument_id IS NULL OR instrument_id = 'UNKNOWN'"
         )
     )
+
+
+def _add_strategy_governance_columns(connection, inspector) -> None:
+    _add_missing_columns(
+        connection,
+        inspector,
+        "strategy_versions",
+        {
+            "definition_digest": "VARCHAR(64) NOT NULL DEFAULT ''",
+            "definition_json": "TEXT NOT NULL DEFAULT '{}'",
+            "created_at": "DATETIME NOT NULL DEFAULT '1970-01-01 00:00:00'",
+        },
+    )
+    _add_missing_columns(
+        connection,
+        inspector,
+        "policy_deployments",
+        {
+            "strategy_version": "VARCHAR(96) NOT NULL DEFAULT 'legacy'",
+            "factor_version": "VARCHAR(96) NOT NULL DEFAULT 'legacy'",
+            "parameter_version": "VARCHAR(96) NOT NULL DEFAULT 'legacy'",
+            "universe_version": "VARCHAR(96) NOT NULL DEFAULT 'legacy'",
+            "data_revision": "VARCHAR(128) NOT NULL DEFAULT 'unversioned'",
+            "policy_digest": "VARCHAR(64) NOT NULL DEFAULT ''",
+            "policy_json": "TEXT NOT NULL DEFAULT '{}'",
+            "previous_deployment_id": "VARCHAR(96)",
+            "created_at": "DATETIME NOT NULL DEFAULT '1970-01-01 00:00:00'",
+        },
+    )
+    _add_missing_columns(
+        connection,
+        inspector,
+        "strategy_states",
+        {
+            "current_deployment_id": "VARCHAR(96)",
+            "previous_deployment_id": "VARCHAR(96)",
+            "current_policy_version": "VARCHAR(96)",
+            "previous_policy_version": "VARCHAR(96)",
+            "effective_weight": "NUMERIC(12, 10) NOT NULL DEFAULT 0",
+            "revision": "INTEGER NOT NULL DEFAULT 0",
+            "created_at": "DATETIME NOT NULL DEFAULT '1970-01-01 00:00:00'",
+            "updated_at": "DATETIME NOT NULL DEFAULT '1970-01-01 00:00:00'",
+        },
+    )
+    event_columns = _add_missing_columns(
+        connection,
+        inspector,
+        "strategy_state_events",
+        {
+            "sequence": "INTEGER NOT NULL DEFAULT 0",
+            "idempotency_key": "VARCHAR(160)",
+            "event_type": "VARCHAR(64) NOT NULL DEFAULT 'legacy'",
+            "action": "VARCHAR(64) NOT NULL DEFAULT 'legacy'",
+            "deployment_id": "VARCHAR(96)",
+            "previous_deployment_id": "VARCHAR(96)",
+            "policy_version": "VARCHAR(96)",
+            "effective_weight": "NUMERIC(12, 10) NOT NULL DEFAULT 0",
+            "reason": "TEXT NOT NULL DEFAULT ''",
+            "evidence_json": "TEXT NOT NULL DEFAULT '{}'",
+            "decision_json": "TEXT NOT NULL DEFAULT '{}'",
+            "created_at": "DATETIME NOT NULL DEFAULT '1970-01-01 00:00:00'",
+        },
+    )
+    if "idempotency_key" in event_columns:
+        connection.execute(
+            text(
+                "UPDATE strategy_state_events "
+                "SET idempotency_key = 'legacy-governance-event-' || rowid "
+                "WHERE idempotency_key IS NULL OR idempotency_key = ''"
+            )
+        )
+    if "sequence" in event_columns:
+        connection.execute(
+            text(
+                "UPDATE strategy_state_events AS current SET sequence = ("
+                "SELECT COUNT(*) FROM strategy_state_events AS earlier "
+                "WHERE earlier.strategy_id = current.strategy_id "
+                "AND earlier.rowid <= current.rowid)"
+            )
+        )
+
+
+def _create_strategy_governance_indexes(connection) -> None:
+    inspector = inspect(connection)
+    if inspector.has_table("policy_deployments"):
+        connection.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "uq_policy_deployments_strategy_policy_version "
+                "ON policy_deployments (strategy_id, policy_version)"
+            )
+        )
+    if inspector.has_table("strategy_state_events"):
+        connection.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "uq_strategy_state_events_idempotency_key "
+                "ON strategy_state_events (idempotency_key)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "uq_strategy_state_events_strategy_sequence "
+                "ON strategy_state_events (strategy_id, sequence)"
+            )
+        )
+
+
+def _create_immutable_strategy_governance_triggers(connection) -> None:
+    inspector = inspect(connection)
+    for table_name in ("strategy_versions", "policy_deployments"):
+        if not inspector.has_table(table_name):
+            continue
+        for operation in ("UPDATE", "DELETE"):
+            trigger_name = f"trg_{table_name}_immutable_{operation.lower()}"
+            connection.execute(
+                text(
+                    f"CREATE TRIGGER IF NOT EXISTS {trigger_name} "
+                    f"BEFORE {operation} ON {table_name} "
+                    "BEGIN "
+                    f"SELECT RAISE(ABORT, '{table_name} rows are immutable'); "
+                    "END"
+                )
+            )
 
 
 def _rebuild_revision_scoped_tables(connection) -> None:

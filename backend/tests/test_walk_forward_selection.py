@@ -44,18 +44,22 @@ from qagent.strategy_data.models import FundamentalSnapshot
 
 def test_dataset_lease_heartbeat_renews_during_long_snapshot():
     renewed = Event()
+    heartbeat_at = datetime.now(timezone.utc)
 
     class FakeRepository:
         provider_mode = "free"
 
-        def renew_dataset_lease(self):
+        def maintain_dataset_lease(self, *, expected_revision):
+            assert expected_revision == 7
             renewed.set()
-
-        def acquire_dataset_lease(self):
-            raise AssertionError("healthy heartbeat must not reacquire")
+            return SimpleNamespace(
+                action="renewed",
+                lease=SimpleNamespace(heartbeat_at=heartbeat_at),
+            )
 
     heartbeat = _DatasetLeaseHeartbeat(
         FakeRepository(),
+        expected_revision=7,
         interval_seconds=0.01,
     )
     heartbeat.start()
@@ -64,6 +68,124 @@ def test_dataset_lease_heartbeat_renews_during_long_snapshot():
         heartbeat.raise_if_failed()
     finally:
         heartbeat.stop()
+
+    assert heartbeat.maintenance_count >= 1
+    assert heartbeat.recovery_count == 0
+    assert heartbeat.last_heartbeat_at == heartbeat_at
+
+
+def test_dataset_lease_heartbeat_records_atomic_expiry_recovery():
+    heartbeat_at = datetime.now(timezone.utc)
+    callback_records = []
+
+    class FakeRepository:
+        provider_mode = "free"
+
+        def maintain_dataset_lease(self, *, expected_revision):
+            assert expected_revision == 11
+            return SimpleNamespace(
+                action="expired_reacquired",
+                lease=SimpleNamespace(heartbeat_at=heartbeat_at),
+            )
+
+    heartbeat = _DatasetLeaseHeartbeat(
+        FakeRepository(),
+        expected_revision=11,
+        maintenance_callback=lambda *values: callback_records.append(values),
+    )
+
+    heartbeat.maintain_now()
+
+    assert heartbeat.maintenance_count == 1
+    assert heartbeat.recovery_count == 1
+    assert heartbeat.last_heartbeat_at == heartbeat_at
+    assert callback_records == [(1, 1, heartbeat_at)]
+
+
+def test_dataset_lease_heartbeat_ignores_telemetry_callback_failure():
+    heartbeat_at = datetime.now(timezone.utc)
+
+    class FakeRepository:
+        provider_mode = "free"
+
+        def maintain_dataset_lease(self, *, expected_revision):
+            return SimpleNamespace(
+                action="renewed",
+                lease=SimpleNamespace(heartbeat_at=heartbeat_at),
+            )
+
+    heartbeat = _DatasetLeaseHeartbeat(
+        FakeRepository(),
+        expected_revision=17,
+        maintenance_callback=lambda *_: (_ for _ in ()).throw(
+            RuntimeError("telemetry store unavailable")
+        ),
+    )
+
+    heartbeat.maintain_now()
+    heartbeat.raise_if_failed()
+
+    assert heartbeat.maintenance_count == 1
+    assert heartbeat.last_heartbeat_at == heartbeat_at
+
+
+def test_dataset_lease_heartbeat_continues_persisted_counters_after_restart():
+    previous_heartbeat_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    heartbeat_at = datetime.now(timezone.utc)
+
+    class FakeRepository:
+        provider_mode = "free"
+
+        def maintain_dataset_lease(self, *, expected_revision):
+            return SimpleNamespace(
+                action="expired_reacquired",
+                lease=SimpleNamespace(heartbeat_at=heartbeat_at),
+            )
+
+    heartbeat = _DatasetLeaseHeartbeat(
+        FakeRepository(),
+        expected_revision=19,
+        initial_maintenance_count=8,
+        initial_recovery_count=2,
+        initial_heartbeat_at=previous_heartbeat_at,
+    )
+
+    heartbeat.maintain_now()
+
+    assert heartbeat.maintenance_count == 9
+    assert heartbeat.recovery_count == 3
+    assert heartbeat.last_heartbeat_at == heartbeat_at
+
+
+def test_dataset_lease_heartbeat_retries_transient_failure():
+    heartbeat_at = datetime.now(timezone.utc)
+    attempts = 0
+
+    class FakeRepository:
+        provider_mode = "free"
+
+        def maintain_dataset_lease(self, *, expected_revision):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("temporary database lock")
+            return SimpleNamespace(
+                action="renewed",
+                lease=SimpleNamespace(heartbeat_at=heartbeat_at),
+            )
+
+    heartbeat = _DatasetLeaseHeartbeat(
+        FakeRepository(),
+        expected_revision=13,
+        retry_interval_seconds=0.01,
+        max_attempts=2,
+    )
+
+    heartbeat.maintain_now()
+
+    assert attempts == 2
+    assert heartbeat.maintenance_count == 1
+    assert heartbeat.recovery_count == 0
 
 
 def _replay_repository(tmp_path):

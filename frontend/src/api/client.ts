@@ -57,6 +57,7 @@ import type {
   ScanTask,
   ScanTasksResponse,
   StrategyDiagnosticsResponse,
+  StrategyGovernanceResponse,
   StrategyPerformanceResponse,
   TradableCatalogResponse,
   TradableCatalogSyncResponse,
@@ -680,6 +681,12 @@ export async function fetchStrategyPerformance(
   provider: DataProviderMode,
 ): Promise<StrategyPerformanceResponse> {
   return apiGet<StrategyPerformanceResponse>("/strategy-performance", { provider, limit: 100 });
+}
+
+export async function fetchStrategyGovernance(
+  options?: RequestOptions,
+): Promise<StrategyGovernanceResponse> {
+  return apiGet<StrategyGovernanceResponse>("/strategy-governance", undefined, options);
 }
 
 export async function fetchStrategyDiagnostics(

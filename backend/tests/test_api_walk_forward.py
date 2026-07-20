@@ -101,6 +101,9 @@ def test_walk_forward_job_is_persisted_and_submitted_in_background(tmp_path, mon
     assert body["phase"] == "queued"
     assert body["dataset_revision"] == 7
     assert body["progress"] == 0
+    assert body["lease_maintenance_count"] == 0
+    assert body["lease_recovery_count"] == 0
+    assert body["last_lease_heartbeat_at"] is None
     assert body["total_snapshots"] > 0
     assert body["experiment_manifest"]["strategy_registry_digest"]
     assert body["experiment_manifest"]["execution_rule_set_version"]
@@ -111,6 +114,7 @@ def test_walk_forward_job_is_persisted_and_submitted_in_background(tmp_path, mon
 
     assert detail.status_code == 200
     assert detail.json()["checkpoint_count"] == 0
+    assert detail.json()["lease_maintenance_count"] == 0
     assert latest.status_code == 200
     assert latest.json()["job_id"] == body["job_id"]
 
@@ -427,3 +431,52 @@ def test_walk_forward_runner_rejects_stale_experiment_definition(tmp_path, monke
     assert stored.status == "failed"
     assert "experiment definition changed" in stored.error
     assert called is False
+
+
+def test_walk_forward_runner_persists_live_lease_telemetry(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'walk-forward-lease-telemetry-api.db'}",
+    )
+    repo = routes._repo()
+    with repo.session_factory() as session:
+        session.add(HistoricalDataRevisionRow(provider_mode="free", revision=7))
+        session.commit()
+    manifest = routes.build_walk_forward_experiment_manifest(
+        provider_mode="free",
+        dataset_revision=7,
+        start_date=date(2025, 1, 2),
+        end_date=date(2025, 3, 31),
+        rebalance_step_sessions=5,
+        lookback_days=400,
+    )
+    job = repo.create_walk_forward_job(
+        job_id="walk-forward-live-lease-telemetry",
+        provider="free",
+        start=date(2025, 1, 2),
+        end=date(2025, 3, 31),
+        dataset_revision=7,
+        rebalance_step_sessions=5,
+        lookback_days=400,
+        total_snapshots=12,
+        experiment_manifest=manifest.model_dump(mode="json"),
+    )
+    heartbeat_at = datetime.now(timezone.utc)
+
+    def fake_walk_forward(*args, lease_maintenance_callback, **kwargs):
+        lease_maintenance_callback(3, 1, heartbeat_at)
+        raise RuntimeError("stop after telemetry")
+
+    monkeypatch.setattr(
+        routes,
+        "run_full_market_walk_forward_selection",
+        fake_walk_forward,
+    )
+
+    routes._run_walk_forward_job_safely(job.job_id)
+
+    stored = repo.get_walk_forward_job(job.job_id)
+    assert stored.status == "failed"
+    assert stored.lease_maintenance_count == 3
+    assert stored.lease_recovery_count == 1
+    assert stored.last_lease_heartbeat_at == heartbeat_at

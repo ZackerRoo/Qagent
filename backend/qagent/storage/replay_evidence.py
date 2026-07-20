@@ -4,6 +4,8 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Literal
+
 from pydantic import BaseModel
 from sqlalchemy import func, select, text, tuple_
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -84,6 +86,11 @@ class DatasetLeaseRecord(BaseModel):
     revision: int
     lease_expires_at: datetime
     heartbeat_at: datetime
+
+
+class DatasetLeaseMaintenanceRecord(BaseModel):
+    lease: DatasetLeaseRecord
+    action: Literal["acquired", "renewed", "expired_reacquired"]
 
 
 ActionCoverageRecord = HistoricalCorporateActionCoverage
@@ -1330,11 +1337,30 @@ class ReplayEvidenceRepository:
         }
 
     def acquire_dataset_lease(self, owner_run_id: str | None = None) -> DatasetLeaseRecord:
+        return self.maintain_dataset_lease(owner_run_id).lease
+
+    def maintain_dataset_lease(
+        self,
+        owner_run_id: str | None = None,
+        *,
+        expected_revision: int | None = None,
+    ) -> DatasetLeaseMaintenanceRecord:
+        """Atomically acquire or extend the active run's dataset lease.
+
+        Unlike ``renew_dataset_lease``, this operation lets the same non-terminal
+        run recover an expired lease without a renew/reacquire race.
+        """
+
         owner = owner_run_id or self._require_owner()
         now = self._now()
         with self._immediate_session() as session:
             self._ensure_run_active(owner)
             revision = self._revision_row(session).revision
+            if expected_revision is not None and revision != expected_revision:
+                raise StaleCheckpointRevision(
+                    f"dataset revision {revision} no longer matches expected revision "
+                    f"{expected_revision}"
+                )
             lease = session.get(HistoricalDatasetLeaseRow, self.provider_mode)
             if lease is not None:
                 owner_status = self._run_status_lookup(lease.owner_run_id)
@@ -1352,7 +1378,9 @@ class ReplayEvidenceRepository:
                 raise StaleCheckpointRevision(
                     "dataset revision changed while the lease was persisted"
                 )
+            action: Literal["acquired", "renewed", "expired_reacquired"]
             if lease is None:
+                action = "acquired"
                 lease = HistoricalDatasetLeaseRow(
                     provider_mode=self.provider_mode,
                     owner_run_id=owner,
@@ -1362,10 +1390,16 @@ class ReplayEvidenceRepository:
                 )
                 session.add(lease)
             else:
+                action = (
+                    "expired_reacquired" if lease.lease_expires_at <= now else "renewed"
+                )
                 lease.heartbeat_at = now
                 lease.lease_expires_at = now + LEASE_DURATION
             session.flush()
-            return _lease_from_row(lease)
+            return DatasetLeaseMaintenanceRecord(
+                lease=_lease_from_row(lease),
+                action=action,
+            )
 
     def renew_dataset_lease(self, owner_run_id: str | None = None) -> DatasetLeaseRecord:
         owner = owner_run_id or self._require_owner()

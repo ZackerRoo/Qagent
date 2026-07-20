@@ -3,10 +3,12 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func
 from sqlalchemy.orm import Session, sessionmaker
 
+from qagent.execution.models import AShareExecutionRules, OrderSide
+from qagent.execution.rules import is_tick_aligned
 from qagent.storage.tables import (
     OpportunitySnapshotRow,
     PaperAccountSettingsRow,
@@ -16,6 +18,7 @@ from qagent.storage.tables import (
 )
 
 
+PAPER_EXECUTION_FACTS_NOTE_PREFIX = "[paper_execution_facts:v1]"
 PAPER_TRADE_TERMINAL_STATUSES = frozenset(
     {
         "target_1_hit",
@@ -63,6 +66,68 @@ PAPER_TRADE_EVENT_FIELDS = frozenset(
 )
 
 
+class PaperExecutionLegFacts(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    market_event_id: str
+    side: OrderSide
+    trade_date: date
+    base_price: Decimal = Field(gt=0)
+    price: Decimal = Field(gt=0)
+    quantity: int = Field(gt=0)
+    gross_amount: Decimal = Field(gt=0)
+    commission: Decimal = Field(default=Decimal("0"), ge=0)
+    stamp_duty: Decimal = Field(default=Decimal("0"), ge=0)
+    transfer_fee: Decimal = Field(default=Decimal("0"), ge=0)
+    slippage: Decimal = Field(default=Decimal("0"), ge=0)
+    cash_flow: Decimal
+    source: str = "unified_execution"
+
+    @property
+    def total_fees(self) -> Decimal:
+        return self.commission + self.stamp_duty + self.transfer_fee
+
+    @model_validator(mode="after")
+    def validate_cash_contract(self):
+        if self.gross_amount != self.price * self.quantity:
+            raise ValueError("gross_amount must equal price times quantity")
+        expected = (
+            -(self.gross_amount + self.total_fees)
+            if self.side == OrderSide.BUY
+            else self.gross_amount - self.total_fees
+        )
+        if self.cash_flow != expected:
+            raise ValueError("cash_flow must match side, gross amount, and fees")
+        return self
+
+
+class PaperExecutionFacts(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: str = "paper-execution-facts-v1"
+    allocation: Decimal = Field(gt=0)
+    rules: AShareExecutionRules
+    entry: PaperExecutionLegFacts
+    exit: PaperExecutionLegFacts | None = None
+
+    @model_validator(mode="after")
+    def validate_execution_contract(self):
+        if self.entry.side != OrderSide.BUY:
+            raise ValueError("entry execution fact must be a buy")
+        legs = (self.entry,) if self.exit is None else (self.entry, self.exit)
+        for leg in legs:
+            if leg.quantity % self.rules.lot_size != 0:
+                raise ValueError("execution fact quantity must respect the frozen lot size")
+            if not is_tick_aligned(leg.price, self.rules.tick_size):
+                raise ValueError("execution fact price must respect the frozen tick size")
+        if self.exit is not None:
+            if self.exit.side != OrderSide.SELL:
+                raise ValueError("exit execution fact must be a sell")
+            if self.exit.quantity != self.entry.quantity:
+                raise ValueError("exit execution fact must close the frozen position")
+        return self
+
+
 class PaperTradeRecord(BaseModel):
     trade_id: str
     source_snapshot_id: str
@@ -86,6 +151,7 @@ class PaperTradeRecord(BaseModel):
     realized_return_pct: float | None
     holding_days: int
     notes: str
+    execution_facts: PaperExecutionFacts | None = Field(default=None, exclude=True)
 
 
 class PaperAccountSettings(BaseModel):
@@ -117,6 +183,7 @@ class PaperTradeEventMetadata(BaseModel):
     reason_code: str | None = None
     note: str = ""
     source: str = "paper_repository"
+    execution_facts: PaperExecutionFacts | None = None
 
 
 class PaperTradeEventRecord(BaseModel):
@@ -135,6 +202,7 @@ class PaperTradeEventRecord(BaseModel):
     note: str
     source: str
     created_at: datetime
+    execution_facts: PaperExecutionFacts | None = None
 
 
 class PaperTradingRepository:
@@ -166,7 +234,10 @@ class PaperTradingRepository:
             if existing is not None:
                 if self._ensure_initial_trade_event(session, existing):
                     session.commit()
-                return self._trade_from_row(existing)
+                return self._trade_from_row(
+                    existing,
+                    self._latest_execution_facts(session, existing.trade_id),
+                )
             row = PaperTradeRow(
                 trade_id=f"paper-{uuid4().hex[:12]}",
                 source_snapshot_id=source_snapshot_id,
@@ -209,12 +280,26 @@ class PaperTradingRepository:
                 .filter(PaperTradeRow.source_snapshot_id == source_snapshot_id)
                 .one_or_none()
             )
-            return self._trade_from_row(row) if row is not None else None
+            return (
+                self._trade_from_row(
+                    row,
+                    self._latest_execution_facts(session, row.trade_id),
+                )
+                if row is not None
+                else None
+            )
 
     def get_trade(self, trade_id: str) -> PaperTradeRecord | None:
         with self.session_factory() as session:
             row = session.get(PaperTradeRow, trade_id)
-            return self._trade_from_row(row) if row is not None else None
+            return (
+                self._trade_from_row(
+                    row,
+                    self._latest_execution_facts(session, row.trade_id),
+                )
+                if row is not None
+                else None
+            )
 
     def get_trade_source_context(
         self,
@@ -252,7 +337,11 @@ class PaperTradingRepository:
                 .limit(limit)
                 .all()
             )
-            return [self._trade_from_row(row) for row in rows]
+            facts_by_trade = self._execution_facts_by_trade(
+                session,
+                [row.trade_id for row in rows],
+            )
+            return [self._trade_from_row(row, facts_by_trade.get(row.trade_id)) for row in rows]
 
     def list_trade_events(self, trade_id: str) -> list[PaperTradeEventRecord]:
         with self.session_factory() as session:
@@ -290,7 +379,10 @@ class PaperTradingRepository:
             if not actual_changes:
                 if initialized_event:
                     session.commit()
-                return self._trade_from_row(row)
+                return self._trade_from_row(
+                    row,
+                    self._latest_execution_facts(session, trade_id),
+                )
 
             from_status = row.status
             to_status = str(actual_changes.get("status", from_status))
@@ -335,7 +427,10 @@ class PaperTradingRepository:
                 )
             session.commit()
             session.refresh(row)
-            return self._trade_from_row(row)
+            return self._trade_from_row(
+                row,
+                self._latest_execution_facts(session, trade_id),
+            )
 
     def delete_trade(self, trade_id: str) -> bool:
         with self.session_factory() as session:
@@ -433,7 +528,10 @@ class PaperTradingRepository:
             return self._account_from_row(row)
 
     @staticmethod
-    def _trade_from_row(row: PaperTradeRow) -> PaperTradeRecord:
+    def _trade_from_row(
+        row: PaperTradeRow,
+        execution_facts: PaperExecutionFacts | None = None,
+    ) -> PaperTradeRecord:
         return PaperTradeRecord(
             trade_id=row.trade_id,
             source_snapshot_id=row.source_snapshot_id,
@@ -457,6 +555,7 @@ class PaperTradingRepository:
             realized_return_pct=_float_or_none(row.realized_return_pct),
             holding_days=row.holding_days,
             notes=row.notes,
+            execution_facts=execution_facts,
         )
 
     @staticmethod
@@ -477,6 +576,7 @@ class PaperTradingRepository:
             note=row.note,
             source=row.source,
             created_at=row.created_at,
+            execution_facts=parse_paper_execution_facts(row.note),
         )
 
     @staticmethod
@@ -504,6 +604,9 @@ class PaperTradingRepository:
     ) -> None:
         event_id = f"paper-event-{uuid4().hex}"
         details = metadata or PaperTradeEventMetadata()
+        note = details.note or default_note
+        if details.execution_facts is not None:
+            note = encode_paper_execution_facts(note, details.execution_facts)
         session.add(
             PaperTradeEventRow(
                 event_id=event_id,
@@ -520,10 +623,39 @@ class PaperTradingRepository:
                 ),
                 price=details.price if details.price is not None else default_price,
                 reason_code=(details.reason_code or f"paper_trade.{event_type}.{to_status}"),
-                note=details.note or default_note,
+                note=note,
                 source=details.source,
             )
         )
+
+    @staticmethod
+    def _execution_facts_by_trade(
+        session: Session,
+        trade_ids: list[str],
+    ) -> dict[str, PaperExecutionFacts]:
+        if not trade_ids:
+            return {}
+        rows = (
+            session.query(PaperTradeEventRow.trade_id, PaperTradeEventRow.note)
+            .filter(PaperTradeEventRow.trade_id.in_(trade_ids))
+            .filter(PaperTradeEventRow.note.contains(PAPER_EXECUTION_FACTS_NOTE_PREFIX))
+            .order_by(PaperTradeEventRow.sequence, PaperTradeEventRow.event_id)
+            .all()
+        )
+        result: dict[str, PaperExecutionFacts] = {}
+        for trade_id, note in rows:
+            facts = parse_paper_execution_facts(note)
+            if facts is not None:
+                result[str(trade_id)] = facts
+        return result
+
+    @classmethod
+    def _latest_execution_facts(
+        cls,
+        session: Session,
+        trade_id: str,
+    ) -> PaperExecutionFacts | None:
+        return cls._execution_facts_by_trade(session, [trade_id]).get(trade_id)
 
     def _ensure_initial_trade_event(
         self,
@@ -640,3 +772,31 @@ def _float_or_none(value: Decimal | None) -> float | None:
     if value is None:
         return None
     return float(value)
+
+
+def encode_paper_execution_facts(
+    note: str,
+    facts: PaperExecutionFacts,
+) -> str:
+    payload = json.dumps(
+        facts.model_dump(mode="json"),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    evidence = f"{PAPER_EXECUTION_FACTS_NOTE_PREFIX}{payload}"
+    return f"{note.rstrip()}\n{evidence}" if note.strip() else evidence
+
+
+def parse_paper_execution_facts(note: str | None) -> PaperExecutionFacts | None:
+    if not note:
+        return None
+    for line in reversed(note.splitlines()):
+        if not line.startswith(PAPER_EXECUTION_FACTS_NOTE_PREFIX):
+            continue
+        payload = line[len(PAPER_EXECUTION_FACTS_NOTE_PREFIX) :]
+        try:
+            return PaperExecutionFacts.model_validate_json(payload)
+        except (ValueError, TypeError):
+            return None
+    return None

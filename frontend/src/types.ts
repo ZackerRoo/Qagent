@@ -2526,6 +2526,80 @@ export type StrategyPerformanceResponse = {
   data_health: Record<string, string>;
 };
 
+export type StrategyGovernanceGateDecision = {
+  action?: string | null;
+  allowed?: boolean | null;
+  reason?: string | null;
+  [key: string]: unknown;
+};
+
+export type StrategyGovernanceState = {
+  strategy_id?: string | null;
+  strategy_name?: string | null;
+  name?: string | null;
+  state?: string | null;
+  status?: string | null;
+  effective_weight?: number | string | null;
+  policy_version?: string | null;
+  current_policy_version?: string | null;
+  current_deployment_id?: string | null;
+  latest_reason?: string | null;
+  recent_reason?: string | null;
+  reason?: string | null;
+  gate_decision?: StrategyGovernanceGateDecision | null;
+  updated_at?: string | null;
+  [key: string]: unknown;
+};
+
+export type StrategyGovernanceDeployment = {
+  deployment_id?: string | null;
+  strategy_id?: string | null;
+  policy_version?: string | null;
+  strategy_version?: string | null;
+  created_at?: string | null;
+  [key: string]: unknown;
+};
+
+export type StrategyGovernanceEvent = {
+  event_id?: string | null;
+  strategy_id?: string | null;
+  state?: string | null;
+  from_state?: string | null;
+  to_state?: string | null;
+  reason?: string | null;
+  policy_version?: string | null;
+  effective_weight?: number | string | null;
+  decision?: StrategyGovernanceGateDecision | null;
+  created_at?: string | null;
+  [key: string]: unknown;
+};
+
+export type StrategyGovernanceSummary = {
+  shadow?: number | string | null;
+  shadow_count?: number | string | null;
+  admitted?: number | string | null;
+  admitted_count?: number | string | null;
+  throttled?: number | string | null;
+  throttled_count?: number | string | null;
+  disabled?: number | string | null;
+  disabled_count?: number | string | null;
+  state_counts?: Partial<Record<string, number | string>> | null;
+  [key: string]: unknown;
+};
+
+export type StrategyGovernanceResponse = {
+  states?: StrategyGovernanceState[] | null;
+  deployments?: StrategyGovernanceDeployment[] | null;
+  events?: StrategyGovernanceEvent[] | null;
+  summary?: StrategyGovernanceSummary | null;
+  data_health?: Record<string, string> | null;
+  strategies?: StrategyGovernanceState[] | null;
+  policies?: StrategyGovernanceDeployment[] | null;
+  recent_events?: StrategyGovernanceEvent[] | null;
+  gate_reasons?: StrategyGovernanceEvent[] | null;
+  [key: string]: unknown;
+};
+
 export type StrategyDiagnostic = {
   strategy_id: string;
   verdict: string;
@@ -3152,6 +3226,9 @@ export type WalkForwardJob = {
   total_snapshots: number;
   processed_snapshots: number;
   current_date: string | null;
+  lease_maintenance_count: number;
+  lease_recovery_count: number;
+  last_lease_heartbeat_at: string | null;
   experiment_manifest: WalkForwardExperimentManifest;
   result_run_id: string | null;
   error: string | null;

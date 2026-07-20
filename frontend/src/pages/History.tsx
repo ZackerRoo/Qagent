@@ -18,6 +18,7 @@ import {
   fetchWalkForwardJob,
   fetchScanRuns,
   fetchStrategyDiagnostics,
+  fetchStrategyGovernance,
   fetchStrategyPerformance,
   startWalkForwardJob,
   startFullMarketHistoricalBackfill,
@@ -57,6 +58,10 @@ import type {
   RecommendationClosureWindow,
   ScanRunsResponse,
   StrategyDiagnosticsResponse,
+  StrategyGovernanceDeployment,
+  StrategyGovernanceEvent,
+  StrategyGovernanceResponse,
+  StrategyGovernanceState,
   StrategyPerformanceResponse,
   WalkForwardRun,
   WalkForwardJob,
@@ -101,6 +106,280 @@ type BacktestRunContext = {
   provider: DataProviderMode;
 };
 
+type GovernanceStateTone =
+  | "admitted"
+  | "throttled"
+  | "disabled"
+  | "shadow"
+  | "research"
+  | "unmanaged";
+
+const GOVERNANCE_STATE_LABELS: Record<GovernanceStateTone, string> = {
+  admitted: "已准入",
+  throttled: "已限流",
+  disabled: "已禁用",
+  shadow: "影子观察",
+  research: "研究中",
+  unmanaged: "未管理",
+};
+
+const GOVERNANCE_STATE_DESCRIPTIONS: Record<GovernanceStateTone, string> = {
+  admitted: "正常参与推荐",
+  throttled: "降低策略权重",
+  disabled: "停止参与推荐",
+  shadow: "非确认推荐，可进模拟盘验证",
+  research: "尚未进入验证",
+  unmanaged: "尚未纳入治理",
+};
+
+function firstGovernanceText(...values: (string | null | undefined)[]) {
+  return values.find((value) => value?.trim())?.trim();
+}
+
+function governanceStateTone(value: string | null | undefined): GovernanceStateTone {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "admitted" || normalized === "active" || normalized === "enabled") {
+    return "admitted";
+  }
+  if (normalized === "throttled" || normalized === "throttle" || normalized === "limited") {
+    return "throttled";
+  }
+  if (normalized === "disabled" || normalized === "disable" || normalized === "blocked") {
+    return "disabled";
+  }
+  if (normalized === "shadow") {
+    return "shadow";
+  }
+  if (normalized === "research") {
+    return "research";
+  }
+  return "unmanaged";
+}
+
+function strategyGovernanceStates(response?: StrategyGovernanceResponse) {
+  return response?.states?.length
+    ? response.states
+    : response?.strategies ?? response?.states ?? [];
+}
+
+function strategyGovernanceDeployments(response?: StrategyGovernanceResponse) {
+  return response?.deployments?.length
+    ? response.deployments
+    : response?.policies ?? response?.deployments ?? [];
+}
+
+function strategyGovernanceEvents(response?: StrategyGovernanceResponse) {
+  if (response?.events?.length) {
+    return response.events;
+  }
+  if (response?.recent_events?.length) {
+    return response.recent_events;
+  }
+  return response?.gate_reasons ?? response?.events ?? [];
+}
+
+function governanceSummaryCount(
+  response: StrategyGovernanceResponse | undefined,
+  state: "shadow" | "admitted" | "throttled" | "disabled",
+) {
+  const summary = response?.summary;
+  const value =
+    state === "shadow"
+      ? summary?.shadow_count ?? summary?.shadow ?? summary?.state_counts?.shadow
+      : state === "admitted"
+      ? summary?.admitted_count ?? summary?.admitted ?? summary?.state_counts?.admitted
+      : state === "throttled"
+        ? summary?.throttled_count ?? summary?.throttled ?? summary?.state_counts?.throttled
+        : summary?.disabled_count ?? summary?.disabled ?? summary?.state_counts?.disabled;
+  if (value === null || value === undefined || value === "") {
+    return undefined;
+  }
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function formatGovernanceWeight(value: number | string | null | undefined) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) {
+    return "-";
+  }
+  const percentage = Math.abs(parsed) <= 1 ? parsed * 100 : parsed;
+  return `${percentage.toFixed(Number.isInteger(percentage) ? 0 : 1)}%`;
+}
+
+function governancePolicyVersion(
+  state: StrategyGovernanceState,
+  deployments: StrategyGovernanceDeployment[],
+) {
+  const direct = firstGovernanceText(state.current_policy_version, state.policy_version);
+  if (direct) {
+    return direct;
+  }
+  const strategyId = firstGovernanceText(state.strategy_id);
+  const deploymentId = firstGovernanceText(state.current_deployment_id);
+  const deployment = deployments.find((item) =>
+    deploymentId
+      ? item.deployment_id === deploymentId
+      : Boolean(strategyId && item.strategy_id === strategyId),
+  );
+  return firstGovernanceText(deployment?.policy_version) ?? "-";
+}
+
+function governanceStrategyName(state: StrategyGovernanceState) {
+  const strategyId = firstGovernanceText(state.strategy_id);
+  const providedName = firstGovernanceText(state.strategy_name, state.name);
+  if (!strategyId) {
+    return providedName ?? "未命名策略";
+  }
+  const chineseName = localizeStrategy(strategyId, "zh");
+  const englishName = localizeStrategy(strategyId, "en");
+  return chineseName !== englishName ? chineseName : providedName ?? chineseName;
+}
+
+function governanceRecentReason(
+  state: StrategyGovernanceState,
+  events: StrategyGovernanceEvent[],
+) {
+  const direct = firstGovernanceText(state.latest_reason, state.recent_reason);
+  if (direct) {
+    return direct;
+  }
+  const strategyId = firstGovernanceText(state.strategy_id);
+  const recentEvent = events.find((event) => event.strategy_id === strategyId);
+  return (
+    firstGovernanceText(recentEvent?.reason, recentEvent?.decision?.reason)
+    ?? firstGovernanceText(state.reason, state.gate_decision?.reason)
+    ?? "暂无状态变更原因"
+  );
+}
+
+function StrategyGovernancePanel({
+  governance,
+  error,
+  isLoading,
+}: {
+  governance?: StrategyGovernanceResponse;
+  error: string;
+  isLoading: boolean;
+}) {
+  const states = strategyGovernanceStates(governance);
+  const deployments = strategyGovernanceDeployments(governance);
+  const events = strategyGovernanceEvents(governance);
+  const counts = {
+    shadow:
+      governanceSummaryCount(governance, "shadow")
+      ?? states.filter((item) => governanceStateTone(item.state ?? item.status) === "shadow").length,
+    admitted:
+      governanceSummaryCount(governance, "admitted")
+      ?? states.filter((item) => governanceStateTone(item.state ?? item.status) === "admitted").length,
+    throttled:
+      governanceSummaryCount(governance, "throttled")
+      ?? states.filter((item) => governanceStateTone(item.state ?? item.status) === "throttled").length,
+    disabled:
+      governanceSummaryCount(governance, "disabled")
+      ?? states.filter((item) => governanceStateTone(item.state ?? item.status) === "disabled").length,
+  };
+
+  return (
+    <section className="panel strategy-governance-panel" aria-labelledby="strategy-governance-title">
+      <div className="strategy-governance-header">
+        <div>
+          <p className="eyebrow">发布控制</p>
+          <h2 id="strategy-governance-title">策略治理</h2>
+        </div>
+        <div className="strategy-governance-summary" aria-label="治理状态数量">
+          <div className="strategy-governance-kpi is-shadow">
+            <span>影子验证</span>
+            <strong>{counts.shadow}</strong>
+          </div>
+          <div className="strategy-governance-kpi is-admitted">
+            <span>已准入</span>
+            <strong>{counts.admitted}</strong>
+          </div>
+          <div className="strategy-governance-kpi is-throttled">
+            <span>已限流</span>
+            <strong>{counts.throttled}</strong>
+          </div>
+          <div className="strategy-governance-kpi is-disabled">
+            <span>已禁用</span>
+            <strong>{counts.disabled}</strong>
+          </div>
+        </div>
+      </div>
+
+      <div className="strategy-governance-legend" aria-label="治理状态说明">
+        {(["shadow", "admitted", "throttled", "disabled"] as const).map((tone) => (
+          <span key={tone}>
+            <i className={`strategy-governance-dot is-${tone}`} aria-hidden="true" />
+            <strong>{GOVERNANCE_STATE_LABELS[tone]}</strong>
+            <small>{GOVERNANCE_STATE_DESCRIPTIONS[tone]}</small>
+          </span>
+        ))}
+      </div>
+
+      {isLoading ? (
+        <div className="strategy-governance-message" role="status">正在读取治理状态</div>
+      ) : error ? (
+        <div className="strategy-governance-message is-error" role="status" title={error}>
+          治理记录暂不可用，回测功能不受影响
+        </div>
+      ) : states.length === 0 ? (
+        <div className="strategy-governance-message" role="status">尚未建立治理记录</div>
+      ) : (
+        <details className="strategy-governance-details">
+          <summary>
+            <span>查看策略版本与门禁原因</span>
+            <strong>{states.length} 个策略</strong>
+          </summary>
+          <div className="table-shell strategy-governance-table-shell">
+            <table className="strategy-governance-table">
+            <thead>
+              <tr>
+                <th>策略</th>
+                <th>状态</th>
+                <th>有效权重</th>
+                <th>政策版本</th>
+                <th>最近原因</th>
+              </tr>
+            </thead>
+            <tbody>
+              {states.map((item, index) => {
+                const strategyId = firstGovernanceText(item.strategy_id) ?? `strategy-${index + 1}`;
+                const tone = governanceStateTone(item.state ?? item.status);
+                const reason = governanceRecentReason(item, events);
+                return (
+                  <tr key={`${strategyId}-${index}`} className={`is-${tone}`}>
+                    <td className="strategy-governance-name">
+                      <strong>{governanceStrategyName(item)}</strong>
+                      <small>{strategyId}</small>
+                    </td>
+                    <td>
+                      <span
+                        className={`strategy-governance-state is-${tone}`}
+                        title={GOVERNANCE_STATE_DESCRIPTIONS[tone]}
+                      >
+                        {GOVERNANCE_STATE_LABELS[tone]}
+                      </span>
+                    </td>
+                    <td className="strategy-governance-weight">
+                      <strong>{formatGovernanceWeight(item.effective_weight)}</strong>
+                    </td>
+                    <td className="strategy-governance-policy">
+                      {governancePolicyVersion(item, deployments)}
+                    </td>
+                    <td className="strategy-governance-reason" title={reason}>{reason}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            </table>
+          </div>
+        </details>
+      )}
+    </section>
+  );
+}
+
 export function History({
   dataMode,
   symbols,
@@ -131,6 +410,7 @@ export function History({
   const [calibration, setCalibration] = useState<RecommendationCalibrationResponse>();
   const [performance, setPerformance] = useState<StrategyPerformanceResponse>();
   const [diagnostics, setDiagnostics] = useState<StrategyDiagnosticsResponse>();
+  const [strategyGovernance, setStrategyGovernance] = useState<StrategyGovernanceResponse>();
   const [walkForward, setWalkForward] = useState<WalkForwardRun>();
   const [walkForwardJob, setWalkForwardJob] = useState<WalkForwardJob>();
   const [historicalBackfillJob, setHistoricalBackfillJob] = useState<HistoricalBackfillJob>();
@@ -147,8 +427,35 @@ export function History({
   const [walkForwardError, setWalkForwardError] = useState("");
   const [isHistoricalBackfillRunning, setIsHistoricalBackfillRunning] = useState(false);
   const [historicalBackfillError, setHistoricalBackfillError] = useState("");
+  const [strategyGovernanceError, setStrategyGovernanceError] = useState("");
+  const [isStrategyGovernanceLoading, setIsStrategyGovernanceLoading] = useState(true);
   const [backtestRunContext, setBacktestRunContext] = useState<BacktestRunContext>();
   const autoBacktestKeyRef = useRef("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setStrategyGovernanceError("");
+    setIsStrategyGovernanceLoading(true);
+    void fetchStrategyGovernance({ signal: controller.signal })
+      .then((result) => {
+        if (!controller.signal.aborted) {
+          setStrategyGovernance(result);
+        }
+      })
+      .catch((caught) => {
+        if (!controller.signal.aborted) {
+          setStrategyGovernanceError(
+            caught instanceof Error ? caught.message : "Failed to load strategy governance",
+          );
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setIsStrategyGovernanceLoading(false);
+        }
+      });
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -496,6 +803,11 @@ export function History({
 
   return (
     <div className="stack history-page">
+      <StrategyGovernancePanel
+        governance={strategyGovernance}
+        error={strategyGovernanceError}
+        isLoading={isStrategyGovernanceLoading}
+      />
       <BacktestGuidePanel
         selectedLabel={activeBacktestLabel}
         scanUniverseLabel={scanUniverseLabel}
@@ -1501,6 +1813,27 @@ function WalkForwardValidationCenter({
           </div>
           <div className="walk-forward-progress-track" aria-label={zh ? "验证进度" : "Validation progress"}>
             <span style={{ width: `${activeJob.progress}%` }} />
+          </div>
+          <div className="walk-forward-lease-health">
+            <span>
+              {zh ? "数据租约心跳" : "Dataset lease heartbeats"}
+              <strong>{activeJob.lease_maintenance_count}</strong>
+            </span>
+            <span>
+              {zh ? "自动恢复" : "Automatic recoveries"}
+              <strong>{activeJob.lease_recovery_count}</strong>
+            </span>
+            <span>
+              {zh ? "最近心跳" : "Last heartbeat"}
+              <strong>
+                {activeJob.last_lease_heartbeat_at
+                  ? new Date(activeJob.last_lease_heartbeat_at).toLocaleString(
+                    zh ? "zh-CN" : "en-US",
+                    { hour12: false },
+                  )
+                  : "-"}
+              </strong>
+            </span>
           </div>
         </div>
       ) : null}

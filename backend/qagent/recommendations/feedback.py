@@ -65,6 +65,8 @@ def apply_recommendation_feedback_calibration(
     if not effects:
         return cards
     for card in cards:
+        if _card_has_feedback_marker(card, "推荐反馈校准"):
+            continue
         matched = [effects[key] for key in _card_signal_keys(card) if key in effects]
         if not matched:
             continue
@@ -101,6 +103,8 @@ def apply_recommendation_feedback_quality_gate(
     if not weak_effects:
         return cards
     for card in cards:
+        if _card_has_feedback_marker(card, "推荐反馈门禁"):
+            continue
         matched = [weak_effects[key] for key in _card_signal_keys(card) if key in weak_effects]
         if not matched:
             continue
@@ -133,6 +137,8 @@ def apply_paper_trading_feedback(
     risk_gate = getattr(report, "risk_gate", None)
     paused = bool(risk_gate and getattr(risk_gate, "can_add_entries", True) is False)
     for card in cards:
+        if _card_has_feedback_marker(card, "模拟盘反馈"):
+            continue
         matched_drags = _matched_paper_effects(card, drag_effects)
         if matched_drags:
             raw_delta = -sum(_paper_effect_strength(effect, paused) for effect in matched_drags)
@@ -220,6 +226,10 @@ def apply_walk_forward_validation_feedback(
     if not metrics:
         return cards
     for card in cards:
+        if _card_has_feedback_marker(card, "样本外校准") or _card_has_feedback_marker(
+            card, "样本外门禁"
+        ):
+            continue
         matched = _matched_walk_forward_metrics(card, metrics)
         if not matched:
             continue
@@ -609,3 +619,10 @@ def _block_decision(card: OpportunityCard, detail: str) -> None:
 
 def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return min(high, max(low, value))
+
+
+def _card_has_feedback_marker(card: OpportunityCard, marker: str) -> bool:
+    return any(
+        marker in value
+        for value in [*card.rank_reasons, *card.calibration_notes]
+    )

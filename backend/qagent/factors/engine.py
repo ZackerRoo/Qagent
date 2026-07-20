@@ -1,8 +1,11 @@
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import date, datetime
 
 import pandas as pd
 
 from qagent.factors.models import FactorExposure, FactorRanking
+from qagent.features import FeatureSnapshot, build_feature_snapshot
 from qagent.market.indicators import regression_quality_momentum
 from qagent.strategy_data.models import FundamentalSnapshot
 
@@ -29,6 +32,20 @@ A_SHARE_FACTOR_WEIGHTS = {
     "low_risk": 0.08,
     "risk_filter": 0.08,
     "reversal": 0.04,
+}
+
+FACTOR_FEATURE_SET_VERSION = "factor-cross-sectional-v2"
+
+_FACTOR_SCORE_FIELDS = {
+    "valuation": "valuation_score",
+    "size": "size_score",
+    "quality": "quality_score",
+    "momentum": "momentum_score",
+    "trend_quality": "trend_quality_score",
+    "liquidity": "liquidity_score",
+    "low_risk": "low_risk_score",
+    "risk_filter": "risk_filter_score",
+    "reversal": "reversal_score",
 }
 
 
@@ -110,12 +127,214 @@ def build_factor_rankings(
                 missing_data=item.missing_data,
             )
         )
-    rankings.sort(key=lambda ranking: ranking.factor_score, reverse=True)
+    rankings.sort(key=lambda ranking: (-ranking.factor_score, ranking.instrument_id))
     total = len(rankings)
     for index, ranking in enumerate(rankings, start=1):
         ranking.factor_rank = index
         ranking.percentile = round(1.0 if total == 1 else 1 - ((index - 1) / (total - 1)), 4)
     return rankings
+
+
+def rerank_factor_rankings(
+    rankings: Iterable[FactorRanking],
+    *,
+    instrument_ids: Iterable[str] | None = None,
+) -> list[FactorRanking]:
+    """Rebuild cross-sectional scores over one canonical, complete universe."""
+
+    ranking_by_id = _ranking_by_id(rankings)
+    universe = sorted(
+        set(instrument_ids) if instrument_ids is not None else set(ranking_by_id)
+    )
+    raw_scores = {
+        instrument_id: _raw_exposure_scores(ranking_by_id.get(instrument_id))
+        for instrument_id in universe
+    }
+    cross_sectional_scores = _cross_sectional_scores(raw_scores)
+    rescored = [
+        _rescore_ranking(ranking_by_id[instrument_id], cross_sectional_scores[instrument_id])
+        for instrument_id in universe
+        if instrument_id in ranking_by_id
+    ]
+    rescored.sort(key=lambda ranking: (-ranking.factor_score, ranking.instrument_id))
+    total = len(rescored)
+    return [
+        ranking.model_copy(
+            update={
+                "factor_rank": index,
+                "percentile": round(
+                    1.0 if total == 1 else 1 - ((index - 1) / (total - 1)),
+                    4,
+                ),
+            }
+        )
+        for index, ranking in enumerate(rescored, start=1)
+    ]
+
+
+def build_factor_feature_snapshot(
+    rankings: Iterable[FactorRanking],
+    *,
+    as_of: date | datetime,
+    dataset_revision: int | str,
+    instrument_ids: Iterable[str] | None = None,
+) -> FeatureSnapshot:
+    ranking_by_id = _ranking_by_id(rankings)
+    universe = sorted(
+        set(instrument_ids) if instrument_ids is not None else set(ranking_by_id)
+    )
+    raw_scores = {
+        instrument_id: _raw_exposure_scores(ranking_by_id.get(instrument_id))
+        for instrument_id in universe
+    }
+    cross_sectional_scores = {
+        instrument_id: {
+            factor_id: float(getattr(ranking_by_id[instrument_id], score_field))
+            for factor_id, score_field in _FACTOR_SCORE_FIELDS.items()
+        }
+        if instrument_id in ranking_by_id
+        else {}
+        for instrument_id in universe
+    }
+    input_metadata = {
+        instrument_id: {
+            "data_completeness": ranking_by_id[instrument_id].data_completeness,
+            "execution_penalty": ranking_by_id[instrument_id].execution_penalty,
+        }
+        if instrument_id in ranking_by_id
+        else {
+            "data_completeness": None,
+            "execution_penalty": None,
+        }
+        for instrument_id in universe
+    }
+    return build_feature_snapshot(
+        as_of=as_of,
+        feature_set_version=FACTOR_FEATURE_SET_VERSION,
+        dataset_revision=dataset_revision,
+        raw_scores=raw_scores,
+        cross_sectional_scores=cross_sectional_scores,
+        universe_ids=universe,
+        input_metadata=input_metadata,
+    )
+
+
+def _ranking_by_id(rankings: Iterable[FactorRanking]) -> dict[str, FactorRanking]:
+    ordered = sorted(rankings, key=_ranking_input_key)
+    return {ranking.instrument_id: ranking for ranking in reversed(ordered)}
+
+
+def _ranking_input_key(ranking: FactorRanking) -> tuple[object, ...]:
+    raw_values = tuple(
+        sorted(
+            (
+                exposure.factor_id,
+                "" if exposure.raw_value is None else format(exposure.raw_value, ".17g"),
+            )
+            for exposure in ranking.factor_exposures
+        )
+    )
+    return (
+        ranking.instrument_id,
+        raw_values,
+        ranking.data_completeness,
+        ranking.execution_penalty,
+    )
+
+
+def _raw_exposure_scores(ranking: FactorRanking | None) -> dict[str, float | None]:
+    exposure_by_id = (
+        {exposure.factor_id: exposure for exposure in ranking.factor_exposures}
+        if ranking is not None
+        else {}
+    )
+    return {
+        factor_id: (
+            _float_or_none(exposure_by_id[factor_id].raw_value)
+            if factor_id in exposure_by_id
+            else None
+        )
+        for factor_id in _FACTOR_SCORE_FIELDS
+    }
+
+
+def _cross_sectional_scores(
+    raw_scores: Mapping[str, Mapping[str, float | None]],
+) -> dict[str, dict[str, float]]:
+    by_factor = {
+        factor_id: _rank_scores(
+            {
+                instrument_id: scores.get(factor_id)
+                for instrument_id, scores in raw_scores.items()
+            }
+        )
+        for factor_id in _FACTOR_SCORE_FIELDS
+        if factor_id != "size"
+    }
+    by_factor["size"] = _size_scores_from_values(
+        {
+            instrument_id: scores.get("size")
+            for instrument_id, scores in raw_scores.items()
+        }
+    )
+    return {
+        instrument_id: {
+            factor_id: round(by_factor[factor_id][instrument_id], 4)
+            for factor_id in _FACTOR_SCORE_FIELDS
+        }
+        for instrument_id in raw_scores
+    }
+
+
+def _size_scores_from_values(values: Mapping[str, float | None]) -> dict[str, float]:
+    if not any(value is not None for value in values.values()):
+        return {instrument_id: 0.5 for instrument_id in values}
+    rank_fallback = _rank_scores(dict(values))
+    scores = {
+        instrument_id: (
+            0.35
+            if market_cap is None
+            else _a_share_size_score(market_cap)
+            if _is_a_share(instrument_id)
+            else rank_fallback[instrument_id]
+        )
+        for instrument_id, market_cap in values.items()
+    }
+    return {instrument_id: round(score, 4) for instrument_id, score in scores.items()}
+
+
+def _rescore_ranking(
+    ranking: FactorRanking,
+    scores: Mapping[str, float],
+) -> FactorRanking:
+    weights = _factor_weights(ranking.instrument_id)
+    component_score = sum(scores[factor_id] * weight for factor_id, weight in weights.items())
+    factor_score = _clamp(
+        component_score * ranking.data_completeness - ranking.execution_penalty
+    )
+    exposures = [
+        exposure.model_copy(
+            update={
+                "score": round(scores[exposure.factor_id], 4),
+                "weight": weights[exposure.factor_id],
+            }
+        )
+        if exposure.factor_id in scores
+        else exposure.model_copy(deep=True)
+        for exposure in ranking.factor_exposures
+    ]
+    return ranking.model_copy(
+        update={
+            "factor_score": round(factor_score, 4),
+            "factor_rank": 0,
+            "percentile": 0.0,
+            "factor_exposures": exposures,
+            **{
+                score_field: round(scores[factor_id], 4)
+                for factor_id, score_field in _FACTOR_SCORE_FIELDS.items()
+            },
+        }
+    )
 
 
 def _raw_factors(
@@ -377,16 +596,28 @@ def _weighted_available(values: list[tuple[float | None, float]]) -> float | Non
 
 
 def _rank_scores(values: dict[str, float | None]) -> dict[str, float]:
-    valid = {key: value for key, value in values.items() if value is not None}
+    valid = {
+        key: normalized
+        for key, value in values.items()
+        if (normalized := _float_or_none(value)) is not None
+    }
     if not valid:
         return {key: 0.5 for key in values}
-    sorted_items = sorted(valid.items(), key=lambda item: item[1])
+    sorted_items = sorted(valid.items(), key=lambda item: (item[1], item[0]))
     if len(sorted_items) == 1:
         ranked = {sorted_items[0][0]: 0.5}
     else:
-        ranked = {
-            key: index / (len(sorted_items) - 1) for index, (key, _) in enumerate(sorted_items)
-        }
+        ranked: dict[str, float] = {}
+        start = 0
+        while start < len(sorted_items):
+            end = start + 1
+            while end < len(sorted_items) and sorted_items[end][1] == sorted_items[start][1]:
+                end += 1
+            average_position = (start + end - 1) / 2
+            score = average_position / (len(sorted_items) - 1)
+            for index in range(start, end):
+                ranked[sorted_items[index][0]] = score
+            start = end
     return {key: round(ranked.get(key, 0.35), 4) for key in values}
 
 

@@ -5,9 +5,9 @@ import json
 import math
 import statistics
 from collections.abc import Callable
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from types import SimpleNamespace
 
 from pydantic import BaseModel, Field
@@ -38,7 +38,12 @@ from qagent.jobs.daily_scan import run_daily_scan
 from qagent.market.astock_enhanced import EmptyAShareEnhancedDataProvider
 from qagent.market.calendars import trading_sessions_in_range
 from qagent.historical_evidence.providers import REQUIRED_BENCHMARK_IDS
-from qagent.storage.replay_evidence import LEASE_DURATION, ReplayEvidenceRepository
+from qagent.storage.replay_evidence import (
+    LEASE_DURATION,
+    DatasetLeaseBusy,
+    ReplayEvidenceRepository,
+    StaleCheckpointRevision,
+)
 
 
 EXCLUDED_STATUSES = frozenset({"risk_elevated", "invalidated", "closed", "postmortem_done"})
@@ -52,15 +57,30 @@ class _DatasetLeaseHeartbeat:
         self,
         repository: ReplayEvidenceRepository,
         *,
+        expected_revision: int,
         interval_seconds: float | None = None,
+        retry_interval_seconds: float = 1.0,
+        max_attempts: int = 3,
+        maintenance_callback: Callable[[int, int, datetime], None] | None = None,
+        initial_maintenance_count: int = 0,
+        initial_recovery_count: int = 0,
+        initial_heartbeat_at: datetime | None = None,
     ):
         self.repository = repository
+        self.expected_revision = expected_revision
         self.interval_seconds = interval_seconds or max(
             1.0,
             LEASE_DURATION.total_seconds() / 3,
         )
+        self.retry_interval_seconds = max(0.01, retry_interval_seconds)
+        self.max_attempts = max(1, max_attempts)
+        self.maintenance_callback = maintenance_callback
         self._stop = Event()
+        self._maintenance_lock = Lock()
         self._failure: Exception | None = None
+        self.maintenance_count = max(0, initial_maintenance_count)
+        self.recovery_count = max(0, initial_recovery_count)
+        self.last_heartbeat_at = initial_heartbeat_at
         self._thread = Thread(
             target=self._run,
             name=f"dataset-lease-{repository.provider_mode}",
@@ -80,17 +100,57 @@ class _DatasetLeaseHeartbeat:
                 f"dataset lease heartbeat failed: {self._failure}"
             ) from self._failure
 
+    def maintain_now(self) -> None:
+        telemetry: tuple[int, int, datetime] | None = None
+        with self._maintenance_lock:
+            self.raise_if_failed()
+            for attempt in range(1, self.max_attempts + 1):
+                try:
+                    maintained = self.repository.maintain_dataset_lease(
+                        expected_revision=self.expected_revision,
+                    )
+                except (DatasetLeaseBusy, StaleCheckpointRevision) as exc:
+                    self._failure = exc
+                    self.raise_if_failed()
+                except Exception as exc:
+                    if attempt >= self.max_attempts:
+                        self._failure = exc
+                        self.raise_if_failed()
+                    if self._stop.wait(self.retry_interval_seconds):
+                        return
+                else:
+                    self.maintenance_count += 1
+                    if maintained.action != "renewed":
+                        self.recovery_count += 1
+                    self.last_heartbeat_at = maintained.lease.heartbeat_at
+                    telemetry = (
+                        self.maintenance_count,
+                        self.recovery_count,
+                        maintained.lease.heartbeat_at,
+                    )
+                    break
+        if telemetry is not None and self.maintenance_callback is not None:
+            try:
+                self.maintenance_callback(*telemetry)
+            except Exception:
+                # Lease ownership is the correctness boundary. UI telemetry is
+                # best-effort and must not terminate an otherwise healthy run.
+                pass
+
+    def telemetry(self) -> tuple[int, int, datetime | None]:
+        with self._maintenance_lock:
+            return (
+                self.maintenance_count,
+                self.recovery_count,
+                self.last_heartbeat_at,
+            )
+
     def _run(self) -> None:
         while not self._stop.wait(self.interval_seconds):
             try:
-                self.repository.renew_dataset_lease()
-            except Exception:
-                try:
-                    # The same active run may reacquire its own expired lease.
-                    self.repository.acquire_dataset_lease()
-                except Exception as reacquire_error:
-                    self._failure = reacquire_error
-                    return
+                self.maintain_now()
+            except RuntimeError:
+                return
 
 
 class WalkForwardSelection(BaseModel):
@@ -221,6 +281,9 @@ class WalkForwardProgress(BaseModel):
     total_snapshots: int
     current_date: date | None = None
     snapshot: WalkForwardSnapshot | None = None
+    lease_maintenance_count: int = 0
+    lease_recovery_count: int = 0
+    last_lease_heartbeat_at: datetime | None = None
 
 
 def run_full_market_walk_forward_selection(
@@ -234,6 +297,10 @@ def run_full_market_walk_forward_selection(
     experiment_manifest: WalkForwardExperimentManifest | None = None,
     resume_snapshots: list[WalkForwardSnapshot] | None = None,
     progress_callback: Callable[[WalkForwardProgress], None] | None = None,
+    lease_maintenance_callback: Callable[[int, int, datetime], None] | None = None,
+    initial_lease_maintenance_count: int = 0,
+    initial_lease_recovery_count: int = 0,
+    initial_lease_heartbeat_at: datetime | None = None,
 ) -> WalkForwardSelectionResult:
     if start > end:
         raise ValueError("start must be on or before end")
@@ -265,7 +332,14 @@ def run_full_market_walk_forward_selection(
         raise RuntimeError("dataset revision changed while acquiring replay lease")
     market_provider = ReplayMarketDataProvider(owner_repository, revision)
     strategy_provider = ReplayStrategyDataProvider(owner_repository, revision)
-    lease_heartbeat = _DatasetLeaseHeartbeat(owner_repository)
+    lease_heartbeat = _DatasetLeaseHeartbeat(
+        owner_repository,
+        expected_revision=revision,
+        maintenance_callback=lease_maintenance_callback,
+        initial_maintenance_count=initial_lease_maintenance_count,
+        initial_recovery_count=initial_lease_recovery_count,
+        initial_heartbeat_at=initial_lease_heartbeat_at,
+    )
     lease_heartbeat.start()
     snapshots: list[WalkForwardSnapshot] = []
     eligible_universes: list[tuple[date, list[str]]] = []
@@ -281,10 +355,10 @@ def run_full_market_walk_forward_selection(
             phase="historical_replay",
             processed_snapshots=0,
             total_snapshots=len(sessions),
+            lease_heartbeat=lease_heartbeat,
         )
         for index, decision_date in enumerate(sessions, start=1):
-            lease_heartbeat.raise_if_failed()
-            owner_repository.renew_dataset_lease()
+            lease_heartbeat.maintain_now()
             members = owner_repository.universe_members_on(decision_date, revision)
             if not members:
                 members = owner_repository.materialize_universe(
@@ -378,14 +452,16 @@ def run_full_market_walk_forward_selection(
                 total_snapshots=len(sessions),
                 current_date=decision_date,
                 snapshot=snapshot,
+                lease_heartbeat=lease_heartbeat,
             )
         _report_progress(
             progress_callback,
             phase="portfolio_simulation",
             processed_snapshots=len(snapshots),
             total_snapshots=len(sessions),
+            lease_heartbeat=lease_heartbeat,
         )
-        lease_heartbeat.raise_if_failed()
+        lease_heartbeat.maintain_now()
         execution_resolver = VersionedAshareExecutionResolver(
             owner_repository,
             dataset_revision=revision,
@@ -419,6 +495,7 @@ def run_full_market_walk_forward_selection(
             phase="validation_and_benchmarks",
             processed_snapshots=len(snapshots),
             total_snapshots=len(sessions),
+            lease_heartbeat=lease_heartbeat,
         )
         cost_sensitivity = _cost_sensitivity(
             top_5_signals=top_5_signals,
@@ -498,6 +575,10 @@ def run_full_market_walk_forward_selection(
             "walk_forward_lookback_days": str(lookback_days),
             "walk_forward_scan_errors": str(len(scan_errors)),
             "walk_forward_future_data_guard": "revision_lease_and_decision_date_cutoff",
+            "walk_forward_lease_maintenance_count": str(
+                lease_heartbeat.maintenance_count
+            ),
+            "walk_forward_lease_recovery_count": str(lease_heartbeat.recovery_count),
             "walk_forward_universe": "historical_lifecycle_per_rebalance_date",
             "walk_forward_st_policy": "excluded",
             "walk_forward_validation_scope": (
@@ -581,6 +662,7 @@ def run_full_market_walk_forward_selection(
         phase="completed",
         processed_snapshots=len(snapshots),
         total_snapshots=len(snapshots),
+        lease_heartbeat=lease_heartbeat,
     )
     return result
 
@@ -952,9 +1034,15 @@ def _report_progress(
     total_snapshots: int,
     current_date: date | None = None,
     snapshot: WalkForwardSnapshot | None = None,
+    lease_heartbeat: _DatasetLeaseHeartbeat | None = None,
 ) -> None:
     if callback is None:
         return
+    maintenance_count = 0
+    recovery_count = 0
+    last_heartbeat_at = None
+    if lease_heartbeat is not None:
+        maintenance_count, recovery_count, last_heartbeat_at = lease_heartbeat.telemetry()
     callback(
         WalkForwardProgress(
             phase=phase,
@@ -962,6 +1050,9 @@ def _report_progress(
             total_snapshots=total_snapshots,
             current_date=current_date,
             snapshot=snapshot,
+            lease_maintenance_count=maintenance_count,
+            lease_recovery_count=recovery_count,
+            last_lease_heartbeat_at=last_heartbeat_at,
         )
     )
 

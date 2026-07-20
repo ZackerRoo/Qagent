@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
@@ -7,8 +8,9 @@ from decimal import Decimal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from qagent.domain.models import OpportunityCard
@@ -35,9 +37,13 @@ from qagent.storage.tables import (
     HistoricalInstrumentProfileRow,
     HistoricalTradabilityRow,
     OpportunitySnapshotRow,
+    PolicyDeploymentRow,
     PositionRow,
     ScanResultCacheRow,
     ScanRunRow,
+    StrategyStateEventRow,
+    StrategyStateRow,
+    StrategyVersionRow,
     TradableInstrumentRow,
     TradableUniverseSnapshotRow,
     UniverseRow,
@@ -45,6 +51,9 @@ from qagent.storage.tables import (
     WalkForwardRunRow,
     WalkForwardJobRow,
 )
+from qagent.strategies.governance import strategy_policy_digest
+from qagent.strategies.models import StrategyDefinition, StrategyPolicy, StrategyState
+from qagent.strategies.registry import default_strategy_registry
 from qagent.strategy_data.models import FundamentalSnapshot
 
 
@@ -258,6 +267,9 @@ class WalkForwardJobRecord(BaseModel):
     total_snapshots: int
     processed_snapshots: int
     current_date: date | None
+    lease_maintenance_count: int
+    lease_recovery_count: int
+    last_lease_heartbeat_at: datetime | None
     checkpoints: list[dict[str, object]]
     experiment_manifest: dict[str, object]
     result_run_id: str | None
@@ -368,6 +380,69 @@ class TradableCatalogSearchResult(BaseModel):
     data_health: dict[str, str] = Field(default_factory=dict)
 
 
+class StrategyVersionRecord(BaseModel):
+    strategy_id: str
+    strategy_version: str
+    definition_digest: str
+    definition: dict[str, object]
+    created_at: datetime
+
+
+class PolicyDeploymentRecord(BaseModel):
+    deployment_id: str
+    strategy_id: str
+    policy_version: str
+    strategy_version: str
+    factor_version: str
+    parameter_version: str
+    universe_version: str
+    data_revision: str
+    policy_digest: str
+    policy: StrategyPolicy
+    previous_deployment_id: str | None
+    created_at: datetime
+
+
+class StrategyStateRecord(BaseModel):
+    strategy_id: str
+    state: StrategyState
+    current_deployment_id: str | None
+    previous_deployment_id: str | None
+    current_policy_version: str | None
+    previous_policy_version: str | None
+    effective_weight: float
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+    @property
+    def current_state(self) -> StrategyState:
+        return self.state
+
+
+class StrategyStateEventRecord(BaseModel):
+    event_id: str
+    strategy_id: str
+    sequence: int
+    idempotency_key: str
+    event_type: str
+    action: str
+    from_state: StrategyState | None
+    to_state: StrategyState
+    deployment_id: str | None
+    previous_deployment_id: str | None
+    policy_version: str | None
+    effective_weight: float
+    reason: str
+    evidence: dict[str, object]
+    decision: dict[str, object]
+    created_at: datetime
+
+    @property
+    def state(self) -> StrategyState:
+        return self.to_state
+
+
 def _serialize_tags(tags: list[str]) -> str:
     return ",".join(tag.strip() for tag in tags if tag.strip())
 
@@ -395,6 +470,551 @@ class QagentRepository:
             owner_run_id=owner_run_id,
             run_status_lookup=run_status_lookup,
         )
+
+    def initialize_strategy_governance_defaults(
+        self,
+        defaults: list[StrategyDefinition] | list[StrategyPolicy] | None = None,
+        *,
+        definitions: list[StrategyDefinition] | None = None,
+        policies: list[StrategyPolicy] | None = None,
+        strategy_version: str = "builtin-v1",
+    ) -> list[StrategyStateRecord]:
+        """Add missing built-in strategy records without changing live state."""
+
+        resolved_definitions, resolved_policies = _resolve_governance_defaults(
+            defaults,
+            definitions=definitions,
+            policies=policies,
+        )
+        version = strategy_version.strip()
+        if not version:
+            raise ValueError("strategy_version must not be blank")
+        definitions_by_id: dict[str, StrategyDefinition] = {}
+        for definition in resolved_definitions:
+            existing = definitions_by_id.get(definition.strategy_id)
+            if (
+                existing is not None
+                and _canonical_json(existing) != _canonical_json(definition)
+            ):
+                raise ValueError(
+                    f"conflicting defaults for strategy {definition.strategy_id}"
+                )
+            definitions_by_id[definition.strategy_id] = definition
+        policies_by_identity: dict[tuple[str, str], StrategyPolicy] = {}
+        for policy in resolved_policies:
+            identity = (policy.strategy_id, policy.policy_version)
+            existing = policies_by_identity.get(identity)
+            if (
+                existing is not None
+                and _canonical_json(existing) != _canonical_json(policy)
+            ):
+                raise ValueError(
+                    f"conflicting defaults for policy {policy.strategy_id}:{policy.policy_version}"
+                )
+            policies_by_identity[identity] = policy
+        current_policies: dict[str, StrategyPolicy] = {}
+        for policy in resolved_policies:
+            current_policies[policy.strategy_id] = policy
+
+        with self.session_factory() as session:
+            _begin_governance_write(session)
+            try:
+                ensured: dict[tuple[str, str], PolicyDeploymentRow] = {}
+                visiting: set[tuple[str, str]] = set()
+
+                def ensure_policy(policy: StrategyPolicy) -> PolicyDeploymentRow:
+                    identity = (policy.strategy_id, policy.policy_version)
+                    if identity in ensured:
+                        return ensured[identity]
+                    if identity in visiting:
+                        raise ValueError("policy rollback chain contains a cycle")
+                    visiting.add(identity)
+                    definition = definitions_by_id.get(policy.strategy_id)
+                    _ensure_strategy_version(
+                        session,
+                        strategy_id=policy.strategy_id,
+                        strategy_version=policy.strategy_version,
+                        definition=_strategy_definition_payload(policy, definition),
+                    )
+                    previous = None
+                    if policy.rollback_policy_version is not None:
+                        rollback_identity = (
+                            policy.strategy_id,
+                            policy.rollback_policy_version,
+                        )
+                        rollback_policy = policies_by_identity.get(rollback_identity)
+                        previous = (
+                            ensure_policy(rollback_policy)
+                            if rollback_policy is not None
+                            else _find_policy_deployment(
+                                session,
+                                policy.strategy_id,
+                                policy.rollback_policy_version,
+                            )
+                        )
+                    deployment = _ensure_policy_deployment(
+                        session,
+                        policy,
+                        previous_deployment_id=(
+                            previous.deployment_id if previous is not None else None
+                        ),
+                    )
+                    visiting.remove(identity)
+                    ensured[identity] = deployment
+                    return deployment
+
+                policy_strategy_ids = {policy.strategy_id for policy in resolved_policies}
+                for definition in resolved_definitions:
+                    if definition.strategy_id not in policy_strategy_ids:
+                        _ensure_strategy_version(
+                            session,
+                            strategy_id=definition.strategy_id,
+                            strategy_version=version,
+                            definition=definition.model_dump(mode="json"),
+                        )
+                for policy in resolved_policies:
+                    ensure_policy(policy)
+
+                now = datetime.now(timezone.utc)
+                strategy_ids = set(definitions_by_id) | set(current_policies)
+                for strategy_id in sorted(strategy_ids):
+                    if session.get(StrategyStateRow, strategy_id) is not None:
+                        continue
+                    policy = current_policies.get(strategy_id)
+                    deployment = ensure_policy(policy) if policy is not None else None
+                    previous = (
+                        session.get(PolicyDeploymentRow, deployment.previous_deployment_id)
+                        if deployment is not None and deployment.previous_deployment_id is not None
+                        else None
+                    )
+                    state = policy.state if policy is not None else StrategyState.RESEARCH
+                    session.add(
+                        StrategyStateRow(
+                            strategy_id=strategy_id,
+                            state=state.value,
+                            current_deployment_id=(
+                                deployment.deployment_id if deployment is not None else None
+                            ),
+                            previous_deployment_id=(
+                                previous.deployment_id if previous is not None else None
+                            ),
+                            current_policy_version=(
+                                deployment.policy_version if deployment is not None else None
+                            ),
+                            previous_policy_version=(
+                                previous.policy_version if previous is not None else None
+                            ),
+                            effective_weight=Decimal(str(_policy_effective_weight(policy, state))),
+                            revision=0,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+        return self.list_strategy_states()
+
+    def initialize_strategy_defaults(
+        self,
+        defaults: list[StrategyDefinition] | list[StrategyPolicy] | None = None,
+        **kwargs: object,
+    ) -> list[StrategyStateRecord]:
+        return self.initialize_strategy_governance_defaults(defaults, **kwargs)
+
+    def initialize_governance_defaults(
+        self,
+        defaults: list[StrategyDefinition] | list[StrategyPolicy] | None = None,
+        **kwargs: object,
+    ) -> list[StrategyStateRecord]:
+        return self.initialize_strategy_governance_defaults(defaults, **kwargs)
+
+    def list_strategy_states(
+        self,
+        state: StrategyState | str | None = None,
+    ) -> list[StrategyStateRecord]:
+        with self.session_factory() as session:
+            query = session.query(StrategyStateRow)
+            if state is not None:
+                query = query.filter(StrategyStateRow.state == StrategyState(state).value)
+            rows = query.order_by(StrategyStateRow.strategy_id).all()
+            return [self._strategy_state_from_row(row) for row in rows]
+
+    def get_strategy_state(self, strategy_id: str) -> StrategyStateRecord | None:
+        with self.session_factory() as session:
+            row = session.get(StrategyStateRow, strategy_id)
+            return self._strategy_state_from_row(row) if row is not None else None
+
+    def list_strategy_versions(
+        self,
+        strategy_id: str | None = None,
+    ) -> list[StrategyVersionRecord]:
+        with self.session_factory() as session:
+            query = session.query(StrategyVersionRow)
+            if strategy_id is not None:
+                query = query.filter(StrategyVersionRow.strategy_id == strategy_id)
+            rows = query.order_by(
+                StrategyVersionRow.strategy_id,
+                StrategyVersionRow.created_at,
+                StrategyVersionRow.strategy_version,
+            ).all()
+            return [self._strategy_version_from_row(row) for row in rows]
+
+    def list_policy_deployments(
+        self,
+        strategy_id: str | None = None,
+    ) -> list[PolicyDeploymentRecord]:
+        with self.session_factory() as session:
+            query = session.query(PolicyDeploymentRow)
+            if strategy_id is not None:
+                query = query.filter(PolicyDeploymentRow.strategy_id == strategy_id)
+            rows = query.order_by(
+                PolicyDeploymentRow.created_at,
+                PolicyDeploymentRow.deployment_id,
+            ).all()
+            return [self._policy_deployment_from_row(row) for row in rows]
+
+    def get_policy_deployment(self, deployment_id: str) -> PolicyDeploymentRecord | None:
+        with self.session_factory() as session:
+            row = session.get(PolicyDeploymentRow, deployment_id)
+            return self._policy_deployment_from_row(row) if row is not None else None
+
+    def list_strategy_state_events(
+        self,
+        strategy_id: str | None = None,
+        limit: int = 100,
+    ) -> list[StrategyStateEventRecord]:
+        with self.session_factory() as session:
+            query = session.query(StrategyStateEventRow)
+            if strategy_id is not None:
+                query = query.filter(StrategyStateEventRow.strategy_id == strategy_id)
+            rows = (
+                query.order_by(
+                    StrategyStateEventRow.created_at,
+                    StrategyStateEventRow.event_id,
+                )
+                .limit(max(0, limit))
+                .all()
+            )
+            return [self._strategy_state_event_from_row(row) for row in rows]
+
+    def record_governance_decision(
+        self,
+        policy: StrategyPolicy,
+        decision: BaseModel | dict[str, object],
+        evidence: BaseModel | dict[str, object] | None = None,
+        idempotency_key: str | None = None,
+        *,
+        reason: str | None = None,
+        strategy_definition: StrategyDefinition | None = None,
+        effective_weight: float | None = None,
+        event_type: str = "governance_decision",
+    ) -> StrategyStateEventRecord:
+        policy = StrategyPolicy.model_validate(policy)
+        key = _required_text(idempotency_key, "idempotency_key")
+        decision_json = _canonical_json(decision)
+        evidence_json = _canonical_json(evidence or {})
+        decision_payload = _json_object(decision_json)
+        event_reason = _required_text(
+            reason if reason is not None else decision_payload.get("reason"),
+            "reason",
+        )
+        _validate_decision_identity(policy, decision_payload)
+        declared_from = _optional_strategy_state(decision_payload.get("from_state"))
+        target_state = _decision_target_state(decision_payload)
+        action = _decision_action(decision_payload)
+        event_name = _required_text(event_type, "event_type")
+
+        with self.session_factory() as session:
+            _begin_governance_write(session)
+            try:
+                replay = _find_idempotent_governance_event(session, key)
+                if replay is not None:
+                    _validate_decision_replay(
+                        replay,
+                        policy=policy,
+                        decision_json=decision_json,
+                        evidence_json=evidence_json,
+                        reason=event_reason,
+                    )
+                    return self._strategy_state_event_from_row(replay)
+
+                state_row = session.get(StrategyStateRow, policy.strategy_id)
+                if state_row is None:
+                    initial_state = declared_from or policy.state
+                    now = datetime.now(timezone.utc)
+                    state_row = StrategyStateRow(
+                        strategy_id=policy.strategy_id,
+                        state=initial_state.value,
+                        effective_weight=Decimal("0"),
+                        revision=0,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    session.add(state_row)
+                    session.flush()
+                current_state = StrategyState(state_row.state)
+                if declared_from is not None and declared_from is not current_state:
+                    raise ValueError(
+                        "stale governance decision: "
+                        f"stored state is {current_state.value}, decision expects "
+                        f"{declared_from.value}"
+                    )
+
+                definition_payload = _strategy_definition_payload(
+                    policy,
+                    strategy_definition or _default_strategy_definition(policy.strategy_id),
+                )
+                _ensure_strategy_version(
+                    session,
+                    strategy_id=policy.strategy_id,
+                    strategy_version=policy.strategy_version,
+                    definition=definition_payload,
+                )
+                old_deployment = (
+                    session.get(PolicyDeploymentRow, state_row.current_deployment_id)
+                    if state_row.current_deployment_id is not None
+                    else None
+                )
+                configured_previous = (
+                    _find_policy_deployment(
+                        session,
+                        policy.strategy_id,
+                        policy.rollback_policy_version,
+                    )
+                    if policy.rollback_policy_version is not None
+                    else None
+                )
+                previous_for_snapshot = configured_previous or (
+                    old_deployment
+                    if old_deployment is not None
+                    and old_deployment.policy_version != policy.policy_version
+                    else None
+                )
+                deployment = _ensure_policy_deployment(
+                    session,
+                    policy,
+                    previous_deployment_id=(
+                        previous_for_snapshot.deployment_id
+                        if previous_for_snapshot is not None
+                        else None
+                    ),
+                )
+
+                if state_row.current_deployment_id != deployment.deployment_id:
+                    previous_deployment_id = (
+                        state_row.current_deployment_id or deployment.previous_deployment_id
+                    )
+                else:
+                    previous_deployment_id = state_row.previous_deployment_id
+                previous_policy_version = _deployment_policy_version(
+                    session,
+                    previous_deployment_id,
+                )
+                resolved_weight = _decision_effective_weight(
+                    policy,
+                    decision_payload,
+                    target_state,
+                    override=effective_weight,
+                )
+                now = datetime.now(timezone.utc)
+                sequence = _next_strategy_event_sequence(session, policy.strategy_id)
+                state_row.state = target_state.value
+                state_row.current_deployment_id = deployment.deployment_id
+                state_row.previous_deployment_id = previous_deployment_id
+                state_row.current_policy_version = deployment.policy_version
+                state_row.previous_policy_version = previous_policy_version
+                state_row.effective_weight = Decimal(str(resolved_weight))
+                state_row.revision = max(state_row.revision + 1, sequence)
+                state_row.updated_at = now
+                event_row = StrategyStateEventRow(
+                    event_id=f"strategy-event-{uuid4().hex}",
+                    strategy_id=policy.strategy_id,
+                    sequence=sequence,
+                    idempotency_key=key,
+                    event_type=event_name,
+                    action=action,
+                    from_state=current_state.value,
+                    to_state=target_state.value,
+                    deployment_id=deployment.deployment_id,
+                    previous_deployment_id=previous_deployment_id,
+                    policy_version=deployment.policy_version,
+                    effective_weight=Decimal(str(resolved_weight)),
+                    reason=event_reason,
+                    evidence_json=evidence_json,
+                    decision_json=decision_json,
+                    created_at=now,
+                )
+                session.add(event_row)
+                session.commit()
+                return self._strategy_state_event_from_row(event_row)
+            except IntegrityError as error:
+                session.rollback()
+                replay = self._load_idempotent_governance_event(key)
+                if replay is None:
+                    raise error
+                _validate_decision_replay_record(
+                    replay,
+                    policy=policy,
+                    decision_json=decision_json,
+                    evidence_json=evidence_json,
+                    reason=event_reason,
+                )
+                return replay
+            except Exception:
+                session.rollback()
+                raise
+
+    def rollback_policy_deployment(
+        self,
+        strategy_id: str,
+        idempotency_key: str | None = None,
+        reason: str | None = None,
+        *,
+        target_deployment_id: str | None = None,
+        target_policy_version: str | None = None,
+        evidence: BaseModel | dict[str, object] | None = None,
+        to_state: StrategyState | str = StrategyState.RESEARCH,
+    ) -> StrategyStateEventRecord:
+        strategy_key = _required_text(strategy_id, "strategy_id")
+        key = _required_text(idempotency_key, "idempotency_key")
+        evidence_json = _canonical_json(evidence or {})
+        target_state = StrategyState(to_state)
+
+        with self.session_factory() as session:
+            _begin_governance_write(session)
+            try:
+                replay = _find_idempotent_governance_event(session, key)
+                if replay is not None:
+                    _validate_rollback_replay(
+                        replay,
+                        strategy_id=strategy_key,
+                        target_deployment_id=target_deployment_id,
+                        target_policy_version=target_policy_version,
+                        evidence_json=evidence_json,
+                        reason=reason,
+                    )
+                    return self._strategy_state_event_from_row(replay)
+
+                state_row = session.get(StrategyStateRow, strategy_key)
+                if state_row is None or state_row.current_deployment_id is None:
+                    raise LookupError(f"strategy {strategy_key!r} has no active deployment")
+                current = session.get(PolicyDeploymentRow, state_row.current_deployment_id)
+                if current is None:
+                    raise LookupError("current policy deployment does not exist")
+                target = _resolve_rollback_target(
+                    session,
+                    current=current,
+                    target_deployment_id=target_deployment_id,
+                    target_policy_version=target_policy_version,
+                )
+                if target is None:
+                    raise LookupError(f"strategy {strategy_key!r} has no previous deployment")
+                if target.strategy_id != strategy_key:
+                    raise ValueError("rollback target belongs to a different strategy")
+                if target.deployment_id == current.deployment_id:
+                    raise ValueError("rollback target must differ from current deployment")
+
+                event_reason = _required_text(
+                    reason
+                    or (
+                        f"Rollback strategy {strategy_key} from policy "
+                        f"{current.policy_version} to {target.policy_version}."
+                    ),
+                    "reason",
+                )
+                target_policy = StrategyPolicy.model_validate_json(target.policy_json)
+                resolved_weight = _policy_effective_weight(target_policy, target_state)
+                decision_payload: dict[str, object] = {
+                    "action": "rollback",
+                    "from_state": state_row.state,
+                    "to_state": target_state.value,
+                    "from_deployment_id": current.deployment_id,
+                    "deployment_id": target.deployment_id,
+                    "current_policy_version": current.policy_version,
+                    "rollback_to_policy_version": target.policy_version,
+                }
+                decision_json = _canonical_json(decision_payload)
+                previous_deployment_id = current.deployment_id
+                previous_policy_version = current.policy_version
+                now = datetime.now(timezone.utc)
+                sequence = _next_strategy_event_sequence(session, strategy_key)
+                from_state = StrategyState(state_row.state)
+                state_row.state = target_state.value
+                state_row.current_deployment_id = target.deployment_id
+                state_row.previous_deployment_id = previous_deployment_id
+                state_row.current_policy_version = target.policy_version
+                state_row.previous_policy_version = previous_policy_version
+                state_row.effective_weight = Decimal(str(resolved_weight))
+                state_row.revision = max(state_row.revision + 1, sequence)
+                state_row.updated_at = now
+                event_row = StrategyStateEventRow(
+                    event_id=f"strategy-event-{uuid4().hex}",
+                    strategy_id=strategy_key,
+                    sequence=sequence,
+                    idempotency_key=key,
+                    event_type="deployment_rollback",
+                    action="rollback",
+                    from_state=from_state.value,
+                    to_state=target_state.value,
+                    deployment_id=target.deployment_id,
+                    previous_deployment_id=previous_deployment_id,
+                    policy_version=target.policy_version,
+                    effective_weight=Decimal(str(resolved_weight)),
+                    reason=event_reason,
+                    evidence_json=evidence_json,
+                    decision_json=decision_json,
+                    created_at=now,
+                )
+                session.add(event_row)
+                session.commit()
+                return self._strategy_state_event_from_row(event_row)
+            except IntegrityError as error:
+                session.rollback()
+                replay = self._load_idempotent_governance_event(key)
+                if replay is None:
+                    raise error
+                return replay
+            except Exception:
+                session.rollback()
+                raise
+
+    def rollback_deployment(
+        self,
+        strategy_id: str,
+        idempotency_key: str | None = None,
+        reason: str | None = None,
+        **kwargs: object,
+    ) -> StrategyStateEventRecord:
+        return self.rollback_policy_deployment(
+            strategy_id,
+            idempotency_key,
+            reason,
+            **kwargs,
+        )
+
+    def rollback_strategy_deployment(
+        self,
+        strategy_id: str,
+        idempotency_key: str | None = None,
+        reason: str | None = None,
+        **kwargs: object,
+    ) -> StrategyStateEventRecord:
+        return self.rollback_policy_deployment(
+            strategy_id,
+            idempotency_key,
+            reason,
+            **kwargs,
+        )
+
+    def _load_idempotent_governance_event(
+        self,
+        idempotency_key: str,
+    ) -> StrategyStateEventRecord | None:
+        with self.session_factory() as session:
+            row = _find_idempotent_governance_event(session, idempotency_key)
+            return self._strategy_state_event_from_row(row) if row is not None else None
 
     def save_automation_scheduler_state(
         self,
@@ -1554,6 +2174,9 @@ class QagentRepository:
         phase: str | None = None,
         processed_snapshots: int | None = None,
         current_date: date | None = None,
+        lease_maintenance_count: int | None = None,
+        lease_recovery_count: int | None = None,
+        last_lease_heartbeat_at: datetime | None = None,
         checkpoints: list[dict[str, object]] | None = None,
         result_run_id: str | None = None,
         error: str | None = None,
@@ -1570,6 +2193,9 @@ class QagentRepository:
                 "phase": phase,
                 "processed_snapshots": processed_snapshots,
                 "current_date": current_date,
+                "lease_maintenance_count": lease_maintenance_count,
+                "lease_recovery_count": lease_recovery_count,
+                "last_lease_heartbeat_at": last_lease_heartbeat_at,
                 "result_run_id": result_run_id,
                 "error": error,
                 "started_at": started_at,
@@ -1992,6 +2618,71 @@ class QagentRepository:
             return self._delivery_outbox_from_row(row)
 
     @staticmethod
+    def _strategy_version_from_row(row: StrategyVersionRow) -> StrategyVersionRecord:
+        return StrategyVersionRecord(
+            strategy_id=row.strategy_id,
+            strategy_version=row.strategy_version,
+            definition_digest=row.definition_digest,
+            definition=_json_object(row.definition_json),
+            created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _policy_deployment_from_row(row: PolicyDeploymentRow) -> PolicyDeploymentRecord:
+        return PolicyDeploymentRecord(
+            deployment_id=row.deployment_id,
+            strategy_id=row.strategy_id,
+            policy_version=row.policy_version,
+            strategy_version=row.strategy_version,
+            factor_version=row.factor_version,
+            parameter_version=row.parameter_version,
+            universe_version=row.universe_version,
+            data_revision=row.data_revision,
+            policy_digest=row.policy_digest,
+            policy=StrategyPolicy.model_validate_json(row.policy_json),
+            previous_deployment_id=row.previous_deployment_id,
+            created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _strategy_state_from_row(row: StrategyStateRow) -> StrategyStateRecord:
+        return StrategyStateRecord(
+            strategy_id=row.strategy_id,
+            state=StrategyState(row.state),
+            current_deployment_id=row.current_deployment_id,
+            previous_deployment_id=row.previous_deployment_id,
+            current_policy_version=row.current_policy_version,
+            previous_policy_version=row.previous_policy_version,
+            effective_weight=float(row.effective_weight),
+            revision=row.revision,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    @staticmethod
+    def _strategy_state_event_from_row(
+        row: StrategyStateEventRow,
+    ) -> StrategyStateEventRecord:
+        return StrategyStateEventRecord(
+            event_id=row.event_id,
+            strategy_id=row.strategy_id,
+            sequence=row.sequence,
+            idempotency_key=row.idempotency_key,
+            event_type=row.event_type,
+            action=row.action,
+            from_state=(StrategyState(row.from_state) if row.from_state is not None else None),
+            to_state=StrategyState(row.to_state),
+            deployment_id=row.deployment_id,
+            previous_deployment_id=row.previous_deployment_id,
+            policy_version=row.policy_version,
+            effective_weight=float(row.effective_weight),
+            reason=row.reason,
+            evidence=_json_object(row.evidence_json),
+            decision=_json_object(row.decision_json),
+            created_at=row.created_at,
+        )
+
+    @staticmethod
     def _watchlist_from_row(row: WatchlistItemRow) -> WatchlistItem:
         return WatchlistItem(
             instrument_id=row.instrument_id,
@@ -2214,6 +2905,9 @@ class QagentRepository:
             total_snapshots=row.total_snapshots,
             processed_snapshots=row.processed_snapshots,
             current_date=row.current_date,
+            lease_maintenance_count=row.lease_maintenance_count,
+            lease_recovery_count=row.lease_recovery_count,
+            last_lease_heartbeat_at=row.last_lease_heartbeat_at,
             checkpoints=json.loads(row.checkpoints_json or "[]"),
             experiment_manifest=json.loads(row.experiment_manifest_json or "{}"),
             result_run_id=row.result_run_id,
@@ -2291,6 +2985,379 @@ class QagentRepository:
             settings=settings if isinstance(settings, dict) else {},
             updated_at=row.updated_at,
         )
+
+
+def _resolve_governance_defaults(
+    defaults: list[StrategyDefinition] | list[StrategyPolicy] | None,
+    *,
+    definitions: list[StrategyDefinition] | None,
+    policies: list[StrategyPolicy] | None,
+) -> tuple[list[StrategyDefinition], list[StrategyPolicy]]:
+    if defaults is not None and (definitions is not None or policies is not None):
+        raise ValueError("defaults cannot be combined with definitions or policies")
+    if defaults is not None:
+        if all(isinstance(item, StrategyDefinition) for item in defaults):
+            definitions = [StrategyDefinition.model_validate(item) for item in defaults]
+            policies = []
+        elif all(isinstance(item, StrategyPolicy) for item in defaults):
+            policies = [StrategyPolicy.model_validate(item) for item in defaults]
+            definitions = None
+        else:
+            raise TypeError("defaults must contain only StrategyDefinition or StrategyPolicy")
+
+    resolved_policies = [StrategyPolicy.model_validate(item) for item in (policies or [])]
+    if definitions is not None:
+        resolved_definitions = [StrategyDefinition.model_validate(item) for item in definitions]
+    else:
+        registry_definitions = default_strategy_registry().all()
+        if policies is None and defaults is None:
+            resolved_definitions = registry_definitions
+        else:
+            policy_ids = {policy.strategy_id for policy in resolved_policies}
+            resolved_definitions = [
+                definition
+                for definition in registry_definitions
+                if definition.strategy_id in policy_ids
+            ]
+    return resolved_definitions, resolved_policies
+
+
+def _begin_governance_write(session: Session) -> None:
+    if session.get_bind().dialect.name == "sqlite":
+        session.execute(text("BEGIN IMMEDIATE"))
+
+
+def _strategy_definition_payload(
+    policy: StrategyPolicy,
+    definition: StrategyDefinition | None,
+) -> dict[str, object]:
+    if definition is not None:
+        if definition.strategy_id != policy.strategy_id:
+            raise ValueError("strategy definition and policy strategy_id differ")
+        return definition.model_dump(mode="json")
+    return {
+        "strategy_id": policy.strategy_id,
+        "strategy_version": policy.strategy_version,
+        "source": "policy_snapshot",
+    }
+
+
+def _default_strategy_definition(strategy_id: str) -> StrategyDefinition | None:
+    try:
+        return default_strategy_registry().get(strategy_id)
+    except KeyError:
+        return None
+
+
+def _ensure_strategy_version(
+    session: Session,
+    *,
+    strategy_id: str,
+    strategy_version: str,
+    definition: dict[str, object],
+) -> StrategyVersionRow:
+    definition_json = _canonical_json(definition)
+    definition_digest = hashlib.sha256(definition_json.encode("utf-8")).hexdigest()
+    row = session.get(StrategyVersionRow, (strategy_id, strategy_version))
+    if row is not None:
+        if row.definition_digest != definition_digest or row.definition_json != definition_json:
+            raise ValueError(f"strategy version {strategy_id}:{strategy_version} is immutable")
+        return row
+    row = StrategyVersionRow(
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        definition_digest=definition_digest,
+        definition_json=definition_json,
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def _ensure_policy_deployment(
+    session: Session,
+    policy: StrategyPolicy,
+    *,
+    previous_deployment_id: str | None,
+) -> PolicyDeploymentRow:
+    policy_json = _canonical_json(policy)
+    policy_digest = strategy_policy_digest(policy)
+    row = _find_policy_deployment(session, policy.strategy_id, policy.policy_version)
+    if row is not None:
+        if row.policy_digest != policy_digest or row.policy_json != policy_json:
+            raise ValueError(
+                f"policy snapshot {policy.strategy_id}:{policy.policy_version} is immutable"
+            )
+        return row
+    row = PolicyDeploymentRow(
+        deployment_id=f"policy-deployment-{policy_digest[:24]}",
+        strategy_id=policy.strategy_id,
+        policy_version=policy.policy_version,
+        strategy_version=policy.strategy_version,
+        factor_version=policy.factor_version,
+        parameter_version=policy.parameter_version,
+        universe_version=policy.universe_version,
+        data_revision=str(policy.data_revision),
+        policy_digest=policy_digest,
+        policy_json=policy_json,
+        previous_deployment_id=previous_deployment_id,
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def _find_policy_deployment(
+    session: Session,
+    strategy_id: str,
+    policy_version: str,
+) -> PolicyDeploymentRow | None:
+    return (
+        session.query(PolicyDeploymentRow)
+        .filter(
+            PolicyDeploymentRow.strategy_id == strategy_id,
+            PolicyDeploymentRow.policy_version == policy_version,
+        )
+        .one_or_none()
+    )
+
+
+def _deployment_policy_version(
+    session: Session,
+    deployment_id: str | None,
+) -> str | None:
+    if deployment_id is None:
+        return None
+    row = session.get(PolicyDeploymentRow, deployment_id)
+    return row.policy_version if row is not None else None
+
+
+def _find_idempotent_governance_event(
+    session: Session,
+    idempotency_key: str,
+) -> StrategyStateEventRow | None:
+    return (
+        session.query(StrategyStateEventRow)
+        .filter(StrategyStateEventRow.idempotency_key == idempotency_key)
+        .one_or_none()
+    )
+
+
+def _next_strategy_event_sequence(session: Session, strategy_id: str) -> int:
+    latest = (
+        session.query(func.max(StrategyStateEventRow.sequence))
+        .filter(StrategyStateEventRow.strategy_id == strategy_id)
+        .scalar()
+    )
+    return int(latest or 0) + 1
+
+
+def _resolve_rollback_target(
+    session: Session,
+    *,
+    current: PolicyDeploymentRow,
+    target_deployment_id: str | None,
+    target_policy_version: str | None,
+) -> PolicyDeploymentRow | None:
+    by_id = (
+        session.get(PolicyDeploymentRow, target_deployment_id)
+        if target_deployment_id is not None
+        else None
+    )
+    by_version = (
+        _find_policy_deployment(session, current.strategy_id, target_policy_version)
+        if target_policy_version is not None
+        else None
+    )
+    if target_deployment_id is not None and by_id is None:
+        raise LookupError(f"policy deployment {target_deployment_id!r} does not exist")
+    if target_policy_version is not None and by_version is None:
+        raise LookupError(f"policy {current.strategy_id}:{target_policy_version} does not exist")
+    if (
+        by_id is not None
+        and by_version is not None
+        and by_id.deployment_id != by_version.deployment_id
+    ):
+        raise ValueError("rollback deployment and policy targets differ")
+    if by_id is not None or by_version is not None:
+        return by_id or by_version
+
+    if current.previous_deployment_id is not None:
+        return session.get(PolicyDeploymentRow, current.previous_deployment_id)
+    current_policy = StrategyPolicy.model_validate_json(current.policy_json)
+    if current_policy.rollback_policy_version is None:
+        return None
+    return _find_policy_deployment(
+        session,
+        current.strategy_id,
+        current_policy.rollback_policy_version,
+    )
+
+
+def _validate_decision_identity(
+    policy: StrategyPolicy,
+    decision: dict[str, object],
+) -> None:
+    strategy_id = decision.get("strategy_id")
+    if strategy_id is not None and str(strategy_id) != policy.strategy_id:
+        raise ValueError("decision and policy strategy_id differ")
+    for field_name in ("policy_version", "current_policy_version"):
+        value = decision.get(field_name)
+        if value is not None and str(value) != policy.policy_version:
+            raise ValueError(f"decision {field_name} and policy version differ")
+
+
+def _decision_target_state(decision: dict[str, object]) -> StrategyState:
+    value = decision.get("effective_state", decision.get("to_state"))
+    if value is None:
+        raise ValueError("governance decision must include to_state or effective_state")
+    return StrategyState(str(value))
+
+
+def _optional_strategy_state(value: object) -> StrategyState | None:
+    return StrategyState(str(value)) if value is not None else None
+
+
+def _decision_action(decision: dict[str, object]) -> str:
+    action = decision.get("action")
+    if action is not None:
+        return str(action)
+    if decision.get("admitted") is True:
+        return "admit"
+    if decision.get("admitted") is False or decision.get("allowed") is False:
+        return "hold"
+    return "transition"
+
+
+def _decision_effective_weight(
+    policy: StrategyPolicy,
+    decision: dict[str, object],
+    state: StrategyState,
+    *,
+    override: float | None,
+) -> float:
+    if override is not None:
+        value = float(override)
+    elif decision.get("effective_weight") is not None:
+        value = float(decision["effective_weight"])
+    else:
+        value = _policy_effective_weight(policy, state)
+    if not 0.0 <= value <= 1.0:
+        raise ValueError("effective_weight must be between 0 and 1")
+    return value
+
+
+def _policy_effective_weight(
+    policy: StrategyPolicy | None,
+    state: StrategyState,
+) -> float:
+    if policy is None:
+        return 0.0
+    if state is StrategyState.ADMITTED:
+        return policy.base_weight
+    if state is StrategyState.THROTTLED:
+        return round(
+            policy.base_weight * policy.breach_policy.throttle_multiplier,
+            10,
+        )
+    return 0.0
+
+
+def _validate_decision_replay(
+    row: StrategyStateEventRow,
+    *,
+    policy: StrategyPolicy,
+    decision_json: str,
+    evidence_json: str,
+    reason: str,
+) -> None:
+    if (
+        row.strategy_id != policy.strategy_id
+        or row.policy_version != policy.policy_version
+        or row.decision_json != decision_json
+        or row.evidence_json != evidence_json
+        or row.reason != reason
+    ):
+        raise ValueError("idempotency_key is already used by a different decision")
+
+
+def _validate_decision_replay_record(
+    record: StrategyStateEventRecord,
+    *,
+    policy: StrategyPolicy,
+    decision_json: str,
+    evidence_json: str,
+    reason: str,
+) -> None:
+    if (
+        record.strategy_id != policy.strategy_id
+        or record.policy_version != policy.policy_version
+        or _canonical_json(record.decision) != decision_json
+        or _canonical_json(record.evidence) != evidence_json
+        or record.reason != reason
+    ):
+        raise ValueError("idempotency_key is already used by a different decision")
+
+
+def _validate_rollback_replay(
+    row: StrategyStateEventRow,
+    *,
+    strategy_id: str,
+    target_deployment_id: str | None,
+    target_policy_version: str | None,
+    evidence_json: str,
+    reason: str | None,
+) -> None:
+    mismatched = (
+        row.strategy_id != strategy_id
+        or row.action != "rollback"
+        or row.evidence_json != evidence_json
+        or (target_deployment_id is not None and row.deployment_id != target_deployment_id)
+        or (target_policy_version is not None and row.policy_version != target_policy_version)
+        or (reason is not None and row.reason != reason.strip())
+    )
+    if mismatched:
+        raise ValueError("idempotency_key is already used by a different rollback")
+
+
+def _required_text(value: object, field_name: str) -> str:
+    normalized = str(value).strip() if value is not None else ""
+    if not normalized:
+        raise ValueError(f"{field_name} must not be blank")
+    return normalized
+
+
+def _canonical_json(value: object) -> str:
+    payload = value.model_dump(mode="json") if isinstance(value, BaseModel) else value
+    return json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=_json_default,
+    )
+
+
+def _json_default(value: object) -> object:
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    enum_value = getattr(value, "value", None)
+    if enum_value is not None:
+        return enum_value
+    raise TypeError(f"{type(value).__name__} is not JSON serializable")
+
+
+def _json_object(value: str) -> dict[str, object]:
+    payload = json.loads(value or "{}")
+    if not isinstance(payload, dict):
+        raise ValueError("stored governance JSON must contain an object")
+    return payload
 
 
 def _decimal_or_none(value: object) -> Decimal | None:

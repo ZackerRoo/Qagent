@@ -201,6 +201,45 @@ def test_dual_track_quality_filter_uses_only_signal_date_snapshot_fields():
     assert report.windows[0].calibrated.sample_count == 1
 
 
+def test_dual_track_reads_data_quality_audit_instead_of_legacy_data_quality_key():
+    blocked = _snapshot("snapshot-data-quality", "CN:000001", date(2026, 1, 2), "0.90")
+    blocked.card["data_quality_audit"] = {
+        "status": "blocked",
+        "can_recommend": False,
+        "score": 0.10,
+        "summary": "point-in-time bars failed the quality gate",
+    }
+    blocked.card["data_quality"] = {"score": 1.0}
+    ready = _snapshot("snapshot-data-ready", "CN:000002", date(2026, 1, 2), "0.89")
+    ready.card["data_quality_audit"] = {
+        "status": "ready",
+        "can_recommend": True,
+        "score": 1.0,
+        "summary": "point-in-time bars passed the quality gate",
+    }
+    ready.card["data_quality"] = {"score": 0.10}
+
+    report = build_dual_track_report(
+        snapshots=[blocked, ready],
+        trades=[],
+        instrument_bars=pd.concat(
+            [
+                _bars(blocked.instrument_id, base=100),
+                _bars(ready.instrument_id, base=120),
+            ],
+            ignore_index=True,
+        ),
+        benchmark_bars=pd.DataFrame(),
+        as_of=date(2026, 2, 6),
+    )
+
+    samples = {sample.snapshot_id: sample for sample in report.samples}
+    assert samples[blocked.snapshot_id].calibrated_eligible is False
+    assert "数据质量" in samples[blocked.snapshot_id].calibrated_reason
+    assert samples[ready.snapshot_id].calibrated_eligible is True
+    assert report.summary.calibrated_admitted == 1
+
+
 def test_repository_selects_unique_daily_top_recommendations_per_provider(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'dual-track.db'}"
     engine = create_db_engine(database_url)

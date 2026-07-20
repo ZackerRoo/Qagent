@@ -315,7 +315,7 @@ function buildPillars({
           : "Post-recommendation 5/10/20D results calibrate signal weights."),
       metrics: [
         { label: "10D", value: formatNullablePercent(primaryWindow?.win_rate), tone: toneFromRate(primaryWindow?.win_rate) },
-        { label: language === "zh" ? "均值" : "Avg", value: formatNullablePercent(primaryWindow?.avg_return_10d), tone: toneFromSigned(primaryWindow?.avg_return_10d) },
+        { label: language === "zh" ? "均值" : "Avg", value: formatPercentagePoints(primaryWindow?.avg_return_10d), tone: toneFromSigned(primaryWindow?.avg_return_10d) },
         { label: language === "zh" ? "样本" : "Samples", value: primaryWindow ? `${primaryWindow.completed_count}/${primaryWindow.sample_count}` : "-" },
       ],
       action: followthrough?.action_items?.[0] ?? (language === "zh" ? "继续记录推荐结果。" : "Keep tracking outcomes."),

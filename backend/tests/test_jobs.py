@@ -165,6 +165,32 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
     )
 
     assert cached is not None
+    assert cached.payload["factor_rankings"]
+    assert len(cached.payload["factor_rankings"]) == len(cached.payload["cards"])
+    assert cached.payload["data_health"]["factor_ranking_scope"] == "full_card_universe"
+    assert cached.payload["data_health"]["factor_ranking_normalization"] == "global_second_pass"
+    assert cached.payload["data_health"]["feature_set_version"]
+    assert len(cached.payload["data_health"]["feature_universe_digest"]) == 64
+    assert len(cached.payload["data_health"]["feature_input_digest"]) == 64
+    assert cached.payload["feature_snapshot"]["feature_set_version"]
+    assert cached.payload["feature_drift"]["status"] == "insufficient"
+    assert cached.payload["feature_drift"]["auto_adjust_weights"] is False
+    assert cached.payload["a_share_market_state"]["state"] in {
+        "unknown",
+        "stress",
+        "weak",
+        "mixed",
+        "constructive",
+        "strong",
+    }
+    assert cached.payload["data_health"]["a_share_market_state"]
+    assert cached.payload["portfolio_plan"]["constraint_policy"]["market_state"] == (
+        cached.payload["a_share_market_state"]["state"]
+    )
+    assert (
+        cached.payload["data_health"]["dynamic_calibration_merge_policy"]
+        == "preserve_batch_result_without_reapply"
+    )
     assert cached.payload["strategy_health"]
     assert any(item["curve"] for item in cached.payload["strategy_health"])
     assert cached.payload["cards"][0]["confidence_explanation"]
@@ -197,6 +223,44 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
     assert all(snapshot.latest_close is not None for snapshot in snapshots)
 
 
+def test_full_market_batch_job_resumes_from_persisted_batch_checkpoints(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'checkpoint.db'}")
+    initialize_database()
+    repo = QagentRepository(create_session_factory())
+    job = repo.create_full_market_scan_job(
+        provider="fixture",
+        symbols=["US:TEST", "CN:000001"],
+        batch_size=1,
+        include_etfs=True,
+        sync_if_empty=False,
+    )
+    monkeypatch.setattr(
+        full_market,
+        "build_market_data_provider",
+        lambda provider: FixtureMarketDataProvider(),
+    )
+    full_market.run_full_market_batch_scan_job(job.job_id, top_cards_limit=5)
+
+    def fail_if_rescanned(*args, **kwargs):
+        raise AssertionError("completed checkpoint batches must not be rescanned")
+
+    monkeypatch.setattr(full_market, "run_daily_scan", fail_if_rescanned)
+    repo.update_full_market_scan_job(job.job_id, status="running")
+
+    full_market.run_full_market_batch_scan_job(job.job_id, top_cards_limit=5)
+
+    restored = repo.get_full_market_scan_job(job.job_id)
+    assert restored is not None
+    assert restored.status == "succeeded"
+    assert restored.scanned_symbols == 2
+    assert restored.completed_batches == 2
+    assert restored.data_health["full_market_restart_recovery"] == "batch_checkpoint_resume"
+    assert restored.data_health["full_market_checkpoint_batches_restored"] == "2"
+
+
 def test_full_market_batch_job_caches_rejected_items_with_remediation(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'full-batch-rejected.db'}")
     initialize_database()
@@ -227,6 +291,39 @@ def test_full_market_batch_job_caches_rejected_items_with_remediation(tmp_path, 
     assert rejected[0]["rejection_category"] in {"data_missing", "weak_signal", "execution_blocked", "scan_error"}
     assert rejected[0]["remediation"]
     assert cached.payload["data_health"]["full_market_rejected_items"] == str(len(rejected))
+
+
+def test_full_market_batch_compares_same_version_feature_snapshots(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'feature-drift.db'}")
+    initialize_database()
+    repo = QagentRepository(create_session_factory())
+    monkeypatch.setattr(
+        full_market,
+        "build_market_data_provider",
+        lambda provider: FixtureMarketDataProvider(),
+    )
+
+    for _ in range(2):
+        job = repo.create_full_market_scan_job(
+            provider="fixture",
+            symbols=["US:TEST", "CN:000001"],
+            batch_size=1,
+            include_etfs=True,
+            sync_if_empty=False,
+        )
+        full_market.run_full_market_batch_scan_job(job.job_id, top_cards_limit=5)
+
+    cached = repo.get_recent_scan_result_cache(
+        cache_key=full_market.full_market_batch_cache_key("fixture", True),
+        max_age=timedelta(minutes=60),
+    )
+
+    assert cached is not None
+    drift = cached.payload["feature_drift"]
+    assert drift["reference_version"] == drift["current_version"]
+    assert drift["status"] in {"stable", "watch", "insufficient"}
+    assert drift["auto_adjust_weights"] is False
+    assert cached.payload["data_health"]["feature_drift_auto_weight_change"] == "false"
 
 
 def test_daily_scan_promotes_pead_when_earnings_fixture_is_available():

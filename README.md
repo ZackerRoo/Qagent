@@ -19,6 +19,7 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - Local A-share tradable catalog sync backed by free `akshare` stock and ETF directories; current free sync covers A-share stocks plus listed ETFs and stores them in SQLite for search and scan sampling.
 - US free market data via `yfinance` remains available for explicit symbols, but is not the default dashboard route.
 - Strategy registry covering trend momentum, breakout + volume, healthy pullback, GF-DMA health, catalyst transmission, PEAD, analyst revisions, TAM-adjusted PEG, Bayesian growth valuation, sector regime, short squeeze risk, options flow, and insider/institutional confirmation.
+- Versioned strategy governance with immutable policies, out-of-sample admission gates, research/shadow/admitted/throttled/disabled states, audit events, and rollback support. Shadow strategies can collect paper evidence without being labelled validated buys.
 - Strategy-data provider contract for earnings events, SEC filings, A-share announcements, fundamentals, valuation multiples, and analyst context.
 - Real-data strategy adapters for Alpha Vantage fundamentals/earnings/ratings, FMP earnings/fundamentals/analyst estimates, Finnhub earnings/fundamentals/recommendations, SEC EDGAR filings, CNINFO announcements, and Tushare configuration.
 - Free-data strategy evaluator for trend momentum, breakout + volume, healthy pullback, GF-DMA health, PEAD when earnings actuals/estimates exist, analyst revision when estimate revisions exist, TAM-adjusted PEG, Bayesian growth valuation, and A-share limit-status confirmation.
@@ -31,11 +32,13 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - Scan coverage table showing `setup_ready`, `no_setup`, or `no_data` per symbol plus passed/watch/missing strategy counts.
 - Strategy health summary with sample count, 10-day win rate, average 10/20-day forward return, max 10-day loss, and readiness labels.
 - A-share multifactor ranking layer using momentum, trend quality, liquidity, low-risk, and reversal constraints, with per-factor attribution, flags, and combined opportunity scoring.
+- Deterministic full-market cross-sectional reranking with immutable feature snapshots, input/universe digests, factor coverage, top-set overlap, PSI/rank-correlation drift checks, and no silent weight changes from drift diagnostics.
 - Factor-watch cards for high-ranked A-share/ETF/theme candidates that have not yet triggered a full strategy signal; these are shown as watch/trigger plans, not confirmed buy signals.
 - Rotation-aware recommendation ordering so ETF/index tools and theme-growth candidates remain visible instead of every scan being dominated by the same high-liquidity stocks.
 - Factor validation backtest that freezes historical factor rankings and checks forward returns without lookahead.
 - Strategy validation charts for return distribution, factor rank buckets, portfolio equity curve, drawdown curve, and monthly returns.
 - Persistent scan history and opportunity snapshots saved from dashboard scans.
+- Restart-safe full-market checkpoints that persist every completed batch's cards, rejected items, factor rankings, strategy health, and governance audit before continuing.
 - Outcome replay that computes forward returns, max drawdown, max runup, and target/stop/pending status from saved opportunity snapshots.
 - Strategy performance leaderboard summarizing replayed outcomes by primary strategy.
 - Research-only paper trading / forward testing that seeds simulated trades from opportunity snapshots, tracks pending/open/closed status, and reports forward win rate.

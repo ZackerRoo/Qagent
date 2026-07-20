@@ -10016,6 +10016,359 @@ tbody tr.selected {
   gap: 10px;
 }
 
+.strategy-governance-panel {
+  display: grid;
+  gap: 8px;
+  overflow: hidden;
+  border-color: rgba(77, 212, 255, 0.26);
+  padding: 10px 12px;
+  background: #10171e;
+}
+
+.strategy-governance-header {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.32fr) minmax(360px, 0.68fr);
+  gap: 12px;
+  align-items: center;
+}
+
+.strategy-governance-header .eyebrow {
+  margin-bottom: 2px;
+  color: var(--terminal-cyan);
+}
+
+.strategy-governance-header h2 {
+  font-size: 16px;
+}
+
+.strategy-governance-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.strategy-governance-kpi {
+  display: flex;
+  min-width: 0;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--terminal-border-soft);
+  border-left-width: 3px;
+  border-radius: 6px;
+  padding: 6px 9px;
+  background: var(--terminal-panel-soft);
+}
+
+.strategy-governance-kpi span {
+  overflow: hidden;
+  color: var(--terminal-muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.strategy-governance-kpi strong {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.strategy-governance-kpi.is-admitted {
+  border-left-color: var(--terminal-green);
+}
+
+.strategy-governance-kpi.is-admitted strong {
+  color: var(--terminal-green);
+}
+
+.strategy-governance-kpi.is-shadow {
+  border-left-color: var(--terminal-cyan);
+}
+
+.strategy-governance-kpi.is-shadow strong {
+  color: var(--terminal-cyan);
+}
+
+.strategy-governance-kpi.is-throttled {
+  border-left-color: var(--terminal-yellow);
+}
+
+.strategy-governance-kpi.is-throttled strong {
+  color: var(--terminal-yellow);
+}
+
+.strategy-governance-kpi.is-disabled {
+  border-left-color: var(--terminal-red);
+}
+
+.strategy-governance-kpi.is-disabled strong {
+  color: var(--terminal-red);
+}
+
+.strategy-governance-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  align-items: center;
+  border-top: 1px solid var(--terminal-border-soft);
+  padding-top: 7px;
+}
+
+.strategy-governance-legend > span {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  color: var(--terminal-muted);
+  font-size: 11px;
+}
+
+.strategy-governance-legend strong {
+  color: var(--terminal-text);
+  font-size: 11px;
+}
+
+.strategy-governance-legend small {
+  color: var(--terminal-muted-2);
+}
+
+.strategy-governance-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--terminal-muted-2);
+}
+
+.strategy-governance-dot.is-admitted {
+  background: var(--terminal-green);
+}
+
+.strategy-governance-dot.is-throttled {
+  background: var(--terminal-yellow);
+}
+
+.strategy-governance-dot.is-disabled {
+  background: var(--terminal-red);
+}
+
+.strategy-governance-message {
+  display: grid;
+  min-height: 44px;
+  place-items: center;
+  border: 1px dashed var(--terminal-border);
+  border-radius: 6px;
+  background: var(--terminal-panel-soft);
+  color: var(--terminal-muted);
+  font-size: 12px;
+}
+
+.strategy-governance-message.is-error {
+  border-color: rgba(255, 92, 122, 0.32);
+  color: var(--terminal-red);
+}
+
+.strategy-governance-details {
+  overflow: hidden;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 6px;
+  background: var(--terminal-panel-soft);
+}
+
+.strategy-governance-details > summary {
+  display: flex;
+  min-height: 36px;
+  cursor: pointer;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 10px;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  font-weight: 800;
+  list-style: none;
+}
+
+.strategy-governance-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.strategy-governance-details > summary::before {
+  content: "+";
+  color: var(--terminal-cyan);
+}
+
+.strategy-governance-details[open] > summary::before {
+  content: "−";
+}
+
+.strategy-governance-details > summary strong {
+  margin-left: auto;
+  color: var(--terminal-text);
+}
+
+.strategy-governance-table-shell {
+  border: 0;
+  border-top: 1px solid var(--terminal-border-soft);
+  border-radius: 0;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 6px;
+}
+
+.strategy-governance-table {
+  width: 100%;
+  min-width: 760px;
+  table-layout: fixed;
+}
+
+.strategy-governance-table th:nth-child(1) {
+  width: 23%;
+}
+
+.strategy-governance-table th:nth-child(2) {
+  width: 12%;
+}
+
+.strategy-governance-table th:nth-child(3) {
+  width: 12%;
+}
+
+.strategy-governance-table th:nth-child(4) {
+  width: 18%;
+}
+
+.strategy-governance-table th:nth-child(5) {
+  width: 35%;
+}
+
+.strategy-governance-table th,
+.strategy-governance-table td {
+  padding: 6px 8px;
+  vertical-align: middle;
+}
+
+.strategy-governance-table tbody tr.is-throttled {
+  background: rgba(244, 197, 66, 0.045);
+}
+
+.strategy-governance-table tbody tr.is-disabled {
+  background: rgba(255, 92, 122, 0.055);
+}
+
+.strategy-governance-name {
+  display: grid;
+  gap: 2px;
+}
+
+.strategy-governance-name strong,
+.strategy-governance-name small,
+.strategy-governance-policy,
+.strategy-governance-reason {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.strategy-governance-name strong {
+  color: var(--terminal-text);
+  font-size: 12px;
+}
+
+.strategy-governance-name small {
+  color: var(--terminal-muted-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10px;
+}
+
+.strategy-governance-state {
+  display: inline-flex;
+  min-height: 22px;
+  align-items: center;
+  border: 1px solid var(--terminal-border);
+  border-radius: 4px;
+  padding: 2px 7px;
+  color: var(--terminal-muted);
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.strategy-governance-state.is-admitted {
+  border-color: rgba(57, 217, 138, 0.38);
+  background: rgba(57, 217, 138, 0.1);
+  color: var(--terminal-green);
+}
+
+.strategy-governance-state.is-throttled {
+  border-color: rgba(244, 197, 66, 0.4);
+  background: rgba(244, 197, 66, 0.11);
+  color: var(--terminal-yellow);
+}
+
+.strategy-governance-state.is-disabled {
+  border-color: rgba(255, 92, 122, 0.42);
+  background: rgba(255, 92, 122, 0.11);
+  color: var(--terminal-red);
+}
+
+.strategy-governance-state.is-shadow {
+  border-color: rgba(96, 165, 250, 0.36);
+  background: rgba(96, 165, 250, 0.1);
+  color: #93c5fd;
+}
+
+.strategy-governance-state.is-research,
+.strategy-governance-state.is-unmanaged {
+  background: rgba(148, 163, 184, 0.08);
+  color: var(--terminal-muted);
+}
+
+.strategy-governance-weight strong {
+  color: var(--terminal-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.strategy-governance-table tr.is-admitted .strategy-governance-weight strong {
+  color: var(--terminal-green);
+}
+
+.strategy-governance-table tr.is-throttled .strategy-governance-weight strong {
+  color: var(--terminal-yellow);
+}
+
+.strategy-governance-table tr.is-disabled .strategy-governance-weight strong {
+  color: var(--terminal-red);
+}
+
+.strategy-governance-policy {
+  color: var(--terminal-cyan);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.strategy-governance-reason {
+  color: var(--terminal-muted);
+}
+
+@media (max-width: 760px) {
+  .strategy-governance-header {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .strategy-governance-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .strategy-governance-kpi {
+    padding: 6px 7px;
+  }
+
+  .strategy-governance-legend > span {
+    flex: 1 1 132px;
+  }
+}
+
 .history-loading-panel {
   overflow: hidden;
 }
@@ -13278,6 +13631,31 @@ td {
   transition: width 180ms ease;
 }
 
+.walk-forward-lease-health {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.walk-forward-lease-health span {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.walk-forward-lease-health strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .walk-forward-chart-grid,
 .walk-forward-table-grid {
   display: grid;
@@ -13319,6 +13697,10 @@ td {
   .walk-forward-chart-grid,
   .walk-forward-table-grid,
   .walk-forward-kpis {
+    grid-template-columns: 1fr;
+  }
+
+  .walk-forward-lease-health {
     grid-template-columns: 1fr;
   }
 }

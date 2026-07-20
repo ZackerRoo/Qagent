@@ -1,4 +1,5 @@
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal, ROUND_DOWN
 from typing import Mapping
@@ -7,9 +8,36 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from pydantic import BaseModel, Field
 
+from qagent.execution.models import (
+    AShareExecutionRules,
+    MarketEvent,
+    Order,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    TimeInForce,
+)
+from qagent.execution.rules import (
+    apply_slippage as execution_apply_slippage,
+    fee_breakdown as execution_fee_breakdown,
+    is_one_price_limit_blocked,
+    is_tick_aligned,
+    match_base_price,
+    money as execution_money,
+    participation_capacity,
+    round_lot,
+)
 from qagent.market.calendars import trading_sessions_elapsed
 from qagent.providers.base import MarketDataProvider
-from qagent.storage.paper import PaperTradeRecord, PaperTradeSourceContext, PaperTradingRepository
+from qagent.storage.paper import (
+    PaperAccountSettings,
+    PaperExecutionFacts,
+    PaperExecutionLegFacts,
+    PaperTradeEventMetadata,
+    PaperTradeRecord,
+    PaperTradeSourceContext,
+    PaperTradingRepository,
+)
 from qagent.storage.repository import OpportunitySnapshotRecord
 
 
@@ -29,6 +57,36 @@ A_SHARE_MORNING_END = time(11, 30)
 A_SHARE_AFTERNOON_START = time(13, 0)
 A_SHARE_AFTERNOON_END = time(15, 0)
 PAPER_RISK_PROBE_NOTE = "风控恢复探针"
+_ENTRY_FILL_UPDATE_KEY = "__paper_entry_fill"
+_EXIT_FILL_UPDATE_KEY = "__paper_exit_fill"
+_DEFERRED_FILL_UPDATE_KEY = "__paper_deferred_fills"
+
+
+@dataclass(frozen=True, slots=True)
+class _PaperExecutionContext:
+    rules: AShareExecutionRules
+    allocation: Decimal
+    source_context: PaperTradeSourceContext | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PaperMatchedFill:
+    market_event_id: str
+    side: OrderSide
+    trade_date: date
+    occurred_at: datetime
+    base_price: Decimal
+    price: Decimal
+    quantity: int
+    rules: AShareExecutionRules
+    source: str = "unified_execution"
+
+
+@dataclass(frozen=True, slots=True)
+class _PaperMatchResult:
+    triggered: bool
+    fill: _PaperMatchedFill | None = None
+    reason: str | None = None
 
 
 class PaperSeedResult(BaseModel):
@@ -577,6 +635,7 @@ def update_paper_trades(
     as_of: datetime | None = None,
 ) -> PaperUpdateResult:
     trades = repo.list_trades(limit=1000, provider=provider_mode)
+    account_settings = repo.get_account_settings()
     invalidated_before = sum(1 for trade in trades if trade.status == "invalidated")
     repaired_replaced_statuses = _repair_replaced_trade_statuses(repo, trades)
     if repaired_replaced_statuses:
@@ -593,18 +652,32 @@ def update_paper_trades(
     daily_fallback_checked = 0
     daily_fallback_rows = 0
     for trade in active:
-        minute_update, checked, rows = _try_evaluate_trade_with_minutes(
+        source_context = repo.get_trade_source_context(trade.source_snapshot_id)
+        execution_context = _paper_execution_context(
+            trade,
+            account_settings,
+            source_context,
+        )
+        minute_update, checked, rows, minute_deferred = _try_evaluate_trade_with_minutes(
             repo,
             provider,
             trade,
             max_holding_days=max_holding_days,
             max_entry_wait_days=max_entry_wait_days,
             as_of=execution_time,
+            source_context=source_context,
+            execution_context=execution_context,
         )
         minute_checked += checked
         minute_rows += rows
+        fills_deferred += minute_deferred
         if minute_update is not None:
-            repo.update_trade(trade.trade_id, **minute_update)
+            _persist_paper_trade_update(
+                repo,
+                trade,
+                minute_update,
+                execution_context,
+            )
             continue
         daily_fallback_checked += 1
         daily_end = max(trade.signal_date, execution_time.date())
@@ -616,7 +689,6 @@ def update_paper_trades(
         daily_fallback_rows += len(bars)
         if bars.empty:
             continue
-        source_context = repo.get_trade_source_context(trade.source_snapshot_id)
         updated, deferred = _evaluate_trade(
             trade,
             bars,
@@ -624,9 +696,10 @@ def update_paper_trades(
             max_entry_wait_days,
             as_of=execution_time,
             source_latest_close=_source_context_latest_close(source_context),
+            execution_context=execution_context,
         )
         fills_deferred += deferred
-        repo.update_trade(trade.trade_id, **updated)
+        _persist_paper_trade_update(repo, trade, updated, execution_context)
     refreshed = repo.list_trades(limit=1000, provider=provider_mode)
     provider_errors = getattr(provider, "last_errors", [])
     data_health = {
@@ -647,8 +720,7 @@ def update_paper_trades(
         "paper_repaired_replaced_statuses": str(repaired_replaced_statuses),
         "paper_price_basis_invalidated": str(
             max(
-                sum(1 for trade in refreshed if trade.status == "invalidated")
-                - invalidated_before,
+                sum(1 for trade in refreshed if trade.status == "invalidated") - invalidated_before,
                 0,
             )
         ),
@@ -692,6 +764,18 @@ def _repair_impossible_trade_dates(
             or trade.exit_date >= trade.entry_date
         ):
             continue
+        repair_note = _append_note(
+            trade.notes,
+            "修复异常日期：历史记录出现离场早于入场，已恢复为持仓重新评估。",
+        )
+        event_metadata = None
+        if trade.execution_facts is not None and trade.execution_facts.exit is not None:
+            event_metadata = PaperTradeEventMetadata(
+                note=repair_note,
+                reason_code="paper_trade.execution_facts.invalid_exit_cleared",
+                source="paper_repair",
+                execution_facts=trade.execution_facts.model_copy(update={"exit": None}),
+            )
         repo.update_trade(
             trade.trade_id,
             status="open",
@@ -702,10 +786,8 @@ def _repair_impossible_trade_dates(
             latest_price=trade.entry_price,
             unrealized_return_pct=Decimal("0"),
             holding_days=0,
-            notes=_append_note(
-                trade.notes,
-                "修复异常日期：历史记录出现离场早于入场，已恢复为持仓重新评估。",
-            ),
+            notes=repair_note,
+            event_metadata=event_metadata,
         )
         repaired += 1
     return repaired
@@ -721,6 +803,7 @@ def paper_execution_data_health(
     return {
         "paper_execution_session": session or _a_share_execution_session(execution_time),
         "paper_execution_fills_deferred": str(fills_deferred),
+        "paper_execution_contract": "qagent.execution.a_share_v1",
     }
 
 
@@ -855,6 +938,10 @@ def build_paper_ledger(
         positions=account["positions"],
         data_health={
             "ledger_method": "chronological_cash_ledger",
+            "ledger_execution_facts": str(
+                sum(1 for trade in trades if trade.execution_facts is not None)
+            ),
+            "ledger_execution_facts_precedence": "event_snapshot_then_legacy_fallback",
             "allocation_per_trade_pct": str(allocation_per_trade_pct),
             "max_positions": str(max_positions),
             "transaction_cost_bps": str(transaction_cost_bps),
@@ -2055,7 +2142,7 @@ def _build_account_ledger(
             active_lots.remove(lot)
 
         for trade in entries_by_date.get(current_date, []):
-            if len(active_lots) >= max_positions:
+            if len(active_lots) >= max_positions and trade.execution_facts is None:
                 continue
             buy = _buy_lot(
                 trade=trade,
@@ -2074,6 +2161,27 @@ def _build_account_ledger(
             transactions.append(transaction)
             active_lots.append(lot)
             event_count += 1
+            if (
+                "execution_facts" in lot
+                and lot["exit_date"] == current_date
+                and lot["status"] in CLOSED_STATUSES
+            ):
+                generated = _sell_lot_transactions(
+                    lot=lot,
+                    cash=cash,
+                    fee_rate=fee_rate,
+                    slippage_rate=slippage_rate,
+                    take_profit_pct=take_profit_pct,
+                )
+                for transaction, pnl, fee, slippage, gross in generated:
+                    cash = transaction.cash_balance
+                    realized_pnl += pnl
+                    total_fees += fee
+                    total_slippage += slippage
+                    turnover += gross
+                    transactions.append(transaction)
+                    event_count += 1
+                active_lots.remove(lot)
 
         market_value, unrealized_pnl = _active_lot_market_value(active_lots, current_date)
         equity = cash + market_value
@@ -2513,6 +2621,46 @@ def _buy_lot(
 ) -> tuple[dict[str, object], PaperLedgerTransaction, Decimal, Decimal, Decimal] | None:
     if trade.entry_date is None or trade.entry_price is None or trade.entry_price <= 0:
         return None
+    if trade.execution_facts is not None:
+        entry = trade.execution_facts.entry
+        shares = Decimal(entry.quantity)
+        fee = entry.total_fees
+        slippage = entry.slippage
+        gross = entry.gross_amount
+        cash_balance = _money(cash + entry.cash_flow)
+        cost_basis = -entry.cash_flow
+        lot = {
+            "trade_id": trade.trade_id,
+            "instrument_id": trade.instrument_id,
+            "strategy_id": trade.strategy_id,
+            "status": trade.status,
+            "entry_date": entry.trade_date,
+            "entry_price": entry.price,
+            "exit_date": trade.exit_date,
+            "exit_price": trade.exit_price,
+            "latest_date": trade.latest_date,
+            "latest_price": trade.latest_price,
+            "shares": shares,
+            "cost_basis": cost_basis,
+            "execution_facts": trade.execution_facts,
+        }
+        transaction = PaperLedgerTransaction(
+            transaction_id=f"{trade.trade_id}-buy",
+            trade_id=trade.trade_id,
+            instrument_id=trade.instrument_id,
+            action="entry_buy",
+            side="buy",
+            trade_date=entry.trade_date,
+            price=entry.price,
+            shares=shares,
+            gross_amount=gross,
+            fee=fee,
+            slippage=slippage,
+            cash_flow=entry.cash_flow,
+            cash_balance=cash_balance,
+            notes="按不可变成交事实记入买入流水。",
+        )
+        return lot, transaction, fee, slippage, gross
     all_in_rate = Decimal("1") + fee_rate + slippage_rate
     affordable_gross = cash / all_in_rate if all_in_rate > 0 else cash
     gross_target = min(allocation_per_trade, affordable_gross)
@@ -2576,6 +2724,39 @@ def _sell_lot_transactions(
     cost_per_share = cost_basis / remaining_shares if remaining_shares > 0 else Decimal("0")
     if remaining_shares <= 0:
         return []
+
+    facts = lot.get("execution_facts")
+    if isinstance(facts, PaperExecutionFacts) and facts.exit is not None:
+        exit_fact = facts.exit
+        shares = Decimal(exit_fact.quantity)
+        fee = exit_fact.total_fees
+        slippage = exit_fact.slippage
+        cash_balance = _money(cash + exit_fact.cash_flow)
+        pnl = exit_fact.cash_flow - cost_per_share * shares
+        action = (
+            "take_profit_exit"
+            if status == "target_1_hit"
+            else "stop_loss_exit"
+            if status == "stopped"
+            else "time_exit"
+        )
+        transaction = PaperLedgerTransaction(
+            transaction_id=f"{lot['trade_id']}-{action}",
+            trade_id=str(lot["trade_id"]),
+            instrument_id=str(lot["instrument_id"]),
+            action=action,
+            side="sell",
+            trade_date=exit_fact.trade_date,
+            price=exit_fact.price,
+            shares=shares,
+            gross_amount=exit_fact.gross_amount,
+            fee=fee,
+            slippage=slippage,
+            cash_flow=exit_fact.cash_flow,
+            cash_balance=cash_balance,
+            notes="按不可变成交事实记入卖出流水。",
+        )
+        return [(transaction, pnl, fee, slippage, exit_fact.gross_amount)]
 
     portions: list[tuple[str, Decimal]]
     if status == "target_1_hit" and take_profit_pct < 100:
@@ -2678,7 +2859,20 @@ def _ledger_item(
     return_pct: float | None = None
     capital_allocated = Decimal("0")
 
-    if trade.entry_price and trade.entry_price > 0:
+    if trade.execution_facts is not None:
+        entry = trade.execution_facts.entry
+        shares = Decimal(entry.quantity)
+        capital_allocated = -entry.cash_flow
+        if trade.status in CLOSED_STATUSES and trade.execution_facts.exit is not None:
+            exit_fact = trade.execution_facts.exit
+            realized_pnl = exit_fact.cash_flow - capital_allocated
+            return_pct = _pct(realized_pnl, capital_allocated)
+        elif trade.status == "open":
+            latest_price = trade.latest_price or entry.price
+            market_value = shares * latest_price
+            unrealized_pnl = market_value - capital_allocated
+            return_pct = _pct(unrealized_pnl, capital_allocated)
+    elif trade.entry_price and trade.entry_price > 0:
         shares = (allocation_per_trade / trade.entry_price).quantize(Decimal("0.0001"))
         capital_allocated = allocation_per_trade
         if trade.status in CLOSED_STATUSES and trade.exit_price is not None:
@@ -2735,6 +2929,8 @@ def _trade_allocation(
     trade: PaperTradeRecord,
     allocation_per_trade: Decimal,
 ) -> Decimal:
+    if trade.execution_facts is not None:
+        return trade.execution_facts.allocation
     multiplier = trade.allocation_multiplier or Decimal("1.0")
     return _money(allocation_per_trade * multiplier)
 
@@ -2856,6 +3052,359 @@ def _is_a_share_trade(trade: PaperTradeRecord) -> bool:
     return trade.instrument_id.upper().startswith("CN:")
 
 
+def _paper_execution_context(
+    trade: PaperTradeRecord,
+    account: PaperAccountSettings,
+    source_context: PaperTradeSourceContext | None,
+) -> _PaperExecutionContext | None:
+    if not _is_a_share_trade(trade):
+        return None
+    if trade.execution_facts is not None:
+        return _PaperExecutionContext(
+            rules=trade.execution_facts.rules,
+            allocation=trade.execution_facts.allocation,
+            source_context=source_context,
+        )
+
+    card = source_context.card if source_context is not None else {}
+    constraints = _mapping(card.get("trading_constraints"))
+    overrides = _mapping(card.get("execution_rules") or card.get("execution"))
+    code = trade.instrument_id.split(":", 1)[-1].split(".", 1)[0]
+    default_tick = Decimal("0.001") if code.startswith(("1", "5")) else Decimal("0.01")
+    tick_size = (
+        _positive_decimal_or_none(overrides.get("tick_size") or constraints.get("tick_size"))
+        or default_tick
+    )
+    lot_size = _positive_int(overrides.get("lot_size") or constraints.get("min_lot")) or 100
+
+    settlement_value = overrides.get("settlement_days")
+    if settlement_value in {0, 1, "0", "1"}:
+        settlement_days = int(settlement_value)
+    else:
+        t_plus_one = constraints.get("t_plus_one", True)
+        settlement_days = 1 if _truthy(t_plus_one) else 0
+
+    price_limit_rate = _positive_decimal_or_none(overrides.get("price_limit_rate"))
+    if price_limit_rate is None:
+        price_limit_pct = _positive_decimal_or_none(constraints.get("price_limit_pct"))
+        if price_limit_pct is not None:
+            price_limit_rate = price_limit_pct / Decimal("100")
+    if price_limit_rate is None:
+        if code.startswith(("4", "8", "92")):
+            price_limit_rate = Decimal("0.30")
+        elif code.startswith(("300", "301", "688", "689")):
+            price_limit_rate = Decimal("0.20")
+        else:
+            price_limit_rate = Decimal("0.10")
+
+    rules = AShareExecutionRules(
+        rules_version="paper-a-share-execution-v1",
+        fee_schedule_version="paper-account-cost-v1",
+        tick_size=tick_size,
+        lot_size=lot_size,
+        settlement_days=settlement_days,
+        price_limit_rate=price_limit_rate,
+        volume_participation_rate=Decimal("1"),
+        commission_bps=account.transaction_cost_bps,
+        minimum_commission=Decimal("0"),
+        stamp_duty_bps=Decimal("0"),
+        transfer_fee_bps=Decimal("0"),
+        slippage_bps=account.slippage_bps,
+    )
+    allocation = execution_money(
+        account.initial_capital
+        * account.allocation_per_trade_pct
+        / Decimal("100")
+        * (trade.allocation_multiplier or Decimal("1"))
+    )
+    return _PaperExecutionContext(
+        rules=rules,
+        allocation=allocation,
+        source_context=source_context,
+    )
+
+
+def _paper_entry_quantity(
+    trade: PaperTradeRecord,
+    context: _PaperExecutionContext,
+) -> int:
+    if trade.trigger_price <= 0:
+        return 0
+    return round_lot(
+        int(context.allocation / trade.trigger_price),
+        context.rules.lot_size,
+    )
+
+
+def _paper_position_quantity(
+    trade: PaperTradeRecord,
+    context: _PaperExecutionContext,
+    entry_fill: _PaperMatchedFill | None,
+    entry_price: Decimal | None,
+) -> int:
+    if entry_fill is not None:
+        return entry_fill.quantity
+    if trade.execution_facts is not None:
+        return trade.execution_facts.entry.quantity
+    if entry_price is None or entry_price <= 0:
+        return 0
+    return round_lot(
+        int(context.allocation / entry_price),
+        context.rules.lot_size,
+    )
+
+
+def _paper_match_row(
+    *,
+    trade: PaperTradeRecord,
+    row: pd.Series,
+    trade_date: date,
+    context: _PaperExecutionContext,
+    side: OrderSide,
+    order_type: OrderType,
+    quantity: int,
+    event_suffix: str,
+    limit_price: Decimal | None = None,
+    stop_price: Decimal | None = None,
+    previous_close: Decimal | None = None,
+    max_notional: Decimal | None = None,
+    allow_partial: bool = True,
+) -> _PaperMatchResult:
+    price_to_validate = (
+        limit_price if order_type in {OrderType.LIMIT, OrderType.STOP_LIMIT} else stop_price
+    )
+    if price_to_validate is not None and not is_tick_aligned(
+        price_to_validate,
+        context.rules.tick_size,
+    ):
+        return _PaperMatchResult(triggered=True, reason="price_not_on_tick")
+
+    occurred_at = _paper_row_datetime(row, trade_date)
+    try:
+        market = _paper_market_event(
+            trade=trade,
+            row=row,
+            occurred_at=occurred_at,
+            event_suffix=event_suffix,
+            context=context,
+            previous_close=previous_close,
+            default_volume=max(quantity, context.rules.lot_size),
+        )
+    except ValueError:
+        return _PaperMatchResult(triggered=False, reason="invalid_market_bar")
+    if market is None:
+        return _PaperMatchResult(triggered=False, reason="invalid_market_bar")
+
+    order_quantity = max(quantity, context.rules.lot_size)
+    order = Order(
+        order_id=f"paper-order:{trade.trade_id}:{event_suffix}",
+        intent_id=f"paper-intent:{trade.trade_id}:{event_suffix}",
+        account_id="paper",
+        instrument_id=trade.instrument_id,
+        side=side,
+        quantity=order_quantity,
+        submitted_at=occurred_at,
+        order_type=order_type,
+        limit_price=limit_price,
+        stop_price=stop_price,
+        estimated_price=limit_price or stop_price or market.open,
+        time_in_force=TimeInForce.DAY,
+        status=OrderStatus.ACTIVE,
+        updated_at=occurred_at,
+        rules=context.rules,
+    )
+    base_price = match_base_price(order, market)
+    if base_price is None:
+        return _PaperMatchResult(triggered=False)
+    if market.suspended:
+        return _PaperMatchResult(triggered=True, reason="suspended")
+    if market.volume == 0:
+        return _PaperMatchResult(triggered=True, reason="zero_volume")
+    if is_one_price_limit_blocked(side, market, context.rules):
+        return _PaperMatchResult(triggered=True, reason="one_price_limit")
+    if quantity <= 0:
+        return _PaperMatchResult(triggered=True, reason="quantity_below_round_lot")
+
+    capacity = participation_capacity(market.volume, context.rules)
+    if not allow_partial and capacity < quantity:
+        return _PaperMatchResult(triggered=True, reason="insufficient_round_lot_volume")
+    fill_quantity = round_lot(min(quantity, capacity), context.rules.lot_size)
+    if fill_quantity <= 0:
+        return _PaperMatchResult(triggered=True, reason="insufficient_round_lot_volume")
+    price = execution_apply_slippage(order, market, base_price)
+    if side == OrderSide.BUY and max_notional is not None:
+        affordable = round_lot(
+            int(max_notional / price),
+            context.rules.lot_size,
+        )
+        fill_quantity = min(fill_quantity, affordable)
+        if fill_quantity <= 0:
+            return _PaperMatchResult(triggered=True, reason="quantity_below_round_lot")
+    return _PaperMatchResult(
+        triggered=True,
+        fill=_PaperMatchedFill(
+            market_event_id=market.event_id,
+            side=side,
+            trade_date=trade_date,
+            occurred_at=occurred_at,
+            base_price=base_price,
+            price=price,
+            quantity=fill_quantity,
+            rules=context.rules,
+        ),
+    )
+
+
+def _paper_market_event(
+    *,
+    trade: PaperTradeRecord,
+    row: pd.Series,
+    occurred_at: datetime,
+    event_suffix: str,
+    context: _PaperExecutionContext,
+    previous_close: Decimal | None,
+    default_volume: int,
+) -> MarketEvent | None:
+    prices = {field: _row_decimal(row, field) for field in ("open", "high", "low", "close")}
+    if any(value is None or value <= 0 for value in prices.values()):
+        return None
+    volume = _row_non_negative_int(row, "volume")
+    if volume is None:
+        volume = default_volume
+    trading_status = _source_trading_status(context.source_context)
+    resolved_previous_close = (
+        _row_decimal(row, "previous_close")
+        or _row_decimal(row, "pre_close")
+        or previous_close
+        or _positive_decimal_or_none(trading_status.get("previous_close"))
+    )
+    return MarketEvent(
+        event_id=f"paper-market:{trade.trade_id}:{event_suffix}",
+        instrument_id=trade.instrument_id,
+        occurred_at=occurred_at,
+        trading_date=occurred_at.date(),
+        open=prices["open"],
+        high=prices["high"],
+        low=prices["low"],
+        close=prices["close"],
+        volume=volume,
+        previous_close=resolved_previous_close,
+        suspended=_paper_row_suspended(row),
+        limit_up_price=_row_decimal(row, "limit_up_price"),
+        limit_down_price=_row_decimal(row, "limit_down_price"),
+    )
+
+
+def _paper_previous_close(
+    ordered: pd.DataFrame,
+    row_index: int,
+    trade_date: date,
+    source_latest_close: Decimal | None,
+) -> Decimal | None:
+    row = ordered.iloc[row_index]
+    explicit = _row_decimal(row, "previous_close") or _row_decimal(row, "pre_close")
+    if explicit is not None:
+        return explicit
+    if row_index > 0:
+        previous = ordered.iloc[row_index - 1]
+        previous_date = previous.get("trade_date")
+        if isinstance(previous_date, (datetime, pd.Timestamp)):
+            previous_date = previous_date.date()
+        if previous_date != trade_date:
+            return _row_decimal(previous, "close") or source_latest_close
+    return source_latest_close
+
+
+def _paper_minute_previous_close(
+    ordered: pd.DataFrame,
+    row_index: int,
+    trade_date: date,
+    source_latest_close: Decimal | None,
+) -> Decimal | None:
+    row = ordered.iloc[row_index]
+    explicit = _row_decimal(row, "previous_close") or _row_decimal(row, "pre_close")
+    if explicit is not None:
+        return explicit
+    if row_index > 0:
+        previous = ordered.iloc[row_index - 1]
+        previous_timestamp = previous.get("timestamp")
+        if previous_timestamp is not None and not pd.isna(previous_timestamp):
+            if pd.Timestamp(previous_timestamp).date() != trade_date:
+                return _row_decimal(previous, "close") or source_latest_close
+    return source_latest_close
+
+
+def _paper_row_datetime(row: pd.Series, trade_date: date) -> datetime:
+    raw = row.get("timestamp")
+    if raw is not None and not pd.isna(raw):
+        value = pd.Timestamp(raw).to_pydatetime()
+        return value if value.tzinfo is not None else value.replace(tzinfo=A_SHARE_TZ)
+    return datetime.combine(trade_date, A_SHARE_AFTERNOON_END, tzinfo=A_SHARE_TZ)
+
+
+def _paper_row_suspended(row: pd.Series) -> bool:
+    for key in ("suspended", "is_suspended"):
+        raw = row.get(key)
+        if raw is not None and not pd.isna(raw):
+            return _truthy(raw)
+    status = str(row.get("trading_status") or row.get("status") or "").lower()
+    return status in {"suspended", "halted", "停牌"}
+
+
+def _source_trading_status(
+    source_context: PaperTradeSourceContext | None,
+) -> Mapping[str, object]:
+    if source_context is None:
+        return {}
+    return _mapping(source_context.card.get("trading_status"))
+
+
+def _row_decimal(row: pd.Series, key: str) -> Decimal | None:
+    raw = row.get(key)
+    if raw is None or pd.isna(raw):
+        return None
+    return _positive_decimal_or_none(raw)
+
+
+def _row_non_negative_int(row: pd.Series, key: str) -> int | None:
+    raw = row.get(key)
+    if raw is None or pd.isna(raw):
+        return None
+    try:
+        return max(int(raw), 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mapping(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _positive_int(value: object) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return bool(value)
+
+
+def _paper_execution_deferred_note(reason: str | None) -> str:
+    return {
+        "suspended": "统一成交规则：停牌期间不成交，继续等待。",
+        "zero_volume": "统一成交规则：零成交量行情不成交，继续等待。",
+        "one_price_limit": "统一成交规则：一字涨跌停方向受限，继续等待。",
+        "price_not_on_tick": "统一成交规则：委托价格不符合最小报价单位，继续等待。",
+        "quantity_below_round_lot": "统一成交规则：可买数量不足一手，继续等待。",
+        "insufficient_round_lot_volume": "统一成交规则：可成交量不足一手，继续等待。",
+    }.get(reason, "统一成交规则：当前行情不可成交，继续等待。")
+
+
 def _a_share_can_fill_bar(
     trade: PaperTradeRecord,
     trade_date: date,
@@ -2863,6 +3412,7 @@ def _a_share_can_fill_bar(
     *,
     status: str,
     entry_date: date | None,
+    settlement_days: int | None = None,
 ) -> bool:
     if not _is_a_share_trade(trade) or as_of is None:
         return True
@@ -2882,7 +3432,9 @@ def _a_share_can_fill_bar(
         if status == "pending":
             return trade.signal_date < trade_date
         if status == "open":
-            return entry_date is not None and entry_date < trade_date
+            return entry_date is not None and (
+                entry_date < trade_date or (settlement_days == 0 and entry_date == trade_date)
+            )
     return False
 
 
@@ -2894,6 +3446,142 @@ def _append_note(existing: str, note: str) -> str:
     return f"{existing} {note}"
 
 
+def _persist_paper_trade_update(
+    repo: PaperTradingRepository,
+    trade: PaperTradeRecord,
+    update: dict[str, object],
+    context: _PaperExecutionContext | None,
+) -> None:
+    changes = dict(update)
+    entry_fill = changes.pop(_ENTRY_FILL_UPDATE_KEY, None)
+    exit_fill = changes.pop(_EXIT_FILL_UPDATE_KEY, None)
+    changes.pop(_DEFERRED_FILL_UPDATE_KEY, None)
+    if entry_fill is not None and not isinstance(entry_fill, _PaperMatchedFill):
+        raise TypeError("paper entry fill evidence has an invalid type")
+    if exit_fill is not None and not isinstance(exit_fill, _PaperMatchedFill):
+        raise TypeError("paper exit fill evidence has an invalid type")
+
+    metadata = None
+    if context is not None and (entry_fill is not None or exit_fill is not None):
+        facts = _paper_execution_facts(
+            trade,
+            context,
+            entry_fill=entry_fill,
+            exit_fill=exit_fill,
+        )
+        latest_fill = exit_fill or entry_fill
+        assert latest_fill is not None
+        phase = "exit" if exit_fill is not None else "entry"
+        metadata = PaperTradeEventMetadata(
+            idempotency_key=(
+                f"paper-execution:{trade.trade_id}:{phase}:{latest_fill.market_event_id}"
+            ),
+            occurred_at=latest_fill.occurred_at,
+            trade_date=latest_fill.trade_date,
+            price=latest_fill.price,
+            reason_code=f"paper_trade.unified_execution.{phase}",
+            note=str(changes.get("notes", trade.notes)),
+            source="unified_execution",
+            execution_facts=facts,
+        )
+    repo.update_trade(trade.trade_id, event_metadata=metadata, **changes)
+
+
+def _paper_execution_facts(
+    trade: PaperTradeRecord,
+    context: _PaperExecutionContext,
+    *,
+    entry_fill: _PaperMatchedFill | None,
+    exit_fill: _PaperMatchedFill | None,
+) -> PaperExecutionFacts:
+    existing = trade.execution_facts
+    if existing is not None:
+        entry = existing.entry
+    else:
+        if entry_fill is None:
+            entry_fill = _inferred_entry_fill(trade, context)
+        entry = _paper_execution_leg(entry_fill)
+    exit_leg = existing.exit if existing is not None else None
+    if exit_fill is not None:
+        exit_leg = _paper_execution_leg(exit_fill)
+    return PaperExecutionFacts(
+        allocation=existing.allocation if existing is not None else context.allocation,
+        rules=existing.rules if existing is not None else context.rules,
+        entry=entry,
+        exit=exit_leg,
+    )
+
+
+def _inferred_entry_fill(
+    trade: PaperTradeRecord,
+    context: _PaperExecutionContext,
+) -> _PaperMatchedFill:
+    if trade.entry_date is None or trade.entry_price is None:
+        raise ValueError("cannot infer execution facts without an entry")
+    quantity = _paper_position_quantity(
+        trade,
+        context,
+        entry_fill=None,
+        entry_price=trade.entry_price,
+    )
+    if quantity <= 0:
+        raise ValueError("cannot infer execution facts below one round lot")
+    occurred_at = datetime.combine(
+        trade.entry_date,
+        A_SHARE_AFTERNOON_END,
+        tzinfo=A_SHARE_TZ,
+    )
+    return _PaperMatchedFill(
+        market_event_id=f"paper-market:{trade.trade_id}:legacy-entry",
+        side=OrderSide.BUY,
+        trade_date=trade.entry_date,
+        occurred_at=occurred_at,
+        base_price=trade.entry_price,
+        price=trade.entry_price,
+        quantity=quantity,
+        rules=context.rules,
+        source="legacy_inferred",
+    )
+
+
+def _paper_execution_leg(fill: _PaperMatchedFill) -> PaperExecutionLegFacts:
+    gross = fill.price * fill.quantity
+    fees = execution_fee_breakdown(fill.side, gross, fill.rules)
+    slippage = execution_money(abs(fill.price - fill.base_price) * fill.quantity)
+    cash_flow = -(gross + fees.total) if fill.side == OrderSide.BUY else gross - fees.total
+    return PaperExecutionLegFacts(
+        market_event_id=fill.market_event_id,
+        side=fill.side,
+        trade_date=fill.trade_date,
+        base_price=fill.base_price,
+        price=fill.price,
+        quantity=fill.quantity,
+        gross_amount=gross,
+        commission=fees.commission,
+        stamp_duty=fees.stamp_duty,
+        transfer_fee=fees.transfer_fee,
+        slippage=slippage,
+        cash_flow=execution_money(cash_flow),
+        source=fill.source,
+    )
+
+
+def _attach_execution_fills(
+    update: dict[str, object],
+    *,
+    entry_fill: _PaperMatchedFill | None = None,
+    exit_fill: _PaperMatchedFill | None = None,
+    deferred_fills: int | None = None,
+) -> dict[str, object]:
+    if entry_fill is not None:
+        update[_ENTRY_FILL_UPDATE_KEY] = entry_fill
+    if exit_fill is not None:
+        update[_EXIT_FILL_UPDATE_KEY] = exit_fill
+    if deferred_fills is not None:
+        update[_DEFERRED_FILL_UPDATE_KEY] = deferred_fills
+    return update
+
+
 def _evaluate_trade(
     trade: PaperTradeRecord,
     bars: pd.DataFrame,
@@ -2901,6 +3589,7 @@ def _evaluate_trade(
     max_entry_wait_days: int,
     as_of: datetime | None = None,
     source_latest_close: Decimal | None = None,
+    execution_context: _PaperExecutionContext | None = None,
 ) -> tuple[dict[str, object], int]:
     ordered = bars.sort_values("trade_date").reset_index(drop=True)
     if pd.api.types.is_datetime64_any_dtype(ordered["trade_date"]):
@@ -2910,6 +3599,7 @@ def _evaluate_trade(
     status = trade.status
     notes = trade.notes
     deferred_fills = 0
+    entry_fill: _PaperMatchedFill | None = None
 
     if status == "pending":
         post_signal = ordered[ordered["trade_date"] > trade.signal_date]
@@ -2933,7 +3623,7 @@ def _evaluate_trade(
                     deferred_fills,
                 )
 
-    for _, row in ordered.iterrows():
+    for row_index, row in ordered.iterrows():
         trade_date = row["trade_date"]
         if isinstance(trade_date, pd.Timestamp):
             trade_date = trade_date.date()
@@ -2942,9 +3632,35 @@ def _evaluate_trade(
         high = Decimal(str(row["high"]))
         low = Decimal(str(row["low"]))
         close = Decimal(str(row["close"]))
+        previous_close = _paper_previous_close(
+            ordered,
+            row_index,
+            trade_date,
+            source_latest_close,
+        )
         if status == "pending":
             wait_days = max((trade_date - trade.signal_date).days, 0)
-            if high >= trade.trigger_price:
+            match = None
+            if execution_context is not None:
+                match = _paper_match_row(
+                    trade=trade,
+                    row=row,
+                    trade_date=trade_date,
+                    context=execution_context,
+                    side=OrderSide.BUY,
+                    order_type=OrderType.STOP,
+                    stop_price=trade.trigger_price,
+                    quantity=_paper_entry_quantity(trade, execution_context),
+                    event_suffix=f"daily:{trade_date.isoformat()}:entry",
+                    previous_close=previous_close,
+                    max_notional=execution_context.allocation,
+                )
+            trigger_reached = match.triggered if match is not None else high >= trade.trigger_price
+            if trigger_reached:
+                if match is not None and match.fill is None:
+                    deferred_fills += 1
+                    notes = _append_note(notes, _paper_execution_deferred_note(match.reason))
+                    continue
                 if not _a_share_can_fill_bar(
                     trade,
                     trade_date,
@@ -2960,7 +3676,12 @@ def _evaluate_trade(
                     continue
                 status = "open"
                 entry_date = trade_date
-                entry_price = trade.trigger_price
+                if match is not None:
+                    assert match.fill is not None
+                    entry_fill = match.fill
+                    entry_price = entry_fill.price
+                else:
+                    entry_price = trade.trigger_price
                 notes = _append_note(notes, "触发价被日内高点确认，模拟开仓。")
             elif wait_days > max_entry_wait_days:
                 return (
@@ -2989,6 +3710,13 @@ def _evaluate_trade(
                 as_of,
                 status=status,
                 entry_date=entry_date,
+                settlement_days=(
+                    execution_context.rules.settlement_days
+                    if execution_context is not None
+                    else 1
+                    if _is_a_share_trade(trade)
+                    else 0
+                ),
             ):
                 exit_condition_reached = (
                     (trade.initial_stop is not None and low <= trade.initial_stop)
@@ -3002,8 +3730,144 @@ def _evaluate_trade(
                         "A股非交易时段：卖出条件已出现，等待交易时段确认。",
                     )
                 continue
-            if _is_a_share_trade(trade) and trade_date == entry_date:
+            settlement_days = (
+                execution_context.rules.settlement_days
+                if execution_context is not None
+                else 1
+                if _is_a_share_trade(trade)
+                else 0
+            )
+            if settlement_days > 0 and trade_date == entry_date:
                 notes = _append_note(notes, "A股 T+1：买入当日不模拟卖出。")
+                continue
+            if execution_context is not None:
+                quantity = _paper_position_quantity(
+                    trade,
+                    execution_context,
+                    entry_fill,
+                    entry_price,
+                )
+                if trade.initial_stop is not None:
+                    stop_match = _paper_match_row(
+                        trade=trade,
+                        row=row,
+                        trade_date=trade_date,
+                        context=execution_context,
+                        side=OrderSide.SELL,
+                        order_type=OrderType.STOP,
+                        stop_price=trade.initial_stop,
+                        quantity=quantity,
+                        event_suffix=f"daily:{trade_date.isoformat()}:stop",
+                        previous_close=previous_close,
+                        allow_partial=False,
+                    )
+                    if stop_match.triggered:
+                        if stop_match.fill is None:
+                            deferred_fills += 1
+                            notes = _append_note(
+                                notes,
+                                _paper_execution_deferred_note(stop_match.reason),
+                            )
+                            continue
+                        closed = _closed_update(
+                            status="stopped",
+                            entry_date=entry_date,
+                            entry_price=entry_price,
+                            exit_date=trade_date,
+                            exit_price=stop_match.fill.price,
+                            latest_price=close,
+                            holding_days=holding_days,
+                            notes=_append_note(notes, "触及初始止损，模拟离场。"),
+                        )
+                        return (
+                            _attach_execution_fills(
+                                closed,
+                                entry_fill=entry_fill,
+                                exit_fill=stop_match.fill,
+                            ),
+                            deferred_fills,
+                        )
+                if trade.target_1 is not None:
+                    target_match = _paper_match_row(
+                        trade=trade,
+                        row=row,
+                        trade_date=trade_date,
+                        context=execution_context,
+                        side=OrderSide.SELL,
+                        order_type=OrderType.LIMIT,
+                        limit_price=trade.target_1,
+                        quantity=quantity,
+                        event_suffix=f"daily:{trade_date.isoformat()}:target",
+                        previous_close=previous_close,
+                        allow_partial=False,
+                    )
+                    if target_match.triggered:
+                        if target_match.fill is None:
+                            deferred_fills += 1
+                            notes = _append_note(
+                                notes,
+                                _paper_execution_deferred_note(target_match.reason),
+                            )
+                            continue
+                        closed = _closed_update(
+                            status="target_1_hit",
+                            entry_date=entry_date,
+                            entry_price=entry_price,
+                            exit_date=trade_date,
+                            exit_price=target_match.fill.price,
+                            latest_price=close,
+                            holding_days=holding_days,
+                            notes=_append_note(notes, "触及第一目标价，模拟止盈。"),
+                        )
+                        return (
+                            _attach_execution_fills(
+                                closed,
+                                entry_fill=entry_fill,
+                                exit_fill=target_match.fill,
+                            ),
+                            deferred_fills,
+                        )
+                if holding_days >= max_holding_days:
+                    time_match = _paper_match_row(
+                        trade=trade,
+                        row=row,
+                        trade_date=trade_date,
+                        context=execution_context,
+                        side=OrderSide.SELL,
+                        order_type=OrderType.MARKET,
+                        quantity=quantity,
+                        event_suffix=f"daily:{trade_date.isoformat()}:time",
+                        previous_close=previous_close,
+                        allow_partial=False,
+                    )
+                    if time_match.fill is None:
+                        deferred_fills += 1
+                        notes = _append_note(
+                            notes,
+                            _paper_execution_deferred_note(time_match.reason),
+                        )
+                        continue
+                    closed = _closed_update(
+                        status="time_exit",
+                        entry_date=entry_date,
+                        entry_price=entry_price,
+                        exit_date=trade_date,
+                        exit_price=time_match.fill.price,
+                        latest_price=close,
+                        holding_days=holding_days,
+                        notes=_append_note(
+                            notes,
+                            "达到最长持有窗口，按开盘可成交价模拟退出。",
+                        ),
+                    )
+                    return (
+                        _attach_execution_fills(
+                            closed,
+                            entry_fill=entry_fill,
+                            exit_fill=time_match.fill,
+                        ),
+                        deferred_fills,
+                    )
                 continue
             if trade.initial_stop is not None and low <= trade.initial_stop:
                 return (
@@ -3015,7 +3879,7 @@ def _evaluate_trade(
                         exit_price=trade.initial_stop,
                         latest_price=close,
                         holding_days=holding_days,
-                        notes="触及初始止损，模拟离场。",
+                        notes=_append_note(notes, "触及初始止损，模拟离场。"),
                     ),
                     deferred_fills,
                 )
@@ -3029,7 +3893,7 @@ def _evaluate_trade(
                         exit_price=trade.target_1,
                         latest_price=close,
                         holding_days=holding_days,
-                        notes="触及第一目标价，模拟止盈。",
+                        notes=_append_note(notes, "触及第一目标价，模拟止盈。"),
                     ),
                     deferred_fills,
                 )
@@ -3043,7 +3907,7 @@ def _evaluate_trade(
                         exit_price=close,
                         latest_price=close,
                         holding_days=holding_days,
-                        notes="达到最长持有窗口，按收盘价模拟退出。",
+                        notes=_append_note(notes, "达到最长持有窗口，按收盘价模拟退出。"),
                     ),
                     deferred_fills,
                 )
@@ -3052,17 +3916,18 @@ def _evaluate_trade(
     latest_date = latest["trade_date"]
     latest_price = Decimal(str(latest["close"]))
     if status == "open" and entry_date is not None and entry_price is not None:
+        update = {
+            "status": "open",
+            "entry_date": entry_date,
+            "entry_price": entry_price,
+            "latest_date": latest_date,
+            "latest_price": latest_price,
+            "unrealized_return_pct": Decimal(str(_return_pct(entry_price, latest_price))),
+            "holding_days": max((latest_date - entry_date).days, 0),
+            "notes": notes,
+        }
         return (
-            {
-                "status": "open",
-                "entry_date": entry_date,
-                "entry_price": entry_price,
-                "latest_date": latest_date,
-                "latest_price": latest_price,
-                "unrealized_return_pct": Decimal(str(_return_pct(entry_price, latest_price))),
-                "holding_days": max((latest_date - entry_date).days, 0),
-                "notes": notes,
-            },
+            _attach_execution_fills(update, entry_fill=entry_fill),
             deferred_fills,
         )
     return (
@@ -3085,22 +3950,25 @@ def _try_evaluate_trade_with_minutes(
     max_holding_days: int,
     max_entry_wait_days: int,
     as_of: datetime,
-) -> tuple[dict[str, object] | None, int, int]:
+    source_context: PaperTradeSourceContext | None = None,
+    execution_context: _PaperExecutionContext | None = None,
+) -> tuple[dict[str, object] | None, int, int, int]:
     getter = getattr(provider, "get_minute_bars", None)
     if getter is None or not _is_a_share_trade(trade):
-        return None, 0, 0
-    source_context = repo.get_trade_source_context(trade.source_snapshot_id)
+        return None, 0, 0, 0
+    if source_context is None:
+        source_context = repo.get_trade_source_context(trade.source_snapshot_id)
     signal_datetime = _trade_signal_datetime(trade, source_context)
     if signal_datetime is None:
-        return None, 0, 0
+        return None, 0, 0, 0
     start = signal_datetime
     end = _a_share_local_datetime(as_of).replace(tzinfo=None)
     try:
         minute_bars = getter([trade.instrument_id], start, end)
     except Exception:
-        return None, 1, 0
+        return None, 1, 0, 0
     if minute_bars.empty:
-        return None, 1, 0
+        return None, 1, 0, 0
     update = _evaluate_trade_with_minutes(
         trade,
         minute_bars,
@@ -3109,8 +3977,10 @@ def _try_evaluate_trade_with_minutes(
         signal_datetime=signal_datetime,
         no_chase_above=_trade_no_chase_above(trade, source_context),
         source_latest_close=_source_context_latest_close(source_context),
+        execution_context=execution_context,
     )
-    return update, 1, len(minute_bars)
+    deferred = int(update.pop(_DEFERRED_FILL_UPDATE_KEY, 0))
+    return update, 1, len(minute_bars), deferred
 
 
 def _evaluate_trade_with_minutes(
@@ -3122,11 +3992,12 @@ def _evaluate_trade_with_minutes(
     signal_datetime: datetime,
     no_chase_above: Decimal | None,
     source_latest_close: Decimal | None = None,
+    execution_context: _PaperExecutionContext | None = None,
 ) -> dict[str, object]:
     ordered = minute_bars.sort_values("timestamp").reset_index(drop=True)
     ordered["timestamp"] = pd.to_datetime(ordered["timestamp"], errors="coerce")
     ordered = ordered.dropna(subset=["timestamp"])
-    ordered = ordered[ordered["timestamp"] > signal_datetime]
+    ordered = ordered[ordered["timestamp"] > signal_datetime].reset_index(drop=True)
     if ordered.empty:
         return {
             "status": trade.status,
@@ -3150,18 +4021,46 @@ def _evaluate_trade_with_minutes(
     entry_price = trade.entry_price
     status = trade.status
     notes = trade.notes
+    entry_fill: _PaperMatchedFill | None = None
+    deferred_fills = 0
 
-    for _, row in ordered.iterrows():
+    for row_index, row in ordered.iterrows():
         timestamp = row["timestamp"].to_pydatetime()
         trade_date = timestamp.date()
         open_price = Decimal(str(row["open"]))
         high = Decimal(str(row["high"]))
         low = Decimal(str(row["low"]))
         close = Decimal(str(row["close"]))
+        previous_close = _paper_minute_previous_close(
+            ordered,
+            row_index,
+            trade_date,
+            source_latest_close,
+        )
 
         if status == "pending":
             wait_days = max((trade_date - trade.signal_date).days, 0)
-            if high >= trade.trigger_price:
+            match = None
+            if execution_context is not None:
+                match = _paper_match_row(
+                    trade=trade,
+                    row=row,
+                    trade_date=trade_date,
+                    context=execution_context,
+                    side=OrderSide.BUY,
+                    order_type=OrderType.STOP,
+                    stop_price=trade.trigger_price,
+                    quantity=_paper_entry_quantity(trade, execution_context),
+                    event_suffix=f"minute:{timestamp.isoformat()}:entry",
+                    previous_close=previous_close,
+                    max_notional=execution_context.allocation,
+                )
+            trigger_reached = match.triggered if match is not None else high >= trade.trigger_price
+            if trigger_reached:
+                if match is not None and match.fill is None:
+                    deferred_fills += 1
+                    notes = _append_note(notes, _paper_execution_deferred_note(match.reason))
+                    continue
                 missed = _minute_entry_missed(
                     trigger_price=trade.trigger_price,
                     no_chase_above=no_chase_above,
@@ -3169,38 +4068,49 @@ def _evaluate_trade_with_minutes(
                     low=low,
                 )
                 if missed:
-                    return {
-                        "status": "missed_entry",
+                    return _attach_execution_fills(
+                        {
+                            "status": "missed_entry",
+                            "latest_date": trade_date,
+                            "latest_price": close,
+                            "exit_date": trade_date,
+                            "exit_price": close,
+                            "realized_return_pct": Decimal("0"),
+                            "holding_days": 0,
+                            "notes": _append_note(
+                                notes,
+                                "分钟线显示价格已超过追高上限，放弃本次模拟买入。",
+                            ),
+                        },
+                        deferred_fills=deferred_fills,
+                    )
+                status = "open"
+                entry_date = trade_date
+                if match is not None:
+                    assert match.fill is not None
+                    entry_fill = match.fill
+                    entry_price = entry_fill.price
+                else:
+                    entry_price = _minute_entry_price(
+                        trigger_price=trade.trigger_price,
+                        open_price=open_price,
+                        low=low,
+                    )
+                notes = _append_note(notes, "分钟线确认触发价，模拟开仓。")
+            elif wait_days > max_entry_wait_days:
+                return _attach_execution_fills(
+                    {
+                        "status": "time_exit",
                         "latest_date": trade_date,
                         "latest_price": close,
                         "exit_date": trade_date,
                         "exit_price": close,
                         "realized_return_pct": Decimal("0"),
                         "holding_days": 0,
-                        "notes": _append_note(
-                            notes,
-                            "分钟线显示价格已超过追高上限，放弃本次模拟买入。",
-                        ),
-                    }
-                status = "open"
-                entry_date = trade_date
-                entry_price = _minute_entry_price(
-                    trigger_price=trade.trigger_price,
-                    open_price=open_price,
-                    low=low,
+                        "notes": "买点等待超时，未开仓退出跟踪。",
+                    },
+                    deferred_fills=deferred_fills,
                 )
-                notes = _append_note(notes, "分钟线确认触发价，模拟开仓。")
-            elif wait_days > max_entry_wait_days:
-                return {
-                    "status": "time_exit",
-                    "latest_date": trade_date,
-                    "latest_price": close,
-                    "exit_date": trade_date,
-                    "exit_price": close,
-                    "realized_return_pct": Decimal("0"),
-                    "holding_days": 0,
-                    "notes": "买点等待超时，未开仓退出跟踪。",
-                }
             else:
                 continue
 
@@ -3208,8 +4118,140 @@ def _evaluate_trade_with_minutes(
             if trade_date < entry_date:
                 continue
             holding_days = max((trade_date - entry_date).days, 0)
-            if trade_date == entry_date:
+            settlement_days = (
+                execution_context.rules.settlement_days if execution_context is not None else 1
+            )
+            if settlement_days > 0 and trade_date == entry_date:
                 notes = _append_note(notes, "A股 T+1：买入当日不模拟卖出。")
+                continue
+            if execution_context is not None:
+                quantity = _paper_position_quantity(
+                    trade,
+                    execution_context,
+                    entry_fill,
+                    entry_price,
+                )
+                if trade.initial_stop is not None:
+                    stop_match = _paper_match_row(
+                        trade=trade,
+                        row=row,
+                        trade_date=trade_date,
+                        context=execution_context,
+                        side=OrderSide.SELL,
+                        order_type=OrderType.STOP,
+                        stop_price=trade.initial_stop,
+                        quantity=quantity,
+                        event_suffix=f"minute:{timestamp.isoformat()}:stop",
+                        previous_close=previous_close,
+                        allow_partial=False,
+                    )
+                    if stop_match.triggered:
+                        if stop_match.fill is None:
+                            deferred_fills += 1
+                            notes = _append_note(
+                                notes,
+                                _paper_execution_deferred_note(stop_match.reason),
+                            )
+                            continue
+                        closed = _closed_update(
+                            status="stopped",
+                            entry_date=entry_date,
+                            entry_price=entry_price,
+                            exit_date=trade_date,
+                            exit_price=stop_match.fill.price,
+                            latest_price=close,
+                            holding_days=holding_days,
+                            notes=_append_note(
+                                notes,
+                                "分钟线触及初始止损，模拟离场。",
+                            ),
+                        )
+                        return _attach_execution_fills(
+                            closed,
+                            entry_fill=entry_fill,
+                            exit_fill=stop_match.fill,
+                            deferred_fills=deferred_fills,
+                        )
+                if trade.target_1 is not None:
+                    target_match = _paper_match_row(
+                        trade=trade,
+                        row=row,
+                        trade_date=trade_date,
+                        context=execution_context,
+                        side=OrderSide.SELL,
+                        order_type=OrderType.LIMIT,
+                        limit_price=trade.target_1,
+                        quantity=quantity,
+                        event_suffix=f"minute:{timestamp.isoformat()}:target",
+                        previous_close=previous_close,
+                        allow_partial=False,
+                    )
+                    if target_match.triggered:
+                        if target_match.fill is None:
+                            deferred_fills += 1
+                            notes = _append_note(
+                                notes,
+                                _paper_execution_deferred_note(target_match.reason),
+                            )
+                            continue
+                        closed = _closed_update(
+                            status="target_1_hit",
+                            entry_date=entry_date,
+                            entry_price=entry_price,
+                            exit_date=trade_date,
+                            exit_price=target_match.fill.price,
+                            latest_price=close,
+                            holding_days=holding_days,
+                            notes=_append_note(
+                                notes,
+                                "分钟线触及第一目标价，模拟止盈。",
+                            ),
+                        )
+                        return _attach_execution_fills(
+                            closed,
+                            entry_fill=entry_fill,
+                            exit_fill=target_match.fill,
+                            deferred_fills=deferred_fills,
+                        )
+                if holding_days >= max_holding_days:
+                    time_match = _paper_match_row(
+                        trade=trade,
+                        row=row,
+                        trade_date=trade_date,
+                        context=execution_context,
+                        side=OrderSide.SELL,
+                        order_type=OrderType.MARKET,
+                        quantity=quantity,
+                        event_suffix=f"minute:{timestamp.isoformat()}:time",
+                        previous_close=previous_close,
+                        allow_partial=False,
+                    )
+                    if time_match.fill is None:
+                        deferred_fills += 1
+                        notes = _append_note(
+                            notes,
+                            _paper_execution_deferred_note(time_match.reason),
+                        )
+                        continue
+                    closed = _closed_update(
+                        status="time_exit",
+                        entry_date=entry_date,
+                        entry_price=entry_price,
+                        exit_date=trade_date,
+                        exit_price=time_match.fill.price,
+                        latest_price=close,
+                        holding_days=holding_days,
+                        notes=_append_note(
+                            notes,
+                            "达到最长持有窗口，按分钟可成交价模拟退出。",
+                        ),
+                    )
+                    return _attach_execution_fills(
+                        closed,
+                        entry_fill=entry_fill,
+                        exit_fill=time_match.fill,
+                        deferred_fills=deferred_fills,
+                    )
                 continue
             if trade.initial_stop is not None and low <= trade.initial_stop:
                 return _closed_update(
@@ -3220,7 +4262,7 @@ def _evaluate_trade_with_minutes(
                     exit_price=trade.initial_stop,
                     latest_price=close,
                     holding_days=holding_days,
-                    notes="分钟线触及初始止损，模拟离场。",
+                    notes=_append_note(notes, "分钟线触及初始止损，模拟离场。"),
                 )
             if trade.target_1 is not None and high >= trade.target_1:
                 return _closed_update(
@@ -3231,7 +4273,7 @@ def _evaluate_trade_with_minutes(
                     exit_price=trade.target_1,
                     latest_price=close,
                     holding_days=holding_days,
-                    notes="分钟线触及第一目标价，模拟止盈。",
+                    notes=_append_note(notes, "分钟线触及第一目标价，模拟止盈。"),
                 )
             if holding_days >= max_holding_days:
                 return _closed_update(
@@ -3242,30 +4284,37 @@ def _evaluate_trade_with_minutes(
                     exit_price=close,
                     latest_price=close,
                     holding_days=holding_days,
-                    notes="达到最长持有窗口，按分钟收盘价模拟退出。",
+                    notes=_append_note(notes, "达到最长持有窗口，按分钟收盘价模拟退出。"),
                 )
 
     latest = ordered.iloc[-1]
     latest_date = latest["timestamp"].date()
     latest_price = Decimal(str(latest["close"]))
     if status == "open" and entry_date is not None and entry_price is not None:
-        return {
-            "status": "open",
-            "entry_date": entry_date,
-            "entry_price": entry_price,
+        return _attach_execution_fills(
+            {
+                "status": "open",
+                "entry_date": entry_date,
+                "entry_price": entry_price,
+                "latest_date": latest_date,
+                "latest_price": latest_price,
+                "unrealized_return_pct": Decimal(str(_return_pct(entry_price, latest_price))),
+                "holding_days": max((latest_date - entry_date).days, 0),
+                "notes": notes,
+            },
+            entry_fill=entry_fill,
+            deferred_fills=deferred_fills,
+        )
+    return _attach_execution_fills(
+        {
+            "status": "pending",
             "latest_date": latest_date,
             "latest_price": latest_price,
-            "unrealized_return_pct": Decimal(str(_return_pct(entry_price, latest_price))),
-            "holding_days": max((latest_date - entry_date).days, 0),
-            "notes": notes,
-        }
-    return {
-        "status": "pending",
-        "latest_date": latest_date,
-        "latest_price": latest_price,
-        "holding_days": 0,
-        "notes": _append_note(notes, "分钟线未到触发价，继续等待。"),
-    }
+            "holding_days": 0,
+            "notes": _append_note(notes, "分钟线未到触发价，继续等待。"),
+        },
+        deferred_fills=deferred_fills,
+    )
 
 
 def _paper_price_basis_discontinuous(

@@ -7,9 +7,12 @@ from qagent.backtesting.engine import BacktestSignal
 from qagent.backtesting.execution import (
     HistoricalExecutionRule,
     calculate_round_trip_fees,
+    execute_daily_bar_order,
+    execution_rules_from_historical,
     round_order_quantity,
 )
 from qagent.backtesting.portfolio import _candidate_from_signal, _size_trade
+from qagent.execution import OrderSide, OrderType, is_tick_aligned
 from qagent.historical_evidence.models import HistoricalFeeRule
 
 
@@ -195,3 +198,134 @@ def test_portfolio_trade_uses_versioned_order_step_and_fee_schedule():
     assert trade.shares % 1 == 0
     assert trade.shares % 100 != 0
     assert trade.costs < Decimal("100")
+
+
+def test_daily_bar_adapter_uses_unified_gap_tick_lot_fee_and_blocking_rules():
+    rules = execution_rules_from_historical(
+        _rule(),
+        side=OrderSide.BUY,
+        slippage_bps=Decimal("10"),
+    )
+    previous = {"trade_date": date(2025, 1, 1), "close": Decimal("10")}
+    gap = {
+        "trade_date": date(2025, 1, 2),
+        "open": Decimal("10.50"),
+        "high": Decimal("10.60"),
+        "low": Decimal("10.40"),
+        "close": Decimal("10.55"),
+        "volume": 1_000,
+    }
+
+    fill = execute_daily_bar_order(
+        instrument_id="CN:000001",
+        row=gap,
+        previous=previous,
+        side=OrderSide.BUY,
+        quantity=100,
+        order_type=OrderType.STOP,
+        stop_price=Decimal("10.00"),
+        rules=rules,
+    )
+
+    assert fill is not None
+    assert fill.base_price == Decimal("10.50")
+    assert fill.price == Decimal("10.52")
+    assert is_tick_aligned(fill.price, rules.tick_size)
+    assert fill.total_fees == Decimal("5.01")
+    assert (
+        execute_daily_bar_order(
+            instrument_id="CN:000001",
+            row=gap,
+            previous=previous,
+            side=OrderSide.BUY,
+            quantity=150,
+            order_type=OrderType.STOP,
+            stop_price=Decimal("10.00"),
+            rules=rules,
+        )
+        is None
+    )
+
+    for blocked in (
+        {**gap, "is_suspended": True},
+        {**gap, "volume": 0},
+        {
+            **gap,
+            "open": Decimal("11.00"),
+            "high": Decimal("11.00"),
+            "low": Decimal("11.00"),
+            "close": Decimal("11.00"),
+        },
+    ):
+        assert (
+            execute_daily_bar_order(
+                instrument_id="CN:000001",
+                row=blocked,
+                previous=previous,
+                side=OrderSide.BUY,
+                quantity=100,
+                order_type=OrderType.STOP,
+                stop_price=Decimal("10.00"),
+                rules=rules,
+            )
+            is None
+        )
+
+
+def test_triggered_stop_waits_through_untradable_limit_down_session():
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "CN:000001",
+                "trade_date": date(2025, 1, 1),
+                "open": 10,
+                "high": 10,
+                "low": 10,
+                "close": 10,
+                "volume": 1_000_000,
+            },
+            {
+                "instrument_id": "CN:000001",
+                "trade_date": date(2025, 1, 2),
+                "open": 10.4,
+                "high": 10.6,
+                "low": 10.3,
+                "close": 10.4,
+                "volume": 1_000_000,
+            },
+            {
+                "instrument_id": "CN:000001",
+                "trade_date": date(2025, 1, 3),
+                "open": 9.36,
+                "high": 9.36,
+                "low": 9.36,
+                "close": 9.36,
+                "volume": 1_000_000,
+            },
+            {
+                "instrument_id": "CN:000001",
+                "trade_date": date(2025, 1, 6),
+                "open": 9.0,
+                "high": 9.5,
+                "low": 8.9,
+                "close": 9.2,
+                "volume": 1_000_000,
+            },
+        ]
+    )
+
+    candidate = _candidate_from_signal(
+        _signal().model_copy(
+            update={"target_1": Decimal("20"), "initial_stop": Decimal("10")}
+        ),
+        bars,
+        slippage_bps=Decimal("0"),
+        max_entry_wait_days=2,
+        max_holding_days=3,
+        execution_rule_resolver=StaticResolver(_rule(settlement_days=1)),
+    )
+
+    assert candidate is not None
+    assert candidate.exit_reason == "stopped"
+    assert candidate.exit_date == date(2025, 1, 6)
+    assert candidate.exit_price == Decimal("9.00")

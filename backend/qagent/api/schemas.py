@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class AgentQueryRequest(BaseModel):
@@ -38,3 +38,11 @@ class PaperSessionStartRequest(BaseModel):
     transaction_cost_bps: str = "5"
     slippage_bps: str = "5"
     take_profit_pct: str = "50"
+
+
+class StrategyGovernanceResponse(BaseModel):
+    strategies: list[dict[str, object]] = Field(default_factory=list)
+    policies: list[dict[str, object]] = Field(default_factory=list)
+    recent_events: list[dict[str, object]] = Field(default_factory=list)
+    gate_reasons: list[dict[str, object]] = Field(default_factory=list)
+    data_health: dict[str, str] = Field(default_factory=dict)

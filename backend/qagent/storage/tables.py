@@ -625,6 +625,11 @@ class WalkForwardJobRow(Base):
     total_snapshots: Mapped[int] = mapped_column(Integer, default=0)
     processed_snapshots: Mapped[int] = mapped_column(Integer, default=0)
     current_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    lease_maintenance_count: Mapped[int] = mapped_column(Integer, default=0)
+    lease_recovery_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_lease_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(), nullable=True
+    )
     checkpoints_json: Mapped[str] = mapped_column(Text, default="[]")
     experiment_manifest_json: Mapped[str] = mapped_column(Text, default="{}")
     result_run_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
@@ -635,6 +640,130 @@ class WalkForwardJobRow(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class StrategyVersionRow(Base):
+    __tablename__ = "strategy_versions"
+
+    strategy_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    strategy_version: Mapped[str] = mapped_column(String(96), primary_key=True)
+    definition_digest: Mapped[str] = mapped_column(String(64), index=True)
+    definition_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
+class PolicyDeploymentRow(Base):
+    __tablename__ = "policy_deployments"
+    __table_args__ = (
+        UniqueConstraint(
+            "strategy_id",
+            "policy_version",
+            name="uq_policy_deployments_strategy_policy_version",
+        ),
+    )
+
+    deployment_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    strategy_id: Mapped[str] = mapped_column(String(96), index=True)
+    policy_version: Mapped[str] = mapped_column(String(96), index=True)
+    strategy_version: Mapped[str] = mapped_column(String(96), index=True)
+    factor_version: Mapped[str] = mapped_column(String(96))
+    parameter_version: Mapped[str] = mapped_column(String(96))
+    universe_version: Mapped[str] = mapped_column(String(96))
+    data_revision: Mapped[str] = mapped_column(String(128))
+    policy_digest: Mapped[str] = mapped_column(String(64), index=True)
+    policy_json: Mapped[str] = mapped_column(Text)
+    previous_deployment_id: Mapped[str | None] = mapped_column(
+        String(96),
+        ForeignKey("policy_deployments.deployment_id"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
+class StrategyStateRow(Base):
+    __tablename__ = "strategy_states"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('research', 'shadow', 'admitted', 'throttled', 'disabled')",
+            name="ck_strategy_states_state",
+        ),
+        CheckConstraint(
+            "effective_weight >= 0 AND effective_weight <= 1",
+            name="ck_strategy_states_effective_weight",
+        ),
+    )
+
+    strategy_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    state: Mapped[str] = mapped_column(String(32), index=True, default="research")
+    current_deployment_id: Mapped[str | None] = mapped_column(
+        String(96),
+        ForeignKey("policy_deployments.deployment_id"),
+        nullable=True,
+    )
+    previous_deployment_id: Mapped[str | None] = mapped_column(
+        String(96),
+        ForeignKey("policy_deployments.deployment_id"),
+        nullable=True,
+    )
+    current_policy_version: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    previous_policy_version: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    effective_weight: Mapped[Decimal] = mapped_column(
+        Numeric(12, 10), default=Decimal("0"), nullable=False
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
+
+
+class StrategyStateEventRow(Base):
+    __tablename__ = "strategy_state_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "strategy_id",
+            "sequence",
+            name="uq_strategy_state_events_strategy_sequence",
+        ),
+        CheckConstraint(
+            "from_state IS NULL OR "
+            "from_state IN ('research', 'shadow', 'admitted', 'throttled', 'disabled')",
+            name="ck_strategy_state_events_from_state",
+        ),
+        CheckConstraint(
+            "to_state IN ('research', 'shadow', 'admitted', 'throttled', 'disabled')",
+            name="ck_strategy_state_events_to_state",
+        ),
+        CheckConstraint(
+            "effective_weight >= 0 AND effective_weight <= 1",
+            name="ck_strategy_state_events_effective_weight",
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    strategy_id: Mapped[str] = mapped_column(String(96), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
+    event_type: Mapped[str] = mapped_column(String(64), index=True)
+    action: Mapped[str] = mapped_column(String(64), index=True)
+    from_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    to_state: Mapped[str] = mapped_column(String(32), index=True)
+    deployment_id: Mapped[str | None] = mapped_column(
+        String(96),
+        ForeignKey("policy_deployments.deployment_id"),
+        nullable=True,
+    )
+    previous_deployment_id: Mapped[str | None] = mapped_column(
+        String(96),
+        ForeignKey("policy_deployments.deployment_id"),
+        nullable=True,
+    )
+    policy_version: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    effective_weight: Mapped[Decimal] = mapped_column(
+        Numeric(12, 10), default=Decimal("0"), nullable=False
+    )
+    reason: Mapped[str] = mapped_column(Text)
+    evidence_json: Mapped[str] = mapped_column(Text, default="{}")
+    decision_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
 
 
 class TradableUniverseSnapshotRow(Base):

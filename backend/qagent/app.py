@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from qagent.api.routes import (
     restore_automation_scheduler_from_storage,
+    restore_full_market_scan_job_from_storage,
     restore_historical_backfill_from_storage,
     restore_walk_forward_job_from_storage,
     router,
@@ -16,6 +17,7 @@ from qagent.api.routes import (
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     restore_historical_backfill_from_storage()
     restore_walk_forward_job_from_storage()
+    restore_full_market_scan_job_from_storage()
     restore_automation_scheduler_from_storage()
     yield
 

@@ -46,8 +46,9 @@ def test_research_command_center_summarizes_portfolio_validation_attribution_ale
         },
     )
 
-    assert center.portfolio_advisor.suggested_positions >= 1
-    assert center.portfolio_advisor.positions[0].instrument_label
+    assert center.portfolio_advisor.suggested_positions == 0
+    assert center.portfolio_advisor.positions == []
+    assert "可跟踪候选" in center.portfolio_advisor.summary
     assert center.portfolio_advisor.cash_reserve_pct >= 0
     assert center.recommendation_pool_quality.asset_mix["etf"] >= 1
     assert center.recommendation_pool_quality.risk_filtered_count == 1

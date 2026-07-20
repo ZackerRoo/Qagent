@@ -1,7 +1,9 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.schema import CreateTable
 
 from qagent import db
@@ -189,6 +191,26 @@ def test_initialize_database_adds_paper_probe_allocation_column(tmp_path):
     columns = {column["name"] for column in inspect(migrated).get_columns("paper_trades")}
 
     assert "allocation_multiplier" in columns
+
+
+def test_initialize_database_adds_walk_forward_lease_telemetry_columns(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'legacy-walk-forward-lease.db'}"
+    engine = create_db_engine(database_url)
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE walk_forward_jobs DROP COLUMN lease_maintenance_count"))
+        connection.execute(text("ALTER TABLE walk_forward_jobs DROP COLUMN lease_recovery_count"))
+        connection.execute(text("ALTER TABLE walk_forward_jobs DROP COLUMN last_lease_heartbeat_at"))
+
+    migrated = initialize_database(database_url)
+    columns = {
+        column["name"]: column
+        for column in inspect(migrated).get_columns("walk_forward_jobs")
+    }
+
+    assert columns["lease_maintenance_count"]["nullable"] is False
+    assert columns["lease_recovery_count"]["nullable"] is False
+    assert "last_lease_heartbeat_at" in columns
 
 
 def test_initialize_database_backfills_legacy_paper_event_instrument_id(tmp_path):
@@ -558,3 +580,118 @@ def test_revision_zero_rows_survive_repeated_initialize_after_revision_one_appen
                 ).scalars()
             )
             assert revisions == [0, 1], table_name
+
+
+def test_initialize_database_adds_strategy_governance_schema_to_legacy_database(
+    tmp_path,
+):
+    database_url = f"sqlite:///{tmp_path / 'legacy-strategy-governance.db'}"
+    engine = create_db_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE strategy_state_events (
+                    event_id VARCHAR(96) NOT NULL PRIMARY KEY,
+                    strategy_id VARCHAR(96) NOT NULL,
+                    from_state VARCHAR(32),
+                    to_state VARCHAR(32) NOT NULL
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO strategy_state_events "
+                "(event_id, strategy_id, from_state, to_state) VALUES "
+                "('legacy-event', 'legacy-strategy', NULL, 'research')"
+            )
+        )
+
+    migrated = initialize_database(database_url)
+    inspector = inspect(migrated)
+
+    assert {
+        "strategy_versions",
+        "strategy_states",
+        "strategy_state_events",
+        "policy_deployments",
+    }.issubset(inspector.get_table_names())
+    event_columns = {column["name"] for column in inspector.get_columns("strategy_state_events")}
+    assert {
+        "sequence",
+        "idempotency_key",
+        "reason",
+        "evidence_json",
+        "decision_json",
+        "created_at",
+    }.issubset(event_columns)
+    assert "uq_strategy_state_events_idempotency_key" in {
+        index["name"] for index in inspector.get_indexes("strategy_state_events")
+    }
+    with migrated.connect() as connection:
+        legacy = connection.execute(
+            text(
+                "SELECT sequence, idempotency_key, reason, evidence_json, decision_json "
+                "FROM strategy_state_events WHERE event_id = 'legacy-event'"
+            )
+        ).one()
+        trigger_names = set(
+            connection.execute(
+                text(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'trigger' AND name LIKE 'trg_%_immutable_%'"
+                )
+            ).scalars()
+        )
+
+    assert legacy == (
+        1,
+        "legacy-governance-event-1",
+        "",
+        "{}",
+        "{}",
+    )
+    assert trigger_names == {
+        "trg_strategy_versions_immutable_update",
+        "trg_strategy_versions_immutable_delete",
+        "trg_policy_deployments_immutable_update",
+        "trg_policy_deployments_immutable_delete",
+    }
+
+
+def test_strategy_and_policy_snapshots_are_database_immutable(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'immutable-strategy-snapshots.db'}"
+    engine = initialize_database(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO strategy_versions "
+                "(strategy_id, strategy_version, definition_digest, definition_json, created_at) "
+                "VALUES ('trend', 'v1', 'digest-v1', '{}', '2026-07-17 00:00:00')"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO policy_deployments "
+                "(deployment_id, strategy_id, policy_version, strategy_version, "
+                "factor_version, parameter_version, universe_version, data_revision, "
+                "policy_digest, policy_json, previous_deployment_id, created_at) "
+                "VALUES ('deployment-v1', 'trend', 'policy-v1', 'v1', 'f1', 'p1', "
+                "'u1', '1', 'policy-digest-v1', '{}', NULL, '2026-07-17 00:00:00')"
+            )
+        )
+
+    with pytest.raises(DBAPIError, match="strategy_versions rows are immutable"):
+        with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "UPDATE strategy_versions SET definition_json = 'changed' "
+                        "WHERE strategy_id = 'trend' AND strategy_version = 'v1'"
+                    )
+                )
+    with pytest.raises(DBAPIError, match="policy_deployments rows are immutable"):
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM policy_deployments WHERE deployment_id = 'deployment-v1'")
+            )

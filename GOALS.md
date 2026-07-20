@@ -22,7 +22,7 @@ Qagent is research software. It does not guarantee returns and does not place li
 
 ## Current State
 
-Last audited: 2026-07-15
+Last audited: 2026-07-16
 
 Qagent already has:
 
@@ -34,6 +34,10 @@ Qagent already has:
 - Corrected paper-validation semantics, point-in-time fundamental persistence, and chronological out-of-sample validation implemented in the current working tree.
 - Historical backfill jobs, adjustment metadata, XSHG trading-session horizons, universe snapshots, and machine-readable coverage manifests implemented in the current working tree.
 - No-key TickFlow historical daily bars are available as a final whole-instrument fallback after the existing AKShare/BaoStock China data chain, without changing minute-fill behavior.
+- Strategy policies are immutable and versioned, with research, shadow, admitted, throttled, and disabled lifecycle states. Built-in strategies start in shadow mode: they remain visible as observations and may collect paper evidence, but are not presented as validated buys.
+- Backtests and paper trading share one A-share execution contract for orders, fills, positions, accounts, T+1, lot/tick rules, suspensions, price limits, gaps, partial fills, fees, and slippage.
+- Full-market ranking performs a deterministic global second pass and stores immutable feature snapshots, drift diagnostics, A-share market state, and portfolio-constraint audit results.
+- Full-market scans persist per-batch checkpoints and are resubmitted after service restart. Legacy interrupted jobs restart honestly from batch one; checkpointed jobs continue from the next unfinished batch.
 
 The main product risk is no longer missing UI features. It is insufficient trustworthy historical evidence for deciding whether the recommendation engine has a repeatable edge.
 
@@ -194,12 +198,16 @@ Package Qagent as a reliable research preview with explicit limitations and repe
 - Walk-forward jobs only reuse an active job when dataset revision, date range, rebalance interval, lookback, and experiment digest all match. Distinct experiments queue sequentially, every unfinished job is restored after restart, and stale code/strategy/rule manifests are rejected.
 - Completed runs only satisfy automatic validation when their experiment digest matches the current code, strategy registry, execution rules, parameters, and dataset revision.
 - A real three-year pilot on dataset revision 40 remains available: 146 snapshots, 328 Top-5 trades, and 612 Top-10 trades. Its 0.33% cross-sectional evidence coverage keeps it labelled as a pilot, not validated full-market evidence.
-- The versioned full-market Walk-forward experiment on dataset revision 8,939 is running from persisted checkpoints. At this audit it had completed 32 of 203 rebalance snapshots through 2022-06-22 without an error.
+- The original versioned full-market Walk-forward experiment on dataset revision 8,939 preserved 95 of 203 checkpoints before an expired dataset lease stopped it. Lease ownership now renews atomically, recovers an expired lease for the same active run, retries transient storage failures, and exposes cumulative heartbeat/recovery telemetry across service restarts.
+- A replacement full-market Walk-forward job is running on dataset revision 8,939 with checkpoint resume enabled. Live verification after two backend restarts confirmed that processed snapshots, heartbeat counters, and the latest heartbeat timestamp continue increasing without an error.
 - New Walk-forward experiments treat each signal date as the independent statistical unit, use date-cluster Bootstrap confidence intervals and seeded sign-flip tests, and apply Benjamini-Hochberg false-discovery-rate control before any positive evidence can request a weight increase. The already-running experiment remains pinned to its original manifest and code revision.
 - Paper trading is active with A-share sessions, T+1, costs, slippage, candidate replacement, five validation slots, and restart-safe scheduling. Current evidence is negative and remains visible: 23 eligible samples, 10 triggered, 9 stopped, 9 missed entries, 0% closed win rate, and -4.55% account return as of 2026-07-14.
 - Coverage reporting is listing-aware: post-start IPOs are not penalized for impossible pre-listing fundamentals or universe membership.
-- Full verification passes with 578 backend tests, Ruff, all 12 frontend contract checks, and the frontend production build.
+- Full verification passes with 715 backend tests, Ruff, all 13 frontend contract checks, and the frontend production build.
 - TickFlow Free daily fallback preserves raw and forward-adjusted price provenance, remains disabled for minute fills, and passed a live no-key stock/index smoke test.
+- GitHub architecture adoption is implemented in the current working tree: versioned strategy governance, shared event-driven execution, deterministic feature snapshots, portfolio admission constraints, A-share state hysteresis, drift monitoring, and restart-safe full-market batch checkpoints.
+- The strategy-governance UI exposes 14 built-in strategies in shadow validation, keeps version and gate details behind progressive disclosure, and separates observation signals from formally admitted recommendations.
+- Live verification on 2026-07-16 confirmed the automation scheduler is enabled, the paper ledger contains 68 records, and the validation set contains 24 eligible records with 13 triggers and 10 stops. Current account return remains negative at -5.27%; this evidence is preserved rather than hidden.
 
 ### What's next
 
@@ -207,9 +215,10 @@ Package Qagent as a reliable research preview with explicit limitations and repe
 - Resolve or explicitly accept the remaining coverage gaps: 21 no-bar instruments, 170 delisted instruments without terminal settlements, partial historical benchmark membership coverage, and limited point-in-time financial snapshots.
 - Publish negative as well as positive out-of-sample results, including costs, drawdown, benchmark excess, and regime attribution; do not increase strategy weights before the release gate passes.
 - Continue forward paper evidence to the 20-, 40-, and 60-trading-day checkpoints while preserving the current losses and missed entries as calibration evidence.
+- Finish the in-progress full-market scan so its global feature snapshot, drift baseline, market-state snapshot, and checkpoint-resume path become the next production cache.
 
 ### Any blockers
 
-- No software blocker is preventing the current Walk-forward experiment or paper scheduler from running.
+- No software blocker is preventing the current Walk-forward experiment or paper scheduler from running. The current Walk-forward manifest records `code_dirty=true`, so it is an operational validation run rather than release-grade reproducibility evidence until the working tree is committed.
 - Free providers remain operationally unreliable. The final backfill manifest confirms incomplete historical delist settlements, partial benchmark membership history, and limited true point-in-time corporate metadata even though price coverage is high.
 - The product is not ready for real-money use: full-market Walk-forward evidence has not passed the release gates and current paper evidence is loss-making with an immature sample.

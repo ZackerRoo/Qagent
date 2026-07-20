@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from datetime import date
 
 from pydantic import BaseModel, Field
@@ -38,10 +39,10 @@ from qagent.recommendations.brief import apply_recommendation_briefs
 from qagent.recommendations.cn_execution import build_trading_constraints
 from qagent.recommendations.decision import build_research_decision
 from qagent.recommendations.enrichment import enrich_opportunity_card
-from qagent.recommendations.feedback import (
-    apply_recommendation_feedback_calibration,
-    apply_recommendation_feedback_quality_gate,
-    recommendation_feedback_data_health,
+from qagent.recommendations.governance import (
+    CardStrategyGovernance,
+    StrategyGovernanceContext,
+    apply_final_recommendation_policy,
 )
 from qagent.recommendations.portfolio import build_portfolio_plan
 from qagent.recommendations.probability import (
@@ -121,6 +122,7 @@ class DailyScanResult(BaseModel):
     signal_monitor: SignalMonitorCenter | None = None
     decision_quality_center: DecisionQualityCenter | None = None
     operational_readiness_center: OperationalReadinessCenter | None = None
+    strategy_governance: list[CardStrategyGovernance] = Field(default_factory=list)
     data_health: dict[str, str]
 
 
@@ -132,6 +134,9 @@ def run_daily_scan(
     a_share_enhanced_provider: AShareEnhancedProvider | None = None,
     a_share_enhanced_top_n: int | None = None,
     recommendation_feedback_center: RecommendationCalibrationCenter | None = None,
+    paper_trading_report: object | None = None,
+    walk_forward_validation: Mapping[str, object] | None = None,
+    strategy_governance_context: StrategyGovernanceContext | None = None,
     start: date = date(2026, 1, 1),
     end: date = date(2026, 12, 31),
 ) -> DailyScanResult:
@@ -295,7 +300,6 @@ def run_daily_scan(
         _apply_factor_to_card(card, factor_by_id.get(card.instrument_id))
         card.decision = build_research_decision(card)
         enrich_opportunity_card(card)
-    cards = sort_recommendation_cards(cards)
     for item in items:
         _apply_factor_to_item(item, factor_by_id.get(item.instrument_id))
     _promote_items_for_cards(items, cards)
@@ -306,8 +310,6 @@ def run_daily_scan(
         a_share_enhanced_top_n,
     )
     apply_a_share_enhanced_to_cards(cards, enhanced_snapshots)
-    if enhanced_snapshots:
-        cards = sort_recommendation_cards(cards)
 
     sector_strength = build_sector_strength(cards, bars_by_instrument, items=items)
     portfolio_plan = build_portfolio_plan(cards)
@@ -379,9 +381,15 @@ def run_daily_scan(
     apply_market_intelligence_to_cards(cards, market_intelligence)
     apply_recommendation_quality_gate(cards)
     apply_probability_calibration(cards, strategy_health)
-    apply_recommendation_feedback_calibration(cards, recommendation_feedback_center)
-    apply_recommendation_feedback_quality_gate(cards, recommendation_feedback_center)
-    cards = sort_recommendation_cards(cards)
+    final_policy = apply_final_recommendation_policy(
+        cards,
+        recommendation_feedback_center=recommendation_feedback_center,
+        paper_report=paper_trading_report,
+        walk_forward_validation=walk_forward_validation,
+        governance_context=strategy_governance_context,
+    )
+    cards = sort_recommendation_cards(final_policy.cards)
+    data_health.update(final_policy.data_health)
     data_health.update(
         apply_benchmark_comparisons(
             cards,
@@ -397,7 +405,6 @@ def run_daily_scan(
     data_health.update(market_intelligence.data_health)
     data_health.update(recommendation_quality_data_health(cards))
     data_health.update(probability_calibration_data_health(cards))
-    data_health.update(recommendation_feedback_data_health(cards))
     manual_action_center = build_manual_action_center(
         cards=cards,
         market_intelligence=market_intelligence,
@@ -444,6 +451,7 @@ def run_daily_scan(
         signal_monitor=signal_monitor,
         decision_quality_center=decision_quality_center,
         operational_readiness_center=operational_readiness_center,
+        strategy_governance=final_policy.audits,
         data_health=data_health,
     )
 

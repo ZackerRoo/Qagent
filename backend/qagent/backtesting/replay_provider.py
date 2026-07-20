@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 
+from qagent.historical_evidence.models import HistoricalTradabilityPoint
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
 from qagent.strategy_data.providers import BaseStrategyDataProvider
 
@@ -17,8 +18,12 @@ class ReplayMarketDataProvider:
         self.last_errors: list[str] = []
         self._bars_by_instrument: dict[str, pd.DataFrame] = {}
         self._coverage: dict[str, tuple[date, date]] = {}
+        self._tradability_cache: dict[
+            tuple[str, date], HistoricalTradabilityPoint | None
+        ] = {}
         self._pruned_through: date | None = None
         self.query_count = 0
+        self.tradability_query_count = 0
         self.full_window_queries = 0
         self.incremental_queries = 0
         self.rows_loaded = 0
@@ -104,6 +109,8 @@ class ReplayMarketDataProvider:
                 )
 
     def _append_rows(self, rows) -> None:
+        rows = list(rows)
+        self._load_tradability(rows)
         records = []
         for item in rows:
             adjusted = all(
@@ -120,6 +127,14 @@ class ReplayMarketDataProvider:
                     f"{item.instrument_id} {item.trade_date}: adjusted OHLC is missing"
                 )
                 continue
+            tradability = self._tradability_cache.get(
+                (item.instrument_id, item.trade_date)
+            )
+            trading_status = (
+                str(tradability.trading_status)
+                if tradability is not None
+                else ("suspended" if item.volume <= 0 else "trading")
+            )
             records.append(
                 {
                     "instrument_id": item.instrument_id,
@@ -159,6 +174,12 @@ class ReplayMarketDataProvider:
                         else None
                     ),
                     "adjustment_type": item.adjustment_mode,
+                    "trading_status": trading_status,
+                    "is_suspended": trading_status.strip().lower()
+                    not in {"trading", "normal", "active"},
+                    "is_st": bool(tradability.is_st)
+                    if tradability is not None
+                    else False,
                 }
             )
         self.rows_loaded += len(records)
@@ -178,6 +199,27 @@ class ReplayMarketDataProvider:
                 .reset_index(drop=True)
             )
 
+    def _load_tradability(self, rows) -> None:
+        missing_by_date: dict[date, set[str]] = {}
+        for item in rows:
+            key = (item.instrument_id, item.trade_date)
+            if key not in self._tradability_cache:
+                missing_by_date.setdefault(item.trade_date, set()).add(
+                    item.instrument_id
+                )
+        for trade_date, instrument_ids in sorted(missing_by_date.items()):
+            requested = sorted(instrument_ids)
+            points = self.repository.tradability_on(
+                requested,
+                trade_date,
+                self.revision,
+            )
+            self.tradability_query_count += 1
+            for instrument_id in requested:
+                self._tradability_cache[(instrument_id, trade_date)] = points.get(
+                    instrument_id
+                )
+
     def _prune_before(self, start: date) -> None:
         if self._pruned_through is not None and start <= self._pruned_through:
             return
@@ -194,6 +236,9 @@ class ReplayMarketDataProvider:
                 del self._coverage[instrument_id]
             elif covered_start < start:
                 self._coverage[instrument_id] = (start, covered_end)
+        for key in list(self._tradability_cache):
+            if key[1] < start:
+                del self._tradability_cache[key]
         self._pruned_through = start
 
     def get_snapshot(self, instrument_ids: list[str]) -> pd.DataFrame:

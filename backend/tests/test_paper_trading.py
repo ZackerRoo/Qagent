@@ -4,6 +4,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pytest
 
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.paper_trading.engine import (
@@ -73,6 +74,20 @@ class EmptyMinuteAndDailyProvider:
 
     def get_minute_bars(self, instrument_ids, start, end):
         return pd.DataFrame()
+
+    def get_snapshot(self, instrument_ids):
+        return pd.DataFrame()
+
+
+class DailyRowsProvider:
+    name = "daily_rows"
+    last_errors: list[str] = []
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def get_daily_bars(self, instrument_ids, start, end):
+        return pd.DataFrame(self.rows)
 
     def get_snapshot(self, instrument_ids):
         return pd.DataFrame()
@@ -687,6 +702,343 @@ def test_update_paper_trades_marks_target_hit_from_future_bars(tmp_path):
     assert trade.entry_price == Decimal("70.8000")
     assert trade.exit_price == Decimal("74.0000")
     assert trade.realized_return_pct == 4.5198
+
+
+def test_a_share_execution_blocks_zero_volume_and_one_price_limit_before_gap_fill(
+    tmp_path,
+):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    paper_repo.create_trade(
+        source_snapshot_id="shared-rules-gap-entry",
+        provider="free",
+        instrument_id="CN:600000",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("10.00"),
+        initial_stop=Decimal("9.00"),
+        target_1=Decimal("12.00"),
+        rank_score=Decimal("0.90"),
+    )
+    provider = DailyRowsProvider(
+        [
+            {
+                "instrument_id": "CN:600000",
+                "trade_date": date(2026, 7, 2),
+                "open": Decimal("10.00"),
+                "high": Decimal("10.10"),
+                "low": Decimal("9.90"),
+                "close": Decimal("10.00"),
+                "volume": 100_000,
+                "previous_close": Decimal("10.00"),
+                "suspended": True,
+            },
+            {
+                "instrument_id": "CN:600000",
+                "trade_date": date(2026, 7, 3),
+                "open": Decimal("10.00"),
+                "high": Decimal("10.10"),
+                "low": Decimal("9.90"),
+                "close": Decimal("10.00"),
+                "volume": 0,
+                "previous_close": Decimal("10.00"),
+            },
+            {
+                "instrument_id": "CN:600000",
+                "trade_date": date(2026, 7, 6),
+                "open": Decimal("11.00"),
+                "high": Decimal("11.00"),
+                "low": Decimal("11.00"),
+                "close": Decimal("11.00"),
+                "volume": 100_000,
+                "previous_close": Decimal("10.00"),
+            },
+            {
+                "instrument_id": "CN:600000",
+                "trade_date": date(2026, 7, 7),
+                "open": Decimal("10.20"),
+                "high": Decimal("10.30"),
+                "low": Decimal("10.10"),
+                "close": Decimal("10.25"),
+                "volume": 100_000,
+                "previous_close": Decimal("11.00"),
+            },
+        ]
+    )
+
+    result = update_paper_trades(
+        paper_repo,
+        provider=provider,
+        provider_mode="free",
+        as_of=datetime(2026, 7, 7, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    trade = paper_repo.list_trades(provider="free")[0]
+
+    assert result.data_health["paper_execution_fills_deferred"] == "3"
+    assert trade.status == "open"
+    assert trade.entry_price == Decimal("10.2000")
+    assert trade.execution_facts is not None
+    assert trade.execution_facts.entry.base_price == Decimal("10.20")
+    assert trade.execution_facts.entry.quantity == 900
+    assert "停牌" in trade.notes
+    assert "零成交量" in trade.notes
+    assert "一字涨跌停" in trade.notes
+
+
+def test_a_share_execution_rejects_off_tick_trigger(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    paper_repo.create_trade(
+        source_snapshot_id="shared-rules-bad-tick",
+        provider="free",
+        instrument_id="CN:600000",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("10.005"),
+        initial_stop=Decimal("9.00"),
+        target_1=Decimal("12.00"),
+        rank_score=Decimal("0.90"),
+    )
+    provider = DailyRowsProvider(
+        [
+            {
+                "instrument_id": "CN:600000",
+                "trade_date": date(2026, 7, 2),
+                "open": Decimal("10.00"),
+                "high": Decimal("10.10"),
+                "low": Decimal("9.90"),
+                "close": Decimal("10.05"),
+                "volume": 100_000,
+                "previous_close": Decimal("10.00"),
+            }
+        ]
+    )
+
+    result = update_paper_trades(
+        paper_repo,
+        provider=provider,
+        provider_mode="free",
+        as_of=datetime(2026, 7, 2, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    trade = paper_repo.list_trades(provider="free")[0]
+
+    assert result.data_health["paper_execution_fills_deferred"] == "1"
+    assert trade.status == "pending"
+    assert trade.execution_facts is None
+    assert "最小报价单位" in trade.notes
+
+
+@pytest.mark.parametrize(
+    ("t_plus_one", "expected_status"),
+    [(True, "open"), (False, "stopped")],
+)
+def test_a_share_sellable_quantity_respects_snapshot_t_plus_rule(
+    tmp_path,
+    t_plus_one,
+    expected_status,
+):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    snapshot_id = _insert_cn_snapshot(
+        repo,
+        instrument_id="CN:600001",
+        created_at=datetime(2026, 7, 2, 3, 38, tzinfo=timezone.utc),
+        trigger_price=Decimal("10.00"),
+        no_chase_above=Decimal("10.50"),
+        t_plus_one=t_plus_one,
+    )
+    paper_repo.create_trade(
+        source_snapshot_id=snapshot_id,
+        provider="free",
+        instrument_id="CN:600001",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 2),
+        trigger_price=Decimal("10.00"),
+        initial_stop=Decimal("9.50"),
+        target_1=Decimal("11.00"),
+        rank_score=Decimal("0.90"),
+    )
+    provider = MinuteCnProvider(
+        [
+            {
+                "instrument_id": "CN:600001",
+                "timestamp": datetime(2026, 7, 2, 13, 0),
+                "open": Decimal("9.90"),
+                "high": Decimal("10.10"),
+                "low": Decimal("9.90"),
+                "close": Decimal("10.00"),
+                "volume": 100_000,
+            },
+            {
+                "instrument_id": "CN:600001",
+                "timestamp": datetime(2026, 7, 2, 13, 5),
+                "open": Decimal("9.40"),
+                "high": Decimal("9.50"),
+                "low": Decimal("9.30"),
+                "close": Decimal("9.40"),
+                "volume": 100_000,
+            },
+        ]
+    )
+
+    update_paper_trades(
+        paper_repo,
+        provider=provider,
+        provider_mode="free",
+        as_of=datetime(2026, 7, 2, 14, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    trade = paper_repo.list_trades(provider="free")[0]
+
+    assert trade.status == expected_status
+    assert trade.execution_facts is not None
+    assert trade.execution_facts.rules.settlement_days == int(t_plus_one)
+    if t_plus_one:
+        assert trade.execution_facts.exit is None
+        assert "T+1" in trade.notes
+    else:
+        assert trade.exit_date == trade.entry_date
+        assert trade.execution_facts.exit is not None
+        ledger = build_paper_ledger([trade])
+        assert [item.side for item in ledger.transactions] == ["buy", "sell"]
+        assert ledger.positions == []
+
+
+def test_execution_facts_freeze_quantity_fees_and_slippage_after_settings_change(
+    tmp_path,
+):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    paper_repo.start_account_session(
+        label="frozen execution",
+        initial_capital=Decimal("100000"),
+        allocation_per_trade_pct=Decimal("10"),
+        max_positions=5,
+        transaction_cost_bps=Decimal("10"),
+        slippage_bps=Decimal("10"),
+        take_profit_pct=Decimal("100"),
+    )
+    paper_repo.create_trade(
+        source_snapshot_id="immutable-execution-facts",
+        provider="free",
+        instrument_id="CN:600000",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("10.00"),
+        initial_stop=Decimal("9.50"),
+        target_1=Decimal("12.00"),
+        rank_score=Decimal("0.90"),
+    )
+    entry_row = {
+        "instrument_id": "CN:600000",
+        "trade_date": date(2026, 7, 2),
+        "open": Decimal("10.20"),
+        "high": Decimal("10.30"),
+        "low": Decimal("10.10"),
+        "close": Decimal("10.25"),
+        "volume": 100_000,
+        "previous_close": Decimal("10.00"),
+    }
+    update_paper_trades(
+        paper_repo,
+        provider=DailyRowsProvider([entry_row]),
+        provider_mode="free",
+        as_of=datetime(2026, 7, 2, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    opened = paper_repo.list_trades(provider="free")[0]
+    assert opened.execution_facts is not None
+    assert opened.execution_facts.entry.quantity == 900
+    assert opened.execution_facts.entry.base_price == Decimal("10.20")
+    assert opened.execution_facts.entry.price == Decimal("10.22")
+    assert opened.execution_facts.entry.commission == Decimal("9.20")
+    assert opened.execution_facts.entry.slippage == Decimal("18.00")
+
+    paper_repo.start_account_session(
+        label="changed settings",
+        initial_capital=Decimal("100000"),
+        allocation_per_trade_pct=Decimal("50"),
+        max_positions=1,
+        transaction_cost_bps=Decimal("100"),
+        slippage_bps=Decimal("100"),
+        take_profit_pct=Decimal("25"),
+    )
+    original_open_ledger = build_paper_ledger(
+        [opened],
+        transaction_cost_bps=Decimal("10"),
+        slippage_bps=Decimal("10"),
+    )
+    changed_open_ledger = build_paper_ledger(
+        [opened],
+        allocation_per_trade_pct=Decimal("50"),
+        max_positions=1,
+        transaction_cost_bps=Decimal("100"),
+        slippage_bps=Decimal("100"),
+    )
+    assert original_open_ledger.transactions == changed_open_ledger.transactions
+    assert original_open_ledger.positions == changed_open_ledger.positions
+
+    blocked_exit_row = {
+        "instrument_id": "CN:600000",
+        "trade_date": date(2026, 7, 3),
+        "open": Decimal("9.23"),
+        "high": Decimal("9.23"),
+        "low": Decimal("9.23"),
+        "close": Decimal("9.23"),
+        "volume": 100_000,
+        "previous_close": Decimal("10.25"),
+    }
+    exit_row = {
+        "instrument_id": "CN:600000",
+        "trade_date": date(2026, 7, 6),
+        "open": Decimal("9.30"),
+        "high": Decimal("9.40"),
+        "low": Decimal("9.20"),
+        "close": Decimal("9.25"),
+        "volume": 100_000,
+        "previous_close": Decimal("9.23"),
+    }
+    update_paper_trades(
+        paper_repo,
+        provider=DailyRowsProvider([entry_row, blocked_exit_row, exit_row]),
+        provider_mode="free",
+        as_of=datetime(2026, 7, 6, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    closed = paper_repo.list_trades(provider="free")[0]
+    assert closed.execution_facts is not None
+    assert closed.execution_facts.rules.slippage_bps == Decimal("10")
+    assert closed.execution_facts.entry.quantity == 900
+    assert closed.execution_facts.exit is not None
+    assert closed.execution_facts.exit.quantity == 900
+    assert closed.execution_facts.exit.base_price == Decimal("9.30")
+    assert closed.execution_facts.exit.price == Decimal("9.29")
+    assert closed.execution_facts.exit.slippage == Decimal("9.00")
+    assert "一字涨跌停" in closed.notes
+
+    original = build_paper_ledger(
+        [closed],
+        initial_capital=Decimal("100000"),
+        allocation_per_trade_pct=Decimal("10"),
+        max_positions=5,
+        transaction_cost_bps=Decimal("10"),
+        slippage_bps=Decimal("10"),
+        take_profit_pct=Decimal("100"),
+    )
+    changed = build_paper_ledger(
+        [closed],
+        initial_capital=Decimal("100000"),
+        allocation_per_trade_pct=Decimal("50"),
+        max_positions=1,
+        transaction_cost_bps=Decimal("100"),
+        slippage_bps=Decimal("100"),
+        take_profit_pct=Decimal("25"),
+    )
+
+    assert original.transactions == changed.transactions
+    assert original.summary.total_fees == changed.summary.total_fees
+    assert original.summary.total_slippage == changed.summary.total_slippage
+    assert original.items[0].shares == changed.items[0].shares == Decimal("900")
+    events = paper_repo.list_trade_events(closed.trade_id)
+    assert events[-1].execution_facts == closed.execution_facts
+    assert "[paper_execution_facts:v1]" in events[-1].note
 
 
 def test_build_paper_ledger_summarizes_cash_equity_and_recommendation_outcomes(tmp_path):
@@ -1465,6 +1817,7 @@ def _insert_cn_snapshot(
     no_chase_above: Decimal,
     store_latest_close_in_row: bool = True,
     card_latest_close: Decimal | None = None,
+    t_plus_one: bool | None = None,
 ) -> str:
     snapshot_id = f"scan-minute:{instrument_id}"
     card = {
@@ -1478,6 +1831,12 @@ def _insert_cn_snapshot(
             "latest_close": str(card_latest_close or trigger_price),
         },
     }
+    if t_plus_one is not None:
+        card["trading_constraints"] = {
+            "t_plus_one": t_plus_one,
+            "min_lot": 100,
+            "price_limit_pct": 10,
+        }
     with repo.session_factory() as session:
         session.add(
             ScanRunRow(

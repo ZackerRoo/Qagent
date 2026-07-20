@@ -5,8 +5,12 @@ from decimal import Decimal
 from fastapi.testclient import TestClient
 
 from qagent.app import create_app
+from qagent.api.routes import _recent_scan_run_fallback_payload
 from qagent.db import create_session_factory, initialize_database
+from qagent.storage.repository import QagentRepository
 from qagent.storage.tables import OpportunitySnapshotRow, ScanRunRow
+from qagent.strategies.governance import decide_state_transition
+from qagent.strategies.models import StrategyPolicy, StrategyState
 
 
 def test_watchlist_api_adds_and_lists_items(tmp_path, monkeypatch):
@@ -461,6 +465,142 @@ def test_opportunity_history_api_filters_by_instrument(tmp_path, monkeypatch):
     snapshots = response.json()["snapshots"]
     assert snapshots
     assert {snapshot["instrument_id"] for snapshot in snapshots} == {"US:TEST"}
+
+
+def test_scan_run_fallback_rebuilds_center_without_reapplying_dynamic_calibration(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'api-fallback.db'}")
+    client = TestClient(create_app())
+    scan_response = client.get("/api/opportunities?provider=fixture")
+    original = {
+        card["card_id"]: card["rank_score"] for card in scan_response.json()["cards"]
+    }
+
+    fallback = _recent_scan_run_fallback_payload(
+        provider="fixture",
+        max_symbols=2,
+        include_etfs=True,
+        sync_if_empty=False,
+        cache_ttl_minutes=60,
+    )
+
+    assert fallback is not None
+    assert {
+        card["card_id"]: card["rank_score"] for card in fallback["cards"]
+    } == original
+    assert fallback["data_health"]["dynamic_calibration_passes"] == "1"
+    assert fallback["data_health"]["dynamic_calibration_reapplied"] == "false"
+
+
+def test_strategy_governance_api_returns_state_policy_events_and_gate_reason(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = f"sqlite:///{tmp_path / 'api-strategy-governance.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    repo = QagentRepository(create_session_factory(database_url))
+    policy = StrategyPolicy(
+        strategy_id="trend_momentum_stage2",
+        policy_version="trend-policy-v3",
+        strategy_version="trend-v3",
+        factor_version="factor-v2",
+        parameter_version="params-v2",
+        universe_version="cn-v2",
+        state=StrategyState.SHADOW,
+        base_weight=0.2,
+    )
+    repo.initialize_strategy_governance_defaults(policies=[policy])
+    repo.record_governance_decision(
+        policy,
+        decide_state_transition(StrategyState.SHADOW, StrategyState.DISABLED),
+        {"walk_forward": "negative"},
+        "api-governance-disable",
+    )
+    client = TestClient(create_app())
+
+    response = client.get(
+        "/api/strategy-governance?strategy_id=trend_momentum_stage2&event_limit=10"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["strategies"][0]["strategy_id"] == "trend_momentum_stage2"
+    assert body["strategies"][0]["strategy_version"] == "trend-v3"
+    assert body["strategies"][0]["state"] == "disabled"
+    assert body["strategies"][0]["policy_version"] == "trend-policy-v3"
+    assert body["strategies"][0]["gate_decision"]["action"] == "disable"
+    assert body["strategies"][0]["gate_decision"]["paper_candidate_eligible"] is False
+    assert body["policies"][0]["policy"]["policy_version"] == "trend-policy-v3"
+    assert body["recent_events"][0]["idempotency_key"] == "api-governance-disable"
+    assert body["gate_reasons"][0]["decision"] == "disable"
+    assert body["data_health"]["strategy_governance_events"] == "1"
+
+
+def test_disabled_strategy_is_audited_and_excluded_from_paper_candidates(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = f"sqlite:///{tmp_path / 'api-disabled-strategy.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    repo = QagentRepository(create_session_factory(database_url))
+    policy = StrategyPolicy(
+        strategy_id="pead_earnings_drift",
+        policy_version="pead-policy-v2",
+        strategy_version="pead-v2",
+        factor_version="factor-v1",
+        parameter_version="params-v1",
+        universe_version="global-v1",
+        state=StrategyState.DISABLED,
+        base_weight=0.2,
+    )
+    repo.initialize_strategy_governance_defaults(policies=[policy])
+    client = TestClient(create_app())
+
+    scan_response = client.get("/api/opportunities?provider=fixture")
+
+    assert scan_response.status_code == 200
+    scan = scan_response.json()
+    card = next(item for item in scan["cards"] if item["instrument_id"] == "US:TEST")
+    assert card["primary_strategy_id"] == "pead_earnings_drift"
+    assert card["rank_score"] == 0
+    assert card["decision"]["action"] == "avoid"
+    assert card["strategy_governance"]["state"] == "disabled"
+    assert card["strategy_governance"]["policy_version"] == "pead-policy-v2"
+    assert card["data_health"]["strategy_version"] == "pead-v2"
+    assert card["data_health"]["strategy_gate_decision"] == "disable"
+    assert any(
+        "gate_decision=disable" in item["value"]
+        for item in card["confidence_explanation"]["data_checks"]
+    )
+    assert scan["data_health"]["dynamic_calibration_passes"] == "1"
+
+    candidates = client.get("/api/paper-trades/candidate-pool?provider=fixture&limit=30")
+    assert candidates.status_code == 200
+    assert all(
+        item["strategy_id"] != "pead_earnings_drift"
+        for item in candidates.json()["items"]
+    )
+
+    manual = client.post(
+        "/api/paper-trades/from-opportunity",
+        json={
+            "card_id": card["card_id"],
+            "provider": "fixture",
+            "instrument_id": card["instrument_id"],
+            "trigger_price": card["entry_plan"]["trigger_price"],
+            "initial_stop": card["exit_plan"]["initial_stop"],
+            "target_1": card["exit_plan"]["target_1"],
+            "rank_score": card["rank_score"],
+            "action": "watch_trigger",
+            "risk_status": "clear",
+        },
+    )
+    assert manual.status_code == 400
+    assert "disabled" in manual.json()["detail"]
 
 
 def test_backtest_api_returns_fixture_validation(tmp_path, monkeypatch):

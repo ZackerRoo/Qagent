@@ -677,8 +677,10 @@ def _calibrated_snapshot_eligibility(
         ):
             return False, "策略历史胜率或平均收益未通过"
 
-    data_quality = card.get("data_quality")
+    data_quality = card.get("data_quality_audit")
     if isinstance(data_quality, dict):
+        if data_quality.get("can_recommend") is False or data_quality.get("status") == "blocked":
+            return False, "当时数据质量门禁未通过"
         quality_score = _optional_number(data_quality.get("score"))
         if quality_score is not None and quality_score < 0.5:
             return False, "当时数据质量低于 50%"
