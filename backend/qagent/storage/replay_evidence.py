@@ -131,6 +131,17 @@ class ReplayEvidenceRepository:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._run_status_lookup = run_status_lookup or (lambda _run_id: None)
 
+    def for_owner(self, owner_run_id: str) -> "ReplayEvidenceRepository":
+        """Create an owner-scoped repository without dropping lease lifecycle hooks."""
+
+        return ReplayEvidenceRepository(
+            self.session_factory,
+            self.provider_mode,
+            owner_run_id=owner_run_id,
+            clock=self._clock,
+            run_status_lookup=self._run_status_lookup,
+        )
+
     def current_revision(self) -> int:
         with self.session_factory() as session:
             row = session.get(HistoricalDataRevisionRow, self.provider_mode)

@@ -1466,6 +1466,19 @@ def test_terminal_orphan_lease_is_released(storage):
     assert lease.owner_run_id == "run-b"
 
 
+def test_owner_scope_preserves_terminal_run_lookup(storage):
+    _, clock, statuses, make_repo = storage
+    repository = make_repo()
+    statuses["run-a"] = "running"
+    repository.for_owner("run-a").acquire_dataset_lease()
+    statuses["run-a"] = "failed"
+    clock.advance(timedelta(minutes=11))
+
+    lease = repository.for_owner("run-b").acquire_dataset_lease()
+
+    assert lease.owner_run_id == "run-b"
+
+
 @pytest.mark.parametrize(
     "terminal_status", ["succeeded", "blocked_data", "failed", "cancelled"]
 )

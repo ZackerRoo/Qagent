@@ -321,11 +321,7 @@ def run_full_market_walk_forward_selection(
     )
     if experiment_manifest.dataset_revision != revision:
         raise RuntimeError("experiment dataset revision no longer matches replay data")
-    owner_repository = ReplayEvidenceRepository(
-        repository.session_factory,
-        repository.provider_mode,
-        owner_run_id=owner_run_id,
-    )
+    owner_repository = repository.for_owner(owner_run_id)
     lease = owner_repository.acquire_dataset_lease()
     if lease.revision != revision:
         owner_repository.release_dataset_lease()

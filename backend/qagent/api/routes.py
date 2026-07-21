@@ -338,6 +338,14 @@ def historical_data_coverage(
     return manifest.model_dump(mode="json")
 
 
+def _walk_forward_status_lookup(repo: QagentRepository):
+    def lookup(job_id: str) -> str | None:
+        job = repo.get_walk_forward_job(job_id)
+        return job.status if job is not None else None
+
+    return lookup
+
+
 @router.post("/walk-forward/runs")
 def run_walk_forward(
     start: date,
@@ -357,7 +365,12 @@ def run_walk_forward(
             status_code=400, detail="step_sessions and lookback_days must be positive"
         )
     initialize_database()
-    repository = ReplayEvidenceRepository(create_session_factory(), mode)
+    repo = _repo()
+    repository = ReplayEvidenceRepository(
+        repo.session_factory,
+        mode,
+        run_status_lookup=_walk_forward_status_lookup(repo),
+    )
     owner_run_id = (
         run_id or f"walk-forward-{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{uuid4().hex[:8]}"
     )
@@ -648,7 +661,11 @@ def _run_walk_forward_job_safely(job_id: str) -> None:
         job = repo.get_walk_forward_job(job_id)
         if job is None:
             return
-        replay_repository = ReplayEvidenceRepository(repo.session_factory, job.provider)
+        replay_repository = ReplayEvidenceRepository(
+            repo.session_factory,
+            job.provider,
+            run_status_lookup=_walk_forward_status_lookup(repo),
+        )
         if replay_repository.current_revision() != job.dataset_revision:
             raise RuntimeError("historical dataset revision changed; start a new validation job")
         manifest = WalkForwardExperimentManifest.model_validate(job.experiment_manifest)
