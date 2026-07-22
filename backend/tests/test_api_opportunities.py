@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta, timezone
+import json
 import time
 from types import SimpleNamespace
 
@@ -683,10 +684,27 @@ def test_full_market_batch_latest_result_honors_card_limit(tmp_path, monkeypatch
             "cards": [card.model_dump(mode="json") for card in scan.cards],
             "items": [item.model_dump(mode="json") for item in scan.items],
             "strategy_health": [item.model_dump(mode="json") for item in scan.strategy_health],
-            "factor_rankings": [],
+            "factor_rankings": [
+                item.model_dump(mode="json") for item in scan.factor_rankings
+            ],
             "sector_strength": [],
             "portfolio_plan": scan.portfolio_plan.model_dump(mode="json"),
-            "data_health": {"provider": "fixture"},
+            "feature_snapshot": {
+                "raw_scores": {card.instrument_id: {} for card in scan.cards},
+                "cross_sectional_scores": {
+                    card.instrument_id: {} for card in scan.cards
+                },
+            },
+            "data_health": {
+                "provider": "fixture",
+                "errors": "x" * 3_000,
+                "strategy_governance_gate_decisions": json.dumps(
+                    {
+                        card.card_id: {"gate_decision": "observe"}
+                        for card in scan.cards
+                    }
+                ),
+            },
         },
     )
 
@@ -696,7 +714,18 @@ def test_full_market_batch_latest_result_honors_card_limit(tmp_path, monkeypatch
     )
 
     assert response.status_code == 200
-    assert len(response.json()["cards"]) == 1
+    body = response.json()
+    assert len(body["cards"]) == 1
+    visible_instrument_ids = {card["instrument_id"] for card in body["cards"]}
+    assert {item["instrument_id"] for item in body["items"]} <= visible_instrument_ids
+    assert {
+        item["instrument_id"] for item in body["factor_rankings"]
+    } <= visible_instrument_ids
+    assert set(body["feature_snapshot"]["raw_scores"]) <= visible_instrument_ids
+    assert len(body["data_health"]["errors"]) == 2_003
+    assert set(json.loads(body["data_health"]["strategy_governance_gate_decisions"])) <= {
+        body["cards"][0]["card_id"]
+    }
 
 
 def test_full_market_batch_latest_result_uses_card_calibration_when_no_health_cache(

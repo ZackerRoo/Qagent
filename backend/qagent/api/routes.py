@@ -2,6 +2,7 @@ from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+import json
 import math
 from multiprocessing import get_context
 from threading import Lock
@@ -4390,8 +4391,7 @@ def latest_full_market_batch_scan_result(
         payload,
         provider=mode,
     )
-    if isinstance(payload.get("cards"), list):
-        payload["cards"] = payload["cards"][:limit]
+    _limit_full_market_batch_payload(payload, limit=limit)
     _hydrate_full_market_batch_payload(payload, repo, mode, cache_ttl_minutes)
     data_health = payload.setdefault("data_health", {})
     if isinstance(data_health, dict):
@@ -4399,6 +4399,102 @@ def latest_full_market_batch_scan_result(
         data_health["scan_result_cache_id"] = cached.cache_id
         data_health["paper_invalidated_cards_filtered"] = str(invalidated_filtered)
     return payload
+
+
+def _limit_full_market_batch_payload(payload: dict[str, object], *, limit: int) -> None:
+    raw_cards = payload.get("cards")
+    if not isinstance(raw_cards, list):
+        return
+    payload["cards"] = raw_cards[:limit]
+    visible_card_ids = {
+        str(card.get("card_id"))
+        for card in payload["cards"]
+        if isinstance(card, dict) and card.get("card_id")
+    }
+    visible_instrument_ids = {
+        str(card.get("instrument_id"))
+        for card in payload["cards"]
+        if isinstance(card, dict) and card.get("instrument_id")
+    }
+
+    for key in ("items", "factor_rankings"):
+        values = payload.get(key)
+        if isinstance(values, list):
+            payload[key] = [
+                value
+                for value in values
+                if isinstance(value, dict)
+                and str(value.get("instrument_id")) in visible_instrument_ids
+            ]
+
+    governance = payload.get("strategy_governance")
+    if isinstance(governance, list):
+        payload["strategy_governance"] = [
+            value
+            for value in governance
+            if isinstance(value, dict) and str(value.get("card_id")) in visible_card_ids
+        ]
+
+    feature_snapshot = payload.get("feature_snapshot")
+    if isinstance(feature_snapshot, dict):
+        for key in ("raw_scores", "cross_sectional_scores"):
+            values = feature_snapshot.get(key)
+            if isinstance(values, dict):
+                feature_snapshot[key] = {
+                    instrument_id: value
+                    for instrument_id, value in values.items()
+                    if instrument_id in visible_instrument_ids
+                }
+
+    portfolio_plan = payload.get("portfolio_plan")
+    if isinstance(portfolio_plan, dict):
+        constraints = portfolio_plan.get("constraint_results")
+        if isinstance(constraints, list):
+            portfolio_plan["constraint_results"] = [
+                value
+                for value in constraints
+                if isinstance(value, dict)
+                and str(value.get("instrument_id")) in visible_instrument_ids
+            ]
+
+    data_health = payload.get("data_health")
+    if isinstance(data_health, dict):
+        gate_decisions = data_health.get("strategy_governance_gate_decisions")
+        if isinstance(gate_decisions, str):
+            try:
+                parsed_gate_decisions = json.loads(gate_decisions)
+            except (TypeError, ValueError):
+                parsed_gate_decisions = None
+            if isinstance(parsed_gate_decisions, dict):
+                data_health["strategy_governance_gate_decisions"] = json.dumps(
+                    {
+                        card_id: value
+                        for card_id, value in parsed_gate_decisions.items()
+                        if card_id in visible_card_ids
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+        for key in (
+            "errors",
+            "scan_error_samples",
+            "a_share_enhanced_errors",
+            "full_market_worker_error",
+        ):
+            value = data_health.get(key)
+            if isinstance(value, str) and len(value) > 2_000:
+                data_health[key] = f"{value[:2_000]}..."
+        data_health["full_market_response_card_limit"] = str(limit)
+
+    for key in (
+        "manual_action_center",
+        "signal_monitor",
+        "decision_quality_center",
+        "operational_readiness_center",
+        "alpha_quality_center",
+        "research_center",
+    ):
+        payload.pop(key, None)
 
 
 def _reset_abandoned_full_market_job(repo: QagentRepository, job):
