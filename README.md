@@ -76,6 +76,27 @@ Open:
 - Dashboard: `http://127.0.0.1:5173`
 - API: `http://127.0.0.1:8000/api`
 
+### Remote backend over SSH
+
+The dashboard can stay on the local Mac while the backend and SQLite database run
+on the Tailscale-connected data Mac. Stop the local backend first, then install the
+persistent SSH tunnel:
+
+```bash
+./scripts/uninstall_macos_launch_agent.sh
+./scripts/install_macos_remote_backend_tunnel.sh
+```
+
+The tunnel keeps the browser-facing API at `http://127.0.0.1:8000/api` and forwards
+it to `zhenkunluo@100.85.40.49`. `launchd` restarts the tunnel after a network
+interruption. Override the defaults with `QAGENT_REMOTE_HOST`,
+`QAGENT_REMOTE_BACKEND_HOST`, `QAGENT_LOCAL_BACKEND_PORT`, or
+`QAGENT_REMOTE_BACKEND_PORT` when needed. Remove only the tunnel with:
+
+```bash
+./scripts/uninstall_macos_remote_backend_tunnel.sh
+```
+
 Optional strategy-data keys:
 
 ```bash
