@@ -30,6 +30,10 @@ BAR_COLUMNS = [
     "adjustment_type",
 ]
 
+# SQLite builds may keep the historical 999-variable limit. Leave headroom for
+# dialect-generated parameters so bulk upserts behave consistently everywhere.
+SQLITE_SAFE_VARIABLE_LIMIT = 900
+
 
 class MarketDataCacheSummary(BaseModel):
     provider_mode: str
@@ -79,33 +83,38 @@ class MarketDataCacheRepository:
         if not records:
             return 0
         with self.session_factory() as session:
-            statement = sqlite_insert(MarketBarCacheRow).values(records)
-            excluded = statement.excluded
-            statement = statement.on_conflict_do_update(
-                index_elements=[
-                    MarketBarCacheRow.provider_mode,
-                    MarketBarCacheRow.instrument_id,
-                    MarketBarCacheRow.trade_date,
-                ],
-                set_={
-                    "source_provider": excluded.source_provider,
-                    "open": excluded.open,
-                    "high": excluded.high,
-                    "low": excluded.low,
-                    "close": excluded.close,
-                    "volume": excluded.volume,
-                    "turnover": excluded.turnover,
-                    "adjusted_open": excluded.adjusted_open,
-                    "adjusted_high": excluded.adjusted_high,
-                    "adjusted_low": excluded.adjusted_low,
-                    "adjusted_close": excluded.adjusted_close,
-                    "adjustment_factor": excluded.adjustment_factor,
-                    "adjustment_type": excluded.adjustment_type,
-                    "cached_at": excluded.cached_at,
-                    "updated_at": excluded.updated_at,
-                },
-            )
-            session.execute(statement)
+            parameters_per_record = len(records[0])
+            chunk_size = max(1, SQLITE_SAFE_VARIABLE_LIMIT // parameters_per_record)
+            for offset in range(0, len(records), chunk_size):
+                statement = sqlite_insert(MarketBarCacheRow).values(
+                    records[offset : offset + chunk_size]
+                )
+                excluded = statement.excluded
+                statement = statement.on_conflict_do_update(
+                    index_elements=[
+                        MarketBarCacheRow.provider_mode,
+                        MarketBarCacheRow.instrument_id,
+                        MarketBarCacheRow.trade_date,
+                    ],
+                    set_={
+                        "source_provider": excluded.source_provider,
+                        "open": excluded.open,
+                        "high": excluded.high,
+                        "low": excluded.low,
+                        "close": excluded.close,
+                        "volume": excluded.volume,
+                        "turnover": excluded.turnover,
+                        "adjusted_open": excluded.adjusted_open,
+                        "adjusted_high": excluded.adjusted_high,
+                        "adjusted_low": excluded.adjusted_low,
+                        "adjusted_close": excluded.adjusted_close,
+                        "adjustment_factor": excluded.adjustment_factor,
+                        "adjustment_type": excluded.adjustment_type,
+                        "cached_at": excluded.cached_at,
+                        "updated_at": excluded.updated_at,
+                    },
+                )
+                session.execute(statement)
             session.commit()
         return len(records)
 

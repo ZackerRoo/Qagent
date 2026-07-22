@@ -38,6 +38,29 @@ def test_market_data_cache_saves_and_loads_daily_bars(tmp_path):
     assert summaries[0].source_providers == ["fixture"]
 
 
+def test_market_data_cache_chunks_bulk_upserts_below_sqlite_variable_limit(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": f"CN:{instrument_number:06d}",
+                "trade_date": date(2026, 1, 5),
+                "open": 10.0,
+                "high": 10.5,
+                "low": 9.9,
+                "close": 10.3,
+                "volume": 800_000,
+                "turnover": 8_000_000,
+                "provider": "akshare",
+            }
+            for instrument_number in range(1, 121)
+        ]
+    )
+
+    assert repo.save_daily_bars("free", bars) == 120
+    assert len(repo.list_summaries(provider_mode="free")) == 120
+
+
 def test_market_data_cache_preserves_adjustment_metadata(tmp_path):
     repo = make_cache_repo(tmp_path)
     bars = pd.DataFrame(
