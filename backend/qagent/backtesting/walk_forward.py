@@ -6,6 +6,7 @@ import json
 import math
 import os
 import statistics
+from bisect import bisect_right
 from collections.abc import Callable, Iterable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
@@ -1803,6 +1804,13 @@ def _equal_weight_eligible_return(
     bars = provider.get_daily_bars(instrument_ids, first_date, end)
     if bars.empty:
         return None
+    price_series = {}
+    for instrument_id, frame in bars.groupby("instrument_id", sort=False):
+        ordered = frame.sort_values("trade_date")
+        price_series[instrument_id] = (
+            ordered["trade_date"].tolist(),
+            ordered["adjusted_close"].astype(float).tolist(),
+        )
     compounded = 1.0
     completed_periods = 0
     for index, (decision_date, members) in enumerate(eligible_universes):
@@ -1813,15 +1821,16 @@ def _equal_weight_eligible_return(
             continue
         returns = []
         for instrument_id in members:
-            frame = bars.loc[
-                bars["instrument_id"].eq(instrument_id)
-                & bars["trade_date"].gt(decision_date)
-                & bars["trade_date"].le(period_end)
-            ].sort_values("trade_date")
-            if len(frame) < 2:
+            series = price_series.get(instrument_id)
+            if series is None:
                 continue
-            first = float(frame.iloc[0]["adjusted_close"])
-            last = float(frame.iloc[-1]["adjusted_close"])
+            dates, closes = series
+            first_index = bisect_right(dates, decision_date)
+            final_index = bisect_right(dates, period_end) - 1
+            if final_index - first_index < 1:
+                continue
+            first = closes[first_index]
+            last = closes[final_index]
             if first > 0:
                 returns.append(last / first - 1)
         if not returns:
