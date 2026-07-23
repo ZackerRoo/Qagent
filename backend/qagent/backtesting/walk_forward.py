@@ -45,6 +45,7 @@ from qagent.storage.replay_evidence import (
     LEASE_DURATION,
     DatasetLeaseBusy,
     ReplayEvidenceRepository,
+    ReplayEvidenceUnavailable,
     StaleCheckpointRevision,
 )
 
@@ -532,6 +533,30 @@ def run_full_market_walk_forward_selection(
         unexpected_dates = set(resumed).difference(sessions)
         if unexpected_dates:
             raise ValueError("resume snapshots do not match the requested validation window")
+        lifecycle_inventory = owner_repository.lifecycle_inventory(
+            revision,
+            decision_date=sessions[-1] if sessions else end,
+        )
+        missing_listing_dates = [
+            item.instrument_id
+            for item in lifecycle_inventory
+            if item.listing_date is None
+        ]
+        if missing_listing_dates:
+            raise ReplayEvidenceUnavailable(
+                "lifecycle identity is incomplete; listing_date is missing for "
+                + ", ".join(missing_listing_dates[:10])
+            )
+        missing_security_types = [
+            item.instrument_id
+            for item in lifecycle_inventory
+            if not item.security_type or not item.security_type.strip()
+        ]
+        if missing_security_types:
+            raise ReplayEvidenceUnavailable(
+                "lifecycle identity is incomplete; security_type is missing for "
+                + ", ".join(missing_security_types[:10])
+            )
         _report_progress(
             progress_callback,
             phase="preparing_historical_replay",
@@ -542,13 +567,17 @@ def run_full_market_walk_forward_selection(
         snapshot_inputs: list[_WalkForwardSnapshotInput] = []
         for decision_date in sessions:
             lease_heartbeat.maintain_now()
-            members = owner_repository.universe_members_on(decision_date, revision)
-            if not members:
-                members = owner_repository.materialize_universe(
-                    decision_date,
-                    revision,
-                ).members
-            instrument_ids = [item.instrument_id for item in members if item.active]
+            members = [
+                item
+                for item in lifecycle_inventory
+                if item.listing_date is not None
+                and item.listing_date <= decision_date
+                and (
+                    item.delisting_date is None
+                    or item.delisting_date > decision_date
+                )
+            ]
+            instrument_ids = [item.instrument_id for item in members]
             tradability = owner_repository.tradability_on(
                 instrument_ids,
                 decision_date,
@@ -575,7 +604,7 @@ def run_full_market_walk_forward_selection(
             stock_ids = {
                 item.instrument_id
                 for item in members
-                if item.active and item.security_type in {"stock", "1"}
+                if item.security_type in {"stock", "1"}
             }
             eligible_stocks = [item for item in eligible if item in stock_ids]
             snapshot_inputs.append(

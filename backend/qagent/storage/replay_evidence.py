@@ -1093,9 +1093,13 @@ class ReplayEvidenceRepository:
             for row in rows
         }
 
-    def lifecycle_inventory(self, revision: int) -> list[HistoricalInstrumentProfile]:
+    def lifecycle_inventory(
+        self,
+        revision: int,
+        decision_date: date | None = None,
+    ) -> list[HistoricalInstrumentProfile]:
         with self.session_factory() as session:
-            return self._lifecycle_inventory(session, revision)
+            return self._lifecycle_inventory(session, revision, decision_date)
 
     def recoverable_lifecycle_profiles(
         self,
