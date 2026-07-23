@@ -151,6 +151,7 @@ def test_completed_full_market_backfill_queues_walk_forward_when_coverage_is_rea
     assert stored.data_health["validation_pipeline_state"] == "walk_forward_queued"
     assert stored.data_health["validation_pipeline_blockers"] == ""
     assert walk_jobs[0].dataset_revision == 11
+    assert walk_jobs[0].rebalance_step_sessions == 10
     assert submitted[0][1] == (walk_jobs[0].job_id,)
 
 

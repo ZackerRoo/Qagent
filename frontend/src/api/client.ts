@@ -790,7 +790,7 @@ export async function startWalkForwardJob(
       provider,
       start,
       end,
-      step_sessions: 5,
+      step_sessions: 10,
       lookback_days: 400,
     })}`,
     {},

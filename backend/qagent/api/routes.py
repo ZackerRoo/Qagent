@@ -356,7 +356,7 @@ def run_walk_forward(
     end: date,
     provider: str = "free",
     run_id: str | None = None,
-    step_sessions: int = 5,
+    step_sessions: int = 10,
     lookback_days: int = 400,
 ) -> dict[str, object]:
     mode = provider.strip().lower()
@@ -401,7 +401,7 @@ def start_walk_forward_job(
     start: date,
     end: date,
     provider: str = "free",
-    step_sessions: int = 5,
+    step_sessions: int = 10,
     lookback_days: int = 400,
 ) -> dict[str, object]:
     mode = _validate_walk_forward_params(
@@ -994,7 +994,7 @@ def _continue_validation_pipeline(result) -> str:
         dataset_revision=revision,
         start_date=job.start_date,
         end_date=job.end_date,
-        rebalance_step_sessions=5,
+        rebalance_step_sessions=10,
         lookback_days=400,
     )
     latest_runs = repo.list_walk_forward_runs(provider=job.provider, limit=1)
@@ -1015,7 +1015,7 @@ def _continue_validation_pipeline(result) -> str:
         provider=job.provider,
         start=job.start_date,
         end=job.end_date,
-        step_sessions=5,
+        step_sessions=10,
         lookback_days=400,
     )
     health["validation_pipeline_state"] = "walk_forward_queued"
