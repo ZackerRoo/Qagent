@@ -4795,17 +4795,11 @@ def _validate_full_market_batch_scan_params(
 def _full_market_job_payload(job) -> dict[str, object]:
     payload = job.model_dump(mode="json")
     symbols = payload.pop("symbols", [])
-    if _is_completed_full_market_job(job):
-        data_health = payload.setdefault("data_health", {})
-        if isinstance(data_health, dict) and payload.get("status") != "succeeded":
-            data_health["raw_status"] = str(payload.get("status", ""))
-            data_health["status_normalized"] = "completed_progress"
-        payload["status"] = "succeeded"
-        if not payload.get("result_cache_key"):
-            payload["result_cache_key"] = full_market_batch_cache_key(
-                job.provider,
-                job.include_etfs,
-            )
+    if _is_finalizing_full_market_job(job):
+        payload["phase"] = "finalizing"
+        payload["message"] = "Finalizing full-market rankings and recommendation policy"
+    else:
+        payload["phase"] = payload["status"]
     payload["progress"] = _full_market_job_progress(job)
     if payload["status"] == "succeeded":
         payload["progress"] = 100
@@ -4821,17 +4815,14 @@ def _full_market_job_progress(job) -> int:
     return max(0, min(99, int(job.scanned_symbols * 100 / job.total_symbols)))
 
 
-def _is_completed_full_market_job(job) -> bool:
-    if job.status == "succeeded":
-        return True
-    if job.status not in {"queued", "running"}:
+def _is_finalizing_full_market_job(job) -> bool:
+    if job.status != "running":
         return False
     if job.total_symbols <= 0 or job.total_batches <= 0:
         return False
     return (
         job.scanned_symbols >= job.total_symbols
         and job.completed_batches >= job.total_batches
-        and job.cards > 0
     )
 
 

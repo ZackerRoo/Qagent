@@ -496,6 +496,42 @@ def test_latest_full_market_scan_marks_abandoned_job_failed(tmp_path, monkeypatc
     assert response.json()["data_health"]["full_market_stale_reset"] == "true"
 
 
+def test_full_market_scan_stays_running_while_final_result_is_publishing(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'finalizing.db'}")
+    repo = routes._repo()
+    job = repo.create_full_market_scan_job(
+        provider="free",
+        symbols=["CN:000001", "CN:000002"],
+        batch_size=1,
+        include_etfs=True,
+        sync_if_empty=False,
+    )
+    repo.update_full_market_scan_job(
+        job.job_id,
+        status="running",
+        scanned_symbols=2,
+        completed_batches=2,
+        cards=8,
+        message="Completed batch 2/2",
+    )
+
+    response = TestClient(create_app()).get(
+        "/api/full-market/batch-scan/latest?provider=free"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "running"
+    assert response.json()["phase"] == "finalizing"
+    assert response.json()["progress"] == 99
+    assert response.json()["result_cache_key"] is None
+    assert response.json()["message"] == (
+        "Finalizing full-market rankings and recommendation policy"
+    )
+
+
 def test_running_full_market_scan_is_resubmitted_after_service_restart(
     tmp_path,
     monkeypatch,
