@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from pydantic import BaseModel
 from sqlalchemy import func, select, text, tuple_
@@ -74,6 +74,27 @@ class ReplayEvidenceUnavailable(RuntimeError):
 
 class ImmutableRevisionConflict(ValueError):
     pass
+
+
+class ReplayBarReadRow(NamedTuple):
+    provider_mode: str
+    instrument_id: str
+    trade_date: date
+    raw_open: Decimal
+    raw_high: Decimal
+    raw_low: Decimal
+    raw_close: Decimal
+    adjusted_open: Decimal | None
+    adjusted_high: Decimal | None
+    adjusted_low: Decimal | None
+    adjusted_close: Decimal | None
+    volume: Decimal
+    turnover: Decimal | None
+    adjustment_factor: Decimal | None
+    adjustment_mode: str
+    source_provider: str
+    dataset_revision: int
+    fetched_at: datetime
 
 
 class DerivedUniverseOwnershipConflict(ValueError):
@@ -786,7 +807,7 @@ class ReplayEvidenceRepository:
         revision: int,
     ) -> list[HistoricalReplayBar]:
         return [
-            HistoricalReplayBar.model_validate(dict(row._mapping))
+            HistoricalReplayBar.model_validate(row._asdict())
             for row in self.replay_bar_rows(
                 instrument_ids,
                 start,
@@ -801,7 +822,7 @@ class ReplayEvidenceRepository:
         start: date,
         end: date,
         revision: int,
-    ) -> list:
+    ) -> list[ReplayBarReadRow]:
         """Return lightweight immutable rows for high-volume replay computation."""
         if not instrument_ids:
             return []
@@ -835,13 +856,14 @@ class ReplayEvidenceRepository:
                 ranked.c[column.name]
                 for column in HistoricalReplayBarRow.__table__.columns
             ]
-            rows = list(
-                session.execute(
+            rows = [
+                ReplayBarReadRow(*row)
+                for row in session.execute(
                     select(*selected_columns)
                     .where(ranked.c.revision_rank == 1)
                     .order_by(ranked.c.trade_date, ranked.c.instrument_id)
                 )
-            )
+            ]
         return rows
 
     def replay_instrument_ids(
