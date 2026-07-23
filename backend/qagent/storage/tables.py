@@ -7,6 +7,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -166,6 +167,16 @@ class FundamentalSnapshotRow(Base):
 
 class HistoricalTradabilityRow(Base):
     __tablename__ = "historical_tradability"
+    __table_args__ = (
+        Index(
+            "ix_historical_tradability_replay_lookup",
+            "provider_mode",
+            "instrument_id",
+            "trade_date",
+            "dataset_revision",
+            "source_provider",
+        ),
+    )
 
     provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
     instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
@@ -234,6 +245,16 @@ class HistoricalIndexMembershipRow(Base):
 
 class HistoricalReplayBarRow(Base):
     __tablename__ = "historical_replay_bars"
+    __table_args__ = (
+        Index(
+            "ix_historical_replay_bars_lookup",
+            "provider_mode",
+            "instrument_id",
+            "trade_date",
+            "dataset_revision",
+            "source_provider",
+        ),
+    )
 
     provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
     instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)

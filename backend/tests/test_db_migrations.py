@@ -180,6 +180,27 @@ def test_initialize_database_adds_adjustment_columns_to_legacy_market_cache(tmp_
     ]
 
 
+def test_initialize_database_restores_walk_forward_lookup_indexes(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'walk-forward-indexes.db'}"
+    engine = initialize_database(database_url)
+    index_names = {
+        "historical_tradability": "ix_historical_tradability_replay_lookup",
+        "historical_replay_bars": "ix_historical_replay_bars_lookup",
+    }
+    with engine.begin() as connection:
+        for index_name in index_names.values():
+            connection.execute(text(f"DROP INDEX {index_name}"))
+    db._initialized_urls.discard(database_url)
+
+    migrated = initialize_database(database_url)
+    inspector = inspect(migrated)
+
+    for table_name, index_name in index_names.items():
+        assert index_name in {
+            item["name"] for item in inspector.get_indexes(table_name)
+        }
+
+
 def test_initialize_database_adds_paper_probe_allocation_column(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'legacy-paper-probe.db'}"
     engine = create_db_engine(database_url)
