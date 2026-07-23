@@ -247,12 +247,13 @@ export QAGENT_FINNHUB_API_KEY="..."
 export QAGENT_ALPHA_VANTAGE_API_KEY="..."
 export QAGENT_TUSHARE_TOKEN="..."
 export QAGENT_SEC_USER_AGENT="Qagent research app you@example.com"
-export QAGENT_WALK_FORWARD_SNAPSHOT_WORKERS="2"
+export QAGENT_WALK_FORWARD_SNAPSHOT_WORKERS="1"
 ```
 
 `QAGENT_WALK_FORWARD_SNAPSHOT_WORKERS` controls concurrent full-market
-walk-forward snapshot calculations. Keep it at `2` on an 8 GB machine; valid
-values are `1` through `4`.
+walk-forward snapshot calculations. Keep it at `1` on an 8 GB machine because
+each worker retains a full rolling market-data cache. Use `2` only when at least
+16 GB of memory is available; valid values are `1` through `4`.
 
 The scan response surfaces `strategy_data_provider`, `strategy_filings`, `strategy_announcements`, `strategy_fundamentals`, `strategy_analyst_insights`, and `strategy_data_errors` in `data_health`.
 
