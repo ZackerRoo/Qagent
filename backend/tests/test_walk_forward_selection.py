@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from sqlalchemy.orm import sessionmaker
 
+from qagent.backtesting import walk_forward
 from qagent.backtesting.a_share_rules import (
     BrokerFeeRequest,
     build_instrument_rule_metadata,
@@ -43,6 +44,37 @@ from qagent.storage import tables as _tables  # noqa: F401
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
 from qagent.storage.repository import QagentRepository
 from qagent.strategy_data.models import FundamentalSnapshot
+
+
+def test_snapshot_computation_defers_cyclic_gc_until_checkpoint_end(monkeypatch):
+    observed_gc_states = []
+    collected = []
+    sentinel = object()
+
+    def compute_without_gc(*_args, **_kwargs):
+        observed_gc_states.append(walk_forward.gc.isenabled())
+        return sentinel
+
+    monkeypatch.setattr(
+        walk_forward,
+        "_compute_walk_forward_snapshot_without_gc",
+        compute_without_gc,
+    )
+    monkeypatch.setattr(walk_forward.gc, "collect", lambda: collected.append(True))
+
+    assert walk_forward.gc.isenabled()
+    result = walk_forward._compute_walk_forward_snapshot(
+        object(),
+        lookback_days=400,
+        repository=object(),
+        market_provider=object(),
+        strategy_provider=object(),
+    )
+
+    assert result is sentinel
+    assert observed_gc_states == [False]
+    assert collected == [True]
+    assert walk_forward.gc.isenabled()
 
 
 def test_dataset_lease_heartbeat_renews_during_long_snapshot():

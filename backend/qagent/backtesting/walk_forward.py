@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import math
@@ -383,6 +384,31 @@ def _compute_snapshot_in_worker(
 
 
 def _compute_walk_forward_snapshot(
+    snapshot_input: _WalkForwardSnapshotInput,
+    *,
+    lookback_days: int,
+    repository: ReplayEvidenceRepository,
+    market_provider: ReplayMarketDataProvider,
+    strategy_provider: ReplayStrategyDataProvider,
+) -> _WalkForwardWorkerResult:
+    gc_was_enabled = gc.isenabled()
+    if gc_was_enabled:
+        gc.disable()
+    try:
+        return _compute_walk_forward_snapshot_without_gc(
+            snapshot_input,
+            lookback_days=lookback_days,
+            repository=repository,
+            market_provider=market_provider,
+            strategy_provider=strategy_provider,
+        )
+    finally:
+        if gc_was_enabled:
+            gc.enable()
+            gc.collect()
+
+
+def _compute_walk_forward_snapshot_without_gc(
     snapshot_input: _WalkForwardSnapshotInput,
     *,
     lookback_days: int,
