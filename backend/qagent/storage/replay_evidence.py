@@ -604,6 +604,70 @@ class ReplayEvidenceRepository:
         with self._immediate_session() as session:
             return _write_immutable_reference_rows(session, HistoricalFeeRuleRow, records, keys)
 
+    def instrument_rule_metadata_gaps(
+        self,
+        profiles: Sequence[HistoricalInstrumentProfile],
+        start: date,
+        end: date,
+        *,
+        limit: int = 10,
+    ) -> list[tuple[str, date, date]]:
+        if start > end:
+            raise ValueError("start must be on or before end")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        with self.session_factory() as session:
+            rows = list(
+                session.scalars(
+                    select(HistoricalInstrumentRuleMetadataRow)
+                    .where(
+                        HistoricalInstrumentRuleMetadataRow.provider_mode
+                        == self.provider_mode
+                    )
+                    .order_by(
+                        HistoricalInstrumentRuleMetadataRow.instrument_id,
+                        HistoricalInstrumentRuleMetadataRow.effective_from,
+                    )
+                )
+            )
+        intervals_by_instrument: dict[str, list[tuple[date, date]]] = {}
+        for row in rows:
+            intervals_by_instrument.setdefault(row.instrument_id, []).append(
+                (row.effective_from, row.effective_to or date.max)
+            )
+
+        gaps: list[tuple[str, date, date]] = []
+        for profile in profiles:
+            active_start = max(start, profile.listing_date or start)
+            active_end = min(end, profile.delisting_date or end)
+            if active_start > active_end:
+                continue
+            cursor = active_start
+            uncovered_end: date | None = None
+            for interval_start, interval_end in intervals_by_instrument.get(
+                profile.instrument_id, []
+            ):
+                if interval_end < cursor:
+                    continue
+                if interval_start > cursor:
+                    uncovered_end = min(active_end, interval_start - timedelta(days=1))
+                    break
+                if interval_end >= active_end:
+                    cursor = active_end + timedelta(days=1)
+                    break
+                cursor = interval_end + timedelta(days=1)
+            if cursor <= active_end:
+                gaps.append(
+                    (
+                        profile.instrument_id,
+                        cursor,
+                        uncovered_end or active_end,
+                    )
+                )
+                if len(gaps) >= limit:
+                    break
+        return gaps
+
     def upsert_terminal_settlements(
         self,
         settlements: Sequence[HistoricalTerminalSettlement],

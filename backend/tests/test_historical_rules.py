@@ -7,6 +7,7 @@ from qagent.backtesting.a_share_rules import (
     BrokerFeeRequest,
     EtfRuleMetadata,
     build_instrument_rule_metadata,
+    build_instrument_rule_metadata_schedule,
     load_a_share_rule_schedule,
 )
 from qagent.backtesting.execution import VersionedAshareExecutionResolver
@@ -43,6 +44,12 @@ def _repository(tmp_path):
 def test_checked_in_schedule_covers_board_and_registration_boundaries():
     schedule = load_a_share_rule_schedule()
 
+    pre_registration = schedule.trading_rule(
+        trade_date=date(2021, 11, 2),
+        market="SSE",
+        board="main",
+        security_type="stock",
+    )
     legacy = schedule.trading_rule(
         trade_date=date(2023, 4, 9),
         market="SSE",
@@ -75,6 +82,8 @@ def test_checked_in_schedule_covers_board_and_registration_boundaries():
         security_type="stock",
     )
 
+    assert pre_registration.limit_rule_key == "sse-main-pre-2023"
+    assert pre_registration.ipo_no_limit_sessions == 1
     assert legacy.ipo_no_limit_sessions == 1
     assert registration.ipo_no_limit_sessions == 5
     assert st.limit_pct == Decimal("5")
@@ -89,6 +98,20 @@ def test_fee_schedule_requires_broker_terms_and_switches_stamp_duty():
     schedule = load_a_share_rule_schedule()
     rules = schedule.fee_rules(BrokerFeeRequest(commission_bps="2.5", minimum_commission="5"))
 
+    pre_transfer_fee_cut = next(
+        item
+        for item in rules
+        if item.security_type == "stock"
+        and item.side == "buy"
+        and item.effective_from == date(2021, 11, 1)
+    )
+    post_transfer_fee_cut = next(
+        item
+        for item in rules
+        if item.security_type == "stock"
+        and item.side == "buy"
+        and item.effective_from == date(2022, 4, 29)
+    )
     old_sell = next(
         item
         for item in rules
@@ -107,6 +130,8 @@ def test_fee_schedule_requires_broker_terms_and_switches_stamp_duty():
 
     assert old_sell.stamp_duty_bps == Decimal("10")
     assert new_sell.stamp_duty_bps == Decimal("5")
+    assert pre_transfer_fee_cut.transfer_fee_bps == Decimal("0.2")
+    assert post_transfer_fee_cut.transfer_fee_bps == Decimal("0.1")
     assert new_sell.transfer_fee_bps == Decimal("0.1")
     assert new_sell.commission_bps == Decimal("2.5")
     assert all(item.stamp_duty_bps == 0 for item in etf_rules)
@@ -139,6 +164,27 @@ def test_instrument_metadata_uses_product_specific_etf_rules():
             schedule=schedule,
             etf=EtfRuleMetadata(t0_category="domestic_equity"),
         )
+
+
+def test_instrument_metadata_schedule_covers_every_rule_transition():
+    schedule = load_a_share_rule_schedule()
+    metadata = build_instrument_rule_metadata_schedule(
+        _profile("CN:600012"),
+        start=date(2021, 11, 1),
+        end=date(2025, 12, 31),
+        schedule=schedule,
+    )
+
+    assert [item.effective_from for item in metadata] == [
+        date(2021, 11, 1),
+        date(2023, 1, 3),
+        date(2023, 4, 10),
+    ]
+    assert [item.limit_rule_key for item in metadata] == [
+        "sse-main-pre-2023",
+        "sse-main-legacy",
+        "sse-main-registration",
+    ]
 
 
 def test_rule_repository_is_idempotent_and_resolves_date_specific_rules(tmp_path):
@@ -177,6 +223,30 @@ def test_rule_repository_is_idempotent_and_resolves_date_specific_rules(tmp_path
         repo.upsert_trading_rules([changed])
 
 
+def test_rule_repository_reports_metadata_coverage_gaps(tmp_path):
+    repo = _repository(tmp_path)
+    schedule = load_a_share_rule_schedule()
+    profile = _profile("CN:600012")
+    metadata = build_instrument_rule_metadata_schedule(
+        profile,
+        start=date(2023, 1, 3),
+        end=date(2025, 12, 31),
+        schedule=schedule,
+    )
+    repo.upsert_instrument_rule_metadata(metadata)
+
+    assert repo.instrument_rule_metadata_gaps(
+        [profile],
+        date(2023, 1, 3),
+        date(2025, 12, 31),
+    ) == []
+    assert repo.instrument_rule_metadata_gaps(
+        [profile],
+        date(2021, 11, 1),
+        date(2025, 12, 31),
+    ) == [("CN:600012", date(2021, 11, 1), date(2023, 1, 2))]
+
+
 def test_execution_resolver_selects_st_rule_and_date_specific_stamp_duty(tmp_path):
     repo = _repository(tmp_path)
     schedule = load_a_share_rule_schedule()
@@ -203,6 +273,35 @@ def test_execution_resolver_selects_st_rule_and_date_specific_stamp_duty(tmp_pat
     assert before.limit_pct == Decimal("5")
     assert before.sell_fee.stamp_duty_bps == Decimal("10")
     assert after.sell_fee.stamp_duty_bps == Decimal("5")
+
+
+def test_execution_resolver_supports_pre_2023_validation_dates(tmp_path):
+    repo = _repository(tmp_path)
+    schedule = load_a_share_rule_schedule()
+    profile = _profile("CN:600012")
+    repo.upsert_trading_rules(schedule.trading_rules)
+    repo.upsert_fee_rules(
+        schedule.fee_rules(
+            BrokerFeeRequest(commission_bps="3", minimum_commission="5")
+        )
+    )
+    repo.upsert_instrument_rule_metadata(
+        build_instrument_rule_metadata_schedule(
+            profile,
+            start=date(2021, 11, 1),
+            end=date(2025, 12, 31),
+            schedule=schedule,
+        )
+    )
+
+    resolved = VersionedAshareExecutionResolver(repo).resolve(
+        "CN:600012",
+        date(2021, 11, 2),
+    )
+
+    assert resolved.limit_pct == Decimal("10")
+    assert resolved.sell_fee.stamp_duty_bps == Decimal("10")
+    assert resolved.sell_fee.transfer_fee_bps == Decimal("0.2")
 
 
 def test_terminal_settlements_are_revision_scoped(tmp_path):

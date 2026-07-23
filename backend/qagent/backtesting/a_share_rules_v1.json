@@ -1,9 +1,23 @@
 {
   "rule_set_version": "a-share-rules-v1",
   "fee_schedule_version": "a-share-fees-v1",
-  "valid_from": "2023-01-03",
+  "valid_from": "2021-11-01",
   "valid_to": "2025-12-31",
   "trading_rules": [
+    {"limit_rule_key":"sse-main-pre-2023","market":"SSE","board":"main","is_st":false,"security_type":"stock","effective_from":"2021-11-01","effective_to":"2023-01-02","limit_pct":"10","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":1},
+    {"limit_rule_key":"sse-main-pre-2023-st","market":"SSE","board":"main","is_st":true,"security_type":"stock","effective_from":"2021-11-01","effective_to":"2023-01-02","limit_pct":"5","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":1},
+    {"limit_rule_key":"szse-main-pre-2023","market":"SZSE","board":"main","is_st":false,"security_type":"stock","effective_from":"2021-11-01","effective_to":"2023-01-02","limit_pct":"10","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":1},
+    {"limit_rule_key":"szse-main-pre-2023-st","market":"SZSE","board":"main","is_st":true,"security_type":"stock","effective_from":"2021-11-01","effective_to":"2023-01-02","limit_pct":"5","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":1},
+    {"limit_rule_key":"sse-star-pre-2023","market":"SSE","board":"star","is_st":false,"security_type":"stock","effective_from":"2021-11-01","effective_to":"2023-01-02","limit_pct":"20","tick_size":"0.01","board_lot":200,"minimum_order_quantity":200,"quantity_step":1,"settlement_days":1,"ipo_no_limit_sessions":5},
+    {"limit_rule_key":"sse-star-pre-2023-risk","market":"SSE","board":"star","is_st":true,"security_type":"stock","effective_from":"2021-11-01","effective_to":"2023-01-02","limit_pct":"20","tick_size":"0.01","board_lot":200,"minimum_order_quantity":200,"quantity_step":1,"settlement_days":1,"ipo_no_limit_sessions":5},
+    {"limit_rule_key":"szse-chinext-pre-2023","market":"SZSE","board":"chinext","is_st":false,"security_type":"stock","effective_from":"2021-11-01","effective_to":"2023-01-02","limit_pct":"20","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":5},
+    {"limit_rule_key":"szse-chinext-pre-2023-risk","market":"SZSE","board":"chinext","is_st":true,"security_type":"stock","effective_from":"2021-11-01","effective_to":"2023-01-02","limit_pct":"20","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":5},
+    {"limit_rule_key":"bse-stock-pre-2023","market":"BSE","board":"bse","is_st":false,"security_type":"stock","effective_from":"2021-11-15","effective_to":"2023-01-02","limit_pct":"30","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":1,"settlement_days":1,"ipo_no_limit_sessions":1},
+    {"limit_rule_key":"bse-stock-pre-2023-risk","market":"BSE","board":"bse","is_st":true,"security_type":"stock","effective_from":"2021-11-15","effective_to":"2023-01-02","limit_pct":"30","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":1,"settlement_days":1,"ipo_no_limit_sessions":1},
+    {"limit_rule_key":"cn-etf-10-t1-pre-2023","market":"CN","board":"etf_10","is_st":false,"security_type":"etf","effective_from":"2021-11-01","effective_to":"2023-01-02","limit_pct":"10","tick_size":"0.001","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":0},
+    {"limit_rule_key":"cn-etf-20-t1-pre-2023","market":"CN","board":"etf_20","is_st":false,"security_type":"etf","effective_from":"2021-11-01","effective_to":"2023-01-02","limit_pct":"20","tick_size":"0.001","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":0},
+    {"limit_rule_key":"cn-etf-10-t0-pre-2023","market":"CN","board":"etf_10_t0","is_st":false,"security_type":"etf","effective_from":"2021-11-01","effective_to":"2023-01-02","limit_pct":"10","tick_size":"0.001","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":0,"ipo_no_limit_sessions":0},
+    {"limit_rule_key":"cn-etf-20-t0-pre-2023","market":"CN","board":"etf_20_t0","is_st":false,"security_type":"etf","effective_from":"2021-11-01","effective_to":"2023-01-02","limit_pct":"20","tick_size":"0.001","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":0,"ipo_no_limit_sessions":0},
     {"limit_rule_key":"sse-main-legacy","market":"SSE","board":"main","is_st":false,"security_type":"stock","effective_from":"2023-01-03","effective_to":"2023-04-09","limit_pct":"10","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":1},
     {"limit_rule_key":"sse-main-legacy-st","market":"SSE","board":"main","is_st":true,"security_type":"stock","effective_from":"2023-01-03","effective_to":"2023-04-09","limit_pct":"5","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":1},
     {"limit_rule_key":"sse-main-registration","market":"SSE","board":"main","is_st":false,"security_type":"stock","effective_from":"2023-04-10","effective_to":"2025-12-31","limit_pct":"10","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":5},
@@ -24,11 +38,15 @@
     {"limit_rule_key":"cn-etf-20-t0","market":"CN","board":"etf_20_t0","is_st":false,"security_type":"etf","effective_from":"2023-01-03","effective_to":"2025-12-31","limit_pct":"20","tick_size":"0.001","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":0,"ipo_no_limit_sessions":0}
   ],
   "fee_templates": [
+    {"fee_rule_key":"cn-stock","effective_from":"2021-11-01","effective_to":"2022-04-28","side":"buy","security_type":"stock","exchange":"ALL","stamp_duty_bps":"0","transfer_fee_bps":"0.2"},
+    {"fee_rule_key":"cn-stock","effective_from":"2021-11-01","effective_to":"2022-04-28","side":"sell","security_type":"stock","exchange":"ALL","stamp_duty_bps":"10","transfer_fee_bps":"0.2"},
+    {"fee_rule_key":"cn-stock","effective_from":"2022-04-29","effective_to":"2023-01-02","side":"buy","security_type":"stock","exchange":"ALL","stamp_duty_bps":"0","transfer_fee_bps":"0.1"},
+    {"fee_rule_key":"cn-stock","effective_from":"2022-04-29","effective_to":"2023-01-02","side":"sell","security_type":"stock","exchange":"ALL","stamp_duty_bps":"10","transfer_fee_bps":"0.1"},
     {"fee_rule_key":"cn-stock","effective_from":"2023-01-03","effective_to":"2023-08-27","side":"buy","security_type":"stock","exchange":"ALL","stamp_duty_bps":"0","transfer_fee_bps":"0.1"},
     {"fee_rule_key":"cn-stock","effective_from":"2023-01-03","effective_to":"2023-08-27","side":"sell","security_type":"stock","exchange":"ALL","stamp_duty_bps":"10","transfer_fee_bps":"0.1"},
     {"fee_rule_key":"cn-stock","effective_from":"2023-08-28","effective_to":"2025-12-31","side":"buy","security_type":"stock","exchange":"ALL","stamp_duty_bps":"0","transfer_fee_bps":"0.1"},
     {"fee_rule_key":"cn-stock","effective_from":"2023-08-28","effective_to":"2025-12-31","side":"sell","security_type":"stock","exchange":"ALL","stamp_duty_bps":"5","transfer_fee_bps":"0.1"},
-    {"fee_rule_key":"cn-etf","effective_from":"2023-01-03","effective_to":"2025-12-31","side":"buy","security_type":"etf","exchange":"ALL","stamp_duty_bps":"0","transfer_fee_bps":"0"},
-    {"fee_rule_key":"cn-etf","effective_from":"2023-01-03","effective_to":"2025-12-31","side":"sell","security_type":"etf","exchange":"ALL","stamp_duty_bps":"0","transfer_fee_bps":"0"}
+    {"fee_rule_key":"cn-etf","effective_from":"2021-11-01","effective_to":"2025-12-31","side":"buy","security_type":"etf","exchange":"ALL","stamp_duty_bps":"0","transfer_fee_bps":"0"},
+    {"fee_rule_key":"cn-etf","effective_from":"2021-11-01","effective_to":"2025-12-31","side":"sell","security_type":"etf","exchange":"ALL","stamp_duty_bps":"0","transfer_fee_bps":"0"}
   ]
 }

@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from qagent.backtesting.a_share_rules import (
     BrokerFeeRequest,
-    build_instrument_rule_metadata,
+    build_instrument_rule_metadata_schedule,
     load_a_share_rule_schedule,
 )
 from qagent.historical_evidence.models import (
@@ -471,24 +471,12 @@ def run_historical_backfill(
                 ),
                 provider=profile.provider if profile is not None else "symbol_scope",
             )
-            effective_dates = {
-                max(
-                    start,
-                    schedule.valid_from,
-                    canonical_profile.listing_date or schedule.valid_from,
-                )
-            }
-            registration_date = date(2023, 4, 10)
-            if min(effective_dates) < registration_date <= end:
-                effective_dates.add(registration_date)
-            for effective_from in sorted(effective_dates):
-                if effective_from > min(end, schedule.valid_to):
-                    continue
-                item = build_instrument_rule_metadata(
-                    canonical_profile,
-                    effective_from=effective_from,
-                    schedule=schedule,
-                )
+            for item in build_instrument_rule_metadata_schedule(
+                canonical_profile,
+                start=start,
+                end=end,
+                schedule=schedule,
+            ):
                 metadata.append(item.model_copy(update={"provider_mode": mode}))
         instrument_rule_rows = replay_repo.upsert_instrument_rule_metadata(metadata)
 

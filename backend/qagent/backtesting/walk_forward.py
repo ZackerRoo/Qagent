@@ -703,6 +703,7 @@ def run_full_market_walk_forward_selection(
         )
         snapshot_inputs: list[_WalkForwardSnapshotInput] = []
         inventory_ids = [item.instrument_id for item in lifecycle_inventory]
+        eligible_date_ranges: dict[str, tuple[date, date]] = {}
         for batch_start in range(0, len(sessions), 8):
             lease_heartbeat.maintain_now()
             batch_dates = sessions[batch_start : batch_start + 8]
@@ -741,6 +742,15 @@ def run_full_market_walk_forward_selection(
                         continue
                     eligible.append(instrument_id)
                 eligible = sorted(eligible)
+                for instrument_id in eligible:
+                    first_date, last_date = eligible_date_ranges.get(
+                        instrument_id,
+                        (decision_date, decision_date),
+                    )
+                    eligible_date_ranges[instrument_id] = (
+                        min(first_date, decision_date),
+                        max(last_date, decision_date),
+                    )
                 eligible_universes.append((decision_date, eligible))
                 stock_ids = {
                     item.instrument_id
@@ -763,6 +773,30 @@ def run_full_market_walk_forward_selection(
                         missing_tradability_count=missing_tradability_count,
                     )
                 )
+        metadata_profiles = [
+            item.model_copy(
+                update={
+                    "listing_date": eligible_date_ranges[item.instrument_id][0],
+                    "delisting_date": eligible_date_ranges[item.instrument_id][1],
+                }
+            )
+            for item in lifecycle_inventory
+            if item.instrument_id in eligible_date_ranges
+        ]
+        metadata_gaps = owner_repository.instrument_rule_metadata_gaps(
+            metadata_profiles,
+            start,
+            end,
+        )
+        if metadata_gaps:
+            samples = ", ".join(
+                f"{instrument_id} {gap_start.isoformat()}..{gap_end.isoformat()}"
+                for instrument_id, gap_start, gap_end in metadata_gaps
+            )
+            raise ReplayEvidenceUnavailable(
+                "instrument rule metadata coverage is incomplete: "
+                f"{samples}; rerun the historical backfill before validation"
+            )
         snapshot_by_date = dict(resumed)
         pending_inputs = [
             item for item in snapshot_inputs if item.decision_date not in snapshot_by_date

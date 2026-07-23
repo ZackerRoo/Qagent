@@ -48,7 +48,7 @@ class AShareRuleSchedule(BaseModel):
 
     @model_validator(mode="after")
     def validate_schedule(self):
-        if self.valid_from != date(2023, 1, 3) or self.valid_to != date(2025, 12, 31):
+        if self.valid_from != date(2021, 11, 1) or self.valid_to != date(2025, 12, 31):
             raise ValueError("a-share-rules-v1 must cover the declared validation window")
         if any(item.rule_set_version != self.rule_set_version for item in self.trading_rules):
             raise ValueError("trading rule version does not match schedule")
@@ -163,6 +163,56 @@ def build_instrument_rule_metadata(
         source_provider=source_provider,
         fetched_at=datetime.now(timezone.utc),
     )
+
+
+def build_instrument_rule_metadata_schedule(
+    profile: HistoricalInstrumentProfile,
+    *,
+    start: date,
+    end: date,
+    schedule: AShareRuleSchedule,
+    etf: EtfRuleMetadata | None = None,
+    source_provider: str = "qagent_checked_in_rules",
+) -> list[HistoricalInstrumentRuleMetadata]:
+    if start > end:
+        raise ValueError("start must be on or before end")
+    effective_start = max(
+        start,
+        schedule.valid_from,
+        profile.listing_date or schedule.valid_from,
+    )
+    effective_end = min(end, schedule.valid_to)
+    if profile.delisting_date is not None:
+        effective_end = min(effective_end, profile.delisting_date)
+    if effective_start > effective_end:
+        return []
+
+    probe = build_instrument_rule_metadata(
+        profile,
+        effective_from=effective_start,
+        schedule=schedule,
+        etf=etf,
+        source_provider=source_provider,
+    )
+    transition_dates = {
+        item.effective_from
+        for item in schedule.trading_rules
+        if item.market == probe.market
+        and item.board == probe.board
+        and item.security_type == probe.security_type
+        and item.is_st is False
+        and effective_start < item.effective_from <= effective_end
+    }
+    return [
+        build_instrument_rule_metadata(
+            profile,
+            effective_from=effective_from,
+            schedule=schedule,
+            etf=etf,
+            source_provider=source_provider,
+        )
+        for effective_from in sorted({effective_start, *transition_dates})
+    ]
 
 
 def _stock_market_and_board(symbol: str) -> tuple[str, str]:
