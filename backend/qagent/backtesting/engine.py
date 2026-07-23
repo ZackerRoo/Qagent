@@ -31,6 +31,7 @@ class BacktestSignal(BaseModel):
     initial_stop: Decimal | None
     target_1: Decimal | None
     outcome_status: str
+    no_chase_above: Decimal | None = None
     return_5d: float | None = None
     return_10d: float | None = None
     return_20d: float | None = None
@@ -239,6 +240,7 @@ def _signal_from_outcome(
         initial_stop=snapshot.initial_stop,
         target_1=snapshot.target_1,
         outcome_status=outcome.outcome_status,
+        no_chase_above=_snapshot_no_chase_above(snapshot),
         return_5d=outcome.return_5d,
         return_10d=outcome.return_10d,
         return_20d=outcome.return_20d,
@@ -246,6 +248,24 @@ def _signal_from_outcome(
         max_drawdown_pct=outcome.max_drawdown_pct,
         max_runup_pct=outcome.max_runup_pct,
     )
+
+
+def _snapshot_no_chase_above(
+    snapshot: OpportunitySnapshotRecord,
+) -> Decimal | None:
+    card = snapshot.card
+    if not isinstance(card, dict):
+        return None
+    entry_plan = card.get("entry_plan")
+    if not isinstance(entry_plan, dict):
+        return None
+    value = entry_plan.get("no_chase_above")
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except (ValueError, ArithmeticError):
+        return None
 
 
 def _build_summary(

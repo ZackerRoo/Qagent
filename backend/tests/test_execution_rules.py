@@ -163,7 +163,12 @@ def test_versioned_no_limit_rule_does_not_apply_legacy_symbol_limit():
     )
 
     candidate = _candidate_from_signal(
-        _signal().model_copy(update={"trigger_price": Decimal("12")}),
+        _signal().model_copy(
+            update={
+                "trigger_price": Decimal("12"),
+                "target_1": Decimal("16"),
+            }
+        ),
         bars,
         slippage_bps=Decimal("0"),
         max_entry_wait_days=1,

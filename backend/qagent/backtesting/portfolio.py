@@ -240,7 +240,7 @@ def run_signal_portfolio_backtest(
         "portfolio_model": "fixed_risk_stop_target_time_exit",
         "execution_rules": (
             "unified_execution_kernel:gap,suspension,zero_volume,"
-            "one_price_limit,tick,round_lot,fees"
+            "one_price_limit,tick,round_lot,fees,no_chase,target_guard"
         ),
         "cn_execution_rules": (
             "versioned_replay_evidence"
@@ -323,7 +323,18 @@ def _candidate_from_signal(
         else trigger * Decimal("0.95")
     )
     target = Decimal(signal.target_1) if signal.target_1 is not None else None
-    if trigger <= 0 or stop <= 0:
+    no_chase = (
+        Decimal(signal.no_chase_above)
+        if signal.no_chase_above is not None
+        else None
+    )
+    if (
+        trigger <= 0
+        or stop <= 0
+        or stop >= trigger
+        or (target is not None and target <= trigger)
+        or (no_chase is not None and no_chase < trigger)
+    ):
         return None
 
     ordered = bars.sort_values("trade_date").reset_index(drop=True)
@@ -375,6 +386,10 @@ def _candidate_from_signal(
             )
         )
         if fill is not None and fill.quantity == probe_quantity:
+            if (no_chase is not None and fill.price > no_chase) or (
+                target is not None and fill.price >= target
+            ):
+                return None
             entry_index = index
             entry_rule = row_rule
             entry_price = fill.price

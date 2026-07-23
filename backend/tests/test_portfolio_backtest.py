@@ -139,6 +139,101 @@ def test_cn_portfolio_candidate_skips_limit_up_entry_and_applies_t_plus_one_exit
     assert candidate.exit_date == date(2026, 1, 6)
 
 
+def test_portfolio_candidate_rejects_fill_above_no_chase_limit():
+    signal = BacktestSignal(
+        snapshot_id="test-no-chase",
+        instrument_id="CN:000001",
+        signal_date=date(2026, 1, 1),
+        primary_strategy_id="trend_momentum_stage2",
+        status="setup_ready",
+        rank_score=Decimal("0.9"),
+        trigger_price=Decimal("10.00"),
+        initial_stop=Decimal("9.50"),
+        target_1=Decimal("11.00"),
+        no_chase_above=Decimal("10.30"),
+        outcome_status="pending",
+    )
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "CN:000001",
+                "trade_date": date(2026, 1, 1),
+                "open": 9.8,
+                "high": 9.9,
+                "low": 9.7,
+                "close": 9.8,
+                "volume": 1_000_000,
+            },
+            {
+                "instrument_id": "CN:000001",
+                "trade_date": date(2026, 1, 2),
+                "open": 10.50,
+                "high": 10.80,
+                "low": 10.40,
+                "close": 10.60,
+                "volume": 1_000_000,
+            },
+        ]
+    )
+
+    candidate = _candidate_from_signal(
+        signal,
+        bars,
+        slippage_bps=Decimal("0"),
+        max_entry_wait_days=1,
+        max_holding_days=3,
+    )
+
+    assert candidate is None
+
+
+def test_portfolio_candidate_rejects_fill_at_or_above_target():
+    signal = BacktestSignal(
+        snapshot_id="test-target-guard",
+        instrument_id="US:TEST",
+        signal_date=date(2026, 1, 1),
+        primary_strategy_id="trend_momentum_stage2",
+        status="setup_ready",
+        rank_score=Decimal("0.9"),
+        trigger_price=Decimal("10.00"),
+        initial_stop=Decimal("9.50"),
+        target_1=Decimal("11.00"),
+        outcome_status="pending",
+    )
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "US:TEST",
+                "trade_date": date(2026, 1, 1),
+                "open": 9.8,
+                "high": 9.9,
+                "low": 9.7,
+                "close": 9.8,
+                "volume": 1_000_000,
+            },
+            {
+                "instrument_id": "US:TEST",
+                "trade_date": date(2026, 1, 2),
+                "open": 11.00,
+                "high": 11.20,
+                "low": 10.90,
+                "close": 11.10,
+                "volume": 1_000_000,
+            },
+        ]
+    )
+
+    candidate = _candidate_from_signal(
+        signal,
+        bars,
+        slippage_bps=Decimal("0"),
+        max_entry_wait_days=1,
+        max_holding_days=3,
+    )
+
+    assert candidate is None
+
+
 def test_cn_portfolio_sizing_uses_round_lots():
     signal = BacktestSignal(
         snapshot_id="test-cn",

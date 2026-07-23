@@ -172,6 +172,7 @@ class WalkForwardSelection(BaseModel):
     trigger_price: Decimal | None
     initial_stop: Decimal | None
     target_1: Decimal | None
+    no_chase_above: Decimal | None = None
     factor_signals: list[str] = Field(default_factory=list)
 
 
@@ -1515,6 +1516,7 @@ def _selection(card) -> WalkForwardSelection:
         trigger_price=card.entry_plan.trigger_price,
         initial_stop=card.exit_plan.initial_stop,
         target_1=card.exit_plan.target_1,
+        no_chase_above=card.entry_plan.no_chase_above,
         factor_signals=_selection_factor_signals(card),
     )
 
@@ -1545,6 +1547,7 @@ def _signals(snapshots: list[WalkForwardSnapshot], *, size: int) -> list[Backtes
                 initial_stop=item.initial_stop,
                 target_1=item.target_1,
                 outcome_status="pending",
+                no_chase_above=item.no_chase_above,
             )
             for item in selections
         )
