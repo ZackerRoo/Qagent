@@ -27,6 +27,7 @@ from qagent.backtesting.walk_forward import (
     _equal_weight_eligible_return,
     _equal_weight_eligible_return_from_stream,
     _enforce_release_gate_on_positive_evidence,
+    _paper_eligible_card_ids,
     _trade_temporal_validation,
     _walk_forward_candidates,
     run_full_market_walk_forward_selection,
@@ -45,6 +46,22 @@ from qagent.storage import tables as _tables  # noqa: F401
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
 from qagent.storage.repository import QagentRepository
 from qagent.strategy_data.models import FundamentalSnapshot
+
+
+def test_walk_forward_execution_admission_uses_final_policy_audit():
+    audits = [
+        SimpleNamespace(
+            card_id="eligible",
+            gate_decision=SimpleNamespace(paper_candidate_eligible=True),
+        ),
+        SimpleNamespace(
+            card_id="blocked",
+            gate_decision=SimpleNamespace(paper_candidate_eligible=False),
+        ),
+    ]
+
+    assert _paper_eligible_card_ids(audits) == {"eligible"}
+    assert _paper_eligible_card_ids([]) is None
 
 
 def test_snapshot_computation_defers_cyclic_gc_until_checkpoint_end(monkeypatch):

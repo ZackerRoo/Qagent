@@ -182,6 +182,9 @@ class WalkForwardSnapshot(BaseModel):
     eligible_size: int
     evaluated_size: int = 0
     prefilter_ranked_size: int = 0
+    recommendation_card_count: int = 0
+    paper_eligible_card_count: int = 0
+    paper_blocked_card_count: int = 0
     suspended_count: int
     st_excluded_count: int
     missing_tradability_count: int
@@ -476,11 +479,20 @@ def _compute_walk_forward_snapshot_without_gc(
         end=decision_date,
     )
     errors = [item.reason for item in scan.items if item.status == "error"]
-    selections = [
-        _selection(card)
-        for card in scan.cards
-        if card.status.value not in EXCLUDED_STATUSES
+    recommendation_cards = [
+        card for card in scan.cards if card.status.value not in EXCLUDED_STATUSES
     ]
+    paper_eligible_ids = _paper_eligible_card_ids(scan.strategy_governance)
+    eligible_cards = (
+        [
+            card
+            for card in recommendation_cards
+            if card.card_id in paper_eligible_ids
+        ]
+        if paper_eligible_ids is not None
+        else recommendation_cards
+    )
+    selections = [_selection(card) for card in eligible_cards]
     return _WalkForwardWorkerResult(
         worker_pid=os.getpid(),
         snapshot=WalkForwardSnapshot(
@@ -489,6 +501,11 @@ def _compute_walk_forward_snapshot_without_gc(
             eligible_size=len(snapshot_input.eligible),
             evaluated_size=len(candidates),
             prefilter_ranked_size=len(factor_rankings),
+            recommendation_card_count=len(recommendation_cards),
+            paper_eligible_card_count=len(eligible_cards),
+            paper_blocked_card_count=(
+                len(recommendation_cards) - len(eligible_cards)
+            ),
             suspended_count=snapshot_input.suspended_count,
             st_excluded_count=snapshot_input.st_excluded_count,
             missing_tradability_count=snapshot_input.missing_tradability_count,
@@ -501,6 +518,16 @@ def _compute_walk_forward_snapshot_without_gc(
         scan_error_samples=errors[:3],
         stats=_snapshot_worker_stats(market_provider, strategy_provider),
     )
+
+
+def _paper_eligible_card_ids(governance) -> set[str] | None:
+    if not governance:
+        return None
+    return {
+        audit.card_id
+        for audit in governance
+        if audit.gate_decision.paper_candidate_eligible
+    }
 
 
 def _adjusted_prefilter_bars(bars):
@@ -1013,6 +1040,18 @@ def run_full_market_walk_forward_selection(
                 round(statistics.median(item.evaluated_size for item in snapshots))
                 if snapshots
                 else 0
+            ),
+            "walk_forward_recommendation_cards": str(
+                sum(item.recommendation_card_count for item in snapshots)
+            ),
+            "walk_forward_paper_eligible_cards": str(
+                sum(item.paper_eligible_card_count for item in snapshots)
+            ),
+            "walk_forward_paper_blocked_cards": str(
+                sum(item.paper_blocked_card_count for item in snapshots)
+            ),
+            "walk_forward_execution_admission": (
+                "final_policy_paper_candidate_eligible"
             ),
             "walk_forward_st_policy": "excluded",
             "walk_forward_validation_scope": (
