@@ -89,7 +89,7 @@ class ReplayMarketDataProvider:
                     [],
                 ).append(instrument_id)
         for (query_start, query_end), query_ids in query_groups.items():
-            rows = self.repository.replay_bars(
+            rows = self.repository.replay_bar_rows(
                 query_ids,
                 query_start,
                 query_end,

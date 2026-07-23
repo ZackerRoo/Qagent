@@ -371,14 +371,14 @@ def test_replay_market_provider_reuses_rolling_window(tmp_path, monkeypatch):
     repository, _ = _replay_repository(tmp_path)
     revision = repository.current_revision()
     provider = ReplayMarketDataProvider(repository, revision)
-    original = repository.replay_bars
+    original = repository.replay_bar_rows
     calls = []
 
-    def tracked_replay_bars(instrument_ids, start, end, dataset_revision):
+    def tracked_replay_bar_rows(instrument_ids, start, end, dataset_revision):
         calls.append((list(instrument_ids), start, end, dataset_revision))
         return original(instrument_ids, start, end, dataset_revision)
 
-    monkeypatch.setattr(repository, "replay_bars", tracked_replay_bars)
+    monkeypatch.setattr(repository, "replay_bar_rows", tracked_replay_bar_rows)
 
     first = provider.get_daily_bars(
         ["CN:000001"],
@@ -404,14 +404,14 @@ def test_replay_market_provider_reuses_rolling_window(tmp_path, monkeypatch):
 def test_replay_market_prefetch_avoids_per_instrument_queries(tmp_path, monkeypatch):
     repository, _ = _replay_repository(tmp_path)
     provider = ReplayMarketDataProvider(repository, repository.current_revision())
-    original = repository.replay_bars
+    original = repository.replay_bar_rows
     calls = []
 
-    def tracked_replay_bars(instrument_ids, start, end, dataset_revision):
+    def tracked_replay_bar_rows(instrument_ids, start, end, dataset_revision):
         calls.append(list(instrument_ids))
         return original(instrument_ids, start, end, dataset_revision)
 
-    monkeypatch.setattr(repository, "replay_bars", tracked_replay_bars)
+    monkeypatch.setattr(repository, "replay_bar_rows", tracked_replay_bar_rows)
     instrument_ids = ["CN:000001", "CN:000300.IDX"]
     provider.prefetch_daily_bars(
         instrument_ids,

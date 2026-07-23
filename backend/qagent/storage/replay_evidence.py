@@ -785,6 +785,24 @@ class ReplayEvidenceRepository:
         end: date,
         revision: int,
     ) -> list[HistoricalReplayBar]:
+        return [
+            HistoricalReplayBar.model_validate(dict(row._mapping))
+            for row in self.replay_bar_rows(
+                instrument_ids,
+                start,
+                end,
+                revision,
+            )
+        ]
+
+    def replay_bar_rows(
+        self,
+        instrument_ids: Sequence[str],
+        start: date,
+        end: date,
+        revision: int,
+    ) -> list:
+        """Return lightweight immutable rows for high-volume replay computation."""
         if not instrument_ids:
             return []
         with self.session_factory() as session:
@@ -813,15 +831,18 @@ class ReplayEvidenceRepository:
                 )
                 .subquery()
             )
-            row_alias = aliased(HistoricalReplayBarRow, ranked)
+            selected_columns = [
+                ranked.c[column.name]
+                for column in HistoricalReplayBarRow.__table__.columns
+            ]
             rows = list(
-                session.scalars(
-                    select(row_alias)
+                session.execute(
+                    select(*selected_columns)
                     .where(ranked.c.revision_rank == 1)
-                    .order_by(row_alias.trade_date, row_alias.instrument_id)
+                    .order_by(ranked.c.trade_date, ranked.c.instrument_id)
                 )
             )
-        return [HistoricalReplayBar.model_validate(_row_dict(row)) for row in rows]
+        return rows
 
     def replay_instrument_ids(
         self,

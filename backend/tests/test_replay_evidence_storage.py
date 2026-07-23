@@ -177,6 +177,9 @@ def test_bar_and_action_upserts_are_idempotent(storage):
     assert repo.replay_bars(
         ["CN:000001"], date(2025, 1, 1), date(2025, 1, 3), 2
     )[0].raw_close == Decimal("10.25000000")
+    assert repo.replay_bar_rows(
+        ["CN:000001"], date(2025, 1, 1), date(2025, 1, 3), 2
+    )[0].raw_close == Decimal("10.25000000")
 
 
 def test_same_revision_bar_payload_is_immutable(storage):
