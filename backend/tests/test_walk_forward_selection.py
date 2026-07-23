@@ -26,6 +26,7 @@ from qagent.backtesting.walk_forward import (
     _equal_weight_eligible_return,
     _enforce_release_gate_on_positive_evidence,
     _trade_temporal_validation,
+    _walk_forward_candidates,
     run_full_market_walk_forward_selection,
 )
 from qagent.db import Base, create_db_engine
@@ -430,6 +431,26 @@ def test_replay_market_prefetch_avoids_per_instrument_queries(tmp_path, monkeypa
     assert calls == [instrument_ids]
 
 
+def test_walk_forward_prefilter_reserves_non_stock_candidates():
+    eligible = [f"CN:{index:06d}" for index in range(8)]
+    non_stocks = eligible[-2:]
+    rankings = [
+        SimpleNamespace(instrument_id=instrument_id)
+        for instrument_id in eligible
+    ]
+
+    candidates = _walk_forward_candidates(
+        eligible=eligible,
+        eligible_non_stocks=non_stocks,
+        rankings=rankings,
+        limit=5,
+    )
+
+    assert len(candidates) == 5
+    assert candidates[:4] == eligible[:4]
+    assert candidates[-1] == non_stocks[0]
+
+
 def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     repository, decision_date = _replay_repository(tmp_path)
 
@@ -452,6 +473,8 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert len(first.snapshots) == 1
     assert first.snapshots[0].historical_universe_size == 1
     assert first.snapshots[0].eligible_size == 1
+    assert first.snapshots[0].evaluated_size == 1
+    assert first.snapshots[0].prefilter_ranked_size == 1
     assert first.reproducibility_digest == second.reproducibility_digest
     assert first.experiment_manifest.dataset_revision == repository.current_revision()
     assert first.experiment_manifest.strategy_registry_digest
@@ -472,6 +495,7 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert first.data_health["walk_forward_cross_section_coverage_pct"] == "100.0"
     assert first.data_health["walk_forward_fundamental_coverage_gate"] == "ready"
     assert first.data_health["walk_forward_fundamental_coverage_pct"] == "100.0"
+    assert first.data_health["walk_forward_median_evaluated_instruments"] == "1"
     assert first.data_health["walk_forward_top_5_validation_gate"] == "insufficient"
     assert [item.key for item in first.cost_sensitivity] == [
         "base",

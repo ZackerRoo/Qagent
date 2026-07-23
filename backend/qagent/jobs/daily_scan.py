@@ -137,6 +137,7 @@ def run_daily_scan(
     paper_trading_report: object | None = None,
     walk_forward_validation: Mapping[str, object] | None = None,
     strategy_governance_context: StrategyGovernanceContext | None = None,
+    factor_rankings_override: list[FactorRanking] | None = None,
     start: date = date(2026, 1, 1),
     end: date = date(2026, 12, 31),
 ) -> DailyScanResult:
@@ -275,7 +276,14 @@ def run_daily_scan(
             scan_error_samples.append(error_message)
             items.append(_scan_error_item(instrument_id, exc))
 
-    factor_rankings = _factor_rankings_from_bars(bars_by_instrument, fundamentals_by_instrument)
+    factor_rankings = (
+        list(factor_rankings_override)
+        if factor_rankings_override is not None
+        else _factor_rankings_from_bars(
+            bars_by_instrument,
+            fundamentals_by_instrument,
+        )
+    )
     for ranking in factor_rankings:
         ranking.instrument_label = format_instrument_label(ranking.instrument_id)
     factor_by_id = {ranking.instrument_id: ranking for ranking in factor_rankings}

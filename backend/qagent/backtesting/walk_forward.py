@@ -37,6 +37,8 @@ from qagent.backtesting.temporal_validation import (
     TemporalValidationResult,
     build_temporal_validation,
 )
+from qagent.factors.engine import build_factor_rankings
+from qagent.factors.models import FactorRanking
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.market.astock_enhanced import EmptyAShareEnhancedDataProvider
 from qagent.market.calendars import trading_sessions_in_range
@@ -54,6 +56,9 @@ EXCLUDED_STATUSES = frozenset({"risk_elevated", "invalidated", "closed", "postmo
 ELIGIBLE_UNIVERSE_BENCHMARK_ID = "CN:EQUAL_WEIGHT_ELIGIBLE"
 MIN_FULL_MARKET_COVERAGE_RATIO = 0.90
 MIN_FUNDAMENTAL_COVERAGE_RATIO = 0.80
+PREFILTER_LOOKBACK_DAYS = 220
+PREFILTER_CANDIDATE_LIMIT = 600
+PREFILTER_NON_STOCK_RESERVE_RATIO = 0.20
 
 
 class _DatasetLeaseHeartbeat:
@@ -172,6 +177,8 @@ class WalkForwardSnapshot(BaseModel):
     decision_date: date
     historical_universe_size: int
     eligible_size: int
+    evaluated_size: int = 0
+    prefilter_ranked_size: int = 0
     suspended_count: int
     st_excluded_count: int
     missing_tradability_count: int
@@ -295,6 +302,7 @@ class _WalkForwardSnapshotInput(BaseModel):
     historical_universe_size: int
     eligible: list[str]
     eligible_stocks: list[str]
+    eligible_non_stocks: list[str] = Field(default_factory=list)
     suspended_count: int
     st_excluded_count: int
     missing_tradability_count: int
@@ -391,23 +399,51 @@ def _compute_walk_forward_snapshot(
     fundamental_covered_count = sum(
         _has_usable_fundamental(item) for item in fundamental_evidence.values()
     )
-    window_start = decision_date - timedelta(days=lookback_days)
+    prefilter_start = decision_date - timedelta(
+        days=min(lookback_days, PREFILTER_LOOKBACK_DAYS)
+    )
     market_provider.prefetch_daily_bars(
         snapshot_input.eligible,
+        prefilter_start,
+        decision_date,
+    )
+    prefilter_bars = market_provider.get_daily_bars(
+        snapshot_input.eligible,
+        prefilter_start,
+        decision_date,
+    )
+    factor_rankings = build_factor_rankings(
+        _adjusted_prefilter_bars(prefilter_bars),
+        fundamentals=fundamental_evidence,
+    )
+    candidates = _walk_forward_candidates(
+        eligible=snapshot_input.eligible,
+        eligible_non_stocks=snapshot_input.eligible_non_stocks,
+        rankings=factor_rankings,
+        limit=PREFILTER_CANDIDATE_LIMIT,
+    )
+    window_start = decision_date - timedelta(days=lookback_days)
+    market_provider.prefetch_daily_bars(
+        candidates,
         window_start,
         decision_date,
     )
     strategy_provider.prefetch_fundamentals(
-        snapshot_input.eligible,
+        candidates,
         decision_date,
-        snapshots=fundamental_evidence,
+        snapshots={
+            instrument_id: fundamental_evidence[instrument_id]
+            for instrument_id in candidates
+            if instrument_id in fundamental_evidence
+        },
     )
     scan = run_daily_scan(
-        snapshot_input.eligible,
+        candidates,
         market_provider,
         mode="historical_replay",
         strategy_data_provider=strategy_provider,
         a_share_enhanced_provider=EmptyAShareEnhancedDataProvider(),
+        factor_rankings_override=factor_rankings,
         start=window_start,
         end=decision_date,
     )
@@ -423,6 +459,8 @@ def _compute_walk_forward_snapshot(
             decision_date=decision_date,
             historical_universe_size=snapshot_input.historical_universe_size,
             eligible_size=len(snapshot_input.eligible),
+            evaluated_size=len(candidates),
+            prefilter_ranked_size=len(factor_rankings),
             suspended_count=snapshot_input.suspended_count,
             st_excluded_count=snapshot_input.st_excluded_count,
             missing_tradability_count=snapshot_input.missing_tradability_count,
@@ -434,6 +472,79 @@ def _compute_walk_forward_snapshot(
         scan_error_count=len(errors),
         scan_error_samples=errors[:3],
         stats=_snapshot_worker_stats(market_provider, strategy_provider),
+    )
+
+
+def _adjusted_prefilter_bars(bars):
+    if bars.empty or "adjusted_close" not in bars.columns:
+        return bars
+    adjusted = bars.loc[bars["adjusted_close"].notna()].copy()
+    if adjusted.empty:
+        return bars
+    for column in ("open", "high", "low", "close"):
+        adjusted_column = f"adjusted_{column}"
+        fallback = adjusted[column]
+        if "adjustment_factor" in adjusted.columns:
+            fallback = adjusted[column] * adjusted["adjustment_factor"]
+        if adjusted_column in adjusted.columns:
+            adjusted[column] = adjusted[adjusted_column].where(
+                adjusted[adjusted_column].notna(),
+                fallback,
+            )
+        elif column == "close":
+            adjusted[column] = adjusted["adjusted_close"]
+        elif "adjustment_factor" in adjusted.columns:
+            adjusted[column] = adjusted[column] * adjusted["adjustment_factor"]
+    return adjusted
+
+
+def _walk_forward_candidates(
+    *,
+    eligible: list[str],
+    eligible_non_stocks: list[str],
+    rankings: list[FactorRanking],
+    limit: int,
+) -> list[str]:
+    if limit <= 0:
+        raise ValueError("walk-forward candidate limit must be positive")
+    universe = set(eligible)
+    if len(eligible) <= limit:
+        return list(eligible)
+    ranked = [
+        item.instrument_id
+        for item in rankings
+        if item.instrument_id in universe
+    ]
+    if not ranked:
+        return sorted(eligible)[:limit]
+    non_stocks = set(eligible_non_stocks)
+    reserve = min(
+        len(non_stocks),
+        limit,
+        max(1, math.ceil(limit * PREFILTER_NON_STOCK_RESERVE_RATIO)),
+    )
+    reserved_ids = [
+        instrument_id
+        for instrument_id in ranked
+        if instrument_id in non_stocks
+    ][:reserve]
+    selected_ids = set(reserved_ids)
+    for instrument_id in ranked:
+        if len(selected_ids) >= limit:
+            break
+        selected_ids.add(instrument_id)
+    if len(selected_ids) < limit:
+        for instrument_id in sorted(universe.difference(selected_ids)):
+            selected_ids.add(instrument_id)
+            if len(selected_ids) >= limit:
+                break
+    ranked_position = {instrument_id: index for index, instrument_id in enumerate(ranked)}
+    return sorted(
+        selected_ids,
+        key=lambda instrument_id: (
+            ranked_position.get(instrument_id, len(ranked)),
+            instrument_id,
+        ),
     )
 
 
@@ -611,12 +722,16 @@ def run_full_market_walk_forward_selection(
                     if item.security_type in {"stock", "1"}
                 }
                 eligible_stocks = [item for item in eligible if item in stock_ids]
+                eligible_non_stocks = [
+                    item for item in eligible if item not in stock_ids
+                ]
                 snapshot_inputs.append(
                     _WalkForwardSnapshotInput(
                         decision_date=decision_date,
                         historical_universe_size=len(instrument_ids),
                         eligible=eligible,
                         eligible_stocks=eligible_stocks,
+                        eligible_non_stocks=eligible_non_stocks,
                         suspended_count=suspended_count,
                         st_excluded_count=st_excluded_count,
                         missing_tradability_count=missing_tradability_count,
@@ -827,6 +942,16 @@ def run_full_market_walk_forward_selection(
             ),
             "walk_forward_lease_recovery_count": str(lease_heartbeat.recovery_count),
             "walk_forward_universe": "historical_lifecycle_per_rebalance_date",
+            "walk_forward_selection_pipeline": (
+                "full_market_point_in_time_factor_prefilter_then_full_strategy"
+            ),
+            "walk_forward_prefilter_lookback_days": str(PREFILTER_LOOKBACK_DAYS),
+            "walk_forward_candidate_limit": str(PREFILTER_CANDIDATE_LIMIT),
+            "walk_forward_median_evaluated_instruments": str(
+                round(statistics.median(item.evaluated_size for item in snapshots))
+                if snapshots
+                else 0
+            ),
             "walk_forward_st_policy": "excluded",
             "walk_forward_validation_scope": (
                 "full_market" if market_coverage_gate == "ready" else "pilot"
