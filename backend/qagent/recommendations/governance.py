@@ -20,6 +20,7 @@ from qagent.recommendations.feedback import (
     apply_recommendation_feedback_calibration,
     apply_recommendation_feedback_quality_gate,
     apply_walk_forward_validation_feedback,
+    card_validation_signal_keys,
     paper_trading_feedback_data_health,
     recommendation_feedback_data_health,
     walk_forward_feedback_data_health,
@@ -565,7 +566,7 @@ def _walk_forward_gate_for_card(
         *list(validation.get("strategies", []) or []),
         *list(validation.get("factors", []) or []),
     ]
-    signal_keys = set(_card_signal_keys(card))
+    signal_keys = set(card_validation_signal_keys(card))
     matched: list[Mapping[str, object]] = []
     for raw in raw_metrics:
         if not isinstance(raw, Mapping):
@@ -863,15 +864,6 @@ def _throttle_multiplier(runtime: StrategyRuntimePolicy) -> float:
         configured = _float_value(breach_policy.get("throttle_multiplier"), default=0.5)
         return max(0.0, min(1.0, configured))
     return 0.5
-
-
-def _card_signal_keys(card: OpportunityCard) -> list[str]:
-    keys = list(card.factor_flags)
-    if card.a_share_enhanced is not None:
-        keys.extend(card.a_share_enhanced.signals)
-    if card.primary_strategy_id:
-        keys.append(card.primary_strategy_id)
-    return sorted(set(key for key in keys if key))
 
 
 def _repository_records(

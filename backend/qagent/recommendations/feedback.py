@@ -67,7 +67,11 @@ def apply_recommendation_feedback_calibration(
     for card in cards:
         if _card_has_feedback_marker(card, "推荐反馈校准"):
             continue
-        matched = [effects[key] for key in _card_signal_keys(card) if key in effects]
+        matched = [
+            effects[key]
+            for key in card_validation_signal_keys(card)
+            if key in effects
+        ]
         if not matched:
             continue
         raw_delta = sum(_action_delta(effect) for effect in matched)
@@ -105,7 +109,11 @@ def apply_recommendation_feedback_quality_gate(
     for card in cards:
         if _card_has_feedback_marker(card, "推荐反馈门禁"):
             continue
-        matched = [weak_effects[key] for key in _card_signal_keys(card) if key in weak_effects]
+        matched = [
+            weak_effects[key]
+            for key in card_validation_signal_keys(card)
+            if key in weak_effects
+        ]
         if not matched:
             continue
         _apply_feedback_block(card, matched)
@@ -279,8 +287,13 @@ def walk_forward_feedback_data_health(
     }
 
 
-def _card_signal_keys(card: OpportunityCard) -> list[str]:
+def card_validation_signal_keys(card: OpportunityCard) -> list[str]:
     keys = list(card.factor_flags)
+    keys.extend(
+        exposure.factor_id
+        for exposure in card.factor_exposures
+        if exposure.score >= 0.65
+    )
     a_share_enhanced = getattr(card, "a_share_enhanced", None)
     if a_share_enhanced is not None:
         keys.extend(a_share_enhanced.signals)
@@ -364,7 +377,7 @@ def _matched_paper_effects(
     effect = effects.get(("asset", asset_key))
     if effect is not None:
         matched.append(effect)
-    for key in _card_signal_keys(card):
+    for key in card_validation_signal_keys(card):
         effect = effects.get(("signal", key)) or effects.get(("factor", key))
         if effect is not None:
             matched.append(effect)
@@ -387,7 +400,7 @@ def _matched_walk_forward_metrics(
     metrics: list[Mapping[str, object]],
 ) -> list[Mapping[str, object]]:
     strategy_id = card.primary_strategy_id
-    signal_keys = set(_card_signal_keys(card))
+    signal_keys = set(card_validation_signal_keys(card))
     matched = []
     for item in metrics:
         dimension = str(item.get("dimension", ""))

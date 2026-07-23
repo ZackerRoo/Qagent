@@ -6,7 +6,7 @@ import pytest
 
 from qagent.cards.factor_watch import build_factor_watch_card
 from qagent.db import create_session_factory, initialize_database
-from qagent.factors.models import FactorRanking
+from qagent.factors.models import FactorExposure, FactorRanking
 from qagent.monitoring.recommendation_calibration import (
     RecommendationCalibrationCenter,
     RecommendationSignalEffect,
@@ -216,6 +216,47 @@ def test_walk_forward_disable_is_final_and_idempotent():
     assert "walk_forward" in first.audits[0].gate_decision.sources
     assert second.audits[0].gate_decision.paper_candidate_eligible is False
     assert sum("样本外门禁" in note for note in card.calibration_notes) == 1
+
+
+def test_walk_forward_factor_gate_matches_high_factor_exposure():
+    card = _card("CN:002747", 0.86, "factor_rotation_watch")
+    card.factor_flags = []
+    card.factor_exposures = [
+        FactorExposure(
+            factor_id="size",
+            label="市值",
+            raw_value=1_000_000_000,
+            score=0.82,
+            weight=0.10,
+            explanation="小市值暴露较高。",
+        )
+    ]
+    apply_recommendation_quality_gate([card])
+    validation = {
+        "status": "rejected",
+        "strategies": [],
+        "factors": [
+            {
+                "dimension": "factor",
+                "key": "size",
+                "label": "市值",
+                "out_of_sample_count": 71,
+                "action": "disable",
+                "suggested_weight_delta": -0.10,
+                "reason": "样本外日期聚类结果显著为负。",
+            }
+        ],
+    }
+
+    result = apply_final_recommendation_policy(
+        [card],
+        walk_forward_validation=validation,
+    )
+
+    assert result.audits[0].gate_decision.action == "disable"
+    assert result.audits[0].gate_decision.paper_candidate_eligible is False
+    assert card.rank_score == 0
+    assert any("样本外门禁" in note for note in card.calibration_notes)
 
 
 def test_missing_governance_repository_surface_keeps_legacy_response_compatible():
