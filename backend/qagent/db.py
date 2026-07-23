@@ -242,6 +242,7 @@ def _apply_additive_migrations(engine: Engine) -> None:
         _add_strategy_governance_columns(connection, inspector)
         _rebuild_revision_scoped_tables(connection)
         _create_missing_metadata_indexes(connection)
+        _drop_obsolete_walk_forward_indexes(connection)
         _create_strategy_governance_indexes(connection)
         _create_immutable_strategy_governance_triggers(connection)
 
@@ -510,3 +511,11 @@ def _create_missing_metadata_indexes(connection) -> None:
             continue
         for index in table.indexes:
             index.create(connection, checkfirst=True)
+
+
+def _drop_obsolete_walk_forward_indexes(connection) -> None:
+    for index_name in (
+        "ix_historical_replay_bars_lookup",
+        "ix_historical_tradability_replay_lookup",
+    ):
+        connection.execute(text(f"DROP INDEX IF EXISTS {index_name}"))

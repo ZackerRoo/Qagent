@@ -806,7 +806,7 @@ class ReplayEvidenceRepository:
         end: date,
         revision: int,
     ) -> list[HistoricalReplayBar]:
-        return [
+        rows = [
             HistoricalReplayBar.model_validate(row._asdict())
             for row in self.replay_bar_rows(
                 instrument_ids,
@@ -815,6 +815,7 @@ class ReplayEvidenceRepository:
                 revision,
             )
         ]
+        return sorted(rows, key=lambda item: (item.trade_date, item.instrument_id))
 
     def replay_bar_rows(
         self,
@@ -861,7 +862,6 @@ class ReplayEvidenceRepository:
                 for row in session.execute(
                     select(*selected_columns)
                     .where(ranked.c.revision_rank == 1)
-                    .order_by(ranked.c.trade_date, ranked.c.instrument_id)
                 )
             ]
         return rows
@@ -1175,7 +1175,6 @@ class ReplayEvidenceRepository:
                 session.scalars(
                     select(row_alias)
                     .where(ranked.c.revision_rank == 1)
-                    .order_by(row_alias.trade_date, row_alias.instrument_id)
                 )
             )
         result: dict[date, dict[str, HistoricalTradabilityPoint]] = {

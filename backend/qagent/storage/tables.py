@@ -167,16 +167,6 @@ class FundamentalSnapshotRow(Base):
 
 class HistoricalTradabilityRow(Base):
     __tablename__ = "historical_tradability"
-    __table_args__ = (
-        Index(
-            "ix_historical_tradability_replay_lookup",
-            "provider_mode",
-            "instrument_id",
-            "trade_date",
-            "dataset_revision",
-            "source_provider",
-        ),
-    )
 
     provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
     instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
@@ -187,6 +177,16 @@ class HistoricalTradabilityRow(Base):
     source_provider: Mapped[str] = mapped_column(String(64), primary_key=True)
     dataset_revision: Mapped[int] = mapped_column(Integer, primary_key=True, default=0, index=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+Index(
+    "ix_historical_tradability_replay_lookup_v2",
+    HistoricalTradabilityRow.provider_mode,
+    HistoricalTradabilityRow.instrument_id,
+    HistoricalTradabilityRow.trade_date,
+    HistoricalTradabilityRow.dataset_revision.desc(),
+    HistoricalTradabilityRow.source_provider,
+)
 
 
 class HistoricalInstrumentProfileRow(Base):
@@ -245,16 +245,6 @@ class HistoricalIndexMembershipRow(Base):
 
 class HistoricalReplayBarRow(Base):
     __tablename__ = "historical_replay_bars"
-    __table_args__ = (
-        Index(
-            "ix_historical_replay_bars_lookup",
-            "provider_mode",
-            "instrument_id",
-            "trade_date",
-            "dataset_revision",
-            "source_provider",
-        ),
-    )
 
     provider_mode: Mapped[str] = mapped_column(String(32), primary_key=True)
     instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
@@ -278,6 +268,16 @@ class HistoricalReplayBarRow(Base):
     source_provider: Mapped[str] = mapped_column(String(64), primary_key=True)
     dataset_revision: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+Index(
+    "ix_historical_replay_bars_lookup_v2",
+    HistoricalReplayBarRow.provider_mode,
+    HistoricalReplayBarRow.instrument_id,
+    HistoricalReplayBarRow.trade_date,
+    HistoricalReplayBarRow.dataset_revision.desc(),
+    HistoricalReplayBarRow.source_provider,
+)
 
 
 class HistoricalCorporateActionRow(Base):

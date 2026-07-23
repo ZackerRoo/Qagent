@@ -184,21 +184,46 @@ def test_initialize_database_restores_walk_forward_lookup_indexes(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'walk-forward-indexes.db'}"
     engine = initialize_database(database_url)
     index_names = {
-        "historical_tradability": "ix_historical_tradability_replay_lookup",
-        "historical_replay_bars": "ix_historical_replay_bars_lookup",
+        "historical_tradability": "ix_historical_tradability_replay_lookup_v2",
+        "historical_replay_bars": "ix_historical_replay_bars_lookup_v2",
     }
     with engine.begin() as connection:
         for index_name in index_names.values():
             connection.execute(text(f"DROP INDEX {index_name}"))
+        connection.execute(
+            text(
+                "CREATE INDEX ix_historical_replay_bars_lookup "
+                "ON historical_replay_bars "
+                "(provider_mode, instrument_id, trade_date, "
+                "dataset_revision, source_provider)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX ix_historical_tradability_replay_lookup "
+                "ON historical_tradability "
+                "(provider_mode, instrument_id, trade_date, "
+                "dataset_revision, source_provider)"
+            )
+        )
     db._initialized_urls.discard(database_url)
 
     migrated = initialize_database(database_url)
     inspector = inspect(migrated)
 
-    for table_name, index_name in index_names.items():
-        assert index_name in {
-            item["name"] for item in inspector.get_indexes(table_name)
-        }
+    with migrated.connect() as connection:
+        for table_name, index_name in index_names.items():
+            indexes = {item["name"]: item for item in inspector.get_indexes(table_name)}
+            assert index_name in indexes
+            directions = {
+                row.name: row.desc
+                for row in connection.execute(
+                    text(f'PRAGMA index_xinfo("{index_name}")')
+                )
+                if row.key
+            }
+            assert directions["dataset_revision"] == 1
+            assert index_name.removesuffix("_v2") not in indexes
 
 
 def test_initialize_database_adds_paper_probe_allocation_column(tmp_path):
