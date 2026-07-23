@@ -722,6 +722,8 @@ def test_equal_weight_benchmark_uses_each_historical_eligible_universe(tmp_path)
 
     assert result is not None
     assert result > 0
+    assert provider.boundary_queries == 2
+    assert provider.query_count == 0
 
 
 def test_walk_forward_result_persists_and_round_trips_complete_payload(tmp_path):

@@ -1795,6 +1795,30 @@ def _equal_weight_eligible_return(
     *,
     end: date,
 ) -> float | None:
+    boundary_loader = getattr(provider, "get_adjusted_close_boundaries", None)
+    if callable(boundary_loader):
+        compounded = 1.0
+        completed_periods = 0
+        for index, (decision_date, members) in enumerate(eligible_universes):
+            period_end = (
+                eligible_universes[index + 1][0]
+                if index + 1 < len(eligible_universes)
+                else end
+            )
+            if period_end <= decision_date:
+                continue
+            boundaries = boundary_loader(members, decision_date, period_end)
+            returns = [
+                last_close / first_close - 1
+                for (_, first_close), (_, last_close) in boundaries.values()
+                if first_close > 0
+            ]
+            if not returns:
+                continue
+            compounded *= 1 + statistics.mean(returns)
+            completed_periods += 1
+        return round((compounded - 1) * 100, 4) if completed_periods else None
+
     instrument_ids = sorted(
         {instrument_id for _, members in eligible_universes for instrument_id in members}
     )

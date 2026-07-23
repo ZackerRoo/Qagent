@@ -929,6 +929,92 @@ class ReplayEvidenceRepository:
             ]
         return rows
 
+    def replay_adjusted_close_boundaries(
+        self,
+        instrument_ids: Sequence[str],
+        start_exclusive: date,
+        end_inclusive: date,
+        revision: int,
+    ) -> dict[str, tuple[tuple[date, Decimal], tuple[date, Decimal]]]:
+        """Return the first and last usable adjusted close in an interval."""
+        if not instrument_ids or start_exclusive >= end_inclusive:
+            return {}
+        with self.session_factory() as session:
+            ranked = (
+                select(
+                    HistoricalReplayBarRow.instrument_id,
+                    HistoricalReplayBarRow.trade_date,
+                    HistoricalReplayBarRow.adjusted_close,
+                    func.row_number()
+                    .over(
+                        partition_by=(
+                            HistoricalReplayBarRow.instrument_id,
+                            HistoricalReplayBarRow.trade_date,
+                        ),
+                        order_by=(
+                            HistoricalReplayBarRow.dataset_revision.desc(),
+                            HistoricalReplayBarRow.source_provider,
+                        ),
+                    )
+                    .label("revision_rank"),
+                )
+                .where(
+                    HistoricalReplayBarRow.provider_mode == self.provider_mode,
+                    HistoricalReplayBarRow.instrument_id.in_(instrument_ids),
+                    HistoricalReplayBarRow.trade_date > start_exclusive,
+                    HistoricalReplayBarRow.trade_date <= end_inclusive,
+                    HistoricalReplayBarRow.dataset_revision <= revision,
+                    HistoricalReplayBarRow.adjusted_open.is_not(None),
+                    HistoricalReplayBarRow.adjusted_high.is_not(None),
+                    HistoricalReplayBarRow.adjusted_low.is_not(None),
+                    HistoricalReplayBarRow.adjusted_close.is_not(None),
+                )
+                .subquery()
+            )
+            visible = (
+                select(
+                    ranked.c.instrument_id,
+                    ranked.c.trade_date,
+                    ranked.c.adjusted_close,
+                )
+                .where(ranked.c.revision_rank == 1)
+                .subquery()
+            )
+            bounds = (
+                select(
+                    visible.c.instrument_id,
+                    func.min(visible.c.trade_date).label("first_date"),
+                    func.max(visible.c.trade_date).label("last_date"),
+                )
+                .group_by(visible.c.instrument_id)
+                .having(func.min(visible.c.trade_date) < func.max(visible.c.trade_date))
+                .subquery()
+            )
+            rows = session.execute(
+                select(
+                    visible.c.instrument_id,
+                    visible.c.trade_date,
+                    visible.c.adjusted_close,
+                ).join(
+                    bounds,
+                    (visible.c.instrument_id == bounds.c.instrument_id)
+                    & (
+                        (visible.c.trade_date == bounds.c.first_date)
+                        | (visible.c.trade_date == bounds.c.last_date)
+                    ),
+                )
+            )
+            grouped: dict[str, list[tuple[date, Decimal]]] = {}
+            for instrument_id, trade_date, adjusted_close in rows:
+                grouped.setdefault(str(instrument_id), []).append(
+                    (trade_date, Decimal(adjusted_close))
+                )
+        return {
+            instrument_id: (ordered[0], ordered[-1])
+            for instrument_id, points in grouped.items()
+            if len(ordered := sorted(points)) >= 2
+        }
+
     def replay_instrument_ids(
         self,
         instrument_ids: Sequence[str],

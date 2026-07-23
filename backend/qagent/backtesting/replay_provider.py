@@ -49,6 +49,7 @@ class ReplayMarketDataProvider:
         self.full_window_queries = 0
         self.incremental_queries = 0
         self.rows_loaded = 0
+        self.boundary_queries = 0
 
     def get_daily_bars(
         self, instrument_ids: list[str], start: date, end: date
@@ -86,6 +87,33 @@ class ReplayMarketDataProvider:
             return
         self._prune_before(start)
         self._ensure_coverage(requested, start, end)
+
+    def get_adjusted_close_boundaries(
+        self,
+        instrument_ids: list[str],
+        start_exclusive: date,
+        end_inclusive: date,
+    ) -> dict[str, tuple[tuple[date, float], tuple[date, float]]]:
+        requested = sorted(set(instrument_ids))
+        if not requested or start_exclusive >= end_inclusive:
+            return {}
+        rows = self.repository.replay_adjusted_close_boundaries(
+            requested,
+            start_exclusive,
+            end_inclusive,
+            self.revision,
+        )
+        self.boundary_queries += 1
+        return {
+            instrument_id: (
+                (first_date, float(first_close)),
+                (last_date, float(last_close)),
+            )
+            for instrument_id, (
+                (first_date, first_close),
+                (last_date, last_close),
+            ) in rows.items()
+        }
 
     def _ensure_coverage(
         self,
