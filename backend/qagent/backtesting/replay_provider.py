@@ -9,6 +9,28 @@ from qagent.storage.replay_evidence import ReplayEvidenceRepository
 from qagent.strategy_data.providers import BaseStrategyDataProvider
 
 
+_REPLAY_FRAME_COLUMNS = (
+    "instrument_id",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "turnover",
+    "provider",
+    "adjusted_open",
+    "adjusted_high",
+    "adjusted_low",
+    "adjusted_close",
+    "adjustment_factor",
+    "adjustment_type",
+    "trading_status",
+    "is_suspended",
+    "is_st",
+)
+
+
 class ReplayMarketDataProvider:
     name = "historical_replay"
 
@@ -136,56 +158,54 @@ class ReplayMarketDataProvider:
                 else ("suspended" if item.volume <= 0 else "trading")
             )
             records.append(
-                {
-                    "instrument_id": item.instrument_id,
-                    "trade_date": item.trade_date,
-                    "open": float(item.raw_open),
-                    "high": float(item.raw_high),
-                    "low": float(item.raw_low),
-                    "close": float(item.raw_close),
-                    "volume": float(item.volume),
-                    "turnover": (
+                (
+                    item.instrument_id,
+                    item.trade_date,
+                    float(item.raw_open),
+                    float(item.raw_high),
+                    float(item.raw_low),
+                    float(item.raw_close),
+                    float(item.volume),
+                    (
                         float(item.turnover) if item.turnover is not None else None
                     ),
-                    "provider": item.source_provider,
-                    "adjusted_open": (
+                    item.source_provider,
+                    (
                         float(item.adjusted_open)
                         if item.adjusted_open is not None
                         else None
                     ),
-                    "adjusted_high": (
+                    (
                         float(item.adjusted_high)
                         if item.adjusted_high is not None
                         else None
                     ),
-                    "adjusted_low": (
+                    (
                         float(item.adjusted_low)
                         if item.adjusted_low is not None
                         else None
                     ),
-                    "adjusted_close": (
+                    (
                         float(item.adjusted_close)
                         if item.adjusted_close is not None
                         else None
                     ),
-                    "adjustment_factor": (
+                    (
                         float(item.adjustment_factor)
                         if item.adjustment_factor is not None
                         else None
                     ),
-                    "adjustment_type": item.adjustment_mode,
-                    "trading_status": trading_status,
-                    "is_suspended": trading_status.strip().lower()
+                    item.adjustment_mode,
+                    trading_status,
+                    trading_status.strip().lower()
                     not in {"trading", "normal", "active"},
-                    "is_st": bool(tradability.is_st)
-                    if tradability is not None
-                    else False,
-                }
+                    bool(tradability.is_st) if tradability is not None else False,
+                )
             )
         self.rows_loaded += len(records)
         if not records:
             return
-        incoming = pd.DataFrame.from_records(records)
+        incoming = pd.DataFrame.from_records(records, columns=_REPLAY_FRAME_COLUMNS)
         for instrument_id, frame in incoming.groupby("instrument_id", sort=False):
             existing = self._bars_by_instrument.get(str(instrument_id))
             combined = (
