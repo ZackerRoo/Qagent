@@ -6,7 +6,7 @@ import json
 import math
 import os
 import statistics
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Iterable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
@@ -1795,36 +1795,19 @@ def _equal_weight_eligible_return(
     *,
     end: date,
 ) -> float | None:
-    boundary_loader = getattr(provider, "get_adjusted_close_boundaries", None)
-    if callable(boundary_loader):
-        compounded = 1.0
-        completed_periods = 0
-        for index, (decision_date, members) in enumerate(eligible_universes):
-            period_end = (
-                eligible_universes[index + 1][0]
-                if index + 1 < len(eligible_universes)
-                else end
-            )
-            if period_end <= decision_date:
-                continue
-            boundaries = boundary_loader(members, decision_date, period_end)
-            returns = [
-                last_close / first_close - 1
-                for (_, first_close), (_, last_close) in boundaries.values()
-                if first_close > 0
-            ]
-            if not returns:
-                continue
-            compounded *= 1 + statistics.mean(returns)
-            completed_periods += 1
-        return round((compounded - 1) * 100, 4) if completed_periods else None
-
     instrument_ids = sorted(
         {instrument_id for _, members in eligible_universes for instrument_id in members}
     )
     if not instrument_ids:
         return None
     first_date = eligible_universes[0][0]
+    stream_loader = getattr(provider, "iter_adjusted_closes", None)
+    if callable(stream_loader):
+        return _equal_weight_eligible_return_from_stream(
+            stream_loader(instrument_ids, first_date, end),
+            eligible_universes,
+            end=end,
+        )
     bars = provider.get_daily_bars(instrument_ids, first_date, end)
     if bars.empty:
         return None
@@ -1860,5 +1843,69 @@ def _equal_weight_eligible_return(
         if not returns:
             continue
         compounded *= 1 + statistics.mean(returns)
+        completed_periods += 1
+    return round((compounded - 1) * 100, 4) if completed_periods else None
+
+
+def _equal_weight_eligible_return_from_stream(
+    rows,
+    eligible_universes: list[tuple[date, list[str]]],
+    *,
+    end: date,
+) -> float | None:
+    decision_dates = [decision_date for decision_date, _ in eligible_universes]
+    period_ends = [*decision_dates[1:], end]
+    member_sets = [set(members) for _, members in eligible_universes]
+    return_sums = [0.0] * len(eligible_universes)
+    return_counts = [0] * len(eligible_universes)
+    current_instrument: str | None = None
+    period_prices: dict[int, tuple[float, float, int]] = {}
+
+    def flush_instrument() -> None:
+        for period_index, (first_close, last_close, count) in period_prices.items():
+            if count < 2 or first_close <= 0:
+                continue
+            return_sums[period_index] += last_close / first_close - 1
+            return_counts[period_index] += 1
+
+    for instrument_id, trade_date, adjusted_close in rows:
+        if instrument_id != current_instrument:
+            if current_instrument is not None:
+                flush_instrument()
+            current_instrument = instrument_id
+            period_prices = {}
+        period_index = bisect_left(decision_dates, trade_date) - 1
+        if (
+            period_index < 0
+            or trade_date > period_ends[period_index]
+            or instrument_id not in member_sets[period_index]
+        ):
+            continue
+        previous = period_prices.get(period_index)
+        if previous is None:
+            period_prices[period_index] = (
+                adjusted_close,
+                adjusted_close,
+                1,
+            )
+        else:
+            period_prices[period_index] = (
+                previous[0],
+                adjusted_close,
+                previous[2] + 1,
+            )
+    if current_instrument is not None:
+        flush_instrument()
+
+    compounded = 1.0
+    completed_periods = 0
+    for total_return, sample_count in zip(
+        return_sums,
+        return_counts,
+        strict=True,
+    ):
+        if sample_count <= 0:
+            continue
+        compounded *= 1 + total_return / sample_count
         completed_periods += 1
     return round((compounded - 1) * 100, 4) if completed_periods else None

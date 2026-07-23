@@ -929,16 +929,16 @@ class ReplayEvidenceRepository:
             ]
         return rows
 
-    def replay_adjusted_close_boundaries(
+    def iter_replay_adjusted_closes(
         self,
         instrument_ids: Sequence[str],
         start_exclusive: date,
         end_inclusive: date,
         revision: int,
-    ) -> dict[str, tuple[tuple[date, Decimal], tuple[date, Decimal]]]:
-        """Return the first and last usable adjusted close in an interval."""
+    ) -> Iterator[tuple[str, date, Decimal]]:
+        """Stream the latest usable adjusted close for each instrument and date."""
         if not instrument_ids or start_exclusive >= end_inclusive:
-            return {}
+            return
         with self.session_factory() as session:
             ranked = (
                 select(
@@ -971,49 +971,20 @@ class ReplayEvidenceRepository:
                 )
                 .subquery()
             )
-            visible = (
+            rows = session.execute(
                 select(
                     ranked.c.instrument_id,
                     ranked.c.trade_date,
                     ranked.c.adjusted_close,
                 )
                 .where(ranked.c.revision_rank == 1)
-                .subquery()
-            )
-            bounds = (
-                select(
-                    visible.c.instrument_id,
-                    func.min(visible.c.trade_date).label("first_date"),
-                    func.max(visible.c.trade_date).label("last_date"),
+                .order_by(
+                    ranked.c.instrument_id,
+                    ranked.c.trade_date,
                 )
-                .group_by(visible.c.instrument_id)
-                .having(func.min(visible.c.trade_date) < func.max(visible.c.trade_date))
-                .subquery()
-            )
-            rows = session.execute(
-                select(
-                    visible.c.instrument_id,
-                    visible.c.trade_date,
-                    visible.c.adjusted_close,
-                ).join(
-                    bounds,
-                    (visible.c.instrument_id == bounds.c.instrument_id)
-                    & (
-                        (visible.c.trade_date == bounds.c.first_date)
-                        | (visible.c.trade_date == bounds.c.last_date)
-                    ),
-                )
-            )
-            grouped: dict[str, list[tuple[date, Decimal]]] = {}
+            ).yield_per(10_000)
             for instrument_id, trade_date, adjusted_close in rows:
-                grouped.setdefault(str(instrument_id), []).append(
-                    (trade_date, Decimal(adjusted_close))
-                )
-        return {
-            instrument_id: (ordered[0], ordered[-1])
-            for instrument_id, points in grouped.items()
-            if len(ordered := sorted(points)) >= 2
-        }
+                yield str(instrument_id), trade_date, Decimal(adjusted_close)
 
     def replay_instrument_ids(
         self,

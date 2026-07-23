@@ -25,6 +25,7 @@ from qagent.backtesting.walk_forward import (
     _combined_validation_gate,
     _cross_section_coverage,
     _equal_weight_eligible_return,
+    _equal_weight_eligible_return_from_stream,
     _enforce_release_gate_on_positive_evidence,
     _trade_temporal_validation,
     _walk_forward_candidates,
@@ -722,8 +723,30 @@ def test_equal_weight_benchmark_uses_each_historical_eligible_universe(tmp_path)
 
     assert result is not None
     assert result > 0
-    assert provider.boundary_queries == 2
+    assert provider.adjusted_close_stream_queries == 1
     assert provider.query_count == 0
+
+
+def test_streamed_equal_weight_benchmark_preserves_period_boundaries_and_membership():
+    result = _equal_weight_eligible_return_from_stream(
+        [
+            ("CN:000001", date(2025, 1, 3), 100.0),
+            ("CN:000001", date(2025, 1, 8), 110.0),
+            ("CN:000001", date(2025, 1, 9), 130.0),
+            ("CN:000002", date(2025, 1, 3), 200.0),
+            ("CN:000002", date(2025, 1, 5), 220.0),
+            ("CN:000002", date(2025, 1, 8), 230.0),
+            ("CN:000002", date(2025, 1, 9), 230.0),
+            ("CN:000002", date(2025, 1, 10), 207.0),
+        ],
+        [
+            (date(2025, 1, 2), ["CN:000001", "CN:000002"]),
+            (date(2025, 1, 8), ["CN:000002"]),
+        ],
+        end=date(2025, 1, 13),
+    )
+
+    assert result == 1.25
 
 
 def test_walk_forward_result_persists_and_round_trips_complete_payload(tmp_path):
