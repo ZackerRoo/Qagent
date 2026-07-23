@@ -117,6 +117,35 @@ def walk_forward_manifests_semantically_compatible(
     )
 
 
+def walk_forward_selection_manifests_semantically_compatible(
+    stored: WalkForwardExperimentManifest,
+    current: WalkForwardExperimentManifest,
+) -> bool:
+    """Allow persisted selection snapshots to survive execution-only upgrades."""
+
+    if not (
+        walk_forward_manifest_digest_is_valid(stored)
+        and walk_forward_manifest_digest_is_valid(current)
+    ):
+        return False
+    selection_fields = (
+        "schema_version",
+        "provider_mode",
+        "dataset_revision",
+        "start_date",
+        "end_date",
+        "rebalance_step_sessions",
+        "lookback_days",
+        "selection_algorithm_version",
+        "strategy_registry_digest",
+        "strategy_ids",
+    )
+    return all(
+        getattr(stored, field) == getattr(current, field)
+        for field in selection_fields
+    )
+
+
 def walk_forward_manifest_digest_is_valid(
     manifest: WalkForwardExperimentManifest,
 ) -> bool:
@@ -153,6 +182,30 @@ def record_walk_forward_runtime_revision(
         )
     )
     return stored.model_copy(
+        update={
+            "runtime_revisions": revisions,
+            "code_dirty": stored.code_dirty or current.code_dirty,
+        }
+    )
+
+
+def upgrade_walk_forward_execution_manifest(
+    stored: WalkForwardExperimentManifest,
+    current: WalkForwardExperimentManifest,
+) -> WalkForwardExperimentManifest:
+    if not walk_forward_selection_manifests_semantically_compatible(stored, current):
+        raise ValueError("walk-forward selection definitions are not compatible")
+    revisions = list(
+        dict.fromkeys(
+            [
+                stored.code_revision,
+                *stored.runtime_revisions,
+                current.code_revision,
+                *current.runtime_revisions,
+            ]
+        )
+    )
+    return current.model_copy(
         update={
             "runtime_revisions": revisions,
             "code_dirty": stored.code_dirty or current.code_dirty,

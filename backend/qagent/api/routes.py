@@ -25,7 +25,9 @@ from qagent.backtesting.experiment import (
     WalkForwardExperimentManifest,
     build_walk_forward_experiment_manifest,
     record_walk_forward_runtime_revision,
+    upgrade_walk_forward_execution_manifest,
     walk_forward_manifests_semantically_compatible,
+    walk_forward_selection_manifests_semantically_compatible,
 )
 from qagent.backtesting.portfolio import run_portfolio_backtest
 from qagent.backtesting.sensitivity import build_parameter_sensitivity
@@ -571,21 +573,36 @@ def retry_walk_forward_job(job_id: str) -> dict[str, object]:
         rebalance_step_sessions=job.rebalance_step_sessions,
         lookback_days=job.lookback_days,
     )
-    if not _walk_forward_manifest_payload_matches(
-        job.experiment_manifest,
+    try:
+        stored_manifest = WalkForwardExperimentManifest.model_validate(
+            job.experiment_manifest
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="walk-forward experiment definition changed; start a new validation job",
+        ) from exc
+    if walk_forward_manifests_semantically_compatible(
+        stored_manifest,
         current_manifest,
     ):
+        resumed_manifest = record_walk_forward_runtime_revision(
+            stored_manifest,
+            current_manifest,
+        )
+    elif job.checkpoints and walk_forward_selection_manifests_semantically_compatible(
+        stored_manifest,
+        current_manifest,
+    ):
+        resumed_manifest = upgrade_walk_forward_execution_manifest(
+            stored_manifest,
+            current_manifest,
+        )
+    else:
         raise HTTPException(
             status_code=409,
             detail="walk-forward experiment definition changed; start a new validation job",
         )
-    stored_manifest = WalkForwardExperimentManifest.model_validate(
-        job.experiment_manifest
-    )
-    resumed_manifest = record_walk_forward_runtime_revision(
-        stored_manifest,
-        current_manifest,
-    )
     resumed = repo.update_walk_forward_job(
         job.job_id,
         status="queued",

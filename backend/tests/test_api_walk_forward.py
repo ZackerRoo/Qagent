@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from qagent.api import routes
 from qagent.app import create_app
+from qagent.backtesting import experiment
 from qagent.storage.tables import HistoricalDataRevisionRow, WalkForwardRunRow
 
 
@@ -264,6 +265,71 @@ def test_failed_walk_forward_retry_rejects_changed_experiment(
 
     assert response.status_code == 409
     assert "experiment definition changed" in response.json()["detail"]
+
+
+def test_failed_walk_forward_retry_reuses_checkpoints_after_execution_rule_upgrade(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'walk-forward-execution-upgrade-api.db'}",
+    )
+    submitted = []
+
+    class FakeExecutor:
+        def submit(self, fn, *args, **kwargs):
+            submitted.append((fn, args, kwargs))
+
+    monkeypatch.setattr(routes, "_walk_forward_task_executor", FakeExecutor())
+    routes._submitted_walk_forward_jobs.clear()
+    repo = routes._repo()
+    with repo.session_factory() as session:
+        session.add(HistoricalDataRevisionRow(provider_mode="free", revision=9))
+        session.commit()
+    rules_path = tmp_path / "rules.json"
+    rules_path.write_text('{"revision":"old"}', encoding="utf-8")
+    monkeypatch.setattr(experiment, "RULES_PATH", rules_path)
+    stored_manifest = routes.build_walk_forward_experiment_manifest(
+        provider_mode="free",
+        dataset_revision=9,
+        start_date=date(2021, 11, 1),
+        end_date=date(2025, 12, 31),
+        rebalance_step_sessions=10,
+        lookback_days=400,
+    )
+    rules_path.write_text('{"revision":"new"}', encoding="utf-8")
+    job = repo.create_walk_forward_job(
+        job_id="walk-forward-execution-upgrade",
+        provider="free",
+        start=date(2021, 11, 1),
+        end=date(2025, 12, 31),
+        dataset_revision=9,
+        rebalance_step_sessions=10,
+        lookback_days=400,
+        total_snapshots=102,
+        experiment_manifest=stored_manifest.model_dump(mode="json"),
+    )
+    repo.update_walk_forward_job(
+        job.job_id,
+        status="failed",
+        phase="failed",
+        processed_snapshots=102,
+        checkpoints=[{"decision_date": "2021-11-01"}],
+        error="old execution metadata missing",
+    )
+    client = TestClient(create_app())
+
+    response = client.post(f"/api/walk-forward/jobs/{job.job_id}/retry")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+    assert response.json()["checkpoint_count"] == 1
+    assert (
+        response.json()["experiment_manifest"]["execution_rules_digest"]
+        != stored_manifest.execution_rules_digest
+    )
+    assert submitted[0][1] == (job.job_id,)
 
 
 def test_walk_forward_restore_resubmits_every_persisted_job(tmp_path, monkeypatch):
