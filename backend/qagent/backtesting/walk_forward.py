@@ -565,59 +565,63 @@ def run_full_market_walk_forward_selection(
             lease_heartbeat=lease_heartbeat,
         )
         snapshot_inputs: list[_WalkForwardSnapshotInput] = []
-        for decision_date in sessions:
+        inventory_ids = [item.instrument_id for item in lifecycle_inventory]
+        for batch_start in range(0, len(sessions), 8):
             lease_heartbeat.maintain_now()
-            members = [
-                item
-                for item in lifecycle_inventory
-                if item.listing_date is not None
-                and item.listing_date <= decision_date
-                and (
-                    item.delisting_date is None
-                    or item.delisting_date > decision_date
-                )
-            ]
-            instrument_ids = [item.instrument_id for item in members]
-            tradability = owner_repository.tradability_on(
-                instrument_ids,
-                decision_date,
+            batch_dates = sessions[batch_start : batch_start + 8]
+            tradability_by_date = owner_repository.tradability_on_dates(
+                inventory_ids,
+                batch_dates,
                 revision,
             )
-            eligible = []
-            suspended_count = 0
-            st_excluded_count = 0
-            missing_tradability_count = 0
-            for instrument_id in instrument_ids:
-                point = tradability.get(instrument_id)
-                if point is None:
-                    missing_tradability_count += 1
-                    continue
-                if point.trading_status != "trading":
-                    suspended_count += 1
-                    continue
-                if point.is_st is True:
-                    st_excluded_count += 1
-                    continue
-                eligible.append(instrument_id)
-            eligible = sorted(eligible)
-            eligible_universes.append((decision_date, eligible))
-            stock_ids = {
-                item.instrument_id
-                for item in members
-                if item.security_type in {"stock", "1"}
-            }
-            eligible_stocks = [item for item in eligible if item in stock_ids]
-            snapshot_inputs.append(
-                _WalkForwardSnapshotInput(
-                    decision_date=decision_date,
-                    historical_universe_size=len(instrument_ids),
-                    eligible=eligible,
-                    eligible_stocks=eligible_stocks,
-                    suspended_count=suspended_count,
-                    st_excluded_count=st_excluded_count,
-                    missing_tradability_count=missing_tradability_count,
+            for decision_date in batch_dates:
+                members = [
+                    item
+                    for item in lifecycle_inventory
+                    if item.listing_date is not None
+                    and item.listing_date <= decision_date
+                    and (
+                        item.delisting_date is None
+                        or item.delisting_date > decision_date
+                    )
+                ]
+                instrument_ids = [item.instrument_id for item in members]
+                tradability = tradability_by_date.get(decision_date, {})
+                eligible = []
+                suspended_count = 0
+                st_excluded_count = 0
+                missing_tradability_count = 0
+                for instrument_id in instrument_ids:
+                    point = tradability.get(instrument_id)
+                    if point is None:
+                        missing_tradability_count += 1
+                        continue
+                    if point.trading_status != "trading":
+                        suspended_count += 1
+                        continue
+                    if point.is_st is True:
+                        st_excluded_count += 1
+                        continue
+                    eligible.append(instrument_id)
+                eligible = sorted(eligible)
+                eligible_universes.append((decision_date, eligible))
+                stock_ids = {
+                    item.instrument_id
+                    for item in members
+                    if item.security_type in {"stock", "1"}
+                }
+                eligible_stocks = [item for item in eligible if item in stock_ids]
+                snapshot_inputs.append(
+                    _WalkForwardSnapshotInput(
+                        decision_date=decision_date,
+                        historical_universe_size=len(instrument_ids),
+                        eligible=eligible,
+                        eligible_stocks=eligible_stocks,
+                        suspended_count=suspended_count,
+                        st_excluded_count=st_excluded_count,
+                        missing_tradability_count=missing_tradability_count,
+                    )
                 )
-            )
         snapshot_by_date = dict(resumed)
         pending_inputs = [
             item for item in snapshot_inputs if item.decision_date not in snapshot_by_date

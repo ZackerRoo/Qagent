@@ -331,6 +331,27 @@ def test_replay_adapters_enforce_date_cutoffs(tmp_path):
     assert fundamentals[0].pe_ratio == Decimal("10")
 
 
+def test_batch_tradability_matches_single_date_queries(tmp_path):
+    repository, decision_date = _replay_repository(tmp_path)
+    revision = repository.current_revision()
+    dates = [decision_date, date(2025, 1, 13)]
+
+    batched = repository.tradability_on_dates(
+        ["CN:000001"],
+        dates,
+        revision,
+    )
+
+    assert batched == {
+        current_date: repository.tradability_on(
+            ["CN:000001"],
+            current_date,
+            revision,
+        )
+        for current_date in dates
+    }
+
+
 def test_replay_market_provider_reuses_rolling_window(tmp_path, monkeypatch):
     repository, _ = _replay_repository(tmp_path)
     revision = repository.current_revision()

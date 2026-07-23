@@ -1093,6 +1093,66 @@ class ReplayEvidenceRepository:
             for row in rows
         }
 
+    def tradability_on_dates(
+        self,
+        instrument_ids: Sequence[str],
+        decision_dates: Sequence[date],
+        revision: int,
+    ) -> dict[date, dict[str, HistoricalTradabilityPoint]]:
+        requested_dates = sorted(set(decision_dates))
+        if not instrument_ids or not requested_dates:
+            return {}
+        with self.session_factory() as session:
+            ranked = (
+                select(
+                    HistoricalTradabilityRow,
+                    func.row_number()
+                    .over(
+                        partition_by=(
+                            HistoricalTradabilityRow.instrument_id,
+                            HistoricalTradabilityRow.trade_date,
+                        ),
+                        order_by=(
+                            HistoricalTradabilityRow.dataset_revision.desc(),
+                            HistoricalTradabilityRow.source_provider,
+                        ),
+                    )
+                    .label("revision_rank"),
+                )
+                .where(
+                    HistoricalTradabilityRow.provider_mode == self.provider_mode,
+                    HistoricalTradabilityRow.instrument_id.in_(instrument_ids),
+                    HistoricalTradabilityRow.trade_date.in_(requested_dates),
+                    HistoricalTradabilityRow.dataset_revision <= revision,
+                )
+                .subquery()
+            )
+            row_alias = aliased(HistoricalTradabilityRow, ranked)
+            rows = list(
+                session.scalars(
+                    select(row_alias)
+                    .where(ranked.c.revision_rank == 1)
+                    .order_by(row_alias.trade_date, row_alias.instrument_id)
+                )
+            )
+        result: dict[date, dict[str, HistoricalTradabilityPoint]] = {
+            decision_date: {} for decision_date in requested_dates
+        }
+        for row in rows:
+            result[row.trade_date][row.instrument_id] = HistoricalTradabilityPoint(
+                instrument_id=row.instrument_id,
+                trade_date=row.trade_date,
+                trading_status=row.trading_status,
+                is_st=row.is_st,
+                pct_change_pct=(
+                    float(row.pct_change_pct)
+                    if row.pct_change_pct is not None
+                    else None
+                ),
+                provider=row.source_provider,
+            )
+        return result
+
     def lifecycle_inventory(
         self,
         revision: int,
