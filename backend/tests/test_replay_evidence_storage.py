@@ -1462,7 +1462,6 @@ def test_terminal_orphan_lease_is_released(storage):
     statuses["run-a"] = "running"
     make_repo(owner_run_id="run-a").acquire_dataset_lease()
     statuses["run-a"] = "succeeded"
-    clock.advance(timedelta(minutes=11))
 
     lease = make_repo(owner_run_id="run-b").acquire_dataset_lease()
 

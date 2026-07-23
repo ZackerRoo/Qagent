@@ -52,7 +52,6 @@ from qagent.strategy_data.models import FundamentalSnapshot
 
 
 LEASE_DURATION = timedelta(minutes=5)
-STALE_AFTER = timedelta(minutes=10)
 TERMINAL_RUN_STATUSES = {"succeeded", "blocked_data", "failed", "cancelled"}
 
 
@@ -1482,8 +1481,7 @@ class ReplayEvidenceRepository:
             if lease is not None:
                 owner_status = self._run_status_lookup(lease.owner_run_id)
             if lease is not None and lease.owner_run_id != owner:
-                stale = lease.heartbeat_at <= now - STALE_AFTER
-                if stale and owner_status in TERMINAL_RUN_STATUSES:
+                if owner_status in TERMINAL_RUN_STATUSES:
                     session.delete(lease)
                     session.flush()
                     lease = None

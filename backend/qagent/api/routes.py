@@ -683,6 +683,7 @@ def _release_walk_forward_submission(job_id: str) -> None:
 
 def _run_walk_forward_job_safely(job_id: str) -> None:
     repo = _repo()
+    replay_repository: ReplayEvidenceRepository | None = None
     try:
         job = repo.get_walk_forward_job(job_id)
         if job is None:
@@ -786,6 +787,11 @@ def _run_walk_forward_job_safely(job_id: str) -> None:
                 error=str(exc),
                 finished_at=datetime.now(timezone.utc),
             )
+        if replay_repository is not None:
+            try:
+                replay_repository.for_owner(job_id).release_dataset_lease()
+            except RuntimeError:
+                pass
     finally:
         _release_walk_forward_submission(job_id)
 
