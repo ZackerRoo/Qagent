@@ -1,5 +1,7 @@
+from concurrent.futures import ProcessPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from multiprocessing import get_context
 from threading import Event
 from types import SimpleNamespace
 
@@ -211,7 +213,7 @@ def _replay_repository(tmp_path):
             status="ready",
             expected_count=1,
             stored_count=0,
-            effective_through=decision_date,
+            effective_through=date(2025, 1, 13),
             fetched_at=fetched_at,
         ),
     )
@@ -267,11 +269,12 @@ def _replay_repository(tmp_path):
             tradability=[
                 HistoricalTradabilityPoint(
                     instrument_id="CN:000001",
-                    trade_date=decision_date,
+                    trade_date=trade_date,
                     trading_status="trading",
                     is_st=False,
                     provider="fixture_tradability",
                 )
+                for trade_date in [decision_date, date(2025, 1, 13)]
             ]
         ),
         revision=4,
@@ -291,6 +294,25 @@ def _replay_repository(tmp_path):
         ]
     )
     return repository, decision_date
+
+
+def _run_nested_parallel_walk_forward(database_url: str) -> dict[str, str]:
+    repository = ReplayEvidenceRepository(
+        sessionmaker(bind=create_db_engine(database_url)),
+        "free",
+    )
+    result = run_full_market_walk_forward_selection(
+        repository,
+        owner_run_id="walk-forward-nested-process",
+        start=date(2025, 1, 10),
+        end=date(2025, 1, 13),
+        rebalance_step_sessions=1,
+        snapshot_workers=2,
+    )
+    return {
+        "workers": result.data_health["walk_forward_snapshot_workers"],
+        "snapshots": result.data_health["walk_forward_snapshots"],
+    }
 
 
 def test_replay_adapters_enforce_date_cutoffs(tmp_path):
@@ -447,6 +469,52 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
             *first.strategy_validation.factors,
         ]
     )
+
+
+def test_parallel_walk_forward_matches_serial_results(tmp_path):
+    repository, decision_date = _replay_repository(tmp_path)
+
+    serial = run_full_market_walk_forward_selection(
+        repository,
+        owner_run_id="walk-forward-serial",
+        start=decision_date,
+        end=date(2025, 1, 13),
+        rebalance_step_sessions=1,
+        snapshot_workers=1,
+    )
+    parallel = run_full_market_walk_forward_selection(
+        repository,
+        owner_run_id="walk-forward-parallel",
+        start=decision_date,
+        end=date(2025, 1, 13),
+        rebalance_step_sessions=1,
+        snapshot_workers=2,
+    )
+
+    assert len(serial.snapshots) == 2
+    assert parallel.snapshots == serial.snapshots
+    assert parallel.reproducibility_digest == serial.reproducibility_digest
+    assert parallel.top_5_portfolio == serial.top_5_portfolio
+    assert parallel.top_10_portfolio == serial.top_10_portfolio
+    assert parallel.data_health["walk_forward_snapshot_workers"] == "2"
+
+
+def test_parallel_walk_forward_runs_inside_background_process(tmp_path):
+    repository, _ = _replay_repository(tmp_path)
+    database_url = repository.session_factory.kw["bind"].url.render_as_string(
+        hide_password=False
+    )
+
+    with ProcessPoolExecutor(
+        max_workers=1,
+        mp_context=get_context("spawn"),
+    ) as executor:
+        result = executor.submit(
+            _run_nested_parallel_walk_forward,
+            database_url,
+        ).result(timeout=30)
+
+    assert result == {"workers": "2", "snapshots": "2"}
 
 
 def test_walk_forward_market_coverage_gate_marks_small_replay_as_pilot():

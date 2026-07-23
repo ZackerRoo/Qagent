@@ -1671,6 +1671,9 @@ function WalkForwardValidationCenter({
   ] as const;
   const phaseLabels: Record<string, string> = {
     queued: zh ? "等待后台执行" : "Queued",
+    preparing_historical_replay: zh
+      ? "准备历史可交易股票池"
+      : "Preparing historical universes",
     historical_replay: zh ? "逐日重放历史推荐" : "Replaying historical recommendations",
     portfolio_simulation: zh ? "模拟 Top 5 / Top 10 组合" : "Simulating Top 5 / Top 10 portfolios",
     validation_and_benchmarks: zh ? "计算样本外与基准结果" : "Calculating OOS and benchmarks",

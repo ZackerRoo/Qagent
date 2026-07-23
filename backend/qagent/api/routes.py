@@ -24,6 +24,8 @@ from qagent.backtesting.engine import run_historical_backtest
 from qagent.backtesting.experiment import (
     WalkForwardExperimentManifest,
     build_walk_forward_experiment_manifest,
+    record_walk_forward_runtime_revision,
+    walk_forward_manifests_semantically_compatible,
 )
 from qagent.backtesting.portfolio import run_portfolio_backtest
 from qagent.backtesting.sensitivity import build_parameter_sensitivity
@@ -38,6 +40,7 @@ from qagent.briefing.daily import DailyBrief, build_daily_brief
 from qagent.briefing.export import render_daily_brief_markdown
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
 from qagent.catalysts.providers import FreeCatalystProvider
+from qagent.config import get_settings
 from qagent.data_management import build_historical_coverage_manifest
 from qagent.db import create_session_factory, initialize_database
 from qagent.domain.models import OpportunityCard, PortfolioPlan, SectorStrength
@@ -383,6 +386,7 @@ def run_walk_forward(
             end=end,
             rebalance_step_sessions=step_sessions,
             lookback_days=lookback_days,
+            snapshot_workers=get_settings().walk_forward_snapshot_workers,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -454,8 +458,10 @@ def _create_or_get_walk_forward_job(
             and job.end_date == end
             and job.rebalance_step_sessions == step_sessions
             and job.lookback_days == lookback_days
-            and job.experiment_manifest.get("experiment_digest")
-            == manifest.experiment_digest
+            and _walk_forward_manifest_payload_matches(
+                job.experiment_manifest,
+                manifest,
+            )
         ),
         None,
     )
@@ -486,8 +492,19 @@ def _walk_forward_run_matches_manifest(run, manifest: WalkForwardExperimentManif
         and run.end_date == manifest.end_date
         and run.rebalance_step_sessions == manifest.rebalance_step_sessions
         and run.lookback_days == manifest.lookback_days
-        and stored_manifest.get("experiment_digest") == manifest.experiment_digest
+        and _walk_forward_manifest_payload_matches(stored_manifest, manifest)
     )
+
+
+def _walk_forward_manifest_payload_matches(
+    payload: dict[str, object],
+    current: WalkForwardExperimentManifest,
+) -> bool:
+    try:
+        stored = WalkForwardExperimentManifest.model_validate(payload)
+    except (TypeError, ValueError):
+        return payload.get("experiment_digest") == current.experiment_digest
+    return walk_forward_manifests_semantically_compatible(stored, current)
 
 
 @router.get("/walk-forward/jobs")
@@ -554,18 +571,26 @@ def retry_walk_forward_job(job_id: str) -> dict[str, object]:
         rebalance_step_sessions=job.rebalance_step_sessions,
         lookback_days=job.lookback_days,
     )
-    if (
-        current_manifest.experiment_digest
-        != job.experiment_manifest.get("experiment_digest")
+    if not _walk_forward_manifest_payload_matches(
+        job.experiment_manifest,
+        current_manifest,
     ):
         raise HTTPException(
             status_code=409,
             detail="walk-forward experiment definition changed; start a new validation job",
         )
+    stored_manifest = WalkForwardExperimentManifest.model_validate(
+        job.experiment_manifest
+    )
+    resumed_manifest = record_walk_forward_runtime_revision(
+        stored_manifest,
+        current_manifest,
+    )
     resumed = repo.update_walk_forward_job(
         job.job_id,
         status="queued",
         phase="queued",
+        experiment_manifest=resumed_manifest.model_dump(mode="json"),
         clear_terminal_state=True,
     )
     _submit_walk_forward_job(resumed.job_id)
@@ -678,16 +703,24 @@ def _run_walk_forward_job_safely(job_id: str) -> None:
             rebalance_step_sessions=job.rebalance_step_sessions,
             lookback_days=job.lookback_days,
         )
-        if current_manifest.experiment_digest != manifest.experiment_digest:
+        if not walk_forward_manifests_semantically_compatible(
+            manifest,
+            current_manifest,
+        ):
             raise RuntimeError(
                 "walk-forward experiment definition changed; start a new validation job"
             )
+        manifest = record_walk_forward_runtime_revision(
+            manifest,
+            current_manifest,
+        )
         checkpoint_by_date = {item["decision_date"]: item for item in job.checkpoints}
         repo.update_walk_forward_job(
             job_id,
             status="running",
             phase="historical_replay",
             started_at=job.started_at or datetime.now(timezone.utc),
+            experiment_manifest=manifest.model_dump(mode="json"),
         )
 
         def on_progress(progress: WalkForwardProgress) -> None:
@@ -732,6 +765,7 @@ def _run_walk_forward_job_safely(job_id: str) -> None:
             initial_lease_maintenance_count=job.lease_maintenance_count,
             initial_lease_recovery_count=job.lease_recovery_count,
             initial_lease_heartbeat_at=job.last_lease_heartbeat_at,
+            snapshot_workers=get_settings().walk_forward_snapshot_workers,
         )
         stored = repo.save_walk_forward_run(result)
         repo.update_walk_forward_job(

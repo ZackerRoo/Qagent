@@ -3,10 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import statistics
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from multiprocessing import get_context
 from threading import Event, Lock, Thread
 from types import SimpleNamespace
 
@@ -286,6 +289,183 @@ class WalkForwardProgress(BaseModel):
     last_lease_heartbeat_at: datetime | None = None
 
 
+class _WalkForwardSnapshotInput(BaseModel):
+    decision_date: date
+    historical_universe_size: int
+    eligible: list[str]
+    eligible_stocks: list[str]
+    suspended_count: int
+    st_excluded_count: int
+    missing_tradability_count: int
+
+
+class _WalkForwardWorkerStats(BaseModel):
+    market_queries: int = 0
+    full_window_queries: int = 0
+    incremental_queries: int = 0
+    rows_loaded: int = 0
+    fundamental_prefetches: int = 0
+    fundamental_fallback_queries: int = 0
+
+
+class _WalkForwardWorkerResult(BaseModel):
+    worker_pid: int
+    snapshot: WalkForwardSnapshot
+    scan_error_count: int
+    scan_error_samples: list[str] = Field(default_factory=list)
+    stats: _WalkForwardWorkerStats
+
+
+_snapshot_worker_repository: ReplayEvidenceRepository | None = None
+_snapshot_worker_market_provider: ReplayMarketDataProvider | None = None
+_snapshot_worker_strategy_provider: ReplayStrategyDataProvider | None = None
+
+
+def _repository_database_url(repository: ReplayEvidenceRepository) -> str:
+    bind = repository.session_factory.kw.get("bind")
+    if bind is None:
+        raise RuntimeError("walk-forward repository has no database engine")
+    return bind.url.render_as_string(hide_password=False)
+
+
+def _initialize_snapshot_worker(
+    database_url: str,
+    provider_mode: str,
+    owner_run_id: str,
+    revision: int,
+) -> None:
+    from qagent.db import create_session_factory
+
+    global _snapshot_worker_repository
+    global _snapshot_worker_market_provider
+    global _snapshot_worker_strategy_provider
+    _snapshot_worker_repository = ReplayEvidenceRepository(
+        create_session_factory(database_url),
+        provider_mode,
+        owner_run_id=owner_run_id,
+    )
+    _snapshot_worker_market_provider = ReplayMarketDataProvider(
+        _snapshot_worker_repository,
+        revision,
+    )
+    _snapshot_worker_strategy_provider = ReplayStrategyDataProvider(
+        _snapshot_worker_repository,
+        revision,
+    )
+
+
+def _compute_snapshot_in_worker(
+    snapshot_input: _WalkForwardSnapshotInput,
+    lookback_days: int,
+) -> _WalkForwardWorkerResult:
+    if (
+        _snapshot_worker_repository is None
+        or _snapshot_worker_market_provider is None
+        or _snapshot_worker_strategy_provider is None
+    ):
+        raise RuntimeError("walk-forward snapshot worker is not initialized")
+    return _compute_walk_forward_snapshot(
+        snapshot_input,
+        lookback_days=lookback_days,
+        repository=_snapshot_worker_repository,
+        market_provider=_snapshot_worker_market_provider,
+        strategy_provider=_snapshot_worker_strategy_provider,
+    )
+
+
+def _compute_walk_forward_snapshot(
+    snapshot_input: _WalkForwardSnapshotInput,
+    *,
+    lookback_days: int,
+    repository: ReplayEvidenceRepository,
+    market_provider: ReplayMarketDataProvider,
+    strategy_provider: ReplayStrategyDataProvider,
+) -> _WalkForwardWorkerResult:
+    decision_date = snapshot_input.decision_date
+    fundamental_evidence = repository.fundamentals_as_of(
+        snapshot_input.eligible_stocks,
+        decision_date,
+        market_provider.revision,
+    )
+    fundamental_covered_count = sum(
+        _has_usable_fundamental(item) for item in fundamental_evidence.values()
+    )
+    window_start = decision_date - timedelta(days=lookback_days)
+    market_provider.prefetch_daily_bars(
+        snapshot_input.eligible,
+        window_start,
+        decision_date,
+    )
+    strategy_provider.prefetch_fundamentals(
+        snapshot_input.eligible,
+        decision_date,
+        snapshots=fundamental_evidence,
+    )
+    scan = run_daily_scan(
+        snapshot_input.eligible,
+        market_provider,
+        mode="historical_replay",
+        strategy_data_provider=strategy_provider,
+        a_share_enhanced_provider=EmptyAShareEnhancedDataProvider(),
+        start=window_start,
+        end=decision_date,
+    )
+    errors = [item.reason for item in scan.items if item.status == "error"]
+    selections = [
+        _selection(card)
+        for card in scan.cards
+        if card.status.value not in EXCLUDED_STATUSES
+    ]
+    return _WalkForwardWorkerResult(
+        worker_pid=os.getpid(),
+        snapshot=WalkForwardSnapshot(
+            decision_date=decision_date,
+            historical_universe_size=snapshot_input.historical_universe_size,
+            eligible_size=len(snapshot_input.eligible),
+            suspended_count=snapshot_input.suspended_count,
+            st_excluded_count=snapshot_input.st_excluded_count,
+            missing_tradability_count=snapshot_input.missing_tradability_count,
+            fundamental_universe_size=len(snapshot_input.eligible_stocks),
+            fundamental_covered_count=fundamental_covered_count,
+            top_5=selections[:5],
+            top_10=selections[:10],
+        ),
+        scan_error_count=len(errors),
+        scan_error_samples=errors[:3],
+        stats=_snapshot_worker_stats(market_provider, strategy_provider),
+    )
+
+
+def _snapshot_worker_stats(
+    market_provider: ReplayMarketDataProvider,
+    strategy_provider: ReplayStrategyDataProvider,
+) -> _WalkForwardWorkerStats:
+    return _WalkForwardWorkerStats(
+        market_queries=market_provider.query_count,
+        full_window_queries=market_provider.full_window_queries,
+        incremental_queries=market_provider.incremental_queries,
+        rows_loaded=market_provider.rows_loaded,
+        fundamental_prefetches=strategy_provider.prefetch_count,
+        fundamental_fallback_queries=strategy_provider.query_count,
+    )
+
+
+def _sum_worker_stats(
+    worker_stats: Iterable[_WalkForwardWorkerStats],
+) -> _WalkForwardWorkerStats:
+    values = list(worker_stats)
+    return _WalkForwardWorkerStats(
+        market_queries=sum(item.market_queries for item in values),
+        full_window_queries=sum(item.full_window_queries for item in values),
+        incremental_queries=sum(item.incremental_queries for item in values),
+        rows_loaded=sum(item.rows_loaded for item in values),
+        fundamental_prefetches=sum(item.fundamental_prefetches for item in values),
+        fundamental_fallback_queries=sum(
+            item.fundamental_fallback_queries for item in values
+        ),
+    )
+
+
 def run_full_market_walk_forward_selection(
     repository: ReplayEvidenceRepository,
     *,
@@ -301,6 +481,7 @@ def run_full_market_walk_forward_selection(
     initial_lease_maintenance_count: int = 0,
     initial_lease_recovery_count: int = 0,
     initial_lease_heartbeat_at: datetime | None = None,
+    snapshot_workers: int = 1,
 ) -> WalkForwardSelectionResult:
     if start > end:
         raise ValueError("start must be on or before end")
@@ -308,6 +489,8 @@ def run_full_market_walk_forward_selection(
         raise ValueError("rebalance_step_sessions must be positive")
     if lookback_days <= 0:
         raise ValueError("lookback_days must be positive")
+    if snapshot_workers <= 0:
+        raise ValueError("snapshot_workers must be positive")
     revision = repository.current_revision()
     if revision <= 0:
         raise ValueError("historical replay dataset is empty")
@@ -339,7 +522,10 @@ def run_full_market_walk_forward_selection(
     lease_heartbeat.start()
     snapshots: list[WalkForwardSnapshot] = []
     eligible_universes: list[tuple[date, list[str]]] = []
-    scan_errors: list[str] = []
+    scan_error_count = 0
+    scan_error_samples: list[str] = []
+    selection_worker_stats = _WalkForwardWorkerStats()
+    effective_snapshot_workers = 1
     try:
         sessions = trading_sessions_in_range(start, end)[::rebalance_step_sessions]
         resumed = {item.decision_date: item for item in (resume_snapshots or [])}
@@ -348,12 +534,13 @@ def run_full_market_walk_forward_selection(
             raise ValueError("resume snapshots do not match the requested validation window")
         _report_progress(
             progress_callback,
-            phase="historical_replay",
-            processed_snapshots=0,
+            phase="preparing_historical_replay",
+            processed_snapshots=len(resumed),
             total_snapshots=len(sessions),
             lease_heartbeat=lease_heartbeat,
         )
-        for index, decision_date in enumerate(sessions, start=1):
+        snapshot_inputs: list[_WalkForwardSnapshotInput] = []
+        for decision_date in sessions:
             lease_heartbeat.maintain_now()
             members = owner_repository.universe_members_on(decision_date, revision)
             if not members:
@@ -383,73 +570,103 @@ def run_full_market_walk_forward_selection(
                     st_excluded_count += 1
                     continue
                 eligible.append(instrument_id)
-            eligible_universes.append((decision_date, sorted(eligible)))
+            eligible = sorted(eligible)
+            eligible_universes.append((decision_date, eligible))
             stock_ids = {
                 item.instrument_id
                 for item in members
                 if item.active and item.security_type in {"stock", "1"}
             }
             eligible_stocks = [item for item in eligible if item in stock_ids]
-            fundamental_evidence = owner_repository.fundamentals_as_of(
-                eligible_stocks,
-                decision_date,
-                revision,
-            )
-            fundamental_covered_count = sum(
-                _has_usable_fundamental(item)
-                for item in fundamental_evidence.values()
-            )
-            snapshot = resumed.get(decision_date)
-            if snapshot is None:
-                window_start = decision_date - timedelta(days=lookback_days)
-                market_provider.prefetch_daily_bars(
-                    eligible,
-                    window_start,
-                    decision_date,
-                )
-                strategy_provider.prefetch_fundamentals(
-                    eligible,
-                    decision_date,
-                    snapshots=fundamental_evidence,
-                )
-                scan = run_daily_scan(
-                    eligible,
-                    market_provider,
-                    mode="historical_replay",
-                    strategy_data_provider=strategy_provider,
-                    a_share_enhanced_provider=EmptyAShareEnhancedDataProvider(),
-                    start=window_start,
-                    end=decision_date,
-                )
-                lease_heartbeat.raise_if_failed()
-                scan_errors.extend(item.reason for item in scan.items if item.status == "error")
-                selections = [
-                    _selection(card)
-                    for card in scan.cards
-                    if card.status.value not in EXCLUDED_STATUSES
-                ]
-                snapshot = WalkForwardSnapshot(
+            snapshot_inputs.append(
+                _WalkForwardSnapshotInput(
                     decision_date=decision_date,
                     historical_universe_size=len(instrument_ids),
-                    eligible_size=len(eligible),
+                    eligible=eligible,
+                    eligible_stocks=eligible_stocks,
                     suspended_count=suspended_count,
                     st_excluded_count=st_excluded_count,
                     missing_tradability_count=missing_tradability_count,
-                    fundamental_universe_size=len(eligible_stocks),
-                    fundamental_covered_count=fundamental_covered_count,
-                    top_5=selections[:5],
-                    top_10=selections[:10],
                 )
-            snapshots.append(snapshot)
-            _report_progress(
-                progress_callback,
-                phase="historical_replay",
-                processed_snapshots=index,
-                total_snapshots=len(sessions),
-                current_date=decision_date,
-                snapshot=snapshot,
-                lease_heartbeat=lease_heartbeat,
             )
+        snapshot_by_date = dict(resumed)
+        pending_inputs = [
+            item for item in snapshot_inputs if item.decision_date not in snapshot_by_date
+        ]
+        effective_snapshot_workers = min(snapshot_workers, len(pending_inputs)) or 1
+        _report_progress(
+            progress_callback,
+            phase="historical_replay",
+            processed_snapshots=len(snapshot_by_date),
+            total_snapshots=len(sessions),
+            current_date=max(snapshot_by_date, default=None),
+            lease_heartbeat=lease_heartbeat,
+        )
+        if effective_snapshot_workers == 1:
+            for snapshot_input in pending_inputs:
+                lease_heartbeat.maintain_now()
+                worker_result = _compute_walk_forward_snapshot(
+                    snapshot_input,
+                    lookback_days=lookback_days,
+                    repository=owner_repository,
+                    market_provider=market_provider,
+                    strategy_provider=strategy_provider,
+                )
+                lease_heartbeat.raise_if_failed()
+                snapshot_by_date[worker_result.snapshot.decision_date] = worker_result.snapshot
+                scan_error_count += worker_result.scan_error_count
+                scan_error_samples.extend(worker_result.scan_error_samples)
+                _report_progress(
+                    progress_callback,
+                    phase="historical_replay",
+                    processed_snapshots=len(snapshot_by_date),
+                    total_snapshots=len(sessions),
+                    current_date=worker_result.snapshot.decision_date,
+                    snapshot=worker_result.snapshot,
+                    lease_heartbeat=lease_heartbeat,
+                )
+        elif pending_inputs:
+            database_url = _repository_database_url(owner_repository)
+            stats_by_worker: dict[int, _WalkForwardWorkerStats] = {}
+            with ProcessPoolExecutor(
+                max_workers=effective_snapshot_workers,
+                mp_context=get_context("spawn"),
+                initializer=_initialize_snapshot_worker,
+                initargs=(
+                    database_url,
+                    repository.provider_mode,
+                    owner_run_id,
+                    revision,
+                ),
+            ) as executor:
+                futures = [
+                    executor.submit(
+                        _compute_snapshot_in_worker,
+                        snapshot_input,
+                        lookback_days,
+                    )
+                    for snapshot_input in pending_inputs
+                ]
+                for future in as_completed(futures):
+                    worker_result = future.result()
+                    lease_heartbeat.raise_if_failed()
+                    snapshot_by_date[
+                        worker_result.snapshot.decision_date
+                    ] = worker_result.snapshot
+                    scan_error_count += worker_result.scan_error_count
+                    scan_error_samples.extend(worker_result.scan_error_samples)
+                    stats_by_worker[worker_result.worker_pid] = worker_result.stats
+                    _report_progress(
+                        progress_callback,
+                        phase="historical_replay",
+                        processed_snapshots=len(snapshot_by_date),
+                        total_snapshots=len(sessions),
+                        current_date=worker_result.snapshot.decision_date,
+                        snapshot=worker_result.snapshot,
+                        lease_heartbeat=lease_heartbeat,
+                    )
+            selection_worker_stats = _sum_worker_stats(stats_by_worker.values())
+        snapshots = [snapshot_by_date[item] for item in sessions]
         _report_progress(
             progress_callback,
             phase="portfolio_simulation",
@@ -569,7 +786,8 @@ def run_full_market_walk_forward_selection(
             "walk_forward_revision": str(revision),
             "walk_forward_snapshots": str(len(snapshots)),
             "walk_forward_lookback_days": str(lookback_days),
-            "walk_forward_scan_errors": str(len(scan_errors)),
+            "walk_forward_scan_errors": str(scan_error_count),
+            "walk_forward_snapshot_workers": str(effective_snapshot_workers),
             "walk_forward_future_data_guard": "revision_lease_and_decision_date_cutoff",
             "walk_forward_lease_maintenance_count": str(
                 lease_heartbeat.maintenance_count
@@ -618,19 +836,27 @@ def run_full_market_walk_forward_selection(
                 if item.benchmark_id == ELIGIBLE_UNIVERSE_BENCHMARK_ID
             ),
             "walk_forward_cost_scenarios": str(len(cost_sensitivity)),
-            "walk_forward_replay_cache_queries": str(market_provider.query_count),
+            "walk_forward_replay_cache_queries": str(
+                market_provider.query_count + selection_worker_stats.market_queries
+            ),
             "walk_forward_replay_cache_full_queries": str(
                 market_provider.full_window_queries
+                + selection_worker_stats.full_window_queries
             ),
             "walk_forward_replay_cache_incremental_queries": str(
                 market_provider.incremental_queries
+                + selection_worker_stats.incremental_queries
             ),
-            "walk_forward_replay_cache_rows_loaded": str(market_provider.rows_loaded),
+            "walk_forward_replay_cache_rows_loaded": str(
+                market_provider.rows_loaded + selection_worker_stats.rows_loaded
+            ),
             "walk_forward_fundamental_prefetches": str(
                 strategy_provider.prefetch_count
+                + selection_worker_stats.fundamental_prefetches
             ),
             "walk_forward_fundamental_fallback_queries": str(
                 strategy_provider.query_count
+                + selection_worker_stats.fundamental_fallback_queries
             ),
             "walk_forward_release_gate": strategy_validation.status,
             "walk_forward_statistical_unit": "signal_date_cluster",
@@ -649,8 +875,16 @@ def run_full_market_walk_forward_selection(
             "walk_forward_digest": digest,
             "walk_forward_experiment_digest": experiment_manifest.experiment_digest,
             "walk_forward_code_revision": experiment_manifest.code_revision,
+            "walk_forward_runtime_revisions": ",".join(
+                experiment_manifest.runtime_revisions
+                or [experiment_manifest.code_revision]
+            ),
             "walk_forward_strategy_registry_digest": (experiment_manifest.strategy_registry_digest),
-            **({"walk_forward_error_samples": " | ".join(scan_errors[:3])} if scan_errors else {}),
+            **(
+                {"walk_forward_error_samples": " | ".join(scan_error_samples[:3])}
+                if scan_error_samples
+                else {}
+            ),
         },
     )
     _report_progress(

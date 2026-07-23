@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +21,7 @@ class Settings(BaseSettings):
     a_share_enhanced_min_interval_seconds: float = 1.05
     a_share_enhanced_timeout_seconds: int = 12
     a_share_enhanced_cache_ttl_hours: int = 6
+    walk_forward_snapshot_workers: int = Field(default=2, ge=1, le=4)
 
     model_config = SettingsConfigDict(env_prefix="QAGENT_", env_file=".env")
 

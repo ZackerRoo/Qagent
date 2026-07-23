@@ -7,7 +7,7 @@ import subprocess
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from qagent.backtesting.a_share_rules import RULES_PATH, load_a_share_rule_schedule
 from qagent.strategies.registry import default_strategy_registry
@@ -36,6 +36,7 @@ class WalkForwardExperimentManifest(BaseModel):
     execution_rule_set_version: str
     fee_schedule_version: str
     execution_rules_digest: str
+    runtime_revisions: list[str] = Field(default_factory=list)
 
 
 def build_walk_forward_experiment_manifest(
@@ -80,6 +81,82 @@ def build_walk_forward_experiment_manifest(
         code_dirty=dirty,
         python_version=platform.python_version(),
         strategy_ids=[item["strategy_id"] for item in registry_payload],
+        runtime_revisions=[revision],
+    )
+
+
+def walk_forward_manifests_semantically_compatible(
+    stored: WalkForwardExperimentManifest,
+    current: WalkForwardExperimentManifest,
+) -> bool:
+    """Allow runtime-only upgrades while keeping every research input fixed."""
+
+    if not (
+        walk_forward_manifest_digest_is_valid(stored)
+        and walk_forward_manifest_digest_is_valid(current)
+    ):
+        return False
+    semantic_fields = (
+        "schema_version",
+        "provider_mode",
+        "dataset_revision",
+        "start_date",
+        "end_date",
+        "rebalance_step_sessions",
+        "lookback_days",
+        "selection_algorithm_version",
+        "strategy_registry_digest",
+        "strategy_ids",
+        "execution_rule_set_version",
+        "fee_schedule_version",
+        "execution_rules_digest",
+    )
+    return all(
+        getattr(stored, field) == getattr(current, field)
+        for field in semantic_fields
+    )
+
+
+def walk_forward_manifest_digest_is_valid(
+    manifest: WalkForwardExperimentManifest,
+) -> bool:
+    stable_payload = {
+        "schema_version": manifest.schema_version,
+        "code_revision": manifest.code_revision,
+        "provider_mode": manifest.provider_mode,
+        "dataset_revision": manifest.dataset_revision,
+        "start_date": manifest.start_date.isoformat(),
+        "end_date": manifest.end_date.isoformat(),
+        "rebalance_step_sessions": manifest.rebalance_step_sessions,
+        "lookback_days": manifest.lookback_days,
+        "selection_algorithm_version": manifest.selection_algorithm_version,
+        "strategy_registry_digest": manifest.strategy_registry_digest,
+        "execution_rule_set_version": manifest.execution_rule_set_version,
+        "fee_schedule_version": manifest.fee_schedule_version,
+        "execution_rules_digest": manifest.execution_rules_digest,
+    }
+    return manifest.experiment_digest == _digest(stable_payload)
+
+
+def record_walk_forward_runtime_revision(
+    stored: WalkForwardExperimentManifest,
+    current: WalkForwardExperimentManifest,
+) -> WalkForwardExperimentManifest:
+    revisions = list(
+        dict.fromkeys(
+            [
+                stored.code_revision,
+                *stored.runtime_revisions,
+                current.code_revision,
+                *current.runtime_revisions,
+            ]
+        )
+    )
+    return stored.model_copy(
+        update={
+            "runtime_revisions": revisions,
+            "code_dirty": stored.code_dirty or current.code_dirty,
+        }
     )
 
 

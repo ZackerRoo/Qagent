@@ -2178,6 +2178,7 @@ class QagentRepository:
         lease_recovery_count: int | None = None,
         last_lease_heartbeat_at: datetime | None = None,
         checkpoints: list[dict[str, object]] | None = None,
+        experiment_manifest: dict[str, object] | None = None,
         result_run_id: str | None = None,
         error: str | None = None,
         started_at: datetime | None = None,
@@ -2211,6 +2212,12 @@ class QagentRepository:
             if checkpoints is not None:
                 row.checkpoints_json = json.dumps(
                     checkpoints,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                )
+            if experiment_manifest is not None:
+                row.experiment_manifest_json = json.dumps(
+                    experiment_manifest,
                     ensure_ascii=True,
                     sort_keys=True,
                 )
