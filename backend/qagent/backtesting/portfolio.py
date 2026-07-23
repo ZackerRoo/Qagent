@@ -282,6 +282,10 @@ def _build_candidates(
     execution_rule_resolver: VersionedAshareExecutionResolver | None = None,
 ) -> list[_TradeCandidate]:
     candidates: list[_TradeCandidate] = []
+    bars_by_instrument = {
+        str(instrument_id): frame.reset_index(drop=True)
+        for instrument_id, frame in bars.groupby("instrument_id", sort=False)
+    }
     sorted_signals = sorted(
         signals,
         key=lambda signal: (signal.signal_date, Decimal(signal.rank_score)),
@@ -290,7 +294,7 @@ def _build_candidates(
     for signal in sorted_signals:
         candidate = _candidate_from_signal(
             signal,
-            bars.loc[bars["instrument_id"] == signal.instrument_id].reset_index(drop=True),
+            bars_by_instrument.get(signal.instrument_id, pd.DataFrame()),
             slippage_bps=slippage_bps,
             max_entry_wait_days=max_entry_wait_days,
             max_holding_days=max_holding_days,
