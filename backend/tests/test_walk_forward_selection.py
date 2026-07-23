@@ -352,6 +352,21 @@ def test_batch_tradability_matches_single_date_queries(tmp_path):
     }
 
 
+def test_replay_provider_batches_tradability_for_multiple_bar_dates(tmp_path):
+    repository, decision_date = _replay_repository(tmp_path)
+    provider = ReplayMarketDataProvider(repository, repository.current_revision())
+
+    bars = provider.get_daily_bars(
+        ["CN:000001"],
+        decision_date,
+        date(2025, 1, 13),
+    )
+
+    assert len(bars) == 2
+    assert provider.tradability_query_count == 1
+    assert set(bars["trading_status"]) == {"trading"}
+
+
 def test_replay_market_provider_reuses_rolling_window(tmp_path, monkeypatch):
     repository, _ = _replay_repository(tmp_path)
     revision = repository.current_revision()

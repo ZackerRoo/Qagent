@@ -207,18 +207,28 @@ class ReplayMarketDataProvider:
                 missing_by_date.setdefault(item.trade_date, set()).add(
                     item.instrument_id
                 )
-        for trade_date, instrument_ids in sorted(missing_by_date.items()):
-            requested = sorted(instrument_ids)
-            points = self.repository.tradability_on(
-                requested,
-                trade_date,
+        dates = sorted(missing_by_date)
+        for offset in range(0, len(dates), 8):
+            batch_dates = dates[offset : offset + 8]
+            batch_ids = sorted(
+                {
+                    instrument_id
+                    for trade_date in batch_dates
+                    for instrument_id in missing_by_date[trade_date]
+                }
+            )
+            points_by_date = self.repository.tradability_on_dates(
+                batch_ids,
+                batch_dates,
                 self.revision,
             )
             self.tradability_query_count += 1
-            for instrument_id in requested:
-                self._tradability_cache[(instrument_id, trade_date)] = points.get(
-                    instrument_id
-                )
+            for trade_date in batch_dates:
+                points = points_by_date.get(trade_date, {})
+                for instrument_id in missing_by_date[trade_date]:
+                    self._tradability_cache[
+                        (instrument_id, trade_date)
+                    ] = points.get(instrument_id)
 
     def _prune_before(self, start: date) -> None:
         if self._pruned_through is not None and start <= self._pruned_through:
