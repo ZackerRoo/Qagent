@@ -34,6 +34,7 @@ from qagent.recommendations.feedback import (
 )
 from qagent.recommendations.governance import (
     CardStrategyGovernance,
+    apply_final_recommendation_policy,
     governed_card_payloads,
     load_latest_walk_forward_validation,
     load_strategy_governance_context,
@@ -345,6 +346,18 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         instrument_ids=card_universe,
     )
     _apply_global_factor_rankings(all_cards, all_items, global_factor_rankings)
+    final_governance_context, final_walk_forward_validation, _ = _final_policy_inputs(
+        repo,
+        job.provider,
+    )
+    final_policy = apply_final_recommendation_policy(
+        all_cards,
+        walk_forward_validation=final_walk_forward_validation,
+        governance_context=final_governance_context,
+    )
+    all_cards = final_policy.cards
+    all_governance = final_policy.audits
+    aggregate_health.update(final_policy.data_health)
     feature_as_of = _feature_snapshot_as_of(
         all_items,
         instrument_ids=set(card_universe),
@@ -367,7 +380,10 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
             "factor_ranking_scope": "full_card_universe",
             "factor_ranking_normalization": "global_second_pass",
             "factor_ranking_tie_breaker": "instrument_id_asc",
-            "dynamic_calibration_merge_policy": "preserve_batch_result_without_reapply",
+            "dynamic_calibration_merge_policy": (
+                "preserve_batch_calibration_reconcile_latest_governance"
+            ),
+            "full_market_final_policy_reconciled": "true",
         }
     )
 

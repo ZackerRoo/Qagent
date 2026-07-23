@@ -189,8 +189,9 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
     )
     assert (
         cached.payload["data_health"]["dynamic_calibration_merge_policy"]
-        == "preserve_batch_result_without_reapply"
+        == "preserve_batch_calibration_reconcile_latest_governance"
     )
+    assert cached.payload["data_health"]["full_market_final_policy_reconciled"] == "true"
     assert cached.payload["strategy_health"]
     assert any(item["curve"] for item in cached.payload["strategy_health"])
     assert cached.payload["cards"][0]["confidence_explanation"]
@@ -259,6 +260,92 @@ def test_full_market_batch_job_resumes_from_persisted_batch_checkpoints(
     assert restored.completed_batches == 2
     assert restored.data_health["full_market_restart_recovery"] == "batch_checkpoint_resume"
     assert restored.data_health["full_market_checkpoint_batches_restored"] == "2"
+
+
+def test_full_market_batch_reconciles_validation_completed_during_scan(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'final-policy-reconcile.db'}",
+    )
+    initialize_database()
+    repo = QagentRepository(create_session_factory())
+    job = repo.create_full_market_scan_job(
+        provider="fixture",
+        symbols=["US:TEST"],
+        batch_size=1,
+        include_etfs=True,
+        sync_if_empty=False,
+    )
+    monkeypatch.setattr(
+        full_market,
+        "build_market_data_provider",
+        lambda provider: FixtureMarketDataProvider(),
+    )
+    original_inputs = full_market._final_policy_inputs
+    input_calls = 0
+
+    def staged_inputs(repo, provider):
+        nonlocal input_calls
+        input_calls += 1
+        governance, _, paper_report = original_inputs(repo, provider)
+        if input_calls == 1:
+            return governance, {"status": "insufficient", "strategies": [], "factors": []}, paper_report
+        return (
+            governance,
+            {
+                "status": "rejected",
+                "strategies": [
+                    {
+                        "dimension": "strategy",
+                        "key": strategy_id,
+                        "label": strategy_id,
+                        "out_of_sample_count": 40,
+                        "action": "disable",
+                        "suggested_weight_delta": -0.10,
+                        "reason": "样本外收益显著为负。",
+                    }
+                    for strategy_id in (
+                        "analyst_revision_momentum",
+                        "bayesian_intrinsic_growth",
+                        "breakout_volume_confirmation",
+                        "catalyst_financial_transmission",
+                        "factor_rotation_watch",
+                        "gf_dma_health",
+                        "healthy_pullback",
+                        "insider_institutional_confirmation",
+                        "options_flow_confirmation",
+                        "pead_earnings_drift",
+                        "sector_rotation_regime",
+                        "short_squeeze_risk",
+                        "tam_adj_peg_growth",
+                        "trend_momentum_stage2",
+                    )
+                ],
+                "factors": [],
+            },
+            paper_report,
+        )
+
+    monkeypatch.setattr(full_market, "_final_policy_inputs", staged_inputs)
+
+    full_market.run_full_market_batch_scan_job(job.job_id, top_cards_limit=5)
+
+    cached = repo.get_recent_scan_result_cache(
+        cache_key=full_market.full_market_batch_cache_key("fixture", True),
+        max_age=timedelta(minutes=60),
+    )
+    assert cached is not None
+    assert input_calls == 2
+    assert cached.payload["data_health"]["walk_forward_feedback_gate"] == "rejected"
+    assert cached.payload["data_health"]["walk_forward_feedback_blocked"] == "1"
+    assert cached.payload["cards"][0]["rank_score"] == 0
+    assert (
+        cached.payload["cards"][0]["strategy_governance"]["gate_decision"]["action"]
+        == "disable"
+    )
 
 
 def test_full_market_batch_job_caches_rejected_items_with_remediation(tmp_path, monkeypatch):
