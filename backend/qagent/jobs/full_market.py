@@ -7,12 +7,18 @@ from qagent.domain.models import OpportunityCard, SectorStrength
 from qagent.factors.engine import build_factor_feature_snapshot, rerank_factor_rankings
 from qagent.factors.models import FactorRanking
 from qagent.features import FeatureSnapshot, feature_snapshot_data_health
+from qagent.historical_evidence.providers import REQUIRED_BENCHMARK_IDS
 from qagent.jobs.daily_scan import DailyScanResult, ScanItem, run_daily_scan
 from qagent.market.a_share_state import (
     AShareMarketState,
     AShareStateObservation,
     AShareStateSnapshot,
     advance_a_share_state,
+)
+from qagent.market.benchmark_trend import (
+    BenchmarkTrendSnapshot,
+    benchmark_trend_data_health,
+    build_benchmark_trend_snapshot,
 )
 from qagent.market.tradable import load_cn_tradable_instruments
 from qagent.monitoring.drift import (
@@ -43,6 +49,10 @@ from qagent.recommendations.governance import (
 from qagent.recommendations.probability import probability_calibration_data_health
 from qagent.recommendations.quality_gate import recommendation_quality_data_health
 from qagent.recommendations.rotation import sort_recommendation_cards
+from qagent.recommendations.selection import (
+    select_strategy_diversified,
+    strategy_concentration,
+)
 from qagent.research.action_center import build_manual_action_center
 from qagent.research.decision_quality import build_decision_quality_center
 from qagent.research.market_intelligence import (
@@ -420,9 +430,38 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         expected_count=len(card_universe),
     )
     aggregate_health.update(_a_share_market_state_data_health(market_state))
+    benchmark_trend, benchmark_trend_error = _load_benchmark_trend(
+        provider,
+        as_of=feature_as_of,
+    )
+    aggregate_health.update(benchmark_trend_data_health(benchmark_trend))
+    if benchmark_trend_error:
+        aggregate_health["benchmark_trend_error"] = benchmark_trend_error
     brief_health = apply_recommendation_briefs(all_cards)
     ranked_cards = sort_recommendation_cards(
         sorted(all_cards, key=lambda card: card.instrument_id)
+    )
+    diversified_head = select_strategy_diversified(
+        ranked_cards,
+        limit=10,
+        max_per_strategy=2,
+    )
+    diversified_ids = {card.card_id for card in diversified_head}
+    ranked_cards = [
+        *diversified_head,
+        *(card for card in ranked_cards if card.card_id not in diversified_ids),
+    ]
+    dominant_strategy, dominant_count, dominant_share = strategy_concentration(
+        diversified_head
+    )
+    aggregate_health.update(
+        {
+            "strategy_diversification_limit": "2",
+            "strategy_diversified_head_count": str(len(diversified_head)),
+            "strategy_diversified_dominant_strategy": dominant_strategy or "",
+            "strategy_diversified_dominant_count": str(dominant_count),
+            "strategy_diversified_dominant_share": f"{dominant_share:.4f}",
+        }
     )
     visible_cards = ranked_cards[:top_cards_limit]
     visible_card_ids = {card.card_id for card in visible_cards}
@@ -435,10 +474,14 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         item for item in all_items if item.instrument_id in visible_card_instruments
     ]
     sector_strength = _merge_sector_strength(sector_strength_batches)[:12]
+    market_state_multiplier = min(
+        _a_share_market_state_multiplier(market_state.state),
+        1.0 if benchmark_trend.entry_allowed else 0.0,
+    )
     portfolio_plan = build_portfolio_plan(
-        visible_cards,
+        diversified_head,
         market_state=market_state.state.value,
-        market_state_multiplier=_a_share_market_state_multiplier(market_state.state),
+        market_state_multiplier=market_state_multiplier,
     )
     payload_data_health = {
         **aggregate_health,
@@ -512,6 +555,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         "feature_snapshot": feature_snapshot.model_dump(mode="json"),
         "feature_drift": feature_drift,
         "a_share_market_state": market_state.model_dump(mode="json"),
+        "benchmark_trend": benchmark_trend.model_dump(mode="json"),
         "data_health": payload_data_health,
     }
     repo.save_scan_run(
@@ -931,6 +975,25 @@ def _a_share_market_state_data_health(state: AShareStateSnapshot) -> dict[str, s
         "a_share_market_state_missing_rate": f"{state.missing_rate:.4f}",
         "a_share_market_state_risk_multiplier": f"{_a_share_market_state_multiplier(state.state):.2f}",
     }
+
+
+def _load_benchmark_trend(
+    provider,
+    *,
+    as_of: date,
+) -> tuple[BenchmarkTrendSnapshot, str | None]:
+    try:
+        bars = provider.get_daily_bars(
+            list(REQUIRED_BENCHMARK_IDS),
+            as_of - timedelta(days=200),
+            as_of,
+        )
+        return build_benchmark_trend_snapshot(bars, as_of=as_of), None
+    except Exception as exc:
+        return (
+            build_benchmark_trend_snapshot(None, as_of=as_of),
+            str(exc)[:500],
+        )
 
 
 def _visible_rejected_items(items: list[ScanItem], limit: int = 500) -> list[ScanItem]:

@@ -45,6 +45,11 @@ from qagent.jobs.daily_scan import run_daily_scan
 from qagent.market.astock_enhanced import EmptyAShareEnhancedDataProvider
 from qagent.market.calendars import trading_sessions_in_range
 from qagent.historical_evidence.providers import REQUIRED_BENCHMARK_IDS
+from qagent.market.benchmark_trend import (
+    BenchmarkTrendState,
+    build_benchmark_trend_snapshot,
+)
+from qagent.recommendations.selection import select_strategy_diversified
 from qagent.storage.replay_evidence import (
     LEASE_DURATION,
     DatasetLeaseBusy,
@@ -190,6 +195,12 @@ class WalkForwardSnapshot(BaseModel):
     missing_tradability_count: int
     fundamental_universe_size: int = 0
     fundamental_covered_count: int = 0
+    benchmark_trend_state: str = BenchmarkTrendState.UNKNOWN.value
+    benchmark_trend_valid_count: int = 0
+    benchmark_trend_above_count: int = 0
+    market_entry_allowed: bool = True
+    strategy_diversification_limit: int = 2
+    strategy_diversified_count: int = 0
     top_5: list[WalkForwardSelection] = Field(default_factory=list)
     top_10: list[WalkForwardSelection] = Field(default_factory=list)
 
@@ -493,6 +504,24 @@ def _compute_walk_forward_snapshot_without_gc(
         else recommendation_cards
     )
     selections = [_selection(card) for card in eligible_cards]
+    benchmark_bars = market_provider.get_daily_bars(
+        list(REQUIRED_BENCHMARK_IDS),
+        decision_date - timedelta(days=200),
+        decision_date,
+    )
+    benchmark_trend = build_benchmark_trend_snapshot(
+        benchmark_bars,
+        as_of=decision_date,
+    )
+    diversified = (
+        select_strategy_diversified(
+            selections,
+            limit=10,
+            max_per_strategy=2,
+        )
+        if benchmark_trend.entry_allowed
+        else []
+    )
     return _WalkForwardWorkerResult(
         worker_pid=os.getpid(),
         snapshot=WalkForwardSnapshot(
@@ -511,8 +540,13 @@ def _compute_walk_forward_snapshot_without_gc(
             missing_tradability_count=snapshot_input.missing_tradability_count,
             fundamental_universe_size=len(snapshot_input.eligible_stocks),
             fundamental_covered_count=fundamental_covered_count,
-            top_5=selections[:5],
-            top_10=selections[:10],
+            benchmark_trend_state=benchmark_trend.state.value,
+            benchmark_trend_valid_count=benchmark_trend.valid_benchmarks,
+            benchmark_trend_above_count=benchmark_trend.above_average_count,
+            market_entry_allowed=benchmark_trend.entry_allowed,
+            strategy_diversified_count=len(diversified),
+            top_5=diversified[:5],
+            top_10=diversified,
         ),
         scan_error_count=len(errors),
         scan_error_samples=errors[:3],
@@ -1052,6 +1086,22 @@ def run_full_market_walk_forward_selection(
             ),
             "walk_forward_execution_admission": (
                 "final_policy_paper_candidate_eligible"
+            ),
+            "walk_forward_strategy_diversification_limit": "2",
+            "walk_forward_strategy_diversified_selections": str(
+                sum(item.strategy_diversified_count for item in snapshots)
+            ),
+            "walk_forward_benchmark_trend_policy": (
+                "block_entries_when_3_of_4_benchmarks_below_ma60"
+            ),
+            "walk_forward_market_entry_blocked_snapshots": str(
+                sum(not item.market_entry_allowed for item in snapshots)
+            ),
+            "walk_forward_benchmark_trend_unknown_snapshots": str(
+                sum(
+                    item.benchmark_trend_state == BenchmarkTrendState.UNKNOWN.value
+                    for item in snapshots
+                )
             ),
             "walk_forward_st_policy": "excluded",
             "walk_forward_validation_scope": (

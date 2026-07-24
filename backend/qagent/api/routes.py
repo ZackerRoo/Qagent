@@ -2240,6 +2240,13 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 max_age=timedelta(minutes=max(settings.scan_max_age_minutes, 1)),
                 limit=candidate_pool_limit,
             )
+            snapshots, strategy_capacity_health = _paper_strategy_capacity_filter(
+                paper_repo,
+                snapshots,
+                provider=mode,
+                max_per_strategy=2,
+            )
+            data_health.update(strategy_capacity_health)
             pool_health = _paper_candidate_pool_health(
                 paper_repo=paper_repo,
                 snapshots=snapshots,
@@ -3001,6 +3008,8 @@ def _paper_seed_snapshots_from_recommendations(
         max_age=max_age,
         limit=limit,
     )
+    if health.get("paper_market_entry_gate") == "blocked":
+        return [], health
     snapshots, cache_blocked = _filter_governed_paper_snapshots(repo, snapshots)
     if snapshots:
         return snapshots, {
@@ -3087,6 +3096,14 @@ def _paper_seed_snapshots_from_latest_cache(
     )
     if cached is None:
         return [], {}
+    market_gate_health = _paper_market_entry_gate_from_cache(cached.payload)
+    if market_gate_health.get("paper_market_entry_gate") == "blocked":
+        return [], {
+            **market_gate_health,
+            "automation_seed_source": "latest_recommendation_cache",
+            "automation_seed_cache_id": cached.cache_id,
+            "automation_seed_cache_freshness": cache_freshness,
+        }
     raw_cards = cached.payload.get("cards")
     if not isinstance(raw_cards, list):
         return [], {}
@@ -3131,10 +3148,87 @@ def _paper_seed_snapshots_from_latest_cache(
     if not selected:
         return [], {}
     return selected, {
+        **market_gate_health,
         "automation_seed_source": "latest_recommendation_cache",
         "automation_seed_cache_id": cached.cache_id,
         "automation_seed_cache_freshness": cache_freshness,
         "automation_seed_rank_profile": "balanced",
+        "paper_strategy_diversification_limit": "2",
+    }
+
+
+def _paper_market_entry_gate_from_cache(
+    payload: dict[str, object],
+) -> dict[str, str]:
+    trend = payload.get("benchmark_trend")
+    if not isinstance(trend, dict):
+        return {
+            "paper_market_entry_gate": "unknown",
+            "paper_market_entry_gate_reason": "benchmark_trend_missing",
+        }
+    state = _string_value(trend.get("state")) or "unknown"
+    entry_allowed = trend.get("entry_allowed")
+    blocked = entry_allowed is False or state == "risk_off"
+    return {
+        "paper_market_entry_gate": "blocked" if blocked else "allowed",
+        "paper_market_entry_gate_state": state,
+        "paper_market_entry_gate_reason": _string_value(trend.get("reason")),
+    }
+
+
+def _paper_strategy_capacity_filter(
+    paper_repo: PaperTradingRepository,
+    snapshots: list[OpportunitySnapshotRecord],
+    *,
+    provider: str,
+    max_per_strategy: int,
+) -> tuple[list[OpportunitySnapshotRecord], dict[str, str]]:
+    if max_per_strategy <= 0:
+        raise ValueError("max_per_strategy must be positive")
+    trades = paper_repo.list_trades(limit=1000, provider=provider)
+    active = [trade for trade in trades if trade.status in {"pending", "open"}]
+    pending = [trade for trade in active if trade.status == "pending"]
+    account = paper_repo.get_account_settings()
+    if len(active) >= account.max_positions and pending:
+        return snapshots, {
+            "paper_strategy_capacity_limit": str(max_per_strategy),
+            "paper_strategy_capacity_blocked": "0",
+            "paper_strategy_capacity_active": str(len(active)),
+            "paper_strategy_capacity_mode": "replacement_only",
+        }
+
+    active_counts: dict[str, int] = {}
+    active_instruments = {trade.instrument_id for trade in active}
+    existing_sources = {trade.source_snapshot_id for trade in trades}
+    for trade in active:
+        strategy_id = trade.strategy_id or "unclassified"
+        active_counts[strategy_id] = active_counts.get(strategy_id, 0) + 1
+
+    allowed: list[OpportunitySnapshotRecord] = []
+    blocked = 0
+    already_tracked = 0
+    selected_counts: dict[str, int] = {}
+    for snapshot in snapshots:
+        if (
+            snapshot.instrument_id in active_instruments
+            or snapshot.snapshot_id in existing_sources
+        ):
+            already_tracked += 1
+            continue
+        strategy_id = snapshot.primary_strategy_id or "unclassified"
+        occupied = active_counts.get(strategy_id, 0)
+        selected = selected_counts.get(strategy_id, 0)
+        if occupied + selected >= max_per_strategy:
+            blocked += 1
+            continue
+        allowed.append(snapshot)
+        selected_counts[strategy_id] = selected + 1
+    return allowed, {
+        "paper_strategy_capacity_limit": str(max_per_strategy),
+        "paper_strategy_capacity_blocked": str(blocked),
+        "paper_strategy_capacity_active": str(sum(active_counts.values())),
+        "paper_strategy_capacity_already_tracked": str(already_tracked),
+        "paper_strategy_capacity_mode": "new_entries",
     }
 
 
