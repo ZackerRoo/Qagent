@@ -1,5 +1,5 @@
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -172,6 +172,98 @@ def test_walk_forward_submission_is_released_when_worker_finishes(monkeypatch):
     assert len(callbacks) == 1
     callbacks[0](None)
     assert "walk-forward-process-test" not in routes._submitted_walk_forward_jobs
+
+
+def test_walk_forward_reconciles_cached_policy_without_refreshing_market_age(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'walk-forward-cache-reconcile.db'}",
+    )
+    repo = routes._repo()
+    cached = repo.save_scan_result_cache(
+        cache_key=routes.full_market_batch_cache_key("free", True),
+        provider="free",
+        mode="full_market_batch",
+        symbols=["CN:000001"],
+        payload={
+            "cards": [{"card_id": "card-old"}],
+            "strategy_governance": [],
+            "data_health": {"scan_market_data": "ready"},
+        },
+    )
+
+    card = SimpleNamespace(card_id="card-new")
+    audit = SimpleNamespace(
+        card_id="card-new",
+        model_dump=lambda mode: {
+            "card_id": "card-new",
+            "gate_decision": {
+                "action": "disable",
+                "paper_candidate_eligible": False,
+            },
+        },
+    )
+    final_policy = SimpleNamespace(
+        cards=[card],
+        audits=[audit],
+        data_health={"walk_forward_feedback_gate": "rejected"},
+    )
+    monkeypatch.setattr(routes, "_cards_from_payload", lambda _cards: [card])
+    monkeypatch.setattr(
+        routes,
+        "apply_final_recommendation_policy",
+        lambda *_args, **_kwargs: final_policy,
+    )
+    monkeypatch.setattr(routes, "sort_recommendation_cards", lambda cards: cards)
+    monkeypatch.setattr(
+        routes,
+        "governed_card_payloads",
+        lambda _cards, _audits: [
+            {
+                "card_id": "card-new",
+                "strategy_governance": audit.model_dump(mode="json"),
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        routes,
+        "load_latest_walk_forward_validation",
+        lambda *_args, **_kwargs: SimpleNamespace(status="rejected"),
+    )
+    monkeypatch.setattr(
+        routes,
+        "load_strategy_governance_context",
+        lambda *_args, **_kwargs: SimpleNamespace(strategies={}),
+    )
+
+    reconciled = routes._reconcile_full_market_caches_after_walk_forward(
+        repo,
+        provider="free",
+        run_id="walk-forward-new",
+    )
+    updated = repo.get_recent_scan_result_cache(
+        routes.full_market_batch_cache_key("free", True),
+        max_age=timedelta(days=1),
+    )
+
+    assert reconciled == 1
+    assert updated is not None
+    assert updated.cache_id == cached.cache_id
+    assert updated.created_at == cached.created_at
+    assert updated.payload["cards"][0]["card_id"] == "card-new"
+    assert updated.payload["data_health"]["scan_market_data"] == "ready"
+    assert updated.payload["data_health"]["walk_forward_feedback_gate"] == "rejected"
+    assert (
+        updated.payload["data_health"]["walk_forward_cache_reconciled_run_id"]
+        == "walk-forward-new"
+    )
+    assert (
+        updated.payload["data_health"]["walk_forward_cache_market_data_created_at"]
+        == cached.created_at.isoformat()
+    )
 
 
 def test_failed_walk_forward_job_retries_from_persisted_checkpoints(

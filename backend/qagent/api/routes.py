@@ -786,6 +786,11 @@ def _run_walk_forward_job_safely(job_id: str) -> None:
             snapshot_workers=get_settings().walk_forward_snapshot_workers,
         )
         stored = repo.save_walk_forward_run(result)
+        _reconcile_full_market_caches_after_walk_forward(
+            repo,
+            provider=job.provider,
+            run_id=stored.run_id,
+        )
         repo.update_walk_forward_job(
             job_id,
             status="succeeded",
@@ -818,6 +823,64 @@ def _walk_forward_job_payload(job) -> dict[str, object]:
     payload["progress"] = job.progress
     payload["checkpoint_count"] = len(job.checkpoints)
     return payload
+
+
+def _reconcile_full_market_caches_after_walk_forward(
+    repo: QagentRepository,
+    *,
+    provider: str,
+    run_id: str,
+) -> int:
+    validation = load_latest_walk_forward_validation(repo, provider)
+    governance_context = load_strategy_governance_context(repo)
+    reconciled = 0
+    for include_etfs in (True, False):
+        cached = repo.get_recent_scan_result_cache(
+            cache_key=full_market_batch_cache_key(provider, include_etfs),
+            max_age=timedelta(days=90),
+        )
+        if cached is None:
+            continue
+        payload = deepcopy(cached.payload)
+        raw_cards = payload.get("cards")
+        if not isinstance(raw_cards, list):
+            continue
+        cards = _cards_from_payload(raw_cards)
+        if not cards:
+            continue
+        final_policy = apply_final_recommendation_policy(
+            cards,
+            walk_forward_validation=validation,
+            governance_context=governance_context,
+        )
+        ranked_cards = sort_recommendation_cards(final_policy.cards)
+        audits_by_card = {audit.card_id: audit for audit in final_policy.audits}
+        ranked_audits = [
+            audits_by_card[card.card_id]
+            for card in ranked_cards
+            if card.card_id in audits_by_card
+        ]
+        payload["cards"] = governed_card_payloads(ranked_cards, ranked_audits)
+        payload["strategy_governance"] = [
+            audit.model_dump(mode="json") for audit in ranked_audits
+        ]
+        data_health = payload.setdefault("data_health", {})
+        if not isinstance(data_health, dict):
+            data_health = {}
+            payload["data_health"] = data_health
+        data_health.update(final_policy.data_health)
+        data_health.update(
+            {
+                "walk_forward_cache_reconciled": "true",
+                "walk_forward_cache_reconciled_run_id": run_id,
+                "walk_forward_cache_market_data_created_at": (
+                    cached.created_at.isoformat()
+                ),
+            }
+        )
+        if repo.update_scan_result_cache_payload(cached.cache_id, payload) is not None:
+            reconciled += 1
+    return reconciled
 
 
 @router.post("/historical-data/backfill")

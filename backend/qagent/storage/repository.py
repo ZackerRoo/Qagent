@@ -1791,6 +1791,22 @@ class QagentRepository:
                 return None
             return self._scan_result_cache_from_row(row)
 
+    def update_scan_result_cache_payload(
+        self,
+        cache_id: str,
+        payload: dict[str, object],
+    ) -> ScanResultCacheRecord | None:
+        """Replace derived cache content without changing its market-data age."""
+
+        with self.session_factory() as session:
+            row = session.get(ScanResultCacheRow, cache_id)
+            if row is None:
+                return None
+            row.payload_json = json.dumps(payload, sort_keys=True)
+            session.commit()
+            session.refresh(row)
+            return self._scan_result_cache_from_row(row)
+
     def get_latest_scan_result_cache_by_modes(
         self,
         provider: str,
