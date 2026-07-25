@@ -100,6 +100,8 @@ textarea {
 }
 
 .workspace {
+  container-name: qagent-workspace;
+  container-type: inline-size;
   min-width: 0;
   padding: 22px;
 }
@@ -13762,5 +13764,33 @@ td {
 
   .walk-forward-challenger-head {
     display: grid;
+  }
+}
+
+@container qagent-workspace (max-width: 900px) {
+  .top-bar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .top-tools.terminal-top-grid {
+    grid-column: 1 / -1;
+  }
+
+  .session-strip {
+    justify-content: flex-start;
+  }
+
+  .scan-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .walk-forward-challenger-body,
+  .walk-forward-chart-grid,
+  .walk-forward-table-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .walk-forward-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
