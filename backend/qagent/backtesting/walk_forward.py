@@ -2216,8 +2216,11 @@ def _attribution_label(dimension: str, key: str) -> str:
         return {"stock": "股票", "etf": "ETF", "fund": "基金"}.get(key, key)
     if dimension == "exit_reason":
         return {
+            "target_1_hit": "目标止盈",
             "target_1": "目标止盈",
+            "stopped": "触发止损",
             "initial_stop": "触发止损",
+            "time_exit": "持有期到期",
             "max_holding_days": "持有期到期",
             "end_of_period": "回测期结束",
         }.get(key, key)
@@ -2902,7 +2905,7 @@ def _select_baseline_challenger_scores(
         score_by_instrument[instrument_id]
         for instrument_id in previous_instrument_ids
         if instrument_id in score_by_instrument
-        and score_by_instrument[instrument_id].selection_eligible
+        and _baseline_hold_eligible(score_by_instrument[instrument_id])
     ][:limit]
     selected = _drop_constraint_violations(
         selected,
@@ -2911,11 +2914,11 @@ def _select_baseline_challenger_scores(
     )
 
     for challenger in scores:
-        if not challenger.selection_eligible or any(
-            item.instrument_id == challenger.instrument_id for item in selected
-        ):
+        if any(item.instrument_id == challenger.instrument_id for item in selected):
             continue
         if len(selected) < limit:
+            if not _baseline_hold_eligible(challenger):
+                continue
             trial = [*selected, challenger]
             if _baseline_constraints_hold(
                 trial,
@@ -2927,6 +2930,8 @@ def _select_baseline_challenger_scores(
                 constraint_blocked += 1
             continue
 
+        if not challenger.selection_eligible:
+            continue
         incumbents = sorted(
             selected,
             key=lambda item: (
@@ -2981,6 +2986,17 @@ def _select_baseline_challenger_scores(
         evidence_blocked,
         hysteresis_blocked,
         constraint_blocked,
+    )
+
+
+def _baseline_hold_eligible(score: BaselineCandidateScore) -> bool:
+    """Keep incumbents unless point-in-time evidence identifies a bad segment."""
+
+    if score.negative_segment or score.expected_excess_return_pct is None:
+        return False
+    return score.expected_excess_return_pct >= -0.75 and (
+        score.expected_excess_lower_bound_pct is None
+        or score.expected_excess_lower_bound_pct >= -2.00
     )
 
 

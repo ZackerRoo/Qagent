@@ -152,6 +152,46 @@ def test_baseline_challenger_can_hold_cash_when_no_candidate_clears_evidence():
     assert constrained == 0
 
 
+def test_baseline_challenger_retains_nonnegative_incumbents_without_promoting_them():
+    scores = [
+        BaselineCandidateScore(
+            instrument_id=f"CN:{index:06d}",
+            baseline_position=index + 1,
+            challenger_position=index + 1,
+            baseline_score=1 - index * 0.1,
+            challenger_score=1 - index * 0.1,
+            training_sample_count=80,
+            strategy_sample_count=20,
+            evidence_sample_count=20,
+            expected_excess_return_pct=-0.10,
+            expected_excess_lower_bound_pct=-1.00,
+            selection_eligible=False,
+        )
+        for index in range(5)
+    ]
+    source = {
+        score.instrument_id: _selection(score.instrument_id, index)
+        for index, score in enumerate(scores)
+    }
+    incumbent_ids = list(source)
+
+    selected, evidence, hysteresis, constrained = _select_baseline_challenger_scores(
+        scores,
+        source_by_instrument=source,
+        previous_instrument_ids=incumbent_ids,
+        baseline_instrument_ids=incumbent_ids,
+        model_ready=True,
+        market_entry_allowed=True,
+        limit=5,
+        strategy_limit=2,
+    )
+
+    assert {item.instrument_id for item in selected} == set(incumbent_ids)
+    assert evidence == 5
+    assert hysteresis == 0
+    assert constrained == 0
+
+
 def test_baseline_challenger_requires_material_edge_before_replacing_incumbent():
     scores = [
         BaselineCandidateScore(

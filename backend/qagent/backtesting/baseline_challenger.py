@@ -6,7 +6,7 @@ from datetime import date
 from pydantic import BaseModel, Field
 
 
-BASELINE_CHALLENGER_VERSION = "net-excess-baseline-v1-pit-hysteresis-cash"
+BASELINE_CHALLENGER_VERSION = "net-excess-baseline-v2-two-threshold-hysteresis"
 MIN_BASELINE_TRAINING_SAMPLES = 40
 MIN_BASELINE_STRATEGY_SAMPLES = 12
 BASELINE_PRIOR_STRENGTH = 16
