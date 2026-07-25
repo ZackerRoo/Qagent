@@ -9,7 +9,9 @@ from qagent.backtesting.reranking import (
     rerank_candidates,
 )
 from qagent.backtesting.walk_forward import (
+    WalkForwardGateCriterion,
     WalkForwardSelection,
+    _dynamic_rerank_gate_outcome,
     _select_constrained_dynamic_scores,
 )
 
@@ -165,3 +167,28 @@ def test_dynamic_top_five_enforces_industry_and_etf_overlap_limits():
         "CN:000006",
     ]
     assert blocked == 2
+
+
+def test_dynamic_gate_rejects_known_failure_even_with_incomplete_evidence():
+    status, headline = _dynamic_rerank_gate_outcome(
+        [
+            WalkForwardGateCriterion(
+                key="index_membership_evidence",
+                label="历史指数成分完整性",
+                status="insufficient",
+                value="84 个不完整快照",
+                requirement="0 个不完整快照",
+            ),
+            WalkForwardGateCriterion(
+                key="baseline_total_return",
+                label="全期相对基线",
+                status="fail",
+                value="-10.69%",
+                requirement="> 0%",
+            ),
+        ]
+    )
+
+    assert status == "rejected"
+    assert "仍有证据缺口" in headline
+    assert "不进入模拟盘" in headline

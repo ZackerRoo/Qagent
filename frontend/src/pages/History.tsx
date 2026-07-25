@@ -1593,6 +1593,8 @@ function WalkForwardValidationCenter({
   const benchmarks = payload?.benchmarks ?? [];
   const costScenarios = payload?.cost_sensitivity ?? [];
   const dynamicRerank = payload?.dynamic_rerank;
+  const dynamicKnownFailure = dynamicRerank?.criteria.some((item) => item.status === "fail") ?? false;
+  const dynamicDisplayStatus = dynamicKnownFailure ? "rejected" : dynamicRerank?.status;
   const top5Validation = payload?.top_5_temporal_validation;
   const top10Validation = payload?.top_10_temporal_validation;
   const dynamicValidation = dynamicRerank?.temporal_validation;
@@ -1904,20 +1906,32 @@ function WalkForwardValidationCenter({
             </div>
           )}
           {dynamicRerank ? (
-            <div className={`walk-forward-challenger challenger-${dynamicRerank.status}`}>
+            <div className={`walk-forward-challenger challenger-${dynamicDisplayStatus}`}>
               <div className="walk-forward-challenger-head">
                 <div>
                   <p className="eyebrow">{zh ? "动态重排序挑战者" : "Dynamic reranking challenger"}</p>
                   <h3>
-                    {dynamicRerank.status === "accepted"
+                    {dynamicDisplayStatus === "accepted"
                       ? (zh ? "通过门槛，可进入前向模拟" : "Accepted for forward simulation")
-                      : dynamicRerank.status === "rejected"
+                      : dynamicDisplayStatus === "rejected"
                         ? (zh ? "未优于固定 Top 5" : "Did not beat fixed Top 5")
                         : (zh ? "证据仍不足" : "Evidence still insufficient")}
                   </h3>
-                  <p>{dynamicRerank.headline}</p>
+                  <p>
+                    {dynamicKnownFailure && dynamicRerank.status !== "rejected"
+                      ? (zh
+                        ? "已知结果未优于固定 Top 5，且仍有证据缺口；保持拒绝，不进入模拟盘。"
+                        : "Known results did not beat fixed Top 5 and evidence gaps remain; rejected from paper trading.")
+                      : dynamicRerank.headline}
+                  </p>
                 </div>
-                <span className={`status status-${dynamicRerank.status}`}>{dynamicRerank.status}</span>
+                <span className={`status status-${dynamicDisplayStatus}`}>
+                  {dynamicDisplayStatus === "accepted"
+                    ? (zh ? "已通过" : "Accepted")
+                    : dynamicDisplayStatus === "rejected"
+                      ? (zh ? "已拒绝" : "Rejected")
+                      : (zh ? "证据不足" : "Insufficient")}
+                </span>
               </div>
               <div className="metric-grid walk-forward-kpis">
                 <div><span>{zh ? "挑战者收益" : "Challenger return"}</span><strong>{formatNumber(dynamicRerank.metrics.total_return_pct, "%")}</strong></div>

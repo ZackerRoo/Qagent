@@ -6,6 +6,7 @@ PLIST_PATH="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG_DIR="$HOME/Library/Logs/Qagent"
 SSH_KEY="${QAGENT_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 REMOTE_HOST="${QAGENT_REMOTE_HOST:-zhenkunluo@100.85.40.49}"
+REMOTE_HOST_KEY_ALIAS="${QAGENT_REMOTE_HOST_KEY_ALIAS:-${REMOTE_HOST#*@}}"
 REMOTE_BACKEND_HOST="${QAGENT_REMOTE_BACKEND_HOST:-100.85.40.49}"
 LOCAL_PORT="${QAGENT_LOCAL_BACKEND_PORT:-8000}"
 REMOTE_PORT="${QAGENT_REMOTE_BACKEND_PORT:-8000}"
@@ -26,6 +27,7 @@ fi
   -o BatchMode=yes \
   -o PasswordAuthentication=no \
   -o ConnectTimeout=10 \
+  -o "HostKeyAlias=$REMOTE_HOST_KEY_ALIAS" \
   "$REMOTE_HOST" true
 
 mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
@@ -50,6 +52,8 @@ cat > "$PLIST_PATH" <<PLIST
     <string>BatchMode=yes</string>
     <string>-o</string>
     <string>PasswordAuthentication=no</string>
+    <string>-o</string>
+    <string>HostKeyAlias=$REMOTE_HOST_KEY_ALIAS</string>
     <string>-o</string>
     <string>ExitOnForwardFailure=yes</string>
     <string>-o</string>

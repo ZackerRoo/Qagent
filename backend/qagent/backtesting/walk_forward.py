@@ -1734,15 +1734,7 @@ def _build_dynamic_rerank_evaluation(
             requirement=">= -15% 且不比基线恶化 2 个百分点以上",
         ),
     ]
-    if any(item.status == "insufficient" for item in criteria):
-        status = "insufficient"
-        headline = "动态重排序仍在积累严格按时间截断的训练与样本外证据。"
-    elif any(item.status == "fail" for item in criteria):
-        status = "rejected"
-        headline = "动态重排序尚未稳定优于固定 Top5，继续保留为挑战者。"
-    else:
-        status = "accepted"
-        headline = "动态重排序通过全部门槛，可以进入 20 个交易日前向模拟。"
+    status, headline = _dynamic_rerank_gate_outcome(criteria)
     return WalkForwardRerankEvaluation(
         model_version=DYNAMIC_RERANKER_VERSION,
         status=status,
@@ -1760,6 +1752,32 @@ def _build_dynamic_rerank_evaluation(
         metrics=metrics,
         temporal_validation=temporal_validation,
         criteria=criteria,
+    )
+
+
+def _dynamic_rerank_gate_outcome(
+    criteria: list[WalkForwardGateCriterion],
+) -> tuple[str, str]:
+    has_insufficient_evidence = any(
+        item.status == "insufficient" for item in criteria
+    )
+    if any(item.status == "fail" for item in criteria):
+        return (
+            "rejected",
+            (
+                "动态重排序未优于固定 Top5，且仍有证据缺口；保持拒绝，不进入模拟盘。"
+                if has_insufficient_evidence
+                else "动态重排序未优于固定 Top5，保持拒绝，不进入模拟盘。"
+            ),
+        )
+    if has_insufficient_evidence:
+        return (
+            "insufficient",
+            "动态重排序仍在积累严格按时间截断的训练与样本外证据。",
+        )
+    return (
+        "accepted",
+        "动态重排序通过全部门槛，可以进入 20 个交易日前向模拟。",
     )
 
 
