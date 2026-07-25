@@ -13,6 +13,7 @@ from qagent.backtesting.walk_forward import (
     WalkForwardSelection,
     _dynamic_rerank_gate_outcome,
     _select_constrained_dynamic_scores,
+    _selection_membership_changed,
 )
 
 
@@ -291,3 +292,21 @@ def test_dynamic_gate_rejects_known_failure_even_with_incomplete_evidence():
     assert status == "rejected"
     assert "仍有证据缺口" in headline
     assert "不进入模拟盘" in headline
+
+
+def test_dynamic_changed_snapshot_ignores_display_order_only():
+    baseline = [
+        WalkForwardSelection(
+            instrument_id=f"CN:{index:06d}",
+            status="watch",
+            primary_strategy_id="strategy",
+            rank_score=Decimal("1"),
+            trigger_price=Decimal("10"),
+            initial_stop=Decimal("9"),
+            target_1=Decimal("12"),
+        )
+        for index in range(3)
+    ]
+
+    assert _selection_membership_changed(baseline, list(reversed(baseline))) is False
+    assert _selection_membership_changed(baseline, baseline[:2]) is True

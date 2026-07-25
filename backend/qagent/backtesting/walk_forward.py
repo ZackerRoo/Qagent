@@ -1510,8 +1510,10 @@ def _build_dynamic_rerank_evaluation(
     changed_snapshots = [
         snapshot
         for snapshot in snapshots
-        if [item.instrument_id for item in snapshot.top_5]
-        != [item.instrument_id for item in snapshot.dynamic_top_5]
+        if _selection_membership_changed(
+            snapshot.top_5,
+            snapshot.dynamic_top_5,
+        )
     ]
     promoted_selection_count = sum(
         len(
@@ -1708,6 +1710,13 @@ def _build_dynamic_rerank_evaluation(
         temporal_validation=temporal_validation,
         criteria=criteria,
     )
+
+
+def _selection_membership_changed(
+    baseline: list[WalkForwardSelection],
+    challenger: list[WalkForwardSelection],
+) -> bool:
+    return {item.instrument_id for item in baseline} != {item.instrument_id for item in challenger}
 
 
 def _dynamic_rerank_gate_outcome(
