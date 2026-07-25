@@ -3042,6 +3042,7 @@ export type WalkForwardBenchmarkComparison = {
   top_5_excess_return_pct: number | null;
   top_10_excess_return_pct: number | null;
   dynamic_top_5_excess_return_pct?: number | null;
+  baseline_challenger_excess_return_pct?: number | null;
 };
 
 export type WalkForwardCostScenario = {
@@ -3058,6 +3059,9 @@ export type WalkForwardCostScenario = {
   dynamic_top_5_return_pct?: number | null;
   dynamic_top_5_max_drawdown_pct?: number | null;
   dynamic_top_5_total_costs?: string | null;
+  baseline_challenger_return_pct?: number | null;
+  baseline_challenger_max_drawdown_pct?: number | null;
+  baseline_challenger_total_costs?: string | null;
 };
 
 export type WalkForwardPortfolioPayload = {
@@ -3149,6 +3153,43 @@ export type WalkForwardRerankEvaluation = {
   criteria: WalkForwardGateCriterion[];
 };
 
+export type WalkForwardLossAttribution = {
+  dimension: string;
+  key: string;
+  label: string;
+  trade_count: number;
+  win_rate: number | null;
+  average_return_pct: number;
+  average_benchmark_return_pct: number;
+  average_net_excess_return_pct: number;
+  worst_net_excess_return_pct: number;
+};
+
+export type WalkForwardBaselineChallengerEvaluation = {
+  model_version: string;
+  status: string;
+  headline: string;
+  leakage_guard: string;
+  evaluated_snapshot_count: number;
+  model_ready_snapshot_count: number;
+  changed_snapshot_count: number;
+  cash_snapshot_count: number;
+  average_positions: number;
+  retained_selection_count: number;
+  evidence_blocked_selection_count: number;
+  hysteresis_blocked_selection_count: number;
+  constraint_blocked_selection_count: number;
+  maximum_training_sample_count: number;
+  baseline_return_delta_pct: number;
+  baseline_max_drawdown_delta_pct: number;
+  baseline_turnover_delta_pct: number;
+  portfolio: WalkForwardPortfolioPayload;
+  metrics: WalkForwardPortfolioMetrics;
+  temporal_validation: WalkForwardTemporalValidation;
+  criteria: WalkForwardGateCriterion[];
+  worst_segments: WalkForwardLossAttribution[];
+};
+
 export type WalkForwardPayload = {
   top_5_portfolio: WalkForwardPortfolioPayload;
   top_10_portfolio: WalkForwardPortfolioPayload;
@@ -3160,6 +3201,7 @@ export type WalkForwardPayload = {
   cost_sensitivity: WalkForwardCostScenario[];
   strategy_validation?: WalkForwardValidationCenter;
   dynamic_rerank?: WalkForwardRerankEvaluation;
+  baseline_challenger?: WalkForwardBaselineChallengerEvaluation;
   snapshots: WalkForwardSnapshotPayload[];
   experiment_manifest: WalkForwardExperimentManifest;
 };

@@ -1593,8 +1593,13 @@ function WalkForwardValidationCenter({
   const benchmarks = payload?.benchmarks ?? [];
   const costScenarios = payload?.cost_sensitivity ?? [];
   const dynamicRerank = payload?.dynamic_rerank;
+  const baselineChallenger = payload?.baseline_challenger;
   const dynamicKnownFailure = dynamicRerank?.criteria.some((item) => item.status === "fail") ?? false;
   const dynamicDisplayStatus = dynamicKnownFailure ? "rejected" : dynamicRerank?.status;
+  const baselineChallengerKnownFailure = baselineChallenger?.criteria.some((item) => item.status === "fail") ?? false;
+  const baselineChallengerDisplayStatus = baselineChallengerKnownFailure
+    ? "rejected"
+    : baselineChallenger?.status;
   const top5Validation = payload?.top_5_temporal_validation;
   const top10Validation = payload?.top_10_temporal_validation;
   const dynamicValidation = dynamicRerank?.temporal_validation;
@@ -1608,6 +1613,12 @@ function WalkForwardValidationCenter({
       ? [{
         label: zh ? "动态 Top 5" : "Dynamic Top 5",
         validation: dynamicValidation,
+      }]
+      : []),
+    ...(baselineChallenger
+      ? [{
+        label: zh ? "基线优化 Top 5" : "Optimized baseline Top 5",
+        validation: baselineChallenger.temporal_validation,
       }]
       : []),
   ];
@@ -1915,6 +1926,80 @@ function WalkForwardValidationCenter({
                 : "This is a legacy validation result. Run it again to generate release criteria and strategy/factor gates."}
             </div>
           )}
+          {baselineChallenger ? (
+            <div className={`walk-forward-challenger challenger-${baselineChallengerDisplayStatus}`}>
+              <div className="walk-forward-challenger-head">
+                <div>
+                  <p className="eyebrow">{zh ? "固定 Top 5 基线优化挑战者" : "Fixed Top 5 baseline challenger"}</p>
+                  <h3>
+                    {baselineChallengerDisplayStatus === "accepted"
+                      ? (zh ? "通过门槛，可进入前向模拟" : "Accepted for forward simulation")
+                      : baselineChallengerDisplayStatus === "rejected"
+                        ? (zh ? "尚未形成可发布的净超额" : "No publishable net alpha yet")
+                        : (zh ? "严格时序证据仍不足" : "Point-in-time evidence is insufficient")}
+                  </h3>
+                  <p>{baselineChallenger.headline}</p>
+                </div>
+                <span className={`status status-${baselineChallengerDisplayStatus}`}>
+                  {rerankStatusLabel(baselineChallengerDisplayStatus ?? "insufficient")}
+                </span>
+              </div>
+              <div className="metric-grid walk-forward-kpis">
+                <div><span>{zh ? "挑战者收益" : "Challenger return"}</span><strong>{formatNumber(baselineChallenger.metrics.total_return_pct, "%")}</strong></div>
+                <div><span>{zh ? "较固定 Top 5" : "vs fixed Top 5"}</span><strong>{formatNumber(baselineChallenger.baseline_return_delta_pct, "%")}</strong></div>
+                <div><span>{zh ? "最大回撤" : "Max drawdown"}</span><strong>{formatNumber(baselineChallenger.metrics.max_drawdown_pct, "%")}</strong></div>
+                <div><span>{zh ? "换手率" : "Turnover"}</span><strong>{formatNumber(baselineChallenger.metrics.turnover_pct, "%")}</strong></div>
+                <div><span>{zh ? "换手变化" : "Turnover delta"}</span><strong>{formatNumber(baselineChallenger.baseline_turnover_delta_pct, "%")}</strong></div>
+                <div><span>{zh ? "平均持仓数" : "Average positions"}</span><strong>{baselineChallenger.average_positions.toFixed(2)}/5</strong></div>
+                <div><span>{zh ? "现金防守期" : "Cash-defense periods"}</span><strong>{baselineChallenger.cash_snapshot_count}/{baselineChallenger.evaluated_snapshot_count}</strong></div>
+                <div><span>{zh ? "保留原持仓" : "Retained incumbents"}</span><strong>{baselineChallenger.retained_selection_count}</strong></div>
+                <div><span>{zh ? "证据拦截" : "Evidence blocks"}</span><strong>{baselineChallenger.evidence_blocked_selection_count}</strong></div>
+                <div><span>{zh ? "换仓优势不足" : "Hysteresis blocks"}</span><strong>{baselineChallenger.hysteresis_blocked_selection_count}</strong></div>
+              </div>
+              <div className="walk-forward-challenger-body">
+                <LineValidationChart
+                  title={zh ? "基线优化 Top 5 权益曲线" : "Optimized baseline Top 5 equity curve"}
+                  tone="equity"
+                  points={baselineChallenger.portfolio.equity_curve.map((point) => ({ label: point.date, value: numberFromDecimalText(point.equity) }))}
+                  valueFormatter={(value) => value.toFixed(0)}
+                />
+                <div className="table-shell">
+                  <table>
+                    <thead><tr><th>{zh ? "发布门槛" : "Release gate"}</th><th>{zh ? "结果" : "Result"}</th><th>{zh ? "要求" : "Requirement"}</th></tr></thead>
+                    <tbody>{baselineChallenger.criteria.map((item) => (
+                      <tr key={item.key}>
+                        <td>{item.label}</td>
+                        <td><span className={`status status-${item.status}`}>{item.value}</span></td>
+                        <td>{item.requirement}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+              </div>
+              {baselineChallenger.worst_segments.length > 0 ? (
+                <div className="table-shell walk-forward-attribution-table">
+                  <table>
+                    <thead><tr><th>{zh ? "主要亏损分层" : "Loss attribution"}</th><th>{zh ? "样本" : "Trades"}</th><th>{zh ? "平均收益" : "Avg return"}</th><th>{zh ? "同期指数" : "Benchmark"}</th><th>{zh ? "净超额" : "Net alpha"}</th><th>{zh ? "最差" : "Worst"}</th></tr></thead>
+                    <tbody>{baselineChallenger.worst_segments.slice(0, 8).map((item) => (
+                      <tr key={`${item.dimension}:${item.key}`}>
+                        <td>{item.label}</td>
+                        <td>{item.trade_count}</td>
+                        <td>{formatNumber(item.average_return_pct, "%")}</td>
+                        <td>{formatNumber(item.average_benchmark_return_pct, "%")}</td>
+                        <td className={signedCellClass(item.average_net_excess_return_pct)}>{formatNumber(item.average_net_excess_return_pct, "%")}</td>
+                        <td className={signedCellClass(item.worst_net_excess_return_pct)}>{formatNumber(item.worst_net_excess_return_pct, "%")}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+              ) : null}
+              <p className="walk-forward-leakage-guard">
+                {zh
+                  ? `模型护栏：以同期宽基指数为基准预测净超额，允许不足 5 只并保留现金；${baselineChallenger.leakage_guard}。`
+                  : `Guardrails: predict net excess versus broad indices, allow fewer than five names and hold cash; ${baselineChallenger.leakage_guard}.`}
+              </p>
+            </div>
+          ) : null}
           {dynamicRerank ? (
             <div className={`walk-forward-challenger challenger-${dynamicDisplayStatus}`}>
               <div className="walk-forward-challenger-head">
@@ -2003,22 +2088,23 @@ function WalkForwardValidationCenter({
                 <tbody>
                   <tr><td>Top 5</td><td>{run.top_5_trade_count}</td><td>{formatNumber(run.top_5_return_pct, "%")}</td><td>{formatNumber(payload?.top_5_metrics.max_drawdown_pct ?? null, "%")}</td><td>{top5Oos?.sample_count ?? 0}</td><td>{gateLabel(top5Gate)}</td></tr>
                   <tr><td>Top 10</td><td>{run.top_10_trade_count}</td><td>{formatNumber(run.top_10_return_pct, "%")}</td><td>{formatNumber(payload?.top_10_metrics.max_drawdown_pct ?? null, "%")}</td><td>{top10Oos?.sample_count ?? 0}</td><td>{gateLabel(top10Gate)}</td></tr>
+                  {baselineChallenger ? <tr><td>{zh ? "基线优化 Top 5" : "Optimized baseline Top 5"}</td><td>{baselineChallenger.metrics.trade_count}</td><td>{formatNumber(baselineChallenger.metrics.total_return_pct, "%")}</td><td>{formatNumber(baselineChallenger.metrics.max_drawdown_pct, "%")}</td><td>{baselineChallenger.temporal_validation.out_of_sample?.sample_count ?? 0}</td><td>{rerankStatusLabel(baselineChallenger.status)}</td></tr> : null}
                   {dynamicRerank ? <tr><td>{zh ? "动态 Top 5" : "Dynamic Top 5"}</td><td>{dynamicRerank.metrics.trade_count}</td><td>{formatNumber(dynamicRerank.metrics.total_return_pct, "%")}</td><td>{formatNumber(dynamicRerank.metrics.max_drawdown_pct, "%")}</td><td>{dynamicRerank.temporal_validation.out_of_sample?.sample_count ?? 0}</td><td>{rerankStatusLabel(dynamicRerank.status)}</td></tr> : null}
                 </tbody>
               </table>
             </div>
             <div className="table-shell">
               <table>
-                <thead><tr><th>{zh ? "基准" : "Benchmark"}</th><th>{zh ? "基准收益" : "Benchmark"}</th><th>Top 5</th><th>Top 10</th>{dynamicRerank ? <th>{zh ? "动态 Top 5" : "Dynamic Top 5"}</th> : null}<th>{zh ? "状态" : "Status"}</th></tr></thead>
-                <tbody>{benchmarks.map((item) => <tr key={item.benchmark_id}><td>{benchmarkLabel(item.benchmark_id)}</td><td>{formatNumber(item.benchmark_return_pct, "%")}</td><td>{formatNumber(item.top_5_excess_return_pct, "%")}</td><td>{formatNumber(item.top_10_excess_return_pct, "%")}</td>{dynamicRerank ? <td>{formatNumber(item.dynamic_top_5_excess_return_pct ?? null, "%")}</td> : null}<td>{dataStatusLabel(item.status)}</td></tr>)}</tbody>
+                <thead><tr><th>{zh ? "基准" : "Benchmark"}</th><th>{zh ? "基准收益" : "Benchmark"}</th><th>Top 5</th><th>Top 10</th>{baselineChallenger ? <th>{zh ? "基线优化" : "Optimized baseline"}</th> : null}{dynamicRerank ? <th>{zh ? "动态 Top 5" : "Dynamic Top 5"}</th> : null}<th>{zh ? "状态" : "Status"}</th></tr></thead>
+                <tbody>{benchmarks.map((item) => <tr key={item.benchmark_id}><td>{benchmarkLabel(item.benchmark_id)}</td><td>{formatNumber(item.benchmark_return_pct, "%")}</td><td>{formatNumber(item.top_5_excess_return_pct, "%")}</td><td>{formatNumber(item.top_10_excess_return_pct, "%")}</td>{baselineChallenger ? <td>{formatNumber(item.baseline_challenger_excess_return_pct ?? null, "%")}</td> : null}{dynamicRerank ? <td>{formatNumber(item.dynamic_top_5_excess_return_pct ?? null, "%")}</td> : null}<td>{dataStatusLabel(item.status)}</td></tr>)}</tbody>
               </table>
             </div>
           </div>
           <div className="walk-forward-table-grid">
             <div className="table-shell">
               <table>
-                <thead><tr><th>{zh ? "成本场景" : "Cost scenario"}</th><th>{zh ? "滑点" : "Slippage"}</th><th>{zh ? "费率倍数" : "Fee x"}</th><th>Top 5</th><th>Top 10</th>{dynamicRerank ? <th>{zh ? "动态 Top 5" : "Dynamic Top 5"}</th> : null}</tr></thead>
-                <tbody>{costScenarios.map((item) => <tr key={item.key}><td>{item.label}</td><td>{item.slippage_bps} bp</td><td>{item.fee_multiplier}x</td><td>{formatNumber(item.top_5_return_pct, "%")}</td><td>{formatNumber(item.top_10_return_pct, "%")}</td>{dynamicRerank ? <td>{formatNumber(item.dynamic_top_5_return_pct ?? null, "%")}</td> : null}</tr>)}</tbody>
+                <thead><tr><th>{zh ? "成本场景" : "Cost scenario"}</th><th>{zh ? "滑点" : "Slippage"}</th><th>{zh ? "费率倍数" : "Fee x"}</th><th>Top 5</th><th>Top 10</th>{baselineChallenger ? <th>{zh ? "基线优化" : "Optimized baseline"}</th> : null}{dynamicRerank ? <th>{zh ? "动态 Top 5" : "Dynamic Top 5"}</th> : null}</tr></thead>
+                <tbody>{costScenarios.map((item) => <tr key={item.key}><td>{item.label}</td><td>{item.slippage_bps} bp</td><td>{item.fee_multiplier}x</td><td>{formatNumber(item.top_5_return_pct, "%")}</td><td>{formatNumber(item.top_10_return_pct, "%")}</td>{baselineChallenger ? <td>{formatNumber(item.baseline_challenger_return_pct ?? null, "%")}</td> : null}{dynamicRerank ? <td>{formatNumber(item.dynamic_top_5_return_pct ?? null, "%")}</td> : null}</tr>)}</tbody>
               </table>
             </div>
             <div className="walk-forward-windows">
