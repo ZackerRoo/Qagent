@@ -241,6 +241,7 @@ def _apply_additive_migrations(engine: Engine) -> None:
             )
         _add_strategy_governance_columns(connection, inspector)
         _rebuild_revision_scoped_tables(connection)
+        _repair_legacy_scoped_index_snapshot_counts(connection)
         _create_missing_metadata_indexes(connection)
         _drop_obsolete_walk_forward_indexes(connection)
         _create_strategy_governance_indexes(connection)
@@ -511,6 +512,43 @@ def _create_missing_metadata_indexes(connection) -> None:
             continue
         for index in table.indexes:
             index.create(connection, checkfirst=True)
+
+
+def _repair_legacy_scoped_index_snapshot_counts(connection) -> None:
+    """Align legacy BaoStock snapshot metadata with its stored replay scope."""
+
+    inspector = inspect(connection)
+    required = {
+        "historical_index_snapshots",
+        "historical_index_memberships",
+    }
+    if not all(inspector.has_table(table_name) for table_name in required):
+        return
+    connection.execute(
+        text(
+            "UPDATE historical_index_snapshots AS snapshots "
+            "SET member_count = ("
+            "SELECT COUNT(*) FROM historical_index_memberships AS memberships "
+            "WHERE memberships.provider_mode = snapshots.provider_mode "
+            "AND memberships.index_id = snapshots.index_id "
+            "AND memberships.snapshot_date = snapshots.snapshot_date "
+            "AND memberships.source_provider = snapshots.source_provider "
+            "AND memberships.dataset_revision = snapshots.dataset_revision"
+            ") "
+            "WHERE snapshots.source_provider = 'baostock' "
+            "AND snapshots.dataset_revision = 0 "
+            "AND snapshots.status = 'ready' "
+            "AND (snapshots.error IS NULL OR snapshots.error = '') "
+            "AND snapshots.member_count <> ("
+            "SELECT COUNT(*) FROM historical_index_memberships AS memberships "
+            "WHERE memberships.provider_mode = snapshots.provider_mode "
+            "AND memberships.index_id = snapshots.index_id "
+            "AND memberships.snapshot_date = snapshots.snapshot_date "
+            "AND memberships.source_provider = snapshots.source_provider "
+            "AND memberships.dataset_revision = snapshots.dataset_revision"
+            ")"
+        )
+    )
 
 
 def _drop_obsolete_walk_forward_indexes(connection) -> None:

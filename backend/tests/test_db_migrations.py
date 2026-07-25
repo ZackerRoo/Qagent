@@ -68,6 +68,75 @@ def _downgrade_revision_primary_keys(connection) -> None:
         connection.execute(text(f"DROP TABLE {backup}"))
 
 
+def test_initialize_database_repairs_legacy_scoped_baostock_index_counts(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'legacy-index-counts.db'}"
+    engine = create_db_engine(database_url)
+    now = datetime.now(timezone.utc)
+    snapshots = Base.metadata.tables["historical_index_snapshots"]
+    memberships = Base.metadata.tables["historical_index_memberships"]
+    with engine.begin() as connection:
+        Base.metadata.create_all(connection)
+        connection.execute(
+            snapshots.insert(),
+            [
+                {
+                    "provider_mode": "free",
+                    "index_id": "CN:000300.IDX",
+                    "snapshot_date": date(2025, 1, 2),
+                    "status": "ready",
+                    "member_count": 300,
+                    "source_provider": "baostock",
+                    "dataset_revision": 0,
+                    "fetched_at": now,
+                },
+                {
+                    "provider_mode": "free",
+                    "index_id": "CN:000905.IDX",
+                    "snapshot_date": date(2025, 1, 2),
+                    "status": "ready",
+                    "member_count": 500,
+                    "source_provider": "baostock",
+                    "dataset_revision": 1,
+                    "fetched_at": now,
+                },
+            ],
+        )
+        connection.execute(
+            memberships.insert(),
+            [
+                {
+                    "provider_mode": "free",
+                    "index_id": "CN:000300.IDX",
+                    "snapshot_date": date(2025, 1, 2),
+                    "instrument_id": "CN:000001",
+                    "source_provider": "baostock",
+                    "dataset_revision": 0,
+                    "fetched_at": now,
+                },
+                {
+                    "provider_mode": "free",
+                    "index_id": "CN:000905.IDX",
+                    "snapshot_date": date(2025, 1, 2),
+                    "instrument_id": "CN:000002",
+                    "source_provider": "baostock",
+                    "dataset_revision": 1,
+                    "fetched_at": now,
+                },
+            ],
+        )
+
+    migrated = initialize_database(database_url)
+    with migrated.connect() as connection:
+        counts = connection.execute(
+            text(
+                "SELECT dataset_revision, member_count "
+                "FROM historical_index_snapshots ORDER BY dataset_revision"
+            )
+        ).all()
+
+    assert counts == [(0, 1), (1, 500)]
+
+
 def test_initialize_database_adds_adjustment_columns_to_legacy_market_cache(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'legacy-cache.db'}"
     engine = create_db_engine(database_url)
@@ -217,9 +286,7 @@ def test_initialize_database_restores_walk_forward_lookup_indexes(tmp_path):
             assert index_name in indexes
             directions = {
                 row.name: row.desc
-                for row in connection.execute(
-                    text(f'PRAGMA index_xinfo("{index_name}")')
-                )
+                for row in connection.execute(text(f'PRAGMA index_xinfo("{index_name}")'))
                 if row.key
             }
             assert directions["dataset_revision"] == 1
@@ -244,14 +311,17 @@ def test_initialize_database_adds_walk_forward_lease_telemetry_columns(tmp_path)
     engine = create_db_engine(database_url)
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
-        connection.execute(text("ALTER TABLE walk_forward_jobs DROP COLUMN lease_maintenance_count"))
+        connection.execute(
+            text("ALTER TABLE walk_forward_jobs DROP COLUMN lease_maintenance_count")
+        )
         connection.execute(text("ALTER TABLE walk_forward_jobs DROP COLUMN lease_recovery_count"))
-        connection.execute(text("ALTER TABLE walk_forward_jobs DROP COLUMN last_lease_heartbeat_at"))
+        connection.execute(
+            text("ALTER TABLE walk_forward_jobs DROP COLUMN last_lease_heartbeat_at")
+        )
 
     migrated = initialize_database(database_url)
     columns = {
-        column["name"]: column
-        for column in inspect(migrated).get_columns("walk_forward_jobs")
+        column["name"]: column for column in inspect(migrated).get_columns("walk_forward_jobs")
     }
 
     assert columns["lease_maintenance_count"]["nullable"] is False
@@ -730,12 +800,12 @@ def test_strategy_and_policy_snapshots_are_database_immutable(tmp_path):
 
     with pytest.raises(DBAPIError, match="strategy_versions rows are immutable"):
         with engine.begin() as connection:
-                connection.execute(
-                    text(
-                        "UPDATE strategy_versions SET definition_json = 'changed' "
-                        "WHERE strategy_id = 'trend' AND strategy_version = 'v1'"
-                    )
+            connection.execute(
+                text(
+                    "UPDATE strategy_versions SET definition_json = 'changed' "
+                    "WHERE strategy_id = 'trend' AND strategy_version = 'v1'"
                 )
+            )
     with pytest.raises(DBAPIError, match="policy_deployments rows are immutable"):
         with engine.begin() as connection:
             connection.execute(

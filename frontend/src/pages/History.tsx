@@ -1940,7 +1940,9 @@ function WalkForwardValidationCenter({
                 <div><span>{zh ? "已结束训练样本" : "Resolved training trades"}</span><strong>{dynamicRerank.maximum_training_sample_count}</strong></div>
                 <div><span>{zh ? "改变调仓期" : "Changed rebalances"}</span><strong>{dynamicRerank.changed_snapshot_count}/{dynamicRerank.evaluated_snapshot_count}</strong></div>
                 <div><span>{zh ? "升入 Top 5" : "Promotions into Top 5"}</span><strong>{dynamicRerank.promoted_selection_count}</strong></div>
-                <div><span>{zh ? "集中度约束拦截" : "Concentration blocks"}</span><strong>{dynamicRerank.constraint_blocked_selection_count}</strong></div>
+                <div><span>{zh ? "证据门槛拦截" : "Evidence blocks"}</span><strong>{dynamicRerank.evidence_blocked_selection_count ?? 0}</strong></div>
+                <div><span>{zh ? "换仓优势不足" : "Hysteresis blocks"}</span><strong>{dynamicRerank.hysteresis_blocked_selection_count ?? 0}</strong></div>
+                <div><span>{zh ? "组合约束拦截" : "Portfolio blocks"}</span><strong>{dynamicRerank.constraint_blocked_selection_count}</strong></div>
                 <div><span>{zh ? "不完整指数快照" : "Incomplete index snapshots"}</span><strong>{dynamicRerank.incomplete_index_snapshot_count}</strong></div>
               </div>
               <div className="walk-forward-challenger-body">
@@ -1964,7 +1966,9 @@ function WalkForwardValidationCenter({
                 </div>
               </div>
               <p className="walk-forward-leakage-guard">
-                {zh ? "防止未来数据泄漏：" : "Look-ahead guard: "}{dynamicRerank.leakage_guard}
+                {zh
+                  ? `模型护栏：候选需通过成本后收益、收益与胜率下界、策略样本和换仓优势；防止未来数据泄漏：${dynamicRerank.leakage_guard}。`
+                  : `Model guardrails: candidates must clear net-return, return/win lower-bound, strategy-sample and replacement-margin gates; ${dynamicRerank.leakage_guard}.`}
               </p>
             </div>
           ) : null}

@@ -30,6 +30,7 @@ const checks = [
   ["history renders walk-forward lease health", files.history.includes("walk-forward-lease-health") && files.history.includes("lease_recovery_count")],
   ["history renders dynamic Top 5 challenger", files.history.includes("dynamicRerank") && files.history.includes("动态重排序挑战者")],
   ["history shows dynamic reranker release criteria", files.history.includes("dynamicRerank.criteria") && files.history.includes("防止未来数据泄漏")],
+  ["history shows conservative reranker diagnostics", files.history.includes("evidence_blocked_selection_count") && files.history.includes("hysteresis_blocked_selection_count") && files.history.includes("模型护栏")],
   ["history aggregates strategy factor theme rows", files.history.includes("rollingRows") && files.history.includes("\"theme\"")],
   ["history separates live recommendation review from historical replay", files.history.includes("真实推荐复盘，不是历史回测")],
   ["history labels matured recommendation samples clearly", files.history.includes("已到期推荐")],

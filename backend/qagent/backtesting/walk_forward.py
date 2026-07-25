@@ -34,6 +34,7 @@ from qagent.backtesting.replay_provider import (
 from qagent.backtesting.reranking import (
     DYNAMIC_RERANKER_VERSION,
     MIN_RERANK_TRAINING_SAMPLES,
+    RERANK_PROMOTION_MARGIN,
     RerankCandidate,
     RerankCandidateScore,
     ResolvedRerankObservation,
@@ -195,7 +196,11 @@ class WalkForwardSelection(BaseModel):
     rerank_position: int | None = None
     rerank_training_samples: int = 0
     rerank_expected_return_pct: float | None = None
+    rerank_expected_net_return_pct: float | None = None
+    rerank_expected_return_lower_bound_pct: float | None = None
     rerank_win_probability: float | None = None
+    rerank_win_probability_lower_bound: float | None = None
+    rerank_promotion_eligible: bool = False
     rerank_reason: str = ""
 
 
@@ -226,6 +231,8 @@ class WalkForwardSnapshot(BaseModel):
     rerank_training_sample_count: int = 0
     rerank_model_ready: bool = False
     rerank_constraint_blocked_count: int = 0
+    rerank_evidence_blocked_count: int = 0
+    rerank_hysteresis_blocked_count: int = 0
     rerank_incomplete_index_snapshot_count: int = 0
 
 
@@ -280,6 +287,8 @@ class WalkForwardRerankEvaluation(BaseModel):
     changed_snapshot_count: int
     promoted_selection_count: int
     constraint_blocked_selection_count: int
+    evidence_blocked_selection_count: int = 0
+    hysteresis_blocked_selection_count: int = 0
     incomplete_index_snapshot_count: int
     maximum_training_sample_count: int
     baseline_return_delta_pct: float
@@ -489,9 +498,7 @@ def _compute_walk_forward_snapshot_without_gc(
     fundamental_covered_count = sum(
         _has_usable_fundamental(item) for item in fundamental_evidence.values()
     )
-    prefilter_start = decision_date - timedelta(
-        days=min(lookback_days, PREFILTER_LOOKBACK_DAYS)
-    )
+    prefilter_start = decision_date - timedelta(days=min(lookback_days, PREFILTER_LOOKBACK_DAYS))
     market_provider.prefetch_daily_bars(
         snapshot_input.eligible,
         prefilter_start,
@@ -543,11 +550,7 @@ def _compute_walk_forward_snapshot_without_gc(
     ]
     paper_eligible_ids = _paper_eligible_card_ids(scan.strategy_governance)
     eligible_cards = (
-        [
-            card
-            for card in recommendation_cards
-            if card.card_id in paper_eligible_ids
-        ]
+        [card for card in recommendation_cards if card.card_id in paper_eligible_ids]
         if paper_eligible_ids is not None
         else recommendation_cards
     )
@@ -580,9 +583,7 @@ def _compute_walk_forward_snapshot_without_gc(
             prefilter_ranked_size=len(factor_rankings),
             recommendation_card_count=len(recommendation_cards),
             paper_eligible_card_count=len(eligible_cards),
-            paper_blocked_card_count=(
-                len(recommendation_cards) - len(eligible_cards)
-            ),
+            paper_blocked_card_count=(len(recommendation_cards) - len(eligible_cards)),
             suspended_count=snapshot_input.suspended_count,
             st_excluded_count=snapshot_input.st_excluded_count,
             missing_tradability_count=snapshot_input.missing_tradability_count,
@@ -605,11 +606,7 @@ def _compute_walk_forward_snapshot_without_gc(
 def _paper_eligible_card_ids(governance) -> set[str] | None:
     if not governance:
         return None
-    return {
-        audit.card_id
-        for audit in governance
-        if audit.gate_decision.paper_candidate_eligible
-    }
+    return {audit.card_id for audit in governance if audit.gate_decision.paper_candidate_eligible}
 
 
 def _adjusted_prefilter_bars(bars):
@@ -647,11 +644,7 @@ def _walk_forward_candidates(
     universe = set(eligible)
     if len(eligible) <= limit:
         return list(eligible)
-    ranked = [
-        item.instrument_id
-        for item in rankings
-        if item.instrument_id in universe
-    ]
+    ranked = [item.instrument_id for item in rankings if item.instrument_id in universe]
     if not ranked:
         return sorted(eligible)[:limit]
     non_stocks = set(eligible_non_stocks)
@@ -660,11 +653,9 @@ def _walk_forward_candidates(
         limit,
         max(1, math.ceil(limit * PREFILTER_NON_STOCK_RESERVE_RATIO)),
     )
-    reserved_ids = [
-        instrument_id
-        for instrument_id in ranked
-        if instrument_id in non_stocks
-    ][:reserve]
+    reserved_ids = [instrument_id for instrument_id in ranked if instrument_id in non_stocks][
+        :reserve
+    ]
     selected_ids = set(reserved_ids)
     for instrument_id in ranked:
         if len(selected_ids) >= limit:
@@ -709,9 +700,7 @@ def _sum_worker_stats(
         incremental_queries=sum(item.incremental_queries for item in values),
         rows_loaded=sum(item.rows_loaded for item in values),
         fundamental_prefetches=sum(item.fundamental_prefetches for item in values),
-        fundamental_fallback_queries=sum(
-            item.fundamental_fallback_queries for item in values
-        ),
+        fundamental_fallback_queries=sum(item.fundamental_fallback_queries for item in values),
     )
 
 
@@ -786,9 +775,7 @@ def run_full_market_walk_forward_selection(
             decision_date=sessions[-1] if sessions else end,
         )
         missing_listing_dates = [
-            item.instrument_id
-            for item in lifecycle_inventory
-            if item.listing_date is None
+            item.instrument_id for item in lifecycle_inventory if item.listing_date is None
         ]
         if missing_listing_dates:
             raise ReplayEvidenceUnavailable(
@@ -829,10 +816,7 @@ def run_full_market_walk_forward_selection(
                     for item in lifecycle_inventory
                     if item.listing_date is not None
                     and item.listing_date <= decision_date
-                    and (
-                        item.delisting_date is None
-                        or item.delisting_date > decision_date
-                    )
+                    and (item.delisting_date is None or item.delisting_date > decision_date)
                 ]
                 instrument_ids = [item.instrument_id for item in members]
                 tradability = tradability_by_date.get(decision_date, {})
@@ -864,14 +848,10 @@ def run_full_market_walk_forward_selection(
                     )
                 eligible_universes.append((decision_date, eligible))
                 stock_ids = {
-                    item.instrument_id
-                    for item in members
-                    if item.security_type in {"stock", "1"}
+                    item.instrument_id for item in members if item.security_type in {"stock", "1"}
                 }
                 eligible_stocks = [item for item in eligible if item in stock_ids]
-                eligible_non_stocks = [
-                    item for item in eligible if item not in stock_ids
-                ]
+                eligible_non_stocks = [item for item in eligible if item not in stock_ids]
                 snapshot_inputs.append(
                     _WalkForwardSnapshotInput(
                         decision_date=decision_date,
@@ -969,9 +949,7 @@ def run_full_market_walk_forward_selection(
                 for future in as_completed(futures):
                     worker_result = future.result()
                     lease_heartbeat.raise_if_failed()
-                    snapshot_by_date[
-                        worker_result.snapshot.decision_date
-                    ] = worker_result.snapshot
+                    snapshot_by_date[worker_result.snapshot.decision_date] = worker_result.snapshot
                     scan_error_count += worker_result.scan_error_count
                     scan_error_samples.extend(worker_result.scan_error_samples)
                     stats_by_worker[worker_result.worker_pid] = worker_result.stats
@@ -990,10 +968,7 @@ def run_full_market_walk_forward_selection(
             snapshots,
             repository=owner_repository,
             revision=revision,
-            asset_types={
-                item.instrument_id: item.security_type
-                for item in lifecycle_inventory
-            },
+            asset_types={item.instrument_id: item.security_type for item in lifecycle_inventory},
         )
         _report_progress(
             progress_callback,
@@ -1038,9 +1013,7 @@ def run_full_market_walk_forward_selection(
         )
         dynamic_top_5_portfolio = run_signal_portfolio_backtest(
             signals=dynamic_top_5_signals,
-            instrument_ids=sorted(
-                {item.instrument_id for item in dynamic_top_5_signals}
-            ),
+            instrument_ids=sorted({item.instrument_id for item in dynamic_top_5_signals}),
             provider=market_provider,
             start=start,
             end=end,
@@ -1097,9 +1070,7 @@ def run_full_market_walk_forward_selection(
         "ready" if coverage["ratio"] >= MIN_FULL_MARKET_COVERAGE_RATIO else "insufficient"
     )
     fundamental_coverage_gate = (
-        "ready"
-        if fundamental_coverage >= MIN_FUNDAMENTAL_COVERAGE_RATIO
-        else "insufficient"
+        "ready" if fundamental_coverage >= MIN_FUNDAMENTAL_COVERAGE_RATIO else "insufficient"
     )
     top_5_sample_gate = _oos_gate(top_5_temporal_validation)
     top_10_sample_gate = _oos_gate(top_10_temporal_validation)
@@ -1162,9 +1133,7 @@ def run_full_market_walk_forward_selection(
             "walk_forward_scan_errors": str(scan_error_count),
             "walk_forward_snapshot_workers": str(effective_snapshot_workers),
             "walk_forward_future_data_guard": "revision_lease_and_decision_date_cutoff",
-            "walk_forward_lease_maintenance_count": str(
-                lease_heartbeat.maintenance_count
-            ),
+            "walk_forward_lease_maintenance_count": str(lease_heartbeat.maintenance_count),
             "walk_forward_lease_recovery_count": str(lease_heartbeat.recovery_count),
             "walk_forward_universe": "historical_lifecycle_per_rebalance_date",
             "walk_forward_selection_pipeline": (
@@ -1186,9 +1155,7 @@ def run_full_market_walk_forward_selection(
             "walk_forward_paper_blocked_cards": str(
                 sum(item.paper_blocked_card_count for item in snapshots)
             ),
-            "walk_forward_execution_admission": (
-                "final_policy_paper_candidate_eligible"
-            ),
+            "walk_forward_execution_admission": ("final_policy_paper_candidate_eligible"),
             "walk_forward_strategy_diversification_limit": "2",
             "walk_forward_strategy_diversified_selections": str(
                 sum(item.strategy_diversified_count for item in snapshots)
@@ -1214,28 +1181,28 @@ def run_full_market_walk_forward_selection(
             "walk_forward_cross_section_coverage_pct": str(round(coverage["ratio"] * 100, 4)),
             "walk_forward_median_covered_instruments": str(coverage["median_covered"]),
             "walk_forward_median_historical_universe": str(coverage["median_universe"]),
-            "walk_forward_fundamental_coverage_pct": str(
-                round(fundamental_coverage * 100, 4)
-            ),
+            "walk_forward_fundamental_coverage_pct": str(round(fundamental_coverage * 100, 4)),
             "walk_forward_fundamental_coverage_gate": fundamental_coverage_gate,
             "walk_forward_minimum_fundamental_coverage_pct": str(
                 MIN_FUNDAMENTAL_COVERAGE_RATIO * 100
             ),
             "walk_forward_top_5_trades": str(top_5_portfolio.summary.trade_count),
             "walk_forward_top_10_trades": str(top_10_portfolio.summary.trade_count),
-            "walk_forward_dynamic_top_5_trades": str(
-                dynamic_top_5_portfolio.summary.trade_count
-            ),
+            "walk_forward_dynamic_top_5_trades": str(dynamic_top_5_portfolio.summary.trade_count),
             "walk_forward_dynamic_reranker_version": DYNAMIC_RERANKER_VERSION,
             "walk_forward_dynamic_reranker_gate": dynamic_rerank.status,
-            "walk_forward_dynamic_changed_snapshots": str(
-                dynamic_rerank.changed_snapshot_count
-            ),
+            "walk_forward_dynamic_changed_snapshots": str(dynamic_rerank.changed_snapshot_count),
             "walk_forward_dynamic_promoted_selections": str(
                 dynamic_rerank.promoted_selection_count
             ),
             "walk_forward_dynamic_constraint_blocked": str(
                 dynamic_rerank.constraint_blocked_selection_count
+            ),
+            "walk_forward_dynamic_evidence_blocked": str(
+                dynamic_rerank.evidence_blocked_selection_count
+            ),
+            "walk_forward_dynamic_hysteresis_blocked": str(
+                dynamic_rerank.hysteresis_blocked_selection_count
             ),
             "walk_forward_dynamic_incomplete_index_snapshots": str(
                 dynamic_rerank.incomplete_index_snapshot_count
@@ -1244,7 +1211,8 @@ def run_full_market_walk_forward_selection(
                 "use_complete_snapshots_and_block_release_when_partial"
             ),
             "walk_forward_dynamic_portfolio_constraints": (
-                "max_industry_2,max_overlapping_etf_1"
+                "anchor_baseline_top5,max_strategy_2,max_industry_2,"
+                "max_overlapping_etf_1,promotion_margin_0.03"
             ),
             "walk_forward_dynamic_future_data_guard": (
                 "training_trade_exit_date_strictly_before_decision_date"
@@ -1277,23 +1245,19 @@ def run_full_market_walk_forward_selection(
                 market_provider.query_count + selection_worker_stats.market_queries
             ),
             "walk_forward_replay_cache_full_queries": str(
-                market_provider.full_window_queries
-                + selection_worker_stats.full_window_queries
+                market_provider.full_window_queries + selection_worker_stats.full_window_queries
             ),
             "walk_forward_replay_cache_incremental_queries": str(
-                market_provider.incremental_queries
-                + selection_worker_stats.incremental_queries
+                market_provider.incremental_queries + selection_worker_stats.incremental_queries
             ),
             "walk_forward_replay_cache_rows_loaded": str(
                 market_provider.rows_loaded + selection_worker_stats.rows_loaded
             ),
             "walk_forward_fundamental_prefetches": str(
-                strategy_provider.prefetch_count
-                + selection_worker_stats.fundamental_prefetches
+                strategy_provider.prefetch_count + selection_worker_stats.fundamental_prefetches
             ),
             "walk_forward_fundamental_fallback_queries": str(
-                strategy_provider.query_count
-                + selection_worker_stats.fundamental_fallback_queries
+                strategy_provider.query_count + selection_worker_stats.fundamental_fallback_queries
             ),
             "walk_forward_release_gate": strategy_validation.status,
             "walk_forward_statistical_unit": "signal_date_cluster",
@@ -1316,8 +1280,7 @@ def run_full_market_walk_forward_selection(
             "walk_forward_experiment_digest": experiment_manifest.experiment_digest,
             "walk_forward_code_revision": experiment_manifest.code_revision,
             "walk_forward_runtime_revisions": ",".join(
-                experiment_manifest.runtime_revisions
-                or [experiment_manifest.code_revision]
+                experiment_manifest.runtime_revisions or [experiment_manifest.code_revision]
             ),
             "walk_forward_strategy_registry_digest": (experiment_manifest.strategy_registry_digest),
             **(
@@ -1561,6 +1524,10 @@ def _build_dynamic_rerank_evaluation(
     constraint_blocked_selection_count = sum(
         item.rerank_constraint_blocked_count for item in snapshots
     )
+    evidence_blocked_selection_count = sum(item.rerank_evidence_blocked_count for item in snapshots)
+    hysteresis_blocked_selection_count = sum(
+        item.rerank_hysteresis_blocked_count for item in snapshots
+    )
     incomplete_index_snapshot_count = sum(
         item.rerank_incomplete_index_snapshot_count for item in snapshots
     )
@@ -1570,11 +1537,7 @@ def _build_dynamic_rerank_evaluation(
     )
     model_ready_snapshots = sum(item.rerank_model_ready for item in snapshots)
     eligible_benchmark = next(
-        (
-            item
-            for item in benchmarks
-            if item.benchmark_id == ELIGIBLE_UNIVERSE_BENCHMARK_ID
-        ),
+        (item for item in benchmarks if item.benchmark_id == ELIGIBLE_UNIVERSE_BENCHMARK_ID),
         None,
     )
     stress = next(
@@ -1639,8 +1602,7 @@ def _build_dynamic_rerank_evaluation(
                 and model_ready_snapshots > 0
             ),
             insufficient=(
-                maximum_training_samples < MIN_RERANK_TRAINING_SAMPLES
-                or model_ready_snapshots == 0
+                maximum_training_samples < MIN_RERANK_TRAINING_SAMPLES or model_ready_snapshots == 0
             ),
             value=f"{maximum_training_samples} 笔 / {model_ready_snapshots} 期",
             requirement=f">= {MIN_RERANK_TRAINING_SAMPLES} 笔且至少 1 期启用",
@@ -1691,9 +1653,7 @@ def _build_dynamic_rerank_evaluation(
                 and eligible_benchmark.status == "ready"
                 and (eligible_benchmark.dynamic_top_5_excess_return_pct or 0) > 0
             ),
-            insufficient=(
-                not eligible_benchmark or eligible_benchmark.status != "ready"
-            ),
+            insufficient=(not eligible_benchmark or eligible_benchmark.status != "ready"),
             value=(
                 f"{eligible_benchmark.dynamic_top_5_excess_return_pct:+.2f}%"
                 if eligible_benchmark
@@ -1710,9 +1670,7 @@ def _build_dynamic_rerank_evaluation(
                 and stress.dynamic_top_5_return_pct is not None
                 and stress.dynamic_top_5_return_pct > 0
             ),
-            insufficient=(
-                stress is None or stress.dynamic_top_5_return_pct is None
-            ),
+            insufficient=(stress is None or stress.dynamic_top_5_return_pct is None),
             value=(
                 f"{stress.dynamic_top_5_return_pct:+.2f}%"
                 if stress and stress.dynamic_top_5_return_pct is not None
@@ -1723,14 +1681,9 @@ def _build_dynamic_rerank_evaluation(
         _gate_criterion(
             key="max_drawdown",
             label="挑战者最大回撤",
-            ready=(
-                metrics.max_drawdown_pct >= -15
-                and drawdown_delta >= -2
-            ),
+            ready=(metrics.max_drawdown_pct >= -15 and drawdown_delta >= -2),
             insufficient=False,
-            value=(
-                f"{metrics.max_drawdown_pct:+.2f}% / 较基线 {drawdown_delta:+.2f}%"
-            ),
+            value=(f"{metrics.max_drawdown_pct:+.2f}% / 较基线 {drawdown_delta:+.2f}%"),
             requirement=">= -15% 且不比基线恶化 2 个百分点以上",
         ),
     ]
@@ -1744,6 +1697,8 @@ def _build_dynamic_rerank_evaluation(
         changed_snapshot_count=len(changed_snapshots),
         promoted_selection_count=promoted_selection_count,
         constraint_blocked_selection_count=constraint_blocked_selection_count,
+        evidence_blocked_selection_count=evidence_blocked_selection_count,
+        hysteresis_blocked_selection_count=hysteresis_blocked_selection_count,
         incomplete_index_snapshot_count=incomplete_index_snapshot_count,
         maximum_training_sample_count=maximum_training_samples,
         baseline_return_delta_pct=return_delta,
@@ -1758,9 +1713,7 @@ def _build_dynamic_rerank_evaluation(
 def _dynamic_rerank_gate_outcome(
     criteria: list[WalkForwardGateCriterion],
 ) -> tuple[str, str]:
-    has_insufficient_evidence = any(
-        item.status == "insufficient" for item in criteria
-    )
+    has_insufficient_evidence = any(item.status == "insufficient" for item in criteria)
     if any(item.status == "fail" for item in criteria):
         return (
             "rejected",
@@ -1873,9 +1826,7 @@ def _walk_forward_evidence_metric(
 def _apply_multiple_testing_control(metrics: list[WalkForwardEvidenceMetric]) -> None:
     adjusted = benjamini_hochberg(
         [
-            item.positive_edge_p_value
-            if item.statistical_verdict != "insufficient"
-            else None
+            item.positive_edge_p_value if item.statistical_verdict != "insufficient" else None
             for item in metrics
         ]
     )
@@ -1991,9 +1942,7 @@ def _selection(card) -> WalkForwardSelection:
         factor_signals=_selection_factor_signals(card),
         asset_type=card.asset_type,
         industry=context.industry if context else None,
-        index_memberships=(
-            sorted(set(context.index_memberships)) if context else []
-        ),
+        index_memberships=(sorted(set(context.index_memberships)) if context else []),
     )
 
 
@@ -2020,12 +1969,10 @@ def _enrich_selection_constraints(
             snapshot.decision_date,
             revision,
         )
-        memberships, incomplete_index_snapshots = (
-            repository.available_memberships_as_of(
+        memberships, incomplete_index_snapshots = repository.available_memberships_as_of(
             instrument_ids,
             snapshot.decision_date,
             revision,
-        )
         )
         updated_by_instrument = {}
         for selection in snapshot.top_10:
@@ -2041,20 +1988,11 @@ def _enrich_selection_constraints(
                     "asset_type": asset_type,
                     "industry": (
                         selection.industry
-                        or (
-                            industry_snapshot.industry
-                            if industry_snapshot is not None
-                            else None
-                        )
+                        or (industry_snapshot.industry if industry_snapshot is not None else None)
                     ),
                     "index_memberships": (
                         selection.index_memberships
-                        or sorted(
-                            {
-                                item.index_id
-                                for item in membership_rows
-                            }
-                        )
+                        or sorted({item.index_id for item in membership_rows})
                     ),
                 }
             )
@@ -2062,16 +2000,13 @@ def _enrich_selection_constraints(
             snapshot.model_copy(
                 update={
                     "top_10": [
-                        updated_by_instrument[item.instrument_id]
-                        for item in snapshot.top_10
+                        updated_by_instrument[item.instrument_id] for item in snapshot.top_10
                     ],
                     "top_5": [
                         updated_by_instrument.get(item.instrument_id, item)
                         for item in snapshot.top_5
                     ],
-                    "rerank_incomplete_index_snapshot_count": len(
-                        incomplete_index_snapshots
-                    ),
+                    "rerank_incomplete_index_snapshot_count": len(incomplete_index_snapshots),
                 }
             )
         )
@@ -2089,8 +2024,7 @@ def _apply_dynamic_reranking(
         for item in snapshot.top_10
     }
     regime_by_date = {
-        snapshot.decision_date: snapshot.benchmark_trend_state
-        for snapshot in snapshots
+        snapshot.decision_date: snapshot.benchmark_trend_state for snapshot in snapshots
     }
     observations = []
     for trade in top_10_portfolio.trades:
@@ -2102,9 +2036,7 @@ def _apply_dynamic_reranking(
                 exit_date=trade.exit_date,
                 return_pct=trade.return_pct,
                 primary_strategy_id=trade.strategy_id,
-                factor_signals=(
-                    selection.factor_signals if selection is not None else []
-                ),
+                factor_signals=(selection.factor_signals if selection is not None else []),
                 market_regime=regime_by_date.get(
                     trade.signal_date,
                     "unknown",
@@ -2128,15 +2060,18 @@ def _apply_dynamic_reranking(
             observations,
             decision_date=snapshot.decision_date,
         )
-        source_by_instrument = {
-            item.instrument_id: item for item in snapshot.top_10
-        }
-        constrained_scores, constraint_blocked_count = (
-            _select_constrained_dynamic_scores(
-                decision.candidates,
-                source_by_instrument=source_by_instrument,
-                limit=5,
-            )
+        source_by_instrument = {item.instrument_id: item for item in snapshot.top_10}
+        (
+            constrained_scores,
+            constraint_blocked_count,
+            evidence_blocked_count,
+            hysteresis_blocked_count,
+        ) = _select_constrained_dynamic_scores(
+            decision.candidates,
+            source_by_instrument=source_by_instrument,
+            limit=5,
+            baseline_instrument_ids=[item.instrument_id for item in snapshot.top_5],
+            strategy_limit=snapshot.strategy_diversification_limit,
         )
         dynamic_selections = []
         for score in constrained_scores:
@@ -2149,7 +2084,13 @@ def _apply_dynamic_reranking(
                         "rerank_position": score.rerank_position,
                         "rerank_training_samples": score.training_sample_count,
                         "rerank_expected_return_pct": score.expected_return_pct,
+                        "rerank_expected_net_return_pct": (score.expected_net_return_pct),
+                        "rerank_expected_return_lower_bound_pct": (
+                            score.expected_return_lower_bound_pct
+                        ),
                         "rerank_win_probability": score.win_probability,
+                        "rerank_win_probability_lower_bound": (score.win_probability_lower_bound),
+                        "rerank_promotion_eligible": score.promotion_eligible,
                         "rerank_reason": score.reason,
                     }
                 )
@@ -2161,9 +2102,9 @@ def _apply_dynamic_reranking(
                     "rerank_training_cutoff_date": decision.training_cutoff_date,
                     "rerank_training_sample_count": decision.training_sample_count,
                     "rerank_model_ready": decision.model_ready,
-                    "rerank_constraint_blocked_count": (
-                        constraint_blocked_count
-                    ),
+                    "rerank_constraint_blocked_count": (constraint_blocked_count),
+                    "rerank_evidence_blocked_count": evidence_blocked_count,
+                    "rerank_hysteresis_blocked_count": hysteresis_blocked_count,
                     "rerank_incomplete_index_snapshot_count": (
                         snapshot.rerank_incomplete_index_snapshot_count
                     ),
@@ -2178,41 +2119,154 @@ def _select_constrained_dynamic_scores(
     *,
     source_by_instrument: dict[str, WalkForwardSelection],
     limit: int,
-) -> tuple[list[RerankCandidateScore], int]:
+    baseline_instrument_ids: list[str] | None = None,
+    strategy_limit: int | None = None,
+) -> tuple[list[RerankCandidateScore], int, int, int]:
+    if baseline_instrument_ids is not None:
+        return _select_anchored_dynamic_scores(
+            scores,
+            source_by_instrument=source_by_instrument,
+            baseline_instrument_ids=baseline_instrument_ids,
+            limit=limit,
+            strategy_limit=strategy_limit,
+        )
+
     selected = []
-    industry_counts: dict[str, int] = {}
-    etf_overlap_counts: dict[str, int] = {}
     blocked = 0
     for score in scores:
-        source = source_by_instrument[score.instrument_id]
-        industry = (source.industry or "").strip()
-        constrained_industry = (
-            industry
-            if industry
-            and industry.lower() not in {"unknown", "综合", "指数etf", "etf"}
-            else None
-        )
-        if (
-            constrained_industry is not None
-            and industry_counts.get(constrained_industry, 0) >= 2
+        trial = [*selected, score]
+        if not _dynamic_selection_constraints_hold(
+            trial,
+            source_by_instrument=source_by_instrument,
+            strategy_limit=strategy_limit,
         ):
             blocked += 1
             continue
-        is_etf = source.asset_type.lower() in {"etf", "fund", "index_fund"}
-        overlap_keys = source.index_memberships if is_etf else []
-        if any(etf_overlap_counts.get(key, 0) >= 1 for key in overlap_keys):
-            blocked += 1
-            continue
         selected.append(score)
-        if constrained_industry is not None:
-            industry_counts[constrained_industry] = (
-                industry_counts.get(constrained_industry, 0) + 1
-            )
-        for key in overlap_keys:
-            etf_overlap_counts[key] = etf_overlap_counts.get(key, 0) + 1
         if len(selected) >= limit:
             break
-    return selected, blocked
+    return selected, blocked, 0, 0
+
+
+def _select_anchored_dynamic_scores(
+    scores: list[RerankCandidateScore],
+    *,
+    source_by_instrument: dict[str, WalkForwardSelection],
+    baseline_instrument_ids: list[str],
+    limit: int,
+    strategy_limit: int | None,
+) -> tuple[list[RerankCandidateScore], int, int, int]:
+    score_by_instrument = {item.instrument_id: item for item in scores}
+    selected = [
+        score_by_instrument[instrument_id]
+        for instrument_id in baseline_instrument_ids
+        if instrument_id in score_by_instrument
+    ][:limit]
+    baseline_set = {item.instrument_id for item in selected}
+    constraint_blocked = 0
+    evidence_blocked = 0
+    hysteresis_blocked = 0
+
+    for challenger in scores:
+        if challenger.instrument_id in baseline_set:
+            continue
+        if not challenger.promotion_eligible:
+            evidence_blocked += 1
+            continue
+        if len(selected) < limit:
+            trial = [*selected, challenger]
+            if _dynamic_selection_constraints_hold(
+                trial,
+                source_by_instrument=source_by_instrument,
+                strategy_limit=strategy_limit,
+            ):
+                selected = trial
+            else:
+                constraint_blocked += 1
+            continue
+
+        replacement_candidates = sorted(
+            selected,
+            key=lambda item: (
+                item.rerank_score,
+                -item.baseline_position,
+                item.instrument_id,
+            ),
+        )
+        material_replacements = [
+            incumbent
+            for incumbent in replacement_candidates
+            if challenger.rerank_score >= incumbent.rerank_score + RERANK_PROMOTION_MARGIN
+        ]
+        if not material_replacements:
+            hysteresis_blocked += 1
+            continue
+        replaced = False
+        for incumbent in material_replacements:
+            trial = [
+                challenger if item.instrument_id == incumbent.instrument_id else item
+                for item in selected
+            ]
+            if not _dynamic_selection_constraints_hold(
+                trial,
+                source_by_instrument=source_by_instrument,
+                strategy_limit=strategy_limit,
+            ):
+                continue
+            selected = trial
+            replaced = True
+            break
+        if not replaced:
+            constraint_blocked += 1
+
+    return (
+        sorted(
+            selected,
+            key=lambda item: (
+                -item.rerank_score,
+                item.baseline_position,
+                item.instrument_id,
+            ),
+        ),
+        constraint_blocked,
+        evidence_blocked,
+        hysteresis_blocked,
+    )
+
+
+def _dynamic_selection_constraints_hold(
+    scores: list[RerankCandidateScore],
+    *,
+    source_by_instrument: dict[str, WalkForwardSelection],
+    strategy_limit: int | None,
+) -> bool:
+    industry_counts: dict[str, int] = {}
+    strategy_counts: dict[str, int] = {}
+    etf_overlap_counts: dict[str, int] = {}
+    for score in scores:
+        source = source_by_instrument[score.instrument_id]
+        strategy = (source.primary_strategy_id or "").strip()
+        if strategy and strategy_limit is not None:
+            strategy_counts[strategy] = strategy_counts.get(strategy, 0) + 1
+            if strategy_counts[strategy] > strategy_limit:
+                return False
+        industry = (source.industry or "").strip()
+        constrained_industry = (
+            industry
+            if industry and industry.lower() not in {"unknown", "综合", "指数etf", "etf"}
+            else None
+        )
+        if constrained_industry is not None:
+            industry_counts[constrained_industry] = industry_counts.get(constrained_industry, 0) + 1
+            if industry_counts[constrained_industry] > 2:
+                return False
+        if source.asset_type.lower() not in {"etf", "fund", "index_fund"}:
+            continue
+        for key in source.index_memberships:
+            etf_overlap_counts[key] = etf_overlap_counts.get(key, 0) + 1
+            if etf_overlap_counts[key] > 1:
+                return False
+    return True
 
 
 def _signals(
@@ -2350,9 +2404,7 @@ def _cost_sensitivity(
             )
             dynamic_top_5 = run_signal_portfolio_backtest(
                 signals=dynamic_top_5_signals,
-                instrument_ids=sorted(
-                    {item.instrument_id for item in dynamic_top_5_signals}
-                ),
+                instrument_ids=sorted({item.instrument_id for item in dynamic_top_5_signals}),
                 provider=market_provider,
                 start=start,
                 end=end,
@@ -2374,9 +2426,7 @@ def _cost_sensitivity(
                 top_5_total_costs=sum((item.costs for item in top_5.trades), Decimal("0")),
                 top_10_total_costs=sum((item.costs for item in top_10.trades), Decimal("0")),
                 dynamic_top_5_return_pct=dynamic_top_5.summary.total_return_pct,
-                dynamic_top_5_max_drawdown_pct=(
-                    dynamic_top_5.summary.max_drawdown_pct
-                ),
+                dynamic_top_5_max_drawdown_pct=(dynamic_top_5.summary.max_drawdown_pct),
                 dynamic_top_5_total_costs=sum(
                     (item.costs for item in dynamic_top_5.trades),
                     Decimal("0"),

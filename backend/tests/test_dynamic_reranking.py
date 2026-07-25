@@ -74,18 +74,22 @@ def test_dynamic_reranker_promotes_positive_resolved_evidence():
         _observations(40, decision_date=decision_date),
         decision_date=decision_date,
     )
-    positions = {
-        item.instrument_id: item.rerank_position for item in result.candidates
-    }
+    positions = {item.instrument_id: item.rerank_position for item in result.candidates}
 
     assert result.model_ready is True
     assert positions["CN:000001"] < positions["CN:000000"]
-    assert next(
-        item for item in result.candidates if item.instrument_id == "CN:000001"
-    ).expected_return_pct > 0
-    assert next(
-        item for item in result.candidates if item.instrument_id == "CN:000000"
-    ).expected_return_pct < 0
+    assert (
+        next(
+            item for item in result.candidates if item.instrument_id == "CN:000001"
+        ).expected_return_pct
+        > 0
+    )
+    assert (
+        next(
+            item for item in result.candidates if item.instrument_id == "CN:000000"
+        ).expected_return_pct
+        < 0
+    )
 
 
 def test_dynamic_reranker_ignores_outcomes_not_resolved_before_decision():
@@ -153,7 +157,7 @@ def test_dynamic_top_five_enforces_industry_and_etf_overlap_limits():
         for index, score in enumerate(scores)
     }
 
-    selected, blocked = _select_constrained_dynamic_scores(
+    selected, blocked, evidence_blocked, hysteresis_blocked = _select_constrained_dynamic_scores(
         scores,
         source_by_instrument=source,
         limit=5,
@@ -167,6 +171,101 @@ def test_dynamic_top_five_enforces_industry_and_etf_overlap_limits():
         "CN:000006",
     ]
     assert blocked == 2
+    assert evidence_blocked == 0
+    assert hysteresis_blocked == 0
+
+
+def test_dynamic_top_five_requires_evidence_and_material_margin_to_replace_baseline():
+    scores = [
+        RerankCandidateScore(
+            instrument_id=f"CN:{index:06d}",
+            baseline_position=index + 1,
+            rerank_position=index + 1,
+            baseline_score=1 - index * 0.1,
+            rerank_score=(0.90 if index == 5 else 1 - index * 0.1),
+            training_sample_count=80,
+            strategy_sample_count=30,
+            factor_sample_count=30,
+            promotion_eligible=index == 5,
+            reason="fixture",
+        )
+        for index in range(6)
+    ]
+    source = {
+        score.instrument_id: WalkForwardSelection(
+            instrument_id=score.instrument_id,
+            status="watch",
+            primary_strategy_id=f"strategy-{index % 3}",
+            rank_score=Decimal(str(score.baseline_score)),
+            trigger_price=Decimal("10"),
+            initial_stop=Decimal("9"),
+            target_1=Decimal("12"),
+            industry=f"industry-{index % 3}",
+        )
+        for index, score in enumerate(scores)
+    }
+
+    selected, blocked, evidence_blocked, hysteresis_blocked = _select_constrained_dynamic_scores(
+        scores,
+        source_by_instrument=source,
+        baseline_instrument_ids=[f"CN:{index:06d}" for index in range(5)],
+        strategy_limit=2,
+        limit=5,
+    )
+
+    assert {item.instrument_id for item in selected} == {
+        "CN:000000",
+        "CN:000001",
+        "CN:000002",
+        "CN:000003",
+        "CN:000005",
+    }
+    assert blocked == 0
+    assert evidence_blocked == 0
+    assert hysteresis_blocked == 0
+
+
+def test_dynamic_top_five_keeps_baseline_when_challenger_edge_is_too_small():
+    scores = [
+        RerankCandidateScore(
+            instrument_id=f"CN:{index:06d}",
+            baseline_position=index + 1,
+            rerank_position=index + 1,
+            baseline_score=1 - index * 0.1,
+            rerank_score=(0.52 if index == 5 else 1 - index * 0.1),
+            training_sample_count=80,
+            strategy_sample_count=30,
+            factor_sample_count=30,
+            promotion_eligible=index == 5,
+            reason="fixture",
+        )
+        for index in range(6)
+    ]
+    source = {
+        score.instrument_id: WalkForwardSelection(
+            instrument_id=score.instrument_id,
+            status="watch",
+            primary_strategy_id=f"strategy-{index}",
+            rank_score=Decimal(str(score.baseline_score)),
+            trigger_price=Decimal("10"),
+            initial_stop=Decimal("9"),
+            target_1=Decimal("12"),
+        )
+        for index, score in enumerate(scores)
+    }
+
+    selected, blocked, evidence_blocked, hysteresis_blocked = _select_constrained_dynamic_scores(
+        scores,
+        source_by_instrument=source,
+        baseline_instrument_ids=[f"CN:{index:06d}" for index in range(5)],
+        strategy_limit=2,
+        limit=5,
+    )
+
+    assert [item.instrument_id for item in selected] == [f"CN:{index:06d}" for index in range(5)]
+    assert blocked == 0
+    assert evidence_blocked == 0
+    assert hysteresis_blocked == 1
 
 
 def test_dynamic_gate_rejects_known_failure_even_with_incomplete_evidence():
