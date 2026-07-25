@@ -1656,6 +1656,16 @@ function WalkForwardValidationCenter({
     if (!zh) return status;
     return status === "ready" ? "可用" : status === "missing" ? "缺失" : status;
   };
+  const rerankStatusLabel = (status: string) => {
+    if (!zh) return status;
+    return (
+      {
+        accepted: "已通过",
+        rejected: "已拒绝",
+        insufficient: "证据不足",
+      } as Record<string, string>
+    )[status] ?? status;
+  };
   const verdictLabel = (verdict: string | undefined) => {
     if (!zh) return verdict ?? "insufficient";
     return ({ positive: "正向", negative: "负向", mixed: "观察", insufficient: "样本不足" } as Record<string, string>)[verdict ?? "insufficient"] ?? verdict;
@@ -1993,7 +2003,7 @@ function WalkForwardValidationCenter({
                 <tbody>
                   <tr><td>Top 5</td><td>{run.top_5_trade_count}</td><td>{formatNumber(run.top_5_return_pct, "%")}</td><td>{formatNumber(payload?.top_5_metrics.max_drawdown_pct ?? null, "%")}</td><td>{top5Oos?.sample_count ?? 0}</td><td>{gateLabel(top5Gate)}</td></tr>
                   <tr><td>Top 10</td><td>{run.top_10_trade_count}</td><td>{formatNumber(run.top_10_return_pct, "%")}</td><td>{formatNumber(payload?.top_10_metrics.max_drawdown_pct ?? null, "%")}</td><td>{top10Oos?.sample_count ?? 0}</td><td>{gateLabel(top10Gate)}</td></tr>
-                  {dynamicRerank ? <tr><td>{zh ? "动态 Top 5" : "Dynamic Top 5"}</td><td>{dynamicRerank.metrics.trade_count}</td><td>{formatNumber(dynamicRerank.metrics.total_return_pct, "%")}</td><td>{formatNumber(dynamicRerank.metrics.max_drawdown_pct, "%")}</td><td>{dynamicRerank.temporal_validation.out_of_sample?.sample_count ?? 0}</td><td>{dynamicRerank.status}</td></tr> : null}
+                  {dynamicRerank ? <tr><td>{zh ? "动态 Top 5" : "Dynamic Top 5"}</td><td>{dynamicRerank.metrics.trade_count}</td><td>{formatNumber(dynamicRerank.metrics.total_return_pct, "%")}</td><td>{formatNumber(dynamicRerank.metrics.max_drawdown_pct, "%")}</td><td>{dynamicRerank.temporal_validation.out_of_sample?.sample_count ?? 0}</td><td>{rerankStatusLabel(dynamicRerank.status)}</td></tr> : null}
                 </tbody>
               </table>
             </div>
