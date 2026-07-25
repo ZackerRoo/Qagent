@@ -3137,6 +3137,7 @@ export type WalkForwardRerankEvaluation = {
   changed_snapshot_count: number;
   promoted_selection_count: number;
   constraint_blocked_selection_count: number;
+  incomplete_index_snapshot_count: number;
   maximum_training_sample_count: number;
   baseline_return_delta_pct: number;
   baseline_max_drawdown_delta_pct: number;

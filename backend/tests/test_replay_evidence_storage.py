@@ -873,6 +873,59 @@ def test_membership_read_rejects_incomplete_ready_snapshot(storage):
         repo.memberships_as_of(["CN:000001"], snapshot_date, revision=1)
 
 
+def test_available_memberships_skip_incomplete_ready_snapshots(storage):
+    session_factory, _, _, make_repo = storage
+    repo = make_repo()
+    snapshot_date = date(2025, 3, 31)
+    repo.upsert_point_in_time_evidence(
+        HistoricalEvidenceBundle(
+            index_snapshots=[
+                HistoricalIndexSnapshot(
+                    index_id=index_id,
+                    snapshot_date=snapshot_date,
+                    status="ready",
+                    member_count=2,
+                    provider="fixture",
+                )
+                for index_id in ("CN:000300.IDX", "CN:000905.IDX")
+            ],
+            index_memberships=[
+                HistoricalIndexMembership(
+                    index_id=index_id,
+                    snapshot_date=snapshot_date,
+                    instrument_id=instrument_id,
+                    provider="fixture",
+                )
+                for index_id in ("CN:000300.IDX", "CN:000905.IDX")
+                for instrument_id in ("CN:000001", "CN:000002")
+            ],
+        ),
+        revision=1,
+    )
+    with session_factory() as session:
+        session.execute(
+            delete(HistoricalIndexMembershipRow).where(
+                HistoricalIndexMembershipRow.index_id == "CN:000905.IDX",
+                HistoricalIndexMembershipRow.instrument_id == "CN:000002",
+            )
+        )
+        session.commit()
+
+    memberships, incomplete = repo.available_memberships_as_of(
+        ["CN:000001"],
+        snapshot_date,
+        revision=1,
+    )
+
+    assert [item.index_id for item in memberships["CN:000001"]] == [
+        "CN:000300.IDX"
+    ]
+    assert len(incomplete) == 1
+    assert "CN:000905.IDX" in incomplete[0]
+    assert "member_count=2" in incomplete[0]
+    assert "stored=1" in incomplete[0]
+
+
 def test_memberships_as_of_query_count_is_bounded_for_100_indexes(storage):
     session_factory, _, _, make_repo = storage
     repo = make_repo()

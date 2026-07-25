@@ -1100,9 +1100,26 @@ class ReplayEvidenceRepository:
         decision_date: date,
         revision: int,
     ) -> dict[str, list[HistoricalIndexMembership]]:
+        result, incomplete_snapshots = self.available_memberships_as_of(
+            instrument_ids,
+            decision_date,
+            revision,
+        )
+        if incomplete_snapshots:
+            raise ReplayEvidenceUnavailable(incomplete_snapshots[0])
+        return result
+
+    def available_memberships_as_of(
+        self,
+        instrument_ids: Sequence[str],
+        decision_date: date,
+        revision: int,
+    ) -> tuple[dict[str, list[HistoricalIndexMembership]], list[str]]:
+        """Return complete index memberships and report incomplete ready snapshots."""
+
         result = {instrument_id: [] for instrument_id in instrument_ids}
         if not instrument_ids:
-            return result
+            return result, []
         with self.session_factory() as session:
             ranked = (
                 select(
@@ -1144,7 +1161,7 @@ class ReplayEvidenceRepository:
                 for snapshot in snapshots
             ]
             if not identities:
-                return result
+                return result, []
             identity_columns = (
                 HistoricalIndexMembershipRow.index_id,
                 HistoricalIndexMembershipRow.snapshot_date,
@@ -1171,13 +1188,18 @@ class ReplayEvidenceRepository:
                         )
                     }
                 )
+            incomplete_snapshots = []
+            complete_identities = []
             for snapshot, identity in zip(snapshots, identities, strict=True):
                 stored = stored_counts.get(identity, 0)
                 if stored != snapshot.member_count:
-                    raise ReplayEvidenceUnavailable(
+                    incomplete_snapshots.append(
                         f"ready index snapshot {snapshot.index_id} is incomplete: "
                         f"member_count={snapshot.member_count}, stored={stored}"
                     )
+                    continue
+                complete_identities.append(identity)
+            identities = complete_identities
             rows = []
             requested_ids = list(dict.fromkeys(instrument_ids))
             for instrument_chunk in _chunks(requested_ids, 400):
@@ -1208,7 +1230,7 @@ class ReplayEvidenceRepository:
                 )
         for memberships in result.values():
             memberships.sort(key=lambda item: item.index_id)
-        return result
+        return result, incomplete_snapshots
 
     def tradability_on(
         self,

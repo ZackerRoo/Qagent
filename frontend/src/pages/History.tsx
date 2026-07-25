@@ -1927,6 +1927,7 @@ function WalkForwardValidationCenter({
                 <div><span>{zh ? "改变调仓期" : "Changed rebalances"}</span><strong>{dynamicRerank.changed_snapshot_count}/{dynamicRerank.evaluated_snapshot_count}</strong></div>
                 <div><span>{zh ? "升入 Top 5" : "Promotions into Top 5"}</span><strong>{dynamicRerank.promoted_selection_count}</strong></div>
                 <div><span>{zh ? "集中度约束拦截" : "Concentration blocks"}</span><strong>{dynamicRerank.constraint_blocked_selection_count}</strong></div>
+                <div><span>{zh ? "不完整指数快照" : "Incomplete index snapshots"}</span><strong>{dynamicRerank.incomplete_index_snapshot_count}</strong></div>
               </div>
               <div className="walk-forward-challenger-body">
                 <LineValidationChart

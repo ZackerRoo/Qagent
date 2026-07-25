@@ -226,6 +226,7 @@ class WalkForwardSnapshot(BaseModel):
     rerank_training_sample_count: int = 0
     rerank_model_ready: bool = False
     rerank_constraint_blocked_count: int = 0
+    rerank_incomplete_index_snapshot_count: int = 0
 
 
 class WalkForwardGateCriterion(BaseModel):
@@ -279,6 +280,7 @@ class WalkForwardRerankEvaluation(BaseModel):
     changed_snapshot_count: int
     promoted_selection_count: int
     constraint_blocked_selection_count: int
+    incomplete_index_snapshot_count: int
     maximum_training_sample_count: int
     baseline_return_delta_pct: float
     baseline_max_drawdown_delta_pct: float
@@ -1235,6 +1237,12 @@ def run_full_market_walk_forward_selection(
             "walk_forward_dynamic_constraint_blocked": str(
                 dynamic_rerank.constraint_blocked_selection_count
             ),
+            "walk_forward_dynamic_incomplete_index_snapshots": str(
+                dynamic_rerank.incomplete_index_snapshot_count
+            ),
+            "walk_forward_dynamic_index_membership_policy": (
+                "use_complete_snapshots_and_block_release_when_partial"
+            ),
             "walk_forward_dynamic_portfolio_constraints": (
                 "max_industry_2,max_overlapping_etf_1"
             ),
@@ -1553,6 +1561,9 @@ def _build_dynamic_rerank_evaluation(
     constraint_blocked_selection_count = sum(
         item.rerank_constraint_blocked_count for item in snapshots
     )
+    incomplete_index_snapshot_count = sum(
+        item.rerank_incomplete_index_snapshot_count for item in snapshots
+    )
     maximum_training_samples = max(
         (item.rerank_training_sample_count for item in snapshots),
         default=0,
@@ -1611,6 +1622,14 @@ def _build_dynamic_rerank_evaluation(
             insufficient=fundamental_coverage_ratio < MIN_FUNDAMENTAL_COVERAGE_RATIO,
             value=f"{fundamental_coverage_ratio:.1%}",
             requirement=f">= {MIN_FUNDAMENTAL_COVERAGE_RATIO:.0%}",
+        ),
+        _gate_criterion(
+            key="index_membership_evidence",
+            label="历史指数成分完整性",
+            ready=incomplete_index_snapshot_count == 0,
+            insufficient=incomplete_index_snapshot_count > 0,
+            value=f"{incomplete_index_snapshot_count} 个不完整快照",
+            requirement="0 个不完整快照",
         ),
         _gate_criterion(
             key="resolved_training_history",
@@ -1733,6 +1752,7 @@ def _build_dynamic_rerank_evaluation(
         changed_snapshot_count=len(changed_snapshots),
         promoted_selection_count=promoted_selection_count,
         constraint_blocked_selection_count=constraint_blocked_selection_count,
+        incomplete_index_snapshot_count=incomplete_index_snapshot_count,
         maximum_training_sample_count=maximum_training_samples,
         baseline_return_delta_pct=return_delta,
         baseline_max_drawdown_delta_pct=drawdown_delta,
@@ -1982,10 +2002,12 @@ def _enrich_selection_constraints(
             snapshot.decision_date,
             revision,
         )
-        memberships = repository.memberships_as_of(
+        memberships, incomplete_index_snapshots = (
+            repository.available_memberships_as_of(
             instrument_ids,
             snapshot.decision_date,
             revision,
+        )
         )
         updated_by_instrument = {}
         for selection in snapshot.top_10:
@@ -2029,6 +2051,9 @@ def _enrich_selection_constraints(
                         updated_by_instrument.get(item.instrument_id, item)
                         for item in snapshot.top_5
                     ],
+                    "rerank_incomplete_index_snapshot_count": len(
+                        incomplete_index_snapshots
+                    ),
                 }
             )
         )
@@ -2120,6 +2145,9 @@ def _apply_dynamic_reranking(
                     "rerank_model_ready": decision.model_ready,
                     "rerank_constraint_blocked_count": (
                         constraint_blocked_count
+                    ),
+                    "rerank_incomplete_index_snapshot_count": (
+                        snapshot.rerank_incomplete_index_snapshot_count
                     ),
                 }
             )
