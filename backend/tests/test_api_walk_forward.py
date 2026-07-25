@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from qagent.api import routes
 from qagent.app import create_app
 from qagent.backtesting import experiment
+from qagent.backtesting.walk_forward import WalkForwardSnapshot
 from qagent.storage.tables import HistoricalDataRevisionRow, WalkForwardRunRow
 
 
@@ -514,6 +515,96 @@ def test_walk_forward_job_only_reuses_identical_active_experiment(tmp_path, monk
     assert second.job_id != first.job_id
     assert len(repo.list_walk_forward_jobs(provider="free", limit=10)) == 2
     assert [item[1] for item in submitted] == [(first.job_id,), (second.job_id,)]
+
+
+def test_new_walk_forward_job_reuses_completed_selection_snapshots(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'walk-forward-reuse-run-api.db'}",
+    )
+    submitted = []
+
+    class FakeExecutor:
+        def submit(self, fn, *args, **kwargs):
+            submitted.append((fn, args, kwargs))
+
+    monkeypatch.setattr(routes, "_walk_forward_task_executor", FakeExecutor())
+    routes._submitted_walk_forward_jobs.clear()
+    repo = routes._repo()
+    start = date(2025, 1, 2)
+    end = date(2025, 1, 15)
+    sessions = routes.trading_sessions_in_range(start, end)[::5]
+    manifest = routes.build_walk_forward_experiment_manifest(
+        provider_mode="free",
+        dataset_revision=7,
+        start_date=start,
+        end_date=end,
+        rebalance_step_sessions=5,
+        lookback_days=400,
+    )
+    snapshots = [
+        WalkForwardSnapshot(
+            decision_date=decision_date,
+            historical_universe_size=1,
+            eligible_size=1,
+            suspended_count=0,
+            st_excluded_count=0,
+            missing_tradability_count=0,
+        ).model_dump(mode="json")
+        for decision_date in sessions
+    ]
+    now = datetime.now(timezone.utc)
+    with repo.session_factory() as session:
+        session.add(HistoricalDataRevisionRow(provider_mode="free", revision=7))
+        session.add(
+            WalkForwardRunRow(
+                run_id="walk-forward-base-v4",
+                provider="free",
+                status="succeeded",
+                start_date=start,
+                end_date=end,
+                dataset_revision=7,
+                rebalance_step_sessions=5,
+                lookback_days=400,
+                snapshot_count=len(snapshots),
+                top_5_trade_count=0,
+                top_10_trade_count=0,
+                top_5_return_pct=Decimal("0"),
+                top_10_return_pct=Decimal("0"),
+                top_5_oos_trades=0,
+                top_10_oos_trades=0,
+                top_5_oos_gate="insufficient",
+                top_10_oos_gate="insufficient",
+                reproducibility_digest="base-v4",
+                payload_json=json.dumps(
+                    {
+                        "experiment_manifest": manifest.model_dump(mode="json"),
+                        "snapshots": snapshots,
+                    }
+                ),
+                data_health="{}",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.commit()
+
+    job = routes._create_or_get_walk_forward_job(
+        repo=repo,
+        provider="free",
+        start=start,
+        end=end,
+        step_sessions=5,
+        lookback_days=400,
+    )
+
+    assert len(job.checkpoints) == len(sessions)
+    assert job.processed_snapshots == len(sessions)
+    assert job.current_date == sessions[-1]
+    assert submitted[0][1] == (job.job_id,)
 
 
 def test_walk_forward_completed_run_requires_matching_experiment_digest():

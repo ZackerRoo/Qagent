@@ -31,6 +31,14 @@ from qagent.backtesting.replay_provider import (
     ReplayMarketDataProvider,
     ReplayStrategyDataProvider,
 )
+from qagent.backtesting.reranking import (
+    DYNAMIC_RERANKER_VERSION,
+    MIN_RERANK_TRAINING_SAMPLES,
+    RerankCandidate,
+    RerankCandidateScore,
+    ResolvedRerankObservation,
+    rerank_candidates,
+)
 from qagent.backtesting.statistical_validation import (
     benjamini_hochberg,
     clustered_return_inference,
@@ -179,6 +187,16 @@ class WalkForwardSelection(BaseModel):
     target_1: Decimal | None
     no_chase_above: Decimal | None = None
     factor_signals: list[str] = Field(default_factory=list)
+    asset_type: str = "unknown"
+    industry: str | None = None
+    index_memberships: list[str] = Field(default_factory=list)
+    rerank_score: float | None = None
+    rerank_baseline_position: int | None = None
+    rerank_position: int | None = None
+    rerank_training_samples: int = 0
+    rerank_expected_return_pct: float | None = None
+    rerank_win_probability: float | None = None
+    rerank_reason: str = ""
 
 
 class WalkForwardSnapshot(BaseModel):
@@ -203,6 +221,11 @@ class WalkForwardSnapshot(BaseModel):
     strategy_diversified_count: int = 0
     top_5: list[WalkForwardSelection] = Field(default_factory=list)
     top_10: list[WalkForwardSelection] = Field(default_factory=list)
+    dynamic_top_5: list[WalkForwardSelection] = Field(default_factory=list)
+    rerank_training_cutoff_date: date | None = None
+    rerank_training_sample_count: int = 0
+    rerank_model_ready: bool = False
+    rerank_constraint_blocked_count: int = 0
 
 
 class WalkForwardGateCriterion(BaseModel):
@@ -247,6 +270,24 @@ class WalkForwardValidationCenter(BaseModel):
     factors: list[WalkForwardEvidenceMetric] = Field(default_factory=list)
 
 
+class WalkForwardRerankEvaluation(BaseModel):
+    model_version: str
+    status: str
+    headline: str
+    leakage_guard: str
+    evaluated_snapshot_count: int
+    changed_snapshot_count: int
+    promoted_selection_count: int
+    constraint_blocked_selection_count: int
+    maximum_training_sample_count: int
+    baseline_return_delta_pct: float
+    baseline_max_drawdown_delta_pct: float
+    portfolio: PortfolioBacktestResult
+    metrics: "WalkForwardPortfolioMetrics"
+    temporal_validation: TemporalValidationResult
+    criteria: list[WalkForwardGateCriterion] = Field(default_factory=list)
+
+
 class WalkForwardSelectionResult(BaseModel):
     owner_run_id: str
     provider_mode: str
@@ -264,6 +305,7 @@ class WalkForwardSelectionResult(BaseModel):
     benchmarks: list["WalkForwardBenchmarkComparison"]
     cost_sensitivity: list["WalkForwardCostScenario"]
     strategy_validation: WalkForwardValidationCenter
+    dynamic_rerank: WalkForwardRerankEvaluation
     experiment_manifest: WalkForwardExperimentManifest
     reproducibility_digest: str
     data_health: dict[str, str] = Field(default_factory=dict)
@@ -288,6 +330,7 @@ class WalkForwardBenchmarkComparison(BaseModel):
     benchmark_return_pct: float | None
     top_5_excess_return_pct: float | None
     top_10_excess_return_pct: float | None
+    dynamic_top_5_excess_return_pct: float | None = None
 
 
 class WalkForwardCostScenario(BaseModel):
@@ -301,6 +344,9 @@ class WalkForwardCostScenario(BaseModel):
     top_10_max_drawdown_pct: float
     top_5_total_costs: Decimal
     top_10_total_costs: Decimal
+    dynamic_top_5_return_pct: float | None = None
+    dynamic_top_5_max_drawdown_pct: float | None = None
+    dynamic_top_5_total_costs: Decimal | None = None
 
 
 class WalkForwardProgress(BaseModel):
@@ -938,6 +984,15 @@ def run_full_market_walk_forward_selection(
                     )
             selection_worker_stats = _sum_worker_stats(stats_by_worker.values())
         snapshots = [snapshot_by_date[item] for item in sessions]
+        snapshots = _enrich_selection_constraints(
+            snapshots,
+            repository=owner_repository,
+            revision=revision,
+            asset_types={
+                item.instrument_id: item.security_type
+                for item in lifecycle_inventory
+            },
+        )
         _report_progress(
             progress_callback,
             phase="portfolio_simulation",
@@ -970,10 +1025,38 @@ def run_full_market_walk_forward_selection(
             max_positions=10,
             execution_rule_resolver=execution_resolver,
         )
+        snapshots = _apply_dynamic_reranking(
+            snapshots,
+            top_10_portfolio=top_10_portfolio,
+        )
+        dynamic_top_5_signals = _signals(
+            snapshots,
+            size=5,
+            selection_source="dynamic",
+        )
+        dynamic_top_5_portfolio = run_signal_portfolio_backtest(
+            signals=dynamic_top_5_signals,
+            instrument_ids=sorted(
+                {item.instrument_id for item in dynamic_top_5_signals}
+            ),
+            provider=market_provider,
+            start=start,
+            end=end,
+            max_positions=5,
+            execution_rule_resolver=execution_resolver,
+        )
         top_5_metrics = _portfolio_metrics(top_5_portfolio, start, end)
         top_10_metrics = _portfolio_metrics(top_10_portfolio, start, end)
+        dynamic_top_5_metrics = _portfolio_metrics(
+            dynamic_top_5_portfolio,
+            start,
+            end,
+        )
         top_5_temporal_validation = _trade_temporal_validation(top_5_portfolio.trades)
         top_10_temporal_validation = _trade_temporal_validation(top_10_portfolio.trades)
+        dynamic_top_5_temporal_validation = _trade_temporal_validation(
+            dynamic_top_5_portfolio.trades
+        )
         _report_progress(
             progress_callback,
             phase="validation_and_benchmarks",
@@ -984,8 +1067,10 @@ def run_full_market_walk_forward_selection(
         cost_sensitivity = _cost_sensitivity(
             top_5_signals=top_5_signals,
             top_10_signals=top_10_signals,
+            dynamic_top_5_signals=dynamic_top_5_signals,
             top_5_portfolio=top_5_portfolio,
             top_10_portfolio=top_10_portfolio,
+            dynamic_top_5_portfolio=dynamic_top_5_portfolio,
             market_provider=market_provider,
             execution_resolver=execution_resolver,
             start=start,
@@ -997,6 +1082,7 @@ def run_full_market_walk_forward_selection(
             end=end,
             top_5_return=top_5_metrics.total_return_pct,
             top_10_return=top_10_metrics.total_return_pct,
+            dynamic_top_5_return=dynamic_top_5_metrics.total_return_pct,
             eligible_universes=eligible_universes,
         )
         lease_heartbeat.raise_if_failed()
@@ -1025,6 +1111,18 @@ def run_full_market_walk_forward_selection(
         fundamental_coverage_ratio=fundamental_coverage,
         metrics=top_5_metrics,
     )
+    dynamic_rerank = _build_dynamic_rerank_evaluation(
+        snapshots=snapshots,
+        baseline_metrics=top_5_metrics,
+        baseline_temporal_validation=top_5_temporal_validation,
+        portfolio=dynamic_top_5_portfolio,
+        metrics=dynamic_top_5_metrics,
+        temporal_validation=dynamic_top_5_temporal_validation,
+        benchmarks=benchmarks,
+        cost_sensitivity=cost_sensitivity,
+        market_coverage_ratio=coverage["ratio"],
+        fundamental_coverage_ratio=fundamental_coverage,
+    )
     digest = _selection_digest(
         snapshots,
         revision,
@@ -1033,6 +1131,7 @@ def run_full_market_walk_forward_selection(
         benchmarks,
         cost_sensitivity,
         strategy_validation,
+        dynamic_rerank,
     )
     result = WalkForwardSelectionResult(
         owner_run_id=owner_run_id,
@@ -1051,6 +1150,7 @@ def run_full_market_walk_forward_selection(
         benchmarks=benchmarks,
         cost_sensitivity=cost_sensitivity,
         strategy_validation=strategy_validation,
+        dynamic_rerank=dynamic_rerank,
         experiment_manifest=experiment_manifest,
         reproducibility_digest=digest,
         data_health={
@@ -1121,6 +1221,26 @@ def run_full_market_walk_forward_selection(
             ),
             "walk_forward_top_5_trades": str(top_5_portfolio.summary.trade_count),
             "walk_forward_top_10_trades": str(top_10_portfolio.summary.trade_count),
+            "walk_forward_dynamic_top_5_trades": str(
+                dynamic_top_5_portfolio.summary.trade_count
+            ),
+            "walk_forward_dynamic_reranker_version": DYNAMIC_RERANKER_VERSION,
+            "walk_forward_dynamic_reranker_gate": dynamic_rerank.status,
+            "walk_forward_dynamic_changed_snapshots": str(
+                dynamic_rerank.changed_snapshot_count
+            ),
+            "walk_forward_dynamic_promoted_selections": str(
+                dynamic_rerank.promoted_selection_count
+            ),
+            "walk_forward_dynamic_constraint_blocked": str(
+                dynamic_rerank.constraint_blocked_selection_count
+            ),
+            "walk_forward_dynamic_portfolio_constraints": (
+                "max_industry_2,max_overlapping_etf_1"
+            ),
+            "walk_forward_dynamic_future_data_guard": (
+                "training_trade_exit_date_strictly_before_decision_date"
+            ),
             "walk_forward_oos_minimum_trades": "30",
             "walk_forward_top_5_oos_trades": str(_oos_sample_count(top_5_temporal_validation)),
             "walk_forward_top_10_oos_trades": str(_oos_sample_count(top_10_temporal_validation)),
@@ -1181,6 +1301,9 @@ def run_full_market_walk_forward_selection(
             ),
             "walk_forward_stress_top_5_return_pct": str(cost_sensitivity[-1].top_5_return_pct),
             "walk_forward_stress_top_10_return_pct": str(cost_sensitivity[-1].top_10_return_pct),
+            "walk_forward_stress_dynamic_top_5_return_pct": str(
+                cost_sensitivity[-1].dynamic_top_5_return_pct
+            ),
             "walk_forward_digest": digest,
             "walk_forward_experiment_digest": experiment_manifest.experiment_digest,
             "walk_forward_code_revision": experiment_manifest.code_revision,
@@ -1400,6 +1523,226 @@ def _build_strategy_validation_center(
     )
 
 
+def _build_dynamic_rerank_evaluation(
+    *,
+    snapshots: list[WalkForwardSnapshot],
+    baseline_metrics: WalkForwardPortfolioMetrics,
+    baseline_temporal_validation: TemporalValidationResult,
+    portfolio: PortfolioBacktestResult,
+    metrics: WalkForwardPortfolioMetrics,
+    temporal_validation: TemporalValidationResult,
+    benchmarks: list[WalkForwardBenchmarkComparison],
+    cost_sensitivity: list[WalkForwardCostScenario],
+    market_coverage_ratio: float,
+    fundamental_coverage_ratio: float,
+) -> WalkForwardRerankEvaluation:
+    changed_snapshots = [
+        snapshot
+        for snapshot in snapshots
+        if [item.instrument_id for item in snapshot.top_5]
+        != [item.instrument_id for item in snapshot.dynamic_top_5]
+    ]
+    promoted_selection_count = sum(
+        len(
+            set(item.instrument_id for item in snapshot.dynamic_top_5).difference(
+                item.instrument_id for item in snapshot.top_5
+            )
+        )
+        for snapshot in snapshots
+    )
+    constraint_blocked_selection_count = sum(
+        item.rerank_constraint_blocked_count for item in snapshots
+    )
+    maximum_training_samples = max(
+        (item.rerank_training_sample_count for item in snapshots),
+        default=0,
+    )
+    model_ready_snapshots = sum(item.rerank_model_ready for item in snapshots)
+    eligible_benchmark = next(
+        (
+            item
+            for item in benchmarks
+            if item.benchmark_id == ELIGIBLE_UNIVERSE_BENCHMARK_ID
+        ),
+        None,
+    )
+    stress = next(
+        (item for item in cost_sensitivity if item.key == "stress"),
+        None,
+    )
+    challenger_oos = temporal_validation.out_of_sample
+    baseline_oos = baseline_temporal_validation.out_of_sample
+    challenger_oos_return = (
+        challenger_oos.avg_return_pct
+        if challenger_oos and challenger_oos.avg_return_pct is not None
+        else None
+    )
+    baseline_oos_return = (
+        baseline_oos.avg_return_pct
+        if baseline_oos and baseline_oos.avg_return_pct is not None
+        else None
+    )
+    oos_improvement = (
+        challenger_oos_return - baseline_oos_return
+        if challenger_oos_return is not None and baseline_oos_return is not None
+        else None
+    )
+    return_delta = round(
+        metrics.total_return_pct - baseline_metrics.total_return_pct,
+        4,
+    )
+    drawdown_delta = round(
+        metrics.max_drawdown_pct - baseline_metrics.max_drawdown_pct,
+        4,
+    )
+    criteria = [
+        _gate_criterion(
+            key="market_coverage",
+            label="历史市场覆盖",
+            ready=market_coverage_ratio >= MIN_FULL_MARKET_COVERAGE_RATIO,
+            insufficient=market_coverage_ratio < MIN_FULL_MARKET_COVERAGE_RATIO,
+            value=f"{market_coverage_ratio:.1%}",
+            requirement=f">= {MIN_FULL_MARKET_COVERAGE_RATIO:.0%}",
+        ),
+        _gate_criterion(
+            key="fundamental_coverage",
+            label="历史财务覆盖",
+            ready=fundamental_coverage_ratio >= MIN_FUNDAMENTAL_COVERAGE_RATIO,
+            insufficient=fundamental_coverage_ratio < MIN_FUNDAMENTAL_COVERAGE_RATIO,
+            value=f"{fundamental_coverage_ratio:.1%}",
+            requirement=f">= {MIN_FUNDAMENTAL_COVERAGE_RATIO:.0%}",
+        ),
+        _gate_criterion(
+            key="resolved_training_history",
+            label="可用训练历史",
+            ready=(
+                maximum_training_samples >= MIN_RERANK_TRAINING_SAMPLES
+                and model_ready_snapshots > 0
+            ),
+            insufficient=(
+                maximum_training_samples < MIN_RERANK_TRAINING_SAMPLES
+                or model_ready_snapshots == 0
+            ),
+            value=f"{maximum_training_samples} 笔 / {model_ready_snapshots} 期",
+            requirement=f">= {MIN_RERANK_TRAINING_SAMPLES} 笔且至少 1 期启用",
+        ),
+        _gate_criterion(
+            key="out_of_sample_count",
+            label="挑战者样本外交易",
+            ready=bool(challenger_oos and challenger_oos.sample_count >= 30),
+            insufficient=not challenger_oos or challenger_oos.sample_count < 30,
+            value=str(challenger_oos.sample_count if challenger_oos else 0),
+            requirement=">= 30",
+        ),
+        _gate_criterion(
+            key="out_of_sample_improvement",
+            label="样本外相对基线",
+            ready=bool(
+                challenger_oos_return is not None
+                and challenger_oos_return > 0
+                and oos_improvement is not None
+                and oos_improvement > 0
+            ),
+            insufficient=(
+                challenger_oos_return is None
+                or baseline_oos_return is None
+                or not challenger_oos
+                or challenger_oos.sample_count < 30
+            ),
+            value=(
+                f"{challenger_oos_return:+.2f}% / 较基线 {oos_improvement:+.2f}%"
+                if challenger_oos_return is not None and oos_improvement is not None
+                else "-"
+            ),
+            requirement="样本外均值 > 0 且优于固定 Top5",
+        ),
+        _gate_criterion(
+            key="baseline_total_return",
+            label="全期相对基线",
+            ready=return_delta > 0,
+            insufficient=False,
+            value=f"{return_delta:+.2f}%",
+            requirement="> 0%",
+        ),
+        _gate_criterion(
+            key="benchmark_excess",
+            label="历史可交易池超额",
+            ready=bool(
+                eligible_benchmark
+                and eligible_benchmark.status == "ready"
+                and (eligible_benchmark.dynamic_top_5_excess_return_pct or 0) > 0
+            ),
+            insufficient=(
+                not eligible_benchmark or eligible_benchmark.status != "ready"
+            ),
+            value=(
+                f"{eligible_benchmark.dynamic_top_5_excess_return_pct:+.2f}%"
+                if eligible_benchmark
+                and eligible_benchmark.dynamic_top_5_excess_return_pct is not None
+                else "-"
+            ),
+            requirement="> 0%",
+        ),
+        _gate_criterion(
+            key="cost_stress",
+            label="压力成本后收益",
+            ready=bool(
+                stress
+                and stress.dynamic_top_5_return_pct is not None
+                and stress.dynamic_top_5_return_pct > 0
+            ),
+            insufficient=(
+                stress is None or stress.dynamic_top_5_return_pct is None
+            ),
+            value=(
+                f"{stress.dynamic_top_5_return_pct:+.2f}%"
+                if stress and stress.dynamic_top_5_return_pct is not None
+                else "-"
+            ),
+            requirement="> 0%",
+        ),
+        _gate_criterion(
+            key="max_drawdown",
+            label="挑战者最大回撤",
+            ready=(
+                metrics.max_drawdown_pct >= -15
+                and drawdown_delta >= -2
+            ),
+            insufficient=False,
+            value=(
+                f"{metrics.max_drawdown_pct:+.2f}% / 较基线 {drawdown_delta:+.2f}%"
+            ),
+            requirement=">= -15% 且不比基线恶化 2 个百分点以上",
+        ),
+    ]
+    if any(item.status == "insufficient" for item in criteria):
+        status = "insufficient"
+        headline = "动态重排序仍在积累严格按时间截断的训练与样本外证据。"
+    elif any(item.status == "fail" for item in criteria):
+        status = "rejected"
+        headline = "动态重排序尚未稳定优于固定 Top5，继续保留为挑战者。"
+    else:
+        status = "accepted"
+        headline = "动态重排序通过全部门槛，可以进入 20 个交易日前向模拟。"
+    return WalkForwardRerankEvaluation(
+        model_version=DYNAMIC_RERANKER_VERSION,
+        status=status,
+        headline=headline,
+        leakage_guard="仅使用 exit_date 严格早于当期 decision_date 的已结束交易",
+        evaluated_snapshot_count=len(snapshots),
+        changed_snapshot_count=len(changed_snapshots),
+        promoted_selection_count=promoted_selection_count,
+        constraint_blocked_selection_count=constraint_blocked_selection_count,
+        maximum_training_sample_count=maximum_training_samples,
+        baseline_return_delta_pct=return_delta,
+        baseline_max_drawdown_delta_pct=drawdown_delta,
+        portfolio=portfolio,
+        metrics=metrics,
+        temporal_validation=temporal_validation,
+        criteria=criteria,
+    )
+
+
 def _enforce_release_gate_on_positive_evidence(
     metrics: list[WalkForwardEvidenceMetric],
     *,
@@ -1597,6 +1940,7 @@ def _report_progress(
 
 
 def _selection(card) -> WalkForwardSelection:
+    context = card.market_context
     return WalkForwardSelection(
         instrument_id=card.instrument_id,
         status=card.status.value,
@@ -1607,6 +1951,11 @@ def _selection(card) -> WalkForwardSelection:
         target_1=card.exit_plan.target_1,
         no_chase_above=card.entry_plan.no_chase_above,
         factor_signals=_selection_factor_signals(card),
+        asset_type=card.asset_type,
+        industry=context.industry if context else None,
+        index_memberships=(
+            sorted(set(context.index_memberships)) if context else []
+        ),
     )
 
 
@@ -1618,14 +1967,225 @@ def _selection_factor_signals(card) -> list[str]:
     return sorted(set(signals))
 
 
-def _signals(snapshots: list[WalkForwardSnapshot], *, size: int) -> list[BacktestSignal]:
+def _enrich_selection_constraints(
+    snapshots: list[WalkForwardSnapshot],
+    *,
+    repository: ReplayEvidenceRepository,
+    revision: int,
+    asset_types: dict[str, str],
+) -> list[WalkForwardSnapshot]:
+    enriched = []
+    for snapshot in snapshots:
+        instrument_ids = [item.instrument_id for item in snapshot.top_10]
+        industries = repository.industries_as_of(
+            instrument_ids,
+            snapshot.decision_date,
+            revision,
+        )
+        memberships = repository.memberships_as_of(
+            instrument_ids,
+            snapshot.decision_date,
+            revision,
+        )
+        updated_by_instrument = {}
+        for selection in snapshot.top_10:
+            industry_snapshot = industries.get(selection.instrument_id)
+            membership_rows = memberships.get(selection.instrument_id, [])
+            asset_type = selection.asset_type
+            if asset_type == "unknown":
+                asset_type = asset_types.get(selection.instrument_id, "unknown")
+            if asset_type == "1":
+                asset_type = "stock"
+            updated_by_instrument[selection.instrument_id] = selection.model_copy(
+                update={
+                    "asset_type": asset_type,
+                    "industry": (
+                        selection.industry
+                        or (
+                            industry_snapshot.industry
+                            if industry_snapshot is not None
+                            else None
+                        )
+                    ),
+                    "index_memberships": (
+                        selection.index_memberships
+                        or sorted(
+                            {
+                                item.index_id
+                                for item in membership_rows
+                            }
+                        )
+                    ),
+                }
+            )
+        enriched.append(
+            snapshot.model_copy(
+                update={
+                    "top_10": [
+                        updated_by_instrument[item.instrument_id]
+                        for item in snapshot.top_10
+                    ],
+                    "top_5": [
+                        updated_by_instrument.get(item.instrument_id, item)
+                        for item in snapshot.top_5
+                    ],
+                }
+            )
+        )
+    return enriched
+
+
+def _apply_dynamic_reranking(
+    snapshots: list[WalkForwardSnapshot],
+    *,
+    top_10_portfolio: PortfolioBacktestResult,
+) -> list[WalkForwardSnapshot]:
+    selection_by_key = {
+        (snapshot.decision_date, item.instrument_id): item
+        for snapshot in snapshots
+        for item in snapshot.top_10
+    }
+    regime_by_date = {
+        snapshot.decision_date: snapshot.benchmark_trend_state
+        for snapshot in snapshots
+    }
+    observations = []
+    for trade in top_10_portfolio.trades:
+        selection = selection_by_key.get((trade.signal_date, trade.instrument_id))
+        observations.append(
+            ResolvedRerankObservation(
+                instrument_id=trade.instrument_id,
+                signal_date=trade.signal_date,
+                exit_date=trade.exit_date,
+                return_pct=trade.return_pct,
+                primary_strategy_id=trade.strategy_id,
+                factor_signals=(
+                    selection.factor_signals if selection is not None else []
+                ),
+                market_regime=regime_by_date.get(
+                    trade.signal_date,
+                    "unknown",
+                ),
+            )
+        )
+
+    reranked_snapshots = []
+    for snapshot in snapshots:
+        decision = rerank_candidates(
+            [
+                RerankCandidate(
+                    instrument_id=item.instrument_id,
+                    baseline_rank_score=float(item.rank_score),
+                    primary_strategy_id=item.primary_strategy_id,
+                    factor_signals=item.factor_signals,
+                    market_regime=snapshot.benchmark_trend_state,
+                )
+                for item in snapshot.top_10
+            ],
+            observations,
+            decision_date=snapshot.decision_date,
+        )
+        source_by_instrument = {
+            item.instrument_id: item for item in snapshot.top_10
+        }
+        constrained_scores, constraint_blocked_count = (
+            _select_constrained_dynamic_scores(
+                decision.candidates,
+                source_by_instrument=source_by_instrument,
+                limit=5,
+            )
+        )
+        dynamic_selections = []
+        for score in constrained_scores:
+            source = source_by_instrument[score.instrument_id]
+            dynamic_selections.append(
+                source.model_copy(
+                    update={
+                        "rerank_score": score.rerank_score,
+                        "rerank_baseline_position": score.baseline_position,
+                        "rerank_position": score.rerank_position,
+                        "rerank_training_samples": score.training_sample_count,
+                        "rerank_expected_return_pct": score.expected_return_pct,
+                        "rerank_win_probability": score.win_probability,
+                        "rerank_reason": score.reason,
+                    }
+                )
+            )
+        reranked_snapshots.append(
+            snapshot.model_copy(
+                update={
+                    "dynamic_top_5": dynamic_selections,
+                    "rerank_training_cutoff_date": decision.training_cutoff_date,
+                    "rerank_training_sample_count": decision.training_sample_count,
+                    "rerank_model_ready": decision.model_ready,
+                    "rerank_constraint_blocked_count": (
+                        constraint_blocked_count
+                    ),
+                }
+            )
+        )
+    return reranked_snapshots
+
+
+def _select_constrained_dynamic_scores(
+    scores: list[RerankCandidateScore],
+    *,
+    source_by_instrument: dict[str, WalkForwardSelection],
+    limit: int,
+) -> tuple[list[RerankCandidateScore], int]:
+    selected = []
+    industry_counts: dict[str, int] = {}
+    etf_overlap_counts: dict[str, int] = {}
+    blocked = 0
+    for score in scores:
+        source = source_by_instrument[score.instrument_id]
+        industry = (source.industry or "").strip()
+        constrained_industry = (
+            industry
+            if industry
+            and industry.lower() not in {"unknown", "综合", "指数etf", "etf"}
+            else None
+        )
+        if (
+            constrained_industry is not None
+            and industry_counts.get(constrained_industry, 0) >= 2
+        ):
+            blocked += 1
+            continue
+        is_etf = source.asset_type.lower() in {"etf", "fund", "index_fund"}
+        overlap_keys = source.index_memberships if is_etf else []
+        if any(etf_overlap_counts.get(key, 0) >= 1 for key in overlap_keys):
+            blocked += 1
+            continue
+        selected.append(score)
+        if constrained_industry is not None:
+            industry_counts[constrained_industry] = (
+                industry_counts.get(constrained_industry, 0) + 1
+            )
+        for key in overlap_keys:
+            etf_overlap_counts[key] = etf_overlap_counts.get(key, 0) + 1
+        if len(selected) >= limit:
+            break
+    return selected, blocked
+
+
+def _signals(
+    snapshots: list[WalkForwardSnapshot],
+    *,
+    size: int,
+    selection_source: str = "baseline",
+) -> list[BacktestSignal]:
     result = []
     for snapshot in snapshots:
-        selections = snapshot.top_5 if size == 5 else snapshot.top_10
+        if selection_source == "dynamic":
+            selections = snapshot.dynamic_top_5
+        else:
+            selections = snapshot.top_5 if size == 5 else snapshot.top_10
         result.extend(
             BacktestSignal(
                 snapshot_id=(
-                    f"walk-forward-{size}-{snapshot.decision_date:%Y%m%d}:{item.instrument_id}"
+                    f"walk-forward-{selection_source}-{size}-"
+                    f"{snapshot.decision_date:%Y%m%d}:{item.instrument_id}"
                 ),
                 instrument_id=item.instrument_id,
                 signal_date=snapshot.decision_date,
@@ -1651,6 +2211,7 @@ def _selection_digest(
     benchmarks: list[WalkForwardBenchmarkComparison],
     cost_sensitivity: list[WalkForwardCostScenario],
     strategy_validation: WalkForwardValidationCenter,
+    dynamic_rerank: WalkForwardRerankEvaluation,
 ) -> str:
     payload = {
         "dataset_revision": revision,
@@ -1666,6 +2227,7 @@ def _selection_digest(
         "benchmarks": [item.model_dump(mode="json") for item in benchmarks],
         "cost_sensitivity": [item.model_dump(mode="json") for item in cost_sensitivity],
         "strategy_validation": strategy_validation.model_dump(mode="json"),
+        "dynamic_rerank": dynamic_rerank.model_dump(mode="json"),
     }
     encoded = json.dumps(
         payload,
@@ -1697,8 +2259,10 @@ def _cost_sensitivity(
     *,
     top_5_signals: list[BacktestSignal],
     top_10_signals: list[BacktestSignal],
+    dynamic_top_5_signals: list[BacktestSignal],
     top_5_portfolio: PortfolioBacktestResult,
     top_10_portfolio: PortfolioBacktestResult,
+    dynamic_top_5_portfolio: PortfolioBacktestResult,
     market_provider: ReplayMarketDataProvider,
     execution_resolver: VersionedAshareExecutionResolver,
     start: date,
@@ -1714,6 +2278,7 @@ def _cost_sensitivity(
         if key == "base":
             top_5 = top_5_portfolio
             top_10 = top_10_portfolio
+            dynamic_top_5 = dynamic_top_5_portfolio
         else:
             top_5 = run_signal_portfolio_backtest(
                 signals=top_5_signals,
@@ -1737,6 +2302,19 @@ def _cost_sensitivity(
                 fee_multiplier=fee_multiplier,
                 execution_rule_resolver=execution_resolver,
             )
+            dynamic_top_5 = run_signal_portfolio_backtest(
+                signals=dynamic_top_5_signals,
+                instrument_ids=sorted(
+                    {item.instrument_id for item in dynamic_top_5_signals}
+                ),
+                provider=market_provider,
+                start=start,
+                end=end,
+                max_positions=5,
+                slippage_bps=slippage_bps,
+                fee_multiplier=fee_multiplier,
+                execution_rule_resolver=execution_resolver,
+            )
         results.append(
             WalkForwardCostScenario(
                 key=key,
@@ -1749,6 +2327,14 @@ def _cost_sensitivity(
                 top_10_max_drawdown_pct=top_10.summary.max_drawdown_pct,
                 top_5_total_costs=sum((item.costs for item in top_5.trades), Decimal("0")),
                 top_10_total_costs=sum((item.costs for item in top_10.trades), Decimal("0")),
+                dynamic_top_5_return_pct=dynamic_top_5.summary.total_return_pct,
+                dynamic_top_5_max_drawdown_pct=(
+                    dynamic_top_5.summary.max_drawdown_pct
+                ),
+                dynamic_top_5_total_costs=sum(
+                    (item.costs for item in dynamic_top_5.trades),
+                    Decimal("0"),
+                ),
             )
         )
     return results
@@ -1815,6 +2401,7 @@ def _benchmark_comparisons(
     end: date,
     top_5_return: float,
     top_10_return: float,
+    dynamic_top_5_return: float,
     eligible_universes: list[tuple[date, list[str]]],
 ) -> list[WalkForwardBenchmarkComparison]:
     bars = provider.get_daily_bars(list(REQUIRED_BENCHMARK_IDS), start, end)
@@ -1833,6 +2420,7 @@ def _benchmark_comparisons(
                     benchmark_return_pct=None,
                     top_5_excess_return_pct=None,
                     top_10_excess_return_pct=None,
+                    dynamic_top_5_excess_return_pct=None,
                 )
             )
             continue
@@ -1851,6 +2439,11 @@ def _benchmark_comparisons(
                 ),
                 top_10_excess_return_pct=(
                     round(top_10_return - benchmark_return, 4)
+                    if benchmark_return is not None
+                    else None
+                ),
+                dynamic_top_5_excess_return_pct=(
+                    round(dynamic_top_5_return - benchmark_return, 4)
                     if benchmark_return is not None
                     else None
                 ),
@@ -1873,6 +2466,11 @@ def _benchmark_comparisons(
             ),
             top_10_excess_return_pct=(
                 round(top_10_return - equal_weight_return, 4)
+                if equal_weight_return is not None
+                else None
+            ),
+            dynamic_top_5_excess_return_pct=(
+                round(dynamic_top_5_return - equal_weight_return, 4)
                 if equal_weight_return is not None
                 else None
             ),

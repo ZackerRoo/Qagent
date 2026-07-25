@@ -480,8 +480,46 @@ def _create_or_get_walk_forward_job(
         total_snapshots=len(sessions),
         experiment_manifest=manifest.model_dump(mode="json"),
     )
+    reusable_checkpoints = _reusable_walk_forward_checkpoints(
+        repo,
+        manifest=manifest,
+        sessions=sessions,
+    )
+    if reusable_checkpoints:
+        job = repo.update_walk_forward_job(
+            job.job_id,
+            processed_snapshots=len(reusable_checkpoints),
+            current_date=sessions[-1],
+            checkpoints=reusable_checkpoints,
+        )
     _submit_walk_forward_job(job.job_id)
     return job
+
+
+def _reusable_walk_forward_checkpoints(
+    repo: QagentRepository,
+    *,
+    manifest: WalkForwardExperimentManifest,
+    sessions: list[date],
+) -> list[dict[str, object]]:
+    expected_dates = [item.isoformat() for item in sessions]
+    for run in repo.list_walk_forward_runs(provider=manifest.provider_mode, limit=20):
+        if run.status != "succeeded" or not _walk_forward_run_matches_manifest(
+            run,
+            manifest,
+        ):
+            continue
+        snapshots = run.payload.get("snapshots")
+        if not isinstance(snapshots, list):
+            continue
+        checkpoints = [
+            item
+            for item in snapshots
+            if isinstance(item, dict) and isinstance(item.get("decision_date"), str)
+        ]
+        if [item["decision_date"] for item in checkpoints] == expected_dates:
+            return checkpoints
+    return []
 
 
 def _walk_forward_run_matches_manifest(run, manifest: WalkForwardExperimentManifest) -> bool:

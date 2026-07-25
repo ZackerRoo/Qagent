@@ -65,6 +65,7 @@ import type {
   StrategyPerformanceResponse,
   WalkForwardRun,
   WalkForwardJob,
+  WalkForwardTemporalValidation,
   WalkForwardValidationCenter,
 } from "../types";
 
@@ -1591,8 +1592,23 @@ function WalkForwardValidationCenter({
   const payload = run?.payload;
   const benchmarks = payload?.benchmarks ?? [];
   const costScenarios = payload?.cost_sensitivity ?? [];
+  const dynamicRerank = payload?.dynamic_rerank;
   const top5Validation = payload?.top_5_temporal_validation;
   const top10Validation = payload?.top_10_temporal_validation;
+  const dynamicValidation = dynamicRerank?.temporal_validation;
+  const validationWindows: Array<{
+    label: string;
+    validation: WalkForwardTemporalValidation | undefined;
+  }> = [
+    { label: "Top 5", validation: top5Validation },
+    { label: "Top 10", validation: top10Validation },
+    ...(dynamicRerank
+      ? [{
+        label: zh ? "动态 Top 5" : "Dynamic Top 5",
+        validation: dynamicValidation,
+      }]
+      : []),
+  ];
   const top5Oos = top5Validation?.out_of_sample;
   const top10Oos = top10Validation?.out_of_sample;
   const snapshots = payload?.snapshots ?? [];
@@ -1887,6 +1903,56 @@ function WalkForwardValidationCenter({
                 : "This is a legacy validation result. Run it again to generate release criteria and strategy/factor gates."}
             </div>
           )}
+          {dynamicRerank ? (
+            <div className={`walk-forward-challenger challenger-${dynamicRerank.status}`}>
+              <div className="walk-forward-challenger-head">
+                <div>
+                  <p className="eyebrow">{zh ? "动态重排序挑战者" : "Dynamic reranking challenger"}</p>
+                  <h3>
+                    {dynamicRerank.status === "accepted"
+                      ? (zh ? "通过门槛，可进入前向模拟" : "Accepted for forward simulation")
+                      : dynamicRerank.status === "rejected"
+                        ? (zh ? "未优于固定 Top 5" : "Did not beat fixed Top 5")
+                        : (zh ? "证据仍不足" : "Evidence still insufficient")}
+                  </h3>
+                  <p>{dynamicRerank.headline}</p>
+                </div>
+                <span className={`status status-${dynamicRerank.status}`}>{dynamicRerank.status}</span>
+              </div>
+              <div className="metric-grid walk-forward-kpis">
+                <div><span>{zh ? "挑战者收益" : "Challenger return"}</span><strong>{formatNumber(dynamicRerank.metrics.total_return_pct, "%")}</strong></div>
+                <div><span>{zh ? "较固定 Top 5" : "vs fixed Top 5"}</span><strong>{formatNumber(dynamicRerank.baseline_return_delta_pct, "%")}</strong></div>
+                <div><span>{zh ? "最大回撤" : "Max drawdown"}</span><strong>{formatNumber(dynamicRerank.metrics.max_drawdown_pct, "%")}</strong></div>
+                <div><span>{zh ? "已结束训练样本" : "Resolved training trades"}</span><strong>{dynamicRerank.maximum_training_sample_count}</strong></div>
+                <div><span>{zh ? "改变调仓期" : "Changed rebalances"}</span><strong>{dynamicRerank.changed_snapshot_count}/{dynamicRerank.evaluated_snapshot_count}</strong></div>
+                <div><span>{zh ? "升入 Top 5" : "Promotions into Top 5"}</span><strong>{dynamicRerank.promoted_selection_count}</strong></div>
+                <div><span>{zh ? "集中度约束拦截" : "Concentration blocks"}</span><strong>{dynamicRerank.constraint_blocked_selection_count}</strong></div>
+              </div>
+              <div className="walk-forward-challenger-body">
+                <LineValidationChart
+                  title={zh ? "动态 Top 5 权益曲线" : "Dynamic Top 5 equity curve"}
+                  tone="equity"
+                  points={dynamicRerank.portfolio.equity_curve.map((point) => ({ label: point.date, value: numberFromDecimalText(point.equity) }))}
+                  valueFormatter={(value) => value.toFixed(0)}
+                />
+                <div className="table-shell">
+                  <table>
+                    <thead><tr><th>{zh ? "挑战者门槛" : "Challenger gate"}</th><th>{zh ? "结果" : "Result"}</th><th>{zh ? "要求" : "Requirement"}</th></tr></thead>
+                    <tbody>{dynamicRerank.criteria.map((item) => (
+                      <tr key={item.key}>
+                        <td>{item.label}</td>
+                        <td><span className={`status status-${item.status}`}>{item.value}</span></td>
+                        <td>{item.requirement}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+              </div>
+              <p className="walk-forward-leakage-guard">
+                {zh ? "防止未来数据泄漏：" : "Look-ahead guard: "}{dynamicRerank.leakage_guard}
+              </p>
+            </div>
+          ) : null}
           <div className="walk-forward-chart-grid">
             <LineValidationChart
               title={zh ? "Top 5 权益曲线" : "Top 5 equity curve"}
@@ -1908,27 +1974,28 @@ function WalkForwardValidationCenter({
                 <tbody>
                   <tr><td>Top 5</td><td>{run.top_5_trade_count}</td><td>{formatNumber(run.top_5_return_pct, "%")}</td><td>{formatNumber(payload?.top_5_metrics.max_drawdown_pct ?? null, "%")}</td><td>{top5Oos?.sample_count ?? 0}</td><td>{gateLabel(top5Gate)}</td></tr>
                   <tr><td>Top 10</td><td>{run.top_10_trade_count}</td><td>{formatNumber(run.top_10_return_pct, "%")}</td><td>{formatNumber(payload?.top_10_metrics.max_drawdown_pct ?? null, "%")}</td><td>{top10Oos?.sample_count ?? 0}</td><td>{gateLabel(top10Gate)}</td></tr>
+                  {dynamicRerank ? <tr><td>{zh ? "动态 Top 5" : "Dynamic Top 5"}</td><td>{dynamicRerank.metrics.trade_count}</td><td>{formatNumber(dynamicRerank.metrics.total_return_pct, "%")}</td><td>{formatNumber(dynamicRerank.metrics.max_drawdown_pct, "%")}</td><td>{dynamicRerank.temporal_validation.out_of_sample?.sample_count ?? 0}</td><td>{dynamicRerank.status}</td></tr> : null}
                 </tbody>
               </table>
             </div>
             <div className="table-shell">
               <table>
-                <thead><tr><th>{zh ? "基准" : "Benchmark"}</th><th>{zh ? "基准收益" : "Benchmark"}</th><th>Top 5</th><th>Top 10</th><th>{zh ? "状态" : "Status"}</th></tr></thead>
-                <tbody>{benchmarks.map((item) => <tr key={item.benchmark_id}><td>{benchmarkLabel(item.benchmark_id)}</td><td>{formatNumber(item.benchmark_return_pct, "%")}</td><td>{formatNumber(item.top_5_excess_return_pct, "%")}</td><td>{formatNumber(item.top_10_excess_return_pct, "%")}</td><td>{dataStatusLabel(item.status)}</td></tr>)}</tbody>
+                <thead><tr><th>{zh ? "基准" : "Benchmark"}</th><th>{zh ? "基准收益" : "Benchmark"}</th><th>Top 5</th><th>Top 10</th>{dynamicRerank ? <th>{zh ? "动态 Top 5" : "Dynamic Top 5"}</th> : null}<th>{zh ? "状态" : "Status"}</th></tr></thead>
+                <tbody>{benchmarks.map((item) => <tr key={item.benchmark_id}><td>{benchmarkLabel(item.benchmark_id)}</td><td>{formatNumber(item.benchmark_return_pct, "%")}</td><td>{formatNumber(item.top_5_excess_return_pct, "%")}</td><td>{formatNumber(item.top_10_excess_return_pct, "%")}</td>{dynamicRerank ? <td>{formatNumber(item.dynamic_top_5_excess_return_pct ?? null, "%")}</td> : null}<td>{dataStatusLabel(item.status)}</td></tr>)}</tbody>
               </table>
             </div>
           </div>
           <div className="walk-forward-table-grid">
             <div className="table-shell">
               <table>
-                <thead><tr><th>{zh ? "成本场景" : "Cost scenario"}</th><th>{zh ? "滑点" : "Slippage"}</th><th>{zh ? "费率倍数" : "Fee x"}</th><th>Top 5</th><th>Top 10</th></tr></thead>
-                <tbody>{costScenarios.map((item) => <tr key={item.key}><td>{item.label}</td><td>{item.slippage_bps} bp</td><td>{item.fee_multiplier}x</td><td>{formatNumber(item.top_5_return_pct, "%")}</td><td>{formatNumber(item.top_10_return_pct, "%")}</td></tr>)}</tbody>
+                <thead><tr><th>{zh ? "成本场景" : "Cost scenario"}</th><th>{zh ? "滑点" : "Slippage"}</th><th>{zh ? "费率倍数" : "Fee x"}</th><th>Top 5</th><th>Top 10</th>{dynamicRerank ? <th>{zh ? "动态 Top 5" : "Dynamic Top 5"}</th> : null}</tr></thead>
+                <tbody>{costScenarios.map((item) => <tr key={item.key}><td>{item.label}</td><td>{item.slippage_bps} bp</td><td>{item.fee_multiplier}x</td><td>{formatNumber(item.top_5_return_pct, "%")}</td><td>{formatNumber(item.top_10_return_pct, "%")}</td>{dynamicRerank ? <td>{formatNumber(item.dynamic_top_5_return_pct ?? null, "%")}</td> : null}</tr>)}</tbody>
               </table>
             </div>
             <div className="walk-forward-windows">
-              {[top5Validation, top10Validation].map((validation, index) => (
-                <div className="walk-forward-window-card" key={index}>
-                  <strong>{index === 0 ? "Top 5" : "Top 10"} {zh ? "样本外" : "out-of-sample"}</strong>
+              {validationWindows.map(({ label, validation }) => (
+                <div className="walk-forward-window-card" key={label}>
+                  <strong>{label} {zh ? "样本外" : "out-of-sample"}</strong>
                   <span>{validation?.out_of_sample?.start_date ?? "-"} - {validation?.out_of_sample?.end_date ?? "-"}</span>
                   <span>{validation?.out_of_sample?.sample_count ?? 0} {zh ? "笔 · " : "trades · "}{verdictLabel(validation?.verdict)}</span>
                 </div>

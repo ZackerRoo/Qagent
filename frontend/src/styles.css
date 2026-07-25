@@ -13683,6 +13683,58 @@ td {
   font-size: 14px;
 }
 
+.walk-forward-challenger {
+  display: grid;
+  gap: 14px;
+  border-block: 1px solid var(--terminal-border-soft);
+  padding-block: 16px;
+}
+
+.walk-forward-challenger-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.walk-forward-challenger-head h3 {
+  margin: 3px 0 5px;
+  color: var(--terminal-text);
+  font-size: 20px;
+}
+
+.walk-forward-challenger-head p,
+.walk-forward-leakage-guard {
+  margin: 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.walk-forward-challenger.challenger-accepted {
+  border-top-color: rgba(46, 204, 135, 0.58);
+}
+
+.walk-forward-challenger.challenger-rejected {
+  border-top-color: rgba(244, 92, 113, 0.58);
+}
+
+.walk-forward-challenger.challenger-insufficient {
+  border-top-color: rgba(244, 197, 66, 0.58);
+}
+
+.walk-forward-challenger-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(360px, 0.75fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.walk-forward-leakage-guard {
+  border-left: 2px solid var(--terminal-cyan);
+  padding-left: 10px;
+}
+
 @media (max-width: 1000px) {
   .walk-forward-kpis {
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -13690,6 +13742,10 @@ td {
 
   .historical-backfill-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .walk-forward-challenger-body {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -13702,5 +13758,9 @@ td {
 
   .walk-forward-lease-health {
     grid-template-columns: 1fr;
+  }
+
+  .walk-forward-challenger-head {
+    display: grid;
   }
 }
