@@ -618,6 +618,81 @@ def test_factor_prefilter_matches_mixed_adjustment_semantics(tmp_path):
     assert raw_only.iloc[0]["close"] == 20.0
 
 
+def test_factor_prefilter_does_not_fall_back_past_latest_incomplete_revision(
+    tmp_path,
+):
+    repository, decision_date = _replay_repository(tmp_path)
+    fetched_at = datetime(2025, 1, 11, tzinfo=timezone.utc)
+    instrument_id = "CN:100005"
+    complete_revision = repository.current_revision() + 1
+    repository.upsert_replay_bars(
+        [
+            HistoricalReplayBar(
+                provider_mode="free",
+                instrument_id=instrument_id,
+                trade_date=decision_date,
+                raw_open=Decimal("19"),
+                raw_high=Decimal("21"),
+                raw_low=Decimal("18"),
+                raw_close=Decimal("20"),
+                adjusted_open=Decimal("9.5"),
+                adjusted_high=Decimal("10.5"),
+                adjusted_low=Decimal("9"),
+                adjusted_close=Decimal("10"),
+                volume=Decimal("1000000"),
+                adjustment_factor=Decimal("0.5"),
+                adjustment_mode="qfq",
+                source_provider="fixture_complete_revision",
+                dataset_revision=complete_revision,
+                fetched_at=fetched_at,
+            )
+        ],
+        revision=complete_revision,
+    )
+    incomplete_revision = complete_revision + 1
+    repository.upsert_replay_bars(
+        [
+            HistoricalReplayBar(
+                provider_mode="free",
+                instrument_id=instrument_id,
+                trade_date=decision_date,
+                raw_open=Decimal("20"),
+                raw_high=Decimal("22"),
+                raw_low=Decimal("19"),
+                raw_close=Decimal("21"),
+                adjusted_close=Decimal("10.5"),
+                volume=Decimal("1100000"),
+                adjustment_factor=Decimal("0.5"),
+                adjustment_mode="qfq",
+                source_provider="fixture_incomplete_revision",
+                dataset_revision=incomplete_revision,
+                fetched_at=fetched_at,
+            )
+        ],
+        revision=incomplete_revision,
+    )
+    legacy_provider = ReplayMarketDataProvider(repository, incomplete_revision)
+    lightweight_provider = ReplayMarketDataProvider(repository, incomplete_revision)
+
+    legacy = _adjusted_prefilter_bars(
+        legacy_provider.get_daily_bars(
+            [instrument_id],
+            decision_date,
+            decision_date,
+        )
+    )
+    lightweight = lightweight_provider.get_factor_prefilter_bars(
+        [instrument_id],
+        decision_date,
+        decision_date,
+    )
+
+    assert legacy.empty
+    assert lightweight.empty
+    assert lightweight_provider.factor_prefilter_rows_loaded == 1
+    assert any(instrument_id in error for error in lightweight_provider.last_errors)
+
+
 def test_factor_prefilter_reuses_incremental_window_and_prunes(
     tmp_path,
     monkeypatch,
