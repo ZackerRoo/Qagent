@@ -9,6 +9,7 @@ from sqlalchemy import event, inspect, text
 from sqlalchemy.engine import Dialect
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.pool import NullPool
 from sqlalchemy.types import TypeDecorator
 
 from qagent.config import get_settings
@@ -103,6 +104,9 @@ def create_db_engine(database_url: str | None = None):
     if is_file_sqlite:
         Path(parsed.database).expanduser().parent.mkdir(parents=True, exist_ok=True)
         engine_kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
+        # API repositories create short-lived engines. Do not leave one pooled
+        # SQLite descriptor behind for every request.
+        engine_kwargs["poolclass"] = NullPool
     engine = create_engine(url, future=True, **engine_kwargs)
     if is_file_sqlite:
         _configure_sqlite_pragmas(engine)

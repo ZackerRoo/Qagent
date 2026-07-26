@@ -34,6 +34,8 @@ from qagent.backtesting.baseline_challenger import (
     score_baseline_candidates,
 )
 from qagent.backtesting.portfolio import (
+    ADAPTIVE_CONFIRMATION_EXECUTION_PROFILE,
+    ADAPTIVE_EXECUTION_PROFILE,
     PortfolioBacktestResult,
     run_signal_portfolio_backtest,
 )
@@ -355,6 +357,27 @@ class WalkForwardBaselineChallengerEvaluation(BaseModel):
     worst_segments: list[WalkForwardLossAttribution] = Field(default_factory=list)
 
 
+class WalkForwardExecutionChallengerEvaluation(BaseModel):
+    model_version: str
+    status: str
+    headline: str
+    leakage_guard: str
+    baseline_return_delta_pct: float
+    baseline_max_drawdown_delta_pct: float
+    baseline_trade_count: int
+    trade_count_ratio: float
+    baseline_stop_rate_pct: float
+    challenger_stop_rate_pct: float
+    stop_rate_delta_pct: float
+    baseline_target_rate_pct: float
+    challenger_target_rate_pct: float
+    target_rate_delta_pct: float
+    portfolio: PortfolioBacktestResult
+    metrics: "WalkForwardPortfolioMetrics"
+    temporal_validation: TemporalValidationResult
+    criteria: list[WalkForwardGateCriterion] = Field(default_factory=list)
+
+
 class WalkForwardSelectionResult(BaseModel):
     owner_run_id: str
     provider_mode: str
@@ -374,6 +397,7 @@ class WalkForwardSelectionResult(BaseModel):
     strategy_validation: WalkForwardValidationCenter
     dynamic_rerank: WalkForwardRerankEvaluation
     baseline_challenger: WalkForwardBaselineChallengerEvaluation
+    execution_challenger: WalkForwardExecutionChallengerEvaluation
     experiment_manifest: WalkForwardExperimentManifest
     reproducibility_digest: str
     data_health: dict[str, str] = Field(default_factory=dict)
@@ -400,6 +424,7 @@ class WalkForwardBenchmarkComparison(BaseModel):
     top_10_excess_return_pct: float | None
     dynamic_top_5_excess_return_pct: float | None = None
     baseline_challenger_excess_return_pct: float | None = None
+    execution_challenger_excess_return_pct: float | None = None
 
 
 class WalkForwardCostScenario(BaseModel):
@@ -419,6 +444,9 @@ class WalkForwardCostScenario(BaseModel):
     baseline_challenger_return_pct: float | None = None
     baseline_challenger_max_drawdown_pct: float | None = None
     baseline_challenger_total_costs: Decimal | None = None
+    execution_challenger_return_pct: float | None = None
+    execution_challenger_max_drawdown_pct: float | None = None
+    execution_challenger_total_costs: Decimal | None = None
 
 
 class WalkForwardProgress(BaseModel):
@@ -1063,6 +1091,16 @@ def run_full_market_walk_forward_selection(
             max_positions=10,
             execution_rule_resolver=execution_resolver,
         )
+        execution_challenger_portfolio = run_signal_portfolio_backtest(
+            signals=top_5_signals,
+            instrument_ids=sorted({item.instrument_id for item in top_5_signals}),
+            provider=market_provider,
+            start=start,
+            end=end,
+            max_positions=5,
+            execution_rule_resolver=execution_resolver,
+            execution_profile=ADAPTIVE_CONFIRMATION_EXECUTION_PROFILE,
+        )
         snapshots = _apply_dynamic_reranking(
             snapshots,
             top_10_portfolio=top_10_portfolio,
@@ -1114,6 +1152,11 @@ def run_full_market_walk_forward_selection(
             start,
             end,
         )
+        execution_challenger_metrics = _portfolio_metrics(
+            execution_challenger_portfolio,
+            start,
+            end,
+        )
         top_5_temporal_validation = _trade_temporal_validation(top_5_portfolio.trades)
         top_10_temporal_validation = _trade_temporal_validation(top_10_portfolio.trades)
         dynamic_top_5_temporal_validation = _trade_temporal_validation(
@@ -1121,6 +1164,9 @@ def run_full_market_walk_forward_selection(
         )
         baseline_challenger_temporal_validation = _trade_temporal_validation(
             baseline_challenger_portfolio.trades
+        )
+        execution_challenger_temporal_validation = _trade_temporal_validation(
+            execution_challenger_portfolio.trades
         )
         _report_progress(
             progress_callback,
@@ -1138,6 +1184,7 @@ def run_full_market_walk_forward_selection(
             top_10_portfolio=top_10_portfolio,
             dynamic_top_5_portfolio=dynamic_top_5_portfolio,
             baseline_challenger_portfolio=baseline_challenger_portfolio,
+            execution_challenger_portfolio=execution_challenger_portfolio,
             market_provider=market_provider,
             execution_resolver=execution_resolver,
             start=start,
@@ -1151,6 +1198,7 @@ def run_full_market_walk_forward_selection(
             top_10_return=top_10_metrics.total_return_pct,
             dynamic_top_5_return=dynamic_top_5_metrics.total_return_pct,
             baseline_challenger_return=baseline_challenger_metrics.total_return_pct,
+            execution_challenger_return=execution_challenger_metrics.total_return_pct,
             eligible_universes=eligible_universes,
         )
         lease_heartbeat.raise_if_failed()
@@ -1202,6 +1250,18 @@ def run_full_market_walk_forward_selection(
         market_coverage_ratio=coverage["ratio"],
         fundamental_coverage_ratio=fundamental_coverage,
     )
+    execution_challenger = _build_execution_challenger_evaluation(
+        baseline_portfolio=top_5_portfolio,
+        baseline_metrics=top_5_metrics,
+        baseline_temporal_validation=top_5_temporal_validation,
+        portfolio=execution_challenger_portfolio,
+        metrics=execution_challenger_metrics,
+        temporal_validation=execution_challenger_temporal_validation,
+        benchmarks=benchmarks,
+        cost_sensitivity=cost_sensitivity,
+        market_coverage_ratio=coverage["ratio"],
+        fundamental_coverage_ratio=fundamental_coverage,
+    )
     digest = _selection_digest(
         snapshots,
         revision,
@@ -1212,6 +1272,7 @@ def run_full_market_walk_forward_selection(
         strategy_validation,
         dynamic_rerank,
         baseline_challenger,
+        execution_challenger,
     )
     result = WalkForwardSelectionResult(
         owner_run_id=owner_run_id,
@@ -1232,6 +1293,7 @@ def run_full_market_walk_forward_selection(
         strategy_validation=strategy_validation,
         dynamic_rerank=dynamic_rerank,
         baseline_challenger=baseline_challenger,
+        execution_challenger=execution_challenger,
         experiment_manifest=experiment_manifest,
         reproducibility_digest=digest,
         data_health={
@@ -1354,6 +1416,17 @@ def run_full_market_walk_forward_selection(
             "walk_forward_baseline_challenger_future_data_guard": (
                 "training_trade_exit_date_strictly_before_decision_date"
             ),
+            "walk_forward_execution_challenger_trades": str(
+                execution_challenger_portfolio.summary.trade_count
+            ),
+            "walk_forward_execution_challenger_version": ADAPTIVE_EXECUTION_PROFILE,
+            "walk_forward_execution_challenger_gate": execution_challenger.status,
+            "walk_forward_execution_challenger_policy": (
+                "close_confirmation_next_open_two_atr_stop_two_r_target_breakeven"
+            ),
+            "walk_forward_execution_challenger_future_data_guard": (
+                "confirmation_on_signal_close_execution_next_session"
+            ),
             "walk_forward_oos_minimum_trades": "30",
             "walk_forward_top_5_oos_trades": str(_oos_sample_count(top_5_temporal_validation)),
             "walk_forward_top_10_oos_trades": str(_oos_sample_count(top_10_temporal_validation)),
@@ -1415,6 +1488,9 @@ def run_full_market_walk_forward_selection(
             ),
             "walk_forward_stress_baseline_challenger_return_pct": str(
                 cost_sensitivity[-1].baseline_challenger_return_pct
+            ),
+            "walk_forward_stress_execution_challenger_return_pct": str(
+                cost_sensitivity[-1].execution_challenger_return_pct
             ),
             "walk_forward_digest": digest,
             "walk_forward_experiment_digest": experiment_manifest.experiment_digest,
@@ -2131,6 +2207,238 @@ def _baseline_challenger_gate_outcome(
     return (
         "accepted",
         "基线优化挑战者通过全部门槛，可进入 20 个交易日前向模拟。",
+    )
+
+
+def _build_execution_challenger_evaluation(
+    *,
+    baseline_portfolio: PortfolioBacktestResult,
+    baseline_metrics: WalkForwardPortfolioMetrics,
+    baseline_temporal_validation: TemporalValidationResult,
+    portfolio: PortfolioBacktestResult,
+    metrics: WalkForwardPortfolioMetrics,
+    temporal_validation: TemporalValidationResult,
+    benchmarks: list[WalkForwardBenchmarkComparison],
+    cost_sensitivity: list[WalkForwardCostScenario],
+    market_coverage_ratio: float,
+    fundamental_coverage_ratio: float,
+) -> WalkForwardExecutionChallengerEvaluation:
+    return_delta = round(
+        metrics.total_return_pct - baseline_metrics.total_return_pct,
+        4,
+    )
+    drawdown_delta = round(
+        metrics.max_drawdown_pct - baseline_metrics.max_drawdown_pct,
+        4,
+    )
+    baseline_trade_count = baseline_metrics.trade_count
+    trade_count_ratio = (
+        round(metrics.trade_count / baseline_trade_count, 4) if baseline_trade_count else 0.0
+    )
+    baseline_stop_rate = _exit_reason_rate(baseline_portfolio, "stopped")
+    challenger_stop_rate = _exit_reason_rate(portfolio, "stopped")
+    baseline_target_rate = _exit_reason_rate(baseline_portfolio, "target_1_hit")
+    challenger_target_rate = _exit_reason_rate(portfolio, "target_1_hit")
+    challenger_oos = temporal_validation.out_of_sample
+    baseline_oos = baseline_temporal_validation.out_of_sample
+    challenger_oos_return = (
+        challenger_oos.avg_return_pct
+        if challenger_oos and challenger_oos.avg_return_pct is not None
+        else None
+    )
+    baseline_oos_return = (
+        baseline_oos.avg_return_pct
+        if baseline_oos and baseline_oos.avg_return_pct is not None
+        else None
+    )
+    oos_delta = (
+        challenger_oos_return - baseline_oos_return
+        if challenger_oos_return is not None and baseline_oos_return is not None
+        else None
+    )
+    eligible_benchmark = next(
+        (item for item in benchmarks if item.benchmark_id == ELIGIBLE_UNIVERSE_BENCHMARK_ID),
+        None,
+    )
+    stress = next((item for item in cost_sensitivity if item.key == "stress"), None)
+    stop_rate_ready = challenger_stop_rate <= 25 or challenger_stop_rate <= baseline_stop_rate * 0.8
+    criteria = [
+        _gate_criterion(
+            key="market_coverage",
+            label="历史市场覆盖",
+            ready=market_coverage_ratio >= MIN_FULL_MARKET_COVERAGE_RATIO,
+            insufficient=market_coverage_ratio < MIN_FULL_MARKET_COVERAGE_RATIO,
+            value=f"{market_coverage_ratio:.1%}",
+            requirement=f">= {MIN_FULL_MARKET_COVERAGE_RATIO:.0%}",
+        ),
+        _gate_criterion(
+            key="fundamental_coverage",
+            label="历史财务覆盖",
+            ready=fundamental_coverage_ratio >= MIN_FUNDAMENTAL_COVERAGE_RATIO,
+            insufficient=fundamental_coverage_ratio < MIN_FUNDAMENTAL_COVERAGE_RATIO,
+            value=f"{fundamental_coverage_ratio:.1%}",
+            requirement=f">= {MIN_FUNDAMENTAL_COVERAGE_RATIO:.0%}",
+        ),
+        _gate_criterion(
+            key="sample_count",
+            label="执行挑战者交易数",
+            ready=metrics.trade_count >= 30 and trade_count_ratio >= 0.5,
+            insufficient=metrics.trade_count < 30,
+            value=f"{metrics.trade_count} / 基线 {trade_count_ratio:.0%}",
+            requirement=">= 30 且不少于基线 50%",
+        ),
+        _gate_criterion(
+            key="out_of_sample_return",
+            label="样本外净收益",
+            ready=bool(
+                challenger_oos_return is not None
+                and challenger_oos_return > 0
+                and oos_delta is not None
+                and oos_delta > 0
+            ),
+            insufficient=(
+                challenger_oos is None
+                or challenger_oos.sample_count < 30
+                or challenger_oos_return is None
+                or baseline_oos_return is None
+            ),
+            value=(
+                f"{challenger_oos_return:+.2f}% / 较基线 {oos_delta:+.2f}%"
+                if challenger_oos_return is not None and oos_delta is not None
+                else "-"
+            ),
+            requirement="> 0% 且优于原执行",
+        ),
+        _gate_criterion(
+            key="full_period_return",
+            label="全期净收益",
+            ready=metrics.total_return_pct > 0 and return_delta > 0,
+            insufficient=False,
+            value=f"{metrics.total_return_pct:+.2f}% / 较基线 {return_delta:+.2f}%",
+            requirement="> 0% 且优于原执行",
+        ),
+        _gate_criterion(
+            key="benchmark_excess",
+            label="历史可交易池超额",
+            ready=bool(
+                eligible_benchmark
+                and eligible_benchmark.status == "ready"
+                and (eligible_benchmark.execution_challenger_excess_return_pct or 0) > 0
+            ),
+            insufficient=not eligible_benchmark or eligible_benchmark.status != "ready",
+            value=(
+                f"{eligible_benchmark.execution_challenger_excess_return_pct:+.2f}%"
+                if eligible_benchmark
+                and eligible_benchmark.execution_challenger_excess_return_pct is not None
+                else "-"
+            ),
+            requirement="> 0%",
+        ),
+        _gate_criterion(
+            key="cost_stress",
+            label="压力成本后收益",
+            ready=bool(
+                stress
+                and stress.execution_challenger_return_pct is not None
+                and stress.execution_challenger_return_pct > 0
+            ),
+            insufficient=not stress or stress.execution_challenger_return_pct is None,
+            value=(
+                f"{stress.execution_challenger_return_pct:+.2f}%"
+                if stress and stress.execution_challenger_return_pct is not None
+                else "-"
+            ),
+            requirement="> 0%",
+        ),
+        _gate_criterion(
+            key="stop_rate",
+            label="止损退出比例",
+            ready=stop_rate_ready,
+            insufficient=False,
+            value=(
+                f"{challenger_stop_rate:.1f}% / 较基线 "
+                f"{challenger_stop_rate - baseline_stop_rate:+.1f}%"
+            ),
+            requirement="<= 25% 或较原执行下降 20%",
+        ),
+        _gate_criterion(
+            key="payoff_quality",
+            label="盈亏质量",
+            ready=bool(
+                portfolio.summary.profit_factor is not None and portfolio.summary.profit_factor > 1
+            ),
+            insufficient=portfolio.summary.profit_factor is None,
+            value=(
+                f"PF {portfolio.summary.profit_factor:.2f} / 目标命中 {challenger_target_rate:.1f}%"
+                if portfolio.summary.profit_factor is not None
+                else "-"
+            ),
+            requirement="PF > 1",
+        ),
+        _gate_criterion(
+            key="max_drawdown",
+            label="最大回撤",
+            ready=metrics.max_drawdown_pct >= -15 and drawdown_delta >= -2,
+            insufficient=False,
+            value=f"{metrics.max_drawdown_pct:+.2f}% / 较基线 {drawdown_delta:+.2f}%",
+            requirement=">= -15% 且不比基线恶化 2 个百分点以上",
+        ),
+    ]
+    status, headline = _execution_challenger_gate_outcome(criteria)
+    return WalkForwardExecutionChallengerEvaluation(
+        model_version=ADAPTIVE_EXECUTION_PROFILE,
+        status=status,
+        headline=headline,
+        leakage_guard=(
+            "信号日收盘确认只决定次一交易日委托；ATR、结构止损和风险距离"
+            "只使用 signal_date 当日及以前的行情"
+        ),
+        baseline_return_delta_pct=return_delta,
+        baseline_max_drawdown_delta_pct=drawdown_delta,
+        baseline_trade_count=baseline_trade_count,
+        trade_count_ratio=trade_count_ratio,
+        baseline_stop_rate_pct=baseline_stop_rate,
+        challenger_stop_rate_pct=challenger_stop_rate,
+        stop_rate_delta_pct=round(challenger_stop_rate - baseline_stop_rate, 4),
+        baseline_target_rate_pct=baseline_target_rate,
+        challenger_target_rate_pct=challenger_target_rate,
+        target_rate_delta_pct=round(challenger_target_rate - baseline_target_rate, 4),
+        portfolio=portfolio,
+        metrics=metrics,
+        temporal_validation=temporal_validation,
+        criteria=criteria,
+    )
+
+
+def _execution_challenger_gate_outcome(
+    criteria: list[WalkForwardGateCriterion],
+) -> tuple[str, str]:
+    if any(item.status == "fail" for item in criteria):
+        return (
+            "rejected",
+            "自适应执行未同时改善收益、止损率、成本和回撤，保持影子实验。",
+        )
+    if any(item.status == "insufficient" for item in criteria):
+        return (
+            "insufficient",
+            "自适应执行仍缺少足够样本，不接入正式推荐或模拟盘。",
+        )
+    return (
+        "accepted",
+        "自适应执行通过全部门槛，可进入 20 个交易日前向影子模拟。",
+    )
+
+
+def _exit_reason_rate(
+    portfolio: PortfolioBacktestResult,
+    reason: str,
+) -> float:
+    count = len(portfolio.trades)
+    if not count:
+        return 0.0
+    return round(
+        sum(item.exit_reason == reason for item in portfolio.trades) / count * 100,
+        4,
     )
 
 
@@ -3125,6 +3433,7 @@ def _selection_digest(
     strategy_validation: WalkForwardValidationCenter,
     dynamic_rerank: WalkForwardRerankEvaluation,
     baseline_challenger: WalkForwardBaselineChallengerEvaluation,
+    execution_challenger: WalkForwardExecutionChallengerEvaluation,
 ) -> str:
     payload = {
         "dataset_revision": revision,
@@ -3142,6 +3451,7 @@ def _selection_digest(
         "strategy_validation": strategy_validation.model_dump(mode="json"),
         "dynamic_rerank": dynamic_rerank.model_dump(mode="json"),
         "baseline_challenger": baseline_challenger.model_dump(mode="json"),
+        "execution_challenger": execution_challenger.model_dump(mode="json"),
     }
     encoded = json.dumps(
         payload,
@@ -3179,6 +3489,7 @@ def _cost_sensitivity(
     top_10_portfolio: PortfolioBacktestResult,
     dynamic_top_5_portfolio: PortfolioBacktestResult,
     baseline_challenger_portfolio: PortfolioBacktestResult,
+    execution_challenger_portfolio: PortfolioBacktestResult,
     market_provider: ReplayMarketDataProvider,
     execution_resolver: VersionedAshareExecutionResolver,
     start: date,
@@ -3196,6 +3507,7 @@ def _cost_sensitivity(
             top_10 = top_10_portfolio
             dynamic_top_5 = dynamic_top_5_portfolio
             baseline_challenger = baseline_challenger_portfolio
+            execution_challenger = execution_challenger_portfolio
         else:
             top_5 = run_signal_portfolio_backtest(
                 signals=top_5_signals,
@@ -3241,6 +3553,18 @@ def _cost_sensitivity(
                 fee_multiplier=fee_multiplier,
                 execution_rule_resolver=execution_resolver,
             )
+            execution_challenger = run_signal_portfolio_backtest(
+                signals=top_5_signals,
+                instrument_ids=sorted({item.instrument_id for item in top_5_signals}),
+                provider=market_provider,
+                start=start,
+                end=end,
+                max_positions=5,
+                slippage_bps=slippage_bps,
+                fee_multiplier=fee_multiplier,
+                execution_rule_resolver=execution_resolver,
+                execution_profile=ADAPTIVE_CONFIRMATION_EXECUTION_PROFILE,
+            )
         results.append(
             WalkForwardCostScenario(
                 key=key,
@@ -3263,6 +3587,14 @@ def _cost_sensitivity(
                 baseline_challenger_max_drawdown_pct=(baseline_challenger.summary.max_drawdown_pct),
                 baseline_challenger_total_costs=sum(
                     (item.costs for item in baseline_challenger.trades),
+                    Decimal("0"),
+                ),
+                execution_challenger_return_pct=(execution_challenger.summary.total_return_pct),
+                execution_challenger_max_drawdown_pct=(
+                    execution_challenger.summary.max_drawdown_pct
+                ),
+                execution_challenger_total_costs=sum(
+                    (item.costs for item in execution_challenger.trades),
                     Decimal("0"),
                 ),
             )
@@ -3333,6 +3665,7 @@ def _benchmark_comparisons(
     top_10_return: float,
     dynamic_top_5_return: float,
     baseline_challenger_return: float,
+    execution_challenger_return: float,
     eligible_universes: list[tuple[date, list[str]]],
 ) -> list[WalkForwardBenchmarkComparison]:
     bars = provider.get_daily_bars(list(REQUIRED_BENCHMARK_IDS), start, end)
@@ -3353,6 +3686,7 @@ def _benchmark_comparisons(
                     top_10_excess_return_pct=None,
                     dynamic_top_5_excess_return_pct=None,
                     baseline_challenger_excess_return_pct=None,
+                    execution_challenger_excess_return_pct=None,
                 )
             )
             continue
@@ -3381,6 +3715,11 @@ def _benchmark_comparisons(
                 ),
                 baseline_challenger_excess_return_pct=(
                     round(baseline_challenger_return - benchmark_return, 4)
+                    if benchmark_return is not None
+                    else None
+                ),
+                execution_challenger_excess_return_pct=(
+                    round(execution_challenger_return - benchmark_return, 4)
                     if benchmark_return is not None
                     else None
                 ),
@@ -3413,6 +3752,11 @@ def _benchmark_comparisons(
             ),
             baseline_challenger_excess_return_pct=(
                 round(baseline_challenger_return - equal_weight_return, 4)
+                if equal_weight_return is not None
+                else None
+            ),
+            execution_challenger_excess_return_pct=(
+                round(execution_challenger_return - equal_weight_return, 4)
                 if equal_weight_return is not None
                 else None
             ),

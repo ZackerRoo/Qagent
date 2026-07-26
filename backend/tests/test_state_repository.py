@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 from sqlalchemy import text
+from sqlalchemy.pool import NullPool
 
 from qagent.db import Base, create_db_engine, create_session_factory, initialize_database
 from qagent.storage.repository import (
@@ -116,6 +117,7 @@ def test_create_db_engine_configures_sqlite_for_local_concurrency(tmp_path):
 
     assert str(journal_mode).lower() == "wal"
     assert busy_timeout >= 30000
+    assert isinstance(engine.pool, NullPool)
 
 
 def test_repository_adds_and_lists_alert_rules(tmp_path):

@@ -29,8 +29,36 @@ from qagent.execution import (
 )
 from qagent.domain.enums import Market
 from qagent.market.calendars import trading_sessions_in_range
+from qagent.market.indicators import wilder_atr
 from qagent.providers.base import MarketDataProvider
 from qagent.strategy_data.providers import StrategyDataProvider
+
+
+LEGACY_EXECUTION_PROFILE = "intraday-touch-fixed-plan-v1"
+ADAPTIVE_EXECUTION_PROFILE = "close-confirm-next-open-atr-risk-v1"
+
+
+@dataclass(frozen=True)
+class PortfolioExecutionProfile:
+    key: str = LEGACY_EXECUTION_PROFILE
+    close_confirmation: bool = False
+    atr_stop_multiple: Decimal | None = None
+    minimum_stop_pct: Decimal | None = None
+    maximum_stop_pct: Decimal | None = None
+    target_r_multiple: Decimal | None = None
+    breakeven_r_multiple: Decimal | None = None
+
+
+DEFAULT_EXECUTION_PROFILE = PortfolioExecutionProfile()
+ADAPTIVE_CONFIRMATION_EXECUTION_PROFILE = PortfolioExecutionProfile(
+    key=ADAPTIVE_EXECUTION_PROFILE,
+    close_confirmation=True,
+    atr_stop_multiple=Decimal("2"),
+    minimum_stop_pct=Decimal("6"),
+    maximum_stop_pct=Decimal("10"),
+    target_r_multiple=Decimal("2"),
+    breakeven_r_multiple=Decimal("1"),
+)
 
 
 class PortfolioBacktestTrade(BaseModel):
@@ -128,6 +156,7 @@ def run_portfolio_backtest(
     max_holding_days: int = 20,
     strategy_data_provider: StrategyDataProvider | None = None,
     execution_rule_resolver: VersionedAshareExecutionResolver | None = None,
+    execution_profile: PortfolioExecutionProfile = DEFAULT_EXECUTION_PROFILE,
 ) -> PortfolioBacktestResult:
     if start > end:
         raise ValueError("start must be on or before end")
@@ -162,10 +191,9 @@ def run_portfolio_backtest(
         max_entry_wait_days=max_entry_wait_days,
         max_holding_days=max_holding_days,
         execution_rule_resolver=execution_rule_resolver,
+        execution_profile=execution_profile,
     )
-    result.data_health["source_backtest_scans"] = str(
-        signal_result.summary.scan_count
-    )
+    result.data_health["source_backtest_scans"] = str(signal_result.summary.scan_count)
     return result
 
 
@@ -185,6 +213,7 @@ def run_signal_portfolio_backtest(
     max_entry_wait_days: int = 5,
     max_holding_days: int = 20,
     execution_rule_resolver: VersionedAshareExecutionResolver | None = None,
+    execution_profile: PortfolioExecutionProfile = DEFAULT_EXECUTION_PROFILE,
 ) -> PortfolioBacktestResult:
     if start > end:
         raise ValueError("start must be on or before end")
@@ -209,6 +238,7 @@ def run_signal_portfolio_backtest(
         max_entry_wait_days=max_entry_wait_days,
         max_holding_days=max_holding_days,
         execution_rule_resolver=execution_rule_resolver,
+        execution_profile=execution_profile,
     )
     trades, equity_curve = _simulate_portfolio(
         candidates,
@@ -238,6 +268,12 @@ def run_signal_portfolio_backtest(
         "trades": str(len(trades)),
         "lookahead_guard": "signals_generated_before_exits",
         "portfolio_model": "fixed_risk_stop_target_time_exit",
+        "execution_profile": execution_profile.key,
+        "entry_confirmation": (
+            "close_then_next_open"
+            if execution_profile.close_confirmation
+            else "intraday_trigger_touch"
+        ),
         "execution_rules": (
             "unified_execution_kernel:gap,suspension,zero_volume,"
             "one_price_limit,tick,round_lot,fees,no_chase,target_guard"
@@ -251,6 +287,11 @@ def run_signal_portfolio_backtest(
         "risk_per_trade_pct": str(risk_per_trade_pct),
         "fee_multiplier": str(fee_multiplier),
         "slippage_bps": str(slippage_bps),
+        "atr_stop_multiple": str(execution_profile.atr_stop_multiple or ""),
+        "minimum_stop_pct": str(execution_profile.minimum_stop_pct or ""),
+        "maximum_stop_pct": str(execution_profile.maximum_stop_pct or ""),
+        "target_r_multiple": str(execution_profile.target_r_multiple or ""),
+        "breakeven_r_multiple": str(execution_profile.breakeven_r_multiple or ""),
     }
     provider_errors = getattr(provider, "last_errors", [])
     if provider_errors:
@@ -280,6 +321,7 @@ def _build_candidates(
     max_entry_wait_days: int,
     max_holding_days: int,
     execution_rule_resolver: VersionedAshareExecutionResolver | None = None,
+    execution_profile: PortfolioExecutionProfile = DEFAULT_EXECUTION_PROFILE,
 ) -> list[_TradeCandidate]:
     candidates: list[_TradeCandidate] = []
     bars_by_instrument = {
@@ -299,6 +341,7 @@ def _build_candidates(
             max_entry_wait_days=max_entry_wait_days,
             max_holding_days=max_holding_days,
             execution_rule_resolver=execution_rule_resolver,
+            execution_profile=execution_profile,
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -312,6 +355,7 @@ def _candidate_from_signal(
     max_entry_wait_days: int,
     max_holding_days: int,
     execution_rule_resolver: VersionedAshareExecutionResolver | None = None,
+    execution_profile: PortfolioExecutionProfile = DEFAULT_EXECUTION_PROFILE,
 ) -> _TradeCandidate | None:
     if bars.empty or signal.trigger_price is None:
         return None
@@ -323,11 +367,7 @@ def _candidate_from_signal(
         else trigger * Decimal("0.95")
     )
     target = Decimal(signal.target_1) if signal.target_1 is not None else None
-    no_chase = (
-        Decimal(signal.no_chase_above)
-        if signal.no_chase_above is not None
-        else None
-    )
+    no_chase = Decimal(signal.no_chase_above) if signal.no_chase_above is not None else None
     if (
         trigger <= 0
         or stop <= 0
@@ -347,6 +387,7 @@ def _candidate_from_signal(
     entry_price: Decimal | None = None
     entry_capacity = 0
     entry_triggered = False
+    close_confirmed = False
     for index, row in future.head(max_entry_wait_days).iterrows():
         previous = ordered.iloc[index - 1] if index > 0 else None
         row_rule = _resolve_execution_rule(
@@ -367,23 +408,38 @@ def _candidate_from_signal(
             rounding=ROUND_CEILING,
         )
         probe_quantity = _execution_probe_quantity(row_rule, rules)
+        if execution_profile.close_confirmation and not close_confirmed:
+            close = Decimal(str(row["close"]))
+            if (
+                _row_has_trades(row)
+                and close >= trigger_order_price
+                and (no_chase is None or close <= no_chase)
+                and (target is None or close < target)
+            ):
+                close_confirmed = True
+            continue
         fill = execute_daily_bar_order(
             instrument_id=signal.instrument_id,
             row=row,
             previous=previous,
             side=OrderSide.BUY,
             quantity=probe_quantity,
-            order_type=(OrderType.MARKET if entry_triggered else OrderType.STOP),
+            order_type=(
+                OrderType.MARKET
+                if execution_profile.close_confirmation or entry_triggered
+                else OrderType.STOP
+            ),
             rules=rules,
-            stop_price=None if entry_triggered else trigger_order_price,
+            stop_price=(
+                None
+                if execution_profile.close_confirmation or entry_triggered
+                else trigger_order_price
+            ),
             intent_id=f"{signal.snapshot_id}:entry:{row['trade_date']}",
         )
-        touched = (
-            _row_has_trades(row)
-            and (
-                Decimal(str(row["open"])) >= trigger_order_price
-                or Decimal(str(row["high"])) >= trigger_order_price
-            )
+        touched = _row_has_trades(row) and (
+            Decimal(str(row["open"])) >= trigger_order_price
+            or Decimal(str(row["high"])) >= trigger_order_price
         )
         if fill is not None and fill.quantity == probe_quantity:
             if (no_chase is not None and fill.price > no_chase) or (
@@ -401,6 +457,15 @@ def _candidate_from_signal(
         return None
 
     entry_date = ordered.iloc[entry_index]["trade_date"]
+    stop, target = _execution_plan_prices(
+        signal=signal,
+        bars=ordered,
+        entry_price=entry_price,
+        trigger=trigger,
+        original_stop=stop,
+        original_target=target,
+        execution_profile=execution_profile,
+    )
     settlement_days = (
         entry_rule.settlement_days
         if entry_rule is not None
@@ -417,6 +482,8 @@ def _candidate_from_signal(
     exit_order_price: Decimal | None = None
     exit_capacity = 0
     exit_rows = ordered.iloc[entry_index:]
+    active_stop = stop
+    initial_risk = entry_price - stop
     for session_offset, (row_index, row) in enumerate(exit_rows.iterrows()):
         trade_date = row["trade_date"]
         if session_offset < settlement_days:
@@ -446,11 +513,11 @@ def _candidate_from_signal(
         if exit_order_type is None:
             low = Decimal(str(row["low"]))
             high = Decimal(str(row["high"]))
-            if _row_has_trades(row) and low <= stop:
+            if _row_has_trades(row) and low <= active_stop:
                 exit_reason = "stopped"
                 exit_order_type = OrderType.STOP
                 exit_order_price = round_to_tick(
-                    stop,
+                    active_stop,
                     rules.tick_size,
                     rounding=ROUND_FLOOR,
                 )
@@ -466,6 +533,13 @@ def _candidate_from_signal(
                 exit_reason = "time_exit"
                 exit_order_type = OrderType.MARKET
             else:
+                active_stop = _next_session_stop(
+                    current_stop=active_stop,
+                    entry_price=entry_price,
+                    initial_risk=initial_risk,
+                    row=row,
+                    execution_profile=execution_profile,
+                )
                 continue
 
         probe_quantity = _execution_probe_quantity(exit_rule, rules)
@@ -477,12 +551,8 @@ def _candidate_from_signal(
             quantity=probe_quantity,
             order_type=exit_order_type,
             rules=rules,
-            limit_price=(
-                exit_order_price if exit_order_type == OrderType.LIMIT else None
-            ),
-            stop_price=(
-                exit_order_price if exit_order_type == OrderType.STOP else None
-            ),
+            limit_price=(exit_order_price if exit_order_type == OrderType.LIMIT else None),
+            stop_price=(exit_order_price if exit_order_type == OrderType.STOP else None),
             intent_id=f"{signal.snapshot_id}:exit:{trade_date}",
         )
         if fill is not None and fill.quantity == probe_quantity:
@@ -512,6 +582,77 @@ def _candidate_from_signal(
         exit_execution_rule=selected_exit_rule,
         max_executable_shares=Decimal(min(entry_capacity, exit_capacity)),
     )
+
+
+def _execution_plan_prices(
+    *,
+    signal: BacktestSignal,
+    bars: pd.DataFrame,
+    entry_price: Decimal,
+    trigger: Decimal,
+    original_stop: Decimal,
+    original_target: Decimal | None,
+    execution_profile: PortfolioExecutionProfile,
+) -> tuple[Decimal, Decimal | None]:
+    if execution_profile.atr_stop_multiple is None:
+        return original_stop, original_target
+
+    atr = _point_in_time_atr(bars, signal.signal_date, trigger)
+    minimum_risk = (
+        entry_price * (execution_profile.minimum_stop_pct or Decimal("0")) / Decimal("100")
+    )
+    maximum_risk = (
+        entry_price * (execution_profile.maximum_stop_pct or Decimal("100")) / Decimal("100")
+    )
+    structure_risk = max(entry_price - original_stop, Decimal("0"))
+    desired_risk = max(
+        atr * execution_profile.atr_stop_multiple,
+        minimum_risk,
+        structure_risk,
+    )
+    risk = min(desired_risk, maximum_risk)
+    if risk <= 0 or risk >= entry_price:
+        return original_stop, original_target
+
+    stop = (entry_price - risk).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    target = original_target
+    if execution_profile.target_r_multiple is not None:
+        target = (entry_price + risk * execution_profile.target_r_multiple).quantize(
+            Decimal("0.0001"), rounding=ROUND_HALF_UP
+        )
+    return stop, target
+
+
+def _point_in_time_atr(
+    bars: pd.DataFrame,
+    signal_date: date,
+    fallback_price: Decimal,
+) -> Decimal:
+    history = bars.loc[bars["trade_date"] <= signal_date].sort_values("trade_date")
+    if history.empty:
+        return fallback_price * Decimal("0.04")
+    series = wilder_atr(history, period=14)
+    value = series.iloc[-1] if not series.empty else None
+    if value is None or pd.isna(value) or float(value) <= 0:
+        return fallback_price * Decimal("0.04")
+    return Decimal(str(float(value)))
+
+
+def _next_session_stop(
+    *,
+    current_stop: Decimal,
+    entry_price: Decimal,
+    initial_risk: Decimal,
+    row: pd.Series,
+    execution_profile: PortfolioExecutionProfile,
+) -> Decimal:
+    multiple = execution_profile.breakeven_r_multiple
+    if multiple is None or initial_risk <= 0:
+        return current_stop
+    close = Decimal(str(row["close"]))
+    if close >= entry_price + initial_risk * multiple:
+        return max(current_stop, entry_price)
+    return current_stop
 
 
 def _simulate_portfolio(
@@ -549,9 +690,7 @@ def _simulate_portfolio(
     trading_dates.update(candidate.exit_date for candidate in candidates)
     rows_by_date: dict[date, pd.DataFrame] = {}
     if bars is not None and not bars.empty:
-        relevant = bars.loc[
-            (bars["trade_date"] >= start) & (bars["trade_date"] <= final_date)
-        ]
+        relevant = bars.loc[(bars["trade_date"] >= start) & (bars["trade_date"] <= final_date)]
         for trade_date, frame in relevant.groupby("trade_date", sort=True):
             rows_by_date[trade_date] = frame
             trading_dates.add(trade_date)
@@ -559,20 +698,12 @@ def _simulate_portfolio(
     if bars is not None and not bars.empty:
         symbols.update(str(value) for value in bars["instrument_id"].unique())
     if any(_is_cn(symbol) for symbol in symbols):
-        trading_dates.update(
-            trading_sessions_in_range(start, final_date, market=Market.CN)
-        )
+        trading_dates.update(trading_sessions_in_range(start, final_date, market=Market.CN))
     if any(not _is_cn(symbol) for symbol in symbols):
-        trading_dates.update(
-            trading_sessions_in_range(start, final_date, market=Market.US)
-        )
+        trading_dates.update(trading_sessions_in_range(start, final_date, market=Market.US))
 
     for current_date in sorted(trading_dates):
-        due = [
-            position
-            for position in open_positions
-            if position.trade.exit_date <= current_date
-        ]
+        due = [position for position in open_positions if position.trade.exit_date <= current_date]
         for position in sorted(
             due,
             key=lambda item: (item.trade.exit_date, item.trade.instrument_id),
@@ -583,9 +714,7 @@ def _simulate_portfolio(
             open_positions.remove(position)
             closed_trades.append(trade)
 
-        sizing_equity = _money(
-            cash + _open_market_value(open_positions, latest_prices)
-        )
+        sizing_equity = _money(cash + _open_market_value(open_positions, latest_prices))
         for candidate in candidates_by_date.get(current_date, []):
             if len(open_positions) >= max_positions:
                 continue
@@ -617,15 +746,11 @@ def _simulate_portfolio(
                 exit_costs=exit_costs,
             )
             if trade.exit_date <= current_date:
-                cash = _money(
-                    cash + trade.exit_price * trade.shares - exit_costs
-                )
+                cash = _money(cash + trade.exit_price * trade.shares - exit_costs)
                 closed_trades.append(trade)
             else:
                 open_positions.append(position)
-            sizing_equity = _money(
-                cash + _open_market_value(open_positions, latest_prices)
-            )
+            sizing_equity = _money(cash + _open_market_value(open_positions, latest_prices))
 
         for _, row in rows_by_date.get(current_date, pd.DataFrame()).iterrows():
             latest_prices[str(row["instrument_id"])] = Decimal(str(row["close"]))
@@ -899,7 +1024,9 @@ def _build_summary(
     )
 
 
-def _build_monthly_returns(equity_curve: list[PortfolioEquityPoint]) -> list[PortfolioMonthlyReturn]:
+def _build_monthly_returns(
+    equity_curve: list[PortfolioEquityPoint],
+) -> list[PortfolioMonthlyReturn]:
     if not equity_curve:
         return []
     ordered = sorted(equity_curve, key=lambda point: point.date)
@@ -913,7 +1040,9 @@ def _build_monthly_returns(equity_curve: list[PortfolioEquityPoint]) -> list[Por
         points = grouped[month]
         starting_equity = previous_equity
         ending_equity = points[-1].equity
-        return_pct = _pct((ending_equity - starting_equity) / starting_equity) if starting_equity else 0.0
+        return_pct = (
+            _pct((ending_equity - starting_equity) / starting_equity) if starting_equity else 0.0
+        )
         monthly_returns.append(
             PortfolioMonthlyReturn(
                 month=month,
@@ -996,25 +1125,19 @@ def _execution_rules_for_row(
         return rules.model_copy(
             update={
                 "price_limit_rate": (
-                    effective_limit / Decimal("100")
-                    if effective_limit is not None
-                    else None
+                    effective_limit / Decimal("100") if effective_limit is not None else None
                 )
             }
         )
 
     is_cn = _is_cn(instrument_id)
     return AShareExecutionRules(
-        rules_version=(
-            "portfolio-cn-legacy-v1" if is_cn else "portfolio-generic-v1"
-        ),
+        rules_version=("portfolio-cn-legacy-v1" if is_cn else "portfolio-generic-v1"),
         fee_schedule_version="portfolio-cost-model-v1",
         tick_size=Decimal("0.01") if is_cn else Decimal("0.0001"),
         lot_size=100 if is_cn else 1,
         settlement_days=1 if is_cn else 0,
-        price_limit_rate=(
-            _limit_pct(instrument_id) / Decimal("100") if is_cn else None
-        ),
+        price_limit_rate=(_limit_pct(instrument_id) / Decimal("100") if is_cn else None),
         volume_participation_rate=Decimal("1"),
         commission_bps=Decimal("0"),
         minimum_commission=Decimal("0"),
@@ -1029,9 +1152,7 @@ def _execution_probe_quantity(
     rules: AShareExecutionRules,
 ) -> int:
     minimum = (
-        historical_rule.minimum_order_quantity
-        if historical_rule is not None
-        else rules.lot_size
+        historical_rule.minimum_order_quantity if historical_rule is not None else rules.lot_size
     )
     remainder = minimum % rules.lot_size
     return minimum if remainder == 0 else minimum + rules.lot_size - remainder
@@ -1047,9 +1168,7 @@ def _row_volume(row) -> int:
 def _row_has_trades(row) -> bool:
     if _row_volume(row) <= 0:
         return False
-    if _truthy(row.get("suspended", False)) or _truthy(
-        row.get("is_suspended", False)
-    ):
+    if _truthy(row.get("suspended", False)) or _truthy(row.get("is_suspended", False)):
         return False
     status = row.get("trading_status", "trading")
     if status is None or pd.isna(status):
@@ -1124,9 +1243,7 @@ def _row_is_st(row) -> bool:
     return value is True or str(value).strip().lower() in {"1", "true", "yes"}
 
 
-def _effective_limit_pct(
-    rule: HistoricalExecutionRule, trade_date: date
-) -> Decimal | None:
+def _effective_limit_pct(rule: HistoricalExecutionRule, trade_date: date) -> Decimal | None:
     if rule.listing_date is None or rule.ipo_no_limit_sessions <= 0:
         return rule.limit_pct
     if trade_date < rule.listing_date:

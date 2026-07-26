@@ -5,6 +5,7 @@ import pandas as pd
 
 from qagent.backtesting.engine import BacktestSignal
 from qagent.backtesting.portfolio import (
+    ADAPTIVE_CONFIRMATION_EXECUTION_PROFILE,
     _candidate_from_signal,
     _size_trade,
     run_portfolio_backtest,
@@ -65,9 +66,7 @@ def test_portfolio_fee_multiplier_reduces_returns_under_cost_stress():
 
     assert base.trades
     assert stress.trades
-    assert sum(item.costs for item in stress.trades) > sum(
-        item.costs for item in base.trades
-    )
+    assert sum(item.costs for item in stress.trades) > sum(item.costs for item in base.trades)
     assert stress.summary.total_return_pct < base.summary.total_return_pct
     assert stress.data_health["fee_multiplier"] == "2"
 
@@ -234,6 +233,161 @@ def test_portfolio_candidate_rejects_fill_at_or_above_target():
     assert candidate is None
 
 
+def test_adaptive_execution_waits_for_close_confirmation_and_uses_next_open():
+    signal = BacktestSignal(
+        snapshot_id="adaptive-confirmation",
+        instrument_id="US:TEST",
+        signal_date=date(2026, 1, 1),
+        primary_strategy_id="trend_momentum_stage2",
+        status="setup_ready",
+        rank_score=Decimal("0.9"),
+        trigger_price=Decimal("10.00"),
+        initial_stop=Decimal("9.90"),
+        target_1=Decimal("11.00"),
+        no_chase_above=Decimal("10.50"),
+        outcome_status="pending",
+    )
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "US:TEST",
+                "trade_date": date(2026, 1, 1),
+                "open": 9.8,
+                "high": 9.9,
+                "low": 9.7,
+                "close": 9.8,
+                "volume": 1_000_000,
+            },
+            {
+                "instrument_id": "US:TEST",
+                "trade_date": date(2026, 1, 2),
+                "open": 9.9,
+                "high": 10.2,
+                "low": 9.7,
+                "close": 9.85,
+                "volume": 1_000_000,
+            },
+            {
+                "instrument_id": "US:TEST",
+                "trade_date": date(2026, 1, 5),
+                "open": 9.9,
+                "high": 10.4,
+                "low": 9.8,
+                "close": 10.2,
+                "volume": 1_000_000,
+            },
+            {
+                "instrument_id": "US:TEST",
+                "trade_date": date(2026, 1, 6),
+                "open": 10.25,
+                "high": 10.6,
+                "low": 10.0,
+                "close": 10.4,
+                "volume": 1_000_000,
+            },
+            {
+                "instrument_id": "US:TEST",
+                "trade_date": date(2026, 1, 7),
+                "open": 10.5,
+                "high": 12.0,
+                "low": 10.4,
+                "close": 11.5,
+                "volume": 1_000_000,
+            },
+        ]
+    )
+
+    candidate = _candidate_from_signal(
+        signal,
+        bars,
+        slippage_bps=Decimal("0"),
+        max_entry_wait_days=4,
+        max_holding_days=4,
+        execution_profile=ADAPTIVE_CONFIRMATION_EXECUTION_PROFILE,
+    )
+
+    assert candidate is not None
+    assert candidate.entry_date == date(2026, 1, 6)
+    assert candidate.entry_price == Decimal("10.25")
+    assert candidate.stop_price == Decimal("9.4500")
+    assert candidate.exit_reason == "target_1_hit"
+    assert candidate.exit_date == date(2026, 1, 7)
+    assert candidate.exit_price == Decimal("11.8500")
+
+
+def test_adaptive_breakeven_stop_only_applies_from_next_session():
+    signal = BacktestSignal(
+        snapshot_id="adaptive-breakeven",
+        instrument_id="US:TEST",
+        signal_date=date(2026, 1, 1),
+        primary_strategy_id="trend_momentum_stage2",
+        status="setup_ready",
+        rank_score=Decimal("0.9"),
+        trigger_price=Decimal("10.00"),
+        initial_stop=Decimal("9.80"),
+        target_1=Decimal("12.00"),
+        no_chase_above=Decimal("10.50"),
+        outcome_status="pending",
+    )
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "US:TEST",
+                "trade_date": date(2026, 1, 1),
+                "open": 9.8,
+                "high": 9.9,
+                "low": 9.7,
+                "close": 9.8,
+                "volume": 1_000_000,
+            },
+            {
+                "instrument_id": "US:TEST",
+                "trade_date": date(2026, 1, 2),
+                "open": 9.9,
+                "high": 10.3,
+                "low": 9.8,
+                "close": 10.2,
+                "volume": 1_000_000,
+            },
+            {
+                "instrument_id": "US:TEST",
+                "trade_date": date(2026, 1, 5),
+                "open": 10.1,
+                "high": 11.1,
+                "low": 9.9,
+                "close": 11.0,
+                "volume": 1_000_000,
+            },
+            {
+                "instrument_id": "US:TEST",
+                "trade_date": date(2026, 1, 6),
+                "open": 10.0,
+                "high": 10.2,
+                "low": 9.8,
+                "close": 9.9,
+                "volume": 1_000_000,
+            },
+        ]
+    )
+
+    candidate = _candidate_from_signal(
+        signal,
+        bars,
+        slippage_bps=Decimal("0"),
+        max_entry_wait_days=3,
+        max_holding_days=4,
+        execution_profile=ADAPTIVE_CONFIRMATION_EXECUTION_PROFILE,
+    )
+
+    assert candidate is not None
+    assert candidate.entry_date == date(2026, 1, 5)
+    assert candidate.entry_price == Decimal("10.10")
+    assert candidate.stop_price == Decimal("9.3000")
+    assert candidate.exit_reason == "stopped"
+    assert candidate.exit_date == date(2026, 1, 6)
+    assert candidate.exit_price == Decimal("10.0")
+
+
 def test_cn_portfolio_sizing_uses_round_lots():
     signal = BacktestSignal(
         snapshot_id="test-cn",
@@ -382,10 +536,7 @@ def test_portfolio_marks_to_market_daily_and_captures_open_position_drawdown():
     points = {point.date: point for point in result.equity_curve}
     drawdown = points[date(2026, 1, 5)]
     assert [point.date for point in result.equity_curve] == list(bars["trade_date"])
-    assert all(
-        point.cash + point.market_value == point.equity
-        for point in result.equity_curve
-    )
+    assert all(point.cash + point.market_value == point.equity for point in result.equity_curve)
     assert drawdown.cash == Decimal("8000.00")
     assert drawdown.market_value == Decimal("1600.00")
     assert drawdown.equity == Decimal("9600.00")

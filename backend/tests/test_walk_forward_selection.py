@@ -20,6 +20,7 @@ from qagent.backtesting.replay_provider import (
 from qagent.backtesting.walk_forward import (
     ELIGIBLE_UNIVERSE_BENCHMARK_ID,
     WalkForwardEvidenceMetric,
+    WalkForwardGateCriterion,
     WalkForwardSnapshot,
     _DatasetLeaseHeartbeat,
     _combined_validation_gate,
@@ -27,6 +28,7 @@ from qagent.backtesting.walk_forward import (
     _equal_weight_eligible_return,
     _equal_weight_eligible_return_from_stream,
     _enforce_release_gate_on_positive_evidence,
+    _execution_challenger_gate_outcome,
     _paper_eligible_card_ids,
     _trade_temporal_validation,
     _walk_forward_candidates,
@@ -62,6 +64,59 @@ def test_walk_forward_execution_admission_uses_final_policy_audit():
 
     assert _paper_eligible_card_ids(audits) == {"eligible"}
     assert _paper_eligible_card_ids([]) is None
+
+
+def test_execution_challenger_gate_rejects_known_failure_before_forward_shadow():
+    status, headline = _execution_challenger_gate_outcome(
+        [
+            WalkForwardGateCriterion(
+                key="out_of_sample_return",
+                label="样本外净收益",
+                status="pass",
+                value="+1.20%",
+                requirement="> 0% 且优于原执行",
+            ),
+            WalkForwardGateCriterion(
+                key="cost_stress",
+                label="压力成本后收益",
+                status="fail",
+                value="-0.30%",
+                requirement="> 0%",
+            ),
+        ]
+    )
+
+    assert status == "rejected"
+    assert "保持影子实验" in headline
+
+
+def test_execution_challenger_gate_accepts_only_when_every_criterion_passes():
+    status, headline = _execution_challenger_gate_outcome(
+        [
+            WalkForwardGateCriterion(
+                key=key,
+                label=key,
+                status="pass",
+                value="ready",
+                requirement="pass",
+            )
+            for key in (
+                "market_coverage",
+                "fundamental_coverage",
+                "sample_count",
+                "out_of_sample_return",
+                "full_period_return",
+                "benchmark_excess",
+                "cost_stress",
+                "stop_rate",
+                "payoff_quality",
+                "max_drawdown",
+            )
+        ]
+    )
+
+    assert status == "accepted"
+    assert "20 个交易日" in headline
 
 
 def test_snapshot_computation_defers_cyclic_gc_until_checkpoint_end(monkeypatch):
@@ -484,10 +539,7 @@ def test_replay_market_prefetch_avoids_per_instrument_queries(tmp_path, monkeypa
 def test_walk_forward_prefilter_reserves_non_stock_candidates():
     eligible = [f"CN:{index:06d}" for index in range(8)]
     non_stocks = eligible[-2:]
-    rankings = [
-        SimpleNamespace(instrument_id=instrument_id)
-        for instrument_id in eligible
-    ]
+    rankings = [SimpleNamespace(instrument_id=instrument_id) for instrument_id in eligible]
 
     candidates = _walk_forward_candidates(
         eligible=eligible,
@@ -611,9 +663,7 @@ def test_parallel_walk_forward_matches_serial_results(tmp_path):
 
 def test_parallel_walk_forward_runs_inside_background_process(tmp_path):
     repository, _ = _replay_repository(tmp_path)
-    database_url = repository.session_factory.kw["bind"].url.render_as_string(
-        hide_password=False
-    )
+    database_url = repository.session_factory.kw["bind"].url.render_as_string(hide_password=False)
 
     with ProcessPoolExecutor(
         max_workers=1,

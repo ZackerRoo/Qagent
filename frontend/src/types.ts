@@ -3043,6 +3043,7 @@ export type WalkForwardBenchmarkComparison = {
   top_10_excess_return_pct: number | null;
   dynamic_top_5_excess_return_pct?: number | null;
   baseline_challenger_excess_return_pct?: number | null;
+  execution_challenger_excess_return_pct?: number | null;
 };
 
 export type WalkForwardCostScenario = {
@@ -3062,6 +3063,9 @@ export type WalkForwardCostScenario = {
   baseline_challenger_return_pct?: number | null;
   baseline_challenger_max_drawdown_pct?: number | null;
   baseline_challenger_total_costs?: string | null;
+  execution_challenger_return_pct?: number | null;
+  execution_challenger_max_drawdown_pct?: number | null;
+  execution_challenger_total_costs?: string | null;
 };
 
 export type WalkForwardPortfolioPayload = {
@@ -3071,6 +3075,7 @@ export type WalkForwardPortfolioPayload = {
     max_drawdown_pct: number;
     trade_count: number;
     win_rate: number | null;
+    profit_factor?: number | null;
   };
   equity_curve: Array<{
     date: string;
@@ -3190,6 +3195,27 @@ export type WalkForwardBaselineChallengerEvaluation = {
   worst_segments: WalkForwardLossAttribution[];
 };
 
+export type WalkForwardExecutionChallengerEvaluation = {
+  model_version: string;
+  status: string;
+  headline: string;
+  leakage_guard: string;
+  baseline_return_delta_pct: number;
+  baseline_max_drawdown_delta_pct: number;
+  baseline_trade_count: number;
+  trade_count_ratio: number;
+  baseline_stop_rate_pct: number;
+  challenger_stop_rate_pct: number;
+  stop_rate_delta_pct: number;
+  baseline_target_rate_pct: number;
+  challenger_target_rate_pct: number;
+  target_rate_delta_pct: number;
+  portfolio: WalkForwardPortfolioPayload;
+  metrics: WalkForwardPortfolioMetrics;
+  temporal_validation: WalkForwardTemporalValidation;
+  criteria: WalkForwardGateCriterion[];
+};
+
 export type WalkForwardPayload = {
   top_5_portfolio: WalkForwardPortfolioPayload;
   top_10_portfolio: WalkForwardPortfolioPayload;
@@ -3202,6 +3228,7 @@ export type WalkForwardPayload = {
   strategy_validation?: WalkForwardValidationCenter;
   dynamic_rerank?: WalkForwardRerankEvaluation;
   baseline_challenger?: WalkForwardBaselineChallengerEvaluation;
+  execution_challenger?: WalkForwardExecutionChallengerEvaluation;
   snapshots: WalkForwardSnapshotPayload[];
   experiment_manifest: WalkForwardExperimentManifest;
 };
