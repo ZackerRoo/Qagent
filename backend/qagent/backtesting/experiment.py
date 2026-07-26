@@ -15,7 +15,7 @@ from qagent.strategies.registry import default_strategy_registry
 
 EXPERIMENT_SCHEMA_VERSION = "walk-forward-experiment-v1"
 SELECTION_ALGORITHM_VERSION = (
-    "historical-shadow-recommendation-v4-strategy-cap2-benchmark-ma60"
+    "historical-shadow-recommendation-v5-ranking-v3-candidate-pool50"
 )
 
 

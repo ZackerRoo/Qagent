@@ -7,6 +7,7 @@ from decimal import (
     ROUND_FLOOR,
     ROUND_HALF_UP,
 )
+from enum import Enum
 
 import pandas as pd
 from pydantic import BaseModel
@@ -59,6 +60,49 @@ ADAPTIVE_CONFIRMATION_EXECUTION_PROFILE = PortfolioExecutionProfile(
     target_r_multiple=Decimal("2"),
     breakeven_r_multiple=Decimal("1"),
 )
+
+
+class CandidateOutcomeStatus(str, Enum):
+    RESOLVED = "resolved"
+    NOT_TRIGGERED_OR_UNFILLABLE = "not_triggered_or_unfillable"
+    INVALID_PLAN = "invalid_plan"
+    INSUFFICIENT_FUTURE_DATA = "insufficient_future_data"
+    OUTSIDE_REQUESTED_RANGE = "outside_requested_range"
+
+
+class CandidateSignalOutcome(BaseModel):
+    snapshot_id: str
+    instrument_id: str
+    strategy_id: str | None
+    signal_date: date
+    status: CandidateOutcomeStatus
+    status_detail: str
+    nominal_amount: Decimal
+    entry_date: date | None = None
+    exit_date: date | None = None
+    exit_reason: str | None = None
+    entry_price: Decimal | None = None
+    exit_price: Decimal | None = None
+    shares: Decimal | None = None
+    entry_value: Decimal | None = None
+    exit_value: Decimal | None = None
+    gross_pnl: Decimal | None = None
+    entry_costs: Decimal | None = None
+    exit_costs: Decimal | None = None
+    costs: Decimal | None = None
+    net_pnl: Decimal | None = None
+    return_pct: float | None = None
+    holding_days: int | None = None
+
+
+class CandidateOutcomeLedgerResult(BaseModel):
+    provider: str
+    start: date
+    end: date
+    nominal_amount: Decimal
+    outcomes: list[CandidateSignalOutcome]
+    status_counts: dict[str, int]
+    data_health: dict[str, str]
 
 
 class PortfolioBacktestTrade(BaseModel):
@@ -131,6 +175,13 @@ class _TradeCandidate:
     execution_rule: HistoricalExecutionRule | None = None
     exit_execution_rule: HistoricalExecutionRule | None = None
     max_executable_shares: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class _CandidateResolution:
+    status: CandidateOutcomeStatus
+    detail: str
+    candidate: _TradeCandidate | None = None
 
 
 @dataclass
@@ -305,6 +356,142 @@ def run_signal_portfolio_backtest(
     )
 
 
+def resolve_candidate_outcome_ledger(
+    *,
+    signals: list[BacktestSignal],
+    provider: MarketDataProvider,
+    start: date,
+    end: date,
+    nominal_amount: Decimal = Decimal("100000"),
+    transaction_cost_bps: Decimal = Decimal("5"),
+    slippage_bps: Decimal = Decimal("5"),
+    fee_multiplier: Decimal = Decimal("1"),
+    max_entry_wait_days: int = 5,
+    max_holding_days: int = 20,
+    execution_rule_resolver: VersionedAshareExecutionResolver | None = None,
+    execution_profile: PortfolioExecutionProfile = DEFAULT_EXECUTION_PROFILE,
+) -> CandidateOutcomeLedgerResult:
+    """Resolve every signal independently, without portfolio capital or position limits."""
+
+    if start > end:
+        raise ValueError("start must be on or before end")
+    if nominal_amount <= 0:
+        raise ValueError("nominal_amount must be positive")
+    if transaction_cost_bps < 0:
+        raise ValueError("transaction_cost_bps must be non-negative")
+    if slippage_bps < 0:
+        raise ValueError("slippage_bps must be non-negative")
+    if fee_multiplier <= 0:
+        raise ValueError("fee_multiplier must be positive")
+    if max_entry_wait_days <= 0:
+        raise ValueError("max_entry_wait_days must be positive")
+    if max_holding_days <= 0:
+        raise ValueError("max_holding_days must be positive")
+
+    ordered_signals = sorted(
+        signals,
+        key=lambda signal: (
+            signal.signal_date,
+            signal.instrument_id,
+            signal.snapshot_id,
+            Decimal(signal.rank_score),
+        ),
+    )
+    instrument_ids = sorted({signal.instrument_id for signal in ordered_signals})
+    if instrument_ids:
+        bars = provider.get_daily_bars(
+            instrument_ids,
+            start=start,
+            end=end + timedelta(days=(max_entry_wait_days + max_holding_days) * 3),
+        )
+        bars = _normalize_bars(bars)
+    else:
+        bars = pd.DataFrame()
+    bars_by_instrument = (
+        {
+            str(instrument_id): frame.reset_index(drop=True)
+            for instrument_id, frame in bars.groupby("instrument_id", sort=False)
+        }
+        if not bars.empty
+        else {}
+    )
+
+    outcomes: list[CandidateSignalOutcome] = []
+    for signal in ordered_signals:
+        if signal.signal_date < start or signal.signal_date > end:
+            outcomes.append(
+                _unresolved_candidate_outcome(
+                    signal,
+                    CandidateOutcomeStatus.OUTSIDE_REQUESTED_RANGE,
+                    "signal_date_outside_requested_range",
+                    nominal_amount,
+                )
+            )
+            continue
+        resolution = _candidate_resolution_from_signal(
+            signal,
+            bars_by_instrument.get(signal.instrument_id, pd.DataFrame()),
+            slippage_bps=slippage_bps,
+            max_entry_wait_days=max_entry_wait_days,
+            max_holding_days=max_holding_days,
+            execution_rule_resolver=execution_rule_resolver,
+            execution_profile=execution_profile,
+        )
+        if resolution.candidate is None:
+            outcomes.append(
+                _unresolved_candidate_outcome(
+                    signal,
+                    resolution.status,
+                    resolution.detail,
+                    nominal_amount,
+                )
+            )
+            continue
+        outcomes.append(
+            _resolved_candidate_outcome(
+                resolution.candidate,
+                nominal_amount=nominal_amount,
+                transaction_cost_bps=transaction_cost_bps,
+                fee_multiplier=fee_multiplier,
+            )
+        )
+
+    status_counts = {
+        status.value: sum(outcome.status == status for outcome in outcomes)
+        for status in CandidateOutcomeStatus
+    }
+    data_health = {
+        "provider": provider.name,
+        "source_signals": str(len(signals)),
+        "resolved_signals": str(status_counts[CandidateOutcomeStatus.RESOLVED.value]),
+        "independent_resolution": "no_capital_or_position_capacity",
+        "nominal_amount": str(nominal_amount),
+        "transaction_cost_bps": str(transaction_cost_bps),
+        "slippage_bps": str(slippage_bps),
+        "fee_multiplier": str(fee_multiplier),
+        "max_entry_wait_days": str(max_entry_wait_days),
+        "max_holding_days": str(max_holding_days),
+        "execution_profile": execution_profile.key,
+        "cn_execution_rules": (
+            "versioned_replay_evidence"
+            if execution_rule_resolver is not None
+            else "legacy_symbol_fallback"
+        ),
+    }
+    provider_errors = getattr(provider, "last_errors", [])
+    if provider_errors:
+        data_health["errors"] = " | ".join(provider_errors[:3])
+    return CandidateOutcomeLedgerResult(
+        provider=provider.name,
+        start=start,
+        end=end,
+        nominal_amount=nominal_amount,
+        outcomes=outcomes,
+        status_counts=status_counts,
+        data_health=data_health,
+    )
+
+
 def _normalize_bars(bars: pd.DataFrame) -> pd.DataFrame:
     if bars.empty:
         return bars
@@ -357,8 +544,36 @@ def _candidate_from_signal(
     execution_rule_resolver: VersionedAshareExecutionResolver | None = None,
     execution_profile: PortfolioExecutionProfile = DEFAULT_EXECUTION_PROFILE,
 ) -> _TradeCandidate | None:
-    if bars.empty or signal.trigger_price is None:
-        return None
+    return _candidate_resolution_from_signal(
+        signal,
+        bars,
+        slippage_bps=slippage_bps,
+        max_entry_wait_days=max_entry_wait_days,
+        max_holding_days=max_holding_days,
+        execution_rule_resolver=execution_rule_resolver,
+        execution_profile=execution_profile,
+    ).candidate
+
+
+def _candidate_resolution_from_signal(
+    signal: BacktestSignal,
+    bars: pd.DataFrame,
+    slippage_bps: Decimal,
+    max_entry_wait_days: int,
+    max_holding_days: int,
+    execution_rule_resolver: VersionedAshareExecutionResolver | None = None,
+    execution_profile: PortfolioExecutionProfile = DEFAULT_EXECUTION_PROFILE,
+) -> _CandidateResolution:
+    if signal.trigger_price is None:
+        return _CandidateResolution(
+            CandidateOutcomeStatus.INVALID_PLAN,
+            "missing_trigger_price",
+        )
+    if bars.empty:
+        return _CandidateResolution(
+            CandidateOutcomeStatus.INSUFFICIENT_FUTURE_DATA,
+            "no_daily_bars",
+        )
 
     trigger = Decimal(signal.trigger_price)
     stop = (
@@ -375,12 +590,18 @@ def _candidate_from_signal(
         or (target is not None and target <= trigger)
         or (no_chase is not None and no_chase < trigger)
     ):
-        return None
+        return _CandidateResolution(
+            CandidateOutcomeStatus.INVALID_PLAN,
+            "invalid_trigger_stop_target_or_no_chase",
+        )
 
     ordered = bars.sort_values("trade_date").reset_index(drop=True)
     future = ordered.loc[ordered["trade_date"] > signal.signal_date]
     if future.empty:
-        return None
+        return _CandidateResolution(
+            CandidateOutcomeStatus.INSUFFICIENT_FUTURE_DATA,
+            "no_sessions_after_signal",
+        )
 
     entry_index: int | None = None
     entry_rule: HistoricalExecutionRule | None = None
@@ -445,7 +666,10 @@ def _candidate_from_signal(
             if (no_chase is not None and fill.price > no_chase) or (
                 target is not None and fill.price >= target
             ):
-                return None
+                return _CandidateResolution(
+                    CandidateOutcomeStatus.NOT_TRIGGERED_OR_UNFILLABLE,
+                    "entry_fill_outside_plan",
+                )
             entry_index = index
             entry_rule = row_rule
             entry_price = fill.price
@@ -454,7 +678,16 @@ def _candidate_from_signal(
         if touched:
             entry_triggered = True
     if entry_index is None or entry_price is None:
-        return None
+        observed_entry_sessions = len(future.head(max_entry_wait_days))
+        if observed_entry_sessions < max_entry_wait_days:
+            return _CandidateResolution(
+                CandidateOutcomeStatus.INSUFFICIENT_FUTURE_DATA,
+                "entry_wait_window_incomplete",
+            )
+        return _CandidateResolution(
+            CandidateOutcomeStatus.NOT_TRIGGERED_OR_UNFILLABLE,
+            "entry_not_triggered_or_fill_blocked",
+        )
 
     entry_date = ordered.iloc[entry_index]["trade_date"]
     stop, target = _execution_plan_prices(
@@ -472,7 +705,10 @@ def _candidate_from_signal(
         else (1 if _is_cn(signal.instrument_id) else 0)
     )
     if max_holding_days <= settlement_days:
-        return None
+        return _CandidateResolution(
+            CandidateOutcomeStatus.INVALID_PLAN,
+            "holding_window_not_longer_than_settlement",
+        )
 
     exit_price: Decimal | None = None
     exit_date: date | None = None
@@ -567,20 +803,32 @@ def _candidate_from_signal(
             exit_order_price = None
 
     if exit_price is None or exit_date is None or exit_reason is None:
-        return None
+        if len(exit_rows) < max_holding_days:
+            return _CandidateResolution(
+                CandidateOutcomeStatus.INSUFFICIENT_FUTURE_DATA,
+                "exit_window_incomplete",
+            )
+        return _CandidateResolution(
+            CandidateOutcomeStatus.NOT_TRIGGERED_OR_UNFILLABLE,
+            "exit_order_unfillable",
+        )
 
-    return _TradeCandidate(
-        signal=signal,
-        entry_date=entry_date,
-        exit_date=exit_date,
-        exit_reason=exit_reason,
-        entry_price=entry_price,
-        exit_price=exit_price,
-        stop_price=stop,
-        holding_days=max((exit_date - entry_date).days, 0),
-        execution_rule=entry_rule,
-        exit_execution_rule=selected_exit_rule,
-        max_executable_shares=Decimal(min(entry_capacity, exit_capacity)),
+    return _CandidateResolution(
+        CandidateOutcomeStatus.RESOLVED,
+        "resolved",
+        _TradeCandidate(
+            signal=signal,
+            entry_date=entry_date,
+            exit_date=exit_date,
+            exit_reason=exit_reason,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            stop_price=stop,
+            holding_days=max((exit_date - entry_date).days, 0),
+            execution_rule=entry_rule,
+            exit_execution_rule=selected_exit_rule,
+            max_executable_shares=Decimal(min(entry_capacity, exit_capacity)),
+        ),
     )
 
 
@@ -911,6 +1159,84 @@ def _trade_cost_breakdown(
             exit_rules,
         ).total
     return _money(entry_base * fee_multiplier), _money(exit_base * fee_multiplier)
+
+
+def _unresolved_candidate_outcome(
+    signal: BacktestSignal,
+    status: CandidateOutcomeStatus,
+    detail: str,
+    nominal_amount: Decimal,
+) -> CandidateSignalOutcome:
+    return CandidateSignalOutcome(
+        snapshot_id=signal.snapshot_id,
+        instrument_id=signal.instrument_id,
+        strategy_id=signal.primary_strategy_id,
+        signal_date=signal.signal_date,
+        status=status,
+        status_detail=detail,
+        nominal_amount=nominal_amount,
+    )
+
+
+def _resolved_candidate_outcome(
+    candidate: _TradeCandidate,
+    *,
+    nominal_amount: Decimal,
+    transaction_cost_bps: Decimal,
+    fee_multiplier: Decimal,
+) -> CandidateSignalOutcome:
+    desired_shares = nominal_amount / candidate.entry_price
+    if candidate.max_executable_shares is not None:
+        desired_shares = min(desired_shares, candidate.max_executable_shares)
+    shares = _shares(
+        desired_shares,
+        candidate.signal.instrument_id,
+        execution_rule=candidate.execution_rule,
+    )
+    shares = _round_for_exit_rule(shares, candidate.exit_execution_rule)
+    if shares <= 0:
+        return _unresolved_candidate_outcome(
+            candidate.signal,
+            CandidateOutcomeStatus.NOT_TRIGGERED_OR_UNFILLABLE,
+            "nominal_amount_below_minimum_order",
+            nominal_amount,
+        )
+
+    entry_value = _money(candidate.entry_price * shares)
+    exit_value = _money(candidate.exit_price * shares)
+    gross_pnl = _money(exit_value - entry_value)
+    entry_costs, exit_costs = _trade_cost_breakdown(
+        candidate,
+        shares,
+        transaction_cost_bps,
+        fee_multiplier,
+    )
+    costs = _money(entry_costs + exit_costs)
+    net_pnl = _money(gross_pnl - costs)
+    return CandidateSignalOutcome(
+        snapshot_id=candidate.signal.snapshot_id,
+        instrument_id=candidate.signal.instrument_id,
+        strategy_id=candidate.signal.primary_strategy_id,
+        signal_date=candidate.signal.signal_date,
+        status=CandidateOutcomeStatus.RESOLVED,
+        status_detail="resolved",
+        nominal_amount=nominal_amount,
+        entry_date=candidate.entry_date,
+        exit_date=candidate.exit_date,
+        exit_reason=candidate.exit_reason,
+        entry_price=candidate.entry_price,
+        exit_price=candidate.exit_price,
+        shares=shares,
+        entry_value=entry_value,
+        exit_value=exit_value,
+        gross_pnl=gross_pnl,
+        entry_costs=entry_costs,
+        exit_costs=exit_costs,
+        costs=costs,
+        net_pnl=net_pnl,
+        return_pct=_pct(net_pnl / entry_value) if entry_value else 0.0,
+        holding_days=candidate.holding_days,
+    )
 
 
 def _fit_shares_to_cash(

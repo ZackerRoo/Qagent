@@ -65,19 +65,20 @@ import type {
   StrategyPerformanceResponse,
   WalkForwardRun,
   WalkForwardJob,
+  WalkForwardRankingV3Evaluation,
   WalkForwardTemporalValidation,
   WalkForwardValidationCenter,
 } from "../types";
 
-function formatNumber(value: number | null, suffix = "") {
-  if (value === null || Number.isNaN(value)) {
+function formatNumber(value: number | null | undefined, suffix = "") {
+  if (value === null || value === undefined || Number.isNaN(value)) {
     return "-";
   }
   return `${value.toFixed(2)}${suffix}`;
 }
 
-function formatRatio(value: number | null) {
-  if (value === null || Number.isNaN(value)) {
+function formatRatio(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
     return "-";
   }
   return `${(value * 100).toFixed(0)}%`;
@@ -1566,6 +1567,231 @@ export function History({
   );
 }
 
+const RANKING_V3_GATE_LABELS: Record<string, { zh: string; en: string }> = {
+  common_rebalance_calendar: { zh: "共同调仓日", en: "Common calendar" },
+  independent_rebalance_dates: { zh: "独立调仓期", en: "Independent dates" },
+  completed_trades: { zh: "完成交易", en: "Completed trades" },
+  positive_paired_mean: { zh: "配对净超额", en: "Paired net alpha" },
+  one_sided_95_lower_bound: { zh: "95% 收益下界", en: "95% lower bound" },
+  holm_adjusted_positive_edge: { zh: "多重检验", en: "Multiple testing" },
+  deflated_sharpe_probability: { zh: "折损夏普概率", en: "Deflated Sharpe" },
+  positive_contiguous_subperiods: { zh: "连续分段稳定性", en: "Subperiod stability" },
+  probability_of_backtest_overfit: { zh: "过拟合概率", en: "PBO" },
+};
+
+function RankingV3ShadowCard({
+  evaluation,
+  zh,
+}: {
+  evaluation: WalkForwardRankingV3Evaluation;
+  zh: boolean;
+}) {
+  const validation = evaluation.historical_validation;
+  const protocol = evaluation.protocol;
+  const criteria = evaluation.criteria ?? [];
+  const gates = validation?.gates ?? [];
+  const knownFailure = criteria.some((item) => item.status === "fail")
+    || gates.some((item) => item.status === "fail");
+  const statisticalStatus = validation?.statistical_gate_status;
+  const isFailure = knownFailure
+    || ["fail", "failed", "rejected"].includes(evaluation.status)
+    || statisticalStatus === "fail";
+  const isStatisticallyReady = !isFailure && statisticalStatus === "pass";
+  const tone = isFailure ? "fail" : isStatisticallyReady ? "pass" : "insufficient";
+  const statusLabel = isFailure
+    ? (zh ? "历史审计未通过" : "Historical audit failed")
+    : isStatisticallyReady
+      ? (zh ? "统计门禁通过 · 仍为影子" : "Statistical gates passed · shadow only")
+      : (zh ? "证据不足 · 继续影子" : "Insufficient evidence · shadow only");
+  const resolvedCoverage = evaluation.candidate_pool_signal_count > 0
+    ? evaluation.resolved_candidate_count / evaluation.candidate_pool_signal_count
+    : null;
+  const historicalAuditWindow = protocol?.windows?.find((window) => window.key === "historical_reused_oos");
+  const forwardWindow = protocol?.windows?.find((window) => window.key === "prospective_shadow");
+  const requiredDates = protocol?.thresholds?.minimum_rebalance_dates;
+  const requiredTrades = protocol?.thresholds?.minimum_completed_trades;
+  const passedGateCount = gates.filter((item) => item.status === "pass").length;
+
+  return (
+    <section className={`walk-forward-challenger ranking-v3-shadow ranking-v3-${tone}`}>
+      <div className="ranking-v3-shadow-banner">
+        <strong>{zh ? "影子验证" : "Shadow validation"}</strong>
+        <span>{zh ? "不影响正式推荐 / 模拟盘" : "Does not affect official recommendations or paper trading"}</span>
+      </div>
+      <div className="walk-forward-challenger-head ranking-v3-head">
+        <div>
+          <p className="eyebrow">{zh ? "推荐排序 V3" : "Recommendation ranking V3"}</p>
+          <h3>{statusLabel}</h3>
+          <p>{evaluation.headline || (zh ? "等待 V3 历史审计结果。" : "Waiting for V3 historical audit results.")}</p>
+        </div>
+        <span className={`ranking-v3-status ranking-v3-status-${tone}`}>{statusLabel}</span>
+      </div>
+
+      <div className="ranking-v3-comparison" aria-label={zh ? "V3 与同约束基线对比" : "V3 versus constraint-matched baseline"}>
+        <div className="ranking-v3-comparison-head">
+          <strong>{zh ? "同约束对比" : "Constraint-matched comparison"}</strong>
+          <span>{zh ? "同一调仓日、同一持仓约束" : "Same dates and portfolio constraints"}</span>
+        </div>
+        <div className="ranking-v3-comparison-row ranking-v3-comparison-labels">
+          <span />
+          <strong>{zh ? "同约束基线" : "Baseline"}</strong>
+          <strong>V3</strong>
+          <strong>{zh ? "压力成本" : "Stress cost"}</strong>
+        </div>
+        <div className="ranking-v3-comparison-row">
+          <span>{zh ? "收益" : "Return"}</span>
+          <b>{formatNumber(evaluation.constraint_matched_baseline_metrics?.total_return_pct, "%")}</b>
+          <b className={signedCellClass(evaluation.metrics?.total_return_pct ?? null)}>{formatNumber(evaluation.metrics?.total_return_pct, "%")}</b>
+          <b className={signedCellClass(evaluation.stress_metrics?.total_return_pct ?? null)}>{formatNumber(evaluation.stress_metrics?.total_return_pct, "%")}</b>
+        </div>
+        <div className="ranking-v3-comparison-row">
+          <span>{zh ? "最大回撤" : "Max drawdown"}</span>
+          <b>{formatNumber(evaluation.constraint_matched_baseline_metrics?.max_drawdown_pct, "%")}</b>
+          <b>{formatNumber(evaluation.metrics?.max_drawdown_pct, "%")}</b>
+          <b>{formatNumber(evaluation.stress_metrics?.max_drawdown_pct, "%")}</b>
+        </div>
+        <div className="ranking-v3-comparison-row">
+          <span>{zh ? "换手率" : "Turnover"}</span>
+          <b>{formatNumber(evaluation.constraint_matched_baseline_metrics?.turnover_pct, "%")}</b>
+          <b>{formatNumber(evaluation.metrics?.turnover_pct, "%")}</b>
+          <b>{formatNumber(evaluation.stress_metrics?.turnover_pct, "%")}</b>
+        </div>
+      </div>
+
+      <div className="ranking-v3-summary-grid">
+        <div>
+          <span>{zh ? "候选池覆盖" : "Candidate coverage"}</span>
+          <strong>{formatRatio(resolvedCoverage)}</strong>
+          <small>
+            {evaluation.resolved_candidate_count ?? 0}/{evaluation.candidate_pool_signal_count ?? 0} {zh ? "已完成" : "resolved"}
+            {" · "}
+            {zh ? "未触发" : "untriggered"} {evaluation.untriggered_candidate_count ?? 0}
+            {" · "}
+            {zh ? "无效" : "invalid"} {evaluation.invalid_candidate_count ?? 0}
+          </small>
+        </div>
+        <div>
+          <span>{zh ? "全市场等权超额" : "Equal-weight excess"}</span>
+          <strong className={signedCellClass(evaluation.benchmark_excess_return_pct ?? null)}>
+            {formatNumber(evaluation.benchmark_excess_return_pct, "%")}
+          </strong>
+          <small>
+            {zh ? "基准" : "benchmark"} {formatNumber(evaluation.benchmark_return_pct, "%")}
+            {" · "}
+            {zh ? "换手下降" : "turnover reduction"} {formatNumber(evaluation.turnover_reduction_pct, "%")}
+          </small>
+        </div>
+        <div>
+          <span>{zh ? "共同调仓日" : "Common rebalance dates"}</span>
+          <strong>{validation?.common_rebalance_date_count ?? 0}/{requiredDates ?? "-"}</strong>
+          <small>{validation?.dates_are_common ? (zh ? "日历一致" : "Calendars match") : (zh ? "日历未对齐" : "Calendars differ")}</small>
+        </div>
+        <div>
+          <span>{zh ? "完成交易" : "Completed trades"}</span>
+          <strong>{validation?.completed_trade_count ?? 0}/{requiredTrades ?? "-"}</strong>
+          <small>
+            {zh ? `改变 ${evaluation.changed_snapshot_count ?? 0} 个调仓期` : `${evaluation.changed_snapshot_count ?? 0} changed dates`}
+            {" · "}
+            {evaluation.maximum_training_observation_count ?? 0}/{evaluation.maximum_training_date_count ?? 0} {zh ? "训练证据/日期" : "training rows/dates"}
+          </small>
+        </div>
+        <div>
+          <span>{zh ? "配对净超额" : "Paired net alpha"}</span>
+          <strong className={signedCellClass(validation?.paired_mean_net_excess_pct ?? null)}>
+            {formatNumber(validation?.paired_mean_net_excess_pct, "%")}
+          </strong>
+          <small>{zh ? "V3 减同约束基线" : "V3 minus baseline"}</small>
+        </div>
+        <div>
+          <span>{zh ? "95% 单侧下界" : "One-sided 95% bound"}</span>
+          <strong className={signedCellClass(validation?.bootstrap_one_sided_95_lower_bound_pct ?? null)}>
+            {formatNumber(validation?.bootstrap_one_sided_95_lower_bound_pct, "%")}
+          </strong>
+          <small>{zh ? "需大于 0" : "Must exceed 0"}</small>
+        </div>
+        <div>
+          <span>Holm p</span>
+          <strong>{formatNumber(validation?.holm_adjusted_positive_edge_p_value)}</strong>
+          <small>{zh ? "已校正多重检验" : "Multiple-test adjusted"}</small>
+        </div>
+        <div>
+          <span>DSR</span>
+          <strong>{formatRatio(validation?.deflated_sharpe_probability)}</strong>
+          <small>
+            {zh ? "正向分段" : "Positive subperiods"} {validation?.positive_subperiod_count ?? 0}/{validation?.required_positive_subperiod_count ?? "-"}
+          </small>
+        </div>
+      </div>
+
+      <div className="ranking-v3-gate-strip">
+        <div>
+          <span>{zh ? "统计门禁" : "Statistical gates"}</span>
+          <strong>{passedGateCount}/{gates.length || "-"}</strong>
+        </div>
+        {gates.map((gate) => (
+          <span
+            className={`ranking-v3-gate ranking-v3-gate-${gate.status}`}
+            key={gate.key}
+            title={`${gate.observed || "-"} / ${gate.required || "-"}${gate.reason ? ` · ${gate.reason}` : ""}`}
+          >
+            {RANKING_V3_GATE_LABELS[gate.key]?.[zh ? "zh" : "en"] ?? gate.key}
+          </span>
+        ))}
+      </div>
+
+      <div className="ranking-v3-protocol">
+        <div>
+          <span>{zh ? "协议冻结" : "Protocol frozen"}</span>
+          <strong>{protocol?.frozen_on ?? "-"}</strong>
+          <small>
+            {protocol?.protocol_id ?? evaluation.model_version ?? "-"}
+            {protocol?.protocol_digest ? ` · ${protocol.protocol_digest.slice(0, 8)}` : ""}
+          </small>
+        </div>
+        <div>
+          <span>{zh ? "历史审计窗口" : "Historical audit window"}</span>
+          <strong>{historicalAuditWindow ? `${historicalAuditWindow.start_date} - ${historicalAuditWindow.end_date ?? "-"}` : "-"}</strong>
+          <small>{zh ? "重复使用 OOS，仅作影子准入参考" : "Reused OOS, shadow admission evidence only"}</small>
+        </div>
+        <div>
+          <span>{zh ? "前向影子起点" : "Prospective shadow start"}</span>
+          <strong>{protocol?.prospective_shadow_start ?? forwardWindow?.start_date ?? "-"}</strong>
+          <small>{zh ? "未来新数据才可提供确认性证据" : "Only new future data is confirmatory"}</small>
+        </div>
+      </div>
+
+      {validation?.pbo_status !== "pass" ? (
+        <div className="ranking-v3-pbo-note">
+          <strong>{zh ? "PBO 未验证" : "PBO unavailable"}</strong>
+          <span>{zh ? "当前结果不能视为正式通过。" : "This result cannot be treated as an official pass."}</span>
+        </div>
+      ) : null}
+
+      <details className="ranking-v3-details">
+        <summary>{zh ? "查看门禁细节与模型护栏" : "Gate details and model guardrails"}</summary>
+        <div className="ranking-v3-detail-grid">
+          {gates.map((gate) => (
+            <div key={`detail:${gate.key}`}>
+              <span>{RANKING_V3_GATE_LABELS[gate.key]?.[zh ? "zh" : "en"] ?? gate.key}</span>
+              <strong className={`ranking-v3-text-${gate.status}`}>{gate.observed || "-"}</strong>
+              <small>{zh ? "要求" : "Required"}: {gate.required || "-"}</small>
+            </div>
+          ))}
+          {criteria.map((criterion) => (
+            <div key={`criterion:${criterion.key}`}>
+              <span>{criterion.label}</span>
+              <strong className={`ranking-v3-text-${criterion.status}`}>{criterion.value || "-"}</strong>
+              <small>{zh ? "要求" : "Required"}: {criterion.requirement || "-"}</small>
+            </div>
+          ))}
+        </div>
+        <p>{evaluation.leakage_guard || (zh ? "仅使用决策日以前可获得的数据。" : "Only data available before each decision date is used.")}</p>
+        {validation?.pbo_reason ? <p>{validation.pbo_reason}</p> : null}
+      </details>
+    </section>
+  );
+}
+
 function WalkForwardValidationCenter({
   run,
   job,
@@ -1595,6 +1821,7 @@ function WalkForwardValidationCenter({
   const dynamicRerank = payload?.dynamic_rerank;
   const baselineChallenger = payload?.baseline_challenger;
   const executionChallenger = payload?.execution_challenger;
+  const rankingV3 = payload?.ranking_v3;
   const dynamicKnownFailure = dynamicRerank?.criteria.some((item) => item.status === "fail") ?? false;
   const dynamicDisplayStatus = dynamicKnownFailure ? "rejected" : dynamicRerank?.status;
   const baselineChallengerKnownFailure = baselineChallenger?.criteria.some((item) => item.status === "fail") ?? false;
@@ -1937,6 +2164,7 @@ function WalkForwardValidationCenter({
                 : "This is a legacy validation result. Run it again to generate release criteria and strategy/factor gates."}
             </div>
           )}
+          {rankingV3 ? <RankingV3ShadowCard evaluation={rankingV3} zh={zh} /> : null}
           {executionChallenger ? (
             <div className={`walk-forward-challenger challenger-${executionChallengerDisplayStatus}`}>
               <div className="walk-forward-challenger-head">

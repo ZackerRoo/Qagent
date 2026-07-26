@@ -26,7 +26,7 @@ def test_runtime_only_revision_change_keeps_walk_forward_resume_compatible(monke
     assert stored.experiment_digest != current.experiment_digest
     assert (
         stored.selection_algorithm_version
-        == "historical-shadow-recommendation-v4-strategy-cap2-benchmark-ma60"
+        == "historical-shadow-recommendation-v5-ranking-v3-candidate-pool50"
     )
     assert experiment.walk_forward_manifests_semantically_compatible(stored, current)
 
