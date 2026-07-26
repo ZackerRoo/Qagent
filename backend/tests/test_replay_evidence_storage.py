@@ -104,6 +104,36 @@ def _bar(*, revision: int = 1, close: str = "10.25") -> HistoricalReplayBar:
     )
 
 
+def _factor_bar(
+    instrument_id: str,
+    trade_date: date,
+    *,
+    provider_mode: str,
+    source_provider: str,
+    revision: int,
+    close: str,
+) -> HistoricalReplayBar:
+    price = Decimal(close)
+    return _bar(revision=revision, close=close).model_copy(
+        update={
+            "provider_mode": provider_mode,
+            "instrument_id": instrument_id,
+            "trade_date": trade_date,
+            "raw_open": price,
+            "raw_high": price,
+            "raw_low": price,
+            "raw_close": price,
+            "adjusted_open": price,
+            "adjusted_high": price,
+            "adjusted_low": price,
+            "adjusted_close": price,
+            "volume": price * Decimal("100"),
+            "source_provider": source_provider,
+            "dataset_revision": revision,
+        }
+    )
+
+
 def _action(
     *, revision: int = 1, cash_per_share: str = "0.25"
 ) -> HistoricalCorporateAction:
@@ -180,6 +210,239 @@ def test_bar_and_action_upserts_are_idempotent(storage):
     assert repo.replay_bar_rows(
         ["CN:000001"], date(2025, 1, 1), date(2025, 1, 3), 2
     )[0].raw_close == Decimal("10.25000000")
+
+
+def test_replay_factor_bar_rows_match_legacy_winner_semantics_and_filters(storage):
+    session_factory, _, _, make_repo = storage
+    provider_mode = "factor-winner"
+    repo = make_repo(provider_mode)
+    first_date = date(2025, 1, 2)
+    second_date = date(2025, 1, 3)
+    first_id = "CN:000001"
+    second_id = "CN:000002"
+    filtered_id = "CN:000003"
+    bars = [
+        _factor_bar(
+            first_id,
+            first_date,
+            provider_mode=provider_mode,
+            source_provider="zeta",
+            revision=1,
+            close="11",
+        ),
+        _factor_bar(
+            first_id,
+            first_date,
+            provider_mode=provider_mode,
+            source_provider="zeta",
+            revision=2,
+            close="22",
+        ),
+        _factor_bar(
+            first_id,
+            first_date,
+            provider_mode=provider_mode,
+            source_provider="alpha",
+            revision=2,
+            close="21",
+        ),
+        _factor_bar(
+            first_id,
+            first_date,
+            provider_mode=provider_mode,
+            source_provider="beta",
+            revision=3,
+            close="31",
+        ),
+        _factor_bar(
+            first_id,
+            second_date,
+            provider_mode=provider_mode,
+            source_provider="zeta",
+            revision=1,
+            close="12",
+        ),
+        _factor_bar(
+            second_id,
+            first_date,
+            provider_mode=provider_mode,
+            source_provider="zeta",
+            revision=1,
+            close="41",
+        ),
+        _factor_bar(
+            second_id,
+            second_date,
+            provider_mode=provider_mode,
+            source_provider="zeta",
+            revision=2,
+            close="42",
+        ),
+        _factor_bar(
+            filtered_id,
+            first_date,
+            provider_mode=provider_mode,
+            source_provider="alpha",
+            revision=2,
+            close="99",
+        ),
+    ]
+    for source_revision in (1, 2, 3):
+        repo.upsert_replay_bars(
+            [bar for bar in bars if bar.dataset_revision == source_revision],
+            revision=source_revision,
+        )
+
+    ranked = (
+        select(
+            HistoricalReplayBarRow.instrument_id,
+            HistoricalReplayBarRow.trade_date,
+            HistoricalReplayBarRow.raw_close,
+            HistoricalReplayBarRow.adjusted_open,
+            HistoricalReplayBarRow.adjusted_high,
+            HistoricalReplayBarRow.adjusted_low,
+            HistoricalReplayBarRow.adjusted_close,
+            HistoricalReplayBarRow.volume,
+            HistoricalReplayBarRow.adjustment_mode,
+            func.row_number()
+            .over(
+                partition_by=(
+                    HistoricalReplayBarRow.instrument_id,
+                    HistoricalReplayBarRow.trade_date,
+                ),
+                order_by=(
+                    HistoricalReplayBarRow.dataset_revision.desc(),
+                    HistoricalReplayBarRow.source_provider,
+                ),
+            )
+            .label("revision_rank"),
+        )
+        .where(
+            HistoricalReplayBarRow.provider_mode == provider_mode,
+            HistoricalReplayBarRow.instrument_id.in_([first_id, second_id]),
+            HistoricalReplayBarRow.trade_date >= first_date,
+            HistoricalReplayBarRow.trade_date <= second_date,
+            HistoricalReplayBarRow.dataset_revision <= 2,
+        )
+        .subquery()
+    )
+    with session_factory() as session:
+        legacy_rows = list(
+            session.execute(
+                select(
+                    ranked.c.instrument_id,
+                    ranked.c.trade_date,
+                    ranked.c.raw_close,
+                    ranked.c.adjusted_open,
+                    ranked.c.adjusted_high,
+                    ranked.c.adjusted_low,
+                    ranked.c.adjusted_close,
+                    ranked.c.volume,
+                    ranked.c.adjustment_mode,
+                ).where(ranked.c.revision_rank == 1)
+            )
+        )
+
+    delayed_rows = list(
+        repo.replay_factor_bar_rows(
+            [first_id, second_id],
+            first_date,
+            second_date,
+            revision=2,
+        )
+    )
+    def row_key(row):
+        return row.instrument_id, row.trade_date
+
+    assert [tuple(row) for row in sorted(delayed_rows, key=row_key)] == [
+        tuple(row) for row in sorted(legacy_rows, key=row_key)
+    ]
+    assert [
+        (row.instrument_id, row.trade_date, row.raw_close) for row in delayed_rows
+    ] == [
+        (first_id, first_date, Decimal("21.00000000")),
+        (first_id, second_date, Decimal("12.00000000")),
+        (second_id, first_date, Decimal("41.00000000")),
+        (second_id, second_date, Decimal("42.00000000")),
+    ]
+    assert list(
+        repo.replay_factor_bar_rows(
+            [first_id],
+            first_date,
+            first_date,
+            revision=1,
+        )
+    )[0].raw_close == Decimal("11.00000000")
+    assert list(
+        repo.replay_factor_bar_rows(
+            [first_id],
+            first_date,
+            first_date,
+            revision=3,
+        )
+    )[0].raw_close == Decimal("31.00000000")
+    assert [
+        (row.instrument_id, row.trade_date)
+        for row in repo.replay_factor_bar_rows(
+            [first_id],
+            second_date,
+            second_date,
+            revision=3,
+        )
+    ] == [(first_id, second_date)]
+
+
+def test_replay_factor_bar_rows_use_covering_index_then_rowid_lookup(storage):
+    session_factory, _, _, make_repo = storage
+    provider_mode = "factor-query-plan"
+    repo = make_repo(provider_mode)
+    trade_date = date(2025, 1, 2)
+    repo.upsert_replay_bars(
+        [
+            _factor_bar(
+                "CN:000001",
+                trade_date,
+                provider_mode=provider_mode,
+                source_provider="fixture",
+                revision=1,
+                close="10",
+            )
+        ],
+        revision=1,
+    )
+    engine = session_factory.kw["bind"]
+    captured: list[tuple[str, tuple[object, ...]]] = []
+
+    def capture_query(_conn, _cursor, statement, parameters, _context, _executemany):
+        if "ranked_replay_bar_rowids" in statement:
+            captured.append((statement, tuple(parameters)))
+
+    event.listen(engine, "before_cursor_execute", capture_query)
+    try:
+        assert list(
+            repo.replay_factor_bar_rows(
+                ["CN:000001"],
+                trade_date,
+                trade_date,
+                revision=1,
+            )
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_query)
+
+    assert len(captured) == 1
+    statement, parameters = captured[0]
+
+    with engine.connect() as connection:
+        plan_rows = connection.exec_driver_sql(
+            f"EXPLAIN QUERY PLAN {statement}",
+            parameters,
+        ).all()
+    plan = "\n".join(str(row[-1]) for row in plan_rows).lower()
+    assert "covering index" in plan
+    assert "ix_historical_replay_bars_lookup_v2" in plan
+    assert "winner_bar" in plan
+    assert "integer primary key" in plan
 
 
 def test_same_revision_bar_payload_is_immutable(storage):

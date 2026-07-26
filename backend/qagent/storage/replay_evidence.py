@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Literal, NamedTuple
 
 from pydantic import BaseModel
-from sqlalchemy import func, select, text, tuple_
+from sqlalchemy import func, literal_column, select, text, tuple_
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
@@ -952,17 +952,11 @@ class ReplayEvidenceRepository:
         if not instrument_ids:
             return
         with self.session_factory() as session:
-            ranked = (
+            ranked_rowids = (
                 select(
-                    HistoricalReplayBarRow.instrument_id,
-                    HistoricalReplayBarRow.trade_date,
-                    HistoricalReplayBarRow.raw_close,
-                    HistoricalReplayBarRow.adjusted_open,
-                    HistoricalReplayBarRow.adjusted_high,
-                    HistoricalReplayBarRow.adjusted_low,
-                    HistoricalReplayBarRow.adjusted_close,
-                    HistoricalReplayBarRow.volume,
-                    HistoricalReplayBarRow.adjustment_mode,
+                    literal_column(
+                        f"{HistoricalReplayBarRow.__tablename__}.rowid"
+                    ).label("winner_rowid"),
                     func.row_number()
                     .over(
                         partition_by=(
@@ -983,20 +977,29 @@ class ReplayEvidenceRepository:
                     HistoricalReplayBarRow.trade_date <= end,
                     HistoricalReplayBarRow.dataset_revision <= revision,
                 )
-                .subquery()
+                .subquery("ranked_replay_bar_rowids")
             )
+            winner_bar = HistoricalReplayBarRow.__table__.alias("winner_bar")
             rows = session.execute(
                 select(
-                    ranked.c.instrument_id,
-                    ranked.c.trade_date,
-                    ranked.c.raw_close,
-                    ranked.c.adjusted_open,
-                    ranked.c.adjusted_high,
-                    ranked.c.adjusted_low,
-                    ranked.c.adjusted_close,
-                    ranked.c.volume,
-                    ranked.c.adjustment_mode,
-                ).where(ranked.c.revision_rank == 1)
+                    winner_bar.c.instrument_id,
+                    winner_bar.c.trade_date,
+                    winner_bar.c.raw_close,
+                    winner_bar.c.adjusted_open,
+                    winner_bar.c.adjusted_high,
+                    winner_bar.c.adjusted_low,
+                    winner_bar.c.adjusted_close,
+                    winner_bar.c.volume,
+                    winner_bar.c.adjustment_mode,
+                )
+                .select_from(
+                    ranked_rowids.join(
+                        winner_bar,
+                        literal_column("winner_bar.rowid")
+                        == ranked_rowids.c.winner_rowid,
+                    )
+                )
+                .where(ranked_rowids.c.revision_rank == 1)
             ).yield_per(10_000)
             for row in rows:
                 yield ReplayFactorBarReadRow(*row)
