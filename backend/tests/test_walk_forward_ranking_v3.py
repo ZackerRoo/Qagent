@@ -12,7 +12,9 @@ from qagent.backtesting.walk_forward import (
     WalkForwardSnapshot,
     _apply_ranking_v3,
     _ranking_v3_common_return_observations,
+    _ranking_v3_historical_audit_last_decision_date,
 )
+from qagent.market.calendars import trading_sessions_in_range
 
 
 def _selection(
@@ -218,3 +220,18 @@ def test_ranking_v3_validation_does_not_count_all_cash_dates_as_evidence():
     assert baseline_rows == []
     assert challenger_rows == []
     assert completed == 0
+
+
+def test_ranking_v3_historical_audit_reserves_full_outcome_window():
+    audit_end = date(2025, 12, 31)
+
+    last_decision = _ranking_v3_historical_audit_last_decision_date(
+        date(2021, 11, 1),
+        audit_end,
+    )
+
+    sessions_after_decision = trading_sessions_in_range(
+        last_decision,
+        audit_end,
+    )[1:]
+    assert len(sessions_after_decision) == 25

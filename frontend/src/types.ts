@@ -3298,6 +3298,7 @@ export type WalkForwardRankingV3Evaluation = {
   maximum_training_date_count: number;
   historical_audit_start: string;
   historical_audit_end: string;
+  historical_audit_last_decision_date: string;
   benchmark_id: string;
   benchmark_status: string;
   benchmark_return_pct: number | null;

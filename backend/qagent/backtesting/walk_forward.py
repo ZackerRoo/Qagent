@@ -52,6 +52,7 @@ from qagent.backtesting.ranking_v3 import (
 )
 from qagent.backtesting.ranking_v3_protocol import (
     RANKING_V3_CANDIDATE_POOL_LIMIT,
+    RANKING_V3_EMBARGO_SESSIONS,
     RANKING_V3_HISTORICAL_AUDIT_END,
     RANKING_V3_HISTORICAL_AUDIT_START,
     RANKING_V3_MAX_PER_STRATEGY,
@@ -441,6 +442,7 @@ class WalkForwardRankingV3Evaluation(BaseModel):
     maximum_training_date_count: int
     historical_audit_start: date
     historical_audit_end: date
+    historical_audit_last_decision_date: date
     benchmark_id: str
     benchmark_status: str
     benchmark_return_pct: float | None = None
@@ -1253,12 +1255,18 @@ def run_full_market_walk_forward_selection(
             max_positions=5,
             execution_rule_resolver=execution_resolver,
         )
+        audit_last_decision_date = (
+            _ranking_v3_historical_audit_last_decision_date(
+                start,
+                end,
+            )
+        )
         audit_snapshots = [
             snapshot
             for snapshot in snapshots
             if RANKING_V3_HISTORICAL_AUDIT_START
             <= snapshot.decision_date
-            <= RANKING_V3_HISTORICAL_AUDIT_END
+            <= audit_last_decision_date
         ]
         audit_baseline_signals = _signals(
             audit_snapshots,
@@ -1495,6 +1503,7 @@ def run_full_market_walk_forward_selection(
         audit_start=audit_start,
         audit_end=audit_end,
         benchmark_return_pct=audit_benchmark_return,
+        audit_last_decision_date=audit_last_decision_date,
     )
     digest = _selection_digest(
         snapshots,
@@ -3607,6 +3616,18 @@ def _ranking_v3_common_return_observations(
     return baseline_rows, challenger_rows, completed_challenger_trades
 
 
+def _ranking_v3_historical_audit_last_decision_date(
+    start: date,
+    end: date,
+) -> date:
+    audit_start = max(start, RANKING_V3_HISTORICAL_AUDIT_START)
+    audit_end = min(end, RANKING_V3_HISTORICAL_AUDIT_END)
+    sessions = trading_sessions_in_range(audit_start, audit_end)
+    if len(sessions) <= RANKING_V3_EMBARGO_SESSIONS:
+        return audit_start
+    return sessions[-(RANKING_V3_EMBARGO_SESSIONS + 1)]
+
+
 def _build_ranking_v3_evaluation(
     *,
     snapshots: list[WalkForwardSnapshot],
@@ -3620,6 +3641,7 @@ def _build_ranking_v3_evaluation(
     audit_start: date,
     audit_end: date,
     benchmark_return_pct: float | None,
+    audit_last_decision_date: date,
 ) -> WalkForwardRankingV3Evaluation:
     protocol = build_ranking_v3_protocol()
     thresholds = protocol.thresholds
@@ -3802,6 +3824,7 @@ def _build_ranking_v3_evaluation(
         leakage_guard=(
             "候选结果仅在退出日严格早于决策日时可训练；历史审计期冻结在"
             f" {RANKING_V3_HISTORICAL_AUDIT_START.isoformat()} 之前的证据，"
+            f"末端保留 {RANKING_V3_EMBARGO_SESSIONS} 个交易日避免未成熟结果；"
             "旧样本外仅用于审计，不能作为正式上线证明。"
         ),
         protocol=protocol,
@@ -3829,6 +3852,7 @@ def _build_ranking_v3_evaluation(
         ),
         historical_audit_start=audit_start,
         historical_audit_end=audit_end,
+        historical_audit_last_decision_date=audit_last_decision_date,
         benchmark_id=ELIGIBLE_UNIVERSE_BENCHMARK_ID,
         benchmark_status=(
             "ready" if benchmark_return_pct is not None else "missing"

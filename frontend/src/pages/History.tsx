@@ -1751,7 +1751,11 @@ function RankingV3ShadowCard({
         <div>
           <span>{zh ? "历史审计窗口" : "Historical audit window"}</span>
           <strong>{historicalAuditWindow ? `${historicalAuditWindow.start_date} - ${historicalAuditWindow.end_date ?? "-"}` : "-"}</strong>
-          <small>{zh ? "重复使用 OOS，仅作影子准入参考" : "Reused OOS, shadow admission evidence only"}</small>
+          <small>
+            {zh ? "最后决策日" : "last decision"} {evaluation.historical_audit_last_decision_date ?? "-"}
+            {" · "}
+            {zh ? "重复 OOS，仅作影子准入" : "reused OOS, shadow admission only"}
+          </small>
         </div>
         <div>
           <span>{zh ? "前向影子起点" : "Prospective shadow start"}</span>
