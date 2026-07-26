@@ -557,6 +557,10 @@ class _WalkForwardWorkerStats(BaseModel):
     full_window_queries: int = 0
     incremental_queries: int = 0
     rows_loaded: int = 0
+    factor_prefilter_queries: int = 0
+    factor_prefilter_full_window_queries: int = 0
+    factor_prefilter_incremental_queries: int = 0
+    factor_prefilter_rows_loaded: int = 0
     fundamental_prefetches: int = 0
     fundamental_fallback_queries: int = 0
 
@@ -669,18 +673,13 @@ def _compute_walk_forward_snapshot_without_gc(
         _has_usable_fundamental(item) for item in fundamental_evidence.values()
     )
     prefilter_start = decision_date - timedelta(days=min(lookback_days, PREFILTER_LOOKBACK_DAYS))
-    market_provider.prefetch_daily_bars(
-        snapshot_input.eligible,
-        prefilter_start,
-        decision_date,
-    )
-    prefilter_bars = market_provider.get_daily_bars(
+    prefilter_bars = market_provider.get_factor_prefilter_bars(
         snapshot_input.eligible,
         prefilter_start,
         decision_date,
     )
     factor_rankings = build_factor_rankings(
-        _adjusted_prefilter_bars(prefilter_bars),
+        prefilter_bars,
         fundamentals=fundamental_evidence,
     )
     candidates = _walk_forward_candidates(
@@ -866,6 +865,16 @@ def _snapshot_worker_stats(
         full_window_queries=market_provider.full_window_queries,
         incremental_queries=market_provider.incremental_queries,
         rows_loaded=market_provider.rows_loaded,
+        factor_prefilter_queries=market_provider.factor_prefilter_query_count,
+        factor_prefilter_full_window_queries=(
+            market_provider.factor_prefilter_full_window_queries
+        ),
+        factor_prefilter_incremental_queries=(
+            market_provider.factor_prefilter_incremental_queries
+        ),
+        factor_prefilter_rows_loaded=(
+            market_provider.factor_prefilter_rows_loaded
+        ),
         fundamental_prefetches=strategy_provider.prefetch_count,
         fundamental_fallback_queries=strategy_provider.query_count,
     )
@@ -880,6 +889,18 @@ def _sum_worker_stats(
         full_window_queries=sum(item.full_window_queries for item in values),
         incremental_queries=sum(item.incremental_queries for item in values),
         rows_loaded=sum(item.rows_loaded for item in values),
+        factor_prefilter_queries=sum(
+            item.factor_prefilter_queries for item in values
+        ),
+        factor_prefilter_full_window_queries=sum(
+            item.factor_prefilter_full_window_queries for item in values
+        ),
+        factor_prefilter_incremental_queries=sum(
+            item.factor_prefilter_incremental_queries for item in values
+        ),
+        factor_prefilter_rows_loaded=sum(
+            item.factor_prefilter_rows_loaded for item in values
+        ),
         fundamental_prefetches=sum(item.fundamental_prefetches for item in values),
         fundamental_fallback_queries=sum(item.fundamental_fallback_queries for item in values),
     )
@@ -1734,6 +1755,22 @@ def run_full_market_walk_forward_selection(
             ),
             "walk_forward_replay_cache_rows_loaded": str(
                 market_provider.rows_loaded + selection_worker_stats.rows_loaded
+            ),
+            "walk_forward_factor_prefilter_queries": str(
+                market_provider.factor_prefilter_query_count
+                + selection_worker_stats.factor_prefilter_queries
+            ),
+            "walk_forward_factor_prefilter_full_queries": str(
+                market_provider.factor_prefilter_full_window_queries
+                + selection_worker_stats.factor_prefilter_full_window_queries
+            ),
+            "walk_forward_factor_prefilter_incremental_queries": str(
+                market_provider.factor_prefilter_incremental_queries
+                + selection_worker_stats.factor_prefilter_incremental_queries
+            ),
+            "walk_forward_factor_prefilter_rows_loaded": str(
+                market_provider.factor_prefilter_rows_loaded
+                + selection_worker_stats.factor_prefilter_rows_loaded
             ),
             "walk_forward_fundamental_prefetches": str(
                 strategy_provider.prefetch_count + selection_worker_stats.fundamental_prefetches

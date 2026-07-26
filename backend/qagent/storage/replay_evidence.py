@@ -96,6 +96,18 @@ class ReplayBarReadRow(NamedTuple):
     fetched_at: datetime
 
 
+class ReplayFactorBarReadRow(NamedTuple):
+    instrument_id: str
+    trade_date: date
+    raw_close: Decimal
+    adjusted_open: Decimal | None
+    adjusted_high: Decimal | None
+    adjusted_low: Decimal | None
+    adjusted_close: Decimal | None
+    volume: Decimal
+    adjustment_mode: str
+
+
 class DerivedUniverseOwnershipConflict(ValueError):
     pass
 
@@ -928,6 +940,66 @@ class ReplayEvidenceRepository:
                 )
             ]
         return rows
+
+    def replay_factor_bar_rows(
+        self,
+        instrument_ids: Sequence[str],
+        start: date,
+        end: date,
+        revision: int,
+    ) -> Iterator[ReplayFactorBarReadRow]:
+        """Stream only the fields required by the full-market factor prefilter."""
+        if not instrument_ids:
+            return
+        with self.session_factory() as session:
+            ranked = (
+                select(
+                    HistoricalReplayBarRow.instrument_id,
+                    HistoricalReplayBarRow.trade_date,
+                    HistoricalReplayBarRow.raw_close,
+                    HistoricalReplayBarRow.adjusted_open,
+                    HistoricalReplayBarRow.adjusted_high,
+                    HistoricalReplayBarRow.adjusted_low,
+                    HistoricalReplayBarRow.adjusted_close,
+                    HistoricalReplayBarRow.volume,
+                    HistoricalReplayBarRow.adjustment_mode,
+                    func.row_number()
+                    .over(
+                        partition_by=(
+                            HistoricalReplayBarRow.instrument_id,
+                            HistoricalReplayBarRow.trade_date,
+                        ),
+                        order_by=(
+                            HistoricalReplayBarRow.dataset_revision.desc(),
+                            HistoricalReplayBarRow.source_provider,
+                        ),
+                    )
+                    .label("revision_rank"),
+                )
+                .where(
+                    HistoricalReplayBarRow.provider_mode == self.provider_mode,
+                    HistoricalReplayBarRow.instrument_id.in_(instrument_ids),
+                    HistoricalReplayBarRow.trade_date >= start,
+                    HistoricalReplayBarRow.trade_date <= end,
+                    HistoricalReplayBarRow.dataset_revision <= revision,
+                )
+                .subquery()
+            )
+            rows = session.execute(
+                select(
+                    ranked.c.instrument_id,
+                    ranked.c.trade_date,
+                    ranked.c.raw_close,
+                    ranked.c.adjusted_open,
+                    ranked.c.adjusted_high,
+                    ranked.c.adjusted_low,
+                    ranked.c.adjusted_close,
+                    ranked.c.volume,
+                    ranked.c.adjustment_mode,
+                ).where(ranked.c.revision_rank == 1)
+            ).yield_per(10_000)
+            for row in rows:
+                yield ReplayFactorBarReadRow(*row)
 
     def iter_replay_adjusted_closes(
         self,

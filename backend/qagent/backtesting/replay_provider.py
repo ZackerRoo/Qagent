@@ -30,6 +30,14 @@ _REPLAY_FRAME_COLUMNS = (
     "is_st",
 )
 
+_REPLAY_FACTOR_FRAME_COLUMNS = (
+    "instrument_id",
+    "trade_date",
+    "raw_close",
+    "adjusted_close",
+    "volume",
+)
+
 
 class ReplayMarketDataProvider:
     name = "historical_replay"
@@ -40,16 +48,23 @@ class ReplayMarketDataProvider:
         self.last_errors: list[str] = []
         self._bars_by_instrument: dict[str, pd.DataFrame] = {}
         self._coverage: dict[str, tuple[date, date]] = {}
+        self._factor_bars = pd.DataFrame(columns=_REPLAY_FACTOR_FRAME_COLUMNS)
+        self._factor_coverage: dict[str, tuple[date, date]] = {}
         self._tradability_cache: dict[
             tuple[str, date], HistoricalTradabilityPoint | None
         ] = {}
         self._pruned_through: date | None = None
+        self._factor_pruned_through: date | None = None
         self.query_count = 0
         self.tradability_query_count = 0
         self.full_window_queries = 0
         self.incremental_queries = 0
         self.rows_loaded = 0
         self.adjusted_close_stream_queries = 0
+        self.factor_prefilter_query_count = 0
+        self.factor_prefilter_full_window_queries = 0
+        self.factor_prefilter_incremental_queries = 0
+        self.factor_prefilter_rows_loaded = 0
 
     def get_daily_bars(
         self, instrument_ids: list[str], start: date, end: date
@@ -73,6 +88,41 @@ class ReplayMarketDataProvider:
                 ]
             )
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    def get_factor_prefilter_bars(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> pd.DataFrame:
+        """Return close/volume bars with the legacy prefilter adjustment semantics."""
+        if start > end:
+            raise ValueError("start must be on or before end")
+        requested = sorted(set(instrument_ids))
+        if not requested:
+            return pd.DataFrame()
+        self._prune_factor_before(start)
+        self._ensure_factor_coverage(requested, start, end)
+        if self._factor_bars.empty:
+            return pd.DataFrame()
+        combined = self._factor_bars.loc[
+            self._factor_bars["instrument_id"].isin(requested)
+            & (self._factor_bars["trade_date"] >= start)
+            & (self._factor_bars["trade_date"] <= end)
+        ]
+        if combined.empty:
+            return pd.DataFrame()
+        adjusted_rows = combined["adjusted_close"].notna()
+        if adjusted_rows.any():
+            combined = combined.loc[adjusted_rows].copy()
+            combined["close"] = combined["adjusted_close"]
+        else:
+            combined = combined.copy()
+            combined["close"] = combined["raw_close"]
+        return combined.loc[
+            :,
+            ["instrument_id", "trade_date", "close", "volume"],
+        ].reset_index(drop=True)
 
     def prefetch_daily_bars(
         self,
@@ -146,6 +196,49 @@ class ReplayMarketDataProvider:
             for instrument_id in query_ids:
                 previous = self._coverage.get(instrument_id)
                 self._coverage[instrument_id] = (
+                    min(previous[0], query_start) if previous else query_start,
+                    max(previous[1], query_end) if previous else query_end,
+                )
+
+    def _ensure_factor_coverage(
+        self,
+        requested: list[str],
+        start: date,
+        end: date,
+    ) -> None:
+        query_groups: dict[tuple[date, date], list[str]] = {}
+        for instrument_id in requested:
+            coverage = self._factor_coverage.get(instrument_id)
+            if coverage is None:
+                query_groups.setdefault((start, end), []).append(instrument_id)
+                continue
+            covered_start, covered_end = coverage
+            if start < covered_start:
+                query_groups.setdefault(
+                    (start, covered_start - timedelta(days=1)),
+                    [],
+                ).append(instrument_id)
+            if end > covered_end:
+                query_groups.setdefault(
+                    (covered_end + timedelta(days=1), end),
+                    [],
+                ).append(instrument_id)
+        for (query_start, query_end), query_ids in query_groups.items():
+            rows = self.repository.replay_factor_bar_rows(
+                query_ids,
+                query_start,
+                query_end,
+                self.revision,
+            )
+            self.factor_prefilter_query_count += 1
+            if query_start == start and query_end == end:
+                self.factor_prefilter_full_window_queries += 1
+            else:
+                self.factor_prefilter_incremental_queries += 1
+            self._append_factor_rows(rows)
+            for instrument_id in query_ids:
+                previous = self._factor_coverage.get(instrument_id)
+                self._factor_coverage[instrument_id] = (
                     min(previous[0], query_start) if previous else query_start,
                     max(previous[1], query_end) if previous else query_end,
                 )
@@ -239,6 +332,57 @@ class ReplayMarketDataProvider:
                 .reset_index(drop=True)
             )
 
+    def _append_factor_rows(self, rows) -> None:
+        records = []
+        for item in rows:
+            self.factor_prefilter_rows_loaded += 1
+            adjusted = all(
+                value is not None
+                for value in (
+                    item.adjusted_open,
+                    item.adjusted_high,
+                    item.adjusted_low,
+                    item.adjusted_close,
+                )
+            )
+            if not adjusted and item.adjustment_mode != "none":
+                self.last_errors.append(
+                    f"{item.instrument_id} {item.trade_date}: adjusted OHLC is missing"
+                )
+                continue
+            records.append(
+                (
+                    item.instrument_id,
+                    item.trade_date,
+                    float(item.raw_close),
+                    (
+                        float(item.adjusted_close)
+                        if item.adjusted_close is not None
+                        else None
+                    ),
+                    float(item.volume),
+                )
+            )
+        if not records:
+            return
+        incoming = pd.DataFrame.from_records(
+            records,
+            columns=_REPLAY_FACTOR_FRAME_COLUMNS,
+        )
+        combined = (
+            pd.concat([self._factor_bars, incoming], ignore_index=True)
+            if not self._factor_bars.empty
+            else incoming
+        )
+        self._factor_bars = (
+            combined.drop_duplicates(
+                subset=["instrument_id", "trade_date"],
+                keep="last",
+            )
+            .sort_values(["instrument_id", "trade_date"])
+            .reset_index(drop=True)
+        )
+
     def _load_tradability(self, rows) -> None:
         missing_by_date: dict[date, set[str]] = {}
         for item in rows:
@@ -290,6 +434,25 @@ class ReplayMarketDataProvider:
             if key[1] < start:
                 del self._tradability_cache[key]
         self._pruned_through = start
+
+    def _prune_factor_before(self, start: date) -> None:
+        if (
+            self._factor_pruned_through is not None
+            and start <= self._factor_pruned_through
+        ):
+            return
+        if not self._factor_bars.empty:
+            self._factor_bars = self._factor_bars.loc[
+                self._factor_bars["trade_date"] >= start
+            ].reset_index(drop=True)
+        for instrument_id, (covered_start, covered_end) in list(
+            self._factor_coverage.items()
+        ):
+            if covered_end < start:
+                del self._factor_coverage[instrument_id]
+            elif covered_start < start:
+                self._factor_coverage[instrument_id] = (start, covered_end)
+        self._factor_pruned_through = start
 
     def get_snapshot(self, instrument_ids: list[str]) -> pd.DataFrame:
         return pd.DataFrame()
