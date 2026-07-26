@@ -58,19 +58,41 @@ import type {
   StrategyHealth,
 } from "../types";
 
+const LATEST_RESULT_TIMEOUT_MS = 60_000;
+
 type Props = {
   dataMode: DataProviderMode;
   profile: ResearchProfile;
   selectedCard?: OpportunityCard;
+  latestResult?: FullMarketScanResponse;
+  latestResultStatus: LatestResultLoadStatus;
+  latestResultError: string;
   onSelect(card: OpportunityCard): void;
   onResult(result: FullMarketScanResponse): void;
   onNavigate?(page: PageId): void;
+  onRetryLatestResult(): void;
 };
 
-export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onNavigate }: Props) {
+export type LatestResultLoadStatus = "loading" | "ready" | "error";
+
+export function Today({
+  dataMode,
+  profile,
+  selectedCard,
+  latestResult,
+  latestResultStatus,
+  latestResultError,
+  onSelect,
+  onResult,
+  onNavigate,
+  onRetryLatestResult,
+}: Props) {
   const { language, t } = useI18n();
   const [task, setTask] = useState<ScanTask>();
   const [result, setResult] = useState<FullMarketScanResponse>();
+  const [filteredResultStatus, setFilteredResultStatus] =
+    useState<LatestResultLoadStatus>("loading");
+  const [filteredResultError, setFilteredResultError] = useState("");
   const [scanSize, setScanSize] = useState("30");
   const [includeEtfs, setIncludeEtfs] = useState(true);
   const [error, setError] = useState("");
@@ -108,20 +130,47 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onN
   const blocked = cards.length - actionable.length;
   const etfCount = result?.symbols.filter((symbol) => isEtfSymbol(symbol)).length ?? 0;
   const scannedCount = result ? scanCount(result) : null;
+  const initialResultStatus = includeEtfs
+    ? latestResultStatus === "ready" && result
+      ? "ready"
+      : latestResultStatus
+    : result
+      ? "ready"
+      : filteredResultStatus;
+  const initialResultError = includeEtfs ? latestResultError : filteredResultError;
 
   async function loadInitialResult() {
+    setFilteredResultStatus("loading");
+    setFilteredResultError("");
+    setResult(undefined);
     try {
-      const fullResult = await fetchLatestFullMarketBatchResult(dataMode, includeEtfs);
+      const fullResult = await withLatestResultTimeout(
+        fetchLatestFullMarketBatchResult(dataMode, includeEtfs),
+      );
       setResult(fullResult);
+      setFilteredResultStatus("ready");
       onResult(fullResult);
       const nextCards = applyResearchProfile(fullResult.cards, profile);
       if (nextCards.length) {
         onSelect(nextCards[0]);
       }
-    } catch {
+    } catch (caught) {
       setResult(undefined);
       setTask(undefined);
+      setFilteredResultStatus("error");
+      setFilteredResultError(
+        caught instanceof Error ? caught.message : "Failed to load the latest full-market result",
+      );
     }
+  }
+
+  function retryInitialResult() {
+    setError("");
+    if (includeEtfs) {
+      onRetryLatestResult();
+      return;
+    }
+    void loadInitialResult();
   }
 
   async function loadFollowthrough(retry = true) {
@@ -298,7 +347,18 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onN
   }
 
   useEffect(() => {
-    void loadInitialResult();
+    if (includeEtfs) {
+      setResult(latestResultStatus === "ready" ? latestResult : undefined);
+    }
+  }, [includeEtfs, latestResult, latestResultStatus]);
+
+  useEffect(() => {
+    if (!includeEtfs) {
+      void loadInitialResult();
+    }
+  }, [dataMode, includeEtfs]);
+
+  useEffect(() => {
     void loadFollowthrough();
     void refreshFullScanJob();
     void loadAutoPaperStatus();
@@ -324,6 +384,19 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onN
       onSelect(decisionCards[0]);
     }
   }, [decisionCards, onSelect, paperCandidatePool, safeSelectedCard?.card_id, selectedCard]);
+
+  if (initialResultStatus !== "ready") {
+    return (
+      <div className="stack today-decision-page">
+        <LatestResultStatePanel
+          status={initialResultStatus}
+          error={initialResultError}
+          language={language}
+          onRetry={retryInitialResult}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="stack today-decision-page">
@@ -415,6 +488,83 @@ export function Today({ dataMode, profile, selectedCard, onSelect, onResult, onN
           onSelect={onSelect}
         />
     </div>
+  );
+}
+
+async function withLatestResultTimeout<T>(request: Promise<T>): Promise<T> {
+  let timeoutId: number | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = window.setTimeout(
+      () => reject(new Error("Latest full-market result request timed out")),
+      LATEST_RESULT_TIMEOUT_MS,
+    );
+  });
+  try {
+    return await Promise.race([request, timeout]);
+  } finally {
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+    }
+  }
+}
+
+function LatestResultStatePanel({
+  status,
+  error,
+  language,
+  onRetry,
+}: {
+  status: Exclude<LatestResultLoadStatus, "ready">;
+  error: string;
+  language: "zh" | "en";
+  onRetry(): void;
+}) {
+  const loading = status === "loading";
+  return (
+    <section className="panel history-loading-panel" aria-live="polite">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">
+            {language === "zh" ? "最近全市场结果" : "Latest full-market result"}
+          </p>
+          <h2>
+            {loading
+              ? language === "zh"
+                ? "正在载入最近全市场结果"
+                : "Loading the latest full-market result"
+              : language === "zh"
+                ? "最近全市场结果载入失败"
+                : "Could not load the latest full-market result"}
+          </h2>
+          <p>
+            {loading
+              ? language === "zh"
+                ? "正在读取已保存的扫描结果，不会启动新的全市场扫描。"
+                : "Reading the saved scan result without starting a new market scan."
+              : language === "zh"
+                ? "没有把加载失败当成没有机会。请重试读取已保存结果。"
+                : "This is a load failure, not an empty opportunity set. Retry the saved result."}
+          </p>
+        </div>
+        {!loading && (
+          <button
+            className="icon-action"
+            type="button"
+            onClick={onRetry}
+            title={error || undefined}
+          >
+            {language === "zh" ? "重试" : "Retry"}
+          </button>
+        )}
+      </div>
+      {loading && (
+        <div className="loading-bars" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </div>
+      )}
+    </section>
   );
 }
 

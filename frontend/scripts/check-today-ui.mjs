@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const todayPath = resolve(__dirname, "../src/pages/Today.tsx");
+const appPath = resolve(__dirname, "../src/App.tsx");
 const clientPath = resolve(__dirname, "../src/api/client.ts");
 const manualActionPath = resolve(__dirname, "../src/components/ManualActionCenter.tsx");
 const intelligencePath = resolve(__dirname, "../src/components/MarketIntelligenceCenter.tsx");
@@ -18,13 +19,14 @@ const detailPath = resolve(__dirname, "../src/components/OpportunityDetail.tsx")
 const stylesPath = resolve(__dirname, "../src/styles.css");
 const catalogPath = resolve(__dirname, "../src/i18n/catalog.ts");
 
-for (const path of [todayPath, clientPath, manualActionPath, intelligencePath, followthroughPath, signalMonitorPath, decisionQualityPath, operationalReadinessPath, alphaQualityPath, decisionAutomationPath, tablePath, detailPath, stylesPath, catalogPath]) {
+for (const path of [todayPath, appPath, clientPath, manualActionPath, intelligencePath, followthroughPath, signalMonitorPath, decisionQualityPath, operationalReadinessPath, alphaQualityPath, decisionAutomationPath, tablePath, detailPath, stylesPath, catalogPath]) {
   if (!existsSync(path)) {
     throw new Error(`missing ${path}`);
   }
 }
 
 const today = readFileSync(todayPath, "utf8");
+const app = readFileSync(appPath, "utf8");
 const client = readFileSync(clientPath, "utf8");
 const manualAction = readFileSync(manualActionPath, "utf8");
 const intelligence = readFileSync(intelligencePath, "utf8");
@@ -91,8 +93,36 @@ assert(today.includes("CompactDataHealth"), "Today page must keep data health in
 assert(today.includes("signal-console"), "Today page must expose signal-console layout class");
 assert(!today.includes("autoStartedKeys"), "Today page must reload cached scan results when remounted");
 assert(
-  today.includes("void loadInitialResult();") && today.includes("}, [dataMode, includeEtfs]);"),
-  "Today page must reload cached scan results when data mode or ETF filter changes",
+  app.includes('useState<LatestResultLoadStatus>("loading")') &&
+    app.includes("latestResultRequestRef") &&
+    app.includes("withLatestResultTimeout(") &&
+    app.includes("latestResultStatus={latestResultStatus}") &&
+    app.includes("latestFullMarketResult,\n    latestResultError,\n    latestResultStatus,") &&
+    app.includes("onRetryLatestResult={() => void loadCachedDashboard(dataMode)}"),
+  "App must expose explicit loading/error/retry state for the shared latest-result request",
+);
+assert(
+  today.includes("latestResultStatus === \"ready\" ? latestResult : undefined") &&
+    today.includes("if (!includeEtfs)") &&
+    today.includes("void loadInitialResult();") &&
+    today.includes("withLatestResultTimeout("),
+  "Today must consume the shared ETF-inclusive result and only fetch a separate filtered result",
+);
+assert(
+  today.includes('initialResultStatus !== "ready"') &&
+    today.includes("LatestResultStatePanel") &&
+    today.includes("正在载入最近全市场结果") &&
+    today.includes("最近全市场结果载入失败") &&
+    today.includes("重试"),
+  "Today must distinguish latest-result loading, failure, retry, and ready states",
+);
+assert(
+  today.includes("不会启动新的全市场扫描") &&
+    !today.slice(
+      today.indexOf("function LatestResultStatePanel"),
+      today.indexOf("function TodayRouteCards"),
+    ).includes("onStartFullScan"),
+  "Latest-result state panel must never start a new full-market scan",
 );
 assert(
   trackTopBlock.includes("setBulkPaperMessage(") &&

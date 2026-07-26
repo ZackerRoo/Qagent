@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   fetchLatestFullMarketBatchResult,
@@ -17,7 +17,7 @@ import { Overview } from "./pages/Overview";
 import { Portfolio } from "./pages/Portfolio";
 import { Review } from "./pages/Review";
 import { Settings } from "./pages/Settings";
-import { Today } from "./pages/Today";
+import { Today, type LatestResultLoadStatus } from "./pages/Today";
 import { Watchlist } from "./pages/Watchlist";
 import { registerInstrumentLabels } from "./lib/instruments";
 import { hasInstrumentLabel, marketSymbol } from "./lib/instruments";
@@ -36,6 +36,7 @@ import type {
 import { applyResearchProfile } from "./lib/profiles";
 
 const DEFAULT_SYMBOLS = "CN:ALL";
+const LATEST_RESULT_TIMEOUT_MS = 60_000;
 
 export default function App() {
   const [page, setPage] = useState<PageId>("today");
@@ -49,6 +50,12 @@ export default function App() {
   const [universes, setUniverses] = useState<UniverseRecord[]>([]);
   const [selectedUniverseId, setSelectedUniverseId] = useState("free_default");
   const [labelBootstrapNonce, setLabelBootstrapNonce] = useState(0);
+  const [latestFullMarketResult, setLatestFullMarketResult] =
+    useState<FullMarketScanResponse>();
+  const [latestResultStatus, setLatestResultStatus] =
+    useState<LatestResultLoadStatus>("loading");
+  const [latestResultError, setLatestResultError] = useState("");
+  const latestResultRequestRef = useRef(0);
 
   useEffect(() => {
     void refreshUniverses();
@@ -72,10 +79,29 @@ export default function App() {
   }, [dataMode]);
 
   async function loadCachedDashboard(mode: DataProviderMode) {
+    const requestId = latestResultRequestRef.current + 1;
+    latestResultRequestRef.current = requestId;
+    setLatestResultStatus("loading");
+    setLatestResultError("");
+    setLatestFullMarketResult(undefined);
     try {
-      const result = await fetchLatestFullMarketBatchResult(mode, true);
+      const result = await withLatestResultTimeout(
+        fetchLatestFullMarketBatchResult(mode, true),
+      );
+      if (requestId !== latestResultRequestRef.current) {
+        return;
+      }
+      setLatestFullMarketResult(result);
+      setLatestResultStatus("ready");
       applyDashboardResult(result);
-    } catch {
+    } catch (caught) {
+      if (requestId !== latestResultRequestRef.current) {
+        return;
+      }
+      setLatestResultStatus("error");
+      setLatestResultError(
+        caught instanceof Error ? caught.message : "Failed to load the latest full-market result",
+      );
       setOverview(undefined);
       setOpportunities(undefined);
       setRadar(undefined);
@@ -266,6 +292,10 @@ export default function App() {
             onSelect={setSelectedCard}
             onResult={applyDashboardResult}
             onNavigate={setPage}
+            latestResult={latestFullMarketResult}
+            latestResultStatus={latestResultStatus}
+            latestResultError={latestResultError}
+            onRetryLatestResult={() => void loadCachedDashboard(dataMode)}
           />
         );
       case "brief":
@@ -320,6 +350,9 @@ export default function App() {
   }, [
     dataMode,
     labelBootstrapNonce,
+    latestFullMarketResult,
+    latestResultError,
+    latestResultStatus,
     opportunities,
     page,
     profile,
@@ -349,6 +382,23 @@ export default function App() {
       {content}
     </Layout>
   );
+}
+
+async function withLatestResultTimeout<T>(request: Promise<T>): Promise<T> {
+  let timeoutId: number | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = window.setTimeout(
+      () => reject(new Error("Latest full-market result request timed out")),
+      LATEST_RESULT_TIMEOUT_MS,
+    );
+  });
+  try {
+    return await Promise.race([request, timeout]);
+  } finally {
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+    }
+  }
 }
 
 function toOpportunitiesResponse(result: FullMarketScanResponse): OpportunitiesResponse {
