@@ -1362,7 +1362,7 @@ def run_full_market_walk_forward_selection(
         audit_eligible_universes = [
             (decision_date, members)
             for decision_date, members in eligible_universes
-            if audit_start <= decision_date <= audit_end
+            if audit_start <= decision_date <= audit_last_decision_date
         ]
         audit_benchmark_return = _equal_weight_eligible_return(
             market_provider,
@@ -3446,14 +3446,13 @@ def _build_ranking_v3_observations(
             )
             if benchmark_return is not None:
                 net_excess = round(outcome.return_pct - benchmark_return, 4)
-        available_at = outcome.exit_date or (
-            outcome.signal_date + timedelta(days=10)
-        )
+        if outcome.resolved_at is None:
+            continue
         observations.append(
             ResolvedRankingV3Observation(
                 instrument_id=outcome.instrument_id,
                 signal_date=outcome.signal_date,
-                available_at=available_at,
+                available_at=outcome.resolved_at,
                 outcome_status=outcome.status.value,
                 triggered=outcome.status == CandidateOutcomeStatus.RESOLVED,
                 return_pct=outcome.return_pct,
@@ -3805,6 +3804,7 @@ def _build_ranking_v3_evaluation(
     invalid_count = sum(
         status_counts.get(status.value, 0)
         for status in (
+            CandidateOutcomeStatus.EXIT_UNFILLABLE,
             CandidateOutcomeStatus.INVALID_PLAN,
             CandidateOutcomeStatus.INSUFFICIENT_FUTURE_DATA,
             CandidateOutcomeStatus.OUTSIDE_REQUESTED_RANGE,

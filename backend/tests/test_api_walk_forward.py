@@ -607,6 +607,86 @@ def test_new_walk_forward_job_reuses_completed_selection_snapshots(
     assert submitted[0][1] == (job.job_id,)
 
 
+def test_new_walk_forward_job_reuses_partial_prefix_from_failed_validation(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'walk-forward-reuse-checkpoints-api.db'}",
+    )
+    submitted = []
+
+    class FakeExecutor:
+        def submit(self, fn, *args, **kwargs):
+            submitted.append((fn, args, kwargs))
+
+    monkeypatch.setattr(routes, "_walk_forward_task_executor", FakeExecutor())
+    routes._submitted_walk_forward_jobs.clear()
+    repo = routes._repo()
+    start = date(2025, 1, 2)
+    end = date(2025, 2, 28)
+    sessions = routes.trading_sessions_in_range(start, end)[::5]
+    manifest = routes.build_walk_forward_experiment_manifest(
+        provider_mode="free",
+        dataset_revision=7,
+        start_date=start,
+        end_date=end,
+        rebalance_step_sessions=5,
+        lookback_days=400,
+    )
+    checkpoints = [
+        WalkForwardSnapshot(
+            decision_date=decision_date,
+            historical_universe_size=1,
+            eligible_size=1,
+            suspended_count=0,
+            st_excluded_count=0,
+            missing_tradability_count=0,
+        ).model_dump(mode="json")
+        for decision_date in sessions[:2]
+    ]
+    with repo.session_factory() as session:
+        session.add(HistoricalDataRevisionRow(provider_mode="free", revision=7))
+        session.commit()
+    source = repo.create_walk_forward_job(
+        job_id="walk-forward-failed-source",
+        provider="free",
+        start=start,
+        end=end,
+        dataset_revision=7,
+        rebalance_step_sessions=5,
+        lookback_days=400,
+        total_snapshots=len(sessions),
+        experiment_manifest=manifest.model_dump(mode="json"),
+    )
+    repo.update_walk_forward_job(
+        source.job_id,
+        status="failed",
+        processed_snapshots=len(checkpoints),
+        current_date=sessions[1],
+        checkpoints=checkpoints,
+        error="validation protocol superseded",
+    )
+
+    job = routes._create_or_get_walk_forward_job(
+        repo=repo,
+        provider="free",
+        start=start,
+        end=end,
+        step_sessions=5,
+        lookback_days=400,
+    )
+
+    assert job.job_id != source.job_id
+    assert [item["decision_date"] for item in job.checkpoints] == [
+        item.isoformat() for item in sessions[:2]
+    ]
+    assert job.processed_snapshots == 2
+    assert job.current_date == sessions[1]
+    assert submitted[0][1] == (job.job_id,)
+
+
 def test_walk_forward_completed_run_requires_matching_experiment_digest():
     manifest = routes.build_walk_forward_experiment_manifest(
         provider_mode="free",

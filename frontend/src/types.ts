@@ -3244,6 +3244,9 @@ export type WalkForwardRankingV3ProtocolThresholds = {
 
 export type WalkForwardRankingV3Protocol = {
   protocol_id: string;
+  model_version?: string;
+  candidate_ledger_implementation_version?: string;
+  statistics_implementation_version?: string;
   protocol_digest: string;
   frozen_on: string;
   prospective_shadow_start: string;
@@ -3267,6 +3270,8 @@ export type WalkForwardRankingV3HistoricalValidation = {
   challenger_row_count: number;
   completed_trade_count: number;
   common_rebalance_date_count: number;
+  dependence_block_length: number;
+  effective_independent_block_count: number;
   dates_are_common: boolean;
   paired_mean_net_excess_pct: number | null;
   bootstrap_one_sided_95_lower_bound_pct: number | null;
@@ -3334,6 +3339,7 @@ export type WalkForwardPayload = {
 
 export type WalkForwardExperimentManifest = {
   schema_version: string;
+  selection_snapshot_schema_version?: string;
   experiment_digest: string;
   created_at: string;
   code_revision: string;
@@ -3351,6 +3357,10 @@ export type WalkForwardExperimentManifest = {
   execution_rule_set_version: string;
   fee_schedule_version: string;
   execution_rules_digest: string;
+  ranking_v3_protocol_digest?: string;
+  candidate_ledger_implementation_version?: string;
+  ranking_v3_statistics_implementation_version?: string;
+  runtime_revisions?: string[];
 };
 
 export type WalkForwardRun = {

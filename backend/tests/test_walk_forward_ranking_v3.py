@@ -11,6 +11,7 @@ from qagent.backtesting.walk_forward import (
     WalkForwardSelection,
     WalkForwardSnapshot,
     _apply_ranking_v3,
+    _build_ranking_v3_observations,
     _ranking_v3_common_return_observations,
     _ranking_v3_historical_audit_last_decision_date,
 )
@@ -235,3 +236,65 @@ def test_ranking_v3_historical_audit_reserves_full_outcome_window():
         audit_end,
     )[1:]
     assert len(sessions_after_decision) == 25
+
+
+def test_ranking_v3_observations_use_explicit_resolution_date_and_skip_censored():
+    decision_date = date(2025, 1, 24)
+    resolved_at = date(2025, 2, 11)
+    selection = _selection(1, rank_score="0.90", trend_quality=0.8)
+    snapshot = WalkForwardSnapshot(
+        decision_date=decision_date,
+        historical_universe_size=100,
+        eligible_size=100,
+        suspended_count=0,
+        st_excluded_count=0,
+        missing_tradability_count=0,
+        candidate_pool=[selection],
+    )
+    ledger = CandidateOutcomeLedgerResult(
+        provider="test",
+        start=decision_date,
+        end=resolved_at,
+        nominal_amount=Decimal("100000"),
+        outcomes=[
+            CandidateSignalOutcome(
+                snapshot_id="resolved-window",
+                instrument_id=selection.instrument_id,
+                strategy_id=selection.primary_strategy_id,
+                signal_date=decision_date,
+                status=CandidateOutcomeStatus.NOT_TRIGGERED_OR_UNFILLABLE,
+                status_detail="entry_not_triggered_or_fill_blocked",
+                nominal_amount=Decimal("100000"),
+                resolved_at=resolved_at,
+            ),
+            CandidateSignalOutcome(
+                snapshot_id="censored-window",
+                instrument_id=selection.instrument_id,
+                strategy_id=selection.primary_strategy_id,
+                signal_date=decision_date,
+                status=CandidateOutcomeStatus.INSUFFICIENT_FUTURE_DATA,
+                status_detail="entry_wait_window_incomplete",
+                nominal_amount=Decimal("100000"),
+            ),
+        ],
+        status_counts={},
+        data_health={},
+    )
+
+    class EmptyMarketProvider:
+        def get_daily_bars(self, instrument_ids, start, end):
+            import pandas as pd
+
+            return pd.DataFrame()
+
+    observations = _build_ranking_v3_observations(
+        [snapshot],
+        ledger=ledger,
+        market_provider=EmptyMarketProvider(),
+        start=decision_date,
+        end=resolved_at,
+    )
+
+    assert len(observations) == 1
+    assert observations[0].available_at == resolved_at
+    assert observations[0].triggered is False

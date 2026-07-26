@@ -16,6 +16,10 @@ from qagent.backtesting.ranking_v3_protocol import build_ranking_v3_protocol
 ValidationStatus = Literal["pass", "insufficient", "fail"]
 GateStatus = Literal["pass", "insufficient", "fail", "unavailable"]
 
+# V3 holds positions for up to 20 sessions and rebalances every 10 sessions.
+# Adjacent rebalance cohorts therefore share roughly half of their return window.
+DEPENDENCE_BLOCK_LENGTH = 2
+
 
 class RankingV3ReturnObservation(BaseModel):
     rebalance_date: date
@@ -59,6 +63,8 @@ class RankingV3ValidationEvaluation(BaseModel):
     baseline_rebalance_date_count: int
     challenger_rebalance_date_count: int
     common_rebalance_date_count: int
+    dependence_block_length: int
+    effective_independent_block_count: int
     dates_are_common: bool
     baseline_only_dates: list[date]
     challenger_only_dates: list[date]
@@ -100,10 +106,12 @@ def evaluate_ranking_v3_validation(
 ) -> RankingV3ValidationEvaluation:
     """Evaluate V3 against a constraint-matched baseline on common rebalance dates.
 
-    Multiple rows on one rebalance date are averaged before any paired inference,
-    so correlated positions cannot inflate the independent sample count. This
-    utility deliberately does not estimate PBO from one pair of return series.
-    Without a genuine model-return matrix the result remains shadow-only.
+    Multiple rows on one rebalance date are averaged before any paired inference.
+    Because a 20-session holding period overlaps adjacent 10-session rebalance
+    cohorts, inference uses two-cohort time blocks and a conservative effective
+    sample count. This utility deliberately does not estimate PBO from one pair
+    of return series. Without a genuine model-return matrix the result remains
+    shadow-only.
     """
     if bootstrap_samples <= 0:
         raise ValueError("bootstrap_samples must be positive")
@@ -155,16 +163,23 @@ def evaluate_ranking_v3_validation(
             for rebalance_date in common_dates
         ]
 
-    paired_mean = _mean([value for _, value in paired_values])
+    paired_returns = [value for _, value in paired_values]
+    effective_block_count = _effective_independent_block_count(
+        len(paired_returns),
+        block_length=DEPENDENCE_BLOCK_LENGTH,
+    )
+    paired_mean = _mean(paired_returns)
     bootstrap_lower = _one_sided_bootstrap_lower_bound(
-        [value for _, value in paired_values],
+        paired_returns,
         samples=bootstrap_samples,
         seed=seed,
+        block_length=DEPENDENCE_BLOCK_LENGTH,
     )
     positive_p_value = _positive_sign_flip_p_value(
-        [value for _, value in paired_values],
+        paired_returns,
         samples=permutation_samples,
         seed=seed + 1,
+        block_length=DEPENDENCE_BLOCK_LENGTH,
     )
     holm_adjusted = None
     holm_family_size = len(additional_p_values) + (1 if positive_p_value is not None else 0)
@@ -173,9 +188,17 @@ def evaluate_ranking_v3_validation(
             [positive_p_value, *additional_p_values]
         )[0]
     dsr_probability = _deflated_sharpe_probability(
-        [value for _, value in paired_values],
+        paired_returns,
         prior_experiment_count=experiments,
+        effective_sample_count=effective_block_count,
     )
+    if dsr_probability is not None:
+        iid_dsr_probability = _deflated_sharpe_probability(
+            paired_returns,
+            prior_experiment_count=experiments,
+        )
+        if iid_dsr_probability is not None:
+            dsr_probability = min(dsr_probability, iid_dsr_probability)
     subperiods = _contiguous_subperiods(
         paired_values,
         required_subperiods=thresholds.required_subperiods,
@@ -190,6 +213,7 @@ def evaluate_ranking_v3_validation(
     gates = _build_gates(
         dates_are_common=dates_are_common,
         common_date_count=len(common_dates),
+        effective_block_count=effective_block_count,
         completed_trade_count=completed_trades,
         paired_mean=paired_mean_metric,
         bootstrap_lower=bootstrap_lower_metric,
@@ -229,6 +253,8 @@ def evaluate_ranking_v3_validation(
         baseline_rebalance_date_count=len(baseline_dates),
         challenger_rebalance_date_count=len(challenger_dates),
         common_rebalance_date_count=len(common_dates),
+        dependence_block_length=DEPENDENCE_BLOCK_LENGTH,
+        effective_independent_block_count=effective_block_count,
         dates_are_common=dates_are_common,
         baseline_only_dates=baseline_only_dates,
         challenger_only_dates=challenger_only_dates,
@@ -296,17 +322,38 @@ def _one_sided_bootstrap_lower_bound(
     *,
     samples: int,
     seed: int,
+    block_length: int = DEPENDENCE_BLOCK_LENGTH,
 ) -> float | None:
-    if len(values) < 2:
+    if block_length <= 0:
+        raise ValueError("block_length must be positive")
+    count = len(values)
+    if count < block_length * 2:
         return None
     generator = random.Random(seed)
-    count = len(values)
-    bootstrap_means = sorted(
-        sum(generator.choice(values) for _ in range(count)) / count
-        for _ in range(samples)
-    )
+    blocks = [
+        list(values[start : start + block_length])
+        for start in range(count - block_length + 1)
+    ]
+    blocks_per_sample = math.ceil(count / block_length)
+    bootstrap_means: list[float] = []
+    for _ in range(samples):
+        sample: list[float] = []
+        for _ in range(blocks_per_sample):
+            sample.extend(generator.choice(blocks))
+        bootstrap_means.append(math.fsum(sample[:count]) / count)
+    bootstrap_means.sort()
     lower_index = max(0, math.floor((len(bootstrap_means) - 1) * 0.05))
-    return bootstrap_means[lower_index]
+    moving_block_lower = bootstrap_means[lower_index]
+    iid_lower = _iid_bootstrap_lower_bound(
+        values,
+        samples=samples,
+        seed=seed,
+    )
+    return (
+        moving_block_lower
+        if iid_lower is None
+        else min(moving_block_lower, iid_lower)
+    )
 
 
 def _positive_sign_flip_p_value(
@@ -314,16 +361,76 @@ def _positive_sign_flip_p_value(
     *,
     samples: int,
     seed: int,
+    block_length: int = DEPENDENCE_BLOCK_LENGTH,
 ) -> float | None:
-    if not values:
+    if block_length <= 0:
+        raise ValueError("block_length must be positive")
+    complete_count = (len(values) // block_length) * block_length
+    if complete_count < block_length:
         return None
-    observed = _mean(values)
+    complete_values = list(values[:complete_count])
+    observed = _mean(complete_values)
     if observed is None or observed <= 0:
+        return 1.0
+    block_sums = [
+        math.fsum(complete_values[start : start + block_length])
+        for start in range(0, complete_count, block_length)
+    ]
+    generator = random.Random(seed)
+    exceedances = 0
+    for _ in range(samples):
+        null_mean = math.fsum(
+            block_sum if generator.random() >= 0.5 else -block_sum
+            for block_sum in block_sums
+        ) / complete_count
+        if null_mean >= observed:
+            exceedances += 1
+    block_p_value = (exceedances + 1) / (samples + 1)
+    iid_p_value = _iid_positive_sign_flip_p_value(
+        complete_values,
+        samples=samples,
+        seed=seed,
+    )
+    return (
+        block_p_value
+        if iid_p_value is None
+        else max(block_p_value, iid_p_value)
+    )
+
+
+def _iid_bootstrap_lower_bound(
+    values: Sequence[float],
+    *,
+    samples: int,
+    seed: int,
+) -> float | None:
+    if len(values) < 2:
+        return None
+    generator = random.Random(seed)
+    count = len(values)
+    bootstrap_means = sorted(
+        math.fsum(generator.choice(values) for _ in range(count)) / count
+        for _ in range(samples)
+    )
+    lower_index = max(0, math.floor((len(bootstrap_means) - 1) * 0.05))
+    return bootstrap_means[lower_index]
+
+
+def _iid_positive_sign_flip_p_value(
+    values: Sequence[float],
+    *,
+    samples: int,
+    seed: int,
+) -> float | None:
+    observed = _mean(values)
+    if observed is None:
+        return None
+    if observed <= 0:
         return 1.0
     generator = random.Random(seed)
     exceedances = 0
     for _ in range(samples):
-        null_mean = sum(
+        null_mean = math.fsum(
             value if generator.random() >= 0.5 else -value
             for value in values
         ) / len(values)
@@ -336,9 +443,15 @@ def _deflated_sharpe_probability(
     values: Sequence[float],
     *,
     prior_experiment_count: int,
+    effective_sample_count: int | None = None,
 ) -> float | None:
     count = len(values)
-    if count < 3:
+    effective_count = (
+        count
+        if effective_sample_count is None
+        else min(count, effective_sample_count)
+    )
+    if effective_count < 3:
         return None
     mean = _mean(values)
     if mean is None:
@@ -366,7 +479,7 @@ def _deflated_sharpe_probability(
             - skewness * sharpe
             + ((kurtosis - 1.0) / 4.0) * sharpe**2
         )
-        / (count - 1),
+        / (effective_count - 1),
         1e-18,
     )
     sharpe_standard_error = math.sqrt(sharpe_variance)
@@ -427,6 +540,7 @@ def _build_gates(
     *,
     dates_are_common: bool,
     common_date_count: int,
+    effective_block_count: int,
     completed_trade_count: int,
     paired_mean: float | None,
     bootstrap_lower: float | None,
@@ -449,13 +563,20 @@ def _build_gates(
         ),
         _gate(
             key="independent_rebalance_dates",
-            passed=common_date_count >= thresholds.minimum_rebalance_dates,
-            insufficient=common_date_count < thresholds.minimum_rebalance_dates,
-            observed=str(common_date_count),
-            required=f">={thresholds.minimum_rebalance_dates}",
+            passed=effective_block_count >= thresholds.minimum_rebalance_dates,
+            insufficient=effective_block_count < thresholds.minimum_rebalance_dates,
+            observed=(
+                f"{effective_block_count} effective blocks "
+                f"({common_date_count} rebalance dates)"
+            ),
+            required=(
+                f">={thresholds.minimum_rebalance_dates} effective "
+                f"{DEPENDENCE_BLOCK_LENGTH}-cohort blocks"
+            ),
             failure_reason=(
-                f"Only {common_date_count} independent rebalance dates are available; "
-                f"at least {thresholds.minimum_rebalance_dates} are required."
+                f"Only {effective_block_count} independent time blocks are available "
+                f"from {common_date_count} rebalance dates; at least "
+                f"{thresholds.minimum_rebalance_dates} are required."
             ),
         ),
         _gate(
@@ -484,7 +605,8 @@ def _build_gates(
             observed=_format_metric(bootstrap_lower, suffix="%"),
             required=">0%",
             failure_reason=(
-                "The one-sided 95% cluster-bootstrap lower bound is not above zero."
+                "The one-sided 95% moving-block bootstrap lower bound is not above "
+                "zero."
             ),
         ),
         _gate(
@@ -592,6 +714,16 @@ def _validated_p_value(value: float) -> float:
     if not math.isfinite(parsed) or not 0 <= parsed <= 1:
         raise ValueError("p-values must be finite and between 0 and 1")
     return parsed
+
+
+def _effective_independent_block_count(
+    observation_count: int,
+    *,
+    block_length: int,
+) -> int:
+    if block_length <= 0:
+        raise ValueError("block_length must be positive")
+    return observation_count // block_length
 
 
 def _mean(values: Sequence[float]) -> float | None:

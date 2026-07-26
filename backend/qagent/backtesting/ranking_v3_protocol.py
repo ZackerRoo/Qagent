@@ -9,6 +9,12 @@ from pydantic import BaseModel, Field
 
 RANKING_V3_PROTOCOL_ID = "QAGENT-RANK-V3-20260726"
 RANKING_V3_MODEL_VERSION = "point-in-time-net-excess-v3"
+RANKING_V3_CANDIDATE_LEDGER_IMPLEMENTATION_VERSION = (
+    "independent-candidate-outcome-ledger-v2-hard-cutoff-resolved-at"
+)
+RANKING_V3_STATISTICS_IMPLEMENTATION_VERSION = (
+    "rebalance-date-block-dependent-validation-v2"
+)
 RANKING_V3_CANDIDATE_POOL_LIMIT = 50
 RANKING_V3_MAX_POSITIONS = 5
 RANKING_V3_MAX_PER_STRATEGY = 2
@@ -49,6 +55,12 @@ class RankingV3GateThresholds(BaseModel):
 class RankingV3Protocol(BaseModel):
     protocol_id: str = RANKING_V3_PROTOCOL_ID
     model_version: str = RANKING_V3_MODEL_VERSION
+    candidate_ledger_implementation_version: str = (
+        RANKING_V3_CANDIDATE_LEDGER_IMPLEMENTATION_VERSION
+    )
+    statistics_implementation_version: str = (
+        RANKING_V3_STATISTICS_IMPLEMENTATION_VERSION
+    )
     protocol_digest: str
     frozen_on: date = date(2026, 7, 26)
     prospective_shadow_start: date = RANKING_V3_PROSPECTIVE_SHADOW_START
@@ -61,7 +73,7 @@ class RankingV3Protocol(BaseModel):
     prior_experiment_count: int = RANKING_V3_PRIOR_EXPERIMENT_COUNT
     primary_metric: str = "paired_net_excess_return_vs_constraint_matched_baseline"
     training_evidence_rule: str = "outcome_available_at_strictly_before_decision_date"
-    sample_unit: str = "independent_rebalance_date"
+    sample_unit: str = "two_rebalance_moving_block"
     historical_oos_label: str = "historical_reused_oos"
     official_recommendation_isolation: str = "shadow_only_until_all_gates_and_forward_validation_pass"
     windows: list[RankingV3Window] = Field(default_factory=list)
@@ -72,6 +84,12 @@ def build_ranking_v3_protocol() -> RankingV3Protocol:
     stable_payload = {
         "protocol_id": RANKING_V3_PROTOCOL_ID,
         "model_version": RANKING_V3_MODEL_VERSION,
+        "candidate_ledger_implementation_version": (
+            RANKING_V3_CANDIDATE_LEDGER_IMPLEMENTATION_VERSION
+        ),
+        "statistics_implementation_version": (
+            RANKING_V3_STATISTICS_IMPLEMENTATION_VERSION
+        ),
         "frozen_on": "2026-07-26",
         "prospective_shadow_start": "2026-07-27",
         "candidate_pool_limit": RANKING_V3_CANDIDATE_POOL_LIMIT,
@@ -83,7 +101,7 @@ def build_ranking_v3_protocol() -> RankingV3Protocol:
         "prior_experiment_count": RANKING_V3_PRIOR_EXPERIMENT_COUNT,
         "primary_metric": "paired_net_excess_return_vs_constraint_matched_baseline",
         "training_evidence_rule": "outcome_available_at_strictly_before_decision_date",
-        "sample_unit": "independent_rebalance_date",
+        "sample_unit": "two_rebalance_moving_block",
         "historical_oos_label": "historical_reused_oos",
         "official_recommendation_isolation": (
             "shadow_only_until_all_gates_and_forward_validation_pass"

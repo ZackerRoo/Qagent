@@ -23,7 +23,7 @@ def test_runtime_only_revision_change_keeps_walk_forward_resume_compatible(monke
         lookback_days=400,
     )
 
-    assert stored.experiment_digest != current.experiment_digest
+    assert stored.experiment_digest == current.experiment_digest
     assert (
         stored.selection_algorithm_version
         == "historical-shadow-recommendation-v5-ranking-v3-candidate-pool50"
@@ -34,6 +34,128 @@ def test_runtime_only_revision_change_keeps_walk_forward_resume_compatible(monke
 
     assert resumed.experiment_digest == stored.experiment_digest
     assert resumed.runtime_revisions == ["revision-a", "revision-b"]
+
+
+def test_v3_validation_identity_change_rejects_resume_but_reuses_raw_snapshots(
+    monkeypatch,
+):
+    monkeypatch.setattr(experiment, "_git_revision", lambda: ("revision-a", False))
+    protocol = experiment.build_ranking_v3_protocol()
+    stored = experiment.build_walk_forward_experiment_manifest(
+        provider_mode="free",
+        dataset_revision=7,
+        start_date=date(2021, 11, 1),
+        end_date=date(2025, 12, 31),
+        rebalance_step_sessions=5,
+        lookback_days=400,
+    )
+
+    changes = (
+        {"protocol_digest": "changed-protocol"},
+        {"candidate_ledger_implementation_version": "candidate-ledger-v-next"},
+        {"statistics_implementation_version": "ranking-statistics-v-next"},
+    )
+    for update in changes:
+        changed_protocol = protocol.model_copy(update=update)
+        monkeypatch.setattr(
+            experiment,
+            "build_ranking_v3_protocol",
+            lambda protocol=changed_protocol: protocol,
+        )
+        changed = experiment.build_walk_forward_experiment_manifest(
+            provider_mode="free",
+            dataset_revision=7,
+            start_date=date(2021, 11, 1),
+            end_date=date(2025, 12, 31),
+            rebalance_step_sessions=5,
+            lookback_days=400,
+        )
+
+        assert changed.experiment_digest != stored.experiment_digest
+        assert not experiment.walk_forward_manifests_semantically_compatible(
+            stored,
+            changed,
+        )
+        assert experiment.walk_forward_selection_manifests_semantically_compatible(
+            stored,
+            changed,
+        )
+        upgraded = experiment.upgrade_walk_forward_execution_manifest(
+            stored,
+            changed,
+        )
+        assert upgraded.experiment_digest == changed.experiment_digest
+        assert upgraded.runtime_revisions == ["revision-a"]
+
+
+def test_v3_protocol_component_versions_are_frozen_into_manifest(monkeypatch):
+    monkeypatch.setattr(experiment, "_git_revision", lambda: ("revision-a", False))
+    manifest = experiment.build_walk_forward_experiment_manifest(
+        provider_mode="free",
+        dataset_revision=7,
+        start_date=date(2021, 11, 1),
+        end_date=date(2025, 12, 31),
+        rebalance_step_sessions=5,
+        lookback_days=400,
+    )
+    protocol = experiment.build_ranking_v3_protocol()
+
+    assert manifest.ranking_v3_protocol_digest == protocol.protocol_digest
+    assert (
+        manifest.candidate_ledger_implementation_version
+        == protocol.candidate_ledger_implementation_version
+    )
+    assert (
+        manifest.ranking_v3_statistics_implementation_version
+        == protocol.statistics_implementation_version
+    )
+    assert experiment.walk_forward_manifest_digest_is_valid(manifest)
+
+
+def test_legacy_manifest_can_only_reuse_raw_selection_snapshots(monkeypatch):
+    monkeypatch.setattr(experiment, "_git_revision", lambda: ("revision-a", False))
+    current = experiment.build_walk_forward_experiment_manifest(
+        provider_mode="free",
+        dataset_revision=7,
+        start_date=date(2021, 11, 1),
+        end_date=date(2025, 12, 31),
+        rebalance_step_sessions=5,
+        lookback_days=400,
+    )
+    legacy = current.model_copy(
+        update={
+            "schema_version": experiment.LEGACY_EXPERIMENT_SCHEMA_VERSION,
+            "ranking_v3_protocol_digest": experiment.UNVERSIONED_V3_COMPONENT,
+            "candidate_ledger_implementation_version": (
+                experiment.UNVERSIONED_V3_COMPONENT
+            ),
+            "ranking_v3_statistics_implementation_version": (
+                experiment.UNVERSIONED_V3_COMPONENT
+            ),
+        }
+    )
+    legacy = legacy.model_copy(
+        update={
+            "experiment_digest": experiment._digest(
+                experiment._legacy_manifest_digest_payload(legacy)
+            )
+        }
+    )
+
+    assert experiment.walk_forward_manifest_digest_is_valid(legacy)
+    assert not experiment.walk_forward_manifests_semantically_compatible(
+        legacy,
+        current,
+    )
+    assert experiment.walk_forward_selection_manifests_semantically_compatible(
+        legacy,
+        current,
+    )
+
+    upgraded = experiment.upgrade_walk_forward_execution_manifest(legacy, current)
+    assert upgraded.schema_version == experiment.EXPERIMENT_SCHEMA_VERSION
+    assert upgraded.experiment_digest == current.experiment_digest
+    assert upgraded.runtime_revisions == ["revision-a"]
 
 
 def test_semantic_change_rejects_walk_forward_resume(monkeypatch):

@@ -10,10 +10,14 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from qagent.backtesting.a_share_rules import RULES_PATH, load_a_share_rule_schedule
+from qagent.backtesting.ranking_v3_protocol import build_ranking_v3_protocol
 from qagent.strategies.registry import default_strategy_registry
 
 
-EXPERIMENT_SCHEMA_VERSION = "walk-forward-experiment-v1"
+EXPERIMENT_SCHEMA_VERSION = "walk-forward-experiment-v2"
+LEGACY_EXPERIMENT_SCHEMA_VERSION = "walk-forward-experiment-v1"
+SELECTION_SNAPSHOT_SCHEMA_VERSION = "walk-forward-selection-snapshot-v1"
+UNVERSIONED_V3_COMPONENT = "unversioned"
 SELECTION_ALGORITHM_VERSION = (
     "historical-shadow-recommendation-v5-ranking-v3-candidate-pool50"
 )
@@ -21,6 +25,7 @@ SELECTION_ALGORITHM_VERSION = (
 
 class WalkForwardExperimentManifest(BaseModel):
     schema_version: str
+    selection_snapshot_schema_version: str = SELECTION_SNAPSHOT_SCHEMA_VERSION
     experiment_digest: str
     created_at: datetime
     code_revision: str
@@ -38,6 +43,9 @@ class WalkForwardExperimentManifest(BaseModel):
     execution_rule_set_version: str
     fee_schedule_version: str
     execution_rules_digest: str
+    ranking_v3_protocol_digest: str = UNVERSIONED_V3_COMPONENT
+    candidate_ledger_implementation_version: str = UNVERSIONED_V3_COMPONENT
+    ranking_v3_statistics_implementation_version: str = UNVERSIONED_V3_COMPONENT
     runtime_revisions: list[str] = Field(default_factory=list)
 
 
@@ -61,9 +69,10 @@ def build_walk_forward_experiment_manifest(
     schedule = load_a_share_rule_schedule()
     rules_digest = hashlib.sha256(RULES_PATH.read_bytes()).hexdigest()
     revision, dirty = _git_revision()
+    ranking_v3_protocol = build_ranking_v3_protocol()
     stable_payload = {
         "schema_version": EXPERIMENT_SCHEMA_VERSION,
-        "code_revision": revision,
+        "selection_snapshot_schema_version": SELECTION_SNAPSHOT_SCHEMA_VERSION,
         "provider_mode": provider_mode,
         "dataset_revision": dataset_revision,
         "start_date": start_date.isoformat(),
@@ -75,10 +84,18 @@ def build_walk_forward_experiment_manifest(
         "execution_rule_set_version": schedule.rule_set_version,
         "fee_schedule_version": schedule.fee_schedule_version,
         "execution_rules_digest": rules_digest,
+        "ranking_v3_protocol_digest": ranking_v3_protocol.protocol_digest,
+        "candidate_ledger_implementation_version": (
+            ranking_v3_protocol.candidate_ledger_implementation_version
+        ),
+        "ranking_v3_statistics_implementation_version": (
+            ranking_v3_protocol.statistics_implementation_version
+        ),
     }
     return WalkForwardExperimentManifest(
         **stable_payload,
         experiment_digest=_digest(stable_payload),
+        code_revision=revision,
         created_at=datetime.now(timezone.utc),
         code_dirty=dirty,
         python_version=platform.python_version(),
@@ -112,6 +129,9 @@ def walk_forward_manifests_semantically_compatible(
         "execution_rule_set_version",
         "fee_schedule_version",
         "execution_rules_digest",
+        "ranking_v3_protocol_digest",
+        "candidate_ledger_implementation_version",
+        "ranking_v3_statistics_implementation_version",
     )
     return all(
         getattr(stored, field) == getattr(current, field)
@@ -131,7 +151,7 @@ def walk_forward_selection_manifests_semantically_compatible(
     ):
         return False
     selection_fields = (
-        "schema_version",
+        "selection_snapshot_schema_version",
         "provider_mode",
         "dataset_revision",
         "start_date",
@@ -151,6 +171,49 @@ def walk_forward_selection_manifests_semantically_compatible(
 def walk_forward_manifest_digest_is_valid(
     manifest: WalkForwardExperimentManifest,
 ) -> bool:
+    if manifest.schema_version == LEGACY_EXPERIMENT_SCHEMA_VERSION:
+        return manifest.experiment_digest == _digest(
+            _legacy_manifest_digest_payload(manifest)
+        )
+    if manifest.schema_version != EXPERIMENT_SCHEMA_VERSION:
+        return False
+    return manifest.experiment_digest == _digest(
+        _semantic_manifest_digest_payload(manifest)
+    )
+
+
+def _semantic_manifest_digest_payload(
+    manifest: WalkForwardExperimentManifest,
+) -> dict[str, object]:
+    return {
+        "schema_version": manifest.schema_version,
+        "selection_snapshot_schema_version": (
+            manifest.selection_snapshot_schema_version
+        ),
+        "provider_mode": manifest.provider_mode,
+        "dataset_revision": manifest.dataset_revision,
+        "start_date": manifest.start_date.isoformat(),
+        "end_date": manifest.end_date.isoformat(),
+        "rebalance_step_sessions": manifest.rebalance_step_sessions,
+        "lookback_days": manifest.lookback_days,
+        "selection_algorithm_version": manifest.selection_algorithm_version,
+        "strategy_registry_digest": manifest.strategy_registry_digest,
+        "execution_rule_set_version": manifest.execution_rule_set_version,
+        "fee_schedule_version": manifest.fee_schedule_version,
+        "execution_rules_digest": manifest.execution_rules_digest,
+        "ranking_v3_protocol_digest": manifest.ranking_v3_protocol_digest,
+        "candidate_ledger_implementation_version": (
+            manifest.candidate_ledger_implementation_version
+        ),
+        "ranking_v3_statistics_implementation_version": (
+            manifest.ranking_v3_statistics_implementation_version
+        ),
+    }
+
+
+def _legacy_manifest_digest_payload(
+    manifest: WalkForwardExperimentManifest,
+) -> dict[str, object]:
     stable_payload = {
         "schema_version": manifest.schema_version,
         "code_revision": manifest.code_revision,
@@ -166,7 +229,7 @@ def walk_forward_manifest_digest_is_valid(
         "fee_schedule_version": manifest.fee_schedule_version,
         "execution_rules_digest": manifest.execution_rules_digest,
     }
-    return manifest.experiment_digest == _digest(stable_payload)
+    return stable_payload
 
 
 def record_walk_forward_runtime_revision(

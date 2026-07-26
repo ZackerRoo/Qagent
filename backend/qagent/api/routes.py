@@ -489,7 +489,9 @@ def _create_or_get_walk_forward_job(
         job = repo.update_walk_forward_job(
             job.job_id,
             processed_snapshots=len(reusable_checkpoints),
-            current_date=sessions[-1],
+            current_date=date.fromisoformat(
+                reusable_checkpoints[-1]["decision_date"]
+            ),
             checkpoints=reusable_checkpoints,
         )
     _submit_walk_forward_job(job.job_id)
@@ -503,23 +505,69 @@ def _reusable_walk_forward_checkpoints(
     sessions: list[date],
 ) -> list[dict[str, object]]:
     expected_dates = [item.isoformat() for item in sessions]
-    for run in repo.list_walk_forward_runs(provider=manifest.provider_mode, limit=20):
-        if run.status != "succeeded" or not _walk_forward_run_matches_manifest(
-            run,
+    candidates: list[list[dict[str, object]]] = []
+    for job in repo.list_walk_forward_jobs(
+        provider=manifest.provider_mode,
+        limit=100,
+    ):
+        if not job.checkpoints or not _walk_forward_selection_manifest_payload_matches(
+            job.experiment_manifest,
             manifest,
         ):
+            continue
+        checkpoints = _ordered_reusable_checkpoint_prefix(
+            job.checkpoints,
+            expected_dates=expected_dates,
+        )
+        if checkpoints:
+            candidates.append(checkpoints)
+    for run in repo.list_walk_forward_runs(provider=manifest.provider_mode, limit=20):
+        if run.status != "succeeded":
             continue
         snapshots = run.payload.get("snapshots")
         if not isinstance(snapshots, list):
             continue
-        checkpoints = [
-            item
-            for item in snapshots
-            if isinstance(item, dict) and isinstance(item.get("decision_date"), str)
-        ]
-        if [item["decision_date"] for item in checkpoints] == expected_dates:
-            return checkpoints
-    return []
+        stored_manifest = run.payload.get("experiment_manifest")
+        if not isinstance(stored_manifest, dict) or not (
+            run.dataset_revision == manifest.dataset_revision
+            and run.start_date == manifest.start_date
+            and run.end_date == manifest.end_date
+            and run.rebalance_step_sessions == manifest.rebalance_step_sessions
+            and run.lookback_days == manifest.lookback_days
+            and _walk_forward_selection_manifest_payload_matches(
+                stored_manifest,
+                manifest,
+            )
+        ):
+            continue
+        checkpoints = _ordered_reusable_checkpoint_prefix(
+            snapshots,
+            expected_dates=expected_dates,
+        )
+        if checkpoints:
+            candidates.append(checkpoints)
+    return max(candidates, key=len, default=[])
+
+
+def _ordered_reusable_checkpoint_prefix(
+    payloads: list[dict[str, object]],
+    *,
+    expected_dates: list[str],
+) -> list[dict[str, object]]:
+    by_date = {
+        item["decision_date"]: item
+        for item in payloads
+        if isinstance(item, dict) and isinstance(item.get("decision_date"), str)
+    }
+    checkpoints = [
+        by_date[decision_date]
+        for decision_date in expected_dates
+        if decision_date in by_date
+    ]
+    checkpoint_dates = [item["decision_date"] for item in checkpoints]
+    if checkpoint_dates != expected_dates[: len(checkpoint_dates)]:
+        return []
+    return checkpoints
 
 
 def _walk_forward_run_matches_manifest(run, manifest: WalkForwardExperimentManifest) -> bool:
@@ -545,6 +593,20 @@ def _walk_forward_manifest_payload_matches(
     except (TypeError, ValueError):
         return payload.get("experiment_digest") == current.experiment_digest
     return walk_forward_manifests_semantically_compatible(stored, current)
+
+
+def _walk_forward_selection_manifest_payload_matches(
+    payload: dict[str, object],
+    current: WalkForwardExperimentManifest,
+) -> bool:
+    try:
+        stored = WalkForwardExperimentManifest.model_validate(payload)
+    except (TypeError, ValueError):
+        return False
+    return walk_forward_selection_manifests_semantically_compatible(
+        stored,
+        current,
+    )
 
 
 @router.get("/walk-forward/jobs")

@@ -1682,9 +1682,13 @@ function RankingV3ShadowCard({
           </small>
         </div>
         <div>
-          <span>{zh ? "共同调仓日" : "Common rebalance dates"}</span>
-          <strong>{validation?.common_rebalance_date_count ?? 0}/{requiredDates ?? "-"}</strong>
-          <small>{validation?.dates_are_common ? (zh ? "日历一致" : "Calendars match") : (zh ? "日历未对齐" : "Calendars differ")}</small>
+          <span>{zh ? "有效时间块" : "Independent time blocks"}</span>
+          <strong>{validation?.effective_independent_block_count ?? 0}/{requiredDates ?? "-"}</strong>
+          <small>
+            {zh ? "原始调仓日" : "raw dates"} {validation?.common_rebalance_date_count ?? 0}
+            {" · "}
+            {zh ? "每块" : "block"} {validation?.dependence_block_length ?? 1} {zh ? "期" : "cohorts"}
+          </small>
         </div>
         <div>
           <span>{zh ? "完成交易" : "Completed trades"}</span>
@@ -1746,6 +1750,7 @@ function RankingV3ShadowCard({
           <small>
             {protocol?.protocol_id ?? evaluation.model_version ?? "-"}
             {protocol?.protocol_digest ? ` · ${protocol.protocol_digest.slice(0, 8)}` : ""}
+            {protocol?.statistics_implementation_version ? ` · ${protocol.statistics_implementation_version}` : ""}
           </small>
         </div>
         <div>

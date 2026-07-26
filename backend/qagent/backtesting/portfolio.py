@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from decimal import (
     Decimal,
     ROUND_CEILING,
@@ -65,6 +65,7 @@ ADAPTIVE_CONFIRMATION_EXECUTION_PROFILE = PortfolioExecutionProfile(
 class CandidateOutcomeStatus(str, Enum):
     RESOLVED = "resolved"
     NOT_TRIGGERED_OR_UNFILLABLE = "not_triggered_or_unfillable"
+    EXIT_UNFILLABLE = "exit_unfillable"
     INVALID_PLAN = "invalid_plan"
     INSUFFICIENT_FUTURE_DATA = "insufficient_future_data"
     OUTSIDE_REQUESTED_RANGE = "outside_requested_range"
@@ -78,6 +79,7 @@ class CandidateSignalOutcome(BaseModel):
     status: CandidateOutcomeStatus
     status_detail: str
     nominal_amount: Decimal
+    resolved_at: date | None = None
     entry_date: date | None = None
     exit_date: date | None = None
     exit_reason: str | None = None
@@ -175,6 +177,7 @@ class _TradeCandidate:
     execution_rule: HistoricalExecutionRule | None = None
     exit_execution_rule: HistoricalExecutionRule | None = None
     max_executable_shares: Decimal | None = None
+    exit_executable_shares: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -182,6 +185,7 @@ class _CandidateResolution:
     status: CandidateOutcomeStatus
     detail: str
     candidate: _TradeCandidate | None = None
+    resolved_at: date | None = None
 
 
 @dataclass
@@ -279,7 +283,7 @@ def run_signal_portfolio_backtest(
     bars = provider.get_daily_bars(
         instrument_ids,
         start=start,
-        end=end + timedelta(days=(max_entry_wait_days + max_holding_days) * 3),
+        end=end,
     )
     bars = _normalize_bars(bars)
     candidates = _build_candidates(
@@ -291,6 +295,7 @@ def run_signal_portfolio_backtest(
         execution_rule_resolver=execution_rule_resolver,
         execution_profile=execution_profile,
     )
+    candidates = [candidate for candidate in candidates if candidate.exit_date <= end]
     trades, equity_curve = _simulate_portfolio(
         candidates,
         start=start,
@@ -318,6 +323,7 @@ def run_signal_portfolio_backtest(
         "trade_candidates": str(len(candidates)),
         "trades": str(len(trades)),
         "lookahead_guard": "signals_generated_before_exits",
+        "history_cutoff": "hard_end_date_no_future_bars",
         "portfolio_model": "fixed_risk_stop_target_time_exit",
         "execution_profile": execution_profile.key,
         "entry_confirmation": (
@@ -402,7 +408,7 @@ def resolve_candidate_outcome_ledger(
         bars = provider.get_daily_bars(
             instrument_ids,
             start=start,
-            end=end + timedelta(days=(max_entry_wait_days + max_holding_days) * 3),
+            end=end,
         )
         bars = _normalize_bars(bars)
     else:
@@ -425,6 +431,7 @@ def resolve_candidate_outcome_ledger(
                     CandidateOutcomeStatus.OUTSIDE_REQUESTED_RANGE,
                     "signal_date_outside_requested_range",
                     nominal_amount,
+                    resolved_at=signal.signal_date,
                 )
             )
             continue
@@ -444,6 +451,7 @@ def resolve_candidate_outcome_ledger(
                     resolution.status,
                     resolution.detail,
                     nominal_amount,
+                    resolved_at=resolution.resolved_at,
                 )
             )
             continue
@@ -471,6 +479,9 @@ def resolve_candidate_outcome_ledger(
         "fee_multiplier": str(fee_multiplier),
         "max_entry_wait_days": str(max_entry_wait_days),
         "max_holding_days": str(max_holding_days),
+        "result_availability": "explicit_resolved_at",
+        "history_cutoff": "hard_end_date_no_future_bars",
+        "liquidity_sizing": "entry_date_only_exit_capacity_is_censoring_gate",
         "execution_profile": execution_profile.key,
         "cn_execution_rules": (
             "versioned_replay_evidence"
@@ -669,6 +680,7 @@ def _candidate_resolution_from_signal(
                 return _CandidateResolution(
                     CandidateOutcomeStatus.NOT_TRIGGERED_OR_UNFILLABLE,
                     "entry_fill_outside_plan",
+                    resolved_at=row["trade_date"],
                 )
             entry_index = index
             entry_rule = row_rule
@@ -687,6 +699,7 @@ def _candidate_resolution_from_signal(
         return _CandidateResolution(
             CandidateOutcomeStatus.NOT_TRIGGERED_OR_UNFILLABLE,
             "entry_not_triggered_or_fill_blocked",
+            resolved_at=future.head(max_entry_wait_days).iloc[-1]["trade_date"],
         )
 
     entry_date = ordered.iloc[entry_index]["trade_date"]
@@ -708,6 +721,7 @@ def _candidate_resolution_from_signal(
         return _CandidateResolution(
             CandidateOutcomeStatus.INVALID_PLAN,
             "holding_window_not_longer_than_settlement",
+            resolved_at=entry_date,
         )
 
     exit_price: Decimal | None = None
@@ -809,8 +823,9 @@ def _candidate_resolution_from_signal(
                 "exit_window_incomplete",
             )
         return _CandidateResolution(
-            CandidateOutcomeStatus.NOT_TRIGGERED_OR_UNFILLABLE,
+            CandidateOutcomeStatus.EXIT_UNFILLABLE,
             "exit_order_unfillable",
+            resolved_at=exit_rows.iloc[-1]["trade_date"],
         )
 
     return _CandidateResolution(
@@ -827,8 +842,10 @@ def _candidate_resolution_from_signal(
             holding_days=max((exit_date - entry_date).days, 0),
             execution_rule=entry_rule,
             exit_execution_rule=selected_exit_rule,
-            max_executable_shares=Decimal(min(entry_capacity, exit_capacity)),
+            max_executable_shares=Decimal(entry_capacity),
+            exit_executable_shares=Decimal(exit_capacity),
         ),
+        resolved_at=exit_date,
     )
 
 
@@ -1086,6 +1103,11 @@ def _size_trade(
         execution_rule=candidate.execution_rule,
     )
     shares = _round_for_exit_rule(shares, candidate.exit_execution_rule)
+    if (
+        candidate.exit_executable_shares is not None
+        and shares > candidate.exit_executable_shares
+    ):
+        return None
     if cash is not None:
         shares = _fit_shares_to_cash(
             candidate,
@@ -1166,6 +1188,8 @@ def _unresolved_candidate_outcome(
     status: CandidateOutcomeStatus,
     detail: str,
     nominal_amount: Decimal,
+    *,
+    resolved_at: date | None = None,
 ) -> CandidateSignalOutcome:
     return CandidateSignalOutcome(
         snapshot_id=signal.snapshot_id,
@@ -1175,6 +1199,7 @@ def _unresolved_candidate_outcome(
         status=status,
         status_detail=detail,
         nominal_amount=nominal_amount,
+        resolved_at=resolved_at,
     )
 
 
@@ -1200,6 +1225,18 @@ def _resolved_candidate_outcome(
             CandidateOutcomeStatus.NOT_TRIGGERED_OR_UNFILLABLE,
             "nominal_amount_below_minimum_order",
             nominal_amount,
+            resolved_at=candidate.entry_date,
+        )
+    if (
+        candidate.exit_executable_shares is not None
+        and shares > candidate.exit_executable_shares
+    ):
+        return _unresolved_candidate_outcome(
+            candidate.signal,
+            CandidateOutcomeStatus.EXIT_UNFILLABLE,
+            "fixed_notional_exceeds_exit_liquidity",
+            nominal_amount,
+            resolved_at=candidate.exit_date,
         )
 
     entry_value = _money(candidate.entry_price * shares)
@@ -1221,6 +1258,7 @@ def _resolved_candidate_outcome(
         status=CandidateOutcomeStatus.RESOLVED,
         status_detail="resolved",
         nominal_amount=nominal_amount,
+        resolved_at=candidate.exit_date,
         entry_date=candidate.entry_date,
         exit_date=candidate.exit_date,
         exit_reason=candidate.exit_reason,

@@ -17,8 +17,10 @@ class FrameProvider:
 
     def __init__(self, bars: pd.DataFrame):
         self.bars = bars
+        self.requested_windows = []
 
     def get_daily_bars(self, instrument_ids, start, end):
+        self.requested_windows.append((start, end))
         return self.bars.loc[
             self.bars["instrument_id"].isin(instrument_ids)
             & (self.bars["trade_date"] >= start)
@@ -285,3 +287,118 @@ def test_candidate_ledger_is_deterministic_for_input_order_and_repeated_runs():
         "deterministic-a",
         "deterministic-b",
     ]
+
+
+def test_candidate_ledger_hard_stops_market_data_at_requested_end():
+    signal = _signal("cutoff", "CN:000001").model_copy(
+        update={"signal_date": date(2025, 12, 29)}
+    )
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "CN:000001",
+                "trade_date": trade_date,
+                "open": open_price,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": 1_000_000,
+            }
+            for trade_date, open_price, high, low, close in (
+                (date(2025, 12, 29), 9.8, 9.9, 9.7, 9.8),
+                (date(2025, 12, 30), 10.0, 10.3, 9.8, 10.2),
+                (date(2025, 12, 31), 10.2, 10.4, 9.8, 10.1),
+                (date(2026, 1, 5), 11.0, 11.2, 10.8, 11.0),
+            )
+        ]
+    )
+    provider = FrameProvider(bars)
+
+    result = resolve_candidate_outcome_ledger(
+        signals=[signal],
+        provider=provider,
+        start=date(2025, 12, 29),
+        end=date(2025, 12, 31),
+        slippage_bps=Decimal("0"),
+        max_entry_wait_days=2,
+        max_holding_days=3,
+    )
+
+    outcome = result.outcomes[0]
+    assert provider.requested_windows == [
+        (date(2025, 12, 29), date(2025, 12, 31))
+    ]
+    assert outcome.status == CandidateOutcomeStatus.INSUFFICIENT_FUTURE_DATA
+    assert outcome.exit_date is None
+    assert outcome.resolved_at is None
+    assert result.data_health["history_cutoff"] == "hard_end_date_no_future_bars"
+
+
+def test_untriggered_result_becomes_available_on_fifth_actual_session():
+    signal = _signal("holiday-window", "CN:000001", trigger="20").model_copy(
+        update={
+            "signal_date": date(2025, 1, 24),
+            "initial_stop": Decimal("19"),
+            "target_1": Decimal("22"),
+        }
+    )
+    session_dates = (
+        date(2025, 1, 24),
+        date(2025, 2, 5),
+        date(2025, 2, 6),
+        date(2025, 2, 7),
+        date(2025, 2, 10),
+        date(2025, 2, 11),
+    )
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "CN:000001",
+                "trade_date": trade_date,
+                "open": 10,
+                "high": 10.5,
+                "low": 9.5,
+                "close": 10,
+                "volume": 1_000_000,
+            }
+            for trade_date in session_dates
+        ]
+    )
+
+    result = resolve_candidate_outcome_ledger(
+        signals=[signal],
+        provider=FrameProvider(bars),
+        start=date(2025, 1, 24),
+        end=date(2025, 2, 11),
+        slippage_bps=Decimal("0"),
+        max_entry_wait_days=5,
+        max_holding_days=3,
+    )
+
+    outcome = result.outcomes[0]
+    assert outcome.status == CandidateOutcomeStatus.NOT_TRIGGERED_OR_UNFILLABLE
+    assert outcome.resolved_at == date(2025, 2, 11)
+
+
+def test_exit_liquidity_does_not_resize_the_historical_entry_position():
+    bars = _resolved_bars("CN:000001")
+    bars.loc[bars["trade_date"] == date(2025, 1, 3), "volume"] = 500
+
+    result = resolve_candidate_outcome_ledger(
+        signals=[_signal("thin-exit", "CN:000001")],
+        provider=FrameProvider(bars),
+        start=date(2025, 1, 1),
+        end=date(2025, 1, 3),
+        nominal_amount=Decimal("100000"),
+        transaction_cost_bps=Decimal("0"),
+        slippage_bps=Decimal("0"),
+        max_entry_wait_days=2,
+        max_holding_days=3,
+        execution_rule_resolver=StaticExecutionResolver(_execution_rule()),
+    )
+
+    outcome = result.outcomes[0]
+    assert outcome.status == CandidateOutcomeStatus.EXIT_UNFILLABLE
+    assert outcome.status_detail == "fixed_notional_exceeds_exit_liquidity"
+    assert outcome.shares is None
+    assert outcome.resolved_at == date(2025, 1, 3)

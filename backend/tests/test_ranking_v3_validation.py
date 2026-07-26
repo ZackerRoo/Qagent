@@ -5,6 +5,8 @@ import pytest
 
 from qagent.backtesting.ranking_v3_validation import (
     RankingV3ReturnObservation,
+    _iid_bootstrap_lower_bound,
+    _iid_positive_sign_flip_p_value,
     evaluate_ranking_v3_validation,
     holm_bonferroni,
 )
@@ -53,11 +55,12 @@ def _evaluation(
 
 
 def test_clusters_multiple_rows_by_date_and_never_reports_official_pass():
-    result = _evaluation([0.8 + (index % 5) * 0.05 for index in range(30)])
+    result = _evaluation([0.8 + (index % 5) * 0.05 for index in range(60)])
 
-    assert result.baseline_row_count == 90
-    assert result.challenger_row_count == 90
-    assert result.common_rebalance_date_count == 30
+    assert result.baseline_row_count == 180
+    assert result.challenger_row_count == 180
+    assert result.common_rebalance_date_count == 60
+    assert result.effective_independent_block_count == 30
     assert result.paired_mean_net_excess_pct == pytest.approx(0.9)
     assert result.statistical_gate_status == "pass"
     assert result.status == "insufficient"
@@ -135,8 +138,8 @@ def test_distribution_concentration_cannot_inflate_independent_sample_count():
 
     assert result.completed_trade_count == 100
     assert result.common_rebalance_date_count == 5
-    assert result.statistical_gate_status == "insufficient"
-    assert result.status == "insufficient"
+    assert result.statistical_gate_status != "pass"
+    assert result.status != "pass"
     date_gate = next(
         gate for gate in result.gates if gate.key == "independent_rebalance_dates"
     )
@@ -154,7 +157,7 @@ def test_fewer_than_sixty_completed_trades_is_insufficient():
     assert trade_gate.status == "insufficient"
 
 
-def test_exact_24_date_and_60_trade_boundaries_pass_sample_gates():
+def test_24_overlapping_dates_are_only_12_effective_blocks():
     result = evaluate_ranking_v3_validation(
         _observations([0.0] * 24),
         _observations([0.7 + (index % 3) * 0.1 for index in range(24)]),
@@ -170,14 +173,38 @@ def test_exact_24_date_and_60_trade_boundaries_pass_sample_gates():
     trade_gate = next(
         gate for gate in result.gates if gate.key == "completed_trades"
     )
-    assert date_gate.status == "pass"
+    assert result.dependence_block_length == 2
+    assert result.effective_independent_block_count == 12
+    assert date_gate.status == "insufficient"
     assert trade_gate.status == "pass"
 
 
-def test_23_date_and_59_trade_boundaries_are_insufficient():
+def test_exact_48_date_and_60_trade_boundaries_pass_effective_sample_gates():
     result = evaluate_ranking_v3_validation(
-        _observations([0.0] * 23),
-        _observations([1.0] * 23),
+        _observations([0.0] * 48),
+        _observations([0.7 + (index % 3) * 0.1 for index in range(48)]),
+        completed_trade_count=60,
+        bootstrap_samples=500,
+        permutation_samples=1000,
+        seed=17,
+    )
+
+    date_gate = next(
+        gate for gate in result.gates if gate.key == "independent_rebalance_dates"
+    )
+    trade_gate = next(
+        gate for gate in result.gates if gate.key == "completed_trades"
+    )
+    assert result.effective_independent_block_count == 24
+    assert date_gate.status == "pass"
+    assert date_gate.observed == "24 effective blocks (48 rebalance dates)"
+    assert trade_gate.status == "pass"
+
+
+def test_47_date_and_59_trade_boundaries_are_insufficient():
+    result = evaluate_ranking_v3_validation(
+        _observations([0.0] * 47),
+        _observations([1.0] * 47),
         completed_trade_count=59,
         bootstrap_samples=300,
         permutation_samples=500,
@@ -192,38 +219,9 @@ def test_23_date_and_59_trade_boundaries_are_insufficient():
 
 
 def test_positive_mean_with_bootstrap_interval_crossing_zero_fails():
-    values = [
-        -3.0,
-        3.1,
-        -2.8,
-        2.9,
-        -2.6,
-        2.7,
-        -2.4,
-        2.5,
-        -2.2,
-        2.3,
-        -2.0,
-        2.1,
-        -1.8,
-        1.9,
-        -1.6,
-        1.7,
-        -1.4,
-        1.5,
-        -1.2,
-        1.3,
-        -1.0,
-        1.1,
-        -0.8,
-        0.9,
-        0.1,
-        0.1,
-        0.1,
-        0.1,
-        0.1,
-        0.1,
-    ]
+    values: list[float] = []
+    for block in range(15):
+        values.extend([3.2, 3.2] if block % 2 == 0 else [-3.0, -3.0])
 
     result = _evaluation(values)
 
@@ -254,7 +252,7 @@ def test_holm_can_reject_an_unadjusted_p_value_that_passes():
 
 
 def test_validation_applies_holm_family_adjustment():
-    centered = [(-2.3 + index * 0.2) for index in range(24)]
+    centered = [(-2.3 + index * 0.1) for index in range(48)]
     values = [value + 0.5 for value in centered]
     result = _evaluation(
         values,
@@ -340,6 +338,76 @@ def test_zero_variance_dsr_is_unavailable_instead_of_bypassing_trial_penalty():
     )
     assert dsr_gate.status == "insufficient"
     assert result.status == "insufficient"
+
+
+def test_small_overlapping_sample_cannot_produce_dsr():
+    result = evaluate_ranking_v3_validation(
+        _observations([0.0] * 5),
+        _observations([0.4, 0.7, 0.1, 0.8, 0.2]),
+        completed_trade_count=60,
+        bootstrap_samples=300,
+        permutation_samples=1000,
+    )
+
+    assert result.common_rebalance_date_count == 5
+    assert result.effective_independent_block_count == 2
+    assert result.deflated_sharpe_probability is None
+    dsr_gate = next(
+        gate for gate in result.gates if gate.key == "deflated_sharpe_probability"
+    )
+    assert dsr_gate.status == "insufficient"
+
+
+def test_block_statistics_are_deterministic_for_overlapping_returns():
+    values = [
+        1.4 if (index // 2) % 3 else -0.9
+        for index in range(60)
+    ]
+    first = _evaluation(values, rows_per_date=2, seed=73)
+    second = _evaluation(values, rows_per_date=2, seed=73)
+
+    assert first == second
+    assert first.effective_independent_block_count == 30
+    assert first.bootstrap_one_sided_95_lower_bound_pct is not None
+    assert first.positive_edge_p_value is not None
+
+
+def test_alternating_overlap_does_not_inflate_effective_sample_gate():
+    values = [1.0 if index % 2 == 0 else -0.2 for index in range(30)]
+    result = _evaluation(values, rows_per_date=3)
+
+    assert result.common_rebalance_date_count == 30
+    assert result.effective_independent_block_count == 15
+    date_gate = next(
+        gate for gate in result.gates if gate.key == "independent_rebalance_dates"
+    )
+    assert date_gate.status == "insufficient"
+    assert "15 independent time blocks" in date_gate.reason
+
+
+def test_block_inference_cannot_be_less_conservative_than_iid():
+    values = [
+        1.4 if (index // 2) % 3 else -0.9
+        for index in range(60)
+    ]
+    result = _evaluation(values, rows_per_date=2, seed=73)
+    iid_lower = _iid_bootstrap_lower_bound(
+        values,
+        samples=1500,
+        seed=73,
+    )
+    iid_p_value = _iid_positive_sign_flip_p_value(
+        values,
+        samples=5000,
+        seed=74,
+    )
+
+    assert iid_lower is not None
+    assert iid_p_value is not None
+    assert result.bootstrap_one_sided_95_lower_bound_pct is not None
+    assert result.positive_edge_p_value is not None
+    assert result.bootstrap_one_sided_95_lower_bound_pct <= iid_lower
+    assert result.positive_edge_p_value >= iid_p_value
 
 
 def test_empty_inputs_are_rejected_without_fabricating_statistics():
