@@ -58,9 +58,10 @@ def apply_recommendation_feedback_calibration(
     if center is None or not center.signal_effects:
         return cards
     effects = {
-        effect.signal_key: effect
+        (effect.dimension, effect.signal_key): effect
         for effect in center.signal_effects
         if effect.completed_count >= 2 and abs(effect.suggested_weight_delta) > 0
+        and effect.signal_key != "unknown"
     }
     if not effects:
         return cards
@@ -69,12 +70,12 @@ def apply_recommendation_feedback_calibration(
             continue
         matched = [
             effects[key]
-            for key in card_validation_signal_keys(card)
+            for key in card_validation_dimension_keys(card)
             if key in effects
         ]
         if not matched:
             continue
-        raw_delta = sum(_action_delta(effect) for effect in matched)
+        raw_delta = _dimension_normalized_adjustment(matched, _action_delta)
         reliability_scale = 0.45 + center.reliability_score * 0.55
         delta = _clamp(raw_delta * reliability_scale, -0.08, 0.08)
         if abs(delta) < 0.001:
@@ -102,7 +103,9 @@ def apply_recommendation_feedback_quality_gate(
     if center is None or not center.signal_effects:
         return cards
     weak_effects = {
-        effect.signal_key: effect for effect in center.signal_effects if _is_blocking_effect(effect)
+        (effect.dimension, effect.signal_key): effect
+        for effect in center.signal_effects
+        if effect.signal_key != "unknown" and _is_blocking_effect(effect)
     }
     if not weak_effects:
         return cards
@@ -111,7 +114,7 @@ def apply_recommendation_feedback_quality_gate(
             continue
         matched = [
             weak_effects[key]
-            for key in card_validation_signal_keys(card)
+            for key in card_validation_dimension_keys(card)
             if key in weak_effects
         ]
         if not matched:
@@ -149,7 +152,10 @@ def apply_paper_trading_feedback(
             continue
         matched_drags = _matched_paper_effects(card, drag_effects)
         if matched_drags:
-            raw_delta = -sum(_paper_effect_strength(effect, paused) for effect in matched_drags)
+            raw_delta = -_dimension_normalized_adjustment(
+                matched_drags,
+                lambda effect: _paper_effect_strength(effect, paused),
+            )
             delta = _clamp(raw_delta, -0.12, -0.02)
             card.rank_score = round(_clamp(card.rank_score + delta, 0.0, 1.0), 4)
             card.dynamic_score = card.rank_score
@@ -172,8 +178,9 @@ def apply_paper_trading_feedback(
         matched_contributors = _matched_paper_effects(card, contributor_effects)
         if not matched_contributors:
             continue
-        raw_delta = sum(
-            _paper_contributor_strength(effect, paused) for effect in matched_contributors
+        raw_delta = _dimension_normalized_adjustment(
+            matched_contributors,
+            lambda effect: _paper_contributor_strength(effect, paused),
         )
         delta = _clamp(raw_delta, 0.015, 0.06)
         card.rank_score = round(_clamp(card.rank_score + delta, 0.0, 1.0), 4)
@@ -304,6 +311,32 @@ def card_validation_signal_keys(card: OpportunityCard) -> list[str]:
     return sorted(set(key for key in keys if key))
 
 
+def card_validation_dimension_keys(card: OpportunityCard) -> list[tuple[str, str]]:
+    keys: set[tuple[str, str]] = {
+        ("signal", key) for key in card_validation_signal_keys(card)
+    }
+    if card.primary_strategy_id:
+        keys.add(("strategy", card.primary_strategy_id))
+    factor_ids = set(card.factor_flags)
+    factor_ids.update(
+        exposure.factor_id
+        for exposure in card.factor_exposures
+        if exposure.factor_id
+    )
+    a_share_enhanced = getattr(card, "a_share_enhanced", None)
+    if a_share_enhanced is not None:
+        factor_ids.update(a_share_enhanced.signals)
+    keys.update(("factor", key) for key in factor_ids if key)
+    if card.market_context is not None:
+        if card.market_context.industry:
+            keys.add(("industry", card.market_context.industry))
+        keys.update(("theme", key) for key in card.market_context.themes if key)
+    market_regime = _card_signal_market_regime(card)
+    if market_regime != "unknown":
+        keys.add(("market_regime", market_regime))
+    return sorted(keys)
+
+
 def _paper_drag_effects(report: object | None) -> dict[tuple[str, str], object]:
     if report is None:
         return {}
@@ -314,7 +347,7 @@ def _paper_drag_effects(report: object | None) -> dict[tuple[str, str], object]:
             continue
         dimension = str(getattr(item, "dimension", "")).strip().lower()
         key = str(getattr(item, "key", "")).strip()
-        if not dimension or not key:
+        if not dimension or not key or key == "unknown":
             continue
         effects[(dimension, key)] = item
     return effects
@@ -330,7 +363,7 @@ def _paper_contributor_effects(report: object | None) -> dict[tuple[str, str], o
             continue
         dimension = str(getattr(item, "dimension", "")).strip().lower()
         key = str(getattr(item, "key", "")).strip()
-        if not dimension or not key:
+        if not dimension or not key or key == "unknown":
             continue
         effects[(dimension, key)] = item
     return effects
@@ -369,18 +402,14 @@ def _matched_paper_effects(
     effects: dict[tuple[str, str], object],
 ) -> list[object]:
     matched: list[object] = []
-    if card.primary_strategy_id:
-        effect = effects.get(("strategy", card.primary_strategy_id))
+    for dimension_key in card_validation_dimension_keys(card):
+        effect = effects.get(dimension_key)
         if effect is not None:
             matched.append(effect)
     asset_key = _card_asset_key(card)
     effect = effects.get(("asset", asset_key))
     if effect is not None:
         matched.append(effect)
-    for key in card_validation_signal_keys(card):
-        effect = effects.get(("signal", key)) or effects.get(("factor", key))
-        if effect is not None:
-            matched.append(effect)
     unique: list[object] = []
     seen: set[tuple[str, str]] = set()
     for effect in matched:
@@ -497,6 +526,49 @@ def _action_delta(effect) -> float:
     if action in {"降低", "lower", "decrease", "demote"}:
         return -abs(effect.suggested_weight_delta)
     return effect.suggested_weight_delta
+
+
+def _dimension_normalized_adjustment(
+    effects: list[object],
+    adjustment,
+) -> float:
+    by_dimension: dict[str, list[float]] = {}
+    for effect in effects:
+        dimension = str(getattr(effect, "dimension", "signal") or "signal")
+        by_dimension.setdefault(dimension, []).append(float(adjustment(effect)))
+    if not by_dimension:
+        return 0.0
+    representative = [
+        max(values, key=abs)
+        for values in by_dimension.values()
+        if values
+    ]
+    return sum(representative) / len(representative) if representative else 0.0
+
+
+def _card_signal_market_regime(card: OpportunityCard) -> str:
+    market_context = card.market_context
+    candidates = [
+        getattr(card, "market_regime", None),
+        getattr(card, "market_environment", None),
+        getattr(card, "market_state", None),
+        getattr(market_context, "market_regime", None),
+        getattr(market_context, "regime", None),
+        getattr(market_context, "market_state", None),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, Mapping):
+            candidate = (
+                candidate.get("regime")
+                or candidate.get("state")
+                or candidate.get("CN")
+            )
+            if isinstance(candidate, Mapping):
+                candidate = candidate.get("regime") or candidate.get("state")
+        value = str(candidate or "").strip()
+        if value and value.lower() not in {"none", "null", "unknown", "未分类"}:
+            return value
+    return "unknown"
 
 
 def _is_blocking_effect(effect) -> bool:

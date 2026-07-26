@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from collections.abc import Generator
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -8,6 +9,7 @@ from sqlalchemy import BigInteger, DateTime, Numeric, create_engine
 from sqlalchemy import event, inspect, text
 from sqlalchemy.engine import Dialect
 from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import NullPool
 from sqlalchemy.types import TypeDecorator
@@ -89,6 +91,8 @@ class SQLiteScaledDecimal(TypeDecorator[Decimal]):
 
 _schema_lock = Lock()
 _initialized_urls: set[str] = set()
+_RANKING_V3_FORWARD_TRIGGER_VERSION = 2
+_RANKING_V3_PRODUCTION_TRIGGER_VERSION = 1
 
 
 def create_db_engine(database_url: str | None = None):
@@ -118,8 +122,10 @@ def _configure_sqlite_pragmas(engine: Engine) -> None:
     def _set_sqlite_pragmas(dbapi_connection, _connection_record):
         cursor = dbapi_connection.cursor()
         try:
-            cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute("PRAGMA journal_mode")
+            if str(cursor.fetchone()[0]).lower() != "wal":
+                cursor.execute("PRAGMA journal_mode=WAL")
         finally:
             cursor.close()
 
@@ -132,8 +138,10 @@ def initialize_database(database_url: str | None = None):
     engine = create_db_engine(url)
     with _schema_lock:
         if url not in _initialized_urls:
-            Base.metadata.create_all(engine)
-            _apply_additive_migrations(engine)
+            if engine.dialect.name.startswith("sqlite"):
+                _apply_additive_migrations(engine)
+            else:
+                Base.metadata.create_all(engine)
             _initialized_urls.add(url)
     return engine
 
@@ -151,8 +159,11 @@ def get_session() -> Generator[Session, None, None]:
 def _apply_additive_migrations(engine: Engine) -> None:
     if not engine.dialect.name.startswith("sqlite"):
         return
-    inspector = inspect(engine)
-    with engine.begin() as connection:
+    with _exclusive_sqlite_migration(engine) as connection:
+        Base.metadata.create_all(connection)
+        inspector = inspect(connection)
+        _drop_ranking_v3_forward_triggers(connection)
+        _drop_ranking_v3_production_triggers(connection)
         _add_missing_columns(
             connection,
             inspector,
@@ -173,8 +184,14 @@ def _apply_additive_migrations(engine: Engine) -> None:
             "paper_trades",
             {
                 "allocation_multiplier": "NUMERIC(8, 4) NOT NULL DEFAULT 1.0",
+                "admission_source": "VARCHAR(32) DEFAULT 'legacy_unknown'",
+                "production_identity_digest": "VARCHAR(64)",
+                "production_batch_fact_digest": "VARCHAR(64)",
+                "production_selection_item_digest": "VARCHAR(64)",
+                "release_proof_digest": "VARCHAR(64)",
             },
         )
+        _backfill_paper_trade_admission_source(connection)
         _add_missing_columns(
             connection,
             inspector,
@@ -244,23 +261,59 @@ def _apply_additive_migrations(engine: Engine) -> None:
                 {"owner_run_id": ("VARCHAR(64) NOT NULL DEFAULT 'legacy-unknown-owner'")},
             )
         _add_strategy_governance_columns(connection, inspector)
+        _migrate_ranking_v3_forward_integrity(connection, inspector)
         _rebuild_revision_scoped_tables(connection)
+        _rebuild_ranking_v3_forward_gate_evidence_kind(connection)
         _repair_legacy_scoped_index_snapshot_counts(connection)
         _create_missing_metadata_indexes(connection)
         _drop_obsolete_walk_forward_indexes(connection)
         _create_strategy_governance_indexes(connection)
+        _create_ranking_v3_production_indexes(connection)
         _create_immutable_strategy_governance_triggers(connection)
+        _create_immutable_ranking_v3_forward_triggers(connection)
+        _create_ranking_v3_forward_source_snapshot_triggers(connection)
+        _record_ranking_v3_forward_trigger_version(connection)
+        _create_immutable_ranking_v3_production_triggers(connection)
+        _record_ranking_v3_production_trigger_version(connection)
 
 
-def _add_missing_columns(connection, inspector, table_name: str, additions) -> set[str]:
-    if not inspector.has_table(table_name):
+@contextmanager
+def _exclusive_sqlite_migration(engine: Engine):
+    with engine.connect() as connection:
+        connection.exec_driver_sql("BEGIN EXCLUSIVE")
+        try:
+            yield connection
+        except BaseException:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+
+
+def _sqlite_table_columns(connection, table_name: str) -> set[str]:
+    quoted_table = connection.dialect.identifier_preparer.quote(table_name)
+    return {str(row[1]) for row in connection.exec_driver_sql(f"PRAGMA table_info({quoted_table})")}
+
+
+def _add_missing_columns(connection, _inspector, table_name: str, additions) -> set[str]:
+    if not inspect(connection).has_table(table_name):
         return set()
-    existing = {column["name"] for column in inspector.get_columns(table_name)}
     added = set()
     for column, sql_type in additions.items():
-        if column not in existing:
-            connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column} {sql_type}"))
-            added.add(column)
+        if column in _sqlite_table_columns(connection, table_name):
+            continue
+        quoted_table = connection.dialect.identifier_preparer.quote(table_name)
+        quoted_column = connection.dialect.identifier_preparer.quote(column)
+        try:
+            connection.execute(
+                text(f"ALTER TABLE {quoted_table} ADD COLUMN {quoted_column} {sql_type}")
+            )
+        except OperationalError as exc:
+            if "duplicate column name" not in str(
+                exc
+            ).lower() or column not in _sqlite_table_columns(connection, table_name):
+                raise
+        added.add(column)
     return added
 
 
@@ -289,6 +342,91 @@ def _backfill_paper_trade_event_instrument_ids(connection) -> None:
             "), 'UNKNOWN') WHERE instrument_id IS NULL OR instrument_id = 'UNKNOWN'"
         )
     )
+
+
+def _backfill_paper_trade_admission_source(connection) -> None:
+    if not inspect(connection).has_table("paper_trades"):
+        return
+    if "admission_source" not in _sqlite_table_columns(connection, "paper_trades"):
+        return
+    connection.execute(
+        text(
+            "UPDATE paper_trades SET admission_source = 'legacy_unknown' "
+            "WHERE admission_source IS NULL OR trim(admission_source) = ''"
+        )
+    )
+
+
+def _migrate_ranking_v3_forward_integrity(connection, inspector) -> None:
+    candidate_columns = _add_missing_columns(
+        connection,
+        inspector,
+        "ranking_v3_forward_candidates",
+        {
+            "source_snapshot_id": "VARCHAR(192) NOT NULL DEFAULT ''",
+            "integrity_status": "VARCHAR(32) NOT NULL DEFAULT 'verified'",
+            "quarantine_reason": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _add_missing_columns(
+        connection,
+        inspector,
+        "ranking_v3_forward_ledgers",
+        {
+            "integrity_status": "VARCHAR(32) NOT NULL DEFAULT 'verified'",
+            "quarantine_reason": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    if not (
+        inspect(connection).has_table("ranking_v3_forward_candidates")
+        and inspect(connection).has_table("ranking_v3_forward_ledgers")
+    ):
+        return
+
+    reason = "legacy/quarantined: unverifiable Ranking V3 candidate source facts"
+    connection.execute(
+        text(
+            "UPDATE ranking_v3_forward_candidates "
+            "SET integrity_status = 'legacy_quarantined', quarantine_reason = :reason "
+            "WHERE integrity_status = 'verified' AND ("
+            "source_snapshot_id IS NULL OR trim(source_snapshot_id) = '' "
+            "OR fact_digest IS NULL OR length(trim(fact_digest)) <> 64 "
+            "OR selection_digest IS NULL OR length(trim(selection_digest)) <> 64"
+            ")"
+        ),
+        {"reason": reason},
+    )
+    connection.execute(
+        text(
+            "UPDATE ranking_v3_forward_ledgers "
+            "SET integrity_status = 'legacy_quarantined', "
+            "quarantine_reason = :reason, status = 'rejected', "
+            "rejection_reasons_json = :reasons, "
+            "current_release_proof_digest = NULL, revision = revision + 1, "
+            "updated_at = CURRENT_TIMESTAMP "
+            "WHERE integrity_status = 'verified' AND EXISTS ("
+            "SELECT 1 FROM ranking_v3_forward_candidates AS candidates "
+            "WHERE candidates.protocol_id = ranking_v3_forward_ledgers.protocol_id "
+            "AND candidates.protocol_digest = ranking_v3_forward_ledgers.protocol_digest "
+            "AND candidates.model_version = ranking_v3_forward_ledgers.model_version "
+            "AND candidates.integrity_status = 'legacy_quarantined'"
+            ")"
+        ),
+        {
+            "reason": reason,
+            "reasons": '["legacy/quarantined: unverifiable Ranking V3 candidate source facts"]',
+        },
+    )
+    if "source_snapshot_id" in candidate_columns:
+        connection.execute(
+            text(
+                "UPDATE ranking_v3_forward_candidates "
+                "SET quarantine_reason = :reason "
+                "WHERE integrity_status = 'legacy_quarantined' "
+                "AND (quarantine_reason IS NULL OR quarantine_reason = '')"
+            ),
+            {"reason": reason},
+        )
 
 
 def _add_strategy_governance_columns(connection, inspector) -> None:
@@ -398,6 +536,25 @@ def _create_strategy_governance_indexes(connection) -> None:
         )
 
 
+def _create_ranking_v3_production_indexes(connection) -> None:
+    inspector = inspect(connection)
+    if inspector.has_table("paper_trades"):
+        for column in (
+            "production_identity_digest",
+            "production_batch_fact_digest",
+            "production_selection_item_digest",
+            "release_proof_digest",
+        ):
+            if column not in _sqlite_table_columns(connection, "paper_trades"):
+                continue
+            connection.execute(
+                text(
+                    f"CREATE INDEX IF NOT EXISTS ix_paper_trades_{column} "
+                    f"ON paper_trades ({column})"
+                )
+            )
+
+
 def _create_immutable_strategy_governance_triggers(connection) -> None:
     inspector = inspect(connection)
     for table_name in ("strategy_versions", "policy_deployments"):
@@ -414,6 +571,558 @@ def _create_immutable_strategy_governance_triggers(connection) -> None:
                     "END"
                 )
             )
+
+
+def _drop_ranking_v3_forward_triggers(connection) -> None:
+    names = connection.execute(
+        text(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND ("
+            "name LIKE 'trg_ranking_v3_forward_%' "
+            "OR name LIKE 'trg_opportunity_snapshots_forward_reference_%'"
+            ")"
+        )
+    ).scalars()
+    for name in names:
+        if not (
+            name.startswith("trg_ranking_v3_forward_")
+            or name.startswith("trg_opportunity_snapshots_forward_reference_")
+        ):
+            continue
+        connection.execute(text(f'DROP TRIGGER IF EXISTS "{name}"'))
+
+
+def _drop_ranking_v3_production_triggers(connection) -> None:
+    names = connection.execute(
+        text(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND ("
+            "name LIKE 'trg_ranking_v3_production_%' "
+            "OR name LIKE 'trg_opportunity_snapshots_production_reference_%' "
+            "OR name LIKE 'trg_paper_trades_ranking_v3_production_%'"
+            ")"
+        )
+    ).scalars()
+    for name in names:
+        if not (
+            name.startswith("trg_ranking_v3_production_")
+            or name.startswith("trg_opportunity_snapshots_production_reference_")
+            or name.startswith("trg_paper_trades_ranking_v3_production_")
+        ):
+            continue
+        connection.execute(text(f'DROP TRIGGER IF EXISTS "{name}"'))
+
+
+def _record_ranking_v3_forward_trigger_version(connection) -> None:
+    connection.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS qagent_schema_components ("
+            "component VARCHAR(96) PRIMARY KEY, "
+            "version INTEGER NOT NULL, "
+            "applied_at DATETIME NOT NULL"
+            ")"
+        )
+    )
+    connection.execute(
+        text(
+            "INSERT INTO qagent_schema_components (component, version, applied_at) "
+            "VALUES ('ranking_v3_forward_triggers', :version, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(component) DO UPDATE SET "
+            "version = excluded.version, applied_at = excluded.applied_at"
+        ),
+        {"version": _RANKING_V3_FORWARD_TRIGGER_VERSION},
+    )
+
+
+def _record_ranking_v3_production_trigger_version(connection) -> None:
+    connection.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS qagent_schema_components ("
+            "component VARCHAR(96) PRIMARY KEY, "
+            "version INTEGER NOT NULL, "
+            "applied_at DATETIME NOT NULL"
+            ")"
+        )
+    )
+    connection.execute(
+        text(
+            "INSERT INTO qagent_schema_components (component, version, applied_at) "
+            "VALUES ('ranking_v3_production_triggers', :version, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(component) DO UPDATE SET "
+            "version = excluded.version, applied_at = excluded.applied_at"
+        ),
+        {"version": _RANKING_V3_PRODUCTION_TRIGGER_VERSION},
+    )
+
+
+def _create_immutable_ranking_v3_forward_triggers(connection) -> None:
+    inspector = inspect(connection)
+    if inspector.has_table("ranking_v3_forward_ledgers"):
+        _create_ranking_v3_forward_ledger_triggers(connection)
+    for table_name in (
+        "ranking_v3_forward_sessions",
+        "ranking_v3_forward_gate_evidence",
+        "ranking_v3_forward_release_proofs",
+    ):
+        if not inspector.has_table(table_name):
+            continue
+        _create_immutable_row_triggers(connection, table_name)
+
+    candidate_table = "ranking_v3_forward_candidates"
+    if inspector.has_table(candidate_table):
+        _create_ranking_v3_forward_candidate_triggers(connection)
+
+    snapshot_table = "opportunity_snapshots"
+    if inspector.has_table(snapshot_table) and inspector.has_table(candidate_table):
+        _create_referenced_opportunity_snapshot_triggers(connection)
+
+
+def _create_ranking_v3_forward_ledger_triggers(connection) -> None:
+    table_name = "ranking_v3_forward_ledgers"
+    immutable_columns = (
+        "protocol_id",
+        "protocol_digest",
+        "model_version",
+        "data_revision",
+        "created_at",
+        "integrity_status",
+        "quarantine_reason",
+    )
+    immutable_changed = " OR ".join(
+        f"OLD.{column} IS NOT NEW.{column}" for column in immutable_columns
+    )
+    connection.execute(
+        text(
+            f"CREATE TRIGGER trg_{table_name}_shape_insert "
+            f"BEFORE INSERT ON {table_name} "
+            "WHEN NEW.status <> 'pending' OR NEW.revision <> 0 "
+            "OR NEW.current_release_proof_digest IS NOT NULL "
+            "OR NEW.rejection_reasons_json <> '[]' "
+            "OR NEW.integrity_status <> 'verified' "
+            "OR NEW.quarantine_reason <> '' "
+            "BEGIN "
+            "SELECT RAISE(ABORT, 'Ranking V3 forward ledger insert shape is invalid'); "
+            "END"
+        )
+    )
+    connection.execute(
+        text(
+            f"CREATE TRIGGER trg_{table_name}_terminal_immutable_update "
+            f"BEFORE UPDATE ON {table_name} "
+            "WHEN OLD.status <> 'pending' "
+            "BEGIN "
+            "SELECT RAISE(ABORT, 'Ranking V3 forward terminal ledger is immutable'); "
+            "END"
+        )
+    )
+    connection.execute(
+        text(
+            f"CREATE TRIGGER trg_{table_name}_identity_immutable_update "
+            f"BEFORE UPDATE ON {table_name} "
+            f"WHEN {immutable_changed} "
+            "BEGIN "
+            "SELECT RAISE(ABORT, 'Ranking V3 forward ledger identity is immutable'); "
+            "END"
+        )
+    )
+    connection.execute(
+        text(
+            f"CREATE TRIGGER trg_{table_name}_revision_update "
+            f"BEFORE UPDATE ON {table_name} "
+            "WHEN NEW.revision <> OLD.revision + 1 "
+            "BEGIN "
+            "SELECT RAISE(ABORT, 'Ranking V3 forward ledger revision must increment by one'); "
+            "END"
+        )
+    )
+    connection.execute(
+        text(
+            f"CREATE TRIGGER trg_{table_name}_transition_update "
+            f"BEFORE UPDATE ON {table_name} "
+            "WHEN NOT ("
+            "(NEW.status = 'pending' "
+            "AND NEW.current_release_proof_digest IS NULL "
+            "AND NEW.rejection_reasons_json = '[]') "
+            "OR (NEW.status = 'approved' "
+            "AND NEW.current_release_proof_digest IS NOT NULL "
+            "AND length(trim(NEW.current_release_proof_digest)) = 64 "
+            "AND NEW.rejection_reasons_json = '[]' "
+            "AND EXISTS ("
+            "SELECT 1 FROM ranking_v3_forward_release_proofs AS proof "
+            "WHERE proof.proof_digest = NEW.current_release_proof_digest "
+            "AND proof.protocol_id = NEW.protocol_id "
+            "AND proof.protocol_digest = NEW.protocol_digest "
+            "AND proof.model_version = NEW.model_version "
+            "AND proof.data_revision = NEW.data_revision "
+            "AND proof.ledger_revision = OLD.revision"
+            ")) "
+            "OR (NEW.status = 'rejected' "
+            "AND NEW.current_release_proof_digest IS NULL "
+            "AND json_valid(NEW.rejection_reasons_json) = 1 "
+            "AND json_type(NEW.rejection_reasons_json) = 'array' "
+            "AND json_array_length(NEW.rejection_reasons_json) > 0)"
+            ") "
+            "BEGIN "
+            "SELECT RAISE(ABORT, 'Ranking V3 forward ledger transition is invalid'); "
+            "END"
+        )
+    )
+    connection.execute(
+        text(
+            f"CREATE TRIGGER trg_{table_name}_immutable_delete "
+            f"BEFORE DELETE ON {table_name} "
+            "BEGIN "
+            "SELECT RAISE(ABORT, 'Ranking V3 forward ledgers cannot be deleted'); "
+            "END"
+        )
+    )
+
+
+def _create_immutable_row_triggers(connection, table_name: str) -> None:
+    for operation in ("UPDATE", "DELETE"):
+        trigger_name = f"trg_{table_name}_immutable_{operation.lower()}"
+        connection.execute(
+            text(
+                f"CREATE TRIGGER IF NOT EXISTS {trigger_name} "
+                f"BEFORE {operation} ON {table_name} "
+                "BEGIN "
+                f"SELECT RAISE(ABORT, '{table_name} rows are immutable'); "
+                "END"
+            )
+        )
+
+
+def _create_ranking_v3_forward_candidate_triggers(connection) -> None:
+    table_name = "ranking_v3_forward_candidates"
+    selection_columns = (
+        "protocol_id",
+        "protocol_digest",
+        "model_version",
+        "candidate_id",
+        "source_snapshot_id",
+        "session_date",
+        "maturity_session_date",
+        "instrument_id",
+        "strategy_id",
+        "rank",
+        "score",
+        "benchmark_id",
+        "data_revision",
+        "selection_digest",
+        "idempotency_key",
+        "fact_digest",
+        "integrity_status",
+        "quarantine_reason",
+        "created_at",
+    )
+    selection_changed = " OR ".join(
+        f"OLD.{column} IS NOT NEW.{column}" for column in selection_columns
+    )
+    connection.execute(
+        text(
+            f"CREATE TRIGGER IF NOT EXISTS trg_{table_name}_selection_immutable_update "
+            f"BEFORE UPDATE ON {table_name} "
+            f"WHEN {selection_changed} "
+            "BEGIN "
+            "SELECT RAISE(ABORT, "
+            "'Ranking V3 forward candidate selection facts are immutable'); "
+            "END"
+        )
+    )
+
+    outcome_columns = (
+        "outcome_digest",
+        "outcome_idempotency_key",
+        "resolved_on",
+        "gross_return_pct",
+        "transaction_cost_pct",
+        "stress_transaction_cost_pct",
+        "net_return_pct",
+        "stress_net_return_pct",
+        "benchmark_return_pct",
+        "benchmark_excess_pct",
+        "stress_benchmark_excess_pct",
+        "max_drawdown_pct",
+        "outcome_reason",
+        "updated_at",
+    )
+    pending_outcome_changed = " OR ".join(
+        f"OLD.{column} IS NOT NEW.{column}" for column in outcome_columns
+    )
+    connection.execute(
+        text(
+            f"CREATE TRIGGER IF NOT EXISTS trg_{table_name}_pending_outcome_guard_update "
+            f"BEFORE UPDATE ON {table_name} "
+            "WHEN OLD.outcome_status = 'pending' "
+            "AND NEW.outcome_status = 'pending' "
+            f"AND ({pending_outcome_changed}) "
+            "BEGIN "
+            "SELECT RAISE(ABORT, "
+            "'Ranking V3 forward candidate pending outcome cannot be partially written'); "
+            "END"
+        )
+    )
+    connection.execute(
+        text(
+            f"CREATE TRIGGER IF NOT EXISTS trg_{table_name}_terminal_shape_update "
+            f"BEFORE UPDATE ON {table_name} "
+            "WHEN OLD.outcome_status = 'pending' "
+            "AND NEW.outcome_status <> 'pending' "
+            "AND (NEW.outcome_digest IS NULL OR trim(NEW.outcome_digest) = '' "
+            "OR NEW.outcome_idempotency_key IS NULL "
+            "OR trim(NEW.outcome_idempotency_key) = '' "
+            "OR NEW.resolved_on IS NULL) "
+            "BEGIN "
+            "SELECT RAISE(ABORT, "
+            "'Ranking V3 forward candidate terminal outcome is incomplete'); "
+            "END"
+        )
+    )
+    connection.execute(
+        text(
+            f"CREATE TRIGGER IF NOT EXISTS trg_{table_name}_terminal_immutable_update "
+            f"BEFORE UPDATE ON {table_name} "
+            "WHEN OLD.outcome_status <> 'pending' "
+            "BEGIN "
+            "SELECT RAISE(ABORT, "
+            "'Ranking V3 forward candidate terminal outcome is immutable'); "
+            "END"
+        )
+    )
+    connection.execute(
+        text(
+            f"CREATE TRIGGER IF NOT EXISTS trg_{table_name}_immutable_delete "
+            f"BEFORE DELETE ON {table_name} "
+            "BEGIN "
+            "SELECT RAISE(ABORT, 'Ranking V3 forward candidates cannot be deleted'); "
+            "END"
+        )
+    )
+
+
+def _create_referenced_opportunity_snapshot_triggers(connection) -> None:
+    table_name = "opportunity_snapshots"
+    reference_check = (
+        "EXISTS (SELECT 1 FROM ranking_v3_forward_candidates "
+        "WHERE source_snapshot_id = OLD.snapshot_id)"
+    )
+    for operation in ("UPDATE", "DELETE"):
+        trigger_name = f"trg_{table_name}_forward_reference_{operation.lower()}"
+        connection.execute(
+            text(
+                f"CREATE TRIGGER IF NOT EXISTS {trigger_name} "
+                f"BEFORE {operation} ON {table_name} "
+                f"WHEN {reference_check} "
+                "BEGIN "
+                "SELECT RAISE(ABORT, "
+                "'opportunity snapshot referenced by Ranking V3 forward evidence is immutable'); "
+                "END"
+            )
+        )
+
+
+def _create_immutable_ranking_v3_production_triggers(connection) -> None:
+    inspector = inspect(connection)
+    batch_table = "ranking_v3_production_batches"
+    selection_table = "ranking_v3_production_selections"
+    alias_table = "ranking_v3_production_idempotency_keys"
+    for table_name in (batch_table, selection_table, alias_table):
+        if inspector.has_table(table_name):
+            _create_immutable_row_triggers(connection, table_name)
+
+    if inspector.has_table(batch_table) and inspector.has_table(selection_table):
+        connection.execute(
+            text(
+                f"CREATE TRIGGER trg_{selection_table}_batch_reference_insert "
+                f"BEFORE INSERT ON {selection_table} "
+                "WHEN NOT EXISTS ("
+                f"SELECT 1 FROM {batch_table} AS batch "
+                "WHERE batch.fact_digest = NEW.batch_fact_digest "
+                "AND batch.identity_digest = NEW.identity_digest "
+                "AND batch.selected_count >= NEW.rank "
+                "AND json_valid(batch.payload_json) = 1 "
+                "AND json_extract(batch.payload_json, '$.fact_digest') = batch.fact_digest "
+                "AND json_extract(batch.payload_json, '$.identity.identity_digest') "
+                "= batch.identity_digest "
+                "AND json_extract("
+                "batch.payload_json, "
+                "'$.selections[' || (NEW.rank - 1) || '].item_digest'"
+                ") = NEW.item_digest"
+                ") "
+                "BEGIN "
+                "SELECT RAISE(ABORT, "
+                "'Ranking V3 production selection must reference its immutable batch'); "
+                "END"
+            )
+        )
+
+    snapshot_table = "opportunity_snapshots"
+    if inspector.has_table(snapshot_table) and inspector.has_table(selection_table):
+        connection.execute(
+            text(
+                f"CREATE TRIGGER trg_{selection_table}_snapshot_reference_insert "
+                f"BEFORE INSERT ON {selection_table} "
+                "WHEN NOT EXISTS ("
+                f"SELECT 1 FROM {snapshot_table} AS snapshot "
+                "WHERE snapshot.snapshot_id = NEW.source_snapshot_id "
+                "AND snapshot.instrument_id = NEW.instrument_id "
+                "AND snapshot.primary_strategy_id = NEW.strategy_id"
+                ") "
+                "BEGIN "
+                "SELECT RAISE(ABORT, "
+                "'Ranking V3 production selection must reference an opportunity snapshot'); "
+                "END"
+            )
+        )
+        reference_check = (
+            f"EXISTS (SELECT 1 FROM {selection_table} WHERE source_snapshot_id = OLD.snapshot_id)"
+        )
+        for operation in ("UPDATE", "DELETE"):
+            connection.execute(
+                text(
+                    f"CREATE TRIGGER "
+                    f"trg_{snapshot_table}_production_reference_{operation.lower()} "
+                    f"BEFORE {operation} ON {snapshot_table} "
+                    f"WHEN {reference_check} "
+                    "BEGIN "
+                    "SELECT RAISE(ABORT, "
+                    "'opportunity snapshot referenced by Ranking V3 production "
+                    "selection is immutable'); "
+                    "END"
+                )
+            )
+
+    if inspector.has_table(batch_table) and inspector.has_table(alias_table):
+        connection.execute(
+            text(
+                f"CREATE TRIGGER trg_{alias_table}_batch_reference_insert "
+                f"BEFORE INSERT ON {alias_table} "
+                "WHEN NOT EXISTS ("
+                f"SELECT 1 FROM {batch_table} AS batch "
+                "WHERE batch.fact_digest = NEW.batch_fact_digest "
+                "AND batch.identity_digest = NEW.identity_digest"
+                ") "
+                "BEGIN "
+                "SELECT RAISE(ABORT, "
+                "'Ranking V3 production idempotency alias must reference its batch'); "
+                "END"
+            )
+        )
+
+    paper_table = "paper_trades"
+    required_tables = {batch_table, selection_table, paper_table}
+    if required_tables.issubset(set(inspector.get_table_names())):
+        source_plan_invalid = (
+            "NOT EXISTS ("
+            "SELECT 1 FROM opportunity_snapshots AS snapshot "
+            "JOIN scan_runs AS scan ON scan.run_id = snapshot.run_id "
+            "WHERE snapshot.snapshot_id = NEW.source_snapshot_id "
+            "AND scan.provider = NEW.provider "
+            "AND snapshot.instrument_id = NEW.instrument_id "
+            "AND snapshot.primary_strategy_id = NEW.strategy_id "
+            "AND snapshot.signal_date = NEW.signal_date "
+            "AND snapshot.trigger_price = NEW.trigger_price "
+            "AND snapshot.initial_stop IS NEW.initial_stop "
+            "AND snapshot.target_1 IS NEW.target_1 "
+            "AND snapshot.rank_score IS NEW.rank_score"
+            ")"
+        )
+        production_binding_invalid = (
+            "NEW.admission_source = 'ranking_v3_production' AND ("
+            "NEW.production_identity_digest IS NULL "
+            "OR length(trim(NEW.production_identity_digest)) <> 64 "
+            "OR NEW.production_batch_fact_digest IS NULL "
+            "OR length(trim(NEW.production_batch_fact_digest)) <> 64 "
+            "OR NEW.production_selection_item_digest IS NULL "
+            "OR length(trim(NEW.production_selection_item_digest)) <> 64 "
+            "OR NEW.release_proof_digest IS NULL "
+            "OR length(trim(NEW.release_proof_digest)) <> 64 "
+            "OR NEW.strategy_id IS NULL OR trim(NEW.strategy_id) = '' "
+            "OR NOT EXISTS ("
+            f"SELECT 1 FROM {selection_table} AS selection "
+            f"JOIN {batch_table} AS batch "
+            "ON batch.fact_digest = selection.batch_fact_digest "
+            "WHERE batch.fact_digest = NEW.production_batch_fact_digest "
+            "AND batch.identity_digest = NEW.production_identity_digest "
+            "AND batch.release_proof_digest = NEW.release_proof_digest "
+            "AND batch.session_date = NEW.signal_date "
+            "AND selection.item_digest = NEW.production_selection_item_digest "
+            "AND selection.source_snapshot_id = NEW.source_snapshot_id "
+            "AND selection.instrument_id = NEW.instrument_id "
+            "AND selection.strategy_id = NEW.strategy_id"
+            ") "
+            f"OR {source_plan_invalid} "
+            "OR NEW.allocation_multiplier <= 0 "
+            "OR NEW.allocation_multiplier > 1"
+            ")"
+        )
+        for operation in ("INSERT", "UPDATE"):
+            connection.execute(
+                text(
+                    f"CREATE TRIGGER "
+                    f"trg_{paper_table}_ranking_v3_production_{operation.lower()} "
+                    f"BEFORE {operation} ON {paper_table} "
+                    f"WHEN {production_binding_invalid} "
+                    "BEGIN "
+                    "SELECT RAISE(ABORT, "
+                    "'paper trade Ranking V3 production admission proof is invalid'); "
+                    "END"
+                )
+            )
+        immutable_production_plan = " OR ".join(
+            f"NEW.{column} IS NOT OLD.{column}"
+            for column in (
+                "source_snapshot_id",
+                "provider",
+                "instrument_id",
+                "strategy_id",
+                "admission_source",
+                "production_identity_digest",
+                "production_batch_fact_digest",
+                "production_selection_item_digest",
+                "release_proof_digest",
+                "signal_date",
+                "trigger_price",
+                "initial_stop",
+                "target_1",
+                "rank_score",
+                "allocation_multiplier",
+            )
+        )
+        connection.execute(
+            text(
+                f"CREATE TRIGGER trg_{paper_table}_ranking_v3_production_immutable_update "
+                f"BEFORE UPDATE ON {paper_table} "
+                "WHEN OLD.admission_source = 'ranking_v3_production' "
+                f"AND ({immutable_production_plan}) "
+                "BEGIN "
+                "SELECT RAISE(ABORT, "
+                "'paper trade Ranking V3 production plan is immutable'); "
+                "END"
+            )
+        )
+
+
+def _create_ranking_v3_forward_source_snapshot_triggers(connection) -> None:
+    inspector = inspect(connection)
+    table_name = "ranking_v3_forward_candidates"
+    if not inspector.has_table(table_name):
+        return
+    columns = {column["name"] for column in inspector.get_columns(table_name)}
+    if "source_snapshot_id" not in columns:
+        return
+    for operation in ("INSERT", "UPDATE"):
+        trigger_name = f"trg_{table_name}_source_snapshot_required_{operation.lower()}"
+        connection.execute(
+            text(
+                f"CREATE TRIGGER IF NOT EXISTS {trigger_name} "
+                f"BEFORE {operation} ON {table_name} "
+                "WHEN NEW.source_snapshot_id IS NULL "
+                "OR trim(NEW.source_snapshot_id) = '' "
+                "BEGIN "
+                "SELECT RAISE(ABORT, "
+                "'Ranking V3 forward candidate source snapshot is required'); "
+                "END"
+            )
+        )
 
 
 def _rebuild_revision_scoped_tables(connection) -> None:
@@ -485,6 +1194,35 @@ def _rebuild_revision_scoped_tables(connection) -> None:
     }
     for table_name, expected_key in expected_keys.items():
         _rebuild_table_primary_key(connection, table_name, expected_key)
+
+
+def _rebuild_ranking_v3_forward_gate_evidence_kind(connection) -> None:
+    table_name = "ranking_v3_forward_gate_evidence"
+    inspector = inspect(connection)
+    if not inspector.has_table(table_name):
+        return
+    table_sql = connection.execute(
+        text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = :table_name"),
+        {"table_name": table_name},
+    ).scalar_one_or_none()
+    if table_sql is None or "'portfolio'" in table_sql:
+        return
+
+    for operation in ("update", "delete"):
+        connection.execute(text(f"DROP TRIGGER IF EXISTS trg_{table_name}_immutable_{operation}"))
+    table = Base.metadata.tables[table_name]
+    column_names = [column.name for column in table.columns]
+    columns_sql = ", ".join(column_names)
+    backup_name = f"{table_name}_migration_backup"
+    connection.execute(
+        text(f"CREATE TEMP TABLE {backup_name} AS SELECT {columns_sql} FROM {table_name}")
+    )
+    connection.execute(text(f"DROP TABLE {table_name}"))
+    table.create(connection)
+    connection.execute(
+        text(f"INSERT INTO {table_name} ({columns_sql}) SELECT {columns_sql} FROM {backup_name}")
+    )
+    connection.execute(text(f"DROP TABLE {backup_name}"))
 
 
 def _rebuild_table_primary_key(connection, table_name: str, expected_key: list[str]) -> None:

@@ -10,7 +10,17 @@ from typing import Literal
 
 from pydantic import BaseModel, field_validator
 
-from qagent.backtesting.ranking_v3_protocol import build_ranking_v3_protocol
+from qagent.backtesting.ranking_v3_experiment_registry import RankingV3ExperimentRegistry
+from qagent.backtesting.ranking_v3_pbo import (
+    CSCV_PBO_METHOD,
+    PBO_SCOPE_FROZEN_SIX_MODEL_FAMILY,
+    PBO_SEARCH_PROCESS_COVERAGE,
+    RANKING_V3_FROZEN_PBO_MODEL_IDS,
+)
+from qagent.backtesting.ranking_v3_protocol import (
+    RankingV3StatisticalDefinition,
+    build_ranking_v3_protocol,
+)
 
 
 ValidationStatus = Literal["pass", "insufficient", "fail"]
@@ -18,7 +28,11 @@ GateStatus = Literal["pass", "insufficient", "fail", "unavailable"]
 
 # V3 holds positions for up to 20 sessions and rebalances every 10 sessions.
 # Adjacent rebalance cohorts therefore share roughly half of their return window.
-DEPENDENCE_BLOCK_LENGTH = 2
+_STATISTICS_DEFINITION = RankingV3StatisticalDefinition()
+DEPENDENCE_BLOCK_LENGTH = _STATISTICS_DEFINITION.dependence_block_length
+DEFAULT_BOOTSTRAP_SAMPLES = _STATISTICS_DEFINITION.bootstrap_samples
+DEFAULT_PERMUTATION_SAMPLES = _STATISTICS_DEFINITION.permutation_samples
+DEFAULT_RANDOM_SEED = _STATISTICS_DEFINITION.random_seed
 
 
 class RankingV3ReturnObservation(BaseModel):
@@ -73,24 +87,30 @@ class RankingV3ValidationEvaluation(BaseModel):
     positive_edge_p_value: float | None = None
     holm_adjusted_positive_edge_p_value: float | None = None
     holm_family_size: int
+    holm_observed_prior_p_value_count: int
+    holm_unobserved_prior_p_value_count: int
+    holm_adjustment_method: Literal[
+        "exact_holm_bonferroni",
+        "conservative_bonferroni_unknown_prior_p_values",
+        "unavailable",
+    ]
+    holm_adjustment_reason: str
+    deflated_sharpe_status: Literal["pass", "fail", "unavailable"] = "unavailable"
     deflated_sharpe_probability: float | None = None
+    deflated_sharpe_reason: str
     prior_experiment_count: int
     positive_subperiod_count: int
     required_positive_subperiod_count: int
     subperiod_count: int
     subperiods: list[RankingV3SubperiodResult]
-    pbo_status: Literal["unavailable"] = "unavailable"
-    pbo_probability: None = None
+    pbo_status: Literal["pass", "fail", "unavailable"] = "unavailable"
+    pbo_probability: float | None = None
     pbo_reason: str
     gates: list[RankingV3ValidationGate]
     reasons: list[str]
 
 
-ReturnObservationLike = (
-    RankingV3ReturnObservation
-    | tuple[date, float]
-    | Mapping[str, object]
-)
+ReturnObservationLike = RankingV3ReturnObservation | tuple[date, float] | Mapping[str, object]
 
 
 def evaluate_ranking_v3_validation(
@@ -100,9 +120,10 @@ def evaluate_ranking_v3_validation(
     completed_trade_count: int | None = None,
     additional_hypothesis_p_values: Sequence[float] = (),
     prior_experiment_count: int | None = None,
-    bootstrap_samples: int = 5000,
-    permutation_samples: int = 10000,
-    seed: int = 42,
+    pbo_evidence: Mapping[str, object] | None = None,
+    bootstrap_samples: int = DEFAULT_BOOTSTRAP_SAMPLES,
+    permutation_samples: int = DEFAULT_PERMUTATION_SAMPLES,
+    seed: int = DEFAULT_RANDOM_SEED,
 ) -> RankingV3ValidationEvaluation:
     """Evaluate V3 against a constraint-matched baseline on common rebalance dates.
 
@@ -130,17 +151,13 @@ def evaluate_ranking_v3_validation(
 
     baseline = [_coerce_observation(item) for item in baseline_returns]
     challenger = [_coerce_observation(item) for item in challenger_returns]
-    completed_trades = (
-        len(challenger)
-        if completed_trade_count is None
-        else completed_trade_count
-    )
+    completed_trades = len(challenger) if completed_trade_count is None else completed_trade_count
     if completed_trades < 0:
         raise ValueError("completed_trade_count must be non-negative")
 
-    additional_p_values = [
-        _validated_p_value(value) for value in additional_hypothesis_p_values
-    ]
+    additional_p_values = [_validated_p_value(value) for value in additional_hypothesis_p_values]
+    if len(additional_p_values) > experiments:
+        raise ValueError("observed prior p-value count cannot exceed prior_experiment_count")
     baseline_by_date = _cluster_daily_returns(baseline)
     challenger_by_date = _cluster_daily_returns(challenger)
     baseline_dates = set(baseline_by_date)
@@ -148,10 +165,7 @@ def evaluate_ranking_v3_validation(
     common_dates = sorted(baseline_dates & challenger_dates)
     baseline_only_dates = sorted(baseline_dates - challenger_dates)
     challenger_only_dates = sorted(challenger_dates - baseline_dates)
-    dates_are_common = (
-        bool(baseline_dates)
-        and baseline_dates == challenger_dates
-    )
+    dates_are_common = bool(baseline_dates) and baseline_dates == challenger_dates
 
     paired_values: list[tuple[date, float]] = []
     if dates_are_common:
@@ -182,23 +196,42 @@ def evaluate_ranking_v3_validation(
         block_length=DEPENDENCE_BLOCK_LENGTH,
     )
     holm_adjusted = None
-    holm_family_size = len(additional_p_values) + (1 if positive_p_value is not None else 0)
-    if positive_p_value is not None:
-        holm_adjusted = holm_bonferroni(
-            [positive_p_value, *additional_p_values]
-        )[0]
-    dsr_probability = _deflated_sharpe_probability(
-        paired_returns,
-        prior_experiment_count=experiments,
-        effective_sample_count=effective_block_count,
+    holm_family_size = experiments + 1
+    unobserved_prior_p_value_count = experiments - len(additional_p_values)
+    holm_adjustment_method: Literal[
+        "exact_holm_bonferroni",
+        "conservative_bonferroni_unknown_prior_p_values",
+        "unavailable",
+    ] = "unavailable"
+    holm_adjustment_reason = (
+        "The current positive-edge p-value is unavailable; multiple-testing "
+        "adjustment cannot be evaluated."
     )
-    if dsr_probability is not None:
-        iid_dsr_probability = _deflated_sharpe_probability(
-            paired_returns,
-            prior_experiment_count=experiments,
-        )
-        if iid_dsr_probability is not None:
-            dsr_probability = min(dsr_probability, iid_dsr_probability)
+    if positive_p_value is not None:
+        if unobserved_prior_p_value_count == 0:
+            holm_adjusted = holm_bonferroni([positive_p_value, *additional_p_values])[0]
+            holm_adjustment_method = "exact_holm_bonferroni"
+            holm_adjustment_reason = (
+                "All registered family members have observed, provenance-backed "
+                "p-values; exact Holm-Bonferroni was applied."
+            )
+        else:
+            holm_adjusted = min(1.0, holm_family_size * positive_p_value)
+            holm_adjustment_method = "conservative_bonferroni_unknown_prior_p_values"
+            holm_adjustment_reason = (
+                f"{unobserved_prior_p_value_count} of {experiments} registered "
+                "prior hypotheses lack provenance-backed p-values. The current "
+                f"hypothesis therefore uses the fail-closed upper bound "
+                f"min(1, {holm_family_size} * p) instead of silently shrinking "
+                "the family."
+            )
+    dsr_probability, dsr_reason = _evaluate_deflated_sharpe_evidence(
+        protocol.experiment_registry,
+        pbo_evidence=pbo_evidence,
+        paired_values=paired_values,
+        registered_trial_count=experiments + 1,
+        dependence_block_length=DEPENDENCE_BLOCK_LENGTH,
+    )
     subperiods = _contiguous_subperiods(
         paired_values,
         required_subperiods=thresholds.required_subperiods,
@@ -219,23 +252,27 @@ def evaluate_ranking_v3_validation(
         bootstrap_lower=bootstrap_lower_metric,
         holm_adjusted_p_value=holm_adjusted_metric,
         dsr_probability=dsr_probability_metric,
+        dsr_reason=dsr_reason,
         positive_subperiod_count=positive_subperiod_count,
         actual_subperiod_count=len(subperiods),
     )
     statistical_gate_status = _statistical_gate_status(gates)
+    pbo_status, pbo_probability, pbo_reason = _evaluate_pbo_evidence(
+        pbo_evidence,
+        maximum_probability=thresholds.maximum_probability_of_backtest_overfit,
+    )
     status: ValidationStatus
-    if statistical_gate_status == "fail":
+    if statistical_gate_status == "fail" or pbo_status == "fail":
         status = "fail"
+    elif statistical_gate_status == "pass" and pbo_status == "pass":
+        status = "pass"
     else:
         status = "insufficient"
 
-    pbo_reason = (
-        "PBO unavailable: paired baseline/challenger returns do not provide the "
-        "model-return matrix required for CSCV/PBO. The result must remain shadow-only."
-    )
     reasons = [gate.reason for gate in gates if gate.status != "pass"]
-    reasons.append(pbo_reason)
-    if statistical_gate_status == "pass":
+    if pbo_status != "pass":
+        reasons.append(pbo_reason)
+    if statistical_gate_status == "pass" and pbo_status == "unavailable":
         reasons.append(
             "All observable statistical gates passed, but PBO evidence is unavailable; "
             "official admission is not allowed."
@@ -263,15 +300,98 @@ def evaluate_ranking_v3_validation(
         positive_edge_p_value=positive_p_value_metric,
         holm_adjusted_positive_edge_p_value=holm_adjusted_metric,
         holm_family_size=holm_family_size,
+        holm_observed_prior_p_value_count=len(additional_p_values),
+        holm_unobserved_prior_p_value_count=unobserved_prior_p_value_count,
+        holm_adjustment_method=holm_adjustment_method,
+        holm_adjustment_reason=holm_adjustment_reason,
+        deflated_sharpe_status=(
+            "unavailable"
+            if dsr_probability_metric is None
+            else "pass"
+            if dsr_probability_metric
+            >= thresholds.minimum_deflated_sharpe_probability
+            else "fail"
+        ),
         deflated_sharpe_probability=dsr_probability_metric,
+        deflated_sharpe_reason=dsr_reason,
         prior_experiment_count=experiments,
         positive_subperiod_count=positive_subperiod_count,
         required_positive_subperiod_count=thresholds.minimum_positive_subperiods,
         subperiod_count=len(subperiods),
         subperiods=subperiods,
+        pbo_status=pbo_status,
+        pbo_probability=pbo_probability,
         pbo_reason=pbo_reason,
         gates=gates,
         reasons=reasons,
+    )
+
+
+def _evaluate_pbo_evidence(
+    evidence: Mapping[str, object] | None,
+    *,
+    maximum_probability: float,
+) -> tuple[Literal["pass", "fail", "unavailable"], float | None, str]:
+    if evidence is None:
+        return (
+            "unavailable",
+            None,
+            "PBO unavailable: a genuine common-date model-return matrix was not provided. "
+            "The result must remain shadow-only.",
+        )
+    rejection_reason = evidence.get("rejection_reason")
+    probability_value = evidence.get("probability")
+    matrix_digest = evidence.get("matrix_digest")
+    fold_count = evidence.get("fold_count")
+    model_count = evidence.get("model_count")
+    date_count = evidence.get("date_count")
+    method = evidence.get("method")
+    scope = evidence.get("scope")
+    search_process_coverage = evidence.get("search_process_coverage")
+    if rejection_reason:
+        return (
+            "unavailable",
+            None,
+            f"PBO unavailable: {str(rejection_reason).strip()}",
+        )
+    if (
+        isinstance(probability_value, bool)
+        or not isinstance(probability_value, (int, float))
+        or not math.isfinite(float(probability_value))
+        or not 0.0 <= float(probability_value) <= 1.0
+        or not isinstance(matrix_digest, str)
+        or len(matrix_digest) != 64
+        or not isinstance(fold_count, int)
+        or fold_count <= 0
+        or not isinstance(model_count, int)
+        or model_count != len(RANKING_V3_FROZEN_PBO_MODEL_IDS)
+        or not isinstance(date_count, int)
+        or date_count <= 0
+        or method != CSCV_PBO_METHOD
+        or scope != PBO_SCOPE_FROZEN_SIX_MODEL_FAMILY
+        or search_process_coverage != PBO_SEARCH_PROCESS_COVERAGE
+    ):
+        return (
+            "unavailable",
+            None,
+            "PBO unavailable: evidence must identify the frozen six-model family, "
+            "the implemented CSCV method, and partial search-process coverage.",
+        )
+    probability = round(float(probability_value), 12)
+    if probability <= maximum_probability:
+        return (
+            "pass",
+            probability,
+            f"Six-model-family PBO {probability:.2%} is within the "
+            f"{maximum_probability:.0%} release limit. This is not a full "
+            "search-process PBO estimate.",
+        )
+    return (
+        "fail",
+        probability,
+        f"Six-model-family PBO {probability:.2%} exceeds the "
+        f"{maximum_probability:.0%} release limit. This is not a full "
+        "search-process PBO estimate.",
     )
 
 
@@ -288,10 +408,7 @@ def holm_bonferroni(p_values: Sequence[float]) -> list[float]:
         adjusted = min(1.0, (total - rank) * p_value)
         running_max = max(running_max, adjusted)
         adjusted_by_index[original_index] = running_max
-    return [
-        round(adjusted_by_index[index], 12)
-        for index in range(len(validated))
-    ]
+    return [round(adjusted_by_index[index], 12) for index in range(len(validated))]
 
 
 def _coerce_observation(item: ReturnObservationLike) -> RankingV3ReturnObservation:
@@ -331,8 +448,7 @@ def _one_sided_bootstrap_lower_bound(
         return None
     generator = random.Random(seed)
     blocks = [
-        list(values[start : start + block_length])
-        for start in range(count - block_length + 1)
+        list(values[start : start + block_length]) for start in range(count - block_length + 1)
     ]
     blocks_per_sample = math.ceil(count / block_length)
     bootstrap_means: list[float] = []
@@ -349,11 +465,7 @@ def _one_sided_bootstrap_lower_bound(
         samples=samples,
         seed=seed,
     )
-    return (
-        moving_block_lower
-        if iid_lower is None
-        else min(moving_block_lower, iid_lower)
-    )
+    return moving_block_lower if iid_lower is None else min(moving_block_lower, iid_lower)
 
 
 def _positive_sign_flip_p_value(
@@ -379,10 +491,12 @@ def _positive_sign_flip_p_value(
     generator = random.Random(seed)
     exceedances = 0
     for _ in range(samples):
-        null_mean = math.fsum(
-            block_sum if generator.random() >= 0.5 else -block_sum
-            for block_sum in block_sums
-        ) / complete_count
+        null_mean = (
+            math.fsum(
+                block_sum if generator.random() >= 0.5 else -block_sum for block_sum in block_sums
+            )
+            / complete_count
+        )
         if null_mean >= observed:
             exceedances += 1
     block_p_value = (exceedances + 1) / (samples + 1)
@@ -391,11 +505,7 @@ def _positive_sign_flip_p_value(
         samples=samples,
         seed=seed,
     )
-    return (
-        block_p_value
-        if iid_p_value is None
-        else max(block_p_value, iid_p_value)
-    )
+    return block_p_value if iid_p_value is None else max(block_p_value, iid_p_value)
 
 
 def _iid_bootstrap_lower_bound(
@@ -409,8 +519,7 @@ def _iid_bootstrap_lower_bound(
     generator = random.Random(seed)
     count = len(values)
     bootstrap_means = sorted(
-        math.fsum(generator.choice(values) for _ in range(count)) / count
-        for _ in range(samples)
+        math.fsum(generator.choice(values) for _ in range(count)) / count for _ in range(samples)
     )
     lower_index = max(0, math.floor((len(bootstrap_means) - 1) * 0.05))
     return bootstrap_means[lower_index]
@@ -431,75 +540,256 @@ def _iid_positive_sign_flip_p_value(
     exceedances = 0
     for _ in range(samples):
         null_mean = math.fsum(
-            value if generator.random() >= 0.5 else -value
-            for value in values
+            value if generator.random() >= 0.5 else -value for value in values
         ) / len(values)
         if null_mean >= observed:
             exceedances += 1
     return (exceedances + 1) / (samples + 1)
 
 
-def _deflated_sharpe_probability(
+def _evaluate_deflated_sharpe_evidence(
+    registry: RankingV3ExperimentRegistry,
+    *,
+    pbo_evidence: Mapping[str, object] | None,
+    paired_values: Sequence[tuple[date, float]],
+    registered_trial_count: int,
+    dependence_block_length: int,
+) -> tuple[float | None, str]:
+    """Compute Bailey-Lopez de Prado DSR from frozen common-date evidence.
+
+    The current strategy uses challenger-minus-baseline returns. Cross-trial
+    Sharpe dispersion comes from the immutable six-model PBO matrix after each
+    model is differenced against the same constraint-matched baseline. The
+    expected-maximum penalty still uses every registered research attempt.
+    Overlapping holding cohorts are collapsed into non-overlapping time blocks
+    before estimating Sharpe, skewness, and kurtosis.
+    """
+
+    if registered_trial_count < registry.prior_attempt_count + 1:
+        return (
+            None,
+            "Deflated Sharpe unavailable: the supplied trial count omits "
+            "registered research attempts.",
+        )
+    if dependence_block_length <= 0:
+        return None, "Deflated Sharpe unavailable: dependence block length is invalid."
+    matrix, matrix_reason = _deflated_sharpe_matrix(pbo_evidence)
+    if matrix_reason is not None:
+        return None, f"Deflated Sharpe unavailable: {matrix_reason}."
+    assert matrix is not None
+
+    paired_dates = tuple(item[0] for item in paired_values)
+    if not paired_dates:
+        return None, "Deflated Sharpe unavailable: no paired return observations exist."
+    matrix_dates = tuple(item[0] for item in next(iter(matrix.values())))
+    if matrix_dates != paired_dates:
+        return (
+            None,
+            "Deflated Sharpe unavailable: the frozen model matrix calendar does "
+            "not exactly match the paired validation calendar.",
+        )
+
+    current_blocks = _non_overlapping_block_means(
+        [item[1] for item in paired_values],
+        block_length=dependence_block_length,
+    )
+    if len(current_blocks) < 3:
+        return (
+            None,
+            "Deflated Sharpe unavailable: fewer than three independent return "
+            "blocks are available.",
+        )
+    current_sharpe = _sample_sharpe(current_blocks)
+    if current_sharpe is None:
+        return (
+            None,
+            "Deflated Sharpe unavailable: the current paired return series has "
+            "zero or invalid dispersion.",
+        )
+
+    baseline = matrix["constraint_matched_baseline"]
+    trial_sharpes: list[float] = []
+    for model_id in RANKING_V3_FROZEN_PBO_MODEL_IDS:
+        model = matrix[model_id]
+        excess = [
+            model_row[1] - baseline_row[1]
+            for model_row, baseline_row in zip(model, baseline, strict=True)
+        ]
+        blocks = _non_overlapping_block_means(
+            excess,
+            block_length=dependence_block_length,
+        )
+        trial_sharpe = _sample_sharpe(blocks, allow_zero_series=True)
+        if trial_sharpe is None:
+            return (
+                None,
+                "Deflated Sharpe unavailable: the frozen model family contains "
+                f"an invalid Sharpe series for {model_id}.",
+            )
+        trial_sharpes.append(trial_sharpe)
+
+    cross_trial_std = _sample_standard_deviation(trial_sharpes)
+    if cross_trial_std is None or cross_trial_std <= 0:
+        return (
+            None,
+            "Deflated Sharpe unavailable: frozen cross-model Sharpe dispersion "
+            "is zero or invalid.",
+        )
+    expected_maximum = _expected_maximum_sharpe(
+        mean_sharpe=_mean(trial_sharpes) or 0.0,
+        sharpe_standard_deviation=cross_trial_std,
+        trial_count=max(registered_trial_count, len(trial_sharpes)),
+    )
+    if expected_maximum is None:
+        return None, "Deflated Sharpe unavailable: expected-maximum Sharpe is invalid."
+
+    skewness, kurtosis = _sample_skewness_and_kurtosis(current_blocks)
+    denominator_term = (
+        1.0
+        - skewness * current_sharpe
+        + ((kurtosis - 1.0) / 4.0) * current_sharpe * current_sharpe
+    )
+    if not math.isfinite(denominator_term) or denominator_term <= 0:
+        return (
+            None,
+            "Deflated Sharpe unavailable: the non-normality correction is "
+            "non-positive.",
+        )
+    statistic = (
+        (current_sharpe - expected_maximum)
+        * math.sqrt(len(current_blocks) - 1)
+        / math.sqrt(denominator_term)
+    )
+    probability = NormalDist().cdf(statistic)
+    if not math.isfinite(probability):
+        return None, "Deflated Sharpe unavailable: the probability is non-finite."
+    return (
+        probability,
+        "Deflated Sharpe uses "
+        f"{len(current_blocks)} independent blocks, "
+        f"{registered_trial_count} registered trials, observed Sharpe "
+        f"{current_sharpe:.4f}, and expected maximum Sharpe "
+        f"{expected_maximum:.4f}.",
+    )
+
+
+def _deflated_sharpe_matrix(
+    evidence: Mapping[str, object] | None,
+) -> tuple[
+    dict[str, tuple[tuple[date, float], ...]] | None,
+    str | None,
+]:
+    if not isinstance(evidence, Mapping):
+        return None, "a frozen PBO model-return matrix was not provided"
+    if evidence.get("rejection_reason") is not None:
+        return None, "the frozen PBO matrix was rejected"
+    if evidence.get("scope") != PBO_SCOPE_FROZEN_SIX_MODEL_FAMILY:
+        return None, "the evidence does not disclose the frozen six-model family"
+    payload = evidence.get("model_return_matrix")
+    if not isinstance(payload, Mapping):
+        return None, "the PBO evidence has no model-return matrix"
+    if set(payload) != set(RANKING_V3_FROZEN_PBO_MODEL_IDS):
+        return None, "the model-return matrix does not match the frozen family"
+
+    matrix: dict[str, tuple[tuple[date, float], ...]] = {}
+    reference_dates: tuple[date, ...] | None = None
+    try:
+        for model_id in RANKING_V3_FROZEN_PBO_MODEL_IDS:
+            raw_rows = payload[model_id]
+            if not isinstance(raw_rows, Sequence) or isinstance(
+                raw_rows, (str, bytes)
+            ):
+                return None, f"matrix rows for {model_id} are not a sequence"
+            rows: list[tuple[date, float]] = []
+            for item in raw_rows:
+                if not isinstance(item, Mapping):
+                    return None, f"matrix row for {model_id} is not an object"
+                rebalance_date = date.fromisoformat(str(item["rebalance_date"]))
+                net_return = float(item["net_return"])
+                if not math.isfinite(net_return):
+                    return None, f"matrix return for {model_id} is non-finite"
+                rows.append((rebalance_date, net_return))
+            dates = tuple(item[0] for item in rows)
+            if not dates or any(right <= left for left, right in zip(dates, dates[1:])):
+                return None, f"matrix calendar for {model_id} is empty or unordered"
+            if reference_dates is None:
+                reference_dates = dates
+            elif dates != reference_dates:
+                return None, "matrix models do not use an identical calendar"
+            matrix[model_id] = tuple(rows)
+    except (KeyError, TypeError, ValueError):
+        return None, "the model-return matrix contains malformed values"
+    return matrix, None
+
+
+def _non_overlapping_block_means(
     values: Sequence[float],
     *,
-    prior_experiment_count: int,
-    effective_sample_count: int | None = None,
-) -> float | None:
-    count = len(values)
-    effective_count = (
-        count
-        if effective_sample_count is None
-        else min(count, effective_sample_count)
-    )
-    if effective_count < 3:
-        return None
-    mean = _mean(values)
-    if mean is None:
-        return None
-    sample_variance = math.fsum(
-        (value - mean) ** 2 for value in values
-    ) / (count - 1)
-    if sample_variance <= 1e-18:
-        return None
-
-    sample_deviation = math.sqrt(sample_variance)
-    sharpe = mean / sample_deviation
-    population_deviation = math.sqrt(
-        math.fsum((value - mean) ** 2 for value in values) / count
-    )
-    standardized = [
-        (value - mean) / population_deviation
-        for value in values
+    block_length: int,
+) -> list[float]:
+    return [
+        math.fsum(values[offset : offset + block_length])
+        / len(values[offset : offset + block_length])
+        for offset in range(0, len(values), block_length)
+        if len(values[offset : offset + block_length]) == block_length
     ]
-    skewness = math.fsum(value**3 for value in standardized) / count
-    kurtosis = math.fsum(value**4 for value in standardized) / count
-    sharpe_variance = max(
-        (
-            1.0
-            - skewness * sharpe
-            + ((kurtosis - 1.0) / 4.0) * sharpe**2
-        )
-        / (effective_count - 1),
-        1e-18,
+
+
+def _sample_sharpe(
+    values: Sequence[float],
+    *,
+    allow_zero_series: bool = False,
+) -> float | None:
+    standard_deviation = _sample_standard_deviation(values)
+    mean = _mean(values)
+    if mean is None or standard_deviation is None:
+        return None
+    if standard_deviation == 0:
+        return 0.0 if allow_zero_series and mean == 0 else None
+    result = mean / standard_deviation
+    return result if math.isfinite(result) else None
+
+
+def _sample_standard_deviation(values: Sequence[float]) -> float | None:
+    if len(values) < 2:
+        return None
+    mean = math.fsum(values) / len(values)
+    variance = math.fsum((value - mean) ** 2 for value in values) / (
+        len(values) - 1
     )
-    sharpe_standard_error = math.sqrt(sharpe_variance)
-    trial_count = max(1, prior_experiment_count + 1)
-    expected_maximum_sharpe = 0.0
-    if trial_count > 1:
-        normal = NormalDist()
-        euler_gamma = 0.5772156649015329
-        first_probability = _clamp_probability(1.0 - 1.0 / trial_count)
-        second_probability = _clamp_probability(
-            1.0 - 1.0 / (trial_count * math.e)
-        )
-        expected_maximum_sharpe = sharpe_standard_error * (
-            (1.0 - euler_gamma) * normal.inv_cdf(first_probability)
-            + euler_gamma * normal.inv_cdf(second_probability)
-        )
-    z_score = (
-        sharpe - expected_maximum_sharpe
-    ) / sharpe_standard_error
-    return NormalDist().cdf(z_score)
+    if not math.isfinite(variance) or variance < 0:
+        return None
+    return math.sqrt(variance)
+
+
+def _sample_skewness_and_kurtosis(
+    values: Sequence[float],
+) -> tuple[float, float]:
+    mean = math.fsum(values) / len(values)
+    second = math.fsum((value - mean) ** 2 for value in values) / len(values)
+    if second <= 0:
+        return 0.0, 3.0
+    third = math.fsum((value - mean) ** 3 for value in values) / len(values)
+    fourth = math.fsum((value - mean) ** 4 for value in values) / len(values)
+    return third / (second**1.5), fourth / (second**2)
+
+
+def _expected_maximum_sharpe(
+    *,
+    mean_sharpe: float,
+    sharpe_standard_deviation: float,
+    trial_count: int,
+) -> float | None:
+    if trial_count < 2 or sharpe_standard_deviation <= 0:
+        return None
+    normal = NormalDist()
+    euler_gamma = 0.5772156649015329
+    first = normal.inv_cdf(1.0 - 1.0 / trial_count)
+    second = normal.inv_cdf(1.0 - 1.0 / (trial_count * math.e))
+    result = mean_sharpe + sharpe_standard_deviation * (
+        (1.0 - euler_gamma) * first + euler_gamma * second
+    )
+    return result if math.isfinite(result) else None
 
 
 def _contiguous_subperiods(
@@ -519,9 +809,7 @@ def _contiguous_subperiods(
             continue
         chunk = ordered[offset : offset + size]
         offset += size
-        mean = _rounded(
-            math.fsum(value for _, value in chunk) / size
-        )
+        mean = _rounded(math.fsum(value for _, value in chunk) / size)
         assert mean is not None
         results.append(
             RankingV3SubperiodResult(
@@ -546,6 +834,7 @@ def _build_gates(
     bootstrap_lower: float | None,
     holm_adjusted_p_value: float | None,
     dsr_probability: float | None,
+    dsr_reason: str,
     positive_subperiod_count: int,
     actual_subperiod_count: int,
 ) -> list[RankingV3ValidationGate]:
@@ -557,17 +846,14 @@ def _build_gates(
             insufficient=False,
             observed="common" if dates_are_common else "mismatch",
             required="identical non-empty rebalance-date sets",
-            failure_reason=(
-                "Baseline and challenger do not use an identical rebalance calendar."
-            ),
+            failure_reason=("Baseline and challenger do not use an identical rebalance calendar."),
         ),
         _gate(
             key="independent_rebalance_dates",
             passed=effective_block_count >= thresholds.minimum_rebalance_dates,
             insufficient=effective_block_count < thresholds.minimum_rebalance_dates,
             observed=(
-                f"{effective_block_count} effective blocks "
-                f"({common_date_count} rebalance dates)"
+                f"{effective_block_count} effective blocks ({common_date_count} rebalance dates)"
             ),
             required=(
                 f">={thresholds.minimum_rebalance_dates} effective "
@@ -605,16 +891,14 @@ def _build_gates(
             observed=_format_metric(bootstrap_lower, suffix="%"),
             required=">0%",
             failure_reason=(
-                "The one-sided 95% moving-block bootstrap lower bound is not above "
-                "zero."
+                "The one-sided 95% moving-block bootstrap lower bound is not above zero."
             ),
         ),
         _gate(
             key="holm_adjusted_positive_edge",
             passed=(
                 holm_adjusted_p_value is not None
-                and holm_adjusted_p_value
-                <= thresholds.maximum_holm_adjusted_p_value
+                and holm_adjusted_p_value <= thresholds.maximum_holm_adjusted_p_value
             ),
             insufficient=holm_adjusted_p_value is None,
             observed=_format_metric(holm_adjusted_p_value),
@@ -628,41 +912,33 @@ def _build_gates(
             key="deflated_sharpe_probability",
             passed=(
                 dsr_probability is not None
-                and dsr_probability
-                >= thresholds.minimum_deflated_sharpe_probability
+                and dsr_probability >= thresholds.minimum_deflated_sharpe_probability
             ),
             insufficient=dsr_probability is None,
             observed=_format_metric(dsr_probability),
             required=f">={thresholds.minimum_deflated_sharpe_probability}",
-            failure_reason=(
-                "The Deflated Sharpe probability does not meet the frozen threshold."
-            ),
+            failure_reason=dsr_reason,
         ),
         _gate(
             key="positive_contiguous_subperiods",
             passed=(
                 actual_subperiod_count == thresholds.required_subperiods
-                and positive_subperiod_count
-                >= thresholds.minimum_positive_subperiods
+                and positive_subperiod_count >= thresholds.minimum_positive_subperiods
             ),
             insufficient=actual_subperiod_count < thresholds.required_subperiods,
             observed=f"{positive_subperiod_count}/{actual_subperiod_count}",
             required=(
-                f">={thresholds.minimum_positive_subperiods}/"
-                f"{thresholds.required_subperiods}"
+                f">={thresholds.minimum_positive_subperiods}/{thresholds.required_subperiods}"
             ),
             failure_reason=(
-                "Fewer than four of five contiguous subperiods have positive "
-                "paired net excess."
+                "Fewer than four of five contiguous subperiods have positive paired net excess."
             ),
         ),
         RankingV3ValidationGate(
             key="probability_of_backtest_overfit",
             status="unavailable",
             observed="unavailable",
-            required=(
-                f"<={thresholds.maximum_probability_of_backtest_overfit}"
-            ),
+            required=(f"<={thresholds.maximum_probability_of_backtest_overfit}"),
             reason=(
                 "PBO requires a genuine model-return matrix and is not estimated "
                 "from one baseline/challenger pair."
@@ -740,7 +1016,3 @@ def _format_metric(value: float | None, *, suffix: str = "") -> str:
     if value is None:
         return "unavailable"
     return f"{value:.12g}{suffix}"
-
-
-def _clamp_probability(value: float) -> float:
-    return min(1.0 - 1e-12, max(1e-12, value))

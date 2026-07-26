@@ -10,6 +10,7 @@ import {
   fetchPortfolioBacktest,
   fetchRecommendationCalibration,
   fetchRecommendationClosure,
+  fetchRankingV3ForwardState,
   fetchLatestWalkForwardRun,
   fetchLatestWalkForwardJob,
   fetchLatestHistoricalBackfillJob,
@@ -56,6 +57,7 @@ import type {
   RecommendationCalibrationResponse,
   RecommendationClosureResponse,
   RecommendationClosureWindow,
+  RankingV3ForwardStateResponse,
   ScanRunsResponse,
   StrategyDiagnosticsResponse,
   StrategyGovernanceDeployment,
@@ -415,6 +417,7 @@ export function History({
   const [strategyGovernance, setStrategyGovernance] = useState<StrategyGovernanceResponse>();
   const [walkForward, setWalkForward] = useState<WalkForwardRun>();
   const [walkForwardJob, setWalkForwardJob] = useState<WalkForwardJob>();
+  const [rankingV3ForwardState, setRankingV3ForwardState] = useState<RankingV3ForwardStateResponse>();
   const [historicalBackfillJob, setHistoricalBackfillJob] = useState<HistoricalBackfillJob>();
   const [error, setError] = useState("");
   const [isHistoryLoading, setIsHistoryLoading] = useState(true);
@@ -427,12 +430,15 @@ export function History({
   const [isPortfolioBacktesting, setIsPortfolioBacktesting] = useState(false);
   const [isWalkForwardRunning, setIsWalkForwardRunning] = useState(false);
   const [walkForwardError, setWalkForwardError] = useState("");
+  const [rankingV3ForwardError, setRankingV3ForwardError] = useState("");
+  const [isRankingV3ForwardLoading, setIsRankingV3ForwardLoading] = useState(true);
   const [isHistoricalBackfillRunning, setIsHistoricalBackfillRunning] = useState(false);
   const [historicalBackfillError, setHistoricalBackfillError] = useState("");
   const [strategyGovernanceError, setStrategyGovernanceError] = useState("");
   const [isStrategyGovernanceLoading, setIsStrategyGovernanceLoading] = useState(true);
   const [backtestRunContext, setBacktestRunContext] = useState<BacktestRunContext>();
   const autoBacktestKeyRef = useRef("");
+  const rankingV3ForwardRequestRef = useRef(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -458,6 +464,64 @@ export function History({
       });
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    if (dataMode !== "free") {
+      setRankingV3ForwardState(undefined);
+      setRankingV3ForwardError("");
+      setIsRankingV3ForwardLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const requestGeneration = ++rankingV3ForwardRequestRef.current;
+    let timeout: number | undefined;
+    let firstLoad = true;
+    const load = async () => {
+      if (firstLoad) {
+        setIsRankingV3ForwardLoading(true);
+      }
+      try {
+        const result = await fetchRankingV3ForwardState({ signal: controller.signal });
+        if (
+          !controller.signal.aborted
+          && requestGeneration === rankingV3ForwardRequestRef.current
+        ) {
+          setRankingV3ForwardState(result);
+          setRankingV3ForwardError("");
+        }
+      } catch (caught) {
+        if (
+          !controller.signal.aborted
+          && requestGeneration === rankingV3ForwardRequestRef.current
+        ) {
+          setRankingV3ForwardError(
+            caught instanceof Error ? caught.message : "Failed to load Ranking V3 forward state",
+          );
+        }
+      } finally {
+        if (
+          !controller.signal.aborted
+          && requestGeneration === rankingV3ForwardRequestRef.current
+        ) {
+          if (firstLoad) {
+            setIsRankingV3ForwardLoading(false);
+            firstLoad = false;
+          }
+          timeout = window.setTimeout(() => void load(), 15_000);
+        }
+      }
+    };
+
+    void load();
+    return () => {
+      ++rankingV3ForwardRequestRef.current;
+      controller.abort();
+      if (timeout !== undefined) {
+        window.clearTimeout(timeout);
+      }
+    };
+  }, [dataMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -655,7 +719,7 @@ export function History({
     try {
       setIsWalkForwardRunning(true);
       setWalkForwardError("");
-      const job = await startWalkForwardJob("2023-01-03", "2025-12-31", dataMode);
+      const job = await startWalkForwardJob("2021-11-01", "2025-12-31", dataMode);
       setWalkForwardJob(job);
     } catch (caught) {
       setWalkForwardError(caught instanceof Error ? caught.message : "Failed to run walk-forward validation");
@@ -827,6 +891,9 @@ export function History({
         isBackfillRunning={isHistoricalBackfillRunning}
         onRun={runFullMarketWalkForward}
         onBackfill={runFullMarketHistoricalBackfill}
+        forwardState={rankingV3ForwardState}
+        forwardStateError={rankingV3ForwardError}
+        isForwardStateLoading={isRankingV3ForwardLoading}
       />
 
       <BacktestCommandCenter
@@ -1579,6 +1646,487 @@ const RANKING_V3_GATE_LABELS: Record<string, { zh: string; en: string }> = {
   probability_of_backtest_overfit: { zh: "过拟合概率", en: "PBO" },
 };
 
+function rankingV3ForwardMetric(value: number | string | null | undefined): number | null {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+type RankingV3ForwardPhase =
+  | "idle"
+  | "waiting"
+  | "collecting"
+  | "settling"
+  | "approved"
+  | "rejected";
+
+function RankingV3ForwardLiveCard({
+  state,
+  error,
+  isLoading,
+  zh,
+}: {
+  state?: RankingV3ForwardStateResponse;
+  error: string;
+  isLoading: boolean;
+  zh: boolean;
+}) {
+  const metrics = state?.metrics;
+  const releaseProofExists = Boolean(state?.release_proof_digest);
+  const isWaitingStart = state?.state === "waiting_start";
+  const isWaitingSnapshot = state?.state === "waiting_snapshot"
+    || state?.phase === "waiting_snapshot";
+  const isReady = state?.state === "ready";
+  const isRejected = state?.state === "shadow_rejected" || state?.status === "rejected";
+  const isApproved = state?.state === "approved_proof_available"
+    || (state?.status === "approved" && releaseProofExists);
+  const production = state?.production;
+  const productionReady = production?.state === "recorded";
+  const productionBlocked = production?.state === "blocked";
+  const paperAdmissionReady = Boolean(
+    productionReady && production?.paper_admission_enforced,
+  );
+  const productionLabel = paperAdmissionReady
+    ? (zh ? "正式批次已冻结，模拟盘已开放" : "Production batch frozen; paper admission open")
+    : productionReady
+      ? (zh ? "正式批次已冻结，模拟盘尚未开放" : "Production batch frozen; paper admission closed")
+    : productionBlocked
+      ? (zh ? "正式批次生成受阻" : "Production batch blocked")
+      : production?.state === "awaiting_current_session_scan"
+        ? (zh ? "等待目标交易日全市场快照" : "Waiting for target-session market snapshot")
+        : production?.state === "awaiting_full_market_scan"
+          ? (zh ? "等待当日全市场扫描完成" : "Waiting for the current full-market scan")
+          : production?.state === "gated"
+            ? (zh ? "正式推荐尚未解锁" : "Production remains gated")
+            : (zh ? "等待当日全市场快照" : "Waiting for the current market snapshot");
+  const productionMessage = paperAdmissionReady
+    ? (zh
+        ? `本批次 ${production?.selected_count ?? 0} 只标的已冻结，只有这些标的可进入模拟盘。`
+        : `${production?.selected_count ?? 0} frozen selections are eligible for paper trading.`)
+    : productionReady
+      ? (zh ? "批次已保存，但模拟盘准入门禁尚未开启。" : "The batch is saved, but paper admission is not enabled.")
+    : productionBlocked
+      ? (zh ? "当前不会生成正式推荐，也不会新增模拟盘标的。" : "No production recommendations or new paper entries will be created.")
+      : (zh ? "验证已通过；快照完整后才会冻结正式推荐。" : "Validation passed; production freezes only after the snapshot is complete.");
+  const currentSessions = metrics?.session_count ?? 0;
+  const requiredSessions = state?.collection_target_sessions
+    || state?.required_sessions
+    || null;
+  const currentTrades = metrics?.completed_trade_count ?? 0;
+  const requiredTrades = state?.required_completed_trades || null;
+  const candidateCount = metrics?.candidate_count ?? 0;
+  const pendingCandidateCount = metrics?.pending_candidate_count ?? 0;
+  const matureCandidateCount = metrics?.mature_candidate_count ?? 0;
+  const validOutcomeCount = metrics?.valid_outcome_count ?? 0;
+  const coverage = rankingV3ForwardMetric(metrics?.valid_outcome_coverage_ratio);
+  const candidateMeanExcess = rankingV3ForwardMetric(metrics?.mean_benchmark_excess_pct);
+  const candidateStressMeanExcess = rankingV3ForwardMetric(
+    metrics?.mean_stress_benchmark_excess_pct,
+  );
+  const portfolioNetReturn = rankingV3ForwardMetric(metrics?.portfolio_net_return_pct);
+  const portfolioStressNetReturn = rankingV3ForwardMetric(
+    metrics?.portfolio_stress_net_return_pct,
+  );
+  const portfolioBenchmarkReturn = rankingV3ForwardMetric(
+    metrics?.portfolio_benchmark_return_pct,
+  );
+  const portfolioBenchmarkExcess = rankingV3ForwardMetric(
+    metrics?.portfolio_benchmark_excess_pct,
+  );
+  const portfolioStressBenchmarkExcess = rankingV3ForwardMetric(
+    metrics?.portfolio_stress_benchmark_excess_pct,
+  );
+  const portfolioCompletedTrades = metrics?.portfolio_completed_trade_count ?? null;
+  const maxDrawdown = rankingV3ForwardMetric(metrics?.maximum_drawdown_pct);
+  const hasPortfolioEvidence = [
+    portfolioNetReturn,
+    portfolioStressNetReturn,
+    portfolioBenchmarkReturn,
+    portfolioBenchmarkExcess,
+    portfolioStressBenchmarkExcess,
+    maxDrawdown,
+  ].every((value) => value !== null) && portfolioCompletedTrades !== null;
+  const isIdle = !state
+    || state.state === "idle"
+    || state.status === "idle"
+    || isWaitingStart
+    || isReady;
+  const collectionComplete = Boolean(
+    requiredSessions && currentSessions >= requiredSessions,
+  );
+  const serverPhase: RankingV3ForwardPhase | null = state?.phase === "candidate_collection"
+    ? "collecting"
+    : state?.phase === "waiting_snapshot"
+      ? "waiting"
+      : state?.phase === "liquidation"
+      ? "settling"
+      : state?.phase === "approved"
+        ? "approved"
+        : state?.phase === "rejected"
+          ? "rejected"
+          : state?.phase === "idle" || state?.phase === "waiting_collection"
+            ? "idle"
+            : null;
+  const phase: RankingV3ForwardPhase = serverPhase ?? (
+    isApproved
+      ? "approved"
+      : isRejected
+        ? "rejected"
+        : isIdle
+          ? "idle"
+          : collectionComplete
+            ? "settling"
+            : "collecting"
+  );
+  const tone = error || phase === "rejected"
+    ? "fail"
+    : phase === "approved"
+      ? "pass"
+      : "insufficient";
+  const title = error
+    ? (zh ? "前向状态暂不可用" : "Forward state unavailable")
+    : isLoading && !state
+      ? (zh ? "读取前向影子账本" : "Loading forward shadow ledger")
+      : phase === "approved"
+        ? (zh ? "前向验证通过" : "Forward validation passed")
+        : phase === "rejected"
+          ? (zh ? "前向验证未通过" : "Forward validation rejected")
+          : phase === "settling"
+            ? (zh ? "候选收集完成，等待成熟与清算" : "Collection complete; waiting for maturity and settlement")
+            : phase === "waiting"
+              ? (zh ? "等待每日推荐快照" : "Waiting for daily recommendation snapshot")
+              : phase === "collecting"
+                ? (zh ? "正在收集未来候选" : "Collecting prospective candidates")
+                : (zh ? "前向验证尚未开始" : "Forward validation has not started");
+  const statusLabel = error
+    ? (zh ? "连接错误" : "Error")
+    : isLoading && !state
+      ? (zh ? "读取中" : "Loading")
+      : phase === "approved"
+        ? (zh ? "通过" : "Passed")
+        : phase === "rejected"
+          ? (zh ? "拒绝" : "Rejected")
+          : phase === "settling"
+            ? (zh ? "成熟清算中" : "Settling")
+            : phase === "waiting"
+              ? (zh ? "等待数据" : "Waiting for data")
+              : phase === "collecting"
+                ? (zh ? "候选收集中" : "Collecting")
+                : (zh ? "未开始" : "Not started");
+  const latestSession = state?.latest_session_date ?? metrics?.latest_session_date ?? null;
+  const cappedCollectionSessions = requiredSessions
+    ? Math.min(currentSessions, requiredSessions)
+    : currentSessions;
+  const sessionProgress = requiredSessions
+    ? Math.min(100, Math.round((cappedCollectionSessions / requiredSessions) * 100))
+    : 0;
+  const serverMessage = state?.message?.trim()
+    || state?.reason?.trim()
+    || state?.error?.trim()
+    || "";
+  const defaultMessage = error
+    ? (zh ? "无法读取服务端状态；页面不会用缓存值伪装为最新结果。" : "The server state could not be loaded; cached values are not shown as current.")
+    : isWaitingStart
+      ? (zh ? "冻结模型尚未到前向起始日；到达后系统才会逐交易日记录，当前不会进入模拟盘。" : "The frozen model has not reached its forward start date; daily evidence begins then and does not enter paper trading.")
+      : isReady
+        ? (zh ? "历史门禁已准入，等待记录第一个未来交易日；当前不会进入模拟盘。" : "Historical admission is complete and the first future session is pending; this does not enter paper trading.")
+        : phase === "waiting"
+          ? (zh
+              ? `缺少 ${state?.blocked_date ?? "待处理交易日"} 的每日推荐快照，验证已暂停；系统不会伪造数据或显示为持续运行。`
+              : `The daily recommendation snapshot for ${state?.blocked_date ?? "the blocked session"} is missing. Validation is paused and no session is fabricated.`)
+          : phase === "idle"
+          ? (zh ? "历史门禁通过并创建账本后，系统才会按未来交易日逐日记录；这里不是模拟持仓。" : "The ledger starts only after historical admission and then records future sessions; this is not a paper portfolio.")
+          : phase === "collecting"
+            ? (zh ? "固定模型每天记录入选候选，达到要求交易日后停止新增并进入成熟清算。" : "The frozen model records selected candidates each day, then stops adding candidates and enters settlement.")
+            : phase === "settling"
+              ? (zh ? `停止新增候选，等待 ${pendingCandidateCount} 个候选到期；全部完成后才生成资本约束组合证据。` : `No new candidates are added; ${pendingCandidateCount} candidates are awaiting maturity before portfolio evidence is generated.`)
+              : phase === "approved"
+                ? (zh ? "资本约束组合在净收益、指数超额、压力成本和回撤门禁上均已通过，并生成不可变发布证明。" : "The capital-constrained portfolio passed return, benchmark excess, stress-cost and drawdown gates.")
+                : (zh ? "至少一个组合门禁未通过，此模型不会进入正式推荐或模拟盘。" : "At least one portfolio gate failed; this model will not enter official recommendations or paper trading.");
+  const activeStep = phase === "collecting"
+    ? 1
+    : phase === "waiting"
+      ? 1
+      : phase === "settling"
+      ? 2
+      : phase === "approved"
+        ? 4
+        : phase === "rejected"
+          ? 3
+          : 0;
+  const stepLabels = zh
+    ? ["收集候选", "成熟 / 清算", "组合门禁", "发布证明"]
+    : ["Collect", "Mature / settle", "Portfolio gates", "Release proof"];
+  const governanceStage = paperAdmissionReady ? 3 : isApproved ? 2 : 1;
+  const governanceSteps = [
+    {
+      title: zh ? "滚动验证" : "Rolling validation",
+      status: isRejected
+        ? (zh ? "未通过" : "Rejected")
+        : isApproved
+          ? (zh ? "已通过" : "Passed")
+          : (zh ? "进行中" : "In progress"),
+      state: isRejected ? "blocked" : isApproved ? "done" : "current",
+    },
+    {
+      title: zh ? "当日全市场快照" : "Current full-market snapshot",
+      status: !isApproved
+        ? (zh ? "等待验证" : "Locked")
+        : productionBlocked
+          ? (zh ? "生成受阻" : "Blocked")
+          : productionReady
+            ? (zh ? "已确认" : "Confirmed")
+            : (zh ? "等待快照" : "Waiting"),
+      state: !isApproved
+        ? "upcoming"
+        : productionBlocked
+          ? "blocked"
+          : productionReady
+            ? "done"
+            : "current",
+    },
+    {
+      title: zh ? "正式推荐与模拟盘" : "Production and paper",
+      status: paperAdmissionReady
+        ? (zh ? "已开放" : "Open")
+        : isApproved
+          ? (zh ? "待冻结" : "Pending")
+          : (zh ? "未开放" : "Locked"),
+      state: paperAdmissionReady ? "current ready" : "upcoming",
+    },
+  ];
+
+  return (
+    <section
+      className={`ranking-v3-forward-live ranking-v3-${tone} ranking-v3-forward-phase-${phase}`}
+      aria-live="polite"
+      aria-busy={isLoading}
+    >
+      <div className="ranking-v3-forward-live-head">
+        <div>
+          <p className="eyebrow">{zh ? "推荐排序 V3 · 前向影子验证" : "Ranking V3 · forward shadow validation"}</p>
+          <h3>{title}</h3>
+          <p>{error || serverMessage || defaultMessage}</p>
+        </div>
+        <span className={`ranking-v3-status ranking-v3-status-${tone}`}>{statusLabel}</span>
+      </div>
+
+      {!error && !isLoading ? (
+        <div
+          className="ranking-v3-governance-path"
+          aria-label={zh ? "正式推荐三阶段" : "Three-stage production path"}
+        >
+          {governanceSteps.map((step, index) => (
+            <div
+              key={step.title}
+              className={`ranking-v3-governance-step is-${step.state.replace(" ", " is-")}`}
+              aria-current={index + 1 === governanceStage ? "step" : undefined}
+            >
+              <span>{index + 1}</span>
+              <div>
+                <strong>{step.title}</strong>
+                <small>{step.status}</small>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {!error && !isLoading && phase !== "idle" && !isApproved ? (
+        <div className="ranking-v3-forward-steps" aria-label={zh ? "前向验证阶段" : "Forward validation stages"}>
+          {stepLabels.map((label, index) => {
+            const step = index + 1;
+            const isDone = phase === "approved"
+              ? step <= 4
+              : phase === "rejected"
+                ? step < activeStep
+                : step < activeStep;
+            const isCurrent = step === activeStep;
+            return (
+              <div
+                key={label}
+                className={`${isDone ? "is-done" : ""} ${isCurrent ? "is-current" : ""}`.trim()}
+              >
+                <span>{isDone ? "✓" : step}</span>
+                <strong>{label}</strong>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+
+      {!error && !isLoading && !isIdle ? (
+        <>
+          <div className="ranking-v3-forward-progress">
+            <div>
+              <span>{zh ? "候选收集进度" : "Collection progress"}</span>
+              <strong>{cappedCollectionSessions}/{requiredSessions ?? "-"}</strong>
+            </div>
+            <div className="ranking-v3-forward-progress-track" aria-hidden="true">
+              <span style={{ width: `${sessionProgress}%` }} />
+            </div>
+          </div>
+
+          {isApproved ? (
+            <div
+              className={`ranking-v3-production-state ${
+                paperAdmissionReady ? "is-ready" : productionBlocked || productionReady ? "is-blocked" : "is-waiting"
+              }`}
+              role="status"
+            >
+              <div>
+                <span>{zh ? "正式推荐 / 模拟盘准入" : "Production / paper admission"}</span>
+                <strong>{productionLabel}</strong>
+                <small>{productionMessage}</small>
+              </div>
+              <div className="ranking-v3-production-facts">
+                <span>
+                  {zh ? "目标交易日" : "Target session"}
+                  <strong>{production?.target_session_date ?? "-"}</strong>
+                </span>
+                <span>
+                  {zh ? "已冻结标的" : "Frozen selections"}
+                  <strong>{productionReady ? production?.selected_count ?? 0 : "-"}</strong>
+                </span>
+                <span>
+                  {zh ? "最新批次" : "Latest batch"}
+                  <strong>{production?.latest_session_date ?? "-"}</strong>
+                </span>
+              </div>
+            </div>
+          ) : null}
+
+          {isWaitingSnapshot ? (
+            <div className="ranking-v3-forward-blocked" role="status">
+              <strong>{zh ? "验证已暂停，等待快照" : "Validation paused pending snapshot"}</strong>
+              <span>
+                {zh ? "阻断交易日" : "Blocked session"} {state?.blocked_date ?? "-"}
+              </span>
+              <span>
+                {zh ? "阻断代码" : "Block code"}{" "}
+                {state?.blocked_code ?? "daily_opportunity_snapshot_missing"}
+              </span>
+              <span>
+                {zh ? "最近尝试" : "Last attempt"}{" "}
+                {state?.last_attempt_at
+                  ? new Date(state.last_attempt_at).toLocaleString(zh ? "zh-CN" : "en-US")
+                  : "-"}
+              </span>
+            </div>
+          ) : null}
+
+          <div className="ranking-v3-forward-live-grid ranking-v3-forward-candidate-grid">
+            <div>
+              <span>{zh ? "累计候选" : "Candidates"}</span>
+              <strong>{candidateCount}</strong>
+            </div>
+            <div>
+              <span>{zh ? "等待成熟" : "Pending maturity"}</span>
+              <strong>{pendingCandidateCount}</strong>
+            </div>
+            <div>
+              <span>{zh ? "已成熟候选" : "Mature candidates"}</span>
+              <strong>{matureCandidateCount}</strong>
+            </div>
+            <div>
+              <span>{zh ? "有效结果" : "Valid outcomes"}</span>
+              <strong>{validOutcomeCount}</strong>
+            </div>
+          </div>
+
+          {hasPortfolioEvidence ? (
+            <div className="ranking-v3-forward-portfolio">
+              <div className="ranking-v3-forward-section-head">
+                <div>
+                  <strong>{zh ? "资本约束组合结果" : "Capital-constrained portfolio"}</strong>
+                  <span>{zh ? "包含仓位、资金、交易成本和压力成本；不是候选平均收益。" : "Includes capital, positions and costs; not a candidate average."}</span>
+                </div>
+                <small>{portfolioCompletedTrades} {zh ? "笔完成交易" : "completed trades"}</small>
+              </div>
+              <div className="ranking-v3-forward-live-grid ranking-v3-forward-portfolio-grid">
+                <div>
+                  <span>{zh ? "组合净收益" : "Portfolio net return"}</span>
+                  <strong className={signedCellClass(portfolioNetReturn)}>{formatNumber(portfolioNetReturn, "%")}</strong>
+                </div>
+                <div>
+                  <span>{zh ? "同期基准" : "Benchmark return"}</span>
+                  <strong className={signedCellClass(portfolioBenchmarkReturn)}>{formatNumber(portfolioBenchmarkReturn, "%")}</strong>
+                </div>
+                <div>
+                  <span>{zh ? "组合超额" : "Portfolio excess"}</span>
+                  <strong className={signedCellClass(portfolioBenchmarkExcess)}>{formatNumber(portfolioBenchmarkExcess, "%")}</strong>
+                </div>
+                <div>
+                  <span>{zh ? "压力成本后净收益" : "Stress-cost net return"}</span>
+                  <strong className={signedCellClass(portfolioStressNetReturn)}>{formatNumber(portfolioStressNetReturn, "%")}</strong>
+                </div>
+                <div>
+                  <span>{zh ? "压力成本后超额" : "Stress-cost excess"}</span>
+                  <strong className={signedCellClass(portfolioStressBenchmarkExcess)}>{formatNumber(portfolioStressBenchmarkExcess, "%")}</strong>
+                </div>
+                <div>
+                  <span>{zh ? "最大回撤" : "Maximum drawdown"}</span>
+                  <strong className={signedCellClass(maxDrawdown)}>{formatNumber(maxDrawdown, "%")}</strong>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="ranking-v3-forward-evidence-empty" role="status">
+              <div>
+                <strong>{zh ? "组合净值尚未生成" : "Portfolio evidence is not available yet"}</strong>
+                <p>
+                  {phase === "collecting"
+                    ? (zh ? "当前只收集冻结模型的未来候选。达到收集期后，还要等待每个候选到期和清算。" : "The system is still collecting prospective candidates. Maturity and settlement follow the collection period.")
+                    : phase === "settling"
+                      ? (zh ? `仍有 ${pendingCandidateCount} 个候选等待成熟。全部候选终结后才会计算真实组合净收益、指数超额和回撤。` : `${pendingCandidateCount} candidates still await maturity. Portfolio return, excess and drawdown are calculated only after all candidates terminate.`)
+                      : (zh ? "没有可验证的资本约束组合证据，因此页面不会绘制空曲线或展示候选均值作为组合收益。" : "No capital-constrained portfolio evidence exists, so the page does not draw an empty chart or present candidate averages as portfolio returns.")}
+                </p>
+              </div>
+              <span>{zh ? "等待组合证据" : "Awaiting portfolio evidence"}</span>
+            </div>
+          )}
+
+          <details className="ranking-v3-forward-candidate-details">
+            <summary>
+              <span>{zh ? "候选层统计（非组合收益）" : "Candidate statistics (not portfolio returns)"}</span>
+              <strong>{formatRatio(coverage)} {zh ? "有效覆盖" : "valid coverage"}</strong>
+            </summary>
+            <div>
+              <span>
+                {zh ? "候选平均指数超额" : "Mean candidate benchmark excess"}
+                <strong className={signedCellClass(candidateMeanExcess)}>{formatNumber(candidateMeanExcess, "%")}</strong>
+              </span>
+              <span>
+                {zh ? "压力成本后候选平均超额" : "Mean stress-cost candidate excess"}
+                <strong className={signedCellClass(candidateStressMeanExcess)}>{formatNumber(candidateStressMeanExcess, "%")}</strong>
+              </span>
+              <span>
+                {zh ? "候选完成交易" : "Candidate completed trades"}
+                <strong>{currentTrades}/{requiredTrades ?? "-"}</strong>
+              </span>
+            </div>
+          </details>
+
+          <div className="ranking-v3-forward-foot">
+            <span>{zh ? "最近处理交易日" : "Latest processed session"} <strong>{latestSession ?? "-"}</strong></span>
+            <span>{zh ? "正式发布证明" : "Official release proof"} <strong className={releaseProofExists ? "good" : ""}>{releaseProofExists ? (zh ? "已生成" : "Available") : (zh ? "尚未生成" : "Not available")}</strong></span>
+          </div>
+        </>
+      ) : null}
+
+      {state?.protocol_id || state?.validation_run_id || state?.release_proof_digest ? (
+        <div className="ranking-v3-forward-live-meta">
+          {state.protocol_id ? <span>{state.protocol_id}</span> : null}
+          {state.validation_run_id ? <span>{zh ? "历史准入" : "Admission"} {state.validation_run_id.slice(0, 12)}</span> : null}
+          {state.release_proof_digest ? <span>{zh ? "证明" : "Proof"} {state.release_proof_digest.slice(0, 12)}</span> : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function RankingV3ShadowCard({
   evaluation,
   zh,
@@ -1603,9 +2151,22 @@ function RankingV3ShadowCard({
     : isStatisticallyReady
       ? (zh ? "统计门禁通过 · 仍为影子" : "Statistical gates passed · shadow only")
       : (zh ? "证据不足 · 继续影子" : "Insufficient evidence · shadow only");
-  const resolvedCoverage = evaluation.candidate_pool_signal_count > 0
-    ? evaluation.resolved_candidate_count / evaluation.candidate_pool_signal_count
+  const candidateCoverage = Number.isFinite(evaluation.candidate_outcome_coverage_ratio)
+    ? evaluation.candidate_outcome_coverage_ratio
     : null;
+  const validationCoverage = Number.isFinite(evaluation.validation_valid_outcome_coverage_ratio)
+    ? evaluation.validation_valid_outcome_coverage_ratio
+    : null;
+  const pairedDateCoverage = Number.isFinite(evaluation.validation_paired_rebalance_date_coverage_ratio)
+    ? evaluation.validation_paired_rebalance_date_coverage_ratio
+    : null;
+  const benchmarkCoverage = Number.isFinite(evaluation.benchmark_member_coverage_ratio)
+    ? evaluation.benchmark_member_coverage_ratio
+    : null;
+  const stratifiedCoverage = Number.isFinite(evaluation.worst_stratified_outcome_coverage_ratio)
+    ? evaluation.worst_stratified_outcome_coverage_ratio
+    : null;
+  const scoringArtifact = evaluation.forward_scoring_artifact;
   const historicalAuditWindow = protocol?.windows?.find((window) => window.key === "historical_reused_oos");
   const forwardWindow = protocol?.windows?.find((window) => window.key === "prospective_shadow");
   const requiredDates = protocol?.thresholds?.minimum_rebalance_dates;
@@ -1660,14 +2221,25 @@ function RankingV3ShadowCard({
 
       <div className="ranking-v3-summary-grid">
         <div>
-          <span>{zh ? "候选池覆盖" : "Candidate coverage"}</span>
-          <strong>{formatRatio(resolvedCoverage)}</strong>
+          <span>{zh ? "统计样本覆盖" : "Validation coverage"}</span>
+          <strong>{formatRatio(validationCoverage)}</strong>
           <small>
-            {evaluation.resolved_candidate_count ?? 0}/{evaluation.candidate_pool_signal_count ?? 0} {zh ? "已完成" : "resolved"}
+            {evaluation.validation_valid_outcome_count ?? 0}/{evaluation.validation_selected_outcome_count ?? 0} {zh ? "有效" : "valid"}
             {" · "}
-            {zh ? "未触发" : "untriggered"} {evaluation.untriggered_candidate_count ?? 0}
+            {zh ? "无效" : "invalid"} {evaluation.validation_invalid_outcome_count ?? 0}
             {" · "}
-            {zh ? "无效" : "invalid"} {evaluation.invalid_candidate_count ?? 0}
+            {zh ? "完整调仓日" : "complete dates"} {formatRatio(pairedDateCoverage)}
+          </small>
+        </div>
+        <div>
+          <span>{zh ? "候选结果账本" : "Candidate outcome ledger"}</span>
+          <strong>{formatRatio(candidateCoverage)}</strong>
+          <small>
+            {evaluation.valid_candidate_outcome_count ?? 0}/{evaluation.candidate_pool_signal_count ?? 0} {zh ? "有效结果" : "valid outcomes"}
+            {" · "}
+            {zh ? "明确未触发" : "valid cash"} {evaluation.untriggered_candidate_count ?? 0}
+            {" · "}
+            {zh ? "无效/删失" : "invalid/censored"} {evaluation.invalid_candidate_count ?? 0}
           </small>
         </div>
         <div>
@@ -1678,7 +2250,18 @@ function RankingV3ShadowCard({
           <small>
             {zh ? "基准" : "benchmark"} {formatNumber(evaluation.benchmark_return_pct, "%")}
             {" · "}
-            {zh ? "换手下降" : "turnover reduction"} {formatNumber(evaluation.turnover_reduction_pct, "%")}
+            {zh ? "成分覆盖" : "member coverage"} {formatRatio(benchmarkCoverage)}
+            {" · "}
+            {evaluation.benchmark_priced_member_observations ?? 0}/{evaluation.benchmark_expected_member_observations ?? 0}
+          </small>
+        </div>
+        <div>
+          <span>{zh ? "分层数据覆盖" : "Stratified coverage"}</span>
+          <strong>{formatRatio(stratifiedCoverage)}</strong>
+          <small>
+            {evaluation.stratified_coverage_group_count ?? 0} {zh ? "个有效分层" : "eligible slices"}
+            {" · "}
+            {evaluation.stratified_coverage_failure_count ?? 0} {zh ? "个未达标" : "failed"}
           </small>
         </div>
         <div>
@@ -1723,6 +2306,19 @@ function RankingV3ShadowCard({
           <strong>{formatRatio(validation?.deflated_sharpe_probability)}</strong>
           <small>
             {zh ? "正向分段" : "Positive subperiods"} {validation?.positive_subperiod_count ?? 0}/{validation?.required_positive_subperiod_count ?? "-"}
+          </small>
+        </div>
+        <div>
+          <span>{zh ? "回测过拟合概率" : "Backtest overfit probability"}</span>
+          <strong>{formatRatio(validation?.pbo_probability)}</strong>
+          <small>{validation?.pbo_status === "pass" ? (zh ? "门禁通过" : "Gate passed") : (zh ? "未通过或证据不足" : "Failed or insufficient")}</small>
+        </div>
+        <div>
+          <span>{zh ? "前向冻结模型" : "Frozen forward model"}</span>
+          <strong>{scoringArtifact?.model_ready ? (zh ? "已就绪" : "Ready") : (zh ? "未就绪" : "Not ready")}</strong>
+          <small>
+            {scoringArtifact?.training_observation_count ?? 0}/{scoringArtifact?.training_date_count ?? 0} {zh ? "样本/日期" : "rows/dates"}
+            {scoringArtifact?.stable_digest ? ` · ${scoringArtifact.stable_digest.slice(0, 8)}` : ""}
           </small>
         </div>
       </div>
@@ -1805,6 +2401,9 @@ function WalkForwardValidationCenter({
   run,
   job,
   backfillJob,
+  forwardState,
+  forwardStateError,
+  isForwardStateLoading,
   error,
   backfillError,
   isRunning,
@@ -1815,6 +2414,9 @@ function WalkForwardValidationCenter({
   run?: WalkForwardRun;
   job?: WalkForwardJob;
   backfillJob?: HistoricalBackfillJob;
+  forwardState?: RankingV3ForwardStateResponse;
+  forwardStateError: string;
+  isForwardStateLoading: boolean;
   error: string;
   backfillError: string;
   isRunning: boolean;
@@ -2129,6 +2731,12 @@ function WalkForwardValidationCenter({
           </div>
         </div>
       ) : null}
+      <RankingV3ForwardLiveCard
+        state={forwardState}
+        error={forwardStateError}
+        isLoading={isForwardStateLoading}
+        zh={zh}
+      />
       {!run ? (
         <div className="walk-forward-empty">
           <strong>{zh ? "还没有保存的 Walk-forward 结果" : "No saved walk-forward result"}</strong>

@@ -118,6 +118,77 @@ def test_signal_portfolio_backtest_never_reads_or_realizes_beyond_end_date():
     assert result.data_health["history_cutoff"] == "hard_end_date_no_future_bars"
 
 
+def test_portfolio_does_not_open_duplicate_positions_for_same_instrument():
+    class FrameProvider:
+        name = "frame"
+
+        def __init__(self, frame):
+            self.frame = frame
+
+        def get_daily_bars(self, instrument_ids, start, end):
+            return self.frame.loc[
+                self.frame["instrument_id"].isin(instrument_ids)
+                & (self.frame["trade_date"] >= start)
+                & (self.frame["trade_date"] <= end)
+            ].copy()
+
+    signals = [
+        BacktestSignal(
+            snapshot_id=f"duplicate-{signal_date}",
+            instrument_id="US:TEST",
+            signal_date=signal_date,
+            primary_strategy_id="trend",
+            status="setup_ready",
+            rank_score=Decimal("0.9"),
+            trigger_price=Decimal("10"),
+            initial_stop=Decimal("9"),
+            target_1=Decimal("20"),
+            outcome_status="pending",
+        )
+        for signal_date in (date(2025, 1, 2), date(2025, 1, 3))
+    ]
+    sessions = (
+        date(2025, 1, 2),
+        date(2025, 1, 3),
+        date(2025, 1, 6),
+        date(2025, 1, 7),
+        date(2025, 1, 8),
+        date(2025, 1, 9),
+        date(2025, 1, 10),
+    )
+    provider = FrameProvider(
+        pd.DataFrame(
+            [
+                {
+                    "instrument_id": "US:TEST",
+                    "trade_date": session,
+                    "open": 10,
+                    "high": 10.5,
+                    "low": 9.8,
+                    "close": 10.2,
+                    "volume": 1_000_000,
+                }
+                for session in sessions
+            ]
+        )
+    )
+
+    result = run_signal_portfolio_backtest(
+        signals=signals,
+        instrument_ids=["US:TEST"],
+        provider=provider,
+        start=sessions[0],
+        end=sessions[-1],
+        max_positions=5,
+        slippage_bps=Decimal("0"),
+        max_entry_wait_days=2,
+        max_holding_days=4,
+    )
+
+    assert result.summary.trade_count == 1
+    assert [trade.instrument_id for trade in result.trades] == ["US:TEST"]
+
+
 def test_portfolio_does_not_use_future_exit_liquidity_to_resize_entry():
     signal = BacktestSignal(
         snapshot_id="thin-exit",
@@ -173,15 +244,46 @@ def test_portfolio_does_not_use_future_exit_liquidity_to_resize_entry():
     assert candidate is not None
     assert candidate.max_executable_shares == Decimal("1000000")
     assert candidate.exit_executable_shares == Decimal("100")
+    trade = _size_trade(
+        candidate,
+        equity=Decimal("100000"),
+        risk_per_trade_pct=Decimal("1"),
+        max_positions=5,
+        transaction_cost_bps=Decimal("0"),
+    )
+    assert trade is not None
+    assert trade.shares == Decimal("1000")
+    assert trade.shares > candidate.exit_executable_shares
+
+    class FrameProvider:
+        name = "thin-exit"
+
+        def get_daily_bars(self, instrument_ids, start, end):
+            return bars.loc[
+                bars["instrument_id"].isin(instrument_ids)
+                & (bars["trade_date"] >= start)
+                & (bars["trade_date"] <= end)
+            ].copy()
+
+    result = run_signal_portfolio_backtest(
+        signals=[signal],
+        instrument_ids=["CN:000001"],
+        provider=FrameProvider(),
+        start=date(2025, 1, 1),
+        end=date(2025, 1, 3),
+        transaction_cost_bps=Decimal("0"),
+        slippage_bps=Decimal("0"),
+        max_entry_wait_days=2,
+        max_holding_days=3,
+    )
+
+    assert result.trades == []
+    assert result.equity_curve[-1].open_positions == 1
+    assert result.equity_curve[-1].market_value == Decimal("9000.00")
+    assert result.summary.final_equity == Decimal("99000.00")
     assert (
-        _size_trade(
-            candidate,
-            equity=Decimal("100000"),
-            risk_per_trade_pct=Decimal("1"),
-            max_positions=5,
-            transaction_cost_bps=Decimal("0"),
-        )
-        is None
+        result.data_health["exit_liquidity_policy"]
+        == "preserve_entry_mark_at_lower_of_latest_or_stop_and_censor_realized_return"
     )
 
 

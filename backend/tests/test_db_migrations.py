@@ -7,7 +7,19 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.schema import CreateTable
 
 from qagent import db
-from qagent.db import Base, create_db_engine, initialize_database
+from qagent.backtesting.ranking_v3_forward import (
+    RankingV3ForwardIdentity,
+    RankingV3ForwardSessionInput,
+    RankingV3ShadowCandidateInput,
+    stable_digest,
+)
+from qagent.db import (
+    Base,
+    create_db_engine,
+    create_session_factory,
+    initialize_database,
+)
+from qagent.storage.ranking_v3_forward import RankingV3ForwardRepository
 from qagent.storage import tables as _tables  # noqa: F401
 
 
@@ -768,12 +780,12 @@ def test_initialize_database_adds_strategy_governance_schema_to_legacy_database(
         "{}",
         "{}",
     )
-    assert trigger_names == {
+    assert {
         "trg_strategy_versions_immutable_update",
         "trg_strategy_versions_immutable_delete",
         "trg_policy_deployments_immutable_update",
         "trg_policy_deployments_immutable_delete",
-    }
+    }.issubset(trigger_names)
 
 
 def test_strategy_and_policy_snapshots_are_database_immutable(tmp_path):
@@ -811,3 +823,431 @@ def test_strategy_and_policy_snapshots_are_database_immutable(tmp_path):
             connection.execute(
                 text("DELETE FROM policy_deployments WHERE deployment_id = 'deployment-v1'")
             )
+
+
+def test_forward_candidate_source_snapshot_migration_quarantines_legacy_rows(
+    tmp_path,
+):
+    database_url = f"sqlite:///{tmp_path / 'legacy-forward-source.db'}"
+    engine = create_db_engine(database_url)
+    Base.metadata.create_all(engine)
+    repository = RankingV3ForwardRepository(create_session_factory(database_url))
+    identity = RankingV3ForwardIdentity(
+        protocol_id="QAGENT-RANK-V3-LEGACY",
+        protocol_digest="1" * 64,
+        model_version="legacy-forward",
+    )
+    data_revision = "legacy-data-revision"
+    session_date = date(2026, 7, 27)
+    source = RankingV3ShadowCandidateInput(
+        candidate_id="legacy-candidate",
+        source_snapshot_id="source-that-legacy-schema-did-not-store",
+        session_date=session_date,
+        maturity_session_date=date(2026, 7, 28),
+        instrument_id="CN:000001",
+        strategy_id="ranking-v3",
+        rank=1,
+        score=Decimal("0.8"),
+        benchmark_id="CN:000300",
+        data_revision=data_revision,
+        selection_digest="2" * 64,
+    )
+    repository.ensure_ledger(identity, data_revision)
+    session_input = RankingV3ForwardSessionInput(
+        session_date=session_date,
+        benchmark_id="CN:000300",
+        benchmark_return_pct=Decimal("0"),
+        portfolio_equity=Decimal("100"),
+        stress_portfolio_equity=Decimal("100"),
+        benchmark_equity=Decimal("100"),
+        data_revision=data_revision,
+    )
+    repository.record_session(
+        identity,
+        session_input,
+        idempotency_key="legacy-session",
+        fact_digest=stable_digest(session_input),
+    )
+    repository.record_candidate(
+        identity,
+        source,
+        idempotency_key="legacy-candidate",
+        fact_digest=stable_digest(source),
+    )
+
+    candidate_table = Base.metadata.tables["ranking_v3_forward_candidates"]
+    current_ddl = str(CreateTable(candidate_table).compile(dialect=engine.dialect))
+    legacy_ddl = current_ddl.replace(
+        "\n\tsource_snapshot_id VARCHAR(192) NOT NULL, ",
+        "",
+    ).replace(
+        ", \n\tCONSTRAINT ck_ranking_v3_forward_candidates_source_snapshot "
+        "CHECK (length(trim(source_snapshot_id)) > 0)",
+        "",
+    )
+    assert "source_snapshot_id" not in legacy_ddl
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE ranking_v3_forward_candidates "
+                "RENAME TO ranking_v3_forward_candidates_current"
+            )
+        )
+        connection.execute(text(legacy_ddl))
+        current_columns = [
+            column["name"]
+            for column in inspect(connection).get_columns("ranking_v3_forward_candidates_current")
+            if column["name"] != "source_snapshot_id"
+        ]
+        column_sql = ", ".join(current_columns)
+        connection.execute(
+            text(
+                f"INSERT INTO ranking_v3_forward_candidates ({column_sql}) "
+                f"SELECT {column_sql} "
+                "FROM ranking_v3_forward_candidates_current"
+            )
+        )
+        connection.execute(
+            text("UPDATE ranking_v3_forward_candidates SET fact_digest = :legacy_digest"),
+            {"legacy_digest": "3" * 64},
+        )
+        connection.execute(text("DROP TABLE ranking_v3_forward_candidates_current"))
+
+    db._initialized_urls.discard(database_url)
+    migrated = initialize_database(database_url)
+    columns = {
+        column["name"]: column
+        for column in inspect(migrated).get_columns("ranking_v3_forward_candidates")
+    }
+    assert columns["source_snapshot_id"]["nullable"] is False
+    with migrated.connect() as connection:
+        candidate_state = connection.execute(
+            text(
+                "SELECT source_snapshot_id, integrity_status, quarantine_reason "
+                "FROM ranking_v3_forward_candidates"
+            )
+        ).one()
+        ledger_state = connection.execute(
+            text(
+                "SELECT status, integrity_status, quarantine_reason, "
+                "rejection_reasons_json, revision "
+                "FROM ranking_v3_forward_ledgers"
+            )
+        ).one()
+        trigger_version = connection.execute(
+            text(
+                "SELECT version FROM qagent_schema_components "
+                "WHERE component = 'ranking_v3_forward_triggers'"
+            )
+        ).scalar_one()
+    assert candidate_state[0] == ""
+    assert candidate_state[1] == "legacy_quarantined"
+    assert "unverifiable" in candidate_state[2]
+    assert ledger_state[0:2] == ("rejected", "legacy_quarantined")
+    assert "unverifiable" in ledger_state[2]
+    assert "legacy/quarantined" in ledger_state[3]
+    assert trigger_version == 2
+
+    restarted = RankingV3ForwardRepository(create_session_factory(database_url))
+    snapshot = restarted.load_snapshot(identity)
+    assert snapshot is not None
+    assert snapshot.ledger.status == "rejected"
+    assert snapshot.candidates == []
+    assert any("legacy/quarantined" in reason for reason in snapshot.ledger.rejection_reasons)
+
+    first_revision = ledger_state[4]
+    db._initialized_urls.discard(database_url)
+    initialize_database(database_url)
+    with migrated.connect() as connection:
+        assert (
+            connection.execute(text("SELECT revision FROM ranking_v3_forward_ledgers")).scalar_one()
+            == first_revision
+        )
+
+    with pytest.raises(
+        DBAPIError,
+        match="candidate selection facts are immutable",
+    ):
+        with migrated.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE ranking_v3_forward_candidates "
+                    "SET source_snapshot_id = 'forged-after-migration'"
+                )
+            )
+    with pytest.raises(
+        DBAPIError,
+        match="source snapshot is required",
+    ):
+        with migrated.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE ranking_v3_forward_candidates "
+                    "SET source_snapshot_id = '' "
+                    "WHERE candidate_id = 'legacy-candidate'"
+                )
+            )
+
+
+def test_forward_evidence_migration_adds_portfolio_kind_and_preserves_rows(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'legacy-forward-evidence.db'}"
+    engine = create_db_engine(database_url)
+    Base.metadata.create_all(engine)
+    evidence_table = Base.metadata.tables["ranking_v3_forward_gate_evidence"]
+    current_ddl = str(CreateTable(evidence_table).compile(dialect=engine.dialect))
+    legacy_ddl = current_ddl.replace(
+        "'historical_gates', 'pbo', 'portfolio'",
+        "'historical_gates', 'pbo'",
+    )
+    assert legacy_ddl != current_ddl
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE ranking_v3_forward_gate_evidence "
+                "RENAME TO ranking_v3_forward_gate_evidence_current"
+            )
+        )
+        connection.execute(text(legacy_ddl))
+        connection.execute(
+            text(
+                "INSERT INTO ranking_v3_forward_gate_evidence ("
+                "evidence_digest, protocol_id, protocol_digest, model_version, "
+                "evidence_kind, sequence, data_revision, passed, payload_json, "
+                "idempotency_key, recorded_at"
+                ") VALUES ("
+                ":evidence_digest, 'QAGENT-RANK-V3', :protocol_digest, 'v3', "
+                "'pbo', 1, 'revision-1', 1, '{}', 'pbo-1', :recorded_at"
+                ")"
+            ),
+            {
+                "evidence_digest": "a" * 64,
+                "protocol_digest": "b" * 64,
+                "recorded_at": datetime(2026, 7, 27, tzinfo=timezone.utc),
+            },
+        )
+        connection.execute(text("DROP TABLE ranking_v3_forward_gate_evidence_current"))
+
+    db._initialized_urls.discard(database_url)
+    migrated = initialize_database(database_url)
+    with migrated.begin() as connection:
+        table_sql = connection.execute(
+            text(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'table' "
+                "AND name = 'ranking_v3_forward_gate_evidence'"
+            )
+        ).scalar_one()
+        assert "'portfolio'" in table_sql
+        assert (
+            connection.execute(
+                text(
+                    "SELECT evidence_kind FROM ranking_v3_forward_gate_evidence "
+                    "WHERE evidence_digest = :evidence_digest"
+                ),
+                {"evidence_digest": "a" * 64},
+            ).scalar_one()
+            == "pbo"
+        )
+        connection.execute(
+            text(
+                "INSERT INTO ranking_v3_forward_gate_evidence ("
+                "evidence_digest, protocol_id, protocol_digest, model_version, "
+                "evidence_kind, sequence, data_revision, passed, payload_json, "
+                "idempotency_key, recorded_at"
+                ") VALUES ("
+                ":evidence_digest, 'QAGENT-RANK-V3', :protocol_digest, 'v3', "
+                "'portfolio', 1, 'revision-1', 1, '{}', 'portfolio-1', :recorded_at"
+                ")"
+            ),
+            {
+                "evidence_digest": "c" * 64,
+                "protocol_digest": "b" * 64,
+                "recorded_at": datetime(2026, 7, 28, tzinfo=timezone.utc),
+            },
+        )
+
+    with pytest.raises(
+        DBAPIError,
+        match="ranking_v3_forward_gate_evidence rows are immutable",
+    ):
+        with migrated.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE ranking_v3_forward_gate_evidence "
+                    "SET passed = 0 WHERE evidence_digest = :evidence_digest"
+                ),
+                {"evidence_digest": "a" * 64},
+            )
+
+
+def test_forward_trigger_bundle_is_versioned_and_replaced_on_restart(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'forward-trigger-version.db'}"
+    engine = initialize_database(database_url)
+    trigger_name = "trg_ranking_v3_forward_ledgers_transition_update"
+
+    with engine.begin() as connection:
+        connection.execute(text(f'DROP TRIGGER "{trigger_name}"'))
+        connection.execute(
+            text(
+                f"CREATE TRIGGER {trigger_name} "
+                "BEFORE UPDATE ON ranking_v3_forward_ledgers "
+                "BEGIN SELECT RAISE(ABORT, 'stale trigger body'); END"
+            )
+        )
+        connection.execute(
+            text(
+                "UPDATE qagent_schema_components SET version = 1 "
+                "WHERE component = 'ranking_v3_forward_triggers'"
+            )
+        )
+
+    db._initialized_urls.discard(database_url)
+    migrated = initialize_database(database_url)
+    with migrated.connect() as connection:
+        trigger_sql = connection.execute(
+            text("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = :name"),
+            {"name": trigger_name},
+        ).scalar_one()
+        version = connection.execute(
+            text(
+                "SELECT version FROM qagent_schema_components "
+                "WHERE component = 'ranking_v3_forward_triggers'"
+            )
+        ).scalar_one()
+
+    assert "stale trigger body" not in trigger_sql
+    assert "ledger transition is invalid" in trigger_sql
+    assert version == 2
+
+
+def test_initialize_database_adds_production_schema_and_backfills_legacy_paper_trades(
+    tmp_path,
+):
+    database_url = f"sqlite:///{tmp_path / 'legacy-production-selection.db'}"
+    engine = create_db_engine(database_url)
+    Base.metadata.create_all(engine)
+    production_tables = (
+        "ranking_v3_production_idempotency_keys",
+        "ranking_v3_production_selections",
+        "ranking_v3_production_batches",
+    )
+    paper_columns = (
+        "admission_source",
+        "production_identity_digest",
+        "production_batch_fact_digest",
+        "production_selection_item_digest",
+        "release_proof_digest",
+    )
+    with engine.begin() as connection:
+        for table_name in production_tables:
+            connection.execute(text(f"DROP TABLE {table_name}"))
+        for column in paper_columns[1:]:
+            connection.execute(text(f"DROP INDEX ix_paper_trades_{column}"))
+        for column in paper_columns:
+            connection.execute(text(f"ALTER TABLE paper_trades DROP COLUMN {column}"))
+        connection.execute(
+            text(
+                "INSERT INTO paper_trades ("
+                "trade_id, source_snapshot_id, provider, instrument_id, strategy_id, "
+                "status, signal_date, trigger_price, allocation_multiplier, holding_days, "
+                "notes, created_at, updated_at"
+                ") VALUES ("
+                "'legacy-paper', 'legacy-snapshot', 'free', 'CN:000001', 'legacy', "
+                "'pending', '2026-07-01', 10, 1, 0, '', "
+                "'2026-07-01 00:00:00', '2026-07-01 00:00:00'"
+                ")"
+            )
+        )
+
+    migrated = initialize_database(database_url)
+    inspector = inspect(migrated)
+    assert set(production_tables).issubset(inspector.get_table_names())
+    assert set(paper_columns).issubset(
+        {column["name"] for column in inspector.get_columns("paper_trades")}
+    )
+    with migrated.connect() as connection:
+        legacy = connection.execute(
+            text(
+                "SELECT admission_source, production_identity_digest, "
+                "production_batch_fact_digest, production_selection_item_digest, "
+                "release_proof_digest FROM paper_trades "
+                "WHERE trade_id = 'legacy-paper'"
+            )
+        ).one()
+        version = connection.execute(
+            text(
+                "SELECT version FROM qagent_schema_components "
+                "WHERE component = 'ranking_v3_production_triggers'"
+            )
+        ).scalar_one()
+        triggers = set(
+            connection.execute(
+                text(
+                    "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                    "AND (name LIKE 'trg_ranking_v3_production_%' "
+                    "OR name LIKE 'trg_opportunity_snapshots_production_reference_%' "
+                    "OR name LIKE 'trg_paper_trades_ranking_v3_production_%')"
+                )
+            ).scalars()
+        )
+    assert legacy == ("legacy_unknown", None, None, None, None)
+    assert version == 1
+    assert {
+        "trg_ranking_v3_production_batches_immutable_update",
+        "trg_ranking_v3_production_batches_immutable_delete",
+        "trg_ranking_v3_production_selections_batch_reference_insert",
+        "trg_opportunity_snapshots_production_reference_update",
+        "trg_opportunity_snapshots_production_reference_delete",
+        "trg_paper_trades_ranking_v3_production_insert",
+        "trg_paper_trades_ranking_v3_production_update",
+    }.issubset(triggers)
+
+    for _ in range(2):
+        db._initialized_urls.discard(database_url)
+        initialize_database(database_url)
+    with migrated.connect() as connection:
+        assert (
+            connection.execute(
+                text("SELECT admission_source FROM paper_trades WHERE trade_id = 'legacy-paper'")
+            ).scalar_one()
+            == "legacy_unknown"
+        )
+
+
+def test_production_trigger_bundle_is_versioned_and_replaced_on_restart(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'production-trigger-version.db'}"
+    engine = initialize_database(database_url)
+    trigger_name = "trg_ranking_v3_production_batches_immutable_update"
+    with engine.begin() as connection:
+        connection.execute(text(f'DROP TRIGGER "{trigger_name}"'))
+        connection.execute(
+            text(
+                f"CREATE TRIGGER {trigger_name} "
+                "BEFORE UPDATE ON ranking_v3_production_batches "
+                "BEGIN SELECT RAISE(ABORT, 'stale production trigger'); END"
+            )
+        )
+        connection.execute(
+            text(
+                "UPDATE qagent_schema_components SET version = 0 "
+                "WHERE component = 'ranking_v3_production_triggers'"
+            )
+        )
+
+    db._initialized_urls.discard(database_url)
+    migrated = initialize_database(database_url)
+    with migrated.connect() as connection:
+        trigger_sql = connection.execute(
+            text("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = :name"),
+            {"name": trigger_name},
+        ).scalar_one()
+        version = connection.execute(
+            text(
+                "SELECT version FROM qagent_schema_components "
+                "WHERE component = 'ranking_v3_production_triggers'"
+            )
+        ).scalar_one()
+    assert "stale production trigger" not in trigger_sql
+    assert "rows are immutable" in trigger_sql
+    assert version == 1

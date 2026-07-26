@@ -18,6 +18,11 @@ class RecommendationCalibrationSample(BaseModel):
     score_band: str
     primary_strategy_id: str | None = None
     signals: list[str] = Field(default_factory=list)
+    factor_ids: list[str] = Field(default_factory=list)
+    industry: str = "unknown"
+    themes: list[str] = Field(default_factory=list)
+    market_regime: str = "unknown"
+    admission_source: str = "legacy_unknown"
     outcome_status: str
     return_5d: float | None = None
     return_10d: float | None = None
@@ -43,6 +48,7 @@ class RecommendationCalibrationBand(BaseModel):
 
 
 class RecommendationSignalEffect(BaseModel):
+    dimension: str = "signal"
     signal_key: str
     label: str
     sample_count: int
@@ -58,6 +64,7 @@ class RecommendationSignalEffect(BaseModel):
 
 
 class RecommendationWeightSuggestion(BaseModel):
+    dimension: str = "signal"
     key: str
     label: str
     action: str
@@ -96,9 +103,15 @@ def build_recommendation_calibration_center(
     recent_limit: int = 12,
     data_health: dict[str, str] | None = None,
 ) -> RecommendationCalibrationCenter:
-    samples = [_sample(snapshot, outcome) for snapshot, outcome in pairs]
+    all_samples = [_sample(snapshot, outcome) for snapshot, outcome in pairs]
+    official_samples = [
+        sample for sample in all_samples if sample.admission_source == "ranking_v3_production"
+    ]
+    samples = official_samples or all_samples
     completed = [item for item in samples if _is_completed(item)]
-    baseline_win = _ratio(sum(1 for item in completed if (item.return_10d or 0) > 0), len(completed))
+    baseline_win = _ratio(
+        sum(1 for item in completed if (item.return_10d or 0) > 0), len(completed)
+    )
     baseline_avg = _average([item.return_10d for item in completed if item.return_10d is not None])
     bands = _score_bands(samples)
     effects = _signal_effects(samples, baseline_win, baseline_avg)
@@ -106,7 +119,9 @@ def build_recommendation_calibration_center(
     curve = _curve_points(samples)
     reliability = _center_score(bands, effects, len(samples), len(completed))
     verdict = _verdict(reliability, len(samples), len(completed), baseline_avg)
-    effective_as_of = as_of or max((item.signal_date for item in samples if item.signal_date), default=date.today())
+    effective_as_of = as_of or max(
+        (item.signal_date for item in samples if item.signal_date), default=date.today()
+    )
     recent = sorted(
         samples,
         key=lambda item: (item.signal_date or date.min, item.score),
@@ -127,10 +142,37 @@ def build_recommendation_calibration_center(
         action_items=_action_items(verdict, bands, effects),
         data_health={
             **(data_health or {}),
+            "recommendation_calibration_scope": (
+                "ranking_v3_production" if official_samples else "legacy_compatible"
+            ),
+            "recommendation_calibration_source_total": str(len(all_samples)),
+            "recommendation_calibration_source_official": str(len(official_samples)),
+            "recommendation_calibration_source_legacy_manual": str(
+                sum(item.admission_source == "legacy_manual" for item in all_samples)
+            ),
+            "recommendation_calibration_source_legacy_unknown": str(
+                sum(
+                    item.admission_source not in {"ranking_v3_production", "legacy_manual"}
+                    for item in all_samples
+                )
+            ),
+            "recommendation_calibration_source_excluded": str(len(all_samples) - len(samples)),
             "recommendation_calibration_samples": str(len(samples)),
             "recommendation_calibration_completed": str(len(completed)),
             "recommendation_calibration_score_bands": str(len(bands)),
             "recommendation_calibration_signal_effects": str(len(effects)),
+            "recommendation_calibration_strategy_effects": str(
+                sum(item.dimension == "strategy" for item in effects)
+            ),
+            "recommendation_calibration_factor_effects": str(
+                sum(item.dimension == "factor" for item in effects)
+            ),
+            "recommendation_calibration_industry_effects": str(
+                sum(item.dimension == "industry" for item in effects)
+            ),
+            "recommendation_calibration_market_regime_effects": str(
+                sum(item.dimension == "market_regime" for item in effects)
+            ),
             "recommendation_calibration_curve_points": str(len(curve)),
         },
     )
@@ -142,6 +184,7 @@ def _sample(
 ) -> RecommendationCalibrationSample:
     score = _snapshot_score(snapshot)
     card = snapshot.card if isinstance(snapshot.card, dict) else {}
+    industry, themes, market_regime, factor_ids = _context_dimensions(card)
     return RecommendationCalibrationSample(
         snapshot_id=snapshot.snapshot_id,
         instrument_id=snapshot.instrument_id,
@@ -151,6 +194,11 @@ def _sample(
         score_band=_score_band(score),
         primary_strategy_id=snapshot.primary_strategy_id,
         signals=_signals_from_card(card),
+        factor_ids=factor_ids,
+        industry=industry,
+        themes=themes,
+        market_regime=market_regime,
+        admission_source=_recommendation_admission_source(card),
         outcome_status=outcome.outcome_status,
         return_5d=outcome.return_5d,
         return_10d=outcome.return_10d,
@@ -160,7 +208,9 @@ def _sample(
     )
 
 
-def _score_bands(samples: list[RecommendationCalibrationSample]) -> list[RecommendationCalibrationBand]:
+def _score_bands(
+    samples: list[RecommendationCalibrationSample],
+) -> list[RecommendationCalibrationBand]:
     definitions = [
         ("80+", "80 分以上", 0.8, 1.01),
         ("70-80", "70-80 分", 0.7, 0.8),
@@ -175,11 +225,15 @@ def _score_bands(samples: list[RecommendationCalibrationSample]) -> list[Recomme
         completed = [item for item in items if _is_completed(item)]
         returns_10d = [item.return_10d for item in completed if item.return_10d is not None]
         returns_20d = [item.return_20d for item in completed if item.return_20d is not None]
-        drawdowns = [item.max_drawdown_pct for item in completed if item.max_drawdown_pct is not None]
+        drawdowns = [
+            item.max_drawdown_pct for item in completed if item.max_drawdown_pct is not None
+        ]
         runups = [item.max_runup_pct for item in completed if item.max_runup_pct is not None]
         win_rate = _ratio(sum(1 for value in returns_10d if value > 0), len(returns_10d))
         avg_10d = _average(returns_10d)
-        reliability = _segment_score(len(items), len(completed), win_rate, avg_10d, min(drawdowns) if drawdowns else None)
+        reliability = _segment_score(
+            len(items), len(completed), win_rate, avg_10d, min(drawdowns) if drawdowns else None
+        )
         rows.append(
             RecommendationCalibrationBand(
                 band=key,
@@ -205,24 +259,35 @@ def _signal_effects(
     baseline_win: float | None,
     baseline_avg: float | None,
 ) -> list[RecommendationSignalEffect]:
-    grouped: dict[str, list[RecommendationCalibrationSample]] = {}
+    grouped: dict[tuple[str, str], list[RecommendationCalibrationSample]] = {}
     for sample in samples:
-        for signal in sample.signals:
-            grouped.setdefault(signal, []).append(sample)
+        for dimension, key in _sample_dimension_keys(sample):
+            grouped.setdefault((dimension, key), []).append(sample)
     effects = []
     baseline_avg_value = baseline_avg or 0
-    for signal, items in grouped.items():
+    for (dimension, key), items in grouped.items():
         completed = [item for item in items if _is_completed(item)]
         returns_10d = [item.return_10d for item in completed if item.return_10d is not None]
         win_rate = _ratio(sum(1 for value in returns_10d if value > 0), len(returns_10d))
         avg_10d = _average(returns_10d)
         lift = None if avg_10d is None or baseline_avg is None else round(avg_10d - baseline_avg, 4)
-        reliability = _signal_score(len(items), len(completed), win_rate, avg_10d, baseline_win, baseline_avg)
-        action, delta, reason = _signal_action(signal, len(completed), win_rate, avg_10d, baseline_avg_value)
+        reliability = _signal_score(
+            len(items), len(completed), win_rate, avg_10d, baseline_win, baseline_avg
+        )
+        label = _dimension_label(dimension, key)
+        action, delta, reason = _signal_action(
+            key,
+            label,
+            len(completed),
+            win_rate,
+            avg_10d,
+            baseline_avg_value,
+        )
         effects.append(
             RecommendationSignalEffect(
-                signal_key=signal,
-                label=_signal_label(signal),
+                dimension=dimension,
+                signal_key=key,
+                label=label,
                 sample_count=len(items),
                 completed_count=len(completed),
                 win_rate_10d=win_rate,
@@ -235,7 +300,15 @@ def _signal_effects(
                 reason=reason,
             )
         )
-    return sorted(effects, key=lambda item: (item.reliability_score, item.completed_count), reverse=True)
+    return sorted(
+        effects,
+        key=lambda item: (
+            item.signal_key != "unknown",
+            item.reliability_score,
+            item.completed_count,
+        ),
+        reverse=True,
+    )
 
 
 def _weight_suggestions(
@@ -244,6 +317,7 @@ def _weight_suggestions(
 ) -> list[RecommendationWeightSuggestion]:
     suggestions = [
         RecommendationWeightSuggestion(
+            dimension=item.dimension,
             key=item.signal_key,
             label=item.label,
             action=item.weight_action,
@@ -261,6 +335,7 @@ def _weight_suggestions(
             suggestions.insert(
                 0,
                 RecommendationWeightSuggestion(
+                    dimension="score",
                     key="rank_score",
                     label="推荐总分",
                     action="提高",
@@ -271,6 +346,7 @@ def _weight_suggestions(
     if not suggestions:
         suggestions.append(
             RecommendationWeightSuggestion(
+                dimension="system",
                 key="sample_collection",
                 label="样本积累",
                 action="保持",
@@ -281,7 +357,9 @@ def _weight_suggestions(
     return suggestions[:8]
 
 
-def _curve_points(samples: list[RecommendationCalibrationSample]) -> list[RecommendationCalibrationCurvePoint]:
+def _curve_points(
+    samples: list[RecommendationCalibrationSample],
+) -> list[RecommendationCalibrationCurvePoint]:
     ordered = sorted(
         [item for item in samples if item.signal_date is not None],
         key=lambda item: item.signal_date or date.min,
@@ -291,13 +369,17 @@ def _curve_points(samples: list[RecommendationCalibrationSample]) -> list[Recomm
     for index, item in enumerate(ordered, start=1):
         if _is_completed(item):
             completed_so_far.append(item)
-        returns_10d = [sample.return_10d for sample in completed_so_far if sample.return_10d is not None]
+        returns_10d = [
+            sample.return_10d for sample in completed_so_far if sample.return_10d is not None
+        ]
         rows.append(
             RecommendationCalibrationCurvePoint(
                 date=item.signal_date or date.today(),
                 sample_count=index,
                 completed_count=len(completed_so_far),
-                cumulative_win_rate_10d=_ratio(sum(1 for value in returns_10d if value > 0), len(returns_10d)),
+                cumulative_win_rate_10d=_ratio(
+                    sum(1 for value in returns_10d if value > 0), len(returns_10d)
+                ),
                 cumulative_avg_return_10d=_average(returns_10d),
             )
         )
@@ -337,6 +419,97 @@ def _signals_from_card(card: dict[str, object]) -> list[str]:
     if isinstance(quality, dict) and quality.get("tier"):
         signals.append(f"quality_{quality.get('tier')}")
     return sorted(set(signals))
+
+
+def _context_dimensions(
+    card: dict[str, object],
+) -> tuple[str, list[str], str, list[str]]:
+    market_context = card.get("market_context")
+    market_context = market_context if isinstance(market_context, dict) else {}
+    industry = _normalized_dimension_value(
+        market_context.get("industry") or card.get("industry") or card.get("sector")
+    )
+    themes = _normalized_text_list(
+        market_context.get("themes") or card.get("themes") or card.get("theme")
+    )
+    factor_ids = _normalized_text_list(card.get("factor_flags"))
+    exposures = card.get("factor_exposures")
+    if isinstance(exposures, list):
+        factor_ids.extend(
+            str(item.get("factor_id")).strip()
+            for item in exposures
+            if isinstance(item, dict) and item.get("factor_id")
+        )
+    enhanced = card.get("a_share_enhanced")
+    enhanced = enhanced if isinstance(enhanced, dict) else {}
+    factor_ids.extend(_normalized_text_list(enhanced.get("signals")))
+    market_regime = _market_regime_from_card(card)
+    return industry, themes, market_regime, sorted(set(factor_ids))
+
+
+def _recommendation_admission_source(card: dict[str, object]) -> str:
+    sources = [
+        value
+        for key in ("paper_admission", "recommendation_provenance", "ranking_v3")
+        if isinstance((value := card.get(key)), dict)
+    ]
+    sources.append(card)
+    for source in sources:
+        value = str(source.get("admission_source") or "").strip()
+        if value == "ranking_v3_production":
+            return value
+        if value == "legacy_manual":
+            return value
+    return "legacy_unknown"
+
+
+def _sample_dimension_keys(
+    sample: RecommendationCalibrationSample,
+) -> list[tuple[str, str]]:
+    rows = [("strategy", sample.primary_strategy_id or "unknown")]
+    rows.extend(("factor", key) for key in sample.factor_ids or ["unknown"])
+    rows.append(("industry", sample.industry))
+    rows.extend(("theme", key) for key in sample.themes or ["unknown"])
+    rows.append(("market_regime", sample.market_regime))
+    rows.extend(("signal", key) for key in sample.signals if key not in set(sample.factor_ids))
+    return sorted(set(rows))
+
+
+def _market_regime_from_card(card: dict[str, object]) -> str:
+    for candidate in (
+        card.get("market_regime"),
+        card.get("market_environment"),
+        card.get("market_state"),
+    ):
+        if isinstance(candidate, dict):
+            candidate = candidate.get("regime") or candidate.get("state") or candidate.get("CN")
+            if isinstance(candidate, dict):
+                candidate = candidate.get("regime") or candidate.get("state")
+        value = _normalized_dimension_value(candidate)
+        if value != "unknown":
+            return value
+    return "unknown"
+
+
+def _normalized_text_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    values = value if isinstance(value, (list, tuple, set)) else [value]
+    normalized = []
+    for item in values:
+        text = str(item).strip()
+        if text and text.lower() not in {"none", "null", "unknown", "未分类"}:
+            normalized.append(text)
+    return sorted(set(normalized))
+
+
+def _normalized_dimension_value(value: object) -> str:
+    if value is None:
+        return "unknown"
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "null", "unknown", "未分类"}:
+        return "unknown"
+    return text
 
 
 def _instrument_label(
@@ -446,20 +619,23 @@ def _segment_verdict(
 
 
 def _signal_action(
-    signal: str,
+    key: str,
+    label: str,
     completed_count: int,
     win_rate: float | None,
     avg_return: float | None,
     baseline_avg: float,
 ) -> tuple[str, float, str]:
+    if key == "unknown":
+        return "保持", 0, f"{label}，不允许据此自动调整权重。"
     if completed_count < 2:
         return "保持", 0, "样本不足，暂不调整权重。"
     lift = (avg_return or 0) - baseline_avg
     if lift >= 1 and (win_rate or 0) >= 0.5:
-        return "提高", 0.03, f"{_signal_label(signal)} 样本 10 日均值高于基准 {lift:.2f} 个百分点。"
+        return "提高", 0.03, f"{label}样本 10 日均值高于基准 {lift:.2f} 个百分点。"
     if lift <= -1:
-        return "降低", -0.03, f"{_signal_label(signal)} 样本 10 日均值低于基准 {abs(lift):.2f} 个百分点。"
-    return "保持", 0, f"{_signal_label(signal)} 暂未显示显著超额。"
+        return "降低", -0.03, f"{label}样本 10 日均值低于基准 {abs(lift):.2f} 个百分点。"
+    return "保持", 0, f"{label}暂未显示显著超额。"
 
 
 def _headline(
@@ -496,6 +672,20 @@ def _action_items(
         items.append("存在失效分层，建议复盘该分层的入场价格和市场环境。")
     items.append("每次推荐后都保留快照，并用 5/10/20 日表现更新校准结果。")
     return items[:4]
+
+
+def _dimension_label(dimension: str, key: str) -> str:
+    if key == "unknown":
+        return {
+            "strategy": "策略未知",
+            "factor": "因子未知",
+            "industry": "行业未知",
+            "theme": "主题未知",
+            "market_regime": "信号时点市场环境未知",
+        }.get(dimension, "信号未知")
+    if dimension in {"factor", "signal"}:
+        return _signal_label(key)
+    return key
 
 
 def _signal_label(signal: str) -> str:

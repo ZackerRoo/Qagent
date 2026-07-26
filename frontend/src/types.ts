@@ -3236,6 +3236,11 @@ export type WalkForwardRankingV3ProtocolThresholds = {
   maximum_holm_adjusted_p_value?: number;
   minimum_deflated_sharpe_probability?: number;
   maximum_probability_of_backtest_overfit?: number;
+  minimum_valid_outcome_coverage_ratio?: number;
+  minimum_paired_rebalance_date_coverage_ratio?: number;
+  minimum_stratified_coverage_group_size?: number;
+  minimum_stratified_outcome_coverage_ratio?: number;
+  minimum_benchmark_member_coverage_ratio?: number;
   minimum_forward_shadow_sessions?: number;
   minimum_forward_shadow_trades?: number;
   maximum_forward_shadow_sessions?: number;
@@ -3281,6 +3286,7 @@ export type WalkForwardRankingV3HistoricalValidation = {
   positive_subperiod_count: number;
   required_positive_subperiod_count: number;
   pbo_status: string;
+  pbo_probability: number | null;
   pbo_reason: string;
   gates: WalkForwardRankingV3ValidationGate[];
   reasons: string[];
@@ -3298,6 +3304,24 @@ export type WalkForwardRankingV3Evaluation = {
   resolved_candidate_count: number;
   untriggered_candidate_count: number;
   invalid_candidate_count: number;
+  valid_candidate_outcome_count: number;
+  candidate_outcome_coverage_ratio: number;
+  validation_selected_outcome_count: number;
+  validation_valid_outcome_count: number;
+  validation_invalid_outcome_count: number;
+  validation_excluded_rebalance_date_count: number;
+  validation_valid_outcome_coverage_ratio: number;
+  validation_paired_rebalance_date_coverage_ratio: number;
+  stratified_coverage_group_count: number;
+  stratified_coverage_failure_count: number;
+  worst_stratified_outcome_coverage_ratio: number | null;
+  stratified_outcome_coverage: Array<{
+    dimension: string;
+    value: string;
+    total_count: number;
+    valid_count: number;
+    coverage_ratio: number;
+  }>;
   changed_snapshot_count: number;
   maximum_training_observation_count: number;
   maximum_training_date_count: number;
@@ -3307,6 +3331,9 @@ export type WalkForwardRankingV3Evaluation = {
   benchmark_id: string;
   benchmark_status: string;
   benchmark_return_pct: number | null;
+  benchmark_member_coverage_ratio: number | null;
+  benchmark_expected_member_observations: number;
+  benchmark_priced_member_observations: number;
   benchmark_excess_return_pct: number | null;
   turnover_reduction_pct: number | null;
   max_drawdown_degradation_pct: number | null;
@@ -3316,7 +3343,102 @@ export type WalkForwardRankingV3Evaluation = {
   metrics: WalkForwardPortfolioMetrics;
   stress_metrics: WalkForwardPortfolioMetrics;
   historical_validation: WalkForwardRankingV3HistoricalValidation;
+  pbo_evidence: Record<string, unknown>;
+  forward_scoring_artifact: {
+    model_version: string;
+    cutoff: string;
+    training_cutoff_date: string | null;
+    training_observation_count: number;
+    training_date_count: number;
+    model_ready: boolean;
+    stable_digest: string;
+  };
+  forward_scoring_artifact_digest: string;
   criteria: WalkForwardGateCriterion[];
+};
+
+export type RankingV3ForwardMetricValue = number | string | null;
+
+export type RankingV3ForwardMetrics = {
+  session_count: number;
+  completed_trade_count: number;
+  candidate_count: number;
+  mature_candidate_count: number;
+  valid_outcome_count: number;
+  invalid_outcome_count: number;
+  pending_mature_outcome_count: number;
+  pending_candidate_count: number;
+  valid_outcome_coverage_ratio: RankingV3ForwardMetricValue;
+  invalid_outcome_ratio: RankingV3ForwardMetricValue;
+  common_benchmark_id: string | null;
+  mean_benchmark_excess_pct: RankingV3ForwardMetricValue;
+  mean_stress_benchmark_excess_pct: RankingV3ForwardMetricValue;
+  portfolio_net_return_pct: RankingV3ForwardMetricValue;
+  portfolio_stress_net_return_pct: RankingV3ForwardMetricValue;
+  portfolio_benchmark_return_pct: RankingV3ForwardMetricValue;
+  portfolio_benchmark_excess_pct: RankingV3ForwardMetricValue;
+  portfolio_stress_benchmark_excess_pct: RankingV3ForwardMetricValue;
+  portfolio_completed_trade_count: number | null;
+  maximum_drawdown_pct: RankingV3ForwardMetricValue;
+  first_session_date: string | null;
+  latest_session_date: string | null;
+};
+
+export type RankingV3ProductionStateCode =
+  | "gated"
+  | "blocked"
+  | "awaiting_full_market_scan"
+  | "awaiting_current_session_scan"
+  | "recorded";
+
+export type RankingV3ProductionState = {
+  state: RankingV3ProductionStateCode | string;
+  message: string;
+  paper_admission_enforced: boolean;
+  target_session_date: string | null;
+  latest_session_date: string | null;
+  selected_count: number;
+  batch_fact_digest: string | null;
+  identity_digest: string | null;
+};
+
+export type RankingV3ForwardStateResponse = {
+  state:
+    | "idle"
+    | "waiting_start"
+    | "waiting_snapshot"
+    | "ready"
+    | "shadow_unpublished"
+    | "shadow_rejected"
+    | "approved_proof_available"
+    | string;
+  status: "idle" | "pending" | "rejected" | "approved" | string;
+  phase?:
+    | "idle"
+    | "waiting_collection"
+    | "waiting_snapshot"
+    | "candidate_collection"
+    | "liquidation"
+    | "approved"
+    | "rejected"
+    | string;
+  validation_run_id: string | null;
+  protocol_id: string | null;
+  model_version: string | null;
+  required_sessions: number;
+  collection_target_sessions?: number;
+  required_completed_trades: number;
+  maximum_sessions: number | null;
+  latest_session_date: string | null;
+  blocked_date?: string | null;
+  blocked_code?: string | null;
+  last_attempt_at?: string | null;
+  metrics: RankingV3ForwardMetrics | null;
+  release_proof_digest: string | null;
+  reason?: string | null;
+  message: string | null;
+  error?: string | null;
+  production?: RankingV3ProductionState;
 };
 
 export type WalkForwardPayload = {

@@ -200,7 +200,7 @@ def test_incomplete_future_and_untriggered_signals_have_explicit_statuses():
         == CandidateOutcomeStatus.NOT_TRIGGERED_OR_UNFILLABLE
     )
     assert by_snapshot["not-triggered"].status_detail == (
-        "entry_not_triggered_or_fill_blocked"
+        "entry_not_triggered"
     )
     assert (
         by_snapshot["future-missing"].status
@@ -399,6 +399,45 @@ def test_exit_liquidity_does_not_resize_the_historical_entry_position():
 
     outcome = result.outcomes[0]
     assert outcome.status == CandidateOutcomeStatus.EXIT_UNFILLABLE
-    assert outcome.status_detail == "fixed_notional_exceeds_exit_liquidity"
-    assert outcome.shares is None
+    assert outcome.status_detail == "exit_liquidity_censored_after_entry"
     assert outcome.resolved_at == date(2025, 1, 3)
+    assert outcome.entry_date == date(2025, 1, 2)
+    assert outcome.entry_price == Decimal("10")
+    assert outcome.shares == Decimal("10000")
+    assert outcome.entry_value == Decimal("100000.00")
+    assert outcome.entry_costs is not None
+    assert outcome.entry_costs > 0
+    assert outcome.exit_date is None
+    assert outcome.exit_price is None
+    assert outcome.return_pct is None
+    assert (
+        result.data_health["exit_liquidity_policy"]
+        == "preserve_entry_and_censor_unliquidated_return"
+    )
+
+
+def test_zero_exit_capacity_preserves_the_entered_position_as_censored():
+    bars = _resolved_bars("CN:000001")
+    bars.loc[bars["trade_date"] == date(2025, 1, 3), "volume"] = 0
+
+    result = resolve_candidate_outcome_ledger(
+        signals=[_signal("blocked-exit", "CN:000001")],
+        provider=FrameProvider(bars),
+        start=date(2025, 1, 1),
+        end=date(2025, 1, 3),
+        nominal_amount=Decimal("100000"),
+        transaction_cost_bps=Decimal("0"),
+        slippage_bps=Decimal("0"),
+        max_entry_wait_days=2,
+        max_holding_days=2,
+    )
+
+    outcome = result.outcomes[0]
+    assert outcome.status == CandidateOutcomeStatus.EXIT_UNFILLABLE
+    assert outcome.status_detail == "exit_liquidity_censored_after_entry"
+    assert outcome.entry_date == date(2025, 1, 2)
+    assert outcome.entry_price == Decimal("10")
+    assert outcome.shares == Decimal("10000")
+    assert outcome.entry_value == Decimal("100000.00")
+    assert outcome.exit_date is None
+    assert outcome.return_pct is None

@@ -134,10 +134,7 @@ def build_full_market_symbols(
     if remaining > 0:
         etf_quota += min(len(etfs) - etf_quota, remaining)
 
-    return [
-        item.instrument_id
-        for item in [*stocks[:stock_quota], *etfs[:etf_quota]]
-    ]
+    return [item.instrument_id for item in [*stocks[:stock_quota], *etfs[:etf_quota]]]
 
 
 def build_full_market_batch_symbols(
@@ -239,38 +236,51 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     aggregate_health: dict[str, str] = {
         **job.data_health,
         "provider": job.provider,
-        "full_market_scan_mode": "batch",
+        "full_market_scan_mode": "full_market_batch",
         "full_market_total_symbols": str(job.total_symbols),
         "full_market_batch_size": str(job.batch_size),
         "full_market_batches": str(job.total_batches),
+        "full_market_total_batches": str(job.total_batches),
+        "full_market_scanned_symbols": "0",
+        "full_market_completed_batches": "0",
+        "full_market_error_count": "0",
+        "full_market_batches_complete": "false",
+        "full_market_scan_complete": "false",
         "full_market_include_etfs": str(job.include_etfs).lower(),
     }
     scanned_symbols = 0
     completed_batches = 0
     error_count = 0
 
-    if job.completed_batches > 0 and _load_full_market_batch_checkpoint(
-        repo,
-        job_id=job.job_id,
-        batch_index=1,
-        symbols=job.symbols[: job.batch_size],
-    ) is None:
+    if (
+        job.completed_batches > 0
+        and _load_full_market_batch_checkpoint(
+            repo,
+            job_id=job.job_id,
+            batch_index=1,
+            symbols=job.symbols[: job.batch_size],
+        )
+        is None
+    ):
         aggregate_health.update(
             {
                 "full_market_restart_recovery": "restart_from_batch_1",
                 "full_market_restart_reason": "legacy_job_without_batch_checkpoints",
             }
         )
-        job = repo.update_full_market_scan_job(
-            job_id,
-            status="queued",
-            scanned_symbols=0,
-            completed_batches=0,
-            cards=0,
-            errors=0,
-            message="Restart recovery: rebuilding from batch 1",
-            data_health=aggregate_health,
-        ) or job
+        job = (
+            repo.update_full_market_scan_job(
+                job_id,
+                status="queued",
+                scanned_symbols=0,
+                completed_batches=0,
+                cards=0,
+                errors=0,
+                message="Restart recovery: rebuilding from batch 1",
+                data_health=aggregate_health,
+            )
+            or job
+        )
 
     repo.update_full_market_scan_job(
         job_id,
@@ -294,9 +304,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         if checkpoint is not None:
             restored_batches += 1
             aggregate_health["full_market_restart_recovery"] = "batch_checkpoint_resume"
-            aggregate_health["full_market_checkpoint_batches_restored"] = str(
-                restored_batches
-            )
+            aggregate_health["full_market_checkpoint_batches_restored"] = str(restored_batches)
         else:
             try:
                 scan = run_daily_scan(
@@ -339,6 +347,15 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
                 batch_error_message or "batch checkpoint recorded an unknown error"
             )
         scanned_symbols += len(batch)
+        aggregate_health.update(
+            {
+                "full_market_scanned_symbols": str(scanned_symbols),
+                "full_market_completed_batches": str(completed_batches),
+                "full_market_error_count": str(error_count),
+                "full_market_batches_complete": str(completed_batches == job.total_batches).lower(),
+                "full_market_scan_complete": "false",
+            }
+        )
         repo.update_full_market_scan_job(
             job_id,
             status="running",
@@ -438,9 +455,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     if benchmark_trend_error:
         aggregate_health["benchmark_trend_error"] = benchmark_trend_error
     brief_health = apply_recommendation_briefs(all_cards)
-    ranked_cards = sort_recommendation_cards(
-        sorted(all_cards, key=lambda card: card.instrument_id)
-    )
+    ranked_cards = sort_recommendation_cards(sorted(all_cards, key=lambda card: card.instrument_id))
     diversified_head = select_strategy_diversified(
         ranked_cards,
         limit=10,
@@ -451,9 +466,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         *diversified_head,
         *(card for card in ranked_cards if card.card_id not in diversified_ids),
     ]
-    dominant_strategy, dominant_count, dominant_share = strategy_concentration(
-        diversified_head
-    )
+    dominant_strategy, dominant_count, dominant_share = strategy_concentration(diversified_head)
     aggregate_health.update(
         {
             "strategy_diversification_limit": "2",
@@ -465,14 +478,10 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     )
     visible_cards = ranked_cards[:top_cards_limit]
     visible_card_ids = {card.card_id for card in visible_cards}
-    visible_governance = [
-        audit for audit in all_governance if audit.card_id in visible_card_ids
-    ]
+    visible_governance = [audit for audit in all_governance if audit.card_id in visible_card_ids]
     visible_items = _visible_rejected_items(all_items, limit=500)
     visible_card_instruments = {card.instrument_id for card in visible_cards}
-    snapshot_items = [
-        item for item in all_items if item.instrument_id in visible_card_instruments
-    ]
+    snapshot_items = [item for item in all_items if item.instrument_id in visible_card_instruments]
     sector_strength = _merge_sector_strength(sector_strength_batches)[:12]
     market_state_multiplier = min(
         _a_share_market_state_multiplier(market_state.state),
@@ -483,6 +492,9 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         market_state=market_state.state.value,
         market_state_multiplier=market_state_multiplier,
     )
+    batches_complete = completed_batches == job.total_batches
+    symbols_complete = scanned_symbols == job.total_symbols == len(job.symbols)
+    scan_complete = batches_complete and symbols_complete and error_count == 0
     payload_data_health = {
         **aggregate_health,
         **market_intelligence.data_health,
@@ -500,6 +512,14 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         ),
         "full_market_items_returned": str(len(visible_items)),
         "full_market_snapshot_items": str(len(snapshot_items)),
+        "full_market_scanned_symbols": str(scanned_symbols),
+        "full_market_total_symbols": str(job.total_symbols),
+        "full_market_completed_batches": str(completed_batches),
+        "full_market_total_batches": str(job.total_batches),
+        "full_market_error_count": str(error_count),
+        "full_market_batches_complete": str(batches_complete).lower(),
+        "full_market_scan_complete": str(scan_complete).lower(),
+        "full_market_signal_date": feature_as_of.isoformat(),
         "sector_strength": str(len(sector_strength)),
         "scanned": str(scanned_symbols),
         "cards": str(len(visible_cards)),
@@ -539,9 +559,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         "cards": governed_card_payloads(visible_cards, visible_governance),
         "items": [item.model_dump(mode="json") for item in visible_items],
         "strategy_health": [item.model_dump(mode="json") for item in strategy_health],
-        "factor_rankings": [
-            ranking.model_dump(mode="json") for ranking in global_factor_rankings
-        ],
+        "factor_rankings": [ranking.model_dump(mode="json") for ranking in global_factor_rankings],
         "sector_strength": [item.model_dump(mode="json") for item in sector_strength],
         "portfolio_plan": portfolio_plan.model_dump(mode="json"),
         "market_intelligence": market_intelligence.model_dump(mode="json"),
@@ -549,9 +567,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         "signal_monitor": signal_monitor.model_dump(mode="json"),
         "decision_quality_center": decision_quality_center.model_dump(mode="json"),
         "operational_readiness_center": operational_readiness_center.model_dump(mode="json"),
-        "strategy_governance": [
-            audit.model_dump(mode="json") for audit in visible_governance
-        ],
+        "strategy_governance": [audit.model_dump(mode="json") for audit in visible_governance],
         "feature_snapshot": feature_snapshot.model_dump(mode="json"),
         "feature_drift": feature_drift,
         "a_share_market_state": market_state.model_dump(mode="json"),
@@ -574,12 +590,16 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     )
     repo.update_full_market_scan_job(
         job_id,
-        status="succeeded",
+        status="succeeded" if scan_complete else "failed",
         scanned_symbols=scanned_symbols,
-        completed_batches=job.total_batches,
+        completed_batches=completed_batches,
         cards=len(visible_cards),
         errors=error_count,
-        message="Full-market batch scan complete",
+        message=(
+            "Full-market batch scan complete"
+            if scan_complete
+            else "Full-market batch scan incomplete"
+        ),
         data_health=payload["data_health"],
         result_cache_key=cache_key,
     )
@@ -685,9 +705,7 @@ def _apply_global_factor_rankings(
         if card.primary_strategy_id == "factor_rotation_watch":
             card.rank_reasons.insert(0, f"因子排名第 {ranking.factor_rank}")
             _update_factor_watch_evidence(card, ranking)
-        card.rank_reasons.extend(
-            f"factor flag: {flag}" for flag in ranking.flags
-        )
+        card.rank_reasons.extend(f"factor flag: {flag}" for flag in ranking.flags)
 
     for item in items:
         ranking = ranking_by_id.get(item.instrument_id)
@@ -822,9 +840,7 @@ def _feature_drift_metadata(
         },
         rejection_reasons={
             item.instrument_id: tuple(
-                value
-                for value in (item.status, item.rejection_category)
-                if value
+                value for value in (item.status, item.rejection_category) if value
             )
             for item in items
             if _is_rejected_item(item)
@@ -907,7 +923,9 @@ def _build_a_share_market_state(
     expected = max(expected_count, breadth.sample_count, 1)
     missing_rate = round(max(0.0, 1.0 - min(1.0, breadth.sample_count / expected)), 4)
     confidence = round(
-        min(0.95, 0.45 + min(0.35, breadth.sample_count / 100) + abs(environment.score - 0.5) * 0.3),
+        min(
+            0.95, 0.45 + min(0.35, breadth.sample_count / 100) + abs(environment.score - 0.5) * 0.3
+        ),
         4,
     )
     observation = AShareStateObservation(
@@ -1044,20 +1062,10 @@ def _merge_strategy_health(batches: list[list[StrategyHealth]]) -> list[Strategy
     merged: list[StrategyHealth] = []
     for strategy_id, items in grouped.items():
         sample_count = sum(item.sample_count for item in items)
-        win_rate = _weighted_average(
-            [(item.win_rate_10d, item.sample_count) for item in items]
-        )
-        avg_10d = _weighted_average(
-            [(item.avg_return_10d, item.sample_count) for item in items]
-        )
-        avg_20d = _weighted_average(
-            [(item.avg_return_20d, item.sample_count) for item in items]
-        )
-        max_losses = [
-            item.max_loss_10d
-            for item in items
-            if item.max_loss_10d is not None
-        ]
+        win_rate = _weighted_average([(item.win_rate_10d, item.sample_count) for item in items])
+        avg_10d = _weighted_average([(item.avg_return_10d, item.sample_count) for item in items])
+        avg_20d = _weighted_average([(item.avg_return_20d, item.sample_count) for item in items])
+        max_losses = [item.max_loss_10d for item in items if item.max_loss_10d is not None]
         missing_data = sorted({value for item in items for value in item.missing_data})
         merged.append(
             StrategyHealth(
@@ -1097,22 +1105,13 @@ def _merge_sector_strength(items: list[SectorStrength]) -> list[SectorStrength]:
             key=lambda laggard: laggard.change_pct,
         )[:3]
         score = _weighted_average(
-            [
-                (item.score, max(item.sample_count, len(item.symbols), 1))
-                for item in group
-            ]
+            [(item.score, max(item.sample_count, len(item.symbols), 1)) for item in group]
         )
         avg_change_pct = _weighted_average(
-            [
-                (item.avg_change_pct, max(item.sample_count, len(item.symbols), 1))
-                for item in group
-            ]
+            [(item.avg_change_pct, max(item.sample_count, len(item.symbols), 1)) for item in group]
         )
         advance_ratio = _weighted_average(
-            [
-                (item.advance_ratio, max(item.sample_count, len(item.symbols), 1))
-                for item in group
-            ]
+            [(item.advance_ratio, max(item.sample_count, len(item.symbols), 1)) for item in group]
         )
         representative = max(group, key=lambda item: item.score)
         merged.append(
@@ -1144,20 +1143,14 @@ def _merge_strategy_curve(items: list[StrategyHealth]) -> list[StrategyHealthPoi
     for label in sorted(grouped):
         points = grouped[label]
         sample_count = sum(point.sample_count for point in points)
-        win_rate = _weighted_average(
-            [(point.win_rate_10d, point.sample_count) for point in points]
-        )
+        win_rate = _weighted_average([(point.win_rate_10d, point.sample_count) for point in points])
         avg_10d = _weighted_average(
             [(point.avg_return_10d, point.sample_count) for point in points]
         )
         avg_20d = _weighted_average(
             [(point.avg_return_20d, point.sample_count) for point in points]
         )
-        max_losses = [
-            point.max_loss_10d
-            for point in points
-            if point.max_loss_10d is not None
-        ]
+        max_losses = [point.max_loss_10d for point in points if point.max_loss_10d is not None]
         curve.append(
             StrategyHealthPoint(
                 label=label,

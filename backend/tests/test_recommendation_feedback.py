@@ -4,11 +4,14 @@ from decimal import Decimal
 import pandas as pd
 
 from qagent.cards.factor_watch import build_factor_watch_card
+from qagent.domain.models import MarketContext
 from qagent.factors.models import FactorRanking
+from qagent.monitoring.outcomes import OpportunityOutcome
 from qagent.monitoring.recommendation_calibration import (
     RecommendationCalibrationBand,
     RecommendationCalibrationCenter,
     RecommendationSignalEffect,
+    build_recommendation_calibration_center,
 )
 from qagent.paper_trading.engine import (
     PaperDailyBenchmark,
@@ -27,6 +30,7 @@ from qagent.recommendations.feedback import (
     walk_forward_feedback_data_health,
 )
 from qagent.recommendations.quality_gate import apply_recommendation_quality_gate
+from qagent.storage.repository import OpportunitySnapshotRecord
 
 
 def test_recommendation_feedback_promotes_working_signals_and_demotes_failed_signals():
@@ -241,6 +245,246 @@ def test_paper_trading_feedback_promotes_contributing_strategy():
     assert health["paper_feedback_adjusted"] == "1"
 
 
+def test_recommendation_calibration_tracks_strategy_factor_industry_and_regime():
+    pairs = []
+    for index, return_10d in enumerate((2.4, -1.2), start=1):
+        snapshot = OpportunitySnapshotRecord(
+            snapshot_id=f"pit-calibration-{index}",
+            run_id="pit-calibration",
+            card_id=f"card-{index}",
+            instrument_id=f"CN:68898{index}",
+            market="CN",
+            status="setup_ready",
+            signal_date=date(2026, 6, index),
+            latest_close=Decimal("100"),
+            primary_strategy_id="trend_momentum_stage2",
+            score=Decimal("0.80"),
+            strategy_score=Decimal("0.80"),
+            rank_score=Decimal("0.80"),
+            trigger_price=Decimal("100"),
+            initial_stop=Decimal("95"),
+            target_1=Decimal("110"),
+            card={
+                "instrument_label": f"样本 {index}",
+                "market_context": {
+                    "industry": "半导体",
+                    "themes": ["国产替代"],
+                },
+                "market_regime": {"regime": "risk_off"},
+                "factor_flags": ["overextended"],
+                "factor_exposures": [
+                    {"factor_id": "quality", "score": 0.82},
+                    {"factor_id": "trend_quality", "score": 0.76},
+                ],
+            },
+        )
+        outcome = OpportunityOutcome(
+            snapshot_id=snapshot.snapshot_id,
+            run_id=snapshot.run_id,
+            instrument_id=snapshot.instrument_id,
+            instrument_label=f"样本 {index}",
+            primary_strategy_id=snapshot.primary_strategy_id,
+            signal_date=snapshot.signal_date,
+            outcome_status="resolved",
+            return_5d=return_10d / 2,
+            return_10d=return_10d,
+            return_20d=return_10d * 1.2,
+            max_drawdown_pct=-3.0,
+            max_runup_pct=4.0,
+        )
+        pairs.append((snapshot, outcome))
+
+    center = build_recommendation_calibration_center(pairs)
+    dimensions = {(effect.dimension, effect.signal_key) for effect in center.signal_effects}
+
+    assert ("strategy", "trend_momentum_stage2") in dimensions
+    assert ("factor", "quality") in dimensions
+    assert ("industry", "半导体") in dimensions
+    assert ("theme", "国产替代") in dimensions
+    assert ("market_regime", "risk_off") in dimensions
+    assert center.recent_samples[0].industry == "半导体"
+    assert center.recent_samples[0].market_regime == "risk_off"
+    assert "quality" in center.recent_samples[0].factor_ids
+    assert center.data_health["recommendation_calibration_market_regime_effects"] == "1"
+
+
+def test_recommendation_calibration_excludes_legacy_when_official_samples_exist():
+    pairs = []
+    definitions = (
+        ("official", "ranking_v3_production", 3.0),
+        ("manual", "legacy_manual", -20.0),
+        ("unknown", None, -30.0),
+    )
+    for index, (name, admission_source, return_10d) in enumerate(
+        definitions,
+        start=1,
+    ):
+        card: dict[str, object] = {"instrument_label": name}
+        if admission_source is not None:
+            card["paper_admission"] = {"admission_source": admission_source}
+        snapshot = OpportunitySnapshotRecord(
+            snapshot_id=f"calibration-{name}",
+            run_id="calibration-source-scope",
+            card_id=f"card-{name}",
+            instrument_id=f"CN:60000{index}",
+            market="CN",
+            status="setup_ready",
+            signal_date=date(2026, 7, index),
+            latest_close=Decimal("10"),
+            primary_strategy_id="trend_momentum_stage2",
+            score=Decimal("0.80"),
+            strategy_score=Decimal("0.80"),
+            rank_score=Decimal("0.80"),
+            trigger_price=Decimal("10"),
+            initial_stop=Decimal("9"),
+            target_1=Decimal("12"),
+            card=card,
+        )
+        pairs.append(
+            (
+                snapshot,
+                OpportunityOutcome(
+                    snapshot_id=snapshot.snapshot_id,
+                    run_id=snapshot.run_id,
+                    instrument_id=snapshot.instrument_id,
+                    instrument_label=name,
+                    primary_strategy_id=snapshot.primary_strategy_id,
+                    signal_date=snapshot.signal_date,
+                    outcome_status="resolved",
+                    return_5d=return_10d / 2,
+                    return_10d=return_10d,
+                    return_20d=return_10d,
+                    max_drawdown_pct=-2,
+                    max_runup_pct=4,
+                ),
+            )
+        )
+
+    center = build_recommendation_calibration_center(pairs)
+
+    assert center.baseline_win_rate_10d == 1.0
+    assert center.baseline_avg_return_10d == 3.0
+    assert [sample.snapshot_id for sample in center.recent_samples] == ["calibration-official"]
+    assert center.recent_samples[0].admission_source == "ranking_v3_production"
+    assert center.data_health["recommendation_calibration_scope"] == ("ranking_v3_production")
+    assert center.data_health["recommendation_calibration_source_total"] == "3"
+    assert center.data_health["recommendation_calibration_source_official"] == "1"
+    assert center.data_health["recommendation_calibration_source_legacy_manual"] == "1"
+    assert center.data_health["recommendation_calibration_source_legacy_unknown"] == "1"
+    assert center.data_health["recommendation_calibration_source_excluded"] == "2"
+    assert center.data_health["recommendation_calibration_samples"] == "1"
+
+
+def test_paper_feedback_matches_pit_dimensions_without_double_counting():
+    card = _card("CN:688981", "中芯国际 688981.SH", 0.76, ["quality"])
+    card.market_context = MarketContext(
+        board="科创板",
+        industry="半导体",
+        themes=["国产替代"],
+        summary="半导体；国产替代",
+    ).model_copy(update={"market_regime": "risk_off"})
+    report = _paper_report(
+        [
+            _paper_attribution("factor", "quality", "质量因子"),
+            _paper_attribution("industry", "半导体", "半导体"),
+            _paper_attribution("market_regime", "risk_off", "risk_off"),
+        ]
+    )
+    before = card.rank_score
+
+    apply_paper_trading_feedback([card], report)
+
+    assert card.rank_score == before - 0.10
+    assert any("模拟盘反馈降权" in reason for reason in card.rank_reasons)
+
+
+def test_recommendation_calibration_normalizes_correlated_dimensions():
+    single = _card("CN:688981", "中芯国际 688981.SH", 0.76, ["quality"])
+    multiple = _card("CN:688981", "中芯国际 688981.SH", 0.76, ["quality"])
+    for card in (single, multiple):
+        card.market_context = MarketContext(
+            board="科创板",
+            industry="半导体",
+            themes=[],
+            summary="半导体",
+        )
+    base_effect = RecommendationSignalEffect(
+        dimension="factor",
+        signal_key="quality",
+        label="质量因子",
+        sample_count=10,
+        completed_count=8,
+        win_rate_10d=0.25,
+        avg_return_10d=-2.0,
+        baseline_avg_return_10d=0.2,
+        lift_vs_baseline_10d=-2.2,
+        reliability_score=0.6,
+        weight_action="降低",
+        suggested_weight_delta=-0.04,
+        reason="近期表现偏弱。",
+    )
+    industry_effect = base_effect.model_copy(
+        update={
+            "dimension": "industry",
+            "signal_key": "半导体",
+            "label": "半导体",
+        }
+    )
+    single_center = RecommendationCalibrationCenter(
+        as_of=date(2026, 7, 1),
+        headline="校准",
+        verdict="观察",
+        reliability_score=1.0,
+        signal_effects=[base_effect],
+    )
+    multiple_center = single_center.model_copy(
+        update={"signal_effects": [base_effect, industry_effect]}
+    )
+
+    apply_recommendation_feedback_calibration([single], single_center)
+    apply_recommendation_feedback_calibration([multiple], multiple_center)
+
+    assert single.rank_score == multiple.rank_score == 0.72
+
+
+def test_recommendation_calibration_matches_explicit_signal_date_market_regime():
+    card = _card("CN:688981", "中芯国际 688981.SH", 0.76, [])
+    card.market_context = MarketContext(
+        board="科创板",
+        industry="半导体",
+        themes=[],
+        summary="半导体",
+    ).model_copy(update={"market_regime": "risk_off"})
+    center = RecommendationCalibrationCenter(
+        as_of=date(2026, 7, 1),
+        headline="校准",
+        verdict="观察",
+        reliability_score=1.0,
+        signal_effects=[
+            RecommendationSignalEffect(
+                dimension="market_regime",
+                signal_key="risk_off",
+                label="弱市",
+                sample_count=10,
+                completed_count=8,
+                win_rate_10d=0.25,
+                avg_return_10d=-2.0,
+                baseline_avg_return_10d=0.2,
+                lift_vs_baseline_10d=-2.2,
+                reliability_score=0.6,
+                weight_action="降低",
+                suggested_weight_delta=-0.04,
+                reason="弱市中的推荐近期表现偏弱。",
+            )
+        ],
+    )
+
+    apply_recommendation_feedback_calibration([card], center)
+
+    assert card.rank_score == 0.72
+    assert any("弱市" in reason for reason in card.rank_reasons)
+
+
 def test_walk_forward_feedback_requires_mature_out_of_sample_evidence():
     blocked = _card("CN:002747", "埃斯顿 002747.SZ", 0.74, ["trend_momentum"])
     blocked.primary_strategy_id = "trend_momentum_stage2"
@@ -392,4 +636,28 @@ def _paper_report(failure_attribution: list[PaperFailureAttributionItem]) -> Pap
         asset_groups=[],
         next_trade_day_focus=[],
         data_health={},
+    )
+
+
+def _paper_attribution(
+    dimension: str,
+    key: str,
+    label: str,
+) -> PaperFailureAttributionItem:
+    return PaperFailureAttributionItem(
+        dimension=dimension,
+        key=key,
+        label=label,
+        total_trades=5,
+        evaluated_trades=4,
+        closed_trades=4,
+        stopped_trades=3,
+        target_hit_trades=0,
+        win_rate=0.0,
+        average_return_pct=-3.0,
+        total_pnl=-Decimal("500"),
+        total_return_pct=-4.0,
+        worst_return_pct=-6.0,
+        verdict="drag",
+        note="该信号时点维度近期拖累模拟盘。",
     )

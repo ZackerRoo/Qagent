@@ -648,9 +648,7 @@ class WalkForwardJobRow(Base):
     current_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     lease_maintenance_count: Mapped[int] = mapped_column(Integer, default=0)
     lease_recovery_count: Mapped[int] = mapped_column(Integer, default=0)
-    last_lease_heartbeat_at: Mapped[datetime | None] = mapped_column(
-        UTCDateTime(), nullable=True
-    )
+    last_lease_heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     checkpoints_json: Mapped[str] = mapped_column(Text, default="[]")
     experiment_manifest_json: Mapped[str] = mapped_column(Text, default="{}")
     result_run_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
@@ -661,6 +659,346 @@ class WalkForwardJobRow(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class RankingV3ForwardLedgerRow(Base):
+    __tablename__ = "ranking_v3_forward_ledgers"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'rejected', 'approved')",
+            name="ck_ranking_v3_forward_ledgers_status",
+        ),
+        CheckConstraint(
+            "revision >= 0",
+            name="ck_ranking_v3_forward_ledgers_revision",
+        ),
+        CheckConstraint(
+            "integrity_status IN ('verified', 'legacy_quarantined')",
+            name="ck_ranking_v3_forward_ledgers_integrity_status",
+        ),
+    )
+
+    protocol_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    protocol_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    model_version: Mapped[str] = mapped_column(String(96), primary_key=True)
+    data_revision: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    first_session_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    latest_session_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    rejection_reasons_json: Mapped[str] = mapped_column(Text, default="[]")
+    current_release_proof_digest: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    integrity_status: Mapped[str] = mapped_column(
+        String(32), default="verified", nullable=False, index=True
+    )
+    quarantine_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
+
+
+class RankingV3ForwardSessionRow(Base):
+    __tablename__ = "ranking_v3_forward_sessions"
+    __table_args__ = (
+        UniqueConstraint(
+            "protocol_id",
+            "protocol_digest",
+            "model_version",
+            "idempotency_key",
+            name="uq_ranking_v3_forward_sessions_idempotency",
+        ),
+        CheckConstraint(
+            "CAST(portfolio_equity AS NUMERIC) > 0 "
+            "AND CAST(stress_portfolio_equity AS NUMERIC) > 0 "
+            "AND CAST(benchmark_equity AS NUMERIC) > 0",
+            name="ck_ranking_v3_forward_sessions_positive_equity",
+        ),
+    )
+
+    protocol_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    protocol_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    model_version: Mapped[str] = mapped_column(String(96), primary_key=True)
+    session_date: Mapped[date] = mapped_column(Date, primary_key=True, index=True)
+    benchmark_id: Mapped[str] = mapped_column(String(64), index=True)
+    benchmark_return_pct: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(20, 8))
+    portfolio_equity: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(24, 8))
+    stress_portfolio_equity: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(24, 8))
+    benchmark_equity: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(24, 8))
+    data_revision: Mapped[str] = mapped_column(String(128))
+    idempotency_key: Mapped[str] = mapped_column(String(192))
+    fact_digest: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
+class RankingV3ForwardCandidateRow(Base):
+    __tablename__ = "ranking_v3_forward_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "protocol_id",
+            "protocol_digest",
+            "model_version",
+            "idempotency_key",
+            name="uq_ranking_v3_forward_candidates_idempotency",
+        ),
+        UniqueConstraint(
+            "protocol_id",
+            "protocol_digest",
+            "model_version",
+            "outcome_idempotency_key",
+            name="uq_ranking_v3_forward_candidates_outcome_idempotency",
+        ),
+        CheckConstraint(
+            "outcome_status IN ('pending', 'completed', 'not_triggered', 'invalid', 'censored')",
+            name="ck_ranking_v3_forward_candidates_outcome_status",
+        ),
+        CheckConstraint(
+            "rank >= 1",
+            name="ck_ranking_v3_forward_candidates_rank",
+        ),
+        CheckConstraint(
+            "length(trim(source_snapshot_id)) > 0",
+            name="ck_ranking_v3_forward_candidates_source_snapshot",
+        ),
+        CheckConstraint(
+            "integrity_status IN ('verified', 'legacy_quarantined')",
+            name="ck_ranking_v3_forward_candidates_integrity_status",
+        ),
+    )
+
+    protocol_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    protocol_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    model_version: Mapped[str] = mapped_column(String(96), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    source_snapshot_id: Mapped[str] = mapped_column(String(192))
+    session_date: Mapped[date] = mapped_column(Date, index=True)
+    maturity_session_date: Mapped[date] = mapped_column(Date, index=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), index=True)
+    strategy_id: Mapped[str] = mapped_column(String(96), index=True)
+    rank: Mapped[int] = mapped_column(Integer)
+    score: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(20, 10))
+    benchmark_id: Mapped[str] = mapped_column(String(64), index=True)
+    data_revision: Mapped[str] = mapped_column(String(128))
+    selection_digest: Mapped[str] = mapped_column(String(64))
+    idempotency_key: Mapped[str] = mapped_column(String(192))
+    fact_digest: Mapped[str] = mapped_column(String(64))
+    integrity_status: Mapped[str] = mapped_column(
+        String(32), default="verified", nullable=False, index=True
+    )
+    quarantine_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    outcome_status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    outcome_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    outcome_idempotency_key: Mapped[str | None] = mapped_column(String(192), nullable=True)
+    resolved_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    gross_return_pct: Mapped[Decimal | None] = mapped_column(
+        SQLiteScaledDecimal(20, 8), nullable=True
+    )
+    transaction_cost_pct: Mapped[Decimal | None] = mapped_column(
+        SQLiteScaledDecimal(20, 8), nullable=True
+    )
+    stress_transaction_cost_pct: Mapped[Decimal | None] = mapped_column(
+        SQLiteScaledDecimal(20, 8), nullable=True
+    )
+    net_return_pct: Mapped[Decimal | None] = mapped_column(
+        SQLiteScaledDecimal(20, 8), nullable=True
+    )
+    stress_net_return_pct: Mapped[Decimal | None] = mapped_column(
+        SQLiteScaledDecimal(20, 8), nullable=True
+    )
+    benchmark_return_pct: Mapped[Decimal | None] = mapped_column(
+        SQLiteScaledDecimal(20, 8), nullable=True
+    )
+    benchmark_excess_pct: Mapped[Decimal | None] = mapped_column(
+        SQLiteScaledDecimal(20, 8), nullable=True
+    )
+    stress_benchmark_excess_pct: Mapped[Decimal | None] = mapped_column(
+        SQLiteScaledDecimal(20, 8), nullable=True
+    )
+    max_drawdown_pct: Mapped[Decimal | None] = mapped_column(
+        SQLiteScaledDecimal(20, 8), nullable=True
+    )
+    outcome_reason: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
+
+
+class RankingV3ForwardGateEvidenceRow(Base):
+    __tablename__ = "ranking_v3_forward_gate_evidence"
+    __table_args__ = (
+        UniqueConstraint(
+            "protocol_id",
+            "protocol_digest",
+            "model_version",
+            "idempotency_key",
+            name="uq_ranking_v3_forward_gate_evidence_idempotency",
+        ),
+        UniqueConstraint(
+            "protocol_id",
+            "protocol_digest",
+            "model_version",
+            "evidence_kind",
+            "sequence",
+            name="uq_ranking_v3_forward_gate_evidence_sequence",
+        ),
+        CheckConstraint(
+            "evidence_kind IN ('historical_gates', 'pbo', 'portfolio')",
+            name="ck_ranking_v3_forward_gate_evidence_kind",
+        ),
+        CheckConstraint(
+            "sequence >= 1",
+            name="ck_ranking_v3_forward_gate_evidence_sequence",
+        ),
+    )
+
+    evidence_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    protocol_id: Mapped[str] = mapped_column(String(96), index=True)
+    protocol_digest: Mapped[str] = mapped_column(String(64), index=True)
+    model_version: Mapped[str] = mapped_column(String(96), index=True)
+    evidence_kind: Mapped[str] = mapped_column(String(32), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    data_revision: Mapped[str] = mapped_column(String(128))
+    passed: Mapped[bool] = mapped_column(Boolean)
+    payload_json: Mapped[str] = mapped_column(Text)
+    idempotency_key: Mapped[str] = mapped_column(String(192))
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+
+
+Index(
+    "ix_ranking_v3_forward_evidence_identity_kind",
+    RankingV3ForwardGateEvidenceRow.protocol_id,
+    RankingV3ForwardGateEvidenceRow.protocol_digest,
+    RankingV3ForwardGateEvidenceRow.model_version,
+    RankingV3ForwardGateEvidenceRow.evidence_kind,
+    RankingV3ForwardGateEvidenceRow.sequence,
+)
+
+
+class RankingV3ForwardReleaseProofRow(Base):
+    __tablename__ = "ranking_v3_forward_release_proofs"
+    __table_args__ = (
+        UniqueConstraint(
+            "protocol_id",
+            "protocol_digest",
+            "model_version",
+            name="uq_ranking_v3_forward_release_proof_identity",
+        ),
+        CheckConstraint(
+            "status = 'approved'",
+            name="ck_ranking_v3_forward_release_proofs_status",
+        ),
+    )
+
+    proof_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    protocol_id: Mapped[str] = mapped_column(String(96), index=True)
+    protocol_digest: Mapped[str] = mapped_column(String(64), index=True)
+    model_version: Mapped[str] = mapped_column(String(96), index=True)
+    data_revision: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(32), default="approved")
+    generated_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+    ledger_revision: Mapped[int] = mapped_column(Integer)
+    payload_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
+class RankingV3ProductionBatchRow(Base):
+    __tablename__ = "ranking_v3_production_batches"
+    __table_args__ = (
+        UniqueConstraint(
+            "identity_digest",
+            "session_date",
+            name="uq_ranking_v3_production_batches_identity_session",
+        ),
+        CheckConstraint(
+            "selected_count >= 0",
+            name="ck_ranking_v3_production_batches_selected_count",
+        ),
+    )
+
+    fact_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    identity_digest: Mapped[str] = mapped_column(String(64), index=True)
+    release_proof_digest: Mapped[str] = mapped_column(String(64), index=True)
+    validation_run_id: Mapped[str] = mapped_column(String(128), index=True)
+    data_revision: Mapped[str] = mapped_column(String(128))
+    protocol_id: Mapped[str] = mapped_column(String(96))
+    protocol_digest: Mapped[str] = mapped_column(String(64))
+    model_version: Mapped[str] = mapped_column(String(96))
+    session_date: Mapped[date] = mapped_column(Date, index=True)
+    candidate_snapshot_digest: Mapped[str] = mapped_column(String(64))
+    selection_batch_digest: Mapped[str] = mapped_column(String(64))
+    selected_count: Mapped[int] = mapped_column(Integer)
+    payload_json: Mapped[str] = mapped_column(Text)
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+
+
+class RankingV3ProductionSelectionRow(Base):
+    __tablename__ = "ranking_v3_production_selections"
+    __table_args__ = (
+        UniqueConstraint(
+            "batch_fact_digest",
+            "rank",
+            name="uq_ranking_v3_production_selections_batch_rank",
+        ),
+        UniqueConstraint(
+            "batch_fact_digest",
+            "instrument_id",
+            name="uq_ranking_v3_production_selections_batch_instrument",
+        ),
+        UniqueConstraint(
+            "batch_fact_digest",
+            "source_snapshot_id",
+            name="uq_ranking_v3_production_selections_batch_source_snapshot",
+        ),
+        UniqueConstraint(
+            "batch_fact_digest",
+            "candidate_id",
+            name="uq_ranking_v3_production_selections_batch_candidate",
+        ),
+        CheckConstraint(
+            "rank >= 1",
+            name="ck_ranking_v3_production_selections_rank",
+        ),
+    )
+
+    batch_fact_digest: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("ranking_v3_production_batches.fact_digest"),
+        primary_key=True,
+    )
+    item_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    identity_digest: Mapped[str] = mapped_column(String(64), index=True)
+    candidate_id: Mapped[str] = mapped_column(String(160))
+    instrument_id: Mapped[str] = mapped_column(String(32), index=True)
+    source_snapshot_id: Mapped[str] = mapped_column(
+        String(192),
+        ForeignKey("opportunity_snapshots.snapshot_id"),
+        index=True,
+    )
+    strategy_id: Mapped[str] = mapped_column(String(96), index=True)
+    rank: Mapped[int] = mapped_column(Integer)
+    score: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(20, 10))
+    payload_json: Mapped[str] = mapped_column(Text)
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class RankingV3ProductionIdempotencyKeyRow(Base):
+    __tablename__ = "ranking_v3_production_idempotency_keys"
+    __table_args__ = (
+        UniqueConstraint(
+            "identity_digest",
+            "idempotency_key",
+            name="uq_ranking_v3_production_idempotency_identity_key",
+        ),
+    )
+
+    identity_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(256), primary_key=True)
+    batch_fact_digest: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("ranking_v3_production_batches.fact_digest"),
+        index=True,
+    )
+    payload_json: Mapped[str] = mapped_column(Text)
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
 class StrategyVersionRow(Base):
@@ -880,6 +1218,22 @@ class PaperTradeRow(Base):
     provider: Mapped[str] = mapped_column(String(32), index=True)
     instrument_id: Mapped[str] = mapped_column(String(32), index=True)
     strategy_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    admission_source: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+        default="legacy_unknown",
+        server_default="legacy_unknown",
+    )
+    production_identity_digest: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    production_batch_fact_digest: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    production_selection_item_digest: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    release_proof_digest: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
     signal_date: Mapped[date] = mapped_column(Date)
     trigger_price: Mapped[Decimal] = mapped_column(Numeric(18, 4))

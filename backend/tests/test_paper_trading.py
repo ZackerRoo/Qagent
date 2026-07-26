@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
+from qagent.backtesting.ranking_v3_protocol import RANKING_V3_MODEL_VERSION
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.paper_trading.engine import (
     build_paper_daily_report,
@@ -13,6 +14,7 @@ from qagent.paper_trading.engine import (
     build_paper_validation,
     paper_snapshot_price_basis_is_consistent,
     seed_paper_trades_from_snapshots,
+    summarize_paper_trades,
     update_paper_trades,
 )
 from qagent.providers.cached import CachedMarketDataProvider
@@ -20,7 +22,7 @@ from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.storage.market_cache import MarketDataCacheRepository
 from qagent.storage.paper import PaperTradeSourceContext, PaperTradingRepository
 from qagent.storage.repository import OpportunitySnapshotRecord
-from qagent.storage.tables import OpportunitySnapshotRow, ScanRunRow
+from qagent.storage.tables import OpportunitySnapshotRow, PaperTradeRow, ScanRunRow
 
 from test_state_repository import make_repo
 
@@ -112,6 +114,54 @@ def test_paper_trading_seeds_unique_trades_from_opportunity_snapshots(tmp_path):
     assert trades[0].trigger_price == Decimal("83.2000")
     assert trades[0].initial_stop == Decimal("80.9000")
     assert trades[0].target_1 == Decimal("88.7600")
+
+
+def test_low_level_seed_cannot_bypass_unreleased_ranking_v3(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    snapshot = OpportunitySnapshotRecord(
+        snapshot_id="ranking-v3-unreleased-direct",
+        run_id="ranking-v3-unreleased-run",
+        card_id="ranking-v3-unreleased-card",
+        instrument_id="US:TEST",
+        market="US",
+        status="setup_ready",
+        signal_date=date(2026, 7, 13),
+        latest_close=Decimal("83.00"),
+        primary_strategy_id="trend_momentum_stage2",
+        score=Decimal("0.90"),
+        strategy_score=Decimal("0.90"),
+        rank_score=Decimal("0.90"),
+        trigger_price=Decimal("83.20"),
+        initial_stop=Decimal("80.90"),
+        target_1=Decimal("88.76"),
+        card={
+            "ranking_v3": {
+                "selection_source": "ranking_v3",
+                "model_version": RANKING_V3_MODEL_VERSION,
+                "deployment_scope": "paper",
+                "official_release_allowed": True,
+            }
+        },
+    )
+
+    without_authority = seed_paper_trades_from_snapshots(
+        paper_repo,
+        [snapshot],
+        provider="fixture",
+    )
+    with_authority = seed_paper_trades_from_snapshots(
+        paper_repo,
+        [snapshot.model_copy(update={"snapshot_id": "ranking-v3-unreleased-authority"})],
+        provider="fixture",
+        admission_repo=repo,
+    )
+
+    assert without_authority.created == 0
+    assert without_authority.skipped == 1
+    assert with_authority.created == 0
+    assert with_authority.skipped == 1
+    assert paper_repo.list_trades() == []
 
 
 def test_paper_trading_rejects_snapshot_with_inconsistent_price_basis(tmp_path):
@@ -1145,6 +1195,107 @@ def test_build_paper_ledger_summarizes_cash_equity_and_recommendation_outcomes(t
     assert any(item.outcome == "浮盈跟踪" for item in ledger.items)
 
 
+def test_official_ranking_v3_statistics_exclude_legacy_records(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    official = paper_repo.create_trade(
+        source_snapshot_id="official-ranking-v3",
+        provider="fixture",
+        instrument_id="CN:688981",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("100"),
+        initial_stop=Decimal("95"),
+        target_1=Decimal("110"),
+        rank_score=Decimal("0.90"),
+    )
+    manual = paper_repo.create_trade(
+        source_snapshot_id="legacy-manual",
+        provider="fixture",
+        instrument_id="CN:000001",
+        strategy_id="legacy_strategy",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("100"),
+        initial_stop=Decimal("90"),
+        target_1=Decimal("120"),
+        rank_score=Decimal("0.40"),
+    )
+    paper_repo.create_trade(
+        source_snapshot_id="legacy-unknown",
+        provider="fixture",
+        instrument_id="CN:000002",
+        strategy_id=None,
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("100"),
+        initial_stop=Decimal("90"),
+        target_1=Decimal("120"),
+    )
+    paper_repo.update_trade(
+        official.trade_id,
+        status="target_1_hit",
+        entry_date=date(2026, 7, 2),
+        entry_price=Decimal("100"),
+        exit_date=date(2026, 7, 8),
+        exit_price=Decimal("110"),
+        latest_date=date(2026, 7, 8),
+        latest_price=Decimal("110"),
+        realized_return_pct=Decimal("10"),
+        holding_days=4,
+    )
+    paper_repo.update_trade(
+        manual.trade_id,
+        status="stopped",
+        entry_date=date(2026, 7, 2),
+        entry_price=Decimal("100"),
+        exit_date=date(2026, 7, 8),
+        exit_price=Decimal("50"),
+        latest_date=date(2026, 7, 8),
+        latest_price=Decimal("50"),
+        realized_return_pct=Decimal("-50"),
+        holding_days=4,
+    )
+    stored = {trade.source_snapshot_id: trade for trade in paper_repo.list_trades(limit=10)}
+    trades = [
+        stored["official-ranking-v3"].model_copy(
+            update={"admission_source": "ranking_v3_production"}
+        ),
+        stored["legacy-manual"].model_copy(update={"admission_source": "legacy_manual"}),
+        stored["legacy-unknown"],
+    ]
+
+    summary = summarize_paper_trades(trades)
+    ledger = build_paper_ledger(trades)
+    validation = build_paper_validation(
+        trades,
+        ledger,
+        as_of=date(2026, 7, 8),
+    )
+    report = build_paper_daily_report(
+        trades=trades,
+        ledger=ledger,
+        validation=validation,
+        as_of=date(2026, 7, 1),
+    )
+
+    assert summary.total == 1
+    assert summary.win_rate == 1.0
+    assert ledger.summary.total_trades == 1
+    assert ledger.summary.total_return_pct > 0
+    assert {item.trade_id for item in ledger.items} == {official.trade_id}
+    assert ledger.data_health["paper_reporting_scope"] == "ranking_v3_production"
+    assert ledger.data_health["paper_reporting_official"] == "1"
+    assert ledger.data_health["paper_reporting_legacy_manual"] == "1"
+    assert ledger.data_health["paper_reporting_legacy_unknown"] == "1"
+    assert ledger.data_health["paper_reporting_excluded"] == "2"
+    assert validation.summary.total_trades == 1
+    assert validation.summary.win_rate == 1.0
+    assert validation.data_health["validation_non_official_excluded"] == "2"
+    assert [item.trade_id for item in report.new_opportunities] == [official.trade_id]
+    assert report.summary.total_trades == 1
+    assert report.summary.win_rate == 1.0
+    assert report.data_health["paper_daily_report_non_official_excluded"] == "2"
+
+
 def test_build_paper_ledger_generates_trade_flows_fees_slippage_and_positions(tmp_path):
     repo = make_repo(tmp_path)
     paper_repo = PaperTradingRepository(repo.session_factory)
@@ -1808,6 +1959,244 @@ def test_paper_daily_report_explains_recovery_market_context_and_trigger_quality
     assert report.risk_gate.position_size_multiplier == 1.0
 
 
+def test_paper_trade_freezes_normalized_point_in_time_source_context(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    snapshot_id = _insert_cn_snapshot(
+        repo,
+        instrument_id="CN:688981",
+        created_at=datetime(2026, 7, 1, 7, 0, tzinfo=timezone.utc),
+        trigger_price=Decimal("100"),
+        no_chase_above=Decimal("103"),
+        card_overrides={
+            "market_context": {
+                "industry": "半导体",
+                "themes": ["先进制程", "国产替代"],
+            },
+            "market_regime": {"regime": "risk_off"},
+            "factor_flags": ["overextended"],
+            "factor_exposures": [
+                {"factor_id": "quality", "score": 0.82},
+                {"factor_id": "trend_quality", "score": 0.76},
+            ],
+        },
+    )
+
+    trade = paper_repo.create_trade(
+        source_snapshot_id=snapshot_id,
+        provider="free",
+        instrument_id="CN:688981",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 2),
+        trigger_price=Decimal("100"),
+        initial_stop=Decimal("95"),
+        target_1=Decimal("110"),
+    )
+    context = paper_repo.get_trade_source_context(trade.source_snapshot_id)
+
+    assert context is not None
+    assert context.source_status == "frozen"
+    assert context.signal_date == date(2026, 7, 2)
+    assert context.industry == "半导体"
+    assert context.themes == ["先进制程", "国产替代"]
+    assert context.market_regime == "risk_off"
+    assert context.factor_ids == [
+        "overextended",
+        "quality",
+        "trend_quality",
+    ]
+
+    with repo.session_factory() as session:
+        snapshot = session.get(OpportunitySnapshotRow, snapshot_id)
+        assert snapshot is not None
+        snapshot.card_json = json.dumps(
+            {
+                "market_context": {"industry": "银行", "themes": ["红利"]},
+                "market_regime": {"regime": "risk_on"},
+                "factor_flags": ["low_risk"],
+            }
+        )
+        session.commit()
+
+    frozen = paper_repo.get_trade_source_context(trade.source_snapshot_id)
+    assert frozen is not None
+    assert frozen.industry == "半导体"
+    assert frozen.market_regime == "risk_off"
+    assert frozen.factor_ids == context.factor_ids
+
+
+def test_legacy_paper_trade_without_frozen_context_stays_unknown(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    snapshot_id = _insert_cn_snapshot(
+        repo,
+        instrument_id="CN:688008",
+        created_at=datetime(2026, 6, 30, 7, 0, tzinfo=timezone.utc),
+        trigger_price=Decimal("50"),
+        no_chase_above=Decimal("52"),
+        card_overrides={
+            "market_context": {
+                "industry": "半导体",
+                "themes": ["AI芯片"],
+            },
+            "market_regime": "risk_off",
+            "factor_exposures": [{"factor_id": "quality", "score": 0.8}],
+        },
+    )
+    with repo.session_factory() as session:
+        session.add(
+            PaperTradeRow(
+                trade_id="legacy-paper-context",
+                source_snapshot_id=snapshot_id,
+                provider="free",
+                instrument_id="CN:688008",
+                strategy_id="quality_compounder",
+                status="pending",
+                signal_date=date(2026, 7, 1),
+                trigger_price=Decimal("50"),
+                initial_stop=Decimal("47"),
+                target_1=Decimal("56"),
+                notes="旧记录没有冻结上下文事件。",
+            )
+        )
+        session.commit()
+
+    context = paper_repo.get_trade_source_context(snapshot_id)
+
+    assert context is not None
+    assert context.source_status == "unknown"
+    assert context.signal_date == date(2026, 7, 1)
+    assert context.industry == "unknown"
+    assert context.themes == []
+    assert context.market_regime == "unknown"
+    assert context.factor_ids == []
+    assert context.card == {}
+
+    with repo.session_factory() as session:
+        snapshot = session.get(OpportunitySnapshotRow, snapshot_id)
+        assert snapshot is not None
+        snapshot.card_json = json.dumps(
+            {
+                "market_context": {
+                    "industry": "银行",
+                    "themes": ["红利"],
+                },
+                "market_regime": "risk_on",
+                "factor_flags": ["low_risk"],
+            }
+        )
+        session.commit()
+
+    unchanged = paper_repo.get_trade_source_context(snapshot_id)
+    assert unchanged is not None
+    assert unchanged.source_status == "unknown"
+    assert unchanged.industry == "unknown"
+    assert unchanged.market_regime == "unknown"
+    assert unchanged.factor_ids == []
+
+
+def test_paper_daily_report_uses_only_saved_pit_context_for_historical_attribution(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    stopped = paper_repo.create_trade(
+        source_snapshot_id="pit-attribution",
+        provider="fixture",
+        instrument_id="CN:688981",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("100"),
+        initial_stop=Decimal("90"),
+        target_1=Decimal("115"),
+        rank_score=Decimal("0.82"),
+    )
+    paper_repo.update_trade(
+        stopped.trade_id,
+        status="stopped",
+        entry_date=date(2026, 7, 2),
+        entry_price=Decimal("100"),
+        exit_date=date(2026, 7, 8),
+        exit_price=Decimal("90"),
+        latest_date=date(2026, 7, 8),
+        latest_price=Decimal("90"),
+        realized_return_pct=Decimal("-10"),
+        holding_days=4,
+    )
+    trades = paper_repo.list_trades(limit=10)
+    ledger = build_paper_ledger(trades)
+    validation = build_paper_validation(trades, ledger, as_of=date(2026, 7, 8))
+    report = build_paper_daily_report(
+        trades=trades,
+        ledger=ledger,
+        validation=validation,
+        as_of=date(2026, 7, 8),
+        benchmark_items=[
+            {
+                "name": "沪深300",
+                "return_pct": -4.0,
+                "excess_return_pct": -1.0,
+            }
+        ],
+        source_context_by_trade={
+            stopped.trade_id: PaperTradeSourceContext(
+                source_snapshot_id=stopped.source_snapshot_id,
+                created_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                signal_date=date(2026, 7, 1),
+                industry="半导体",
+                themes=["国产替代"],
+                market_regime="risk_on",
+                factor_ids=["quality", "trend_quality"],
+                source_status="frozen",
+                card={"instrument_label": "中芯国际 688981.SH"},
+            )
+        },
+    )
+
+    dimensions = {(item.dimension, item.key) for item in report.failure_attribution}
+    assert report.market_context.regime == "market_drag"
+    assert ("strategy", "trend_momentum_stage2") in dimensions
+    assert ("factor", "quality") in dimensions
+    assert ("industry", "半导体") in dimensions
+    assert ("market_regime", "risk_on") in dimensions
+    assert ("market_regime", "market_drag") not in dimensions
+    assert report.trade_diagnostics[0].source_market_regime == "risk_on"
+    assert report.trade_diagnostics[0].root_cause != "market_regime"
+    assert report.data_health["paper_pit_context_frozen"] == "1"
+    assert report.data_health["paper_pit_context_unknown"] == "0"
+
+
+def test_paper_daily_report_marks_missing_legacy_context_unknown(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    trade = paper_repo.create_trade(
+        source_snapshot_id="legacy-context-missing",
+        provider="fixture",
+        instrument_id="CN:000001",
+        strategy_id=None,
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("10"),
+        initial_stop=Decimal("9"),
+        target_1=Decimal("12"),
+    )
+    trades = paper_repo.list_trades(limit=10)
+    ledger = build_paper_ledger(trades)
+    validation = build_paper_validation(trades, ledger, as_of=date(2026, 7, 2))
+    report = build_paper_daily_report(
+        trades=trades,
+        ledger=ledger,
+        validation=validation,
+        as_of=date(2026, 7, 2),
+    )
+
+    dimensions = {(item.dimension, item.key) for item in report.failure_attribution}
+    assert ("industry", "unknown") in dimensions
+    assert ("factor", "unknown") in dimensions
+    assert ("market_regime", "unknown") in dimensions
+    assert report.data_health["paper_pit_context_unknown"] == "1"
+    context = paper_repo.get_trade_source_context(trade.source_snapshot_id)
+    assert context is not None
+    assert context.source_status == "unknown"
+
+
 def _insert_cn_snapshot(
     repo,
     *,
@@ -1818,6 +2207,7 @@ def _insert_cn_snapshot(
     store_latest_close_in_row: bool = True,
     card_latest_close: Decimal | None = None,
     t_plus_one: bool | None = None,
+    card_overrides: dict[str, object] | None = None,
 ) -> str:
     snapshot_id = f"scan-minute:{instrument_id}"
     card = {
@@ -1837,6 +2227,7 @@ def _insert_cn_snapshot(
             "min_lot": 100,
             "price_limit_pct": 10,
         }
+    card.update(card_overrides or {})
     with repo.session_factory() as session:
         session.add(
             ScanRunRow(

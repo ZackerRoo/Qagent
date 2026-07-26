@@ -24,7 +24,9 @@ def test_daily_scan_returns_cards_for_fixture_universe():
     assert result.items[0].instrument_id in {"US:TEST", "CN:000001"}
     assert {item.status for item in result.items} == {"setup_ready"}
     assert result.strategy_health
-    assert any(item.strategy_id == "breakout_volume_confirmation" for item in result.strategy_health)
+    assert any(
+        item.strategy_id == "breakout_volume_confirmation" for item in result.strategy_health
+    )
     assert result.items[0].strategies_passed >= 1
     assert result.items[0].strategies_missing_data >= 1
     assert result.cards[0].rank_score >= result.cards[-1].rank_score
@@ -184,8 +186,9 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
         "strong",
     }
     assert cached.payload["data_health"]["a_share_market_state"]
-    assert cached.payload["portfolio_plan"]["constraint_policy"]["market_state"] == (
-        cached.payload["a_share_market_state"]["state"]
+    assert (
+        cached.payload["portfolio_plan"]["constraint_policy"]["market_state"]
+        == (cached.payload["a_share_market_state"]["state"])
     )
     assert (
         cached.payload["data_health"]["dynamic_calibration_merge_policy"]
@@ -200,13 +203,19 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
     assert cached.payload["signal_monitor"]["total"] == len(cached.payload["cards"])
     assert cached.payload["signal_monitor"]["action_queue"]
     assert cached.payload["decision_quality_center"]["explanation_cards"]
-    assert cached.payload["data_health"]["decision_quality_cards"] == str(len(cached.payload["cards"]))
+    assert cached.payload["data_health"]["decision_quality_cards"] == str(
+        len(cached.payload["cards"])
+    )
     assert cached.payload["operational_readiness_center"]["checks"]
     assert cached.payload["operational_readiness_center"]["user_questions"]
     assert cached.payload["data_health"]["operational_readiness_checks"] == "6"
-    assert cached.payload["data_health"]["probability_calibration_cards"] == str(len(cached.payload["cards"]))
+    assert cached.payload["data_health"]["probability_calibration_cards"] == str(
+        len(cached.payload["cards"])
+    )
     assert cached.payload["sector_strength"]
-    assert cached.payload["data_health"]["sector_strength"] == str(len(cached.payload["sector_strength"]))
+    assert cached.payload["data_health"]["sector_strength"] == str(
+        len(cached.payload["sector_strength"])
+    )
     assert cached.payload["data_health"]["full_market_snapshot_items"] == str(
         len(cached.payload["cards"])
     )
@@ -214,7 +223,23 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
     runs = repo.list_scan_runs(provider="fixture", limit=10)
     assert len(runs) == 1
     assert runs[0].mode == "full_market_batch"
+    assert runs[0].scanned == len(job.symbols)
     assert runs[0].cards == len(cached.payload["cards"])
+    assert runs[0].data_health["full_market_scanned_symbols"] == str(len(job.symbols))
+    assert runs[0].data_health["full_market_total_symbols"] == str(len(job.symbols))
+    assert runs[0].data_health["full_market_completed_batches"] == str(job.total_batches)
+    assert runs[0].data_health["full_market_total_batches"] == str(job.total_batches)
+    assert runs[0].data_health["full_market_error_count"] == "0"
+    assert runs[0].data_health["full_market_batches_complete"] == "true"
+    assert runs[0].data_health["full_market_scan_complete"] == "true"
+    assert runs[0].data_health["full_market_signal_date"]
+    complete_bundle = repo.get_latest_complete_daily_scan_with_snapshots(
+        provider="fixture",
+        signal_date=date.fromisoformat(runs[0].data_health["full_market_signal_date"]),
+        minimum_scanned=len(job.symbols),
+    )
+    assert complete_bundle is not None
+    assert complete_bundle.run.run_id == runs[0].run_id
     snapshots = repo.list_opportunity_snapshots(
         provider="fixture",
         limit=10,
@@ -262,6 +287,65 @@ def test_full_market_batch_job_resumes_from_persisted_batch_checkpoints(
     assert restored.data_health["full_market_checkpoint_batches_restored"] == "2"
 
 
+def test_full_market_batch_with_scan_errors_is_persisted_but_not_complete(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'full-batch-error.db'}",
+    )
+    initialize_database()
+    repo = QagentRepository(create_session_factory())
+    job = repo.create_full_market_scan_job(
+        provider="fixture",
+        symbols=["CN:000001"],
+        batch_size=1,
+        include_etfs=True,
+        sync_if_empty=False,
+    )
+    monkeypatch.setattr(
+        full_market,
+        "build_market_data_provider",
+        lambda provider: FixtureMarketDataProvider(),
+    )
+    real_run_daily_scan = full_market.run_daily_scan
+
+    def scan_with_error(*args, **kwargs):
+        result = real_run_daily_scan(*args, **kwargs)
+        result.data_health["scan_errors"] = "1"
+        return result
+
+    monkeypatch.setattr(full_market, "run_daily_scan", scan_with_error)
+
+    full_market.run_full_market_batch_scan_job(job.job_id, top_cards_limit=5)
+
+    finished = repo.get_full_market_scan_job(job.job_id)
+    assert finished is not None
+    assert finished.status == "failed"
+    assert finished.scanned_symbols == 1
+    assert finished.errors == 1
+    assert finished.data_health["full_market_total_symbols"] == "1"
+    assert finished.data_health["full_market_scanned_symbols"] == "1"
+    assert finished.data_health["full_market_total_batches"] == "1"
+    assert finished.data_health["full_market_completed_batches"] == "1"
+    assert finished.data_health["full_market_error_count"] == "1"
+    assert finished.data_health["full_market_batches_complete"] == "true"
+    assert finished.data_health["full_market_scan_complete"] == "false"
+
+    run = repo.list_scan_runs(provider="fixture", limit=1)[0]
+    assert run.scanned == 1
+    assert run.data_health["full_market_error_count"] == "1"
+    assert (
+        repo.get_latest_complete_daily_scan_with_snapshots(
+            provider="fixture",
+            signal_date=date.fromisoformat(run.data_health["full_market_signal_date"]),
+            minimum_scanned=1,
+        )
+        is None
+    )
+
+
 def test_full_market_batch_reconciles_validation_completed_during_scan(
     tmp_path,
     monkeypatch,
@@ -292,7 +376,11 @@ def test_full_market_batch_reconciles_validation_completed_during_scan(
         input_calls += 1
         governance, _, paper_report = original_inputs(repo, provider)
         if input_calls == 1:
-            return governance, {"status": "insufficient", "strategies": [], "factors": []}, paper_report
+            return (
+                governance,
+                {"status": "insufficient", "strategies": [], "factors": []},
+                paper_report,
+            )
         return (
             governance,
             {
@@ -342,10 +430,7 @@ def test_full_market_batch_reconciles_validation_completed_during_scan(
     assert cached.payload["data_health"]["walk_forward_feedback_gate"] == "rejected"
     assert cached.payload["data_health"]["walk_forward_feedback_blocked"] == "1"
     assert cached.payload["cards"][0]["rank_score"] == 0
-    assert (
-        cached.payload["cards"][0]["strategy_governance"]["gate_decision"]["action"]
-        == "disable"
-    )
+    assert cached.payload["cards"][0]["strategy_governance"]["gate_decision"]["action"] == "disable"
 
 
 def test_full_market_batch_job_caches_rejected_items_with_remediation(tmp_path, monkeypatch):
@@ -373,9 +458,18 @@ def test_full_market_batch_job_caches_rejected_items_with_remediation(tmp_path, 
     )
 
     assert cached is not None
-    rejected = [item for item in cached.payload["items"] if item["status"] in {"no_data", "no_setup", "data_error"}]
+    rejected = [
+        item
+        for item in cached.payload["items"]
+        if item["status"] in {"no_data", "no_setup", "data_error"}
+    ]
     assert rejected
-    assert rejected[0]["rejection_category"] in {"data_missing", "weak_signal", "execution_blocked", "scan_error"}
+    assert rejected[0]["rejection_category"] in {
+        "data_missing",
+        "weak_signal",
+        "execution_blocked",
+        "scan_error",
+    }
     assert rejected[0]["remediation"]
     assert cached.payload["data_health"]["full_market_rejected_items"] == str(len(rejected))
 
@@ -471,7 +565,9 @@ def test_sector_strength_uses_full_scan_items_for_theme_breadth():
         _scan_item("CN:000001", "watch"),
     ]
     bars_by_instrument = {
-        item.instrument_id: _theme_bars(item.instrument_id, direction=1 if item.instrument_id != "CN:000001" else -1)
+        item.instrument_id: _theme_bars(
+            item.instrument_id, direction=1 if item.instrument_id != "CN:000001" else -1
+        )
         for item in items
     }
 
@@ -643,6 +739,7 @@ def _benchmark_bars(instrument_id: str, total_return: float) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
 
 class StrategyDataProviderWithOwnershipFilings:
     name = "ownership_records"

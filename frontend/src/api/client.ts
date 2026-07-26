@@ -53,6 +53,7 @@ import type {
   RecommendationCalibrationResponse,
   RecommendationClosureResponse,
   RecommendationFollowThroughCenterResponse,
+  RankingV3ForwardStateResponse,
   ScanRunsResponse,
   ScanTask,
   ScanTasksResponse,
@@ -126,6 +127,32 @@ type ScanParams = {
 type RequestOptions = {
   signal?: AbortSignal;
 };
+
+export class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "ApiRequestError";
+  }
+}
+
+async function apiError(response: Response): Promise<ApiRequestError> {
+  let detail = "";
+  try {
+    const payload = await response.json() as { detail?: unknown };
+    if (typeof payload.detail === "string") {
+      detail = payload.detail;
+    }
+  } catch {
+    // Keep the HTTP status useful when an upstream returns a non-JSON body.
+  }
+  return new ApiRequestError(
+    detail || `API request failed: ${response.status}`,
+    response.status,
+  );
+}
 
 function queryString(params?: ScanParams): string {
   if (!params) {
@@ -267,7 +294,7 @@ export async function apiGet<T>(
     signal: options?.signal,
   });
   if (!response.ok) {
-    throw new Error(`API request failed: ${response.status}`);
+    throw await apiError(response);
   }
   return response.json() as Promise<T>;
 }
@@ -761,6 +788,16 @@ export async function fetchLatestWalkForwardRun(
   provider: DataProviderMode = "free",
 ): Promise<WalkForwardRun> {
   return apiGet<WalkForwardRun>("/walk-forward/runs/latest", { provider });
+}
+
+export async function fetchRankingV3ForwardState(
+  options?: RequestOptions,
+): Promise<RankingV3ForwardStateResponse> {
+  return apiGet<RankingV3ForwardStateResponse>(
+    "/ranking-v3/forward/state",
+    undefined,
+    options,
+  );
 }
 
 export async function runWalkForward(

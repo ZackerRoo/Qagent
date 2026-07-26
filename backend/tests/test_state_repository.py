@@ -13,7 +13,11 @@ from qagent.storage.repository import (
     QagentRepository,
     WatchlistCreate,
 )
-from qagent.storage.tables import ScanResultCacheRow
+from qagent.storage.tables import (
+    OpportunitySnapshotRow,
+    ScanResultCacheRow,
+    ScanRunRow,
+)
 from qagent.strategy_data.models import FundamentalSnapshot
 
 
@@ -163,7 +167,111 @@ def test_repository_saves_scan_run_and_opportunity_snapshots(tmp_path):
     assert snapshots[0].primary_strategy_id
     assert snapshots[0].signal_date is not None
     assert snapshots[0].latest_close == Decimal("82.00")
+    assert repo.get_opportunity_snapshot(snapshots[0].snapshot_id) == snapshots[0]
+    assert repo.get_opportunity_snapshot("missing-snapshot") is None
     assert snapshots[0].card["instrument_id"] == "US:TEST"
+
+
+def test_top_daily_opportunities_support_protocol_pool_and_isolate_provider(tmp_path):
+    repo = make_repo(tmp_path)
+    free_run_id = "scan-free-candidate-pool"
+    fixture_run_id = "scan-fixture-candidate-pool"
+    with repo.session_factory() as session:
+        session.add_all(
+            [
+                ScanRunRow(
+                    run_id=free_run_id,
+                    provider="free",
+                    mode="full_market",
+                    symbols="[]",
+                    scanned=510,
+                    cards=510,
+                    data_health="{}",
+                ),
+                ScanRunRow(
+                    run_id=fixture_run_id,
+                    provider="fixture",
+                    mode="fixture",
+                    symbols="[]",
+                    scanned=10,
+                    cards=10,
+                    data_health="{}",
+                ),
+            ]
+        )
+        session.add_all(
+            [
+                OpportunitySnapshotRow(
+                    snapshot_id=f"{free_run_id}:card-{index:04d}",
+                    run_id=free_run_id,
+                    card_id=f"free-card-{index:04d}",
+                    instrument_id=f"CN:{600000 + index:06d}",
+                    market="CN",
+                    status="watch",
+                    signal_date=date(2026, 7, 27),
+                    latest_close=Decimal("10"),
+                    primary_strategy_id="trend",
+                    score=Decimal("1") - Decimal(index) / Decimal("10000"),
+                    strategy_score=Decimal("1") - Decimal(index) / Decimal("10000"),
+                    rank_score=Decimal("1") - Decimal(index) / Decimal("10000"),
+                    trigger_price=Decimal("10"),
+                    initial_stop=Decimal("9"),
+                    target_1=Decimal("12"),
+                    card_json="{}",
+                )
+                for index in range(510)
+            ]
+        )
+        session.add_all(
+            [
+                OpportunitySnapshotRow(
+                    snapshot_id=f"{fixture_run_id}:card-{index:04d}",
+                    run_id=fixture_run_id,
+                    card_id=f"fixture-card-{index:04d}",
+                    instrument_id=f"CN:{700000 + index:06d}",
+                    market="CN",
+                    status="watch",
+                    signal_date=date(2026, 7, 27),
+                    latest_close=Decimal("10"),
+                    primary_strategy_id="fixture",
+                    score=Decimal("2"),
+                    strategy_score=Decimal("2"),
+                    rank_score=Decimal("2"),
+                    trigger_price=Decimal("10"),
+                    initial_stop=Decimal("9"),
+                    target_1=Decimal("12"),
+                    card_json="{}",
+                )
+                for index in range(10)
+            ]
+        )
+        session.commit()
+
+    protocol_pool = repo.list_top_daily_opportunity_snapshots(
+        start=date(2026, 7, 27),
+        end=date(2026, 7, 27),
+        top_n=50,
+        provider="free",
+    )
+    bounded = repo.list_top_daily_opportunity_snapshots(
+        start=date(2026, 7, 27),
+        end=date(2026, 7, 27),
+        top_n=1000,
+        provider="free",
+    )
+
+    assert len(protocol_pool) == 50
+    assert len(bounded) == 500
+    assert {item.run_id for item in protocol_pool} == {free_run_id}
+    assert all(not item.snapshot_id.startswith(fixture_run_id) for item in bounded)
+    assert repo.opportunity_snapshots_belong_to_provider(
+        [item.snapshot_id for item in protocol_pool],
+        provider="free",
+    )
+    assert not repo.opportunity_snapshots_belong_to_provider(
+        [protocol_pool[0].snapshot_id, f"{fixture_run_id}:card-0000"],
+        provider="free",
+    )
 
 
 def test_repository_saves_and_loads_recent_scan_result_cache(tmp_path):

@@ -1,4 +1,5 @@
 from copy import deepcopy
+from collections.abc import Mapping
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -10,6 +11,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException
+from sqlalchemy.exc import IntegrityError
 
 from qagent.agent.responder import answer_question
 from qagent.api.schemas import (
@@ -30,6 +32,27 @@ from qagent.backtesting.experiment import (
     walk_forward_selection_manifests_semantically_compatible,
 )
 from qagent.backtesting.portfolio import run_portfolio_backtest
+from qagent.backtesting.ranking_v3 import RankingV3FrozenScoringArtifact
+from qagent.backtesting.ranking_v3_evidence import (
+    RankingV3RepositoryEvidenceAuthority,
+    ranking_v3_data_revision,
+)
+from qagent.backtesting.ranking_v3_forward import (
+    RankingV3ForwardConflictError,
+    RankingV3ForwardIdentity,
+    RankingV3ForwardStateError,
+    RankingV3ForwardValidator,
+)
+from qagent.backtesting.ranking_v3_production import (
+    RankingV3ProductionIdentity,
+    RankingV3ProductionIntegrityError,
+)
+from qagent.backtesting.ranking_v3_protocol import (
+    RANKING_V3_REBALANCE_STEP_SESSIONS,
+    RankingV3Protocol,
+    build_ranking_v3_protocol,
+    ranking_v3_protocol_digest_is_valid,
+)
 from qagent.backtesting.sensitivity import build_parameter_sensitivity
 from qagent.backtesting.walk_forward import (
     MIN_FULL_MARKET_COVERAGE_RATIO,
@@ -64,6 +87,11 @@ from qagent.jobs.full_market import (
 from qagent.jobs.historical_data import run_historical_backfill_job
 from qagent.jobs.alert_runner import run_alert_rules
 from qagent.jobs.intraday_check import evaluate_snapshot_alerts
+from qagent.jobs.ranking_v3_forward import run_ranking_v3_forward_day
+from qagent.jobs.ranking_v3_production import (
+    RankingV3ProductionSnapshotUnavailable,
+    run_ranking_v3_production_day,
+)
 from qagent.jobs.task_manager import TaskManager
 from qagent.market.a_share_universe import (
     ResolvedSymbols,
@@ -111,6 +139,7 @@ from qagent.paper_trading.engine import (
     update_paper_trades,
     summarize_paper_trades,
 )
+from qagent.paper_trading.admission import evaluate_paper_snapshot_admission
 from qagent.paper_trading.dual_track import (
     build_dual_track_report,
     select_daily_top_recommendations,
@@ -151,8 +180,14 @@ from qagent.research.market_intelligence import (
     build_market_intelligence_center,
 )
 from qagent.research.operational_readiness import build_operational_readiness_center
-from qagent.storage.paper import PaperAccountSettings, PaperTradingRepository
-from qagent.storage.paper import PaperTradeRecord
+from qagent.storage.paper import (
+    PaperAccountSettings,
+    PaperTradeAdmissionProof,
+    PaperTradeRecord,
+    PaperTradingRepository,
+)
+from qagent.storage.ranking_v3_forward import RankingV3ForwardRepository
+from qagent.storage.ranking_v3_production import RankingV3ProductionRepository
 from qagent.storage.repository import (
     AlertRuleCreate,
     OpportunitySnapshotRecord,
@@ -179,6 +214,12 @@ _walk_forward_task_executor: ProcessPoolExecutor | None = None
 _walk_forward_jobs_lock = Lock()
 _submitted_walk_forward_jobs: set[str] = set()
 _automation_scheduler = AutomationScheduler()
+_ranking_v3_forward_runtime_lock = Lock()
+_ranking_v3_forward_runtime_status: dict[str, dict[str, object]] = {}
+
+
+class _WalkForwardJobCancelled(RuntimeError):
+    pass
 
 
 def _walk_forward_executor() -> ProcessPoolExecutor:
@@ -249,8 +290,7 @@ def restore_full_market_scan_job_from_storage() -> list[str]:
         if job is None:
             continue
         recoverable = job.status == "running" or (
-            job.status == "queued"
-            and job.data_health.get("full_market_worker_submitted") == "true"
+            job.status == "queued" and job.data_health.get("full_market_worker_submitted") == "true"
         )
         if not recoverable:
             continue
@@ -366,9 +406,15 @@ def run_walk_forward(
         raise HTTPException(status_code=400, detail="walk-forward only supports free A-share data")
     if start > end:
         raise HTTPException(status_code=400, detail="start must be on or before end")
-    if step_sessions <= 0 or lookback_days <= 0:
+    if lookback_days <= 0:
+        raise HTTPException(status_code=400, detail="lookback_days must be positive")
+    if step_sessions != RANKING_V3_REBALANCE_STEP_SESSIONS:
         raise HTTPException(
-            status_code=400, detail="step_sessions and lookback_days must be positive"
+            status_code=400,
+            detail=(
+                "strict Ranking V3 validation requires "
+                f"step_sessions={RANKING_V3_REBALANCE_STEP_SESSIONS}"
+            ),
         )
     initialize_database()
     repo = _repo()
@@ -489,9 +535,7 @@ def _create_or_get_walk_forward_job(
         job = repo.update_walk_forward_job(
             job.job_id,
             processed_snapshots=len(reusable_checkpoints),
-            current_date=date.fromisoformat(
-                reusable_checkpoints[-1]["decision_date"]
-            ),
+            current_date=date.fromisoformat(reusable_checkpoints[-1]["decision_date"]),
             checkpoints=reusable_checkpoints,
         )
     _submit_walk_forward_job(job.job_id)
@@ -510,9 +554,13 @@ def _reusable_walk_forward_checkpoints(
         provider=manifest.provider_mode,
         limit=100,
     ):
-        if not job.checkpoints or not _walk_forward_selection_manifest_payload_matches(
+        if (
+            job.status != "succeeded"
+            or not job.checkpoints
+            or not _walk_forward_selection_manifest_payload_matches(
             job.experiment_manifest,
             manifest,
+            )
         ):
             continue
         checkpoints = _ordered_reusable_checkpoint_prefix(
@@ -560,9 +608,7 @@ def _ordered_reusable_checkpoint_prefix(
         if isinstance(item, dict) and isinstance(item.get("decision_date"), str)
     }
     checkpoints = [
-        by_date[decision_date]
-        for decision_date in expected_dates
-        if decision_date in by_date
+        by_date[decision_date] for decision_date in expected_dates if decision_date in by_date
     ]
     checkpoint_dates = [item["decision_date"] for item in checkpoints]
     if checkpoint_dates != expected_dates[: len(checkpoint_dates)]:
@@ -642,6 +688,29 @@ def get_walk_forward_job(job_id: str) -> dict[str, object]:
     return _walk_forward_job_payload(job)
 
 
+@router.post("/walk-forward/jobs/{job_id}/cancel")
+def cancel_walk_forward_job(job_id: str) -> dict[str, object]:
+    repo = _repo()
+    job = repo.get_walk_forward_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="walk-forward job not found")
+    if job.status == "cancelled":
+        return _walk_forward_job_payload(job)
+    if job.status not in {"queued", "running"}:
+        raise HTTPException(
+            status_code=409,
+            detail=f"walk-forward job cannot be cancelled from {job.status}",
+        )
+    cancelled = repo.update_walk_forward_job(
+        job_id,
+        status="cancelled",
+        phase="cancelled",
+        error="validation cancelled before publication",
+        finished_at=datetime.now(timezone.utc),
+    )
+    return _walk_forward_job_payload(cancelled)
+
+
 @router.post("/walk-forward/jobs/{job_id}/retry")
 def retry_walk_forward_job(job_id: str) -> dict[str, object]:
     repo = _repo()
@@ -674,9 +743,7 @@ def retry_walk_forward_job(job_id: str) -> dict[str, object]:
         lookback_days=job.lookback_days,
     )
     try:
-        stored_manifest = WalkForwardExperimentManifest.model_validate(
-            job.experiment_manifest
-        )
+        stored_manifest = WalkForwardExperimentManifest.model_validate(job.experiment_manifest)
     except ValueError as exc:
         raise HTTPException(
             status_code=409,
@@ -747,6 +814,489 @@ def get_walk_forward_run(run_id: str) -> dict[str, object]:
     return record.model_dump(mode="json")
 
 
+@router.get("/ranking-v3/forward/state")
+def ranking_v3_forward_state(
+    run_id: str | None = None,
+) -> dict[str, object]:
+    repo = _repo()
+    try:
+        context = _ranking_v3_forward_context(repo, run_id=run_id)
+        return _ranking_v3_forward_state_payload(repo, context)
+    except (
+        LookupError,
+        RankingV3ForwardConflictError,
+        RankingV3ForwardStateError,
+        ValueError,
+    ) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Ranking V3 forward ledger repository conflict",
+        ) from exc
+
+
+@router.post("/ranking-v3/forward/run-once")
+def run_ranking_v3_forward_once(
+    run_id: str | None = None,
+    session_date: date | None = None,
+) -> dict[str, object]:
+    repo = _repo()
+    try:
+        context = _ranking_v3_forward_context(repo, run_id=run_id)
+        if context is None:
+            raise RankingV3ForwardStateError(
+                "no successful Ranking V3 run is eligible for forward validation"
+            )
+        target_date = session_date or _a_share_today()
+        processed = _run_ranking_v3_forward_catch_up(
+            repo,
+            build_market_data_provider("free"),
+            context,
+            through_date=target_date,
+        )
+        state = _ranking_v3_forward_state_payload(repo, context)
+    except (
+        LookupError,
+        RankingV3ForwardConflictError,
+        RankingV3ForwardStateError,
+        ValueError,
+    ) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Ranking V3 forward ledger repository conflict",
+        ) from exc
+    return {
+        **state,
+        "processed_session_count": len(processed),
+        "processed_session_dates": [
+            result.session_date.isoformat() for result in processed
+        ],
+    }
+
+
+def _ranking_v3_forward_context(
+    repo: QagentRepository,
+    *,
+    run_id: str | None = None,
+) -> tuple[object, Mapping[str, object], RankingV3Protocol] | None:
+    if run_id is not None:
+        records = [repo.get_walk_forward_run(run_id)]
+    else:
+        active_run_id = _ranking_v3_bound_validation_run_id(repo)
+        records = (
+            [repo.get_walk_forward_run(active_run_id)]
+            if active_run_id is not None
+            else repo.list_walk_forward_runs(provider="free", limit=1)
+        )
+    explicit_error = "requested walk-forward run is not eligible for Ranking V3 forward validation"
+    for record in records:
+        if record is None or getattr(record, "status", None) != "succeeded":
+            continue
+        payload = getattr(record, "payload", None)
+        ranking = payload.get("ranking_v3") if isinstance(payload, Mapping) else None
+        if not isinstance(ranking, Mapping) or ranking.get("status") not in {
+            "forward_validation_pending",
+            "shadow_candidate",
+        }:
+            continue
+        try:
+            protocol_payload = ranking.get("protocol")
+            if not isinstance(protocol_payload, Mapping):
+                raise ValueError("Ranking V3 protocol is missing")
+            protocol = RankingV3Protocol.model_validate(protocol_payload)
+            if not ranking_v3_protocol_digest_is_valid(protocol):
+                raise ValueError("Ranking V3 protocol digest is invalid")
+            if ranking.get("model_version") != protocol.model_version:
+                raise ValueError("Ranking V3 model version does not match its protocol")
+            artifact_payload = ranking.get("forward_scoring_artifact")
+            if not isinstance(artifact_payload, Mapping):
+                raise ValueError("Ranking V3 frozen scoring artifact is missing")
+            artifact = RankingV3FrozenScoringArtifact.model_validate(artifact_payload)
+            if (
+                artifact.stable_digest != ranking.get("forward_scoring_artifact_digest")
+                or artifact.model_version != protocol.model_version
+                or artifact.cutoff != protocol.prospective_shadow_start
+                or not artifact.model_ready
+            ):
+                raise ValueError("Ranking V3 frozen scoring artifact is not release-ready")
+        except (TypeError, ValueError):
+            continue
+        existing = RankingV3ForwardRepository(repo.session_factory).load_snapshot(
+            RankingV3ForwardIdentity.from_protocol(protocol)
+        )
+        if (
+            existing is not None
+            and existing.ledger.data_revision != ranking_v3_data_revision(record)
+        ):
+            continue
+        return record, ranking, protocol
+    if run_id is not None:
+        raise ValueError(explicit_error)
+    return None
+
+
+def _ranking_v3_bound_validation_run_id(repo: QagentRepository) -> str | None:
+    """Return the server-bound run instead of silently falling back to old results."""
+
+    try:
+        protocol = build_ranking_v3_protocol()
+        snapshot = RankingV3ForwardRepository(repo.session_factory).load_snapshot(
+            RankingV3ForwardIdentity.from_protocol(protocol)
+        )
+    except (TypeError, ValueError):
+        return None
+    if snapshot is None:
+        return None
+    for evidence in reversed(snapshot.evidence):
+        if evidence.evidence_kind not in {"historical_gates", "pbo"}:
+            continue
+        validation_run_id = evidence.payload.get("validation_run_id")
+        if isinstance(validation_run_id, str) and validation_run_id.strip():
+            return validation_run_id.strip()
+    return None
+
+
+def _ranking_v3_forward_state_payload(
+    repo: QagentRepository,
+    context: tuple[object, Mapping[str, object], RankingV3Protocol] | None,
+) -> dict[str, object]:
+    if context is None:
+        return {
+            "state": "idle",
+            "status": "idle",
+            "reason": "no eligible successful Ranking V3 validation run",
+            "message": "no eligible successful Ranking V3 validation run",
+            "validation_run_id": None,
+            "protocol": None,
+            "protocol_id": None,
+            "model_version": None,
+            "required_sessions": 0,
+            "required_completed_trades": 0,
+            "maximum_sessions": None,
+            "phase": "idle",
+            "collection_target_sessions": 0,
+            "latest_session_date": None,
+            "blocked_date": None,
+            "blocked_code": None,
+            "last_attempt_at": None,
+            "error": None,
+            "metrics": None,
+            "evaluation": None,
+            "release_proof_available": False,
+            "release_proof_digest": None,
+        }
+    run, _, protocol = context
+    store = RankingV3ForwardRepository(repo.session_factory)
+    identity = RankingV3ForwardIdentity.from_protocol(protocol)
+    snapshot = store.load_snapshot(identity)
+    base: dict[str, object] = {
+        "validation_run_id": getattr(run, "run_id"),
+        "protocol": protocol.model_dump(mode="json"),
+        "protocol_id": protocol.protocol_id,
+        "model_version": protocol.model_version,
+        "required_sessions": protocol.thresholds.minimum_forward_shadow_sessions,
+        "collection_target_sessions": (
+            protocol.thresholds.minimum_forward_shadow_sessions
+        ),
+        "required_completed_trades": protocol.thresholds.minimum_forward_shadow_trades,
+        "maximum_sessions": protocol.thresholds.maximum_forward_shadow_sessions,
+        "release_proof_available": False,
+        "blocked_date": None,
+        "blocked_code": None,
+        "last_attempt_at": None,
+        "error": None,
+    }
+    if snapshot is None:
+        today = _a_share_today()
+        payload = {
+            **base,
+            "state": (
+                "waiting_start"
+                if today < protocol.prospective_shadow_start
+                else "ready"
+            ),
+            "status": "pending",
+            "phase": "waiting_collection",
+            "reason": (
+                f"forward shadow starts on {protocol.prospective_shadow_start.isoformat()}"
+                if today < protocol.prospective_shadow_start
+                else "eligible protocol is ready for its first forward session"
+            ),
+            "message": (
+                f"forward shadow starts on {protocol.prospective_shadow_start.isoformat()}"
+                if today < protocol.prospective_shadow_start
+                else "eligible protocol is ready for its first forward session"
+            ),
+            "evaluation": None,
+            "metrics": None,
+            "pending_candidate_count": 0,
+            "latest_session_date": None,
+            "release_proof_digest": None,
+        }
+        blocked = _ranking_v3_forward_runtime_status_for(protocol)
+        if blocked is not None:
+            payload.update(blocked)
+        return payload
+    validator = RankingV3ForwardValidator(
+        store,
+        protocol,
+        evidence_authority=RankingV3RepositoryEvidenceAuthority(repo),
+    )
+    evaluation = validator.inspect()
+    pending_count = sum(
+        candidate.outcome_status == "pending" for candidate in snapshot.candidates
+    )
+    if evaluation.status in {"approved", "rejected"}:
+        phase = evaluation.status
+    elif (
+        evaluation.metrics.session_count
+        < protocol.thresholds.minimum_forward_shadow_sessions
+    ):
+        phase = "candidate_collection"
+    else:
+        phase = "liquidation"
+    payload = {
+        **base,
+        "state": (
+            "approved_proof_available"
+            if evaluation.status == "approved"
+            else "shadow_rejected"
+            if evaluation.status == "rejected"
+            else "shadow_unpublished"
+        ),
+        "status": evaluation.status,
+        "phase": phase,
+        "reason": evaluation.reasons[0] if evaluation.reasons else "",
+        "message": evaluation.reasons[0] if evaluation.reasons else "",
+        "evaluation": evaluation.model_dump(mode="json"),
+        "metrics": evaluation.metrics.model_dump(mode="json"),
+        "pending_candidate_count": pending_count,
+        "candidate_count": len(snapshot.candidates),
+        "latest_session_date": (
+            snapshot.ledger.latest_session_date.isoformat()
+            if snapshot.ledger.latest_session_date is not None
+            else None
+        ),
+        "release_proof_available": evaluation.release_proof is not None,
+        "release_proof_digest": (
+            evaluation.release_proof.proof_digest
+            if evaluation.release_proof is not None
+            else None
+        ),
+        "production": _ranking_v3_production_state_payload(
+            repo,
+            validation_run_id=str(getattr(run, "run_id")),
+            evaluation=evaluation,
+        ),
+    }
+    blocked = _ranking_v3_forward_runtime_status_for(protocol)
+    if blocked is not None and evaluation.status == "pending":
+        payload.update(blocked)
+    return payload
+
+
+def _ranking_v3_production_state_payload(
+    repo: QagentRepository,
+    *,
+    validation_run_id: str,
+    evaluation,
+) -> dict[str, object]:
+    """Expose immutable production-batch readiness without creating new facts."""
+
+    proof = evaluation.release_proof
+    if evaluation.status != "approved" or proof is None:
+        return {
+            "state": "gated",
+            "message": "forward release proof is not approved",
+            "paper_admission_enforced": True,
+            "target_session_date": None,
+            "latest_session_date": None,
+            "selected_count": 0,
+            "batch_fact_digest": None,
+            "identity_digest": None,
+        }
+    try:
+        identity = RankingV3ProductionIdentity.from_release_proof(
+            proof,
+            validation_run_id=validation_run_id,
+        )
+        batches = RankingV3ProductionRepository(repo.session_factory).list_batches(
+            identity,
+            limit=1,
+        )
+    except (RankingV3ProductionIntegrityError, TypeError, ValueError) as exc:
+        return {
+            "state": "blocked",
+            "message": f"production identity is invalid: {exc}",
+            "paper_admission_enforced": True,
+            "target_session_date": None,
+            "latest_session_date": None,
+            "selected_count": 0,
+            "batch_fact_digest": None,
+            "identity_digest": None,
+        }
+
+    today = _a_share_today()
+    sessions = trading_sessions_in_range(today - timedelta(days=14), today)
+    target_session = sessions[-1] if sessions else None
+    if not batches:
+        return {
+            "state": "awaiting_full_market_scan",
+            "message": "approved model is waiting for a complete full-market production scan",
+            "paper_admission_enforced": True,
+            "target_session_date": (
+                target_session.isoformat() if target_session is not None else None
+            ),
+            "latest_session_date": None,
+            "selected_count": 0,
+            "batch_fact_digest": None,
+            "identity_digest": identity.identity_digest,
+        }
+
+    latest = batches[0]
+    is_current = target_session is not None and latest.session_date == target_session
+    return {
+        "state": "recorded" if is_current else "awaiting_current_session_scan",
+        "message": (
+            "current production batch is frozen and eligible for paper admission"
+            if is_current
+            else "approved model is waiting for the latest complete full-market scan"
+        ),
+        "paper_admission_enforced": True,
+        "target_session_date": (
+            target_session.isoformat() if target_session is not None else None
+        ),
+        "latest_session_date": latest.session_date.isoformat(),
+        "selected_count": latest.selected_count,
+        "batch_fact_digest": latest.fact_digest,
+        "identity_digest": identity.identity_digest,
+    }
+
+
+def _ranking_v3_forward_runtime_key(protocol: RankingV3Protocol) -> str:
+    return f"{protocol.protocol_id}:{protocol.model_version}"
+
+
+def _ranking_v3_forward_runtime_status_for(
+    protocol: RankingV3Protocol,
+) -> dict[str, object] | None:
+    with _ranking_v3_forward_runtime_lock:
+        status = _ranking_v3_forward_runtime_status.get(
+            _ranking_v3_forward_runtime_key(protocol)
+        )
+        return dict(status) if status is not None else None
+
+
+def _set_ranking_v3_forward_waiting_snapshot(
+    protocol: RankingV3Protocol,
+    blocked_date: date,
+) -> None:
+    message = (
+        f"daily opportunity snapshot for {blocked_date.isoformat()} is not available; "
+        "forward validation is waiting and no session was fabricated"
+    )
+    with _ranking_v3_forward_runtime_lock:
+        _ranking_v3_forward_runtime_status[
+            _ranking_v3_forward_runtime_key(protocol)
+        ] = {
+            "state": "waiting_snapshot",
+            "status": "pending",
+            "phase": "waiting_snapshot",
+            "reason": message,
+            "message": message,
+            "error": message,
+            "blocked_date": blocked_date.isoformat(),
+            "blocked_code": "daily_opportunity_snapshot_missing",
+            "last_attempt_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+
+def _clear_ranking_v3_forward_runtime_status(protocol: RankingV3Protocol) -> None:
+    with _ranking_v3_forward_runtime_lock:
+        _ranking_v3_forward_runtime_status.pop(
+            _ranking_v3_forward_runtime_key(protocol),
+            None,
+        )
+
+
+def _run_ranking_v3_forward_catch_up(
+    repo: QagentRepository,
+    provider,
+    context: tuple[object, Mapping[str, object], RankingV3Protocol],
+    *,
+    through_date: date,
+) -> list[object]:
+    run, _, protocol = context
+    today = _a_share_today()
+    effective_through = min(through_date, today)
+    available_sessions = trading_sessions_in_range(
+        effective_through - timedelta(days=14),
+        effective_through,
+    )
+    if effective_through == today and available_sessions[-1:] == [today]:
+        available_sessions = available_sessions[:-1]
+    if not available_sessions:
+        return []
+    latest_available = available_sessions[-1]
+    if latest_available < protocol.prospective_shadow_start:
+        return []
+    store = RankingV3ForwardRepository(repo.session_factory)
+    snapshot = store.load_snapshot(RankingV3ForwardIdentity.from_protocol(protocol))
+    if snapshot is not None and snapshot.ledger.status != "pending":
+        return []
+    start_date = (
+        snapshot.ledger.latest_session_date
+        if snapshot is not None and snapshot.ledger.latest_session_date is not None
+        else protocol.prospective_shadow_start
+    )
+    if start_date > latest_available:
+        return []
+    results = []
+    for current_session in trading_sessions_in_range(start_date, latest_available):
+        current_snapshot = store.load_snapshot(
+            RankingV3ForwardIdentity.from_protocol(protocol)
+        )
+        sessions = (
+            sorted(
+                current_snapshot.sessions,
+                key=lambda item: item.session_date,
+            )
+            if current_snapshot is not None
+            else []
+        )
+        minimum_sessions = protocol.thresholds.minimum_forward_shadow_sessions
+        collection_open = len(sessions) < minimum_sessions
+        if not collection_open:
+            collection_end = sessions[minimum_sessions - 1].session_date
+            collection_open = current_session <= collection_end
+        recorded_session_dates = {item.session_date for item in sessions}
+        requires_candidate_snapshot = (
+            collection_open and current_session not in recorded_session_dates
+        )
+        if requires_candidate_snapshot and not repo.list_top_daily_opportunity_snapshots(
+            start=current_session,
+            end=current_session,
+            top_n=1,
+            provider="free",
+        ):
+            _set_ranking_v3_forward_waiting_snapshot(protocol, current_session)
+            break
+        result = run_ranking_v3_forward_day(
+            repo,
+            provider,
+            getattr(run, "run_id"),
+            current_session,
+        )
+        results.append(result)
+        _clear_ranking_v3_forward_runtime_status(protocol)
+        if result.ledger_status in {"approved", "rejected"}:
+            break
+    return results
+
+
 def restore_walk_forward_job_from_storage() -> str | None:
     active = [
         job
@@ -775,10 +1325,18 @@ def _validate_walk_forward_params(
         )
     if start > end:
         raise HTTPException(status_code=400, detail="start must be on or before end")
-    if step_sessions <= 0 or lookback_days <= 0:
+    if lookback_days <= 0:
         raise HTTPException(
             status_code=400,
-            detail="step_sessions and lookback_days must be positive",
+            detail="lookback_days must be positive",
+        )
+    if step_sessions != RANKING_V3_REBALANCE_STEP_SESSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "strict Ranking V3 validation requires "
+                f"step_sessions={RANKING_V3_REBALANCE_STEP_SESSIONS}"
+            ),
         )
     return mode
 
@@ -842,6 +1400,11 @@ def _run_walk_forward_job_safely(job_id: str) -> None:
         )
 
         def on_progress(progress: WalkForwardProgress) -> None:
+            current = repo.get_walk_forward_job(job_id)
+            if current is None or current.status == "cancelled":
+                raise _WalkForwardJobCancelled(
+                    f"walk-forward job {job_id} was cancelled before checkpoint publication"
+                )
             if progress.snapshot is not None:
                 snapshot_payload = progress.snapshot.model_dump(mode="json")
                 checkpoint_by_date[snapshot_payload["decision_date"]] = snapshot_payload
@@ -885,6 +1448,11 @@ def _run_walk_forward_job_safely(job_id: str) -> None:
             initial_lease_heartbeat_at=job.last_lease_heartbeat_at,
             snapshot_workers=get_settings().walk_forward_snapshot_workers,
         )
+        current = repo.get_walk_forward_job(job_id)
+        if current is None or current.status == "cancelled":
+            raise _WalkForwardJobCancelled(
+                f"walk-forward job {job_id} was cancelled before result publication"
+            )
         stored = repo.save_walk_forward_run(result)
         _reconcile_full_market_caches_after_walk_forward(
             repo,
@@ -901,7 +1469,7 @@ def _run_walk_forward_job_safely(job_id: str) -> None:
         )
     except Exception as exc:
         current = repo.get_walk_forward_job(job_id)
-        if current is not None:
+        if current is not None and current.status != "cancelled":
             repo.update_walk_forward_job(
                 job_id,
                 status="failed",
@@ -956,14 +1524,10 @@ def _reconcile_full_market_caches_after_walk_forward(
         ranked_cards = sort_recommendation_cards(final_policy.cards)
         audits_by_card = {audit.card_id: audit for audit in final_policy.audits}
         ranked_audits = [
-            audits_by_card[card.card_id]
-            for card in ranked_cards
-            if card.card_id in audits_by_card
+            audits_by_card[card.card_id] for card in ranked_cards if card.card_id in audits_by_card
         ]
         payload["cards"] = governed_card_payloads(ranked_cards, ranked_audits)
-        payload["strategy_governance"] = [
-            audit.model_dump(mode="json") for audit in ranked_audits
-        ]
+        payload["strategy_governance"] = [audit.model_dump(mode="json") for audit in ranked_audits]
         data_health = payload.setdefault("data_health", {})
         if not isinstance(data_health, dict):
             data_health = {}
@@ -973,9 +1537,7 @@ def _reconcile_full_market_caches_after_walk_forward(
             {
                 "walk_forward_cache_reconciled": "true",
                 "walk_forward_cache_reconciled_run_id": run_id,
-                "walk_forward_cache_market_data_created_at": (
-                    cached.created_at.isoformat()
-                ),
+                "walk_forward_cache_market_data_created_at": (cached.created_at.isoformat()),
             }
         )
         if repo.update_scan_result_cache_payload(cached.cache_id, payload) is not None:
@@ -1071,10 +1633,10 @@ def retry_historical_data_backfill(job_id: str) -> dict[str, object]:
         _submit_historical_backfill(job.job_id)
         return _historical_backfill_job_payload(job)
     validation_state = job.data_health.get("validation_pipeline_state")
-    retryable_completed = (
-        job.status == "succeeded_with_errors"
-        and validation_state in {"blocked_data_coverage", "failed"}
-    )
+    retryable_completed = job.status == "succeeded_with_errors" and validation_state in {
+        "blocked_data_coverage",
+        "failed",
+    }
     if job.status not in {"failed", "cancelled"} and not retryable_completed:
         raise HTTPException(
             status_code=409,
@@ -1146,10 +1708,13 @@ def _continue_validation_pipeline(result) -> str:
     repo = _repo()
     job = repo.get_historical_backfill_job(result.job.job_id) or result.job
     default_enabled = job.data_health.get("backfill_scope") == "full-a-share"
-    enabled = job.data_health.get(
-        "backfill_auto_validate",
-        str(default_enabled).lower(),
-    ).lower() == "true"
+    enabled = (
+        job.data_health.get(
+            "backfill_auto_validate",
+            str(default_enabled).lower(),
+        ).lower()
+        == "true"
+    )
     readiness = _historical_validation_readiness(
         result.manifest,
         start=job.start_date,
@@ -1184,9 +1749,7 @@ def _continue_validation_pipeline(result) -> str:
     ):
         health["validation_pipeline_state"] = "already_validated"
         health["validation_pipeline_walk_forward_run_id"] = latest_runs[0].run_id
-        health["validation_pipeline_experiment_digest"] = (
-            current_manifest.experiment_digest
-        )
+        health["validation_pipeline_experiment_digest"] = current_manifest.experiment_digest
         repo.update_historical_backfill_job(job.job_id, data_health=health)
         return "already_validated"
 
@@ -1201,8 +1764,8 @@ def _continue_validation_pipeline(result) -> str:
     health["validation_pipeline_state"] = "walk_forward_queued"
     health["validation_pipeline_walk_forward_job_id"] = walk_job.job_id
     health["validation_pipeline_dataset_revision"] = str(walk_job.dataset_revision)
-    health["validation_pipeline_experiment_digest"] = (
-        walk_job.experiment_manifest.get("experiment_digest", "")
+    health["validation_pipeline_experiment_digest"] = walk_job.experiment_manifest.get(
+        "experiment_digest", ""
     )
     repo.update_historical_backfill_job(job.job_id, data_health=health)
     return "walk_forward_queued"
@@ -1218,14 +1781,9 @@ def _historical_validation_readiness(manifest, *, start: date) -> dict[str, str]
 
     ratios = {
         "market": sum(item.bar_coverage_ratio >= 0.95 for item in instruments) / total,
-        "adjusted": sum(
-            (item.adjustment_coverage_ratio or 0) >= 0.95 for item in adjusted
-        )
+        "adjusted": sum((item.adjustment_coverage_ratio or 0) >= 0.95 for item in adjusted)
         / adjusted_total,
-        "tradability": sum(
-            item.tradability_coverage_ratio >= 0.95 for item in instruments
-        )
-        / total,
+        "tradability": sum(item.tradability_coverage_ratio >= 0.95 for item in instruments) / total,
         "universe": sum(
             item.universe_snapshot_rows > 0
             and item.first_universe_date is not None
@@ -2340,6 +2898,12 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 max_age=timedelta(minutes=max(settings.scan_max_age_minutes, 1)),
                 limit=candidate_pool_limit,
             )
+            snapshots, production_health = _ranking_v3_production_seed_scope(
+                repo,
+                snapshots,
+                provider=mode,
+            )
+            data_health.update(production_health)
             snapshots, strategy_capacity_health = _paper_strategy_capacity_filter(
                 paper_repo,
                 snapshots,
@@ -2372,17 +2936,13 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                     if snapshot.instrument_id != replaced_instrument
                 ]
                 data_health["paper_replacement_excluded_replacee"] = replaced_instrument
-                replacement_candidate = replacement_health.get(
-                    "paper_replacement_candidate"
-                )
+                replacement_candidate = replacement_health.get("paper_replacement_candidate")
                 if replacement_candidate:
                     snapshots = _prioritize_paper_replacement_candidate(
                         snapshots,
                         replacement_candidate,
                     )
-                    data_health["paper_replacement_seed_priority"] = str(
-                        replacement_candidate
-                    )
+                    data_health["paper_replacement_seed_priority"] = str(replacement_candidate)
             recently_released = _paper_recently_released_instruments(
                 paper_repo.list_trades(limit=1000, provider=mode)
             )
@@ -2431,6 +2991,7 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                     if risk_gate_health.get("paper_risk_gate_action") == "throttle_new_entries"
                     else "1.0"
                 ),
+                admission_repo=repo,
             )
             paper_created += seed_result.created
             data_health["automation_seed_snapshots"] = str(len(snapshots))
@@ -2480,6 +3041,49 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             data_health.update(alert_result.data_health)
         except Exception as exc:
             errors.append(f"alerts: {exc}")
+
+    if mode == "free":
+        try:
+            forward_context = _ranking_v3_forward_context(repo)
+            forward_results = (
+                _run_ranking_v3_forward_catch_up(
+                    repo,
+                    build_market_data_provider(mode),
+                    forward_context,
+                    through_date=_a_share_today(),
+                )
+                if forward_context is not None
+                else []
+            )
+            forward_state = _ranking_v3_forward_state_payload(repo, forward_context)
+            data_health["ranking_v3_forward_state"] = str(forward_state["state"])
+            data_health["ranking_v3_forward_processed_sessions"] = str(
+                len(forward_results)
+            )
+            if forward_state.get("validation_run_id"):
+                data_health["ranking_v3_forward_run_id"] = str(
+                    forward_state["validation_run_id"]
+                )
+            evaluation = forward_state.get("evaluation")
+            metrics = (
+                evaluation.get("metrics")
+                if isinstance(evaluation, Mapping)
+                and isinstance(evaluation.get("metrics"), Mapping)
+                else {}
+            )
+            data_health["ranking_v3_forward_sessions"] = str(
+                metrics.get("session_count", 0)
+            )
+            data_health["ranking_v3_forward_completed_trades"] = str(
+                metrics.get("completed_trade_count", 0)
+            )
+            data_health["ranking_v3_forward_release_proof"] = str(
+                bool(forward_state.get("release_proof_available"))
+            ).lower()
+        except Exception as exc:
+            data_health["ranking_v3_forward_state"] = "error"
+            data_health["ranking_v3_forward_error"] = str(exc)
+            errors.append(f"ranking_v3_forward: {exc}")
 
     # Seeding and price updates can change active capacity. Keep the gate that
     # governed this cycle for auditability, then publish the post-cycle gate as
@@ -2745,9 +3349,7 @@ def _paper_candidate_price_basis_is_consistent(
         return False
     if not paper_snapshot_price_basis_is_consistent(snapshot, max_gap_ratio=max_gap_ratio):
         return False
-    gap_limit = max_gap_ratio or paper_price_basis_gap_limit(
-        getattr(snapshot, "instrument_id", "")
-    )
+    gap_limit = max_gap_ratio or paper_price_basis_gap_limit(getattr(snapshot, "instrument_id", ""))
     return abs(trigger - latest_value) / trigger <= gap_limit
 
 
@@ -3110,15 +3712,24 @@ def _paper_seed_snapshots_from_recommendations(
     )
     if health.get("paper_market_entry_gate") == "blocked":
         return [], health
-    snapshots, cache_blocked = _filter_governed_paper_snapshots(repo, snapshots)
-    if snapshots:
+    cache_is_authoritative = health.get("automation_seed_source") == ("latest_recommendation_cache")
+    snapshots, cache_blocked = _filter_governed_paper_snapshots(
+        repo,
+        snapshots,
+        provider=mode,
+    )
+    if snapshots or cache_is_authoritative:
         return snapshots, {
             **health,
             "paper_strategy_governance_blocked": str(cache_blocked),
         }
 
     fallback = repo.list_latest_signal_opportunity_snapshots(limit=limit, provider=mode)
-    fallback, fallback_blocked = _filter_governed_paper_snapshots(repo, fallback)
+    fallback, fallback_blocked = _filter_governed_paper_snapshots(
+        repo,
+        fallback,
+        provider=mode,
+    )
     return fallback, {
         "automation_seed_source": "latest_signal_day",
         "automation_seed_rank_profile": "rank_score",
@@ -3129,56 +3740,64 @@ def _paper_seed_snapshots_from_recommendations(
 def _filter_governed_paper_snapshots(
     repo: QagentRepository,
     snapshots: list,
+    *,
+    provider: str,
 ) -> tuple[list, int]:
     context = load_strategy_governance_context(repo)
     allowed = []
     blocked = 0
     for snapshot in snapshots:
-        card = snapshot.card if isinstance(snapshot.card, dict) else {}
-        governance = card.get("strategy_governance")
-        gate = governance.get("gate_decision") if isinstance(governance, dict) else None
-        if isinstance(gate, dict) and gate.get("paper_candidate_eligible") is False:
-            blocked += 1
-            continue
-        decision = card.get("decision")
-        if isinstance(decision, dict) and (
-            decision.get("risk_status") in {"blocked", "veto"}
-            or decision.get("action") in {"avoid", "blocked", "no_trade"}
+        if (
+            _paper_snapshot_governance_block_reason(
+                repo,
+                snapshot,
+                provider=provider,
+                governance_context=context,
+            )
+            is not None
         ):
-            blocked += 1
-            continue
-        runtime = context.strategies.get(snapshot.primary_strategy_id or "")
-        if runtime is not None and runtime.state in {"research", "disabled"}:
             blocked += 1
             continue
         allowed.append(snapshot)
     return allowed, blocked
 
 
-def _paper_strategy_governance_block_reason(
-    strategy_id: str | None,
+def _paper_snapshot_governance_block_reason(
+    repo: QagentRepository,
+    snapshot: OpportunitySnapshotRecord,
     *,
     provider: str,
-    card_id: str,
+    admission_mode: str = "automatic",
+    governance_context=None,
 ) -> str | None:
-    repo = _repo()
-    resolved_strategy_id = strategy_id
-    if not resolved_strategy_id and card_id.strip():
-        snapshots = repo.list_latest_opportunity_snapshots_by_card_ids(
-            [card_id.strip()],
-            provider=provider,
+    card = snapshot.card if isinstance(snapshot.card, dict) else {}
+    context = governance_context or load_strategy_governance_context(repo)
+    strategy_id = snapshot.primary_strategy_id or ""
+    runtime = context.strategies.get(strategy_id)
+    if runtime is not None and runtime.state in {"research", "disabled"}:
+        return (
+            f"strategy {strategy_id} is {runtime.state} under policy "
+            f"{runtime.policy_version} and is not eligible for paper trading"
         )
-        if snapshots:
-            resolved_strategy_id = snapshots[0].primary_strategy_id
-    if not resolved_strategy_id:
-        return None
-    runtime = load_strategy_governance_context(repo).strategies.get(resolved_strategy_id)
-    if runtime is None or runtime.state not in {"research", "disabled"}:
-        return None
-    return (
-        f"strategy {resolved_strategy_id} is {runtime.state} under policy "
-        f"{runtime.policy_version} and is not eligible for paper trading"
+
+    governance = card.get("strategy_governance")
+    gate = governance.get("gate_decision") if isinstance(governance, dict) else None
+    if isinstance(gate, dict) and gate.get("paper_candidate_eligible") is False:
+        return "opportunity is not eligible for paper trading under its authoritative gate"
+    decision = card.get("decision")
+    if isinstance(decision, dict) and (
+        decision.get("risk_status") in {"blocked", "veto"}
+        or decision.get("action") in {"avoid", "blocked", "no_trade"}
+    ):
+        return "opportunity is blocked by its authoritative decision"
+
+    admission = evaluate_paper_snapshot_admission(
+        repo,
+        snapshot,
+        provider=provider,
+        mode=admission_mode,
     )
+    return admission.reason if not admission.eligible else None
 
 
 def _paper_seed_snapshots_from_latest_cache(
@@ -3216,7 +3835,6 @@ def _paper_seed_snapshots_from_latest_cache(
     ranked = sorted(cards, key=_balanced_cached_card_score, reverse=True)
     ranked = ranked[: max(limit * 3, limit)]
     card_ids = [_string_value(card.get("card_id")) for card in ranked]
-    instrument_ids = [_string_value(card.get("instrument_id")) for card in ranked]
     snapshots_by_card = {
         snapshot.card_id: snapshot
         for snapshot in repo.list_latest_opportunity_snapshots_by_card_ids(
@@ -3224,28 +3842,30 @@ def _paper_seed_snapshots_from_latest_cache(
             provider=mode,
         )
     }
-    snapshots_by_instrument = {
-        snapshot.instrument_id: snapshot
-        for snapshot in repo.list_latest_opportunity_snapshots_by_instruments(
-            instrument_ids,
-            provider=mode,
-        )
-    }
-
     selected = []
     seen_snapshot_ids: set[str] = set()
     for card in ranked:
         snapshot = snapshots_by_card.get(_string_value(card.get("card_id")))
-        if snapshot is None:
-            snapshot = snapshots_by_instrument.get(_string_value(card.get("instrument_id")))
         if snapshot is None or snapshot.snapshot_id in seen_snapshot_ids:
             continue
+        if snapshot.instrument_id != _string_value(card.get("instrument_id")):
+            continue
         cached_latest = _paper_card_latest_value(card)
+        updates: dict[str, object] = {"card": deepcopy(card)}
         if snapshot.latest_close is None and cached_latest is not None:
-            snapshot = snapshot.model_copy(update={"latest_close": cached_latest})
+            updates["latest_close"] = cached_latest
+        snapshot = snapshot.model_copy(update=updates)
         selected.append(snapshot)
         seen_snapshot_ids.add(snapshot.snapshot_id)
     if not selected:
+        if ranked:
+            return [], {
+                **market_gate_health,
+                "automation_seed_source": "latest_recommendation_cache",
+                "automation_seed_cache_id": cached.cache_id,
+                "automation_seed_cache_freshness": cache_freshness,
+                "paper_authoritative_snapshot_missing": str(len(ranked)),
+            }
         return [], {}
     return selected, {
         **market_gate_health,
@@ -3254,6 +3874,62 @@ def _paper_seed_snapshots_from_latest_cache(
         "automation_seed_cache_freshness": cache_freshness,
         "automation_seed_rank_profile": "balanced",
         "paper_strategy_diversification_limit": "2",
+    }
+
+
+def _ranking_v3_production_seed_scope(
+    repo: QagentRepository,
+    snapshots: list[OpportunitySnapshotRecord],
+    *,
+    provider: str,
+) -> tuple[list[OpportunitySnapshotRecord], dict[str, str]]:
+    signal_dates = sorted(
+        {snapshot.signal_date for snapshot in snapshots if snapshot.signal_date is not None}
+    )
+    if not signal_dates:
+        return snapshots, {"ranking_v3_production_state": "no_signal_date"}
+    session_date = signal_dates[-1]
+    try:
+        result = run_ranking_v3_production_day(
+            repo,
+            session_date=session_date,
+            provider=provider,
+        )
+    except PermissionError as exc:
+        if "no current approved release" in str(exc):
+            return snapshots, {"ranking_v3_production_state": "inactive"}
+        return [], {
+            "ranking_v3_production_state": "blocked",
+            "ranking_v3_production_error": str(exc),
+        }
+    except RankingV3ProductionSnapshotUnavailable as exc:
+        return [], {
+            "ranking_v3_production_state": "waiting_snapshot",
+            "ranking_v3_production_error": str(exc),
+        }
+    except (LookupError, RuntimeError, TypeError, ValueError) as exc:
+        return [], {
+            "ranking_v3_production_state": "blocked",
+            "ranking_v3_production_error": str(exc),
+        }
+
+    selected: list[OpportunitySnapshotRecord] = []
+    for item in result.batch.selections:
+        snapshot = repo.get_opportunity_snapshot(item.source_snapshot_id)
+        if snapshot is None:
+            return [], {
+                "ranking_v3_production_state": "blocked",
+                "ranking_v3_production_error": (
+                    f"selected source snapshot {item.source_snapshot_id} is missing"
+                ),
+            }
+        selected.append(snapshot)
+    return selected, {
+        "ranking_v3_production_state": "recorded",
+        "ranking_v3_production_session": session_date.isoformat(),
+        "ranking_v3_production_selected": str(result.selected_count),
+        "ranking_v3_production_batch": result.batch_fact_digest,
+        "ranking_v3_production_scan_run": result.source_scan_run_id,
     }
 
 
@@ -3309,10 +3985,7 @@ def _paper_strategy_capacity_filter(
     already_tracked = 0
     selected_counts: dict[str, int] = {}
     for snapshot in snapshots:
-        if (
-            snapshot.instrument_id in active_instruments
-            or snapshot.snapshot_id in existing_sources
-        ):
+        if snapshot.instrument_id in active_instruments or snapshot.snapshot_id in existing_sources:
             already_tracked += 1
             continue
         strategy_id = snapshot.primary_strategy_id or "unclassified"
@@ -3503,8 +4176,9 @@ def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, o
     if limit <= 0 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
     mode = provider.strip().lower()
+    repo = _repo()
     snapshots, _ = _paper_seed_snapshots_from_recommendations(
-        _repo(),
+        repo,
         mode=mode,
         include_etfs=True,
         max_age=timedelta(days=7),
@@ -3526,6 +4200,7 @@ def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, o
         max_active_trades=account.max_positions,
         max_signal_age_days=None,
         signal_date_override=_a_share_today() if mode != "fixture" else None,
+        admission_repo=repo,
     )
     return result.model_dump(mode="json")
 
@@ -3930,23 +4605,48 @@ def delete_paper_trade(trade_id: str) -> dict[str, object]:
 def create_paper_trade_from_opportunity(
     request: PaperTradeFromOpportunityRequest,
 ) -> dict[str, object]:
-    if request.risk_status == "blocked" or request.action == "avoid":
-        raise HTTPException(status_code=400, detail="opportunity is blocked")
-    if not request.instrument_id.strip():
-        raise HTTPException(status_code=400, detail="instrument_id is required")
-    if not request.trigger_price:
-        raise HTTPException(status_code=400, detail="trigger_price is required")
-
     mode = request.provider.strip().lower()
-    governance_reason = _paper_strategy_governance_block_reason(
-        request.strategy_id,
+    card_id = request.card_id.strip()
+    if not card_id:
+        raise HTTPException(status_code=400, detail="card_id is required")
+    opportunity_repo = _repo()
+    snapshots = opportunity_repo.list_latest_opportunity_snapshots_by_card_ids(
+        [card_id],
         provider=mode,
-        card_id=request.card_id,
+    )
+    if not snapshots:
+        raise HTTPException(
+            status_code=404,
+            detail="authoritative opportunity snapshot not found",
+        )
+    snapshot = snapshots[0]
+    mismatch = _paper_request_snapshot_mismatch(request, snapshot)
+    if mismatch is not None:
+        raise HTTPException(status_code=400, detail=mismatch)
+    governance_reason = _paper_snapshot_governance_block_reason(
+        opportunity_repo,
+        snapshot,
+        provider=mode,
+        admission_mode="manual",
     )
     if governance_reason is not None:
         raise HTTPException(status_code=400, detail=governance_reason)
-    instrument_id = request.instrument_id.strip()
-    source_snapshot_id = f"opportunity:{request.card_id.strip()}"
+    if snapshot.trigger_price is None:
+        raise HTTPException(
+            status_code=400,
+            detail="authoritative opportunity has no trigger price",
+        )
+    admission = evaluate_paper_snapshot_admission(
+        opportunity_repo,
+        snapshot,
+        provider=mode,
+        mode="manual",
+    )
+    if not admission.eligible:
+        raise HTTPException(status_code=400, detail=admission.reason)
+
+    instrument_id = snapshot.instrument_id
+    source_snapshot_id = snapshot.snapshot_id
     repo = _paper_repo()
     existing = repo.get_trade_by_source_snapshot_id(source_snapshot_id)
     if existing is not None:
@@ -3998,19 +4698,51 @@ def create_paper_trade_from_opportunity(
         source_snapshot_id=source_snapshot_id,
         provider=mode,
         instrument_id=instrument_id,
-        strategy_id=request.strategy_id,
-        signal_date=_a_share_today() if instrument_id.startswith("CN:") else date.today(),
-        trigger_price=Decimal(str(request.trigger_price)),
-        initial_stop=_decimal_or_none(request.initial_stop),
-        target_1=_decimal_or_none(request.target_1),
-        rank_score=_decimal_or_none(request.rank_score),
-        notes="从机会卡加入模拟跟踪；等待触发价确认后才视为开仓。",
+        strategy_id=snapshot.primary_strategy_id,
+        signal_date=snapshot.signal_date
+        or (_a_share_today() if instrument_id.startswith("CN:") else date.today()),
+        trigger_price=snapshot.trigger_price,
+        initial_stop=snapshot.initial_stop,
+        target_1=snapshot.target_1,
+        rank_score=snapshot.rank_score,
+        notes=("从服务端权威机会快照加入模拟跟踪；等待触发价确认后才视为开仓。"),
+        admission_proof=PaperTradeAdmissionProof(
+            admission_source=admission.admission_source,
+            production_identity_digest=admission.production_identity_digest,
+            production_batch_fact_digest=admission.production_batch_fact_digest,
+            production_selection_item_digest=(
+                admission.production_selection_item_digest
+            ),
+            release_proof_digest=admission.release_proof_digest,
+        ),
     )
     return {
         "created": True,
         "trade": trade.model_dump(mode="json"),
         "message": "tracking_created",
     }
+
+
+def _paper_request_snapshot_mismatch(
+    request: PaperTradeFromOpportunityRequest,
+    snapshot: OpportunitySnapshotRecord,
+) -> str | None:
+    if request.instrument_id.strip() != snapshot.instrument_id:
+        return "instrument_id does not match the authoritative opportunity"
+    if request.strategy_id and request.strategy_id.strip() != (snapshot.primary_strategy_id or ""):
+        return "strategy_id does not match the authoritative opportunity"
+    numeric_fields = (
+        ("trigger_price", request.trigger_price, snapshot.trigger_price),
+        ("initial_stop", request.initial_stop, snapshot.initial_stop),
+        ("target_1", request.target_1, snapshot.target_1),
+        ("rank_score", request.rank_score, snapshot.rank_score),
+    )
+    for field, requested, authoritative in numeric_fields:
+        if requested is None:
+            continue
+        if _decimal_or_none(requested) != authoritative:
+            return f"{field} does not match the authoritative opportunity"
+    return None
 
 
 def _decimal_or_none(value: object) -> Decimal | None:
@@ -4961,9 +5693,7 @@ def _full_market_scan_payload(
     cards = [card for card in result.scan.cards if card.instrument_id not in invalidated]
     visible_card_ids = {card.card_id for card in cards}
     governance_audits = [
-        audit
-        for audit in result.scan.strategy_governance
-        if audit.card_id in visible_card_ids
+        audit for audit in result.scan.strategy_governance if audit.card_id in visible_card_ids
     ]
     _repo().save_scan_run(provider=mode, mode=mode, symbols=result.symbols, result=result.scan)
     payload = {
@@ -4995,9 +5725,7 @@ def _full_market_scan_payload(
         )
         if result.scan.operational_readiness_center
         else None,
-        "strategy_governance": [
-            audit.model_dump(mode="json") for audit in governance_audits
-        ],
+        "strategy_governance": [audit.model_dump(mode="json") for audit in governance_audits],
         "data_health": result.data_health,
     }
     payload["data_health"]["paper_invalidated_cards_filtered"] = str(
@@ -5077,10 +5805,7 @@ def _is_finalizing_full_market_job(job) -> bool:
         return False
     if job.total_symbols <= 0 or job.total_batches <= 0:
         return False
-    return (
-        job.scanned_symbols >= job.total_symbols
-        and job.completed_batches >= job.total_batches
-    )
+    return job.scanned_symbols >= job.total_symbols and job.completed_batches >= job.total_batches
 
 
 def _recent_full_market_scan_payload(
@@ -5375,9 +6100,7 @@ def _restore_governance_card_payload(payload: dict[str, object]) -> bool:
     if not cards or {audit.card_id for audit in audits} != card_ids:
         return False
     payload["cards"] = governed_card_payloads(cards, audits)
-    payload["strategy_governance"] = [
-        audit.model_dump(mode="json") for audit in audits
-    ]
+    payload["strategy_governance"] = [audit.model_dump(mode="json") for audit in audits]
     return True
 
 
@@ -5571,9 +6294,7 @@ def _attach_market_intelligence_payload(
     payload_data_health = payload.setdefault("data_health", {})
     if isinstance(payload_data_health, dict):
         payload_data_health.update(center.data_health)
-        payload_data_health["dynamic_calibration_reapplied"] = str(
-            not already_calibrated
-        ).lower()
+        payload_data_health["dynamic_calibration_reapplied"] = str(not already_calibrated).lower()
 
 
 def _attach_recommendation_quality_payload(

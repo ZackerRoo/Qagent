@@ -9,6 +9,10 @@ from qagent.catalysts.hypotheses import build_catalyst_hypotheses
 from qagent.catalysts.providers import FreeCatalystProvider
 from qagent.jobs.alert_runner import AlertRunResult, run_alert_rules
 from qagent.jobs.daily_scan import run_daily_scan
+from qagent.jobs.ranking_v3_production import (
+    RankingV3ProductionSnapshotUnavailable,
+    run_ranking_v3_production_day,
+)
 from qagent.paper_trading.engine import (
     PaperUpdateResult,
     seed_paper_trades_from_snapshots,
@@ -78,12 +82,43 @@ def run_research_automation(
             limit=len(scan_result.cards),
             provider=mode,
         )
+        signal_dates = sorted(
+            {
+                snapshot.signal_date
+                for snapshot in snapshots
+                if snapshot.signal_date is not None
+            }
+        )
+        if signal_dates:
+            try:
+                production = run_ranking_v3_production_day(
+                    repo,
+                    session_date=signal_dates[-1],
+                    provider=mode,
+                )
+            except PermissionError:
+                production = None
+            except RankingV3ProductionSnapshotUnavailable:
+                snapshots = []
+                production = None
+            if production is not None:
+                snapshots = [
+                    snapshot
+                    for item in production.batch.selections
+                    if (
+                        snapshot := repo.get_opportunity_snapshot(
+                            item.source_snapshot_id
+                        )
+                    )
+                    is not None
+                ]
         seed_result = seed_paper_trades_from_snapshots(
             paper_repo,
             snapshots,
             provider=mode,
             max_created=len(scan_result.cards),
             max_signal_age_days=0 if mode != "fixture" else None,
+            admission_repo=repo,
         )
         paper_seed_created = seed_result.created
     if update_paper:

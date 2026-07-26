@@ -7,9 +7,11 @@ from zoneinfo import ZoneInfo
 from fastapi.testclient import TestClient
 
 import qagent.api.routes as routes
+import qagent.jobs.automation as research_automation
 from qagent.app import create_app
 from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.automation_scheduler import AutomationScheduler, AutoProcessingSettings
+from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.storage.repository import QagentRepository
 from qagent.storage.tables import OpportunitySnapshotRow, PaperTradeRow, ScanRunRow
 
@@ -41,6 +43,44 @@ def test_automation_reuses_same_market_day_cache_after_ttl(monkeypatch):
     assert result is cache
     assert freshness == "same_market_day"
     assert repo.max_ages == [timedelta(hours=4), timedelta(days=1)]
+
+
+def test_research_automation_passes_authoritative_repository_to_seed(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = f"sqlite:///{tmp_path / 'research-automation-admission.db'}"
+    initialize_database(database_url)
+    repo = QagentRepository(create_session_factory(database_url))
+    captured: dict[str, object] = {}
+
+    def fake_seed(paper_repo, snapshots, **kwargs):
+        captured["paper_repo"] = paper_repo
+        captured["snapshots"] = snapshots
+        captured.update(kwargs)
+        return SimpleNamespace(created=0)
+
+    monkeypatch.setattr(
+        research_automation,
+        "seed_paper_trades_from_snapshots",
+        fake_seed,
+    )
+
+    research_automation.run_research_automation(
+        repo=repo,
+        provider=FixtureMarketDataProvider(),
+        provider_mode="fixture",
+        symbols=["US:TEST"],
+        include_news=False,
+        queue_brief=False,
+        run_alerts=False,
+        run_backtest=False,
+        seed_paper=True,
+        update_paper=False,
+    )
+
+    assert captured["admission_repo"] is repo
+    assert len(captured["snapshots"]) == 1
 
 
 def test_paper_candidate_requires_latest_price_for_entry_validation():
@@ -156,17 +196,20 @@ def test_automation_scheduler_run_once_updates_paper_status(tmp_path, monkeypatc
     database_url = f"sqlite:///{tmp_path / 'automation-scheduler-run-once.db'}"
     monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
     client = TestClient(create_app())
+    card = client.get("/api/opportunities?provider=fixture&symbols=US:TEST").json()[
+        "cards"
+    ][0]
     created = client.post(
         "/api/paper-trades/from-opportunity",
         json={
-            "card_id": "card_auto_scheduler",
+            "card_id": card["card_id"],
             "provider": "fixture",
-            "instrument_id": "US:TEST",
-            "strategy_id": "breakout_volume_confirmation",
-            "trigger_price": "82.00",
-            "initial_stop": "78.72",
-            "target_1": "88.56",
-            "rank_score": 0.91,
+            "instrument_id": card["instrument_id"],
+            "strategy_id": card["primary_strategy_id"],
+            "trigger_price": card["entry_plan"]["trigger_price"],
+            "initial_stop": card["exit_plan"]["initial_stop"],
+            "target_1": card["exit_plan"]["target_1"],
+            "rank_score": card["rank_score"],
             "action": "watch_trigger",
             "risk_status": "clear",
         },

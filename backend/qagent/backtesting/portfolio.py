@@ -178,6 +178,7 @@ class _TradeCandidate:
     exit_execution_rule: HistoricalExecutionRule | None = None
     max_executable_shares: Decimal | None = None
     exit_executable_shares: Decimal | None = None
+    exit_liquidity_censored: bool = False
 
 
 @dataclass(frozen=True)
@@ -193,6 +194,8 @@ class _OpenPortfolioPosition:
     trade: PortfolioBacktestTrade
     entry_costs: Decimal
     exit_costs: Decimal
+    exit_liquidity_censored: bool = False
+    conservative_mark_price: Decimal | None = None
 
 
 def run_portfolio_backtest(
@@ -325,6 +328,9 @@ def run_signal_portfolio_backtest(
         "lookahead_guard": "signals_generated_before_exits",
         "history_cutoff": "hard_end_date_no_future_bars",
         "portfolio_model": "fixed_risk_stop_target_time_exit",
+        "exit_liquidity_policy": (
+            "preserve_entry_mark_at_lower_of_latest_or_stop_and_censor_realized_return"
+        ),
         "execution_profile": execution_profile.key,
         "entry_confirmation": (
             "close_then_next_open"
@@ -481,7 +487,8 @@ def resolve_candidate_outcome_ledger(
         "max_holding_days": str(max_holding_days),
         "result_availability": "explicit_resolved_at",
         "history_cutoff": "hard_end_date_no_future_bars",
-        "liquidity_sizing": "entry_date_only_exit_capacity_is_censoring_gate",
+        "liquidity_sizing": "entry_date_only_exit_capacity_never_resizes_or_rejects_entry",
+        "exit_liquidity_policy": "preserve_entry_and_censor_unliquidated_return",
         "execution_profile": execution_profile.key,
         "cn_execution_rules": (
             "versioned_replay_evidence"
@@ -698,7 +705,11 @@ def _candidate_resolution_from_signal(
             )
         return _CandidateResolution(
             CandidateOutcomeStatus.NOT_TRIGGERED_OR_UNFILLABLE,
-            "entry_not_triggered_or_fill_blocked",
+            (
+                "entry_triggered_but_unfillable"
+                if entry_triggered
+                else "entry_not_triggered"
+            ),
             resolved_at=future.head(max_entry_wait_days).iloc[-1]["trade_date"],
         )
 
@@ -731,6 +742,7 @@ def _candidate_resolution_from_signal(
     exit_order_type: OrderType | None = None
     exit_order_price: Decimal | None = None
     exit_capacity = 0
+    last_exit_rule: HistoricalExecutionRule | None = None
     exit_rows = ordered.iloc[entry_index:]
     active_stop = stop
     initial_risk = entry_price - stop
@@ -744,6 +756,7 @@ def _candidate_resolution_from_signal(
             signal.instrument_id,
             row,
         )
+        last_exit_rule = exit_rule
         rules = _execution_rules_for_row(
             signal.instrument_id,
             trade_date,
@@ -825,6 +838,24 @@ def _candidate_resolution_from_signal(
         return _CandidateResolution(
             CandidateOutcomeStatus.EXIT_UNFILLABLE,
             "exit_order_unfillable",
+            _TradeCandidate(
+                signal=signal,
+                entry_date=entry_date,
+                exit_date=exit_rows.iloc[-1]["trade_date"],
+                exit_reason="exit_liquidity_censored",
+                entry_price=entry_price,
+                exit_price=Decimal(str(exit_rows.iloc[-1]["close"])),
+                stop_price=stop,
+                holding_days=max(
+                    (exit_rows.iloc[-1]["trade_date"] - entry_date).days,
+                    0,
+                ),
+                execution_rule=entry_rule,
+                exit_execution_rule=last_exit_rule,
+                max_executable_shares=Decimal(entry_capacity),
+                exit_executable_shares=Decimal("0"),
+                exit_liquidity_censored=True,
+            ),
             resolved_at=exit_rows.iloc[-1]["trade_date"],
         )
 
@@ -968,7 +999,12 @@ def _simulate_portfolio(
         trading_dates.update(trading_sessions_in_range(start, final_date, market=Market.US))
 
     for current_date in sorted(trading_dates):
-        due = [position for position in open_positions if position.trade.exit_date <= current_date]
+        due = [
+            position
+            for position in open_positions
+            if not position.exit_liquidity_censored
+            and position.trade.exit_date <= current_date
+        ]
         for position in sorted(
             due,
             key=lambda item: (item.trade.exit_date, item.trade.instrument_id),
@@ -982,6 +1018,11 @@ def _simulate_portfolio(
         sizing_equity = _money(cash + _open_market_value(open_positions, latest_prices))
         for candidate in candidates_by_date.get(current_date, []):
             if len(open_positions) >= max_positions:
+                continue
+            if any(
+                position.trade.instrument_id == candidate.signal.instrument_id
+                for position in open_positions
+            ):
                 continue
             trade = _size_trade(
                 candidate,
@@ -1000,6 +1041,10 @@ def _simulate_portfolio(
                 transaction_cost_bps,
                 fee_multiplier,
             )
+            exit_liquidity_censored = _exit_liquidity_censors_position(
+                candidate,
+                trade.shares,
+            )
             entry_outlay = trade.entry_price * trade.shares + entry_costs
             if entry_outlay > cash:
                 continue
@@ -1009,8 +1054,12 @@ def _simulate_portfolio(
                 trade=trade,
                 entry_costs=entry_costs,
                 exit_costs=exit_costs,
+                exit_liquidity_censored=exit_liquidity_censored,
+                conservative_mark_price=(
+                    candidate.stop_price if exit_liquidity_censored else None
+                ),
             )
-            if trade.exit_date <= current_date:
+            if trade.exit_date <= current_date and not position.exit_liquidity_censored:
                 cash = _money(cash + trade.exit_price * trade.shares - exit_costs)
                 closed_trades.append(trade)
             else:
@@ -1102,12 +1151,6 @@ def _size_trade(
         candidate.signal.instrument_id,
         execution_rule=candidate.execution_rule,
     )
-    shares = _round_for_exit_rule(shares, candidate.exit_execution_rule)
-    if (
-        candidate.exit_executable_shares is not None
-        and shares > candidate.exit_executable_shares
-    ):
-        return None
     if cash is not None:
         shares = _fit_shares_to_cash(
             candidate,
@@ -1218,7 +1261,6 @@ def _resolved_candidate_outcome(
         candidate.signal.instrument_id,
         execution_rule=candidate.execution_rule,
     )
-    shares = _round_for_exit_rule(shares, candidate.exit_execution_rule)
     if shares <= 0:
         return _unresolved_candidate_outcome(
             candidate.signal,
@@ -1227,16 +1269,30 @@ def _resolved_candidate_outcome(
             nominal_amount,
             resolved_at=candidate.entry_date,
         )
-    if (
-        candidate.exit_executable_shares is not None
-        and shares > candidate.exit_executable_shares
-    ):
-        return _unresolved_candidate_outcome(
-            candidate.signal,
-            CandidateOutcomeStatus.EXIT_UNFILLABLE,
-            "fixed_notional_exceeds_exit_liquidity",
-            nominal_amount,
+    if _exit_liquidity_censors_position(candidate, shares):
+        entry_value = _money(candidate.entry_price * shares)
+        entry_costs, _ = _trade_cost_breakdown(
+            candidate,
+            shares,
+            transaction_cost_bps,
+            fee_multiplier,
+        )
+        return CandidateSignalOutcome(
+            snapshot_id=candidate.signal.snapshot_id,
+            instrument_id=candidate.signal.instrument_id,
+            strategy_id=candidate.signal.primary_strategy_id,
+            signal_date=candidate.signal.signal_date,
+            status=CandidateOutcomeStatus.EXIT_UNFILLABLE,
+            status_detail="exit_liquidity_censored_after_entry",
+            nominal_amount=nominal_amount,
             resolved_at=candidate.exit_date,
+            entry_date=candidate.entry_date,
+            exit_reason="exit_liquidity_censored",
+            entry_price=candidate.entry_price,
+            shares=shares,
+            entry_value=entry_value,
+            entry_costs=entry_costs,
+            costs=entry_costs,
         )
 
     entry_value = _money(candidate.entry_price * shares)
@@ -1277,6 +1333,16 @@ def _resolved_candidate_outcome(
     )
 
 
+def _exit_liquidity_censors_position(
+    candidate: _TradeCandidate,
+    shares: Decimal,
+) -> bool:
+    return candidate.exit_liquidity_censored or (
+        candidate.exit_executable_shares is not None
+        and shares > candidate.exit_executable_shares
+    )
+
+
 def _fit_shares_to_cash(
     candidate: _TradeCandidate,
     shares: Decimal,
@@ -1301,31 +1367,15 @@ def _fit_shares_to_cash(
             candidate.signal.instrument_id,
             execution_rule=candidate.execution_rule,
         )
-        adjusted = _round_for_exit_rule(
-            min(shares, adjusted),
-            candidate.exit_execution_rule,
-        )
+        adjusted = min(shares, adjusted)
         if adjusted >= shares:
             adjusted = _shares(
                 shares - _share_step(candidate),
                 candidate.signal.instrument_id,
                 execution_rule=candidate.execution_rule,
             )
-            adjusted = _round_for_exit_rule(
-                adjusted,
-                candidate.exit_execution_rule,
-            )
         shares = adjusted
     return Decimal("0")
-
-
-def _round_for_exit_rule(
-    shares: Decimal,
-    exit_rule: HistoricalExecutionRule | None,
-) -> Decimal:
-    if exit_rule is None:
-        return shares
-    return min(shares, round_order_quantity(shares, exit_rule))
 
 
 def _share_step(candidate: _TradeCandidate) -> Decimal:
@@ -1343,14 +1393,26 @@ def _open_market_value(
     return sum(
         (
             position.trade.shares
-            * latest_prices.get(
-                position.trade.instrument_id,
-                position.trade.entry_price,
+            * _position_mark_price(
+                position,
+                latest_prices.get(
+                    position.trade.instrument_id,
+                    position.trade.entry_price,
+                ),
             )
             for position in positions
         ),
         Decimal("0"),
     )
+
+
+def _position_mark_price(
+    position: _OpenPortfolioPosition,
+    latest_price: Decimal,
+) -> Decimal:
+    if position.conservative_mark_price is None:
+        return latest_price
+    return min(latest_price, position.conservative_mark_price)
 
 
 def _build_summary(

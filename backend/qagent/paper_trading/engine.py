@@ -28,11 +28,13 @@ from qagent.execution.rules import (
     round_lot,
 )
 from qagent.market.calendars import trading_sessions_elapsed
+from qagent.paper_trading.admission import evaluate_paper_snapshot_admission
 from qagent.providers.base import MarketDataProvider
 from qagent.storage.paper import (
     PaperAccountSettings,
     PaperExecutionFacts,
     PaperExecutionLegFacts,
+    PaperTradeAdmissionProof,
     PaperTradeEventMetadata,
     PaperTradeRecord,
     PaperTradeSourceContext,
@@ -471,6 +473,10 @@ class PaperTradeDiagnostic(BaseModel):
     root_cause_label: str
     severity: str
     factor_signals: list[str]
+    source_industry: str = "unknown"
+    source_themes: list[str] = Field(default_factory=list)
+    source_market_regime: str = "unknown"
+    source_context_status: str = "unknown"
     evidence: list[str]
     action: str
 
@@ -543,6 +549,8 @@ def seed_paper_trades_from_snapshots(
     signal_date_override: date | None = None,
     notes: str = "",
     allocation_multiplier: Decimal = Decimal("1.0"),
+    admission_repo: object | None = None,
+    admission_mode: str = "automatic",
 ) -> PaperSeedResult:
     if allocation_multiplier <= 0 or allocation_multiplier > 1:
         raise ValueError("allocation_multiplier must be between 0 and 1")
@@ -581,6 +589,15 @@ def seed_paper_trades_from_snapshots(
         ):
             skipped += 1
             continue
+        admission = evaluate_paper_snapshot_admission(
+            admission_repo or repo,
+            snapshot,
+            provider=provider,
+            mode=admission_mode,
+        )
+        if not admission.eligible:
+            skipped += 1
+            continue
         repo.create_trade(
             source_snapshot_id=snapshot.snapshot_id,
             provider=provider,
@@ -593,6 +610,13 @@ def seed_paper_trades_from_snapshots(
             rank_score=snapshot.rank_score,
             notes=notes,
             allocation_multiplier=allocation_multiplier,
+            admission_proof=PaperTradeAdmissionProof(
+                admission_source=admission.admission_source,
+                production_identity_digest=admission.production_identity_digest,
+                production_batch_fact_digest=admission.production_batch_fact_digest,
+                production_selection_item_digest=(admission.production_selection_item_digest),
+                release_proof_digest=admission.release_proof_digest,
+            ),
         )
         created += 1
         active_instruments.add(snapshot.instrument_id)
@@ -808,6 +832,7 @@ def paper_execution_data_health(
 
 
 def summarize_paper_trades(trades: list[PaperTradeRecord]) -> PaperTradingSummary:
+    trades, _ = _paper_reporting_scope(trades)
     closed = [trade for trade in trades if _is_executed_closed_trade(trade)]
     winning = [
         trade
@@ -861,6 +886,7 @@ def build_paper_ledger(
     if take_profit_pct <= 0 or take_profit_pct > 100:
         raise ValueError("take_profit_pct must be between 0 and 100")
 
+    trades, reporting_health = _paper_reporting_scope(trades)
     allocation_per_trade = _money(initial_capital * allocation_per_trade_pct / Decimal("100"))
     items: list[PaperLedgerItem] = []
     planned_capital = Decimal("0")
@@ -937,6 +963,7 @@ def build_paper_ledger(
         transactions=account["transactions"],
         positions=account["positions"],
         data_health={
+            **reporting_health,
             "ledger_method": "chronological_cash_ledger",
             "ledger_execution_facts": str(
                 sum(1 for trade in trades if trade.execution_facts is not None)
@@ -960,6 +987,9 @@ def build_paper_validation(
 ) -> PaperValidationResult:
     if not windows:
         raise ValueError("windows must not be empty")
+    reporting_trade_ids = {item.trade_id for item in ledger.items}
+    all_trades = trades
+    trades = [trade for trade in all_trades if trade.trade_id in reporting_trade_ids]
     as_of = as_of or _validation_as_of(trades)
     validation_trades = [
         trade for trade in trades if trade.status not in {"replaced", "invalidated"}
@@ -1046,6 +1076,7 @@ def build_paper_validation(
             "validation_invalidated_excluded": str(
                 sum(1 for trade in trades if trade.status == "invalidated")
             ),
+            "validation_non_official_excluded": str(len(all_trades) - len(trades)),
             "validation_batches": str(len(batches)),
             "validation_credibility": credibility.level,
             "validation_primary_window": str(windows[-1]),
@@ -1063,6 +1094,9 @@ def build_paper_daily_report(
     asset_type_by_instrument: Mapping[str, str] | None = None,
     source_context_by_trade: Mapping[str, PaperTradeSourceContext] | None = None,
 ) -> PaperDailyReport:
+    all_trades = trades
+    reporting_trade_ids = {item.trade_id for item in ledger.items}
+    trades = [trade for trade in all_trades if trade.trade_id in reporting_trade_ids]
     report_date = as_of or _validation_as_of(trades)
     ledger_by_id = {item.trade_id: item for item in ledger.items}
     validation_by_id = {item.trade_id: item for item in validation.items}
@@ -1095,7 +1129,6 @@ def build_paper_daily_report(
     source_contexts = source_context_by_trade or {}
     trade_diagnostics = _paper_trade_diagnostics(
         ledger.items,
-        market_context=market_context,
         source_context_by_trade=source_contexts,
     )
     return PaperDailyReport(
@@ -1155,9 +1188,29 @@ def build_paper_daily_report(
             "paper_daily_report": "ready",
             "paper_daily_report_date": report_date.isoformat(),
             "paper_daily_report_trades": str(len(trades)),
+            "paper_daily_report_non_official_excluded": str(len(all_trades) - len(trades)),
             "paper_daily_report_benchmarks": str(len(benchmark.items)),
+            **_paper_source_context_health(ledger.items, source_contexts),
         },
     )
+
+
+def _paper_reporting_scope(
+    trades: list[PaperTradeRecord],
+) -> tuple[list[PaperTradeRecord], dict[str, str]]:
+    official = [trade for trade in trades if trade.admission_source == "ranking_v3_production"]
+    legacy_manual = sum(trade.admission_source == "legacy_manual" for trade in trades)
+    legacy_unknown = sum(
+        trade.admission_source not in {"ranking_v3_production", "legacy_manual"} for trade in trades
+    )
+    reporting_trades = official if official else list(trades)
+    return reporting_trades, {
+        "paper_reporting_scope": ("ranking_v3_production" if official else "legacy_compatible"),
+        "paper_reporting_official": str(len(official)),
+        "paper_reporting_legacy_manual": str(legacy_manual),
+        "paper_reporting_legacy_unknown": str(legacy_unknown),
+        "paper_reporting_excluded": str(len(trades) - len(reporting_trades)),
+    }
 
 
 def build_paper_risk_gate_status(
@@ -1566,6 +1619,19 @@ def _paper_failure_attribution(
         ].append(item)
         grouped[("status", item.status, _paper_status_label(item.status))].append(item)
         context = source_context_by_trade.get(item.trade_id)
+        industry = context.industry if context is not None else "unknown"
+        grouped[("industry", industry, _paper_context_label("industry", industry))].append(item)
+        market_regime = context.market_regime if context is not None else "unknown"
+        grouped[
+            (
+                "market_regime",
+                market_regime,
+                _paper_context_label("market_regime", market_regime),
+            )
+        ].append(item)
+        factor_ids = context.factor_ids if context is not None else []
+        for factor_id in factor_ids or ["unknown"]:
+            grouped[("factor", factor_id, _paper_context_label("factor", factor_id))].append(item)
         for signal in _paper_source_signals(context.card if context else {}):
             grouped[("signal", signal, _paper_signal_label(signal))].append(item)
 
@@ -1595,13 +1661,72 @@ def _paper_failure_attribution(
     return sorted(
         attribution,
         key=lambda item: (item.total_pnl, -item.evaluated_trades, item.dimension, item.key),
-    )[:12]
+    )
+
+
+def _paper_source_context_health(
+    items: list[PaperLedgerItem],
+    source_context_by_trade: Mapping[str, PaperTradeSourceContext],
+) -> dict[str, str]:
+    contexts = [source_context_by_trade.get(item.trade_id) for item in items]
+    return {
+        "paper_pit_context_total": str(len(items)),
+        "paper_pit_context_frozen": str(
+            sum(context is not None and context.source_status == "frozen" for context in contexts)
+        ),
+        "paper_pit_context_legacy": str(
+            sum(
+                context is not None and context.source_status == "legacy_snapshot"
+                for context in contexts
+            )
+        ),
+        "paper_pit_context_unknown": str(
+            sum(
+                context is None
+                or context.source_status == "unknown"
+                or (
+                    context.industry == "unknown"
+                    and context.market_regime == "unknown"
+                    and not context.factor_ids
+                )
+                for context in contexts
+            )
+        ),
+    }
+
+
+def _paper_source_market_context(
+    context: PaperTradeSourceContext | None,
+) -> PaperMarketContext:
+    if context is None or context.market_regime == "unknown":
+        return PaperMarketContext(
+            regime="unknown",
+            title="信号时点市场环境未知",
+            summary="该交易没有保存信号时点市场环境，不能用当前市场状态回填。",
+        )
+    return PaperMarketContext(
+        regime=context.market_regime,
+        title=f"信号时点市场环境：{context.market_regime}",
+        summary=f"归因仅使用 {context.signal_date or context.created_at.date()} 保存的市场环境。",
+    )
+
+
+def _paper_context_label(dimension: str, key: str) -> str:
+    if key == "unknown":
+        return {
+            "industry": "行业未知",
+            "theme": "主题未知",
+            "market_regime": "信号时点市场环境未知",
+            "factor": "因子未知",
+        }.get(dimension, "未知")
+    if dimension == "factor":
+        return _paper_signal_label(key)
+    return key
 
 
 def _paper_trade_diagnostics(
     items: list[PaperLedgerItem],
     *,
-    market_context: PaperMarketContext,
     source_context_by_trade: Mapping[str, PaperTradeSourceContext],
 ) -> list[PaperTradeDiagnostic]:
     diagnostics = []
@@ -1610,11 +1735,14 @@ def _paper_trade_diagnostics(
             continue
         context = source_context_by_trade.get(item.trade_id)
         source_card = context.card if context else {}
-        signals = _paper_source_signals(source_card)
+        signals = context.factor_ids if context is not None else []
+        if not signals:
+            signals = _paper_source_signals(source_card)
+        source_market_context = _paper_source_market_context(context)
         cause, label, severity, evidence, action = _paper_trade_root_cause(
             item,
             signals=signals,
-            market_context=market_context,
+            market_context=source_market_context,
         )
         if cause == "waiting":
             continue
@@ -1630,6 +1758,10 @@ def _paper_trade_diagnostics(
                 root_cause_label=label,
                 severity=severity,
                 factor_signals=signals,
+                source_industry=context.industry if context is not None else "unknown",
+                source_themes=context.themes if context is not None else [],
+                source_market_regime=source_market_context.regime,
+                source_context_status=context.source_status if context is not None else "unknown",
                 evidence=evidence,
                 action=action,
             )
@@ -1719,10 +1851,17 @@ def _paper_trade_root_cause(
             [f"计划风险距离仅 {stop_distance:.2f}%"],
             "按 ATR/波动率重新设置止损，并同步降低仓位。",
         )
-    if market_context.regime == "market_drag":
+    if market_context.regime in {
+        "market_drag",
+        "risk_off",
+        "risk-off",
+        "bear",
+        "bearish",
+        "weak",
+    }:
         return (
             "market_regime",
-            "市场环境拖累",
+            "信号时点市场环境拖累",
             "watch",
             [market_context.summary],
             "弱市降低总仓位，只保留相对强度最高的机会。",

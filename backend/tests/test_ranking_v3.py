@@ -1,13 +1,19 @@
 from datetime import date, timedelta
 
+import pytest
+from pydantic import ValidationError
+
 from qagent.backtesting.ranking_v3 import (
     MIN_V3_TRAINING_DATES,
     MIN_V3_TRAINING_OBSERVATIONS,
     RankingV3Candidate,
     RankingV3FeatureVector,
+    RankingV3FrozenScoringArtifact,
     ResolvedRankingV3Observation,
+    build_ranking_v3_frozen_scoring_artifact,
     frozen_feature_score,
     score_ranking_v3_candidates,
+    score_ranking_v3_candidates_from_artifact,
 )
 
 
@@ -194,9 +200,7 @@ def test_v3_counts_rebalance_dates_instead_of_overlapping_stock_rows():
             available_at=date(2024, 6, 1),
             excess=2.0,
         )
-        observations.append(
-            item.model_copy(update={"signal_date": date(2024, 1, 2)})
-        )
+        observations.append(item.model_copy(update={"signal_date": date(2024, 1, 2)}))
 
     decision = score_ranking_v3_candidates(
         [_candidate("CN:000001")],
@@ -216,9 +220,7 @@ def test_v3_calibration_is_bounded_and_incumbent_bonus_reduces_turnover():
             available_at=date(2024, 8, 1),
             excess=20.0,
         )
-        for index in range(
-            max(MIN_V3_TRAINING_OBSERVATIONS, MIN_V3_TRAINING_DATES)
-        )
+        for index in range(max(MIN_V3_TRAINING_OBSERVATIONS, MIN_V3_TRAINING_DATES))
     ]
     candidates = [
         _candidate("CN:000001", incumbent=True),
@@ -235,3 +237,266 @@ def test_v3_calibration_is_bounded_and_incumbent_bonus_reduces_turnover():
     assert all(abs(item.calibration_delta) <= 0.05 for item in decision.candidates)
     assert decision.candidates[0].instrument_id == "CN:000001"
     assert decision.candidates[0].turnover_bonus > 0
+
+
+def test_frozen_artifact_contains_stable_point_in_time_parameters():
+    observations = [
+        _observation(
+            index,
+            available_at=date(2024, 8, 1),
+            excess=2.0 if index % 3 else -1.0,
+            strategy="two_stage_trend_momentum",
+        ).model_copy(
+            update={
+                "features": _features(momentum=0.8, valuation=0.2),
+            }
+        )
+        for index in range(MIN_V3_TRAINING_OBSERVATIONS)
+    ]
+    not_triggered = _observation(
+        999,
+        available_at=date(2024, 8, 2),
+        excess=0.0,
+        strategy="two_stage_trend_momentum",
+    ).model_copy(
+        update={
+            "outcome_status": "not_triggered",
+            "triggered": False,
+            "return_pct": None,
+            "benchmark_return_pct": None,
+            "net_excess_return_pct": None,
+        }
+    )
+    invalid_status = _observation(
+        1000,
+        available_at=date(2024, 8, 2),
+        excess=999.0,
+        strategy="two_stage_trend_momentum",
+    ).model_copy(update={"outcome_status": "invalid_plan"})
+    nonfinite = _observation(
+        1001,
+        available_at=date(2024, 8, 2),
+        excess=float("nan"),
+        strategy="two_stage_trend_momentum",
+    )
+    ambiguous_not_triggered = _observation(
+        1002,
+        available_at=date(2024, 8, 2),
+        excess=0.0,
+        strategy="two_stage_trend_momentum",
+    ).model_copy(
+        update={
+            "outcome_status": "not_triggered_or_unfillable",
+            "triggered": False,
+            "net_excess_return_pct": None,
+        }
+    )
+
+    artifact = build_ranking_v3_frozen_scoring_artifact(
+        [
+            invalid_status,
+            nonfinite,
+            ambiguous_not_triggered,
+            not_triggered,
+            *reversed(observations),
+        ],
+        cutoff=date(2025, 1, 2),
+    )
+    rebuilt = build_ranking_v3_frozen_scoring_artifact(
+        [*observations, not_triggered],
+        cutoff=date(2025, 1, 2),
+    )
+
+    assert artifact.model_dump(mode="json") == rebuilt.model_dump(mode="json")
+    assert artifact.training_observation_count == MIN_V3_TRAINING_OBSERVATIONS
+    assert artifact.training_date_count == MIN_V3_TRAINING_OBSERVATIONS
+    assert len(artifact.stable_digest) == 64
+    assert {item.segment for item in artifact.segment_posteriors} >= {
+        "strategy:two_stage_trend_momentum",
+        "asset:stock",
+        "factor:momentum:high",
+        "factor:valuation:low",
+    }
+    trigger = {item.segment: item for item in artifact.trigger_probabilities}[
+        "strategy:two_stage_trend_momentum"
+    ]
+    assert trigger.observation_count == MIN_V3_TRAINING_OBSERVATIONS + 1
+    assert trigger.triggered_count == MIN_V3_TRAINING_OBSERVATIONS
+    assert trigger.probability == pytest.approx(122 / 125)
+    assert (
+        RankingV3FrozenScoringArtifact.model_validate(artifact.model_dump(mode="json")) == artifact
+    )
+    with pytest.raises(ValidationError):
+        artifact.cutoff = date(2026, 1, 1)
+
+
+def test_not_triggered_cash_outcome_enters_posterior_with_benchmark_opportunity_cost():
+    resolved = [
+        _observation(
+            index,
+            available_at=date(2024, 8, 1),
+            excess=1.0,
+            strategy="two_stage_trend_momentum",
+        )
+        for index in range(MIN_V3_TRAINING_OBSERVATIONS)
+    ]
+    cash = _observation(
+        999,
+        available_at=date(2024, 8, 2),
+        excess=-2.0,
+        strategy="two_stage_trend_momentum",
+    ).model_copy(
+        update={
+            "outcome_status": "not_triggered",
+            "triggered": False,
+            "return_pct": 0.0,
+            "benchmark_return_pct": 2.0,
+            "net_excess_return_pct": -2.0,
+        }
+    )
+
+    without_cash = build_ranking_v3_frozen_scoring_artifact(
+        resolved,
+        cutoff=date(2025, 1, 2),
+    )
+    with_cash = build_ranking_v3_frozen_scoring_artifact(
+        [*resolved, cash],
+        cutoff=date(2025, 1, 2),
+    )
+
+    assert with_cash.training_observation_count == MIN_V3_TRAINING_OBSERVATIONS + 1
+    assert with_cash.training_date_count == MIN_V3_TRAINING_OBSERVATIONS + 1
+    without_posterior = {item.segment: item for item in without_cash.segment_posteriors}[
+        "strategy:two_stage_trend_momentum"
+    ]
+    with_posterior = {item.segment: item for item in with_cash.segment_posteriors}[
+        "strategy:two_stage_trend_momentum"
+    ]
+    assert with_posterior.date_count == without_posterior.date_count + 1
+    assert (
+        with_posterior.expected_excess_return_pct
+        < without_posterior.expected_excess_return_pct
+    )
+
+
+def test_artifact_scoring_exactly_matches_observation_scoring():
+    observations = [
+        _observation(
+            index,
+            available_at=date(2024, 8, 1),
+            excess=3.0 if index % 4 else -2.0,
+        )
+        for index in range(MIN_V3_TRAINING_OBSERVATIONS)
+    ]
+    observations.extend(
+        [
+            _observation(
+                2000,
+                available_at=date(2024, 8, 2),
+                excess=0.0,
+            ).model_copy(
+                update={
+                    "outcome_status": "not_triggered",
+                    "triggered": False,
+                    "return_pct": None,
+                    "benchmark_return_pct": None,
+                    "net_excess_return_pct": None,
+                }
+            ),
+            _observation(
+                2001,
+                available_at=date(2024, 8, 2),
+                excess=0.0,
+            ).model_copy(
+                update={
+                    "outcome_status": "not_triggered_or_unfillable",
+                    "triggered": False,
+                    "return_pct": None,
+                    "benchmark_return_pct": None,
+                    "net_excess_return_pct": None,
+                }
+            ),
+        ]
+    )
+    candidates = [
+        _candidate(
+            "CN:000001",
+            incumbent=True,
+            features=_features(momentum=0.9, trend_quality=0.8),
+        ),
+        _candidate(
+            "CN:000002",
+            asset_type="ETF",
+            features=_features(momentum=0.7, trend_quality=0.7),
+        ),
+    ]
+    cutoff = date(2025, 1, 2)
+    artifact = build_ranking_v3_frozen_scoring_artifact(
+        observations,
+        cutoff=cutoff,
+    )
+
+    direct = score_ranking_v3_candidates(
+        candidates,
+        observations,
+        decision_date=cutoff,
+    )
+    frozen = score_ranking_v3_candidates_from_artifact(
+        candidates,
+        artifact,
+        decision_date=cutoff,
+    )
+
+    assert direct.model_dump(mode="json") == frozen.model_dump(mode="json")
+
+
+def test_observations_at_or_after_cutoff_do_not_change_artifact():
+    cutoff = date(2025, 1, 2)
+    training = [
+        _observation(
+            index,
+            available_at=date(2024, 8, 1),
+            excess=2.0,
+        )
+        for index in range(MIN_V3_TRAINING_OBSERVATIONS)
+    ]
+    future = [
+        _observation(
+            index + 1000,
+            available_at=cutoff if index % 2 else date(2025, 2, 1),
+            excess=-99.0,
+        )
+        for index in range(40)
+    ]
+
+    before = build_ranking_v3_frozen_scoring_artifact(
+        training,
+        cutoff=cutoff,
+    )
+    after = build_ranking_v3_frozen_scoring_artifact(
+        [*training, *future],
+        cutoff=cutoff,
+    )
+
+    assert before.model_dump(mode="json") == after.model_dump(mode="json")
+
+
+def test_artifact_rejects_tampered_digest_and_pre_cutoff_decision():
+    artifact = build_ranking_v3_frozen_scoring_artifact(
+        [],
+        cutoff=date(2025, 1, 2),
+    )
+
+    with pytest.raises(ValidationError, match="digest mismatch"):
+        RankingV3FrozenScoringArtifact.model_validate(
+            {
+                **artifact.model_dump(mode="json"),
+                "stable_digest": "0" * 64,
+            }
+        )
+    with pytest.raises(ValueError, match="earlier than artifact cutoff"):
+        score_ranking_v3_candidates_from_artifact(
+            [_candidate("CN:000001")],
+            artifact,
+            decision_date=date(2025, 1, 1),
+        )

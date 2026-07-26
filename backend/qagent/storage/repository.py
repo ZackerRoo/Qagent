@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
@@ -205,9 +205,7 @@ class HistoricalBackfillJobRecord(BaseModel):
         fundamental_processed = int(
             self.data_health.get("backfill_fundamental_processed", "0") or 0
         )
-        evidence_processed = int(
-            self.data_health.get("backfill_evidence_processed", "0") or 0
-        )
+        evidence_processed = int(self.data_health.get("backfill_evidence_processed", "0") or 0)
         phase_progress = {
             "queued": 0,
             "inventory": 1,
@@ -284,13 +282,17 @@ class WalkForwardJobRecord(BaseModel):
         if self.status == "succeeded":
             return 100
         if self.status == "failed":
-            return max(
-                0,
-                min(
-                    100,
-                    int(self.processed_snapshots * 100 / self.total_snapshots),
-                ),
-            ) if self.total_snapshots else 0
+            return (
+                max(
+                    0,
+                    min(
+                        100,
+                        int(self.processed_snapshots * 100 / self.total_snapshots),
+                    ),
+                )
+                if self.total_snapshots
+                else 0
+            )
         if self.total_snapshots <= 0:
             return 0
         return max(
@@ -492,22 +494,14 @@ class QagentRepository:
         definitions_by_id: dict[str, StrategyDefinition] = {}
         for definition in resolved_definitions:
             existing = definitions_by_id.get(definition.strategy_id)
-            if (
-                existing is not None
-                and _canonical_json(existing) != _canonical_json(definition)
-            ):
-                raise ValueError(
-                    f"conflicting defaults for strategy {definition.strategy_id}"
-                )
+            if existing is not None and _canonical_json(existing) != _canonical_json(definition):
+                raise ValueError(f"conflicting defaults for strategy {definition.strategy_id}")
             definitions_by_id[definition.strategy_id] = definition
         policies_by_identity: dict[tuple[str, str], StrategyPolicy] = {}
         for policy in resolved_policies:
             identity = (policy.strategy_id, policy.policy_version)
             existing = policies_by_identity.get(identity)
-            if (
-                existing is not None
-                and _canonical_json(existing) != _canonical_json(policy)
-            ):
+            if existing is not None and _canonical_json(existing) != _canonical_json(policy):
                 raise ValueError(
                     f"conflicting defaults for policy {policy.strategy_id}:{policy.policy_version}"
                 )
@@ -1248,10 +1242,7 @@ class QagentRepository:
                     continue
                 if profile.listing_date is not None and profile.listing_date > snapshot_date:
                     continue
-                if (
-                    profile.delisting_date is not None
-                    and profile.delisting_date < snapshot_date
-                ):
+                if profile.delisting_date is not None and profile.delisting_date < snapshot_date:
                     continue
                 symbol = profile.instrument_id.split(":", 1)[-1]
                 records.append(
@@ -1261,9 +1252,7 @@ class QagentRepository:
                         "symbol": symbol,
                         "name": profile.name or symbol,
                         "asset_type": asset_type,
-                        "exchange": (
-                            "SH" if symbol.startswith(("5", "6", "9")) else "SZ"
-                        ),
+                        "exchange": ("SH" if symbol.startswith(("5", "6", "9")) else "SZ"),
                         "source": profile.provider,
                         "active": True,
                         "captured_at": now,
@@ -1291,9 +1280,7 @@ class QagentRepository:
             if as_of_date is not None:
                 query = query.filter(TradableUniverseSnapshotRow.as_of_date == as_of_date)
             if instrument_ids:
-                query = query.filter(
-                    TradableUniverseSnapshotRow.instrument_id.in_(instrument_ids)
-                )
+                query = query.filter(TradableUniverseSnapshotRow.instrument_id.in_(instrument_ids))
             if start is not None:
                 query = query.filter(TradableUniverseSnapshotRow.as_of_date >= start)
             if end is not None:
@@ -1341,9 +1328,7 @@ class QagentRepository:
             ): snapshot
             for snapshot in snapshots
         }
-        return self.replay_evidence(provider_mode).upsert_fundamentals(
-            list(deduplicated.values())
-        )
+        return self.replay_evidence(provider_mode).upsert_fundamentals(list(deduplicated.values()))
 
     def list_fundamental_snapshots(
         self,
@@ -1433,8 +1418,7 @@ class QagentRepository:
             return {}
         mode = provider_mode.strip().lower()
         result = {
-            instrument_id: HistoricalInstrumentEvidenceStats()
-            for instrument_id in instrument_ids
+            instrument_id: HistoricalInstrumentEvidenceStats() for instrument_id in instrument_ids
         }
         with self.session_factory() as session:
             tradability_alias, tradability_rank = _latest_revision_alias(
@@ -1453,9 +1437,7 @@ class QagentRepository:
                             else_=0,
                         )
                     ),
-                    func.sum(
-                        case((tradability_alias.is_st.is_(True), 1), else_=0)
-                    ),
+                    func.sum(case((tradability_alias.is_st.is_(True), 1), else_=0)),
                 )
                 .filter(
                     tradability_alias.provider_mode == mode,
@@ -1536,10 +1518,7 @@ class QagentRepository:
                         HistoricalIndexMembershipRow.provider_mode
                         == membership_snapshot_alias.provider_mode
                     )
-                    & (
-                        HistoricalIndexMembershipRow.index_id
-                        == membership_snapshot_alias.index_id
-                    )
+                    & (HistoricalIndexMembershipRow.index_id == membership_snapshot_alias.index_id)
                     & (
                         HistoricalIndexMembershipRow.snapshot_date
                         == membership_snapshot_alias.snapshot_date
@@ -1575,10 +1554,7 @@ class QagentRepository:
                         HistoricalIndexMembershipRow.provider_mode
                         == membership_snapshot_alias.provider_mode
                     )
-                    & (
-                        HistoricalIndexMembershipRow.index_id
-                        == membership_snapshot_alias.index_id
-                    )
+                    & (HistoricalIndexMembershipRow.index_id == membership_snapshot_alias.index_id)
                     & (
                         HistoricalIndexMembershipRow.snapshot_date
                         == membership_snapshot_alias.snapshot_date
@@ -1648,12 +1624,8 @@ class QagentRepository:
             row = (
                 session.query(
                     func.count(snapshot_alias.index_id),
-                    func.sum(
-                        case((snapshot_alias.status == "ready", 1), else_=0)
-                    ),
-                    func.sum(
-                        case((snapshot_alias.status == "failed", 1), else_=0)
-                    ),
+                    func.sum(case((snapshot_alias.status == "ready", 1), else_=0)),
+                    func.sum(case((snapshot_alias.status == "failed", 1), else_=0)),
                     func.min(snapshot_alias.snapshot_date),
                     func.max(snapshot_alias.snapshot_date),
                 )
@@ -1699,13 +1671,26 @@ class QagentRepository:
         run_id = f"scan-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
         item_source = snapshot_items if snapshot_items is not None else result.items
         item_by_instrument = {item.instrument_id: item for item in item_source}
+        scanned = len(result.items)
+        if mode == "full_market_batch":
+            try:
+                scanned = int(result.data_health["full_market_scanned_symbols"])
+                total_symbols = int(result.data_health["full_market_total_symbols"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "full_market_batch ScanRun requires explicit scan-count evidence"
+                ) from exc
+            if scanned != total_symbols or total_symbols != len(symbols):
+                raise ValueError(
+                    "full_market_batch scan counts must equal the persisted symbol universe"
+                )
         with self.session_factory() as session:
             run_row = ScanRunRow(
                 run_id=run_id,
                 provider=provider,
                 mode=mode,
                 symbols=json.dumps(symbols),
-                scanned=len(result.items),
+                scanned=scanned,
                 cards=len(result.cards),
                 data_health=json.dumps(result.data_health, sort_keys=True),
             )
@@ -1723,8 +1708,7 @@ class QagentRepository:
             if provider:
                 query = query.filter(ScanRunRow.provider == provider)
             rows = (
-                query
-                .order_by(ScanRunRow.created_at.desc(), ScanRunRow.run_id.desc())
+                query.order_by(ScanRunRow.created_at.desc(), ScanRunRow.run_id.desc())
                 .limit(limit)
                 .all()
             )
@@ -1738,7 +1722,9 @@ class QagentRepository:
         symbols: list[str],
         payload: dict[str, object],
     ) -> ScanResultCacheRecord:
-        cache_id = f"scan-cache-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+        cache_id = (
+            f"scan-cache-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+        )
         with self.session_factory() as session:
             row = ScanResultCacheRow(
                 cache_id=cache_id,
@@ -1867,6 +1853,102 @@ class QagentRepository:
                 snapshots=[self._opportunity_snapshot_from_row(row) for row in snapshot_rows],
             )
 
+    def get_latest_complete_daily_scan_with_snapshots(
+        self,
+        *,
+        provider: str,
+        signal_date: date,
+        minimum_scanned: int,
+    ) -> ScanRunSnapshotBundle | None:
+        """Return one strictly complete full-market batch for one signal date."""
+
+        if minimum_scanned < 1:
+            raise ValueError("minimum_scanned must be positive")
+        with self.session_factory() as session:
+            run_rows = (
+                session.query(ScanRunRow)
+                .filter(
+                    ScanRunRow.provider == provider,
+                    ScanRunRow.mode == "full_market_batch",
+                    ScanRunRow.scanned >= minimum_scanned,
+                )
+                .order_by(ScanRunRow.created_at.desc(), ScanRunRow.run_id.desc())
+                .all()
+            )
+            run_row = None
+            for candidate in run_rows:
+                try:
+                    symbols = json.loads(candidate.symbols or "[]")
+                    health = json.loads(candidate.data_health or "{}")
+                    total_symbols = int(health["full_market_total_symbols"])
+                    scanned_symbols = int(health["full_market_scanned_symbols"])
+                    total_batches = int(health["full_market_total_batches"])
+                    completed_batches = int(health["full_market_completed_batches"])
+                    error_count = int(health["full_market_error_count"])
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if (
+                    not isinstance(symbols, list)
+                    or not symbols
+                    or not all(isinstance(value, str) and value for value in symbols)
+                    or len(set(symbols)) != len(symbols)
+                    or not isinstance(health, dict)
+                    or health.get("full_market_scan_mode") != "full_market_batch"
+                    or health.get("full_market_batches_complete") != "true"
+                    or health.get("full_market_scan_complete") != "true"
+                    or health.get("full_market_signal_date") != signal_date.isoformat()
+                    or candidate.scanned != len(symbols)
+                    or scanned_symbols != len(symbols)
+                    or total_symbols != len(symbols)
+                    or total_symbols < minimum_scanned
+                    or total_batches < 1
+                    or completed_batches != total_batches
+                    or error_count != 0
+                ):
+                    continue
+                observed_dates = [
+                    value
+                    for (value,) in (
+                        session.query(OpportunitySnapshotRow.signal_date)
+                        .filter(OpportunitySnapshotRow.run_id == candidate.run_id)
+                        .distinct()
+                        .all()
+                    )
+                ]
+                if any(value is None for value in observed_dates):
+                    continue
+                if observed_dates and set(observed_dates) != {signal_date}:
+                    continue
+                snapshot_count = (
+                    session.query(func.count(OpportunitySnapshotRow.snapshot_id))
+                    .filter(OpportunitySnapshotRow.run_id == candidate.run_id)
+                    .scalar()
+                )
+                if int(snapshot_count or 0) != candidate.cards:
+                    continue
+                run_row = candidate
+                break
+            if run_row is None:
+                return None
+            snapshot_rows = (
+                session.query(OpportunitySnapshotRow)
+                .filter(
+                    OpportunitySnapshotRow.run_id == run_row.run_id,
+                    OpportunitySnapshotRow.signal_date == signal_date,
+                )
+                .order_by(
+                    OpportunitySnapshotRow.rank_score.desc(),
+                    OpportunitySnapshotRow.strategy_score.desc(),
+                    OpportunitySnapshotRow.score.desc(),
+                    OpportunitySnapshotRow.snapshot_id.desc(),
+                )
+                .all()
+            )
+            return ScanRunSnapshotBundle(
+                run=self._scan_run_from_row(run_row),
+                snapshots=[self._opportunity_snapshot_from_row(row) for row in snapshot_rows],
+            )
+
     def create_full_market_scan_job(
         self,
         provider: str,
@@ -1964,13 +2046,10 @@ class QagentRepository:
             query = session.query(FullMarketScanJobRow)
             if provider:
                 query = query.filter(FullMarketScanJobRow.provider == provider)
-            row = (
-                query.order_by(
-                    FullMarketScanJobRow.created_at.desc(),
-                    FullMarketScanJobRow.job_id.desc(),
-                )
-                .first()
-            )
+            row = query.order_by(
+                FullMarketScanJobRow.created_at.desc(),
+                FullMarketScanJobRow.job_id.desc(),
+            ).first()
             if row is None:
                 return None
             return self._full_market_scan_job_from_row(row)
@@ -2102,26 +2181,16 @@ class QagentRepository:
                 "end_date": result.end_date,
                 "dataset_revision": result.dataset_revision,
                 "rebalance_step_sessions": result.rebalance_step_sessions,
-                "lookback_days": int(
-                    data_health.get("walk_forward_lookback_days", 0) or 0
-                ),
+                "lookback_days": int(data_health.get("walk_forward_lookback_days", 0) or 0),
                 "snapshot_count": len(result.snapshots),
                 "top_5_trade_count": result.top_5_metrics.trade_count,
                 "top_10_trade_count": result.top_10_metrics.trade_count,
                 "top_5_return_pct": result.top_5_metrics.total_return_pct,
                 "top_10_return_pct": result.top_10_metrics.total_return_pct,
-                "top_5_oos_trades": int(
-                    data_health.get("walk_forward_top_5_oos_trades", 0) or 0
-                ),
-                "top_10_oos_trades": int(
-                    data_health.get("walk_forward_top_10_oos_trades", 0) or 0
-                ),
-                "top_5_oos_gate": data_health.get(
-                    "walk_forward_top_5_oos_gate", "insufficient"
-                ),
-                "top_10_oos_gate": data_health.get(
-                    "walk_forward_top_10_oos_gate", "insufficient"
-                ),
+                "top_5_oos_trades": int(data_health.get("walk_forward_top_5_oos_trades", 0) or 0),
+                "top_10_oos_trades": int(data_health.get("walk_forward_top_10_oos_trades", 0) or 0),
+                "top_5_oos_gate": data_health.get("walk_forward_top_5_oos_gate", "insufficient"),
+                "top_10_oos_gate": data_health.get("walk_forward_top_10_oos_gate", "insufficient"),
                 "reproducibility_digest": result.reproducibility_digest,
                 "payload_json": json.dumps(payload, ensure_ascii=True, sort_keys=True),
                 "data_health": json.dumps(data_health, ensure_ascii=True, sort_keys=True),
@@ -2258,10 +2327,14 @@ class QagentRepository:
             query = session.query(WalkForwardJobRow)
             if provider:
                 query = query.filter(WalkForwardJobRow.provider == provider)
-            rows = query.order_by(
-                WalkForwardJobRow.created_at.desc(),
-                WalkForwardJobRow.job_id.desc(),
-            ).limit(bounded_limit).all()
+            rows = (
+                query.order_by(
+                    WalkForwardJobRow.created_at.desc(),
+                    WalkForwardJobRow.job_id.desc(),
+                )
+                .limit(bounded_limit)
+                .all()
+            )
             return [self._walk_forward_job_from_row(row) for row in rows]
 
     def get_walk_forward_run(self, run_id: str) -> WalkForwardRunRecord | None:
@@ -2280,10 +2353,14 @@ class QagentRepository:
             query = session.query(WalkForwardRunRow)
             if provider:
                 query = query.filter(WalkForwardRunRow.provider == provider)
-            rows = query.order_by(
-                WalkForwardRunRow.created_at.desc(),
-                WalkForwardRunRow.run_id.desc(),
-            ).limit(bounded_limit).all()
+            rows = (
+                query.order_by(
+                    WalkForwardRunRow.created_at.desc(),
+                    WalkForwardRunRow.run_id.desc(),
+                )
+                .limit(bounded_limit)
+                .all()
+            )
             return [self._walk_forward_run_from_row(row) for row in rows]
 
     def list_opportunity_snapshots(
@@ -2312,6 +2389,37 @@ class QagentRepository:
             )
             return [self._opportunity_snapshot_from_row(row) for row in rows]
 
+    def get_opportunity_snapshot(
+        self,
+        snapshot_id: str,
+    ) -> OpportunitySnapshotRecord | None:
+        with self.session_factory() as session:
+            row = session.get(OpportunitySnapshotRow, snapshot_id)
+            return self._opportunity_snapshot_from_row(row) if row is not None else None
+
+    def opportunity_snapshots_belong_to_provider(
+        self,
+        snapshot_ids: Sequence[str],
+        *,
+        provider: str,
+    ) -> bool:
+        unique_ids = sorted(set(snapshot_ids))
+        if len(unique_ids) != len(snapshot_ids):
+            return False
+        if not unique_ids:
+            return True
+        with self.session_factory() as session:
+            matching = (
+                session.query(func.count(OpportunitySnapshotRow.snapshot_id))
+                .join(ScanRunRow, OpportunitySnapshotRow.run_id == ScanRunRow.run_id)
+                .filter(
+                    OpportunitySnapshotRow.snapshot_id.in_(unique_ids),
+                    ScanRunRow.provider == provider,
+                )
+                .scalar()
+            )
+            return int(matching or 0) == len(unique_ids)
+
     def list_top_daily_opportunity_snapshots(
         self,
         *,
@@ -2320,7 +2428,7 @@ class QagentRepository:
         top_n: int = 5,
         provider: str | None = None,
     ) -> list[OpportunitySnapshotRecord]:
-        bounded_top_n = max(1, min(top_n, 20))
+        bounded_top_n = max(1, min(top_n, 500))
         with self.session_factory() as session:
             per_instrument = session.query(
                 OpportunitySnapshotRow.snapshot_id.label("snapshot_id"),
@@ -2414,15 +2522,12 @@ class QagentRepository:
             if provider:
                 query = query.join(ScanRunRow, OpportunitySnapshotRow.run_id == ScanRunRow.run_id)
                 query = query.filter(ScanRunRow.provider == provider)
-            rows = (
-                query.order_by(
-                    OpportunitySnapshotRow.rank_score.desc(),
-                    OpportunitySnapshotRow.score.desc(),
-                    OpportunitySnapshotRow.created_at.desc(),
-                    OpportunitySnapshotRow.snapshot_id.desc(),
-                )
-                .all()
-            )
+            rows = query.order_by(
+                OpportunitySnapshotRow.rank_score.desc(),
+                OpportunitySnapshotRow.score.desc(),
+                OpportunitySnapshotRow.created_at.desc(),
+                OpportunitySnapshotRow.snapshot_id.desc(),
+            ).all()
             snapshots: list[OpportunitySnapshotRecord] = []
             seen_instruments: set[str] = set()
             for row in rows:
@@ -2450,13 +2555,10 @@ class QagentRepository:
             if provider:
                 query = query.join(ScanRunRow, OpportunitySnapshotRow.run_id == ScanRunRow.run_id)
                 query = query.filter(ScanRunRow.provider == provider)
-            rows = (
-                query.order_by(
-                    OpportunitySnapshotRow.created_at.desc(),
-                    OpportunitySnapshotRow.snapshot_id.desc(),
-                )
-                .all()
-            )
+            rows = query.order_by(
+                OpportunitySnapshotRow.created_at.desc(),
+                OpportunitySnapshotRow.snapshot_id.desc(),
+            ).all()
             latest_by_card_id: dict[str, OpportunitySnapshotRecord] = {}
             for row in rows:
                 if row.card_id not in latest_by_card_id:
@@ -2472,7 +2574,9 @@ class QagentRepository:
         instrument_ids: list[str],
         provider: str | None = None,
     ) -> list[OpportunitySnapshotRecord]:
-        ordered_ids = [instrument_id for instrument_id in _dedupe_strings(instrument_ids) if instrument_id]
+        ordered_ids = [
+            instrument_id for instrument_id in _dedupe_strings(instrument_ids) if instrument_id
+        ]
         if not ordered_ids:
             return []
         with self.session_factory() as session:
@@ -2483,17 +2587,16 @@ class QagentRepository:
             if provider:
                 query = query.join(ScanRunRow, OpportunitySnapshotRow.run_id == ScanRunRow.run_id)
                 query = query.filter(ScanRunRow.provider == provider)
-            rows = (
-                query.order_by(
-                    OpportunitySnapshotRow.created_at.desc(),
-                    OpportunitySnapshotRow.snapshot_id.desc(),
-                )
-                .all()
-            )
+            rows = query.order_by(
+                OpportunitySnapshotRow.created_at.desc(),
+                OpportunitySnapshotRow.snapshot_id.desc(),
+            ).all()
             latest_by_instrument: dict[str, OpportunitySnapshotRecord] = {}
             for row in rows:
                 if row.instrument_id not in latest_by_instrument:
-                    latest_by_instrument[row.instrument_id] = self._opportunity_snapshot_from_row(row)
+                    latest_by_instrument[row.instrument_id] = self._opportunity_snapshot_from_row(
+                        row
+                    )
             return [
                 latest_by_instrument[instrument_id]
                 for instrument_id in ordered_ids
@@ -2528,8 +2631,7 @@ class QagentRepository:
             if provider:
                 query = query.filter(BriefRunRow.provider == provider)
             rows = (
-                query
-                .order_by(BriefRunRow.created_at.desc(), BriefRunRow.brief_id.desc())
+                query.order_by(BriefRunRow.created_at.desc(), BriefRunRow.brief_id.desc())
                 .limit(limit)
                 .all()
             )

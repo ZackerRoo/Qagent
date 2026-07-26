@@ -844,18 +844,25 @@ def test_full_market_batch_latest_result_refreshes_paper_account_health(
             "data_health": {"provider": "fixture", "paper_total": "0", "paper_closed": "0"},
         },
     )
+    repo.save_scan_run(
+        provider="fixture",
+        mode="fixture",
+        symbols=["US:TEST", "CN:000001"],
+        result=scan,
+    )
     client = TestClient(create_app())
+    card = scan.cards[0]
     created = client.post(
         "/api/paper-trades/from-opportunity",
         json={
-            "card_id": "card_paper_health",
+            "card_id": card.card_id,
             "provider": "fixture",
-            "instrument_id": "US:TEST",
-            "strategy_id": "breakout_volume_confirmation",
-            "trigger_price": "82.00",
-            "initial_stop": "78.72",
-            "target_1": "88.56",
-            "rank_score": 0.91,
+            "instrument_id": card.instrument_id,
+            "strategy_id": card.primary_strategy_id,
+            "trigger_price": str(card.entry_plan.trigger_price),
+            "initial_stop": str(card.exit_plan.initial_stop),
+            "target_1": str(card.exit_plan.target_1),
+            "rank_score": card.rank_score,
             "action": "watch_trigger",
             "risk_status": "clear",
         },

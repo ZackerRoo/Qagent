@@ -1,5 +1,7 @@
 from datetime import date
 
+import pytest
+
 from qagent.backtesting import experiment
 
 
@@ -36,7 +38,7 @@ def test_runtime_only_revision_change_keeps_walk_forward_resume_compatible(monke
     assert resumed.runtime_revisions == ["revision-a", "revision-b"]
 
 
-def test_v3_validation_identity_change_rejects_resume_but_reuses_raw_snapshots(
+def test_v3_validation_identity_change_rejects_resume_and_selection_snapshots(
     monkeypatch,
 ):
     monkeypatch.setattr(experiment, "_git_revision", lambda: ("revision-a", False))
@@ -76,16 +78,18 @@ def test_v3_validation_identity_change_rejects_resume_but_reuses_raw_snapshots(
             stored,
             changed,
         )
-        assert experiment.walk_forward_selection_manifests_semantically_compatible(
+        assert not experiment.walk_forward_selection_manifests_semantically_compatible(
             stored,
             changed,
         )
-        upgraded = experiment.upgrade_walk_forward_execution_manifest(
-            stored,
-            changed,
-        )
-        assert upgraded.experiment_digest == changed.experiment_digest
-        assert upgraded.runtime_revisions == ["revision-a"]
+        with pytest.raises(
+            ValueError,
+            match="selection definitions are not compatible",
+        ):
+            experiment.upgrade_walk_forward_execution_manifest(
+                stored,
+                changed,
+            )
 
 
 def test_v3_protocol_component_versions_are_frozen_into_manifest(monkeypatch):
@@ -112,7 +116,7 @@ def test_v3_protocol_component_versions_are_frozen_into_manifest(monkeypatch):
     assert experiment.walk_forward_manifest_digest_is_valid(manifest)
 
 
-def test_legacy_manifest_can_only_reuse_raw_selection_snapshots(monkeypatch):
+def test_legacy_manifest_cannot_reuse_ranking_v3_selection_snapshots(monkeypatch):
     monkeypatch.setattr(experiment, "_git_revision", lambda: ("revision-a", False))
     current = experiment.build_walk_forward_experiment_manifest(
         provider_mode="free",
@@ -126,12 +130,8 @@ def test_legacy_manifest_can_only_reuse_raw_selection_snapshots(monkeypatch):
         update={
             "schema_version": experiment.LEGACY_EXPERIMENT_SCHEMA_VERSION,
             "ranking_v3_protocol_digest": experiment.UNVERSIONED_V3_COMPONENT,
-            "candidate_ledger_implementation_version": (
-                experiment.UNVERSIONED_V3_COMPONENT
-            ),
-            "ranking_v3_statistics_implementation_version": (
-                experiment.UNVERSIONED_V3_COMPONENT
-            ),
+            "candidate_ledger_implementation_version": (experiment.UNVERSIONED_V3_COMPONENT),
+            "ranking_v3_statistics_implementation_version": (experiment.UNVERSIONED_V3_COMPONENT),
         }
     )
     legacy = legacy.model_copy(
@@ -147,15 +147,15 @@ def test_legacy_manifest_can_only_reuse_raw_selection_snapshots(monkeypatch):
         legacy,
         current,
     )
-    assert experiment.walk_forward_selection_manifests_semantically_compatible(
+    assert not experiment.walk_forward_selection_manifests_semantically_compatible(
         legacy,
         current,
     )
-
-    upgraded = experiment.upgrade_walk_forward_execution_manifest(legacy, current)
-    assert upgraded.schema_version == experiment.EXPERIMENT_SCHEMA_VERSION
-    assert upgraded.experiment_digest == current.experiment_digest
-    assert upgraded.runtime_revisions == ["revision-a"]
+    with pytest.raises(
+        ValueError,
+        match="selection definitions are not compatible",
+    ):
+        experiment.upgrade_walk_forward_execution_manifest(legacy, current)
 
 
 def test_semantic_change_rejects_walk_forward_resume(monkeypatch):

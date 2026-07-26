@@ -28,6 +28,7 @@ from qagent.backtesting.walk_forward import (
     _cross_section_coverage,
     _equal_weight_eligible_return,
     _equal_weight_eligible_return_from_stream,
+    _equal_weight_eligible_return_from_stream_with_coverage,
     _enforce_release_gate_on_positive_evidence,
     _execution_challenger_gate_outcome,
     _adjusted_prefilter_bars,
@@ -561,18 +562,10 @@ def test_factor_prefilter_matches_mixed_adjustment_semantics(tmp_path):
                 raw_high=Decimal("21"),
                 raw_low=Decimal("18"),
                 raw_close=Decimal("20"),
-                adjusted_open=(
-                    Decimal(adjusted[0]) if adjusted[0] is not None else None
-                ),
-                adjusted_high=(
-                    Decimal(adjusted[1]) if adjusted[1] is not None else None
-                ),
-                adjusted_low=(
-                    Decimal(adjusted[2]) if adjusted[2] is not None else None
-                ),
-                adjusted_close=(
-                    Decimal(adjusted[3]) if adjusted[3] is not None else None
-                ),
+                adjusted_open=(Decimal(adjusted[0]) if adjusted[0] is not None else None),
+                adjusted_high=(Decimal(adjusted[1]) if adjusted[1] is not None else None),
+                adjusted_low=(Decimal(adjusted[2]) if adjusted[2] is not None else None),
+                adjusted_close=(Decimal(adjusted[3]) if adjusted[3] is not None else None),
                 volume=Decimal("1000000"),
                 adjustment_factor=Decimal("0.5"),
                 adjustment_mode=adjustment_mode,
@@ -1049,6 +1042,24 @@ def test_streamed_equal_weight_benchmark_preserves_period_boundaries_and_members
     )
 
     assert result == 1.25
+
+
+def test_equal_weight_benchmark_reports_missing_member_coverage():
+    result = _equal_weight_eligible_return_from_stream_with_coverage(
+        [
+            ("CN:000001", date(2025, 1, 3), 100.0),
+            ("CN:000001", date(2025, 1, 8), 110.0),
+        ],
+        [
+            (date(2025, 1, 2), ["CN:000001", "CN:000002"]),
+        ],
+        end=date(2025, 1, 13),
+    )
+
+    assert result.return_pct == 10.0
+    assert result.expected_member_observations == 2
+    assert result.priced_member_observations == 1
+    assert result.member_coverage_ratio == 0.5
 
 
 def test_walk_forward_result_persists_and_round_trips_complete_payload(tmp_path):

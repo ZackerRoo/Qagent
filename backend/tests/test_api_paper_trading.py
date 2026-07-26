@@ -1,38 +1,499 @@
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+import json
+from types import SimpleNamespace
 
 import pandas as pd
 from fastapi.testclient import TestClient
 
 from qagent.app import create_app
 from qagent.api import routes
+from qagent.backtesting.experiment import build_walk_forward_experiment_manifest
+from qagent.backtesting.ranking_v3_evidence import (
+    RankingV3RepositoryEvidenceAuthority,
+    ranking_v3_data_revision,
+    ranking_v3_historical_gate_results,
+    ranking_v3_historical_source_digest,
+    ranking_v3_pbo_source_digest,
+)
+from qagent.backtesting.ranking_v3_forward import (
+    RankingV3ForwardEquityPoint,
+    RankingV3ForwardOutcomeInput,
+    RankingV3ForwardPortfolioInput,
+    RankingV3ForwardSelectionBatchInput,
+    RankingV3ForwardSessionInput,
+    RankingV3ForwardValidator,
+    RankingV3HistoricalGatesInput,
+    RankingV3PBOInput,
+    RankingV3ShadowCandidateInput,
+    encode_forward_session_batch_key,
+    forward_candidate_selection_digest,
+    forward_candidate_source_digest,
+    stable_digest,
+)
+from qagent.backtesting.ranking_v3_production import (
+    RankingV3ProductionBatchInput,
+    RankingV3ProductionIdentity,
+    RankingV3ProductionReleaseValidation,
+    RankingV3ProductionSelectionItem,
+    RankingV3ProductionSelectionValidation,
+    RankingV3ProductionSelectionService,
+)
+from qagent.backtesting.ranking_v3_protocol import (
+    RANKING_V3_MODEL_VERSION,
+    build_ranking_v3_protocol,
+)
+from qagent.backtesting.ranking_v3_pbo import (
+    RankingV3DatedModelReturn,
+    evaluate_ranking_v3_cscv_pbo,
+)
+from qagent.jobs.daily_scan import run_daily_scan
+from qagent.market.calendars import trading_day_offset
+from qagent.paper_trading.admission import evaluate_paper_snapshot_admission
+from qagent.paper_trading.engine import seed_paper_trades_from_snapshots
+from qagent.providers.fixtures import FixtureMarketDataProvider
+from qagent.storage.ranking_v3_forward import RankingV3ForwardRepository
+from qagent.storage.ranking_v3_production import RankingV3ProductionRepository
+from qagent.storage.repository import QagentRepository
+from qagent.storage.tables import OpportunitySnapshotRow
+
+
+def _persist_authoritative_opportunities(
+    *,
+    provider: str,
+    cards: list[tuple[str, str]],
+):
+    scan = run_daily_scan(["US:TEST"], FixtureMarketDataProvider())
+    template = scan.cards[0]
+    template_item = scan.items[0]
+    authoritative_cards = [
+        template.model_copy(
+            update={
+                "card_id": card_id,
+                "instrument_id": instrument_id,
+            }
+        )
+        for card_id, instrument_id in cards
+    ]
+    authoritative_items = [
+        template_item.model_copy(update={"instrument_id": instrument_id})
+        for _, instrument_id in cards
+    ]
+    routes._repo().save_scan_run(
+        provider=provider,
+        mode=provider,
+        symbols=[instrument_id for _, instrument_id in cards],
+        result=scan.model_copy(
+            update={
+                "cards": authoritative_cards,
+                "items": authoritative_items,
+            }
+        ),
+    )
+    return authoritative_cards
+
+
+def _opportunity_request(card, *, provider: str) -> dict[str, object]:
+    return {
+        "card_id": card.card_id,
+        "provider": provider,
+        "instrument_id": card.instrument_id,
+        "strategy_id": card.primary_strategy_id,
+        "trigger_price": str(card.entry_plan.trigger_price),
+        "initial_stop": str(card.exit_plan.initial_stop),
+        "target_1": str(card.exit_plan.target_1),
+        "rank_score": card.rank_score,
+        "action": "watch_trigger",
+        "risk_status": "clear",
+    }
+
+
+def _patch_authoritative_card(
+    *,
+    provider: str,
+    card_id: str,
+    updates: dict[str, object],
+) -> None:
+    repo = routes._repo()
+    snapshot = repo.list_latest_opportunity_snapshots_by_card_ids(
+        [card_id],
+        provider=provider,
+    )[0]
+    with repo.session_factory() as session:
+        row = session.get(OpportunitySnapshotRow, snapshot.snapshot_id)
+        payload = json.loads(row.card_json)
+        payload.update(updates)
+        row.card_json = json.dumps(payload, sort_keys=True)
+        session.commit()
+
+
+def _released_ranking_v3_run(*, provider: str, run_id: str):
+    protocol = build_ranking_v3_protocol()
+    pbo_evidence = _authoritative_pbo_evidence()
+    now = datetime(2026, 7, 26, 8, 0, tzinfo=timezone.utc)
+    experiment_manifest = build_walk_forward_experiment_manifest(
+        provider_mode=provider,
+        dataset_revision=42,
+        start_date=date(2025, 1, 2),
+        end_date=date(2026, 7, 24),
+        rebalance_step_sessions=10,
+        lookback_days=365,
+    )
+    return SimpleNamespace(
+        run_id=run_id,
+        provider=provider,
+        status="succeeded",
+        dataset_revision=42,
+        reproducibility_digest="d" * 64,
+        updated_at=now,
+        payload={
+            "experiment_manifest": experiment_manifest.model_dump(mode="json"),
+            "ranking_v3": {
+                "model_version": RANKING_V3_MODEL_VERSION,
+                "forward_scoring_artifact_digest": "a" * 64,
+                "status": "forward_validation_pending",
+                "deployment_scope": "shadow_only",
+                "official_release_allowed": False,
+                "protocol": protocol.model_dump(mode="json"),
+                "historical_validation": {
+                    "status": "insufficient",
+                    "statistical_gate_status": "pass",
+                },
+                "criteria": [
+                    {"key": "historical", "status": "pass"},
+                    {"key": "positive_audit_return", "status": "pass"},
+                    {"key": "pbo", "status": "insufficient"},
+                    {"key": "prospective_shadow", "status": "insufficient"},
+                ],
+                "pbo_evidence": pbo_evidence,
+            },
+        },
+    )
+
+
+def _authoritative_pbo_evidence() -> dict[str, object]:
+    start = date(2025, 1, 2)
+    dates = [start + timedelta(days=index) for index in range(24)]
+    values = {
+        "ranking_v3_full": [0.025 + (index % 3) * 0.001 for index in range(24)],
+        "static_balanced": [0.012 + (index % 2) * 0.001 for index in range(24)],
+        "constraint_matched_baseline": [0.004 - (index % 4) * 0.001 for index in range(24)],
+    }
+    matrix = {
+        model_id: [
+            RankingV3DatedModelReturn(rebalance_date=rebalance_date, net_return=returns[index])
+            for index, rebalance_date in enumerate(dates)
+        ]
+        for model_id, returns in values.items()
+    }
+    result = evaluate_ranking_v3_cscv_pbo(
+        matrix,
+        block_count=6,
+        purge_rebalance_cohorts=2,
+    )
+    assert result["rejection_reason"] is None
+    return {
+        **result,
+        "model_return_matrix": {
+            model_id: [
+                {
+                    "rebalance_date": item.rebalance_date.isoformat(),
+                    "net_return": item.net_return,
+                }
+                for item in rows
+            ]
+            for model_id, rows in matrix.items()
+        },
+    }
+
+
+def _persist_ranking_v3_release_proof(
+    repo,
+    run,
+    *,
+    approved_snapshot_id: str,
+    approved_instrument_id: str,
+):
+    protocol = build_ranking_v3_protocol()
+    repository = RankingV3ForwardRepository(repo.session_factory)
+
+    class _AuthoritativePortfolio:
+        def recompute_portfolio(self, _identity, _protocol, _snapshot, submitted):
+            return submitted
+
+    validator = RankingV3ForwardValidator(
+        repository,
+        protocol,
+        evidence_authority=RankingV3RepositoryEvidenceAuthority(repo),
+        portfolio_authority=_AuthoritativePortfolio(),
+        now=lambda: run.updated_at,
+    )
+    data_revision = ranking_v3_data_revision(run)
+    validator.ensure_ledger(data_revision)
+    first_candidate_binding = None
+    recorded_candidates = []
+    for index in range(20):
+        session_date = trading_day_offset(protocol.prospective_shadow_start, index)
+        candidates = ()
+        if index < 10:
+            candidate_id = f"api-proof-candidate-{index}"
+            source_snapshot_id = approved_snapshot_id if index == 0 else f"api-proof-source-{index}"
+            instrument_id = approved_instrument_id if index == 0 else f"CN:{index + 1:06d}"
+            candidate = RankingV3ShadowCandidateInput(
+                candidate_id=candidate_id,
+                source_snapshot_id=source_snapshot_id,
+                session_date=session_date,
+                maturity_session_date=trading_day_offset(session_date, 1),
+                instrument_id=instrument_id,
+                strategy_id="ranking-v3",
+                rank=1,
+                score=Decimal("0.8"),
+                benchmark_id=protocol.benchmark_definition.forward_release_benchmark_id,
+                data_revision=data_revision,
+                selection_digest="0" * 64,
+            )
+            candidates = (candidate,)
+        candidate_snapshot_digest = stable_digest(
+            {
+                "session_date": session_date,
+                "candidates": [
+                    item.model_dump(mode="json", exclude={"selection_digest"})
+                    for item in candidates
+                ],
+            }
+        )
+        selection_batch_digest = stable_digest(
+            {
+                "candidate_snapshot_digest": candidate_snapshot_digest,
+                "selected": [
+                    item.model_dump(mode="json", exclude={"selection_digest"})
+                    for item in candidates
+                ],
+            }
+        )
+        frozen_candidates = tuple(
+            item.model_copy(
+                update={
+                    "selection_digest": forward_candidate_selection_digest(
+                        selection_batch_digest=selection_batch_digest,
+                        source_snapshot_id=item.source_snapshot_id,
+                        instrument_id=item.instrument_id,
+                        strategy_id=item.strategy_id,
+                        rank=item.rank,
+                        score=item.score,
+                    )
+                }
+            )
+            for item in candidates
+        )
+        validator.freeze_selection_batch(
+            RankingV3ForwardSelectionBatchInput.create(
+                session_date=session_date,
+                benchmark_id=protocol.benchmark_definition.forward_release_benchmark_id,
+                data_revision=data_revision,
+                candidate_snapshot_digest=candidate_snapshot_digest,
+                selection_batch_digest=selection_batch_digest,
+                candidates=frozen_candidates,
+            ),
+            idempotency_key=f"api-proof-selection-batch-{index}",
+        )
+        validator.record_session(
+            RankingV3ForwardSessionInput(
+                session_date=session_date,
+                benchmark_id=protocol.benchmark_definition.forward_release_benchmark_id,
+                benchmark_return_pct=Decimal("0.2"),
+                portfolio_equity=Decimal("100") + Decimal(index),
+                stress_portfolio_equity=Decimal("100") + Decimal(index) * Decimal("0.8"),
+                benchmark_equity=Decimal("100") + Decimal(index) * Decimal("0.2"),
+                data_revision=data_revision,
+                candidate_snapshot_digest=candidate_snapshot_digest,
+                selection_batch_digest=selection_batch_digest,
+                selected_candidate_count=len(frozen_candidates),
+            ),
+            idempotency_key=encode_forward_session_batch_key(
+                session_date=session_date,
+                candidate_snapshot_digest=candidate_snapshot_digest,
+                selection_batch_digest=selection_batch_digest,
+                selected_candidate_count=len(frozen_candidates),
+            ),
+        )
+        for frozen_candidate in frozen_candidates:
+            validator.record_candidate(
+                frozen_candidate,
+                idempotency_key=f"api-proof-candidate-{index}",
+            )
+            recorded_candidates.append(frozen_candidate)
+            if index == 0:
+                first_candidate_binding = {
+                    "candidate_id": frozen_candidate.candidate_id,
+                    "source_snapshot_id": frozen_candidate.source_snapshot_id,
+                    "selection_digest": frozen_candidate.selection_digest,
+                }
+    for index, candidate in enumerate(recorded_candidates):
+        validator.finalize_candidate(
+            candidate.candidate_id,
+            RankingV3ForwardOutcomeInput(
+                status="completed",
+                resolved_on=candidate.maturity_session_date,
+                gross_return_pct=Decimal("2"),
+                transaction_cost_pct=Decimal("0.1"),
+                stress_transaction_cost_pct=Decimal("0.2"),
+                benchmark_return_pct=Decimal("0.5"),
+                max_drawdown_pct=Decimal("-1"),
+                data_revision=data_revision,
+            ),
+            idempotency_key=f"api-proof-outcome-{index}",
+        )
+    validator.record_historical_gates(
+        RankingV3HistoricalGatesInput(
+            validation_run_id=run.run_id,
+            data_revision=data_revision,
+            gate_results=ranking_v3_historical_gate_results(run),
+            source_proof_digest=ranking_v3_historical_source_digest(run),
+            source_generated_at=run.updated_at,
+        ),
+        idempotency_key="api-proof-history",
+    )
+    pbo_evidence = run.payload["ranking_v3"]["pbo_evidence"]
+    validator.record_pbo(
+        RankingV3PBOInput(
+            validation_run_id=run.run_id,
+            data_revision=data_revision,
+            probability=Decimal(str(pbo_evidence["probability"])),
+            matrix_digest=str(pbo_evidence["matrix_digest"]),
+            fold_count=int(pbo_evidence["fold_count"]),
+            method=str(pbo_evidence["method"]),
+            source_proof_digest=ranking_v3_pbo_source_digest(run),
+            source_generated_at=run.updated_at,
+        ),
+        idempotency_key="api-proof-pbo",
+    )
+    as_of_session_date = trading_day_offset(protocol.prospective_shadow_start, 19)
+    equity_curve = (
+        RankingV3ForwardEquityPoint(
+            date=as_of_session_date - timedelta(days=2),
+            equity=Decimal("100000"),
+            cash=Decimal("100000"),
+            market_value=Decimal("0"),
+            open_positions=0,
+            drawdown_pct=Decimal("0"),
+        ),
+        RankingV3ForwardEquityPoint(
+            date=as_of_session_date - timedelta(days=1),
+            equity=Decimal("98000"),
+            cash=Decimal("98000"),
+            market_value=Decimal("0"),
+            open_positions=0,
+            drawdown_pct=Decimal("-2"),
+        ),
+        RankingV3ForwardEquityPoint(
+            date=as_of_session_date,
+            equity=Decimal("103000"),
+            cash=Decimal("103000"),
+            market_value=Decimal("0"),
+            open_positions=0,
+            drawdown_pct=Decimal("0"),
+        ),
+    )
+    stress_equity_curve = (
+        RankingV3ForwardEquityPoint(
+            date=as_of_session_date - timedelta(days=2),
+            equity=Decimal("100000"),
+            cash=Decimal("100000"),
+            market_value=Decimal("0"),
+            open_positions=0,
+            drawdown_pct=Decimal("0"),
+        ),
+        RankingV3ForwardEquityPoint(
+            date=as_of_session_date - timedelta(days=1),
+            equity=Decimal("97000"),
+            cash=Decimal("97000"),
+            market_value=Decimal("0"),
+            open_positions=0,
+            drawdown_pct=Decimal("-3"),
+        ),
+        RankingV3ForwardEquityPoint(
+            date=as_of_session_date,
+            equity=Decimal("102000"),
+            cash=Decimal("102000"),
+            market_value=Decimal("0"),
+            open_positions=0,
+            drawdown_pct=Decimal("0"),
+        ),
+    )
+    snapshot = repository.load_snapshot(validator.identity)
+    assert snapshot is not None
+    portfolio = RankingV3ForwardPortfolioInput(
+        validation_run_id=run.run_id,
+        data_revision=data_revision,
+        as_of_session_date=as_of_session_date,
+        benchmark_id=protocol.benchmark_definition.forward_release_benchmark_id,
+        provider=run.provider,
+        execution_profile="api-test-capital-constrained",
+        initial_equity=Decimal("100000"),
+        final_equity=Decimal("103000"),
+        stress_final_equity=Decimal("102000"),
+        benchmark_final_equity=Decimal("101000"),
+        net_return_pct=Decimal("3"),
+        stress_net_return_pct=Decimal("2"),
+        benchmark_return_pct=Decimal("1"),
+        benchmark_excess_pct=Decimal("2"),
+        stress_benchmark_excess_pct=Decimal("1"),
+        maximum_drawdown_pct=Decimal("-2"),
+        stress_maximum_drawdown_pct=Decimal("-3"),
+        completed_trade_count=10,
+        equity_curve=equity_curve,
+        stress_equity_curve=stress_equity_curve,
+        equity_curve_digest=stable_digest([item.model_dump(mode="json") for item in equity_curve]),
+        stress_equity_curve_digest=stable_digest(
+            [item.model_dump(mode="json") for item in stress_equity_curve]
+        ),
+        final_open_positions=0,
+        stress_final_open_positions=0,
+        source_candidate_digest=forward_candidate_source_digest(snapshot.candidates),
+    )
+    validator.record_portfolio(
+        portfolio,
+        idempotency_key="api-proof-portfolio",
+    )
+    result = validator.evaluate()
+    assert result.release_proof is not None
+    assert first_candidate_binding is not None
+    return result.release_proof, first_candidate_binding
 
 
 def test_paper_trade_from_opportunity_creates_once_and_rejects_blocked(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-from-card.db'}")
     client = TestClient(create_app())
-    opportunity = {
-        "card_id": "card_test_0001",
-        "provider": "fixture",
-        "instrument_id": "US:TEST",
-        "strategy_id": "breakout_volume_confirmation",
-        "trigger_price": "82.00",
-        "initial_stop": "78.72",
-        "target_1": "88.56",
-        "rank_score": 0.91,
-        "action": "watch_trigger",
-        "risk_status": "clear",
-    }
+    first_card, duplicate_card, blocked_card = _persist_authoritative_opportunities(
+        provider="fixture",
+        cards=[
+            ("card_test_0001", "US:TEST"),
+            ("card_test_0002", "US:TEST"),
+            ("card_blocked", "US:TEST"),
+        ],
+    )
+    _patch_authoritative_card(
+        provider="fixture",
+        card_id=blocked_card.card_id,
+        updates={
+            "decision": {
+                **blocked_card.decision.model_dump(mode="json"),
+                "risk_status": "blocked",
+            }
+        },
+    )
+    opportunity = _opportunity_request(first_card, provider="fixture")
 
     created = client.post("/api/paper-trades/from-opportunity", json=opportunity)
     duplicate = client.post("/api/paper-trades/from-opportunity", json=opportunity)
     duplicate_instrument = client.post(
         "/api/paper-trades/from-opportunity",
-        json={**opportunity, "card_id": "card_test_0002"},
+        json=_opportunity_request(duplicate_card, provider="fixture"),
     )
     blocked = client.post(
         "/api/paper-trades/from-opportunity",
-        json={**opportunity, "card_id": "card_blocked", "risk_status": "blocked"},
+        json=_opportunity_request(blocked_card, provider="fixture"),
     )
     listed = client.get("/api/paper-trades")
 
@@ -55,6 +516,406 @@ def test_paper_trade_from_opportunity_creates_once_and_rejects_blocked(tmp_path,
     assert events.json()["events"][0]["event_type"] == "created"
 
 
+def test_paper_trade_from_opportunity_requires_authoritative_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'paper-forged-card.db'}",
+    )
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/paper-trades/from-opportunity",
+        json={
+            "card_id": "forged-card",
+            "provider": "fixture",
+            "instrument_id": "US:FAKE",
+            "strategy_id": "trend_momentum_stage2",
+            "trigger_price": "1.00",
+            "initial_stop": "0.90",
+            "target_1": "1.20",
+            "rank_score": 1.0,
+            "action": "watch_trigger",
+            "risk_status": "clear",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "authoritative opportunity snapshot not found"
+    assert client.get("/api/paper-trades").json()["summary"]["total"] == 0
+
+
+def test_paper_trade_from_opportunity_rejects_client_price_and_strategy_spoofing(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'paper-spoofed-fields.db'}",
+    )
+    client = TestClient(create_app())
+    (card,) = _persist_authoritative_opportunities(
+        provider="fixture",
+        cards=[("authoritative-card", "US:TEST")],
+    )
+    request = _opportunity_request(card, provider="fixture")
+
+    price_spoof = client.post(
+        "/api/paper-trades/from-opportunity",
+        json={**request, "trigger_price": "0.01"},
+    )
+    strategy_spoof = client.post(
+        "/api/paper-trades/from-opportunity",
+        json={**request, "strategy_id": "forged_strategy"},
+    )
+    instrument_spoof = client.post(
+        "/api/paper-trades/from-opportunity",
+        json={**request, "instrument_id": "US:FAKE"},
+    )
+
+    assert price_spoof.status_code == 400
+    assert "trigger_price" in price_spoof.json()["detail"]
+    assert strategy_spoof.status_code == 400
+    assert "strategy_id" in strategy_spoof.json()["detail"]
+    assert instrument_spoof.status_code == 400
+    assert "instrument_id" in instrument_spoof.json()["detail"]
+    assert client.get("/api/paper-trades").json()["summary"]["total"] == 0
+
+
+def test_unreleased_ranking_v3_is_fail_closed_for_manual_and_seed(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'paper-v3-shadow.db'}",
+    )
+    client = TestClient(create_app())
+    (card,) = _persist_authoritative_opportunities(
+        provider="fixture",
+        cards=[("ranking-v3-shadow", "US:TEST")],
+    )
+    _patch_authoritative_card(
+        provider="fixture",
+        card_id=card.card_id,
+        updates={
+            "ranking_v3": {
+                "selection_source": "ranking_v3",
+                "model_version": RANKING_V3_MODEL_VERSION,
+                "deployment_scope": "shadow_only",
+                "official_release_allowed": False,
+            }
+        },
+    )
+
+    manual = client.post(
+        "/api/paper-trades/from-opportunity",
+        json=_opportunity_request(card, provider="fixture"),
+    )
+    seeded = client.post("/api/paper-trades/seed?provider=fixture&limit=5")
+
+    assert manual.status_code == 400
+    assert "approved release" in manual.json()["detail"]
+    assert seeded.status_code == 200
+    assert seeded.json()["created"] == 0
+    assert client.get("/api/paper-trades").json()["summary"]["total"] == 0
+
+
+def test_seed_api_passes_authoritative_repository_to_low_level_admission(monkeypatch):
+    authoritative_repo = object()
+    paper_repo = SimpleNamespace(
+        list_trades=lambda **_kwargs: [],
+        get_account_settings=lambda: SimpleNamespace(max_positions=10),
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(routes, "_repo", lambda: authoritative_repo)
+    monkeypatch.setattr(routes, "_paper_repo", lambda: paper_repo)
+    monkeypatch.setattr(
+        routes,
+        "_paper_seed_snapshots_from_recommendations",
+        lambda repo, **_kwargs: ([], {}) if repo is authoritative_repo else None,
+    )
+
+    def fake_seed(repo, snapshots, **kwargs):
+        captured["paper_repo"] = repo
+        captured["snapshots"] = snapshots
+        captured.update(kwargs)
+        return SimpleNamespace(
+            model_dump=lambda **_kwargs: {"scanned": 0, "created": 0, "skipped": 0}
+        )
+
+    monkeypatch.setattr(routes, "seed_paper_trades_from_snapshots", fake_seed)
+
+    result = routes.seed_paper_trades(provider="fixture", limit=5)
+
+    assert result["created"] == 0
+    assert captured["paper_repo"] is paper_repo
+    assert captured["admission_repo"] is authoritative_repo
+
+
+def test_cached_unreleased_ranking_v3_does_not_fall_back_to_legacy_seed(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'paper-v3-cache-fallback.db'}",
+    )
+    client = TestClient(create_app())
+    legacy_card, v3_card = _persist_authoritative_opportunities(
+        provider="fixture",
+        cards=[
+            ("legacy-seed-card", "US:LEGACY"),
+            ("ranking-v3-cache-card", "US:V3"),
+        ],
+    )
+    _patch_authoritative_card(
+        provider="fixture",
+        card_id=v3_card.card_id,
+        updates={
+            "ranking_v3": {
+                "selection_source": "ranking_v3",
+                "model_version": RANKING_V3_MODEL_VERSION,
+                "deployment_scope": "shadow_only",
+                "official_release_allowed": False,
+            }
+        },
+    )
+    repo = routes._repo()
+    authoritative_v3 = repo.list_latest_opportunity_snapshots_by_card_ids(
+        [v3_card.card_id],
+        provider="fixture",
+    )[0]
+    repo.save_scan_result_cache(
+        cache_key=routes.full_market_batch_cache_key("fixture", True),
+        provider="fixture",
+        mode="full_market_batch",
+        symbols=[legacy_card.instrument_id, v3_card.instrument_id],
+        payload={
+            "cards": [authoritative_v3.card],
+            "benchmark_trend": {
+                "state": "risk_on",
+                "entry_allowed": True,
+                "reason": "test",
+            },
+        },
+    )
+
+    seeded = client.post("/api/paper-trades/seed?provider=fixture&limit=5")
+
+    assert seeded.status_code == 200
+    assert seeded.json()["created"] == 0
+    assert client.get("/api/paper-trades").json()["summary"]["total"] == 0
+
+
+def test_ranking_v3_requires_matching_authoritative_release_proof(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'paper-v3-proof.db'}",
+    )
+    TestClient(create_app())
+    production_card, forward_only_card, tagged_only_card = _persist_authoritative_opportunities(
+        provider="fixture",
+        cards=[
+            ("ranking-v3-production", "US:PRODUCTION"),
+            ("ranking-v3-forward-only", "US:FORWARD"),
+            ("ranking-v3-tagged-only", "US:TAGGED"),
+        ],
+    )
+    run_id = "walk-forward-release-1"
+    released_run = _released_ranking_v3_run(provider="fixture", run_id=run_id)
+    monkeypatch.setattr(
+        QagentRepository,
+        "get_walk_forward_run",
+        lambda _repo, requested_run_id: (
+            released_run if requested_run_id == released_run.run_id else None
+        ),
+    )
+    repo = routes._repo()
+    initial_snapshots = repo.list_latest_opportunity_snapshots_by_card_ids(
+        [
+            production_card.card_id,
+            forward_only_card.card_id,
+            tagged_only_card.card_id,
+        ],
+        provider="fixture",
+    )
+    initial_by_card = {snapshot.card_id: snapshot for snapshot in initial_snapshots}
+    production_date = trading_day_offset(
+        build_ranking_v3_protocol().prospective_shadow_start,
+        20,
+    )
+    with repo.session_factory() as session:
+        for snapshot in initial_snapshots:
+            row = session.get(OpportunitySnapshotRow, snapshot.snapshot_id)
+            assert row is not None
+            row.signal_date = production_date
+        session.commit()
+
+    ranking_v3_metadata = {
+        "selection_source": "ranking_v3",
+        "model_version": RANKING_V3_MODEL_VERSION,
+        "deployment_scope": "paper",
+        "official_release_allowed": True,
+    }
+    for card in (production_card, forward_only_card, tagged_only_card):
+        _patch_authoritative_card(
+            provider="fixture",
+            card_id=card.card_id,
+            updates={"ranking_v3": ranking_v3_metadata},
+        )
+
+    snapshots = repo.list_latest_opportunity_snapshots_by_card_ids(
+        [
+            production_card.card_id,
+            forward_only_card.card_id,
+            tagged_only_card.card_id,
+        ],
+        provider="fixture",
+    )
+    snapshots_by_card = {snapshot.card_id: snapshot for snapshot in snapshots}
+    production_snapshot = snapshots_by_card[production_card.card_id]
+    forward_only_snapshot = snapshots_by_card[forward_only_card.card_id]
+    tagged_only_snapshot = snapshots_by_card[tagged_only_card.card_id]
+    assert {snapshot.snapshot_id for snapshot in snapshots} == {
+        snapshot.snapshot_id for snapshot in initial_by_card.values()
+    }
+
+    proof, _forward_candidate_binding = _persist_ranking_v3_release_proof(
+        repo,
+        released_run,
+        approved_snapshot_id=forward_only_snapshot.snapshot_id,
+        approved_instrument_id=forward_only_snapshot.instrument_id,
+    )
+
+    identity = RankingV3ProductionIdentity.from_release_proof(
+        proof,
+        validation_run_id=released_run.run_id,
+    )
+
+    class _ApprovedRelease:
+        def validate_current_release(self, requested_identity):
+            return RankingV3ProductionReleaseValidation(
+                valid=requested_identity == identity,
+                current=requested_identity == identity,
+                status="approved" if requested_identity == identity else "missing",
+                reason="authoritative test release",
+                release_proof_digest=proof.proof_digest,
+                validation_run_id=released_run.run_id,
+                data_revision=proof.data_revision,
+                protocol_identity=proof.identity,
+                approved_at=proof.generated_at,
+            )
+
+    production_selection = RankingV3ProductionSelectionItem.create(
+        candidate_id="production-candidate-1",
+        instrument_id=production_snapshot.instrument_id,
+        source_snapshot_id=production_snapshot.snapshot_id,
+        strategy_id=production_snapshot.primary_strategy_id or "",
+        rank=1,
+        score=Decimal("0.9"),
+    )
+    production_batch_input = RankingV3ProductionBatchInput.create(
+        session_date=production_date,
+        candidate_snapshot_digest=stable_digest(
+            {
+                "session_date": production_date,
+                "snapshot_id": production_snapshot.snapshot_id,
+                "instrument_id": production_snapshot.instrument_id,
+                "strategy_id": production_snapshot.primary_strategy_id,
+            }
+        ),
+        selections=(production_selection,),
+    )
+
+    class _ApprovedSelection:
+        def validate_selection(self, requested_identity, requested_batch):
+            allowed = (
+                requested_identity == identity
+                and requested_batch == production_batch_input
+            )
+            return RankingV3ProductionSelectionValidation(
+                authorized=allowed,
+                reason="authoritative test selection",
+                identity_digest=identity.identity_digest if allowed else None,
+                selection_batch_digest=(
+                    production_batch_input.selection_batch_digest if allowed else None
+                ),
+            )
+
+    production_service = RankingV3ProductionSelectionService(
+        RankingV3ProductionRepository(repo.session_factory),
+        _ApprovedRelease(),
+        selection_authority=_ApprovedSelection(),
+        now=lambda: datetime.combine(
+            production_date,
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        ),
+    )
+    production_batch = production_service.record_batch(
+        identity,
+        production_batch_input,
+        idempotency_key="api-production-batch",
+    )
+
+    accepted = evaluate_paper_snapshot_admission(
+        repo,
+        production_snapshot,
+        provider="fixture",
+        mode="automatic",
+    )
+    forward_only = evaluate_paper_snapshot_admission(
+        repo,
+        forward_only_snapshot,
+        provider="fixture",
+        mode="automatic",
+    )
+    tagged_only = evaluate_paper_snapshot_admission(
+        repo,
+        tagged_only_snapshot,
+        provider="fixture",
+        mode="automatic",
+    )
+    manual_tagged_only = evaluate_paper_snapshot_admission(
+        repo,
+        tagged_only_snapshot,
+        provider="fixture",
+        mode="manual",
+    )
+
+    assert accepted.eligible is True
+    assert accepted.admission_source == "ranking_v3_production"
+    assert accepted.production_identity_digest == identity.identity_digest
+    assert accepted.production_batch_fact_digest == production_batch.fact_digest
+    assert accepted.production_selection_item_digest == production_selection.item_digest
+    assert accepted.release_proof_digest == proof.proof_digest
+    assert forward_only.eligible is False
+    assert "not an exact member" in (forward_only.reason or "")
+    assert tagged_only.eligible is False
+    assert "not an exact member" in (tagged_only.reason or "")
+    assert manual_tagged_only.eligible is False
+    assert "not an exact member" in (manual_tagged_only.reason or "")
+
+    seed_result = seed_paper_trades_from_snapshots(
+        routes._paper_repo(),
+        [production_snapshot, forward_only_snapshot, tagged_only_snapshot],
+        provider="fixture",
+        max_created=3,
+        max_active_trades=3,
+        admission_repo=repo,
+        admission_mode="automatic",
+    )
+    trades = routes._paper_repo().list_trades(limit=10, provider="fixture")
+
+    assert seed_result.scanned == 3
+    assert seed_result.created == 1
+    assert seed_result.skipped == 2
+    assert len(trades) == 1
+    assert trades[0].source_snapshot_id == production_snapshot.snapshot_id
+    assert trades[0].admission_source == "ranking_v3_production"
+    assert trades[0].production_identity_digest == identity.identity_digest
+    assert trades[0].production_batch_fact_digest == production_batch.fact_digest
+    assert trades[0].production_selection_item_digest == production_selection.item_digest
+
+
 def test_paper_trade_events_return_not_found_for_unknown_trade(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-events.db'}")
     client = TestClient(create_app())
@@ -74,18 +935,14 @@ def test_paper_trade_from_opportunity_rejects_recently_invalidated_price_data(
         f"sqlite:///{tmp_path / 'paper-invalidated-card.db'}",
     )
     client = TestClient(create_app())
-    payload = {
-        "card_id": "card_invalidated_0001",
-        "provider": "free",
-        "instrument_id": "CN:159516",
-        "strategy_id": "trend_momentum_stage2",
-        "trigger_price": "1.75",
-        "initial_stop": "1.68",
-        "target_1": "1.90",
-        "rank_score": 0.82,
-        "action": "watch_trigger",
-        "risk_status": "clear",
-    }
+    first_card, second_card = _persist_authoritative_opportunities(
+        provider="free",
+        cards=[
+            ("card_invalidated_0001", "CN:159516"),
+            ("card_invalidated_0002", "CN:159516"),
+        ],
+    )
+    payload = _opportunity_request(first_card, provider="free")
     created = client.post("/api/paper-trades/from-opportunity", json=payload)
     trade_id = created.json()["trade"]["trade_id"]
     routes._paper_repo().update_trade(
@@ -99,7 +956,7 @@ def test_paper_trade_from_opportunity_rejects_recently_invalidated_price_data(
 
     response = client.post(
         "/api/paper-trades/from-opportunity",
-        json={**payload, "card_id": "card_invalidated_0002"},
+        json=_opportunity_request(second_card, provider="free"),
     )
 
     assert response.status_code == 400
@@ -125,24 +982,21 @@ def test_paper_trade_from_opportunity_enforces_account_capacity(tmp_path, monkey
             "take_profit_pct": "50",
         },
     )
-    base = {
-        "provider": "fixture",
-        "strategy_id": "trend_momentum_stage2",
-        "trigger_price": "12.00",
-        "initial_stop": "11.40",
-        "target_1": "13.20",
-        "rank_score": 0.82,
-        "action": "watch_trigger",
-        "risk_status": "clear",
-    }
+    first_card, second_card = _persist_authoritative_opportunities(
+        provider="fixture",
+        cards=[
+            ("capacity_1", "US:ONE"),
+            ("capacity_2", "US:TWO"),
+        ],
+    )
 
     first = client.post(
         "/api/paper-trades/from-opportunity",
-        json={**base, "card_id": "capacity_1", "instrument_id": "US:ONE"},
+        json=_opportunity_request(first_card, provider="fixture"),
     )
     second = client.post(
         "/api/paper-trades/from-opportunity",
-        json={**base, "card_id": "capacity_2", "instrument_id": "US:TWO"},
+        json=_opportunity_request(second_card, provider="fixture"),
     )
 
     assert first.status_code == 200
@@ -189,18 +1043,11 @@ def test_paper_candidate_pool_blocks_recently_invalidated_price_basis(tmp_path, 
 def test_paper_trade_api_deletes_trade(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-delete.db'}")
     client = TestClient(create_app())
-    opportunity = {
-        "card_id": "card_delete_0001",
-        "provider": "fixture",
-        "instrument_id": "US:TEST",
-        "strategy_id": "breakout_volume_confirmation",
-        "trigger_price": "82.00",
-        "initial_stop": "78.72",
-        "target_1": "88.56",
-        "rank_score": 0.91,
-        "action": "watch_trigger",
-        "risk_status": "clear",
-    }
+    (card,) = _persist_authoritative_opportunities(
+        provider="fixture",
+        cards=[("card_delete_0001", "US:TEST")],
+    )
+    opportunity = _opportunity_request(card, provider="fixture")
 
     created = client.post("/api/paper-trades/from-opportunity", json=opportunity)
     trade_id = created.json()["trade"]["trade_id"]
@@ -223,23 +1070,21 @@ def test_paper_trade_api_deletes_trade(tmp_path, monkeypatch):
 def test_paper_trade_api_filters_by_provider(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-provider-filter.db'}")
     client = TestClient(create_app())
-    base = {
-        "instrument_id": "CN:000001",
-        "strategy_id": "trend_momentum",
-        "trigger_price": "12.00",
-        "initial_stop": "11.40",
-        "target_1": "13.20",
-        "rank_score": 0.82,
-        "action": "watch_trigger",
-        "risk_status": "clear",
-    }
-    client.post(
-        "/api/paper-trades/from-opportunity",
-        json={**base, "card_id": "card_filter_free", "provider": "free"},
+    (free_card,) = _persist_authoritative_opportunities(
+        provider="free",
+        cards=[("card_filter_free", "CN:000001")],
+    )
+    (fixture_card,) = _persist_authoritative_opportunities(
+        provider="fixture",
+        cards=[("card_filter_fixture", "CN:000001")],
     )
     client.post(
         "/api/paper-trades/from-opportunity",
-        json={**base, "card_id": "card_filter_fixture", "provider": "fixture"},
+        json=_opportunity_request(free_card, provider="free"),
+    )
+    client.post(
+        "/api/paper-trades/from-opportunity",
+        json=_opportunity_request(fixture_card, provider="fixture"),
     )
 
     listed = client.get("/api/paper-trades?provider=free")
@@ -258,20 +1103,13 @@ def test_paper_trade_api_filters_by_provider(tmp_path, monkeypatch):
 def test_paper_trade_session_start_resets_records_and_saves_rules(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-session.db'}")
     client = TestClient(create_app())
+    (card,) = _persist_authoritative_opportunities(
+        provider="fixture",
+        cards=[("card_session_0001", "US:TEST")],
+    )
     client.post(
         "/api/paper-trades/from-opportunity",
-        json={
-            "card_id": "card_session_0001",
-            "provider": "fixture",
-            "instrument_id": "US:TEST",
-            "strategy_id": "breakout_volume_confirmation",
-            "trigger_price": "82.00",
-            "initial_stop": "78.72",
-            "target_1": "88.56",
-            "rank_score": 0.91,
-            "action": "watch_trigger",
-            "risk_status": "clear",
-        },
+        json=_opportunity_request(card, provider="fixture"),
     )
 
     started = client.post(
@@ -349,20 +1187,13 @@ def test_paper_trade_daily_report_uses_cached_benchmarks_only(tmp_path, monkeypa
         "QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-daily-report-cache.db'}"
     )
     client = TestClient(create_app())
+    (card,) = _persist_authoritative_opportunities(
+        provider="free",
+        cards=[("card_report_cache_0001", "CN:000001")],
+    )
     client.post(
         "/api/paper-trades/from-opportunity",
-        json={
-            "card_id": "card_report_cache_0001",
-            "provider": "free",
-            "instrument_id": "CN:000001",
-            "strategy_id": "trend_momentum",
-            "trigger_price": "12.00",
-            "initial_stop": "11.40",
-            "target_1": "13.20",
-            "rank_score": 0.82,
-            "action": "watch_trigger",
-            "risk_status": "clear",
-        },
+        json=_opportunity_request(card, provider="free"),
     )
 
     def fail_live_provider(*_args, **_kwargs):
@@ -577,20 +1408,13 @@ def test_paper_trade_api_returns_flow_ledger_with_costs(tmp_path, monkeypatch):
 def test_agent_answers_from_paper_trade_context(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-agent.db'}")
     client = TestClient(create_app())
+    (card,) = _persist_authoritative_opportunities(
+        provider="fixture",
+        cards=[("card_agent_0001", "US:TEST")],
+    )
     client.post(
         "/api/paper-trades/from-opportunity",
-        json={
-            "card_id": "card_agent_0001",
-            "provider": "fixture",
-            "instrument_id": "US:TEST",
-            "strategy_id": "breakout_volume_confirmation",
-            "trigger_price": "82.00",
-            "initial_stop": "78.72",
-            "target_1": "88.56",
-            "rank_score": 0.91,
-            "action": "watch_trigger",
-            "risk_status": "clear",
-        },
+        json=_opportunity_request(card, provider="fixture"),
     )
 
     response = client.post(
