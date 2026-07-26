@@ -1906,7 +1906,11 @@ function WalkForwardValidationCenter({
     if (gate === "insufficient_fundamental_coverage") return zh ? "财务覆盖不足" : "Fundamentals low";
     return zh ? "样本不足" : "Samples low";
   };
+  const activeJob = job && ["queued", "running"].includes(job.status) ? job : undefined;
   const runStatusLabel = (status: string) => {
+    if (activeJob && run && status === "succeeded") {
+      return zh ? "上一次已完成" : "Previous completed";
+    }
     if (!zh) return status;
     return ({ succeeded: "已完成", running: "运行中", queued: "等待中", failed: "失败" } as Record<string, string>)[status] ?? status;
   };
@@ -1928,7 +1932,6 @@ function WalkForwardValidationCenter({
     if (!zh) return verdict ?? "insufficient";
     return ({ positive: "正向", negative: "负向", mixed: "观察", insufficient: "样本不足" } as Record<string, string>)[verdict ?? "insufficient"] ?? verdict;
   };
-  const activeJob = job && ["queued", "running"].includes(job.status) ? job : undefined;
   const isFullMarketBackfill = backfillJob?.data_health.backfill_scope === "full-a-share";
   const pipelineGate = backfillJob?.data_health.validation_pipeline_gate;
   const pipelineState = backfillJob?.data_health.validation_pipeline_state;
@@ -2137,6 +2140,31 @@ function WalkForwardValidationCenter({
         </div>
       ) : (
         <div className="stack">
+          {activeJob ? (
+            <div className="walk-forward-result-boundary" role="status" aria-live="polite">
+              <div>
+                <strong>
+                  {zh
+                    ? "以下为上一次已完成验证结果"
+                    : "Results below are from the previous completed validation"}
+                </strong>
+                <span>
+                  {activeJob.status === "queued"
+                    ? (zh
+                      ? `当前新验证 ${activeJob.processed_snapshots}/${activeJob.total_snapshots} 已排队，运行完成后才替换结论。`
+                      : `The new validation is queued at ${activeJob.processed_snapshots}/${activeJob.total_snapshots}; it will replace these conclusions only after completion.`)
+                    : (zh
+                      ? `当前新验证 ${activeJob.processed_snapshots}/${activeJob.total_snapshots} 正在运行，完成后才替换结论。`
+                      : `The new validation is running at ${activeJob.processed_snapshots}/${activeJob.total_snapshots}; it will replace these conclusions only after completion.`)}
+                </span>
+              </div>
+              <span className={`status status-${activeJob.status}`}>
+                {activeJob.status === "queued"
+                  ? (zh ? "新验证等待中" : "New validation queued")
+                  : (zh ? "新验证运行中" : "New validation running")}
+              </span>
+            </div>
+          ) : null}
           <div className="walk-forward-run-meta">
             <span>{run.start_date} - {run.end_date}</span>
             <span>{zh ? "数据版本" : "Dataset"} {run.dataset_revision}</span>
