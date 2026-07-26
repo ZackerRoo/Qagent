@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import ValidationError
@@ -10,6 +11,8 @@ from pydantic import ValidationError
 from qagent.backtesting.ranking_v3_forward import RankingV3ForwardIdentity, stable_digest
 from qagent.backtesting.ranking_v3_production import (
     InMemoryRankingV3ProductionStore,
+    LEGACY_PRODUCTION_BATCH_SCHEMA_VERSION,
+    LEGACY_PRODUCTION_SELECTION_SCHEMA_VERSION,
     PRODUCTION_BATCH_ATTESTATION_KIND,
     RankingV3ProductionAuthorizationError,
     RankingV3ProductionBatch,
@@ -25,6 +28,8 @@ from qagent.backtesting.ranking_v3_production import (
     production_identity_digest,
     production_selection_batch_digest,
     production_selection_item_digest,
+    require_current_ranking_v3_production_batch,
+    require_ranking_v3_production_batch_integrity,
 )
 from qagent.security.ranking_v3_attestation import RankingV3Attestor
 
@@ -36,6 +41,7 @@ APPROVED_AT = datetime(2026, 7, 28, 8, 0, tzinfo=timezone.utc)
 RECORDED_AT = datetime(2026, 7, 29, 8, 30, tzinfo=timezone.utc)
 ATTESTATION_KEY = b"p" * 32
 WRONG_ATTESTATION_KEY = b"w" * 32
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 class _ReleaseAuthority:
@@ -123,6 +129,11 @@ def _selection(
         strategy_id="ranking-v3",
         rank=rank,
         score=Decimal("0.9") - Decimal(rank) / Decimal("100"),
+        source_rank_score=Decimal("0.9") - Decimal(rank) / Decimal("100"),
+        trigger_price=Decimal("10"),
+        initial_stop=Decimal("9"),
+        target_1=Decimal("12"),
+        allocation_multiplier=Decimal("1"),
     )
 
 
@@ -132,10 +143,19 @@ def _batch(
     candidate_snapshot_digest: str = "c" * 64,
     selections: tuple[RankingV3ProductionSelectionItem, ...] | None = None,
 ) -> RankingV3ProductionBatchInput:
+    started_at = datetime.combine(session_date, time(10, 0), tzinfo=SHANGHAI)
+    completed_at = datetime.combine(session_date, time(15, 30), tzinfo=SHANGHAI)
+    scan_recorded_at = datetime.combine(session_date, time(15, 31), tzinfo=SHANGHAI)
+    recorded_at = datetime.combine(session_date, time(16, 30), tzinfo=SHANGHAI)
     return RankingV3ProductionBatchInput.create(
         session_date=session_date,
         candidate_snapshot_digest=candidate_snapshot_digest,
-        selections=selections or (_selection(1), _selection(2)),
+        selections=selections if selections is not None else (_selection(1), _selection(2)),
+        source_scan_run_id=f"scan-{session_date.isoformat()}",
+        source_scan_started_at=started_at,
+        source_scan_completed_at=completed_at,
+        source_scan_recorded_at=scan_recorded_at,
+        recorded_at=recorded_at,
     )
 
 
@@ -370,6 +390,11 @@ def test_rank_instrument_and_source_snapshot_must_be_unique():
                     strategy_id="ranking-v3",
                     rank=1,
                     score=Decimal("0.88"),
+                    source_rank_score=Decimal("0.88"),
+                    trigger_price=Decimal("10"),
+                    initial_stop=Decimal("9"),
+                    target_1=Decimal("12"),
+                    allocation_multiplier=Decimal("1"),
                 ),
             )
         )
@@ -438,6 +463,134 @@ def test_every_owned_digest_is_canonical_and_tamper_evident():
         RankingV3ProductionBatch.model_validate(persisted_payload)
 
 
+def test_recorded_at_is_part_of_the_signed_batch_payload():
+    identity = _identity()
+    service, _, _ = _service(identity)
+    persisted = service.record_batch(
+        identity,
+        _batch(),
+        idempotency_key="recorded-at-signed",
+    )
+    tampered = persisted.model_dump(mode="python")
+    tampered["recorded_at"] = persisted.recorded_at + timedelta(minutes=1)
+
+    with pytest.raises(ValidationError, match="selection batch digest is invalid"):
+        RankingV3ProductionBatch.model_validate(tampered)
+
+
+def test_execution_plan_fields_are_selection_digest_protected():
+    selection = _selection(1)
+    for field, value in (
+        ("trigger_price", Decimal("10.5")),
+        ("initial_stop", Decimal("8.5")),
+        ("target_1", Decimal("13")),
+        ("allocation_multiplier", Decimal("0.5")),
+        ("source_rank_score", Decimal("0.5")),
+    ):
+        payload = selection.model_dump(mode="python")
+        payload[field] = value
+        with pytest.raises(ValidationError, match="selection item digest is invalid"):
+            RankingV3ProductionSelectionItem.model_validate(payload)
+
+
+def test_historical_session_cannot_be_backfilled_with_a_late_server_clock():
+    identity = _identity()
+    attestor = RankingV3Attestor(ATTESTATION_KEY)
+    service = RankingV3ProductionSelectionService(
+        InMemoryRankingV3ProductionStore(attestor=attestor),
+        _ReleaseAuthority(identity),
+        selection_authority=_SelectionAuthority(),
+        attestor=attestor,
+        now=lambda: RECORDED_AT + timedelta(days=1),
+    )
+
+    with pytest.raises(
+        RankingV3ProductionAuthorizationError,
+        match="does not match the server clock",
+    ):
+        service.record_batch(identity, _batch(), idempotency_key="late-backfill")
+
+
+def test_scan_and_batch_timestamps_must_be_ordered_inside_signal_day():
+    valid = _batch()
+
+    with pytest.raises(ValidationError, match="timestamps must be ordered"):
+        RankingV3ProductionBatchInput.create(
+            session_date=valid.session_date,
+            candidate_snapshot_digest=valid.candidate_snapshot_digest,
+            selections=valid.selections,
+            source_scan_run_id=valid.source_scan_run_id or "",
+            source_scan_started_at=valid.source_scan_started_at,
+            source_scan_completed_at=valid.recorded_at,
+            source_scan_recorded_at=valid.source_scan_recorded_at,
+            recorded_at=valid.recorded_at,
+        )
+
+    with pytest.raises(ValidationError, match="signal-day window"):
+        RankingV3ProductionBatchInput.create(
+            session_date=valid.session_date,
+            candidate_snapshot_digest=valid.candidate_snapshot_digest,
+            selections=valid.selections,
+            source_scan_run_id=valid.source_scan_run_id or "",
+            source_scan_started_at=valid.source_scan_started_at - timedelta(days=1),
+            source_scan_completed_at=valid.source_scan_completed_at,
+            source_scan_recorded_at=valid.source_scan_recorded_at,
+            recorded_at=valid.recorded_at,
+        )
+
+
+def test_legacy_v1_batch_is_readable_but_cannot_be_formally_admitted():
+    identity = _identity()
+    selection_payload = {
+        "schema_version": LEGACY_PRODUCTION_SELECTION_SCHEMA_VERSION,
+        "candidate_id": "legacy-candidate",
+        "instrument_id": "CN:000001",
+        "source_snapshot_id": "legacy-snapshot",
+        "strategy_id": "ranking-v3",
+        "rank": 1,
+        "score": Decimal("0.8"),
+    }
+    legacy_selection = RankingV3ProductionSelectionItem(
+        **selection_payload,
+        item_digest=stable_digest(selection_payload),
+    )
+    batch_payload = {
+        "schema_version": LEGACY_PRODUCTION_BATCH_SCHEMA_VERSION,
+        "session_date": date(2026, 7, 29),
+        "candidate_snapshot_digest": "c" * 64,
+        "selected_count": 1,
+        "selections": (legacy_selection,),
+    }
+    legacy_input = RankingV3ProductionBatchInput(
+        **batch_payload,
+        selection_batch_digest=stable_digest(batch_payload),
+    )
+    fact_digest = production_batch_fact_digest(identity, legacy_input)
+    legacy_batch = RankingV3ProductionBatch(
+        **(
+            legacy_input.model_dump(mode="python")
+            | {"recorded_at": RECORDED_AT}
+        ),
+        identity=identity,
+        fact_digest=fact_digest,
+        attestation=RankingV3Attestor(ATTESTATION_KEY).sign(
+            PRODUCTION_BATCH_ATTESTATION_KIND,
+            fact_digest,
+        ),
+        idempotency_key="legacy-readable",
+    )
+
+    require_ranking_v3_production_batch_integrity(
+        legacy_batch,
+        RankingV3Attestor(ATTESTATION_KEY),
+    )
+    with pytest.raises(
+        RankingV3ProductionAuthorizationError,
+        match="legacy production batch is readable",
+    ):
+        require_current_ranking_v3_production_batch(legacy_batch)
+
+
 def test_fact_digest_excludes_attestation_but_forged_signature_is_rejected():
     identity = _identity()
     item = _batch()
@@ -476,7 +629,6 @@ def test_forged_recomputed_fact_digest_without_server_key_is_rejected():
         fact_digest=forged_digest,
         attestation=forged_attestation,
         idempotency_key="forged",
-        recorded_at=RECORDED_AT,
     )
 
     with pytest.raises(
@@ -535,11 +687,7 @@ def test_wrong_attestation_key_rejects_every_service_read_and_replay():
 
 
 def test_empty_selection_batch_is_valid_and_content_addressed():
-    item = RankingV3ProductionBatchInput.create(
-        session_date=date(2026, 7, 29),
-        candidate_snapshot_digest="c" * 64,
-        selections=(),
-    )
+    item = _batch(selections=())
 
     assert item.selected_count == 0
     assert item.selection_batch_digest == production_selection_batch_digest(item)

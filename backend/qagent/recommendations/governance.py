@@ -236,9 +236,11 @@ def apply_final_recommendation_policy(
     """Apply every dynamic adjustment and final strategy gate exactly once per card."""
 
     context = governance_context or StrategyGovernanceContext()
-    apply_recommendation_feedback_calibration(cards, recommendation_feedback_center)
-    apply_recommendation_feedback_quality_gate(cards, recommendation_feedback_center)
-    apply_paper_trading_feedback(cards, paper_report)
+    official_calibration = _official_calibration_or_none(recommendation_feedback_center)
+    official_paper_report = _official_paper_report_or_none(paper_report)
+    apply_recommendation_feedback_calibration(cards, official_calibration)
+    apply_recommendation_feedback_quality_gate(cards, official_calibration)
+    apply_paper_trading_feedback(cards, official_paper_report)
     apply_walk_forward_validation_feedback(cards, walk_forward_validation)
 
     audits: list[CardStrategyGovernance] = []
@@ -263,13 +265,47 @@ def apply_final_recommendation_policy(
     health = {
         **recommendation_feedback_data_health(cards),
         **paper_trading_feedback_data_health(cards),
+        "recommendation_feedback_scope": (
+            "ranking_v3_production" if official_calibration is not None else "no_official_samples"
+        ),
+        "paper_feedback_scope": (
+            "ranking_v3_production" if official_paper_report is not None else "no_official_samples"
+        ),
         **walk_forward_feedback_data_health(cards, walk_forward_validation),
         **recommendation_policy_data_health(audits),
     }
     health["paper_feedback_source"] = (
-        "paper_daily_report" if paper_report is not None else "unavailable"
+        "paper_daily_report" if official_paper_report is not None else "unavailable"
     )
     return FinalRecommendationPolicyResult(cards=cards, audits=audits, data_health=health)
+
+
+def _official_calibration_or_none(center: object | None) -> object | None:
+    health = getattr(center, "data_health", None)
+    if not isinstance(health, Mapping):
+        return None
+    if health.get("recommendation_calibration_scope") != "ranking_v3_production":
+        return None
+    if health.get("recommendation_calibration_fail_closed") != "true":
+        return None
+    try:
+        return center if int(str(health.get("recommendation_calibration_source_official", "0"))) > 0 else None
+    except ValueError:
+        return None
+
+
+def _official_paper_report_or_none(report: object | None) -> object | None:
+    health = getattr(report, "data_health", None)
+    if not isinstance(health, Mapping):
+        return None
+    if health.get("paper_reporting_scope") != "ranking_v3_production":
+        return None
+    if health.get("paper_reporting_fail_closed") != "true":
+        return None
+    try:
+        return report if int(str(health.get("paper_reporting_official", "0"))) > 0 else None
+    except ValueError:
+        return None
 
 
 def recommendation_policy_data_health(

@@ -868,7 +868,10 @@ def test_full_market_batch_latest_result_refreshes_paper_account_health(
         },
     )
     assert created.status_code == 200
-    assert client.get("/api/paper-trades").json()["summary"]["total"] == 1
+    assert (
+        client.get("/api/paper-trades?reporting_scope=legacy").json()["summary"]["total"]
+        == 1
+    )
 
     response = client.get(
         "/api/full-market/batch-scan/latest-result?provider=fixture&include_etfs=true"
@@ -876,11 +879,11 @@ def test_full_market_batch_latest_result_refreshes_paper_account_health(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["data_health"]["paper_total"] == "1"
+    assert body["data_health"]["paper_total"] == "0"
     paper_check = next(
         item for item in body["operational_readiness_center"]["checks"] if item["key"] == "paper_account"
     )
-    assert "模拟记录 1 条" in paper_check["evidence"]
+    assert "模拟记录 0 条" in paper_check["evidence"]
 
 
 def test_daily_brief_fast_mode_sets_snapshot_controls():

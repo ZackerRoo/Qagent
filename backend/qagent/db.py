@@ -92,7 +92,7 @@ class SQLiteScaledDecimal(TypeDecorator[Decimal]):
 _schema_lock = Lock()
 _initialized_urls: set[str] = set()
 _RANKING_V3_FORWARD_TRIGGER_VERSION = 2
-_RANKING_V3_PRODUCTION_TRIGGER_VERSION = 1
+_RANKING_V3_PRODUCTION_TRIGGER_VERSION = 2
 
 
 def create_db_engine(database_url: str | None = None):
@@ -181,6 +181,15 @@ def _apply_additive_migrations(engine: Engine) -> None:
         _add_missing_columns(
             connection,
             inspector,
+            "scan_runs",
+            {
+                "started_at": "DATETIME",
+                "completed_at": "DATETIME",
+            },
+        )
+        _add_missing_columns(
+            connection,
+            inspector,
             "paper_trades",
             {
                 "allocation_multiplier": "NUMERIC(8, 4) NOT NULL DEFAULT 1.0",
@@ -189,6 +198,18 @@ def _apply_additive_migrations(engine: Engine) -> None:
                 "production_batch_fact_digest": "VARCHAR(64)",
                 "production_selection_item_digest": "VARCHAR(64)",
                 "release_proof_digest": "VARCHAR(64)",
+            },
+        )
+        _add_missing_columns(
+            connection,
+            inspector,
+            "ranking_v3_production_selections",
+            {
+                "source_rank_score": "NUMERIC(8, 4)",
+                "trigger_price": "NUMERIC(18, 4)",
+                "initial_stop": "NUMERIC(18, 4)",
+                "target_1": "NUMERIC(18, 4)",
+                "allocation_multiplier": "NUMERIC(8, 4)",
             },
         )
         _backfill_paper_trade_admission_source(connection)
@@ -597,6 +618,7 @@ def _drop_ranking_v3_production_triggers(connection) -> None:
             "SELECT name FROM sqlite_master WHERE type = 'trigger' AND ("
             "name LIKE 'trg_ranking_v3_production_%' "
             "OR name LIKE 'trg_opportunity_snapshots_production_reference_%' "
+            "OR name LIKE 'trg_scan_runs_production_reference_%' "
             "OR name LIKE 'trg_paper_trades_ranking_v3_production_%'"
             ")"
         )
@@ -605,6 +627,7 @@ def _drop_ranking_v3_production_triggers(connection) -> None:
         if not (
             name.startswith("trg_ranking_v3_production_")
             or name.startswith("trg_opportunity_snapshots_production_reference_")
+            or name.startswith("trg_scan_runs_production_reference_")
             or name.startswith("trg_paper_trades_ranking_v3_production_")
         ):
             continue
@@ -920,6 +943,11 @@ def _create_referenced_opportunity_snapshot_triggers(connection) -> None:
 
 
 def _create_immutable_ranking_v3_production_triggers(connection) -> None:
+    from qagent.backtesting.ranking_v3_production import (
+        PRODUCTION_BATCH_SCHEMA_VERSION,
+        PRODUCTION_SELECTION_SCHEMA_VERSION,
+    )
+
     inspector = inspect(connection)
     batch_table = "ranking_v3_production_batches"
     selection_table = "ranking_v3_production_selections"
@@ -964,7 +992,25 @@ def _create_immutable_ranking_v3_production_triggers(connection) -> None:
                 f"SELECT 1 FROM {snapshot_table} AS snapshot "
                 "WHERE snapshot.snapshot_id = NEW.source_snapshot_id "
                 "AND snapshot.instrument_id = NEW.instrument_id "
-                "AND snapshot.primary_strategy_id = NEW.strategy_id"
+                "AND snapshot.primary_strategy_id = NEW.strategy_id "
+                "AND snapshot.trigger_price = NEW.trigger_price "
+                "AND snapshot.initial_stop IS NEW.initial_stop "
+                "AND snapshot.target_1 IS NEW.target_1 "
+                "AND snapshot.rank_score = NEW.source_rank_score "
+                "AND NEW.trigger_price IS NOT NULL "
+                "AND NEW.allocation_multiplier IS NOT NULL "
+                "AND NEW.allocation_multiplier > 0 "
+                "AND NEW.allocation_multiplier <= 1 "
+                "AND json_valid(NEW.payload_json) = 1 "
+                "AND json_extract(NEW.payload_json, '$.schema_version') "
+                f"= '{PRODUCTION_SELECTION_SCHEMA_VERSION}' "
+                "AND EXISTS ("
+                f"SELECT 1 FROM {batch_table} AS batch "
+                "WHERE batch.fact_digest = NEW.batch_fact_digest "
+                "AND json_valid(batch.payload_json) = 1 "
+                "AND json_extract(batch.payload_json, '$.source_scan_run_id') "
+                "= snapshot.run_id"
+                ")"
                 ") "
                 "BEGIN "
                 "SELECT RAISE(ABORT, "
@@ -986,6 +1032,32 @@ def _create_immutable_ranking_v3_production_triggers(connection) -> None:
                     "SELECT RAISE(ABORT, "
                     "'opportunity snapshot referenced by Ranking V3 production "
                     "selection is immutable'); "
+                    "END"
+                )
+            )
+
+    scan_table = "scan_runs"
+    if (
+        inspector.has_table(scan_table)
+        and inspector.has_table(snapshot_table)
+        and inspector.has_table(selection_table)
+        and inspector.has_table(batch_table)
+    ):
+        reference_check = (
+            f"EXISTS (SELECT 1 FROM {selection_table} AS selection "
+            f"JOIN {snapshot_table} AS snapshot "
+            "ON snapshot.snapshot_id = selection.source_snapshot_id "
+            "WHERE snapshot.run_id = OLD.run_id)"
+        )
+        for operation in ("UPDATE", "DELETE"):
+            connection.execute(
+                text(
+                    f"CREATE TRIGGER trg_{scan_table}_production_reference_{operation.lower()} "
+                    f"BEFORE {operation} ON {scan_table} "
+                    f"WHEN {reference_check} "
+                    "BEGIN "
+                    "SELECT RAISE(ABORT, "
+                    "'scan run referenced by Ranking V3 production selection is immutable'); "
                     "END"
                 )
             )
@@ -1044,10 +1116,21 @@ def _create_immutable_ranking_v3_production_triggers(connection) -> None:
             "AND batch.identity_digest = NEW.production_identity_digest "
             "AND batch.release_proof_digest = NEW.release_proof_digest "
             "AND batch.session_date = NEW.signal_date "
+            "AND json_valid(batch.payload_json) = 1 "
+            "AND json_extract(batch.payload_json, '$.schema_version') "
+            f"= '{PRODUCTION_BATCH_SCHEMA_VERSION}' "
             "AND selection.item_digest = NEW.production_selection_item_digest "
             "AND selection.source_snapshot_id = NEW.source_snapshot_id "
             "AND selection.instrument_id = NEW.instrument_id "
-            "AND selection.strategy_id = NEW.strategy_id"
+            "AND selection.strategy_id = NEW.strategy_id "
+            "AND selection.trigger_price = NEW.trigger_price "
+            "AND selection.initial_stop IS NEW.initial_stop "
+            "AND selection.target_1 IS NEW.target_1 "
+            "AND selection.source_rank_score = NEW.rank_score "
+            "AND selection.allocation_multiplier = NEW.allocation_multiplier "
+            "AND json_valid(selection.payload_json) = 1 "
+            "AND json_extract(selection.payload_json, '$.schema_version') "
+            f"= '{PRODUCTION_SELECTION_SCHEMA_VERSION}'"
             ") "
             f"OR {source_plan_invalid} "
             "OR NEW.allocation_multiplier <= 0 "

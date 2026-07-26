@@ -534,7 +534,9 @@ class ScanRunRow(Base):
     scanned: Mapped[int] = mapped_column(Integer, default=0)
     cards: Mapped[int] = mapped_column(Integer, default=0)
     data_health: Mapped[str] = mapped_column(Text, default="{}")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
 
 
 class ScanResultCacheRow(Base):
@@ -976,6 +978,23 @@ class RankingV3ProductionSelectionRow(Base):
     strategy_id: Mapped[str] = mapped_column(String(96), index=True)
     rank: Mapped[int] = mapped_column(Integer)
     score: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(20, 10))
+    source_rank_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    trigger_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 4),
+        nullable=True,
+    )
+    initial_stop: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 4),
+        nullable=True,
+    )
+    target_1: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 4),
+        nullable=True,
+    )
+    allocation_multiplier: Mapped[Decimal | None] = mapped_column(
+        Numeric(8, 4),
+        nullable=True,
+    )
     payload_json: Mapped[str] = mapped_column(Text)
     recorded_at: Mapped[datetime] = mapped_column(UTCDateTime())
 

@@ -405,6 +405,8 @@ def _insert_scan(
                 scanned=scanned_count,
                 cards=len(cards),
                 data_health=json.dumps(data_health, sort_keys=True),
+                started_at=created_at - timedelta(minutes=2),
+                completed_at=created_at - timedelta(minutes=1),
                 created_at=created_at,
             )
         )
@@ -442,6 +444,14 @@ def _production_row_counts(harness: _Harness) -> tuple[int, int]:
         )
 
 
+def _production_now(session_date: date) -> datetime:
+    return datetime.combine(
+        session_date,
+        datetime.min.time(),
+        tzinfo=timezone.utc,
+    ) + timedelta(hours=2)
+
+
 def test_unapproved_release_blocks_production_generation(
     tmp_path,
     authoritative_payload,
@@ -459,6 +469,7 @@ def test_unapproved_release_blocks_production_generation(
         run_ranking_v3_production_day(
             harness.repository,
             session_date=PRODUCTION_DATE,
+            now=lambda: _production_now(PRODUCTION_DATE),
         )
 
     assert _production_row_counts(harness) == (0, 0)
@@ -482,6 +493,7 @@ def test_approved_release_freezes_one_complete_scan_and_exact_selection_facts(
     result = run_ranking_v3_production_day(
         harness.repository,
         session_date=PRODUCTION_DATE,
+        now=lambda: _production_now(PRODUCTION_DATE),
     )
 
     assert result.state == "recorded"
@@ -556,6 +568,7 @@ def test_production_continues_after_forward_collection_window_ends(
     result = run_ranking_v3_production_day(
         harness.repository,
         session_date=late_date,
+        now=lambda: _production_now(late_date),
     )
 
     assert result.session_date == late_date
@@ -580,6 +593,7 @@ def test_complete_scan_with_no_candidates_freezes_an_empty_batch(
     result = run_ranking_v3_production_day(
         harness.repository,
         session_date=PRODUCTION_DATE,
+        now=lambda: _production_now(PRODUCTION_DATE),
     )
 
     assert result.source_scan_run_id == scan_run_id
@@ -605,6 +619,7 @@ def test_new_or_changed_same_day_scan_conflicts_with_frozen_batch(
     first = run_ranking_v3_production_day(
         harness.repository,
         session_date=PRODUCTION_DATE,
+        now=lambda: _production_now(PRODUCTION_DATE),
     )
     _insert_scan(
         harness,
@@ -621,6 +636,7 @@ def test_new_or_changed_same_day_scan_conflicts_with_frozen_batch(
         run_ranking_v3_production_day(
             harness.repository,
             session_date=PRODUCTION_DATE,
+            now=lambda: _production_now(PRODUCTION_DATE),
         )
 
     production = RankingV3ProductionRepository(harness.session_factory)
@@ -649,10 +665,12 @@ def test_exact_same_day_replay_is_idempotent(
     first = run_ranking_v3_production_day(
         harness.repository,
         session_date=PRODUCTION_DATE,
+        now=lambda: _production_now(PRODUCTION_DATE),
     )
     replayed = run_ranking_v3_production_day(
         harness.repository,
         session_date=PRODUCTION_DATE,
+        now=lambda: _production_now(PRODUCTION_DATE),
     )
 
     assert replayed == first
@@ -684,6 +702,7 @@ def test_missing_or_small_scan_waits_without_freezing_production(
         run_ranking_v3_production_day(
             harness.repository,
             session_date=PRODUCTION_DATE,
+            now=lambda: _production_now(PRODUCTION_DATE),
         )
 
     assert _production_row_counts(harness) == (0, 0)

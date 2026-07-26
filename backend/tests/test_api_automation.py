@@ -341,7 +341,9 @@ def test_automation_scheduler_seeds_latest_signal_day_not_latest_inserted_rows(
     assert body["last_result"]["paper_created"] == 2
     assert body["last_result"]["data_health"]["automation_seed_latest_signal_date"] == "2026-07-01"
 
-    trades = client.get("/api/paper-trades?limit=10").json()["trades"]
+    trades = client.get(
+        "/api/paper-trades?limit=10&reporting_scope=legacy"
+    ).json()["trades"]
     assert [trade["instrument_id"] for trade in trades] == ["CN:588190", "CN:588850"]
     assert {trade["signal_date"] for trade in trades} == {"2026-07-01"}
 
@@ -476,7 +478,9 @@ def test_automation_scheduler_seeds_from_cached_recommendation_order(tmp_path, m
         == "latest_recommendation_cache"
     )
 
-    trades = client.get("/api/paper-trades?limit=10").json()["trades"]
+    trades = client.get(
+        "/api/paper-trades?limit=10&reporting_scope=legacy"
+    ).json()["trades"]
     assert {trade["instrument_id"] for trade in trades} == {"CN:002747", "CN:688052"}
     assert {trade["signal_date"] for trade in trades} == {
         datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
@@ -697,7 +701,9 @@ def test_automation_scheduler_backfills_closed_paper_slot_from_deeper_cache_cand
 
     assert second.status_code == 200
     assert second.json()["last_result"]["paper_created"] == 1
-    trades = client.get("/api/paper-trades?limit=10").json()["trades"]
+    trades = client.get(
+        "/api/paper-trades?limit=10&reporting_scope=legacy"
+    ).json()["trades"]
     active = {trade["instrument_id"] for trade in trades if trade["status"] in {"pending", "open"}}
     assert active == {"CN:688002", "CN:688003"}
 
@@ -795,7 +801,9 @@ def test_automation_scheduler_allows_one_recovery_probe_when_ledger_drawdown_is_
     assert health["paper_risk_gate_action"] == "throttle_new_entries"
     assert health["paper_risk_gate_max_new_entries"] == "1"
     assert health["paper_risk_gate_position_size_multiplier"] == "0.3500"
-    trades = client.get("/api/paper-trades?provider=free&limit=20").json()["trades"]
+    trades = client.get(
+        "/api/paper-trades?provider=free&limit=20&reporting_scope=legacy"
+    ).json()["trades"]
     probe = next(trade for trade in trades if trade["instrument_id"] == "CN:688999")
     assert "风控恢复探针" in probe["notes"]
 
@@ -1038,7 +1046,9 @@ def test_automation_scheduler_replaces_stale_pending_with_strong_candidate(
     post_stale_item = next(item for item in pool["items"] if item["instrument_id"] == "CN:159558")
     assert post_stale_item["status"] == "blocked_by_data"
     assert post_stale_item["price_basis_consistent"] is False
-    trades = client.get("/api/paper-trades?provider=free&limit=20").json()["trades"]
+    trades = client.get(
+        "/api/paper-trades?provider=free&limit=20&reporting_scope=legacy"
+    ).json()["trades"]
     by_id = {trade["trade_id"]: trade for trade in trades}
     assert by_id["paper-stale-pending"]["status"] == "replaced"
     assert "候补替换" in by_id["paper-stale-pending"]["notes"]

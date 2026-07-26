@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -102,12 +104,28 @@ def build_recommendation_calibration_center(
     as_of: date | None = None,
     recent_limit: int = 12,
     data_health: dict[str, str] | None = None,
+    authenticated_admission_sources: Mapping[str, str] | None = None,
+    reporting_scope: Literal["official", "legacy"] = "official",
 ) -> RecommendationCalibrationCenter:
-    all_samples = [_sample(snapshot, outcome) for snapshot, outcome in pairs]
+    admission_sources = authenticated_admission_sources or {}
+    all_samples = [
+        _sample(
+            snapshot,
+            outcome,
+            admission_source=_authenticated_admission_source(
+                snapshot.snapshot_id,
+                admission_sources,
+            ),
+        )
+        for snapshot, outcome in pairs
+    ]
     official_samples = [
         sample for sample in all_samples if sample.admission_source == "ranking_v3_production"
     ]
-    samples = official_samples or all_samples
+    legacy_samples = [
+        sample for sample in all_samples if sample.admission_source != "ranking_v3_production"
+    ]
+    samples = official_samples if reporting_scope == "official" else legacy_samples
     completed = [item for item in samples if _is_completed(item)]
     baseline_win = _ratio(
         sum(1 for item in completed if (item.return_10d or 0) > 0), len(completed)
@@ -143,8 +161,9 @@ def build_recommendation_calibration_center(
         data_health={
             **(data_health or {}),
             "recommendation_calibration_scope": (
-                "ranking_v3_production" if official_samples else "legacy_compatible"
+                "ranking_v3_production" if reporting_scope == "official" else "legacy_only"
             ),
+            "recommendation_calibration_fail_closed": "true",
             "recommendation_calibration_source_total": str(len(all_samples)),
             "recommendation_calibration_source_official": str(len(official_samples)),
             "recommendation_calibration_source_legacy_manual": str(
@@ -181,6 +200,8 @@ def build_recommendation_calibration_center(
 def _sample(
     snapshot: OpportunitySnapshotRecord,
     outcome: OpportunityOutcome,
+    *,
+    admission_source: str,
 ) -> RecommendationCalibrationSample:
     score = _snapshot_score(snapshot)
     card = snapshot.card if isinstance(snapshot.card, dict) else {}
@@ -198,7 +219,7 @@ def _sample(
         industry=industry,
         themes=themes,
         market_regime=market_regime,
-        admission_source=_recommendation_admission_source(card),
+        admission_source=admission_source,
         outcome_status=outcome.outcome_status,
         return_5d=outcome.return_5d,
         return_10d=outcome.return_10d,
@@ -447,19 +468,15 @@ def _context_dimensions(
     return industry, themes, market_regime, sorted(set(factor_ids))
 
 
-def _recommendation_admission_source(card: dict[str, object]) -> str:
-    sources = [
-        value
-        for key in ("paper_admission", "recommendation_provenance", "ranking_v3")
-        if isinstance((value := card.get(key)), dict)
-    ]
-    sources.append(card)
-    for source in sources:
-        value = str(source.get("admission_source") or "").strip()
-        if value == "ranking_v3_production":
-            return value
-        if value == "legacy_manual":
-            return value
+def _authenticated_admission_source(
+    snapshot_id: str,
+    authenticated_sources: Mapping[str, str],
+) -> str:
+    value = str(authenticated_sources.get(snapshot_id) or "").strip()
+    if value == "ranking_v3_production":
+        return value
+    if value == "legacy_manual":
+        return value
     return "legacy_unknown"
 
 

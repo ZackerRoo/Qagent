@@ -10,7 +10,7 @@ from qagent.backtesting.ranking_v3_protocol import RANKING_V3_MODEL_VERSION
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.paper_trading.engine import (
     build_paper_daily_report,
-    build_paper_ledger,
+    build_paper_ledger as build_official_paper_ledger,
     build_paper_validation,
     paper_snapshot_price_basis_is_consistent,
     seed_paper_trades_from_snapshots,
@@ -25,6 +25,11 @@ from qagent.storage.repository import OpportunitySnapshotRecord
 from qagent.storage.tables import OpportunitySnapshotRow, PaperTradeRow, ScanRunRow
 
 from test_state_repository import make_repo
+
+
+def build_paper_ledger(*args, **kwargs):
+    kwargs.setdefault("reporting_scope", "legacy")
+    return build_official_paper_ledger(*args, **kwargs)
 
 
 class SingleDayCnProvider:
@@ -1257,14 +1262,27 @@ def test_official_ranking_v3_statistics_exclude_legacy_records(tmp_path):
     stored = {trade.source_snapshot_id: trade for trade in paper_repo.list_trades(limit=10)}
     trades = [
         stored["official-ranking-v3"].model_copy(
-            update={"admission_source": "ranking_v3_production"}
+            update={
+                "admission_source": "ranking_v3_production",
+                "production_identity_digest": "1" * 64,
+                "production_batch_fact_digest": "2" * 64,
+                "production_selection_item_digest": "3" * 64,
+                "release_proof_digest": "4" * 64,
+            }
         ),
         stored["legacy-manual"].model_copy(update={"admission_source": "legacy_manual"}),
         stored["legacy-unknown"],
     ]
 
-    summary = summarize_paper_trades(trades)
-    ledger = build_paper_ledger(trades)
+    authenticated_trade_ids = {official.trade_id}
+    summary = summarize_paper_trades(
+        trades,
+        authenticated_trade_ids=authenticated_trade_ids,
+    )
+    ledger = build_official_paper_ledger(
+        trades,
+        authenticated_trade_ids=authenticated_trade_ids,
+    )
     validation = build_paper_validation(
         trades,
         ledger,
@@ -1294,6 +1312,43 @@ def test_official_ranking_v3_statistics_exclude_legacy_records(tmp_path):
     assert report.summary.total_trades == 1
     assert report.summary.win_rate == 1.0
     assert report.data_health["paper_daily_report_non_official_excluded"] == "2"
+
+
+def test_paper_reporting_rejects_unproven_official_claim_and_keeps_legacy_report(
+    tmp_path,
+):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    stored = paper_repo.create_trade(
+        source_snapshot_id="forged-ranking-v3-paper",
+        provider="fixture",
+        instrument_id="CN:600001",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("10"),
+        initial_stop=Decimal("9"),
+        target_1=Decimal("12"),
+        rank_score=Decimal("0.90"),
+    )
+    forged = stored.model_copy(
+        update={
+            "admission_source": "ranking_v3_production",
+            "production_identity_digest": None,
+            "production_batch_fact_digest": None,
+            "production_selection_item_digest": None,
+            "release_proof_digest": None,
+        }
+    )
+
+    official = build_official_paper_ledger([forged])
+    legacy = build_official_paper_ledger([forged], reporting_scope="legacy")
+
+    assert official.summary.total_trades == 0
+    assert official.data_health["paper_reporting_scope"] == "ranking_v3_production"
+    assert official.data_health["paper_reporting_fail_closed"] == "true"
+    assert official.data_health["paper_reporting_invalid_official_claims"] == "1"
+    assert legacy.summary.total_trades == 1
+    assert legacy.data_health["paper_reporting_scope"] == "legacy_only"
 
 
 def test_build_paper_ledger_generates_trade_flows_fees_slippage_and_positions(tmp_path):

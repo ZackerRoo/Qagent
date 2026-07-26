@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from pydantic import BaseModel, Field
 
@@ -35,6 +35,7 @@ from qagent.providers.factory import build_market_data_provider
 from qagent.recommendations.portfolio import build_portfolio_plan
 from qagent.recommendations.brief import apply_recommendation_briefs
 from qagent.recommendations.feedback import (
+    authenticated_ranking_v3_paper_trade_ids,
     build_recent_recommendation_feedback_center,
     recommendation_feedback_data_health,
 )
@@ -203,6 +204,7 @@ def run_full_market_scan(
 
 
 def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> None:
+    scan_started_at = datetime.now(timezone.utc)
     repo = _repo()
     job = repo.get_full_market_scan_job(job_id)
     if job is None:
@@ -495,6 +497,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     batches_complete = completed_batches == job.total_batches
     symbols_complete = scanned_symbols == job.total_symbols == len(job.symbols)
     scan_complete = batches_complete and symbols_complete and error_count == 0
+    scan_completed_at = datetime.now(timezone.utc)
     payload_data_health = {
         **aggregate_health,
         **market_intelligence.data_health,
@@ -520,6 +523,8 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         "full_market_batches_complete": str(batches_complete).lower(),
         "full_market_scan_complete": str(scan_complete).lower(),
         "full_market_signal_date": feature_as_of.isoformat(),
+        "full_market_scan_started_at": scan_started_at.isoformat(),
+        "full_market_scan_completed_at": scan_completed_at.isoformat(),
         "sector_strength": str(len(sector_strength)),
         "scanned": str(scanned_symbols),
         "cards": str(len(visible_cards)),
@@ -1225,6 +1230,14 @@ def _load_paper_feedback_report(
         trades = paper_repo.list_trades(limit=500, provider=provider.strip().lower())
         if not trades:
             return None
+        authenticated_ids, authentication_health = (
+            authenticated_ranking_v3_paper_trade_ids(repo, trades)
+        )
+        if not authenticated_ids:
+            return None
+        reporting_trades = [
+            trade for trade in trades if trade.trade_id in authenticated_ids
+        ]
         account = paper_repo.get_account_settings()
         ledger = build_paper_ledger(
             trades,
@@ -1234,11 +1247,15 @@ def _load_paper_feedback_report(
             transaction_cost_bps=account.transaction_cost_bps,
             slippage_bps=account.slippage_bps,
             take_profit_pct=account.take_profit_pct,
+            authenticated_trade_ids=authenticated_ids,
         )
+        ledger.data_health.update(authentication_health)
+        if ledger.data_health.get("paper_reporting_official") == "0":
+            return None
         validation = build_paper_validation(trades, ledger)
         report_date = max(
             value
-            for trade in trades
+            for trade in reporting_trades
             for value in (
                 trade.latest_date,
                 trade.exit_date,
@@ -1247,7 +1264,7 @@ def _load_paper_feedback_report(
             )
             if value is not None
         )
-        instrument_ids = {trade.instrument_id for trade in trades}
+        instrument_ids = {trade.instrument_id for trade in reporting_trades}
         asset_types = {
             item.instrument_id: item.asset_type
             for item in repo.list_tradable_instruments(limit=20_000)

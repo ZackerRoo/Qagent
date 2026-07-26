@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 
 from qagent.backtesting.ranking_v3_evidence import (
     RankingV3RepositoryEvidenceAuthority,
 )
 from qagent.backtesting.ranking_v3_forward import RankingV3ForwardValidator
-from qagent.backtesting.ranking_v3_production import RankingV3ProductionIdentity
+from qagent.backtesting.ranking_v3_production import (
+    RankingV3ProductionAuthorizationError,
+    RankingV3ProductionIdentity,
+    require_current_ranking_v3_production_batch,
+)
 from qagent.backtesting.ranking_v3_protocol import (
     RANKING_V3_MODEL_VERSION,
     build_ranking_v3_protocol,
@@ -46,6 +51,7 @@ def evaluate_paper_snapshot_admission(
     *,
     provider: str,
     mode: str = "automatic",
+    allocation_multiplier: Decimal = Decimal("1"),
 ) -> PaperAdmissionDecision:
     """Admit only post-approval production selections when Ranking V3 is active."""
 
@@ -170,6 +176,11 @@ def evaluate_paper_snapshot_admission(
         or snapshot.signal_date is None
         or binding.session_date != snapshot.signal_date
         or binding.release_proof_digest != validation.proof.proof_digest
+        or binding.trigger_price != snapshot.trigger_price
+        or binding.initial_stop != snapshot.initial_stop
+        or binding.target_1 != snapshot.target_1
+        or binding.source_rank_score != snapshot.rank_score
+        or binding.allocation_multiplier != allocation_multiplier
     ):
         return _blocked(
             "production selection does not exactly match the opportunity facts",
@@ -185,6 +196,16 @@ def evaluate_paper_snapshot_admission(
     if batch is None or batch.identity != identity:
         return _blocked(
             "production selection references a missing or mismatched immutable batch",
+            selection_source="ranking_v3",
+            model_version=protocol.model_version,
+            deployment_scope="paper",
+            release_run_id=release_run_id,
+        )
+    try:
+        require_current_ranking_v3_production_batch(batch)
+    except RankingV3ProductionAuthorizationError as exc:
+        return _blocked(
+            str(exc),
             selection_source="ranking_v3",
             model_version=protocol.model_version,
             deployment_scope="paper",

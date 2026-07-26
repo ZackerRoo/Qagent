@@ -55,7 +55,7 @@ from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.storage.ranking_v3_forward import RankingV3ForwardRepository
 from qagent.storage.ranking_v3_production import RankingV3ProductionRepository
 from qagent.storage.repository import QagentRepository
-from qagent.storage.tables import OpportunitySnapshotRow
+from qagent.storage.tables import OpportunitySnapshotRow, ScanRunRow
 
 
 def _persist_authoritative_opportunities(
@@ -495,7 +495,7 @@ def test_paper_trade_from_opportunity_creates_once_and_rejects_blocked(tmp_path,
         "/api/paper-trades/from-opportunity",
         json=_opportunity_request(blocked_card, provider="fixture"),
     )
-    listed = client.get("/api/paper-trades")
+    listed = client.get("/api/paper-trades?reporting_scope=legacy")
 
     assert created.status_code == 200
     assert created.json()["created"] is True
@@ -710,7 +710,7 @@ def test_ranking_v3_requires_matching_authoritative_release_proof(tmp_path, monk
         "QAGENT_DATABASE_URL",
         f"sqlite:///{tmp_path / 'paper-v3-proof.db'}",
     )
-    TestClient(create_app())
+    client = TestClient(create_app())
     production_card, forward_only_card, tagged_only_card = _persist_authoritative_opportunities(
         provider="fixture",
         cards=[
@@ -810,8 +810,27 @@ def test_ranking_v3_requires_matching_authoritative_release_proof(tmp_path, monk
         source_snapshot_id=production_snapshot.snapshot_id,
         strategy_id=production_snapshot.primary_strategy_id or "",
         rank=1,
-        score=Decimal("0.9"),
+        score=production_snapshot.rank_score,
+        source_rank_score=production_snapshot.rank_score,
+        trigger_price=production_snapshot.trigger_price,
+        initial_stop=production_snapshot.initial_stop,
+        target_1=production_snapshot.target_1,
+        allocation_multiplier=Decimal("1"),
     )
+    scan_started_at = datetime.combine(
+        production_date,
+        datetime.min.time(),
+        tzinfo=timezone.utc,
+    ) + timedelta(hours=1)
+    scan_completed_at = scan_started_at + timedelta(hours=6)
+    scan_recorded_at = scan_completed_at + timedelta(minutes=1)
+    batch_recorded_at = scan_recorded_at + timedelta(minutes=1)
+    with repo.session_factory.begin() as session:
+        scan_row = session.get(ScanRunRow, production_snapshot.run_id)
+        assert scan_row is not None
+        scan_row.started_at = scan_started_at
+        scan_row.completed_at = scan_completed_at
+        scan_row.created_at = scan_recorded_at
     production_batch_input = RankingV3ProductionBatchInput.create(
         session_date=production_date,
         candidate_snapshot_digest=stable_digest(
@@ -823,6 +842,11 @@ def test_ranking_v3_requires_matching_authoritative_release_proof(tmp_path, monk
             }
         ),
         selections=(production_selection,),
+        source_scan_run_id=production_snapshot.run_id,
+        source_scan_started_at=scan_started_at,
+        source_scan_completed_at=scan_completed_at,
+        source_scan_recorded_at=scan_recorded_at,
+        recorded_at=batch_recorded_at,
     )
 
     class _ApprovedSelection:
@@ -844,11 +868,7 @@ def test_ranking_v3_requires_matching_authoritative_release_proof(tmp_path, monk
         RankingV3ProductionRepository(repo.session_factory),
         _ApprovedRelease(),
         selection_authority=_ApprovedSelection(),
-        now=lambda: datetime.combine(
-            production_date,
-            datetime.min.time(),
-            tzinfo=timezone.utc,
-        ),
+        now=lambda: batch_recorded_at,
     )
     production_batch = production_service.record_batch(
         identity,
@@ -914,6 +934,29 @@ def test_ranking_v3_requires_matching_authoritative_release_proof(tmp_path, monk
     assert trades[0].production_identity_digest == identity.identity_digest
     assert trades[0].production_batch_fact_digest == production_batch.fact_digest
     assert trades[0].production_selection_item_digest == production_selection.item_digest
+    listed = client.get("/api/paper-trades?provider=fixture")
+    assert listed.status_code == 200
+    assert listed.json()["summary"]["total"] == 1
+    assert len(listed.json()["trades"]) == 1
+    assert (
+        listed.json()["data_health"]["paper_production_authentication"]
+        == "verified"
+    )
+    retained_session = client.post(
+        "/api/paper-trades/session/start",
+        json={
+            "label": "保留正式样本",
+            "reset_existing": False,
+            "initial_capital": "100000",
+            "allocation_per_trade_pct": "10",
+            "max_positions": 5,
+            "transaction_cost_bps": "5",
+            "slippage_bps": "5",
+            "take_profit_pct": "50",
+        },
+    )
+    assert retained_session.status_code == 200
+    assert retained_session.json()["ledger"]["summary"]["total_trades"] == 1
 
 
 def test_paper_trade_events_return_not_found_for_unknown_trade(tmp_path, monkeypatch):
@@ -1014,7 +1057,9 @@ def test_paper_candidate_pool_blocks_recently_invalidated_price_basis(tmp_path, 
     client.get("/api/opportunities?provider=fixture&symbols=US:TEST")
     seeded = client.post("/api/paper-trades/seed?provider=fixture&limit=1")
     assert seeded.status_code == 200
-    trade = client.get("/api/paper-trades?provider=fixture").json()["trades"][0]
+    trade = client.get(
+        "/api/paper-trades?provider=fixture&reporting_scope=legacy"
+    ).json()["trades"][0]
     trigger = Decimal(trade["trigger_price"])
     routes._paper_repo().update_trade(
         trade["trade_id"],
@@ -1087,10 +1132,14 @@ def test_paper_trade_api_filters_by_provider(tmp_path, monkeypatch):
         json=_opportunity_request(fixture_card, provider="fixture"),
     )
 
-    listed = client.get("/api/paper-trades?provider=free")
-    ledger = client.get("/api/paper-trades/ledger?provider=free")
-    validation = client.get("/api/paper-trades/validation?provider=free")
-    report = client.get("/api/paper-trades/daily-report?provider=free")
+    listed = client.get("/api/paper-trades?provider=free&reporting_scope=legacy")
+    ledger = client.get("/api/paper-trades/ledger?provider=free&reporting_scope=legacy")
+    validation = client.get(
+        "/api/paper-trades/validation?provider=free&reporting_scope=legacy"
+    )
+    report = client.get(
+        "/api/paper-trades/daily-report?provider=free&reporting_scope=legacy"
+    )
 
     assert listed.status_code == 200
     assert listed.json()["summary"]["total"] == 1
@@ -1153,7 +1202,9 @@ def test_paper_trade_api_returns_ledger_metrics(tmp_path, monkeypatch):
     client.post("/api/paper-trades/seed?provider=fixture&limit=5")
     client.post("/api/paper-trades/update?provider=fixture")
 
-    response = client.get("/api/paper-trades/ledger?initial_capital=100000")
+    response = client.get(
+        "/api/paper-trades/ledger?initial_capital=100000&reporting_scope=legacy"
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -1173,7 +1224,7 @@ def test_paper_trade_api_returns_daily_report(tmp_path, monkeypatch):
     client.post("/api/paper-trades/seed?provider=fixture&limit=5")
     client.post("/api/paper-trades/update?provider=fixture")
 
-    response = client.get("/api/paper-trades/daily-report")
+    response = client.get("/api/paper-trades/daily-report?reporting_scope=legacy")
 
     assert response.status_code == 200
     body = response.json()
@@ -1201,7 +1252,9 @@ def test_paper_trade_daily_report_uses_cached_benchmarks_only(tmp_path, monkeypa
 
     monkeypatch.setattr("qagent.api.routes.build_market_data_provider", fail_live_provider)
 
-    response = client.get("/api/paper-trades/daily-report?provider=free")
+    response = client.get(
+        "/api/paper-trades/daily-report?provider=free&reporting_scope=legacy"
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -1265,7 +1318,9 @@ def test_paper_trade_daily_report_uses_cached_etf_proxy_benchmarks(tmp_path, mon
 
     monkeypatch.setattr("qagent.api.routes.build_market_data_provider", fail_live_provider)
 
-    response = client.get("/api/paper-trades/daily-report?provider=free")
+    response = client.get(
+        "/api/paper-trades/daily-report?provider=free&reporting_scope=legacy"
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -1335,7 +1390,9 @@ def test_paper_trade_daily_report_falls_back_to_recent_cached_benchmarks(tmp_pat
 
     monkeypatch.setattr("qagent.api.routes.build_market_data_provider", fail_live_provider)
 
-    response = client.get("/api/paper-trades/daily-report?provider=free")
+    response = client.get(
+        "/api/paper-trades/daily-report?provider=free&reporting_scope=legacy"
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -1349,7 +1406,9 @@ def test_paper_trade_auto_validation_reports_5_10_20_day_outcomes(tmp_path, monk
     client.get("/api/opportunities?provider=fixture&symbols=US:TEST")
     client.post("/api/paper-trades/seed?provider=fixture&limit=5")
 
-    response = client.post("/api/paper-trades/validation/run?provider=fixture")
+    response = client.post(
+        "/api/paper-trades/validation/run?provider=fixture&reporting_scope=legacy"
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -1393,7 +1452,8 @@ def test_paper_trade_api_returns_flow_ledger_with_costs(tmp_path, monkeypatch):
 
     response = client.get(
         "/api/paper-trades/ledger"
-        "?initial_capital=100000&transaction_cost_bps=3&slippage_bps=5&take_profit_pct=50"
+        "?initial_capital=100000&transaction_cost_bps=3&slippage_bps=5"
+        "&take_profit_pct=50&reporting_scope=legacy"
     )
 
     assert response.status_code == 200
@@ -1436,7 +1496,7 @@ def test_paper_trading_api_seeds_updates_and_lists_trades(tmp_path, monkeypatch)
 
     seed_response = client.post("/api/paper-trades/seed?provider=fixture&limit=5")
     update_response = client.post("/api/paper-trades/update?provider=fixture")
-    list_response = client.get("/api/paper-trades")
+    list_response = client.get("/api/paper-trades?reporting_scope=legacy")
 
     assert seed_response.status_code == 200
     assert seed_response.json()["created"] == 1

@@ -6,6 +6,7 @@ from threading import Event
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 from sqlalchemy.orm import sessionmaker
 
 from qagent.backtesting import walk_forward
@@ -887,6 +888,73 @@ def test_parallel_walk_forward_matches_serial_results(tmp_path):
     assert parallel.top_5_portfolio == serial.top_5_portfolio
     assert parallel.top_10_portfolio == serial.top_10_portfolio
     assert parallel.data_health["walk_forward_snapshot_workers"] == "2"
+
+
+def test_parallel_walk_forward_bounds_submissions_when_progress_cancels(
+    tmp_path,
+    monkeypatch,
+):
+    repository, _ = _replay_repository(tmp_path)
+    real_executor = walk_forward.ProcessPoolExecutor
+    executors = []
+
+    class CountingExecutor:
+        def __init__(self, *args, **kwargs):
+            self.delegate = real_executor(*args, **kwargs)
+            self.submission_count = 0
+            self.shutdown_calls = []
+            executors.append(self)
+
+        def __enter__(self):
+            self.delegate.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self.delegate.__exit__(exc_type, exc_value, traceback)
+
+        def submit(self, *args, **kwargs):
+            self.submission_count += 1
+            return self.delegate.submit(*args, **kwargs)
+
+        def shutdown(self, *, wait=True, cancel_futures=False):
+            self.shutdown_calls.append((wait, cancel_futures))
+            return self.delegate.shutdown(
+                wait=wait,
+                cancel_futures=cancel_futures,
+            )
+
+        @property
+        def _processes(self):
+            return self.delegate._processes
+
+    class ValidationCancelled(RuntimeError):
+        pass
+
+    completed_dates = []
+
+    def cancel_after_first_snapshot(progress):
+        if progress.snapshot is None:
+            return
+        completed_dates.append(progress.snapshot.decision_date)
+        raise ValidationCancelled
+
+    monkeypatch.setattr(walk_forward, "ProcessPoolExecutor", CountingExecutor)
+
+    with pytest.raises(ValidationCancelled):
+        run_full_market_walk_forward_selection(
+            repository,
+            owner_run_id="walk-forward-cancel-bounded",
+            start=date(2025, 1, 6),
+            end=date(2025, 1, 13),
+            rebalance_step_sessions=1,
+            snapshot_workers=2,
+            progress_callback=cancel_after_first_snapshot,
+        )
+
+    assert completed_dates
+    assert len(executors) == 1
+    assert executors[0].submission_count == 2
+    assert executors[0].shutdown_calls == [(False, True)]
 
 
 def test_parallel_walk_forward_runs_inside_background_process(tmp_path):

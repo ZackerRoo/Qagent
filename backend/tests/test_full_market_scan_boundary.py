@@ -68,6 +68,8 @@ def _insert_run(
                     _valid_health(symbol_count) if health is None else health,
                     sort_keys=True,
                 ),
+                started_at=created_at - timedelta(minutes=2),
+                completed_at=created_at - timedelta(minutes=1),
                 created_at=created_at,
             )
         )

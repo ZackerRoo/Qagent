@@ -1192,7 +1192,7 @@ def test_initialize_database_adds_production_schema_and_backfills_legacy_paper_t
             ).scalars()
         )
     assert legacy == ("legacy_unknown", None, None, None, None)
-    assert version == 1
+    assert version == 2
     assert {
         "trg_ranking_v3_production_batches_immutable_update",
         "trg_ranking_v3_production_batches_immutable_delete",
@@ -1250,4 +1250,4 @@ def test_production_trigger_bundle_is_versioned_and_replaced_on_restart(tmp_path
         ).scalar_one()
     assert "stale production trigger" not in trigger_sql
     assert "rows are immutable" in trigger_sql
-    assert version == 1
+    assert version == 2

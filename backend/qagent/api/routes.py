@@ -149,6 +149,8 @@ from qagent.providers.status import build_provider_status
 from qagent.recommendations.enrichment import enrich_opportunity_card
 from qagent.recommendations.brief import apply_recommendation_briefs
 from qagent.recommendations.feedback import (
+    authenticated_ranking_v3_paper_trade_ids,
+    authenticated_ranking_v3_snapshot_sources,
     build_recent_recommendation_feedback_center,
 )
 from qagent.recommendations.governance import (
@@ -3022,11 +3024,17 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             data_health.update(paper_update.data_health)
         except Exception as exc:
             errors.append(f"paper_update: {exc}")
-            summary = summarize_paper_trades(paper_repo.list_trades(limit=1000, provider=mode))
+            summary = summarize_paper_trades(
+                paper_repo.list_trades(limit=1000, provider=mode),
+                reporting_scope="all",
+            )
             paper_total = summary.total
             paper_closed = summary.closed
     else:
-        summary = summarize_paper_trades(paper_repo.list_trades(limit=1000, provider=mode))
+        summary = summarize_paper_trades(
+            paper_repo.list_trades(limit=1000, provider=mode),
+            reporting_scope="all",
+        )
         paper_total = summary.total
         paper_closed = summary.closed
 
@@ -3143,6 +3151,7 @@ def _paper_seed_risk_gate(
         transaction_cost_bps=account.transaction_cost_bps,
         slippage_bps=account.slippage_bps,
         take_profit_pct=account.take_profit_pct,
+        reporting_scope="all",
     )
     risk_gate = build_paper_risk_gate_status(ledger)
     summary = ledger.summary
@@ -4151,22 +4160,61 @@ def _as_utc_datetime(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _paper_reporting_scope_value(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in {"official", "legacy"}:
+        raise HTTPException(
+            status_code=400,
+            detail="reporting_scope must be official or legacy",
+        )
+    return normalized
+
+
+def _paper_reporting_trades(
+    trades: list[PaperTradeRecord],
+    *,
+    reporting_scope: str,
+) -> tuple[list[PaperTradeRecord], set[str], dict[str, str]]:
+    authenticated_ids, authentication_health = authenticated_ranking_v3_paper_trade_ids(
+        _repo(),
+        trades,
+    )
+    if reporting_scope == "official":
+        selected = [trade for trade in trades if trade.trade_id in authenticated_ids]
+    else:
+        selected = [trade for trade in trades if trade.trade_id not in authenticated_ids]
+    return selected, authenticated_ids, authentication_health
+
+
 @router.get("/paper-trades")
 def paper_trades(
     status: str | None = None,
     limit: int = 100,
     provider: str | None = None,
+    reporting_scope: str = "official",
 ) -> dict[str, object]:
     if limit <= 0 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
     mode = provider.strip().lower() if provider else None
+    scope = _paper_reporting_scope_value(reporting_scope)
     trades = _paper_repo().list_trades(status=status, limit=limit, provider=mode)
+    reporting_trades, authenticated_ids, authentication_health = _paper_reporting_trades(
+        trades,
+        reporting_scope=scope,
+    )
     return {
-        "summary": summarize_paper_trades(trades).model_dump(mode="json"),
-        "trades": [trade.model_dump(mode="json") for trade in trades],
+        "summary": summarize_paper_trades(
+            trades,
+            reporting_scope=scope,
+            authenticated_trade_ids=authenticated_ids,
+        ).model_dump(mode="json"),
+        "trades": [trade.model_dump(mode="json") for trade in reporting_trades],
         "data_health": {
             **paper_execution_data_health(),
+            **authentication_health,
             "paper_provider_filter": mode or "all",
+            "paper_reporting_scope": scope,
+            "paper_reporting_returned": str(len(reporting_trades)),
         },
     }
 
@@ -4225,11 +4273,19 @@ def paper_trade_session(provider: str | None = None) -> dict[str, object]:
     account = repo.get_account_settings()
     mode = provider.strip().lower() if provider else None
     trades = repo.list_trades(limit=1000, provider=mode)
+    _, authenticated_ids, authentication_health = _paper_reporting_trades(
+        trades,
+        reporting_scope="official",
+    )
     return {
         "account": account.model_dump(mode="json"),
-        "summary": summarize_paper_trades(trades).model_dump(mode="json"),
+        "summary": summarize_paper_trades(
+            trades,
+            authenticated_trade_ids=authenticated_ids,
+        ).model_dump(mode="json"),
         "data_health": {
             **_paper_account_data_health(account),
+            **authentication_health,
             "paper_provider_filter": mode or "all",
         },
     }
@@ -4261,16 +4317,27 @@ def start_paper_trade_session(request: PaperSessionStartRequest) -> dict[str, ob
         slippage_bps=slippage_bps,
         take_profit_pct=take_profit_pct,
     )
+    retained_trades = repo.list_trades(limit=1000)
+    _, authenticated_ids, authentication_health = _paper_reporting_trades(
+        retained_trades,
+        reporting_scope="official",
+    )
     ledger = build_paper_ledger(
-        repo.list_trades(limit=1000),
+        retained_trades,
         initial_capital=account.initial_capital,
         allocation_per_trade_pct=account.allocation_per_trade_pct,
         max_positions=account.max_positions,
         transaction_cost_bps=account.transaction_cost_bps,
         slippage_bps=account.slippage_bps,
         take_profit_pct=account.take_profit_pct,
+        authenticated_trade_ids=authenticated_ids,
     )
-    ledger.data_health.update(_paper_account_data_health(account))
+    ledger.data_health.update(
+        {
+            **_paper_account_data_health(account),
+            **authentication_health,
+        }
+    )
     return {
         "account": account.model_dump(mode="json"),
         "cleared_trades": cleared,
@@ -4288,26 +4355,36 @@ def paper_trade_ledger(
     take_profit_pct: Decimal | None = None,
     limit: int = 500,
     provider: str | None = None,
+    reporting_scope: str = "official",
 ) -> dict[str, object]:
     if limit <= 0 or limit > 1000:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
     account = _paper_repo().get_account_settings()
     mode = provider.strip().lower() if provider else None
+    scope = _paper_reporting_scope_value(reporting_scope)
+    trades = _paper_repo().list_trades(limit=limit, provider=mode)
+    _, authenticated_ids, authentication_health = _paper_reporting_trades(
+        trades,
+        reporting_scope=scope,
+    )
     try:
         ledger = build_paper_ledger(
-            _paper_repo().list_trades(limit=limit, provider=mode),
+            trades,
             initial_capital=initial_capital or account.initial_capital,
             allocation_per_trade_pct=allocation_per_trade_pct or account.allocation_per_trade_pct,
             max_positions=max_positions or account.max_positions,
             transaction_cost_bps=transaction_cost_bps or account.transaction_cost_bps,
             slippage_bps=slippage_bps or account.slippage_bps,
             take_profit_pct=take_profit_pct or account.take_profit_pct,
+            reporting_scope=scope,
+            authenticated_trade_ids=authenticated_ids,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     ledger.data_health.update(
         {
             **_paper_account_data_health(account),
+            **authentication_health,
             "paper_provider_filter": mode or "all",
         }
     )
@@ -4315,15 +4392,27 @@ def paper_trade_ledger(
 
 
 @router.get("/paper-trades/validation")
-def paper_trade_validation(limit: int = 500, provider: str | None = None) -> dict[str, object]:
+def paper_trade_validation(
+    limit: int = 500,
+    provider: str | None = None,
+    reporting_scope: str = "official",
+) -> dict[str, object]:
     if limit <= 0 or limit > 1000:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
     mode = provider.strip().lower() if provider else None
-    return _paper_validation_payload(limit=limit, provider=mode)
+    return _paper_validation_payload(
+        limit=limit,
+        provider=mode,
+        reporting_scope=_paper_reporting_scope_value(reporting_scope),
+    )
 
 
 @router.post("/paper-trades/validation/run")
-def run_paper_trade_validation(provider: str = "fixture", limit: int = 500) -> dict[str, object]:
+def run_paper_trade_validation(
+    provider: str = "fixture",
+    limit: int = 500,
+    reporting_scope: str = "official",
+) -> dict[str, object]:
     if limit <= 0 or limit > 1000:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
     mode = provider.strip().lower()
@@ -4335,7 +4424,11 @@ def run_paper_trade_validation(provider: str = "fixture", limit: int = 500) -> d
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    payload = _paper_validation_payload(limit=limit, provider=mode)
+    payload = _paper_validation_payload(
+        limit=limit,
+        provider=mode,
+        reporting_scope=_paper_reporting_scope_value(reporting_scope),
+    )
     payload["data_health"].update(
         {
             **update_result.data_health,
@@ -4346,10 +4439,19 @@ def run_paper_trade_validation(provider: str = "fixture", limit: int = 500) -> d
     return payload
 
 
-def _paper_validation_payload(limit: int = 500, provider: str | None = None) -> dict[str, object]:
+def _paper_validation_payload(
+    limit: int = 500,
+    provider: str | None = None,
+    reporting_scope: str = "official",
+) -> dict[str, object]:
     repo = _paper_repo()
     account = repo.get_account_settings()
     trades = repo.list_trades(limit=limit, provider=provider)
+    scope = _paper_reporting_scope_value(reporting_scope)
+    _, authenticated_ids, authentication_health = _paper_reporting_trades(
+        trades,
+        reporting_scope=scope,
+    )
     ledger = build_paper_ledger(
         trades,
         initial_capital=account.initial_capital,
@@ -4358,10 +4460,13 @@ def _paper_validation_payload(limit: int = 500, provider: str | None = None) -> 
         transaction_cost_bps=account.transaction_cost_bps,
         slippage_bps=account.slippage_bps,
         take_profit_pct=account.take_profit_pct,
+        reporting_scope=scope,
+        authenticated_trade_ids=authenticated_ids,
     )
     ledger.data_health.update(
         {
             **_paper_account_data_health(account),
+            **authentication_health,
             "paper_provider_filter": provider or "all",
         }
     )
@@ -4381,17 +4486,26 @@ def _paper_report_date(trades) -> date:
 
 
 @router.get("/paper-trades/daily-report")
-def paper_trade_daily_report(provider: str = "fixture", limit: int = 500) -> dict[str, object]:
+def paper_trade_daily_report(
+    provider: str = "fixture",
+    limit: int = 500,
+    reporting_scope: str = "official",
+) -> dict[str, object]:
     if limit <= 0 or limit > 1000:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
     mode = provider.strip().lower()
+    scope = _paper_reporting_scope_value(reporting_scope)
     repo = _paper_repo()
     account = repo.get_account_settings()
     trades = repo.list_trades(limit=limit, provider=mode)
-    asset_type_by_instrument = _paper_asset_types_for_trades(trades)
+    reporting_trades, authenticated_ids, authentication_health = _paper_reporting_trades(
+        trades,
+        reporting_scope=scope,
+    )
+    asset_type_by_instrument = _paper_asset_types_for_trades(reporting_trades)
     source_context_by_trade = {
         trade.trade_id: context
-        for trade in trades
+        for trade in reporting_trades
         if (context := repo.get_trade_source_context(trade.source_snapshot_id)) is not None
     }
     ledger = build_paper_ledger(
@@ -4402,21 +4516,24 @@ def paper_trade_daily_report(provider: str = "fixture", limit: int = 500) -> dic
         transaction_cost_bps=account.transaction_cost_bps,
         slippage_bps=account.slippage_bps,
         take_profit_pct=account.take_profit_pct,
+        reporting_scope=scope,
+        authenticated_trade_ids=authenticated_ids,
     )
     ledger.data_health.update(
         {
             **_paper_account_data_health(account),
+            **authentication_health,
             "paper_provider_filter": mode,
         }
     )
     validation = build_paper_validation(trades, ledger)
-    report_date = _paper_report_date(trades)
+    report_date = _paper_report_date(reporting_trades)
     benchmark_items: list[dict[str, object]] = []
     benchmark_rows = 0
-    if trades:
+    if reporting_trades:
         cached_benchmark_ids = benchmark_ids() + benchmark_proxy_ids()
         benchmark_start = min(
-            min(trade.signal_date for trade in trades),
+            min(trade.signal_date for trade in reporting_trades),
             report_date - timedelta(days=180),
         )
         benchmark_bars = _market_cache_repo().load_daily_bars(
@@ -6562,11 +6679,19 @@ def _attach_live_paper_health_payload(payload: dict[str, object]) -> None:
     try:
         provider = _payload_provider_mode(payload)
         trades = _paper_repo().list_trades(limit=1000, provider=provider)
-        summary = summarize_paper_trades(trades)
+        _, authenticated_ids, authentication_health = _paper_reporting_trades(
+            trades,
+            reporting_scope="official",
+        )
+        summary = summarize_paper_trades(
+            trades,
+            authenticated_trade_ids=authenticated_ids,
+        )
     except Exception:
         return
     data_health.update(
         {
+            **authentication_health,
             "paper_total": str(summary.total),
             "paper_pending": str(summary.pending),
             "paper_open": str(summary.open),
@@ -7237,8 +7362,13 @@ def recommendation_calibration(
     provider: str = "fixture",
     instrument_id: str | None = None,
     limit: int = 200,
+    reporting_scope: str = "official",
 ) -> dict[str, object]:
     pairs, data_health = _replay_snapshot_outcome_pairs(provider, instrument_id, limit)
+    authenticated_sources, authentication_health = authenticated_ranking_v3_snapshot_sources(
+        _repo(),
+        [snapshot.snapshot_id for snapshot, _ in pairs],
+    )
     as_of = max(
         (outcome.signal_date for _, outcome in pairs if outcome.signal_date is not None),
         default=date.today(),
@@ -7246,7 +7376,9 @@ def recommendation_calibration(
     center = build_recommendation_calibration_center(
         pairs,
         as_of=as_of,
-        data_health=data_health,
+        data_health={**data_health, **authentication_health},
+        reporting_scope=_paper_reporting_scope_value(reporting_scope),
+        authenticated_admission_sources=authenticated_sources,
     )
     return center.model_dump(mode="json")
 

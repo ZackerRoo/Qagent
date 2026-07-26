@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from threading import RLock
 from typing import Literal, Protocol
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -22,9 +23,13 @@ from qagent.security.ranking_v3_attestation import (
 
 
 PRODUCTION_IDENTITY_SCHEMA_VERSION = "ranking-v3-production-identity-v1"
-PRODUCTION_SELECTION_SCHEMA_VERSION = "ranking-v3-production-selection-v1"
-PRODUCTION_BATCH_SCHEMA_VERSION = "ranking-v3-production-batch-v1"
+LEGACY_PRODUCTION_SELECTION_SCHEMA_VERSION = "ranking-v3-production-selection-v1"
+PRODUCTION_SELECTION_SCHEMA_VERSION = "ranking-v3-production-selection-v2"
+LEGACY_PRODUCTION_BATCH_SCHEMA_VERSION = "ranking-v3-production-batch-v1"
+PRODUCTION_BATCH_SCHEMA_VERSION = "ranking-v3-production-batch-v2"
 PRODUCTION_BATCH_ATTESTATION_KIND = "ranking-v3-production-batch"
+PRODUCTION_TIMEZONE = ZoneInfo("Asia/Shanghai")
+PRODUCTION_RECORDING_CLOCK_SKEW = timedelta(minutes=2)
 
 
 class RankingV3ProductionError(RuntimeError):
@@ -109,9 +114,43 @@ class RankingV3ProductionSelectionItem(BaseModel):
     strategy_id: str = Field(min_length=1, max_length=96)
     rank: int = Field(ge=1)
     score: Decimal = Field(ge=0, le=1)
+    source_rank_score: Decimal | None = Field(default=None, ge=0, le=1)
+    trigger_price: Decimal | None = Field(default=None, gt=0)
+    initial_stop: Decimal | None = Field(default=None, gt=0)
+    target_1: Decimal | None = Field(default=None, gt=0)
+    allocation_multiplier: Decimal | None = Field(default=None, gt=0, le=1)
 
     @model_validator(mode="after")
     def validate_digest(self):
+        if self.schema_version not in {
+            LEGACY_PRODUCTION_SELECTION_SCHEMA_VERSION,
+            PRODUCTION_SELECTION_SCHEMA_VERSION,
+        }:
+            raise ValueError("production selection schema version is unsupported")
+        if self.schema_version == PRODUCTION_SELECTION_SCHEMA_VERSION:
+            if (
+                self.source_rank_score is None
+                or self.trigger_price is None
+                or self.allocation_multiplier is None
+            ):
+                raise ValueError(
+                    "current production selection requires a complete execution plan"
+                )
+            if self.initial_stop is not None and self.initial_stop >= self.trigger_price:
+                raise ValueError("production initial stop must be below trigger price")
+            if self.target_1 is not None and self.target_1 <= self.trigger_price:
+                raise ValueError("production target must be above trigger price")
+        elif any(
+            value is not None
+            for value in (
+                self.trigger_price,
+                self.initial_stop,
+                self.target_1,
+                self.allocation_multiplier,
+                self.source_rank_score,
+            )
+        ):
+            raise ValueError("legacy production selection cannot contain unsigned plan fields")
         if production_selection_item_digest(self) != self.item_digest:
             raise ValueError("production selection item digest is invalid")
         return self
@@ -126,6 +165,11 @@ class RankingV3ProductionSelectionItem(BaseModel):
         strategy_id: str,
         rank: int,
         score: Decimal,
+        source_rank_score: Decimal,
+        trigger_price: Decimal,
+        initial_stop: Decimal | None,
+        target_1: Decimal | None,
+        allocation_multiplier: Decimal,
     ) -> RankingV3ProductionSelectionItem:
         payload = {
             "schema_version": PRODUCTION_SELECTION_SCHEMA_VERSION,
@@ -135,6 +179,11 @@ class RankingV3ProductionSelectionItem(BaseModel):
             "strategy_id": strategy_id,
             "rank": rank,
             "score": score,
+            "source_rank_score": source_rank_score,
+            "trigger_price": trigger_price,
+            "initial_stop": initial_stop,
+            "target_1": target_1,
+            "allocation_multiplier": allocation_multiplier,
         }
         return cls(item_digest=stable_digest(payload), **payload)
 
@@ -150,10 +199,39 @@ class RankingV3ProductionBatchInput(BaseModel):
     selection_batch_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     selected_count: int = Field(ge=0)
     selections: tuple[RankingV3ProductionSelectionItem, ...]
+    source_scan_run_id: str | None = Field(default=None, min_length=1, max_length=64)
+    source_scan_started_at: datetime | None = None
+    source_scan_completed_at: datetime | None = None
+    source_scan_recorded_at: datetime | None = None
+    recorded_at: datetime | None = None
 
     @model_validator(mode="after")
     def validate_complete_batch(self):
+        if self.schema_version not in {
+            LEGACY_PRODUCTION_BATCH_SCHEMA_VERSION,
+            PRODUCTION_BATCH_SCHEMA_VERSION,
+        }:
+            raise ValueError("production batch schema version is unsupported")
         _validate_selection_set(self.selections, self.selected_count)
+        if self.schema_version == PRODUCTION_BATCH_SCHEMA_VERSION:
+            _validate_current_batch_temporal_facts(self)
+            if any(
+                selection.schema_version != PRODUCTION_SELECTION_SCHEMA_VERSION
+                for selection in self.selections
+            ):
+                raise ValueError(
+                    "current production batch cannot contain legacy selection items"
+                )
+        elif any(
+            value is not None
+            for value in (
+                self.source_scan_run_id,
+                self.source_scan_started_at,
+                self.source_scan_completed_at,
+                self.source_scan_recorded_at,
+            )
+        ):
+            raise ValueError("legacy production batch cannot contain unsigned scan timing facts")
         if production_selection_batch_digest(self) != self.selection_batch_digest:
             raise ValueError("production selection batch digest is invalid")
         return self
@@ -165,6 +243,11 @@ class RankingV3ProductionBatchInput(BaseModel):
         session_date: date,
         candidate_snapshot_digest: str,
         selections: tuple[RankingV3ProductionSelectionItem, ...],
+        source_scan_run_id: str,
+        source_scan_started_at: datetime,
+        source_scan_completed_at: datetime,
+        source_scan_recorded_at: datetime,
+        recorded_at: datetime,
     ) -> RankingV3ProductionBatchInput:
         selected_count = len(selections)
         digest = _selection_batch_digest(
@@ -172,6 +255,11 @@ class RankingV3ProductionBatchInput(BaseModel):
             candidate_snapshot_digest=candidate_snapshot_digest,
             selected_count=selected_count,
             selections=selections,
+            source_scan_run_id=source_scan_run_id,
+            source_scan_started_at=source_scan_started_at,
+            source_scan_completed_at=source_scan_completed_at,
+            source_scan_recorded_at=source_scan_recorded_at,
+            recorded_at=recorded_at,
         )
         return cls(
             session_date=session_date,
@@ -179,6 +267,11 @@ class RankingV3ProductionBatchInput(BaseModel):
             selection_batch_digest=digest,
             selected_count=selected_count,
             selections=selections,
+            source_scan_run_id=source_scan_run_id,
+            source_scan_started_at=source_scan_started_at,
+            source_scan_completed_at=source_scan_completed_at,
+            source_scan_recorded_at=source_scan_recorded_at,
+            recorded_at=recorded_at,
         )
 
 
@@ -189,10 +282,11 @@ class RankingV3ProductionBatch(RankingV3ProductionBatchInput):
     fact_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     attestation: RankingV3AttestationEnvelope
     idempotency_key: str = Field(min_length=1, max_length=256)
-    recorded_at: datetime
 
     @model_validator(mode="after")
     def validate_persisted_facts(self):
+        if self.recorded_at is None:
+            raise ValueError("persisted production batch requires recorded_at")
         _require_aware_datetime(self.recorded_at, "recorded_at")
         if production_batch_fact_digest(self.identity, self) != self.fact_digest:
             raise ValueError("production batch fact digest is invalid")
@@ -219,6 +313,13 @@ class RankingV3ProductionAdmissionBinding(BaseModel):
     strategy_id: str = Field(min_length=1, max_length=96)
     rank: int = Field(ge=1)
     score: Decimal = Field(ge=0, le=1)
+    source_rank_score: Decimal | None = None
+    batch_schema_version: str
+    selection_schema_version: str
+    trigger_price: Decimal | None = None
+    initial_stop: Decimal | None = None
+    target_1: Decimal | None = None
+    allocation_multiplier: Decimal | None = None
 
     @classmethod
     def from_batch(
@@ -240,6 +341,13 @@ class RankingV3ProductionAdmissionBinding(BaseModel):
             strategy_id=selection.strategy_id,
             rank=selection.rank,
             score=selection.score,
+            source_rank_score=selection.source_rank_score,
+            batch_schema_version=batch.schema_version,
+            selection_schema_version=selection.schema_version,
+            trigger_price=selection.trigger_price,
+            initial_stop=selection.initial_stop,
+            target_1=selection.target_1,
+            allocation_multiplier=selection.allocation_multiplier,
         )
 
 
@@ -425,7 +533,7 @@ class RankingV3ProductionSelectionService:
         idempotency_key: str,
     ) -> RankingV3ProductionBatch:
         key = _require_nonempty(idempotency_key, "idempotency_key")
-        self._require_authoritative_release(identity, item.session_date)
+        approved_at = self._require_authoritative_release(identity, item.session_date)
         self._require_authoritative_selection(identity, item)
         fact_digest = production_batch_fact_digest(identity, item)
 
@@ -436,6 +544,7 @@ class RankingV3ProductionSelectionService:
                     "production idempotency key is already bound to different facts"
                 )
             _require_batch_integrity(by_key, self.attestor)
+            _require_current_production_batch(by_key)
             return by_key
 
         by_session = self.store.get_batch_for_session(identity, item.session_date)
@@ -445,6 +554,7 @@ class RankingV3ProductionSelectionService:
                     "production session already has a different immutable selection batch"
                 )
             _require_batch_integrity(by_session, self.attestor)
+            _require_current_production_batch(by_session)
             if by_session.idempotency_key == key:
                 return by_session
             alias = RankingV3ProductionBatch(
@@ -456,6 +566,12 @@ class RankingV3ProductionSelectionService:
             )
             return self.store.append_batch(alias)
 
+        now = _require_aware_datetime(self._now(), "clock")
+        _require_new_batch_temporal_authorization(
+            item,
+            approved_at=approved_at,
+            now=now,
+        )
         batch = RankingV3ProductionBatch(
             **item.model_dump(mode="python"),
             identity=identity,
@@ -465,7 +581,6 @@ class RankingV3ProductionSelectionService:
                 fact_digest,
             ),
             idempotency_key=key,
-            recorded_at=_require_aware_datetime(self._now(), "clock"),
         )
         persisted = self.store.append_batch(batch)
         _require_batch_integrity(persisted, self.attestor)
@@ -551,7 +666,7 @@ class RankingV3ProductionSelectionService:
         self,
         identity: RankingV3ProductionIdentity,
         session_date: date,
-    ) -> None:
+    ) -> datetime:
         try:
             validation = RankingV3ProductionReleaseValidation.model_validate(
                 self.release_authority.validate_current_release(identity)
@@ -577,10 +692,11 @@ class RankingV3ProductionSelectionService:
             raise RankingV3ProductionAuthorizationError(
                 "authoritative release has no approval timestamp"
             )
-        if session_date < validation.approved_at.date():
+        if session_date < validation.approved_at.astimezone(PRODUCTION_TIMEZONE).date():
             raise RankingV3ProductionAuthorizationError(
                 "production signal session predates the authoritative release"
             )
+        return validation.approved_at
 
     def _require_authoritative_selection(
         self,
@@ -736,7 +852,18 @@ def production_identity_digest(identity: RankingV3ProductionIdentity) -> str:
 def production_selection_item_digest(
     item: RankingV3ProductionSelectionItem,
 ) -> str:
-    return stable_digest(item.model_dump(mode="python", exclude={"item_digest"}))
+    excluded = {"item_digest"}
+    if item.schema_version == LEGACY_PRODUCTION_SELECTION_SCHEMA_VERSION:
+        excluded.update(
+            {
+                "trigger_price",
+                "initial_stop",
+                "target_1",
+                "allocation_multiplier",
+                "source_rank_score",
+            }
+        )
+    return stable_digest(item.model_dump(mode="python", exclude=excluded))
 
 
 def production_selection_batch_digest(item: RankingV3ProductionBatchInput) -> str:
@@ -745,6 +872,12 @@ def production_selection_batch_digest(item: RankingV3ProductionBatchInput) -> st
         candidate_snapshot_digest=item.candidate_snapshot_digest,
         selected_count=item.selected_count,
         selections=item.selections,
+        source_scan_run_id=item.source_scan_run_id,
+        source_scan_started_at=item.source_scan_started_at,
+        source_scan_completed_at=item.source_scan_completed_at,
+        source_scan_recorded_at=item.source_scan_recorded_at,
+        recorded_at=item.recorded_at,
+        schema_version=item.schema_version,
     )
 
 
@@ -752,19 +885,26 @@ def production_batch_fact_digest(
     identity: RankingV3ProductionIdentity,
     item: RankingV3ProductionBatchInput | RankingV3ProductionBatch,
 ) -> str:
+    excluded = {
+        "identity",
+        "fact_digest",
+        "attestation",
+        "idempotency_key",
+    }
+    if item.schema_version == LEGACY_PRODUCTION_BATCH_SCHEMA_VERSION:
+        excluded.update(
+            {
+                "source_scan_run_id",
+                "source_scan_started_at",
+                "source_scan_completed_at",
+                "source_scan_recorded_at",
+                "recorded_at",
+            }
+        )
     return stable_digest(
         {
             "identity": identity,
-            "batch": item.model_dump(
-                mode="python",
-                exclude={
-                    "identity",
-                    "fact_digest",
-                    "attestation",
-                    "idempotency_key",
-                    "recorded_at",
-                },
-            ),
+            "batch": item.model_dump(mode="python", exclude=excluded),
         }
     )
 
@@ -775,16 +915,31 @@ def _selection_batch_digest(
     candidate_snapshot_digest: str,
     selected_count: int,
     selections: tuple[RankingV3ProductionSelectionItem, ...],
+    source_scan_run_id: str | None,
+    source_scan_started_at: datetime | None,
+    source_scan_completed_at: datetime | None,
+    source_scan_recorded_at: datetime | None,
+    recorded_at: datetime | None,
+    schema_version: str = PRODUCTION_BATCH_SCHEMA_VERSION,
 ) -> str:
-    return stable_digest(
-        {
-            "schema_version": PRODUCTION_BATCH_SCHEMA_VERSION,
-            "session_date": session_date,
-            "candidate_snapshot_digest": candidate_snapshot_digest,
-            "selected_count": selected_count,
-            "selections": selections,
-        }
-    )
+    payload = {
+        "schema_version": schema_version,
+        "session_date": session_date,
+        "candidate_snapshot_digest": candidate_snapshot_digest,
+        "selected_count": selected_count,
+        "selections": selections,
+    }
+    if schema_version != LEGACY_PRODUCTION_BATCH_SCHEMA_VERSION:
+        payload.update(
+            {
+                "source_scan_run_id": source_scan_run_id,
+                "source_scan_started_at": source_scan_started_at,
+                "source_scan_completed_at": source_scan_completed_at,
+                "source_scan_recorded_at": source_scan_recorded_at,
+                "recorded_at": recorded_at,
+            }
+        )
+    return stable_digest(payload)
 
 
 def _validate_selection_set(
@@ -834,7 +989,107 @@ def require_ranking_v3_production_batch_integrity(
         raise RankingV3ProductionIntegrityError("persisted production batch attestation is invalid")
 
 
+def require_current_ranking_v3_production_batch(
+    batch: RankingV3ProductionBatch,
+) -> None:
+    """Reject readable legacy proofs from any formal production admission path."""
+
+    _require_current_production_batch(batch)
+
+
 _require_batch_integrity = require_ranking_v3_production_batch_integrity
+
+
+def _require_current_production_batch(batch: RankingV3ProductionBatch) -> None:
+    if batch.schema_version != PRODUCTION_BATCH_SCHEMA_VERSION:
+        raise RankingV3ProductionAuthorizationError(
+            "legacy production batch is readable but cannot be formally admitted"
+        )
+    if any(
+        item.schema_version != PRODUCTION_SELECTION_SCHEMA_VERSION
+        for item in batch.selections
+    ):
+        raise RankingV3ProductionAuthorizationError(
+            "legacy production selection is readable but cannot be formally admitted"
+        )
+    try:
+        _validate_current_batch_temporal_facts(batch)
+    except ValueError as exc:
+        raise RankingV3ProductionAuthorizationError(
+            "production batch has incomplete temporal evidence"
+        ) from exc
+
+
+def _validate_current_batch_temporal_facts(
+    item: RankingV3ProductionBatchInput | RankingV3ProductionBatch,
+) -> None:
+    required = {
+        "source_scan_run_id": item.source_scan_run_id,
+        "source_scan_started_at": item.source_scan_started_at,
+        "source_scan_completed_at": item.source_scan_completed_at,
+        "source_scan_recorded_at": item.source_scan_recorded_at,
+        "recorded_at": item.recorded_at,
+    }
+    missing = [label for label, value in required.items() if value is None]
+    if missing:
+        raise ValueError(
+            "current production batch requires complete scan and recording timestamps"
+        )
+    started_at = _require_aware_datetime(
+        item.source_scan_started_at,
+        "source_scan_started_at",
+    )
+    completed_at = _require_aware_datetime(
+        item.source_scan_completed_at,
+        "source_scan_completed_at",
+    )
+    scan_recorded_at = _require_aware_datetime(
+        item.source_scan_recorded_at,
+        "source_scan_recorded_at",
+    )
+    recorded_at = _require_aware_datetime(item.recorded_at, "recorded_at")
+    if not started_at <= completed_at <= scan_recorded_at <= recorded_at:
+        raise ValueError(
+            "production timestamps must be ordered scan start, completion, persistence, batch"
+        )
+    window_start, window_end = _production_session_window(item.session_date)
+    if started_at < window_start or recorded_at >= window_end:
+        raise ValueError(
+            "production scan and batch must be generated inside the signal-day window"
+        )
+
+
+def _require_new_batch_temporal_authorization(
+    item: RankingV3ProductionBatchInput,
+    *,
+    approved_at: datetime,
+    now: datetime,
+) -> None:
+    if item.schema_version != PRODUCTION_BATCH_SCHEMA_VERSION:
+        raise RankingV3ProductionAuthorizationError(
+            "legacy production schema cannot create a formal production batch"
+        )
+    try:
+        _validate_current_batch_temporal_facts(item)
+    except ValueError as exc:
+        raise RankingV3ProductionAuthorizationError(str(exc)) from exc
+    if item.source_scan_started_at is None or item.recorded_at is None:
+        raise RankingV3ProductionAuthorizationError(
+            "production batch temporal evidence is incomplete"
+        )
+    if item.source_scan_started_at < approved_at:
+        raise RankingV3ProductionAuthorizationError(
+            "production scan started before the authoritative release approval"
+        )
+    if abs(now - item.recorded_at) > PRODUCTION_RECORDING_CLOCK_SKEW:
+        raise RankingV3ProductionAuthorizationError(
+            "production batch recorded_at does not match the server clock"
+        )
+
+
+def _production_session_window(session_date: date) -> tuple[datetime, datetime]:
+    start = datetime.combine(session_date, time.min, tzinfo=PRODUCTION_TIMEZONE)
+    return start, start + timedelta(days=1)
 
 
 def _require_aware_datetime(value: datetime, label: str) -> datetime:

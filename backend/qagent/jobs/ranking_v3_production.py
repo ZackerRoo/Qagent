@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-from datetime import date
+from collections.abc import Callable, Mapping
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -21,11 +22,13 @@ from qagent.backtesting.ranking_v3_forward_runtime import (
 from qagent.backtesting.ranking_v3_production import (
     RankingV3ProductionBatch,
     RankingV3ProductionBatchInput,
+    RankingV3ProductionAuthorizationError,
     RankingV3ProductionIdentity,
     RankingV3ProductionReleaseValidation,
     RankingV3ProductionSelectionItem,
     RankingV3ProductionSelectionValidation,
     RankingV3ProductionSelectionService,
+    PRODUCTION_TIMEZONE,
 )
 from qagent.backtesting.ranking_v3_protocol import (
     RankingV3Protocol,
@@ -37,7 +40,7 @@ from qagent.backtesting.ranking_v3_evidence import (
 from qagent.jobs.ranking_v3_forward import _candidate_from_snapshot
 from qagent.storage.ranking_v3_forward import RankingV3ForwardRepository
 from qagent.storage.ranking_v3_production import RankingV3ProductionRepository
-from qagent.storage.repository import ScanRunSnapshotBundle
+from qagent.storage.repository import OpportunitySnapshotRecord, ScanRunSnapshotBundle
 
 
 class RankingV3ProductionSnapshotUnavailable(RuntimeError):
@@ -89,6 +92,10 @@ class QagentRankingV3ProductionCandidateLoader:
         self.minimum_scanned = minimum_scanned
         self.protocol = protocol
         self.source_scan_run_id: str | None = None
+        self.source_scan_started_at: datetime | None = None
+        self.source_scan_completed_at: datetime | None = None
+        self.source_scan_recorded_at: datetime | None = None
+        self.snapshots_by_id: dict[str, OpportunitySnapshotRecord] = {}
 
     def load_candidate_snapshot(
         self,
@@ -104,6 +111,13 @@ class QagentRankingV3ProductionCandidateLoader:
                 "no complete authoritative full-market scan exists for the session"
             )
         self.source_scan_run_id = bundle.run.run_id
+        self.source_scan_started_at = bundle.run.started_at
+        self.source_scan_completed_at = bundle.run.completed_at
+        self.source_scan_recorded_at = bundle.run.created_at
+        if self.source_scan_started_at is None or self.source_scan_completed_at is None:
+            raise RankingV3ProductionSnapshotUnavailable(
+                "full-market scan has no authoritative start/completion timestamps"
+            )
         candidates: list[RankingV3ServerCandidateRecord] = []
         seen_snapshots: set[str] = set()
         seen_instruments: set[str] = set()
@@ -116,6 +130,7 @@ class QagentRankingV3ProductionCandidateLoader:
                 raise ValueError("production scan contains duplicate instruments")
             seen_snapshots.add(snapshot.snapshot_id)
             seen_instruments.add(snapshot.instrument_id)
+            self.snapshots_by_id[snapshot.snapshot_id] = snapshot
             candidate = _candidate_from_snapshot(snapshot)
             if candidate is not None:
                 candidates.append(candidate)
@@ -251,6 +266,8 @@ def run_ranking_v3_production_day(
     session_date: date,
     provider: str = "free",
     protocol: RankingV3Protocol | None = None,
+    allocation_multiplier: Decimal = Decimal("1"),
+    now: Callable[[], datetime] | None = None,
 ) -> RankingV3ProductionDayResult:
     """Freeze the current approved model's complete production selection for one day."""
 
@@ -273,6 +290,17 @@ def run_ranking_v3_production_day(
     if not proof_validation.valid or proof_validation.proof is None:
         raise PermissionError(
             f"Ranking V3 release proof is invalid: {proof_validation.reason}"
+        )
+    if session_date < proof_validation.proof.generated_at.astimezone(
+        PRODUCTION_TIMEZONE
+    ).date():
+        raise RankingV3ProductionAuthorizationError(
+            "production signal session predates the authoritative release"
+        )
+    recorded_at = (now or (lambda: datetime.now(timezone.utc)))()
+    if recorded_at.astimezone(PRODUCTION_TIMEZONE).date() != session_date:
+        raise RankingV3ProductionAuthorizationError(
+            "production batch cannot be generated after the signal-day window"
         )
     historical_evidence = next(
         (
@@ -340,26 +368,39 @@ def run_ranking_v3_production_day(
             protocol=frozen_protocol,
         )
     )
-    selection_items = tuple(
-        RankingV3ProductionSelectionItem.create(
-            candidate_id=_production_candidate_id(
-                identity,
-                session_date=session_date,
+    selection_items_list: list[RankingV3ProductionSelectionItem] = []
+    for item in selected:
+        execution_snapshot = _execution_snapshot(loader, item.source_snapshot_id)
+        selection_items_list.append(
+            RankingV3ProductionSelectionItem.create(
+                candidate_id=_production_candidate_id(
+                    identity,
+                    session_date=session_date,
+                    source_snapshot_id=item.source_snapshot_id,
+                    runtime_selection_digest=runtime_selection_digest,
+                ),
+                instrument_id=item.instrument_id,
                 source_snapshot_id=item.source_snapshot_id,
-                runtime_selection_digest=runtime_selection_digest,
-            ),
-            instrument_id=item.instrument_id,
-            source_snapshot_id=item.source_snapshot_id,
-            strategy_id=item.strategy_id,
-            rank=item.rank,
-            score=item.score,
+                strategy_id=item.strategy_id,
+                rank=item.rank,
+                score=item.score,
+                source_rank_score=execution_snapshot.rank_score,
+                trigger_price=execution_snapshot.trigger_price,
+                initial_stop=execution_snapshot.initial_stop,
+                target_1=execution_snapshot.target_1,
+                allocation_multiplier=allocation_multiplier,
+            )
         )
-        for item in selected
-    )
+    selection_items = tuple(selection_items_list)
     batch_input = RankingV3ProductionBatchInput.create(
         session_date=session_date,
         candidate_snapshot_digest=snapshot.snapshot_digest,
         selections=selection_items,
+        source_scan_run_id=loader.source_scan_run_id or "",
+        source_scan_started_at=loader.source_scan_started_at,
+        source_scan_completed_at=loader.source_scan_completed_at,
+        source_scan_recorded_at=loader.source_scan_recorded_at,
+        recorded_at=recorded_at,
     )
     production_repository = RankingV3ProductionRepository(repository.session_factory)
     service = RankingV3ProductionSelectionService(
@@ -374,6 +415,7 @@ def run_ranking_v3_production_day(
             identity,
             batch_input,
         ),
+        now=lambda: recorded_at,
     )
     batch = service.record_batch(
         identity,
@@ -422,3 +464,15 @@ def _invalid_release(reason: str) -> RankingV3ProductionReleaseValidation:
         status="missing",
         reason=reason,
     )
+
+
+def _execution_snapshot(
+    loader: QagentRankingV3ProductionCandidateLoader,
+    source_snapshot_id: str,
+) -> OpportunitySnapshotRecord:
+    snapshot = loader.snapshots_by_id.get(source_snapshot_id)
+    if snapshot is None:
+        raise ValueError("selected production candidate has no source execution snapshot")
+    if getattr(snapshot, "trigger_price", None) is None:
+        raise ValueError("selected production candidate has no trigger price")
+    return snapshot

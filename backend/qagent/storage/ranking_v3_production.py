@@ -8,12 +8,14 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.backtesting.ranking_v3_production import (
+    PRODUCTION_BATCH_SCHEMA_VERSION,
     RankingV3ProductionAdmissionBinding,
     RankingV3ProductionBatch,
     RankingV3ProductionConflictError,
     RankingV3ProductionIdentity,
     RankingV3ProductionIntegrityError,
     RankingV3ProductionSelectionItem,
+    require_current_ranking_v3_production_batch,
     require_ranking_v3_production_batch_integrity,
 )
 from qagent.security.ranking_v3_attestation import RankingV3Attestor, load_attestation_key
@@ -21,6 +23,8 @@ from qagent.storage.tables import (
     RankingV3ProductionBatchRow,
     RankingV3ProductionIdempotencyKeyRow,
     RankingV3ProductionSelectionRow,
+    OpportunitySnapshotRow,
+    ScanRunRow,
 )
 
 
@@ -55,6 +59,7 @@ class RankingV3ProductionRepository:
             batch = _batch_from_row(session, row)
             _require_identity(batch, identity)
             require_ranking_v3_production_batch_integrity(batch, self.attestor)
+            _require_source_scan_facts(session, batch, allow_legacy=True)
             return batch
 
     def get_batch_by_idempotency_key(
@@ -78,6 +83,7 @@ class RankingV3ProductionRepository:
             batch = _batch_from_row(session, row)
             _require_identity(batch, identity)
             require_ranking_v3_production_batch_integrity(batch, self.attestor)
+            _require_source_scan_facts(session, batch, allow_legacy=True)
             return batch
 
     def get_batch_by_fact_digest(
@@ -92,6 +98,7 @@ class RankingV3ProductionRepository:
             batch = _batch_from_row(session, row)
             _require_identity(batch, identity)
             require_ranking_v3_production_batch_integrity(batch, self.attestor)
+            _require_source_scan_facts(session, batch, allow_legacy=True)
             return batch
 
     def get_selection_by_source_snapshot(
@@ -122,6 +129,7 @@ class RankingV3ProductionRepository:
                 persisted_batch,
                 self.attestor,
             )
+            _require_source_scan_facts(session, persisted_batch, allow_legacy=True)
             selection = _selection_from_row(row)
             if selection not in persisted_batch.selections:
                 raise RankingV3ProductionIntegrityError(
@@ -150,6 +158,7 @@ class RankingV3ProductionRepository:
             batches = tuple(_batch_from_row(session, row) for row in rows)
             for batch in batches:
                 require_ranking_v3_production_batch_integrity(batch, self.attestor)
+                _require_source_scan_facts(session, batch, allow_legacy=True)
             return batches
 
     def append_batch(
@@ -161,6 +170,7 @@ class RankingV3ProductionRepository:
 
         with self.session_factory() as session:
             _begin_immediate(session)
+            _require_source_scan_facts(session, requested)
             self._append_batch_row(session, requested)
             self._append_selection_rows(session, requested)
             self._append_alias_row(session, requested)
@@ -248,6 +258,11 @@ class RankingV3ProductionRepository:
                     strategy_id=item.strategy_id,
                     rank=item.rank,
                     score=item.score,
+                    source_rank_score=item.source_rank_score,
+                    trigger_price=item.trigger_price,
+                    initial_stop=item.initial_stop,
+                    target_1=item.target_1,
+                    allocation_multiplier=item.allocation_multiplier,
                     payload_json=_canonical_json(item.model_dump(mode="json")),
                     recorded_at=batch.recorded_at,
                 )
@@ -316,6 +331,53 @@ class RankingV3ProductionRepository:
 def _begin_immediate(session: Session) -> None:
     if session.get_bind().dialect.name == "sqlite":
         session.execute(text("BEGIN IMMEDIATE"))
+
+
+def _require_source_scan_facts(
+    session: Session,
+    batch: RankingV3ProductionBatch,
+    *,
+    allow_legacy: bool = False,
+) -> None:
+    if batch.schema_version != PRODUCTION_BATCH_SCHEMA_VERSION and allow_legacy:
+        return
+    require_current_ranking_v3_production_batch(batch)
+    if batch.source_scan_run_id is None:
+        raise RankingV3ProductionIntegrityError(
+            "current production batch has no source scan run"
+        )
+    run = session.get(ScanRunRow, batch.source_scan_run_id)
+    if run is None:
+        raise RankingV3ProductionIntegrityError(
+            "current production batch references a missing source scan run"
+        )
+    expected_times = (
+        batch.source_scan_started_at,
+        batch.source_scan_completed_at,
+        batch.source_scan_recorded_at,
+    )
+    observed_times = (run.started_at, run.completed_at, run.created_at)
+    if observed_times != expected_times:
+        raise RankingV3ProductionIntegrityError(
+            "current production batch scan timestamps do not match the source run"
+        )
+    snapshot_run_ids = {
+        run_id
+        for (run_id,) in (
+            session.query(OpportunitySnapshotRow.run_id)
+            .filter(
+                OpportunitySnapshotRow.snapshot_id.in_(
+                    [item.source_snapshot_id for item in batch.selections]
+                )
+            )
+            .distinct()
+            .all()
+        )
+    }
+    if batch.selections and snapshot_run_ids != {batch.source_scan_run_id}:
+        raise RankingV3ProductionIntegrityError(
+            "current production batch selections do not belong to its source scan"
+        )
 
 
 def _batch_from_row(
@@ -393,6 +455,11 @@ def _selection_from_row(
             "strategy_id": item.strategy_id,
             "rank": item.rank,
             "score": item.score,
+            "source_rank_score": item.source_rank_score,
+            "trigger_price": item.trigger_price,
+            "initial_stop": item.initial_stop,
+            "target_1": item.target_1,
+            "allocation_multiplier": item.allocation_multiplier,
         },
         "persisted production selection metadata does not match its canonical payload",
     )

@@ -436,7 +436,10 @@ def test_recommendation_calibration_api_groups_scores_and_signal_effects(
         session.commit()
 
     client = TestClient(create_app())
-    response = client.get("/api/recommendation-calibration?provider=fixture&limit=20")
+    response = client.get(
+        "/api/recommendation-calibration"
+        "?provider=fixture&limit=20&reporting_scope=legacy"
+    )
 
     assert response.status_code == 200
     center = response.json()

@@ -8,7 +8,7 @@ import os
 import statistics
 from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Iterable
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from multiprocessing import get_context
@@ -931,6 +931,22 @@ def _sum_worker_stats(
     )
 
 
+def _terminate_snapshot_executor(
+    executor: ProcessPoolExecutor,
+    futures: Iterable[object],
+) -> None:
+    """Stop canceled replay work instead of waiting for expensive snapshots."""
+
+    for future in futures:
+        cancel = getattr(future, "cancel", None)
+        if callable(cancel):
+            cancel()
+    for process in list(getattr(executor, "_processes", {}).values()):
+        if process.is_alive():
+            process.terminate()
+    executor.shutdown(wait=False, cancel_futures=True)
+
+
 def run_full_market_walk_forward_selection(
     repository: ReplayEvidenceRepository,
     *,
@@ -1154,7 +1170,7 @@ def run_full_market_walk_forward_selection(
         elif pending_inputs:
             database_url = _repository_database_url(owner_repository)
             stats_by_worker: dict[int, _WalkForwardWorkerStats] = {}
-            with ProcessPoolExecutor(
+            executor = ProcessPoolExecutor(
                 max_workers=effective_snapshot_workers,
                 mp_context=get_context("spawn"),
                 initializer=_initialize_snapshot_worker,
@@ -1164,31 +1180,59 @@ def run_full_market_walk_forward_selection(
                     owner_run_id,
                     revision,
                 ),
-            ) as executor:
-                futures = [
+            )
+            in_flight = set()
+            try:
+                pending_iterator = iter(pending_inputs)
+                in_flight = {
                     executor.submit(
                         _compute_snapshot_in_worker,
                         snapshot_input,
                         lookback_days,
                     )
-                    for snapshot_input in pending_inputs
-                ]
-                for future in as_completed(futures):
-                    worker_result = future.result()
-                    lease_heartbeat.raise_if_failed()
-                    snapshot_by_date[worker_result.snapshot.decision_date] = worker_result.snapshot
-                    scan_error_count += worker_result.scan_error_count
-                    scan_error_samples.extend(worker_result.scan_error_samples)
-                    stats_by_worker[worker_result.worker_pid] = worker_result.stats
-                    _report_progress(
-                        progress_callback,
-                        phase="historical_replay",
-                        processed_snapshots=len(snapshot_by_date),
-                        total_snapshots=len(sessions),
-                        current_date=worker_result.snapshot.decision_date,
-                        snapshot=worker_result.snapshot,
-                        lease_heartbeat=lease_heartbeat,
+                    for snapshot_input in (
+                        next(pending_iterator, None)
+                        for _ in range(effective_snapshot_workers)
                     )
+                    if snapshot_input is not None
+                }
+                while in_flight:
+                    completed, in_flight = wait(
+                        in_flight,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    for future in completed:
+                        worker_result = future.result()
+                        lease_heartbeat.raise_if_failed()
+                        snapshot_by_date[worker_result.snapshot.decision_date] = (
+                            worker_result.snapshot
+                        )
+                        scan_error_count += worker_result.scan_error_count
+                        scan_error_samples.extend(worker_result.scan_error_samples)
+                        stats_by_worker[worker_result.worker_pid] = worker_result.stats
+                        _report_progress(
+                            progress_callback,
+                            phase="historical_replay",
+                            processed_snapshots=len(snapshot_by_date),
+                            total_snapshots=len(sessions),
+                            current_date=worker_result.snapshot.decision_date,
+                            snapshot=worker_result.snapshot,
+                            lease_heartbeat=lease_heartbeat,
+                        )
+                        snapshot_input = next(pending_iterator, None)
+                        if snapshot_input is not None:
+                            in_flight.add(
+                                executor.submit(
+                                    _compute_snapshot_in_worker,
+                                    snapshot_input,
+                                    lookback_days,
+                                )
+                            )
+            except BaseException:
+                _terminate_snapshot_executor(executor, in_flight)
+                raise
+            else:
+                executor.shutdown(wait=True)
             selection_worker_stats = _sum_worker_stats(stats_by_worker.values())
         snapshots = [snapshot_by_date[item] for item in sessions]
         snapshots = _enrich_selection_constraints(

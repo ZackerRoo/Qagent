@@ -2,7 +2,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal, ROUND_DOWN
-from typing import Mapping
+from typing import Literal, Mapping
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -594,6 +594,7 @@ def seed_paper_trades_from_snapshots(
             snapshot,
             provider=provider,
             mode=admission_mode,
+            allocation_multiplier=allocation_multiplier,
         )
         if not admission.eligible:
             skipped += 1
@@ -752,7 +753,7 @@ def update_paper_trades(
     if provider_errors:
         data_health["errors"] = " | ".join(provider_errors[:3])
     return PaperUpdateResult(
-        summary=summarize_paper_trades(refreshed),
+        summary=summarize_paper_trades(refreshed, reporting_scope="all"),
         trades=refreshed,
         data_health=data_health,
     )
@@ -831,8 +832,17 @@ def paper_execution_data_health(
     }
 
 
-def summarize_paper_trades(trades: list[PaperTradeRecord]) -> PaperTradingSummary:
-    trades, _ = _paper_reporting_scope(trades)
+def summarize_paper_trades(
+    trades: list[PaperTradeRecord],
+    *,
+    reporting_scope: Literal["official", "legacy", "all"] = "official",
+    authenticated_trade_ids: set[str] | None = None,
+) -> PaperTradingSummary:
+    trades, _ = _paper_reporting_scope(
+        trades,
+        reporting_scope=reporting_scope,
+        authenticated_trade_ids=authenticated_trade_ids,
+    )
     closed = [trade for trade in trades if _is_executed_closed_trade(trade)]
     winning = [
         trade
@@ -874,6 +884,8 @@ def build_paper_ledger(
     transaction_cost_bps: Decimal = Decimal("0"),
     slippage_bps: Decimal = Decimal("0"),
     take_profit_pct: Decimal = Decimal("100"),
+    reporting_scope: Literal["official", "legacy", "all"] = "official",
+    authenticated_trade_ids: set[str] | None = None,
 ) -> PaperLedger:
     if initial_capital <= 0:
         raise ValueError("initial_capital must be greater than zero")
@@ -886,7 +898,11 @@ def build_paper_ledger(
     if take_profit_pct <= 0 or take_profit_pct > 100:
         raise ValueError("take_profit_pct must be between 0 and 100")
 
-    trades, reporting_health = _paper_reporting_scope(trades)
+    trades, reporting_health = _paper_reporting_scope(
+        trades,
+        reporting_scope=reporting_scope,
+        authenticated_trade_ids=authenticated_trade_ids,
+    )
     allocation_per_trade = _money(initial_capital * allocation_per_trade_pct / Decimal("100"))
     items: list[PaperLedgerItem] = []
     planned_capital = Decimal("0")
@@ -1197,18 +1213,40 @@ def build_paper_daily_report(
 
 def _paper_reporting_scope(
     trades: list[PaperTradeRecord],
+    *,
+    reporting_scope: Literal["official", "legacy", "all"] = "official",
+    authenticated_trade_ids: set[str] | None = None,
 ) -> tuple[list[PaperTradeRecord], dict[str, str]]:
-    official = [trade for trade in trades if trade.admission_source == "ranking_v3_production"]
+    authenticated_ids = authenticated_trade_ids or set()
+    official = [trade for trade in trades if trade.trade_id in authenticated_ids]
+    invalid_official_claims = sum(
+        trade.admission_source == "ranking_v3_production"
+        and trade.trade_id not in authenticated_ids
+        for trade in trades
+    )
     legacy_manual = sum(trade.admission_source == "legacy_manual" for trade in trades)
     legacy_unknown = sum(
         trade.admission_source not in {"ranking_v3_production", "legacy_manual"} for trade in trades
+    ) + invalid_official_claims
+    legacy = [trade for trade in trades if trade.trade_id not in authenticated_ids]
+    reporting_trades = (
+        official
+        if reporting_scope == "official"
+        else legacy
+        if reporting_scope == "legacy"
+        else trades
     )
-    reporting_trades = official if official else list(trades)
     return reporting_trades, {
-        "paper_reporting_scope": ("ranking_v3_production" if official else "legacy_compatible"),
+        "paper_reporting_scope": {
+            "official": "ranking_v3_production",
+            "legacy": "legacy_only",
+            "all": "operational_all",
+        }[reporting_scope],
+        "paper_reporting_fail_closed": "true",
         "paper_reporting_official": str(len(official)),
         "paper_reporting_legacy_manual": str(legacy_manual),
         "paper_reporting_legacy_unknown": str(legacy_unknown),
+        "paper_reporting_invalid_official_claims": str(invalid_official_claims),
         "paper_reporting_excluded": str(len(trades) - len(reporting_trades)),
     }
 

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import date
+from decimal import Decimal
+
+from pydantic import ValidationError
 
 from qagent.domain.models import (
     OpportunityCard,
@@ -29,6 +33,12 @@ def build_recent_recommendation_feedback_center(
     snapshots = repo.list_opportunity_snapshots(provider=provider, limit=limit)
     if not snapshots:
         return None
+    authenticated_sources, authentication_health = (
+        authenticated_ranking_v3_snapshot_sources(
+            repo,
+            [snapshot.snapshot_id for snapshot in snapshots],
+        )
+    )
     instrument_ids = list(dict.fromkeys(snapshot.instrument_id for snapshot in snapshots))
     bars = market_provider.get_daily_bars(
         instrument_ids,
@@ -47,7 +57,9 @@ def build_recent_recommendation_feedback_center(
         data_health={
             "feedback_provider": provider,
             "feedback_snapshots": str(len(snapshots)),
+            **authentication_health,
         },
+        authenticated_admission_sources=authenticated_sources,
     )
 
 
@@ -55,7 +67,11 @@ def apply_recommendation_feedback_calibration(
     cards: list[OpportunityCard],
     center: RecommendationCalibrationCenter | None,
 ) -> list[OpportunityCard]:
-    if center is None or not center.signal_effects:
+    if (
+        center is None
+        or not _is_authenticated_official_calibration(center)
+        or not center.signal_effects
+    ):
         return cards
     effects = {
         (effect.dimension, effect.signal_key): effect
@@ -100,7 +116,11 @@ def apply_recommendation_feedback_quality_gate(
     cards: list[OpportunityCard],
     center: RecommendationCalibrationCenter | None,
 ) -> list[OpportunityCard]:
-    if center is None or not center.signal_effects:
+    if (
+        center is None
+        or not _is_authenticated_official_calibration(center)
+        or not center.signal_effects
+    ):
         return cards
     weak_effects = {
         (effect.dimension, effect.signal_key): effect
@@ -141,6 +161,8 @@ def apply_paper_trading_feedback(
     cards: list[OpportunityCard],
     report: object | None,
 ) -> list[OpportunityCard]:
+    if not _is_authenticated_official_paper_report(report):
+        return cards
     drag_effects = _paper_drag_effects(report)
     contributor_effects = _paper_contributor_effects(report)
     if not drag_effects and not contributor_effects:
@@ -200,6 +222,276 @@ def apply_paper_trading_feedback(
         if note not in card.calibration_notes:
             card.calibration_notes.append(note)
     return cards
+
+
+def authenticated_ranking_v3_snapshot_sources(
+    repo: QagentRepository,
+    snapshot_ids: list[str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    from qagent.backtesting.ranking_v3_production import (
+        RankingV3ProductionBatch,
+        RankingV3ProductionAuthorizationError,
+        RankingV3ProductionIntegrityError,
+        require_current_ranking_v3_production_batch,
+        require_ranking_v3_production_batch_integrity,
+    )
+    from qagent.security.ranking_v3_attestation import (
+        RankingV3Attestor,
+        load_attestation_key,
+    )
+    from qagent.storage.tables import (
+        RankingV3ProductionBatchRow,
+        RankingV3ProductionSelectionRow,
+    )
+
+    requested = sorted(set(snapshot_ids))
+    if not requested:
+        return {}, {
+            "feedback_production_authentication": "empty",
+            "feedback_production_authenticated": "0",
+            "feedback_production_authentication_errors": "0",
+        }
+
+    try:
+        attestor = RankingV3Attestor(load_attestation_key())
+        with repo.session_factory() as session:
+            selection_rows = (
+                session.query(
+                    RankingV3ProductionSelectionRow.source_snapshot_id,
+                    RankingV3ProductionSelectionRow.batch_fact_digest,
+                )
+                .filter(RankingV3ProductionSelectionRow.source_snapshot_id.in_(requested))
+                .all()
+            )
+            batch_digests = sorted({row.batch_fact_digest for row in selection_rows})
+            batch_rows = (
+                session.query(RankingV3ProductionBatchRow)
+                .filter(RankingV3ProductionBatchRow.fact_digest.in_(batch_digests))
+                .all()
+                if batch_digests
+                else []
+            )
+    except Exception:
+        return {}, {
+            "feedback_production_authentication": "unavailable",
+            "feedback_production_authenticated": "0",
+            "feedback_production_authentication_errors": "1",
+        }
+
+    authenticated: dict[str, str] = {}
+    authentication_errors = 0
+    requested_set = set(requested)
+    for row in batch_rows:
+        try:
+            batch = RankingV3ProductionBatch.model_validate(json.loads(row.payload_json))
+            require_ranking_v3_production_batch_integrity(batch, attestor)
+            require_current_ranking_v3_production_batch(batch)
+        except (
+            json.JSONDecodeError,
+            TypeError,
+            ValidationError,
+            RankingV3ProductionAuthorizationError,
+            RankingV3ProductionIntegrityError,
+            ValueError,
+        ):
+            authentication_errors += 1
+            continue
+        for selection in batch.selections:
+            if selection.source_snapshot_id in requested_set:
+                authenticated[selection.source_snapshot_id] = "ranking_v3_production"
+
+    return authenticated, {
+        "feedback_production_authentication": (
+            "verified" if authenticated else "no_official_samples"
+        ),
+        "feedback_production_authenticated": str(len(authenticated)),
+        "feedback_production_authentication_errors": str(authentication_errors),
+    }
+
+
+def authenticated_ranking_v3_paper_trade_ids(
+    repo: QagentRepository,
+    trades: list[object],
+) -> tuple[set[str], dict[str, str]]:
+    """Authenticate persisted paper rows against signed current-schema batches."""
+
+    from qagent.backtesting.ranking_v3_production import (
+        RankingV3ProductionAuthorizationError,
+        RankingV3ProductionBatch,
+        RankingV3ProductionIntegrityError,
+        require_current_ranking_v3_production_batch,
+        require_ranking_v3_production_batch_integrity,
+    )
+    from qagent.security.ranking_v3_attestation import (
+        RankingV3Attestor,
+        load_attestation_key,
+    )
+    from qagent.storage.tables import RankingV3ProductionBatchRow
+
+    candidates = [
+        trade
+        for trade in trades
+        if getattr(trade, "admission_source", None) == "ranking_v3_production"
+        and getattr(trade, "production_batch_fact_digest", None)
+    ]
+    if not candidates:
+        return set(), {
+            "paper_production_authentication": "no_official_claims",
+            "paper_production_authenticated": "0",
+            "paper_production_authentication_errors": "0",
+        }
+
+    batch_digests = sorted(
+        {
+            str(getattr(trade, "production_batch_fact_digest"))
+            for trade in candidates
+        }
+    )
+    try:
+        attestor = RankingV3Attestor(load_attestation_key())
+        with repo.session_factory() as session:
+            rows = (
+                session.query(RankingV3ProductionBatchRow)
+                .filter(RankingV3ProductionBatchRow.fact_digest.in_(batch_digests))
+                .all()
+            )
+    except Exception:
+        return set(), {
+            "paper_production_authentication": "unavailable",
+            "paper_production_authenticated": "0",
+            "paper_production_authentication_errors": str(len(candidates)),
+        }
+
+    batches: dict[str, RankingV3ProductionBatch] = {}
+    errors = 0
+    for row in rows:
+        try:
+            batch = RankingV3ProductionBatch.model_validate(json.loads(row.payload_json))
+            require_ranking_v3_production_batch_integrity(batch, attestor)
+            require_current_ranking_v3_production_batch(batch)
+        except (
+            json.JSONDecodeError,
+            TypeError,
+            ValidationError,
+            RankingV3ProductionAuthorizationError,
+            RankingV3ProductionIntegrityError,
+            ValueError,
+        ):
+            errors += 1
+            continue
+        batches[batch.fact_digest] = batch
+
+    authenticated: set[str] = set()
+    for trade in candidates:
+        batch = batches.get(str(getattr(trade, "production_batch_fact_digest")))
+        if batch is None:
+            errors += 1
+            continue
+        selection = next(
+            (
+                item
+                for item in batch.selections
+                if item.item_digest
+                == getattr(trade, "production_selection_item_digest", None)
+            ),
+            None,
+        )
+        if selection is None or not _paper_trade_matches_signed_selection(
+            trade,
+            batch,
+            selection,
+        ):
+            errors += 1
+            continue
+        authenticated.add(str(getattr(trade, "trade_id")))
+
+    return authenticated, {
+        "paper_production_authentication": (
+            "verified" if authenticated else "no_authenticated_official_trades"
+        ),
+        "paper_production_authenticated": str(len(authenticated)),
+        "paper_production_authentication_errors": str(errors),
+    }
+
+
+def _paper_trade_matches_signed_selection(
+    trade: object,
+    batch: object,
+    selection: object,
+) -> bool:
+    return (
+        getattr(trade, "production_identity_digest", None)
+        == getattr(getattr(batch, "identity"), "identity_digest", None)
+        and getattr(trade, "release_proof_digest", None)
+        == getattr(getattr(batch, "identity"), "release_proof_digest", None)
+        and getattr(trade, "source_snapshot_id", None)
+        == getattr(selection, "source_snapshot_id", None)
+        and getattr(trade, "instrument_id", None)
+        == getattr(selection, "instrument_id", None)
+        and getattr(trade, "strategy_id", None)
+        == getattr(selection, "strategy_id", None)
+        and getattr(trade, "signal_date", None)
+        == getattr(batch, "session_date", None)
+        and _decimal_equal(
+            getattr(trade, "rank_score", None),
+            getattr(selection, "source_rank_score", None),
+        )
+        and _decimal_equal(
+            getattr(trade, "trigger_price", None),
+            getattr(selection, "trigger_price", None),
+        )
+        and _decimal_equal(
+            getattr(trade, "initial_stop", None),
+            getattr(selection, "initial_stop", None),
+        )
+        and _decimal_equal(
+            getattr(trade, "target_1", None),
+            getattr(selection, "target_1", None),
+        )
+        and _decimal_equal(
+            getattr(trade, "allocation_multiplier", None),
+            getattr(selection, "allocation_multiplier", None),
+        )
+    )
+
+
+def _decimal_equal(left: object, right: object) -> bool:
+    if left is None or right is None:
+        return left is right
+    try:
+        return Decimal(str(left)) == Decimal(str(right))
+    except (ArithmeticError, ValueError):
+        return False
+
+
+def _is_authenticated_official_calibration(
+    center: RecommendationCalibrationCenter,
+) -> bool:
+    health = center.data_health
+    if health.get("recommendation_calibration_scope") != "ranking_v3_production":
+        return False
+    if health.get("recommendation_calibration_fail_closed") != "true":
+        return False
+    try:
+        return int(health.get("recommendation_calibration_source_official", "0")) > 0
+    except ValueError:
+        return False
+
+
+def _is_authenticated_official_paper_report(report: object | None) -> bool:
+    if report is None:
+        return False
+    health = getattr(report, "data_health", None)
+    if not isinstance(health, Mapping):
+        return False
+    if health.get("paper_reporting_scope") != "ranking_v3_production":
+        return False
+    if health.get("paper_reporting_fail_closed") != "true":
+        return False
+    try:
+        return int(str(health.get("paper_reporting_official", "0"))) > 0
+    except ValueError:
+        return False
 
 
 def paper_trading_feedback_data_health(cards: list[OpportunityCard]) -> dict[str, str]:

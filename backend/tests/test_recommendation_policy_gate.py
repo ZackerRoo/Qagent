@@ -299,9 +299,19 @@ def test_feedback_and_paper_dynamic_calibration_each_apply_only_once():
                 reason="历史推荐后表现较好。",
             )
         ],
+        data_health={
+            "recommendation_calibration_scope": "ranking_v3_production",
+            "recommendation_calibration_fail_closed": "true",
+            "recommendation_calibration_source_official": "8",
+        },
     )
     paper_report = SimpleNamespace(
         risk_gate=SimpleNamespace(can_add_entries=True),
+        data_health={
+            "paper_reporting_scope": "ranking_v3_production",
+            "paper_reporting_fail_closed": "true",
+            "paper_reporting_official": "5",
+        },
         failure_attribution=[
             SimpleNamespace(
                 dimension="strategy",
@@ -332,6 +342,70 @@ def test_feedback_and_paper_dynamic_calibration_each_apply_only_once():
     assert card.rank_score == after_first
     assert sum("推荐反馈校准" in note for note in card.calibration_notes) == 1
     assert sum("模拟盘反馈降权" in note for note in card.calibration_notes) == 1
+
+
+def test_governance_ignores_empty_official_and_legacy_feedback_sources():
+    card = _card("CN:688981", 0.72, "trend_momentum_stage2")
+    before = card.rank_score
+    effect = RecommendationSignalEffect(
+        signal_key="trend_momentum_stage2",
+        label="趋势动量",
+        sample_count=100,
+        completed_count=100,
+        win_rate_10d=0.0,
+        avg_return_10d=-20.0,
+        baseline_avg_return_10d=1.0,
+        lift_vs_baseline_10d=-21.0,
+        reliability_score=1.0,
+        weight_action="降低",
+        suggested_weight_delta=-0.08,
+        reason="legacy poison",
+    )
+    empty_official = RecommendationCalibrationCenter(
+        as_of=date(2026, 7, 17),
+        headline="无正式样本",
+        verdict="样本不足",
+        reliability_score=0.0,
+        signal_effects=[effect],
+        data_health={
+            "recommendation_calibration_scope": "ranking_v3_production",
+            "recommendation_calibration_fail_closed": "true",
+            "recommendation_calibration_source_official": "0",
+        },
+    )
+    legacy_report = SimpleNamespace(
+        risk_gate=SimpleNamespace(can_add_entries=False),
+        failure_attribution=[
+            SimpleNamespace(
+                dimension="strategy",
+                key="trend_momentum_stage2",
+                label="趋势动量",
+                verdict="drag",
+                evaluated_trades=100,
+                total_return_pct=-50.0,
+                win_rate=0.0,
+                stopped_trades=100,
+                target_hit_trades=0,
+            )
+        ],
+        data_health={
+            "paper_reporting_scope": "legacy_only",
+            "paper_reporting_fail_closed": "true",
+            "paper_reporting_official": "0",
+        },
+    )
+
+    result = apply_final_recommendation_policy(
+        [card],
+        recommendation_feedback_center=empty_official,
+        paper_report=legacy_report,
+    )
+
+    assert card.rank_score == before
+    assert not any("推荐反馈" in note for note in card.calibration_notes)
+    assert not any("模拟盘反馈" in note for note in card.calibration_notes)
+    assert result.data_health["recommendation_feedback_scope"] == "no_official_samples"
+    assert result.data_health["paper_feedback_scope"] == "no_official_samples"
 
 
 def test_governance_context_accepts_mapping_records_from_compatibility_repository():

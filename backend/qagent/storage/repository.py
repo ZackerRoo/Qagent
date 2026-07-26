@@ -119,6 +119,8 @@ class ScanRunRecord(BaseModel):
     scanned: int
     cards: int
     data_health: dict[str, str]
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
     created_at: datetime
 
 
@@ -1668,7 +1670,8 @@ class QagentRepository:
         result,
         snapshot_items: list[object] | None = None,
     ) -> ScanRunRecord:
-        run_id = f"scan-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+        persisted_at = datetime.now(timezone.utc)
+        run_id = f"scan-{persisted_at.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
         item_source = snapshot_items if snapshot_items is not None else result.items
         item_by_instrument = {item.instrument_id: item for item in item_source}
         scanned = len(result.items)
@@ -1685,6 +1688,22 @@ class QagentRepository:
                     "full_market_batch scan counts must equal the persisted symbol universe"
                 )
         with self.session_factory() as session:
+            started_at = _aware_health_datetime(
+                result.data_health.get("full_market_scan_started_at")
+            )
+            completed_at = _aware_health_datetime(
+                result.data_health.get("full_market_scan_completed_at")
+            )
+            if mode == "full_market_batch" and (
+                started_at is None or completed_at is None
+            ):
+                raise ValueError(
+                    "full_market_batch ScanRun requires scan start and completion timestamps"
+                )
+            started_at = started_at or persisted_at
+            completed_at = completed_at or persisted_at
+            if started_at > completed_at or completed_at > persisted_at:
+                raise ValueError("ScanRun timestamps must be ordered and not in the future")
             run_row = ScanRunRow(
                 run_id=run_id,
                 provider=provider,
@@ -1693,6 +1712,9 @@ class QagentRepository:
                 scanned=scanned,
                 cards=len(result.cards),
                 data_health=json.dumps(result.data_health, sort_keys=True),
+                started_at=started_at,
+                completed_at=completed_at,
+                created_at=persisted_at,
             )
             session.add(run_row)
             for card in result.cards:
@@ -1904,6 +1926,10 @@ class QagentRepository:
                     or total_batches < 1
                     or completed_batches != total_batches
                     or error_count != 0
+                    or candidate.started_at is None
+                    or candidate.completed_at is None
+                    or candidate.started_at > candidate.completed_at
+                    or candidate.completed_at > candidate.created_at
                 ):
                     continue
                 observed_dates = [
@@ -2922,6 +2948,8 @@ class QagentRepository:
             scanned=row.scanned,
             cards=row.cards,
             data_health=json.loads(row.data_health or "{}"),
+            started_at=row.started_at,
+            completed_at=row.completed_at,
             created_at=row.created_at,
         )
 
@@ -3613,3 +3641,15 @@ def _dedupe_strings(values: list[str]) -> list[str]:
         result.append(normalized)
         seen.add(normalized)
     return result
+
+
+def _aware_health_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError as exc:
+        raise ValueError("scan timestamp must be valid ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("scan timestamp must be timezone-aware")
+    return parsed.astimezone(timezone.utc)

@@ -33,6 +33,13 @@ from qagent.recommendations.quality_gate import apply_recommendation_quality_gat
 from qagent.storage.repository import OpportunitySnapshotRecord
 
 
+OFFICIAL_CALIBRATION_HEALTH = {
+    "recommendation_calibration_scope": "ranking_v3_production",
+    "recommendation_calibration_fail_closed": "true",
+    "recommendation_calibration_source_official": "10",
+}
+
+
 def test_recommendation_feedback_promotes_working_signals_and_demotes_failed_signals():
     winner = _card("CN:688981", "中芯国际 688981.SH", 0.72, ["fund_flow_positive"])
     loser = _card("CN:000063", "中兴通讯 000063.SZ", 0.72, ["overextended"])
@@ -87,6 +94,7 @@ def test_recommendation_feedback_promotes_working_signals_and_demotes_failed_sig
                 reason="短线过热样本显著跑输基准。",
             ),
         ],
+        data_health=OFFICIAL_CALIBRATION_HEALTH,
     )
 
     before_winner = winner.rank_score
@@ -130,6 +138,7 @@ def test_recommendation_feedback_blocks_signals_with_bad_followthrough():
                 reason="最近推荐后 10 日收益显著弱于基准。",
             )
         ],
+        data_health=OFFICIAL_CALIBRATION_HEALTH,
     )
 
     apply_recommendation_feedback_quality_gate([card], center)
@@ -294,7 +303,12 @@ def test_recommendation_calibration_tracks_strategy_factor_industry_and_regime()
         )
         pairs.append((snapshot, outcome))
 
-    center = build_recommendation_calibration_center(pairs)
+    center = build_recommendation_calibration_center(
+        pairs,
+        authenticated_admission_sources={
+            snapshot.snapshot_id: "ranking_v3_production" for snapshot, _ in pairs
+        },
+    )
     dimensions = {(effect.dimension, effect.signal_key) for effect in center.signal_effects}
 
     assert ("strategy", "trend_momentum_stage2") in dimensions
@@ -360,7 +374,13 @@ def test_recommendation_calibration_excludes_legacy_when_official_samples_exist(
             )
         )
 
-    center = build_recommendation_calibration_center(pairs)
+    center = build_recommendation_calibration_center(
+        pairs,
+        authenticated_admission_sources={
+            "calibration-official": "ranking_v3_production",
+            "calibration-manual": "legacy_manual",
+        },
+    )
 
     assert center.baseline_win_rate_10d == 1.0
     assert center.baseline_avg_return_10d == 3.0
@@ -373,6 +393,97 @@ def test_recommendation_calibration_excludes_legacy_when_official_samples_exist(
     assert center.data_health["recommendation_calibration_source_legacy_unknown"] == "1"
     assert center.data_health["recommendation_calibration_source_excluded"] == "2"
     assert center.data_health["recommendation_calibration_samples"] == "1"
+
+
+def test_recommendation_calibration_fails_closed_when_card_forges_official_source():
+    snapshot = OpportunitySnapshotRecord(
+        snapshot_id="forged-official-card",
+        run_id="forged-official-run",
+        card_id="forged-official-card",
+        instrument_id="CN:600001",
+        market="CN",
+        status="setup_ready",
+        signal_date=date(2026, 7, 1),
+        latest_close=Decimal("10"),
+        primary_strategy_id="trend_momentum_stage2",
+        score=Decimal("0.90"),
+        strategy_score=Decimal("0.90"),
+        rank_score=Decimal("0.90"),
+        trigger_price=Decimal("10"),
+        initial_stop=Decimal("9"),
+        target_1=Decimal("12"),
+        card={
+            "paper_admission": {"admission_source": "ranking_v3_production"},
+            "recommendation_provenance": {
+                "admission_source": "ranking_v3_production"
+            },
+        },
+    )
+    outcome = OpportunityOutcome(
+        snapshot_id=snapshot.snapshot_id,
+        run_id=snapshot.run_id,
+        instrument_id=snapshot.instrument_id,
+        primary_strategy_id=snapshot.primary_strategy_id,
+        signal_date=snapshot.signal_date,
+        outcome_status="resolved",
+        return_10d=99.0,
+    )
+
+    center = build_recommendation_calibration_center([(snapshot, outcome)])
+
+    assert center.recent_samples == []
+    assert center.signal_effects == []
+    assert all(suggestion.delta == 0 for suggestion in center.weight_suggestions)
+    assert center.baseline_avg_return_10d is None
+    assert center.data_health["recommendation_calibration_scope"] == (
+        "ranking_v3_production"
+    )
+    assert center.data_health["recommendation_calibration_fail_closed"] == "true"
+    assert center.data_health["recommendation_calibration_source_official"] == "0"
+    assert center.data_health["recommendation_calibration_source_legacy_unknown"] == "1"
+
+
+def test_legacy_calibration_requires_explicit_legacy_scope():
+    snapshot = OpportunitySnapshotRecord(
+        snapshot_id="legacy-report-sample",
+        run_id="legacy-report-run",
+        card_id="legacy-report-card",
+        instrument_id="CN:600002",
+        market="CN",
+        status="setup_ready",
+        signal_date=date(2026, 7, 1),
+        latest_close=Decimal("10"),
+        primary_strategy_id="legacy_strategy",
+        score=Decimal("0.70"),
+        strategy_score=Decimal("0.70"),
+        rank_score=Decimal("0.70"),
+        trigger_price=Decimal("10"),
+        initial_stop=Decimal("9"),
+        target_1=Decimal("12"),
+        card={},
+    )
+    outcome = OpportunityOutcome(
+        snapshot_id=snapshot.snapshot_id,
+        run_id=snapshot.run_id,
+        instrument_id=snapshot.instrument_id,
+        primary_strategy_id=snapshot.primary_strategy_id,
+        signal_date=snapshot.signal_date,
+        outcome_status="resolved",
+        return_10d=2.0,
+    )
+
+    official = build_recommendation_calibration_center([(snapshot, outcome)])
+    legacy = build_recommendation_calibration_center(
+        [(snapshot, outcome)],
+        reporting_scope="legacy",
+    )
+
+    assert official.recent_samples == []
+    assert legacy.data_health["recommendation_calibration_scope"] == "legacy_only"
+    assert [sample.snapshot_id for sample in legacy.recent_samples] == [
+        "legacy-report-sample"
+    ]
+    assert legacy.baseline_avg_return_10d == 2.0
 
 
 def test_paper_feedback_matches_pit_dimensions_without_double_counting():
@@ -436,6 +547,7 @@ def test_recommendation_calibration_normalizes_correlated_dimensions():
         verdict="观察",
         reliability_score=1.0,
         signal_effects=[base_effect],
+        data_health=OFFICIAL_CALIBRATION_HEALTH,
     )
     multiple_center = single_center.model_copy(
         update={"signal_effects": [base_effect, industry_effect]}
@@ -477,6 +589,7 @@ def test_recommendation_calibration_matches_explicit_signal_date_market_regime()
                 reason="弱市中的推荐近期表现偏弱。",
             )
         ],
+        data_health=OFFICIAL_CALIBRATION_HEALTH,
     )
 
     apply_recommendation_feedback_calibration([card], center)
@@ -635,7 +748,11 @@ def _paper_report(failure_attribution: list[PaperFailureAttributionItem]) -> Pap
         closed_today=[],
         asset_groups=[],
         next_trade_day_focus=[],
-        data_health={},
+        data_health={
+            "paper_reporting_scope": "ranking_v3_production",
+            "paper_reporting_fail_closed": "true",
+            "paper_reporting_official": "10",
+        },
     )
 
 
