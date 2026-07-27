@@ -1,0 +1,41 @@
+{
+  "description": "Clean completed Qagent sub-agent sessions after the parent turn has consumed their results.",
+  "hooks": {
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/qagent_subagent_cleanup.py\"",
+            "timeout": 5,
+            "statusMessage": "Queueing completed sub-agent session cleanup"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/qagent_subagent_cleanup.py\"",
+            "timeout": 30,
+            "statusMessage": "Cleaning completed sub-agent sessions"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/qagent_subagent_cleanup.py\"",
+            "timeout": 30,
+            "statusMessage": "Checking stale sub-agent session cleanup"
+          }
+        ]
+      }
+    ]
+  }
+}

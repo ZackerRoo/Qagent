@@ -22,4 +22,7 @@
   new sub-agents so the full Qagent conversation is not copied repeatedly.
 - At the end of each multi-agent round, report the agents closed and the session
   storage removed.
+- Keep the repository `SubagentStop`/`Stop` cleanup hook enabled. It queues
+  stopped sub-agents, validates their terminal state, and deletes their Codex
+  sessions only after the parent turn has consumed their results.
 - Do not use the `superpowers` skill for this project.
