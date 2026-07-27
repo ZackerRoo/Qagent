@@ -529,6 +529,8 @@ def _build_candidates(
     execution_profile: PortfolioExecutionProfile = DEFAULT_EXECUTION_PROFILE,
 ) -> list[_TradeCandidate]:
     candidates: list[_TradeCandidate] = []
+    if not signals or bars.empty:
+        return candidates
     bars_by_instrument = {
         str(instrument_id): frame.reset_index(drop=True)
         for instrument_id, frame in bars.groupby("instrument_id", sort=False)
@@ -705,11 +707,7 @@ def _candidate_resolution_from_signal(
             )
         return _CandidateResolution(
             CandidateOutcomeStatus.NOT_TRIGGERED_OR_UNFILLABLE,
-            (
-                "entry_triggered_but_unfillable"
-                if entry_triggered
-                else "entry_not_triggered"
-            ),
+            ("entry_triggered_but_unfillable" if entry_triggered else "entry_not_triggered"),
             resolved_at=future.head(max_entry_wait_days).iloc[-1]["trade_date"],
         )
 
@@ -1002,8 +1000,7 @@ def _simulate_portfolio(
         due = [
             position
             for position in open_positions
-            if not position.exit_liquidity_censored
-            and position.trade.exit_date <= current_date
+            if not position.exit_liquidity_censored and position.trade.exit_date <= current_date
         ]
         for position in sorted(
             due,
@@ -1055,9 +1052,7 @@ def _simulate_portfolio(
                 entry_costs=entry_costs,
                 exit_costs=exit_costs,
                 exit_liquidity_censored=exit_liquidity_censored,
-                conservative_mark_price=(
-                    candidate.stop_price if exit_liquidity_censored else None
-                ),
+                conservative_mark_price=(candidate.stop_price if exit_liquidity_censored else None),
             )
             if trade.exit_date <= current_date and not position.exit_liquidity_censored:
                 cash = _money(cash + trade.exit_price * trade.shares - exit_costs)
@@ -1338,8 +1333,7 @@ def _exit_liquidity_censors_position(
     shares: Decimal,
 ) -> bool:
     return candidate.exit_liquidity_censored or (
-        candidate.exit_executable_shares is not None
-        and shares > candidate.exit_executable_shares
+        candidate.exit_executable_shares is not None and shares > candidate.exit_executable_shares
     )
 
 

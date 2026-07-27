@@ -3,13 +3,18 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from qagent.api import routes
 from qagent.app import create_app
 from qagent.backtesting import experiment
 from qagent.backtesting.walk_forward import WalkForwardSnapshot
-from qagent.storage.tables import HistoricalDataRevisionRow, WalkForwardRunRow
+from qagent.storage.tables import (
+    HistoricalDataRevisionRow,
+    WalkForwardJobRow,
+    WalkForwardRunRow,
+)
 
 
 def test_walk_forward_run_queries_return_latest_and_complete_payload(tmp_path, monkeypatch):
@@ -345,6 +350,137 @@ def test_failed_walk_forward_job_retries_from_persisted_checkpoints(
     assert response.json()["error"] is None
     assert response.json()["finished_at"] is None
     assert submitted[0][1] == (job.job_id,)
+
+
+def test_current_walk_forward_checkpoint_envelope_rejects_tampering(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'walk-forward-checkpoint-integrity.db'}",
+    )
+    repo = routes._repo()
+    manifest = routes.build_walk_forward_experiment_manifest(
+        provider_mode="free",
+        dataset_revision=9,
+        start_date=date(2025, 1, 2),
+        end_date=date(2025, 3, 31),
+        rebalance_step_sessions=5,
+        lookback_days=400,
+    )
+    job = repo.create_walk_forward_job(
+        job_id="walk-forward-checkpoint-integrity",
+        provider="free",
+        start=date(2025, 1, 2),
+        end=date(2025, 3, 31),
+        dataset_revision=9,
+        rebalance_step_sessions=5,
+        lookback_days=400,
+        total_snapshots=12,
+        experiment_manifest=manifest.model_dump(mode="json"),
+    )
+    repo.update_walk_forward_job(
+        job.job_id,
+        status="failed",
+        checkpoints=[{"decision_date": "2025-01-02"}],
+    )
+    with repo.session_factory() as session:
+        row = session.get(WalkForwardJobRow, job.job_id)
+        original = row.checkpoints_json
+
+    def change_checkpoint(envelope):
+        envelope["checkpoints"][0]["decision_date"] = "2025-01-03"
+
+    def change_manifest_binding(envelope):
+        envelope["experiment_digest"] = "0" * 64
+
+    def change_execution_plan(envelope):
+        envelope["execution_plan"]["lookback_days"] = 399
+
+    for mutate, error in (
+        (change_checkpoint, "checkpoint chain"),
+        (change_manifest_binding, "checkpoint binding"),
+        (change_execution_plan, "checkpoint binding"),
+    ):
+        envelope = json.loads(original)
+        mutate(envelope)
+        with repo.session_factory() as session:
+            row = session.get(WalkForwardJobRow, job.job_id)
+            row.checkpoints_json = json.dumps(envelope, sort_keys=True)
+            session.commit()
+
+        with pytest.raises(ValueError, match=error):
+            repo.get_walk_forward_job(job.job_id)
+
+        with repo.session_factory() as session:
+            row = session.get(WalkForwardJobRow, job.job_id)
+            row.checkpoints_json = original
+            session.commit()
+
+    with repo.session_factory() as session:
+        row = session.get(WalkForwardJobRow, job.job_id)
+        row.checkpoints_json = json.dumps([{"decision_date": "2025-01-02"}])
+        session.commit()
+    with pytest.raises(ValueError, match="lack integrity envelope"):
+        repo.get_walk_forward_job(job.job_id)
+
+
+def test_checkpoint_integrity_failure_stops_runner_and_marks_job_failed(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'walk-forward-checkpoint-stop.db'}",
+    )
+    repo = routes._repo()
+    manifest = routes.build_walk_forward_experiment_manifest(
+        provider_mode="free",
+        dataset_revision=9,
+        start_date=date(2025, 1, 2),
+        end_date=date(2025, 3, 31),
+        rebalance_step_sessions=5,
+        lookback_days=400,
+    )
+    job = repo.create_walk_forward_job(
+        job_id="walk-forward-checkpoint-stop",
+        provider="free",
+        start=date(2025, 1, 2),
+        end=date(2025, 3, 31),
+        dataset_revision=9,
+        rebalance_step_sessions=5,
+        lookback_days=400,
+        total_snapshots=12,
+        experiment_manifest=manifest.model_dump(mode="json"),
+    )
+    repo.update_walk_forward_job(
+        job.job_id,
+        status="running",
+        checkpoints=[{"decision_date": "2025-01-02"}],
+    )
+    with repo.session_factory() as session:
+        row = session.get(WalkForwardJobRow, job.job_id)
+        envelope = json.loads(row.checkpoints_json)
+        envelope["checkpoints"][0]["decision_date"] = "2025-01-03"
+        row.checkpoints_json = json.dumps(envelope, sort_keys=True)
+        session.commit()
+
+    monkeypatch.setattr(
+        routes,
+        "run_full_market_walk_forward_selection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("corrupt checkpoints must never reach the runner")
+        ),
+    )
+
+    routes._run_walk_forward_job_safely(job.job_id)
+
+    with repo.session_factory() as session:
+        row = session.get(WalkForwardJobRow, job.job_id)
+        assert row.status == "failed"
+        assert row.phase == "failed"
+        assert "checkpoint integrity validation failed" in row.error
 
 
 def test_running_walk_forward_job_can_be_cancelled_without_losing_checkpoints(
@@ -688,41 +824,27 @@ def test_new_walk_forward_job_reuses_completed_selection_snapshots(
         ).model_dump(mode="json")
         for decision_date in sessions
     ]
-    now = datetime.now(timezone.utc)
     with repo.session_factory() as session:
         session.add(HistoricalDataRevisionRow(provider_mode="free", revision=7))
-        session.add(
-            WalkForwardRunRow(
-                run_id="walk-forward-base-v4",
-                provider="free",
-                status="succeeded",
-                start_date=start,
-                end_date=end,
-                dataset_revision=7,
-                rebalance_step_sessions=5,
-                lookback_days=400,
-                snapshot_count=len(snapshots),
-                top_5_trade_count=0,
-                top_10_trade_count=0,
-                top_5_return_pct=Decimal("0"),
-                top_10_return_pct=Decimal("0"),
-                top_5_oos_trades=0,
-                top_10_oos_trades=0,
-                top_5_oos_gate="insufficient",
-                top_10_oos_gate="insufficient",
-                reproducibility_digest="base-v4",
-                payload_json=json.dumps(
-                    {
-                        "experiment_manifest": manifest.model_dump(mode="json"),
-                        "snapshots": snapshots,
-                    }
-                ),
-                data_health="{}",
-                created_at=now,
-                updated_at=now,
-            )
-        )
         session.commit()
+    source = repo.create_walk_forward_job(
+        job_id="walk-forward-base-v4",
+        provider="free",
+        start=start,
+        end=end,
+        dataset_revision=7,
+        rebalance_step_sessions=5,
+        lookback_days=400,
+        total_snapshots=len(snapshots),
+        experiment_manifest=manifest.model_dump(mode="json"),
+    )
+    repo.update_walk_forward_job(
+        source.job_id,
+        status="succeeded",
+        processed_snapshots=len(snapshots),
+        current_date=sessions[-1],
+        checkpoints=snapshots,
+    )
 
     job = routes._create_or_get_walk_forward_job(
         repo=repo,
@@ -833,9 +955,7 @@ def test_walk_forward_completed_run_requires_matching_experiment_digest():
         rebalance_step_sessions=5,
         lookback_days=400,
         payload={
-            "experiment_manifest": {
-                "experiment_digest": manifest.experiment_digest,
-            }
+            "experiment_manifest": manifest.model_dump(mode="json"),
         },
     )
 
@@ -862,8 +982,7 @@ def test_walk_forward_runner_rejects_stale_experiment_definition(tmp_path, monke
         end_date=date(2025, 3, 31),
         rebalance_step_sessions=5,
         lookback_days=400,
-    ).model_dump(mode="json")
-    manifest["experiment_digest"] = "stale-definition"
+    )
     job = repo.create_walk_forward_job(
         job_id="walk-forward-stale-definition",
         provider="free",
@@ -873,8 +992,14 @@ def test_walk_forward_runner_rejects_stale_experiment_definition(tmp_path, monke
         rebalance_step_sessions=5,
         lookback_days=400,
         total_snapshots=12,
-        experiment_manifest=manifest,
+        experiment_manifest=manifest.model_dump(mode="json"),
     )
+    with repo.session_factory() as session:
+        row = session.get(WalkForwardJobRow, job.job_id)
+        payload = json.loads(row.experiment_manifest_json)
+        payload["experiment_digest"] = "stale-definition"
+        row.experiment_manifest_json = json.dumps(payload, sort_keys=True)
+        session.commit()
     called = False
 
     def fail_if_called(*args, **kwargs):
@@ -886,9 +1011,10 @@ def test_walk_forward_runner_rejects_stale_experiment_definition(tmp_path, monke
 
     routes._run_walk_forward_job_safely(job.job_id)
 
-    stored = repo.get_walk_forward_job(job.job_id)
-    assert stored.status == "failed"
-    assert "experiment definition changed" in stored.error
+    with repo.session_factory() as session:
+        stored = session.get(WalkForwardJobRow, job.job_id)
+        assert stored.status == "failed"
+        assert "integrity validation failed" in stored.error
     assert called is False
 
 

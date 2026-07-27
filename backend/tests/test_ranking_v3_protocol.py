@@ -469,6 +469,7 @@ def test_new_protocol_digest_prevents_legacy_checkpoint_reuse(monkeypatch):
             )
         }
     )
+    legacy = experiment._with_execution_digest(legacy)
 
     assert current.ranking_v3_protocol_digest != LEGACY_INCOMPLETE_PROTOCOL_DIGEST
     assert experiment.walk_forward_manifest_digest_is_valid(legacy)

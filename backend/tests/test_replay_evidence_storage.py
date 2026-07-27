@@ -134,9 +134,7 @@ def _factor_bar(
     )
 
 
-def _action(
-    *, revision: int = 1, cash_per_share: str = "0.25"
-) -> HistoricalCorporateAction:
+def _action(*, revision: int = 1, cash_per_share: str = "0.25") -> HistoricalCorporateAction:
     return HistoricalCorporateAction(
         provider_mode="free",
         instrument_id="CN:000001",
@@ -199,17 +197,68 @@ def test_bar_and_action_upserts_are_idempotent(storage):
 
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(HistoricalReplayBarRow)) == 1
-        assert (
-            session.scalar(select(func.count()).select_from(HistoricalCorporateActionRow))
-            == 1
-        )
+        assert session.scalar(select(func.count()).select_from(HistoricalCorporateActionRow)) == 1
     assert repo.current_revision() == 2
-    assert repo.replay_bars(
-        ["CN:000001"], date(2025, 1, 1), date(2025, 1, 3), 2
-    )[0].raw_close == Decimal("10.25000000")
-    assert repo.replay_bar_rows(
-        ["CN:000001"], date(2025, 1, 1), date(2025, 1, 3), 2
-    )[0].raw_close == Decimal("10.25000000")
+    assert repo.replay_bars(["CN:000001"], date(2025, 1, 1), date(2025, 1, 3), 2)[
+        0
+    ].raw_close == Decimal("10.25000000")
+    assert repo.replay_bar_rows(["CN:000001"], date(2025, 1, 1), date(2025, 1, 3), 2)[
+        0
+    ].raw_close == Decimal("10.25000000")
+
+
+def test_replay_bar_queries_select_only_vintages_known_by_cutoff(storage):
+    _, _, _, make_repo = storage
+    repo = make_repo("bar-vintage")
+    trade_date = date(2025, 1, 2)
+    first_fetch = datetime(2025, 1, 2, 16, 0, tzinfo=timezone.utc)
+    revised_fetch = datetime(2025, 2, 1, 16, 0, tzinfo=timezone.utc)
+    first = _factor_bar(
+        "CN:000001",
+        trade_date,
+        provider_mode="bar-vintage",
+        source_provider="fixture",
+        revision=1,
+        close="10",
+    ).model_copy(update={"fetched_at": first_fetch})
+    revised = _factor_bar(
+        "CN:000001",
+        trade_date,
+        provider_mode="bar-vintage",
+        source_provider="fixture",
+        revision=2,
+        close="20",
+    ).model_copy(update={"fetched_at": revised_fetch})
+    repo.upsert_replay_bars([first], revision=1)
+    repo.upsert_replay_bars([revised], revision=2)
+
+    point_in_time = repo.replay_bar_rows(
+        ["CN:000001"],
+        trade_date,
+        trade_date,
+        revision=2,
+        known_at_or_before=datetime(2025, 1, 31, tzinfo=timezone.utc),
+    )
+    factor_point_in_time = list(
+        repo.replay_factor_bar_rows(
+            ["CN:000001"],
+            trade_date,
+            trade_date,
+            revision=2,
+            known_at_or_before=datetime(2025, 1, 31, tzinfo=timezone.utc),
+        )
+    )
+    latest = repo.replay_bar_rows(
+        ["CN:000001"],
+        trade_date,
+        trade_date,
+        revision=2,
+        known_at_or_before=datetime(2025, 2, 2, tzinfo=timezone.utc),
+    )
+
+    assert point_in_time[0].raw_close == Decimal("10.00000000")
+    assert factor_point_in_time[0].raw_close == Decimal("10.00000000")
+    assert latest[0].raw_close == Decimal("20.00000000")
 
 
 def test_replay_factor_bar_rows_match_legacy_winner_semantics_and_filters(storage):
@@ -351,15 +400,14 @@ def test_replay_factor_bar_rows_match_legacy_winner_semantics_and_filters(storag
             revision=2,
         )
     )
+
     def row_key(row):
         return row.instrument_id, row.trade_date
 
     assert [tuple(row) for row in sorted(delayed_rows, key=row_key)] == [
         tuple(row) for row in sorted(legacy_rows, key=row_key)
     ]
-    assert [
-        (row.instrument_id, row.trade_date, row.raw_close) for row in delayed_rows
-    ] == [
+    assert [(row.instrument_id, row.trade_date, row.raw_close) for row in delayed_rows] == [
         (first_id, first_date, Decimal("21.00000000")),
         (first_id, second_date, Decimal("12.00000000")),
         (second_id, first_date, Decimal("41.00000000")),
@@ -453,9 +501,7 @@ def test_same_revision_bar_payload_is_immutable(storage):
     with pytest.raises(ValueError, match="immutable"):
         repo.upsert_replay_bars([_bar(close="11")], revision=1)
 
-    stored = repo.replay_bars(
-        ["CN:000001"], date(2025, 1, 2), date(2025, 1, 2), revision=1
-    )
+    stored = repo.replay_bars(["CN:000001"], date(2025, 1, 2), date(2025, 1, 2), revision=1)
     assert stored[0].raw_close == Decimal("10.00000000")
 
 
@@ -464,15 +510,11 @@ def test_conflicting_duplicate_identity_in_one_source_batch_is_rejected(storage)
     repo = make_repo()
 
     with pytest.raises(ValueError, match="immutable"):
-        repo.upsert_replay_bars(
-            [_bar(close="10"), _bar(close="11")], revision=1
-        )
+        repo.upsert_replay_bars([_bar(close="10"), _bar(close="11")], revision=1)
 
     assert repo.current_revision() == 0
     with session_factory() as session:
-        assert session.scalar(
-            select(func.count()).select_from(HistoricalReplayBarRow)
-        ) == 0
+        assert session.scalar(select(func.count()).select_from(HistoricalReplayBarRow)) == 0
 
 
 def test_same_revision_action_payload_is_immutable(storage):
@@ -481,9 +523,7 @@ def test_same_revision_action_payload_is_immutable(storage):
     repo.upsert_corporate_actions([_action(cash_per_share="0.25")], revision=1)
 
     with pytest.raises(ValueError, match="immutable"):
-        repo.upsert_corporate_actions(
-            [_action(cash_per_share="0.30")], revision=1
-        )
+        repo.upsert_corporate_actions([_action(cash_per_share="0.30")], revision=1)
 
     with session_factory() as session:
         stored = session.scalar(select(HistoricalCorporateActionRow))
@@ -520,12 +560,8 @@ def test_bar_and_action_revisions_preserve_old_payloads(storage):
         revision=2,
     )
 
-    old_bars = bars.replay_bars(
-        ["CN:000001"], date(2025, 1, 2), date(2025, 1, 2), revision=1
-    )
-    new_bars = bars.replay_bars(
-        ["CN:000001"], date(2025, 1, 2), date(2025, 1, 2), revision=2
-    )
+    old_bars = bars.replay_bars(["CN:000001"], date(2025, 1, 2), date(2025, 1, 2), revision=1)
+    new_bars = bars.replay_bars(["CN:000001"], date(2025, 1, 2), date(2025, 1, 2), revision=2)
     with session_factory() as session:
         stored_bar_revisions = list(
             session.scalars(
@@ -582,12 +618,8 @@ def test_fundamental_and_action_coverage_reads_select_requested_revision(storage
         revision=2,
     )
 
-    old_fundamental = fundamentals.fundamentals_as_of(
-        ["CN:000001"], date(2025, 6, 30), revision=1
-    )
-    new_fundamental = fundamentals.fundamentals_as_of(
-        ["CN:000001"], date(2025, 6, 30), revision=2
-    )
+    old_fundamental = fundamentals.fundamentals_as_of(["CN:000001"], date(2025, 6, 30), revision=1)
+    new_fundamental = fundamentals.fundamentals_as_of(["CN:000001"], date(2025, 6, 30), revision=2)
     old_coverage = coverage.action_coverage(
         ["CN:000001"], date(2025, 1, 1), date(2025, 12, 31), revision=1
     )
@@ -595,16 +627,22 @@ def test_fundamental_and_action_coverage_reads_select_requested_revision(storage
         ["CN:000001"], date(2025, 1, 1), date(2025, 12, 31), revision=2
     )
     with session_factory() as session:
-        assert session.scalar(
-            select(func.count()).select_from(FundamentalSnapshotRow).where(
-                FundamentalSnapshotRow.provider_mode == "fundamentals"
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(FundamentalSnapshotRow)
+                .where(FundamentalSnapshotRow.provider_mode == "fundamentals")
             )
-        ) == 2
-        assert session.scalar(
-            select(func.count()).select_from(HistoricalCorporateActionCoverageRow).where(
-                HistoricalCorporateActionCoverageRow.provider_mode == "coverage"
+            == 2
+        )
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(HistoricalCorporateActionCoverageRow)
+                .where(HistoricalCorporateActionCoverageRow.provider_mode == "coverage")
             )
-        ) == 2
+            == 2
+        )
 
     assert old_fundamental["CN:000001"].pe_ratio == Decimal("8.500000")
     assert new_fundamental["CN:000001"].pe_ratio == Decimal("9.500000")
@@ -660,27 +698,17 @@ def test_point_in_time_revisions_preserve_old_payloads_without_duplicate_reads(s
         bundle(trading_status="suspended", industry="Fintech"), revision=2
     )
 
-    old_tradability = repo.tradability_on(
-        ["CN:000001"], date(2025, 3, 31), revision=1
-    )
-    new_tradability = repo.tradability_on(
-        ["CN:000001"], date(2025, 3, 31), revision=2
-    )
-    old_industry = repo.industries_as_of(
-        ["CN:000001"], date(2025, 3, 31), revision=1
-    )
-    new_industry = repo.industries_as_of(
-        ["CN:000001"], date(2025, 3, 31), revision=2
-    )
-    memberships = repo.memberships_as_of(
-        ["CN:000001"], date(2025, 3, 31), revision=2
-    )
+    old_tradability = repo.tradability_on(["CN:000001"], date(2025, 3, 31), revision=1)
+    new_tradability = repo.tradability_on(["CN:000001"], date(2025, 3, 31), revision=2)
+    old_industry = repo.industries_as_of(["CN:000001"], date(2025, 3, 31), revision=1)
+    new_industry = repo.industries_as_of(["CN:000001"], date(2025, 3, 31), revision=2)
+    memberships = repo.memberships_as_of(["CN:000001"], date(2025, 3, 31), revision=2)
     with session_factory() as session:
         revision_counts = {
             model.__tablename__: session.scalar(
-                select(func.count()).select_from(model).where(
-                    model.provider_mode == "point-in-time"
-                )
+                select(func.count())
+                .select_from(model)
+                .where(model.provider_mode == "point-in-time")
             )
             for model in (
                 HistoricalTradabilityRow,
@@ -694,9 +722,7 @@ def test_point_in_time_revisions_preserve_old_payloads_without_duplicate_reads(s
     assert new_tradability["CN:000001"].trading_status == "suspended"
     assert old_industry["CN:000001"].industry == "Banking"
     assert new_industry["CN:000001"].industry == "Fintech"
-    assert [item.index_id for item in memberships["CN:000001"]] == [
-        "CN:000300.IDX"
-    ]
+    assert [item.index_id for item in memberships["CN:000001"]] == ["CN:000300.IDX"]
     assert revision_counts == {
         "historical_tradability": 2,
         "historical_industry_snapshots": 2,
@@ -727,6 +753,103 @@ def test_same_revision_generic_source_payload_is_immutable(storage):
 
     stored = repo.tradability_on(["CN:000001"], date(2025, 1, 2), revision=1)
     assert stored["CN:000001"].trading_status == "trading"
+
+
+def test_point_in_time_queries_exclude_evidence_fetched_after_decision(storage):
+    _, clock, _, make_repo = storage
+    repo = make_repo()
+    decision_date = date(2025, 12, 31)
+    repo.upsert_fundamentals(
+        [
+            FundamentalSnapshot(
+                instrument_id="CN:000001",
+                as_of_date=date(2025, 9, 30),
+                revenue_growth_pct=12.0,
+                provider="fixture",
+            )
+        ],
+        revision=1,
+    )
+    repo.upsert_point_in_time_evidence(
+        HistoricalEvidenceBundle(
+            industries=[
+                HistoricalIndustrySnapshot(
+                    instrument_id="CN:000001",
+                    snapshot_date=date(2025, 9, 30),
+                    industry="Banking",
+                    provider="fixture",
+                )
+            ],
+            index_snapshots=[
+                HistoricalIndexSnapshot(
+                    index_id="CN:000300.IDX",
+                    snapshot_date=date(2025, 9, 30),
+                    status="ready",
+                    member_count=1,
+                    provider="fixture",
+                )
+            ],
+            index_memberships=[
+                HistoricalIndexMembership(
+                    index_id="CN:000300.IDX",
+                    snapshot_date=date(2025, 9, 30),
+                    instrument_id="CN:000001",
+                    provider="fixture",
+                )
+            ],
+        ),
+        revision=2,
+    )
+    before_fetch = datetime(2025, 12, 31, 23, 59, tzinfo=timezone.utc)
+    after_fetch = clock.now
+
+    assert (
+        repo.fundamentals_as_of(
+            ["CN:000001"],
+            decision_date,
+            revision=2,
+            known_at_or_before=before_fetch,
+        )
+        == {}
+    )
+    assert (
+        repo.industries_as_of(
+            ["CN:000001"],
+            decision_date,
+            revision=2,
+            known_at_or_before=before_fetch,
+        )
+        == {}
+    )
+    memberships, incomplete = repo.available_memberships_as_of(
+        ["CN:000001"],
+        decision_date,
+        revision=2,
+        known_at_or_before=before_fetch,
+    )
+    assert memberships == {"CN:000001": []}
+    assert incomplete == ["no ready index snapshots were known by the decision cutoff"]
+
+    assert "CN:000001" in repo.fundamentals_as_of(
+        ["CN:000001"],
+        decision_date,
+        revision=2,
+        known_at_or_before=after_fetch,
+    )
+    assert "CN:000001" in repo.industries_as_of(
+        ["CN:000001"],
+        decision_date,
+        revision=2,
+        known_at_or_before=after_fetch,
+    )
+    memberships, incomplete = repo.available_memberships_as_of(
+        ["CN:000001"],
+        decision_date,
+        revision=2,
+        known_at_or_before=after_fetch,
+    )
+    assert [item.index_id for item in memberships["CN:000001"]] == ["CN:000300.IDX"]
+    assert incomplete == []
 
 
 def test_same_revision_identical_generic_payload_is_idempotent(storage):
@@ -875,9 +998,7 @@ def test_fundamental_as_of_never_returns_future_snapshot(storage):
         revision=1,
     )
 
-    result = repo.fundamentals_as_of(
-        ["CN:000001"], date(2025, 6, 30), revision=1
-    )
+    result = repo.fundamentals_as_of(["CN:000001"], date(2025, 6, 30), revision=1)
 
     assert result["CN:000001"].as_of_date == date(2025, 3, 31)
     assert result["CN:000001"].pe_ratio == Decimal("8.500000")
@@ -981,11 +1102,14 @@ def test_large_bar_insert_chunks_stay_below_sqlite_bind_limit(storage):
     assert len(insert_statements) > 1
     assert max(statement.count("?") for statement in insert_statements) <= 900
     with session_factory() as session:
-        assert session.scalar(
-            select(func.count()).select_from(HistoricalReplayBarRow).where(
-                HistoricalReplayBarRow.provider_mode == "bulk-bars"
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(HistoricalReplayBarRow)
+                .where(HistoricalReplayBarRow.provider_mode == "bulk-bars")
             )
-        ) == 1000
+            == 1000
+        )
 
 
 def test_industry_and_membership_reads_use_latest_ready_as_of_snapshot(storage):
@@ -1048,18 +1172,12 @@ def test_industry_and_membership_reads_use_latest_ready_as_of_snapshot(storage):
         revision=1,
     )
 
-    industries = repo.industries_as_of(
-        ["CN:000001"], date(2025, 6, 30), revision=1
-    )
-    memberships = repo.memberships_as_of(
-        ["CN:000001"], date(2025, 6, 30), revision=1
-    )
+    industries = repo.industries_as_of(["CN:000001"], date(2025, 6, 30), revision=1)
+    memberships = repo.memberships_as_of(["CN:000001"], date(2025, 6, 30), revision=1)
 
     assert industries["CN:000001"].snapshot_date == date(2025, 3, 31)
     assert industries["CN:000001"].industry == "Banking"
-    assert [item.index_id for item in memberships["CN:000001"]] == [
-        "CN:000300.IDX"
-    ]
+    assert [item.index_id for item in memberships["CN:000001"]] == ["CN:000300.IDX"]
     assert memberships["CN:000001"][0].snapshot_date == date(2025, 3, 31)
 
 
@@ -1092,9 +1210,7 @@ def test_ready_index_snapshot_rejects_incomplete_membership_write(storage):
     assert repo.current_revision() == 0
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(HistoricalIndexSnapshotRow)) == 0
-        assert session.scalar(
-            select(func.count()).select_from(HistoricalIndexMembershipRow)
-        ) == 0
+        assert session.scalar(select(func.count()).select_from(HistoricalIndexMembershipRow)) == 0
 
 
 def test_membership_read_rejects_incomplete_ready_snapshot(storage):
@@ -1180,9 +1296,7 @@ def test_available_memberships_skip_incomplete_ready_snapshots(storage):
         revision=1,
     )
 
-    assert [item.index_id for item in memberships["CN:000001"]] == [
-        "CN:000300.IDX"
-    ]
+    assert [item.index_id for item in memberships["CN:000001"]] == ["CN:000300.IDX"]
     assert len(incomplete) == 1
     assert "CN:000905.IDX" in incomplete[0]
     assert "member_count=2" in incomplete[0]
@@ -1318,12 +1432,8 @@ def test_legacy_repository_ignores_superseded_replay_revisions(storage):
             ],
         )
 
-    replay.upsert_point_in_time_evidence(
-        evidence("Banking", "CN:000001"), revision=1
-    )
-    replay.upsert_point_in_time_evidence(
-        evidence("Fintech", "CN:000002"), revision=2
-    )
+    replay.upsert_point_in_time_evidence(evidence("Banking", "CN:000001"), revision=1)
+    replay.upsert_point_in_time_evidence(evidence("Fintech", "CN:000002"), revision=2)
     fundamentals = make_repo("legacy-fundamentals")
     first = FundamentalSnapshot(
         instrument_id="CN:000001",
@@ -1343,9 +1453,7 @@ def test_legacy_repository_ignores_superseded_replay_revisions(storage):
     index_stats = legacy.historical_index_snapshot_stats(
         "legacy-stats", date(2025, 1, 1), date(2025, 12, 31)
     )
-    listed = legacy.list_fundamental_snapshots(
-        "legacy-fundamentals", ["CN:000001"]
-    )
+    listed = legacy.list_fundamental_snapshots("legacy-fundamentals", ["CN:000001"])
     fundamental_stats = legacy.fundamental_snapshot_stats(
         "legacy-fundamentals", ["CN:000001"], date(2025, 12, 31)
     )
@@ -1384,9 +1492,7 @@ def test_tradability_requires_an_exact_date_row(storage):
         revision=1,
     )
 
-    result = repo.tradability_on(
-        ["CN:000001", "CN:000002"], date(2025, 6, 30), revision=1
-    )
+    result = repo.tradability_on(["CN:000001", "CN:000002"], date(2025, 6, 30), revision=1)
 
     assert set(result) == {"CN:000002"}
     assert result["CN:000002"].trading_status == "suspended"
@@ -1395,9 +1501,7 @@ def test_tradability_requires_an_exact_date_row(storage):
 def test_exact_date_members_are_provider_and_revision_scoped(storage):
     _, _, _, make_repo = storage
     free = make_repo("free")
-    free.upsert_lifecycle_inventory(
-        [_profile("CN:000001")], _lifecycle_manifest("free", 1, 1)
-    )
+    free.upsert_lifecycle_inventory([_profile("CN:000001")], _lifecycle_manifest("free", 1, 1))
     free_owner = make_repo("free", "run-free-1")
     free_owner.acquire_dataset_lease()
     first = free_owner.materialize_universe(date(2025, 6, 30), revision=1)
@@ -1427,25 +1531,20 @@ def test_exact_date_members_are_provider_and_revision_scoped(storage):
     ]
     assert [item.instrument_id for item in third.members] == ["CN:600000"]
     assert [
-        item.instrument_id
-        for item in free.universe_members_on(date(2025, 6, 30), revision=1)
+        item.instrument_id for item in free.universe_members_on(date(2025, 6, 30), revision=1)
     ] == ["CN:000001"]
 
 
 def test_lifecycle_inventory_uses_latest_ready_manifest_at_revision(storage):
     _, _, _, make_repo = storage
     repo = make_repo()
-    repo.upsert_lifecycle_inventory(
-        [_profile("CN:000001")], _lifecycle_manifest("free", 1, 1)
-    )
+    repo.upsert_lifecycle_inventory([_profile("CN:000001")], _lifecycle_manifest("free", 1, 1))
     repo.upsert_lifecycle_inventory(
         [_profile("CN:000001"), _profile("CN:000002")],
         _lifecycle_manifest("free", 2, 2),
     )
 
-    assert [item.instrument_id for item in repo.lifecycle_inventory(1)] == [
-        "CN:000001"
-    ]
+    assert [item.instrument_id for item in repo.lifecycle_inventory(1)] == ["CN:000001"]
     assert [item.instrument_id for item in repo.lifecycle_inventory(2)] == [
         "CN:000001",
         "CN:000002",
@@ -1536,10 +1635,7 @@ def test_legacy_lifecycle_profiles_migrate_to_revision_scoped_identity(tmp_path)
     ] == ["provider_mode", "instrument_id", "snapshot_date", "dataset_revision"]
     with migrated.connect() as connection:
         assert connection.execute(
-            text(
-                "SELECT instrument_id, dataset_revision "
-                "FROM historical_instrument_profiles"
-            )
+            text("SELECT instrument_id, dataset_revision FROM historical_instrument_profiles")
         ).one() == ("CN:000001", 0)
 
 
@@ -1604,27 +1700,19 @@ def test_provider_identity_is_normalized_before_persistence_and_reads(storage):
         ],
         revision=1,
     )
-    padded.upsert_lifecycle_inventory(
-        [_profile("CN:000001")], _lifecycle_manifest(" FREE ", 2, 1)
-    )
+    padded.upsert_lifecycle_inventory([_profile("CN:000001")], _lifecycle_manifest(" FREE ", 2, 1))
 
     normalized = make_repo("free")
 
-    assert normalized.replay_bars(
-        ["CN:000001"], date(2025, 1, 2), date(2025, 1, 2), revision=2
-    )
-    assert [item.instrument_id for item in normalized.lifecycle_inventory(2)] == [
-        "CN:000001"
-    ]
+    assert normalized.replay_bars(["CN:000001"], date(2025, 1, 2), date(2025, 1, 2), revision=2)
+    assert [item.instrument_id for item in normalized.lifecycle_inventory(2)] == ["CN:000001"]
     with session_factory() as session:
         identities = {
             session.scalar(select(HistoricalDataRevisionRow.provider_mode)),
             session.scalar(select(HistoricalReplayBarRow.provider_mode)),
             session.scalar(select(HistoricalLifecycleManifestRow.provider_mode)),
         }
-        source_provider = session.scalar(
-            select(HistoricalReplayBarRow.source_provider)
-        )
+        source_provider = session.scalar(select(HistoricalReplayBarRow.source_provider))
     assert identities == {"free"}
     assert source_provider == "fixture"
 
@@ -1797,9 +1885,7 @@ def test_owner_scope_preserves_terminal_run_lookup(storage):
     assert lease.owner_run_id == "run-b"
 
 
-@pytest.mark.parametrize(
-    "terminal_status", ["succeeded", "blocked_data", "failed", "cancelled"]
-)
+@pytest.mark.parametrize("terminal_status", ["succeeded", "blocked_data", "failed", "cancelled"])
 def test_terminal_run_cannot_acquire_without_existing_lease(storage, terminal_status):
     session_factory, _, statuses, make_repo = storage
     statuses["run-a"] = terminal_status
@@ -1808,9 +1894,7 @@ def test_terminal_run_cannot_acquire_without_existing_lease(storage, terminal_st
         make_repo(owner_run_id="run-a").acquire_dataset_lease()
 
     with session_factory() as session:
-        assert session.scalar(
-            select(func.count()).select_from(HistoricalDatasetLeaseRow)
-        ) == 0
+        assert session.scalar(select(func.count()).select_from(HistoricalDatasetLeaseRow)) == 0
 
 
 def test_terminal_status_check_runs_inside_immediate_transaction(storage):
@@ -1844,12 +1928,8 @@ def test_terminal_status_check_runs_inside_immediate_transaction(storage):
 
     assert lookup_observations == [True]
     with session_factory() as session:
-        assert session.scalar(
-            select(func.count()).select_from(HistoricalDatasetLeaseRow)
-        ) == 0
-        assert session.scalar(
-            select(func.count()).select_from(HistoricalDataRevisionRow)
-        ) == 0
+        assert session.scalar(select(func.count()).select_from(HistoricalDatasetLeaseRow)) == 0
+        assert session.scalar(select(func.count()).select_from(HistoricalDataRevisionRow)) == 0
 
 
 def test_terminal_owner_cannot_reenter_or_renew_its_stale_lease(storage):
@@ -1891,9 +1971,7 @@ def test_lease_owner_can_materialize_revision_scoped_universe_without_revision_i
 ):
     session_factory, _, _, make_repo = storage
     source = make_repo()
-    source.upsert_lifecycle_inventory(
-        [_profile("CN:000001")], _lifecycle_manifest("free", 1, 1)
-    )
+    source.upsert_lifecycle_inventory([_profile("CN:000001")], _lifecycle_manifest("free", 1, 1))
     owner = make_repo(owner_run_id="run-a")
     owner.acquire_dataset_lease()
 
@@ -1910,23 +1988,17 @@ def test_lease_owner_can_materialize_revision_scoped_universe_without_revision_i
 def test_nonowner_cannot_materialize_universe_under_lease(storage):
     _, _, _, make_repo = storage
     source = make_repo()
-    source.upsert_lifecycle_inventory(
-        [_profile("CN:000001")], _lifecycle_manifest("free", 1, 1)
-    )
+    source.upsert_lifecycle_inventory([_profile("CN:000001")], _lifecycle_manifest("free", 1, 1))
     make_repo(owner_run_id="run-a").acquire_dataset_lease()
 
     with pytest.raises(DatasetLeaseBusy):
-        make_repo(owner_run_id="run-b").materialize_universe(
-            date(2025, 6, 30), revision=1
-        )
+        make_repo(owner_run_id="run-b").materialize_universe(date(2025, 6, 30), revision=1)
 
 
 def test_derived_universe_owner_persists_after_lease_release(storage):
     session_factory, _, _, make_repo = storage
     source = make_repo()
-    source.upsert_lifecycle_inventory(
-        [_profile("CN:000001")], _lifecycle_manifest("free", 1, 1)
-    )
+    source.upsert_lifecycle_inventory([_profile("CN:000001")], _lifecycle_manifest("free", 1, 1))
     run_a = make_repo(owner_run_id="run-a")
     run_a.acquire_dataset_lease()
     run_a.materialize_universe(date(2025, 6, 30), revision=1)
@@ -1946,16 +2018,12 @@ def test_derived_universe_owner_persists_after_lease_release(storage):
 def test_same_owner_universe_materialization_is_strictly_idempotent(storage):
     session_factory, clock, _, make_repo = storage
     source = make_repo()
-    source.upsert_lifecycle_inventory(
-        [_profile("CN:000001")], _lifecycle_manifest("free", 1, 1)
-    )
+    source.upsert_lifecycle_inventory([_profile("CN:000001")], _lifecycle_manifest("free", 1, 1))
     owner = make_repo(owner_run_id="run-a")
     owner.acquire_dataset_lease()
     first = owner.materialize_universe(date(2025, 6, 30), revision=1)
     with session_factory() as session:
-        first_fetched_at = session.scalar(
-            select(HistoricalReplayUniverseMemberRow.fetched_at)
-        )
+        first_fetched_at = session.scalar(select(HistoricalReplayUniverseMemberRow.fetched_at))
     clock.advance(timedelta(seconds=30))
 
     second = owner.materialize_universe(date(2025, 6, 30), revision=1)
@@ -1991,9 +2059,9 @@ def test_materialize_universe_rejects_unknown_listing_date(storage):
         owner.materialize_universe(date(2025, 6, 30), revision=1)
 
     with session_factory() as session:
-        assert session.scalar(select(func.count()).select_from(
-            HistoricalReplayUniverseMemberRow
-        )) == 0
+        assert (
+            session.scalar(select(func.count()).select_from(HistoricalReplayUniverseMemberRow)) == 0
+        )
 
 
 def test_materialize_universe_rejects_unknown_security_type(storage):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta, timezone
@@ -55,6 +56,199 @@ from qagent.strategies.governance import strategy_policy_digest
 from qagent.strategies.models import StrategyDefinition, StrategyPolicy, StrategyState
 from qagent.strategies.registry import default_strategy_registry
 from qagent.strategy_data.models import FundamentalSnapshot
+
+
+WALK_FORWARD_CHECKPOINT_STORAGE_SCHEMA = "walk-forward-checkpoints-v2"
+WALK_FORWARD_RUN_STORAGE_SCHEMA = "walk-forward-run-storage-v2"
+WALK_FORWARD_RUN_STORAGE_SCHEMA_KEY = "_qagent_walk_forward_storage_schema"
+
+
+def _canonical_digest(payload: object) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _walk_forward_job_execution_plan(row: WalkForwardJobRow) -> dict[str, object]:
+    return {
+        "provider": row.provider,
+        "start_date": row.start_date.isoformat(),
+        "end_date": row.end_date.isoformat(),
+        "dataset_revision": row.dataset_revision,
+        "rebalance_step_sessions": row.rebalance_step_sessions,
+        "lookback_days": row.lookback_days,
+        "total_snapshots": row.total_snapshots,
+    }
+
+
+def _current_walk_forward_manifest(
+    payload: object,
+):
+    if not isinstance(payload, dict):
+        return None
+    from qagent.backtesting.experiment import (
+        EXPERIMENT_SCHEMA_VERSION,
+        WalkForwardExperimentManifest,
+        walk_forward_manifest_digest_is_valid,
+    )
+
+    if payload.get("schema_version") != EXPERIMENT_SCHEMA_VERSION:
+        return None
+    try:
+        manifest = WalkForwardExperimentManifest.model_validate(payload)
+    except ValueError as exc:
+        raise ValueError("current walk-forward manifest is malformed") from exc
+    if not walk_forward_manifest_digest_is_valid(manifest):
+        raise ValueError("current walk-forward manifest failed integrity validation")
+    return manifest
+
+
+def _validate_walk_forward_job_manifest_plan(
+    row: WalkForwardJobRow,
+    manifest,
+) -> None:
+    expected = _walk_forward_job_execution_plan(row)
+    manifest_plan = {
+        "provider": manifest.provider_mode,
+        "start_date": manifest.start_date.isoformat(),
+        "end_date": manifest.end_date.isoformat(),
+        "dataset_revision": manifest.dataset_revision,
+        "rebalance_step_sessions": manifest.rebalance_step_sessions,
+        "lookback_days": manifest.lookback_days,
+        "total_snapshots": row.total_snapshots,
+    }
+    if expected != manifest_plan:
+        raise ValueError("walk-forward job execution plan does not match its manifest")
+
+
+def _checkpoint_chain_digest(
+    *,
+    job_id: str,
+    experiment_digest: str,
+    execution_digest: str,
+    execution_plan: dict[str, object],
+    checkpoints: list[dict[str, object]],
+) -> str:
+    previous = _canonical_digest(
+        {
+            "schema_version": WALK_FORWARD_CHECKPOINT_STORAGE_SCHEMA,
+            "job_id": job_id,
+            "experiment_digest": experiment_digest,
+            "execution_digest": execution_digest,
+            "execution_plan": execution_plan,
+        }
+    )
+    for index, checkpoint in enumerate(checkpoints):
+        previous = _canonical_digest(
+            {
+                "previous_digest": previous,
+                "index": index,
+                "checkpoint": checkpoint,
+            }
+        )
+    return previous
+
+
+def _encode_walk_forward_checkpoints(
+    row: WalkForwardJobRow,
+    *,
+    manifest_payload: dict[str, object],
+    checkpoints: list[dict[str, object]],
+) -> str:
+    manifest = _current_walk_forward_manifest(manifest_payload)
+    if manifest is None:
+        return json.dumps(checkpoints, ensure_ascii=True, sort_keys=True)
+    _validate_walk_forward_job_manifest_plan(row, manifest)
+    execution_plan = _walk_forward_job_execution_plan(row)
+    envelope: dict[str, object] = {
+        "schema_version": WALK_FORWARD_CHECKPOINT_STORAGE_SCHEMA,
+        "job_id": row.job_id,
+        "experiment_digest": manifest.experiment_digest,
+        "execution_digest": manifest.execution_digest,
+        "execution_plan": execution_plan,
+        "checkpoint_count": len(checkpoints),
+        "checkpoint_chain_digest": _checkpoint_chain_digest(
+            job_id=row.job_id,
+            experiment_digest=manifest.experiment_digest,
+            execution_digest=manifest.execution_digest,
+            execution_plan=execution_plan,
+            checkpoints=checkpoints,
+        ),
+        "checkpoints": checkpoints,
+    }
+    envelope["envelope_digest"] = _canonical_digest(envelope)
+    return json.dumps(envelope, ensure_ascii=True, sort_keys=True)
+
+
+def _decode_walk_forward_checkpoints(
+    row: WalkForwardJobRow,
+    *,
+    manifest_payload: dict[str, object],
+) -> list[dict[str, object]]:
+    try:
+        stored = json.loads(row.checkpoints_json or "[]")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"walk-forward job {row.job_id} checkpoint JSON is invalid") from exc
+    manifest = _current_walk_forward_manifest(manifest_payload)
+    if manifest is None:
+        if not isinstance(stored, list) or not all(isinstance(item, dict) for item in stored):
+            raise ValueError(f"legacy walk-forward job {row.job_id} checkpoints are malformed")
+        return stored
+    _validate_walk_forward_job_manifest_plan(row, manifest)
+    if not isinstance(stored, dict):
+        raise ValueError(
+            f"walk-forward job {row.job_id} current checkpoints lack integrity envelope"
+        )
+    expected_keys = {
+        "schema_version",
+        "job_id",
+        "experiment_digest",
+        "execution_digest",
+        "execution_plan",
+        "checkpoint_count",
+        "checkpoint_chain_digest",
+        "checkpoints",
+        "envelope_digest",
+    }
+    if set(stored) != expected_keys:
+        raise ValueError(
+            f"walk-forward job {row.job_id} checkpoint envelope fields are invalid"
+        )
+    checkpoints = stored.get("checkpoints")
+    if not isinstance(checkpoints, list) or not all(isinstance(item, dict) for item in checkpoints):
+        raise ValueError(f"walk-forward job {row.job_id} checkpoints are malformed")
+    execution_plan = _walk_forward_job_execution_plan(row)
+    bindings_match = (
+        stored.get("schema_version") == WALK_FORWARD_CHECKPOINT_STORAGE_SCHEMA
+        and stored.get("job_id") == row.job_id
+        and stored.get("experiment_digest") == manifest.experiment_digest
+        and stored.get("execution_digest") == manifest.execution_digest
+        and stored.get("execution_plan") == execution_plan
+        and stored.get("checkpoint_count") == len(checkpoints)
+    )
+    if not bindings_match:
+        raise ValueError(f"walk-forward job {row.job_id} checkpoint binding is invalid")
+    expected_chain_digest = _checkpoint_chain_digest(
+        job_id=row.job_id,
+        experiment_digest=manifest.experiment_digest,
+        execution_digest=manifest.execution_digest,
+        execution_plan=execution_plan,
+        checkpoints=checkpoints,
+    )
+    if not hmac.compare_digest(
+        str(stored.get("checkpoint_chain_digest", "")),
+        expected_chain_digest,
+    ):
+        raise ValueError(f"walk-forward job {row.job_id} checkpoint chain is invalid")
+    digest_payload = dict(stored)
+    stored_envelope_digest = str(digest_payload.pop("envelope_digest", ""))
+    if not hmac.compare_digest(stored_envelope_digest, _canonical_digest(digest_payload)):
+        raise ValueError(f"walk-forward job {row.job_id} checkpoint envelope is invalid")
+    return checkpoints
 
 
 class WatchlistCreate(BaseModel):
@@ -2196,7 +2390,30 @@ class QagentRepository:
         status: str = "succeeded",
     ) -> WalkForwardRunRecord:
         payload = result.model_dump(mode="json")
+        manifest_payload = payload.get("experiment_manifest")
+        current_manifest = _current_walk_forward_manifest(manifest_payload)
+        is_current_result = (
+            current_manifest is not None
+            or
+            payload.get("result_digest_schema") == "walk-forward-result-digest-v2"
+            or str(getattr(result, "reproducibility_digest", "")).startswith("v2")
+        )
+        if is_current_result:
+            from qagent.backtesting.experiment import walk_forward_manifest_digest_is_valid
+            from qagent.backtesting.walk_forward import (
+                walk_forward_selection_result_digest_is_valid,
+            )
+
+            if not walk_forward_manifest_digest_is_valid(result.experiment_manifest):
+                raise ValueError("walk-forward experiment manifest integrity check failed")
+            if not walk_forward_selection_result_digest_is_valid(payload):
+                raise ValueError("walk-forward result reproducibility digest check failed")
         data_health = dict(result.data_health)
+        stored_data_health = dict(data_health)
+        if is_current_result:
+            stored_data_health[WALK_FORWARD_RUN_STORAGE_SCHEMA_KEY] = (
+                WALK_FORWARD_RUN_STORAGE_SCHEMA
+            )
         now = datetime.now(timezone.utc)
         with self.session_factory() as session:
             row = session.get(WalkForwardRunRow, result.owner_run_id)
@@ -2219,7 +2436,11 @@ class QagentRepository:
                 "top_10_oos_gate": data_health.get("walk_forward_top_10_oos_gate", "insufficient"),
                 "reproducibility_digest": result.reproducibility_digest,
                 "payload_json": json.dumps(payload, ensure_ascii=True, sort_keys=True),
-                "data_health": json.dumps(data_health, ensure_ascii=True, sort_keys=True),
+                "data_health": json.dumps(
+                    stored_data_health,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
                 "updated_at": now,
             }
             if row is None:
@@ -2272,6 +2493,11 @@ class QagentRepository:
                 created_at=now,
                 updated_at=now,
             )
+            row.checkpoints_json = _encode_walk_forward_checkpoints(
+                row,
+                manifest_payload=experiment_manifest,
+                checkpoints=[],
+            )
             session.add(row)
             session.commit()
             session.refresh(row)
@@ -2300,6 +2526,40 @@ class QagentRepository:
             row = session.get(WalkForwardJobRow, job_id)
             if row is None:
                 raise ValueError(f"walk-forward job not found: {job_id}")
+            stored_manifest_payload = json.loads(row.experiment_manifest_json or "{}")
+            stored_checkpoints = _decode_walk_forward_checkpoints(
+                row,
+                manifest_payload=stored_manifest_payload,
+            )
+            next_manifest_payload = (
+                experiment_manifest
+                if experiment_manifest is not None
+                else stored_manifest_payload
+            )
+            stored_current_manifest = _current_walk_forward_manifest(
+                stored_manifest_payload
+            )
+            next_current_manifest = _current_walk_forward_manifest(next_manifest_payload)
+            if (
+                experiment_manifest is not None
+                and stored_checkpoints
+                and (stored_current_manifest is not None or next_current_manifest is not None)
+            ):
+                from qagent.backtesting.experiment import (
+                    walk_forward_selection_manifests_semantically_compatible,
+                )
+
+                if (
+                    stored_current_manifest is None
+                    or next_current_manifest is None
+                    or not walk_forward_selection_manifests_semantically_compatible(
+                        stored_current_manifest,
+                        next_current_manifest,
+                    )
+                ):
+                    raise ValueError(
+                        "walk-forward checkpoints cannot be rebound to a different selection plan"
+                    )
             values = {
                 "status": status,
                 "phase": phase,
@@ -2320,17 +2580,19 @@ class QagentRepository:
                 row.result_run_id = None
                 row.error = None
                 row.finished_at = None
-            if checkpoints is not None:
-                row.checkpoints_json = json.dumps(
-                    checkpoints,
-                    ensure_ascii=True,
-                    sort_keys=True,
-                )
             if experiment_manifest is not None:
                 row.experiment_manifest_json = json.dumps(
                     experiment_manifest,
                     ensure_ascii=True,
                     sort_keys=True,
+                )
+            if checkpoints is not None or experiment_manifest is not None:
+                row.checkpoints_json = _encode_walk_forward_checkpoints(
+                    row,
+                    manifest_payload=next_manifest_payload,
+                    checkpoints=(
+                        checkpoints if checkpoints is not None else stored_checkpoints
+                    ),
                 )
             row.updated_at = datetime.now(timezone.utc)
             session.commit()
@@ -2341,6 +2603,25 @@ class QagentRepository:
         with self.session_factory() as session:
             row = session.get(WalkForwardJobRow, job_id)
             return self._walk_forward_job_from_row(row) if row is not None else None
+
+    def fail_walk_forward_job_integrity(
+        self,
+        job_id: str,
+        *,
+        error: str,
+    ) -> None:
+        """Fail a corrupt job without deserializing its untrusted checkpoint payload."""
+
+        with self.session_factory() as session:
+            row = session.get(WalkForwardJobRow, job_id)
+            if row is None or row.status == "cancelled":
+                return
+            row.status = "failed"
+            row.phase = "failed"
+            row.error = error
+            row.finished_at = datetime.now(timezone.utc)
+            row.updated_at = datetime.now(timezone.utc)
+            session.commit()
 
     def list_walk_forward_jobs(
         self,
@@ -3018,6 +3299,101 @@ class QagentRepository:
 
     @staticmethod
     def _walk_forward_run_from_row(row: WalkForwardRunRow) -> WalkForwardRunRecord:
+        payload = json.loads(row.payload_json)
+        stored_data_health = json.loads(row.data_health)
+        if not isinstance(stored_data_health, dict):
+            raise ValueError(f"walk-forward run {row.run_id} data health is malformed")
+        storage_schema = stored_data_health.get(WALK_FORWARD_RUN_STORAGE_SCHEMA_KEY)
+        data_health = {
+            key: value
+            for key, value in stored_data_health.items()
+            if key != WALK_FORWARD_RUN_STORAGE_SCHEMA_KEY
+        }
+        is_current_result = (
+            storage_schema == WALK_FORWARD_RUN_STORAGE_SCHEMA
+            or payload.get("result_digest_schema") == "walk-forward-result-digest-v2"
+            or str(row.reproducibility_digest).startswith("v2")
+        )
+        if storage_schema not in {None, WALK_FORWARD_RUN_STORAGE_SCHEMA}:
+            raise ValueError(
+                f"walk-forward run {row.run_id} has unknown storage integrity schema"
+            )
+        if is_current_result:
+            from qagent.backtesting.experiment import (
+                WalkForwardExperimentManifest,
+                walk_forward_manifest_digest_is_valid,
+            )
+            from qagent.backtesting.walk_forward import (
+                WalkForwardSelectionResult,
+                walk_forward_selection_result_digest_is_valid,
+            )
+
+            try:
+                manifest = WalkForwardExperimentManifest.model_validate(
+                    payload.get("experiment_manifest")
+                )
+                result = WalkForwardSelectionResult.model_validate(payload)
+            except ValueError as exc:
+                raise ValueError(
+                    f"walk-forward run {row.run_id} contains an invalid current-schema payload"
+                ) from exc
+            if not walk_forward_manifest_digest_is_valid(manifest):
+                raise ValueError(
+                    f"walk-forward run {row.run_id} failed manifest integrity validation"
+                )
+            if not walk_forward_selection_result_digest_is_valid(payload):
+                raise ValueError(
+                    f"walk-forward run {row.run_id} failed result digest validation"
+                )
+            expected = {
+                "run_id": result.owner_run_id,
+                "provider": result.provider_mode,
+                "start_date": result.start_date,
+                "end_date": result.end_date,
+                "dataset_revision": result.dataset_revision,
+                "rebalance_step_sessions": result.rebalance_step_sessions,
+                "lookback_days": result.experiment_manifest.lookback_days,
+                "snapshot_count": len(result.snapshots),
+                "top_5_trade_count": result.top_5_metrics.trade_count,
+                "top_10_trade_count": result.top_10_metrics.trade_count,
+                "top_5_oos_trades": int(
+                    data_health.get("walk_forward_top_5_oos_trades", 0) or 0
+                ),
+                "top_10_oos_trades": int(
+                    data_health.get("walk_forward_top_10_oos_trades", 0) or 0
+                ),
+                "top_5_oos_gate": data_health.get(
+                    "walk_forward_top_5_oos_gate",
+                    "insufficient",
+                ),
+                "top_10_oos_gate": data_health.get(
+                    "walk_forward_top_10_oos_gate",
+                    "insufficient",
+                ),
+                "reproducibility_digest": result.reproducibility_digest,
+            }
+            mismatches = [
+                field
+                for field, expected_value in expected.items()
+                if getattr(row, field) != expected_value
+            ]
+            if round(float(row.top_5_return_pct), 6) != round(
+                result.top_5_metrics.total_return_pct,
+                6,
+            ):
+                mismatches.append("top_5_return_pct")
+            if round(float(row.top_10_return_pct), 6) != round(
+                result.top_10_metrics.total_return_pct,
+                6,
+            ):
+                mismatches.append("top_10_return_pct")
+            if payload.get("data_health") != data_health:
+                mismatches.append("data_health")
+            if mismatches:
+                fields = ", ".join(sorted(set(mismatches)))
+                raise ValueError(
+                    f"walk-forward run {row.run_id} row/payload integrity mismatch: {fields}"
+                )
         return WalkForwardRunRecord(
             run_id=row.run_id,
             provider=row.provider,
@@ -3037,14 +3413,19 @@ class QagentRepository:
             top_5_oos_gate=row.top_5_oos_gate,
             top_10_oos_gate=row.top_10_oos_gate,
             reproducibility_digest=row.reproducibility_digest,
-            payload=json.loads(row.payload_json),
-            data_health=json.loads(row.data_health),
+            payload=payload,
+            data_health=data_health,
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
 
     @staticmethod
     def _walk_forward_job_from_row(row: WalkForwardJobRow) -> WalkForwardJobRecord:
+        experiment_manifest = json.loads(row.experiment_manifest_json or "{}")
+        checkpoints = _decode_walk_forward_checkpoints(
+            row,
+            manifest_payload=experiment_manifest,
+        )
         return WalkForwardJobRecord(
             job_id=row.job_id,
             provider=row.provider,
@@ -3061,8 +3442,8 @@ class QagentRepository:
             lease_maintenance_count=row.lease_maintenance_count,
             lease_recovery_count=row.lease_recovery_count,
             last_lease_heartbeat_at=row.last_lease_heartbeat_at,
-            checkpoints=json.loads(row.checkpoints_json or "[]"),
-            experiment_manifest=json.loads(row.experiment_manifest_json or "{}"),
+            checkpoints=checkpoints,
+            experiment_manifest=experiment_manifest,
             result_run_id=row.result_run_id,
             error=row.error,
             created_at=row.created_at,

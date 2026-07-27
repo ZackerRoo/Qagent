@@ -3357,6 +3357,182 @@ export type WalkForwardRankingV3Evaluation = {
   criteria: WalkForwardGateCriterion[];
 };
 
+export type WalkForwardRankingV4Scalar = number | string | null;
+
+export type WalkForwardRankingV4EvidenceWindow = {
+  key: string;
+  start_date: string | null;
+  end_date: string | null;
+  role: string;
+  evidence_label: string;
+  eligible_for_release_gate: boolean;
+  activation_rule?: string | null;
+};
+
+export type WalkForwardRankingV4Thresholds = {
+  minimum_rebalance_dates: number;
+  minimum_completed_trades: number;
+  minimum_profit_factor: WalkForwardRankingV4Scalar;
+  minimum_positive_subperiods: number;
+  required_subperiods: number;
+  maximum_drawdown_floor_pct: WalkForwardRankingV4Scalar;
+  maximum_holm_adjusted_p_value: WalkForwardRankingV4Scalar;
+  minimum_deflated_sharpe_probability: WalkForwardRankingV4Scalar;
+  maximum_probability_of_backtest_overfit: WalkForwardRankingV4Scalar;
+  minimum_valid_outcome_coverage_ratio: WalkForwardRankingV4Scalar;
+  minimum_confirmatory_forward_sessions: number;
+  maximum_confirmatory_forward_sessions: number;
+  minimum_confirmatory_forward_trades: number;
+};
+
+export type WalkForwardRankingV4Protocol = {
+  protocol_schema_version: string;
+  protocol_id: string;
+  model_version: string;
+  preregistered_on: string;
+  registration_state: "preregistered_code_not_yet_frozen";
+  protocol_digest: string;
+  experiment_registry: {
+    registry_digest: string;
+    [key: string]: unknown;
+  };
+  statistics_definition: {
+    registered_models: Array<{
+      model_id: string;
+      candidate_order_rule: string;
+      portfolio_constraint_rule: string;
+      invalid_or_missing_date_rule: string;
+    }>;
+    [key: string]: unknown;
+  };
+  thresholds: WalkForwardRankingV4Thresholds;
+  confirmatory_definition: {
+    implementation_version: string;
+    historical_development_evidence_may_satisfy_forward_gate: boolean;
+    release_state_before_forward_pass: "shadow_only";
+    [key: string]: unknown;
+  };
+  evidence_windows: WalkForwardRankingV4EvidenceWindow[];
+  official_recommendation_isolation: "shadow_only_until_every_gate_passes";
+  [key: string]: unknown;
+};
+
+export type WalkForwardRankingV4ValidationGate = {
+  key: string;
+  status: "pass" | "insufficient" | "fail" | "unavailable" | string;
+  observed: string;
+  required: string;
+  reason: string;
+};
+
+export type WalkForwardRankingV4HistoricalValidation = {
+  validation_schema_version: string;
+  protocol_id: string;
+  protocol_digest: string;
+  experiment_registry_digest: string;
+  evidence_window: string;
+  evidence_class: string;
+  status: string;
+  historical_gate_status: string;
+  deployment_scope: "shadow_only";
+  eligible_for_confirmatory_forward: boolean;
+  official_release_allowed: false;
+  execution_start_date: string | null;
+  execution_end_date: string | null;
+  execution_rebalance_step_sessions: number | null;
+  execution_lookback_days: number | null;
+  execution_plan_matches_protocol: boolean;
+  baseline_row_count: number;
+  challenger_row_count: number;
+  completed_trade_count: number;
+  valid_outcome_count: number;
+  expected_outcome_count: number;
+  valid_outcome_coverage_ratio: number | null;
+  baseline_rebalance_date_count: number;
+  challenger_rebalance_date_count: number;
+  common_rebalance_date_count: number;
+  dates_are_common: boolean;
+  baseline_only_dates: string[];
+  challenger_only_dates: string[];
+  dependence_block_length: number;
+  effective_independent_block_count: number;
+  paired_mean_net_excess_pct: number | null;
+  cumulative_benchmark_excess_return_pct: number | null;
+  cumulative_stress_cost_adjusted_return_pct: number | null;
+  maximum_drawdown_pct: number | null;
+  profit_factor: number | null;
+  profit_factor_is_infinite: boolean;
+  bootstrap_one_sided_95_lower_bound_pct: number | null;
+  positive_edge_p_value: number | null;
+  holm_adjusted_positive_edge_p_value: number | null;
+  holm_family_size: number;
+  positive_subperiod_count: number;
+  required_positive_subperiod_count: number;
+  subperiod_count: number;
+  pbo_status: string;
+  pbo_probability: number | null;
+  pbo_reason: string;
+  trial_ledger_status: string;
+  trial_ledger_reason: string;
+  trial_count: number;
+  deflated_sharpe_status: string;
+  deflated_sharpe_probability: number | null;
+  deflated_sharpe_reason: string;
+  gates: WalkForwardRankingV4ValidationGate[];
+  reasons: string[];
+  evaluation_digest: string;
+};
+
+export type WalkForwardRankingV4TrialLedger = {
+  schema_version: string;
+  ledger_id: string;
+  immutable: boolean;
+  covers_all_known_attempts: boolean;
+  known_trial_ids: string[];
+  research_attempt_ids: string[];
+  research_attempt_inventory_digest: string;
+  current_trial_id: string;
+  experiment_registry_digest: string;
+  ledger_digest: string;
+  trial_series: Array<{
+    trial_id: string;
+    returns: Array<{
+      rebalance_date: string;
+      net_return_pct: number;
+      stress_net_return_pct?: number | null;
+    }>;
+  }>;
+};
+
+export type WalkForwardRankingV4Evaluation = {
+  model_version: string;
+  status: string;
+  headline: string;
+  deployment_scope: "shadow_only";
+  official_release_allowed: false;
+  leakage_guard: string;
+  protocol: WalkForwardRankingV4Protocol;
+  candidate_pool_signal_count: number;
+  valid_candidate_outcome_count: number;
+  candidate_outcome_coverage_ratio: number;
+  changed_snapshot_count: number;
+  maximum_training_observation_count: number;
+  maximum_training_date_count: number;
+  constraint_matched_baseline_portfolio: WalkForwardPortfolioPayload;
+  constraint_matched_baseline_metrics: WalkForwardPortfolioMetrics;
+  portfolio: WalkForwardPortfolioPayload;
+  metrics: WalkForwardPortfolioMetrics;
+  stress_metrics: WalkForwardPortfolioMetrics;
+  historical_validation: WalkForwardRankingV4HistoricalValidation;
+  pbo_evidence: {
+    matrix_return_semantics?: string;
+    invalid_or_missing_date_rule?: string;
+    [key: string]: unknown;
+  };
+  trial_ledger: WalkForwardRankingV4TrialLedger;
+  criteria: WalkForwardGateCriterion[];
+};
+
 export type RankingV3ForwardMetricValue = number | string | null;
 
 export type RankingV3ForwardMetrics = {
@@ -3442,6 +3618,7 @@ export type RankingV3ForwardStateResponse = {
 };
 
 export type WalkForwardPayload = {
+  result_digest_schema: "walk-forward-result-digest-v2";
   top_5_portfolio: WalkForwardPortfolioPayload;
   top_10_portfolio: WalkForwardPortfolioPayload;
   top_5_metrics: WalkForwardPortfolioMetrics;
@@ -3455,14 +3632,18 @@ export type WalkForwardPayload = {
   baseline_challenger?: WalkForwardBaselineChallengerEvaluation;
   execution_challenger?: WalkForwardExecutionChallengerEvaluation;
   ranking_v3?: WalkForwardRankingV3Evaluation;
+  ranking_v4?: WalkForwardRankingV4Evaluation;
   snapshots: WalkForwardSnapshotPayload[];
   experiment_manifest: WalkForwardExperimentManifest;
+  reproducibility_digest: string;
+  data_health: Record<string, string>;
 };
 
 export type WalkForwardExperimentManifest = {
   schema_version: string;
   selection_snapshot_schema_version?: string;
   experiment_digest: string;
+  execution_digest: string;
   created_at: string;
   code_revision: string;
   code_dirty: boolean;
@@ -3482,6 +3663,13 @@ export type WalkForwardExperimentManifest = {
   ranking_v3_protocol_digest?: string;
   candidate_ledger_implementation_version?: string;
   ranking_v3_statistics_implementation_version?: string;
+  ranking_v4_protocol_digest?: string;
+  ranking_v4_experiment_registry_digest?: string;
+  ranking_v4_candidate_implementation_version?: string;
+  ranking_v4_model_implementation_version?: string;
+  ranking_v4_portfolio_implementation_version?: string;
+  ranking_v4_statistics_implementation_version?: string;
+  research_source_digest: string;
   runtime_revisions?: string[];
 };
 

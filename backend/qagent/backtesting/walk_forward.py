@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -14,13 +15,16 @@ from decimal import Decimal
 from multiprocessing import get_context
 from threading import Event, Lock, Thread
 from types import SimpleNamespace
+from typing import Literal
 
+import pandas as pd
 from pydantic import BaseModel, Field
 
 from qagent.backtesting.engine import BacktestSignal
 from qagent.backtesting.experiment import (
     WalkForwardExperimentManifest,
     build_walk_forward_experiment_manifest,
+    walk_forward_manifest_digest_is_valid,
 )
 from qagent.backtesting.execution import VersionedAshareExecutionResolver
 from qagent.backtesting.baseline_challenger import (
@@ -76,6 +80,39 @@ from qagent.backtesting.ranking_v3_validation import (
     RankingV3ValidationEvaluation,
     evaluate_ranking_v3_validation,
 )
+from qagent.backtesting.ranking_v4 import (
+    RankingV4Candidate,
+    RankingV4CandidateScore,
+    RankingV4Decision,
+    RankingV4FeatureVector,
+    ResolvedRankingV4Observation,
+    score_ranking_v4_candidates,
+)
+from qagent.backtesting.ranking_v4_candidates import (
+    RankingV4CandidatePoolEntry,
+    build_preregistered_ranking_v4_candidate_pool,
+)
+from qagent.backtesting.ranking_v4_portfolio import (
+    RankingV4PortfolioDecision,
+    select_ranking_v4_portfolio,
+)
+from qagent.backtesting.ranking_v4_pbo import (
+    RANKING_V4_FROZEN_PBO_MODEL_IDS,
+    RankingV4DatedModelReturn,
+    evaluate_ranking_v4_cscv_pbo,
+)
+from qagent.backtesting.ranking_v4_protocol import (
+    RANKING_V4_MODEL_VERSION,
+    RankingV4Protocol,
+    build_ranking_v4_protocol,
+)
+from qagent.backtesting.ranking_v4_validation import (
+    RankingV4HistoricalValidationEvaluation,
+    RankingV4ReturnObservation,
+    RankingV4TrialLedgerEvidence,
+    build_ranking_v4_trial_ledger,
+    evaluate_ranking_v4_historical_validation,
+)
 from qagent.backtesting.replay_provider import (
     ReplayMarketDataProvider,
     ReplayStrategyDataProvider,
@@ -130,6 +167,17 @@ RANKING_V3_VALID_CASH_DETAILS = frozenset(
         "entry_fill_outside_plan",
     }
 )
+RANKING_V4_VALID_CASH_DETAILS = frozenset(
+    {
+        "entry_not_triggered",
+        "entry_fill_outside_plan",
+    }
+)
+RANKING_V4_RISK_BENCHMARK_ID = "CN:000300.IDX"
+RANKING_V4_RISK_LOOKBACK_SESSIONS = 120
+RANKING_V4_MIN_COMMON_RETURN_OBSERVATIONS = 60
+WALK_FORWARD_RESULT_DIGEST_SCHEMA = "walk-forward-result-digest-v2"
+WALK_FORWARD_RESULT_DIGEST_PREFIX = "v2"
 
 
 class _DatasetLeaseHeartbeat:
@@ -245,8 +293,32 @@ class WalkForwardSelection(BaseModel):
     factor_signals: list[str] = Field(default_factory=list)
     asset_type: str = "unknown"
     industry: str | None = None
+    themes: list[str] = Field(default_factory=list)
     index_memberships: list[str] = Field(default_factory=list)
+    underlying_ids: list[str] = Field(default_factory=list)
     ranking_features: RankingV3FeatureVector = Field(default_factory=RankingV3FeatureVector)
+    ranking_v4_features: RankingV4FeatureVector = Field(default_factory=RankingV4FeatureVector)
+    ranking_v4_primary_channel: str | None = None
+    ranking_v4_matched_channels: list[str] = Field(default_factory=list)
+    ranking_v4_channel_scores: dict[str, float] = Field(default_factory=dict)
+    ranking_v4_score: float | None = None
+    ranking_v4_position: int | None = None
+    ranking_v4_training_dates: int = 0
+    ranking_v4_trigger_probability: float | None = None
+    ranking_v4_expected_net_excess_pct: float | None = None
+    ranking_v4_net_excess_lower_bound_pct: float | None = None
+    ranking_v4_expected_utility_pct: float | None = None
+    ranking_v4_utility_lower_bound_pct: float | None = None
+    ranking_v4_blocked_reasons: list[str] = Field(default_factory=list)
+    ranking_v4_reason: str = ""
+    ranking_v4_beta: float | None = None
+    ranking_v4_temporal_evidence_complete: bool = False
+    ranking_v4_constraint_data_complete: bool = False
+    ranking_v4_underlying_evidence_complete: bool = False
+    ranking_v4_replacement_cost_pct: float | None = None
+    ranking_v4_benchmark_opportunity_cost_pct: float | None = None
+    ranking_v4_liquidity_penalty_pct: float | None = None
+    ranking_v4_tail_risk_penalty_pct: float | None = None
     ranking_v3_score: float | None = None
     ranking_v3_position: int | None = None
     ranking_v3_training_dates: int = 0
@@ -285,6 +357,11 @@ class WalkForwardSnapshot(BaseModel):
     benchmark_trend_valid_count: int = 0
     benchmark_trend_above_count: int = 0
     market_entry_allowed: bool = True
+    ranking_v4_market_breadth: float | None = None
+    ranking_v4_benchmark_slope: float | None = None
+    ranking_v4_realized_volatility: float | None = None
+    ranking_v4_cross_sectional_dispersion: float | None = None
+    ranking_v4_market_features_complete: bool = False
     strategy_diversification_limit: int = 2
     strategy_diversified_count: int = 0
     candidate_pool: list[WalkForwardSelection] = Field(default_factory=list)
@@ -292,6 +369,11 @@ class WalkForwardSnapshot(BaseModel):
     top_10: list[WalkForwardSelection] = Field(default_factory=list)
     constraint_matched_baseline_top_5: list[WalkForwardSelection] = Field(default_factory=list)
     ranking_v3_top_5: list[WalkForwardSelection] = Field(default_factory=list)
+    ranking_v4_candidate_pool: list[WalkForwardSelection] = Field(default_factory=list)
+    ranking_v4_constraint_matched_baseline_top_5: list[WalkForwardSelection] = Field(
+        default_factory=list
+    )
+    ranking_v4_top_5: list[WalkForwardSelection] = Field(default_factory=list)
     dynamic_top_5: list[WalkForwardSelection] = Field(default_factory=list)
     baseline_challenger_top_5: list[WalkForwardSelection] = Field(default_factory=list)
     rerank_training_cutoff_date: date | None = None
@@ -314,6 +396,14 @@ class WalkForwardSnapshot(BaseModel):
     ranking_v3_training_date_count: int = 0
     ranking_v3_model_ready: bool = False
     ranking_v3_constraint_blocked_count: int = 0
+    ranking_v4_training_cutoff_date: date | None = None
+    ranking_v4_training_observation_count: int = 0
+    ranking_v4_training_date_count: int = 0
+    ranking_v4_model_ready: bool = False
+    ranking_v4_cash_slot_count: int = 5
+    ranking_v4_constraint_blocked_count: int = 0
+    ranking_v4_portfolio: RankingV4PortfolioDecision | None = None
+    ranking_v4_pairwise_correlations: dict[str, float] = Field(default_factory=dict)
 
 
 class WalkForwardGateCriterion(BaseModel):
@@ -495,7 +585,35 @@ class WalkForwardRankingV3Evaluation(BaseModel):
     criteria: list[WalkForwardGateCriterion] = Field(default_factory=list)
 
 
+class WalkForwardRankingV4Evaluation(BaseModel):
+    model_version: str = RANKING_V4_MODEL_VERSION
+    status: str
+    headline: str
+    deployment_scope: str = "shadow_only"
+    official_release_allowed: Literal[False] = False
+    leakage_guard: str
+    protocol: RankingV4Protocol
+    candidate_pool_signal_count: int
+    valid_candidate_outcome_count: int
+    candidate_outcome_coverage_ratio: float
+    changed_snapshot_count: int
+    maximum_training_observation_count: int
+    maximum_training_date_count: int
+    constraint_matched_baseline_portfolio: PortfolioBacktestResult
+    constraint_matched_baseline_metrics: "WalkForwardPortfolioMetrics"
+    portfolio: PortfolioBacktestResult
+    metrics: "WalkForwardPortfolioMetrics"
+    stress_metrics: "WalkForwardPortfolioMetrics"
+    historical_validation: RankingV4HistoricalValidationEvaluation
+    pbo_evidence: dict[str, object]
+    trial_ledger: RankingV4TrialLedgerEvidence
+    criteria: list[WalkForwardGateCriterion] = Field(default_factory=list)
+
+
 class WalkForwardSelectionResult(BaseModel):
+    result_digest_schema: Literal["walk-forward-result-digest-v2"] = (
+        WALK_FORWARD_RESULT_DIGEST_SCHEMA
+    )
     owner_run_id: str
     provider_mode: str
     dataset_revision: int
@@ -516,6 +634,7 @@ class WalkForwardSelectionResult(BaseModel):
     baseline_challenger: WalkForwardBaselineChallengerEvaluation
     execution_challenger: WalkForwardExecutionChallengerEvaluation
     ranking_v3: WalkForwardRankingV3Evaluation | None = None
+    ranking_v4: WalkForwardRankingV4Evaluation | None = None
     experiment_manifest: WalkForwardExperimentManifest
     reproducibility_digest: str
     data_health: dict[str, str] = Field(default_factory=dict)
@@ -768,7 +887,6 @@ def _compute_walk_forward_snapshot_without_gc(
         )
         for card in eligible_cards
     ]
-    candidate_pool = selections[:RANKING_V3_CANDIDATE_POOL_LIMIT]
     benchmark_bars = market_provider.get_daily_bars(
         list(REQUIRED_BENCHMARK_IDS),
         decision_date - timedelta(days=200),
@@ -778,6 +896,54 @@ def _compute_walk_forward_snapshot_without_gc(
         benchmark_bars,
         as_of=decision_date,
     )
+    ranking_v4_market_features = _ranking_v4_market_features(
+        factor_rankings,
+        benchmark_valid_count=benchmark_trend.valid_benchmarks,
+        benchmark_required_count=benchmark_trend.required_benchmarks,
+        benchmark_above_count=benchmark_trend.above_average_count,
+    )
+    ranking_v4_feature_update = {
+        key: float(ranking_v4_market_features[key])
+        for key in (
+            "market_breadth",
+            "benchmark_slope",
+            "realized_volatility",
+            "cross_sectional_dispersion",
+        )
+    }
+    selections = [
+        item.model_copy(
+            update={
+                "ranking_v4_features": item.ranking_v4_features.model_copy(
+                    update=ranking_v4_feature_update
+                )
+            }
+        )
+        for item in selections
+    ]
+    selections = _with_ranking_v4_industry_strength(selections)
+    candidate_pool = selections[:RANKING_V3_CANDIDATE_POOL_LIMIT]
+    ranking_v4_entries = build_preregistered_ranking_v4_candidate_pool(
+        [
+            _ranking_v4_candidate_from_selection(
+                item,
+                decision_date=decision_date,
+                market_regime=benchmark_trend.state.value,
+                market_features_complete=bool(
+                    ranking_v4_market_features["market_features_complete"]
+                ),
+            )
+            for item in selections
+        ]
+    )
+    selection_by_instrument = {item.instrument_id: item for item in selections}
+    ranking_v4_candidate_pool = [
+        _selection_with_ranking_v4_channel(
+            selection_by_instrument[entry.candidate.instrument_id],
+            entry,
+        )
+        for entry in ranking_v4_entries
+    ]
     diversified = (
         select_strategy_diversified(
             selections,
@@ -807,8 +973,18 @@ def _compute_walk_forward_snapshot_without_gc(
             benchmark_trend_valid_count=benchmark_trend.valid_benchmarks,
             benchmark_trend_above_count=benchmark_trend.above_average_count,
             market_entry_allowed=benchmark_trend.entry_allowed,
+            ranking_v4_market_breadth=ranking_v4_market_features["market_breadth"],
+            ranking_v4_benchmark_slope=ranking_v4_market_features["benchmark_slope"],
+            ranking_v4_realized_volatility=(ranking_v4_market_features["realized_volatility"]),
+            ranking_v4_cross_sectional_dispersion=(
+                ranking_v4_market_features["cross_sectional_dispersion"]
+            ),
+            ranking_v4_market_features_complete=bool(
+                ranking_v4_market_features["market_features_complete"]
+            ),
             strategy_diversified_count=len(diversified),
             candidate_pool=candidate_pool,
+            ranking_v4_candidate_pool=ranking_v4_candidate_pool,
             top_5=diversified[:5],
             top_10=diversified,
         ),
@@ -909,6 +1085,19 @@ def _snapshot_worker_stats(
     )
 
 
+class WalkForwardCancellationRequested(RuntimeError):
+    """Raised when a persisted cancellation asks replay workers to stop."""
+
+
+def _raise_if_walk_forward_cancelled(
+    cancellation_check: Callable[[], bool] | None,
+) -> None:
+    if cancellation_check is not None and cancellation_check():
+        raise WalkForwardCancellationRequested(
+            "walk-forward validation was cancelled before publication"
+        )
+
+
 def _sum_worker_stats(
     worker_stats: Iterable[_WalkForwardWorkerStats],
 ) -> _WalkForwardWorkerStats:
@@ -963,6 +1152,7 @@ def run_full_market_walk_forward_selection(
     initial_lease_recovery_count: int = 0,
     initial_lease_heartbeat_at: datetime | None = None,
     snapshot_workers: int = 1,
+    cancellation_check: Callable[[], bool] | None = None,
 ) -> WalkForwardSelectionResult:
     if start > end:
         raise ValueError("start must be on or before end")
@@ -983,8 +1173,28 @@ def run_full_market_walk_forward_selection(
         rebalance_step_sessions=rebalance_step_sessions,
         lookback_days=lookback_days,
     )
+    if not walk_forward_manifest_digest_is_valid(experiment_manifest):
+        raise RuntimeError("experiment manifest digest is invalid")
     if experiment_manifest.dataset_revision != revision:
         raise RuntimeError("experiment dataset revision no longer matches replay data")
+    observed_plan = (
+        experiment_manifest.provider_mode,
+        experiment_manifest.start_date,
+        experiment_manifest.end_date,
+        experiment_manifest.rebalance_step_sessions,
+        experiment_manifest.lookback_days,
+    )
+    requested_plan = (
+        repository.provider_mode,
+        start,
+        end,
+        rebalance_step_sessions,
+        lookback_days,
+    )
+    if observed_plan != requested_plan:
+        raise RuntimeError(
+            "experiment manifest execution plan does not match the requested walk-forward run"
+        )
     owner_repository = repository.for_owner(owner_run_id)
     lease = owner_repository.acquire_dataset_lease()
     if lease.revision != revision:
@@ -1008,6 +1218,7 @@ def run_full_market_walk_forward_selection(
     selection_worker_stats = _WalkForwardWorkerStats()
     effective_snapshot_workers = 1
     try:
+        _raise_if_walk_forward_cancelled(cancellation_check)
         sessions = trading_sessions_in_range(start, end)[::rebalance_step_sessions]
         resumed = {item.decision_date: item for item in (resume_snapshots or [])}
         unexpected_dates = set(resumed).difference(sessions)
@@ -1144,8 +1355,10 @@ def run_full_market_walk_forward_selection(
             current_date=max(snapshot_by_date, default=None),
             lease_heartbeat=lease_heartbeat,
         )
-        if effective_snapshot_workers == 1:
+        isolate_snapshot_work = cancellation_check is not None
+        if effective_snapshot_workers == 1 and not isolate_snapshot_work:
             for snapshot_input in pending_inputs:
+                _raise_if_walk_forward_cancelled(cancellation_check)
                 lease_heartbeat.maintain_now()
                 worker_result = _compute_walk_forward_snapshot(
                     snapshot_input,
@@ -1191,17 +1404,20 @@ def run_full_market_walk_forward_selection(
                         lookback_days,
                     )
                     for snapshot_input in (
-                        next(pending_iterator, None)
-                        for _ in range(effective_snapshot_workers)
+                        next(pending_iterator, None) for _ in range(effective_snapshot_workers)
                     )
                     if snapshot_input is not None
                 }
                 while in_flight:
+                    _raise_if_walk_forward_cancelled(cancellation_check)
                     completed, in_flight = wait(
                         in_flight,
+                        timeout=1.0,
                         return_when=FIRST_COMPLETED,
                     )
+                    lease_heartbeat.raise_if_failed()
                     for future in completed:
+                        _raise_if_walk_forward_cancelled(cancellation_check)
                         worker_result = future.result()
                         lease_heartbeat.raise_if_failed()
                         snapshot_by_date[worker_result.snapshot.decision_date] = (
@@ -1260,6 +1476,11 @@ def run_full_market_walk_forward_selection(
             size=RANKING_V3_CANDIDATE_POOL_LIMIT,
             selection_source="candidate_pool",
         )
+        ranking_v4_candidate_pool_signals = _signals(
+            snapshots,
+            size=50,
+            selection_source="ranking_v4_candidate_pool",
+        )
         top_5_portfolio = run_signal_portfolio_backtest(
             signals=top_5_signals,
             instrument_ids=sorted({item.instrument_id for item in top_5_signals}),
@@ -1285,6 +1506,26 @@ def run_full_market_walk_forward_selection(
             end=end,
             execution_rule_resolver=execution_resolver,
         )
+        ranking_v4_candidate_outcome_ledger = resolve_candidate_outcome_ledger(
+            signals=ranking_v4_candidate_pool_signals,
+            provider=market_provider,
+            start=start,
+            end=end,
+            max_entry_wait_days=5,
+            max_holding_days=20,
+            execution_rule_resolver=execution_resolver,
+        )
+        ranking_v4_stress_candidate_outcome_ledger = resolve_candidate_outcome_ledger(
+            signals=ranking_v4_candidate_pool_signals,
+            provider=market_provider,
+            start=start,
+            end=end,
+            slippage_bps=Decimal("15"),
+            fee_multiplier=Decimal("1.5"),
+            max_entry_wait_days=5,
+            max_holding_days=20,
+            execution_rule_resolver=execution_resolver,
+        )
         ranking_v3_observations = _build_ranking_v3_observations(
             snapshots,
             ledger=candidate_outcome_ledger,
@@ -1295,6 +1536,18 @@ def run_full_market_walk_forward_selection(
         snapshots = _apply_ranking_v3(
             snapshots,
             observations=ranking_v3_observations,
+        )
+        ranking_v4_observations = _build_ranking_v4_observations(
+            snapshots,
+            ledger=ranking_v4_candidate_outcome_ledger,
+            market_provider=market_provider,
+            start=start,
+            end=end,
+        )
+        snapshots = _apply_ranking_v4(
+            snapshots,
+            observations=ranking_v4_observations,
+            market_provider=market_provider,
         )
         execution_challenger_portfolio = run_signal_portfolio_backtest(
             signals=top_5_signals,
@@ -1327,6 +1580,16 @@ def run_full_market_walk_forward_selection(
             size=5,
             selection_source="baseline_challenger",
         )
+        ranking_v4_baseline_signals = _signals(
+            snapshots,
+            size=5,
+            selection_source="ranking_v4_constraint_matched_baseline",
+        )
+        ranking_v4_signals = _signals(
+            snapshots,
+            size=5,
+            selection_source="ranking_v4",
+        )
         dynamic_top_5_portfolio = run_signal_portfolio_backtest(
             signals=dynamic_top_5_signals,
             instrument_ids=sorted({item.instrument_id for item in dynamic_top_5_signals}),
@@ -1345,6 +1608,59 @@ def run_full_market_walk_forward_selection(
             max_positions=5,
             execution_rule_resolver=execution_resolver,
         )
+        ranking_v4_baseline_portfolio = run_signal_portfolio_backtest(
+            signals=ranking_v4_baseline_signals,
+            instrument_ids=sorted({item.instrument_id for item in ranking_v4_baseline_signals}),
+            provider=market_provider,
+            start=start,
+            end=end,
+            max_positions=5,
+            execution_rule_resolver=execution_resolver,
+        )
+        ranking_v4_portfolio = run_signal_portfolio_backtest(
+            signals=ranking_v4_signals,
+            instrument_ids=sorted({item.instrument_id for item in ranking_v4_signals}),
+            provider=market_provider,
+            start=start,
+            end=end,
+            max_positions=5,
+            execution_rule_resolver=execution_resolver,
+        )
+        ranking_v4_stress_portfolio = run_signal_portfolio_backtest(
+            signals=ranking_v4_signals,
+            instrument_ids=sorted({item.instrument_id for item in ranking_v4_signals}),
+            provider=market_provider,
+            start=start,
+            end=end,
+            max_positions=5,
+            slippage_bps=Decimal("15"),
+            fee_multiplier=Decimal("1.5"),
+            execution_rule_resolver=execution_resolver,
+        )
+        ranking_v4_channel_portfolios = {}
+        for channel in (
+            "baseline",
+            "trend",
+            "breakout",
+            "quality_value",
+            "defensive_low_vol",
+            "etf_industry",
+        ):
+            model_id = f"channel_{channel}"
+            channel_signals = _signals(
+                snapshots,
+                size=5,
+                selection_source=f"ranking_v4_{model_id}",
+            )
+            ranking_v4_channel_portfolios[model_id] = run_signal_portfolio_backtest(
+                signals=channel_signals,
+                instrument_ids=sorted({item.instrument_id for item in channel_signals}),
+                provider=market_provider,
+                start=start,
+                end=end,
+                max_positions=5,
+                execution_rule_resolver=execution_resolver,
+            )
         audit_last_decision_date = _ranking_v3_historical_audit_last_decision_date(
             start,
             end,
@@ -1411,6 +1727,21 @@ def run_full_market_walk_forward_selection(
         )
         baseline_challenger_metrics = _portfolio_metrics(
             baseline_challenger_portfolio,
+            start,
+            end,
+        )
+        ranking_v4_baseline_metrics = _portfolio_metrics(
+            ranking_v4_baseline_portfolio,
+            start,
+            end,
+        )
+        ranking_v4_metrics = _portfolio_metrics(
+            ranking_v4_portfolio,
+            start,
+            end,
+        )
+        ranking_v4_stress_metrics = _portfolio_metrics(
+            ranking_v4_stress_portfolio,
             start,
             end,
         )
@@ -1595,18 +1926,95 @@ def run_full_market_walk_forward_selection(
         pbo_evidence=ranking_v3_pbo_evidence,
         forward_scoring_artifact=ranking_v3_forward_artifact,
     )
-    digest = _selection_digest(
+    ranking_v4_model_matrix = _ranking_v4_model_return_matrix(
         snapshots,
-        revision,
-        top_5_portfolio,
-        top_10_portfolio,
-        benchmarks,
-        cost_sensitivity,
-        strategy_validation,
-        dynamic_rerank,
-        baseline_challenger,
-        execution_challenger,
-        ranking_v3,
+        portfolios={
+            "constraint_matched_baseline": ranking_v4_baseline_portfolio,
+            "ranking_v4_full": ranking_v4_portfolio,
+            **ranking_v4_channel_portfolios,
+        },
+    )
+    (
+        ranking_v4_baseline_returns,
+        ranking_v4_challenger_returns,
+        ranking_v4_completed_trades,
+        ranking_v4_valid_outcomes,
+        ranking_v4_expected_outcomes,
+    ) = _ranking_v4_selected_return_observations(
+        snapshots,
+        normal_ledger=ranking_v4_candidate_outcome_ledger,
+        stress_ledger=ranking_v4_stress_candidate_outcome_ledger,
+        baseline_portfolio=ranking_v4_baseline_portfolio,
+        challenger_portfolio=ranking_v4_portfolio,
+        stress_portfolio=ranking_v4_stress_portfolio,
+    )
+    ranking_v4_validation_dates = {item.rebalance_date for item in ranking_v4_baseline_returns}
+    ranking_v4_model_matrix = {
+        model_id: [item for item in rows if item.rebalance_date in ranking_v4_validation_dates]
+        for model_id, rows in ranking_v4_model_matrix.items()
+    }
+    ranking_v4_pbo_evidence = evaluate_ranking_v4_cscv_pbo(ranking_v4_model_matrix)
+    ranking_v4_protocol = build_ranking_v4_protocol()
+    ranking_v4_known_attempt_ids = tuple(
+        attempt_id
+        for attempt_id in owner_repository.walk_forward_research_attempt_ids()
+        if attempt_id != owner_run_id
+    )
+    ranking_v4_trial_ledger = build_ranking_v4_trial_ledger(
+        ranking_v4_model_matrix,
+        experiment_registry_digest=(ranking_v4_protocol.experiment_registry.registry_digest),
+        known_research_attempt_ids=ranking_v4_known_attempt_ids,
+    )
+    ranking_v4_historical_validation = evaluate_ranking_v4_historical_validation(
+        ranking_v4_baseline_returns,
+        ranking_v4_challenger_returns,
+        completed_trade_count=ranking_v4_completed_trades,
+        valid_outcome_count=ranking_v4_valid_outcomes,
+        expected_outcome_count=ranking_v4_expected_outcomes,
+        execution_start_date=start,
+        execution_end_date=end,
+        execution_rebalance_step_sessions=rebalance_step_sessions,
+        execution_lookback_days=lookback_days,
+        challenger_max_drawdown_pct=ranking_v4_metrics.max_drawdown_pct,
+        known_research_attempt_ids=ranking_v4_known_attempt_ids,
+        pbo_evidence=ranking_v4_pbo_evidence,
+        trial_ledger=ranking_v4_trial_ledger,
+    )
+    ranking_v4 = _build_ranking_v4_evaluation(
+        snapshots=snapshots,
+        ledger=ranking_v4_candidate_outcome_ledger,
+        constraint_matched_baseline_portfolio=ranking_v4_baseline_portfolio,
+        constraint_matched_baseline_metrics=ranking_v4_baseline_metrics,
+        portfolio=ranking_v4_portfolio,
+        metrics=ranking_v4_metrics,
+        stress_metrics=ranking_v4_stress_metrics,
+        historical_validation=ranking_v4_historical_validation,
+        pbo_evidence=ranking_v4_pbo_evidence,
+        trial_ledger=ranking_v4_trial_ledger,
+    )
+    digest = _selection_digest(
+        provider_mode=repository.provider_mode,
+        revision=revision,
+        start=start,
+        end=end,
+        rebalance_step_sessions=rebalance_step_sessions,
+        lookback_days=lookback_days,
+        snapshots=snapshots,
+        top_5_portfolio=top_5_portfolio,
+        top_10_portfolio=top_10_portfolio,
+        top_5_metrics=top_5_metrics,
+        top_10_metrics=top_10_metrics,
+        top_5_temporal_validation=top_5_temporal_validation,
+        top_10_temporal_validation=top_10_temporal_validation,
+        benchmarks=benchmarks,
+        cost_sensitivity=cost_sensitivity,
+        strategy_validation=strategy_validation,
+        dynamic_rerank=dynamic_rerank,
+        baseline_challenger=baseline_challenger,
+        execution_challenger=execution_challenger,
+        ranking_v3=ranking_v3,
+        ranking_v4=ranking_v4,
+        experiment_manifest=experiment_manifest,
     )
     result = WalkForwardSelectionResult(
         owner_run_id=owner_run_id,
@@ -1629,6 +2037,7 @@ def run_full_market_walk_forward_selection(
         baseline_challenger=baseline_challenger,
         execution_challenger=execution_challenger,
         ranking_v3=ranking_v3,
+        ranking_v4=ranking_v4,
         experiment_manifest=experiment_manifest,
         reproducibility_digest=digest,
         data_health={
@@ -1637,7 +2046,12 @@ def run_full_market_walk_forward_selection(
             "walk_forward_lookback_days": str(lookback_days),
             "walk_forward_scan_errors": str(scan_error_count),
             "walk_forward_snapshot_workers": str(effective_snapshot_workers),
-            "walk_forward_future_data_guard": "revision_lease_and_decision_date_cutoff",
+            "walk_forward_future_data_guard": (
+                "frozen_dataset_revision_and_economic_availability_date"
+            ),
+            "walk_forward_historical_ingestion_mode": (
+                "pre_run_reconstruction_exploratory_only"
+            ),
             "walk_forward_lease_maintenance_count": str(lease_heartbeat.maintenance_count),
             "walk_forward_lease_recovery_count": str(lease_heartbeat.recovery_count),
             "walk_forward_universe": "historical_lifecycle_per_rebalance_date",
@@ -1844,6 +2258,19 @@ def run_full_market_walk_forward_selection(
                 strategy_provider.query_count + selection_worker_stats.fundamental_fallback_queries
             ),
             "walk_forward_release_gate": strategy_validation.status,
+            "walk_forward_ranking_v4_status": ranking_v4.status,
+            "walk_forward_ranking_v4_scope": ranking_v4.deployment_scope,
+            "walk_forward_ranking_v4_official_release_allowed": str(
+                ranking_v4.official_release_allowed
+            ).lower(),
+            "walk_forward_ranking_v4_protocol_digest": (ranking_v4.protocol.protocol_digest),
+            "walk_forward_ranking_v4_candidate_coverage": (
+                f"{ranking_v4.candidate_outcome_coverage_ratio:.6f}"
+            ),
+            "walk_forward_ranking_v4_pbo_status": (ranking_v4.historical_validation.pbo_status),
+            "walk_forward_ranking_v4_forward_eligible": str(
+                ranking_v4.historical_validation.eligible_for_confirmatory_forward
+            ).lower(),
             "walk_forward_statistical_unit": "signal_date_cluster",
             "walk_forward_statistical_test": "cluster_bootstrap_sign_flip",
             "walk_forward_multiple_testing": "benjamini_hochberg",
@@ -3123,8 +3550,10 @@ def _selection(
         factor_signals=_selection_factor_signals(card),
         asset_type=card.asset_type,
         industry=context.industry if context else None,
+        themes=(sorted(set(context.themes)) if context else []),
         index_memberships=(sorted(set(context.index_memberships)) if context else []),
         ranking_features=_ranking_v3_features(card, factor_ranking),
+        ranking_v4_features=_ranking_v4_features(card, factor_ranking),
     )
 
 
@@ -3167,6 +3596,202 @@ def _ranking_v3_features(
     )
 
 
+def _ranking_v4_features(
+    card,
+    factor_ranking: FactorRanking | None,
+) -> RankingV4FeatureVector:
+    v3 = _ranking_v3_features(card, factor_ranking)
+    breakout_quality = (
+        float(card.strategy_score)
+        if (card.primary_strategy_id or "") == "breakout_volume_confirmation"
+        else 0.0
+    )
+    realized_volatility = max(0.0, min(1.0, 1.0 - v3.low_risk))
+    tail_risk = max(
+        realized_volatility,
+        1.0 - v3.risk_filter,
+    )
+    return RankingV4FeatureVector(
+        strategy_score=v3.strategy_score,
+        factor_score=v3.factor_score,
+        valuation=v3.valuation,
+        size=v3.size,
+        quality=v3.quality,
+        momentum=v3.momentum,
+        trend_quality=v3.trend_quality,
+        breakout_quality=breakout_quality,
+        liquidity=v3.liquidity,
+        low_risk=v3.low_risk,
+        risk_filter=v3.risk_filter,
+        reversal=v3.reversal,
+        capacity=v3.liquidity,
+        tail_risk=tail_risk,
+        execution_penalty=v3.execution_penalty,
+        data_completeness=v3.data_completeness,
+    )
+
+
+def _ranking_v4_market_features(
+    rankings: list[FactorRanking],
+    *,
+    benchmark_valid_count: int,
+    benchmark_required_count: int,
+    benchmark_above_count: int,
+) -> dict[str, float | bool | None]:
+    if not rankings:
+        return {
+            "market_breadth": 0.5,
+            "benchmark_slope": 0.5,
+            "realized_volatility": 0.5,
+            "cross_sectional_dispersion": 0.5,
+            "market_features_complete": False,
+        }
+    factor_scores = [float(item.factor_score) for item in rankings]
+    market_breadth = sum(value >= 0.5 for value in factor_scores) / len(factor_scores)
+    realized_volatility = statistics.fmean(1.0 - float(item.low_risk_score) for item in rankings)
+    cross_sectional_dispersion = min(
+        1.0,
+        statistics.pstdev(factor_scores) * 4.0,
+    )
+    benchmark_complete = (
+        benchmark_required_count > 0 and benchmark_valid_count == benchmark_required_count
+    )
+    benchmark_slope = (
+        benchmark_above_count / benchmark_required_count if benchmark_complete else 0.5
+    )
+    complete = (
+        benchmark_complete
+        and len(rankings) >= 30
+        and all(
+            math.isfinite(value)
+            for value in (
+                market_breadth,
+                realized_volatility,
+                cross_sectional_dispersion,
+            )
+        )
+    )
+    return {
+        "market_breadth": round(market_breadth, 8),
+        "benchmark_slope": round(benchmark_slope, 8),
+        "realized_volatility": round(realized_volatility, 8),
+        "cross_sectional_dispersion": round(cross_sectional_dispersion, 8),
+        "market_features_complete": complete,
+    }
+
+
+def _ranking_v4_candidate_from_selection(
+    selection: WalkForwardSelection,
+    *,
+    decision_date: date,
+    market_regime: str,
+    market_features_complete: bool,
+    incumbent: bool = False,
+) -> RankingV4Candidate:
+    features = selection.ranking_v4_features
+    benchmark_opportunity_cost = max(
+        0.0,
+        ((features.benchmark_slope or 0.0) - 0.5) * 0.5,
+    )
+    liquidity_penalty = max(0.0, (1.0 - features.liquidity) * 0.25)
+    tail_risk_penalty = max(0.0, features.tail_risk * 0.25)
+    is_etf = selection.asset_type.strip().lower() in {
+        "etf",
+        "fund",
+        "index_fund",
+    }
+    return RankingV4Candidate(
+        instrument_id=selection.instrument_id,
+        baseline_rank_score=float(selection.rank_score),
+        decision_date=decision_date,
+        feature_as_of=decision_date,
+        market_regime_as_of=decision_date,
+        constraint_as_of=decision_date,
+        cost_as_of=decision_date,
+        primary_strategy_id=selection.primary_strategy_id,
+        factor_signals=selection.factor_signals,
+        market_regime=market_regime,
+        asset_type=selection.asset_type,
+        industry=selection.industry,
+        themes=selection.themes,
+        index_memberships=selection.index_memberships,
+        underlying_ids=selection.underlying_ids,
+        factor_exposures=(
+            {"beta": selection.ranking_v4_beta} if selection.ranking_v4_beta is not None else {}
+        ),
+        features=features,
+        point_in_time_evidence_complete=(selection.ranking_v4_temporal_evidence_complete),
+        market_regime_features_complete=market_features_complete,
+        constraint_data_complete=(selection.ranking_v4_constraint_data_complete),
+        underlying_evidence_complete=(
+            selection.ranking_v4_underlying_evidence_complete or not is_etf
+        ),
+        incumbent=incumbent,
+        replacement_cost_pct=0.0 if incumbent else 0.15,
+        benchmark_opportunity_cost_pct=round(
+            benchmark_opportunity_cost,
+            6,
+        ),
+        liquidity_penalty_pct=round(liquidity_penalty, 6),
+        tail_risk_penalty_pct=round(tail_risk_penalty, 6),
+    )
+
+
+def _selection_with_ranking_v4_channel(
+    selection: WalkForwardSelection,
+    entry: RankingV4CandidatePoolEntry,
+) -> WalkForwardSelection:
+    return selection.model_copy(
+        update={
+            "ranking_v4_primary_channel": entry.primary_channel,
+            "ranking_v4_matched_channels": list(entry.matched_channels),
+            "ranking_v4_channel_scores": dict(entry.channel_scores),
+            "ranking_v4_replacement_cost_pct": (entry.candidate.replacement_cost_pct),
+            "ranking_v4_benchmark_opportunity_cost_pct": (
+                entry.candidate.benchmark_opportunity_cost_pct
+            ),
+            "ranking_v4_liquidity_penalty_pct": (entry.candidate.liquidity_penalty_pct),
+            "ranking_v4_tail_risk_penalty_pct": (entry.candidate.tail_risk_penalty_pct),
+        }
+    )
+
+
+def _with_ranking_v4_industry_strength(
+    selections: list[WalkForwardSelection],
+) -> list[WalkForwardSelection]:
+    scores_by_industry: dict[str, list[float]] = {}
+    for selection in selections:
+        industry = (selection.industry or "").strip()
+        if not industry or industry.lower() in {"unknown", "未知", "未分类"}:
+            continue
+        scores_by_industry.setdefault(industry, []).append(
+            selection.ranking_v4_features.factor_score
+        )
+    strength_by_industry = {
+        industry: statistics.fmean(values)
+        for industry, values in scores_by_industry.items()
+        if values
+    }
+    return [
+        selection.model_copy(
+            update={
+                "ranking_v4_features": selection.ranking_v4_features.model_copy(
+                    update={
+                        "industry_strength": round(
+                            strength_by_industry.get(
+                                (selection.industry or "").strip(),
+                                0.5,
+                            ),
+                            8,
+                        )
+                    }
+                )
+            }
+        )
+        for selection in selections
+    ]
+
+
 def _selection_factor_signals(card) -> list[str]:
     signals = [str(value) for value in card.factor_flags if value]
     for exposure in card.factor_exposures:
@@ -3186,10 +3811,20 @@ def _enrich_selection_constraints(
     for snapshot in snapshots:
         source_items = list(
             {
-                item.instrument_id: item for item in [*snapshot.candidate_pool, *snapshot.top_10]
+                item.instrument_id: item
+                for item in [
+                    *snapshot.candidate_pool,
+                    *snapshot.ranking_v4_candidate_pool,
+                    *snapshot.top_10,
+                ]
             }.values()
         )
         instrument_ids = [item.instrument_id for item in source_items]
+        fundamentals = repository.fundamentals_as_of(
+            instrument_ids,
+            snapshot.decision_date,
+            revision,
+        )
         industries = repository.industries_as_of(
             instrument_ids,
             snapshot.decision_date,
@@ -3197,6 +3832,12 @@ def _enrich_selection_constraints(
         )
         memberships, incomplete_index_snapshots = repository.available_memberships_as_of(
             instrument_ids,
+            snapshot.decision_date,
+            revision,
+        )
+        adjusted_bar_counts = repository.adjusted_bar_vintage_counts(
+            instrument_ids,
+            snapshot.decision_date - timedelta(days=365),
             snapshot.decision_date,
             revision,
         )
@@ -3209,19 +3850,34 @@ def _enrich_selection_constraints(
                 asset_type = asset_types.get(selection.instrument_id, "unknown")
             if asset_type == "1":
                 asset_type = "stock"
+            normalized_asset_type = asset_type.strip().lower()
+            is_stock = normalized_asset_type in {"stock", "equity"}
+            temporal_evidence_complete = (
+                (not is_stock or selection.instrument_id in fundamentals)
+                and (not is_stock or industry_snapshot is not None)
+                and not incomplete_index_snapshots
+                and adjusted_bar_counts.get(selection.instrument_id, 0)
+                >= RANKING_V4_MIN_COMMON_RETURN_OBSERVATIONS + 1
+            )
             updated_by_instrument[selection.instrument_id] = selection.model_copy(
                 update={
                     "asset_type": asset_type,
                     "industry": (
-                        selection.industry
-                        or (industry_snapshot.industry if industry_snapshot is not None else None)
+                        industry_snapshot.industry if industry_snapshot is not None else None
                     ),
-                    "index_memberships": (
-                        selection.index_memberships
-                        or sorted({item.index_id for item in membership_rows})
+                    "index_memberships": sorted({item.index_id for item in membership_rows}),
+                    "ranking_v4_temporal_evidence_complete": (temporal_evidence_complete),
+                    "ranking_v4_underlying_evidence_complete": (
+                        normalized_asset_type not in {"etf", "fund", "index_fund"}
                     ),
                 }
             )
+        updated_v4_pool = _with_ranking_v4_industry_strength(
+            [
+                updated_by_instrument[item.instrument_id].model_copy(update={"themes": []})
+                for item in snapshot.ranking_v4_candidate_pool
+            ]
+        )
         enriched.append(
             snapshot.model_copy(
                 update={
@@ -3232,6 +3888,7 @@ def _enrich_selection_constraints(
                         updated_by_instrument[item.instrument_id]
                         for item in snapshot.candidate_pool
                     ],
+                    "ranking_v4_candidate_pool": updated_v4_pool,
                     "top_5": [
                         updated_by_instrument.get(item.instrument_id, item)
                         for item in snapshot.top_5
@@ -3241,6 +3898,179 @@ def _enrich_selection_constraints(
             )
         )
     return enriched
+
+
+def _ranking_v4_risk_evidence(
+    snapshot: WalkForwardSnapshot,
+    *,
+    market_provider: ReplayMarketDataProvider,
+) -> tuple[list[WalkForwardSelection], dict[tuple[str, str], float]]:
+    pool = snapshot.ranking_v4_candidate_pool
+    instrument_ids = [item.instrument_id for item in pool]
+    if not instrument_ids:
+        return [], {}
+    bars = market_provider.get_daily_bars(
+        sorted({*instrument_ids, RANKING_V4_RISK_BENCHMARK_ID}),
+        snapshot.decision_date - timedelta(days=365),
+        snapshot.decision_date,
+    )
+    if bars.empty:
+        return [
+            item.model_copy(
+                update={
+                    "ranking_v4_beta": None,
+                    "ranking_v4_constraint_data_complete": False,
+                }
+            )
+            for item in pool
+        ], {}
+
+    benchmark_frame = bars.loc[bars["instrument_id"] == RANKING_V4_RISK_BENCHMARK_ID]
+    benchmark_returns = _ranking_v4_return_series(
+        benchmark_frame,
+        adjusted_required=False,
+    )
+    returns_by_instrument: dict[str, dict[date, float]] = {}
+    beta_by_instrument: dict[str, float] = {}
+    for instrument_id in instrument_ids:
+        frame = bars.loc[bars["instrument_id"] == instrument_id]
+        returns = _ranking_v4_return_series(
+            frame,
+            adjusted_required=True,
+        )
+        returns_by_instrument[instrument_id] = returns
+        beta = _ranking_v4_beta(returns, benchmark_returns)
+        if beta is not None:
+            beta_by_instrument[instrument_id] = beta
+
+    correlations: dict[tuple[str, str], float] = {}
+    for left_index, left in enumerate(instrument_ids):
+        for right in instrument_ids[left_index + 1 :]:
+            correlation = _ranking_v4_correlation(
+                returns_by_instrument.get(left, {}),
+                returns_by_instrument.get(right, {}),
+            )
+            if correlation is not None:
+                correlations[(left, right)] = correlation
+
+    updated = []
+    for selection in pool:
+        asset_type = selection.asset_type.strip().lower()
+        industry = (selection.industry or "").strip().lower()
+        beta = beta_by_instrument.get(selection.instrument_id)
+        metadata_complete = asset_type not in {"", "unknown", "未知"} and industry not in {
+            "",
+            "unknown",
+            "未知",
+            "未分类",
+        }
+        updated.append(
+            selection.model_copy(
+                update={
+                    "ranking_v4_beta": beta,
+                    "ranking_v4_constraint_data_complete": (beta is not None and metadata_complete),
+                }
+            )
+        )
+    return updated, correlations
+
+
+def _ranking_v4_return_series(
+    frame: pd.DataFrame,
+    *,
+    adjusted_required: bool,
+) -> dict[date, float]:
+    if frame.empty:
+        return {}
+    ordered = frame.sort_values("trade_date")
+    if adjusted_required:
+        if "adjusted_close" not in ordered.columns:
+            return {}
+        ordered = ordered.loc[ordered["adjusted_close"].notna()].copy()
+        price_column = "adjusted_close"
+    else:
+        if "adjusted_close" in ordered.columns:
+            ordered = ordered.copy()
+            ordered["_risk_price"] = ordered["adjusted_close"].where(
+                ordered["adjusted_close"].notna(),
+                ordered["close"],
+            )
+            price_column = "_risk_price"
+        else:
+            price_column = "close"
+    if len(ordered) < 2:
+        return {}
+    ordered = ordered.tail(RANKING_V4_RISK_LOOKBACK_SESSIONS + 1)
+    result: dict[date, float] = {}
+    previous: float | None = None
+    for trade_date, raw_value in zip(
+        ordered["trade_date"],
+        ordered[price_column],
+        strict=True,
+    ):
+        value = float(raw_value)
+        if not math.isfinite(value) or value <= 0:
+            previous = None
+            continue
+        if previous is not None:
+            result[trade_date] = value / previous - 1.0
+        previous = value
+    return result
+
+
+def _ranking_v4_beta(
+    candidate_returns: dict[date, float],
+    benchmark_returns: dict[date, float],
+) -> float | None:
+    common_dates = sorted(set(candidate_returns).intersection(benchmark_returns))
+    if len(common_dates) < RANKING_V4_MIN_COMMON_RETURN_OBSERVATIONS:
+        return None
+    candidate_values = [candidate_returns[item] for item in common_dates]
+    benchmark_values = [benchmark_returns[item] for item in common_dates]
+    benchmark_mean = statistics.fmean(benchmark_values)
+    candidate_mean = statistics.fmean(candidate_values)
+    variance = sum((value - benchmark_mean) ** 2 for value in benchmark_values)
+    if variance <= 0:
+        return None
+    beta = (
+        sum(
+            (benchmark - benchmark_mean) * (candidate - candidate_mean)
+            for benchmark, candidate in zip(
+                benchmark_values,
+                candidate_values,
+                strict=True,
+            )
+        )
+        / variance
+    )
+    if not math.isfinite(beta) or beta < 0:
+        return None
+    return round(beta, 8)
+
+
+def _ranking_v4_correlation(
+    left_returns: dict[date, float],
+    right_returns: dict[date, float],
+) -> float | None:
+    common_dates = sorted(set(left_returns).intersection(right_returns))
+    if len(common_dates) < RANKING_V4_MIN_COMMON_RETURN_OBSERVATIONS:
+        return None
+    left_values = [left_returns[item] for item in common_dates]
+    right_values = [right_returns[item] for item in common_dates]
+    left_mean = statistics.fmean(left_values)
+    right_mean = statistics.fmean(right_values)
+    left_sum = sum((value - left_mean) ** 2 for value in left_values)
+    right_sum = sum((value - right_mean) ** 2 for value in right_values)
+    if left_sum <= 0 or right_sum <= 0:
+        return None
+    covariance = sum(
+        (left - left_mean) * (right - right_mean)
+        for left, right in zip(left_values, right_values, strict=True)
+    )
+    correlation = covariance / math.sqrt(left_sum * right_sum)
+    if not math.isfinite(correlation):
+        return None
+    return round(max(-1.0, min(correlation, 1.0)), 8)
 
 
 def _apply_dynamic_reranking(
@@ -3499,6 +4329,297 @@ def _dynamic_selection_constraints_hold(
     return True
 
 
+def _build_ranking_v4_observations(
+    snapshots: list[WalkForwardSnapshot],
+    *,
+    ledger: CandidateOutcomeLedgerResult,
+    market_provider: ReplayMarketDataProvider,
+    start: date,
+    end: date,
+) -> list[ResolvedRankingV4Observation]:
+    selection_by_key = {
+        (snapshot.decision_date, item.instrument_id): item
+        for snapshot in snapshots
+        for item in snapshot.ranking_v4_candidate_pool
+    }
+    regime_by_date = {
+        snapshot.decision_date: snapshot.benchmark_trend_state for snapshot in snapshots
+    }
+    benchmark_series = _benchmark_price_series(
+        market_provider,
+        start=start,
+        end=end,
+    )
+    observations: list[ResolvedRankingV4Observation] = []
+    for outcome in ledger.outcomes:
+        selection = selection_by_key.get((outcome.signal_date, outcome.instrument_id))
+        if (
+            selection is None
+            or outcome.resolved_at is None
+            or not selection.ranking_v4_temporal_evidence_complete
+        ):
+            continue
+        triggered = outcome.status == CandidateOutcomeStatus.RESOLVED
+        if triggered:
+            if (
+                outcome.entry_date is None
+                or outcome.exit_date is None
+                or outcome.return_pct is None
+                or not math.isfinite(float(outcome.return_pct))
+            ):
+                continue
+            benchmark_return = _composite_benchmark_return(
+                benchmark_series,
+                start=outcome.entry_date,
+                end=outcome.exit_date,
+            )
+            if benchmark_return is None:
+                continue
+            available_at = outcome.resolved_at
+            return_pct = float(outcome.return_pct)
+            net_excess = round(return_pct - benchmark_return, 4)
+            semantic_status = "resolved"
+        elif (
+            outcome.status == CandidateOutcomeStatus.NOT_TRIGGERED_OR_UNFILLABLE
+            and outcome.status_detail in RANKING_V4_VALID_CASH_DETAILS
+        ):
+            maturity_date = trading_day_offset(
+                outcome.signal_date,
+                25,
+            )
+            benchmark_return = _composite_benchmark_return(
+                benchmark_series,
+                start=outcome.signal_date,
+                end=maturity_date,
+            )
+            if benchmark_return is None:
+                continue
+            available_at = max(outcome.resolved_at, maturity_date)
+            return_pct = None
+            net_excess = None
+            semantic_status = "not_triggered"
+        else:
+            continue
+        observations.append(
+            ResolvedRankingV4Observation(
+                instrument_id=outcome.instrument_id,
+                signal_date=outcome.signal_date,
+                available_at=available_at,
+                outcome_status=semantic_status,
+                triggered=triggered,
+                return_pct=return_pct,
+                benchmark_return_pct=benchmark_return,
+                cost_adjusted_net_excess_return_pct=net_excess,
+                primary_strategy_id=outcome.strategy_id,
+                factor_signals=selection.factor_signals,
+                market_regime=regime_by_date.get(
+                    outcome.signal_date,
+                    "unknown",
+                ),
+                asset_type=selection.asset_type,
+                industry=selection.industry,
+                features=selection.ranking_v4_features,
+            )
+        )
+    return observations
+
+
+def _apply_ranking_v4(
+    snapshots: list[WalkForwardSnapshot],
+    *,
+    observations: list[ResolvedRankingV4Observation],
+    market_provider: ReplayMarketDataProvider,
+) -> list[WalkForwardSnapshot]:
+    updated: list[WalkForwardSnapshot] = []
+    previous_v4_ids: list[str] = []
+    for snapshot in snapshots:
+        risk_pool, pairwise_correlations = _ranking_v4_risk_evidence(
+            snapshot,
+            market_provider=market_provider,
+        )
+        candidates = [
+            _ranking_v4_candidate_from_selection(
+                item,
+                decision_date=snapshot.decision_date,
+                market_regime=snapshot.benchmark_trend_state,
+                market_features_complete=(snapshot.ranking_v4_market_features_complete),
+                incumbent=item.instrument_id in previous_v4_ids,
+            )
+            for item in risk_pool
+        ]
+        decision = score_ranking_v4_candidates(
+            candidates,
+            observations,
+            decision_date=snapshot.decision_date,
+        )
+        portfolio = select_ranking_v4_portfolio(
+            decision,
+            candidates,
+            pairwise_correlations=pairwise_correlations,
+        )
+        baseline_decision = _ranking_v4_baseline_decision(
+            candidates,
+            decision_date=snapshot.decision_date,
+        )
+        baseline_portfolio = select_ranking_v4_portfolio(
+            baseline_decision,
+            candidates,
+            pairwise_correlations=pairwise_correlations,
+        )
+        source_by_instrument = {item.instrument_id: item for item in risk_pool}
+        score_by_instrument = {item.instrument_id: item for item in decision.candidates}
+        selected = [
+            _selection_with_ranking_v4_score(
+                source_by_instrument[item.instrument_id],
+                score_by_instrument[item.instrument_id],
+                position=item.position,
+            )
+            for item in portfolio.selected
+        ]
+        baseline = [
+            source_by_instrument[item.instrument_id] for item in baseline_portfolio.selected
+        ]
+        previous_v4_ids = [item.instrument_id for item in selected]
+        updated.append(
+            snapshot.model_copy(
+                update={
+                    "ranking_v4_candidate_pool": risk_pool,
+                    "ranking_v4_constraint_matched_baseline_top_5": baseline,
+                    "ranking_v4_top_5": selected,
+                    "ranking_v4_training_cutoff_date": (decision.training_cutoff_date),
+                    "ranking_v4_training_observation_count": (decision.training_observation_count),
+                    "ranking_v4_training_date_count": (decision.training_date_count),
+                    "ranking_v4_model_ready": decision.model_ready,
+                    "ranking_v4_cash_slot_count": portfolio.cash_slot_count,
+                    "ranking_v4_constraint_blocked_count": len(portfolio.blocked),
+                    "ranking_v4_portfolio": portfolio,
+                    "ranking_v4_pairwise_correlations": {
+                        _ranking_v4_pair_key(left, right): value
+                        for (left, right), value in sorted(pairwise_correlations.items())
+                    },
+                }
+            )
+        )
+    return updated
+
+
+def _ranking_v4_pair_key(left: str, right: str) -> str:
+    return "|".join(sorted((left, right)))
+
+
+def _ranking_v4_pairwise_correlations(
+    snapshot: WalkForwardSnapshot,
+) -> dict[tuple[str, str], float]:
+    result: dict[tuple[str, str], float] = {}
+    for key, value in snapshot.ranking_v4_pairwise_correlations.items():
+        parts = key.split("|", maxsplit=1)
+        if len(parts) != 2:
+            continue
+        result[(parts[0], parts[1])] = value
+    return result
+
+
+def _ranking_v4_baseline_decision(
+    candidates: list[RankingV4Candidate],
+    *,
+    decision_date: date,
+) -> RankingV4Decision:
+    ordered = sorted(
+        candidates,
+        key=lambda item: (-item.baseline_rank_score, item.instrument_id),
+    )
+    scores: list[RankingV4CandidateScore] = []
+    for position, candidate in enumerate(ordered, start=1):
+        costs_complete = all(
+            value is not None
+            for value in (
+                candidate.replacement_cost_pct,
+                candidate.benchmark_opportunity_cost_pct,
+                candidate.liquidity_penalty_pct,
+                candidate.tail_risk_penalty_pct,
+            )
+        )
+        blocked = []
+        if (
+            candidate.decision_date != decision_date
+            or candidate.feature_as_of is None
+            or candidate.feature_as_of > decision_date
+            or candidate.market_regime_as_of is None
+            or candidate.market_regime_as_of > decision_date
+            or candidate.constraint_as_of is None
+            or candidate.constraint_as_of > decision_date
+            or candidate.cost_as_of is None
+            or candidate.cost_as_of > decision_date
+        ):
+            blocked.append("temporal_evidence_incomplete")
+        if not candidate.point_in_time_evidence_complete:
+            blocked.append("point_in_time_evidence_incomplete")
+        if not candidate.market_regime_features_complete:
+            blocked.append("market_regime_evidence_incomplete")
+        if not candidate.constraint_data_complete:
+            blocked.append("constraint_evidence_incomplete")
+        if candidate.features.data_completeness < 0.68:
+            blocked.append("data_incomplete")
+        if not costs_complete:
+            blocked.append("cost_evidence_incomplete")
+        baseline_utility = max(0.0, float(candidate.baseline_rank_score))
+        scores.append(
+            RankingV4CandidateScore(
+                instrument_id=candidate.instrument_id,
+                baseline_position=position,
+                v4_position=position,
+                baseline_rank_score=round(
+                    float(candidate.baseline_rank_score),
+                    8,
+                ),
+                expected_utility_pct=baseline_utility,
+                expected_utility_lower_bound_pct=baseline_utility,
+                eligible_for_position=not blocked and baseline_utility > 0,
+                blocked_reasons=blocked,
+                reason=("constraint_matched_baseline" if not blocked else ",".join(blocked)),
+            )
+        )
+    eligible_count = sum(item.eligible_for_position for item in scores)
+    return RankingV4Decision(
+        decision_date=decision_date,
+        training_observation_count=0,
+        training_triggered_observation_count=0,
+        training_date_count=0,
+        model_ready=False,
+        eligible_position_count=eligible_count,
+        cash_slot_count=max(5 - min(5, eligible_count), 0),
+        candidates=scores,
+    )
+
+
+def _selection_with_ranking_v4_score(
+    selection: WalkForwardSelection,
+    score: RankingV4CandidateScore,
+    *,
+    position: int,
+) -> WalkForwardSelection:
+    return selection.model_copy(
+        update={
+            "ranking_v4_score": score.expected_utility_lower_bound_pct,
+            "ranking_v4_position": position,
+            "ranking_v4_training_dates": score.evidence_date_count,
+            "ranking_v4_trigger_probability": score.trigger_probability,
+            "ranking_v4_expected_net_excess_pct": (score.expected_triggered_net_excess_return_pct),
+            "ranking_v4_net_excess_lower_bound_pct": (
+                score.expected_triggered_net_excess_lower_bound_pct
+            ),
+            "ranking_v4_expected_utility_pct": (score.expected_utility_pct),
+            "ranking_v4_utility_lower_bound_pct": (score.expected_utility_lower_bound_pct),
+            "ranking_v4_blocked_reasons": list(score.blocked_reasons),
+            "ranking_v4_reason": score.reason,
+            "ranking_v4_replacement_cost_pct": (score.replacement_cost_pct),
+            "ranking_v4_benchmark_opportunity_cost_pct": (score.benchmark_opportunity_cost_pct),
+            "ranking_v4_liquidity_penalty_pct": (score.liquidity_penalty_pct),
+            "ranking_v4_tail_risk_penalty_pct": (score.tail_risk_penalty_pct),
+        }
+    )
+
+
 def _build_ranking_v3_observations(
     snapshots: list[WalkForwardSnapshot],
     *,
@@ -3563,9 +4684,7 @@ def _build_ranking_v3_observations(
             available_at = max(available_at, maturity_date)
             net_excess = round(-benchmark_return, 4)
         semantic_status = (
-            "resolved"
-            if outcome.status == CandidateOutcomeStatus.RESOLVED
-            else "not_triggered"
+            "resolved" if outcome.status == CandidateOutcomeStatus.RESOLVED else "not_triggered"
         )
         observations.append(
             ResolvedRankingV3Observation(
@@ -4060,6 +5179,279 @@ def _ranking_v3_pbo_evidence(
             }
         )
     return evidence
+
+
+def _ranking_v4_valid_outcome_return(outcome) -> float | None:
+    if outcome is None or outcome.resolved_at is None:
+        return None
+    if (
+        outcome.status == CandidateOutcomeStatus.RESOLVED
+        and outcome.return_pct is not None
+        and math.isfinite(float(outcome.return_pct))
+    ):
+        return float(outcome.return_pct)
+    if (
+        outcome.status == CandidateOutcomeStatus.NOT_TRIGGERED_OR_UNFILLABLE
+        and outcome.status_detail in RANKING_V4_VALID_CASH_DETAILS
+    ):
+        return 0.0
+    return None
+
+
+def _ranking_v4_model_return_matrix(
+    snapshots: list[WalkForwardSnapshot],
+    *,
+    portfolios: dict[str, PortfolioBacktestResult],
+) -> dict[str, list[RankingV4DatedModelReturn]]:
+    expected_ids = set(RANKING_V4_FROZEN_PBO_MODEL_IDS)
+    if set(portfolios) != expected_ids:
+        raise ValueError("Ranking V4 model portfolios must match the frozen family")
+    rebalance_dates = [snapshot.decision_date for snapshot in snapshots]
+    returns_by_model = {
+        model_id: _portfolio_rebalance_returns(
+            portfolio,
+            rebalance_dates=rebalance_dates,
+        )
+        for model_id, portfolio in portfolios.items()
+    }
+    # The frozen protocol defines a cash return for a registered model that
+    # has no position on an otherwise valid rebalance date. Keep the full
+    # preregistered calendar; outcome-coverage gates separately fail closed
+    # when a selected candidate lacks valid evidence.
+    common_dates = sorted(set(rebalance_dates))
+    matrix = {model_id: [] for model_id in RANKING_V4_FROZEN_PBO_MODEL_IDS}
+    for rebalance_date in common_dates:
+        for model_id in RANKING_V4_FROZEN_PBO_MODEL_IDS:
+            matrix[model_id].append(
+                RankingV4DatedModelReturn(
+                    rebalance_date=rebalance_date,
+                    net_return=returns_by_model[model_id].get(rebalance_date, 0.0),
+                )
+            )
+    return matrix
+
+
+def _portfolio_rebalance_returns(
+    portfolio: PortfolioBacktestResult,
+    *,
+    rebalance_dates: list[date],
+) -> dict[date, float]:
+    """Return capital-constrained period returns from one realized equity curve."""
+
+    equity_by_date = {
+        point.date: Decimal(point.equity)
+        for point in sorted(portfolio.equity_curve, key=lambda item: item.date)
+    }
+    curve_dates = sorted(equity_by_date)
+    if not curve_dates:
+        return {}
+
+    def equity_at_or_before(target: date) -> Decimal | None:
+        index = bisect_right(curve_dates, target) - 1
+        if index < 0:
+            return None
+        return equity_by_date[curve_dates[index]]
+
+    ordered_dates = sorted(set(rebalance_dates))
+    result: dict[date, float] = {}
+    for index, rebalance_date in enumerate(ordered_dates):
+        period_end = (
+            ordered_dates[index + 1] if index + 1 < len(ordered_dates) else portfolio.summary.end
+        )
+        if period_end <= rebalance_date:
+            continue
+        starting_equity = equity_at_or_before(rebalance_date)
+        ending_equity = equity_at_or_before(period_end)
+        if starting_equity is None or ending_equity is None or starting_equity <= 0:
+            continue
+        value = float((ending_equity / starting_equity - Decimal("1")) * Decimal("100"))
+        if math.isfinite(value):
+            result[rebalance_date] = round(value, 8)
+    return result
+
+
+def _ranking_v4_model_selections(
+    snapshot: WalkForwardSnapshot,
+) -> dict[str, list[WalkForwardSelection]]:
+    result = {
+        "constraint_matched_baseline": list(snapshot.ranking_v4_constraint_matched_baseline_top_5),
+        "ranking_v4_full": list(snapshot.ranking_v4_top_5),
+    }
+    source_by_instrument = {item.instrument_id: item for item in snapshot.ranking_v4_candidate_pool}
+    candidates = [
+        _ranking_v4_candidate_from_selection(
+            item,
+            decision_date=snapshot.decision_date,
+            market_regime=snapshot.benchmark_trend_state,
+            market_features_complete=(snapshot.ranking_v4_market_features_complete),
+        )
+        for item in snapshot.ranking_v4_candidate_pool
+    ]
+    correlations = _ranking_v4_pairwise_correlations(snapshot)
+    for channel in (
+        "baseline",
+        "trend",
+        "breakout",
+        "quality_value",
+        "defensive_low_vol",
+        "etf_industry",
+    ):
+        model_id = f"channel_{channel}"
+        channel_candidates = [
+            candidate
+            for candidate in candidates
+            if channel in source_by_instrument[candidate.instrument_id].ranking_v4_channel_scores
+        ]
+        channel_score_by_id = {
+            candidate.instrument_id: source_by_instrument[
+                candidate.instrument_id
+            ].ranking_v4_channel_scores[channel]
+            for candidate in channel_candidates
+        }
+        decision = _ranking_v4_static_decision(
+            channel_candidates,
+            objective_score_by_instrument=channel_score_by_id,
+            decision_date=snapshot.decision_date,
+        )
+        portfolio = select_ranking_v4_portfolio(
+            decision,
+            channel_candidates,
+            pairwise_correlations=correlations,
+        )
+        result[model_id] = [source_by_instrument[item.instrument_id] for item in portfolio.selected]
+    return result
+
+
+def _ranking_v4_static_decision(
+    candidates: list[RankingV4Candidate],
+    *,
+    objective_score_by_instrument: dict[str, float],
+    decision_date: date,
+) -> RankingV4Decision:
+    objective_candidates = [
+        candidate.model_copy(
+            update={"baseline_rank_score": objective_score_by_instrument[candidate.instrument_id]}
+        )
+        for candidate in candidates
+    ]
+    return _ranking_v4_baseline_decision(
+        objective_candidates,
+        decision_date=decision_date,
+    )
+
+
+def _ranking_v4_selected_return_observations(
+    snapshots: list[WalkForwardSnapshot],
+    *,
+    normal_ledger: CandidateOutcomeLedgerResult,
+    stress_ledger: CandidateOutcomeLedgerResult,
+    baseline_portfolio: PortfolioBacktestResult,
+    challenger_portfolio: PortfolioBacktestResult,
+    stress_portfolio: PortfolioBacktestResult,
+) -> tuple[
+    list[RankingV4ReturnObservation],
+    list[RankingV4ReturnObservation],
+    int,
+    int,
+    int,
+]:
+    normal_by_key = {
+        (outcome.signal_date, outcome.instrument_id): outcome for outcome in normal_ledger.outcomes
+    }
+    stress_by_key = {
+        (outcome.signal_date, outcome.instrument_id): outcome for outcome in stress_ledger.outcomes
+    }
+    rebalance_dates = [snapshot.decision_date for snapshot in snapshots]
+    baseline_portfolio_returns = _portfolio_rebalance_returns(
+        baseline_portfolio,
+        rebalance_dates=rebalance_dates,
+    )
+    challenger_portfolio_returns = _portfolio_rebalance_returns(
+        challenger_portfolio,
+        rebalance_dates=rebalance_dates,
+    )
+    stress_portfolio_returns = _portfolio_rebalance_returns(
+        stress_portfolio,
+        rebalance_dates=rebalance_dates,
+    )
+    baseline_rows: list[RankingV4ReturnObservation] = []
+    challenger_rows: list[RankingV4ReturnObservation] = []
+    completed_trade_count = 0
+    valid_outcome_count = 0
+    expected_outcome_count = 0
+    for snapshot in snapshots:
+        model_selections = _ranking_v4_model_selections(snapshot)
+        snapshot_expected = 0
+        snapshot_valid = 0
+        for selections in model_selections.values():
+            _, _, model_valid = _ranking_v4_fixed_slot_return(
+                selections,
+                decision_date=snapshot.decision_date,
+                outcome_by_key=normal_by_key,
+            )
+            snapshot_expected += len(selections[:5])
+            snapshot_valid += model_valid
+        _, completed, _ = _ranking_v4_fixed_slot_return(
+            snapshot.ranking_v4_top_5,
+            decision_date=snapshot.decision_date,
+            outcome_by_key=normal_by_key,
+        )
+        _, _, stress_valid = _ranking_v4_fixed_slot_return(
+            snapshot.ranking_v4_top_5,
+            decision_date=snapshot.decision_date,
+            outcome_by_key=stress_by_key,
+        )
+        snapshot_expected += len(snapshot.ranking_v4_top_5[:5])
+        snapshot_valid += stress_valid
+        expected_outcome_count += snapshot_expected
+        valid_outcome_count += snapshot_valid
+        completed_trade_count += completed
+        baseline_rows.append(
+            RankingV4ReturnObservation(
+                rebalance_date=snapshot.decision_date,
+                net_return_pct=baseline_portfolio_returns.get(snapshot.decision_date, 0.0),
+            )
+        )
+        challenger_rows.append(
+            RankingV4ReturnObservation(
+                rebalance_date=snapshot.decision_date,
+                net_return_pct=challenger_portfolio_returns.get(snapshot.decision_date, 0.0),
+                stress_net_return_pct=stress_portfolio_returns.get(
+                    snapshot.decision_date,
+                    0.0,
+                ),
+            )
+        )
+    return (
+        baseline_rows,
+        challenger_rows,
+        completed_trade_count,
+        valid_outcome_count,
+        expected_outcome_count,
+    )
+
+
+def _ranking_v4_fixed_slot_return(
+    selections: list[WalkForwardSelection],
+    *,
+    decision_date: date,
+    outcome_by_key: dict[tuple[date, str], object],
+) -> tuple[float, int, int]:
+    values = []
+    completed = 0
+    valid = 0
+    for selection in selections[:5]:
+        outcome = outcome_by_key.get((decision_date, selection.instrument_id))
+        value = _ranking_v4_valid_outcome_return(outcome)
+        if value is not None:
+            valid += 1
+        else:
+            value = 0.0
+        if outcome is not None and outcome.status == CandidateOutcomeStatus.RESOLVED:
+            completed += 1
+        values.append(value)
+    values.extend([0.0] * (5 - len(values)))
+    return math.fsum(values) / 5, completed, valid
 
 
 def _ranking_v3_pbo_model_selections(
@@ -4882,6 +6274,15 @@ def _signals(
             selections = snapshot.constraint_matched_baseline_top_5
         elif selection_source == "ranking_v3":
             selections = snapshot.ranking_v3_top_5
+        elif selection_source == "ranking_v4_candidate_pool":
+            selections = snapshot.ranking_v4_candidate_pool
+        elif selection_source == "ranking_v4_constraint_matched_baseline":
+            selections = snapshot.ranking_v4_constraint_matched_baseline_top_5
+        elif selection_source == "ranking_v4":
+            selections = snapshot.ranking_v4_top_5
+        elif selection_source.startswith("ranking_v4_channel_"):
+            model_id = selection_source.removeprefix("ranking_v4_")
+            selections = _ranking_v4_model_selections(snapshot).get(model_id, [])
         else:
             selections = snapshot.top_5 if size == 5 else snapshot.top_10
         result.extend(
@@ -4906,30 +6307,131 @@ def _signals(
     return result
 
 
-def _selection_digest(
+def _build_ranking_v4_evaluation(
+    *,
     snapshots: list[WalkForwardSnapshot],
+    ledger: CandidateOutcomeLedgerResult,
+    constraint_matched_baseline_portfolio: PortfolioBacktestResult,
+    constraint_matched_baseline_metrics: WalkForwardPortfolioMetrics,
+    portfolio: PortfolioBacktestResult,
+    metrics: WalkForwardPortfolioMetrics,
+    stress_metrics: WalkForwardPortfolioMetrics,
+    historical_validation: RankingV4HistoricalValidationEvaluation,
+    pbo_evidence: dict[str, object],
+    trial_ledger: RankingV4TrialLedgerEvidence,
+) -> WalkForwardRankingV4Evaluation:
+    protocol = build_ranking_v4_protocol()
+    total_outcomes = len(ledger.outcomes)
+    valid_outcomes = sum(
+        _ranking_v4_valid_outcome_return(outcome) is not None for outcome in ledger.outcomes
+    )
+    if historical_validation.status == "pass":
+        status = "forward_validation_pending"
+        headline = "V4 历史开发门禁通过，等待冻结后的独立前向验证"
+    elif historical_validation.status == "fail":
+        status = "rejected"
+        headline = "V4 历史门禁失败，继续保持影子隔离"
+    else:
+        status = "insufficient"
+        headline = "V4 历史证据不足，不进入正式模拟盘"
+    criteria = [
+        WalkForwardGateCriterion(
+            key=gate.key,
+            label=gate.key,
+            status=gate.status,
+            value=gate.observed,
+            requirement=gate.required,
+        )
+        for gate in historical_validation.gates
+    ]
+    return WalkForwardRankingV4Evaluation(
+        status=status,
+        headline=headline,
+        leakage_guard=(
+            "特征、市场状态、约束和成本证据均不得晚于决策日；"
+            "训练结果必须在训练截止日前成熟；候选收益使用复权历史和真实"
+            "A股执行约束，缺失证据一律持有现金。历史开发结果不能直接发布。"
+        ),
+        protocol=protocol,
+        candidate_pool_signal_count=total_outcomes,
+        valid_candidate_outcome_count=valid_outcomes,
+        candidate_outcome_coverage_ratio=(
+            round(valid_outcomes / total_outcomes, 6) if total_outcomes else 0.0
+        ),
+        changed_snapshot_count=sum(
+            [item.instrument_id for item in snapshot.ranking_v4_top_5]
+            != [
+                item.instrument_id for item in snapshot.ranking_v4_constraint_matched_baseline_top_5
+            ]
+            for snapshot in snapshots
+        ),
+        maximum_training_observation_count=max(
+            (snapshot.ranking_v4_training_observation_count for snapshot in snapshots),
+            default=0,
+        ),
+        maximum_training_date_count=max(
+            (snapshot.ranking_v4_training_date_count for snapshot in snapshots),
+            default=0,
+        ),
+        constraint_matched_baseline_portfolio=(constraint_matched_baseline_portfolio),
+        constraint_matched_baseline_metrics=(constraint_matched_baseline_metrics),
+        portfolio=portfolio,
+        metrics=metrics,
+        stress_metrics=stress_metrics,
+        historical_validation=historical_validation,
+        pbo_evidence=pbo_evidence,
+        trial_ledger=trial_ledger,
+        criteria=criteria,
+    )
+
+
+def _selection_digest(
+    *,
+    provider_mode: str,
     revision: int,
+    start: date,
+    end: date,
+    rebalance_step_sessions: int,
+    lookback_days: int,
+    snapshots: list[WalkForwardSnapshot],
     top_5_portfolio: PortfolioBacktestResult,
     top_10_portfolio: PortfolioBacktestResult,
+    top_5_metrics: WalkForwardPortfolioMetrics,
+    top_10_metrics: WalkForwardPortfolioMetrics,
+    top_5_temporal_validation: TemporalValidationResult,
+    top_10_temporal_validation: TemporalValidationResult,
     benchmarks: list[WalkForwardBenchmarkComparison],
     cost_sensitivity: list[WalkForwardCostScenario],
     strategy_validation: WalkForwardValidationCenter,
     dynamic_rerank: WalkForwardRerankEvaluation,
     baseline_challenger: WalkForwardBaselineChallengerEvaluation,
     execution_challenger: WalkForwardExecutionChallengerEvaluation,
-    ranking_v3: WalkForwardRankingV3Evaluation,
+    ranking_v3: WalkForwardRankingV3Evaluation | None,
+    ranking_v4: WalkForwardRankingV4Evaluation | None,
+    experiment_manifest: WalkForwardExperimentManifest,
 ) -> str:
     payload = {
+        "digest_schema": WALK_FORWARD_RESULT_DIGEST_SCHEMA,
+        "execution_plan": {
+            "provider_mode": provider_mode,
+            "dataset_revision": revision,
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "rebalance_step_sessions": rebalance_step_sessions,
+            "lookback_days": lookback_days,
+            "experiment_manifest": experiment_manifest.model_dump(
+                mode="json",
+                exclude={"created_at"},
+            ),
+        },
         "dataset_revision": revision,
         "snapshots": [item.model_dump(mode="json") for item in snapshots],
         "top_5_portfolio": top_5_portfolio.model_dump(mode="json"),
         "top_10_portfolio": top_10_portfolio.model_dump(mode="json"),
-        "top_5_temporal_validation": _trade_temporal_validation(top_5_portfolio.trades).model_dump(
-            mode="json"
-        ),
-        "top_10_temporal_validation": _trade_temporal_validation(
-            top_10_portfolio.trades
-        ).model_dump(mode="json"),
+        "top_5_metrics": top_5_metrics.model_dump(mode="json"),
+        "top_10_metrics": top_10_metrics.model_dump(mode="json"),
+        "top_5_temporal_validation": top_5_temporal_validation.model_dump(mode="json"),
+        "top_10_temporal_validation": top_10_temporal_validation.model_dump(mode="json"),
         "benchmarks": [item.model_dump(mode="json") for item in benchmarks],
         "cost_sensitivity": [item.model_dump(mode="json") for item in cost_sensitivity],
         "strategy_validation": strategy_validation.model_dump(mode="json"),
@@ -4937,6 +6439,7 @@ def _selection_digest(
         "baseline_challenger": baseline_challenger.model_dump(mode="json"),
         "execution_challenger": execution_challenger.model_dump(mode="json"),
         "ranking_v3": ranking_v3.model_dump(mode="json"),
+        "ranking_v4": ranking_v4.model_dump(mode="json"),
     }
     encoded = json.dumps(
         payload,
@@ -4944,7 +6447,44 @@ def _selection_digest(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    digest = hashlib.sha256(encoded).hexdigest()
+    return f"{WALK_FORWARD_RESULT_DIGEST_PREFIX}{digest[2:]}"
+
+
+def walk_forward_selection_result_digest_is_valid(
+    payload: dict[str, object],
+) -> bool:
+    if payload.get("result_digest_schema") != WALK_FORWARD_RESULT_DIGEST_SCHEMA:
+        return False
+    try:
+        result = WalkForwardSelectionResult.model_validate(payload)
+    except (TypeError, ValueError):
+        return False
+    expected = _selection_digest(
+        provider_mode=result.provider_mode,
+        revision=result.dataset_revision,
+        start=result.start_date,
+        end=result.end_date,
+        rebalance_step_sessions=result.rebalance_step_sessions,
+        lookback_days=result.experiment_manifest.lookback_days,
+        snapshots=result.snapshots,
+        top_5_portfolio=result.top_5_portfolio,
+        top_10_portfolio=result.top_10_portfolio,
+        top_5_metrics=result.top_5_metrics,
+        top_10_metrics=result.top_10_metrics,
+        top_5_temporal_validation=result.top_5_temporal_validation,
+        top_10_temporal_validation=result.top_10_temporal_validation,
+        benchmarks=result.benchmarks,
+        cost_sensitivity=result.cost_sensitivity,
+        strategy_validation=result.strategy_validation,
+        dynamic_rerank=result.dynamic_rerank,
+        baseline_challenger=result.baseline_challenger,
+        execution_challenger=result.execution_challenger,
+        ranking_v3=result.ranking_v3,
+        ranking_v4=result.ranking_v4,
+        experiment_manifest=result.experiment_manifest,
+    )
+    return hmac.compare_digest(result.reproducibility_digest, expected)
 
 
 def _trade_temporal_validation(trades) -> TemporalValidationResult:

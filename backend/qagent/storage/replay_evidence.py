@@ -47,6 +47,8 @@ from qagent.storage.tables import (
     HistoricalTradabilityRow,
     HistoricalTradingRuleRow,
     HistoricalUniverseManifestRow,
+    WalkForwardJobRow,
+    WalkForwardRunRow,
 )
 from qagent.strategy_data.models import FundamentalSnapshot
 
@@ -178,6 +180,36 @@ class ReplayEvidenceRepository:
         with self.session_factory() as session:
             row = session.get(HistoricalDataRevisionRow, self.provider_mode)
             return row.revision if row is not None else 0
+
+    def walk_forward_research_attempt_ids(self) -> tuple[str, ...]:
+        """Return every persisted walk-forward attempt known to this database.
+
+        Terminal and already-started jobs count even when they failed or were
+        cancelled. A merely queued job with no processed snapshots is not yet
+        a research attempt.
+        """
+
+        with self.session_factory() as session:
+            job_ids = {
+                str(job_id)
+                for job_id, status, processed in session.execute(
+                    select(
+                        WalkForwardJobRow.job_id,
+                        WalkForwardJobRow.status,
+                        WalkForwardJobRow.processed_snapshots,
+                    ).where(WalkForwardJobRow.provider == self.provider_mode)
+                )
+                if status != "queued" or int(processed or 0) > 0
+            }
+            run_ids = {
+                str(run_id)
+                for (run_id,) in session.execute(
+                    select(WalkForwardRunRow.run_id).where(
+                        WalkForwardRunRow.provider == self.provider_mode
+                    )
+                )
+            }
+        return tuple(sorted(job_ids | run_ids))
 
     def upsert_replay_bars(
         self,
@@ -632,10 +664,7 @@ class ReplayEvidenceRepository:
             rows = list(
                 session.scalars(
                     select(HistoricalInstrumentRuleMetadataRow)
-                    .where(
-                        HistoricalInstrumentRuleMetadataRow.provider_mode
-                        == self.provider_mode
-                    )
+                    .where(HistoricalInstrumentRuleMetadataRow.provider_mode == self.provider_mode)
                     .order_by(
                         HistoricalInstrumentRuleMetadataRow.instrument_id,
                         HistoricalInstrumentRuleMetadataRow.effective_from,
@@ -753,8 +782,7 @@ class ReplayEvidenceRepository:
                 session.scalars(
                     select(HistoricalTradingRuleRow)
                     .where(
-                        HistoricalTradingRuleRow.rule_set_version
-                        == rule_set_version,
+                        HistoricalTradingRuleRow.rule_set_version == rule_set_version,
                         HistoricalTradingRuleRow.market == market,
                         HistoricalTradingRuleRow.board == board,
                         HistoricalTradingRuleRow.security_type == security_type,
@@ -898,12 +926,14 @@ class ReplayEvidenceRepository:
         start: date,
         end: date,
         revision: int,
+        *,
+        known_at_or_before: datetime | None = None,
     ) -> list[ReplayBarReadRow]:
         """Return lightweight immutable rows for high-volume replay computation."""
         if not instrument_ids:
             return []
         with self.session_factory() as session:
-            ranked = (
+            query = (
                 select(
                     HistoricalReplayBarRow,
                     func.row_number()
@@ -926,17 +956,19 @@ class ReplayEvidenceRepository:
                     HistoricalReplayBarRow.trade_date <= end,
                     HistoricalReplayBarRow.dataset_revision <= revision,
                 )
-                .subquery()
             )
+            if known_at_or_before is not None:
+                query = query.where(
+                    HistoricalReplayBarRow.fetched_at <= known_at_or_before
+                )
+            ranked = query.subquery()
             selected_columns = [
-                ranked.c[column.name]
-                for column in HistoricalReplayBarRow.__table__.columns
+                ranked.c[column.name] for column in HistoricalReplayBarRow.__table__.columns
             ]
             rows = [
                 ReplayBarReadRow(*row)
                 for row in session.execute(
-                    select(*selected_columns)
-                    .where(ranked.c.revision_rank == 1)
+                    select(*selected_columns).where(ranked.c.revision_rank == 1)
                 )
             ]
         return rows
@@ -947,16 +979,18 @@ class ReplayEvidenceRepository:
         start: date,
         end: date,
         revision: int,
+        *,
+        known_at_or_before: datetime | None = None,
     ) -> Iterator[ReplayFactorBarReadRow]:
         """Stream only the fields required by the full-market factor prefilter."""
         if not instrument_ids:
             return
         with self.session_factory() as session:
-            ranked_rowids = (
+            query = (
                 select(
-                    literal_column(
-                        f"{HistoricalReplayBarRow.__tablename__}.rowid"
-                    ).label("winner_rowid"),
+                    literal_column(f"{HistoricalReplayBarRow.__tablename__}.rowid").label(
+                        "winner_rowid"
+                    ),
                     func.row_number()
                     .over(
                         partition_by=(
@@ -977,8 +1011,12 @@ class ReplayEvidenceRepository:
                     HistoricalReplayBarRow.trade_date <= end,
                     HistoricalReplayBarRow.dataset_revision <= revision,
                 )
-                .subquery("ranked_replay_bar_rowids")
             )
+            if known_at_or_before is not None:
+                query = query.where(
+                    HistoricalReplayBarRow.fetched_at <= known_at_or_before
+                )
+            ranked_rowids = query.subquery("ranked_replay_bar_rowids")
             winner_bar = HistoricalReplayBarRow.__table__.alias("winner_bar")
             rows = session.execute(
                 select(
@@ -995,8 +1033,7 @@ class ReplayEvidenceRepository:
                 .select_from(
                     ranked_rowids.join(
                         winner_bar,
-                        literal_column("winner_bar.rowid")
-                        == ranked_rowids.c.winner_rowid,
+                        literal_column("winner_bar.rowid") == ranked_rowids.c.winner_rowid,
                     )
                 )
                 .where(ranked_rowids.c.revision_rank == 1)
@@ -1087,37 +1124,98 @@ class ReplayEvidenceRepository:
                 available.update(str(row[0]) for row in rows)
         return available
 
-    def fundamentals_as_of(
+    def adjusted_bar_vintage_counts(
         self,
         instrument_ids: Sequence[str],
-        decision_date: date,
+        start: date,
+        end: date,
         revision: int,
-    ) -> dict[str, FundamentalSnapshot]:
+        *,
+        known_at_or_before: datetime | None = None,
+    ) -> dict[str, int]:
+        """Count adjusted bars in the frozen revision.
+
+        ``known_at_or_before`` is reserved for as-ingested replay audits. Historical
+        development normally relies on the bar's economic trade date and a dataset
+        revision frozen before the run, because ingestion can occur years later.
+        """
+
         if not instrument_ids:
             return {}
         with self.session_factory() as session:
-            ranked = (
+            query = (
                 select(
-                    FundamentalSnapshotRow,
+                    HistoricalReplayBarRow.instrument_id,
+                    HistoricalReplayBarRow.trade_date,
                     func.row_number()
                     .over(
-                        partition_by=FundamentalSnapshotRow.instrument_id,
+                        partition_by=(
+                            HistoricalReplayBarRow.instrument_id,
+                            HistoricalReplayBarRow.trade_date,
+                        ),
                         order_by=(
-                            FundamentalSnapshotRow.as_of_date.desc(),
-                            FundamentalSnapshotRow.dataset_revision.desc(),
-                            FundamentalSnapshotRow.source_provider,
+                            HistoricalReplayBarRow.dataset_revision.desc(),
+                            HistoricalReplayBarRow.source_provider,
                         ),
                     )
                     .label("revision_rank"),
                 )
                 .where(
-                    FundamentalSnapshotRow.provider_mode == self.provider_mode,
-                    FundamentalSnapshotRow.instrument_id.in_(instrument_ids),
-                    FundamentalSnapshotRow.as_of_date <= decision_date,
-                    FundamentalSnapshotRow.dataset_revision <= revision,
+                    HistoricalReplayBarRow.provider_mode == self.provider_mode,
+                    HistoricalReplayBarRow.instrument_id.in_(instrument_ids),
+                    HistoricalReplayBarRow.trade_date >= start,
+                    HistoricalReplayBarRow.trade_date <= end,
+                    HistoricalReplayBarRow.dataset_revision <= revision,
+                    HistoricalReplayBarRow.adjusted_open.is_not(None),
+                    HistoricalReplayBarRow.adjusted_high.is_not(None),
+                    HistoricalReplayBarRow.adjusted_low.is_not(None),
+                    HistoricalReplayBarRow.adjusted_close.is_not(None),
                 )
-                .subquery()
             )
+            if known_at_or_before is not None:
+                query = query.where(
+                    HistoricalReplayBarRow.fetched_at <= known_at_or_before
+                )
+            ranked = query.subquery()
+            rows = session.execute(
+                select(ranked.c.instrument_id, func.count())
+                .where(ranked.c.revision_rank == 1)
+                .group_by(ranked.c.instrument_id)
+            )
+            return {str(instrument_id): int(count) for instrument_id, count in rows}
+
+    def fundamentals_as_of(
+        self,
+        instrument_ids: Sequence[str],
+        decision_date: date,
+        revision: int,
+        *,
+        known_at_or_before: datetime | None = None,
+    ) -> dict[str, FundamentalSnapshot]:
+        if not instrument_ids:
+            return {}
+        with self.session_factory() as session:
+            query = select(
+                FundamentalSnapshotRow,
+                func.row_number()
+                .over(
+                    partition_by=FundamentalSnapshotRow.instrument_id,
+                    order_by=(
+                        FundamentalSnapshotRow.as_of_date.desc(),
+                        FundamentalSnapshotRow.dataset_revision.desc(),
+                        FundamentalSnapshotRow.source_provider,
+                    ),
+                )
+                .label("revision_rank"),
+            ).where(
+                FundamentalSnapshotRow.provider_mode == self.provider_mode,
+                FundamentalSnapshotRow.instrument_id.in_(instrument_ids),
+                FundamentalSnapshotRow.as_of_date <= decision_date,
+                FundamentalSnapshotRow.dataset_revision <= revision,
+            )
+            if known_at_or_before is not None:
+                query = query.where(FundamentalSnapshotRow.cached_at <= known_at_or_before)
+            ranked = query.subquery()
             row_alias = aliased(FundamentalSnapshotRow, ranked)
             rows = list(session.scalars(select(row_alias).where(ranked.c.revision_rank == 1)))
         return {row.instrument_id: _fundamental_from_row(row) for row in rows}
@@ -1127,32 +1225,33 @@ class ReplayEvidenceRepository:
         instrument_ids: Sequence[str],
         decision_date: date,
         revision: int,
+        *,
+        known_at_or_before: datetime | None = None,
     ) -> dict[str, HistoricalIndustrySnapshot]:
         if not instrument_ids:
             return {}
         with self.session_factory() as session:
-            ranked = (
-                select(
-                    HistoricalIndustrySnapshotRow,
-                    func.row_number()
-                    .over(
-                        partition_by=HistoricalIndustrySnapshotRow.instrument_id,
-                        order_by=(
-                            HistoricalIndustrySnapshotRow.snapshot_date.desc(),
-                            HistoricalIndustrySnapshotRow.dataset_revision.desc(),
-                            HistoricalIndustrySnapshotRow.source_provider,
-                        ),
-                    )
-                    .label("revision_rank"),
+            query = select(
+                HistoricalIndustrySnapshotRow,
+                func.row_number()
+                .over(
+                    partition_by=HistoricalIndustrySnapshotRow.instrument_id,
+                    order_by=(
+                        HistoricalIndustrySnapshotRow.snapshot_date.desc(),
+                        HistoricalIndustrySnapshotRow.dataset_revision.desc(),
+                        HistoricalIndustrySnapshotRow.source_provider,
+                    ),
                 )
-                .where(
-                    HistoricalIndustrySnapshotRow.provider_mode == self.provider_mode,
-                    HistoricalIndustrySnapshotRow.instrument_id.in_(instrument_ids),
-                    HistoricalIndustrySnapshotRow.snapshot_date <= decision_date,
-                    HistoricalIndustrySnapshotRow.dataset_revision <= revision,
-                )
-                .subquery()
+                .label("revision_rank"),
+            ).where(
+                HistoricalIndustrySnapshotRow.provider_mode == self.provider_mode,
+                HistoricalIndustrySnapshotRow.instrument_id.in_(instrument_ids),
+                HistoricalIndustrySnapshotRow.snapshot_date <= decision_date,
+                HistoricalIndustrySnapshotRow.dataset_revision <= revision,
             )
+            if known_at_or_before is not None:
+                query = query.where(HistoricalIndustrySnapshotRow.fetched_at <= known_at_or_before)
+            ranked = query.subquery()
             row_alias = aliased(HistoricalIndustrySnapshotRow, ranked)
             rows = list(session.scalars(select(row_alias).where(ranked.c.revision_rank == 1)))
         result: dict[str, HistoricalIndustrySnapshot] = {}
@@ -1174,11 +1273,14 @@ class ReplayEvidenceRepository:
         instrument_ids: Sequence[str],
         decision_date: date,
         revision: int,
+        *,
+        known_at_or_before: datetime | None = None,
     ) -> dict[str, list[HistoricalIndexMembership]]:
         result, incomplete_snapshots = self.available_memberships_as_of(
             instrument_ids,
             decision_date,
             revision,
+            known_at_or_before=known_at_or_before,
         )
         if incomplete_snapshots:
             raise ReplayEvidenceUnavailable(incomplete_snapshots[0])
@@ -1189,6 +1291,8 @@ class ReplayEvidenceRepository:
         instrument_ids: Sequence[str],
         decision_date: date,
         revision: int,
+        *,
+        known_at_or_before: datetime | None = None,
     ) -> tuple[dict[str, list[HistoricalIndexMembership]], list[str]]:
         """Return complete index memberships and report incomplete ready snapshots."""
 
@@ -1196,28 +1300,27 @@ class ReplayEvidenceRepository:
         if not instrument_ids:
             return result, []
         with self.session_factory() as session:
-            ranked = (
-                select(
-                    HistoricalIndexSnapshotRow,
-                    func.row_number()
-                    .over(
-                        partition_by=HistoricalIndexSnapshotRow.index_id,
-                        order_by=(
-                            HistoricalIndexSnapshotRow.snapshot_date.desc(),
-                            HistoricalIndexSnapshotRow.dataset_revision.desc(),
-                            HistoricalIndexSnapshotRow.source_provider,
-                        ),
-                    )
-                    .label("revision_rank"),
+            query = select(
+                HistoricalIndexSnapshotRow,
+                func.row_number()
+                .over(
+                    partition_by=HistoricalIndexSnapshotRow.index_id,
+                    order_by=(
+                        HistoricalIndexSnapshotRow.snapshot_date.desc(),
+                        HistoricalIndexSnapshotRow.dataset_revision.desc(),
+                        HistoricalIndexSnapshotRow.source_provider,
+                    ),
                 )
-                .where(
-                    HistoricalIndexSnapshotRow.provider_mode == self.provider_mode,
-                    HistoricalIndexSnapshotRow.status == "ready",
-                    HistoricalIndexSnapshotRow.snapshot_date <= decision_date,
-                    HistoricalIndexSnapshotRow.dataset_revision <= revision,
-                )
-                .subquery()
+                .label("revision_rank"),
+            ).where(
+                HistoricalIndexSnapshotRow.provider_mode == self.provider_mode,
+                HistoricalIndexSnapshotRow.status == "ready",
+                HistoricalIndexSnapshotRow.snapshot_date <= decision_date,
+                HistoricalIndexSnapshotRow.dataset_revision <= revision,
             )
+            if known_at_or_before is not None:
+                query = query.where(HistoricalIndexSnapshotRow.fetched_at <= known_at_or_before)
+            ranked = query.subquery()
             snapshot_alias = aliased(HistoricalIndexSnapshotRow, ranked)
             snapshots = list(
                 session.scalars(
@@ -1236,7 +1339,14 @@ class ReplayEvidenceRepository:
                 for snapshot in snapshots
             ]
             if not identities:
-                return result, []
+                return (
+                    result,
+                    (
+                        ["no ready index snapshots were known by the decision cutoff"]
+                        if known_at_or_before is not None
+                        else []
+                    ),
+                )
             identity_columns = (
                 HistoricalIndexMembershipRow.index_id,
                 HistoricalIndexMembershipRow.snapshot_date,
@@ -1258,6 +1368,11 @@ class ReplayEvidenceRepository:
                             .where(
                                 HistoricalIndexMembershipRow.provider_mode == self.provider_mode,
                                 tuple_(*identity_columns).in_(identity_chunk),
+                                *(
+                                    (HistoricalIndexMembershipRow.fetched_at <= known_at_or_before,)
+                                    if known_at_or_before is not None
+                                    else ()
+                                ),
                             )
                             .group_by(*identity_columns)
                         )
@@ -1287,6 +1402,11 @@ class ReplayEvidenceRepository:
                                 HistoricalIndexMembershipRow.provider_mode == self.provider_mode,
                                 tuple_(*identity_columns).in_(identity_chunk),
                                 HistoricalIndexMembershipRow.instrument_id.in_(instrument_chunk),
+                                *(
+                                    (HistoricalIndexMembershipRow.fetched_at <= known_at_or_before,)
+                                    if known_at_or_before is not None
+                                    else ()
+                                ),
                             )
                             .order_by(
                                 HistoricalIndexMembershipRow.instrument_id,
@@ -1388,12 +1508,7 @@ class ReplayEvidenceRepository:
                 .subquery()
             )
             row_alias = aliased(HistoricalTradabilityRow, ranked)
-            rows = list(
-                session.scalars(
-                    select(row_alias)
-                    .where(ranked.c.revision_rank == 1)
-                )
-            )
+            rows = list(session.scalars(select(row_alias).where(ranked.c.revision_rank == 1)))
         result: dict[date, dict[str, HistoricalTradabilityPoint]] = {
             decision_date: {} for decision_date in requested_dates
         }
@@ -1404,9 +1519,7 @@ class ReplayEvidenceRepository:
                 trading_status=row.trading_status,
                 is_st=row.is_st,
                 pct_change_pct=(
-                    float(row.pct_change_pct)
-                    if row.pct_change_pct is not None
-                    else None
+                    float(row.pct_change_pct) if row.pct_change_pct is not None else None
                 ),
                 provider=row.source_provider,
             )
@@ -1435,10 +1548,8 @@ class ReplayEvidenceRepository:
                 session.scalars(
                     select(HistoricalInstrumentProfileRow)
                     .where(
-                        HistoricalInstrumentProfileRow.provider_mode
-                        == self.provider_mode,
-                        HistoricalInstrumentProfileRow.source_provider
-                        == "baostock",
+                        HistoricalInstrumentProfileRow.provider_mode == self.provider_mode,
+                        HistoricalInstrumentProfileRow.source_provider == "baostock",
                     )
                     .order_by(
                         HistoricalInstrumentProfileRow.dataset_revision.desc(),
@@ -1454,17 +1565,14 @@ class ReplayEvidenceRepository:
             if row.listing_date is None or row.listing_date > effective_through:
                 continue
             delisted_by_cutoff = (
-                row.delisting_date is not None
-                and row.delisting_date <= effective_through
+                row.delisting_date is not None and row.delisting_date <= effective_through
             )
             profile, errors = normalize_and_validate_historical_profile(
                 HistoricalInstrumentProfile(
                     instrument_id=row.instrument_id,
                     snapshot_date=effective_through,
                     listing_date=row.listing_date,
-                    delisting_date=(
-                        row.delisting_date if delisted_by_cutoff else None
-                    ),
+                    delisting_date=(row.delisting_date if delisted_by_cutoff else None),
                     security_type=row.security_type,
                     listing_status="delisted" if delisted_by_cutoff else "active",
                     provider="baostock_cached_lifecycle_recovery",
@@ -1723,9 +1831,7 @@ class ReplayEvidenceRepository:
                 )
                 session.add(lease)
             else:
-                action = (
-                    "expired_reacquired" if lease.lease_expires_at <= now else "renewed"
-                )
+                action = "expired_reacquired" if lease.lease_expires_at <= now else "renewed"
                 lease.heartbeat_at = now
                 lease.lease_expires_at = now + LEASE_DURATION
             session.flush()

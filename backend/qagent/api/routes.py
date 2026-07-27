@@ -639,7 +639,7 @@ def _walk_forward_manifest_payload_matches(
     try:
         stored = WalkForwardExperimentManifest.model_validate(payload)
     except (TypeError, ValueError):
-        return payload.get("experiment_digest") == current.experiment_digest
+        return False
     return walk_forward_manifests_semantically_compatible(stored, current)
 
 
@@ -1449,6 +1449,10 @@ def _run_walk_forward_job_safely(job_id: str) -> None:
             initial_lease_recovery_count=job.lease_recovery_count,
             initial_lease_heartbeat_at=job.last_lease_heartbeat_at,
             snapshot_workers=get_settings().walk_forward_snapshot_workers,
+            cancellation_check=lambda: (
+                (current_job := repo.get_walk_forward_job(job_id)) is None
+                or current_job.status == "cancelled"
+            ),
         )
         current = repo.get_walk_forward_job(job_id)
         if current is None or current.status == "cancelled":
@@ -1470,7 +1474,14 @@ def _run_walk_forward_job_safely(job_id: str) -> None:
             finished_at=datetime.now(timezone.utc),
         )
     except Exception as exc:
-        current = repo.get_walk_forward_job(job_id)
+        try:
+            current = repo.get_walk_forward_job(job_id)
+        except ValueError as integrity_exc:
+            repo.fail_walk_forward_job_integrity(
+                job_id,
+                error=f"checkpoint integrity validation failed: {integrity_exc}",
+            )
+            current = None
         if current is not None and current.status != "cancelled":
             repo.update_walk_forward_job(
                 job_id,

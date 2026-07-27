@@ -65,7 +65,6 @@ class ReplayMarketDataProvider:
         self.factor_prefilter_full_window_queries = 0
         self.factor_prefilter_incremental_queries = 0
         self.factor_prefilter_rows_loaded = 0
-
     def get_daily_bars(
         self, instrument_ids: list[str], start: date, end: date
     ) -> pd.DataFrame:

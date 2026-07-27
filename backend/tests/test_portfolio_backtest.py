@@ -15,6 +15,23 @@ from qagent.backtesting.sensitivity import build_parameter_sensitivity
 from qagent.providers.fixtures import FixtureMarketDataProvider
 
 
+def test_empty_signal_portfolio_is_valid_cash_result():
+    provider = FixtureMarketDataProvider()
+
+    result = run_signal_portfolio_backtest(
+        signals=[],
+        instrument_ids=[],
+        provider=provider,
+        start=date(2025, 1, 2),
+        end=date(2025, 1, 10),
+        max_positions=5,
+    )
+
+    assert result.trades == []
+    assert result.summary.final_equity == result.summary.initial_capital
+    assert result.summary.total_return_pct == 0
+
+
 def test_run_portfolio_backtest_returns_trades_equity_and_summary():
     result = run_portfolio_backtest(
         instrument_ids=["US:TEST", "CN:000001"],
@@ -110,9 +127,7 @@ def test_signal_portfolio_backtest_never_reads_or_realizes_beyond_end_date():
         max_holding_days=3,
     )
 
-    assert provider.requested_windows == [
-        (date(2025, 12, 29), date(2025, 12, 31))
-    ]
+    assert provider.requested_windows == [(date(2025, 12, 29), date(2025, 12, 31))]
     assert result.trades == []
     assert result.summary.final_equity == Decimal("100000")
     assert result.data_health["history_cutoff"] == "hard_end_date_no_future_bars"

@@ -1,0 +1,769 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import date
+from decimal import Decimal
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from qagent.backtesting.ranking_v4_experiment_registry import (
+    RankingV4ExperimentRegistry,
+    build_ranking_v4_experiment_registry,
+)
+
+
+RANKING_V4_PROTOCOL_SCHEMA_VERSION = "ranking-v4-preregistered-protocol-v1"
+RANKING_V4_PROTOCOL_ID = "QAGENT-RANK-V4-PREREGISTERED-20260727"
+RANKING_V4_MODEL_VERSION = "two-stage-hierarchical-net-excess-v4-preregistered"
+RANKING_V4_DEVELOPMENT_START = date(2021, 11, 1)
+RANKING_V4_DEVELOPMENT_END = date(2025, 12, 31)
+RANKING_V4_DEVELOPMENT_LOOKBACK_DAYS = 400
+RANKING_V4_CANDIDATE_POOL_LIMIT = 50
+
+_CANDIDATE_CHANNEL_QUOTAS = (
+    ("baseline", 10),
+    ("trend", 8),
+    ("breakout", 8),
+    ("quality_value", 8),
+    ("defensive_low_vol", 8),
+    ("etf_industry", 8),
+)
+_HIERARCHICAL_SHRINKAGE_LEVELS = (
+    "global",
+    "asset",
+    "strategy",
+    "strategy_x_market_regime",
+)
+_UTILITY_PENALTIES = (
+    "not_triggered_benchmark_opportunity_cost",
+    "turnover_cost",
+    "liquidity_penalty",
+    "tail_risk_penalty",
+)
+_UTILITY_FORMULA = (
+    "trigger_probability*triggered_cost_adjusted_net_excess"
+    "-(1-trigger_probability)*not_triggered_benchmark_opportunity_cost"
+    "-turnover_cost-liquidity_penalty-tail_risk_penalty"
+)
+_MARKET_REGIME_FEATURES = (
+    "market_breadth",
+    "benchmark_slope",
+    "realized_volatility",
+    "cross_sectional_dispersion",
+)
+_PBO_MODEL_IDS = (
+    "constraint_matched_baseline",
+    "ranking_v4_full",
+    "channel_baseline",
+    "channel_trend",
+    "channel_breakout",
+    "channel_quality_value",
+    "channel_defensive_low_vol",
+    "channel_etf_industry",
+)
+_REGISTERED_MODEL_RULES = (
+    ("constraint_matched_baseline", "baseline_rank_score_desc"),
+    ("ranking_v4_full", "ranking_v4_expected_utility_lower_bound_desc"),
+    ("channel_baseline", "channel_baseline_score_desc"),
+    ("channel_trend", "channel_trend_score_desc"),
+    ("channel_breakout", "channel_breakout_score_desc"),
+    ("channel_quality_value", "channel_quality_value_score_desc"),
+    ("channel_defensive_low_vol", "channel_defensive_low_vol_score_desc"),
+    ("channel_etf_industry", "channel_etf_industry_score_desc"),
+)
+
+
+class RankingV4ProtocolError(RuntimeError):
+    """Raised when the Ranking V4 preregistration is weakened or inconsistent."""
+
+
+class RankingV4CandidateChannel(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    key: str
+    quota: int
+
+
+class RankingV4CandidateDefinition(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    implementation_version: str = "ranking-v4-multi-channel-union-v2"
+    channels: tuple[RankingV4CandidateChannel, ...] = Field(
+        default_factory=lambda: tuple(
+            RankingV4CandidateChannel(key=key, quota=quota)
+            for key, quota in _CANDIDATE_CHANNEL_QUOTAS
+        )
+    )
+    total_pool_limit: int = RANKING_V4_CANDIDATE_POOL_LIMIT
+    channel_rank_rule: str = (
+        "point_in_time_channel_score_desc_then_baseline_score_desc_then_instrument_id_asc"
+    )
+    deduplication_key: str = "instrument_id"
+    channel_precedence: tuple[str, ...] = tuple(key for key, _ in _CANDIDATE_CHANNEL_QUOTAS)
+    duplicate_owner_rule: str = "first_channel_in_frozen_precedence"
+    deterministic_backfill_rule: str = (
+        "best_eligible_channel_score_desc_then_baseline_score_desc_then_instrument_id_asc"
+    )
+    industry_strength_formula: str = (
+        "mean_point_in_time_factor_score_of_candidates_in_same_known_industry"
+    )
+    point_in_time_feature_provenance_required: bool = True
+    point_in_time_cost_provenance_required: bool = True
+    future_outcome_use: Literal["forbidden"] = "forbidden"
+
+
+class RankingV4TwoStageModelDefinition(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    implementation_version: str = "ranking-v4-two-stage-hierarchical-hurdle-v1"
+    stage_one_name: str = "trigger_probability"
+    stage_one_target: str = "entry_condition_triggers_within_frozen_entry_window"
+    stage_two_name: str = "triggered_cost_adjusted_net_excess"
+    stage_two_target: str = (
+        "realized_net_return_after_fees_and_slippage_minus_point_in_time_benchmark_return"
+    )
+    stage_two_population: str = "valid_triggered_candidates_only"
+    hierarchical_shrinkage_levels: tuple[str, ...] = _HIERARCHICAL_SHRINKAGE_LEVELS
+    posterior_interval: str = "one_sided_lower_credible_bound"
+    minimum_position_lower_bound: Decimal = Decimal("0")
+    minimum_position_comparator: Literal["strictly_greater_than"] = "strictly_greater_than"
+    missing_market_regime_policy: Literal["fail_closed_ineligible"] = "fail_closed_ineligible"
+
+
+class RankingV4UtilityDefinition(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    implementation_version: str = "ranking-v4-portfolio-aligned-utility-v2"
+    formula: str = _UTILITY_FORMULA
+    benefit_term: str = "trigger_probability_x_triggered_cost_adjusted_net_excess"
+    penalty_terms: tuple[str, ...] = _UTILITY_PENALTIES
+    replacement_cost_formula: str = (
+        "zero_for_incumbent_else_frozen_candidate_replacement_cost_pct_0.15"
+    )
+    benchmark_opportunity_cost_formula: str = "max_zero_benchmark_slope_minus_0.5_times_0.5_pct"
+    liquidity_penalty_formula: str = "one_minus_liquidity_score_times_0.25_pct"
+    tail_risk_penalty_formula: str = "tail_risk_score_times_0.25_pct"
+    optimization_target: str = "portfolio_cost_adjusted_net_excess_after_frozen_constraints"
+    cash_utility: Decimal = Decimal("0")
+
+
+class RankingV4MarketRegimeDefinition(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    implementation_version: str = "ranking-v4-point-in-time-market-regime-v2"
+    required_features: tuple[str, ...] = _MARKET_REGIME_FEATURES
+    market_breadth_formula: str = "share_of_point_in_time_prefilter_factor_scores_gte_0.5"
+    benchmark_slope_formula: str = (
+        "share_of_required_benchmarks_above_point_in_time_50_session_average"
+    )
+    realized_volatility_formula: str = "mean_one_minus_point_in_time_low_risk_score"
+    cross_sectional_dispersion_formula: str = (
+        "min_one_population_stdev_point_in_time_factor_score_times_four"
+    )
+    minimum_cross_section_count: int = 30
+    availability_rule: str = "published_and_available_at_or_before_decision_timestamp"
+    missing_feature_policy: Literal["fail_closed_no_position"] = "fail_closed_no_position"
+    unknown_regime_trading: Literal["forbidden"] = "forbidden"
+
+
+class RankingV4PortfolioDefinition(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    implementation_version: str = "ranking-v4-zero-to-five-constrained-portfolio-v1"
+    minimum_positions: int = 0
+    maximum_positions: int = 5
+    cash_allowed: bool = True
+    maximum_per_strategy: int = 2
+    maximum_per_industry: int = 2
+    maximum_shared_etf_underlying_ids: int = 0
+    maximum_shared_index_memberships: int = 0
+    maximum_per_theme: int = 2
+    maximum_per_factor: int = 3
+    maximum_pairwise_correlation: Decimal = Decimal("0.8")
+    maximum_portfolio_beta: Decimal = Decimal("1.2")
+    minimum_liquidity_score: Decimal = Decimal("0.5")
+    minimum_capacity_score: Decimal = Decimal("0.5")
+    risk_benchmark_id: str = "CN:000300.IDX"
+    risk_lookback_sessions: int = 120
+    minimum_common_return_observations: int = 60
+    candidate_price_rule: str = "point_in_time_adjusted_close_required"
+    benchmark_price_rule: str = "adjusted_close_else_raw_index_close"
+    missing_constraint_data_policy: Literal["fail_closed_ineligible"] = "fail_closed_ineligible"
+    selection_rule: str = (
+        "maximize_frozen_v4_utility_subject_to_constraints_and_positive_posterior_lower_bound"
+    )
+    incumbent_policy: str = "compare_keep_vs_replace_using_actual_incremental_transaction_cost"
+    fixed_incumbent_bonus: Decimal = Decimal("0")
+
+
+class RankingV4ExecutionDefinition(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    implementation_version: str = "ranking-v4-a-share-execution-v1"
+    signal_session: str = "D"
+    earliest_entry_session: str = "D+1"
+    settlement_rule: str = "T+1"
+    price_limit_policy: Literal["enforced"] = "enforced"
+    suspension_policy: Literal["enforced"] = "enforced"
+    fee_policy: str = "all_applicable_fees_deducted"
+    slippage_policy: str = "frozen_base_and_stress_slippage_deducted"
+    same_day_ambiguous_path_policy: str = "adverse_path_first"
+    unfillable_order_policy: str = "not_filled_never_impute_executable_price"
+
+
+class RankingV4TemporalDefinition(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    implementation_version: str = "ranking-v4-point-in-time-isolation-v2"
+    decision_feature_rule: str = (
+        "economic_available_at_or_before_decision_timestamp_from_pre_run_frozen_dataset"
+    )
+    training_outcome_rule: str = "outcome_matured_strictly_before_training_cutoff"
+    financial_statement_rule: str = "as_published_and_known_on_decision_date"
+    index_constituent_rule: str = "point_in_time_membership_on_decision_date"
+    historical_ingestion_rule: str = (
+        "development_reconstruction_may_be_ingested_later_but_uses_original_economic_dates"
+    )
+    revision_backfill_rule: str = (
+        "dataset_revision_frozen_before_run_and_never_advanced_within_experiment"
+    )
+    future_market_data_rule: Literal["forbidden"] = "forbidden"
+    entry_wait_sessions: int = 5
+    holding_sessions: int = 20
+    rebalance_step_sessions: int = 10
+    candidate_lookback_days: int = RANKING_V4_DEVELOPMENT_LOOKBACK_DAYS
+    purge_sessions: int = 25
+    embargo_sessions: int = 25
+    label_dependency_rebalance_cohorts: int = 3
+    pbo_purge_rebalance_cohorts: int = 2
+
+
+class RankingV4RegisteredModelDefinition(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    model_id: str
+    candidate_order_rule: str
+    portfolio_constraint_rule: str = (
+        "same_frozen_v4_constraints_and_exact_total_lower_utility_optimizer"
+    )
+    invalid_or_missing_date_rule: str = "cash_with_zero_return"
+
+
+class RankingV4StatisticsDefinition(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    implementation_version: str = "ranking-v4-paired-block-statistics-v1"
+    dependence_block_length: int = 3
+    bootstrap_samples: int = 5000
+    permutation_samples: int = 10000
+    random_seed: int = 404
+    pbo_model_ids: tuple[str, ...] = _PBO_MODEL_IDS
+    registered_models: tuple[RankingV4RegisteredModelDefinition, ...] = Field(
+        default_factory=lambda: tuple(
+            RankingV4RegisteredModelDefinition(
+                model_id=model_id,
+                candidate_order_rule=candidate_order_rule,
+            )
+            for model_id, candidate_order_rule in _REGISTERED_MODEL_RULES
+        )
+    )
+    pbo_method: str = (
+        "cscv_contiguous_blocks_symmetric_half_split_purged_overlap_mean_return_rank_logit_v4"
+    )
+    pbo_scope: str = "frozen_eight_model_family_only_not_full_search_process"
+    pbo_block_count: int = 4
+    pbo_purge_rebalance_cohorts: int = 2
+    pbo_date_coverage_threshold: Decimal = Decimal("0.95")
+    multiple_testing_method: str = "holm_bonferroni_registered_family"
+    deflated_sharpe_method: str = "bailey_lopez_de_prado_non_overlapping_rebalance_blocks"
+    trial_ledger_requirement: str = (
+        "immutable_registry_must_cover_all_known_research_attempts_before_release"
+    )
+    unknown_trial_count_policy: Literal["fail_closed_no_release"] = "fail_closed_no_release"
+
+
+class RankingV4EvidenceWindow(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    key: str
+    start_date: date | None
+    end_date: date | None
+    role: str
+    evidence_label: str
+    eligible_for_release_gate: bool
+    activation_rule: str | None = None
+
+
+class RankingV4GateThresholds(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    minimum_rebalance_dates: int = 24
+    minimum_completed_trades: int = 60
+    minimum_profit_factor: Decimal = Decimal("1.10")
+    minimum_positive_subperiods: int = 4
+    required_subperiods: int = 5
+    maximum_drawdown_floor_pct: Decimal = Decimal("-15")
+    maximum_holm_adjusted_p_value: Decimal = Decimal("0.05")
+    minimum_deflated_sharpe_probability: Decimal = Decimal("0.95")
+    maximum_probability_of_backtest_overfit: Decimal = Decimal("0.20")
+    minimum_valid_outcome_coverage_ratio: Decimal = Decimal("0.95")
+    benchmark_excess_comparator: Literal["strictly_greater_than_zero"] = (
+        "strictly_greater_than_zero"
+    )
+    stress_cost_adjusted_return_comparator: Literal["strictly_greater_than_zero"] = (
+        "strictly_greater_than_zero"
+    )
+    minimum_confirmatory_forward_sessions: int = 20
+    maximum_confirmatory_forward_sessions: int = 50
+    minimum_confirmatory_forward_trades: int = 10
+    unknown_gate_policy: Literal["fail_closed_not_passed"] = "fail_closed_not_passed"
+    aggregation_rule: Literal["all_gates_must_pass"] = "all_gates_must_pass"
+
+
+class RankingV4ConfirmatoryDefinition(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    implementation_version: str = "ranking-v4-post-freeze-forward-only-v1"
+    protocol_freeze_required: bool = True
+    code_freeze_required: bool = True
+    code_revision_requirement: str = "full_lowercase_40_character_git_revision"
+    start_rule: str = "first_a_share_session_strictly_after_protocol_and_code_freeze_attestation"
+    historical_development_evidence_may_satisfy_forward_gate: bool = False
+    release_state_before_forward_pass: Literal["shadow_only"] = "shadow_only"
+    official_paper_admission_rule: str = (
+        "signed_protocol_code_and_dataset_attestation_plus_all_historical_and_forward_gates"
+    )
+
+
+class RankingV4Protocol(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    protocol_schema_version: str = RANKING_V4_PROTOCOL_SCHEMA_VERSION
+    protocol_id: str = RANKING_V4_PROTOCOL_ID
+    model_version: str = RANKING_V4_MODEL_VERSION
+    preregistered_on: date = date(2026, 7, 27)
+    registration_state: Literal["preregistered_code_not_yet_frozen"] = (
+        "preregistered_code_not_yet_frozen"
+    )
+    protocol_digest: str
+    experiment_registry: RankingV4ExperimentRegistry
+    candidate_definition: RankingV4CandidateDefinition
+    model_definition: RankingV4TwoStageModelDefinition
+    utility_definition: RankingV4UtilityDefinition
+    market_regime_definition: RankingV4MarketRegimeDefinition
+    portfolio_definition: RankingV4PortfolioDefinition
+    execution_definition: RankingV4ExecutionDefinition
+    temporal_definition: RankingV4TemporalDefinition
+    statistics_definition: RankingV4StatisticsDefinition
+    thresholds: RankingV4GateThresholds
+    confirmatory_definition: RankingV4ConfirmatoryDefinition
+    evidence_windows: tuple[RankingV4EvidenceWindow, ...]
+    predecessor_evidence_policy: str = (
+        "ranking_v3_rejection_is_immutable_and_never_reclassified_by_ranking_v4"
+    )
+    model_selection_policy: str = (
+        "development_window_is_exploratory_and_all_post_inspection_changes_count_as_new_trials"
+    )
+    official_recommendation_isolation: Literal["shadow_only_until_every_gate_passes"] = (
+        "shadow_only_until_every_gate_passes"
+    )
+
+
+def build_ranking_v4_protocol(
+    *,
+    experiment_registry: RankingV4ExperimentRegistry | None = None,
+) -> RankingV4Protocol:
+    registry = experiment_registry or build_ranking_v4_experiment_registry()
+    registry.require_valid()
+    payload = _ranking_v4_protocol_payload(registry)
+    protocol = RankingV4Protocol(
+        **payload,
+        protocol_digest=_digest(payload),
+    )
+    _validate_protocol_semantics(protocol)
+    if not ranking_v4_protocol_digest_is_valid(protocol):
+        raise RuntimeError("Ranking V4 protocol digest validation failed")
+    return protocol
+
+
+def ranking_v4_protocol_digest_is_valid(protocol: RankingV4Protocol) -> bool:
+    try:
+        _validate_protocol_semantics(protocol)
+    except (RankingV4ProtocolError, RuntimeError, ValueError):
+        return False
+    payload = protocol.model_dump(mode="json", exclude={"protocol_digest"})
+    return protocol.protocol_digest == _digest(payload)
+
+
+def _ranking_v4_protocol_payload(
+    experiment_registry: RankingV4ExperimentRegistry,
+) -> dict[str, object]:
+    return {
+        "protocol_schema_version": RANKING_V4_PROTOCOL_SCHEMA_VERSION,
+        "protocol_id": RANKING_V4_PROTOCOL_ID,
+        "model_version": RANKING_V4_MODEL_VERSION,
+        "preregistered_on": "2026-07-27",
+        "registration_state": "preregistered_code_not_yet_frozen",
+        "experiment_registry": experiment_registry.model_dump(mode="json"),
+        "candidate_definition": RankingV4CandidateDefinition().model_dump(mode="json"),
+        "model_definition": RankingV4TwoStageModelDefinition().model_dump(mode="json"),
+        "utility_definition": RankingV4UtilityDefinition().model_dump(mode="json"),
+        "market_regime_definition": RankingV4MarketRegimeDefinition().model_dump(mode="json"),
+        "portfolio_definition": RankingV4PortfolioDefinition().model_dump(mode="json"),
+        "execution_definition": RankingV4ExecutionDefinition().model_dump(mode="json"),
+        "temporal_definition": RankingV4TemporalDefinition().model_dump(mode="json"),
+        "statistics_definition": RankingV4StatisticsDefinition().model_dump(mode="json"),
+        "thresholds": RankingV4GateThresholds().model_dump(mode="json"),
+        "confirmatory_definition": RankingV4ConfirmatoryDefinition().model_dump(mode="json"),
+        "evidence_windows": [
+            {
+                "key": "development",
+                "start_date": RANKING_V4_DEVELOPMENT_START.isoformat(),
+                "end_date": RANKING_V4_DEVELOPMENT_END.isoformat(),
+                "role": "model_development_and_selection",
+                "evidence_label": "exploratory_development_evidence",
+                "eligible_for_release_gate": False,
+                "activation_rule": None,
+            },
+            {
+                "key": "confirmatory_forward",
+                "start_date": None,
+                "end_date": None,
+                "role": "post_freeze_confirmatory_forward_validation",
+                "evidence_label": "confirmatory_forward_evidence",
+                "eligible_for_release_gate": True,
+                "activation_rule": (
+                    "start_only_after_signed_protocol_and_full_code_revision_are_frozen"
+                ),
+            },
+        ],
+        "predecessor_evidence_policy": (
+            "ranking_v3_rejection_is_immutable_and_never_reclassified_by_ranking_v4"
+        ),
+        "model_selection_policy": (
+            "development_window_is_exploratory_and_all_post_inspection_changes_count_as_new_trials"
+        ),
+        "official_recommendation_isolation": "shadow_only_until_every_gate_passes",
+    }
+
+
+def _validate_protocol_semantics(protocol: RankingV4Protocol) -> None:
+    protocol.experiment_registry.require_valid()
+    if (
+        protocol.protocol_schema_version != RANKING_V4_PROTOCOL_SCHEMA_VERSION
+        or protocol.protocol_id != RANKING_V4_PROTOCOL_ID
+        or protocol.model_version != RANKING_V4_MODEL_VERSION
+    ):
+        raise RankingV4ProtocolError("Ranking V4 identity cannot be rewritten")
+    if protocol.registration_state != "preregistered_code_not_yet_frozen":
+        raise RankingV4ProtocolError("V4 cannot claim frozen code before a Git revision exists")
+
+    candidate = protocol.candidate_definition
+    quotas = tuple((item.key, item.quota) for item in candidate.channels)
+    if quotas != _CANDIDATE_CHANNEL_QUOTAS:
+        raise RankingV4ProtocolError("candidate channels and quotas must match preregistration")
+    if candidate.channel_precedence != tuple(key for key, _ in _CANDIDATE_CHANNEL_QUOTAS):
+        raise RankingV4ProtocolError("candidate channel precedence is not frozen")
+    if sum(item.quota for item in candidate.channels) != RANKING_V4_CANDIDATE_POOL_LIMIT:
+        raise RankingV4ProtocolError("candidate quotas must sum to the frozen pool limit")
+    if candidate.total_pool_limit != RANKING_V4_CANDIDATE_POOL_LIMIT:
+        raise RankingV4ProtocolError("candidate pool limit must remain 50")
+    if candidate.future_outcome_use != "forbidden":
+        raise RankingV4ProtocolError("candidate construction cannot use future outcomes")
+    if (
+        candidate.implementation_version != "ranking-v4-multi-channel-union-v2"
+        or candidate.channel_rank_rule
+        != ("point_in_time_channel_score_desc_then_baseline_score_desc_then_instrument_id_asc")
+        or candidate.deduplication_key != "instrument_id"
+        or candidate.duplicate_owner_rule != "first_channel_in_frozen_precedence"
+        or candidate.deterministic_backfill_rule
+        != ("best_eligible_channel_score_desc_then_baseline_score_desc_then_instrument_id_asc")
+        or candidate.industry_strength_formula
+        != "mean_point_in_time_factor_score_of_candidates_in_same_known_industry"
+        or not candidate.point_in_time_feature_provenance_required
+        or not candidate.point_in_time_cost_provenance_required
+    ):
+        raise RankingV4ProtocolError("candidate ranking, de-duplication, or backfill was changed")
+
+    model = protocol.model_definition
+    if (
+        model.stage_one_name != "trigger_probability"
+        or model.stage_one_target != "entry_condition_triggers_within_frozen_entry_window"
+        or model.stage_two_name != "triggered_cost_adjusted_net_excess"
+        or model.stage_two_target
+        != ("realized_net_return_after_fees_and_slippage_minus_point_in_time_benchmark_return")
+        or model.stage_two_population != "valid_triggered_candidates_only"
+        or model.hierarchical_shrinkage_levels != _HIERARCHICAL_SHRINKAGE_LEVELS
+        or model.posterior_interval != "one_sided_lower_credible_bound"
+    ):
+        raise RankingV4ProtocolError("two-stage model or shrinkage hierarchy was changed")
+    if (
+        model.minimum_position_lower_bound != 0
+        or model.minimum_position_comparator != "strictly_greater_than"
+    ):
+        raise RankingV4ProtocolError(
+            "positions require a posterior net-excess lower bound above zero"
+        )
+    if model.missing_market_regime_policy != "fail_closed_ineligible":
+        raise RankingV4ProtocolError("missing market regime must fail closed")
+
+    utility = protocol.utility_definition
+    if (
+        utility.formula != _UTILITY_FORMULA
+        or utility.benefit_term != "trigger_probability_x_triggered_cost_adjusted_net_excess"
+        or utility.penalty_terms != _UTILITY_PENALTIES
+        or utility.replacement_cost_formula
+        != "zero_for_incumbent_else_frozen_candidate_replacement_cost_pct_0.15"
+        or utility.benchmark_opportunity_cost_formula
+        != "max_zero_benchmark_slope_minus_0.5_times_0.5_pct"
+        or utility.liquidity_penalty_formula != "one_minus_liquidity_score_times_0.25_pct"
+        or utility.tail_risk_penalty_formula != "tail_risk_score_times_0.25_pct"
+        or utility.cash_utility != 0
+    ):
+        raise RankingV4ProtocolError("V4 utility penalties or cash baseline were changed")
+    if utility.optimization_target != (
+        "portfolio_cost_adjusted_net_excess_after_frozen_constraints"
+    ):
+        raise RankingV4ProtocolError("V4 must optimize the portfolio release objective")
+
+    regime = protocol.market_regime_definition
+    if (
+        regime.required_features != _MARKET_REGIME_FEATURES
+        or regime.market_breadth_formula != "share_of_point_in_time_prefilter_factor_scores_gte_0.5"
+        or regime.benchmark_slope_formula
+        != "share_of_required_benchmarks_above_point_in_time_50_session_average"
+        or regime.realized_volatility_formula != "mean_one_minus_point_in_time_low_risk_score"
+        or regime.cross_sectional_dispersion_formula
+        != "min_one_population_stdev_point_in_time_factor_score_times_four"
+        or regime.minimum_cross_section_count != 30
+        or regime.availability_rule != "published_and_available_at_or_before_decision_timestamp"
+        or regime.missing_feature_policy != "fail_closed_no_position"
+        or regime.unknown_regime_trading != "forbidden"
+    ):
+        raise RankingV4ProtocolError("unknown market state cannot open a position")
+
+    portfolio = protocol.portfolio_definition
+    expected_constraints = (
+        portfolio.minimum_positions,
+        portfolio.maximum_positions,
+        portfolio.maximum_per_strategy,
+        portfolio.maximum_per_industry,
+        portfolio.maximum_shared_etf_underlying_ids,
+        portfolio.maximum_shared_index_memberships,
+        portfolio.maximum_per_theme,
+        portfolio.maximum_per_factor,
+        portfolio.maximum_pairwise_correlation,
+        portfolio.maximum_portfolio_beta,
+        portfolio.minimum_liquidity_score,
+        portfolio.minimum_capacity_score,
+        portfolio.risk_benchmark_id,
+        portfolio.risk_lookback_sessions,
+        portfolio.minimum_common_return_observations,
+        portfolio.candidate_price_rule,
+        portfolio.benchmark_price_rule,
+    )
+    if expected_constraints != (
+        0,
+        5,
+        2,
+        2,
+        0,
+        0,
+        2,
+        3,
+        Decimal("0.8"),
+        Decimal("1.2"),
+        Decimal("0.5"),
+        Decimal("0.5"),
+        "CN:000300.IDX",
+        120,
+        60,
+        "point_in_time_adjusted_close_required",
+        "adjusted_close_else_raw_index_close",
+    ):
+        raise RankingV4ProtocolError("portfolio constraints do not match preregistration")
+    if not portfolio.cash_allowed or portfolio.fixed_incumbent_bonus != 0:
+        raise RankingV4ProtocolError("V4 must allow cash and cannot use a fixed incumbent bonus")
+    if (
+        portfolio.missing_constraint_data_policy != "fail_closed_ineligible"
+        or portfolio.selection_rule
+        != ("maximize_frozen_v4_utility_subject_to_constraints_and_positive_posterior_lower_bound")
+        or portfolio.incumbent_policy
+        != "compare_keep_vs_replace_using_actual_incremental_transaction_cost"
+    ):
+        raise RankingV4ProtocolError("portfolio selection or missing-data policy was changed")
+
+    execution = protocol.execution_definition
+    if (
+        execution.signal_session != "D"
+        or execution.earliest_entry_session != "D+1"
+        or execution.settlement_rule != "T+1"
+        or execution.price_limit_policy != "enforced"
+        or execution.suspension_policy != "enforced"
+        or execution.fee_policy != "all_applicable_fees_deducted"
+        or execution.slippage_policy != "frozen_base_and_stress_slippage_deducted"
+        or execution.same_day_ambiguous_path_policy != "adverse_path_first"
+        or execution.unfillable_order_policy != "not_filled_never_impute_executable_price"
+    ):
+        raise RankingV4ProtocolError("A-share execution semantics were weakened")
+
+    temporal = protocol.temporal_definition
+    if (
+        temporal.implementation_version != "ranking-v4-point-in-time-isolation-v2"
+        or temporal.decision_feature_rule
+        != (
+            "economic_available_at_or_before_decision_timestamp_from_pre_run_frozen_dataset"
+        )
+        or temporal.training_outcome_rule != "outcome_matured_strictly_before_training_cutoff"
+        or temporal.financial_statement_rule != "as_published_and_known_on_decision_date"
+        or temporal.index_constituent_rule != "point_in_time_membership_on_decision_date"
+        or temporal.historical_ingestion_rule
+        != (
+            "development_reconstruction_may_be_ingested_later_but_uses_original_economic_dates"
+        )
+        or temporal.revision_backfill_rule
+        != "dataset_revision_frozen_before_run_and_never_advanced_within_experiment"
+        or temporal.future_market_data_rule != "forbidden"
+    ):
+        raise RankingV4ProtocolError("point-in-time evidence isolation was weakened")
+    if (
+        temporal.entry_wait_sessions,
+        temporal.holding_sessions,
+        temporal.rebalance_step_sessions,
+        temporal.candidate_lookback_days,
+        temporal.purge_sessions,
+        temporal.embargo_sessions,
+        temporal.label_dependency_rebalance_cohorts,
+        temporal.pbo_purge_rebalance_cohorts,
+    ) != (5, 20, 10, RANKING_V4_DEVELOPMENT_LOOKBACK_DAYS, 25, 25, 3, 2):
+        raise RankingV4ProtocolError("label span, purge, or embargo no longer matches protocol")
+
+    statistics = protocol.statistics_definition
+    if (
+        statistics.implementation_version != "ranking-v4-paired-block-statistics-v1"
+        or statistics.dependence_block_length != 3
+        or statistics.bootstrap_samples != 5000
+        or statistics.permutation_samples != 10000
+        or statistics.random_seed != 404
+        or statistics.pbo_model_ids != _PBO_MODEL_IDS
+        or tuple(
+            (item.model_id, item.candidate_order_rule) for item in statistics.registered_models
+        )
+        != _REGISTERED_MODEL_RULES
+        or any(
+            item.portfolio_constraint_rule
+            != "same_frozen_v4_constraints_and_exact_total_lower_utility_optimizer"
+            or item.invalid_or_missing_date_rule != "cash_with_zero_return"
+            for item in statistics.registered_models
+        )
+        or statistics.pbo_method
+        != ("cscv_contiguous_blocks_symmetric_half_split_purged_overlap_mean_return_rank_logit_v4")
+        or statistics.pbo_scope != "frozen_eight_model_family_only_not_full_search_process"
+        or statistics.pbo_block_count != 4
+        or statistics.pbo_purge_rebalance_cohorts != 2
+        or statistics.pbo_date_coverage_threshold != Decimal("0.95")
+        or statistics.multiple_testing_method != "holm_bonferroni_registered_family"
+        or statistics.deflated_sharpe_method
+        != "bailey_lopez_de_prado_non_overlapping_rebalance_blocks"
+        or statistics.trial_ledger_requirement
+        != "immutable_registry_must_cover_all_known_research_attempts_before_release"
+        or statistics.unknown_trial_count_policy != "fail_closed_no_release"
+    ):
+        raise RankingV4ProtocolError("statistical family or inference method was changed")
+
+    thresholds = protocol.thresholds
+    if thresholds.minimum_rebalance_dates < 24:
+        raise RankingV4ProtocolError("rebalance gate cannot be weaker than 24")
+    if thresholds.minimum_completed_trades < 60:
+        raise RankingV4ProtocolError("completed-trade gate cannot be weaker than 60")
+    if thresholds.minimum_profit_factor < Decimal("1.10"):
+        raise RankingV4ProtocolError("profit-factor gate cannot be weaker than 1.10")
+    if (
+        thresholds.required_subperiods != 5
+        or thresholds.minimum_positive_subperiods < 4
+        or thresholds.minimum_positive_subperiods > thresholds.required_subperiods
+    ):
+        raise RankingV4ProtocolError("subperiod gate cannot be weaker than four of five")
+    if thresholds.maximum_drawdown_floor_pct < Decimal("-15"):
+        raise RankingV4ProtocolError("maximum-drawdown gate cannot be weaker than -15%")
+    if thresholds.maximum_holm_adjusted_p_value > Decimal("0.05"):
+        raise RankingV4ProtocolError("Holm gate cannot be weaker than 0.05")
+    if thresholds.minimum_deflated_sharpe_probability < Decimal("0.95"):
+        raise RankingV4ProtocolError("Deflated Sharpe gate cannot be weaker than 0.95")
+    if thresholds.maximum_probability_of_backtest_overfit > Decimal("0.20"):
+        raise RankingV4ProtocolError("PBO gate cannot be weaker than 0.20")
+    if thresholds.minimum_valid_outcome_coverage_ratio < Decimal("0.95"):
+        raise RankingV4ProtocolError("coverage gate cannot be weaker than 0.95")
+    if (
+        thresholds.minimum_confirmatory_forward_sessions < 20
+        or thresholds.maximum_confirmatory_forward_sessions > 50
+        or thresholds.minimum_confirmatory_forward_sessions
+        > thresholds.maximum_confirmatory_forward_sessions
+        or thresholds.minimum_confirmatory_forward_trades < 10
+    ):
+        raise RankingV4ProtocolError("confirmatory forward gate must remain within 20-50 sessions")
+    if (
+        thresholds.benchmark_excess_comparator != "strictly_greater_than_zero"
+        or thresholds.stress_cost_adjusted_return_comparator != "strictly_greater_than_zero"
+        or thresholds.unknown_gate_policy != "fail_closed_not_passed"
+        or thresholds.aggregation_rule != "all_gates_must_pass"
+    ):
+        raise RankingV4ProtocolError("unknown or failed gates cannot be bypassed")
+
+    windows = {item.key: item for item in protocol.evidence_windows}
+    if len(windows) != 2 or set(windows) != {"development", "confirmatory_forward"}:
+        raise RankingV4ProtocolError("development and confirmatory windows must remain distinct")
+    development = windows["development"]
+    if (
+        development.start_date != RANKING_V4_DEVELOPMENT_START
+        or development.end_date != RANKING_V4_DEVELOPMENT_END
+        or development.evidence_label != "exploratory_development_evidence"
+        or development.eligible_for_release_gate
+    ):
+        raise RankingV4ProtocolError("2021-2025 evidence must remain exploratory")
+    confirmatory = windows["confirmatory_forward"]
+    if (
+        confirmatory.start_date is not None
+        or confirmatory.end_date is not None
+        or confirmatory.evidence_label != "confirmatory_forward_evidence"
+        or not confirmatory.eligible_for_release_gate
+        or confirmatory.activation_rule
+        != "start_only_after_signed_protocol_and_full_code_revision_are_frozen"
+    ):
+        raise RankingV4ProtocolError("confirmatory dates cannot be backfilled before code freeze")
+    confirmation = protocol.confirmatory_definition
+    if (
+        not confirmation.protocol_freeze_required
+        or not confirmation.code_freeze_required
+        or confirmation.code_revision_requirement != "full_lowercase_40_character_git_revision"
+        or confirmation.start_rule
+        != "first_a_share_session_strictly_after_protocol_and_code_freeze_attestation"
+        or confirmation.historical_development_evidence_may_satisfy_forward_gate
+        or confirmation.release_state_before_forward_pass != "shadow_only"
+        or confirmation.official_paper_admission_rule
+        != ("signed_protocol_code_and_dataset_attestation_plus_all_historical_and_forward_gates")
+    ):
+        raise RankingV4ProtocolError("confirmatory forward evidence must start after both freezes")
+    if protocol.predecessor_evidence_policy != (
+        "ranking_v3_rejection_is_immutable_and_never_reclassified_by_ranking_v4"
+    ):
+        raise RankingV4ProtocolError("V3 rejected evidence cannot be reclassified")
+    if protocol.model_selection_policy != (
+        "development_window_is_exploratory_and_all_post_inspection_changes_count_as_new_trials"
+    ):
+        raise RankingV4ProtocolError("post-inspection V4 changes must count as new trials")
+    if protocol.official_recommendation_isolation != "shadow_only_until_every_gate_passes":
+        raise RankingV4ProtocolError("official paper trading must remain isolated")
+
+
+def _digest(payload: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()

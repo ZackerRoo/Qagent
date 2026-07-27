@@ -1,3 +1,4 @@
+import json
 from concurrent.futures import ProcessPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -348,7 +349,11 @@ def _replay_repository(tmp_path):
                 adjustment_mode=("qfq" if instrument_id == "CN:000001" else "none"),
                 source_provider="fixture_paired",
                 dataset_revision=2,
-                fetched_at=fetched_at,
+                fetched_at=(
+                    datetime(2025, 1, 10, 23, 59, tzinfo=timezone.utc)
+                    if trade_date <= decision_date
+                    else fetched_at
+                ),
             )
             for instrument_id in ["CN:000001", *REQUIRED_BENCHMARK_IDS]
             for index, trade_date in enumerate(sessions)
@@ -374,6 +379,20 @@ def _replay_repository(tmp_path):
         ],
         revision=3,
     )
+    with repository.session_factory() as session:
+        session.query(_tables.FundamentalSnapshotRow).update(
+            {
+                _tables.FundamentalSnapshotRow.cached_at: datetime(
+                    2025,
+                    1,
+                    10,
+                    23,
+                    59,
+                    tzinfo=timezone.utc,
+                )
+            }
+        )
+        session.commit()
     repository.upsert_point_in_time_evidence(
         HistoricalEvidenceBundle(
             tradability=[
@@ -484,9 +503,15 @@ def test_replay_market_provider_reuses_rolling_window(tmp_path, monkeypatch):
     original = repository.replay_bar_rows
     calls = []
 
-    def tracked_replay_bar_rows(instrument_ids, start, end, dataset_revision):
+    def tracked_replay_bar_rows(
+        instrument_ids,
+        start,
+        end,
+        dataset_revision,
+        **kwargs,
+    ):
         calls.append((list(instrument_ids), start, end, dataset_revision))
-        return original(instrument_ids, start, end, dataset_revision)
+        return original(instrument_ids, start, end, dataset_revision, **kwargs)
 
     monkeypatch.setattr(repository, "replay_bar_rows", tracked_replay_bar_rows)
 
@@ -696,9 +721,15 @@ def test_factor_prefilter_reuses_incremental_window_and_prunes(
     original = repository.replay_factor_bar_rows
     calls = []
 
-    def tracked_factor_rows(instrument_ids, start, end, dataset_revision):
+    def tracked_factor_rows(
+        instrument_ids,
+        start,
+        end,
+        dataset_revision,
+        **kwargs,
+    ):
         calls.append((list(instrument_ids), start, end, dataset_revision))
-        return original(instrument_ids, start, end, dataset_revision)
+        return original(instrument_ids, start, end, dataset_revision, **kwargs)
 
     monkeypatch.setattr(
         repository,
@@ -736,9 +767,15 @@ def test_replay_market_prefetch_avoids_per_instrument_queries(tmp_path, monkeypa
     original = repository.replay_bar_rows
     calls = []
 
-    def tracked_replay_bar_rows(instrument_ids, start, end, dataset_revision):
+    def tracked_replay_bar_rows(
+        instrument_ids,
+        start,
+        end,
+        dataset_revision,
+        **kwargs,
+    ):
         calls.append(list(instrument_ids))
-        return original(instrument_ids, start, end, dataset_revision)
+        return original(instrument_ids, start, end, dataset_revision, **kwargs)
 
     monkeypatch.setattr(repository, "replay_bar_rows", tracked_replay_bar_rows)
     instrument_ids = ["CN:000001", "CN:000300.IDX"]
@@ -814,6 +851,22 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert int(first.data_health["walk_forward_replay_cache_queries"]) > 0
     assert int(first.data_health["walk_forward_replay_cache_rows_loaded"]) > 0
     assert first.top_10_portfolio == second.top_10_portfolio
+    assert first.ranking_v4 is not None
+    assert first.ranking_v4.deployment_scope == "shadow_only"
+    assert first.ranking_v4.official_release_allowed is False
+    assert first.ranking_v4.historical_validation.official_release_allowed is False
+    assert first.ranking_v4.historical_validation.deployment_scope == "shadow_only"
+    assert set(first.ranking_v4.pbo_evidence["registered_model_ids"]) == {
+        "constraint_matched_baseline",
+        "ranking_v4_full",
+        "channel_baseline",
+        "channel_trend",
+        "channel_breakout",
+        "channel_quality_value",
+        "channel_defensive_low_vol",
+        "channel_etf_industry",
+    }
+    assert "walk-forward-20260726164443-7fd44f0b" in first.ranking_v4.trial_ledger.known_trial_ids
     assert len(first.benchmarks) == 5
     assert all(item.status == "ready" for item in first.benchmarks[:4])
     assert first.benchmarks[-1].benchmark_id == ELIGIBLE_UNIVERSE_BENCHMARK_ID
@@ -840,7 +893,11 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert first.data_health["walk_forward_equal_weight_benchmark"] == "missing"
     assert (
         first.data_health["walk_forward_future_data_guard"]
-        == "revision_lease_and_decision_date_cutoff"
+        == "frozen_dataset_revision_and_economic_availability_date"
+    )
+    assert (
+        first.data_health["walk_forward_historical_ingestion_mode"]
+        == "pre_run_reconstruction_exploratory_only"
     )
     assert first.strategy_validation.status == "insufficient"
     assert {item.key for item in first.strategy_validation.criteria} == {
@@ -955,6 +1012,34 @@ def test_parallel_walk_forward_bounds_submissions_when_progress_cancels(
     assert len(executors) == 1
     assert executors[0].submission_count == 2
     assert executors[0].shutdown_calls == [(False, True)]
+
+
+def test_walk_forward_persisted_cancellation_stops_isolated_snapshot_worker(
+    tmp_path,
+):
+    repository, _ = _replay_repository(tmp_path)
+    checks = 0
+
+    def cancellation_check():
+        nonlocal checks
+        checks += 1
+        return checks >= 2
+
+    with pytest.raises(
+        walk_forward.WalkForwardCancellationRequested,
+        match="cancelled before publication",
+    ):
+        run_full_market_walk_forward_selection(
+            repository,
+            owner_run_id="walk-forward-cancel-poll",
+            start=date(2025, 1, 6),
+            end=date(2025, 1, 13),
+            rebalance_step_sessions=1,
+            snapshot_workers=1,
+            cancellation_check=cancellation_check,
+        )
+
+    assert checks >= 2
 
 
 def test_parallel_walk_forward_runs_inside_background_process(tmp_path):
@@ -1153,3 +1238,74 @@ def test_walk_forward_result_persists_and_round_trips_complete_payload(tmp_path)
     assert loaded.payload["cost_sensitivity"]
     assert loaded.data_health["walk_forward_top_5_oos_gate"] == "insufficient"
     assert listed[0].run_id == "persisted-walk-forward"
+
+
+def test_walk_forward_result_load_rejects_payload_tampering(tmp_path):
+    repository, decision_date = _replay_repository(tmp_path)
+    result = run_full_market_walk_forward_selection(
+        repository,
+        owner_run_id="tampered-walk-forward",
+        start=decision_date,
+        end=decision_date,
+        rebalance_step_sessions=1,
+    )
+    storage = QagentRepository(repository.session_factory)
+    storage.save_walk_forward_run(result)
+
+    with repository.session_factory() as session:
+        row = session.get(_tables.WalkForwardRunRow, "tampered-walk-forward")
+        original_payload = json.loads(row.payload_json)
+        payload = dict(original_payload)
+        payload["top_5_metrics"] = dict(payload["top_5_metrics"])
+        payload["top_5_metrics"]["total_return_pct"] += 1
+        row.payload_json = json.dumps(payload, sort_keys=True)
+        session.commit()
+
+    with pytest.raises(ValueError, match="failed result digest validation"):
+        storage.get_walk_forward_run("tampered-walk-forward")
+
+    with repository.session_factory() as session:
+        row = session.get(_tables.WalkForwardRunRow, "tampered-walk-forward")
+        original_payload.pop("result_digest_schema")
+        row.reproducibility_digest = (
+            "legacy" + str(row.reproducibility_digest)[6:]
+        )
+        row.payload_json = json.dumps(original_payload, sort_keys=True)
+        session.commit()
+
+    with pytest.raises(ValueError, match="failed result digest validation"):
+        storage.get_walk_forward_run("tampered-walk-forward")
+
+
+def test_walk_forward_result_load_rejects_all_oos_row_field_tampering(tmp_path):
+    repository, decision_date = _replay_repository(tmp_path)
+    result = run_full_market_walk_forward_selection(
+        repository,
+        owner_run_id="tampered-oos-row",
+        start=decision_date,
+        end=decision_date,
+        rebalance_step_sessions=1,
+    )
+    storage = QagentRepository(repository.session_factory)
+    storage.save_walk_forward_run(result)
+    mutations = {
+        "top_5_oos_trades": lambda value: int(value) + 1,
+        "top_10_oos_trades": lambda value: int(value) + 1,
+        "top_5_oos_gate": lambda _value: "tampered",
+        "top_10_oos_gate": lambda _value: "tampered",
+    }
+
+    for field, mutate in mutations.items():
+        with repository.session_factory() as session:
+            row = session.get(_tables.WalkForwardRunRow, "tampered-oos-row")
+            original = getattr(row, field)
+            setattr(row, field, mutate(original))
+            session.commit()
+
+        with pytest.raises(ValueError, match=field):
+            storage.get_walk_forward_run("tampered-oos-row")
+
+        with repository.session_factory() as session:
+            row = session.get(_tables.WalkForwardRunRow, "tampered-oos-row")
+            setattr(row, field, original)
+            session.commit()
