@@ -14,9 +14,9 @@ from qagent.backtesting.ranking_v4_experiment_registry import (
 )
 
 
-RANKING_V4_PROTOCOL_SCHEMA_VERSION = "ranking-v4-preregistered-protocol-v1"
-RANKING_V4_PROTOCOL_ID = "QAGENT-RANK-V4-PREREGISTERED-20260727"
-RANKING_V4_MODEL_VERSION = "two-stage-hierarchical-net-excess-v4-preregistered"
+RANKING_V4_PROTOCOL_SCHEMA_VERSION = "ranking-v4.1-preregistered-protocol-v1"
+RANKING_V4_PROTOCOL_ID = "QAGENT-RANK-V4.1-PREREGISTERED-20260728"
+RANKING_V4_MODEL_VERSION = "two-stage-feature-aware-net-excess-v4.1-preregistered"
 RANKING_V4_DEVELOPMENT_START = date(2021, 11, 1)
 RANKING_V4_DEVELOPMENT_END = date(2025, 12, 31)
 RANKING_V4_DEVELOPMENT_LOOKBACK_DAYS = 400
@@ -35,6 +35,31 @@ _HIERARCHICAL_SHRINKAGE_LEVELS = (
     "asset",
     "strategy",
     "strategy_x_market_regime",
+)
+RANKING_V41_FEATURE_EFFECT_NAMES = (
+    "strategy_score",
+    "factor_score",
+    "valuation",
+    "size",
+    "quality",
+    "momentum",
+    "trend_quality",
+    "breakout_quality",
+    "liquidity",
+    "low_risk",
+    "risk_filter",
+    "reversal",
+    "industry_strength",
+    "capacity",
+    "tail_risk",
+    "execution_penalty",
+    "data_completeness",
+)
+RANKING_V41_FEATURE_EFFECT_BUCKET_EDGES = (
+    Decimal("0"),
+    Decimal("0.333333"),
+    Decimal("0.666667"),
+    Decimal("1"),
 )
 _UTILITY_PENALTIES = (
     "not_triggered_benchmark_opportunity_cost",
@@ -55,7 +80,7 @@ _MARKET_REGIME_FEATURES = (
 )
 _PBO_MODEL_IDS = (
     "constraint_matched_baseline",
-    "ranking_v4_full",
+    "ranking_v41_full",
     "channel_baseline",
     "channel_trend",
     "channel_breakout",
@@ -65,7 +90,7 @@ _PBO_MODEL_IDS = (
 )
 _REGISTERED_MODEL_RULES = (
     ("constraint_matched_baseline", "baseline_rank_score_desc"),
-    ("ranking_v4_full", "ranking_v4_expected_utility_lower_bound_desc"),
+    ("ranking_v41_full", "ranking_v41_feature_adjusted_utility_lower_bound_desc"),
     ("channel_baseline", "channel_baseline_score_desc"),
     ("channel_trend", "channel_trend_score_desc"),
     ("channel_breakout", "channel_breakout_score_desc"),
@@ -117,7 +142,7 @@ class RankingV4CandidateDefinition(BaseModel):
 class RankingV4TwoStageModelDefinition(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    implementation_version: str = "ranking-v4-two-stage-hierarchical-hurdle-v1"
+    implementation_version: str = "ranking-v4.1-two-stage-feature-bin-empirical-bayes-v1"
     stage_one_name: str = "trigger_probability"
     stage_one_target: str = "entry_condition_triggers_within_frozen_entry_window"
     stage_two_name: str = "triggered_cost_adjusted_net_excess"
@@ -126,6 +151,15 @@ class RankingV4TwoStageModelDefinition(BaseModel):
     )
     stage_two_population: str = "valid_triggered_candidates_only"
     hierarchical_shrinkage_levels: tuple[str, ...] = _HIERARCHICAL_SHRINKAGE_LEVELS
+    feature_effect_names: tuple[str, ...] = RANKING_V41_FEATURE_EFFECT_NAMES
+    feature_bucket_edges: tuple[Decimal, ...] = RANKING_V41_FEATURE_EFFECT_BUCKET_EDGES
+    feature_effect_prior_date_strength: Decimal = Decimal("18")
+    feature_effect_aggregation: str = (
+        "equal_weight_mean_of_available_preregistered_feature_bucket_residual_effects"
+    )
+    feature_effect_target_isolation: str = (
+        "trigger_features_fit_on_all_valid_candidates_and_return_features_fit_on_triggered_only"
+    )
     posterior_interval: str = "one_sided_lower_credible_bound"
     minimum_position_lower_bound: Decimal = Decimal("0")
     minimum_position_comparator: Literal["strictly_greater_than"] = "strictly_greater_than"
@@ -171,7 +205,7 @@ class RankingV4MarketRegimeDefinition(BaseModel):
 class RankingV4PortfolioDefinition(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    implementation_version: str = "ranking-v4-zero-to-five-constrained-portfolio-v1"
+    implementation_version: str = "ranking-v4.1-zero-to-five-auditable-risk-proxy-v1"
     minimum_positions: int = 0
     maximum_positions: int = 5
     cash_allowed: bool = True
@@ -191,9 +225,15 @@ class RankingV4PortfolioDefinition(BaseModel):
     candidate_price_rule: str = "point_in_time_adjusted_close_required"
     benchmark_price_rule: str = "adjusted_close_else_raw_index_close"
     missing_constraint_data_policy: Literal["fail_closed_ineligible"] = "fail_closed_ineligible"
-    selection_rule: str = (
-        "maximize_frozen_v4_utility_subject_to_constraints_and_positive_posterior_lower_bound"
+    metadata_substitution_policy: str = (
+        "missing_point_in_time_industry_or_etf_constituents_never_backfilled_from_production;"
+        "known_asset_type_beta_and_minimum_return_history_may_prove_single_name_risk;"
+        "every_additional_position_requires_pairwise_return_correlation_evidence"
     )
+    etf_overlap_fallback_policy: str = (
+        "point_in_time_constituent_overlap_when_available_else_mandatory_pairwise_correlation"
+    )
+    selection_rule: str = "maximize_frozen_v41_feature_adjusted_utility_subject_to_constraints_and_positive_lower_bound"
     incumbent_policy: str = "compare_keep_vs_replace_using_actual_incremental_transaction_cost"
     fixed_incumbent_bonus: Decimal = Decimal("0")
 
@@ -343,7 +383,7 @@ class RankingV4Protocol(BaseModel):
     protocol_schema_version: str = RANKING_V4_PROTOCOL_SCHEMA_VERSION
     protocol_id: str = RANKING_V4_PROTOCOL_ID
     model_version: str = RANKING_V4_MODEL_VERSION
-    preregistered_on: date = date(2026, 7, 27)
+    preregistered_on: date = date(2026, 7, 28)
     registration_state: Literal["preregistered_code_not_yet_frozen"] = (
         "preregistered_code_not_yet_frozen"
     )
@@ -361,7 +401,7 @@ class RankingV4Protocol(BaseModel):
     confirmatory_definition: RankingV4ConfirmatoryDefinition
     evidence_windows: tuple[RankingV4EvidenceWindow, ...]
     predecessor_evidence_policy: str = (
-        "ranking_v3_rejection_is_immutable_and_never_reclassified_by_ranking_v4"
+        "ranking_v3_and_ranking_v4_rejections_are_immutable_and_never_reclassified_by_v4.1"
     )
     model_selection_policy: str = (
         "development_window_is_exploratory_and_all_post_inspection_changes_count_as_new_trials"
@@ -404,7 +444,7 @@ def _ranking_v4_protocol_payload(
         "protocol_schema_version": RANKING_V4_PROTOCOL_SCHEMA_VERSION,
         "protocol_id": RANKING_V4_PROTOCOL_ID,
         "model_version": RANKING_V4_MODEL_VERSION,
-        "preregistered_on": "2026-07-27",
+        "preregistered_on": "2026-07-28",
         "registration_state": "preregistered_code_not_yet_frozen",
         "experiment_registry": experiment_registry.model_dump(mode="json"),
         "candidate_definition": RankingV4CandidateDefinition().model_dump(mode="json"),
@@ -440,7 +480,7 @@ def _ranking_v4_protocol_payload(
             },
         ],
         "predecessor_evidence_policy": (
-            "ranking_v3_rejection_is_immutable_and_never_reclassified_by_ranking_v4"
+            "ranking_v3_and_ranking_v4_rejections_are_immutable_and_never_reclassified_by_v4.1"
         ),
         "model_selection_policy": (
             "development_window_is_exploratory_and_all_post_inspection_changes_count_as_new_trials"
@@ -489,13 +529,23 @@ def _validate_protocol_semantics(protocol: RankingV4Protocol) -> None:
 
     model = protocol.model_definition
     if (
-        model.stage_one_name != "trigger_probability"
+        model.implementation_version != "ranking-v4.1-two-stage-feature-bin-empirical-bayes-v1"
+        or model.stage_one_name != "trigger_probability"
         or model.stage_one_target != "entry_condition_triggers_within_frozen_entry_window"
         or model.stage_two_name != "triggered_cost_adjusted_net_excess"
         or model.stage_two_target
         != ("realized_net_return_after_fees_and_slippage_minus_point_in_time_benchmark_return")
         or model.stage_two_population != "valid_triggered_candidates_only"
         or model.hierarchical_shrinkage_levels != _HIERARCHICAL_SHRINKAGE_LEVELS
+        or model.feature_effect_names != RANKING_V41_FEATURE_EFFECT_NAMES
+        or model.feature_bucket_edges != RANKING_V41_FEATURE_EFFECT_BUCKET_EDGES
+        or model.feature_effect_prior_date_strength != Decimal("18")
+        or model.feature_effect_aggregation
+        != ("equal_weight_mean_of_available_preregistered_feature_bucket_residual_effects")
+        or model.feature_effect_target_isolation
+        != (
+            "trigger_features_fit_on_all_valid_candidates_and_return_features_fit_on_triggered_only"
+        )
         or model.posterior_interval != "one_sided_lower_credible_bound"
     ):
         raise RankingV4ProtocolError("two-stage model or shrinkage hierarchy was changed")
@@ -587,11 +637,22 @@ def _validate_protocol_semantics(protocol: RankingV4Protocol) -> None:
     if not portfolio.cash_allowed or portfolio.fixed_incumbent_bonus != 0:
         raise RankingV4ProtocolError("V4 must allow cash and cannot use a fixed incumbent bonus")
     if (
-        portfolio.missing_constraint_data_policy != "fail_closed_ineligible"
+        portfolio.implementation_version != "ranking-v4.1-zero-to-five-auditable-risk-proxy-v1"
+        or portfolio.missing_constraint_data_policy != "fail_closed_ineligible"
         or portfolio.selection_rule
-        != ("maximize_frozen_v4_utility_subject_to_constraints_and_positive_posterior_lower_bound")
+        != (
+            "maximize_frozen_v41_feature_adjusted_utility_subject_to_constraints_and_positive_lower_bound"
+        )
         or portfolio.incumbent_policy
         != "compare_keep_vs_replace_using_actual_incremental_transaction_cost"
+        or portfolio.metadata_substitution_policy
+        != (
+            "missing_point_in_time_industry_or_etf_constituents_never_backfilled_from_production;"
+            "known_asset_type_beta_and_minimum_return_history_may_prove_single_name_risk;"
+            "every_additional_position_requires_pairwise_return_correlation_evidence"
+        )
+        or portfolio.etf_overlap_fallback_policy
+        != ("point_in_time_constituent_overlap_when_available_else_mandatory_pairwise_correlation")
     ):
         raise RankingV4ProtocolError("portfolio selection or missing-data policy was changed")
 
@@ -613,16 +674,12 @@ def _validate_protocol_semantics(protocol: RankingV4Protocol) -> None:
     if (
         temporal.implementation_version != "ranking-v4-point-in-time-isolation-v2"
         or temporal.decision_feature_rule
-        != (
-            "economic_available_at_or_before_decision_timestamp_from_pre_run_frozen_dataset"
-        )
+        != ("economic_available_at_or_before_decision_timestamp_from_pre_run_frozen_dataset")
         or temporal.training_outcome_rule != "outcome_matured_strictly_before_training_cutoff"
         or temporal.financial_statement_rule != "as_published_and_known_on_decision_date"
         or temporal.index_constituent_rule != "point_in_time_membership_on_decision_date"
         or temporal.historical_ingestion_rule
-        != (
-            "development_reconstruction_may_be_ingested_later_but_uses_original_economic_dates"
-        )
+        != ("development_reconstruction_may_be_ingested_later_but_uses_original_economic_dates")
         or temporal.revision_backfill_rule
         != "dataset_revision_frozen_before_run_and_never_advanced_within_experiment"
         or temporal.future_market_data_rule != "forbidden"
@@ -747,9 +804,9 @@ def _validate_protocol_semantics(protocol: RankingV4Protocol) -> None:
     ):
         raise RankingV4ProtocolError("confirmatory forward evidence must start after both freezes")
     if protocol.predecessor_evidence_policy != (
-        "ranking_v3_rejection_is_immutable_and_never_reclassified_by_ranking_v4"
+        "ranking_v3_and_ranking_v4_rejections_are_immutable_and_never_reclassified_by_v4.1"
     ):
-        raise RankingV4ProtocolError("V3 rejected evidence cannot be reclassified")
+        raise RankingV4ProtocolError("V3 or V4 rejected evidence cannot be reclassified")
     if protocol.model_selection_policy != (
         "development_window_is_exploratory_and_all_post_inspection_changes_count_as_new_trials"
     ):

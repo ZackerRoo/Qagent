@@ -312,8 +312,11 @@ class WalkForwardSelection(BaseModel):
     ranking_v4_blocked_reasons: list[str] = Field(default_factory=list)
     ranking_v4_reason: str = ""
     ranking_v4_beta: float | None = None
+    ranking_v4_return_observation_count: int = 0
     ranking_v4_temporal_evidence_complete: bool = False
     ranking_v4_constraint_data_complete: bool = False
+    ranking_v4_constraint_evidence_mode: str = "incomplete"
+    ranking_v4_industry_evidence_complete: bool = False
     ranking_v4_underlying_evidence_complete: bool = False
     ranking_v4_replacement_cost_pct: float | None = None
     ranking_v4_benchmark_opportunity_cost_pct: float | None = None
@@ -404,6 +407,8 @@ class WalkForwardSnapshot(BaseModel):
     ranking_v4_constraint_blocked_count: int = 0
     ranking_v4_portfolio: RankingV4PortfolioDecision | None = None
     ranking_v4_pairwise_correlations: dict[str, float] = Field(default_factory=dict)
+    ranking_v4_evidence_coverage: dict[str, float] = Field(default_factory=dict)
+    ranking_v4_blocked_reason_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class WalkForwardGateCriterion(BaseModel):
@@ -607,6 +612,8 @@ class WalkForwardRankingV4Evaluation(BaseModel):
     historical_validation: RankingV4HistoricalValidationEvaluation
     pbo_evidence: dict[str, object]
     trial_ledger: RankingV4TrialLedgerEvidence
+    evidence_coverage: dict[str, float] = Field(default_factory=dict)
+    blocked_reason_counts: dict[str, int] = Field(default_factory=dict)
     criteria: list[WalkForwardGateCriterion] = Field(default_factory=list)
 
 
@@ -1930,7 +1937,7 @@ def run_full_market_walk_forward_selection(
         snapshots,
         portfolios={
             "constraint_matched_baseline": ranking_v4_baseline_portfolio,
-            "ranking_v4_full": ranking_v4_portfolio,
+            "ranking_v41_full": ranking_v4_portfolio,
             **ranking_v4_channel_portfolios,
         },
     )
@@ -2049,9 +2056,7 @@ def run_full_market_walk_forward_selection(
             "walk_forward_future_data_guard": (
                 "frozen_dataset_revision_and_economic_availability_date"
             ),
-            "walk_forward_historical_ingestion_mode": (
-                "pre_run_reconstruction_exploratory_only"
-            ),
+            "walk_forward_historical_ingestion_mode": ("pre_run_reconstruction_exploratory_only"),
             "walk_forward_lease_maintenance_count": str(lease_heartbeat.maintenance_count),
             "walk_forward_lease_recovery_count": str(lease_heartbeat.recovery_count),
             "walk_forward_universe": "historical_lifecycle_per_rebalance_date",
@@ -3723,6 +3728,7 @@ def _ranking_v4_candidate_from_selection(
         point_in_time_evidence_complete=(selection.ranking_v4_temporal_evidence_complete),
         market_regime_features_complete=market_features_complete,
         constraint_data_complete=(selection.ranking_v4_constraint_data_complete),
+        constraint_evidence_mode=(selection.ranking_v4_constraint_evidence_mode),
         underlying_evidence_complete=(
             selection.ranking_v4_underlying_evidence_complete or not is_etf
         ),
@@ -3853,12 +3859,10 @@ def _enrich_selection_constraints(
             normalized_asset_type = asset_type.strip().lower()
             is_stock = normalized_asset_type in {"stock", "equity"}
             temporal_evidence_complete = (
-                (not is_stock or selection.instrument_id in fundamentals)
-                and (not is_stock or industry_snapshot is not None)
-                and not incomplete_index_snapshots
-                and adjusted_bar_counts.get(selection.instrument_id, 0)
-                >= RANKING_V4_MIN_COMMON_RETURN_OBSERVATIONS + 1
-            )
+                not is_stock or selection.instrument_id in fundamentals
+            ) and adjusted_bar_counts.get(
+                selection.instrument_id, 0
+            ) >= RANKING_V4_MIN_COMMON_RETURN_OBSERVATIONS + 1
             updated_by_instrument[selection.instrument_id] = selection.model_copy(
                 update={
                     "asset_type": asset_type,
@@ -3867,8 +3871,10 @@ def _enrich_selection_constraints(
                     ),
                     "index_memberships": sorted({item.index_id for item in membership_rows}),
                     "ranking_v4_temporal_evidence_complete": (temporal_evidence_complete),
+                    "ranking_v4_industry_evidence_complete": (industry_snapshot is not None),
                     "ranking_v4_underlying_evidence_complete": (
                         normalized_asset_type not in {"etf", "fund", "index_fund"}
+                        or bool(membership_rows)
                     ),
                 }
             )
@@ -3919,7 +3925,9 @@ def _ranking_v4_risk_evidence(
             item.model_copy(
                 update={
                     "ranking_v4_beta": None,
+                    "ranking_v4_return_observation_count": 0,
                     "ranking_v4_constraint_data_complete": False,
+                    "ranking_v4_constraint_evidence_mode": "incomplete",
                 }
             )
             for item in pool
@@ -3958,17 +3966,37 @@ def _ranking_v4_risk_evidence(
         asset_type = selection.asset_type.strip().lower()
         industry = (selection.industry or "").strip().lower()
         beta = beta_by_instrument.get(selection.instrument_id)
+        return_observation_count = len(returns_by_instrument.get(selection.instrument_id, {}))
+        asset_type_complete = asset_type not in {"", "unknown", "未知"}
         metadata_complete = asset_type not in {"", "unknown", "未知"} and industry not in {
             "",
             "unknown",
             "未知",
             "未分类",
         }
+        return_risk_complete = (
+            asset_type_complete
+            and beta is not None
+            and return_observation_count >= RANKING_V4_MIN_COMMON_RETURN_OBSERVATIONS
+        )
+        point_in_time_metadata_complete = metadata_complete and (
+            asset_type not in {"etf", "fund", "index_fund"}
+            or selection.ranking_v4_underlying_evidence_complete
+        )
+        constraint_evidence_mode = (
+            "point_in_time_metadata"
+            if return_risk_complete and point_in_time_metadata_complete
+            else "return_risk_proxy"
+            if return_risk_complete
+            else "incomplete"
+        )
         updated.append(
             selection.model_copy(
                 update={
                     "ranking_v4_beta": beta,
-                    "ranking_v4_constraint_data_complete": (beta is not None and metadata_complete),
+                    "ranking_v4_return_observation_count": (return_observation_count),
+                    "ranking_v4_constraint_data_complete": (return_risk_complete),
+                    "ranking_v4_constraint_evidence_mode": (constraint_evidence_mode),
                 }
             )
         )
@@ -4480,6 +4508,24 @@ def _apply_ranking_v4(
             source_by_instrument[item.instrument_id] for item in baseline_portfolio.selected
         ]
         previous_v4_ids = [item.instrument_id for item in selected]
+        blocked_reasons_by_instrument: dict[str, set[str]] = {}
+        for score in decision.candidates:
+            blocked_reasons_by_instrument.setdefault(score.instrument_id, set()).update(
+                score.blocked_reasons
+            )
+        for blocked in portfolio.blocked:
+            blocked_reasons_by_instrument.setdefault(blocked.instrument_id, set()).update(
+                blocked.reasons
+            )
+        blocked_reason_counts: dict[str, int] = {}
+        for reasons in blocked_reasons_by_instrument.values():
+            for reason in reasons:
+                blocked_reason_counts[reason] = blocked_reason_counts.get(reason, 0) + 1
+        pool_size = len(risk_pool)
+
+        def coverage_count(predicate) -> float:
+            return float(sum(predicate(item) for item in risk_pool))
+
         updated.append(
             snapshot.model_copy(
                 update={
@@ -4497,6 +4543,41 @@ def _apply_ranking_v4(
                         _ranking_v4_pair_key(left, right): value
                         for (left, right), value in sorted(pairwise_correlations.items())
                     },
+                    "ranking_v4_evidence_coverage": {
+                        "candidate_count": float(pool_size),
+                        "temporal_complete_count": coverage_count(
+                            lambda item: item.ranking_v4_temporal_evidence_complete
+                        ),
+                        "constraint_complete_count": coverage_count(
+                            lambda item: item.ranking_v4_constraint_data_complete
+                        ),
+                        "point_in_time_metadata_count": coverage_count(
+                            lambda item: (
+                                item.ranking_v4_constraint_evidence_mode == "point_in_time_metadata"
+                            )
+                        ),
+                        "return_risk_proxy_count": coverage_count(
+                            lambda item: (
+                                item.ranking_v4_constraint_evidence_mode == "return_risk_proxy"
+                            )
+                        ),
+                        "industry_evidence_count": coverage_count(
+                            lambda item: item.ranking_v4_industry_evidence_complete
+                        ),
+                        "underlying_evidence_count": coverage_count(
+                            lambda item: item.ranking_v4_underlying_evidence_complete
+                        ),
+                        "beta_evidence_count": coverage_count(
+                            lambda item: item.ranking_v4_beta is not None
+                        ),
+                        "pairwise_correlation_count": float(len(pairwise_correlations)),
+                        "feature_adjusted_candidate_count": float(
+                            sum(item.feature_adjustment_count > 0 for item in decision.candidates)
+                        ),
+                        "ranking_eligible_count": float(decision.eligible_position_count),
+                        "selected_count": float(portfolio.selected_count),
+                    },
+                    "ranking_v4_blocked_reason_counts": (blocked_reason_counts),
                 }
             )
         )
@@ -5275,7 +5356,7 @@ def _ranking_v4_model_selections(
 ) -> dict[str, list[WalkForwardSelection]]:
     result = {
         "constraint_matched_baseline": list(snapshot.ranking_v4_constraint_matched_baseline_top_5),
-        "ranking_v4_full": list(snapshot.ranking_v4_top_5),
+        "ranking_v41_full": list(snapshot.ranking_v4_top_5),
     }
     source_by_instrument = {item.instrument_id: item for item in snapshot.ranking_v4_candidate_pool}
     candidates = [
@@ -6327,13 +6408,13 @@ def _build_ranking_v4_evaluation(
     )
     if historical_validation.status == "pass":
         status = "forward_validation_pending"
-        headline = "V4 历史开发门禁通过，等待冻结后的独立前向验证"
+        headline = "V4.1 历史开发门禁通过，等待冻结后的独立前向验证"
     elif historical_validation.status == "fail":
         status = "rejected"
-        headline = "V4 历史门禁失败，继续保持影子隔离"
+        headline = "V4.1 历史门禁失败，继续保持影子隔离"
     else:
         status = "insufficient"
-        headline = "V4 历史证据不足，不进入正式模拟盘"
+        headline = "V4.1 历史证据不足，不进入正式模拟盘"
     criteria = [
         WalkForwardGateCriterion(
             key=gate.key,
@@ -6344,6 +6425,31 @@ def _build_ranking_v4_evaluation(
         )
         for gate in historical_validation.gates
     ]
+    evidence_coverage: dict[str, float] = {}
+    blocked_reason_counts: dict[str, int] = {}
+    for snapshot in snapshots:
+        for key, value in snapshot.ranking_v4_evidence_coverage.items():
+            evidence_coverage[key] = evidence_coverage.get(key, 0.0) + float(value)
+        for key, value in snapshot.ranking_v4_blocked_reason_counts.items():
+            blocked_reason_counts[key] = blocked_reason_counts.get(key, 0) + value
+    candidate_count = evidence_coverage.get("candidate_count", 0.0)
+    for source_key, ratio_key in (
+        ("temporal_complete_count", "temporal_complete_ratio"),
+        ("constraint_complete_count", "constraint_complete_ratio"),
+        ("point_in_time_metadata_count", "point_in_time_metadata_ratio"),
+        ("return_risk_proxy_count", "return_risk_proxy_ratio"),
+        ("industry_evidence_count", "industry_evidence_ratio"),
+        ("underlying_evidence_count", "underlying_evidence_ratio"),
+        ("beta_evidence_count", "beta_evidence_ratio"),
+        ("feature_adjusted_candidate_count", "feature_adjusted_candidate_ratio"),
+        ("ranking_eligible_count", "ranking_eligible_ratio"),
+        ("selected_count", "selected_ratio"),
+    ):
+        evidence_coverage[ratio_key] = (
+            round(evidence_coverage.get(source_key, 0.0) / candidate_count, 8)
+            if candidate_count
+            else 0.0
+        )
     return WalkForwardRankingV4Evaluation(
         status=status,
         headline=headline,
@@ -6381,6 +6487,8 @@ def _build_ranking_v4_evaluation(
         historical_validation=historical_validation,
         pbo_evidence=pbo_evidence,
         trial_ledger=trial_ledger,
+        evidence_coverage=evidence_coverage,
+        blocked_reason_counts=blocked_reason_counts,
         criteria=criteria,
     )
 

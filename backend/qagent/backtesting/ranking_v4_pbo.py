@@ -25,8 +25,8 @@ RANKING_V4_PBO_BLOCK_COUNT = _STATISTICS.pbo_block_count
 RANKING_V4_PBO_PURGE_REBALANCE_COHORTS = _STATISTICS.pbo_purge_rebalance_cohorts
 RANKING_V4_PBO_MINIMUM_DATE_COUNT = _PROTOCOL.thresholds.minimum_rebalance_dates
 
-_MATRIX_SCHEMA_VERSION = "ranking-v4-real-model-return-matrix-v1"
-_EVIDENCE_SCHEMA_VERSION = "ranking-v4-cscv-pbo-evidence-v1"
+_MATRIX_SCHEMA_VERSION = "ranking-v4.1-real-model-return-matrix-v1"
+_EVIDENCE_SCHEMA_VERSION = "ranking-v4.1-cscv-pbo-evidence-v1"
 _MATRIX_RETURN_SEMANTICS = (
     "caller_supplied_common_rebalance_calendar_with_invalid_or_missing_model_dates_"
     "explicitly_filled_as_cash_zero_return_before_evaluation"

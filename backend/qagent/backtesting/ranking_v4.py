@@ -5,11 +5,14 @@ import json
 import math
 from collections import defaultdict
 from datetime import date
-from typing import Iterable
+from typing import Iterable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from qagent.backtesting.ranking_v4_protocol import RANKING_V4_MODEL_VERSION
+from qagent.backtesting.ranking_v4_protocol import (
+    RANKING_V4_MODEL_VERSION,
+    RANKING_V41_FEATURE_EFFECT_NAMES,
+)
 
 
 MIN_V4_TRAINING_OBSERVATIONS = 120
@@ -23,6 +26,9 @@ V4_REGIME_PRIOR_DATE_STRENGTH = 8.0
 V4_MINIMUM_DATA_COMPLETENESS = 0.68
 V4_MINIMUM_POSTERIOR_VOLATILITY_PCT = 0.25
 V4_UNKNOWN_VALUES = {"", "unknown", "none", "missing", "未分类", "未知"}
+V41_FEATURE_EFFECT_PRIOR_DATE_STRENGTH = 18.0
+V41_FEATURE_BUCKETS = ("low", "mid", "high")
+V41_MINIMUM_TRIGGER_RESIDUAL_VOLATILITY = 0.05
 
 
 class RankingV4FeatureVector(BaseModel):
@@ -70,12 +76,23 @@ class RankingV4Candidate(BaseModel):
     point_in_time_evidence_complete: bool = False
     market_regime_features_complete: bool = False
     constraint_data_complete: bool = False
+    constraint_evidence_mode: Literal[
+        "point_in_time_metadata",
+        "return_risk_proxy",
+        "incomplete",
+    ] = "incomplete"
     underlying_evidence_complete: bool = False
     incumbent: bool = False
     replacement_cost_pct: float | None = Field(default=None, ge=0.0)
     benchmark_opportunity_cost_pct: float | None = Field(default=None, ge=0.0)
     liquidity_penalty_pct: float | None = Field(default=None, ge=0.0)
     tail_risk_penalty_pct: float | None = Field(default=None, ge=0.0)
+
+    @model_validator(mode="after")
+    def validate_constraint_evidence(self) -> RankingV4Candidate:
+        if self.constraint_data_complete == (self.constraint_evidence_mode == "incomplete"):
+            raise ValueError("Ranking V4.1 constraint completeness and evidence mode disagree")
+        return self
 
 
 class ResolvedRankingV4Observation(BaseModel):
@@ -149,6 +166,30 @@ class RankingV4TriggerProbability(BaseModel):
         return self
 
 
+class RankingV41FeatureEffect(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    stage: Literal["trigger_probability", "triggered_net_excess"]
+    feature_name: str
+    bucket: Literal["low", "mid", "high"]
+    observation_count: int = Field(ge=1)
+    date_count: int = Field(ge=1)
+    expected_effect: float
+    lower_bound_effect: float
+
+    @model_validator(mode="after")
+    def validate_effect(self) -> RankingV41FeatureEffect:
+        if self.feature_name not in RANKING_V41_FEATURE_EFFECT_NAMES:
+            raise ValueError("Ranking V4.1 feature effect is not preregistered")
+        if not all(
+            math.isfinite(value) for value in (self.expected_effect, self.lower_bound_effect)
+        ):
+            raise ValueError("Ranking V4.1 feature effects must be finite")
+        if self.lower_bound_effect > self.expected_effect:
+            raise ValueError("Ranking V4.1 feature lower bound exceeds its mean")
+        return self
+
+
 class RankingV4FrozenScoringArtifact(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -161,16 +202,22 @@ class RankingV4FrozenScoringArtifact(BaseModel):
     model_ready: bool
     posteriors: tuple[RankingV4PosteriorParameters, ...] = ()
     trigger_probabilities: tuple[RankingV4TriggerProbability, ...] = ()
+    feature_effects: tuple[RankingV41FeatureEffect, ...] = ()
     stable_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def validate_stable_digest(self) -> RankingV4FrozenScoringArtifact:
         posterior_segments = [item.segment for item in self.posteriors]
         trigger_segments = [item.segment for item in self.trigger_probabilities]
+        feature_effect_keys = [
+            (item.stage, item.feature_name, item.bucket) for item in self.feature_effects
+        ]
         if posterior_segments != sorted(set(posterior_segments)):
             raise ValueError("Ranking V4 posterior segments must be unique and sorted")
         if trigger_segments != sorted(set(trigger_segments)):
             raise ValueError("Ranking V4 trigger segments must be unique and sorted")
+        if feature_effect_keys != sorted(set(feature_effect_keys)):
+            raise ValueError("Ranking V4.1 feature effects must be unique and sorted")
         if self.training_triggered_observation_count > self.training_observation_count:
             raise ValueError("Ranking V4 triggered training count exceeds all observations")
         if self.training_cutoff_date is not None and self.training_cutoff_date >= self.cutoff:
@@ -207,6 +254,9 @@ class RankingV4CandidateScore(BaseModel):
     tail_risk_penalty_pct: float | None = None
     evidence_segment: str | None = None
     evidence_date_count: int = 0
+    feature_adjustment_count: int = 0
+    trigger_feature_adjustment: float | None = None
+    net_excess_feature_adjustment_pct: float | None = None
     eligible_for_position: bool = False
     blocked_reasons: list[str] = Field(default_factory=list)
     reason: str
@@ -251,6 +301,13 @@ def build_ranking_v4_frozen_scoring_artifact(
         trigger_observations,
         decision_date=cutoff,
     )
+    feature_effects = _build_feature_effects(
+        trigger_observations=trigger_observations,
+        excess_observations=excess_observations,
+        posteriors=posteriors,
+        trigger_probabilities=trigger_probabilities,
+        decision_date=cutoff,
+    )
     payload = {
         "model_version": RANKING_V4_MODEL_VERSION,
         "cutoff": cutoff,
@@ -270,6 +327,12 @@ def build_ranking_v4_frozen_scoring_artifact(
         "posteriors": tuple(sorted(posteriors, key=lambda item: item.segment)),
         "trigger_probabilities": tuple(
             sorted(trigger_probabilities, key=lambda item: item.segment)
+        ),
+        "feature_effects": tuple(
+            sorted(
+                feature_effects,
+                key=lambda item: (item.stage, item.feature_name, item.bucket),
+            )
         ),
     }
     return RankingV4FrozenScoringArtifact(
@@ -319,12 +382,16 @@ def score_ranking_v4_candidates_from_artifact(
     }
     posterior_by_segment = {item.segment: item for item in artifact.posteriors}
     trigger_by_segment = {item.segment: item for item in artifact.trigger_probabilities}
+    feature_effect_by_key = {
+        (item.stage, item.feature_name, item.bucket): item for item in artifact.feature_effects
+    }
     provisional = [
         _score_candidate(
             candidate,
             model_ready=artifact.model_ready,
             posterior_by_segment=posterior_by_segment,
             trigger_by_segment=trigger_by_segment,
+            feature_effect_by_key=feature_effect_by_key,
             baseline_position=baseline_positions[candidate.instrument_id],
             decision_date=decision_date,
         )
@@ -365,11 +432,30 @@ def _score_candidate(
     model_ready: bool,
     posterior_by_segment: dict[str, RankingV4PosteriorParameters],
     trigger_by_segment: dict[str, RankingV4TriggerProbability],
+    feature_effect_by_key: dict[tuple[str, str, str], RankingV41FeatureEffect],
     baseline_position: int,
     decision_date: date,
 ) -> RankingV4CandidateScore:
     posterior = _deepest_candidate_value(candidate, posterior_by_segment)
     trigger = _deepest_candidate_value(candidate, trigger_by_segment)
+    (
+        trigger_adjustment,
+        trigger_lower_adjustment,
+        trigger_adjustment_count,
+    ) = _candidate_feature_adjustment(
+        candidate,
+        feature_effect_by_key,
+        stage="trigger_probability",
+    )
+    (
+        net_excess_adjustment,
+        net_excess_lower_adjustment,
+        net_excess_adjustment_count,
+    ) = _candidate_feature_adjustment(
+        candidate,
+        feature_effect_by_key,
+        stage="triggered_net_excess",
+    )
     blocked_reasons: list[str] = []
     if not model_ready:
         blocked_reasons.append("model_not_ready")
@@ -399,20 +485,34 @@ def _score_candidate(
 
     expected_utility = None
     lower_utility = None
+    adjusted_trigger_probability = None
+    adjusted_trigger_lower_bound = None
+    adjusted_net_excess = None
+    adjusted_net_excess_lower_bound = None
     if posterior is not None and trigger is not None and costs is not None:
+        adjusted_trigger_probability = _clamp_probability(trigger.probability + trigger_adjustment)
+        adjusted_trigger_lower_bound = min(
+            adjusted_trigger_probability,
+            _clamp_probability(trigger.lower_bound + trigger_lower_adjustment),
+        )
+        adjusted_net_excess = posterior.expected_net_excess_return_pct + net_excess_adjustment
+        adjusted_net_excess_lower_bound = min(
+            adjusted_net_excess,
+            posterior.lower_bound_pct + net_excess_lower_adjustment,
+        )
         replacement_cost, opportunity_cost, liquidity_penalty, tail_risk_penalty = costs
         fixed_penalty = replacement_cost + liquidity_penalty + tail_risk_penalty
         expected_utility = (
-            trigger.probability * posterior.expected_net_excess_return_pct
-            - (1.0 - trigger.probability) * opportunity_cost
+            adjusted_trigger_probability * adjusted_net_excess
+            - (1.0 - adjusted_trigger_probability) * opportunity_cost
             - fixed_penalty
         )
         lower_utility = (
-            trigger.lower_bound * posterior.lower_bound_pct
-            - (1.0 - trigger.lower_bound) * opportunity_cost
+            adjusted_trigger_lower_bound * adjusted_net_excess_lower_bound
+            - (1.0 - adjusted_trigger_lower_bound) * opportunity_cost
             - fixed_penalty
         )
-        if posterior.lower_bound_pct <= 0:
+        if adjusted_net_excess_lower_bound <= 0:
             blocked_reasons.append("net_excess_lower_bound_not_positive")
         if lower_utility <= 0:
             blocked_reasons.append("utility_lower_bound_not_positive")
@@ -422,6 +522,8 @@ def _score_candidate(
         eligible=eligible,
         posterior=posterior,
         trigger=trigger,
+        adjusted_trigger_probability=adjusted_trigger_probability,
+        adjusted_net_excess_lower_bound=adjusted_net_excess_lower_bound,
         expected_utility=expected_utility,
         lower_utility=lower_utility,
         blocked_reasons=blocked_reasons,
@@ -431,14 +533,14 @@ def _score_candidate(
         baseline_position=baseline_position,
         v4_position=0,
         baseline_rank_score=round(float(candidate.baseline_rank_score), 8),
-        trigger_probability=_rounded(trigger.probability if trigger else None),
-        trigger_probability_lower_bound=_rounded(trigger.lower_bound if trigger else None),
+        trigger_probability=_rounded(adjusted_trigger_probability),
+        trigger_probability_lower_bound=_rounded(adjusted_trigger_lower_bound),
         expected_triggered_net_excess_return_pct=_rounded(
-            posterior.expected_net_excess_return_pct if posterior else None,
+            adjusted_net_excess,
             digits=4,
         ),
         expected_triggered_net_excess_lower_bound_pct=_rounded(
-            posterior.lower_bound_pct if posterior else None,
+            adjusted_net_excess_lower_bound,
             digits=4,
         ),
         expected_utility_pct=_rounded(expected_utility, digits=4),
@@ -453,6 +555,15 @@ def _score_candidate(
         tail_risk_penalty_pct=_rounded(candidate.tail_risk_penalty_pct),
         evidence_segment=posterior.segment if posterior else None,
         evidence_date_count=posterior.date_count if posterior else 0,
+        feature_adjustment_count=min(
+            trigger_adjustment_count,
+            net_excess_adjustment_count,
+        ),
+        trigger_feature_adjustment=_rounded(trigger_adjustment),
+        net_excess_feature_adjustment_pct=_rounded(
+            net_excess_adjustment,
+            digits=4,
+        ),
         eligible_for_position=eligible,
         blocked_reasons=blocked_reasons,
         reason=reason,
@@ -604,6 +715,166 @@ def _build_hierarchical_trigger_probabilities(
     return list(result.values())
 
 
+def _build_feature_effects(
+    *,
+    trigger_observations: list[ResolvedRankingV4Observation],
+    excess_observations: list[ResolvedRankingV4Observation],
+    posteriors: list[RankingV4PosteriorParameters],
+    trigger_probabilities: list[RankingV4TriggerProbability],
+    decision_date: date,
+) -> list[RankingV41FeatureEffect]:
+    posterior_by_segment = {item.segment: item for item in posteriors}
+    trigger_by_segment = {item.segment: item for item in trigger_probabilities}
+    effects: list[RankingV41FeatureEffect] = []
+    effects.extend(
+        _stage_feature_effects(
+            trigger_observations,
+            stage="trigger_probability",
+            base_by_segment=trigger_by_segment,
+            decision_date=decision_date,
+        )
+    )
+    effects.extend(
+        _stage_feature_effects(
+            excess_observations,
+            stage="triggered_net_excess",
+            base_by_segment=posterior_by_segment,
+            decision_date=decision_date,
+        )
+    )
+    return effects
+
+
+def _stage_feature_effects(
+    observations: list[ResolvedRankingV4Observation],
+    *,
+    stage: Literal["trigger_probability", "triggered_net_excess"],
+    base_by_segment: dict[
+        str,
+        RankingV4PosteriorParameters | RankingV4TriggerProbability,
+    ],
+    decision_date: date,
+) -> list[RankingV41FeatureEffect]:
+    result: list[RankingV41FeatureEffect] = []
+    for feature_name in RANKING_V41_FEATURE_EFFECT_NAMES:
+        grouped: dict[str, list[tuple[ResolvedRankingV4Observation, float]]] = defaultdict(list)
+        for observation in observations:
+            base = _deepest_observation_value(observation, base_by_segment)
+            if base is None:
+                continue
+            if stage == "trigger_probability":
+                target = 1.0 if observation.triggered else 0.0
+                baseline = float(base.probability)
+            else:
+                raw_target = observation.cost_adjusted_net_excess_return_pct
+                if raw_target is None or not math.isfinite(float(raw_target)):
+                    continue
+                target = float(raw_target)
+                baseline = float(base.expected_net_excess_return_pct)
+            residual = target - baseline
+            grouped[_feature_bucket(getattr(observation.features, feature_name))].append(
+                (observation, residual)
+            )
+        for bucket, values in sorted(grouped.items()):
+            effect = _feature_effect(
+                values,
+                stage=stage,
+                feature_name=feature_name,
+                bucket=bucket,
+                decision_date=decision_date,
+            )
+            if effect is not None:
+                result.append(effect)
+    return result
+
+
+def _feature_effect(
+    observations: list[tuple[ResolvedRankingV4Observation, float]],
+    *,
+    stage: Literal["trigger_probability", "triggered_net_excess"],
+    feature_name: str,
+    bucket: str,
+    decision_date: date,
+) -> RankingV41FeatureEffect | None:
+    by_date: dict[date, list[float]] = defaultdict(list)
+    for observation, residual in observations:
+        if math.isfinite(residual):
+            by_date[observation.signal_date].append(residual)
+    if not by_date:
+        return None
+    dated_values = [
+        (signal_date, sum(values) / len(values)) for signal_date, values in sorted(by_date.items())
+    ]
+    weights = _recency_weights(dated_values, decision_date=decision_date)
+    effective_weight = sum(weights)
+    denominator = effective_weight + V41_FEATURE_EFFECT_PRIOR_DATE_STRENGTH
+    expected = (
+        sum(value * weight for (_, value), weight in zip(dated_values, weights, strict=True))
+        / denominator
+    )
+    minimum_volatility = (
+        V41_MINIMUM_TRIGGER_RESIDUAL_VOLATILITY
+        if stage == "trigger_probability"
+        else V4_MINIMUM_POSTERIOR_VOLATILITY_PCT
+    )
+    variance = (
+        sum(
+            weight * (value - expected) ** 2
+            for (_, value), weight in zip(dated_values, weights, strict=True)
+        )
+        + V41_FEATURE_EFFECT_PRIOR_DATE_STRENGTH * expected**2
+    ) / denominator
+    variance = max(variance, minimum_volatility**2)
+    standard_error = math.sqrt(variance / denominator)
+    return RankingV41FeatureEffect(
+        stage=stage,
+        feature_name=feature_name,
+        bucket=bucket,
+        observation_count=len(observations),
+        date_count=len(dated_values),
+        expected_effect=expected,
+        lower_bound_effect=expected - V4_LOWER_CONFIDENCE_Z_SCORE * standard_error,
+    )
+
+
+def _candidate_feature_adjustment(
+    candidate: RankingV4Candidate,
+    values: dict[tuple[str, str, str], RankingV41FeatureEffect],
+    *,
+    stage: Literal["trigger_probability", "triggered_net_excess"],
+) -> tuple[float, float, int]:
+    matched = [
+        effect
+        for feature_name in RANKING_V41_FEATURE_EFFECT_NAMES
+        if (
+            effect := values.get(
+                (
+                    stage,
+                    feature_name,
+                    _feature_bucket(getattr(candidate.features, feature_name)),
+                )
+            )
+        )
+        is not None
+    ]
+    if not matched:
+        return 0.0, 0.0, 0
+    return (
+        sum(item.expected_effect for item in matched) / len(matched),
+        sum(item.lower_bound_effect for item in matched) / len(matched),
+        len(matched),
+    )
+
+
+def _feature_bucket(value: float) -> Literal["low", "mid", "high"]:
+    resolved = float(value)
+    if resolved < 0.333333:
+        return "low"
+    if resolved < 0.666667:
+        return "mid"
+    return "high"
+
+
 def _posterior(
     observations: list[ResolvedRankingV4Observation],
     *,
@@ -713,8 +984,36 @@ def _candidate_segments(candidate: RankingV4Candidate) -> tuple[str, ...]:
     )
 
 
+def _observation_segments(
+    observation: ResolvedRankingV4Observation,
+) -> tuple[str, ...]:
+    return (
+        "global",
+        f"asset:{_asset(observation.asset_type)}",
+        _strategy_segment(
+            observation.asset_type,
+            observation.primary_strategy_id,
+        ),
+        _regime_segment(
+            observation.asset_type,
+            observation.primary_strategy_id,
+            observation.market_regime,
+        ),
+    )
+
+
 def _deepest_candidate_value(candidate: RankingV4Candidate, values: dict[str, object]):
     for segment in reversed(_candidate_segments(candidate)):
+        if segment in values:
+            return values[segment]
+    return None
+
+
+def _deepest_observation_value(
+    observation: ResolvedRankingV4Observation,
+    values: dict[str, object],
+):
+    for segment in reversed(_observation_segments(observation)):
         if segment in values:
             return values[segment]
     return None
@@ -829,14 +1128,22 @@ def _candidate_reason(
     eligible: bool,
     posterior: RankingV4PosteriorParameters | None,
     trigger: RankingV4TriggerProbability | None,
+    adjusted_trigger_probability: float | None,
+    adjusted_net_excess_lower_bound: float | None,
     expected_utility: float | None,
     lower_utility: float | None,
     blocked_reasons: list[str],
 ) -> str:
-    if eligible and posterior is not None and trigger is not None:
+    if (
+        eligible
+        and posterior is not None
+        and trigger is not None
+        and adjusted_trigger_probability is not None
+        and adjusted_net_excess_lower_bound is not None
+    ):
         return (
-            f"触发概率 {trigger.probability:.0%}，触发后净超额下界 "
-            f"{posterior.lower_bound_pct:+.2f}%，保守效用 {lower_utility:+.2f}%；"
+            f"触发概率 {adjusted_trigger_probability:.0%}，触发后净超额下界 "
+            f"{adjusted_net_excess_lower_bound:+.2f}%，保守效用 {lower_utility:+.2f}%；"
             "满足占仓门禁。"
         )
     labels = {
@@ -919,6 +1226,10 @@ def _rounded(value: float | None, *, digits: int = 6) -> float | None:
 
 def _sort_value(value: float | None) -> float:
     return value if value is not None and math.isfinite(value) else -math.inf
+
+
+def _clamp_probability(value: float) -> float:
+    return min(1.0, max(0.0, value))
 
 
 def _stable_digest(payload: object) -> str:

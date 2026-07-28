@@ -24,6 +24,7 @@ from qagent.backtesting.walk_forward import (
     _ranking_v4_beta,
     _ranking_v4_correlation,
     _ranking_v4_market_features,
+    _ranking_v4_risk_evidence,
     _ranking_v4_return_series,
     _ranking_v4_selected_return_observations,
 )
@@ -46,6 +47,7 @@ def _selection(instrument_id: str = "CN:000001") -> WalkForwardSelection:
         industry="银行",
         ranking_v4_temporal_evidence_complete=True,
         ranking_v4_constraint_data_complete=True,
+        ranking_v4_constraint_evidence_mode="point_in_time_metadata",
         ranking_v4_features=RankingV4FeatureVector(data_completeness=0.9),
     )
 
@@ -274,6 +276,92 @@ def test_constraint_enrichment_never_reuses_current_industry_or_membership():
     assert enriched.ranking_v4_candidate_pool[0].index_memberships == ["CN:HISTORICAL.IDX"]
     assert enriched.ranking_v4_candidate_pool[0].ranking_v4_temporal_evidence_complete is True
     assert enriched.ranking_v4_candidate_pool[0].themes == []
+
+
+def test_v41_missing_historical_industry_does_not_erase_price_feature_timeline():
+    selection = _selection().model_copy(
+        update={
+            "industry": "当前行业",
+            "index_memberships": ["CN:CURRENT.IDX"],
+        }
+    )
+    snapshot = _snapshot(selection)
+
+    class PriceAndFundamentalRepository:
+        def fundamentals_as_of(self, *_args, **_kwargs):
+            return {selection.instrument_id: object()}
+
+        def industries_as_of(self, *_args, **_kwargs):
+            return {}
+
+        def available_memberships_as_of(self, *_args, **_kwargs):
+            return ({}, [])
+
+        def adjusted_bar_vintage_counts(self, *_args, **_kwargs):
+            return {selection.instrument_id: 61}
+
+    enriched = _enrich_selection_constraints(
+        [snapshot],
+        repository=PriceAndFundamentalRepository(),
+        revision=1,
+        asset_types={selection.instrument_id: "stock"},
+    )[0].ranking_v4_candidate_pool[0]
+
+    assert enriched.industry is None
+    assert enriched.index_memberships == []
+    assert enriched.ranking_v4_industry_evidence_complete is False
+    assert enriched.ranking_v4_temporal_evidence_complete is True
+
+
+def test_v41_return_history_can_prove_risk_without_industry_metadata():
+    selection = _selection().model_copy(
+        update={
+            "industry": None,
+            "ranking_v4_industry_evidence_complete": False,
+            "ranking_v4_constraint_data_complete": False,
+            "ranking_v4_constraint_evidence_mode": "incomplete",
+        }
+    )
+    snapshot = _snapshot(selection)
+    start = date(2024, 9, 1)
+    rows = []
+    candidate_price = 10.0
+    benchmark_price = 100.0
+    for offset in range(90):
+        trade_date = start + timedelta(days=offset)
+        candidate_price *= 1.0 + (0.002 if offset % 3 else -0.001)
+        benchmark_price *= 1.0 + (0.001 if offset % 3 else -0.0005)
+        rows.extend(
+            (
+                {
+                    "instrument_id": selection.instrument_id,
+                    "trade_date": trade_date,
+                    "close": candidate_price,
+                    "adjusted_close": candidate_price,
+                },
+                {
+                    "instrument_id": "CN:000300.IDX",
+                    "trade_date": trade_date,
+                    "close": benchmark_price,
+                    "adjusted_close": benchmark_price,
+                },
+            )
+        )
+
+    class RiskProvider:
+        def get_daily_bars(self, *_args, **_kwargs):
+            return pd.DataFrame(rows)
+
+    enriched, correlations = _ranking_v4_risk_evidence(
+        snapshot,
+        market_provider=RiskProvider(),
+    )
+
+    assert correlations == {}
+    assert enriched[0].ranking_v4_return_observation_count >= 60
+    assert enriched[0].ranking_v4_beta is not None
+    assert enriched[0].ranking_v4_constraint_data_complete is True
+    assert enriched[0].ranking_v4_constraint_evidence_mode == "return_risk_proxy"
 
 
 def test_validation_keeps_cash_date_and_counts_missing_stress_evidence():

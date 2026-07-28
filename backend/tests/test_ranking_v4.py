@@ -67,6 +67,7 @@ def _candidate(
         point_in_time_evidence_complete=True,
         market_regime_features_complete=True,
         constraint_data_complete=True,
+        constraint_evidence_mode="point_in_time_metadata",
         underlying_evidence_complete=True,
         incumbent=incumbent,
         replacement_cost_pct=replacement_cost,
@@ -357,6 +358,70 @@ def test_v4_separates_trigger_probability_from_triggered_net_excess():
     assert frequent.expected_utility_pct > rare.expected_utility_pct
 
 
+def test_v41_feature_effects_change_cross_sectional_ranking_without_future_data():
+    high_features = _features(
+        strategy_score=0.9,
+        factor_score=0.9,
+        valuation=0.9,
+        size=0.9,
+        quality=0.9,
+        momentum=0.9,
+        trend_quality=0.9,
+        breakout_quality=0.9,
+        low_risk=0.9,
+        risk_filter=0.9,
+        reversal=0.9,
+        industry_strength=0.9,
+    )
+    low_features = high_features.model_copy(
+        update={
+            "strategy_score": 0.1,
+            "factor_score": 0.1,
+            "valuation": 0.1,
+            "size": 0.1,
+            "quality": 0.1,
+            "momentum": 0.1,
+            "trend_quality": 0.1,
+            "breakout_quality": 0.1,
+            "low_risk": 0.1,
+            "risk_filter": 0.1,
+            "reversal": 0.1,
+            "industry_strength": 0.1,
+        }
+    )
+    observations = [
+        _resolved(
+            index,
+            available_at=date(2024, 7, 1),
+            excess=6.0 if index % 2 == 0 else -2.0,
+        ).model_copy(
+            update={
+                "features": high_features if index % 2 == 0 else low_features,
+            }
+        )
+        for index in range(MIN_V4_TRAINING_OBSERVATIONS)
+    ]
+    candidates = [
+        _candidate("CN:000001", features=high_features),
+        _candidate("CN:000002", features=low_features),
+    ]
+
+    decision = score_ranking_v4_candidates(
+        candidates,
+        observations,
+        decision_date=date(2025, 1, 2),
+    )
+    by_id = {item.instrument_id: item for item in decision.candidates}
+
+    assert by_id["CN:000001"].feature_adjustment_count > 0
+    assert (
+        by_id["CN:000001"].expected_utility_lower_bound_pct
+        > by_id["CN:000002"].expected_utility_lower_bound_pct
+    )
+    assert by_id["CN:000001"].net_excess_feature_adjustment_pct > 0
+    assert by_id["CN:000002"].net_excess_feature_adjustment_pct < 0
+
+
 def test_v4_trigger_probability_clusters_cross_section_by_signal_date():
     observations = [
         _resolved(
@@ -485,6 +550,14 @@ def test_v4_fails_closed_when_market_regime_feature_evidence_is_incomplete():
     assert score.eligible_for_position is False
     assert "market_regime_evidence_incomplete" in score.blocked_reasons
     assert decision.cash_slot_count == 5
+
+
+def test_v41_rejects_inconsistent_constraint_evidence_state():
+    payload = _candidate("CN:000001").model_dump(mode="python")
+    payload["constraint_evidence_mode"] = "incomplete"
+
+    with pytest.raises(ValidationError, match="constraint completeness and evidence mode disagree"):
+        RankingV4Candidate.model_validate(payload)
 
 
 def test_v4_artifact_is_hierarchical_stable_and_tamper_evident():

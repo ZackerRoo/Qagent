@@ -34,12 +34,12 @@ ValidationStatus = Literal["pass", "insufficient", "fail"]
 GateStatus = Literal["pass", "insufficient", "fail", "unavailable"]
 EvidenceStatus = Literal["pass", "fail", "unavailable"]
 
-RANKING_V4_TRIAL_LEDGER_SCHEMA_VERSION = "ranking-v4-immutable-trial-ledger-v1"
-RANKING_V4_TRIAL_LEDGER_ID = "QAGENT-RANK-V4-ALL-KNOWN-TRIALS"
-RANKING_V4_VALIDATION_SCHEMA_VERSION = "ranking-v4-historical-validation-v1"
+RANKING_V4_TRIAL_LEDGER_SCHEMA_VERSION = "ranking-v4.1-immutable-trial-ledger-v1"
+RANKING_V4_TRIAL_LEDGER_ID = "QAGENT-RANK-V4.1-ALL-KNOWN-TRIALS"
+RANKING_V4_VALIDATION_SCHEMA_VERSION = "ranking-v4.1-historical-validation-v1"
 
-_PBO_EVIDENCE_SCHEMA_VERSION = "ranking-v4-cscv-pbo-evidence-v1"
-_PBO_MATRIX_SCHEMA_VERSION = "ranking-v4-real-model-return-matrix-v1"
+_PBO_EVIDENCE_SCHEMA_VERSION = "ranking-v4.1-cscv-pbo-evidence-v1"
+_PBO_MATRIX_SCHEMA_VERSION = "ranking-v4.1-real-model-return-matrix-v1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PROTOCOL = build_ranking_v4_protocol()
 _STATISTICS = _PROTOCOL.statistics_definition
@@ -90,7 +90,7 @@ class RankingV4TrialLedgerEvidence(BaseModel):
     known_trial_ids: tuple[str, ...]
     research_attempt_ids: tuple[str, ...]
     research_attempt_inventory_digest: str
-    current_trial_id: str = "ranking_v4_full"
+    current_trial_id: str = "ranking_v41_full"
     experiment_registry_digest: str
     trial_series: tuple[RankingV4TrialSeries, ...]
     ledger_digest: str
@@ -235,7 +235,7 @@ def build_ranking_v4_trial_ledger(
         "research_attempt_inventory_digest": _sha256(
             {"research_attempt_ids": list(normalized_attempt_ids)}
         ),
-        "current_trial_id": "ranking_v4_full",
+        "current_trial_id": "ranking_v41_full",
         "experiment_registry_digest": experiment_registry_digest,
         "trial_series": [item.model_dump(mode="json") for item in series],
     }
@@ -394,7 +394,7 @@ def evaluate_ranking_v4_historical_validation(
         adjusted = holm_bonferroni(
             [family_p_values[model_id] for model_id in RANKING_V4_FROZEN_PBO_MODEL_IDS]
         )
-        holm_adjusted = adjusted[RANKING_V4_FROZEN_PBO_MODEL_IDS.index("ranking_v4_full")]
+        holm_adjusted = adjusted[RANKING_V4_FROZEN_PBO_MODEL_IDS.index("ranking_v41_full")]
 
     ledger = _validate_trial_ledger(
         trial_ledger,
@@ -405,7 +405,7 @@ def evaluate_ranking_v4_historical_validation(
     )
     dsr_probability, dsr_reason = _deflated_sharpe_probability(
         ledger.matrix,
-        current_trial_id="ranking_v4_full",
+        current_trial_id="ranking_v41_full",
         baseline_values=baseline_values,
         validation_dates=common_dates if dates_are_common else (),
         block_length=DEPENDENCE_BLOCK_LENGTH,
@@ -681,7 +681,7 @@ def _validate_pbo_evidence(
         tuple(validation_dates) != matrix_dates
         or tuple(baseline_values)
         != tuple(item[1] for item in matrix["constraint_matched_baseline"])
-        or tuple(challenger_values) != tuple(item[1] for item in matrix["ranking_v4_full"])
+        or tuple(challenger_values) != tuple(item[1] for item in matrix["ranking_v41_full"])
     ):
         return _PBOValidation(
             status="unavailable",
@@ -796,7 +796,7 @@ def _validate_trial_ledger(
         )
     if (
         ledger.known_trial_ids != _required_trial_ids(normalized_attempt_ids)
-        or ledger.current_trial_id != "ranking_v4_full"
+        or ledger.current_trial_id != "ranking_v41_full"
     ):
         return _LedgerValidation(
             status="unavailable",

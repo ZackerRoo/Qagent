@@ -11,6 +11,7 @@ import pytest
 from qagent.backtesting.ranking_v4_experiment_registry import (
     RankingV4ExperimentRegistryError,
     build_ranking_v3_rejected_summary,
+    build_ranking_v4_rejected_summary,
     build_ranking_v4_experiment_registry,
     ranking_v4_experiment_registry_digest_is_valid,
 )
@@ -19,10 +20,13 @@ from qagent.backtesting.ranking_v4_protocol import (
     ranking_v4_protocol_digest_is_valid,
 )
 
-FROZEN_V4_PROTOCOL_DIGEST = "37ddf19d7f63f2787d5ee2c0931c13a9e831fddcb8c564789556a67123c38d9b"
-FROZEN_V4_REGISTRY_DIGEST = "df73b5cfc207c8b33799d288f7d95c38152c7f976990d48997d896e4d61c0623"
+FROZEN_V4_PROTOCOL_DIGEST = "8d95996fbccc99c4df2d458220ead0147e51f3a2b2032628e59572e580eea6e3"
+FROZEN_V4_REGISTRY_DIGEST = "63ae2333f8ed1ef1d45c9551143f5fbffdc1ff0f4fb479e3e26139a49c597298"
 FROZEN_V3_REJECTED_SUMMARY_DIGEST = (
     "197feb4614d18cf182bc4dbe37cb2a1d3b8a94c847b738aad51835f488d7cf54"
+)
+FROZEN_V4_REJECTED_SUMMARY_DIGEST = (
+    "75ff874d9a9d6cf258d20cf472be377a3dff36657c2f317a0bcd3f1ca81f7fd8"
 )
 
 
@@ -157,7 +161,7 @@ def test_v4_gates_are_not_weaker_than_rejected_v3_and_unknowns_fail_closed():
     statistics = protocol.statistics_definition
     assert statistics.pbo_model_ids == (
         "constraint_matched_baseline",
-        "ranking_v4_full",
+        "ranking_v41_full",
         "channel_baseline",
         "channel_trend",
         "channel_breakout",
@@ -285,23 +289,30 @@ def test_v3_summary_and_v4_registry_have_stable_digests_and_detect_tampering():
     first = build_ranking_v4_experiment_registry()
     second = build_ranking_v4_experiment_registry()
     summary = first.predecessor_summaries[0]
+    v4_summary = first.predecessor_summaries[1]
 
     assert first == second
     assert first.registry_digest == second.registry_digest
     assert first.registry_digest == FROZEN_V4_REGISTRY_DIGEST
     assert summary.summary_digest == second.predecessor_summaries[0].summary_digest
     assert summary.summary_digest == FROZEN_V3_REJECTED_SUMMARY_DIGEST
+    assert v4_summary == build_ranking_v4_rejected_summary()
+    assert v4_summary.summary_digest == FROZEN_V4_REJECTED_SUMMARY_DIGEST
+    assert v4_summary.completed_trade_count == 0
+    assert v4_summary.probability_of_backtest_overfit == Decimal("0.833333")
     assert ranking_v4_experiment_registry_digest_is_valid(first)
 
     tampered_summary = summary.model_copy(update={"benchmark_excess_return_pct": Decimal("1")})
-    tampered_registry = first.model_copy(update={"predecessor_summaries": (tampered_summary,)})
+    tampered_registry = first.model_copy(
+        update={"predecessor_summaries": (tampered_summary, v4_summary)}
+    )
     assert not ranking_v4_experiment_registry_digest_is_valid(tampered_registry)
 
     with pytest.raises(
         RankingV4ExperimentRegistryError,
         match="cannot be rewritten|digest mismatch",
     ):
-        build_ranking_v4_experiment_registry(predecessor_summaries=(tampered_summary,))
+        build_ranking_v4_experiment_registry(predecessor_summaries=(tampered_summary, v4_summary))
 
 
 def test_v4_protocol_digest_detects_tampering_even_when_payload_still_looks_valid():

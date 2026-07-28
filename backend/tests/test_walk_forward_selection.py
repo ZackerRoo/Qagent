@@ -858,7 +858,7 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert first.ranking_v4.historical_validation.deployment_scope == "shadow_only"
     assert set(first.ranking_v4.pbo_evidence["registered_model_ids"]) == {
         "constraint_matched_baseline",
-        "ranking_v4_full",
+        "ranking_v41_full",
         "channel_baseline",
         "channel_trend",
         "channel_breakout",
@@ -1267,9 +1267,7 @@ def test_walk_forward_result_load_rejects_payload_tampering(tmp_path):
     with repository.session_factory() as session:
         row = session.get(_tables.WalkForwardRunRow, "tampered-walk-forward")
         original_payload.pop("result_digest_schema")
-        row.reproducibility_digest = (
-            "legacy" + str(row.reproducibility_digest)[6:]
-        )
+        row.reproducibility_digest = "legacy" + str(row.reproducibility_digest)[6:]
         row.payload_json = json.dumps(original_payload, sort_keys=True)
         session.commit()
 

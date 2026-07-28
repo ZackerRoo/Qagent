@@ -59,6 +59,7 @@ def _candidate(
         features=features or _features(),
         market_regime_features_complete=True,
         constraint_data_complete=True,
+        constraint_evidence_mode="point_in_time_metadata",
         underlying_evidence_complete=True,
     )
 

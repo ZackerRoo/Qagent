@@ -45,6 +45,7 @@ def _candidate(
         ),
         market_regime_features_complete=True,
         constraint_data_complete=True,
+        constraint_evidence_mode="point_in_time_metadata",
         underlying_evidence_complete=True,
     )
 
@@ -264,12 +265,22 @@ def test_v4_portfolio_blocks_low_liquidity_capacity_and_beta():
 
 
 def test_v4_portfolio_fails_closed_for_missing_constraint_evidence():
-    stock = _candidate("CN:000001").model_copy(update={"constraint_data_complete": False})
+    stock = _candidate("CN:000001").model_copy(
+        update={
+            "constraint_data_complete": False,
+            "constraint_evidence_mode": "incomplete",
+        }
+    )
     etf = _candidate(
         "CN:510001",
         asset_type="etf",
         underlying_ids=["CN:000002"],
-    ).model_copy(update={"underlying_evidence_complete": False})
+    ).model_copy(
+        update={
+            "underlying_evidence_complete": False,
+            "constraint_evidence_mode": "return_risk_proxy",
+        }
+    )
 
     result = select_ranking_v4_portfolio(
         _decision([stock, etf]),
@@ -278,9 +289,50 @@ def test_v4_portfolio_fails_closed_for_missing_constraint_evidence():
     )
     blocked = {item.instrument_id: item.reasons for item in result.blocked}
 
-    assert result.selected_count == 0
+    assert result.selected_count == 1
+    assert result.selected[0].instrument_id == "CN:510001"
     assert "constraint_evidence_incomplete" in blocked["CN:000001"]
-    assert "etf_underlying_evidence_missing" in blocked["CN:510001"]
+
+
+def test_v41_etf_without_constituents_requires_return_correlation_for_second_position():
+    first = _candidate(
+        "CN:510001",
+        asset_type="etf",
+        underlying_ids=[],
+    ).model_copy(
+        update={
+            "underlying_evidence_complete": False,
+            "constraint_evidence_mode": "return_risk_proxy",
+        }
+    )
+    second = _candidate(
+        "CN:510002",
+        asset_type="etf",
+        underlying_ids=[],
+    ).model_copy(
+        update={
+            "underlying_evidence_complete": False,
+            "constraint_evidence_mode": "return_risk_proxy",
+        }
+    )
+
+    missing = select_ranking_v4_portfolio(
+        _decision([first, second]),
+        [first, second],
+        pairwise_correlations={},
+    )
+    proven = select_ranking_v4_portfolio(
+        _decision([first, second]),
+        [first, second],
+        pairwise_correlations={(first.instrument_id, second.instrument_id): 0.4},
+    )
+
+    assert missing.selected_count == 1
+    assert (
+        "correlation_evidence_missing"
+        in {item.instrument_id: item.reasons for item in missing.blocked}[second.instrument_id]
+    )
+    assert proven.selected_count == 2
 
 
 def test_v4_portfolio_finds_global_optimum_that_greedy_misses():

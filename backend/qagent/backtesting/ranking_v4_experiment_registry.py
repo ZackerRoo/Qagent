@@ -10,8 +10,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, model_validator
 
 
-RANKING_V4_EXPERIMENT_REGISTRY_SCHEMA_VERSION = "ranking-v4-experiment-registry-v1"
-RANKING_V4_EXPERIMENT_REGISTRY_ID = "QAGENT-RANK-V4-PRIOR-EVIDENCE-20260727"
+RANKING_V4_EXPERIMENT_REGISTRY_SCHEMA_VERSION = "ranking-v4.1-experiment-registry-v1"
+RANKING_V4_EXPERIMENT_REGISTRY_ID = "QAGENT-RANK-V4.1-PRIOR-EVIDENCE-20260728"
 RANKING_V3_REJECTED_EXPERIMENT_ID = "walk-forward-20260726164443-7fd44f0b"
 RANKING_V3_REJECTED_CODE_REVISION = "dbd7fa0f6ec76990eca4de8325e14866dfbfe8e7"
 RANKING_V3_REJECTED_DATASET_REVISION = 8939
@@ -20,6 +20,20 @@ RANKING_V3_REJECTED_CANDIDATE_COVERAGE = Decimal("0.986179")
 RANKING_V3_REJECTED_BENCHMARK_RETURN_PCT = Decimal("113.1521")
 RANKING_V3_REJECTED_BENCHMARK_EXCESS_PCT = Decimal("-107.3842")
 RANKING_V3_REJECTED_OFFICIAL_PAPER_TRADE_COUNT = 0
+RANKING_V4_REJECTED_EXPERIMENT_ID = "walk-forward-20260727143622-6dd795aa"
+RANKING_V4_REJECTED_CODE_REVISION = "d256dc947fd4830b4bf5184eef9fd9d25cdd1896"
+RANKING_V4_REJECTED_DATASET_REVISION = 8939
+RANKING_V4_REJECTED_SNAPSHOT_COUNT = 102
+RANKING_V4_REJECTED_CANDIDATE_COVERAGE = Decimal("0.993831")
+RANKING_V4_REJECTED_MODEL_RETURN_PCT = Decimal("0")
+RANKING_V4_REJECTED_STRESS_RETURN_PCT = Decimal("0")
+RANKING_V4_REJECTED_BASELINE_RETURN_PCT = Decimal("-1.1319")
+RANKING_V4_REJECTED_BENCHMARK_EXCESS_PCT = Decimal("1.13189")
+RANKING_V4_REJECTED_BOOTSTRAP_LOWER_BOUND_PCT = Decimal("-0.02637195")
+RANKING_V4_REJECTED_HOLM_P_VALUE = Decimal("1")
+RANKING_V4_REJECTED_PBO = Decimal("0.833333")
+RANKING_V4_REJECTED_COMPLETED_TRADE_COUNT = 0
+RANKING_V4_REJECTED_OFFICIAL_PAPER_TRADE_COUNT = 0
 
 _FULL_GIT_REVISION = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -34,7 +48,7 @@ class RankingV4ExperimentSummary(BaseModel):
 
     summary_schema_version: str
     experiment_id: str
-    model_generation: Literal["ranking_v3"]
+    model_generation: Literal["ranking_v3", "ranking_v4"]
     disposition: Literal["rejected"]
     evidence_class: Literal["exploratory_development_evidence"]
     evaluated_on: date
@@ -45,7 +59,11 @@ class RankingV4ExperimentSummary(BaseModel):
     candidate_outcome_coverage_ratio: Decimal
     historical_portfolio_benchmark_id: str
     historical_portfolio_benchmark_return_pct: Decimal
+    historical_model_return_pct: Decimal | None = None
+    stress_cost_adjusted_return_pct: Decimal | None = None
     benchmark_excess_return_pct: Decimal
+    completed_trade_count: int | None = None
+    bootstrap_one_sided_95_lower_bound_pct: Decimal | None = None
     official_paper_trade_count: int
     failed_gates: tuple[str, ...]
     confirmatory_holm_adjusted_p_value: Decimal | None = None
@@ -71,6 +89,16 @@ class RankingV4ExperimentSummary(BaseModel):
             if not value.is_finite():
                 raise ValueError(f"{label} must be finite")
         for label, value in (
+            ("historical_model_return_pct", self.historical_model_return_pct),
+            ("stress_cost_adjusted_return_pct", self.stress_cost_adjusted_return_pct),
+            (
+                "bootstrap_one_sided_95_lower_bound_pct",
+                self.bootstrap_one_sided_95_lower_bound_pct,
+            ),
+        ):
+            if value is not None and not value.is_finite():
+                raise ValueError(f"{label} must be null or finite")
+        for label, value in (
             ("confirmatory_holm_adjusted_p_value", self.confirmatory_holm_adjusted_p_value),
             ("deflated_sharpe_probability", self.deflated_sharpe_probability),
             ("probability_of_backtest_overfit", self.probability_of_backtest_overfit),
@@ -80,7 +108,16 @@ class RankingV4ExperimentSummary(BaseModel):
         return self
 
     def stable_payload(self) -> dict[str, object]:
-        return self.model_dump(mode="json", exclude={"summary_digest"})
+        payload = self.model_dump(mode="json", exclude={"summary_digest"})
+        if self.model_generation == "ranking_v3":
+            for key in (
+                "historical_model_return_pct",
+                "stress_cost_adjusted_return_pct",
+                "completed_trade_count",
+                "bootstrap_one_sided_95_lower_bound_pct",
+            ):
+                payload.pop(key, None)
+        return payload
 
     def require_valid(self) -> None:
         _validate_summary(self)
@@ -144,12 +181,64 @@ def _ranking_v3_rejected_summary_payload() -> dict[str, object]:
     }
 
 
+def build_ranking_v4_rejected_summary() -> RankingV4ExperimentSummary:
+    payload = _ranking_v4_rejected_summary_payload()
+    summary = RankingV4ExperimentSummary(
+        **payload,
+        summary_digest=_digest(payload),
+    )
+    summary.require_valid()
+    return summary
+
+
+def _ranking_v4_rejected_summary_payload() -> dict[str, object]:
+    return {
+        "summary_schema_version": "ranking-v4.1-predecessor-summary-v1",
+        "experiment_id": RANKING_V4_REJECTED_EXPERIMENT_ID,
+        "model_generation": "ranking_v4",
+        "disposition": "rejected",
+        "evidence_class": "exploratory_development_evidence",
+        "evaluated_on": "2026-07-27",
+        "source_revision": RANKING_V4_REJECTED_CODE_REVISION,
+        "dataset_revision": RANKING_V4_REJECTED_DATASET_REVISION,
+        "configured_snapshot_count": RANKING_V4_REJECTED_SNAPSHOT_COUNT,
+        "completed_snapshot_count": RANKING_V4_REJECTED_SNAPSHOT_COUNT,
+        "candidate_outcome_coverage_ratio": str(RANKING_V4_REJECTED_CANDIDATE_COVERAGE),
+        "historical_portfolio_benchmark_id": "constraint_matched_baseline",
+        "historical_portfolio_benchmark_return_pct": str(RANKING_V4_REJECTED_BASELINE_RETURN_PCT),
+        "historical_model_return_pct": str(RANKING_V4_REJECTED_MODEL_RETURN_PCT),
+        "stress_cost_adjusted_return_pct": str(RANKING_V4_REJECTED_STRESS_RETURN_PCT),
+        "benchmark_excess_return_pct": str(RANKING_V4_REJECTED_BENCHMARK_EXCESS_PCT),
+        "completed_trade_count": RANKING_V4_REJECTED_COMPLETED_TRADE_COUNT,
+        "bootstrap_one_sided_95_lower_bound_pct": str(
+            RANKING_V4_REJECTED_BOOTSTRAP_LOWER_BOUND_PCT
+        ),
+        "official_paper_trade_count": RANKING_V4_REJECTED_OFFICIAL_PAPER_TRADE_COUNT,
+        "failed_gates": [
+            "minimum_completed_trades",
+            "positive_stress_cost_adjusted_return",
+            "positive_block_bootstrap_lower_bound",
+            "holm_adjusted_significance",
+            "subperiod_robustness",
+            "maximum_probability_of_backtest_overfit",
+            "deflated_sharpe_probability",
+        ],
+        "confirmatory_holm_adjusted_p_value": str(RANKING_V4_REJECTED_HOLM_P_VALUE),
+        "deflated_sharpe_probability": None,
+        "probability_of_backtest_overfit": str(RANKING_V4_REJECTED_PBO),
+        "unknown_statistics_policy": "null_means_unobserved_never_zero_or_passed",
+    }
+
+
 def build_ranking_v4_experiment_registry(
     *,
     predecessor_summaries: tuple[RankingV4ExperimentSummary, ...] | None = None,
 ) -> RankingV4ExperimentRegistry:
     summaries = (
-        (build_ranking_v3_rejected_summary(),)
+        (
+            build_ranking_v3_rejected_summary(),
+            build_ranking_v4_rejected_summary(),
+        )
         if predecessor_summaries is None
         else tuple(
             sorted(
@@ -161,7 +250,7 @@ def build_ranking_v4_experiment_registry(
     payload = _registry_payload(
         schema_version=RANKING_V4_EXPERIMENT_REGISTRY_SCHEMA_VERSION,
         registry_id=RANKING_V4_EXPERIMENT_REGISTRY_ID,
-        frozen_on=date(2026, 7, 27),
+        frozen_on=date(2026, 7, 28),
         predecessor_summaries=summaries,
         v4_registration_state="preregistered_code_not_yet_frozen",
     )
@@ -199,7 +288,9 @@ def _registry_payload(
         "schema_version": schema_version,
         "registry_id": registry_id,
         "frozen_on": frozen_on.isoformat(),
-        "predecessor_summaries": [item.model_dump(mode="json") for item in summaries],
+        "predecessor_summaries": [
+            {**item.stable_payload(), "summary_digest": item.summary_digest} for item in summaries
+        ],
         "v4_registration_state": v4_registration_state,
     }
 
@@ -207,10 +298,14 @@ def _registry_payload(
 def _validate_summary(summary: RankingV4ExperimentSummary) -> None:
     if summary.summary_digest != _digest(summary.stable_payload()):
         raise RankingV4ExperimentRegistryError("experiment summary digest mismatch")
-    expected = _ranking_v3_rejected_summary_payload()
+    expected_by_generation = {
+        "ranking_v3": _ranking_v3_rejected_summary_payload(),
+        "ranking_v4": _ranking_v4_rejected_summary_payload(),
+    }
+    expected = expected_by_generation[summary.model_generation]
     if summary.stable_payload() != expected:
         raise RankingV4ExperimentRegistryError(
-            "Ranking V3 rejected evidence cannot be rewritten by Ranking V4"
+            "rejected predecessor evidence cannot be rewritten by Ranking V4.1"
         )
 
 
@@ -223,9 +318,16 @@ def _validate_registry(registry: RankingV4ExperimentRegistry) -> None:
         raise RankingV4ExperimentRegistryError(
             "V4 cannot claim confirmatory status before its code is frozen"
         )
-    if len(registry.predecessor_summaries) != 1:
+    if len(registry.predecessor_summaries) != 2:
         raise RankingV4ExperimentRegistryError(
-            "registry must contain exactly one frozen V3 predecessor summary"
+            "registry must contain the frozen V3 and V4 predecessor summaries"
+        )
+    if {item.model_generation for item in registry.predecessor_summaries} != {
+        "ranking_v3",
+        "ranking_v4",
+    }:
+        raise RankingV4ExperimentRegistryError(
+            "registry must contain exactly one V3 and one V4 rejection"
         )
     for summary in registry.predecessor_summaries:
         summary.require_valid()

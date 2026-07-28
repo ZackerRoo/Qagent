@@ -33,7 +33,7 @@ def _dates(count: int = DATE_COUNT) -> list[date]:
 def _passing_values() -> dict[str, list[float]]:
     return {
         "constraint_matched_baseline": [0.0] * DATE_COUNT,
-        "ranking_v4_full": [
+        "ranking_v41_full": [
             1.1 + [0.0, 0.25, -0.1, 0.15, -0.2, 0.1][index % 6] for index in range(DATE_COUNT)
         ],
         "channel_baseline": [
@@ -102,16 +102,18 @@ def _passing_inputs(
     model_matrix = _matrix(selected_values)
     pbo = evaluate_ranking_v4_cscv_pbo(model_matrix)
     protocol = build_ranking_v4_protocol()
-    predecessor_id = protocol.experiment_registry.predecessor_summaries[0].experiment_id
+    predecessor_ids = [
+        item.experiment_id for item in protocol.experiment_registry.predecessor_summaries
+    ]
     complete_trial_matrix = {
         **model_matrix,
-        predecessor_id: model_matrix["channel_baseline"],
+        **{predecessor_id: model_matrix["channel_baseline"] for predecessor_id in predecessor_ids},
     }
     ledger = build_ranking_v4_trial_ledger(
         complete_trial_matrix,
         experiment_registry_digest=protocol.experiment_registry.registry_digest,
     )
-    challenger_values = selected_values["ranking_v4_full"]
+    challenger_values = selected_values["ranking_v41_full"]
     return {
         "baseline_returns": _observations(selected_values["constraint_matched_baseline"]),
         "challenger_returns": _observations(

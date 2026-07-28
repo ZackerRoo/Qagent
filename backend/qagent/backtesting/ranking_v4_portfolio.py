@@ -41,6 +41,7 @@ class RankingV4SelectedPosition(BaseModel):
     factor_signals: list[str] = Field(default_factory=list)
     asset_type: str
     beta: float
+    constraint_evidence_mode: str
     reason: str
 
 
@@ -181,6 +182,7 @@ def select_ranking_v4_portfolio(
             factor_signals=sorted(set(item.candidate.factor_signals)),
             asset_type=item.candidate.asset_type,
             beta=round(item.beta, 6),
+            constraint_evidence_mode=item.candidate.constraint_evidence_mode,
             reason=item.score.reason,
         )
         for position, item in enumerate(selected_entries, start=1)
@@ -327,8 +329,6 @@ def _constraint_reasons(
         reasons.append("capacity_below_minimum")
     if beta is None:
         reasons.append("beta_evidence_missing")
-    if _is_etf(candidate) and not candidate.underlying_evidence_complete:
-        reasons.append("etf_underlying_evidence_missing")
     if not selected:
         return reasons
 
@@ -403,20 +403,28 @@ def _overlap_reasons(
         other_is_etf = _is_etf(other)
         other_underlyings = set(other.underlying_ids)
         if candidate_is_etf and other_is_etf:
-            if (
-                len(candidate_underlyings.intersection(other_underlyings))
-                > V4_MAX_SHARED_ETF_UNDERLYING_IDS
-            ):
-                reasons.append("etf_underlying_overlap")
-            if (
-                len(candidate_indexes.intersection(other.index_memberships))
-                > V4_MAX_SHARED_ETF_INDEX_MEMBERSHIPS
-            ):
-                reasons.append("etf_index_overlap")
+            if candidate.underlying_evidence_complete and other.underlying_evidence_complete:
+                if (
+                    len(candidate_underlyings.intersection(other_underlyings))
+                    > V4_MAX_SHARED_ETF_UNDERLYING_IDS
+                ):
+                    reasons.append("etf_underlying_overlap")
+                if (
+                    len(candidate_indexes.intersection(other.index_memberships))
+                    > V4_MAX_SHARED_ETF_INDEX_MEMBERSHIPS
+                ):
+                    reasons.append("etf_index_overlap")
         elif candidate_is_etf:
-            if other.instrument_id in candidate_underlyings:
+            if (
+                candidate.underlying_evidence_complete
+                and other.instrument_id in candidate_underlyings
+            ):
                 reasons.append("stock_etf_underlying_overlap")
-        elif other_is_etf and candidate.instrument_id in other_underlyings:
+        elif (
+            other_is_etf
+            and other.underlying_evidence_complete
+            and candidate.instrument_id in other_underlyings
+        ):
             reasons.append("stock_etf_underlying_overlap")
     return reasons
 
