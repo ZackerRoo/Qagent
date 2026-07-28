@@ -571,7 +571,17 @@ def _reusable_walk_forward_checkpoints(
         )
         if checkpoints:
             candidates.append(checkpoints)
-    for run in repo.list_walk_forward_runs(provider=manifest.provider_mode, limit=20):
+    try:
+        completed_runs = repo.list_walk_forward_runs(
+            provider=manifest.provider_mode,
+            limit=20,
+        )
+    except ValueError:
+        # A prior protocol can become intentionally unreadable after its
+        # result schema changes. It is not valid checkpoint evidence for the
+        # current protocol, so skip run reuse without weakening validation.
+        completed_runs = []
+    for run in completed_runs:
         if run.status != "succeeded":
             continue
         snapshots = run.payload.get("snapshots")

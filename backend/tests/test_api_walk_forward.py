@@ -939,6 +939,32 @@ def test_new_walk_forward_job_never_reuses_partial_prefix_from_failed_validation
     assert submitted[0][1] == (job.job_id,)
 
 
+def test_checkpoint_reuse_ignores_incompatible_prior_run_payloads():
+    manifest = routes.build_walk_forward_experiment_manifest(
+        provider_mode="free",
+        dataset_revision=7,
+        start_date=date(2025, 1, 2),
+        end_date=date(2025, 3, 31),
+        rebalance_step_sessions=5,
+        lookback_days=400,
+    )
+
+    class IncompatibleRunRepository:
+        def list_walk_forward_jobs(self, **_kwargs):
+            return []
+
+        def list_walk_forward_runs(self, **_kwargs):
+            raise ValueError("prior result digest does not match current schema")
+
+    checkpoints = routes._reusable_walk_forward_checkpoints(
+        IncompatibleRunRepository(),
+        manifest=manifest,
+        sessions=[date(2025, 1, 2)],
+    )
+
+    assert checkpoints == []
+
+
 def test_walk_forward_completed_run_requires_matching_experiment_digest():
     manifest = routes.build_walk_forward_experiment_manifest(
         provider_mode="free",
