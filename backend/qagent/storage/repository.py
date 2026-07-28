@@ -491,6 +491,29 @@ class WalkForwardJobRecord(BaseModel):
             )
         if self.total_snapshots <= 0:
             return 0
+        if self.status == "running":
+            if self.phase == "preparing_historical_replay":
+                return 1
+            if self.phase == "historical_replay":
+                return max(
+                    2,
+                    min(
+                        80,
+                        int(self.processed_snapshots * 80 / self.total_snapshots),
+                    ),
+                )
+            final_phase_progress = {
+                "portfolio_simulation": 82,
+                "portfolio_baseline": 82,
+                "candidate_outcomes": 85,
+                "candidate_outcomes_stress": 88,
+                "ranking_models": 90,
+                "portfolio_channel_selection": 92,
+                "portfolio_channel_backtests": 95,
+                "validation_and_benchmarks": 97,
+            }
+            if self.phase in final_phase_progress:
+                return final_phase_progress[self.phase]
         return max(
             0,
             min(99, int(self.processed_snapshots * 100 / self.total_snapshots)),

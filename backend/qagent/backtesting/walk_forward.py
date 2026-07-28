@@ -1466,11 +1466,12 @@ def run_full_market_walk_forward_selection(
         )
         _report_progress(
             progress_callback,
-            phase="portfolio_simulation",
+            phase="portfolio_baseline",
             processed_snapshots=len(snapshots),
             total_snapshots=len(sessions),
             lease_heartbeat=lease_heartbeat,
         )
+        _raise_if_walk_forward_cancelled(cancellation_check)
         lease_heartbeat.maintain_now()
         execution_resolver = VersionedAshareExecutionResolver(
             owner_repository,
@@ -1506,6 +1507,14 @@ def run_full_market_walk_forward_selection(
             max_positions=10,
             execution_rule_resolver=execution_resolver,
         )
+        _report_progress(
+            progress_callback,
+            phase="candidate_outcomes",
+            processed_snapshots=len(snapshots),
+            total_snapshots=len(sessions),
+            lease_heartbeat=lease_heartbeat,
+        )
+        _raise_if_walk_forward_cancelled(cancellation_check)
         candidate_outcome_ledger = resolve_candidate_outcome_ledger(
             signals=candidate_pool_signals,
             provider=market_provider,
@@ -1522,6 +1531,14 @@ def run_full_market_walk_forward_selection(
             max_holding_days=20,
             execution_rule_resolver=execution_resolver,
         )
+        _report_progress(
+            progress_callback,
+            phase="candidate_outcomes_stress",
+            processed_snapshots=len(snapshots),
+            total_snapshots=len(sessions),
+            lease_heartbeat=lease_heartbeat,
+        )
+        _raise_if_walk_forward_cancelled(cancellation_check)
         ranking_v4_stress_candidate_outcome_ledger = resolve_candidate_outcome_ledger(
             signals=ranking_v4_candidate_pool_signals,
             provider=market_provider,
@@ -1533,6 +1550,14 @@ def run_full_market_walk_forward_selection(
             max_holding_days=20,
             execution_rule_resolver=execution_resolver,
         )
+        _report_progress(
+            progress_callback,
+            phase="ranking_models",
+            processed_snapshots=len(snapshots),
+            total_snapshots=len(sessions),
+            lease_heartbeat=lease_heartbeat,
+        )
+        _raise_if_walk_forward_cancelled(cancellation_check)
         ranking_v3_observations = _build_ranking_v3_observations(
             snapshots,
             ledger=candidate_outcome_ledger,
@@ -1556,6 +1581,28 @@ def run_full_market_walk_forward_selection(
             observations=ranking_v4_observations,
             market_provider=market_provider,
         )
+        ranking_v4_model_selections_by_date: dict[
+            date,
+            dict[str, list[WalkForwardSelection]],
+        ] = {}
+        for selection_index, snapshot in enumerate(snapshots, start=1):
+            _raise_if_walk_forward_cancelled(cancellation_check)
+            ranking_v4_model_selections_by_date[snapshot.decision_date] = (
+                _ranking_v4_model_selections(snapshot)
+            )
+            if (
+                selection_index == 1
+                or selection_index % 5 == 0
+                or selection_index == len(snapshots)
+            ):
+                _report_progress(
+                    progress_callback,
+                    phase="portfolio_channel_selection",
+                    processed_snapshots=len(snapshots),
+                    total_snapshots=len(sessions),
+                    current_date=snapshot.decision_date,
+                    lease_heartbeat=lease_heartbeat,
+                )
         execution_challenger_portfolio = run_signal_portfolio_backtest(
             signals=top_5_signals,
             instrument_ids=sorted({item.instrument_id for item in top_5_signals}),
@@ -1658,6 +1705,7 @@ def run_full_market_walk_forward_selection(
                 snapshots,
                 size=5,
                 selection_source=f"ranking_v4_{model_id}",
+                ranking_v4_model_selections_by_date=(ranking_v4_model_selections_by_date),
             )
             ranking_v4_channel_portfolios[model_id] = run_signal_portfolio_backtest(
                 signals=channel_signals,
@@ -1668,6 +1716,14 @@ def run_full_market_walk_forward_selection(
                 max_positions=5,
                 execution_rule_resolver=execution_resolver,
             )
+        _report_progress(
+            progress_callback,
+            phase="portfolio_channel_backtests",
+            processed_snapshots=len(snapshots),
+            total_snapshots=len(sessions),
+            lease_heartbeat=lease_heartbeat,
+        )
+        _raise_if_walk_forward_cancelled(cancellation_check)
         audit_last_decision_date = _ranking_v3_historical_audit_last_decision_date(
             start,
             end,
@@ -1954,6 +2010,7 @@ def run_full_market_walk_forward_selection(
         baseline_portfolio=ranking_v4_baseline_portfolio,
         challenger_portfolio=ranking_v4_portfolio,
         stress_portfolio=ranking_v4_stress_portfolio,
+        model_selections_by_date=ranking_v4_model_selections_by_date,
     )
     ranking_v4_validation_dates = {item.rebalance_date for item in ranking_v4_baseline_returns}
     ranking_v4_model_matrix = {
@@ -5429,6 +5486,11 @@ def _ranking_v4_selected_return_observations(
     baseline_portfolio: PortfolioBacktestResult,
     challenger_portfolio: PortfolioBacktestResult,
     stress_portfolio: PortfolioBacktestResult,
+    model_selections_by_date: dict[
+        date,
+        dict[str, list[WalkForwardSelection]],
+    ]
+    | None = None,
 ) -> tuple[
     list[RankingV4ReturnObservation],
     list[RankingV4ReturnObservation],
@@ -5461,7 +5523,13 @@ def _ranking_v4_selected_return_observations(
     valid_outcome_count = 0
     expected_outcome_count = 0
     for snapshot in snapshots:
-        model_selections = _ranking_v4_model_selections(snapshot)
+        model_selections = (
+            model_selections_by_date.get(snapshot.decision_date)
+            if model_selections_by_date is not None
+            else None
+        )
+        if model_selections is None:
+            model_selections = _ranking_v4_model_selections(snapshot)
         snapshot_expected = 0
         snapshot_valid = 0
         for selections in model_selections.values():
@@ -6342,6 +6410,11 @@ def _signals(
     *,
     size: int,
     selection_source: str = "baseline",
+    ranking_v4_model_selections_by_date: dict[
+        date,
+        dict[str, list[WalkForwardSelection]],
+    ]
+    | None = None,
 ) -> list[BacktestSignal]:
     result = []
     for snapshot in snapshots:
@@ -6363,7 +6436,14 @@ def _signals(
             selections = snapshot.ranking_v4_top_5
         elif selection_source.startswith("ranking_v4_channel_"):
             model_id = selection_source.removeprefix("ranking_v4_")
-            selections = _ranking_v4_model_selections(snapshot).get(model_id, [])
+            cached = (
+                ranking_v4_model_selections_by_date.get(snapshot.decision_date)
+                if ranking_v4_model_selections_by_date is not None
+                else None
+            )
+            selections = (
+                cached if cached is not None else _ranking_v4_model_selections(snapshot)
+            ).get(model_id, [])
         else:
             selections = snapshot.top_5 if size == 5 else snapshot.top_10
         result.extend(

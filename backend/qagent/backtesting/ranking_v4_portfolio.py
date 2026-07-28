@@ -244,71 +244,131 @@ def _maximize_conservative_utility(
     )
     best_utility = Decimal("0")
     best_selection: tuple[_EligiblePosition, ...] = ()
+    utilities = [item.conservative_utility for item in ordered]
+    utility_prefix = [Decimal("0")]
+    for utility in utilities:
+        utility_prefix.append(utility_prefix[-1] + utility)
+
+    # Pair constraints are immutable for one decision. Computing them once
+    # avoids rebuilding sets and normalizing strings at every search node.
+    incompatible_masks = [0] * len(ordered)
+    for left_index, left in enumerate(ordered):
+        for right_index in range(left_index + 1, len(ordered)):
+            right = ordered[right_index]
+            if not _pair_is_compatible(
+                left.candidate,
+                right.candidate,
+                pairwise_correlations=pairwise_correlations,
+                require_pairwise_correlation_evidence=require_pairwise_correlation_evidence,
+            ):
+                incompatible_masks[right_index] |= 1 << left_index
+
+    strategies: dict[str, int] = {}
+    industries: dict[str, int] = {}
+    themes: dict[str, int] = {}
+    factors: dict[str, int] = {}
+    selected_indexes: list[int] = []
 
     def search(
         index: int,
-        selected: tuple[_EligiblePosition, ...],
+        selected_mask: int,
         total_utility: Decimal,
+        beta_sum: float,
     ) -> None:
         nonlocal best_selection, best_utility
-        if total_utility > best_utility and _portfolio_beta_is_valid(selected):
+        selected_count = len(selected_indexes)
+        if total_utility > best_utility and (
+            selected_count == 0 or beta_sum / selected_count <= V4_MAX_PORTFOLIO_BETA
+        ):
             best_utility = total_utility
-            best_selection = selected
-        if len(selected) >= maximum_positions or index >= len(ordered):
+            best_selection = tuple(ordered[item_index] for item_index in selected_indexes)
+        if selected_count >= maximum_positions or index >= len(ordered):
             return
 
-        remaining_slots = maximum_positions - len(selected)
-        optimistic_gain = sum(
-            (
-                item.conservative_utility
-                for item in ordered[index:]
-                if item.conservative_utility > 0
-            ),
-            Decimal("0"),
-        )
-        if remaining_slots < len(ordered) - index:
-            optimistic_gain = sum(
-                (
-                    item.conservative_utility
-                    for item in ordered[index : index + remaining_slots]
-                    if item.conservative_utility > 0
-                ),
-                Decimal("0"),
-            )
+        remaining_slots = maximum_positions - selected_count
+        optimistic_end = min(len(ordered), index + remaining_slots)
+        optimistic_gain = utility_prefix[optimistic_end] - utility_prefix[index]
         if total_utility + optimistic_gain <= best_utility:
             return
 
         item = ordered[index]
-        if item.conservative_utility > 0:
-            selected_constraints = [
-                (entry.score, entry.candidate, entry.beta) for entry in selected
-            ]
-            reasons = _constraint_reasons(
-                item.candidate,
-                beta=item.beta,
-                selected=selected_constraints,
-                pairwise_correlations=pairwise_correlations,
-                require_pairwise_correlation_evidence=(require_pairwise_correlation_evidence),
-                enforce_portfolio_beta=False,
+        candidate = item.candidate
+        strategy = candidate.primary_strategy_id
+        industry = _constrained_industry(candidate.industry)
+        candidate_themes = tuple(sorted(_normalized_values(candidate.themes)))
+        candidate_factors = tuple(sorted(_normalized_values(candidate.factor_signals)))
+        concentration_allowed = not (
+            (strategy and strategies.get(strategy, 0) >= V4_MAX_PER_STRATEGY)
+            or (industry and industries.get(industry, 0) >= V4_MAX_PER_INDUSTRY)
+            or any(themes.get(theme, 0) >= V4_MAX_PER_THEME for theme in candidate_themes)
+            or any(factors.get(factor, 0) >= V4_MAX_PER_FACTOR for factor in candidate_factors)
+        )
+        if (
+            item.conservative_utility > 0
+            and concentration_allowed
+            and not (incompatible_masks[index] & selected_mask)
+        ):
+            selected_indexes.append(index)
+            _adjust_constraint_count(strategies, strategy, 1)
+            _adjust_constraint_count(industries, industry, 1)
+            for theme in candidate_themes:
+                _adjust_constraint_count(themes, theme, 1)
+            for factor in candidate_factors:
+                _adjust_constraint_count(factors, factor, 1)
+            search(
+                index + 1,
+                selected_mask | (1 << index),
+                total_utility + item.conservative_utility,
+                beta_sum + item.beta,
             )
-            if not reasons:
-                search(
-                    index + 1,
-                    (*selected, item),
-                    total_utility + item.conservative_utility,
-                )
-        search(index + 1, selected, total_utility)
+            for factor in candidate_factors:
+                _adjust_constraint_count(factors, factor, -1)
+            for theme in candidate_themes:
+                _adjust_constraint_count(themes, theme, -1)
+            _adjust_constraint_count(industries, industry, -1)
+            _adjust_constraint_count(strategies, strategy, -1)
+            selected_indexes.pop()
+        search(index + 1, selected_mask, total_utility, beta_sum)
 
-    search(0, (), Decimal("0"))
+    search(0, 0, Decimal("0"), 0.0)
     return list(best_selection)
 
 
-def _portfolio_beta_is_valid(
-    selected: tuple[_EligiblePosition, ...],
+def _adjust_constraint_count(
+    counts: dict[str, int],
+    key: str | None,
+    delta: int,
+) -> None:
+    if not key:
+        return
+    updated = counts.get(key, 0) + delta
+    if updated:
+        counts[key] = updated
+    else:
+        counts.pop(key, None)
+
+
+def _pair_is_compatible(
+    left: RankingV4Candidate,
+    right: RankingV4Candidate,
+    *,
+    pairwise_correlations: dict[tuple[str, str], float],
+    require_pairwise_correlation_evidence: bool,
 ) -> bool:
-    if not selected:
-        return True
-    return sum(item.beta for item in selected) / len(selected) <= V4_MAX_PORTFOLIO_BETA
+    if _overlap_reasons(right, [left]):
+        return False
+    correlation = _pairwise_value(
+        pairwise_correlations,
+        left.instrument_id,
+        right.instrument_id,
+    )
+    if correlation is None:
+        return not require_pairwise_correlation_evidence
+    return bool(
+        math.isfinite(correlation)
+        and -1.0 <= correlation <= 1.0
+        and correlation <= V4_MAX_PAIRWISE_CORRELATION
+    )
 
 
 def _constraint_reasons(

@@ -236,6 +236,24 @@ def _walk_forward_executor() -> ProcessPoolExecutor:
     return _walk_forward_task_executor
 
 
+def _terminate_walk_forward_executor() -> bool:
+    """Terminate the single isolated worker after its persisted job is cancelled."""
+
+    global _walk_forward_task_executor
+    with _walk_forward_jobs_lock:
+        executor = _walk_forward_task_executor
+        _walk_forward_task_executor = None
+    if executor is None:
+        return False
+    terminated = False
+    for process in list(getattr(executor, "_processes", {}).values()):
+        if process.is_alive():
+            process.terminate()
+            terminated = True
+    executor.shutdown(wait=False, cancel_futures=True)
+    return terminated
+
+
 def _submit_full_market_scan_job(job_id: str) -> bool:
     with _full_market_jobs_lock:
         if job_id in _submitted_full_market_jobs:
@@ -720,6 +738,8 @@ def cancel_walk_forward_job(job_id: str) -> dict[str, object]:
         error="validation cancelled before publication",
         finished_at=datetime.now(timezone.utc),
     )
+    if job.status == "running":
+        _terminate_walk_forward_executor()
     return _walk_forward_job_payload(cancelled)
 
 

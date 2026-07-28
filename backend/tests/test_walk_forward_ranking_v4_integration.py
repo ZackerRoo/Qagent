@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import pandas as pd
 
+from qagent.backtesting import walk_forward
 from qagent.backtesting.portfolio import (
     CandidateOutcomeLedgerResult,
     CandidateOutcomeStatus,
@@ -364,7 +365,7 @@ def test_v41_return_history_can_prove_risk_without_industry_metadata():
     assert enriched[0].ranking_v4_constraint_evidence_mode == "return_risk_proxy"
 
 
-def test_validation_keeps_cash_date_and_counts_missing_stress_evidence():
+def test_validation_keeps_cash_date_and_counts_missing_stress_evidence(monkeypatch):
     selection = _selection()
     snapshot = _snapshot(selection).model_copy(
         update={
@@ -393,6 +394,19 @@ def test_validation_keeps_cash_date_and_counts_missing_stress_evidence():
         data_health={},
     )
     stress = normal.model_copy(update={"outcomes": [], "status_counts": {}})
+    cached_models = {
+        snapshot.decision_date: {
+            "constraint_matched_baseline": [selection],
+            "ranking_v41_full": [selection],
+        }
+    }
+    monkeypatch.setattr(
+        walk_forward,
+        "_ranking_v4_model_selections",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cached channel selections must be reused")
+        ),
+    )
 
     baseline, challenger, completed, valid, expected = _ranking_v4_selected_return_observations(
         [snapshot],
@@ -401,6 +415,7 @@ def test_validation_keeps_cash_date_and_counts_missing_stress_evidence():
         baseline_portfolio=_portfolio(),
         challenger_portfolio=_portfolio(),
         stress_portfolio=_portfolio(),
+        model_selections_by_date=cached_models,
     )
 
     assert baseline[0].net_return_pct == 1.0

@@ -2,6 +2,7 @@ from datetime import date
 
 import pytest
 
+from qagent.backtesting import ranking_v4_portfolio as portfolio_module
 from qagent.backtesting.ranking_v4 import (
     RankingV4Candidate,
     RankingV4CandidateScore,
@@ -441,6 +442,36 @@ def test_v4_portfolio_deterministically_handles_fifty_candidates():
     expected = [f"CN:{index:06d}" for index in range(1, 6)]
     assert [item.instrument_id for item in first.selected] == expected
     assert [item.instrument_id for item in second.selected] == expected
+
+
+def test_v4_portfolio_precomputes_each_pair_once(monkeypatch):
+    candidates = [
+        _candidate(
+            f"CN:{index:06d}",
+            strategy=f"strategy-{index}",
+            industry=f"industry-{index}",
+            themes=[f"theme-{index}"],
+            factors=[f"factor-{index}"],
+        )
+        for index in range(1, 51)
+    ]
+    pair_calls = 0
+    original = portfolio_module._pair_is_compatible
+
+    def counted(*args, **kwargs):
+        nonlocal pair_calls
+        pair_calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(portfolio_module, "_pair_is_compatible", counted)
+    result = select_ranking_v4_portfolio(
+        _decision(candidates),
+        candidates,
+        pairwise_correlations=_correlations(candidates, value=0.9),
+    )
+
+    assert result.selected_count == 1
+    assert pair_calls == 50 * 49 // 2
 
 
 def test_v4_portfolio_rejects_duplicates_and_invalid_limit():

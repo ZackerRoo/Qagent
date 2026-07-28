@@ -510,7 +510,23 @@ def test_running_walk_forward_job_can_be_cancelled_without_losing_checkpoints(
         processed_snapshots=1,
         checkpoints=[{"decision_date": "2025-01-02"}],
     )
+    terminated = []
+    shutdown_calls = []
 
+    class FakeProcess:
+        def is_alive(self):
+            return True
+
+        def terminate(self):
+            terminated.append(True)
+
+    class FakeExecutor:
+        _processes = {1: FakeProcess()}
+
+        def shutdown(self, *, wait, cancel_futures):
+            shutdown_calls.append((wait, cancel_futures))
+
+    monkeypatch.setattr(routes, "_walk_forward_task_executor", FakeExecutor())
     client = TestClient(create_app())
     response = client.post(f"/api/walk-forward/jobs/{job.job_id}/cancel")
     repeated = client.post(f"/api/walk-forward/jobs/{job.job_id}/cancel")
@@ -522,6 +538,9 @@ def test_running_walk_forward_job_can_be_cancelled_without_losing_checkpoints(
     assert response.json()["checkpoint_count"] == 1
     assert response.json()["result_run_id"] is None
     assert response.json()["finished_at"] is not None
+    assert terminated == [True]
+    assert shutdown_calls == [(False, True)]
+    assert routes._walk_forward_task_executor is None
 
 
 def test_cancelled_walk_forward_runner_does_not_publish_or_overwrite_status(
