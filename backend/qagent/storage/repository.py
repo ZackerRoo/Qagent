@@ -473,6 +473,36 @@ class WalkForwardJobRecord(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
 
+    def _portfolio_channel_selection_progress(self) -> int:
+        phase_start = 92
+        next_phase_start = 95
+        if self.current_date is None:
+            return phase_start
+
+        decision_dates: list[date] = []
+        for checkpoint in self.checkpoints:
+            raw_date = checkpoint.get("decision_date")
+            if isinstance(raw_date, date) and not isinstance(raw_date, datetime):
+                decision_date = raw_date
+            elif isinstance(raw_date, str):
+                try:
+                    decision_date = date.fromisoformat(raw_date)
+                except ValueError:
+                    return phase_start
+            else:
+                return phase_start
+            decision_dates.append(decision_date)
+
+        ordered_dates = sorted(set(decision_dates))
+        if len(ordered_dates) != self.total_snapshots or self.current_date not in ordered_dates:
+            return phase_start
+
+        processed_dates = ordered_dates.index(self.current_date) + 1
+        phase_progress = phase_start + (
+            processed_dates * (next_phase_start - phase_start) // len(ordered_dates)
+        )
+        return min(next_phase_start - 1, phase_progress)
+
     @property
     def progress(self) -> int:
         if self.status == "succeeded":
@@ -508,10 +538,11 @@ class WalkForwardJobRecord(BaseModel):
                 "candidate_outcomes": 85,
                 "candidate_outcomes_stress": 88,
                 "ranking_models": 90,
-                "portfolio_channel_selection": 92,
                 "portfolio_channel_backtests": 95,
                 "validation_and_benchmarks": 97,
             }
+            if self.phase == "portfolio_channel_selection":
+                return self._portfolio_channel_selection_progress()
             if self.phase in final_phase_progress:
                 return final_phase_progress[self.phase]
         return max(
