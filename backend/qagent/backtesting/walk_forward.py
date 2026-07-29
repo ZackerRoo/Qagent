@@ -862,10 +862,7 @@ def _compute_walk_forward_snapshot_without_gc(
         fundamentals=fundamental_evidence,
         asset_types={
             **{instrument_id: "stock" for instrument_id in snapshot_input.eligible_stocks},
-            **{
-                instrument_id: "etf"
-                for instrument_id in snapshot_input.eligible_non_stocks
-            },
+            **{instrument_id: "etf" for instrument_id in snapshot_input.eligible_non_stocks},
         },
     )
     candidates = _walk_forward_candidates(
@@ -929,11 +926,7 @@ def _compute_walk_forward_snapshot_without_gc(
     )
     stock_ids = set(snapshot_input.eligible_stocks)
     ranking_v4_market_features = _ranking_v4_market_features(
-        [
-            ranking
-            for ranking in factor_rankings
-            if ranking.instrument_id in stock_ids
-        ],
+        [ranking for ranking in factor_rankings if ranking.instrument_id in stock_ids],
         benchmark_valid_count=benchmark_trend.valid_benchmarks,
         benchmark_required_count=benchmark_trend.required_benchmarks,
         benchmark_above_count=benchmark_trend.above_average_count,
@@ -1579,6 +1572,9 @@ def run_full_market_walk_forward_selection(
             max_holding_days=20,
             execution_rule_resolver=execution_resolver,
         )
+        del candidate_pool_signals
+        del ranking_v4_candidate_pool_signals
+        gc.collect()
         _report_progress(
             progress_callback,
             phase="ranking_models",
@@ -1610,6 +1606,8 @@ def run_full_market_walk_forward_selection(
             observations=ranking_v4_observations,
             market_provider=market_provider,
         )
+        del ranking_v4_observations
+        gc.collect()
         ranking_v4_model_selections_by_date: dict[
             date,
             dict[str, list[WalkForwardSelection]],
@@ -2018,6 +2016,9 @@ def run_full_market_walk_forward_selection(
         pbo_evidence=ranking_v3_pbo_evidence,
         forward_scoring_artifact=ranking_v3_forward_artifact,
     )
+    del candidate_outcome_ledger
+    del ranking_v3_observations
+    gc.collect()
     ranking_v4_model_matrix = _ranking_v4_model_return_matrix(
         snapshots,
         portfolios={
@@ -2085,6 +2086,12 @@ def run_full_market_walk_forward_selection(
         pbo_evidence=ranking_v4_pbo_evidence,
         trial_ledger=ranking_v4_trial_ledger,
     )
+    del ranking_v4_candidate_outcome_ledger
+    del ranking_v4_stress_candidate_outcome_ledger
+    del ranking_v4_model_selections_by_date
+    del ranking_v4_model_matrix
+    del ranking_v4_channel_portfolios
+    gc.collect()
     digest = _selection_digest(
         provider_mode=repository.provider_mode,
         revision=revision,
@@ -5851,7 +5858,17 @@ def _ranking_v4_selected_return_observations(
     )
     baseline_rows: list[RankingV4ReturnObservation] = []
     challenger_rows: list[RankingV4ReturnObservation] = []
-    completed_trade_count = 0
+    completed_trade_count = len(
+        {
+            (
+                trade.instrument_id,
+                trade.signal_date,
+                trade.entry_date,
+                trade.exit_date,
+            )
+            for trade in challenger_portfolio.trades
+        }
+    )
     valid_outcome_count = 0
     expected_outcome_count = 0
     for snapshot in snapshots:
@@ -5872,11 +5889,6 @@ def _ranking_v4_selected_return_observations(
             )
             snapshot_expected += len(selections[:5])
             snapshot_valid += model_valid
-        _, completed, _ = _ranking_v4_fixed_slot_return(
-            snapshot.ranking_v4_top_5,
-            decision_date=snapshot.decision_date,
-            outcome_by_key=normal_by_key,
-        )
         _, _, stress_valid = _ranking_v4_fixed_slot_return(
             snapshot.ranking_v4_top_5,
             decision_date=snapshot.decision_date,
@@ -5886,7 +5898,6 @@ def _ranking_v4_selected_return_observations(
         snapshot_valid += stress_valid
         expected_outcome_count += snapshot_expected
         valid_outcome_count += snapshot_valid
-        completed_trade_count += completed
         baseline_rows.append(
             RankingV4ReturnObservation(
                 rebalance_date=snapshot.decision_date,
@@ -6820,13 +6831,13 @@ def _build_ranking_v4_evaluation(
     )
     if historical_validation.status == "pass":
         status = "forward_validation_pending"
-        headline = "V4.1 历史开发门禁通过，等待冻结后的独立前向验证"
+        headline = f"{protocol.model_version} 历史开发门禁通过，等待冻结后的独立前向验证"
     elif historical_validation.status == "fail":
         status = "rejected"
-        headline = "V4.1 历史门禁失败，继续保持影子隔离"
+        headline = f"{protocol.model_version} 历史门禁失败，继续保持影子隔离"
     else:
         status = "insufficient"
-        headline = "V4.1 历史证据不足，不进入正式模拟盘"
+        headline = f"{protocol.model_version} 历史证据不足，不进入正式模拟盘"
     criteria = [
         WalkForwardGateCriterion(
             key=gate.key,
@@ -6890,6 +6901,7 @@ def _build_ranking_v4_evaluation(
             else 0.0
         )
     return WalkForwardRankingV4Evaluation(
+        model_version=protocol.model_version,
         status=status,
         headline=headline,
         leakage_guard=(
@@ -7074,11 +7086,7 @@ def _selection_digest_from_serialized_result(
     )
     if "lookback_days" not in manifest or any(field not in payload for field in required_fields):
         return None
-    signed_manifest = {
-        key: value
-        for key, value in manifest.items()
-        if key != "created_at"
-    }
+    signed_manifest = {key: value for key, value in manifest.items() if key != "created_at"}
     signed_payload = {
         "digest_schema": WALK_FORWARD_RESULT_DIGEST_SCHEMA,
         "execution_plan": {

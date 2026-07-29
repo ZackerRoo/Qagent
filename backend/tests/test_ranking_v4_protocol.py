@@ -11,6 +11,7 @@ import pytest
 from qagent.backtesting.ranking_v4_experiment_registry import (
     RankingV4ExperimentRegistryError,
     build_ranking_v3_rejected_summary,
+    build_ranking_v43_rejected_summary,
     build_ranking_v4_rejected_summary,
     build_ranking_v4_experiment_registry,
     ranking_v4_experiment_registry_digest_is_valid,
@@ -26,11 +27,16 @@ FROZEN_V42_PROTOCOL_DIGEST = "68bcddae550c28b59c79a325f36bd4cab2676e47390f7e2842
 FROZEN_V42_REGISTRY_DIGEST = "3a61e0dfc2dff46a0cbf7d92d68df091e4299090f14216e011ec9e234494b42d"
 FROZEN_V43_PROTOCOL_DIGEST = "dcae99e7fdb4f998bb3f9fe1588c3b35baab8ebd810d9fbfef9ec08528809b99"
 FROZEN_V43_REGISTRY_DIGEST = "712b5c85326ae1b08732b7e540687279fd0796761596d9f97f4fd91e3af068ce"
+FROZEN_V44_PROTOCOL_DIGEST = "dbd068421c1c1c3073d3fce3785020c116cb3e5adf169756c7f442a00971e3a7"
+FROZEN_V44_REGISTRY_DIGEST = "1d25e86fc75339ae0363f167abd535f52297225dc7d80cae4a099362cebc0114"
 FROZEN_V3_REJECTED_SUMMARY_DIGEST = (
     "197feb4614d18cf182bc4dbe37cb2a1d3b8a94c847b738aad51835f488d7cf54"
 )
 FROZEN_V4_REJECTED_SUMMARY_DIGEST = (
     "75ff874d9a9d6cf258d20cf472be377a3dff36657c2f317a0bcd3f1ca81f7fd8"
+)
+FROZEN_V43_REJECTED_SUMMARY_DIGEST = (
+    "77cd7fd3eb61a003fa1ec9563a29cf272d54498dd8f77aca33dd90ab299db37b"
 )
 
 
@@ -54,7 +60,10 @@ def test_v4_protocol_is_independent_deterministic_and_covers_full_preregistratio
 
     assert first == second
     assert first.protocol_digest == second.protocol_digest
-    assert first.protocol_digest == FROZEN_V43_PROTOCOL_DIGEST
+    assert first.protocol_schema_version == "ranking-v4.4-preregistered-protocol-v1"
+    assert first.protocol_id == "QAGENT-RANK-V4.4-PREREGISTERED-20260730"
+    assert first.model_version == "asset-stratified-net-excess-v4.4-preregistered"
+    assert first.protocol_digest == FROZEN_V44_PROTOCOL_DIGEST
     assert ranking_v4_protocol_digest_is_valid(first)
     protocol_source = inspect.getsource(
         __import__("qagent.backtesting.ranking_v4_protocol", fromlist=["ranking_v4_protocol"])
@@ -113,6 +122,11 @@ def test_v4_protocol_is_independent_deterministic_and_covers_full_preregistratio
     assert utility.optimization_target == (
         "portfolio_cost_adjusted_net_excess_after_frozen_constraints"
     )
+    assert "asset-isolated-partial-pooling" in utility.implementation_version
+    assert "strategy-prior-4-regime-prior-3" in utility.implementation_version
+    assert "asset_isolated_hierarchical_partially_pooled" in (
+        first.portfolio_definition.selection_rule
+    )
     assert first.temporal_definition.rebalance_step_sessions == 10
     assert first.temporal_definition.candidate_lookback_days == 400
     assert utility.cash_utility == 0
@@ -123,6 +137,7 @@ def test_v4_protocol_is_independent_deterministic_and_covers_full_preregistratio
     (
         ("4.1", FROZEN_V41_PROTOCOL_DIGEST, FROZEN_V41_REGISTRY_DIGEST, "ranking_v41_full"),
         ("4.2", FROZEN_V42_PROTOCOL_DIGEST, FROZEN_V42_REGISTRY_DIGEST, "ranking_v42_full"),
+        ("4.3", FROZEN_V43_PROTOCOL_DIGEST, FROZEN_V43_REGISTRY_DIGEST, "ranking_v43_full"),
     ),
 )
 def test_prior_protocol_and_registry_digests_remain_exactly_reproducible(
@@ -195,7 +210,7 @@ def test_v4_gates_are_not_weaker_than_rejected_v3_and_unknowns_fail_closed():
     statistics = protocol.statistics_definition
     assert statistics.pbo_model_ids == (
         "constraint_matched_baseline",
-        "ranking_v43_full",
+        "ranking_v44_full",
         "channel_baseline",
         "channel_trend",
         "channel_breakout",
@@ -239,6 +254,20 @@ def test_v4_rejects_rehashed_attempts_to_weaken_any_gate(field, weakened_value):
     forged = _rehashed_protocol(protocol, thresholds=weakened)
 
     assert not ranking_v4_protocol_digest_is_valid(forged)
+
+
+def test_v44_rejects_rehashed_threshold_changes_even_when_they_are_stricter():
+    protocol = build_ranking_v4_protocol()
+
+    for field, value in (
+        ("maximum_holm_adjusted_p_value", Decimal("0.04")),
+        ("maximum_probability_of_backtest_overfit", Decimal("0.19")),
+        ("minimum_confirmatory_forward_sessions", 21),
+    ):
+        changed = protocol.thresholds.model_copy(update={field: value})
+        assert not ranking_v4_protocol_digest_is_valid(
+            _rehashed_protocol(protocol, thresholds=changed)
+        )
 
 
 def test_v4_development_evidence_is_exploratory_and_forward_is_post_freeze_only():
@@ -322,15 +351,49 @@ def test_v3_rejection_is_exactly_recorded_without_fabricated_statistics():
     assert summary.unknown_statistics_policy == "null_means_unobserved_never_zero_or_passed"
 
 
-def test_v3_summary_and_v4_registry_have_stable_digests_and_detect_tampering():
+def test_v43_rejection_is_exactly_recorded_as_exploratory_predecessor_evidence():
+    summary = build_ranking_v43_rejected_summary()
+
+    assert summary.experiment_id == "walk-forward-20260729081753-9c8c4641"
+    assert summary.source_revision == "043470f4198556ac328ffddf6d5c84c428071745"
+    assert summary.evaluated_on.isoformat() == "2026-07-29"
+    assert summary.dataset_revision == 8939
+    assert summary.configured_snapshot_count == 102
+    assert summary.completed_snapshot_count == 102
+    assert summary.candidate_outcome_coverage_ratio == Decimal("0.994053")
+    assert summary.historical_portfolio_benchmark_id == "constraint_matched_baseline"
+    assert summary.historical_portfolio_benchmark_return_pct == Decimal("-33.4016")
+    assert summary.historical_model_return_pct == Decimal("3.1476")
+    assert summary.stress_cost_adjusted_return_pct == Decimal("1.983059992989")
+    assert summary.benchmark_excess_return_pct == Decimal("36.549120006")
+    assert summary.completed_trade_count == 35
+    assert summary.bootstrap_one_sided_95_lower_bound_pct == Decimal("0.102769767353")
+    assert summary.confirmatory_holm_adjusted_p_value == Decimal("0.112488751125")
+    assert summary.probability_of_backtest_overfit == Decimal("0.214285714286")
+    assert summary.deflated_sharpe_probability is None
+    assert summary.official_paper_trade_count == 0
+    assert summary.disposition == "rejected"
+    assert summary.evidence_class == "exploratory_development_evidence"
+    assert summary.failed_gates == (
+        "minimum_completed_trades",
+        "holm_adjusted_significance",
+        "maximum_probability_of_backtest_overfit",
+        "deflated_sharpe_probability",
+    )
+    assert summary.unknown_statistics_policy == "null_means_unobserved_never_zero_or_passed"
+
+
+def test_predecessor_summaries_and_v44_registry_have_stable_digests_and_detect_tampering():
     first = build_ranking_v4_experiment_registry()
     second = build_ranking_v4_experiment_registry()
     summary = first.predecessor_summaries[0]
     v4_summary = first.predecessor_summaries[1]
+    v43_summary = first.predecessor_summaries[2]
 
     assert first == second
     assert first.registry_digest == second.registry_digest
-    assert first.registry_digest == FROZEN_V43_REGISTRY_DIGEST
+    assert first.schema_version == "ranking-v4.4-experiment-registry-v1"
+    assert first.registry_digest == FROZEN_V44_REGISTRY_DIGEST
     assert first.historical_trial_inventory_complete is False
     assert first.historical_trial_inventory_digest is None
     assert first.historical_trial_return_series_digests == ()
@@ -340,11 +403,13 @@ def test_v3_summary_and_v4_registry_have_stable_digests_and_detect_tampering():
     assert v4_summary.summary_digest == FROZEN_V4_REJECTED_SUMMARY_DIGEST
     assert v4_summary.completed_trade_count == 0
     assert v4_summary.probability_of_backtest_overfit == Decimal("0.833333")
+    assert v43_summary == build_ranking_v43_rejected_summary()
+    assert v43_summary.summary_digest == FROZEN_V43_REJECTED_SUMMARY_DIGEST
     assert ranking_v4_experiment_registry_digest_is_valid(first)
 
     tampered_summary = summary.model_copy(update={"benchmark_excess_return_pct": Decimal("1")})
     tampered_registry = first.model_copy(
-        update={"predecessor_summaries": (tampered_summary, v4_summary)}
+        update={"predecessor_summaries": (tampered_summary, v4_summary, v43_summary)}
     )
     assert not ranking_v4_experiment_registry_digest_is_valid(tampered_registry)
 
@@ -352,7 +417,9 @@ def test_v3_summary_and_v4_registry_have_stable_digests_and_detect_tampering():
         RankingV4ExperimentRegistryError,
         match="cannot be rewritten|digest mismatch",
     ):
-        build_ranking_v4_experiment_registry(predecessor_summaries=(tampered_summary, v4_summary))
+        build_ranking_v4_experiment_registry(
+            predecessor_summaries=(tampered_summary, v4_summary, v43_summary)
+        )
 
 
 def test_v4_protocol_digest_detects_tampering_even_when_payload_still_looks_valid():

@@ -859,7 +859,7 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert first.ranking_v4.historical_validation.deployment_scope == "shadow_only"
     assert set(first.ranking_v4.pbo_evidence["registered_model_ids"]) == {
         "constraint_matched_baseline",
-            "ranking_v43_full",
+        walk_forward.RANKING_V4_FULL_MODEL_ID,
         "channel_baseline",
         "channel_trend",
         "channel_breakout",
@@ -1331,7 +1331,7 @@ def test_walk_forward_result_digest_accepts_old_payload_without_new_default_fiel
                 data_health=json.dumps(
                     {
                         **result.data_health,
-                            "_qagent_walk_forward_storage_schema": "walk-forward-run-storage-v2",
+                        "_qagent_walk_forward_storage_schema": "walk-forward-run-storage-v2",
                     },
                     sort_keys=True,
                 ),

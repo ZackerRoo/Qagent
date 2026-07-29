@@ -16,10 +16,10 @@ RANKING_V42_EXPERIMENT_REGISTRY_SCHEMA_VERSION = "ranking-v4.2-experiment-regist
 RANKING_V42_EXPERIMENT_REGISTRY_ID = "QAGENT-RANK-V4.2-PRIOR-EVIDENCE-20260729"
 RANKING_V43_EXPERIMENT_REGISTRY_SCHEMA_VERSION = "ranking-v4.3-experiment-registry-v1"
 RANKING_V43_EXPERIMENT_REGISTRY_ID = "QAGENT-RANK-V4.3-PRIOR-EVIDENCE-20260729"
-RANKING_V4_EXPERIMENT_REGISTRY_SCHEMA_VERSION = (
-    RANKING_V43_EXPERIMENT_REGISTRY_SCHEMA_VERSION
-)
-RANKING_V4_EXPERIMENT_REGISTRY_ID = RANKING_V43_EXPERIMENT_REGISTRY_ID
+RANKING_V44_EXPERIMENT_REGISTRY_SCHEMA_VERSION = "ranking-v4.4-experiment-registry-v1"
+RANKING_V44_EXPERIMENT_REGISTRY_ID = "QAGENT-RANK-V4.4-PRIOR-EVIDENCE-20260730"
+RANKING_V4_EXPERIMENT_REGISTRY_SCHEMA_VERSION = RANKING_V44_EXPERIMENT_REGISTRY_SCHEMA_VERSION
+RANKING_V4_EXPERIMENT_REGISTRY_ID = RANKING_V44_EXPERIMENT_REGISTRY_ID
 RANKING_V3_REJECTED_EXPERIMENT_ID = "walk-forward-20260726164443-7fd44f0b"
 RANKING_V3_REJECTED_CODE_REVISION = "dbd7fa0f6ec76990eca4de8325e14866dfbfe8e7"
 RANKING_V3_REJECTED_DATASET_REVISION = 8939
@@ -42,6 +42,20 @@ RANKING_V4_REJECTED_HOLM_P_VALUE = Decimal("1")
 RANKING_V4_REJECTED_PBO = Decimal("0.833333")
 RANKING_V4_REJECTED_COMPLETED_TRADE_COUNT = 0
 RANKING_V4_REJECTED_OFFICIAL_PAPER_TRADE_COUNT = 0
+RANKING_V43_REJECTED_EXPERIMENT_ID = "walk-forward-20260729081753-9c8c4641"
+RANKING_V43_REJECTED_CODE_REVISION = "043470f4198556ac328ffddf6d5c84c428071745"
+RANKING_V43_REJECTED_DATASET_REVISION = 8939
+RANKING_V43_REJECTED_SNAPSHOT_COUNT = 102
+RANKING_V43_REJECTED_CANDIDATE_COVERAGE = Decimal("0.994053")
+RANKING_V43_REJECTED_MODEL_RETURN_PCT = Decimal("3.1476")
+RANKING_V43_REJECTED_STRESS_RETURN_PCT = Decimal("1.983059992989")
+RANKING_V43_REJECTED_BASELINE_RETURN_PCT = Decimal("-33.4016")
+RANKING_V43_REJECTED_BENCHMARK_EXCESS_PCT = Decimal("36.549120006")
+RANKING_V43_REJECTED_BOOTSTRAP_LOWER_BOUND_PCT = Decimal("0.102769767353")
+RANKING_V43_REJECTED_HOLM_P_VALUE = Decimal("0.112488751125")
+RANKING_V43_REJECTED_PBO = Decimal("0.214285714286")
+RANKING_V43_REJECTED_COMPLETED_TRADE_COUNT = 35
+RANKING_V43_REJECTED_OFFICIAL_PAPER_TRADE_COUNT = 0
 
 _FULL_GIT_REVISION = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -153,9 +167,7 @@ class RankingV4ExperimentRegistry(BaseModel):
             v4_registration_state=self.v4_registration_state,
             historical_trial_inventory_complete=self.historical_trial_inventory_complete,
             historical_trial_inventory_digest=self.historical_trial_inventory_digest,
-            historical_trial_return_series_digests=(
-                self.historical_trial_return_series_digests
-            ),
+            historical_trial_return_series_digests=(self.historical_trial_return_series_digests),
         )
 
     def require_valid(self) -> None:
@@ -246,15 +258,62 @@ def _ranking_v4_rejected_summary_payload() -> dict[str, object]:
     }
 
 
+def build_ranking_v43_rejected_summary() -> RankingV4ExperimentSummary:
+    payload = _ranking_v43_rejected_summary_payload()
+    summary = RankingV4ExperimentSummary(
+        **payload,
+        summary_digest=_digest(payload),
+    )
+    summary.require_valid()
+    return summary
+
+
+def _ranking_v43_rejected_summary_payload() -> dict[str, object]:
+    return {
+        "summary_schema_version": "ranking-v4.4-predecessor-summary-v1",
+        "experiment_id": RANKING_V43_REJECTED_EXPERIMENT_ID,
+        "model_generation": "ranking_v4",
+        "disposition": "rejected",
+        "evidence_class": "exploratory_development_evidence",
+        "evaluated_on": "2026-07-29",
+        "source_revision": RANKING_V43_REJECTED_CODE_REVISION,
+        "dataset_revision": RANKING_V43_REJECTED_DATASET_REVISION,
+        "configured_snapshot_count": RANKING_V43_REJECTED_SNAPSHOT_COUNT,
+        "completed_snapshot_count": RANKING_V43_REJECTED_SNAPSHOT_COUNT,
+        "candidate_outcome_coverage_ratio": str(RANKING_V43_REJECTED_CANDIDATE_COVERAGE),
+        "historical_portfolio_benchmark_id": "constraint_matched_baseline",
+        "historical_portfolio_benchmark_return_pct": str(RANKING_V43_REJECTED_BASELINE_RETURN_PCT),
+        "historical_model_return_pct": str(RANKING_V43_REJECTED_MODEL_RETURN_PCT),
+        "stress_cost_adjusted_return_pct": str(RANKING_V43_REJECTED_STRESS_RETURN_PCT),
+        "benchmark_excess_return_pct": str(RANKING_V43_REJECTED_BENCHMARK_EXCESS_PCT),
+        "completed_trade_count": RANKING_V43_REJECTED_COMPLETED_TRADE_COUNT,
+        "bootstrap_one_sided_95_lower_bound_pct": str(
+            RANKING_V43_REJECTED_BOOTSTRAP_LOWER_BOUND_PCT
+        ),
+        "official_paper_trade_count": RANKING_V43_REJECTED_OFFICIAL_PAPER_TRADE_COUNT,
+        "failed_gates": [
+            "minimum_completed_trades",
+            "holm_adjusted_significance",
+            "maximum_probability_of_backtest_overfit",
+            "deflated_sharpe_probability",
+        ],
+        "confirmatory_holm_adjusted_p_value": str(RANKING_V43_REJECTED_HOLM_P_VALUE),
+        "deflated_sharpe_probability": None,
+        "probability_of_backtest_overfit": str(RANKING_V43_REJECTED_PBO),
+        "unknown_statistics_policy": "null_means_unobserved_never_zero_or_passed",
+    }
+
+
 def build_ranking_v4_experiment_registry(
     *,
     predecessor_summaries: tuple[RankingV4ExperimentSummary, ...] | None = None,
-    version: Literal["4.1", "4.2", "4.3"] = "4.3",
+    version: Literal["4.1", "4.2", "4.3", "4.4"] = "4.4",
 ) -> RankingV4ExperimentRegistry:
     summaries = (
         (
             build_ranking_v3_rejected_summary(),
             build_ranking_v4_rejected_summary(),
+            *((build_ranking_v43_rejected_summary(),) if version == "4.4" else ()),
         )
         if predecessor_summaries is None
         else tuple(
@@ -276,6 +335,10 @@ def build_ranking_v4_experiment_registry(
         schema_version = RANKING_V43_EXPERIMENT_REGISTRY_SCHEMA_VERSION
         registry_id = RANKING_V43_EXPERIMENT_REGISTRY_ID
         frozen_on = date(2026, 7, 29)
+    elif version == "4.4":
+        schema_version = RANKING_V44_EXPERIMENT_REGISTRY_SCHEMA_VERSION
+        registry_id = RANKING_V44_EXPERIMENT_REGISTRY_ID
+        frozen_on = date(2026, 7, 30)
     else:
         raise ValueError("unsupported Ranking V4 experiment registry version")
     payload = _registry_payload(
@@ -333,9 +396,7 @@ def _registry_payload(
     if schema_version != RANKING_V41_EXPERIMENT_REGISTRY_SCHEMA_VERSION:
         payload.update(
             {
-                "historical_trial_inventory_complete": (
-                    historical_trial_inventory_complete
-                ),
+                "historical_trial_inventory_complete": (historical_trial_inventory_complete),
                 "historical_trial_inventory_digest": historical_trial_inventory_digest,
                 "historical_trial_return_series_digests": [
                     list(item) for item in historical_trial_return_series_digests
@@ -348,11 +409,16 @@ def _registry_payload(
 def _validate_summary(summary: RankingV4ExperimentSummary) -> None:
     if summary.summary_digest != _digest(summary.stable_payload()):
         raise RankingV4ExperimentRegistryError("experiment summary digest mismatch")
-    expected_by_generation = {
-        "ranking_v3": _ranking_v3_rejected_summary_payload(),
-        "ranking_v4": _ranking_v4_rejected_summary_payload(),
+    expected_by_experiment_id = {
+        RANKING_V3_REJECTED_EXPERIMENT_ID: _ranking_v3_rejected_summary_payload(),
+        RANKING_V4_REJECTED_EXPERIMENT_ID: _ranking_v4_rejected_summary_payload(),
+        RANKING_V43_REJECTED_EXPERIMENT_ID: _ranking_v43_rejected_summary_payload(),
     }
-    expected = expected_by_generation[summary.model_generation]
+    expected = expected_by_experiment_id.get(summary.experiment_id)
+    if expected is None:
+        raise RankingV4ExperimentRegistryError(
+            "unknown rejected predecessor evidence cannot be added to Ranking V4"
+        )
     if summary.stable_payload() != expected:
         raise RankingV4ExperimentRegistryError(
             "rejected predecessor evidence cannot be rewritten by Ranking V4"
@@ -361,42 +427,41 @@ def _validate_summary(summary: RankingV4ExperimentSummary) -> None:
 
 def _validate_registry(registry: RankingV4ExperimentRegistry) -> None:
     expected_id_by_schema = {
-        RANKING_V41_EXPERIMENT_REGISTRY_SCHEMA_VERSION: (
-            RANKING_V41_EXPERIMENT_REGISTRY_ID
-        ),
-        RANKING_V42_EXPERIMENT_REGISTRY_SCHEMA_VERSION: (
-            RANKING_V42_EXPERIMENT_REGISTRY_ID
-        ),
-        RANKING_V43_EXPERIMENT_REGISTRY_SCHEMA_VERSION: (
-            RANKING_V43_EXPERIMENT_REGISTRY_ID
-        ),
+        RANKING_V41_EXPERIMENT_REGISTRY_SCHEMA_VERSION: (RANKING_V41_EXPERIMENT_REGISTRY_ID),
+        RANKING_V42_EXPERIMENT_REGISTRY_SCHEMA_VERSION: (RANKING_V42_EXPERIMENT_REGISTRY_ID),
+        RANKING_V43_EXPERIMENT_REGISTRY_SCHEMA_VERSION: (RANKING_V43_EXPERIMENT_REGISTRY_ID),
+        RANKING_V44_EXPERIMENT_REGISTRY_SCHEMA_VERSION: (RANKING_V44_EXPERIMENT_REGISTRY_ID),
     }
     expected_id = expected_id_by_schema.get(registry.schema_version)
     if expected_id is None:
         raise RankingV4ExperimentRegistryError("unsupported Ranking V4 registry schema")
     if registry.registry_id != expected_id:
         raise RankingV4ExperimentRegistryError("unexpected Ranking V4 registry id")
-    expected_frozen_on = (
-        date(2026, 7, 28)
-        if registry.schema_version == RANKING_V41_EXPERIMENT_REGISTRY_SCHEMA_VERSION
-        else date(2026, 7, 29)
-    )
+    expected_frozen_on = {
+        RANKING_V41_EXPERIMENT_REGISTRY_SCHEMA_VERSION: date(2026, 7, 28),
+        RANKING_V42_EXPERIMENT_REGISTRY_SCHEMA_VERSION: date(2026, 7, 29),
+        RANKING_V43_EXPERIMENT_REGISTRY_SCHEMA_VERSION: date(2026, 7, 29),
+        RANKING_V44_EXPERIMENT_REGISTRY_SCHEMA_VERSION: date(2026, 7, 30),
+    }[registry.schema_version]
     if registry.frozen_on != expected_frozen_on:
         raise RankingV4ExperimentRegistryError("unexpected Ranking V4 registry freeze date")
     if registry.v4_registration_state != "preregistered_code_not_yet_frozen":
         raise RankingV4ExperimentRegistryError(
             "V4 cannot claim confirmatory status before its code is frozen"
         )
-    if len(registry.predecessor_summaries) != 2:
+    expected_experiment_ids = {
+        RANKING_V3_REJECTED_EXPERIMENT_ID,
+        RANKING_V4_REJECTED_EXPERIMENT_ID,
+    }
+    if registry.schema_version == RANKING_V44_EXPERIMENT_REGISTRY_SCHEMA_VERSION:
+        expected_experiment_ids.add(RANKING_V43_REJECTED_EXPERIMENT_ID)
+    if {
+        item.experiment_id for item in registry.predecessor_summaries
+    } != expected_experiment_ids or len(registry.predecessor_summaries) != len(
+        expected_experiment_ids
+    ):
         raise RankingV4ExperimentRegistryError(
-            "registry must contain the frozen V3 and V4 predecessor summaries"
-        )
-    if {item.model_generation for item in registry.predecessor_summaries} != {
-        "ranking_v3",
-        "ranking_v4",
-    }:
-        raise RankingV4ExperimentRegistryError(
-            "registry must contain exactly one V3 and one V4 rejection"
+            "registry must contain exactly the frozen predecessor rejection summaries"
         )
     for summary in registry.predecessor_summaries:
         summary.require_valid()

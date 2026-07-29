@@ -15,6 +15,7 @@ from qagent.backtesting.ranking_v4_protocol import (
     RANKING_V41_MODEL_VERSION,
     RANKING_V42_MODEL_VERSION,
     RANKING_V43_MODEL_VERSION,
+    RANKING_V44_MODEL_VERSION,
     RANKING_V4_MODEL_VERSION,
     RANKING_V41_FEATURE_EFFECT_NAMES,
 )
@@ -35,6 +36,8 @@ V41_FEATURE_EFFECT_PRIOR_DATE_STRENGTH = 18.0
 V41_FEATURE_BUCKETS = ("low", "mid", "high")
 V41_MINIMUM_TRIGGER_RESIDUAL_VOLATILITY = 0.05
 V42_UTILITY_BLOCK_LENGTH = 3
+V44_UTILITY_STRATEGY_PRIOR_BLOCK_STRENGTH = 4.0
+V44_UTILITY_REGIME_PRIOR_BLOCK_STRENGTH = 3.0
 
 
 class RankingV4FeatureVector(BaseModel):
@@ -238,9 +241,7 @@ class RankingV4FrozenScoringArtifact(BaseModel):
             raise ValueError("Ranking V4 trigger segments must be unique and sorted")
         if feature_effect_keys != sorted(set(feature_effect_keys)):
             raise ValueError("Ranking V4.1 feature effects must be unique and sorted")
-        utility_keys = [
-            (item.segment, item.rebalance_date) for item in self.realized_utility_dates
-        ]
+        utility_keys = [(item.segment, item.rebalance_date) for item in self.realized_utility_dates]
         if utility_keys != sorted(set(utility_keys)):
             raise ValueError("Ranking V4.2 realized utility dates must be unique and sorted")
         if self.model_version == RANKING_V41_MODEL_VERSION and self.realized_utility_dates:
@@ -249,6 +250,7 @@ class RankingV4FrozenScoringArtifact(BaseModel):
             RANKING_V41_MODEL_VERSION,
             RANKING_V42_MODEL_VERSION,
             RANKING_V43_MODEL_VERSION,
+            RANKING_V44_MODEL_VERSION,
         }:
             raise ValueError("unsupported Ranking V4 artifact model version")
         if self.training_triggered_observation_count > self.training_observation_count:
@@ -353,7 +355,11 @@ def build_ranking_v4_frozen_scoring_artifact(
     realized_utility_dates = (
         _build_realized_utility_dates(trigger_observations)
         if resolved_model_version
-        in {RANKING_V42_MODEL_VERSION, RANKING_V43_MODEL_VERSION}
+        in {
+            RANKING_V42_MODEL_VERSION,
+            RANKING_V43_MODEL_VERSION,
+            RANKING_V44_MODEL_VERSION,
+        }
         else []
     )
     payload = {
@@ -444,9 +450,7 @@ def score_ranking_v4_candidates_from_artifact(
     feature_effect_by_key = {
         (item.stage, item.feature_name, item.bucket): item for item in artifact.feature_effects
     }
-    utility_dates_by_segment: dict[str, list[RankingV42RealizedUtilityDate]] = defaultdict(
-        list
-    )
+    utility_dates_by_segment: dict[str, list[RankingV42RealizedUtilityDate]] = defaultdict(list)
     for item in artifact.realized_utility_dates:
         utility_dates_by_segment[item.segment].append(item)
     provisional = [
@@ -539,7 +543,14 @@ def _score_candidate(
     )
     if _is_unknown(candidate.market_regime):
         blocked_reasons.append("market_regime_missing")
-    if model_version == RANKING_V43_MODEL_VERSION and _asset(candidate.asset_type) == "unknown":
+    if (
+        model_version
+        in {
+            RANKING_V43_MODEL_VERSION,
+            RANKING_V44_MODEL_VERSION,
+        }
+        and _asset(candidate.asset_type) == "unknown"
+    ):
         blocked_reasons.append("asset_type_missing")
     if not candidate.market_regime_features_complete:
         blocked_reasons.append("market_regime_evidence_incomplete")
@@ -863,7 +874,8 @@ def _build_feature_effects(
             stage="trigger_probability",
             base_by_segment=trigger_by_segment,
             decision_date=decision_date,
-            asset_stratified=model_version == RANKING_V43_MODEL_VERSION,
+            asset_stratified=model_version
+            in {RANKING_V43_MODEL_VERSION, RANKING_V44_MODEL_VERSION},
         )
     )
     effects.extend(
@@ -872,7 +884,8 @@ def _build_feature_effects(
             stage="triggered_net_excess",
             base_by_segment=posterior_by_segment,
             decision_date=decision_date,
-            asset_stratified=model_version == RANKING_V43_MODEL_VERSION,
+            asset_stratified=model_version
+            in {RANKING_V43_MODEL_VERSION, RANKING_V44_MODEL_VERSION},
         )
     )
     return effects
@@ -899,9 +912,7 @@ def _build_realized_utility_dates(
                 rebalance_date=rebalance_date,
                 observation_count=len(values),
                 triggered_net_excess_contribution_pct=triggered_contribution,
-                not_triggered_rate=(
-                    sum(not item.triggered for item in values) / len(values)
-                ),
+                not_triggered_rate=(sum(not item.triggered for item in values) / len(values)),
             )
         )
     return result
@@ -916,6 +927,13 @@ def _candidate_realized_utility_lower_bound(
     model_version: str,
 ) -> tuple[float | None, int, int]:
     segments = _candidate_segments(candidate)
+    if model_version == RANKING_V44_MODEL_VERSION:
+        return _candidate_v44_realized_utility_lower_bound(
+            segments=tuple(segment for segment in segments if segment != "global"),
+            values_by_segment=values_by_segment,
+            opportunity_cost_pct=opportunity_cost_pct,
+            fixed_penalty_pct=fixed_penalty_pct,
+        )
     if model_version == RANKING_V43_MODEL_VERSION:
         segments = tuple(segment for segment in segments if segment != "global")
     for segment in reversed(segments):
@@ -933,6 +951,121 @@ def _candidate_realized_utility_lower_bound(
         if lower is not None:
             return lower, len(realized), len(realized) // V42_UTILITY_BLOCK_LENGTH
     return None, 0, 0
+
+
+def _candidate_v44_realized_utility_lower_bound(
+    *,
+    segments: tuple[str, ...],
+    values_by_segment: dict[str, list[RankingV42RealizedUtilityDate]],
+    opportunity_cost_pct: float,
+    fixed_penalty_pct: float,
+) -> tuple[float | None, int, int]:
+    """Asset-isolated partial pooling for nested utility evidence.
+
+    Asset evidence establishes the independent rebalance-date sample. Strategy
+    and regime evidence can move that estimate, but sparse child segments cannot
+    replace the parent estimate outright. The final gate remains the same
+    preregistered one-sided 95% lower bound strictly above zero.
+    """
+
+    if not segments:
+        return None, 0, 0
+    asset_blocks, asset_date_count, _ = _segment_realized_utility_blocks(
+        values_by_segment.get(segments[0], []),
+        opportunity_cost_pct=opportunity_cost_pct,
+        fixed_penalty_pct=fixed_penalty_pct,
+    )
+    posterior = _utility_block_posterior(asset_blocks)
+    if posterior is None:
+        return None, 0, 0
+
+    previous_child_dates: tuple[date, ...] = ()
+    for segment, prior_strength in zip(
+        segments[1:],
+        (
+            V44_UTILITY_STRATEGY_PRIOR_BLOCK_STRENGTH,
+            V44_UTILITY_REGIME_PRIOR_BLOCK_STRENGTH,
+        ),
+        strict=True,
+    ):
+        child_blocks, _, child_dates = _segment_realized_utility_blocks(
+            values_by_segment.get(segment, []),
+            opportunity_cost_pct=opportunity_cost_pct,
+            fixed_penalty_pct=fixed_penalty_pct,
+        )
+        if child_blocks and child_dates != previous_child_dates:
+            posterior = _shrink_utility_block_posterior(
+                child_blocks,
+                parent=posterior,
+                parent_strength=prior_strength,
+            )
+        if child_dates:
+            previous_child_dates = child_dates
+
+    mean, variance, effective_block_count = posterior
+    standard_error = math.sqrt(max(variance, 0.0) / effective_block_count)
+    lower = mean - V4_LOWER_CONFIDENCE_Z_SCORE * standard_error
+    return (
+        lower,
+        asset_date_count,
+        len(asset_blocks),
+    )
+
+
+def _segment_realized_utility_blocks(
+    dated: list[RankingV42RealizedUtilityDate],
+    *,
+    opportunity_cost_pct: float,
+    fixed_penalty_pct: float,
+) -> tuple[tuple[float, ...], int, tuple[date, ...]]:
+    ordered = tuple(sorted(dated, key=lambda item: item.rebalance_date))
+    realized = tuple(
+        item.triggered_net_excess_contribution_pct
+        - item.not_triggered_rate * opportunity_cost_pct
+        - fixed_penalty_pct
+        for item in ordered
+    )
+    complete_count = (len(realized) // V42_UTILITY_BLOCK_LENGTH) * V42_UTILITY_BLOCK_LENGTH
+    blocks = tuple(
+        math.fsum(realized[offset : offset + V42_UTILITY_BLOCK_LENGTH]) / V42_UTILITY_BLOCK_LENGTH
+        for offset in range(0, complete_count, V42_UTILITY_BLOCK_LENGTH)
+    )
+    return blocks, len(realized), tuple(item.rebalance_date for item in ordered)
+
+
+def _utility_block_posterior(
+    blocks: tuple[float, ...],
+) -> tuple[float, float, float] | None:
+    if len(blocks) < 2:
+        return None
+    mean = math.fsum(blocks) / len(blocks)
+    variance = math.fsum((value - mean) ** 2 for value in blocks) / (len(blocks) - 1)
+    return mean, variance, float(len(blocks))
+
+
+def _shrink_utility_block_posterior(
+    child_blocks: tuple[float, ...],
+    *,
+    parent: tuple[float, float, float],
+    parent_strength: float,
+) -> tuple[float, float, float]:
+    if parent_strength <= 0:
+        raise ValueError("parent_strength must be positive")
+    parent_mean, parent_variance, _ = parent
+    child_count = float(len(child_blocks))
+    child_mean = math.fsum(child_blocks) / child_count
+    child_variance = (
+        math.fsum((value - child_mean) ** 2 for value in child_blocks) / (len(child_blocks) - 1)
+        if len(child_blocks) > 1
+        else parent_variance
+    )
+    denominator = child_count + parent_strength
+    posterior_mean = (child_count * child_mean + parent_strength * parent_mean) / denominator
+    posterior_variance = (
+        child_count * (child_variance + (child_mean - posterior_mean) ** 2)
+        + parent_strength * (parent_variance + (parent_mean - posterior_mean) ** 2)
+    ) / denominator
+    return posterior_mean, posterior_variance, denominator
 
 
 def realized_utility_block_lower_bound(
@@ -992,9 +1125,7 @@ def _stage_feature_effects(
             asset_prefix = f"{_asset(observation.asset_type)}|" if asset_stratified else ""
             grouped[
                 f"{asset_prefix}{_feature_bucket(getattr(observation.features, feature_name))}"
-            ].append(
-                (observation, residual)
-            )
+            ].append((observation, residual))
         for grouped_key, values in sorted(grouped.items()):
             if asset_stratified:
                 asset_type, bucket = grouped_key.split("|", maxsplit=1)
@@ -1072,7 +1203,7 @@ def _candidate_feature_adjustment(
 ) -> tuple[float, float, int]:
     feature_prefix = (
         f"{_asset(candidate.asset_type)}|"
-        if model_version == RANKING_V43_MODEL_VERSION
+        if model_version in {RANKING_V43_MODEL_VERSION, RANKING_V44_MODEL_VERSION}
         else ""
     )
     matched = [
@@ -1453,9 +1584,7 @@ def _candidate_costs(
     if any(value is None for value in common_costs):
         return None
     resolved_common = tuple(float(value) for value in common_costs if value is not None)
-    if len(resolved_common) != 3 or not all(
-        math.isfinite(value) for value in resolved_common
-    ):
+    if len(resolved_common) != 3 or not all(math.isfinite(value) for value in resolved_common):
         return None
     if model_version == RANKING_V41_MODEL_VERSION:
         if candidate.replacement_cost_pct is None:
@@ -1467,10 +1596,7 @@ def _candidate_costs(
 
     if not candidate.replacement_cost_evidence_complete:
         return 0.0, *resolved_common, False
-    if (
-        candidate.replacement_cost_pct is None
-        or candidate.stage_two_embedded_cost_pct is None
-    ):
+    if candidate.replacement_cost_pct is None or candidate.stage_two_embedded_cost_pct is None:
         return None
     actual = float(candidate.replacement_cost_pct)
     embedded = float(candidate.stage_two_embedded_cost_pct)
@@ -1522,6 +1648,8 @@ def _resolve_model_version(model_version: str) -> str:
         return RANKING_V42_MODEL_VERSION
     if model_version in {"4.3", RANKING_V43_MODEL_VERSION}:
         return RANKING_V43_MODEL_VERSION
+    if model_version in {"4.4", RANKING_V44_MODEL_VERSION}:
+        return RANKING_V44_MODEL_VERSION
     raise ValueError("unsupported Ranking V4 model version")
 
 

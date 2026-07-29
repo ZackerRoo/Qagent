@@ -11,6 +11,7 @@ from qagent.backtesting.portfolio import (
     CandidateSignalOutcome,
     PortfolioBacktestResult,
     PortfolioBacktestSummary,
+    PortfolioBacktestTrade,
     PortfolioEquityPoint,
 )
 from qagent.backtesting.ranking_v4 import (
@@ -115,26 +116,28 @@ def _portfolio(
     *,
     start_equity: Decimal = Decimal("100000"),
     end_equity: Decimal = Decimal("101000"),
+    trades: list[PortfolioBacktestTrade] | None = None,
 ) -> PortfolioBacktestResult:
     start = date(2025, 1, 2)
     end = date(2025, 3, 1)
+    resolved_trades = trades or []
     return PortfolioBacktestResult(
         summary=PortfolioBacktestSummary(
             provider="fixture",
-            symbols=[],
+            symbols=sorted({trade.instrument_id for trade in resolved_trades}),
             start=start,
             end=end,
             initial_capital=start_equity,
             final_equity=end_equity,
             total_return_pct=float((end_equity / start_equity - 1) * 100),
             max_drawdown_pct=0,
-            trade_count=0,
+            trade_count=len(resolved_trades),
             win_rate=None,
             profit_factor=None,
             avg_trade_return_pct=None,
             exposure_pct=0,
         ),
-        trades=[],
+        trades=resolved_trades,
         equity_curve=[
             PortfolioEquityPoint(
                 date=start,
@@ -153,6 +156,29 @@ def _portfolio(
         ],
         monthly_returns=[],
         data_health={},
+    )
+
+
+def _trade(
+    instrument_id: str = "CN:000001",
+    *,
+    signal_date: date = date(2025, 1, 2),
+) -> PortfolioBacktestTrade:
+    return PortfolioBacktestTrade(
+        instrument_id=instrument_id,
+        strategy_id="trend",
+        signal_date=signal_date,
+        entry_date=signal_date + timedelta(days=1),
+        exit_date=date(2025, 2, 7),
+        exit_reason="target",
+        entry_price=Decimal("10"),
+        exit_price=Decimal("11"),
+        shares=Decimal("1000"),
+        gross_pnl=Decimal("1000"),
+        costs=Decimal("20"),
+        net_pnl=Decimal("980"),
+        return_pct=9.8,
+        holding_days=35,
     )
 
 
@@ -804,7 +830,7 @@ def test_validation_keeps_cash_date_and_counts_missing_stress_evidence(monkeypat
     cached_models = {
         snapshot.decision_date: {
             "constraint_matched_baseline": [selection],
-            "ranking_v43_full": [selection],
+            walk_forward.RANKING_V4_FULL_MODEL_ID: [selection],
         }
     }
     monkeypatch.setattr(
@@ -828,7 +854,7 @@ def test_validation_keeps_cash_date_and_counts_missing_stress_evidence(monkeypat
     assert baseline[0].net_return_pct == 1.0
     assert challenger[0].net_return_pct == 1.0
     assert challenger[0].stress_net_return_pct == 1.0
-    assert completed == 1
+    assert completed == 0
     assert valid == 2
     assert expected == 3
 
@@ -867,7 +893,10 @@ def test_validation_uses_capital_constrained_portfolio_returns():
         normal_ledger=ledger,
         stress_ledger=ledger,
         baseline_portfolio=_portfolio(end_equity=Decimal("101000")),
-        challenger_portfolio=_portfolio(end_equity=Decimal("102000")),
+        challenger_portfolio=_portfolio(
+            end_equity=Decimal("102000"),
+            trades=[_trade()],
+        ),
         stress_portfolio=_portfolio(end_equity=Decimal("100500")),
     )
 
@@ -876,3 +905,103 @@ def test_validation_uses_capital_constrained_portfolio_returns():
     assert challenger[0].stress_net_return_pct == 0.5
     assert completed == 1
     assert valid == expected == 3
+
+
+def test_completed_trade_gate_counts_unique_capital_constrained_trades():
+    incumbent = _selection()
+    capacity_rejected = _selection("CN:000002")
+    first = _snapshot(incumbent).model_copy(
+        update={
+            "ranking_v4_candidate_pool": [incumbent, capacity_rejected],
+            "ranking_v4_top_5": [incumbent, capacity_rejected],
+        }
+    )
+    second = _snapshot(incumbent).model_copy(
+        update={
+            "decision_date": date(2025, 1, 9),
+            "ranking_v4_top_5": [incumbent],
+        }
+    )
+    outcomes = [
+        CandidateSignalOutcome(
+            snapshot_id=f"signal-{signal_date:%Y%m%d}-{instrument_id}",
+            instrument_id=instrument_id,
+            strategy_id="trend",
+            signal_date=signal_date,
+            status=CandidateOutcomeStatus.RESOLVED,
+            status_detail="resolved",
+            nominal_amount=Decimal("100000"),
+            resolved_at=date(2025, 2, 7),
+            return_pct=2.0,
+        )
+        for signal_date, instrument_id in (
+            (first.decision_date, incumbent.instrument_id),
+            (first.decision_date, capacity_rejected.instrument_id),
+            (second.decision_date, incumbent.instrument_id),
+        )
+    ]
+    ledger = CandidateOutcomeLedgerResult(
+        provider="historical_replay",
+        start=date(2025, 1, 1),
+        end=date(2025, 3, 1),
+        nominal_amount=Decimal("100000"),
+        outcomes=outcomes,
+        status_counts={CandidateOutcomeStatus.RESOLVED.value: len(outcomes)},
+        data_health={},
+    )
+    model_selections = {
+        first.decision_date: {walk_forward.RANKING_V4_FULL_MODEL_ID: first.ranking_v4_top_5},
+        second.decision_date: {walk_forward.RANKING_V4_FULL_MODEL_ID: second.ranking_v4_top_5},
+    }
+    executed_trade = _trade()
+
+    _, _, completed, valid, expected = _ranking_v4_selected_return_observations(
+        [first, second],
+        normal_ledger=ledger,
+        stress_ledger=ledger,
+        baseline_portfolio=_portfolio(),
+        challenger_portfolio=_portfolio(
+            trades=[executed_trade, executed_trade.model_copy()],
+        ),
+        stress_portfolio=_portfolio(),
+        model_selections_by_date=model_selections,
+    )
+
+    assert completed == 1
+    assert valid == expected == 6
+
+
+def test_ranking_v4_headline_uses_protocol_model_version(monkeypatch):
+    protocol = SimpleNamespace(model_version="actual-protocol-model-version")
+    monkeypatch.setattr(walk_forward, "build_ranking_v4_protocol", lambda: protocol)
+    monkeypatch.setattr(
+        walk_forward,
+        "WalkForwardRankingV4Evaluation",
+        lambda **values: SimpleNamespace(**values),
+    )
+    historical_validation = SimpleNamespace(status="pass", gates=[])
+    empty_ledger = CandidateOutcomeLedgerResult(
+        provider="historical_replay",
+        start=date(2025, 1, 1),
+        end=date(2025, 3, 1),
+        nominal_amount=Decimal("100000"),
+        outcomes=[],
+        status_counts={},
+        data_health={},
+    )
+
+    evaluation = walk_forward._build_ranking_v4_evaluation(
+        snapshots=[],
+        ledger=empty_ledger,
+        constraint_matched_baseline_portfolio=_portfolio(),
+        constraint_matched_baseline_metrics=None,
+        portfolio=_portfolio(),
+        metrics=None,
+        stress_metrics=None,
+        historical_validation=historical_validation,
+        pbo_evidence={},
+        trial_ledger=None,
+    )
+
+    assert evaluation.model_version == protocol.model_version
+    assert evaluation.headline.startswith(f"{protocol.model_version} ")

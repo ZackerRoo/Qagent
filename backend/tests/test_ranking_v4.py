@@ -14,7 +14,12 @@ from qagent.backtesting.ranking_v4 import (
     realized_utility_block_lower_bound,
     score_ranking_v4_candidates,
 )
-from qagent.backtesting.ranking_v4_protocol import RANKING_V41_MODEL_VERSION
+from qagent.backtesting.ranking_v4_protocol import (
+    RANKING_V41_MODEL_VERSION,
+    RANKING_V42_MODEL_VERSION,
+    RANKING_V43_MODEL_VERSION,
+    RANKING_V44_MODEL_VERSION,
+)
 
 
 def _features(**updates) -> RankingV4FeatureVector:
@@ -541,6 +546,7 @@ def test_v43_feature_effects_are_isolated_between_stocks_and_etfs():
         ],
         observations,
         decision_date=date(2025, 1, 2),
+        model_version=RANKING_V43_MODEL_VERSION,
     )
     by_id = {item.instrument_id: item for item in decision.candidates}
 
@@ -555,6 +561,7 @@ def test_v43_etf_cannot_borrow_global_stock_utility_evidence():
         [_candidate("CN:ETF", asset_type="etf")],
         _training(),
         decision_date=date(2025, 1, 2),
+        model_version=RANKING_V43_MODEL_VERSION,
     ).candidates[0]
 
     assert score.eligible_for_position is False
@@ -567,10 +574,106 @@ def test_v43_unknown_asset_type_fails_closed():
         [_candidate("CN:UNKNOWN", asset_type="unknown")],
         _training(),
         decision_date=date(2025, 1, 2),
+        model_version=RANKING_V43_MODEL_VERSION,
     ).candidates[0]
 
     assert score.eligible_for_position is False
     assert "asset_type_missing" in score.blocked_reasons
+
+
+def test_v44_sparse_child_utility_is_partially_pooled_with_asset_evidence():
+    parent = [
+        _resolved(
+            index,
+            available_at=date(2024, 7, 1),
+            excess=4.0,
+            strategy="asset_parent",
+            regime="risk_on",
+        )
+        for index in range(MIN_V4_TRAINING_OBSERVATIONS)
+    ]
+    sparse_child = [
+        _resolved(
+            index + MIN_V4_TRAINING_OBSERVATIONS,
+            available_at=date(2024, 7, 1),
+            excess=-0.2,
+            strategy="sparse_child",
+            regime="risk_off",
+        )
+        for index in range(6)
+    ]
+
+    score = score_ranking_v4_candidates(
+        [
+            _candidate(
+                "CN:SPARSE",
+                strategy="sparse_child",
+                regime="risk_off",
+            )
+        ],
+        [*parent, *sparse_child],
+        decision_date=date(2025, 1, 2),
+        model_version=RANKING_V44_MODEL_VERSION,
+    ).candidates[0]
+
+    assert score.expected_utility_lower_bound_pct is not None
+    assert 0 < score.expected_utility_lower_bound_pct < 4.0
+    assert score.eligible_for_position is True
+    assert score.utility_evidence_date_count == len(parent) + len(sparse_child)
+
+
+def test_v44_severe_child_loss_can_still_fail_the_unchanged_positive_lcb_gate():
+    parent = [
+        _resolved(
+            index,
+            available_at=date(2024, 7, 1),
+            excess=4.0,
+            strategy="asset_parent",
+            regime="risk_on",
+        )
+        for index in range(MIN_V4_TRAINING_OBSERVATIONS)
+    ]
+    severe_child = [
+        _resolved(
+            index + MIN_V4_TRAINING_OBSERVATIONS,
+            available_at=date(2024, 7, 1),
+            excess=-10.0,
+            strategy="severe_child",
+            regime="risk_off",
+        )
+        for index in range(6)
+    ]
+
+    score = score_ranking_v4_candidates(
+        [
+            _candidate(
+                "CN:SEVERE",
+                strategy="severe_child",
+                regime="risk_off",
+            )
+        ],
+        [*parent, *severe_child],
+        decision_date=date(2025, 1, 2),
+        model_version=RANKING_V44_MODEL_VERSION,
+    ).candidates[0]
+
+    assert score.expected_utility_lower_bound_pct is not None
+    assert score.expected_utility_lower_bound_pct < 0
+    assert score.eligible_for_position is False
+    assert "utility_lower_bound_not_positive" in score.blocked_reasons
+
+
+def test_v44_etf_utility_cannot_borrow_stock_asset_evidence():
+    score = score_ranking_v4_candidates(
+        [_candidate("CN:ETF", asset_type="etf")],
+        _training(),
+        decision_date=date(2025, 1, 2),
+        model_version=RANKING_V44_MODEL_VERSION,
+    ).candidates[0]
+
+    assert score.expected_utility_lower_bound_pct is None
+    assert score.utility_evidence_date_count == 0
+    assert "realized_utility_block_evidence_insufficient" in score.blocked_reasons
 
 
 def test_v42_ignores_unproven_fixed_replacement_cost_and_deducts_only_increment():
@@ -605,11 +708,9 @@ def test_v42_ignores_unproven_fixed_replacement_cost_and_deducts_only_increment(
     by_id = {item.instrument_id: item for item in proven.candidates}
     assert by_id["CN:000002"].replacement_cost_pct == pytest.approx(0.05)
     assert by_id["CN:000002"].incremental_replacement_cost_proven is True
-    assert (
-        by_id["CN:000001"].expected_utility_pct
-        - by_id["CN:000002"].expected_utility_pct
-        == pytest.approx(0.05)
-    )
+    assert by_id["CN:000001"].expected_utility_pct - by_id[
+        "CN:000002"
+    ].expected_utility_pct == pytest.approx(0.05)
 
 
 def test_v42_proven_cost_already_embedded_in_stage2_is_not_charged_again():
@@ -752,6 +853,7 @@ def test_v42_utility_lcb_is_computed_once_from_realized_date_blocks():
         [candidate],
         observations,
         decision_date=date(2025, 1, 2),
+        model_version=RANKING_V42_MODEL_VERSION,
     ).candidates[0]
     direct_lower = realized_utility_block_lower_bound(
         [4.0 if index % 2 == 0 else -1.0 for index in range(MIN_V4_TRAINING_OBSERVATIONS)]
@@ -803,11 +905,9 @@ def test_v41_scoring_preserves_fixed_cost_and_marginal_lcb_gates():
     )
 
     assert decision.model_version == RANKING_V41_MODEL_VERSION
-    assert (
-        decision.candidates[0].expected_utility_pct
-        - decision.candidates[1].expected_utility_pct
-        == pytest.approx(0.2)
-    )
+    assert decision.candidates[0].expected_utility_pct - decision.candidates[
+        1
+    ].expected_utility_pct == pytest.approx(0.2)
     assert decision.candidates[0].utility_evidence_block_count == 0
 
     negative = score_ranking_v4_candidates(
