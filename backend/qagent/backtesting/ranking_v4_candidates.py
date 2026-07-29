@@ -35,8 +35,11 @@ DEFAULT_RANKING_V4_CHANNEL_QUOTAS: dict[RankingV4Channel, int] = {
     "etf_industry": 8,
 }
 MAX_RANKING_V4_CANDIDATE_POOL_SIZE = 50
+RANKING_V43_STOCK_POOL_LIMIT = 42
+RANKING_V43_ETF_POOL_LIMIT = 8
 BREAKOUT_STRATEGY_BONUS = 0.08
-_ETF_ASSET_TYPES = frozenset({"etf", "fund", "index_fund"})
+_STOCK_ASSET_TYPES = frozenset({"stock", "equity", "1"})
+_ETF_ASSET_TYPES = frozenset({"etf", "fund", "index_fund", "5"})
 
 
 class RankingV4CandidatePoolEntry(BaseModel):
@@ -69,11 +72,39 @@ def build_preregistered_ranking_v4_candidate_pool(
 ) -> list[RankingV4CandidatePoolEntry]:
     """Build the production-comparable V4 pool with the frozen protocol settings."""
 
-    return build_ranking_v4_candidate_pool(
-        candidates,
+    stocks = [
+        candidate
+        for candidate in candidates
+        if _normalized_asset_type(candidate.asset_type) == "stock"
+    ]
+    etfs = [
+        candidate
+        for candidate in candidates
+        if _normalized_asset_type(candidate.asset_type) == "etf"
+    ]
+    stock_entries = build_ranking_v4_candidate_pool(
+        stocks,
         quotas=DEFAULT_RANKING_V4_CHANNEL_QUOTAS,
-        limit=MAX_RANKING_V4_CANDIDATE_POOL_SIZE,
-    )
+        limit=min(RANKING_V43_STOCK_POOL_LIMIT, max(len(stocks), 1)),
+    ) if stocks else []
+    etf_entries = build_ranking_v4_candidate_pool(
+        etfs,
+        quotas=DEFAULT_RANKING_V4_CHANNEL_QUOTAS,
+        limit=min(RANKING_V43_ETF_POOL_LIMIT, max(len(etfs), 1)),
+    ) if etfs else []
+    return [
+        *stock_entries,
+        *etf_entries,
+    ]
+
+
+def _normalized_asset_type(asset_type: str) -> str:
+    normalized = asset_type.strip().lower().replace("-", "_")
+    if normalized in _STOCK_ASSET_TYPES:
+        return "stock"
+    if normalized in _ETF_ASSET_TYPES:
+        return "etf"
+    return "unknown"
 
 
 def build_ranking_v4_candidate_pool(
@@ -255,9 +286,6 @@ def _channel_scores(
                 else 0.0
             ),
         ),
-        "quality_value": (
-            0.40 * features.quality + 0.35 * features.valuation + 0.25 * features.low_risk
-        ),
         "defensive_low_vol": (
             0.30 * features.low_risk
             + 0.25 * features.risk_filter
@@ -270,6 +298,10 @@ def _channel_scores(
             0.35 * features.trend_quality
             + 0.35 * features.industry_strength
             + 0.30 * features.liquidity
+        )
+    else:
+        scores["quality_value"] = (
+            0.40 * features.quality + 0.35 * features.valuation + 0.25 * features.low_risk
         )
     return scores
 

@@ -859,7 +859,7 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     assert first.ranking_v4.historical_validation.deployment_scope == "shadow_only"
     assert set(first.ranking_v4.pbo_evidence["registered_model_ids"]) == {
         "constraint_matched_baseline",
-        "ranking_v42_full",
+            "ranking_v43_full",
         "channel_baseline",
         "channel_trend",
         "channel_breakout",

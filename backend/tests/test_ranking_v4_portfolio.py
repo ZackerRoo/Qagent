@@ -336,6 +336,125 @@ def test_v41_etf_without_constituents_requires_return_correlation_for_second_pos
     assert proven.selected_count == 2
 
 
+def test_v41_etfs_with_same_index_block_without_constituent_snapshots():
+    first = _candidate(
+        "CN:510001",
+        asset_type="etf",
+        underlying_ids=[],
+        index_memberships=["CN:000300.IDX"],
+    ).model_copy(
+        update={
+            "underlying_evidence_complete": False,
+            "constraint_evidence_mode": "return_risk_proxy",
+        }
+    )
+    second = _candidate(
+        "CN:510002",
+        asset_type="etf",
+        underlying_ids=[],
+        index_memberships=["CN:000300.IDX"],
+    ).model_copy(
+        update={
+            "underlying_evidence_complete": False,
+            "constraint_evidence_mode": "return_risk_proxy",
+        }
+    )
+
+    result = select_ranking_v4_portfolio(
+        _decision([first, second]),
+        [first, second],
+        pairwise_correlations={(first.instrument_id, second.instrument_id): 0.4},
+    )
+    blocked = {item.instrument_id: item.reasons for item in result.blocked}
+
+    assert [item.instrument_id for item in result.selected] == [first.instrument_id]
+    assert blocked[second.instrument_id] == ["etf_index_overlap"]
+
+
+def test_v41_etfs_with_different_indexes_allow_without_constituent_snapshots():
+    first = _candidate(
+        "CN:510001",
+        asset_type="etf",
+        underlying_ids=[],
+        index_memberships=["CN:000300.IDX"],
+    ).model_copy(
+        update={
+            "underlying_evidence_complete": False,
+            "constraint_evidence_mode": "return_risk_proxy",
+        }
+    )
+    second = _candidate(
+        "CN:510002",
+        asset_type="etf",
+        underlying_ids=[],
+        index_memberships=["CN:000905.IDX"],
+    ).model_copy(
+        update={
+            "underlying_evidence_complete": False,
+            "constraint_evidence_mode": "return_risk_proxy",
+        }
+    )
+
+    result = select_ranking_v4_portfolio(
+        _decision([first, second]),
+        [first, second],
+        pairwise_correlations={(first.instrument_id, second.instrument_id): 0.4},
+    )
+
+    assert [item.instrument_id for item in result.selected] == [
+        first.instrument_id,
+        second.instrument_id,
+    ]
+    assert result.blocked == ()
+
+
+def test_v41_etf_constituent_overlap_requires_complete_underlying_evidence():
+    complete = [
+        _candidate(
+            "CN:510001",
+            asset_type="etf",
+            underlying_ids=["CN:000001"],
+            index_memberships=["CN:000300.IDX"],
+        ),
+        _candidate(
+            "CN:510002",
+            asset_type="etf",
+            underlying_ids=["CN:000001"],
+            index_memberships=["CN:000905.IDX"],
+        ),
+    ]
+    incomplete = [
+        candidate.model_copy(
+            update={
+                "underlying_evidence_complete": False,
+                "constraint_evidence_mode": "return_risk_proxy",
+            }
+        )
+        for candidate in complete
+    ]
+    correlations = {
+        (complete[0].instrument_id, complete[1].instrument_id): 0.4,
+    }
+
+    incomplete_result = select_ranking_v4_portfolio(
+        _decision(incomplete),
+        incomplete,
+        pairwise_correlations=correlations,
+    )
+    complete_result = select_ranking_v4_portfolio(
+        _decision(complete),
+        complete,
+        pairwise_correlations=correlations,
+    )
+    blocked = {
+        item.instrument_id: item.reasons for item in complete_result.blocked
+    }
+
+    assert incomplete_result.selected_count == 2
+    assert complete_result.selected_count == 1
+    assert blocked[complete[1].instrument_id] == ["etf_underlying_overlap"]
+
+
 def test_v4_portfolio_finds_global_optimum_that_greedy_misses():
     candidates = [
         _candidate("CN:000001", strategy="strategy-a", industry="industry-a"),

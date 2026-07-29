@@ -248,6 +248,25 @@ def test_etf_industry_channel_never_contains_stock_candidates():
     assert "etf_industry" not in stock_entry.matched_channels
 
 
+@pytest.mark.parametrize("asset_type", ["ETF", "fund", "index-fund", "5"])
+def test_etf_candidates_are_ineligible_for_quality_value(asset_type):
+    candidate = _candidate(
+        f"CN:{asset_type}",
+        asset_type=asset_type,
+        features=_features(quality=1.0, valuation=1.0, low_risk=1.0),
+    )
+
+    entry = build_ranking_v4_candidate_pool(
+        [candidate],
+        quotas=_quotas(quality_value=1),
+        limit=1,
+    )[0]
+
+    assert "quality_value" not in entry.channel_scores
+    assert "quality_value" not in entry.matched_channels
+    assert entry.primary_channel != "quality_value"
+
+
 def test_pool_backfills_by_best_channel_score_then_baseline_then_id():
     candidates = [
         _candidate(
@@ -335,26 +354,57 @@ def test_default_pool_is_capped_at_fifty_unique_candidates():
     assert len({entry.candidate.instrument_id for entry in entries}) == 50
 
 
-def test_preregistered_pool_always_uses_frozen_protocol_configuration():
-    candidates = [
+def test_preregistered_pool_enforces_asset_quotas_without_cross_asset_backfill():
+    stocks = [
         _candidate(
-            f"CN:{index:06d}",
-            baseline=(70 - index) / 70,
-            features=_features(momentum=(index + 1) / 70),
+            f"CN:STOCK-{index:03d}",
+            baseline=(60 - index) / 60,
+            features=_features(momentum=(index + 1) / 60),
         )
-        for index in range(70)
+        for index in range(60)
+    ]
+    etfs = [
+        _candidate(
+            f"CN:ETF-{index:03d}",
+            asset_type="fund",
+            baseline=(20 - index) / 20,
+            features=_features(momentum=(index + 1) / 20),
+        )
+        for index in range(20)
     ]
 
-    entries = build_preregistered_ranking_v4_candidate_pool(candidates)
-
-    assert _dump(entries) == _dump(
-        build_ranking_v4_candidate_pool(
-            candidates,
-            quotas=DEFAULT_RANKING_V4_CHANNEL_QUOTAS,
-            limit=MAX_RANKING_V4_CANDIDATE_POOL_SIZE,
-        )
+    entries = build_preregistered_ranking_v4_candidate_pool(
+        [
+            *etfs,
+            *stocks,
+            _candidate("CN:UNKNOWN", asset_type="unknown", baseline=1.0),
+        ]
     )
+    stock_entries = [
+        item for item in entries if item.candidate.instrument_id.startswith("CN:STOCK")
+    ]
+    etf_entries = [
+        item for item in entries if item.candidate.instrument_id.startswith("CN:ETF")
+    ]
+
+    assert len(stock_entries) == 42
+    assert len(etf_entries) == 8
     assert len(entries) == 50
+    assert all(item.candidate.instrument_id != "CN:UNKNOWN" for item in entries)
+
+
+def test_preregistered_pool_does_not_replace_missing_etfs_with_more_stocks():
+    entries = build_preregistered_ranking_v4_candidate_pool(
+        [
+            *[_candidate(f"CN:STOCK-{index:03d}") for index in range(60)],
+            *[
+                _candidate(f"CN:ETF-{index:03d}", asset_type="etf")
+                for index in range(3)
+            ],
+        ]
+    )
+
+    assert len(entries) == 45
 
 
 def test_channel_scores_use_frozen_formulas_and_bounded_breakout_bonus():
@@ -388,7 +438,7 @@ def test_channel_scores_use_frozen_formulas_and_bounded_breakout_bonus():
     assert entry.channel_scores["breakout"] == pytest.approx(
         min(1.0, 0.45 * 0.9 + 0.30 * 0.8 + 0.25 * 0.7 + BREAKOUT_STRATEGY_BONUS)
     )
-    assert entry.channel_scores["quality_value"] == pytest.approx(0.665)
+    assert "quality_value" not in entry.channel_scores
     assert entry.channel_scores["defensive_low_vol"] == pytest.approx(0.58)
     assert entry.channel_scores["etf_industry"] == pytest.approx(0.56)
 

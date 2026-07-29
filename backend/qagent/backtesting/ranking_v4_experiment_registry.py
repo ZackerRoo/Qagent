@@ -14,10 +14,12 @@ RANKING_V41_EXPERIMENT_REGISTRY_SCHEMA_VERSION = "ranking-v4.1-experiment-regist
 RANKING_V41_EXPERIMENT_REGISTRY_ID = "QAGENT-RANK-V4.1-PRIOR-EVIDENCE-20260728"
 RANKING_V42_EXPERIMENT_REGISTRY_SCHEMA_VERSION = "ranking-v4.2-experiment-registry-v1"
 RANKING_V42_EXPERIMENT_REGISTRY_ID = "QAGENT-RANK-V4.2-PRIOR-EVIDENCE-20260729"
+RANKING_V43_EXPERIMENT_REGISTRY_SCHEMA_VERSION = "ranking-v4.3-experiment-registry-v1"
+RANKING_V43_EXPERIMENT_REGISTRY_ID = "QAGENT-RANK-V4.3-PRIOR-EVIDENCE-20260729"
 RANKING_V4_EXPERIMENT_REGISTRY_SCHEMA_VERSION = (
-    RANKING_V42_EXPERIMENT_REGISTRY_SCHEMA_VERSION
+    RANKING_V43_EXPERIMENT_REGISTRY_SCHEMA_VERSION
 )
-RANKING_V4_EXPERIMENT_REGISTRY_ID = RANKING_V42_EXPERIMENT_REGISTRY_ID
+RANKING_V4_EXPERIMENT_REGISTRY_ID = RANKING_V43_EXPERIMENT_REGISTRY_ID
 RANKING_V3_REJECTED_EXPERIMENT_ID = "walk-forward-20260726164443-7fd44f0b"
 RANKING_V3_REJECTED_CODE_REVISION = "dbd7fa0f6ec76990eca4de8325e14866dfbfe8e7"
 RANKING_V3_REJECTED_DATASET_REVISION = 8939
@@ -247,7 +249,7 @@ def _ranking_v4_rejected_summary_payload() -> dict[str, object]:
 def build_ranking_v4_experiment_registry(
     *,
     predecessor_summaries: tuple[RankingV4ExperimentSummary, ...] | None = None,
-    version: Literal["4.1", "4.2"] = "4.2",
+    version: Literal["4.1", "4.2", "4.3"] = "4.3",
 ) -> RankingV4ExperimentRegistry:
     summaries = (
         (
@@ -269,6 +271,10 @@ def build_ranking_v4_experiment_registry(
     elif version == "4.2":
         schema_version = RANKING_V42_EXPERIMENT_REGISTRY_SCHEMA_VERSION
         registry_id = RANKING_V42_EXPERIMENT_REGISTRY_ID
+        frozen_on = date(2026, 7, 29)
+    elif version == "4.3":
+        schema_version = RANKING_V43_EXPERIMENT_REGISTRY_SCHEMA_VERSION
+        registry_id = RANKING_V43_EXPERIMENT_REGISTRY_ID
         frozen_on = date(2026, 7, 29)
     else:
         raise ValueError("unsupported Ranking V4 experiment registry version")
@@ -361,6 +367,9 @@ def _validate_registry(registry: RankingV4ExperimentRegistry) -> None:
         RANKING_V42_EXPERIMENT_REGISTRY_SCHEMA_VERSION: (
             RANKING_V42_EXPERIMENT_REGISTRY_ID
         ),
+        RANKING_V43_EXPERIMENT_REGISTRY_SCHEMA_VERSION: (
+            RANKING_V43_EXPERIMENT_REGISTRY_ID
+        ),
     }
     expected_id = expected_id_by_schema.get(registry.schema_version)
     if expected_id is None:
@@ -406,7 +415,7 @@ def _validate_registry(registry: RankingV4ExperimentRegistry) -> None:
         or registry.historical_trial_return_series_digests
     ):
         raise RankingV4ExperimentRegistryError(
-            "V4.2 has no audited complete historical trial-return inventory"
+            "active Ranking V4 has no audited complete historical trial-return inventory"
         )
     if registry.registry_digest != _digest(registry.stable_payload()):
         raise RankingV4ExperimentRegistryError("experiment registry digest mismatch")

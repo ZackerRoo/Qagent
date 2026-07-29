@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from qagent.backtesting.ranking_v4_experiment_registry import (
     RANKING_V41_EXPERIMENT_REGISTRY_SCHEMA_VERSION,
     RANKING_V42_EXPERIMENT_REGISTRY_SCHEMA_VERSION,
+    RANKING_V43_EXPERIMENT_REGISTRY_SCHEMA_VERSION,
     RankingV4ExperimentRegistry,
     build_ranking_v4_experiment_registry,
 )
@@ -22,9 +23,12 @@ RANKING_V41_MODEL_VERSION = "two-stage-feature-aware-net-excess-v4.1-preregister
 RANKING_V42_PROTOCOL_SCHEMA_VERSION = "ranking-v4.2-preregistered-protocol-v1"
 RANKING_V42_PROTOCOL_ID = "QAGENT-RANK-V4.2-PREREGISTERED-20260729"
 RANKING_V42_MODEL_VERSION = "two-stage-feature-aware-net-excess-v4.2-preregistered"
-RANKING_V4_PROTOCOL_SCHEMA_VERSION = RANKING_V42_PROTOCOL_SCHEMA_VERSION
-RANKING_V4_PROTOCOL_ID = RANKING_V42_PROTOCOL_ID
-RANKING_V4_MODEL_VERSION = RANKING_V42_MODEL_VERSION
+RANKING_V43_PROTOCOL_SCHEMA_VERSION = "ranking-v4.3-preregistered-protocol-v1"
+RANKING_V43_PROTOCOL_ID = "QAGENT-RANK-V4.3-PREREGISTERED-20260729"
+RANKING_V43_MODEL_VERSION = "asset-stratified-net-excess-v4.3-preregistered"
+RANKING_V4_PROTOCOL_SCHEMA_VERSION = RANKING_V43_PROTOCOL_SCHEMA_VERSION
+RANKING_V4_PROTOCOL_ID = RANKING_V43_PROTOCOL_ID
+RANKING_V4_MODEL_VERSION = RANKING_V43_MODEL_VERSION
 RANKING_V4_DEVELOPMENT_START = date(2021, 11, 1)
 RANKING_V4_DEVELOPMENT_END = date(2025, 12, 31)
 RANKING_V4_DEVELOPMENT_LOOKBACK_DAYS = 400
@@ -106,6 +110,16 @@ _V42_PBO_MODEL_IDS = (
     "channel_defensive_low_vol",
     "channel_etf_industry",
 )
+_V43_PBO_MODEL_IDS = (
+    "constraint_matched_baseline",
+    "ranking_v43_full",
+    "channel_baseline",
+    "channel_trend",
+    "channel_breakout",
+    "channel_quality_value",
+    "channel_defensive_low_vol",
+    "channel_etf_industry",
+)
 _V41_REGISTERED_MODEL_RULES = (
     ("constraint_matched_baseline", "baseline_rank_score_desc"),
     ("ranking_v41_full", "ranking_v41_feature_adjusted_utility_lower_bound_desc"),
@@ -119,6 +133,16 @@ _V41_REGISTERED_MODEL_RULES = (
 _V42_REGISTERED_MODEL_RULES = (
     ("constraint_matched_baseline", "baseline_rank_score_desc"),
     ("ranking_v42_full", "ranking_v42_direct_realized_utility_lower_bound_desc"),
+    ("channel_baseline", "channel_baseline_score_desc"),
+    ("channel_trend", "channel_trend_score_desc"),
+    ("channel_breakout", "channel_breakout_score_desc"),
+    ("channel_quality_value", "channel_quality_value_score_desc"),
+    ("channel_defensive_low_vol", "channel_defensive_low_vol_score_desc"),
+    ("channel_etf_industry", "channel_etf_industry_score_desc"),
+)
+_V43_REGISTERED_MODEL_RULES = (
+    ("constraint_matched_baseline", "baseline_rank_score_desc"),
+    ("ranking_v43_full", "ranking_v43_asset_realized_utility_lower_bound_desc"),
     ("channel_baseline", "channel_baseline_score_desc"),
     ("channel_trend", "channel_trend_score_desc"),
     ("channel_breakout", "channel_breakout_score_desc"),
@@ -437,10 +461,11 @@ class RankingV4Protocol(BaseModel):
     confirmatory_definition: RankingV4ConfirmatoryDefinition
     evidence_windows: tuple[RankingV4EvidenceWindow, ...]
     predecessor_evidence_policy: str = (
-        "ranking_v3_and_ranking_v4_rejections_are_immutable_and_never_reclassified_by_v4.2"
+        "ranking_v3_and_ranking_v4_rejections_are_immutable_and_never_reclassified_by_v4.3"
     )
     model_selection_policy: str = (
-        "v4.2_is_a_new_preregistered_trial;development_window_is_exploratory;"
+        "v4.3_is_a_new_preregistered_trial;v4.2_was_superseded_before_code_freeze;"
+        "development_window_is_exploratory;"
         "all_post_inspection_changes_count_as_new_trials"
     )
     official_recommendation_isolation: Literal["shadow_only_until_every_gate_passes"] = (
@@ -451,7 +476,7 @@ class RankingV4Protocol(BaseModel):
 def build_ranking_v4_protocol(
     *,
     experiment_registry: RankingV4ExperimentRegistry | None = None,
-    version: Literal["4.1", "4.2"] = "4.2",
+    version: Literal["4.1", "4.2", "4.3"] = "4.3",
 ) -> RankingV4Protocol:
     registry = experiment_registry or build_ranking_v4_experiment_registry(version=version)
     registry.require_valid()
@@ -478,7 +503,7 @@ def ranking_v4_protocol_digest_is_valid(protocol: RankingV4Protocol) -> bool:
 def _ranking_v4_protocol_payload(
     experiment_registry: RankingV4ExperimentRegistry,
     *,
-    version: Literal["4.1", "4.2"],
+    version: Literal["4.1", "4.2", "4.3"],
 ) -> dict[str, object]:
     if version == "4.1":
         protocol_schema_version = RANKING_V41_PROTOCOL_SCHEMA_VERSION
@@ -546,8 +571,78 @@ def _ranking_v4_protocol_payload(
             "v4.2_is_a_new_preregistered_trial;development_window_is_exploratory;"
             "all_post_inspection_changes_count_as_new_trials"
         )
+        candidate_definition = RankingV4CandidateDefinition()
+        market_regime_definition = RankingV4MarketRegimeDefinition()
+    elif version == "4.3":
+        protocol_schema_version = RANKING_V43_PROTOCOL_SCHEMA_VERSION
+        protocol_id = RANKING_V43_PROTOCOL_ID
+        model_version = RANKING_V43_MODEL_VERSION
+        preregistered_on = "2026-07-29"
+        candidate_definition = RankingV4CandidateDefinition(
+            implementation_version=(
+                "ranking-v4.3-asset-stratified-multi-channel-union-v1"
+            ),
+            deterministic_backfill_rule=(
+                "fixed_stock_42_and_etf_8_asset_quotas_no_cross_asset_backfill"
+            ),
+        )
+        model_definition = RankingV4TwoStageModelDefinition(
+            implementation_version=(
+                "ranking-v4.3-asset-stratified-feature-bin-hierarchical-shrinkage-v1"
+            ),
+            feature_effect_aggregation=(
+                "equal_weight_mean_of_asset_stratified_feature_bucket_residual_effects_"
+                "for_interpretation_and_ranking_only"
+            ),
+        )
+        utility_definition = RankingV4UtilityDefinition(
+            implementation_version="ranking-v4.3-portfolio-aligned-utility-v1"
+        )
+        market_regime_definition = RankingV4MarketRegimeDefinition(
+            implementation_version="ranking-v4.3-point-in-time-market-regime-v1",
+            market_breadth_formula=(
+                "share_of_point_in_time_stock_prefilter_factor_scores_gte_0.5"
+            ),
+        )
+        portfolio_definition = RankingV4PortfolioDefinition(
+            implementation_version=(
+                "ranking-v4.3-zero-to-five-asset-aware-risk-proxy-v1"
+            ),
+            etf_overlap_fallback_policy=(
+                "known_index_membership_overlap_always_blocks;"
+                "point_in_time_constituent_overlap_when_available_else_"
+                "mandatory_pairwise_correlation"
+            ),
+            selection_rule=(
+                "maximize_frozen_v43_asset_realized_utility_lower_bound_subject_to_"
+                "constraints;feature_lower_bounds_rank_and_explain_only"
+            ),
+        )
+        statistics_definition = RankingV4StatisticsDefinition(
+            implementation_version="ranking-v4.3-paired-block-statistics-v1",
+            pbo_model_ids=_V43_PBO_MODEL_IDS,
+            registered_models=tuple(
+                RankingV4RegisteredModelDefinition(
+                    model_id=model_id,
+                    candidate_order_rule=candidate_order_rule,
+                )
+                for model_id, candidate_order_rule in _V43_REGISTERED_MODEL_RULES
+            ),
+        )
+        predecessor_evidence_policy = (
+            "ranking_v3_and_ranking_v4_rejections_are_immutable_and_never_"
+            "reclassified_by_v4.3"
+        )
+        model_selection_policy = (
+            "v4.3_is_a_new_preregistered_trial;v4.2_was_superseded_before_code_freeze;"
+            "development_window_is_exploratory;"
+            "all_post_inspection_changes_count_as_new_trials"
+        )
     else:
         raise ValueError("unsupported Ranking V4 protocol version")
+    if version in {"4.1", "4.2"}:
+        candidate_definition = RankingV4CandidateDefinition()
+        market_regime_definition = RankingV4MarketRegimeDefinition()
     return {
         "protocol_schema_version": protocol_schema_version,
         "protocol_id": protocol_id,
@@ -555,10 +650,10 @@ def _ranking_v4_protocol_payload(
         "preregistered_on": preregistered_on,
         "registration_state": "preregistered_code_not_yet_frozen",
         "experiment_registry": _protocol_registry_payload(experiment_registry),
-        "candidate_definition": RankingV4CandidateDefinition().model_dump(mode="json"),
+        "candidate_definition": candidate_definition.model_dump(mode="json"),
         "model_definition": model_definition.model_dump(mode="json"),
         "utility_definition": utility_definition.model_dump(mode="json"),
-        "market_regime_definition": RankingV4MarketRegimeDefinition().model_dump(mode="json"),
+        "market_regime_definition": market_regime_definition.model_dump(mode="json"),
         "portfolio_definition": portfolio_definition.model_dump(mode="json"),
         "execution_definition": RankingV4ExecutionDefinition().model_dump(mode="json"),
         "temporal_definition": RankingV4TemporalDefinition().model_dump(mode="json"),
@@ -627,20 +722,26 @@ def _validate_protocol_semantics(protocol: RankingV4Protocol) -> None:
         RANKING_V41_PROTOCOL_ID,
         RANKING_V41_MODEL_VERSION,
     ):
-        version: Literal["4.1", "4.2"] = "4.1"
+        version: Literal["4.1", "4.2", "4.3"] = "4.1"
     elif identity == (
         RANKING_V42_PROTOCOL_SCHEMA_VERSION,
         RANKING_V42_PROTOCOL_ID,
         RANKING_V42_MODEL_VERSION,
     ):
         version = "4.2"
+    elif identity == (
+        RANKING_V43_PROTOCOL_SCHEMA_VERSION,
+        RANKING_V43_PROTOCOL_ID,
+        RANKING_V43_MODEL_VERSION,
+    ):
+        version = "4.3"
     else:
         raise RankingV4ProtocolError("Ranking V4 identity cannot be rewritten")
-    expected_registry_schema = (
-        RANKING_V41_EXPERIMENT_REGISTRY_SCHEMA_VERSION
-        if version == "4.1"
-        else RANKING_V42_EXPERIMENT_REGISTRY_SCHEMA_VERSION
-    )
+    expected_registry_schema = {
+        "4.1": RANKING_V41_EXPERIMENT_REGISTRY_SCHEMA_VERSION,
+        "4.2": RANKING_V42_EXPERIMENT_REGISTRY_SCHEMA_VERSION,
+        "4.3": RANKING_V43_EXPERIMENT_REGISTRY_SCHEMA_VERSION,
+    }[version]
     if protocol.experiment_registry.schema_version != expected_registry_schema:
         raise RankingV4ProtocolError("protocol and experiment registry versions disagree")
     expected_registration_date = (
@@ -663,14 +764,23 @@ def _validate_protocol_semantics(protocol: RankingV4Protocol) -> None:
         raise RankingV4ProtocolError("candidate pool limit must remain 50")
     if candidate.future_outcome_use != "forbidden":
         raise RankingV4ProtocolError("candidate construction cannot use future outcomes")
+    expected_candidate_implementation = (
+        "ranking-v4.3-asset-stratified-multi-channel-union-v1"
+        if version == "4.3"
+        else "ranking-v4-multi-channel-union-v2"
+    )
+    expected_backfill = (
+        "fixed_stock_42_and_etf_8_asset_quotas_no_cross_asset_backfill"
+        if version == "4.3"
+        else "best_eligible_channel_score_desc_then_baseline_score_desc_then_instrument_id_asc"
+    )
     if (
-        candidate.implementation_version != "ranking-v4-multi-channel-union-v2"
+        candidate.implementation_version != expected_candidate_implementation
         or candidate.channel_rank_rule
         != ("point_in_time_channel_score_desc_then_baseline_score_desc_then_instrument_id_asc")
         or candidate.deduplication_key != "instrument_id"
         or candidate.duplicate_owner_rule != "first_channel_in_frozen_precedence"
-        or candidate.deterministic_backfill_rule
-        != ("best_eligible_channel_score_desc_then_baseline_score_desc_then_instrument_id_asc")
+        or candidate.deterministic_backfill_rule != expected_backfill
         or candidate.industry_strength_formula
         != "mean_point_in_time_factor_score_of_candidates_in_same_known_industry"
         or not candidate.point_in_time_feature_provenance_required
@@ -679,19 +789,24 @@ def _validate_protocol_semantics(protocol: RankingV4Protocol) -> None:
         raise RankingV4ProtocolError("candidate ranking, de-duplication, or backfill was changed")
 
     model = protocol.model_definition
-    expected_model_implementation = (
-        "ranking-v4.1-two-stage-feature-bin-empirical-bayes-v1"
-        if version == "4.1"
-        else "ranking-v4.2-two-stage-feature-bin-hierarchical-shrinkage-v1"
-    )
-    expected_feature_aggregation = (
-        "equal_weight_mean_of_available_preregistered_feature_bucket_residual_effects"
-        if version == "4.1"
-        else (
+    expected_model_implementation = {
+        "4.1": "ranking-v4.1-two-stage-feature-bin-empirical-bayes-v1",
+        "4.2": "ranking-v4.2-two-stage-feature-bin-hierarchical-shrinkage-v1",
+        "4.3": "ranking-v4.3-asset-stratified-feature-bin-hierarchical-shrinkage-v1",
+    }[version]
+    expected_feature_aggregation = {
+        "4.1": (
+            "equal_weight_mean_of_available_preregistered_feature_bucket_residual_effects"
+        ),
+        "4.2": (
             "equal_weight_mean_of_available_preregistered_feature_bucket_residual_effects_"
             "for_interpretation_and_ranking_only"
-        )
-    )
+        ),
+        "4.3": (
+            "equal_weight_mean_of_asset_stratified_feature_bucket_residual_effects_"
+            "for_interpretation_and_ranking_only"
+        ),
+    }[version]
     expected_interval = (
         "one_sided_lower_credible_bound"
         if version == "4.1"
@@ -728,11 +843,11 @@ def _validate_protocol_semantics(protocol: RankingV4Protocol) -> None:
         raise RankingV4ProtocolError("missing market regime must fail closed")
 
     utility = protocol.utility_definition
-    expected_utility_implementation = (
-        "ranking-v4-portfolio-aligned-utility-v2"
-        if version == "4.1"
-        else "ranking-v4.2-portfolio-aligned-utility-v3"
-    )
+    expected_utility_implementation = {
+        "4.1": "ranking-v4-portfolio-aligned-utility-v2",
+        "4.2": "ranking-v4.2-portfolio-aligned-utility-v3",
+        "4.3": "ranking-v4.3-portfolio-aligned-utility-v1",
+    }[version]
     expected_replacement_cost = (
         "zero_for_incumbent_else_frozen_candidate_replacement_cost_pct_0.15"
         if version == "4.1"
@@ -760,9 +875,20 @@ def _validate_protocol_semantics(protocol: RankingV4Protocol) -> None:
         raise RankingV4ProtocolError("V4 must optimize the portfolio release objective")
 
     regime = protocol.market_regime_definition
+    expected_regime_implementation = (
+        "ranking-v4.3-point-in-time-market-regime-v1"
+        if version == "4.3"
+        else "ranking-v4-point-in-time-market-regime-v2"
+    )
+    expected_breadth_formula = (
+        "share_of_point_in_time_stock_prefilter_factor_scores_gte_0.5"
+        if version == "4.3"
+        else "share_of_point_in_time_prefilter_factor_scores_gte_0.5"
+    )
     if (
-        regime.required_features != _MARKET_REGIME_FEATURES
-        or regime.market_breadth_formula != "share_of_point_in_time_prefilter_factor_scores_gte_0.5"
+        regime.implementation_version != expected_regime_implementation
+        or regime.required_features != _MARKET_REGIME_FEATURES
+        or regime.market_breadth_formula != expected_breadth_formula
         or regime.benchmark_slope_formula
         != "share_of_required_benchmarks_above_point_in_time_50_session_average"
         or regime.realized_volatility_formula != "mean_one_minus_point_in_time_low_risk_score"
@@ -817,19 +943,31 @@ def _validate_protocol_semantics(protocol: RankingV4Protocol) -> None:
         raise RankingV4ProtocolError("portfolio constraints do not match preregistration")
     if not portfolio.cash_allowed or portfolio.fixed_incumbent_bonus != 0:
         raise RankingV4ProtocolError("V4 must allow cash and cannot use a fixed incumbent bonus")
-    expected_portfolio_implementation = (
-        "ranking-v4.1-zero-to-five-auditable-risk-proxy-v1"
-        if version == "4.1"
-        else "ranking-v4.2-zero-to-five-auditable-risk-proxy-v1"
-    )
-    expected_selection_rule = (
-        "maximize_frozen_v41_feature_adjusted_utility_subject_to_constraints_"
-        "and_positive_lower_bound"
-        if version == "4.1"
-        else (
+    expected_portfolio_implementation = {
+        "4.1": "ranking-v4.1-zero-to-five-auditable-risk-proxy-v1",
+        "4.2": "ranking-v4.2-zero-to-five-auditable-risk-proxy-v1",
+        "4.3": "ranking-v4.3-zero-to-five-asset-aware-risk-proxy-v1",
+    }[version]
+    expected_selection_rule = {
+        "4.1": (
+            "maximize_frozen_v41_feature_adjusted_utility_subject_to_constraints_"
+            "and_positive_lower_bound"
+        ),
+        "4.2": (
             "maximize_frozen_v42_direct_realized_utility_lower_bound_subject_to_constraints;"
             "feature_lower_bounds_rank_and_explain_only"
-        )
+        ),
+        "4.3": (
+            "maximize_frozen_v43_asset_realized_utility_lower_bound_subject_to_"
+            "constraints;feature_lower_bounds_rank_and_explain_only"
+        ),
+    }[version]
+    expected_etf_overlap_policy = (
+        "known_index_membership_overlap_always_blocks;"
+        "point_in_time_constituent_overlap_when_available_else_"
+        "mandatory_pairwise_correlation"
+        if version == "4.3"
+        else "point_in_time_constituent_overlap_when_available_else_mandatory_pairwise_correlation"
     )
     if (
         portfolio.implementation_version != expected_portfolio_implementation
@@ -843,8 +981,7 @@ def _validate_protocol_semantics(protocol: RankingV4Protocol) -> None:
             "known_asset_type_beta_and_minimum_return_history_may_prove_single_name_risk;"
             "every_additional_position_requires_pairwise_return_correlation_evidence"
         )
-        or portfolio.etf_overlap_fallback_policy
-        != ("point_in_time_constituent_overlap_when_available_else_mandatory_pairwise_correlation")
+        or portfolio.etf_overlap_fallback_policy != expected_etf_overlap_policy
     ):
         raise RankingV4ProtocolError("portfolio selection or missing-data policy was changed")
 
@@ -890,15 +1027,21 @@ def _validate_protocol_semantics(protocol: RankingV4Protocol) -> None:
         raise RankingV4ProtocolError("label span, purge, or embargo no longer matches protocol")
 
     statistics = protocol.statistics_definition
-    expected_model_ids = _V41_PBO_MODEL_IDS if version == "4.1" else _V42_PBO_MODEL_IDS
-    expected_model_rules = (
-        _V41_REGISTERED_MODEL_RULES if version == "4.1" else _V42_REGISTERED_MODEL_RULES
-    )
-    expected_statistics_implementation = (
-        "ranking-v4-paired-block-statistics-v1"
-        if version == "4.1"
-        else "ranking-v4.2-paired-block-statistics-v2"
-    )
+    expected_model_ids = {
+        "4.1": _V41_PBO_MODEL_IDS,
+        "4.2": _V42_PBO_MODEL_IDS,
+        "4.3": _V43_PBO_MODEL_IDS,
+    }[version]
+    expected_model_rules = {
+        "4.1": _V41_REGISTERED_MODEL_RULES,
+        "4.2": _V42_REGISTERED_MODEL_RULES,
+        "4.3": _V43_REGISTERED_MODEL_RULES,
+    }[version]
+    expected_statistics_implementation = {
+        "4.1": "ranking-v4-paired-block-statistics-v1",
+        "4.2": "ranking-v4.2-paired-block-statistics-v2",
+        "4.3": "ranking-v4.3-paired-block-statistics-v1",
+    }[version]
     expected_pbo_method = (
         "cscv_contiguous_blocks_symmetric_half_split_purged_overlap_"
         "mean_return_rank_logit_v4"
@@ -1013,24 +1156,37 @@ def _validate_protocol_semantics(protocol: RankingV4Protocol) -> None:
         != ("signed_protocol_code_and_dataset_attestation_plus_all_historical_and_forward_gates")
     ):
         raise RankingV4ProtocolError("confirmatory forward evidence must start after both freezes")
-    expected_predecessor_policy = (
-        "ranking_v3_and_ranking_v4_rejections_are_immutable_and_never_reclassified_by_v4.1"
-        if version == "4.1"
-        else (
+    expected_predecessor_policy = {
+        "4.1": (
+            "ranking_v3_and_ranking_v4_rejections_are_immutable_and_never_"
+            "reclassified_by_v4.1"
+        ),
+        "4.2": (
             "ranking_v3_and_ranking_v4_rejections_are_immutable_and_never_"
             "reclassified_by_v4.2"
-        )
-    )
+        ),
+        "4.3": (
+            "ranking_v3_and_ranking_v4_rejections_are_immutable_and_never_"
+            "reclassified_by_v4.3"
+        ),
+    }[version]
     if protocol.predecessor_evidence_policy != expected_predecessor_policy:
         raise RankingV4ProtocolError("V3 or V4 rejected evidence cannot be reclassified")
-    expected_selection_policy = (
-        "development_window_is_exploratory_and_all_post_inspection_changes_count_as_new_trials"
-        if version == "4.1"
-        else (
+    expected_selection_policy = {
+        "4.1": (
+            "development_window_is_exploratory_and_all_post_inspection_changes_"
+            "count_as_new_trials"
+        ),
+        "4.2": (
             "v4.2_is_a_new_preregistered_trial;development_window_is_exploratory;"
             "all_post_inspection_changes_count_as_new_trials"
-        )
-    )
+        ),
+        "4.3": (
+            "v4.3_is_a_new_preregistered_trial;v4.2_was_superseded_before_code_freeze;"
+            "development_window_is_exploratory;"
+            "all_post_inspection_changes_count_as_new_trials"
+        ),
+    }[version]
     if protocol.model_selection_policy != expected_selection_policy:
         raise RankingV4ProtocolError("post-inspection V4 changes must count as new trials")
     if protocol.official_recommendation_isolation != "shadow_only_until_every_gate_passes":

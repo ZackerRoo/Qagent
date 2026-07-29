@@ -513,6 +513,9 @@ def test_candidate_preserves_actual_historical_evidence_dates():
     assert candidate.market_regime_as_of == date(2025, 1, 1)
     assert candidate.constraint_as_of == date(2025, 1, 1)
     assert candidate.cost_as_of == date(2023, 8, 28)
+    assert candidate.replacement_cost_pct == 0.15
+    assert candidate.stage_two_embedded_cost_pct == 0.0
+    assert candidate.replacement_cost_evidence_complete is True
     assert {
         candidate.feature_as_of,
         candidate.market_regime_as_of,
@@ -801,7 +804,7 @@ def test_validation_keeps_cash_date_and_counts_missing_stress_evidence(monkeypat
     cached_models = {
         snapshot.decision_date: {
             "constraint_matched_baseline": [selection],
-            "ranking_v42_full": [selection],
+            "ranking_v43_full": [selection],
         }
     }
     monkeypatch.setattr(

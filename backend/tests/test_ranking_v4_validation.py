@@ -33,7 +33,7 @@ def _dates(count: int = DATE_COUNT) -> list[date]:
 def _passing_values() -> dict[str, list[float]]:
     return {
         "constraint_matched_baseline": [0.0] * DATE_COUNT,
-        "ranking_v42_full": [
+        "ranking_v43_full": [
             1.1 + [0.0, 0.25, -0.1, 0.15, -0.2, 0.1][index % 6] for index in range(DATE_COUNT)
         ],
         "channel_baseline": [
@@ -113,7 +113,7 @@ def _passing_inputs(
         complete_trial_matrix,
         experiment_registry_digest=protocol.experiment_registry.registry_digest,
     )
-    challenger_values = selected_values["ranking_v42_full"]
+    challenger_values = selected_values["ranking_v43_full"]
     return {
         "baseline_returns": _observations(selected_values["constraint_matched_baseline"]),
         "challenger_returns": _observations(
@@ -422,9 +422,9 @@ def test_v41_historical_validation_path_remains_reproducible():
     values = {
         key: series[:32]
         for key, series in _passing_values().items()
-        if key != "ranking_v42_full"
+        if key != "ranking_v43_full"
     }
-    values["ranking_v41_full"] = _passing_values()["ranking_v42_full"][:32]
+    values["ranking_v41_full"] = _passing_values()["ranking_v43_full"][:32]
     matrix = {
         model_id: [
             RankingV4DatedModelReturn(rebalance_date=rebalance_date, net_return=value)

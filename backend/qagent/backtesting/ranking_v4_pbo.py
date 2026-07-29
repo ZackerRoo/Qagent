@@ -30,15 +30,17 @@ _V41_MATRIX_SCHEMA_VERSION = "ranking-v4.1-real-model-return-matrix-v1"
 _V41_EVIDENCE_SCHEMA_VERSION = "ranking-v4.1-cscv-pbo-evidence-v1"
 _V42_MATRIX_SCHEMA_VERSION = "ranking-v4.2-real-model-return-matrix-v1"
 _V42_EVIDENCE_SCHEMA_VERSION = "ranking-v4.2-cscv-pbo-evidence-v1"
-_MATRIX_SCHEMA_VERSION = _V42_MATRIX_SCHEMA_VERSION
-_EVIDENCE_SCHEMA_VERSION = _V42_EVIDENCE_SCHEMA_VERSION
+_V43_MATRIX_SCHEMA_VERSION = "ranking-v4.3-real-model-return-matrix-v1"
+_V43_EVIDENCE_SCHEMA_VERSION = "ranking-v4.3-cscv-pbo-evidence-v1"
+_MATRIX_SCHEMA_VERSION = _V43_MATRIX_SCHEMA_VERSION
+_EVIDENCE_SCHEMA_VERSION = _V43_EVIDENCE_SCHEMA_VERSION
 _MATRIX_RETURN_SEMANTICS = (
     "caller_supplied_common_rebalance_calendar_with_invalid_or_missing_model_dates_"
     "explicitly_filled_as_cash_zero_return_before_evaluation"
 )
 
 SerializableEvidence: TypeAlias = dict[str, object]
-ProtocolVersion: TypeAlias = Literal["4.1", "4.2"]
+ProtocolVersion: TypeAlias = Literal["4.1", "4.2", "4.3"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +68,7 @@ class RankingV4DatedModelReturn:
 def evaluate_ranking_v4_cscv_pbo(
     model_returns: Mapping[str, Sequence[RankingV4DatedModelReturn]],
     *,
-    protocol_version: ProtocolVersion = "4.2",
+    protocol_version: ProtocolVersion = "4.3",
 ) -> SerializableEvidence:
     """Evaluate frozen-family Ranking V4 PBO from a complete real-date matrix.
 
@@ -452,16 +454,24 @@ def _pbo_config(version: ProtocolVersion) -> _PBOConfig:
         purge_rebalance_cohorts=statistics.pbo_purge_rebalance_cohorts,
         minimum_date_count=protocol.thresholds.minimum_rebalance_dates,
         minimum_dates_per_half=(
-            protocol.thresholds.minimum_rebalance_dates if version == "4.2" else None
+            protocol.thresholds.minimum_rebalance_dates if version != "4.1" else None
         ),
         matrix_schema_version=(
-            _V42_MATRIX_SCHEMA_VERSION
-            if version == "4.2"
-            else _V41_MATRIX_SCHEMA_VERSION
+            _V41_MATRIX_SCHEMA_VERSION
+            if version == "4.1"
+            else (
+                _V42_MATRIX_SCHEMA_VERSION
+                if version == "4.2"
+                else _V43_MATRIX_SCHEMA_VERSION
+            )
         ),
         evidence_schema_version=(
-            _V42_EVIDENCE_SCHEMA_VERSION
-            if version == "4.2"
-            else _V41_EVIDENCE_SCHEMA_VERSION
+            _V41_EVIDENCE_SCHEMA_VERSION
+            if version == "4.1"
+            else (
+                _V42_EVIDENCE_SCHEMA_VERSION
+                if version == "4.2"
+                else _V43_EVIDENCE_SCHEMA_VERSION
+            )
         ),
     )

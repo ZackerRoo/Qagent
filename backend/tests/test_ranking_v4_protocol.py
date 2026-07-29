@@ -24,6 +24,8 @@ FROZEN_V41_PROTOCOL_DIGEST = "8d95996fbccc99c4df2d458220ead0147e51f3a2b2032628e5
 FROZEN_V41_REGISTRY_DIGEST = "63ae2333f8ed1ef1d45c9551143f5fbffdc1ff0f4fb479e3e26139a49c597298"
 FROZEN_V42_PROTOCOL_DIGEST = "68bcddae550c28b59c79a325f36bd4cab2676e47390f7e2842e2327ce59988f4"
 FROZEN_V42_REGISTRY_DIGEST = "3a61e0dfc2dff46a0cbf7d92d68df091e4299090f14216e011ec9e234494b42d"
+FROZEN_V43_PROTOCOL_DIGEST = "dcae99e7fdb4f998bb3f9fe1588c3b35baab8ebd810d9fbfef9ec08528809b99"
+FROZEN_V43_REGISTRY_DIGEST = "712b5c85326ae1b08732b7e540687279fd0796761596d9f97f4fd91e3af068ce"
 FROZEN_V3_REJECTED_SUMMARY_DIGEST = (
     "197feb4614d18cf182bc4dbe37cb2a1d3b8a94c847b738aad51835f488d7cf54"
 )
@@ -52,7 +54,7 @@ def test_v4_protocol_is_independent_deterministic_and_covers_full_preregistratio
 
     assert first == second
     assert first.protocol_digest == second.protocol_digest
-    assert first.protocol_digest == FROZEN_V42_PROTOCOL_DIGEST
+    assert first.protocol_digest == FROZEN_V43_PROTOCOL_DIGEST
     assert ranking_v4_protocol_digest_is_valid(first)
     protocol_source = inspect.getsource(
         __import__("qagent.backtesting.ranking_v4_protocol", fromlist=["ranking_v4_protocol"])
@@ -80,7 +82,9 @@ def test_v4_protocol_is_independent_deterministic_and_covers_full_preregistratio
     )
     assert candidate.total_pool_limit == 50
     assert candidate.deduplication_key == "instrument_id"
-    assert "best_eligible_channel_score" in candidate.deterministic_backfill_rule
+    assert candidate.deterministic_backfill_rule == (
+        "fixed_stock_42_and_etf_8_asset_quotas_no_cross_asset_backfill"
+    )
 
     model = first.model_definition
     assert "hierarchical-shrinkage" in model.implementation_version
@@ -114,19 +118,26 @@ def test_v4_protocol_is_independent_deterministic_and_covers_full_preregistratio
     assert utility.cash_utility == 0
 
 
-def test_v41_protocol_and_registry_digests_remain_exactly_reproducible():
-    protocol = build_ranking_v4_protocol(version="4.1")
-    registry = build_ranking_v4_experiment_registry(version="4.1")
+@pytest.mark.parametrize(
+    ("version", "protocol_digest", "registry_digest", "model_id"),
+    (
+        ("4.1", FROZEN_V41_PROTOCOL_DIGEST, FROZEN_V41_REGISTRY_DIGEST, "ranking_v41_full"),
+        ("4.2", FROZEN_V42_PROTOCOL_DIGEST, FROZEN_V42_REGISTRY_DIGEST, "ranking_v42_full"),
+    ),
+)
+def test_prior_protocol_and_registry_digests_remain_exactly_reproducible(
+    version,
+    protocol_digest,
+    registry_digest,
+    model_id,
+):
+    protocol = build_ranking_v4_protocol(version=version)
+    registry = build_ranking_v4_experiment_registry(version=version)
 
-    assert protocol.protocol_digest == FROZEN_V41_PROTOCOL_DIGEST
-    assert registry.registry_digest == FROZEN_V41_REGISTRY_DIGEST
-    assert protocol.model_version.endswith("v4.1-preregistered")
-    assert protocol.statistics_definition.pbo_block_count == 4
-    assert protocol.statistics_definition.pbo_model_ids[1] == "ranking_v41_full"
-    assert (
-        protocol.utility_definition.replacement_cost_formula
-        == "zero_for_incumbent_else_frozen_candidate_replacement_cost_pct_0.15"
-    )
+    assert protocol.protocol_digest == protocol_digest
+    assert registry.registry_digest == registry_digest
+    assert protocol.model_version.endswith(f"v{version}-preregistered")
+    assert protocol.statistics_definition.pbo_model_ids[1] == model_id
     assert ranking_v4_protocol_digest_is_valid(protocol)
 
 
@@ -184,7 +195,7 @@ def test_v4_gates_are_not_weaker_than_rejected_v3_and_unknowns_fail_closed():
     statistics = protocol.statistics_definition
     assert statistics.pbo_model_ids == (
         "constraint_matched_baseline",
-        "ranking_v42_full",
+        "ranking_v43_full",
         "channel_baseline",
         "channel_trend",
         "channel_breakout",
@@ -319,7 +330,7 @@ def test_v3_summary_and_v4_registry_have_stable_digests_and_detect_tampering():
 
     assert first == second
     assert first.registry_digest == second.registry_digest
-    assert first.registry_digest == FROZEN_V42_REGISTRY_DIGEST
+    assert first.registry_digest == FROZEN_V43_REGISTRY_DIGEST
     assert first.historical_trial_inventory_complete is False
     assert first.historical_trial_inventory_digest is None
     assert first.historical_trial_return_series_digests == ()

@@ -2,11 +2,22 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from qagent.factors.engine import build_factor_rankings
+from qagent.factors.engine import (
+    A_SHARE_FACTOR_WEIGHTS,
+    ETF_FACTOR_WEIGHTS,
+    FACTOR_WEIGHTS,
+    build_factor_rankings,
+)
 from qagent.strategy_data.models import FundamentalSnapshot
 
 
-def _bars(instrument_id: str, closes: list[float], volume: int = 1_000_000) -> pd.DataFrame:
+def _bars(
+    instrument_id: str,
+    closes: list[float],
+    volume: int = 1_000_000,
+    *,
+    asset_type: object = "stock",
+) -> pd.DataFrame:
     start = date(2026, 1, 1)
     rows = []
     for index, close in enumerate(closes):
@@ -20,6 +31,7 @@ def _bars(instrument_id: str, closes: list[float], volume: int = 1_000_000) -> p
                 "close": close,
                 "volume": volume,
                 "provider": "fixture",
+                "asset_type": asset_type,
             }
         )
     return pd.DataFrame(rows)
@@ -161,3 +173,173 @@ def test_factor_engine_does_not_hide_missing_close_inside_regression_window():
     [ranking] = build_factor_rankings(bars)
 
     assert "29d_trend_regression" in ranking.missing_data
+
+
+def test_factor_engine_ranks_asset_buckets_without_cross_contamination():
+    stock_bars = pd.concat(
+        [
+            _bars(
+                "CN:STOCK-1",
+                [10 + index * 0.06 for index in range(140)],
+                volume=2_000_000,
+                asset_type="equity",
+            ),
+            _bars(
+                "CN:STOCK-2",
+                [16 - index * 0.03 for index in range(140)],
+                volume=700_000,
+                asset_type=1,
+            ),
+        ],
+        ignore_index=True,
+    )
+    etf_bars = pd.concat(
+        [
+            _bars(
+                "CN:ETF-1",
+                [8 + index * 0.04 for index in range(140)],
+                volume=3_000_000,
+                asset_type="fund",
+            ),
+            _bars(
+                "CN:ETF-2",
+                [12 + ((-1) ** index) * 0.4 for index in range(140)],
+                volume=1_000_000,
+                asset_type=5,
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    stock_only = {item.instrument_id: item for item in build_factor_rankings(stock_bars)}
+    etf_only = {item.instrument_id: item for item in build_factor_rankings(etf_bars)}
+    mixed = {
+        item.instrument_id: item
+        for item in build_factor_rankings(pd.concat([etf_bars, stock_bars], ignore_index=True))
+    }
+
+    for instrument_id, ranking in {**stock_only, **etf_only}.items():
+        assert mixed[instrument_id].model_dump() == ranking.model_dump()
+
+
+def test_factor_engine_uses_etf_weights_without_fundamental_completeness_penalty():
+    closes = [10 + index * 0.04 for index in range(140)]
+    etf = build_factor_rankings(_bars("CN:ETF", closes, asset_type="index_fund"))[0]
+    stock = build_factor_rankings(_bars("CN:STOCK", closes, asset_type="stock"))[0]
+
+    etf_weights = {exposure.factor_id: exposure.weight for exposure in etf.factor_exposures}
+
+    assert etf.data_completeness == 1.0
+    assert stock.data_completeness == 0.82
+    assert {"valuation_ep", "market_cap", "quality_fundamentals"} <= set(etf.missing_data)
+    assert etf_weights == {
+        "valuation": 0.0,
+        "size": 0.0,
+        "quality": 0.0,
+        **ETF_FACTOR_WEIGHTS,
+    }
+
+
+def test_factor_engine_infers_etf_from_code_without_asset_type_column():
+    bars = _bars(
+        "CN:588200",
+        [10 + index * 0.04 for index in range(140)],
+    ).drop(columns=["asset_type"])
+
+    [ranking] = build_factor_rankings(bars)
+    weights = {
+        exposure.factor_id: exposure.weight for exposure in ranking.factor_exposures
+    }
+
+    assert ranking.data_completeness == 1.0
+    assert weights == {
+        "valuation": 0.0,
+        "size": 0.0,
+        "quality": 0.0,
+        **ETF_FACTOR_WEIGHTS,
+    }
+
+
+def test_factor_engine_asset_type_override_takes_precedence():
+    bars = _bars(
+        "CN:000001",
+        [10 + index * 0.04 for index in range(140)],
+        asset_type="stock",
+    )
+
+    [ranking] = build_factor_rankings(
+        bars,
+        asset_types={"CN:000001": "etf"},
+    )
+    weights = {
+        exposure.factor_id: exposure.weight for exposure in ranking.factor_exposures
+    }
+
+    assert ranking.data_completeness == 1.0
+    assert weights == {
+        "valuation": 0.0,
+        "size": 0.0,
+        "quality": 0.0,
+        **ETF_FACTOR_WEIGHTS,
+    }
+
+
+def test_factor_engine_keeps_unknown_separate_from_stock_weights():
+    unknown_bars = _bars(
+        "CN:UNKNOWN",
+        [10 + index * 0.04 for index in range(140)],
+        asset_type="unknown",
+    )
+    unknown_only = build_factor_rankings(unknown_bars)[0]
+    rankings = build_factor_rankings(
+        pd.concat(
+            [
+                _bars(
+                    "CN:STOCK",
+                    [18 - index * 0.03 for index in range(140)],
+                    asset_type="stock",
+                ),
+                unknown_bars,
+            ],
+            ignore_index=True,
+        )
+    )
+    weights_by_id = {
+        ranking.instrument_id: {
+            exposure.factor_id: exposure.weight for exposure in ranking.factor_exposures
+        }
+        for ranking in rankings
+    }
+
+    assert weights_by_id["CN:STOCK"] == A_SHARE_FACTOR_WEIGHTS
+    assert weights_by_id["CN:UNKNOWN"] == FACTOR_WEIGHTS
+    unknown_mixed = next(ranking for ranking in rankings if ranking.instrument_id == "CN:UNKNOWN")
+    assert unknown_mixed.factor_score == unknown_only.factor_score
+
+
+def test_factor_engine_output_is_stable_for_shuffled_mixed_asset_input():
+    bars = pd.concat(
+        [
+            _bars(
+                "CN:STOCK",
+                [10 + index * 0.04 for index in range(140)],
+                asset_type="stock",
+            ),
+            _bars(
+                "CN:ETF",
+                [15 - index * 0.02 for index in range(140)],
+                asset_type="etf",
+            ),
+            _bars(
+                "CN:UNKNOWN",
+                [9 + ((-1) ** index) * 0.2 for index in range(140)],
+                asset_type="unknown",
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    ordered = build_factor_rankings(bars)
+    shuffled = build_factor_rankings(bars.sample(frac=1.0, random_state=17))
+
+    assert [item.model_dump() for item in ordered] == [item.model_dump() for item in shuffled]

@@ -860,6 +860,13 @@ def _compute_walk_forward_snapshot_without_gc(
     factor_rankings = build_factor_rankings(
         prefilter_bars,
         fundamentals=fundamental_evidence,
+        asset_types={
+            **{instrument_id: "stock" for instrument_id in snapshot_input.eligible_stocks},
+            **{
+                instrument_id: "etf"
+                for instrument_id in snapshot_input.eligible_non_stocks
+            },
+        },
     )
     candidates = _walk_forward_candidates(
         eligible=snapshot_input.eligible,
@@ -918,9 +925,15 @@ def _compute_walk_forward_snapshot_without_gc(
     benchmark_trend = build_benchmark_trend_snapshot(
         benchmark_bars,
         as_of=decision_date,
+        lookback_sessions=50,
     )
+    stock_ids = set(snapshot_input.eligible_stocks)
     ranking_v4_market_features = _ranking_v4_market_features(
-        factor_rankings,
+        [
+            ranking
+            for ranking in factor_rankings
+            if ranking.instrument_id in stock_ids
+        ],
         benchmark_valid_count=benchmark_trend.valid_benchmarks,
         benchmark_required_count=benchmark_trend.required_benchmarks,
         benchmark_above_count=benchmark_trend.above_average_count,
@@ -2158,7 +2171,7 @@ def run_full_market_walk_forward_selection(
                 sum(item.strategy_diversified_count for item in snapshots)
             ),
             "walk_forward_benchmark_trend_policy": (
-                "block_entries_when_3_of_4_benchmarks_below_ma60"
+                "block_entries_when_3_of_4_benchmarks_below_ma50"
             ),
             "walk_forward_market_entry_blocked_snapshots": str(
                 sum(not item.market_entry_allowed for item in snapshots)
@@ -3816,6 +3829,8 @@ def _ranking_v4_candidate_from_selection(
         ),
         incumbent=incumbent,
         replacement_cost_pct=0.0 if incumbent else 0.15,
+        stage_two_embedded_cost_pct=0.0,
+        replacement_cost_evidence_complete=True,
         benchmark_opportunity_cost_pct=round(
             benchmark_opportunity_cost,
             6,

@@ -469,11 +469,11 @@ def _overlap_reasons(
                     > V4_MAX_SHARED_ETF_UNDERLYING_IDS
                 ):
                     reasons.append("etf_underlying_overlap")
-                if (
-                    len(candidate_indexes.intersection(other.index_memberships))
-                    > V4_MAX_SHARED_ETF_INDEX_MEMBERSHIPS
-                ):
-                    reasons.append("etf_index_overlap")
+            if (
+                len(candidate_indexes.intersection(other.index_memberships))
+                > V4_MAX_SHARED_ETF_INDEX_MEMBERSHIPS
+            ):
+                reasons.append("etf_index_overlap")
         elif candidate_is_etf:
             if (
                 candidate.underlying_evidence_complete

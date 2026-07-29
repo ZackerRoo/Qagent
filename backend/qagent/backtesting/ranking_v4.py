@@ -14,6 +14,7 @@ from qagent.backtesting.portfolio import proven_incremental_transaction_cost_pct
 from qagent.backtesting.ranking_v4_protocol import (
     RANKING_V41_MODEL_VERSION,
     RANKING_V42_MODEL_VERSION,
+    RANKING_V43_MODEL_VERSION,
     RANKING_V4_MODEL_VERSION,
     RANKING_V41_FEATURE_EFFECT_NAMES,
 )
@@ -186,7 +187,8 @@ class RankingV41FeatureEffect(BaseModel):
 
     @model_validator(mode="after")
     def validate_effect(self) -> RankingV41FeatureEffect:
-        if self.feature_name not in RANKING_V41_FEATURE_EFFECT_NAMES:
+        base_feature_name = self.feature_name.rsplit("|", maxsplit=1)[-1]
+        if base_feature_name not in RANKING_V41_FEATURE_EFFECT_NAMES:
             raise ValueError("Ranking V4.1 feature effect is not preregistered")
         if not all(
             math.isfinite(value) for value in (self.expected_effect, self.lower_bound_effect)
@@ -246,6 +248,7 @@ class RankingV4FrozenScoringArtifact(BaseModel):
         if self.model_version not in {
             RANKING_V41_MODEL_VERSION,
             RANKING_V42_MODEL_VERSION,
+            RANKING_V43_MODEL_VERSION,
         }:
             raise ValueError("unsupported Ranking V4 artifact model version")
         if self.training_triggered_observation_count > self.training_observation_count:
@@ -345,10 +348,12 @@ def build_ranking_v4_frozen_scoring_artifact(
         posteriors=posteriors,
         trigger_probabilities=trigger_probabilities,
         decision_date=cutoff,
+        model_version=resolved_model_version,
     )
     realized_utility_dates = (
         _build_realized_utility_dates(trigger_observations)
-        if resolved_model_version == RANKING_V42_MODEL_VERSION
+        if resolved_model_version
+        in {RANKING_V42_MODEL_VERSION, RANKING_V43_MODEL_VERSION}
         else []
     )
     payload = {
@@ -511,6 +516,7 @@ def _score_candidate(
         candidate,
         feature_effect_by_key,
         stage="trigger_probability",
+        model_version=model_version,
     )
     (
         net_excess_adjustment,
@@ -520,6 +526,7 @@ def _score_candidate(
         candidate,
         feature_effect_by_key,
         stage="triggered_net_excess",
+        model_version=model_version,
     )
     blocked_reasons: list[str] = []
     if not model_ready:
@@ -532,6 +539,8 @@ def _score_candidate(
     )
     if _is_unknown(candidate.market_regime):
         blocked_reasons.append("market_regime_missing")
+    if model_version == RANKING_V43_MODEL_VERSION and _asset(candidate.asset_type) == "unknown":
+        blocked_reasons.append("asset_type_missing")
     if not candidate.market_regime_features_complete:
         blocked_reasons.append("market_regime_evidence_incomplete")
     if not candidate.point_in_time_evidence_complete:
@@ -620,6 +629,7 @@ def _score_candidate(
                 utility_dates_by_segment,
                 opportunity_cost_pct=opportunity_cost,
                 fixed_penalty_pct=fixed_penalty,
+                model_version=model_version,
             )
             if direct_lower is None:
                 blocked_reasons.append("realized_utility_block_evidence_insufficient")
@@ -842,6 +852,7 @@ def _build_feature_effects(
     posteriors: list[RankingV4PosteriorParameters],
     trigger_probabilities: list[RankingV4TriggerProbability],
     decision_date: date,
+    model_version: str,
 ) -> list[RankingV41FeatureEffect]:
     posterior_by_segment = {item.segment: item for item in posteriors}
     trigger_by_segment = {item.segment: item for item in trigger_probabilities}
@@ -852,6 +863,7 @@ def _build_feature_effects(
             stage="trigger_probability",
             base_by_segment=trigger_by_segment,
             decision_date=decision_date,
+            asset_stratified=model_version == RANKING_V43_MODEL_VERSION,
         )
     )
     effects.extend(
@@ -860,6 +872,7 @@ def _build_feature_effects(
             stage="triggered_net_excess",
             base_by_segment=posterior_by_segment,
             decision_date=decision_date,
+            asset_stratified=model_version == RANKING_V43_MODEL_VERSION,
         )
     )
     return effects
@@ -900,8 +913,12 @@ def _candidate_realized_utility_lower_bound(
     *,
     opportunity_cost_pct: float,
     fixed_penalty_pct: float,
+    model_version: str,
 ) -> tuple[float | None, int, int]:
-    for segment in reversed(_candidate_segments(candidate)):
+    segments = _candidate_segments(candidate)
+    if model_version == RANKING_V43_MODEL_VERSION:
+        segments = tuple(segment for segment in segments if segment != "global")
+    for segment in reversed(segments):
         dated = values_by_segment.get(segment, [])
         realized = tuple(
             item.triggered_net_excess_contribution_pct
@@ -953,6 +970,7 @@ def _stage_feature_effects(
         RankingV4PosteriorParameters | RankingV4TriggerProbability,
     ],
     decision_date: date,
+    asset_stratified: bool,
 ) -> list[RankingV41FeatureEffect]:
     result: list[RankingV41FeatureEffect] = []
     for feature_name in RANKING_V41_FEATURE_EFFECT_NAMES:
@@ -971,14 +989,23 @@ def _stage_feature_effects(
                 target = float(raw_target)
                 baseline = float(base.expected_net_excess_return_pct)
             residual = target - baseline
-            grouped[_feature_bucket(getattr(observation.features, feature_name))].append(
+            asset_prefix = f"{_asset(observation.asset_type)}|" if asset_stratified else ""
+            grouped[
+                f"{asset_prefix}{_feature_bucket(getattr(observation.features, feature_name))}"
+            ].append(
                 (observation, residual)
             )
-        for bucket, values in sorted(grouped.items()):
+        for grouped_key, values in sorted(grouped.items()):
+            if asset_stratified:
+                asset_type, bucket = grouped_key.split("|", maxsplit=1)
+                stored_feature_name = f"{asset_type}|{feature_name}"
+            else:
+                bucket = grouped_key
+                stored_feature_name = feature_name
             effect = _feature_effect(
                 values,
                 stage=stage,
-                feature_name=feature_name,
+                feature_name=stored_feature_name,
                 bucket=bucket,
                 decision_date=decision_date,
             )
@@ -1041,7 +1068,13 @@ def _candidate_feature_adjustment(
     values: dict[tuple[str, str, str], RankingV41FeatureEffect],
     *,
     stage: Literal["trigger_probability", "triggered_net_excess"],
+    model_version: str,
 ) -> tuple[float, float, int]:
+    feature_prefix = (
+        f"{_asset(candidate.asset_type)}|"
+        if model_version == RANKING_V43_MODEL_VERSION
+        else ""
+    )
     matched = [
         effect
         for feature_name in RANKING_V41_FEATURE_EFFECT_NAMES
@@ -1049,7 +1082,7 @@ def _candidate_feature_adjustment(
             effect := values.get(
                 (
                     stage,
-                    feature_name,
+                    f"{feature_prefix}{feature_name}",
                     _feature_bucket(getattr(candidate.features, feature_name)),
                 )
             )
@@ -1231,7 +1264,12 @@ def _regime_segment(
 
 
 def _asset(asset_type: str) -> str:
-    return _value(asset_type)
+    normalized = _value(asset_type).replace("-", "_")
+    if normalized in {"stock", "equity", "1"}:
+        return "stock"
+    if normalized in {"etf", "fund", "index_fund", "5"}:
+        return "etf"
+    return "unknown"
 
 
 def _value(value: str | None) -> str:
@@ -1482,6 +1520,8 @@ def _resolve_model_version(model_version: str) -> str:
         return RANKING_V41_MODEL_VERSION
     if model_version in {"4.2", RANKING_V42_MODEL_VERSION}:
         return RANKING_V42_MODEL_VERSION
+    if model_version in {"4.3", RANKING_V43_MODEL_VERSION}:
+        return RANKING_V43_MODEL_VERSION
     raise ValueError("unsupported Ranking V4 model version")
 
 

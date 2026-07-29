@@ -36,16 +36,21 @@ RANKING_V41_VALIDATION_SCHEMA_VERSION = "ranking-v4.1-historical-validation-v1"
 RANKING_V42_TRIAL_LEDGER_SCHEMA_VERSION = "ranking-v4.2-immutable-trial-ledger-v1"
 RANKING_V42_TRIAL_LEDGER_ID = "QAGENT-RANK-V4.2-ALL-KNOWN-TRIALS"
 RANKING_V42_VALIDATION_SCHEMA_VERSION = "ranking-v4.2-historical-validation-v1"
-RANKING_V4_TRIAL_LEDGER_SCHEMA_VERSION = RANKING_V42_TRIAL_LEDGER_SCHEMA_VERSION
-RANKING_V4_TRIAL_LEDGER_ID = RANKING_V42_TRIAL_LEDGER_ID
-RANKING_V4_VALIDATION_SCHEMA_VERSION = RANKING_V42_VALIDATION_SCHEMA_VERSION
+RANKING_V43_TRIAL_LEDGER_SCHEMA_VERSION = "ranking-v4.3-immutable-trial-ledger-v1"
+RANKING_V43_TRIAL_LEDGER_ID = "QAGENT-RANK-V4.3-ALL-KNOWN-TRIALS"
+RANKING_V43_VALIDATION_SCHEMA_VERSION = "ranking-v4.3-historical-validation-v1"
+RANKING_V4_TRIAL_LEDGER_SCHEMA_VERSION = RANKING_V43_TRIAL_LEDGER_SCHEMA_VERSION
+RANKING_V4_TRIAL_LEDGER_ID = RANKING_V43_TRIAL_LEDGER_ID
+RANKING_V4_VALIDATION_SCHEMA_VERSION = RANKING_V43_VALIDATION_SCHEMA_VERSION
 
 _V41_PBO_EVIDENCE_SCHEMA_VERSION = "ranking-v4.1-cscv-pbo-evidence-v1"
 _V41_PBO_MATRIX_SCHEMA_VERSION = "ranking-v4.1-real-model-return-matrix-v1"
 _V42_PBO_EVIDENCE_SCHEMA_VERSION = "ranking-v4.2-cscv-pbo-evidence-v1"
 _V42_PBO_MATRIX_SCHEMA_VERSION = "ranking-v4.2-real-model-return-matrix-v1"
-_PBO_EVIDENCE_SCHEMA_VERSION = _V42_PBO_EVIDENCE_SCHEMA_VERSION
-_PBO_MATRIX_SCHEMA_VERSION = _V42_PBO_MATRIX_SCHEMA_VERSION
+_V43_PBO_EVIDENCE_SCHEMA_VERSION = "ranking-v4.3-cscv-pbo-evidence-v1"
+_V43_PBO_MATRIX_SCHEMA_VERSION = "ranking-v4.3-real-model-return-matrix-v1"
+_PBO_EVIDENCE_SCHEMA_VERSION = _V43_PBO_EVIDENCE_SCHEMA_VERSION
+_PBO_MATRIX_SCHEMA_VERSION = _V43_PBO_MATRIX_SCHEMA_VERSION
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PROTOCOL = build_ranking_v4_protocol()
 _STATISTICS = _PROTOCOL.statistics_definition
@@ -55,6 +60,54 @@ DEPENDENCE_BLOCK_LENGTH = _STATISTICS.dependence_block_length
 DEFAULT_BOOTSTRAP_SAMPLES = _STATISTICS.bootstrap_samples
 DEFAULT_PERMUTATION_SAMPLES = _STATISTICS.permutation_samples
 DEFAULT_RANDOM_SEED = _STATISTICS.random_seed
+
+
+def _current_trial_id(version: Literal["4.1", "4.2", "4.3"]) -> str:
+    return {
+        "4.1": "ranking_v41_full",
+        "4.2": "ranking_v42_full",
+        "4.3": "ranking_v43_full",
+    }[version]
+
+
+def _trial_ledger_schema_version(version: Literal["4.1", "4.2", "4.3"]) -> str:
+    return {
+        "4.1": RANKING_V41_TRIAL_LEDGER_SCHEMA_VERSION,
+        "4.2": RANKING_V42_TRIAL_LEDGER_SCHEMA_VERSION,
+        "4.3": RANKING_V43_TRIAL_LEDGER_SCHEMA_VERSION,
+    }[version]
+
+
+def _trial_ledger_id(version: Literal["4.1", "4.2", "4.3"]) -> str:
+    return {
+        "4.1": RANKING_V41_TRIAL_LEDGER_ID,
+        "4.2": RANKING_V42_TRIAL_LEDGER_ID,
+        "4.3": RANKING_V43_TRIAL_LEDGER_ID,
+    }[version]
+
+
+def _validation_schema_version(version: Literal["4.1", "4.2", "4.3"]) -> str:
+    return {
+        "4.1": RANKING_V41_VALIDATION_SCHEMA_VERSION,
+        "4.2": RANKING_V42_VALIDATION_SCHEMA_VERSION,
+        "4.3": RANKING_V43_VALIDATION_SCHEMA_VERSION,
+    }[version]
+
+
+def _pbo_evidence_schema_version(version: Literal["4.1", "4.2", "4.3"]) -> str:
+    return {
+        "4.1": _V41_PBO_EVIDENCE_SCHEMA_VERSION,
+        "4.2": _V42_PBO_EVIDENCE_SCHEMA_VERSION,
+        "4.3": _V43_PBO_EVIDENCE_SCHEMA_VERSION,
+    }[version]
+
+
+def _pbo_matrix_schema_version(version: Literal["4.1", "4.2", "4.3"]) -> str:
+    return {
+        "4.1": _V41_PBO_MATRIX_SCHEMA_VERSION,
+        "4.2": _V42_PBO_MATRIX_SCHEMA_VERSION,
+        "4.3": _V43_PBO_MATRIX_SCHEMA_VERSION,
+    }[version]
 
 
 class RankingV4ReturnObservation(BaseModel):
@@ -96,7 +149,7 @@ class RankingV4TrialLedgerEvidence(BaseModel):
     known_trial_ids: tuple[str, ...]
     research_attempt_ids: tuple[str, ...]
     research_attempt_inventory_digest: str
-    current_trial_id: str = "ranking_v42_full"
+    current_trial_id: str = "ranking_v43_full"
     experiment_registry_digest: str
     trial_series: tuple[RankingV4TrialSeries, ...]
     ledger_digest: str
@@ -203,7 +256,7 @@ def build_ranking_v4_trial_ledger(
     experiment_registry_digest: str,
     known_research_attempt_ids: Sequence[str] = (),
     immutable: bool = True,
-    protocol_version: Literal["4.1", "4.2"] = "4.2",
+    protocol_version: Literal["4.1", "4.2", "4.3"] = "4.3",
 ) -> RankingV4TrialLedgerEvidence:
     """Build digest-backed evidence for every known research attempt.
 
@@ -237,16 +290,8 @@ def build_ranking_v4_trial_ledger(
         for trial_id in supplied_trial_ids
     )
     payload: dict[str, object] = {
-        "schema_version": (
-            RANKING_V42_TRIAL_LEDGER_SCHEMA_VERSION
-            if protocol_version == "4.2"
-            else RANKING_V41_TRIAL_LEDGER_SCHEMA_VERSION
-        ),
-        "ledger_id": (
-            RANKING_V42_TRIAL_LEDGER_ID
-            if protocol_version == "4.2"
-            else RANKING_V41_TRIAL_LEDGER_ID
-        ),
+        "schema_version": _trial_ledger_schema_version(protocol_version),
+        "ledger_id": _trial_ledger_id(protocol_version),
         "immutable": immutable,
         "covers_all_known_attempts": (
             supplied_trial_ids == normalized_known_ids
@@ -260,9 +305,7 @@ def build_ranking_v4_trial_ledger(
         "research_attempt_inventory_digest": _sha256(
             {"research_attempt_ids": list(normalized_attempt_ids)}
         ),
-        "current_trial_id": (
-            "ranking_v42_full" if protocol_version == "4.2" else "ranking_v41_full"
-        ),
+        "current_trial_id": _current_trial_id(protocol_version),
         "experiment_registry_digest": experiment_registry_digest,
         "trial_series": [item.model_dump(mode="json") for item in series],
     }
@@ -310,7 +353,7 @@ def evaluate_ranking_v4_historical_validation(
     bootstrap_samples: int = DEFAULT_BOOTSTRAP_SAMPLES,
     permutation_samples: int = DEFAULT_PERMUTATION_SAMPLES,
     seed: int = DEFAULT_RANDOM_SEED,
-    protocol_version: Literal["4.1", "4.2"] = "4.2",
+    protocol_version: Literal["4.1", "4.2", "4.3"] = "4.3",
 ) -> RankingV4HistoricalValidationEvaluation:
     """Evaluate preregistered V4 historical evidence without granting release.
 
@@ -334,9 +377,7 @@ def evaluate_ranking_v4_historical_validation(
     protocol = build_ranking_v4_protocol(version=protocol_version)
     statistics = protocol.statistics_definition
     model_ids = statistics.pbo_model_ids
-    current_trial_id = (
-        "ranking_v42_full" if protocol_version == "4.2" else "ranking_v41_full"
-    )
+    current_trial_id = _current_trial_id(protocol_version)
     dependence_block_length = statistics.dependence_block_length
     execution_plan_matches_protocol = (
         execution_start_date == RANKING_V4_DEVELOPMENT_START
@@ -501,11 +542,7 @@ def evaluate_ranking_v4_historical_validation(
 
     rounded_metrics = {key: _rounded(value) for key, value in metrics.items()}
     payload: dict[str, object] = {
-        "validation_schema_version": (
-            RANKING_V42_VALIDATION_SCHEMA_VERSION
-            if protocol_version == "4.2"
-            else RANKING_V41_VALIDATION_SCHEMA_VERSION
-        ),
+        "validation_schema_version": _validation_schema_version(protocol_version),
         "protocol_id": protocol.protocol_id,
         "protocol_digest": protocol.protocol_digest,
         "experiment_registry_digest": protocol.experiment_registry.registry_digest,
@@ -620,23 +657,13 @@ def _validate_pbo_evidence(
     baseline_values: Sequence[float],
     challenger_values: Sequence[float],
     protocol: RankingV4Protocol,
-    protocol_version: Literal["4.1", "4.2"],
+    protocol_version: Literal["4.1", "4.2", "4.3"],
 ) -> _PBOValidation:
     statistics = protocol.statistics_definition
     model_ids = statistics.pbo_model_ids
-    current_trial_id = (
-        "ranking_v42_full" if protocol_version == "4.2" else "ranking_v41_full"
-    )
-    evidence_schema_version = (
-        _V42_PBO_EVIDENCE_SCHEMA_VERSION
-        if protocol_version == "4.2"
-        else _V41_PBO_EVIDENCE_SCHEMA_VERSION
-    )
-    matrix_schema_version = (
-        _V42_PBO_MATRIX_SCHEMA_VERSION
-        if protocol_version == "4.2"
-        else _V41_PBO_MATRIX_SCHEMA_VERSION
-    )
+    current_trial_id = _current_trial_id(protocol_version)
+    evidence_schema_version = _pbo_evidence_schema_version(protocol_version)
+    matrix_schema_version = _pbo_matrix_schema_version(protocol_version)
     if not isinstance(evidence, Mapping):
         return _PBOValidation(
             status="unavailable",
@@ -685,7 +712,7 @@ def _validate_pbo_evidence(
         or evidence.get("registered_model_ids") != list(model_ids)
         or evidence.get("model_count") != len(model_ids)
         or (
-            protocol_version == "4.2"
+            protocol_version != "4.1"
             and evidence.get("minimum_dates_per_half")
             != protocol.thresholds.minimum_rebalance_dates
         )
@@ -811,26 +838,16 @@ def _validate_trial_ledger(
     ledger_like: RankingV4TrialLedgerEvidence | Mapping[str, object] | None,
     *,
     protocol: RankingV4Protocol,
-    protocol_version: Literal["4.1", "4.2"],
+    protocol_version: Literal["4.1", "4.2", "4.3"],
     validation_dates: Sequence[date],
     pbo_matrix: Mapping[str, Sequence[tuple[date, float]]] | None,
     known_research_attempt_ids: Sequence[str],
 ) -> _LedgerValidation:
     registry = protocol.experiment_registry
     model_ids = protocol.statistics_definition.pbo_model_ids
-    current_trial_id = (
-        "ranking_v42_full" if protocol_version == "4.2" else "ranking_v41_full"
-    )
-    expected_schema_version = (
-        RANKING_V42_TRIAL_LEDGER_SCHEMA_VERSION
-        if protocol_version == "4.2"
-        else RANKING_V41_TRIAL_LEDGER_SCHEMA_VERSION
-    )
-    expected_ledger_id = (
-        RANKING_V42_TRIAL_LEDGER_ID
-        if protocol_version == "4.2"
-        else RANKING_V41_TRIAL_LEDGER_ID
-    )
+    current_trial_id = _current_trial_id(protocol_version)
+    expected_schema_version = _trial_ledger_schema_version(protocol_version)
+    expected_ledger_id = _trial_ledger_id(protocol_version)
     if ledger_like is None:
         return _LedgerValidation(
             status="unavailable",
@@ -866,7 +883,7 @@ def _validate_trial_ledger(
             status="unavailable",
             reason="trial ledger is not bound to the active immutable experiment registry",
         )
-    if protocol_version == "4.2" and (
+    if protocol_version != "4.1" and (
         not registry.historical_trial_inventory_complete
         or registry.historical_trial_inventory_digest is None
         or not registry.historical_trial_return_series_digests
@@ -874,7 +891,7 @@ def _validate_trial_ledger(
         return _LedgerValidation(
             status="unavailable",
             reason=(
-                "the active V4.2 registry has no audited complete inventory and "
+                "the active Ranking V4 registry has no audited complete inventory and "
                 "return-series digests for all historical experiments; supplied "
                 "trial rows cannot manufacture that evidence"
             ),

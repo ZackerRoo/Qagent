@@ -55,6 +55,7 @@ def _candidate(
     tail_risk_penalty: float = 0.0,
     features: RankingV4FeatureVector | None = None,
     incumbent: bool = False,
+    asset_type: str = "stock",
 ) -> RankingV4Candidate:
     return RankingV4Candidate(
         instrument_id=instrument_id,
@@ -66,7 +67,7 @@ def _candidate(
         cost_as_of=evidence_date,
         primary_strategy_id=strategy,
         market_regime=regime,
-        asset_type="stock",
+        asset_type=asset_type,
         industry="电子",
         features=features or _features(),
         point_in_time_evidence_complete=True,
@@ -92,6 +93,7 @@ def _resolved(
     triggered: bool = True,
     regime: str = "risk_on",
     strategy: str = "breakout_volume_confirmation",
+    asset_type: str = "stock",
 ) -> ResolvedRankingV4Observation:
     signal_date = date(2023, 1, 2) + timedelta(days=index)
     if triggered:
@@ -106,7 +108,7 @@ def _resolved(
             cost_adjusted_net_excess_return_pct=excess,
             primary_strategy_id=strategy,
             market_regime=regime,
-            asset_type="stock",
+            asset_type=asset_type,
             features=_features(),
         )
     return ResolvedRankingV4Observation(
@@ -120,7 +122,7 @@ def _resolved(
         cost_adjusted_net_excess_return_pct=None,
         primary_strategy_id=strategy,
         market_regime=regime,
-        asset_type="stock",
+        asset_type=asset_type,
         features=_features(),
     )
 
@@ -499,6 +501,76 @@ def test_v4_requires_positive_posterior_and_utility_lower_bounds_or_holds_cash()
     assert score.eligible_for_position is False
     assert "utility_lower_bound_not_positive" in score.blocked_reasons
     assert decision.cash_slot_count == 5
+
+
+def test_v43_feature_effects_are_isolated_between_stocks_and_etfs():
+    high = _features(momentum=0.9, trend_quality=0.9)
+    low = _features(momentum=0.1, trend_quality=0.1)
+    observations = [
+        _resolved(
+            index,
+            available_at=date(2024, 7, 1),
+            excess=6.0 if index % 2 == 0 else -2.0,
+            asset_type="stock",
+        ).model_copy(
+            update={
+                "instrument_id": f"CN:STOCK-{index}",
+                "features": high if index % 2 == 0 else low,
+            }
+        )
+        for index in range(MIN_V4_TRAINING_OBSERVATIONS)
+    ] + [
+        _resolved(
+            index,
+            available_at=date(2024, 7, 1),
+            excess=-2.0 if index % 2 == 0 else 6.0,
+            asset_type="fund",
+        ).model_copy(
+            update={
+                "instrument_id": f"CN:ETF-{index}",
+                "features": high if index % 2 == 0 else low,
+            }
+        )
+        for index in range(MIN_V4_TRAINING_OBSERVATIONS)
+    ]
+
+    decision = score_ranking_v4_candidates(
+        [
+            _candidate("CN:STOCK", features=high, asset_type="equity"),
+            _candidate("CN:ETF", features=high, asset_type="index-fund"),
+        ],
+        observations,
+        decision_date=date(2025, 1, 2),
+    )
+    by_id = {item.instrument_id: item for item in decision.candidates}
+
+    assert by_id["CN:STOCK"].net_excess_feature_adjustment_pct > 0
+    assert by_id["CN:ETF"].net_excess_feature_adjustment_pct < 0
+    assert by_id["CN:STOCK"].feature_adjustment_count > 0
+    assert by_id["CN:ETF"].feature_adjustment_count > 0
+
+
+def test_v43_etf_cannot_borrow_global_stock_utility_evidence():
+    score = score_ranking_v4_candidates(
+        [_candidate("CN:ETF", asset_type="etf")],
+        _training(),
+        decision_date=date(2025, 1, 2),
+    ).candidates[0]
+
+    assert score.eligible_for_position is False
+    assert score.utility_evidence_date_count == 0
+    assert "realized_utility_block_evidence_insufficient" in score.blocked_reasons
+
+
+def test_v43_unknown_asset_type_fails_closed():
+    score = score_ranking_v4_candidates(
+        [_candidate("CN:UNKNOWN", asset_type="unknown")],
+        _training(),
+        decision_date=date(2025, 1, 2),
+    ).candidates[0]
+
+    assert score.eligible_for_position is False
+    assert "asset_type_missing" in score.blocked_reasons
 
 
 def test_v42_ignores_unproven_fixed_replacement_cost_and_deducts_only_increment():
