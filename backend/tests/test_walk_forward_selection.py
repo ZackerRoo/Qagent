@@ -35,6 +35,7 @@ from qagent.backtesting.walk_forward import (
     _execution_challenger_gate_outcome,
     _adjusted_prefilter_bars,
     _paper_eligible_card_ids,
+    _selection_digest_from_serialized_result,
     _trade_temporal_validation,
     _walk_forward_candidates,
     run_full_market_walk_forward_selection,
@@ -1273,6 +1274,77 @@ def test_walk_forward_result_load_rejects_payload_tampering(tmp_path):
 
     with pytest.raises(ValueError, match="failed result digest validation"):
         storage.get_walk_forward_run("tampered-walk-forward")
+
+
+def test_walk_forward_result_digest_accepts_old_payload_without_new_default_fields(tmp_path):
+    repository, decision_date = _replay_repository(tmp_path)
+    result = run_full_market_walk_forward_selection(
+        repository,
+        owner_run_id="schema-evolution-walk-forward",
+        start=decision_date,
+        end=decision_date,
+        rebalance_step_sessions=1,
+    )
+    payload = result.model_dump(mode="json")
+    ranking_v4 = payload["ranking_v4"]
+    assert isinstance(ranking_v4, dict)
+    ranking_v4.pop("blocked_reason_counts")
+    ranking_v4.pop("first_blocked_reason_counts")
+    ranking_v4.pop("gate_reconciliation")
+    legacy_digest = _selection_digest_from_serialized_result(payload)
+    assert legacy_digest is not None
+    payload["reproducibility_digest"] = legacy_digest
+
+    storage = QagentRepository(repository.session_factory)
+    with repository.session_factory() as session:
+        session.add(
+            _tables.WalkForwardRunRow(
+                run_id=result.owner_run_id,
+                provider=result.provider_mode,
+                status="succeeded",
+                start_date=result.start_date,
+                end_date=result.end_date,
+                dataset_revision=result.dataset_revision,
+                rebalance_step_sessions=result.rebalance_step_sessions,
+                lookback_days=result.experiment_manifest.lookback_days,
+                snapshot_count=len(result.snapshots),
+                top_5_trade_count=result.top_5_metrics.trade_count,
+                top_10_trade_count=result.top_10_metrics.trade_count,
+                top_5_return_pct=result.top_5_metrics.total_return_pct,
+                top_10_return_pct=result.top_10_metrics.total_return_pct,
+                top_5_oos_trades=int(
+                    result.data_health.get("walk_forward_top_5_oos_trades", 0) or 0
+                ),
+                top_10_oos_trades=int(
+                    result.data_health.get("walk_forward_top_10_oos_trades", 0) or 0
+                ),
+                top_5_oos_gate=result.data_health.get(
+                    "walk_forward_top_5_oos_gate",
+                    "insufficient",
+                ),
+                top_10_oos_gate=result.data_health.get(
+                    "walk_forward_top_10_oos_gate",
+                    "insufficient",
+                ),
+                reproducibility_digest=legacy_digest,
+                payload_json=json.dumps(payload, sort_keys=True),
+                data_health=json.dumps(
+                    {
+                        **result.data_health,
+                            "_qagent_walk_forward_storage_schema": "walk-forward-run-storage-v2",
+                    },
+                    sort_keys=True,
+                ),
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        session.commit()
+
+    loaded = storage.get_walk_forward_run(result.owner_run_id)
+
+    assert loaded is not None
+    assert loaded.reproducibility_digest == legacy_digest
 
 
 def test_walk_forward_result_load_rejects_all_oos_row_field_tampering(tmp_path):

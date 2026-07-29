@@ -6994,6 +6994,12 @@ def walk_forward_selection_result_digest_is_valid(
         result = WalkForwardSelectionResult.model_validate(payload)
     except (TypeError, ValueError):
         return False
+    serialized_expected = _selection_digest_from_serialized_result(payload)
+    if serialized_expected is not None and hmac.compare_digest(
+        result.reproducibility_digest,
+        serialized_expected,
+    ):
+        return True
     expected = _selection_digest(
         provider_mode=result.provider_mode,
         revision=result.dataset_revision,
@@ -7019,6 +7025,84 @@ def walk_forward_selection_result_digest_is_valid(
         experiment_manifest=result.experiment_manifest,
     )
     return hmac.compare_digest(result.reproducibility_digest, expected)
+
+
+def _selection_digest_from_serialized_result(
+    payload: dict[str, object],
+) -> str | None:
+    """Verify old results without injecting defaults added by newer schemas."""
+
+    manifest = payload.get("experiment_manifest")
+    if not isinstance(manifest, dict):
+        return None
+    required_fields = (
+        "provider_mode",
+        "dataset_revision",
+        "start_date",
+        "end_date",
+        "rebalance_step_sessions",
+        "snapshots",
+        "top_5_portfolio",
+        "top_10_portfolio",
+        "top_5_metrics",
+        "top_10_metrics",
+        "top_5_temporal_validation",
+        "top_10_temporal_validation",
+        "benchmarks",
+        "cost_sensitivity",
+        "strategy_validation",
+        "dynamic_rerank",
+        "baseline_challenger",
+        "execution_challenger",
+        "ranking_v3",
+        "ranking_v4",
+    )
+    if "lookback_days" not in manifest or any(field not in payload for field in required_fields):
+        return None
+    signed_manifest = {
+        key: value
+        for key, value in manifest.items()
+        if key != "created_at"
+    }
+    signed_payload = {
+        "digest_schema": WALK_FORWARD_RESULT_DIGEST_SCHEMA,
+        "execution_plan": {
+            "provider_mode": payload["provider_mode"],
+            "dataset_revision": payload["dataset_revision"],
+            "start_date": payload["start_date"],
+            "end_date": payload["end_date"],
+            "rebalance_step_sessions": payload["rebalance_step_sessions"],
+            "lookback_days": manifest["lookback_days"],
+            "experiment_manifest": signed_manifest,
+        },
+        "dataset_revision": payload["dataset_revision"],
+        "snapshots": payload["snapshots"],
+        "top_5_portfolio": payload["top_5_portfolio"],
+        "top_10_portfolio": payload["top_10_portfolio"],
+        "top_5_metrics": payload["top_5_metrics"],
+        "top_10_metrics": payload["top_10_metrics"],
+        "top_5_temporal_validation": payload["top_5_temporal_validation"],
+        "top_10_temporal_validation": payload["top_10_temporal_validation"],
+        "benchmarks": payload["benchmarks"],
+        "cost_sensitivity": payload["cost_sensitivity"],
+        "strategy_validation": payload["strategy_validation"],
+        "dynamic_rerank": payload["dynamic_rerank"],
+        "baseline_challenger": payload["baseline_challenger"],
+        "execution_challenger": payload["execution_challenger"],
+        "ranking_v3": payload["ranking_v3"],
+        "ranking_v4": payload["ranking_v4"],
+    }
+    try:
+        encoded = json.dumps(
+            signed_payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    digest = hashlib.sha256(encoded).hexdigest()
+    return f"{WALK_FORWARD_RESULT_DIGEST_PREFIX}{digest[2:]}"
 
 
 def _trade_temporal_validation(trades) -> TemporalValidationResult:
