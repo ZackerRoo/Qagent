@@ -1531,6 +1531,8 @@ export type PaperTradesResponse = {
   data_health: Record<string, string>;
 };
 
+export type PaperReportingScope = "official" | "legacy";
+
 export type PaperLedgerSummary = {
   initial_capital: string;
   allocation_per_trade_pct: number;

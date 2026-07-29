@@ -40,6 +40,7 @@ import type {
   PaperSessionStartResponse,
   PaperTradeFromOpportunityPayload,
   PaperTradeFromOpportunityResponse,
+  PaperReportingScope,
   PaperTradesResponse,
   PaperUpdateResponse,
   PaperValidationResponse,
@@ -102,6 +103,7 @@ type ScanParams = {
   sync_if_empty?: boolean;
   seed_paper?: boolean;
   scope?: string;
+  reporting_scope?: PaperReportingScope;
   seed_limit?: number;
   update_paper?: boolean;
   initial_capital?: string | number;
@@ -206,6 +208,9 @@ function queryString(params?: ScanParams): string {
   }
   if (params.scope) {
     search.set("scope", params.scope);
+  }
+  if (params.reporting_scope) {
+    search.set("reporting_scope", params.reporting_scope);
   }
   if (params.status) {
     search.set("status", params.status);
@@ -392,12 +397,20 @@ export async function savePosition(payload: Position): Promise<Position> {
   return apiPost<Position>("/positions", payload);
 }
 
-export async function fetchPaperTrades(provider?: DataProviderMode): Promise<PaperTradesResponse> {
-  return apiGet<PaperTradesResponse>("/paper-trades", { provider, limit: 100 });
+export async function fetchPaperTrades(
+  provider?: DataProviderMode,
+  reportingScope: PaperReportingScope = "official",
+): Promise<PaperTradesResponse> {
+  return apiGet<PaperTradesResponse>("/paper-trades", {
+    provider,
+    reporting_scope: reportingScope,
+    limit: 100,
+  });
 }
 
 type PaperLedgerRequest = {
   provider?: DataProviderMode;
+  reportingScope?: PaperReportingScope;
   initialCapital?: string | number;
   allocationPerTradePct?: string | number;
   maxPositions?: number;
@@ -409,6 +422,7 @@ type PaperLedgerRequest = {
 export async function fetchPaperLedger(params: PaperLedgerRequest = {}): Promise<PaperLedgerResponse> {
   return apiGet<PaperLedgerResponse>("/paper-trades/ledger", {
     provider: params.provider,
+    reporting_scope: params.reportingScope,
     initial_capital: params.initialCapital,
     allocation_per_trade_pct: params.allocationPerTradePct,
     max_positions: params.maxPositions,
@@ -419,15 +433,24 @@ export async function fetchPaperLedger(params: PaperLedgerRequest = {}): Promise
   });
 }
 
-export async function fetchPaperValidation(provider?: DataProviderMode): Promise<PaperValidationResponse> {
-  return apiGet<PaperValidationResponse>("/paper-trades/validation", { provider, limit: 500 });
+export async function fetchPaperValidation(
+  provider?: DataProviderMode,
+  reportingScope: PaperReportingScope = "official",
+): Promise<PaperValidationResponse> {
+  return apiGet<PaperValidationResponse>("/paper-trades/validation", {
+    provider,
+    reporting_scope: reportingScope,
+    limit: 500,
+  });
 }
 
 export async function fetchPaperDailyReport(
   provider: DataProviderMode,
+  reportingScope: PaperReportingScope = "official",
 ): Promise<PaperDailyReportResponse> {
   return apiGet<PaperDailyReportResponse>("/paper-trades/daily-report", {
     provider,
+    reporting_scope: reportingScope,
     limit: 500,
   });
 }
@@ -454,9 +477,14 @@ export async function fetchPaperCandidatePool(
 
 export async function runPaperValidation(
   provider: DataProviderMode,
+  reportingScope: PaperReportingScope = "official",
 ): Promise<PaperValidationResponse> {
   return apiPost<PaperValidationResponse>(
-    `/paper-trades/validation/run${queryString({ provider, limit: 500 })}`,
+    `/paper-trades/validation/run${queryString({
+      provider,
+      reporting_scope: reportingScope,
+      limit: 500,
+    })}`,
     {},
   );
 }

@@ -32,6 +32,7 @@ import type {
   PaperLedgerPosition,
   PaperLedgerResponse,
   PaperLedgerTransaction,
+  PaperReportingScope,
   PaperSessionResponse,
   PaperSessionStartPayload,
   PaperTrade,
@@ -56,7 +57,7 @@ const emptyPosition: Position = {
 
 const defaultPaperSessionForm: PaperSessionStartPayload = {
   label: "A股正式模拟盘",
-  reset_existing: true,
+  reset_existing: false,
   initial_capital: "100000",
   allocation_per_trade_pct: "10",
   max_positions: 5,
@@ -72,6 +73,8 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [positions, setPositions] = useState<Position[]>([]);
   const [portfolio, setPortfolio] = useState<PortfolioResponse>();
   const [paper, setPaper] = useState<PaperTradesResponse>();
+  const [paperScope, setPaperScope] = useState<PaperReportingScope>("legacy");
+  const [paperScopeCounts, setPaperScopeCounts] = useState({ official: 0, legacy: 0 });
   const [ledger, setLedger] = useState<PaperLedgerResponse>();
   const [dailyReport, setDailyReport] = useState<PaperDailyReportResponse>();
   const [candidatePool, setCandidatePool] = useState<PaperCandidatePoolResponse>();
@@ -90,11 +93,12 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   async function load() {
     const results = await Promise.allSettled([
       fetchPortfolio({ provider: dataMode }),
-      fetchPaperTrades(dataMode),
+      fetchPaperTrades(dataMode, paperScope),
+      fetchPaperTrades(dataMode, paperScope === "official" ? "legacy" : "official"),
       fetchPaperSession(dataMode),
-      fetchPaperLedger({ provider: dataMode }),
-      fetchPaperValidation(dataMode),
-      fetchPaperDailyReport(dataMode),
+      fetchPaperLedger({ provider: dataMode, reportingScope: paperScope }),
+      fetchPaperValidation(dataMode, paperScope),
+      fetchPaperDailyReport(dataMode, paperScope),
       fetchPaperCandidatePool(dataMode),
       fetchPaperDualTrack(dataMode),
       fetchAutomationScheduler(),
@@ -102,6 +106,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     const [
       result,
       paperResult,
+      otherPaperResult,
       paperSessionResult,
       ledgerResult,
       validationResult,
@@ -117,6 +122,17 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     if (paperResult.status === "fulfilled") {
       setPaper(paperResult.value);
       setPaperExecutionHealth(paperResult.value.data_health);
+      setPaperScopeCounts((current) => ({
+        ...current,
+        [paperScope]: paperResult.value.summary.total,
+      }));
+    }
+    if (otherPaperResult.status === "fulfilled") {
+      const otherScope = paperScope === "official" ? "legacy" : "official";
+      setPaperScopeCounts((current) => ({
+        ...current,
+        [otherScope]: otherPaperResult.value.summary.total,
+      }));
     }
     if (paperSessionResult.status === "fulfilled") {
       setPaperSession(paperSessionResult.value);
@@ -142,16 +158,18 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
 
   async function refreshPaperRuntime() {
     const results = await Promise.allSettled([
-      fetchPaperTrades(dataMode),
-      fetchPaperLedger({ provider: dataMode }),
-      fetchPaperValidation(dataMode),
-      fetchPaperDailyReport(dataMode),
+      fetchPaperTrades(dataMode, paperScope),
+      fetchPaperTrades(dataMode, paperScope === "official" ? "legacy" : "official"),
+      fetchPaperLedger({ provider: dataMode, reportingScope: paperScope }),
+      fetchPaperValidation(dataMode, paperScope),
+      fetchPaperDailyReport(dataMode, paperScope),
       fetchPaperCandidatePool(dataMode),
       fetchPaperDualTrack(dataMode),
       fetchAutomationScheduler(),
     ]);
     const [
       paperResult,
+      otherPaperResult,
       ledgerResult,
       validationResult,
       dailyReportResult,
@@ -162,6 +180,17 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     if (paperResult.status === "fulfilled") {
       setPaper(paperResult.value);
       setPaperExecutionHealth(paperResult.value.data_health);
+      setPaperScopeCounts((current) => ({
+        ...current,
+        [paperScope]: paperResult.value.summary.total,
+      }));
+    }
+    if (otherPaperResult.status === "fulfilled") {
+      const otherScope = paperScope === "official" ? "legacy" : "official";
+      setPaperScopeCounts((current) => ({
+        ...current,
+        [otherScope]: otherPaperResult.value.summary.total,
+      }));
     }
     if (ledgerResult.status === "fulfilled") setLedger(ledgerResult.value);
     if (validationResult.status === "fulfilled") setValidation(validationResult.value);
@@ -184,7 +213,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       });
     }, PAPER_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(refreshTimer);
-  }, [dataMode]);
+  }, [dataMode, paperScope]);
 
   async function submit() {
     await savePosition(form);
@@ -209,14 +238,15 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
         : `Updated ${result.summary.total} trades, ${result.summary.closed} closed, ${result.data_health.paper_execution_fills_deferred ?? "0"} fills deferred`,
     );
     setPaperExecutionHealth(result.data_health);
-    setPaper({ summary: result.summary, trades: result.trades, data_health: result.data_health });
-    const [ledgerResult, validationResult, dailyReportResult, candidatePoolResult, dualTrackResult] = await Promise.all([
-      fetchPaperLedger({ provider: dataMode }),
-      fetchPaperValidation(dataMode),
-      fetchPaperDailyReport(dataMode),
+    const [paperResult, ledgerResult, validationResult, dailyReportResult, candidatePoolResult, dualTrackResult] = await Promise.all([
+      fetchPaperTrades(dataMode, paperScope),
+      fetchPaperLedger({ provider: dataMode, reportingScope: paperScope }),
+      fetchPaperValidation(dataMode, paperScope),
+      fetchPaperDailyReport(dataMode, paperScope),
       fetchPaperCandidatePool(dataMode),
       fetchPaperDualTrack(dataMode),
     ]);
+    setPaper(paperResult);
     setLedger(ledgerResult);
     setValidation(validationResult);
     setDailyReport(dailyReportResult);
@@ -227,11 +257,11 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   async function runValidationNow() {
     try {
       setIsRunningValidation(true);
-      const validationResult = await runPaperValidation(dataMode);
+      const validationResult = await runPaperValidation(dataMode, paperScope);
       const [paperResult, ledgerResult, dailyReportResult, candidatePoolResult, dualTrackResult] = await Promise.all([
-        fetchPaperTrades(dataMode),
-        fetchPaperLedger({ provider: dataMode }),
-        fetchPaperDailyReport(dataMode),
+        fetchPaperTrades(dataMode, paperScope),
+        fetchPaperLedger({ provider: dataMode, reportingScope: paperScope }),
+        fetchPaperDailyReport(dataMode, paperScope),
         fetchPaperCandidatePool(dataMode),
         fetchPaperDualTrack(dataMode),
       ]);
@@ -294,8 +324,27 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
         <PaperRuntimeIdentity
           scheduler={automationScheduler}
           session={paperSession}
-          officialTradeCount={paper?.summary.total ?? 0}
+          officialTradeCount={paperScopeCounts.official}
+          legacyTradeCount={paperScopeCounts.legacy}
+          legacyActiveCount={
+            paperScope === "legacy"
+              ? (paper?.summary.pending ?? 0) + (paper?.summary.open ?? 0)
+              : undefined
+          }
           language={language}
+        />
+        <PaperScopeSelector
+          scope={paperScope}
+          counts={paperScopeCounts}
+          language={language}
+          onChange={(scope) => {
+            if (scope === paperScope) return;
+            setPaper(undefined);
+            setLedger(undefined);
+            setDailyReport(undefined);
+            setValidation(undefined);
+            setPaperScope(scope);
+          }}
         />
         {ledger ? (
           <PaperLedgerDashboard ledger={ledger} language={language} t={t} />
@@ -331,14 +380,16 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
             }
           />
         </div>
-        <div className="form-row">
-          <button type="button" onClick={seedPaper}>
-            {t("portfolio.seedPaper")}
-          </button>
-          <button type="button" onClick={updatePaper}>
-            {t("portfolio.updatePaper")}
-          </button>
-        </div>
+        {paperScope === "legacy" && (
+          <div className="form-row">
+            <button type="button" onClick={seedPaper}>
+              {t("portfolio.seedPaper")}
+            </button>
+            <button type="button" onClick={updatePaper}>
+              {t("portfolio.updatePaper")}
+            </button>
+          </div>
+        )}
         {paperMessage && <div className="empty-state">{paperMessage}</div>}
         <div className="table-shell">
           <table>
@@ -381,19 +432,38 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
                   <td className="reason-cell">{paperNextAction(trade, language)}</td>
                   <td className="reason-cell">{localizeStrategy(trade.strategy_id, language)}</td>
                   <td>
-                    <button
-                      className="icon-action danger compact-button"
-                      type="button"
-                      onClick={() => removePaperTrade(trade.trade_id)}
-                      disabled={deletingPaperTradeId === trade.trade_id}
-                    >
-                      {deletingPaperTradeId === trade.trade_id
-                        ? t("common.running")
-                        : t("common.delete")}
-                    </button>
+                    {paperScope === "legacy" ? (
+                      <button
+                        className="icon-action danger compact-button"
+                        type="button"
+                        onClick={() => removePaperTrade(trade.trade_id)}
+                        disabled={deletingPaperTradeId === trade.trade_id}
+                      >
+                        {deletingPaperTradeId === trade.trade_id
+                          ? t("common.running")
+                          : t("common.delete")}
+                      </button>
+                    ) : (
+                      <span className="status status-ready">
+                        {language === "zh" ? "认证只读" : "Read only"}
+                      </span>
+                    )}
                   </td>
                 </tr>
               ))}
+              {(paper?.trades.length ?? 0) === 0 && (
+                <tr>
+                  <td colSpan={15} className="empty-state">
+                    {paperScope === "official"
+                      ? language === "zh"
+                        ? "尚无通过签名发布门禁的正式模拟交易。旧记录请切换到“验证账本”查看。"
+                        : "No signed official trades yet. Switch to Validation ledger for prior records."
+                      : language === "zh"
+                        ? "验证账本暂无记录。"
+                        : "No validation records."}
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -895,18 +965,22 @@ function PaperRuntimeIdentity({
   scheduler,
   session,
   officialTradeCount,
+  legacyTradeCount,
+  legacyActiveCount,
   language,
 }: {
   scheduler?: AutoProcessingState;
   session?: PaperSessionResponse;
   officialTradeCount: number;
+  legacyTradeCount: number;
+  legacyActiveCount?: number;
   language: Language;
 }) {
   const zh = language === "zh";
   const cycle = scheduler?.last_result;
   const cycleHealth = cycle?.data_health ?? {};
-  const legacyTotal = cycle?.paper_total ?? 0;
-  const legacyActive = Number(cycleHealth.active_checked ?? 0);
+  const legacyTotal = legacyTradeCount || cycle?.paper_total || 0;
+  const legacyActive = legacyActiveCount ?? Number(cycleHealth.active_checked ?? 0);
   const authenticated = Number(
     session?.data_health.paper_production_authenticated ?? officialTradeCount,
   );
@@ -961,6 +1035,62 @@ function PaperRuntimeIdentity({
           {zh ? "下次运行" : "Next cycle"}
           <strong>{nextRun}</strong>
         </span>
+      </div>
+    </div>
+  );
+}
+
+function PaperScopeSelector({
+  scope,
+  counts,
+  language,
+  onChange,
+}: {
+  scope: PaperReportingScope;
+  counts: Record<PaperReportingScope, number>;
+  language: Language;
+  onChange(scope: PaperReportingScope): void;
+}) {
+  const zh = language === "zh";
+  return (
+    <div className={`paper-scope-selector scope-${scope}`}>
+      <div className="paper-scope-tabs" role="tablist" aria-label={zh ? "模拟盘账本" : "Paper ledger"}>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={scope === "legacy"}
+          className={scope === "legacy" ? "active" : ""}
+          onClick={() => onChange("legacy")}
+        >
+          <span>{zh ? "验证账本" : "Validation ledger"}</span>
+          <strong>{counts.legacy}</strong>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={scope === "official"}
+          className={scope === "official" ? "active" : ""}
+          onClick={() => onChange("official")}
+        >
+          <span>{zh ? "正式认证" : "Official"}</span>
+          <strong>{counts.official}</strong>
+        </button>
+      </div>
+      <div>
+        <strong>
+          {scope === "legacy"
+            ? zh ? "正在查看原模拟盘记录" : "Showing prior paper-trading records"
+            : zh ? "正在查看正式认证业绩" : "Showing authenticated performance"}
+        </strong>
+        <p>
+          {scope === "legacy"
+            ? zh
+              ? "这些记录仍由自动任务更新，用来检验买点、止损和收益，但不会计入正式模型业绩。"
+              : "These records still update automatically for trigger, stop, and return validation, but do not count as official model performance."
+            : zh
+              ? "这里只接收通过严格回测门禁并带签名发布证明的交易；当前为空不是数据丢失。"
+              : "Only trades from a model that passed strict gates with a signed release proof appear here; an empty ledger does not mean data was lost."}
+        </p>
       </div>
     </div>
   );
@@ -1173,7 +1303,7 @@ function formFromPaperSession(session: PaperSessionResponse): PaperSessionStartP
   }
   return {
     label: session.account.label,
-    reset_existing: true,
+    reset_existing: false,
     initial_capital: decimalText(session.account.initial_capital),
     allocation_per_trade_pct: decimalText(session.account.allocation_per_trade_pct),
     max_positions: session.account.max_positions,

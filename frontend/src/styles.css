@@ -7154,6 +7154,68 @@ details.compact-data-health:not([open]) > .data-health-details {
   font-size: 13px;
 }
 
+.paper-scope-selector {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.65fr) minmax(0, 1.35fr);
+  gap: 16px;
+  align-items: center;
+  border: 1px solid var(--terminal-border);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--terminal-panel-soft);
+}
+
+.paper-scope-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 7px;
+  background: var(--terminal-bg);
+}
+
+.paper-scope-tabs button {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--terminal-muted);
+  cursor: pointer;
+}
+
+.paper-scope-tabs button.active {
+  border-color: rgba(244, 197, 66, 0.45);
+  background: rgba(244, 197, 66, 0.12);
+  color: var(--terminal-yellow);
+}
+
+.paper-scope-tabs button strong {
+  min-width: 28px;
+  border-radius: 4px;
+  padding: 3px 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  text-align: center;
+}
+
+.paper-scope-selector > div:last-child > strong {
+  color: var(--terminal-text);
+  font-size: 13px;
+}
+
+.paper-scope-selector > div:last-child p {
+  margin: 5px 0 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .paper-session-starter {
   display: grid;
   gap: 12px;
@@ -13277,6 +13339,7 @@ td {
   .today-decision-grid,
   .dashboard-secondary-grid,
   .paper-runtime-identity,
+  .paper-scope-selector,
   .paper-ledger-visual-grid,
   .opportunities-page {
     grid-template-columns: 1fr;
