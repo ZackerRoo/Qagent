@@ -5,11 +5,15 @@ import json
 import math
 from collections import defaultdict
 from datetime import date
+from decimal import Decimal
 from typing import Iterable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from qagent.backtesting.portfolio import proven_incremental_transaction_cost_pct
 from qagent.backtesting.ranking_v4_protocol import (
+    RANKING_V41_MODEL_VERSION,
+    RANKING_V42_MODEL_VERSION,
     RANKING_V4_MODEL_VERSION,
     RANKING_V41_FEATURE_EFFECT_NAMES,
 )
@@ -29,6 +33,7 @@ V4_UNKNOWN_VALUES = {"", "unknown", "none", "missing", "未分类", "未知"}
 V41_FEATURE_EFFECT_PRIOR_DATE_STRENGTH = 18.0
 V41_FEATURE_BUCKETS = ("low", "mid", "high")
 V41_MINIMUM_TRIGGER_RESIDUAL_VOLATILITY = 0.05
+V42_UTILITY_BLOCK_LENGTH = 3
 
 
 class RankingV4FeatureVector(BaseModel):
@@ -84,6 +89,8 @@ class RankingV4Candidate(BaseModel):
     underlying_evidence_complete: bool = False
     incumbent: bool = False
     replacement_cost_pct: float | None = Field(default=None, ge=0.0)
+    stage_two_embedded_cost_pct: float | None = Field(default=None, ge=0.0)
+    replacement_cost_evidence_complete: bool = False
     benchmark_opportunity_cost_pct: float | None = Field(default=None, ge=0.0)
     liquidity_penalty_pct: float | None = Field(default=None, ge=0.0)
     tail_risk_penalty_pct: float | None = Field(default=None, ge=0.0)
@@ -190,6 +197,16 @@ class RankingV41FeatureEffect(BaseModel):
         return self
 
 
+class RankingV42RealizedUtilityDate(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    segment: str
+    rebalance_date: date
+    observation_count: int = Field(ge=1)
+    triggered_net_excess_contribution_pct: float
+    not_triggered_rate: float = Field(ge=0.0, le=1.0)
+
+
 class RankingV4FrozenScoringArtifact(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -203,6 +220,7 @@ class RankingV4FrozenScoringArtifact(BaseModel):
     posteriors: tuple[RankingV4PosteriorParameters, ...] = ()
     trigger_probabilities: tuple[RankingV4TriggerProbability, ...] = ()
     feature_effects: tuple[RankingV41FeatureEffect, ...] = ()
+    realized_utility_dates: tuple[RankingV42RealizedUtilityDate, ...] = ()
     stable_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
@@ -218,6 +236,18 @@ class RankingV4FrozenScoringArtifact(BaseModel):
             raise ValueError("Ranking V4 trigger segments must be unique and sorted")
         if feature_effect_keys != sorted(set(feature_effect_keys)):
             raise ValueError("Ranking V4.1 feature effects must be unique and sorted")
+        utility_keys = [
+            (item.segment, item.rebalance_date) for item in self.realized_utility_dates
+        ]
+        if utility_keys != sorted(set(utility_keys)):
+            raise ValueError("Ranking V4.2 realized utility dates must be unique and sorted")
+        if self.model_version == RANKING_V41_MODEL_VERSION and self.realized_utility_dates:
+            raise ValueError("Ranking V4.1 artifacts cannot contain V4.2 utility evidence")
+        if self.model_version not in {
+            RANKING_V41_MODEL_VERSION,
+            RANKING_V42_MODEL_VERSION,
+        }:
+            raise ValueError("unsupported Ranking V4 artifact model version")
         if self.training_triggered_observation_count > self.training_observation_count:
             raise ValueError("Ranking V4 triggered training count exceeds all observations")
         if self.training_cutoff_date is not None and self.training_cutoff_date >= self.cutoff:
@@ -229,7 +259,7 @@ class RankingV4FrozenScoringArtifact(BaseModel):
         )
         if self.model_ready != expected_ready:
             raise ValueError("Ranking V4 model readiness does not match training counts")
-        expected = _stable_digest(self.model_dump(mode="json", exclude={"stable_digest"}))
+        expected = _stable_digest(_artifact_digest_payload(self))
         if self.stable_digest != expected:
             raise ValueError("Ranking V4 frozen scoring artifact digest mismatch")
         return self
@@ -256,7 +286,13 @@ class RankingV4CandidateScore(BaseModel):
     evidence_date_count: int = 0
     feature_adjustment_count: int = 0
     trigger_feature_adjustment: float | None = None
+    trigger_feature_lower_adjustment: float | None = None
     net_excess_feature_adjustment_pct: float | None = None
+    net_excess_feature_lower_adjustment_pct: float | None = None
+    feature_ranking_utility_pct: float | None = None
+    utility_evidence_date_count: int = 0
+    utility_evidence_block_count: int = 0
+    incremental_replacement_cost_proven: bool = False
     eligible_for_position: bool = False
     blocked_reasons: list[str] = Field(default_factory=list)
     reason: str
@@ -279,7 +315,9 @@ def build_ranking_v4_frozen_scoring_artifact(
     observations: list[ResolvedRankingV4Observation],
     *,
     cutoff: date,
+    model_version: str = RANKING_V4_MODEL_VERSION,
 ) -> RankingV4FrozenScoringArtifact:
+    resolved_model_version = _resolve_model_version(model_version)
     trigger_observations = sorted(
         (
             item
@@ -308,8 +346,13 @@ def build_ranking_v4_frozen_scoring_artifact(
         trigger_probabilities=trigger_probabilities,
         decision_date=cutoff,
     )
+    realized_utility_dates = (
+        _build_realized_utility_dates(trigger_observations)
+        if resolved_model_version == RANKING_V42_MODEL_VERSION
+        else []
+    )
     payload = {
-        "model_version": RANKING_V4_MODEL_VERSION,
+        "model_version": resolved_model_version,
         "cutoff": cutoff,
         "training_cutoff_date": (
             max(item.available_at for item in trigger_observations)
@@ -334,10 +377,19 @@ def build_ranking_v4_frozen_scoring_artifact(
                 key=lambda item: (item.stage, item.feature_name, item.bucket),
             )
         ),
+        "realized_utility_dates": tuple(
+            sorted(
+                realized_utility_dates,
+                key=lambda item: (item.segment, item.rebalance_date),
+            )
+        ),
     }
+    digest_payload = dict(payload)
+    if resolved_model_version == RANKING_V41_MODEL_VERSION:
+        digest_payload.pop("realized_utility_dates")
     return RankingV4FrozenScoringArtifact(
         **payload,
-        stable_digest=_stable_digest(payload),
+        stable_digest=_stable_digest(digest_payload),
     )
 
 
@@ -348,11 +400,13 @@ def score_ranking_v4_candidates(
     decision_date: date,
     evidence_cutoff_date: date | None = None,
     maximum_positions: int = 5,
+    model_version: str = RANKING_V4_MODEL_VERSION,
 ) -> RankingV4Decision:
     effective_cutoff = min(decision_date, evidence_cutoff_date or decision_date)
     artifact = build_ranking_v4_frozen_scoring_artifact(
         observations,
         cutoff=effective_cutoff,
+        model_version=model_version,
     )
     return score_ranking_v4_candidates_from_artifact(
         candidates,
@@ -385,6 +439,11 @@ def score_ranking_v4_candidates_from_artifact(
     feature_effect_by_key = {
         (item.stage, item.feature_name, item.bucket): item for item in artifact.feature_effects
     }
+    utility_dates_by_segment: dict[str, list[RankingV42RealizedUtilityDate]] = defaultdict(
+        list
+    )
+    for item in artifact.realized_utility_dates:
+        utility_dates_by_segment[item.segment].append(item)
     provisional = [
         _score_candidate(
             candidate,
@@ -392,6 +451,8 @@ def score_ranking_v4_candidates_from_artifact(
             posterior_by_segment=posterior_by_segment,
             trigger_by_segment=trigger_by_segment,
             feature_effect_by_key=feature_effect_by_key,
+            utility_dates_by_segment=utility_dates_by_segment,
+            model_version=artifact.model_version,
             baseline_position=baseline_positions[candidate.instrument_id],
             decision_date=decision_date,
         )
@@ -402,6 +463,7 @@ def score_ranking_v4_candidates_from_artifact(
         key=lambda item: (
             not item.eligible_for_position,
             -_sort_value(item.expected_utility_lower_bound_pct),
+            -_sort_value(item.feature_ranking_utility_pct),
             -_sort_value(item.expected_utility_pct),
             item.baseline_position,
             item.instrument_id,
@@ -414,6 +476,7 @@ def score_ranking_v4_candidates_from_artifact(
     eligible_count = sum(item.eligible_for_position for item in scores)
     occupied_slots = min(maximum_positions, eligible_count)
     return RankingV4Decision(
+        model_version=artifact.model_version,
         decision_date=decision_date,
         training_cutoff_date=artifact.training_cutoff_date,
         training_observation_count=artifact.training_observation_count,
@@ -433,6 +496,8 @@ def _score_candidate(
     posterior_by_segment: dict[str, RankingV4PosteriorParameters],
     trigger_by_segment: dict[str, RankingV4TriggerProbability],
     feature_effect_by_key: dict[tuple[str, str, str], RankingV41FeatureEffect],
+    utility_dates_by_segment: dict[str, list[RankingV42RealizedUtilityDate]],
+    model_version: str,
     baseline_position: int,
     decision_date: date,
 ) -> RankingV4CandidateScore:
@@ -475,7 +540,11 @@ def _score_candidate(
         blocked_reasons.append("constraint_evidence_incomplete")
     if candidate.features.data_completeness < V4_MINIMUM_DATA_COMPLETENESS:
         blocked_reasons.append("data_incomplete")
-    costs = _candidate_costs(candidate, decision_date=decision_date)
+    costs = _candidate_costs(
+        candidate,
+        decision_date=decision_date,
+        model_version=model_version,
+    )
     if costs is None:
         blocked_reasons.append("cost_evidence_incomplete")
     if posterior is None:
@@ -489,32 +558,74 @@ def _score_candidate(
     adjusted_trigger_lower_bound = None
     adjusted_net_excess = None
     adjusted_net_excess_lower_bound = None
+    feature_ranking_utility = None
+    utility_evidence_date_count = 0
+    utility_evidence_block_count = 0
+    incremental_replacement_cost_proven = False
+    replacement_cost_used = None
     if posterior is not None and trigger is not None and costs is not None:
+        (
+            replacement_cost,
+            opportunity_cost,
+            liquidity_penalty,
+            tail_risk_penalty,
+            incremental_replacement_cost_proven,
+        ) = costs
+        replacement_cost_used = replacement_cost
         adjusted_trigger_probability = _clamp_probability(trigger.probability + trigger_adjustment)
+        trigger_lower_feature_effect = (
+            trigger_lower_adjustment
+            if model_version == RANKING_V41_MODEL_VERSION
+            else trigger_adjustment
+        )
         adjusted_trigger_lower_bound = min(
             adjusted_trigger_probability,
-            _clamp_probability(trigger.lower_bound + trigger_lower_adjustment),
+            _clamp_probability(trigger.lower_bound + trigger_lower_feature_effect),
         )
         adjusted_net_excess = posterior.expected_net_excess_return_pct + net_excess_adjustment
+        net_excess_lower_feature_effect = (
+            net_excess_lower_adjustment
+            if model_version == RANKING_V41_MODEL_VERSION
+            else net_excess_adjustment
+        )
         adjusted_net_excess_lower_bound = min(
             adjusted_net_excess,
-            posterior.lower_bound_pct + net_excess_lower_adjustment,
+            posterior.lower_bound_pct + net_excess_lower_feature_effect,
         )
-        replacement_cost, opportunity_cost, liquidity_penalty, tail_risk_penalty = costs
         fixed_penalty = replacement_cost + liquidity_penalty + tail_risk_penalty
         expected_utility = (
             adjusted_trigger_probability * adjusted_net_excess
             - (1.0 - adjusted_trigger_probability) * opportunity_cost
             - fixed_penalty
         )
-        lower_utility = (
-            adjusted_trigger_lower_bound * adjusted_net_excess_lower_bound
-            - (1.0 - adjusted_trigger_lower_bound) * opportunity_cost
-            - fixed_penalty
-        )
-        if adjusted_net_excess_lower_bound <= 0:
-            blocked_reasons.append("net_excess_lower_bound_not_positive")
-        if lower_utility <= 0:
+        if model_version == RANKING_V41_MODEL_VERSION:
+            lower_utility = (
+                adjusted_trigger_lower_bound * adjusted_net_excess_lower_bound
+                - (1.0 - adjusted_trigger_lower_bound) * opportunity_cost
+                - fixed_penalty
+            )
+            if adjusted_net_excess_lower_bound <= 0:
+                blocked_reasons.append("net_excess_lower_bound_not_positive")
+        else:
+            feature_ranking_utility = expected_utility + (
+                trigger_lower_adjustment * adjusted_net_excess
+                + adjusted_trigger_probability * net_excess_lower_adjustment
+            )
+            (
+                direct_lower,
+                utility_evidence_date_count,
+                utility_evidence_block_count,
+            ) = _candidate_realized_utility_lower_bound(
+                candidate,
+                utility_dates_by_segment,
+                opportunity_cost_pct=opportunity_cost,
+                fixed_penalty_pct=fixed_penalty,
+            )
+            if direct_lower is None:
+                blocked_reasons.append("realized_utility_block_evidence_insufficient")
+            else:
+                lower_utility = direct_lower
+        if lower_utility is not None and lower_utility <= 0:
             blocked_reasons.append("utility_lower_bound_not_positive")
 
     eligible = not blocked_reasons
@@ -549,7 +660,7 @@ def _score_candidate(
         win_probability_lower_bound=_rounded(
             posterior.win_probability_lower_bound if posterior else None
         ),
-        replacement_cost_pct=_rounded(candidate.replacement_cost_pct),
+        replacement_cost_pct=_rounded(replacement_cost_used),
         benchmark_opportunity_cost_pct=_rounded(candidate.benchmark_opportunity_cost_pct),
         liquidity_penalty_pct=_rounded(candidate.liquidity_penalty_pct),
         tail_risk_penalty_pct=_rounded(candidate.tail_risk_penalty_pct),
@@ -560,10 +671,19 @@ def _score_candidate(
             net_excess_adjustment_count,
         ),
         trigger_feature_adjustment=_rounded(trigger_adjustment),
+        trigger_feature_lower_adjustment=_rounded(trigger_lower_adjustment),
         net_excess_feature_adjustment_pct=_rounded(
             net_excess_adjustment,
             digits=4,
         ),
+        net_excess_feature_lower_adjustment_pct=_rounded(
+            net_excess_lower_adjustment,
+            digits=4,
+        ),
+        feature_ranking_utility_pct=_rounded(feature_ranking_utility, digits=4),
+        utility_evidence_date_count=utility_evidence_date_count,
+        utility_evidence_block_count=utility_evidence_block_count,
+        incremental_replacement_cost_proven=incremental_replacement_cost_proven,
         eligible_for_position=eligible,
         blocked_reasons=blocked_reasons,
         reason=reason,
@@ -743,6 +863,85 @@ def _build_feature_effects(
         )
     )
     return effects
+
+
+def _build_realized_utility_dates(
+    observations: list[ResolvedRankingV4Observation],
+) -> list[RankingV42RealizedUtilityDate]:
+    grouped: dict[tuple[str, date], list[ResolvedRankingV4Observation]] = defaultdict(list)
+    for observation in observations:
+        for segment in _observation_segments(observation):
+            grouped[(segment, observation.signal_date)].append(observation)
+
+    result: list[RankingV42RealizedUtilityDate] = []
+    for (segment, rebalance_date), values in sorted(grouped.items()):
+        triggered_contribution = math.fsum(
+            float(item.cost_adjusted_net_excess_return_pct)
+            for item in values
+            if item.triggered and item.cost_adjusted_net_excess_return_pct is not None
+        ) / len(values)
+        result.append(
+            RankingV42RealizedUtilityDate(
+                segment=segment,
+                rebalance_date=rebalance_date,
+                observation_count=len(values),
+                triggered_net_excess_contribution_pct=triggered_contribution,
+                not_triggered_rate=(
+                    sum(not item.triggered for item in values) / len(values)
+                ),
+            )
+        )
+    return result
+
+
+def _candidate_realized_utility_lower_bound(
+    candidate: RankingV4Candidate,
+    values_by_segment: dict[str, list[RankingV42RealizedUtilityDate]],
+    *,
+    opportunity_cost_pct: float,
+    fixed_penalty_pct: float,
+) -> tuple[float | None, int, int]:
+    for segment in reversed(_candidate_segments(candidate)):
+        dated = values_by_segment.get(segment, [])
+        realized = tuple(
+            item.triggered_net_excess_contribution_pct
+            - item.not_triggered_rate * opportunity_cost_pct
+            - fixed_penalty_pct
+            for item in dated
+        )
+        lower = realized_utility_block_lower_bound(
+            realized,
+            block_length=V42_UTILITY_BLOCK_LENGTH,
+        )
+        if lower is not None:
+            return lower, len(realized), len(realized) // V42_UTILITY_BLOCK_LENGTH
+    return None, 0, 0
+
+
+def realized_utility_block_lower_bound(
+    realized_utility_pct: Iterable[float],
+    *,
+    block_length: int = V42_UTILITY_BLOCK_LENGTH,
+) -> float | None:
+    """Single one-sided 95% lower bound from realized utility date blocks."""
+
+    if block_length <= 0:
+        raise ValueError("block_length must be positive")
+    values = tuple(float(value) for value in realized_utility_pct)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("realized utility values must be finite")
+    complete_count = (len(values) // block_length) * block_length
+    if complete_count < block_length * 2:
+        return None
+    blocks = tuple(
+        math.fsum(values[offset : offset + block_length]) / block_length
+        for offset in range(0, complete_count, block_length)
+    )
+    mean = math.fsum(blocks) / len(blocks)
+    variance = math.fsum((value - mean) ** 2 for value in blocks) / (len(blocks) - 1)
+    standard_error = math.sqrt(max(variance, 0.0) / len(blocks))
+    lower = mean - V4_LOWER_CONFIDENCE_Z_SCORE * standard_error
+    return 0.0 if lower == 0.0 else lower
 
 
 def _stage_feature_effects(
@@ -1166,6 +1365,7 @@ def _candidate_reason(
         "net_excess_evidence_missing": "缺少触发后净超额证据",
         "trigger_evidence_missing": "缺少买点触发证据",
         "net_excess_lower_bound_not_positive": "触发后净超额下界不为正",
+        "realized_utility_block_evidence_insufficient": "按再平衡日期分块的已实现效用证据不足",
         "utility_lower_bound_not_positive": "扣除机会成本和交易成本后下界不为正",
     }
     detail = "、".join(labels.get(item, item) for item in blocked_reasons)
@@ -1203,21 +1403,46 @@ def _candidate_costs(
     candidate: RankingV4Candidate,
     *,
     decision_date: date,
-) -> tuple[float, float, float, float] | None:
+    model_version: str,
+) -> tuple[float, float, float, float, bool] | None:
     if candidate.cost_as_of is None or candidate.cost_as_of > decision_date:
         return None
-    costs = (
-        candidate.replacement_cost_pct,
+    common_costs = (
         candidate.benchmark_opportunity_cost_pct,
         candidate.liquidity_penalty_pct,
         candidate.tail_risk_penalty_pct,
     )
-    if any(value is None for value in costs):
+    if any(value is None for value in common_costs):
         return None
-    resolved = tuple(float(value) for value in costs if value is not None)
-    if len(resolved) != 4 or not all(math.isfinite(value) for value in resolved):
+    resolved_common = tuple(float(value) for value in common_costs if value is not None)
+    if len(resolved_common) != 3 or not all(
+        math.isfinite(value) for value in resolved_common
+    ):
         return None
-    return resolved
+    if model_version == RANKING_V41_MODEL_VERSION:
+        if candidate.replacement_cost_pct is None:
+            return None
+        replacement_cost = float(candidate.replacement_cost_pct)
+        if not math.isfinite(replacement_cost):
+            return None
+        return replacement_cost, *resolved_common, False
+
+    if not candidate.replacement_cost_evidence_complete:
+        return 0.0, *resolved_common, False
+    if (
+        candidate.replacement_cost_pct is None
+        or candidate.stage_two_embedded_cost_pct is None
+    ):
+        return None
+    actual = float(candidate.replacement_cost_pct)
+    embedded = float(candidate.stage_two_embedded_cost_pct)
+    if not math.isfinite(actual) or not math.isfinite(embedded):
+        return None
+    incremental = proven_incremental_transaction_cost_pct(
+        actual_replacement_cost_pct=Decimal(str(actual)),
+        stage_two_embedded_cost_pct=Decimal(str(embedded)),
+    )
+    return float(incremental), *resolved_common, True
 
 
 def _rounded(value: float | None, *, digits: int = 6) -> float | None:
@@ -1241,6 +1466,23 @@ def _stable_digest(payload: object) -> str:
         allow_nan=False,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _artifact_digest_payload(
+    artifact: RankingV4FrozenScoringArtifact,
+) -> dict[str, object]:
+    payload = artifact.model_dump(mode="json", exclude={"stable_digest"})
+    if artifact.model_version == RANKING_V41_MODEL_VERSION:
+        payload.pop("realized_utility_dates", None)
+    return payload
+
+
+def _resolve_model_version(model_version: str) -> str:
+    if model_version in {"4.1", RANKING_V41_MODEL_VERSION}:
+        return RANKING_V41_MODEL_VERSION
+    if model_version in {"4.2", RANKING_V42_MODEL_VERSION}:
+        return RANKING_V42_MODEL_VERSION
+    raise ValueError("unsupported Ranking V4 model version")
 
 
 def _json_compatible(value: object) -> object:

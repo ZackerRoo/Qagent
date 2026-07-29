@@ -7,6 +7,7 @@ from qagent.backtesting.engine import BacktestSignal
 from qagent.backtesting.execution import HistoricalExecutionRule
 from qagent.backtesting.portfolio import (
     CandidateOutcomeStatus,
+    candidate_outcome_transaction_cost_pct,
     resolve_candidate_outcome_ledger,
 )
 from qagent.historical_evidence.models import HistoricalFeeRule
@@ -134,7 +135,7 @@ def test_same_day_signals_resolve_without_competing_for_capital_or_positions():
         start=date(2025, 1, 1),
         end=date(2025, 1, 3),
         nominal_amount=Decimal("10000"),
-        transaction_cost_bps=Decimal("0"),
+        transaction_cost_bps=Decimal("5"),
         slippage_bps=Decimal("0"),
         max_entry_wait_days=2,
         max_holding_days=3,
@@ -147,6 +148,14 @@ def test_same_day_signals_resolve_without_competing_for_capital_or_positions():
     assert all(outcome.shares == Decimal("1000") for outcome in result.outcomes)
     assert result.status_counts["resolved"] == 2
     assert result.data_health["independent_resolution"] == "no_capital_or_position_capacity"
+    for outcome in result.outcomes:
+        embedded_cost_pct = candidate_outcome_transaction_cost_pct(outcome)
+        gross_return_pct = outcome.gross_pnl / outcome.entry_value * Decimal("100")
+        reported_net_return_pct = Decimal(str(outcome.return_pct))
+        assert (
+            abs(gross_return_pct - reported_net_return_pct - embedded_cost_pct)
+            <= Decimal("0.0001")
+        )
 
 
 def test_incomplete_future_and_untriggered_signals_have_explicit_statuses():

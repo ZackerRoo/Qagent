@@ -20,8 +20,10 @@ from qagent.backtesting.ranking_v4_protocol import (
     ranking_v4_protocol_digest_is_valid,
 )
 
-FROZEN_V4_PROTOCOL_DIGEST = "8d95996fbccc99c4df2d458220ead0147e51f3a2b2032628e59572e580eea6e3"
-FROZEN_V4_REGISTRY_DIGEST = "63ae2333f8ed1ef1d45c9551143f5fbffdc1ff0f4fb479e3e26139a49c597298"
+FROZEN_V41_PROTOCOL_DIGEST = "8d95996fbccc99c4df2d458220ead0147e51f3a2b2032628e59572e580eea6e3"
+FROZEN_V41_REGISTRY_DIGEST = "63ae2333f8ed1ef1d45c9551143f5fbffdc1ff0f4fb479e3e26139a49c597298"
+FROZEN_V42_PROTOCOL_DIGEST = "68bcddae550c28b59c79a325f36bd4cab2676e47390f7e2842e2327ce59988f4"
+FROZEN_V42_REGISTRY_DIGEST = "3a61e0dfc2dff46a0cbf7d92d68df091e4299090f14216e011ec9e234494b42d"
 FROZEN_V3_REJECTED_SUMMARY_DIGEST = (
     "197feb4614d18cf182bc4dbe37cb2a1d3b8a94c847b738aad51835f488d7cf54"
 )
@@ -50,7 +52,7 @@ def test_v4_protocol_is_independent_deterministic_and_covers_full_preregistratio
 
     assert first == second
     assert first.protocol_digest == second.protocol_digest
-    assert first.protocol_digest == FROZEN_V4_PROTOCOL_DIGEST
+    assert first.protocol_digest == FROZEN_V42_PROTOCOL_DIGEST
     assert ranking_v4_protocol_digest_is_valid(first)
     protocol_source = inspect.getsource(
         __import__("qagent.backtesting.ranking_v4_protocol", fromlist=["ranking_v4_protocol"])
@@ -81,6 +83,8 @@ def test_v4_protocol_is_independent_deterministic_and_covers_full_preregistratio
     assert "best_eligible_channel_score" in candidate.deterministic_backfill_rule
 
     model = first.model_definition
+    assert "hierarchical-shrinkage" in model.implementation_version
+    assert "empirical-bayes" not in model.implementation_version
     assert model.stage_one_name == "trigger_probability"
     assert model.stage_two_name == "triggered_cost_adjusted_net_excess"
     assert model.hierarchical_shrinkage_levels == (
@@ -92,6 +96,8 @@ def test_v4_protocol_is_independent_deterministic_and_covers_full_preregistratio
     assert model.minimum_position_lower_bound == 0
     assert model.minimum_position_comparator == "strictly_greater_than"
     assert model.missing_market_regime_policy == "fail_closed_ineligible"
+    assert "ranking_only" in model.feature_effect_aggregation
+    assert "realized_utility_rebalance_date_blocks" in model.posterior_interval
 
     utility = first.utility_definition
     assert utility.penalty_terms == (
@@ -105,6 +111,23 @@ def test_v4_protocol_is_independent_deterministic_and_covers_full_preregistratio
     )
     assert first.temporal_definition.rebalance_step_sessions == 10
     assert first.temporal_definition.candidate_lookback_days == 400
+    assert utility.cash_utility == 0
+
+
+def test_v41_protocol_and_registry_digests_remain_exactly_reproducible():
+    protocol = build_ranking_v4_protocol(version="4.1")
+    registry = build_ranking_v4_experiment_registry(version="4.1")
+
+    assert protocol.protocol_digest == FROZEN_V41_PROTOCOL_DIGEST
+    assert registry.registry_digest == FROZEN_V41_REGISTRY_DIGEST
+    assert protocol.model_version.endswith("v4.1-preregistered")
+    assert protocol.statistics_definition.pbo_block_count == 4
+    assert protocol.statistics_definition.pbo_model_ids[1] == "ranking_v41_full"
+    assert (
+        protocol.utility_definition.replacement_cost_formula
+        == "zero_for_incumbent_else_frozen_candidate_replacement_cost_pct_0.15"
+    )
+    assert ranking_v4_protocol_digest_is_valid(protocol)
 
 
 def test_v4_allows_cash_and_freezes_portfolio_and_execution_constraints():
@@ -161,7 +184,7 @@ def test_v4_gates_are_not_weaker_than_rejected_v3_and_unknowns_fail_closed():
     statistics = protocol.statistics_definition
     assert statistics.pbo_model_ids == (
         "constraint_matched_baseline",
-        "ranking_v41_full",
+        "ranking_v42_full",
         "channel_baseline",
         "channel_trend",
         "channel_breakout",
@@ -172,6 +195,8 @@ def test_v4_gates_are_not_weaker_than_rejected_v3_and_unknowns_fail_closed():
     assert statistics.pbo_scope == ("frozen_eight_model_family_only_not_full_search_process")
     assert statistics.dependence_block_length == 3
     assert statistics.pbo_purge_rebalance_cohorts == 2
+    assert statistics.pbo_block_count == 8
+    assert "minimum_24_dates_per_half" in statistics.pbo_method
     assert statistics.pbo_date_coverage_threshold == Decimal("0.95")
     assert statistics.multiple_testing_method == ("holm_bonferroni_registered_family")
     assert tuple(item.model_id for item in statistics.registered_models) == (
@@ -260,7 +285,8 @@ def test_v4_temporal_rules_forbid_future_data_and_revision_backfill():
     )
     assert (
         protocol.utility_definition.replacement_cost_formula
-        == "zero_for_incumbent_else_frozen_candidate_replacement_cost_pct_0.15"
+        == "proven_actual_replacement_cost_minus_stage2_embedded_cost_floor_zero;"
+        "unproven_incremental_cost_zero"
     )
 
 
@@ -293,7 +319,10 @@ def test_v3_summary_and_v4_registry_have_stable_digests_and_detect_tampering():
 
     assert first == second
     assert first.registry_digest == second.registry_digest
-    assert first.registry_digest == FROZEN_V4_REGISTRY_DIGEST
+    assert first.registry_digest == FROZEN_V42_REGISTRY_DIGEST
+    assert first.historical_trial_inventory_complete is False
+    assert first.historical_trial_inventory_digest is None
+    assert first.historical_trial_return_series_digests == ()
     assert summary.summary_digest == second.predecessor_summaries[0].summary_digest
     assert summary.summary_digest == FROZEN_V3_REJECTED_SUMMARY_DIGEST
     assert v4_summary == build_ranking_v4_rejected_summary()

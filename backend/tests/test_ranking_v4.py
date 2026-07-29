@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+import random
 
 import pytest
 from pydantic import ValidationError
@@ -10,8 +11,10 @@ from qagent.backtesting.ranking_v4 import (
     RankingV4FrozenScoringArtifact,
     ResolvedRankingV4Observation,
     build_ranking_v4_frozen_scoring_artifact,
+    realized_utility_block_lower_bound,
     score_ranking_v4_candidates,
 )
+from qagent.backtesting.ranking_v4_protocol import RANKING_V41_MODEL_VERSION
 
 
 def _features(**updates) -> RankingV4FeatureVector:
@@ -45,6 +48,8 @@ def _candidate(
     regime: str = "risk_on",
     strategy: str = "breakout_volume_confirmation",
     replacement_cost: float = 0.0,
+    embedded_cost: float | None = None,
+    replacement_cost_proven: bool = False,
     opportunity_cost: float = 0.0,
     liquidity_penalty: float = 0.0,
     tail_risk_penalty: float = 0.0,
@@ -71,6 +76,8 @@ def _candidate(
         underlying_evidence_complete=True,
         incumbent=incumbent,
         replacement_cost_pct=replacement_cost,
+        stage_two_embedded_cost_pct=embedded_cost,
+        replacement_cost_evidence_complete=replacement_cost_proven,
         benchmark_opportunity_cost_pct=opportunity_cost,
         liquidity_penalty_pct=liquidity_penalty,
         tail_risk_penalty_pct=tail_risk_penalty,
@@ -272,7 +279,6 @@ def test_v4_fails_closed_when_candidate_decision_date_does_not_match():
 @pytest.mark.parametrize(
     "field",
     [
-        "replacement_cost_pct",
         "benchmark_opportunity_cost_pct",
         "liquidity_penalty_pct",
         "tail_risk_penalty_pct",
@@ -415,11 +421,17 @@ def test_v41_feature_effects_change_cross_sectional_ranking_without_future_data(
 
     assert by_id["CN:000001"].feature_adjustment_count > 0
     assert (
+        by_id["CN:000001"].feature_ranking_utility_pct
+        > by_id["CN:000002"].feature_ranking_utility_pct
+    )
+    assert (
         by_id["CN:000001"].expected_utility_lower_bound_pct
-        > by_id["CN:000002"].expected_utility_lower_bound_pct
+        == by_id["CN:000002"].expected_utility_lower_bound_pct
     )
     assert by_id["CN:000001"].net_excess_feature_adjustment_pct > 0
     assert by_id["CN:000002"].net_excess_feature_adjustment_pct < 0
+    assert by_id["CN:000002"].net_excess_feature_lower_adjustment_pct < 0
+    assert by_id["CN:000002"].eligible_for_position is True
 
 
 def test_v4_trigger_probability_clusters_cross_section_by_signal_date():
@@ -485,11 +497,11 @@ def test_v4_requires_positive_posterior_and_utility_lower_bounds_or_holds_cash()
 
     score = decision.candidates[0]
     assert score.eligible_for_position is False
-    assert "net_excess_lower_bound_not_positive" in score.blocked_reasons
+    assert "utility_lower_bound_not_positive" in score.blocked_reasons
     assert decision.cash_slot_count == 5
 
 
-def test_v4_has_no_fixed_incumbent_bonus_and_uses_actual_replacement_cost():
+def test_v42_ignores_unproven_fixed_replacement_cost_and_deducts_only_increment():
     observations = _training()
     incumbent = _candidate("CN:000001", incumbent=True, replacement_cost=0.0)
     replacement = _candidate("CN:000002", incumbent=False, replacement_cost=0.2)
@@ -501,19 +513,67 @@ def test_v4_has_no_fixed_incumbent_bonus_and_uses_actual_replacement_cost():
     )
 
     assert decision.candidates[0].instrument_id == incumbent.instrument_id
-    assert decision.candidates[0].expected_utility_pct > decision.candidates[1].expected_utility_pct
-    equal_cost = score_ranking_v4_candidates(
+    assert decision.candidates[0].expected_utility_pct == (
+        decision.candidates[1].expected_utility_pct
+    )
+    assert all(item.replacement_cost_pct == 0 for item in decision.candidates)
+    proven = score_ranking_v4_candidates(
         [
-            incumbent.model_copy(update={"replacement_cost_pct": 0.0}),
-            replacement.model_copy(update={"replacement_cost_pct": 0.0}),
+            incumbent,
+            replacement.model_copy(
+                update={
+                    "stage_two_embedded_cost_pct": 0.15,
+                    "replacement_cost_evidence_complete": True,
+                }
+            ),
         ],
         observations,
         decision_date=date(2025, 1, 2),
     )
-    assert [item.instrument_id for item in equal_cost.candidates] == [
+    by_id = {item.instrument_id: item for item in proven.candidates}
+    assert by_id["CN:000002"].replacement_cost_pct == pytest.approx(0.05)
+    assert by_id["CN:000002"].incremental_replacement_cost_proven is True
+    assert (
+        by_id["CN:000001"].expected_utility_pct
+        - by_id["CN:000002"].expected_utility_pct
+        == pytest.approx(0.05)
+    )
+
+
+def test_v42_proven_cost_already_embedded_in_stage2_is_not_charged_again():
+    candidate = _candidate(
         "CN:000001",
-        "CN:000002",
-    ]
+        replacement_cost=0.15,
+        embedded_cost=0.15,
+        replacement_cost_proven=True,
+    )
+
+    score = score_ranking_v4_candidates(
+        [candidate],
+        _training(),
+        decision_date=date(2025, 1, 2),
+    ).candidates[0]
+
+    assert score.replacement_cost_pct == 0
+    assert score.incremental_replacement_cost_proven is True
+
+
+def test_v42_requires_both_cost_values_when_incremental_cost_is_claimed():
+    candidate = _candidate(
+        "CN:000001",
+        replacement_cost=0.15,
+        embedded_cost=None,
+        replacement_cost_proven=True,
+    )
+
+    score = score_ranking_v4_candidates(
+        [candidate],
+        _training(),
+        decision_date=date(2025, 1, 2),
+    ).candidates[0]
+
+    assert score.expected_utility_pct is None
+    assert "cost_evidence_incomplete" in score.blocked_reasons
 
 
 def test_v4_fails_closed_for_unknown_regime_and_incomplete_data():
@@ -602,3 +662,86 @@ def test_v4_does_not_treat_many_same_date_rows_as_independent_dates():
     assert decision.training_date_count == 1
     assert decision.model_ready is False
     assert decision.cash_slot_count == 5
+
+
+def test_v42_utility_lcb_is_computed_once_from_realized_date_blocks():
+    observations = [
+        _resolved(
+            index,
+            available_at=date(2024, 7, 1),
+            excess=4.0,
+            triggered=index % 2 == 0,
+        )
+        for index in range(MIN_V4_TRAINING_OBSERVATIONS)
+    ]
+    candidate = _candidate("CN:000001", opportunity_cost=1.0)
+
+    score = score_ranking_v4_candidates(
+        [candidate],
+        observations,
+        decision_date=date(2025, 1, 2),
+    ).candidates[0]
+    direct_lower = realized_utility_block_lower_bound(
+        [4.0 if index % 2 == 0 else -1.0 for index in range(MIN_V4_TRAINING_OBSERVATIONS)]
+    )
+
+    assert direct_lower is not None
+    assert score.expected_utility_lower_bound_pct == pytest.approx(
+        direct_lower,
+        abs=0.0001,
+    )
+    assert score.utility_evidence_date_count == MIN_V4_TRAINING_OBSERVATIONS
+    assert score.utility_evidence_block_count == MIN_V4_TRAINING_OBSERVATIONS // 3
+
+
+def test_realized_utility_lcb_has_known_dgp_coverage_and_null_is_not_positive():
+    generator = random.Random(4201)
+    true_mean = 0.3
+    covered = 0
+    simulations = 300
+    for _ in range(simulations):
+        values = [generator.gauss(true_mean, 1.0) for _ in range(120)]
+        lower = realized_utility_block_lower_bound(values)
+        assert lower is not None
+        covered += lower <= true_mean
+
+    assert 0.90 <= covered / simulations <= 0.99
+    assert realized_utility_block_lower_bound([0.0] * 120) == 0
+
+    null_score = score_ranking_v4_candidates(
+        [_candidate("CN:000001")],
+        _training(excess=0.0),
+        decision_date=date(2025, 1, 2),
+    ).candidates[0]
+    assert null_score.expected_utility_lower_bound_pct == 0
+    assert null_score.eligible_for_position is False
+    assert "utility_lower_bound_not_positive" in null_score.blocked_reasons
+
+
+def test_v41_scoring_preserves_fixed_cost_and_marginal_lcb_gates():
+    observations = _training()
+    incumbent = _candidate("CN:000001", replacement_cost=0.0)
+    replacement = _candidate("CN:000002", replacement_cost=0.2)
+
+    decision = score_ranking_v4_candidates(
+        [replacement, incumbent],
+        observations,
+        decision_date=date(2025, 1, 2),
+        model_version="4.1",
+    )
+
+    assert decision.model_version == RANKING_V41_MODEL_VERSION
+    assert (
+        decision.candidates[0].expected_utility_pct
+        - decision.candidates[1].expected_utility_pct
+        == pytest.approx(0.2)
+    )
+    assert decision.candidates[0].utility_evidence_block_count == 0
+
+    negative = score_ranking_v4_candidates(
+        [_candidate("CN:000003")],
+        _training(excess=-2.0),
+        decision_date=date(2025, 1, 2),
+        model_version="4.1",
+    ).candidates[0]
+    assert "net_excess_lower_bound_not_positive" in negative.blocked_reasons

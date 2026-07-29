@@ -164,6 +164,42 @@ class PortfolioBacktestResult(BaseModel):
     data_health: dict[str, str]
 
 
+def proven_incremental_transaction_cost_pct(
+    *,
+    actual_replacement_cost_pct: Decimal,
+    stage_two_embedded_cost_pct: Decimal,
+) -> Decimal:
+    """Return only replacement cost not already present in Stage 2 net returns."""
+
+    actual = Decimal(actual_replacement_cost_pct)
+    embedded = Decimal(stage_two_embedded_cost_pct)
+    if not actual.is_finite() or not embedded.is_finite():
+        raise ValueError("transaction cost percentages must be finite")
+    if actual < 0 or embedded < 0:
+        raise ValueError("transaction cost percentages must be non-negative")
+    return max(actual - embedded, Decimal("0"))
+
+
+def candidate_outcome_transaction_cost_pct(
+    outcome: CandidateSignalOutcome,
+) -> Decimal:
+    """Recover the exact transaction-cost percentage embedded in a resolved return."""
+
+    if (
+        outcome.status != CandidateOutcomeStatus.RESOLVED
+        or outcome.entry_value is None
+        or outcome.entry_value <= 0
+        or outcome.gross_pnl is None
+        or outcome.net_pnl is None
+        or outcome.costs is None
+    ):
+        raise ValueError("a fully resolved candidate outcome is required")
+    pnl_cost = outcome.gross_pnl - outcome.net_pnl
+    if abs(pnl_cost - outcome.costs) > Decimal("0.01"):
+        raise ValueError("candidate outcome PnL and recorded costs disagree")
+    return pnl_cost / outcome.entry_value * Decimal("100")
+
+
 @dataclass
 class _TradeCandidate:
     signal: BacktestSignal

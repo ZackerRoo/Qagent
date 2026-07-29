@@ -1761,6 +1761,9 @@ def _continue_validation_pipeline(result) -> str:
     readiness = _historical_validation_readiness(
         result.manifest,
         start=job.start_date,
+        backfill_status=job.status,
+        backfill_errors=job.errors,
+        backfill_data_health=job.data_health,
     )
     health = {
         **job.data_health,
@@ -1814,72 +1817,276 @@ def _continue_validation_pipeline(result) -> str:
     return "walk_forward_queued"
 
 
-def _historical_validation_readiness(manifest, *, start: date) -> dict[str, str]:
+def _historical_validation_readiness(
+    manifest,
+    *,
+    start: date,
+    backfill_status: str | None = None,
+    backfill_errors: list[str] | tuple[str, ...] = (),
+    backfill_data_health: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     instruments = list(manifest.instruments)
     stocks = [item for item in instruments if item.asset_type == "stock"]
+    etfs = [item for item in instruments if item.asset_type == "etf"]
     adjusted = [item for item in instruments if item.asset_type in {"stock", "etf"}]
-    total = max(len(instruments), 1)
-    stock_total = max(len(stocks), 1)
-    adjusted_total = max(len(adjusted), 1)
+    total = len(instruments)
+    stock_total = len(stocks)
+    adjusted_total = len(adjusted)
+    data_health = dict(backfill_data_health or {})
+    data_health.update(getattr(manifest, "data_health", {}) or {})
 
     ratios = {
-        "market": sum(item.bar_coverage_ratio >= 0.95 for item in instruments) / total,
-        "adjusted": sum((item.adjustment_coverage_ratio or 0) >= 0.95 for item in adjusted)
-        / adjusted_total,
-        "tradability": sum(item.tradability_coverage_ratio >= 0.95 for item in instruments) / total,
-        "universe": sum(
-            item.universe_snapshot_rows > 0
-            and item.first_universe_date is not None
-            and (
-                getattr(item, "listing_date", None) is not None
-                and item.listing_date > start
-                or item.first_universe_date <= start
-            )
-            for item in instruments
-        )
-        / total,
-        "profile": sum(item.profile_rows > 0 for item in instruments) / total,
-        "fundamental": sum(
-            item.fundamental_rows > 0
-            and item.first_fundamental_date is not None
-            and (
-                getattr(item, "listing_date", None) is not None
-                and item.listing_date > start
-                or item.first_fundamental_date <= start
-            )
-            for item in stocks
-        )
-        / stock_total,
+        "bars": _scope_ratio(
+            sum(item.bar_coverage_ratio >= 0.95 for item in instruments),
+            total,
+        ),
+        "adjusted": _scope_ratio(
+            sum(
+                (item.adjustment_coverage_ratio or 0) >= 0.95
+                for item in adjusted
+            ),
+            adjusted_total,
+            empty_scope_ready=total > 0,
+        ),
+        "tradability": _scope_ratio(
+            sum(
+                item.tradability_coverage_ratio >= 0.95
+                for item in instruments
+            ),
+            total,
+        ),
+        "universe": _scope_ratio(
+            sum(
+                _historical_item_covers_start(item, "universe", start)
+                for item in instruments
+            ),
+            total,
+        ),
+        "profile": _scope_ratio(
+            sum(item.profile_rows > 0 for item in instruments),
+            total,
+        ),
+        "fundamental": _scope_ratio(
+            sum(
+                _historical_item_covers_start(item, "fundamental", start)
+                for item in stocks
+            ),
+            stock_total,
+            empty_scope_ready=True,
+        ),
+        "industry": _scope_ratio(
+            sum(getattr(item, "industry_rows", 0) > 0 for item in stocks),
+            stock_total,
+            empty_scope_ready=True,
+        ),
     }
     benchmark_ready, benchmark_total = _fraction_value(
-        manifest.data_health.get("historical_benchmark_price_ready", "0/4")
+        data_health.get("historical_benchmark_price_ready", "0/0")
     )
-    benchmark_ratio = benchmark_ready / max(benchmark_total, 1)
-    blockers = []
+    benchmark_ratio = (
+        benchmark_ready / benchmark_total if benchmark_total > 0 else 0.0
+    )
+    index_ready = _integer_value(
+        data_health.get("historical_benchmark_ready")
+    )
+    index_expected = _integer_value(
+        data_health.get("historical_index_expected_snapshots")
+    )
+    index_ratio = index_ready / index_expected if index_expected > 0 else 0.0
+
+    ready_counts = {
+        "bars": sum(item.bar_coverage_ratio >= 0.95 for item in instruments),
+        "adjusted": sum(
+            (item.adjustment_coverage_ratio or 0) >= 0.95 for item in adjusted
+        ),
+        "tradability": sum(
+            item.tradability_coverage_ratio >= 0.95 for item in instruments
+        ),
+        "universe": sum(
+            _historical_item_covers_start(item, "universe", start)
+            for item in instruments
+        ),
+        "profile": sum(item.profile_rows > 0 for item in instruments),
+        "fundamental": sum(
+            _historical_item_covers_start(item, "fundamental", start)
+            for item in stocks
+        ),
+        "industry": sum(
+            getattr(item, "industry_rows", 0) > 0 for item in stocks
+        ),
+    }
+    denominators = {
+        "bars": total,
+        "adjusted": adjusted_total,
+        "tradability": total,
+        "universe": total,
+        "profile": total,
+        "fundamental": stock_total,
+        "industry": stock_total,
+    }
     requirements = {
-        "market": MIN_FULL_MARKET_COVERAGE_RATIO,
+        "bars": MIN_FULL_MARKET_COVERAGE_RATIO,
         "adjusted": MIN_FULL_MARKET_COVERAGE_RATIO,
         "tradability": MIN_FULL_MARKET_COVERAGE_RATIO,
         "universe": MIN_FULL_MARKET_COVERAGE_RATIO,
         "profile": MIN_FULL_MARKET_COVERAGE_RATIO,
         "fundamental": MIN_FUNDAMENTAL_COVERAGE_RATIO,
+        "industry": MIN_FULL_MARKET_COVERAGE_RATIO,
     }
-    for key, minimum in requirements.items():
-        if ratios[key] < minimum:
-            blockers.append(f"{key}<{minimum:.0%}")
+    blockers = [
+        f"{key}<{minimum:.0%}"
+        for key, minimum in requirements.items()
+        if ratios[key] < minimum
+    ]
+    if index_ratio < 1:
+        blockers.append("index<100%")
     if benchmark_ratio < 1:
         blockers.append("benchmarks<100%")
-    return {
+
+    reference_status = data_health.get(
+        "historical_reference_request_status",
+        "unreported",
+    )
+    if reference_status in {
+        "unavailable",
+        "failed",
+        "empty",
+        "succeeded_with_errors",
+    }:
+        blockers.append(f"reference_request={reference_status}")
+    critical_reference_errors = _critical_historical_reference_errors(
+        backfill_status=backfill_status,
+        backfill_errors=backfill_errors,
+        data_health=data_health,
+    )
+    if critical_reference_errors:
+        blockers.append("critical_reference_errors")
+
+    readiness = {
         "validation_pipeline_gate": "ready" if not blockers else "insufficient",
-        "validation_pipeline_blockers": ",".join(blockers),
-        "validation_pipeline_market_coverage": f"{ratios['market']:.4f}",
+        "validation_pipeline_blockers": ",".join(dict.fromkeys(blockers)),
+        "validation_pipeline_market_coverage": f"{ratios['bars']:.4f}",
+        "validation_pipeline_bars_coverage": f"{ratios['bars']:.4f}",
         "validation_pipeline_adjusted_coverage": f"{ratios['adjusted']:.4f}",
         "validation_pipeline_tradability_coverage": f"{ratios['tradability']:.4f}",
         "validation_pipeline_universe_coverage": f"{ratios['universe']:.4f}",
         "validation_pipeline_profile_coverage": f"{ratios['profile']:.4f}",
         "validation_pipeline_fundamental_coverage": f"{ratios['fundamental']:.4f}",
+        "validation_pipeline_industry_coverage": f"{ratios['industry']:.4f}",
+        "validation_pipeline_index_coverage": f"{index_ratio:.4f}",
         "validation_pipeline_benchmark_coverage": f"{benchmark_ratio:.4f}",
+        "validation_pipeline_reference_request_status": reference_status,
+        "validation_pipeline_critical_reference_error_count": str(
+            len(critical_reference_errors)
+        ),
+        "validation_pipeline_critical_reference_errors": " | ".join(
+            critical_reference_errors[:10]
+        ),
+        "validation_pipeline_etf_constituent_gate": "not_required",
+        "validation_pipeline_etf_constituent_requirement": (
+            "optional_point_in_time_holdings_with_pairwise_correlation_fallback"
+        ),
+        "validation_pipeline_etf_constituent_scope": str(len(etfs)),
+        "validation_pipeline_etf_constituent_coverage": "not_applicable",
+        "validation_pipeline_index_ready": f"{index_ready}/{index_expected}",
+        "validation_pipeline_benchmark_ready": (
+            f"{benchmark_ready}/{benchmark_total}"
+        ),
     }
+    for key, minimum in requirements.items():
+        denominator = denominators[key]
+        readiness[f"validation_pipeline_{key}_gate"] = (
+            "not_applicable"
+            if denominator == 0 and key in {"fundamental", "industry"}
+            else "ready"
+            if ratios[key] >= minimum
+            else "insufficient"
+        )
+        readiness[f"validation_pipeline_{key}_ready"] = (
+            f"{ready_counts[key]}/{denominator}"
+        )
+        readiness[f"validation_pipeline_{key}_threshold"] = f"{minimum:.4f}"
+    readiness["validation_pipeline_index_gate"] = (
+        "ready" if index_ratio >= 1 else "insufficient"
+    )
+    readiness["validation_pipeline_index_threshold"] = "1.0000"
+    readiness["validation_pipeline_benchmark_gate"] = (
+        "ready" if benchmark_ratio >= 1 else "insufficient"
+    )
+    readiness["validation_pipeline_benchmark_threshold"] = "1.0000"
+    return readiness
+
+
+def _historical_item_covers_start(item, evidence: str, start: date) -> bool:
+    rows_attribute = (
+        "universe_snapshot_rows"
+        if evidence == "universe"
+        else f"{evidence}_rows"
+    )
+    rows = getattr(item, rows_attribute, 0)
+    first_date = getattr(item, f"first_{evidence}_date", None)
+    listing_date = getattr(item, "listing_date", None)
+    return bool(
+        rows > 0
+        and first_date is not None
+        and (
+            (listing_date is not None and listing_date > start)
+            or first_date <= start
+        )
+    )
+
+
+def _scope_ratio(
+    ready: int,
+    total: int,
+    *,
+    empty_scope_ready: bool = False,
+) -> float:
+    if total <= 0:
+        return 1.0 if empty_scope_ready else 0.0
+    return ready / total
+
+
+def _critical_historical_reference_errors(
+    *,
+    backfill_status: str | None,
+    backfill_errors: list[str] | tuple[str, ...],
+    data_health: Mapping[str, str],
+) -> list[str]:
+    critical: list[str] = []
+    reference_status = data_health.get("historical_reference_request_status")
+    if (
+        backfill_status == "succeeded_with_errors"
+        or reference_status in {"failed", "succeeded_with_errors"}
+    ):
+        markers = ("reference", "industry", "index", "benchmark")
+        critical.extend(
+            str(error)
+            for error in backfill_errors
+            if any(marker in str(error).lower() for marker in markers)
+        )
+        reference_errors = data_health.get("historical_reference_errors", "")
+        critical.extend(
+            error.strip()
+            for error in reference_errors.split(" | ")
+            if error.strip()
+        )
+        if (
+            _integer_value(
+                data_health.get("historical_reference_error_count")
+            )
+            > 0
+            and not critical
+        ):
+            critical.append("historical reference request reported errors")
+    return list(dict.fromkeys(critical))
+
+
+def _integer_value(value: object) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _fraction_value(value: str) -> tuple[int, int]:

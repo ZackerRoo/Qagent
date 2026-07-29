@@ -23,7 +23,7 @@ from qagent.backtesting.ranking_v4_validation import (
 
 
 START = date(2023, 1, 3)
-DATE_COUNT = 30
+DATE_COUNT = 96
 
 
 def _dates(count: int = DATE_COUNT) -> list[date]:
@@ -33,7 +33,7 @@ def _dates(count: int = DATE_COUNT) -> list[date]:
 def _passing_values() -> dict[str, list[float]]:
     return {
         "constraint_matched_baseline": [0.0] * DATE_COUNT,
-        "ranking_v41_full": [
+        "ranking_v42_full": [
             1.1 + [0.0, 0.25, -0.1, 0.15, -0.2, 0.1][index % 6] for index in range(DATE_COUNT)
         ],
         "channel_baseline": [
@@ -113,7 +113,7 @@ def _passing_inputs(
         complete_trial_matrix,
         experiment_registry_digest=protocol.experiment_registry.registry_digest,
     )
-    challenger_values = selected_values["ranking_v41_full"]
+    challenger_values = selected_values["ranking_v42_full"]
     return {
         "baseline_returns": _observations(selected_values["constraint_matched_baseline"]),
         "challenger_returns": _observations(
@@ -143,12 +143,12 @@ def _gate(result, key: str):
     return next(item for item in result.gates if item.key == key)
 
 
-def test_positive_historical_statistics_remain_shadow_only():
+def test_positive_statistics_remain_shadow_only_and_dsr_unavailable_without_audit():
     result = evaluate_ranking_v4_historical_validation(**_passing_inputs())
 
-    assert result.status == "pass"
-    assert result.historical_gate_status == "pass"
-    assert result.eligible_for_confirmatory_forward is True
+    assert result.status == "insufficient"
+    assert result.historical_gate_status == "insufficient"
+    assert result.eligible_for_confirmatory_forward is False
     assert result.deployment_scope == "shadow_only"
     assert result.official_release_allowed is False
     assert result.evidence_window == "development"
@@ -157,14 +157,17 @@ def test_positive_historical_statistics_remain_shadow_only():
     assert result.holm_family_size == 8
     assert result.pbo_status == "pass"
     assert result.pbo_probability == 0
-    assert result.trial_ledger_status == "pass"
-    assert result.deflated_sharpe_status == "pass"
-    assert result.deflated_sharpe_probability is not None
-    assert result.deflated_sharpe_probability >= 0.95
+    assert result.trial_ledger_status == "unavailable"
+    assert "no audited complete inventory" in result.trial_ledger_reason
+    assert result.deflated_sharpe_status == "unavailable"
+    assert result.deflated_sharpe_probability is None
     assert result.positive_subperiod_count == 5
     assert result.subperiod_count == 5
-    assert all(gate.status == "pass" for gate in result.gates)
-    assert "never official release" in result.reasons[0]
+    assert all(
+        gate.status == "pass" for gate in result.gates if gate.key != "deflated_sharpe"
+    )
+    assert _gate(result, "deflated_sharpe").status == "unavailable"
+    assert not any("eligible" in gate.key for gate in result.gates)
 
 
 def test_historical_gate_rejects_non_preregistered_execution_plan():
@@ -203,7 +206,7 @@ def test_rows_are_aggregated_by_rebalance_date_before_pairing():
 
     result = evaluate_ranking_v4_historical_validation(**inputs)
 
-    assert result.status == "pass"
+    assert result.status == "insufficient"
     assert result.baseline_row_count == DATE_COUNT * 2
     assert result.challenger_row_count == DATE_COUNT * 2
     assert result.common_rebalance_date_count == DATE_COUNT
@@ -243,7 +246,7 @@ def test_missing_pbo_is_unavailable_and_cannot_pass():
 
 def test_probability_above_pbo_limit_fails():
     values: dict[str, list[float]] = {}
-    block_sizes = (8, 8, 7, 7)
+    block_sizes = (12,) * 8
     for model_index, model_id in enumerate(RANKING_V4_FROZEN_PBO_MODEL_IDS):
         values[model_id] = [
             ((model_index + 1) * 0.1 if block_index % 2 == 0 else (8 - model_index) * 0.05)
@@ -326,6 +329,17 @@ def test_trial_ledger_cannot_omit_registered_rejected_predecessor():
     assert result.status == "insufficient"
 
 
+def test_supplying_synthetic_predecessor_rows_cannot_manufacture_trial_history():
+    inputs = _passing_inputs()
+
+    result = evaluate_ranking_v4_historical_validation(**inputs)
+
+    assert inputs["trial_ledger"].covers_all_known_attempts is False
+    assert result.trial_ledger_status == "unavailable"
+    assert "cannot manufacture that evidence" in result.trial_ledger_reason
+    assert result.deflated_sharpe_status == "unavailable"
+
+
 def test_trial_ledger_must_be_immutable_complete_and_digest_valid():
     inputs = _passing_inputs()
     ledger = inputs["trial_ledger"]
@@ -400,3 +414,66 @@ def test_evaluation_is_deterministic_for_fixed_seed():
     assert first.evaluation_digest == second.evaluation_digest
     assert len(first.evaluation_digest) == 64
     json.dumps(first.model_dump(mode="json"), allow_nan=False, sort_keys=True)
+
+
+def test_v41_historical_validation_path_remains_reproducible():
+    protocol = build_ranking_v4_protocol(version="4.1")
+    dates = _dates(32)
+    values = {
+        key: series[:32]
+        for key, series in _passing_values().items()
+        if key != "ranking_v42_full"
+    }
+    values["ranking_v41_full"] = _passing_values()["ranking_v42_full"][:32]
+    matrix = {
+        model_id: [
+            RankingV4DatedModelReturn(rebalance_date=rebalance_date, net_return=value)
+            for rebalance_date, value in zip(dates, values[model_id], strict=True)
+        ]
+        for model_id in protocol.statistics_definition.pbo_model_ids
+    }
+    pbo = evaluate_ranking_v4_cscv_pbo(matrix, protocol_version="4.1")
+    predecessor_ids = [
+        item.experiment_id for item in protocol.experiment_registry.predecessor_summaries
+    ]
+    ledger = build_ranking_v4_trial_ledger(
+        {
+            **matrix,
+            **{
+                predecessor_id: matrix["channel_baseline"]
+                for predecessor_id in predecessor_ids
+            },
+        },
+        experiment_registry_digest=protocol.experiment_registry.registry_digest,
+        protocol_version="4.1",
+    )
+
+    result = evaluate_ranking_v4_historical_validation(
+        [(rebalance_date, 0.0) for rebalance_date in dates],
+        [
+            (rebalance_date, value, value - 0.2)
+            for rebalance_date, value in zip(
+                dates,
+                values["ranking_v41_full"],
+                strict=True,
+            )
+        ],
+        completed_trade_count=80,
+        valid_outcome_count=100,
+        expected_outcome_count=100,
+        execution_start_date=RANKING_V4_DEVELOPMENT_START,
+        execution_end_date=RANKING_V4_DEVELOPMENT_END,
+        execution_rebalance_step_sessions=10,
+        execution_lookback_days=RANKING_V4_DEVELOPMENT_LOOKBACK_DAYS,
+        challenger_max_drawdown_pct=-4,
+        pbo_evidence=pbo,
+        trial_ledger=ledger,
+        bootstrap_samples=500,
+        permutation_samples=1_000,
+        protocol_version="4.1",
+    )
+
+    assert pbo["fold_count"] == 6
+    assert result.validation_schema_version == "ranking-v4.1-historical-validation-v1"
+    assert result.protocol_digest == protocol.protocol_digest
+    assert result.trial_ledger_status == "pass"

@@ -7,6 +7,38 @@ from qagent.app import create_app
 from qagent.storage.tables import HistoricalDataRevisionRow
 
 
+def _reference_health(
+    *,
+    index_ready: int = 4,
+    index_expected: int = 4,
+    request_status: str = "succeeded",
+) -> dict[str, str]:
+    return {
+        "historical_benchmark_price_ready": "4/4",
+        "historical_benchmark_ready": str(index_ready),
+        "historical_index_expected_snapshots": str(index_expected),
+        "historical_reference_request_status": request_status,
+    }
+
+
+def _ready_instrument(*, industry_rows: int = 1, asset_type: str = "stock"):
+    start = routes.date(2025, 1, 2)
+    return SimpleNamespace(
+        asset_type=asset_type,
+        bar_coverage_ratio=1.0,
+        adjustment_coverage_ratio=1.0,
+        tradability_coverage_ratio=1.0,
+        universe_snapshot_rows=4,
+        first_universe_date=start,
+        profile_rows=1,
+        fundamental_rows=4 if asset_type == "stock" else 0,
+        first_fundamental_date=(
+            routes.date(2024, 12, 31) if asset_type == "stock" else None
+        ),
+        industry_rows=industry_rows if asset_type == "stock" else 0,
+    )
+
+
 def test_historical_backfill_api_creates_background_job(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "QAGENT_DATABASE_URL",
@@ -133,12 +165,13 @@ def test_completed_full_market_backfill_queues_walk_forward_when_coverage_is_rea
         profile_rows=1,
         fundamental_rows=4,
         first_fundamental_date=routes.date(2024, 12, 31),
+        industry_rows=1,
     )
     result = SimpleNamespace(
         job=job,
         manifest=SimpleNamespace(
             instruments=[item],
-            data_health={"historical_benchmark_price_ready": "4/4"},
+            data_health=_reference_health(),
         ),
     )
 
@@ -190,7 +223,10 @@ def test_completed_full_market_backfill_blocks_validation_on_missing_evidence(
         job=job,
         manifest=SimpleNamespace(
             instruments=[item],
-            data_health={"historical_benchmark_price_ready": "2/4"},
+            data_health={
+                **_reference_health(index_ready=2),
+                "historical_benchmark_price_ready": "2/4",
+            },
         ),
     )
 
@@ -218,12 +254,13 @@ def test_validation_readiness_accepts_listing_aware_universe_history():
         listing_date=routes.date(2025, 2, 7),
         fundamental_rows=2,
         first_fundamental_date=routes.date(2025, 2, 7),
+        industry_rows=1,
     )
 
     readiness = routes._historical_validation_readiness(
         SimpleNamespace(
             instruments=[item],
-            data_health={"historical_benchmark_price_ready": "4/4"},
+            data_health=_reference_health(),
         ),
         start=start,
     )
@@ -263,12 +300,13 @@ def test_completed_full_market_backfill_blocks_recent_only_history(
         profile_rows=1,
         fundamental_rows=4,
         first_fundamental_date=routes.date(2025, 2, 1),
+        industry_rows=1,
     )
     result = SimpleNamespace(
         job=job,
         manifest=SimpleNamespace(
             instruments=[item],
-            data_health={"historical_benchmark_price_ready": "4/4"},
+            data_health=_reference_health(),
         ),
     )
 
@@ -294,16 +332,110 @@ def test_validation_readiness_accepts_post_start_listing_fundamentals():
         listing_date=routes.date(2024, 2, 1),
         fundamental_rows=3,
         first_fundamental_date=routes.date(2024, 4, 30),
+        industry_rows=1,
     )
     manifest = SimpleNamespace(
         instruments=[item],
-        data_health={"historical_benchmark_price_ready": "4/4"},
+        data_health=_reference_health(),
     )
 
     readiness = routes._historical_validation_readiness(manifest, start=start)
 
     assert readiness["validation_pipeline_gate"] == "ready"
     assert readiness["validation_pipeline_fundamental_coverage"] == "1.0000"
+
+
+def test_validation_readiness_fails_closed_on_reference_timeout():
+    readiness = routes._historical_validation_readiness(
+        SimpleNamespace(
+            instruments=[_ready_instrument()],
+            data_health=_reference_health(),
+        ),
+        start=routes.date(2025, 1, 2),
+        backfill_status="succeeded_with_errors",
+        backfill_errors=("baostock reference login: request timed out",),
+    )
+
+    assert readiness["validation_pipeline_gate"] == "insufficient"
+    assert "critical_reference_errors" in readiness["validation_pipeline_blockers"]
+    assert readiness["validation_pipeline_critical_reference_error_count"] == "1"
+    assert readiness["validation_pipeline_bars_gate"] == "ready"
+    assert readiness["validation_pipeline_index_gate"] == "ready"
+
+
+def test_validation_readiness_fails_closed_on_empty_reference_bundle():
+    readiness = routes._historical_validation_readiness(
+        SimpleNamespace(
+            instruments=[_ready_instrument(industry_rows=0)],
+            data_health=_reference_health(
+                index_ready=0,
+                request_status="empty",
+            ),
+        ),
+        start=routes.date(2025, 1, 2),
+    )
+
+    assert readiness["validation_pipeline_gate"] == "insufficient"
+    assert "industry<90%" in readiness["validation_pipeline_blockers"]
+    assert "index<100%" in readiness["validation_pipeline_blockers"]
+    assert "reference_request=empty" in readiness["validation_pipeline_blockers"]
+    assert readiness["validation_pipeline_industry_ready"] == "0/1"
+    assert readiness["validation_pipeline_index_ready"] == "0/4"
+
+
+def test_validation_readiness_uses_declared_scope_for_low_reference_coverage():
+    instruments = [
+        _ready_instrument(industry_rows=1 if index < 8 else 0)
+        for index in range(10)
+    ]
+    readiness = routes._historical_validation_readiness(
+        SimpleNamespace(
+            instruments=instruments,
+            data_health=_reference_health(
+                index_ready=9,
+                index_expected=10,
+            ),
+        ),
+        start=routes.date(2025, 1, 2),
+    )
+
+    assert readiness["validation_pipeline_gate"] == "insufficient"
+    assert readiness["validation_pipeline_industry_coverage"] == "0.8000"
+    assert readiness["validation_pipeline_industry_ready"] == "8/10"
+    assert readiness["validation_pipeline_index_coverage"] == "0.9000"
+    assert readiness["validation_pipeline_index_ready"] == "9/10"
+
+
+def test_validation_readiness_accepts_healthy_scoped_reference_coverage():
+    instruments = [
+        _ready_instrument(industry_rows=1 if index < 9 else 0)
+        for index in range(10)
+    ]
+    instruments.append(_ready_instrument(asset_type="etf"))
+    readiness = routes._historical_validation_readiness(
+        SimpleNamespace(
+            instruments=instruments,
+            data_health=_reference_health(
+                index_ready=10,
+                index_expected=10,
+            ),
+        ),
+        start=routes.date(2025, 1, 2),
+    )
+
+    assert readiness["validation_pipeline_gate"] == "ready"
+    assert readiness["validation_pipeline_bars_gate"] == "ready"
+    assert readiness["validation_pipeline_bars_ready"] == "11/11"
+    assert readiness["validation_pipeline_profile_gate"] == "ready"
+    assert readiness["validation_pipeline_profile_ready"] == "11/11"
+    assert readiness["validation_pipeline_fundamental_gate"] == "ready"
+    assert readiness["validation_pipeline_fundamental_ready"] == "10/10"
+    assert readiness["validation_pipeline_industry_gate"] == "ready"
+    assert readiness["validation_pipeline_industry_ready"] == "9/10"
+    assert readiness["validation_pipeline_index_gate"] == "ready"
+    assert readiness["validation_pipeline_index_ready"] == "10/10"
+    assert readiness["validation_pipeline_etf_constituent_gate"] == "not_required"
+    assert readiness["validation_pipeline_etf_constituent_scope"] == "1"
 
 
 def test_full_market_historical_backfill_rejects_explicit_symbols(tmp_path, monkeypatch):

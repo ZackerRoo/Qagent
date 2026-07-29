@@ -14,11 +14,6 @@ from typing import Literal, TypeAlias
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from qagent.backtesting.ranking_v4_pbo import (
-    RANKING_V4_CSCV_PBO_METHOD,
-    RANKING_V4_FROZEN_PBO_MODEL_IDS,
-    RANKING_V4_PBO_BLOCK_COUNT,
-    RANKING_V4_PBO_PURGE_REBALANCE_COHORTS,
-    RANKING_V4_PBO_SCOPE,
     RankingV4DatedModelReturn,
     evaluate_ranking_v4_cscv_pbo,
 )
@@ -26,6 +21,7 @@ from qagent.backtesting.ranking_v4_protocol import (
     RANKING_V4_DEVELOPMENT_END,
     RANKING_V4_DEVELOPMENT_LOOKBACK_DAYS,
     RANKING_V4_DEVELOPMENT_START,
+    RankingV4Protocol,
     build_ranking_v4_protocol,
 )
 
@@ -34,12 +30,22 @@ ValidationStatus = Literal["pass", "insufficient", "fail"]
 GateStatus = Literal["pass", "insufficient", "fail", "unavailable"]
 EvidenceStatus = Literal["pass", "fail", "unavailable"]
 
-RANKING_V4_TRIAL_LEDGER_SCHEMA_VERSION = "ranking-v4.1-immutable-trial-ledger-v1"
-RANKING_V4_TRIAL_LEDGER_ID = "QAGENT-RANK-V4.1-ALL-KNOWN-TRIALS"
-RANKING_V4_VALIDATION_SCHEMA_VERSION = "ranking-v4.1-historical-validation-v1"
+RANKING_V41_TRIAL_LEDGER_SCHEMA_VERSION = "ranking-v4.1-immutable-trial-ledger-v1"
+RANKING_V41_TRIAL_LEDGER_ID = "QAGENT-RANK-V4.1-ALL-KNOWN-TRIALS"
+RANKING_V41_VALIDATION_SCHEMA_VERSION = "ranking-v4.1-historical-validation-v1"
+RANKING_V42_TRIAL_LEDGER_SCHEMA_VERSION = "ranking-v4.2-immutable-trial-ledger-v1"
+RANKING_V42_TRIAL_LEDGER_ID = "QAGENT-RANK-V4.2-ALL-KNOWN-TRIALS"
+RANKING_V42_VALIDATION_SCHEMA_VERSION = "ranking-v4.2-historical-validation-v1"
+RANKING_V4_TRIAL_LEDGER_SCHEMA_VERSION = RANKING_V42_TRIAL_LEDGER_SCHEMA_VERSION
+RANKING_V4_TRIAL_LEDGER_ID = RANKING_V42_TRIAL_LEDGER_ID
+RANKING_V4_VALIDATION_SCHEMA_VERSION = RANKING_V42_VALIDATION_SCHEMA_VERSION
 
-_PBO_EVIDENCE_SCHEMA_VERSION = "ranking-v4.1-cscv-pbo-evidence-v1"
-_PBO_MATRIX_SCHEMA_VERSION = "ranking-v4.1-real-model-return-matrix-v1"
+_V41_PBO_EVIDENCE_SCHEMA_VERSION = "ranking-v4.1-cscv-pbo-evidence-v1"
+_V41_PBO_MATRIX_SCHEMA_VERSION = "ranking-v4.1-real-model-return-matrix-v1"
+_V42_PBO_EVIDENCE_SCHEMA_VERSION = "ranking-v4.2-cscv-pbo-evidence-v1"
+_V42_PBO_MATRIX_SCHEMA_VERSION = "ranking-v4.2-real-model-return-matrix-v1"
+_PBO_EVIDENCE_SCHEMA_VERSION = _V42_PBO_EVIDENCE_SCHEMA_VERSION
+_PBO_MATRIX_SCHEMA_VERSION = _V42_PBO_MATRIX_SCHEMA_VERSION
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PROTOCOL = build_ranking_v4_protocol()
 _STATISTICS = _PROTOCOL.statistics_definition
@@ -90,7 +96,7 @@ class RankingV4TrialLedgerEvidence(BaseModel):
     known_trial_ids: tuple[str, ...]
     research_attempt_ids: tuple[str, ...]
     research_attempt_inventory_digest: str
-    current_trial_id: str = "ranking_v41_full"
+    current_trial_id: str = "ranking_v42_full"
     experiment_registry_digest: str
     trial_series: tuple[RankingV4TrialSeries, ...]
     ledger_digest: str
@@ -197,6 +203,7 @@ def build_ranking_v4_trial_ledger(
     experiment_registry_digest: str,
     known_research_attempt_ids: Sequence[str] = (),
     immutable: bool = True,
+    protocol_version: Literal["4.1", "4.2"] = "4.2",
 ) -> RankingV4TrialLedgerEvidence:
     """Build digest-backed evidence for every known research attempt.
 
@@ -208,7 +215,11 @@ def build_ranking_v4_trial_ledger(
     normalized_attempt_ids = tuple(
         sorted({str(item).strip() for item in known_research_attempt_ids if str(item).strip()})
     )
-    normalized_known_ids = _required_trial_ids(normalized_attempt_ids)
+    protocol = build_ranking_v4_protocol(version=protocol_version)
+    normalized_known_ids = _required_trial_ids(
+        normalized_attempt_ids,
+        protocol=protocol,
+    )
     supplied_trial_ids = tuple(sorted(trial_returns))
     series = tuple(
         RankingV4TrialSeries(
@@ -226,16 +237,32 @@ def build_ranking_v4_trial_ledger(
         for trial_id in supplied_trial_ids
     )
     payload: dict[str, object] = {
-        "schema_version": RANKING_V4_TRIAL_LEDGER_SCHEMA_VERSION,
-        "ledger_id": RANKING_V4_TRIAL_LEDGER_ID,
+        "schema_version": (
+            RANKING_V42_TRIAL_LEDGER_SCHEMA_VERSION
+            if protocol_version == "4.2"
+            else RANKING_V41_TRIAL_LEDGER_SCHEMA_VERSION
+        ),
+        "ledger_id": (
+            RANKING_V42_TRIAL_LEDGER_ID
+            if protocol_version == "4.2"
+            else RANKING_V41_TRIAL_LEDGER_ID
+        ),
         "immutable": immutable,
-        "covers_all_known_attempts": supplied_trial_ids == normalized_known_ids,
+        "covers_all_known_attempts": (
+            supplied_trial_ids == normalized_known_ids
+            and (
+                protocol_version == "4.1"
+                or protocol.experiment_registry.historical_trial_inventory_complete
+            )
+        ),
         "known_trial_ids": list(normalized_known_ids),
         "research_attempt_ids": list(normalized_attempt_ids),
         "research_attempt_inventory_digest": _sha256(
             {"research_attempt_ids": list(normalized_attempt_ids)}
         ),
-        "current_trial_id": "ranking_v41_full",
+        "current_trial_id": (
+            "ranking_v42_full" if protocol_version == "4.2" else "ranking_v41_full"
+        ),
         "experiment_registry_digest": experiment_registry_digest,
         "trial_series": [item.model_dump(mode="json") for item in series],
     }
@@ -247,14 +274,17 @@ def build_ranking_v4_trial_ledger(
 
 def _required_trial_ids(
     known_research_attempt_ids: Sequence[str] = (),
+    *,
+    protocol: RankingV4Protocol = _PROTOCOL,
 ) -> tuple[str, ...]:
     predecessor_ids = tuple(
-        summary.experiment_id for summary in _PROTOCOL.experiment_registry.predecessor_summaries
+        summary.experiment_id
+        for summary in protocol.experiment_registry.predecessor_summaries
     )
     return tuple(
         sorted(
             {
-                *RANKING_V4_FROZEN_PBO_MODEL_IDS,
+                *protocol.statistics_definition.pbo_model_ids,
                 *predecessor_ids,
                 *known_research_attempt_ids,
             }
@@ -280,6 +310,7 @@ def evaluate_ranking_v4_historical_validation(
     bootstrap_samples: int = DEFAULT_BOOTSTRAP_SAMPLES,
     permutation_samples: int = DEFAULT_PERMUTATION_SAMPLES,
     seed: int = DEFAULT_RANDOM_SEED,
+    protocol_version: Literal["4.1", "4.2"] = "4.2",
 ) -> RankingV4HistoricalValidationEvaluation:
     """Evaluate preregistered V4 historical evidence without granting release.
 
@@ -300,7 +331,13 @@ def evaluate_ranking_v4_historical_validation(
     if valid_outcome_count > expected_outcome_count:
         raise ValueError("valid_outcome_count cannot exceed expected_outcome_count")
 
-    protocol = build_ranking_v4_protocol()
+    protocol = build_ranking_v4_protocol(version=protocol_version)
+    statistics = protocol.statistics_definition
+    model_ids = statistics.pbo_model_ids
+    current_trial_id = (
+        "ranking_v42_full" if protocol_version == "4.2" else "ranking_v41_full"
+    )
+    dependence_block_length = statistics.dependence_block_length
     execution_plan_matches_protocol = (
         execution_start_date == RANKING_V4_DEVELOPMENT_START
         and execution_end_date == RANKING_V4_DEVELOPMENT_END
@@ -334,13 +371,13 @@ def evaluate_ranking_v4_historical_validation(
         paired_returns,
         samples=bootstrap_samples,
         seed=seed,
-        block_length=DEPENDENCE_BLOCK_LENGTH,
+        block_length=dependence_block_length,
     )
     positive_p_value = _block_sign_flip_p_value(
         paired_returns,
         samples=permutation_samples,
         seed=seed + 1,
-        block_length=DEPENDENCE_BLOCK_LENGTH,
+        block_length=dependence_block_length,
     )
     subperiods = _contiguous_subperiods(
         paired_values,
@@ -382,33 +419,38 @@ def evaluate_ranking_v4_historical_validation(
         validation_dates=common_dates if dates_are_common else (),
         baseline_values=baseline_values,
         challenger_values=challenger_values,
+        protocol=protocol,
+        protocol_version=protocol_version,
     )
     holm_adjusted: float | None = None
-    holm_family_size = len(RANKING_V4_FROZEN_PBO_MODEL_IDS)
+    holm_family_size = len(model_ids)
     if pbo.matrix is not None and dates_are_common:
         family_p_values = _registered_family_p_values(
             pbo.matrix,
             samples=permutation_samples,
             seed=seed + 100,
+            model_ids=model_ids,
+            block_length=dependence_block_length,
         )
         adjusted = holm_bonferroni(
-            [family_p_values[model_id] for model_id in RANKING_V4_FROZEN_PBO_MODEL_IDS]
+            [family_p_values[model_id] for model_id in model_ids]
         )
-        holm_adjusted = adjusted[RANKING_V4_FROZEN_PBO_MODEL_IDS.index("ranking_v41_full")]
+        holm_adjusted = adjusted[model_ids.index(current_trial_id)]
 
     ledger = _validate_trial_ledger(
         trial_ledger,
-        protocol_registry_digest=protocol.experiment_registry.registry_digest,
+        protocol=protocol,
+        protocol_version=protocol_version,
         validation_dates=common_dates if dates_are_common else (),
         pbo_matrix=pbo.matrix,
         known_research_attempt_ids=known_research_attempt_ids,
     )
     dsr_probability, dsr_reason = _deflated_sharpe_probability(
         ledger.matrix,
-        current_trial_id="ranking_v41_full",
+        current_trial_id=current_trial_id,
         baseline_values=baseline_values,
         validation_dates=common_dates if dates_are_common else (),
-        block_length=DEPENDENCE_BLOCK_LENGTH,
+        block_length=dependence_block_length,
     )
     dsr_status: EvidenceStatus
     if dsr_probability is None:
@@ -447,6 +489,7 @@ def evaluate_ranking_v4_historical_validation(
         pbo_probability=pbo.probability,
         dsr_status=dsr_status,
         metrics=metrics,
+        protocol=protocol,
     )
     status = _aggregate_gate_status(gates)
     reasons = tuple(gate.reason for gate in gates if gate.status != "pass")
@@ -458,7 +501,11 @@ def evaluate_ranking_v4_historical_validation(
 
     rounded_metrics = {key: _rounded(value) for key, value in metrics.items()}
     payload: dict[str, object] = {
-        "validation_schema_version": RANKING_V4_VALIDATION_SCHEMA_VERSION,
+        "validation_schema_version": (
+            RANKING_V42_VALIDATION_SCHEMA_VERSION
+            if protocol_version == "4.2"
+            else RANKING_V41_VALIDATION_SCHEMA_VERSION
+        ),
         "protocol_id": protocol.protocol_id,
         "protocol_digest": protocol.protocol_digest,
         "experiment_registry_digest": protocol.experiment_registry.registry_digest,
@@ -486,8 +533,9 @@ def evaluate_ranking_v4_historical_validation(
         "dates_are_common": dates_are_common,
         "baseline_only_dates": baseline_only_dates,
         "challenger_only_dates": challenger_only_dates,
-        "dependence_block_length": DEPENDENCE_BLOCK_LENGTH,
-        "effective_independent_block_count": len(common_dates) // DEPENDENCE_BLOCK_LENGTH,
+        "dependence_block_length": dependence_block_length,
+        "effective_independent_block_count": len(common_dates)
+        // dependence_block_length,
         "paired_mean_net_excess_pct": rounded_metrics["paired_mean"],
         "cumulative_benchmark_excess_return_pct": rounded_metrics["benchmark_excess"],
         "cumulative_stress_cost_adjusted_return_pct": rounded_metrics["stress_return"],
@@ -571,7 +619,24 @@ def _validate_pbo_evidence(
     validation_dates: Sequence[date],
     baseline_values: Sequence[float],
     challenger_values: Sequence[float],
+    protocol: RankingV4Protocol,
+    protocol_version: Literal["4.1", "4.2"],
 ) -> _PBOValidation:
+    statistics = protocol.statistics_definition
+    model_ids = statistics.pbo_model_ids
+    current_trial_id = (
+        "ranking_v42_full" if protocol_version == "4.2" else "ranking_v41_full"
+    )
+    evidence_schema_version = (
+        _V42_PBO_EVIDENCE_SCHEMA_VERSION
+        if protocol_version == "4.2"
+        else _V41_PBO_EVIDENCE_SCHEMA_VERSION
+    )
+    matrix_schema_version = (
+        _V42_PBO_MATRIX_SCHEMA_VERSION
+        if protocol_version == "4.2"
+        else _V41_PBO_MATRIX_SCHEMA_VERSION
+    )
     if not isinstance(evidence, Mapping):
         return _PBOValidation(
             status="unavailable",
@@ -609,15 +674,21 @@ def _validate_pbo_evidence(
             reason="PBO unavailable: matrix digest is missing or invalid.",
         )
     if (
-        evidence.get("evidence_schema_version") != _PBO_EVIDENCE_SCHEMA_VERSION
-        or evidence.get("method") != RANKING_V4_CSCV_PBO_METHOD
-        or evidence.get("scope") != RANKING_V4_PBO_SCOPE
+        evidence.get("evidence_schema_version") != evidence_schema_version
+        or evidence.get("method") != statistics.pbo_method
+        or evidence.get("scope") != statistics.pbo_scope
         or evidence.get("search_process_coverage") != "partial"
-        or evidence.get("purge_rebalance_cohorts") != RANKING_V4_PBO_PURGE_REBALANCE_COHORTS
+        or evidence.get("purge_rebalance_cohorts")
+        != statistics.pbo_purge_rebalance_cohorts
         or evidence.get("purge_rebalance_cohorts") != 2
-        or evidence.get("block_count") != RANKING_V4_PBO_BLOCK_COUNT
-        or evidence.get("registered_model_ids") != list(RANKING_V4_FROZEN_PBO_MODEL_IDS)
-        or evidence.get("model_count") != len(RANKING_V4_FROZEN_PBO_MODEL_IDS)
+        or evidence.get("block_count") != statistics.pbo_block_count
+        or evidence.get("registered_model_ids") != list(model_ids)
+        or evidence.get("model_count") != len(model_ids)
+        or (
+            protocol_version == "4.2"
+            and evidence.get("minimum_dates_per_half")
+            != protocol.thresholds.minimum_rebalance_dates
+        )
     ):
         return _PBOValidation(
             status="unavailable",
@@ -630,7 +701,7 @@ def _validate_pbo_evidence(
 
     matrix, matrix_reason = _parse_return_matrix(
         evidence.get("model_return_matrix"),
-        expected_ids=RANKING_V4_FROZEN_PBO_MODEL_IDS,
+        expected_ids=model_ids,
     )
     if matrix is None:
         return _PBOValidation(
@@ -648,7 +719,10 @@ def _validate_pbo_evidence(
         ]
         for model_id, rows in matrix.items()
     }
-    if matrix_digest != _pbo_matrix_digest(serialized):
+    if matrix_digest != _pbo_matrix_digest(
+        serialized,
+        schema_version=matrix_schema_version,
+    ):
         return _PBOValidation(
             status="unavailable",
             probability=None,
@@ -664,7 +738,8 @@ def _validate_pbo_evidence(
                 for rebalance_date, net_return in rows
             ]
             for model_id, rows in matrix.items()
-        }
+        },
+        protocol_version=protocol_version,
     )
     if recomputed != dict(evidence):
         return _PBOValidation(
@@ -681,7 +756,7 @@ def _validate_pbo_evidence(
         tuple(validation_dates) != matrix_dates
         or tuple(baseline_values)
         != tuple(item[1] for item in matrix["constraint_matched_baseline"])
-        or tuple(challenger_values) != tuple(item[1] for item in matrix["ranking_v41_full"])
+        or tuple(challenger_values) != tuple(item[1] for item in matrix[current_trial_id])
     ):
         return _PBOValidation(
             status="unavailable",
@@ -708,7 +783,7 @@ def _validate_pbo_evidence(
             reason="PBO unavailable: probability, fold count, or date count is invalid.",
         )
     probability = float(probability_value)
-    maximum = float(_THRESHOLDS.maximum_probability_of_backtest_overfit)
+    maximum = float(protocol.thresholds.maximum_probability_of_backtest_overfit)
     if probability <= maximum:
         return _PBOValidation(
             status="pass",
@@ -735,11 +810,27 @@ def _validate_pbo_evidence(
 def _validate_trial_ledger(
     ledger_like: RankingV4TrialLedgerEvidence | Mapping[str, object] | None,
     *,
-    protocol_registry_digest: str,
+    protocol: RankingV4Protocol,
+    protocol_version: Literal["4.1", "4.2"],
     validation_dates: Sequence[date],
     pbo_matrix: Mapping[str, Sequence[tuple[date, float]]] | None,
     known_research_attempt_ids: Sequence[str],
 ) -> _LedgerValidation:
+    registry = protocol.experiment_registry
+    model_ids = protocol.statistics_definition.pbo_model_ids
+    current_trial_id = (
+        "ranking_v42_full" if protocol_version == "4.2" else "ranking_v41_full"
+    )
+    expected_schema_version = (
+        RANKING_V42_TRIAL_LEDGER_SCHEMA_VERSION
+        if protocol_version == "4.2"
+        else RANKING_V41_TRIAL_LEDGER_SCHEMA_VERSION
+    )
+    expected_ledger_id = (
+        RANKING_V42_TRIAL_LEDGER_ID
+        if protocol_version == "4.2"
+        else RANKING_V41_TRIAL_LEDGER_ID
+    )
     if ledger_like is None:
         return _LedgerValidation(
             status="unavailable",
@@ -759,9 +850,9 @@ def _validate_trial_ledger(
             status="unavailable",
             reason="trial ledger payload is malformed",
         )
-    if ledger.schema_version != RANKING_V4_TRIAL_LEDGER_SCHEMA_VERSION:
+    if ledger.schema_version != expected_schema_version:
         return _LedgerValidation(status="unavailable", reason="trial ledger schema is invalid")
-    if ledger.ledger_id != RANKING_V4_TRIAL_LEDGER_ID:
+    if ledger.ledger_id != expected_ledger_id:
         return _LedgerValidation(status="unavailable", reason="trial ledger id is invalid")
     if not _SHA256.fullmatch(ledger.ledger_digest) or ledger.ledger_digest != _sha256(
         ledger.stable_payload()
@@ -770,17 +861,30 @@ def _validate_trial_ledger(
             status="unavailable",
             reason="trial ledger digest is missing or invalid",
         )
+    if ledger.experiment_registry_digest != registry.registry_digest:
+        return _LedgerValidation(
+            status="unavailable",
+            reason="trial ledger is not bound to the active immutable experiment registry",
+        )
+    if protocol_version == "4.2" and (
+        not registry.historical_trial_inventory_complete
+        or registry.historical_trial_inventory_digest is None
+        or not registry.historical_trial_return_series_digests
+    ):
+        return _LedgerValidation(
+            status="unavailable",
+            reason=(
+                "the active V4.2 registry has no audited complete inventory and "
+                "return-series digests for all historical experiments; supplied "
+                "trial rows cannot manufacture that evidence"
+            ),
+        )
     if not ledger.immutable or not ledger.covers_all_known_attempts:
         return _LedgerValidation(
             status="unavailable",
             reason=(
                 "trial ledger does not immutably and explicitly cover every known research attempt"
             ),
-        )
-    if ledger.experiment_registry_digest != protocol_registry_digest:
-        return _LedgerValidation(
-            status="unavailable",
-            reason="trial ledger is not bound to the active immutable experiment registry",
         )
     normalized_attempt_ids = tuple(
         sorted({str(item).strip() for item in known_research_attempt_ids if str(item).strip()})
@@ -795,8 +899,9 @@ def _validate_trial_ledger(
             reason="trial ledger does not match the persisted research-attempt inventory",
         )
     if (
-        ledger.known_trial_ids != _required_trial_ids(normalized_attempt_ids)
-        or ledger.current_trial_id != "ranking_v41_full"
+        ledger.known_trial_ids
+        != _required_trial_ids(normalized_attempt_ids, protocol=protocol)
+        or ledger.current_trial_id != current_trial_id
     ):
         return _LedgerValidation(
             status="unavailable",
@@ -837,7 +942,7 @@ def _validate_trial_ledger(
             status="unavailable",
             reason="trial ledger calendar does not exactly match validation dates",
         )
-    if not set(RANKING_V4_FROZEN_PBO_MODEL_IDS).issubset(matrix):
+    if not set(model_ids).issubset(matrix):
         return _LedgerValidation(
             status="unavailable",
             reason="trial ledger omits one or more frozen V4 family members",
@@ -847,7 +952,7 @@ def _validate_trial_ledger(
             status="unavailable",
             reason="trial ledger cannot be reconciled because valid V4 PBO evidence is absent",
         )
-    for model_id in RANKING_V4_FROZEN_PBO_MODEL_IDS:
+    for model_id in model_ids:
         if tuple(matrix[model_id]) != tuple(pbo_matrix[model_id]):
             return _LedgerValidation(
                 status="unavailable",
@@ -959,10 +1064,12 @@ def _registered_family_p_values(
     *,
     samples: int,
     seed: int,
+    model_ids: Sequence[str],
+    block_length: int,
 ) -> dict[str, float]:
     baseline = matrix["constraint_matched_baseline"]
     result: dict[str, float] = {}
-    for index, model_id in enumerate(RANKING_V4_FROZEN_PBO_MODEL_IDS):
+    for index, model_id in enumerate(model_ids):
         values = tuple(
             model_row[1] - baseline_row[1]
             for model_row, baseline_row in zip(
@@ -976,7 +1083,7 @@ def _registered_family_p_values(
                 values,
                 samples=samples,
                 seed=seed + index,
-                block_length=DEPENDENCE_BLOCK_LENGTH,
+                block_length=block_length,
             )
             or 1.0
         )
@@ -1000,8 +1107,9 @@ def _build_gates(
     pbo_probability: float | None,
     dsr_status: EvidenceStatus,
     metrics: Mapping[str, float | None],
+    protocol: RankingV4Protocol,
 ) -> tuple[RankingV4ValidationGate, ...]:
-    threshold = _THRESHOLDS
+    threshold = protocol.thresholds
     gates = [
         _gate(
             "preregistered_execution_plan",
@@ -1013,7 +1121,7 @@ def _build_gates(
             ),
             (
                 f"{RANKING_V4_DEVELOPMENT_START}..{RANKING_V4_DEVELOPMENT_END}; "
-                f"step={_PROTOCOL.temporal_definition.rebalance_step_sessions}; "
+                f"step={protocol.temporal_definition.rebalance_step_sessions}; "
                 f"lookback={RANKING_V4_DEVELOPMENT_LOOKBACK_DAYS}"
             ),
             "Historical development gates are valid only for the frozen execution plan.",
@@ -1358,9 +1466,13 @@ def _parse_return_matrix(
     return matrix, None
 
 
-def _pbo_matrix_digest(payload: Mapping[str, Sequence[Mapping[str, object]]]) -> str:
+def _pbo_matrix_digest(
+    payload: Mapping[str, Sequence[Mapping[str, object]]],
+    *,
+    schema_version: str = _PBO_MATRIX_SCHEMA_VERSION,
+) -> str:
     canonical = {
-        "schema_version": _PBO_MATRIX_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "model_return_matrix": {
             model_id: [
                 {

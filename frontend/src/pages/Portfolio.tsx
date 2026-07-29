@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import {
   deletePaperTrade,
+  fetchAutomationScheduler,
   fetchPaperCandidatePool,
   fetchPaperDailyReport,
   fetchPaperDualTrack,
@@ -22,6 +23,7 @@ import type { Language, TranslationKey } from "../i18n/catalog";
 import { formatInstrumentDisplay } from "../lib/instruments";
 import { localizeAction, localizeStatus, localizeStrategy } from "../lib/localize";
 import type {
+  AutoProcessingState,
   DataProviderMode,
   PaperCandidatePoolResponse,
   PaperDualTrackResponse,
@@ -76,6 +78,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [dualTrack, setDualTrack] = useState<PaperDualTrackResponse>();
   const [validation, setValidation] = useState<PaperValidationResponse>();
   const [paperSession, setPaperSession] = useState<PaperSessionResponse>();
+  const [automationScheduler, setAutomationScheduler] = useState<AutoProcessingState>();
   const [paperExecutionHealth, setPaperExecutionHealth] = useState<Record<string, string>>({});
   const [paperSessionForm, setPaperSessionForm] = useState<PaperSessionStartPayload>(defaultPaperSessionForm);
   const [form, setForm] = useState<Position>(emptyPosition);
@@ -94,6 +97,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchPaperDailyReport(dataMode),
       fetchPaperCandidatePool(dataMode),
       fetchPaperDualTrack(dataMode),
+      fetchAutomationScheduler(),
     ]);
     const [
       result,
@@ -104,6 +108,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       dailyReportResult,
       candidatePoolResult,
       dualTrackResult,
+      automationSchedulerResult,
     ] = results;
     if (result.status === "fulfilled") {
       setPortfolio(result.value);
@@ -122,6 +127,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     if (dailyReportResult.status === "fulfilled") setDailyReport(dailyReportResult.value);
     if (candidatePoolResult.status === "fulfilled") setCandidatePool(candidatePoolResult.value);
     if (dualTrackResult.status === "fulfilled") setDualTrack(dualTrackResult.value);
+    if (automationSchedulerResult.status === "fulfilled") {
+      setAutomationScheduler(automationSchedulerResult.value);
+    }
     const failed = results.filter((item) => item.status === "rejected");
     if (failed.length) {
       setPaperMessage(
@@ -140,8 +148,17 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchPaperDailyReport(dataMode),
       fetchPaperCandidatePool(dataMode),
       fetchPaperDualTrack(dataMode),
+      fetchAutomationScheduler(),
     ]);
-    const [paperResult, ledgerResult, validationResult, dailyReportResult, candidatePoolResult, dualTrackResult] = results;
+    const [
+      paperResult,
+      ledgerResult,
+      validationResult,
+      dailyReportResult,
+      candidatePoolResult,
+      dualTrackResult,
+      automationSchedulerResult,
+    ] = results;
     if (paperResult.status === "fulfilled") {
       setPaper(paperResult.value);
       setPaperExecutionHealth(paperResult.value.data_health);
@@ -151,6 +168,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     if (dailyReportResult.status === "fulfilled") setDailyReport(dailyReportResult.value);
     if (candidatePoolResult.status === "fulfilled") setCandidatePool(candidatePoolResult.value);
     if (dualTrackResult.status === "fulfilled") setDualTrack(dualTrackResult.value);
+    if (automationSchedulerResult.status === "fulfilled") {
+      setAutomationScheduler(automationSchedulerResult.value);
+    }
   }
 
   useEffect(() => {
@@ -271,6 +291,12 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
           <h2>{t("portfolio.paperTitle")}</h2>
           <span className="count">{paper?.summary.total ?? 0}</span>
         </div>
+        <PaperRuntimeIdentity
+          scheduler={automationScheduler}
+          session={paperSession}
+          officialTradeCount={paper?.summary.total ?? 0}
+          language={language}
+        />
         {ledger ? (
           <PaperLedgerDashboard ledger={ledger} language={language} t={t} />
         ) : (
@@ -859,6 +885,81 @@ function PaperExecutionStatus({
         <span>
           {language === "zh" ? "A股限制" : "A-share rule"}
           <strong>T+1</strong>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function PaperRuntimeIdentity({
+  scheduler,
+  session,
+  officialTradeCount,
+  language,
+}: {
+  scheduler?: AutoProcessingState;
+  session?: PaperSessionResponse;
+  officialTradeCount: number;
+  language: Language;
+}) {
+  const zh = language === "zh";
+  const cycle = scheduler?.last_result;
+  const cycleHealth = cycle?.data_health ?? {};
+  const legacyTotal = cycle?.paper_total ?? 0;
+  const legacyActive = Number(cycleHealth.active_checked ?? 0);
+  const authenticated = Number(
+    session?.data_health.paper_production_authenticated ?? officialTradeCount,
+  );
+  const schedulerLabel = !scheduler
+    ? zh ? "读取中" : "Loading"
+    : !scheduler.enabled
+      ? zh ? "已暂停" : "Paused"
+      : scheduler.status === "running"
+        ? zh ? "本轮处理中" : "Cycle running"
+        : zh ? "已启用，等待下轮" : "Enabled; waiting";
+  const nextRun = scheduler?.next_run_at
+    ? new Date(scheduler.next_run_at).toLocaleString()
+    : "-";
+
+  return (
+    <div className="paper-runtime-identity">
+      <div>
+        <span className="eyebrow">{zh ? "模拟盘身份" : "Paper identity"}</span>
+        <h3>
+          {authenticated > 0
+            ? zh ? "正式认证模拟盘已有交易" : "Official paper trades are active"
+            : zh ? "正式认证模拟盘尚未产生交易" : "No official paper trades yet"}
+        </h3>
+        <p>
+          {zh
+            ? "只有带签名发布证明的模型交易才计入正式收益；旧验证记录继续独立更新，不会混入正式胜率、回撤或权益曲线。"
+            : "Only trades backed by a signed release proof count as official. Legacy validation records update separately and never enter official performance."}
+        </p>
+      </div>
+      <div className="paper-runtime-metrics">
+        <span>
+          {zh ? "自动调度" : "Scheduler"}
+          <strong>{schedulerLabel}</strong>
+        </span>
+        <span>
+          {zh ? "正式交易" : "Official"}
+          <strong>{officialTradeCount}</strong>
+        </span>
+        <span>
+          {zh ? "认证交易" : "Authenticated"}
+          <strong>{authenticated}</strong>
+        </span>
+        <span>
+          {zh ? "旧验证记录" : "Legacy records"}
+          <strong>{legacyTotal}</strong>
+        </span>
+        <span>
+          {zh ? "旧记录活动中" : "Legacy active"}
+          <strong>{legacyActive}</strong>
+        </span>
+        <span>
+          {zh ? "下次运行" : "Next cycle"}
+          <strong>{nextRun}</strong>
         </span>
       </div>
     </div>

@@ -989,6 +989,11 @@ def run_historical_backfill(
             )
 
         evidence_data_health: dict[str, str] = {}
+        reference_data_health: dict[str, str] = {}
+        if normalized_scope == "full-a-share":
+            reference_data_health["historical_reference_request_status"] = (
+                "unavailable"
+            )
         evidence_counts = {
             "tradability": 0,
             "profiles": 0,
@@ -1010,6 +1015,10 @@ def run_historical_backfill(
                 evidence_bundle = HistoricalEvidenceBundle(
                     data_health={"historical_evidence_cache": "reused"}
                 )
+                reference_data_health = {
+                    "historical_reference_request_status": "cache_reused",
+                    "historical_reference_error_count": "0",
+                }
                 _update_backfill_health(
                     repo,
                     job.job_id,
@@ -1025,6 +1034,7 @@ def run_historical_backfill(
                     start,
                     end,
                 )
+                reference_data_health = _reference_evidence_health(evidence_bundle)
                 if not evidence_bundle.profiles:
                     evidence_bundle.profiles = inventory_profiles
                 existing_evidence = repo.historical_evidence_stats(
@@ -1075,6 +1085,8 @@ def run_historical_backfill(
                     start,
                     end,
                 )
+                if normalized_scope == "full-a-share":
+                    reference_data_health = _reference_evidence_health(evidence_bundle)
             _infer_etf_tradability_from_cached_bars(
                 cache=cache,
                 provider_mode=mode,
@@ -1098,6 +1110,7 @@ def run_historical_backfill(
             evidence_data_health.update(evidence_bundle.data_health)
             for key, value in evidence_counts.items():
                 evidence_data_health[f"historical_evidence_{key}"] = str(value)
+        evidence_data_health.update(reference_data_health)
 
         _set_backfill_phase(repo, job.job_id, "replay_coverage")
         manifest = build_historical_coverage_manifest(
@@ -1251,6 +1264,37 @@ def _update_backfill_health(
     data_health = dict(job.data_health) if job is not None else {}
     data_health.update(values)
     repo.update_historical_backfill_job(job_id, data_health=data_health)
+
+
+def _reference_evidence_health(
+    bundle: HistoricalEvidenceBundle,
+) -> dict[str, str]:
+    counts = {
+        "profile_rows": len(bundle.profiles),
+        "industry_rows": len(bundle.industries),
+        "index_snapshot_rows": len(bundle.index_snapshots),
+        "index_membership_rows": len(bundle.index_memberships),
+    }
+    total_rows = sum(counts.values())
+    if bundle.errors and total_rows == 0:
+        status = "failed"
+    elif bundle.errors:
+        status = "succeeded_with_errors"
+    elif total_rows == 0:
+        status = "empty"
+    elif counts["industry_rows"] == 0 or counts["index_snapshot_rows"] == 0:
+        status = "partial"
+    else:
+        status = "succeeded"
+    return {
+        "historical_reference_request_status": status,
+        "historical_reference_error_count": str(len(bundle.errors)),
+        "historical_reference_errors": " | ".join(bundle.errors[:10]),
+        **{
+            f"historical_reference_{key}": str(value)
+            for key, value in counts.items()
+        },
+    }
 
 
 def _checkpoint_price_backfill_health(
@@ -1617,6 +1661,7 @@ def build_historical_coverage_manifest(
             "historical_benchmark_ready": str(summary.benchmark_ready_snapshots),
             "historical_benchmark_failed": str(summary.benchmark_failed_snapshots),
             "historical_benchmark_coverage": f"{summary.benchmark_coverage_ratio:.4f}",
+            "historical_index_expected_snapshots": str(expected_index_snapshots),
             "historical_benchmark_price_rows": str(benchmark_price_rows),
             "historical_benchmark_price_ready": (
                 f"{benchmark_price_ready}/{len(REQUIRED_BENCHMARK_IDS)}"

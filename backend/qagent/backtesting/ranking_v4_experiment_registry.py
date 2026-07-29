@@ -10,8 +10,14 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, model_validator
 
 
-RANKING_V4_EXPERIMENT_REGISTRY_SCHEMA_VERSION = "ranking-v4.1-experiment-registry-v1"
-RANKING_V4_EXPERIMENT_REGISTRY_ID = "QAGENT-RANK-V4.1-PRIOR-EVIDENCE-20260728"
+RANKING_V41_EXPERIMENT_REGISTRY_SCHEMA_VERSION = "ranking-v4.1-experiment-registry-v1"
+RANKING_V41_EXPERIMENT_REGISTRY_ID = "QAGENT-RANK-V4.1-PRIOR-EVIDENCE-20260728"
+RANKING_V42_EXPERIMENT_REGISTRY_SCHEMA_VERSION = "ranking-v4.2-experiment-registry-v1"
+RANKING_V42_EXPERIMENT_REGISTRY_ID = "QAGENT-RANK-V4.2-PRIOR-EVIDENCE-20260729"
+RANKING_V4_EXPERIMENT_REGISTRY_SCHEMA_VERSION = (
+    RANKING_V42_EXPERIMENT_REGISTRY_SCHEMA_VERSION
+)
+RANKING_V4_EXPERIMENT_REGISTRY_ID = RANKING_V42_EXPERIMENT_REGISTRY_ID
 RANKING_V3_REJECTED_EXPERIMENT_ID = "walk-forward-20260726164443-7fd44f0b"
 RANKING_V3_REJECTED_CODE_REVISION = "dbd7fa0f6ec76990eca4de8325e14866dfbfe8e7"
 RANKING_V3_REJECTED_DATASET_REVISION = 8939
@@ -131,6 +137,9 @@ class RankingV4ExperimentRegistry(BaseModel):
     frozen_on: date
     predecessor_summaries: tuple[RankingV4ExperimentSummary, ...]
     v4_registration_state: Literal["preregistered_code_not_yet_frozen"]
+    historical_trial_inventory_complete: bool = False
+    historical_trial_inventory_digest: str | None = None
+    historical_trial_return_series_digests: tuple[tuple[str, str], ...] = ()
     registry_digest: str
 
     def stable_payload(self) -> dict[str, object]:
@@ -140,6 +149,11 @@ class RankingV4ExperimentRegistry(BaseModel):
             frozen_on=self.frozen_on,
             predecessor_summaries=self.predecessor_summaries,
             v4_registration_state=self.v4_registration_state,
+            historical_trial_inventory_complete=self.historical_trial_inventory_complete,
+            historical_trial_inventory_digest=self.historical_trial_inventory_digest,
+            historical_trial_return_series_digests=(
+                self.historical_trial_return_series_digests
+            ),
         )
 
     def require_valid(self) -> None:
@@ -233,6 +247,7 @@ def _ranking_v4_rejected_summary_payload() -> dict[str, object]:
 def build_ranking_v4_experiment_registry(
     *,
     predecessor_summaries: tuple[RankingV4ExperimentSummary, ...] | None = None,
+    version: Literal["4.1", "4.2"] = "4.2",
 ) -> RankingV4ExperimentRegistry:
     summaries = (
         (
@@ -247,12 +262,25 @@ def build_ranking_v4_experiment_registry(
             )
         )
     )
+    if version == "4.1":
+        schema_version = RANKING_V41_EXPERIMENT_REGISTRY_SCHEMA_VERSION
+        registry_id = RANKING_V41_EXPERIMENT_REGISTRY_ID
+        frozen_on = date(2026, 7, 28)
+    elif version == "4.2":
+        schema_version = RANKING_V42_EXPERIMENT_REGISTRY_SCHEMA_VERSION
+        registry_id = RANKING_V42_EXPERIMENT_REGISTRY_ID
+        frozen_on = date(2026, 7, 29)
+    else:
+        raise ValueError("unsupported Ranking V4 experiment registry version")
     payload = _registry_payload(
-        schema_version=RANKING_V4_EXPERIMENT_REGISTRY_SCHEMA_VERSION,
-        registry_id=RANKING_V4_EXPERIMENT_REGISTRY_ID,
-        frozen_on=date(2026, 7, 28),
+        schema_version=schema_version,
+        registry_id=registry_id,
+        frozen_on=frozen_on,
         predecessor_summaries=summaries,
         v4_registration_state="preregistered_code_not_yet_frozen",
+        historical_trial_inventory_complete=False,
+        historical_trial_inventory_digest=None,
+        historical_trial_return_series_digests=(),
     )
     registry = RankingV4ExperimentRegistry(
         **payload,
@@ -279,12 +307,15 @@ def _registry_payload(
     frozen_on: date,
     predecessor_summaries: tuple[RankingV4ExperimentSummary, ...],
     v4_registration_state: str,
+    historical_trial_inventory_complete: bool,
+    historical_trial_inventory_digest: str | None,
+    historical_trial_return_series_digests: tuple[tuple[str, str], ...],
 ) -> dict[str, object]:
     summaries = sorted(
         predecessor_summaries,
         key=lambda item: (item.evaluated_on, item.experiment_id),
     )
-    return {
+    payload: dict[str, object] = {
         "schema_version": schema_version,
         "registry_id": registry_id,
         "frozen_on": frozen_on.isoformat(),
@@ -293,6 +324,19 @@ def _registry_payload(
         ],
         "v4_registration_state": v4_registration_state,
     }
+    if schema_version != RANKING_V41_EXPERIMENT_REGISTRY_SCHEMA_VERSION:
+        payload.update(
+            {
+                "historical_trial_inventory_complete": (
+                    historical_trial_inventory_complete
+                ),
+                "historical_trial_inventory_digest": historical_trial_inventory_digest,
+                "historical_trial_return_series_digests": [
+                    list(item) for item in historical_trial_return_series_digests
+                ],
+            }
+        )
+    return payload
 
 
 def _validate_summary(summary: RankingV4ExperimentSummary) -> None:
@@ -305,15 +349,31 @@ def _validate_summary(summary: RankingV4ExperimentSummary) -> None:
     expected = expected_by_generation[summary.model_generation]
     if summary.stable_payload() != expected:
         raise RankingV4ExperimentRegistryError(
-            "rejected predecessor evidence cannot be rewritten by Ranking V4.1"
+            "rejected predecessor evidence cannot be rewritten by Ranking V4"
         )
 
 
 def _validate_registry(registry: RankingV4ExperimentRegistry) -> None:
-    if registry.schema_version != RANKING_V4_EXPERIMENT_REGISTRY_SCHEMA_VERSION:
+    expected_id_by_schema = {
+        RANKING_V41_EXPERIMENT_REGISTRY_SCHEMA_VERSION: (
+            RANKING_V41_EXPERIMENT_REGISTRY_ID
+        ),
+        RANKING_V42_EXPERIMENT_REGISTRY_SCHEMA_VERSION: (
+            RANKING_V42_EXPERIMENT_REGISTRY_ID
+        ),
+    }
+    expected_id = expected_id_by_schema.get(registry.schema_version)
+    if expected_id is None:
         raise RankingV4ExperimentRegistryError("unsupported Ranking V4 registry schema")
-    if registry.registry_id != RANKING_V4_EXPERIMENT_REGISTRY_ID:
+    if registry.registry_id != expected_id:
         raise RankingV4ExperimentRegistryError("unexpected Ranking V4 registry id")
+    expected_frozen_on = (
+        date(2026, 7, 28)
+        if registry.schema_version == RANKING_V41_EXPERIMENT_REGISTRY_SCHEMA_VERSION
+        else date(2026, 7, 29)
+    )
+    if registry.frozen_on != expected_frozen_on:
+        raise RankingV4ExperimentRegistryError("unexpected Ranking V4 registry freeze date")
     if registry.v4_registration_state != "preregistered_code_not_yet_frozen":
         raise RankingV4ExperimentRegistryError(
             "V4 cannot claim confirmatory status before its code is frozen"
@@ -331,6 +391,23 @@ def _validate_registry(registry: RankingV4ExperimentRegistry) -> None:
         )
     for summary in registry.predecessor_summaries:
         summary.require_valid()
+    if registry.schema_version == RANKING_V41_EXPERIMENT_REGISTRY_SCHEMA_VERSION:
+        if (
+            registry.historical_trial_inventory_complete
+            or registry.historical_trial_inventory_digest is not None
+            or registry.historical_trial_return_series_digests
+        ):
+            raise RankingV4ExperimentRegistryError(
+                "V4.1 cannot be retrofitted with a trial inventory"
+            )
+    elif (
+        registry.historical_trial_inventory_complete
+        or registry.historical_trial_inventory_digest is not None
+        or registry.historical_trial_return_series_digests
+    ):
+        raise RankingV4ExperimentRegistryError(
+            "V4.2 has no audited complete historical trial-return inventory"
+        )
     if registry.registry_digest != _digest(registry.stable_payload()):
         raise RankingV4ExperimentRegistryError("experiment registry digest mismatch")
 

@@ -17,7 +17,7 @@ from qagent.backtesting.ranking_v4_protocol import build_ranking_v4_protocol
 
 
 START = date(2023, 1, 3)
-DATE_COUNT = 32
+DATE_COUNT = 96
 
 
 def _series(values: list[float]) -> list[RankingV4DatedModelReturn]:
@@ -35,8 +35,8 @@ def _valid_matrix() -> dict[str, list[RankingV4DatedModelReturn]]:
     for model_index, model_id in enumerate(RANKING_V4_FROZEN_PBO_MODEL_IDS):
         values = [
             ((model_index + 1) * 0.001 if block_index % 2 == 0 else (8 - model_index) * 0.0005)
-            for block_index in range(4)
-            for _ in range(DATE_COUNT // 4)
+            for block_index in range(8)
+            for _ in range(DATE_COUNT // 8)
         ]
         matrix[model_id] = _series(values)
     return matrix
@@ -48,12 +48,14 @@ def test_v4_pbo_uses_frozen_protocol_family_and_normal_path():
     evidence = evaluate_ranking_v4_cscv_pbo(_valid_matrix())
 
     assert evidence["rejection_reason"] is None
-    assert evidence["probability"] == pytest.approx(2 / 6)
-    assert evidence["combination_count"] == math.comb(4, 2)
-    assert evidence["fold_count"] == math.comb(4, 2)
+    assert evidence["probability"] * 70 == pytest.approx(
+        round(evidence["probability"] * 70)
+    )
+    assert evidence["combination_count"] == math.comb(8, 4) == 70
+    assert evidence["fold_count"] == math.comb(8, 4) == 70
     assert evidence["model_count"] == 8
     assert evidence["date_count"] == DATE_COUNT
-    assert evidence["block_count"] == protocol.statistics_definition.pbo_block_count == 4
+    assert evidence["block_count"] == protocol.statistics_definition.pbo_block_count == 8
     assert (
         evidence["purge_rebalance_cohorts"]
         == protocol.statistics_definition.pbo_purge_rebalance_cohorts
@@ -65,6 +67,11 @@ def test_v4_pbo_uses_frozen_protocol_family_and_normal_path():
     assert evidence["scope"] == RANKING_V4_PBO_SCOPE
     assert evidence["search_process_coverage"] == "partial"
     assert evidence["registered_model_ids"] == list(protocol.statistics_definition.pbo_model_ids)
+    assert evidence["minimum_dates_per_half"] == 24
+    assert all(
+        fold["training"] >= 24 and fold["testing"] >= 24
+        for fold in evidence["fold_observation_counts"]
+    )
     assert set(evidence["model_return_matrix"]) == set(RANKING_V4_FROZEN_PBO_MODEL_IDS)
     assert len(evidence["matrix_digest"]) == 64
     assert len(evidence["evidence_digest"]) == 64
@@ -111,17 +118,15 @@ def test_purge_removes_two_adjacent_rebalance_cohorts_at_each_boundary():
     evidence = evaluate_ranking_v4_cscv_pbo(_valid_matrix())
 
     assert evidence["rejection_reason"] is None
-    assert RANKING_V4_PBO_BLOCK_COUNT == 4
+    assert RANKING_V4_PBO_BLOCK_COUNT == 8
     assert RANKING_V4_PBO_PURGE_REBALANCE_COHORTS == 2
-    assert evidence["purged_observation_counts"] == [4, 12, 8, 8, 12, 4]
-    assert evidence["fold_observation_counts"] == [
-        {"training": 14, "testing": 14, "purged": 4},
-        {"training": 10, "testing": 10, "purged": 12},
-        {"training": 12, "testing": 12, "purged": 8},
-        {"training": 12, "testing": 12, "purged": 8},
-        {"training": 10, "testing": 10, "purged": 12},
-        {"training": 14, "testing": 14, "purged": 4},
-    ]
+    assert len(evidence["purged_observation_counts"]) == 70
+    assert min(evidence["purged_observation_counts"]) == 4
+    assert max(evidence["purged_observation_counts"]) == 28
+    assert all(
+        fold["training"] + fold["testing"] + fold["purged"] == DATE_COUNT
+        for fold in evidence["fold_observation_counts"]
+    )
 
 
 def test_matrix_and_evidence_digests_are_stable_and_sensitive():
@@ -175,3 +180,41 @@ def test_less_than_protocol_minimum_genuine_dates_fails_closed():
 
     assert evidence["probability"] is None
     assert "minimum of 24 genuine rebalance dates" in evidence["rejection_reason"]
+
+
+def test_v42_fails_closed_when_purged_half_has_fewer_than_24_dates():
+    matrix = {
+        model_id: _series([0.0] * 64) for model_id in RANKING_V4_FROZEN_PBO_MODEL_IDS
+    }
+
+    evidence = evaluate_ranking_v4_cscv_pbo(matrix)
+
+    assert evidence["probability"] is None
+    assert evidence["fold_count"] == 0
+    assert "fewer than 24 genuine rebalance dates" in evidence["rejection_reason"]
+
+
+def test_v41_four_block_six_fold_resolution_remains_reproducible():
+    protocol = build_ranking_v4_protocol(version="4.1")
+    model_ids = protocol.statistics_definition.pbo_model_ids
+    matrix = {
+        model_id: _series(
+            [
+                (
+                    (model_index + 1) * 0.001
+                    if block_index % 2 == 0
+                    else (8 - model_index) * 0.0005
+                )
+                for block_index in range(4)
+                for _ in range(8)
+            ]
+        )
+        for model_index, model_id in enumerate(model_ids)
+    }
+
+    evidence = evaluate_ranking_v4_cscv_pbo(matrix, protocol_version="4.1")
+
+    assert evidence["rejection_reason"] is None
+    assert evidence["block_count"] == 4
+    assert evidence["fold_count"] == math.comb(4, 2) == 6
+    assert "minimum_dates_per_half" not in evidence

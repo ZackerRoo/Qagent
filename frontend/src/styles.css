@@ -7111,6 +7111,49 @@ details.compact-data-health:not([open]) > .data-health-details {
   grid-template-columns: minmax(130px, 0.5fr) minmax(90px, 0.35fr) minmax(100px, 0.35fr) minmax(100px, 0.35fr) 80px;
 }
 
+.paper-runtime-identity {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.9fr) minmax(0, 1.6fr);
+  gap: 18px;
+  align-items: center;
+  padding: 14px 0;
+  border-block: 1px solid var(--terminal-border-soft);
+}
+
+.paper-runtime-identity h3 {
+  margin: 4px 0 5px;
+  color: var(--terminal-text);
+  font-size: 18px;
+}
+
+.paper-runtime-identity p {
+  margin: 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.paper-runtime-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.paper-runtime-metrics span {
+  min-width: 0;
+  padding: 5px 12px;
+  border-left: 1px solid var(--terminal-border-soft);
+  color: var(--terminal-muted-2);
+  font-size: 11px;
+}
+
+.paper-runtime-metrics strong {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  color: var(--terminal-text);
+  font-size: 13px;
+}
+
 .paper-session-starter {
   display: grid;
   gap: 12px;
@@ -13233,6 +13276,7 @@ td {
   .signal-console-body,
   .today-decision-grid,
   .dashboard-secondary-grid,
+  .paper-runtime-identity,
   .paper-ledger-visual-grid,
   .opportunities-page {
     grid-template-columns: 1fr;
@@ -13329,6 +13373,7 @@ td {
   .paper-control-stats,
   .paper-candidate-metrics,
   .paper-session-rule-grid,
+  .paper-runtime-metrics,
   .return-distribution-summary,
   .return-bucket,
   .market-structure-hero,
