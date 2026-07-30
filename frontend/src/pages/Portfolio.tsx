@@ -66,7 +66,7 @@ const defaultPaperSessionForm: PaperSessionStartPayload = {
   take_profit_pct: "50",
 };
 
-const PAPER_REFRESH_INTERVAL_MS = 30_000;
+const PAPER_REFRESH_INTERVAL_MS = 300_000;
 
 export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const { language, t } = useI18n();
