@@ -452,7 +452,7 @@ def test_sqlite_tables_and_immutable_triggers_reject_direct_mutation(tmp_path):
                 "WHERE component = 'ranking_v4_evidence_triggers'"
             )
         ).scalar_one()
-        assert version == 2
+        assert version == 3
         with pytest.raises(DBAPIError):
             connection.execute(
                 text(

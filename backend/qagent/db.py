@@ -93,7 +93,7 @@ _schema_lock = Lock()
 _initialized_urls: set[str] = set()
 _RANKING_V3_FORWARD_TRIGGER_VERSION = 2
 _RANKING_V3_PRODUCTION_TRIGGER_VERSION = 2
-_RANKING_V4_EVIDENCE_TRIGGER_VERSION = 2
+_RANKING_V4_EVIDENCE_TRIGGER_VERSION = 3
 
 
 def create_db_engine(database_url: str | None = None):
@@ -720,6 +720,8 @@ def _create_immutable_ranking_v4_evidence_triggers(connection) -> None:
         "ranking_v4_evidence_inventories",
         "ranking_v4_evidence_returns",
         "ranking_v4_evidence_proofs",
+        "ranking_v4_prospective_release_policies",
+        "ranking_v4_prospective_execution_summaries",
     )
     for table_name in tables:
         if inspector.has_table(table_name):
@@ -849,6 +851,108 @@ def _create_immutable_ranking_v4_evidence_triggers(connection) -> None:
                 "OR json_valid(NEW.attestation_json) <> 1 "
                 "BEGIN "
                 "SELECT RAISE(ABORT, 'Ranking V4 evidence proof is invalid'); "
+                "END"
+            )
+        )
+
+    if inspector.has_table("ranking_v4_prospective_release_policies"):
+        connection.execute(
+            text(
+                "CREATE TRIGGER trg_ranking_v4_evidence_release_policies_shape_insert "
+                "BEFORE INSERT ON ranking_v4_prospective_release_policies "
+                "WHEN length(NEW.policy_digest) <> 64 "
+                "OR length(NEW.model_protocol_digest) <> 64 "
+                "OR length(NEW.experiment_registry_digest) <> 64 "
+                "OR length(NEW.preregistration_commit) <> 40 "
+                "OR length(NEW.preregistration_document_sha256) <> 64 "
+                "OR NEW.maximum_checkpoint_common_date_count <> 112 "
+                "OR NOT EXISTS ("
+                "SELECT 1 FROM ranking_v4_evidence_definitions AS definition "
+                "WHERE definition.definition_digest = NEW.definition_digest "
+                "AND definition.protocol_digest = NEW.model_protocol_digest "
+                "AND definition.experiment_registry_digest = "
+                "NEW.experiment_registry_digest "
+                "AND datetime(NEW.registered_at) >= datetime(definition.frozen_at)"
+                ") "
+                "OR json_valid(NEW.payload_json) <> 1 "
+                "OR json_valid(NEW.attestation_json) <> 1 "
+                "BEGIN "
+                "SELECT RAISE(ABORT, 'Ranking V4 prospective release policy is invalid'); "
+                "END"
+            )
+        )
+
+    if inspector.has_table("ranking_v4_prospective_execution_summaries"):
+        connection.execute(
+            text(
+                "CREATE TRIGGER "
+                "trg_ranking_v4_evidence_execution_summaries_chain_insert "
+                "BEFORE INSERT ON ranking_v4_prospective_execution_summaries "
+                "WHEN length(NEW.summary_digest) <> 64 "
+                "OR NOT EXISTS ("
+                "SELECT 1 FROM ranking_v4_prospective_release_policies AS policy "
+                "JOIN ranking_v4_evidence_definitions AS definition "
+                "ON definition.definition_digest = policy.definition_digest "
+                "WHERE policy.policy_digest = NEW.policy_digest "
+                "AND policy.definition_digest = NEW.definition_digest "
+                "AND definition.dataset_revision <= NEW.dataset_revision "
+                "AND date(NEW.execution_start_date) = "
+                "date(definition.evidence_start_date)"
+                ") "
+                "OR date(NEW.execution_end_date) < date(NEW.execution_start_date) "
+                "OR date(NEW.latest_mature_rebalance_date) "
+                "NOT BETWEEN date(NEW.execution_start_date) "
+                "AND date(NEW.execution_end_date) "
+                "OR NEW.sequence <> COALESCE(("
+                "SELECT MAX(existing.sequence) + 1 "
+                "FROM ranking_v4_prospective_execution_summaries AS existing "
+                "WHERE existing.definition_digest = NEW.definition_digest"
+                "), 1) "
+                "OR (NEW.sequence = 1 AND NEW.previous_summary_digest IS NOT NULL) "
+                "OR (NEW.sequence > 1 AND NEW.previous_summary_digest IS NOT ("
+                "SELECT existing.summary_digest "
+                "FROM ranking_v4_prospective_execution_summaries AS existing "
+                "WHERE existing.definition_digest = NEW.definition_digest "
+                "ORDER BY existing.sequence DESC LIMIT 1"
+                ")) "
+                "OR NEW.common_date_count <> ("
+                "SELECT COUNT(*) FROM ranking_v4_evidence_returns AS evidence_return "
+                "WHERE evidence_return.definition_digest = NEW.definition_digest"
+                ") "
+                "OR date(NEW.latest_mature_rebalance_date) IS NOT ("
+                "SELECT MAX(evidence_return.rebalance_date) "
+                "FROM ranking_v4_evidence_returns AS evidence_return "
+                "WHERE evidence_return.definition_digest = NEW.definition_digest"
+                ") "
+                "OR NEW.source_result_digest IS NOT ("
+                "SELECT json_extract(evidence_return.payload_json, "
+                "'$.source_result_digest') "
+                "FROM ranking_v4_evidence_returns AS evidence_return "
+                "WHERE evidence_return.definition_digest = NEW.definition_digest "
+                "ORDER BY evidence_return.sequence DESC LIMIT 1"
+                ") "
+                "OR NEW.benchmark_evidence_complete <> 1 "
+                "OR NEW.cost_evidence_complete <> 1 "
+                "OR NEW.capital_constraint_evidence_complete <> 1 "
+                "OR NEW.terminal_force_close_used <> 0 "
+                "OR EXISTS ("
+                "SELECT 1 FROM ranking_v4_prospective_execution_summaries AS existing "
+                "WHERE existing.definition_digest = NEW.definition_digest "
+                "AND (existing.dataset_revision > NEW.dataset_revision "
+                "OR date(existing.execution_end_date) > "
+                "date(NEW.execution_end_date) "
+                "OR date(existing.latest_mature_rebalance_date) > "
+                "date(NEW.latest_mature_rebalance_date) "
+                "OR existing.common_date_count > NEW.common_date_count "
+                "OR existing.completed_trade_count > NEW.completed_trade_count "
+                "OR existing.valid_outcome_count > NEW.valid_outcome_count "
+                "OR existing.expected_outcome_count > NEW.expected_outcome_count "
+                "OR datetime(existing.recorded_at) > datetime(NEW.recorded_at))"
+                ") "
+                "OR json_valid(NEW.payload_json) <> 1 "
+                "OR json_valid(NEW.attestation_json) <> 1 "
+                "BEGIN "
+                "SELECT RAISE(ABORT, 'Ranking V4 prospective execution summary is invalid'); "
                 "END"
             )
         )

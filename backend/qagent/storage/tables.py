@@ -1044,6 +1044,103 @@ class RankingV4EvidenceProofRow(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
 
 
+class RankingV4ProspectiveReleasePolicyRow(Base):
+    __tablename__ = "ranking_v4_prospective_release_policies"
+    __table_args__ = (
+        UniqueConstraint(
+            "definition_digest",
+            name="uq_ranking_v4_prospective_release_policies_definition",
+        ),
+        CheckConstraint(
+            "maximum_checkpoint_common_date_count = 112",
+            name="ck_ranking_v4_prospective_release_policies_final_checkpoint",
+        ),
+    )
+
+    policy_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    definition_digest: Mapped[str] = mapped_column(
+        ForeignKey("ranking_v4_evidence_definitions.definition_digest"),
+        index=True,
+    )
+    model_protocol_digest: Mapped[str] = mapped_column(String(64), index=True)
+    experiment_registry_digest: Mapped[str] = mapped_column(String(64), index=True)
+    preregistration_commit: Mapped[str] = mapped_column(String(40))
+    preregistration_document_sha256: Mapped[str] = mapped_column(String(64))
+    maximum_checkpoint_common_date_count: Mapped[int] = mapped_column(Integer)
+    payload_json: Mapped[str] = mapped_column(Text)
+    attestation_json: Mapped[str] = mapped_column(Text)
+    registered_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
+class RankingV4ProspectiveExecutionSummaryRow(Base):
+    __tablename__ = "ranking_v4_prospective_execution_summaries"
+    __table_args__ = (
+        UniqueConstraint(
+            "definition_digest",
+            "sequence",
+            name="uq_ranking_v4_prospective_execution_summaries_sequence",
+        ),
+        UniqueConstraint(
+            "definition_digest",
+            "source_result_digest",
+            name="uq_ranking_v4_prospective_execution_summaries_source",
+        ),
+        CheckConstraint(
+            "sequence >= 1",
+            name="ck_ranking_v4_prospective_execution_summaries_sequence",
+        ),
+        CheckConstraint(
+            "common_date_count >= 1 AND completed_trade_count >= 0 "
+            "AND valid_outcome_count >= 0 "
+            "AND expected_outcome_count >= valid_outcome_count",
+            name="ck_ranking_v4_prospective_execution_summaries_counts",
+        ),
+        CheckConstraint(
+            "benchmark_evidence_complete = 1 "
+            "AND cost_evidence_complete = 1 "
+            "AND capital_constraint_evidence_complete = 1 "
+            "AND terminal_force_close_used = 0",
+            name="ck_ranking_v4_prospective_execution_summaries_evidence",
+        ),
+    )
+
+    summary_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    definition_digest: Mapped[str] = mapped_column(
+        ForeignKey("ranking_v4_evidence_definitions.definition_digest"),
+        index=True,
+    )
+    policy_digest: Mapped[str] = mapped_column(
+        ForeignKey("ranking_v4_prospective_release_policies.policy_digest"),
+        index=True,
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    source_result_digest: Mapped[str] = mapped_column(String(160), index=True)
+    dataset_revision: Mapped[int] = mapped_column(Integer, index=True)
+    execution_start_date: Mapped[date] = mapped_column(Date, index=True)
+    execution_end_date: Mapped[date] = mapped_column(Date, index=True)
+    latest_mature_rebalance_date: Mapped[date] = mapped_column(Date, index=True)
+    common_date_count: Mapped[int] = mapped_column(Integer)
+    completed_trade_count: Mapped[int] = mapped_column(Integer)
+    valid_outcome_count: Mapped[int] = mapped_column(Integer)
+    expected_outcome_count: Mapped[int] = mapped_column(Integer)
+    maximum_drawdown_pct: Mapped[Decimal] = mapped_column(
+        SQLiteScaledDecimal(18, 8)
+    )
+    benchmark_evidence_complete: Mapped[bool] = mapped_column(Boolean)
+    cost_evidence_complete: Mapped[bool] = mapped_column(Boolean)
+    capital_constraint_evidence_complete: Mapped[bool] = mapped_column(Boolean)
+    terminal_force_close_used: Mapped[bool] = mapped_column(Boolean)
+    previous_summary_digest: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    payload_json: Mapped[str] = mapped_column(Text)
+    attestation_json: Mapped[str] = mapped_column(Text)
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
 class RankingV3ProductionBatchRow(Base):
     __tablename__ = "ranking_v3_production_batches"
     __table_args__ = (
