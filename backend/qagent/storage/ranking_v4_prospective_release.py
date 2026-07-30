@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -13,9 +14,12 @@ from qagent.backtesting.ranking_v4_forward_evidence import (
 )
 from qagent.backtesting.ranking_v4_prospective_release import (
     EXECUTION_SUMMARY_ATTESTATION_KIND,
+    RELEASE_PROOF_ATTESTATION_KIND,
     RELEASE_POLICY_ATTESTATION_KIND,
     RankingV4ProspectiveExecutionSummary,
+    RankingV4ProspectiveReleaseProof,
     RankingV4ProspectiveReleasePolicy,
+    evaluate_prospective_release,
 )
 from qagent.security.ranking_v4_attestation import (
     RankingV4EvidenceAttestor,
@@ -25,8 +29,10 @@ from qagent.storage.tables import (
     RankingV4EvidenceDefinitionRow,
     RankingV4EvidenceReturnRow,
     RankingV4ProspectiveExecutionSummaryRow,
+    RankingV4ProspectiveReleaseProofRow,
     RankingV4ProspectiveReleasePolicyRow,
 )
+from qagent.storage.ranking_v4_forward_evidence import RankingV4EvidenceRepository
 
 
 class RankingV4ProspectiveReleaseRepository:
@@ -245,6 +251,176 @@ class RankingV4ProspectiveReleaseRepository:
             ).scalar_one_or_none()
         return _policy_from_row(row) if row is not None else None
 
+    def evaluate_checkpoint(
+        self,
+        epoch_id: str,
+        *,
+        evaluated_at: datetime,
+    ) -> RankingV4ProspectiveReleaseProof:
+        snapshot = RankingV4EvidenceRepository(
+            self.session_factory,
+            attestor=self.attestor,
+        ).load_snapshot(epoch_id)
+        if snapshot is None:
+            raise RankingV4EvidenceStateError("prospective evidence epoch does not exist")
+        policy = self.load_policy(snapshot.definition.definition_digest)
+        summaries = self.load_execution_summaries(
+            snapshot.definition.definition_digest
+        )
+        if policy is None or not summaries:
+            raise RankingV4EvidenceStateError(
+                "release evaluation requires a frozen policy and execution summary"
+            )
+        proof = evaluate_prospective_release(
+            snapshot=snapshot,
+            policy=policy,
+            execution_summary=summaries[-1],
+            evaluated_at=evaluated_at,
+            attestor=self.attestor,
+        )
+        return self.append_release_proof(proof)
+
+    def append_release_proof(
+        self,
+        proof: RankingV4ProspectiveReleaseProof,
+    ) -> RankingV4ProspectiveReleaseProof:
+        self._verify_signed_payload(
+            digest=proof.release_proof_digest,
+            payload=proof.stable_payload(),
+            kind=RELEASE_PROOF_ATTESTATION_KIND,
+            attestation=proof.attestation,
+            label="release proof",
+        )
+        with self.session_factory() as session:
+            existing = session.get(
+                RankingV4ProspectiveReleaseProofRow,
+                proof.release_proof_digest,
+            )
+            if existing is not None:
+                persisted = _release_proof_from_row(existing)
+                if persisted != proof:
+                    raise RankingV4EvidenceConflictError(
+                        "release-proof digest was reused with different facts"
+                    )
+                return persisted
+
+        evidence_repository = RankingV4EvidenceRepository(
+            self.session_factory,
+            attestor=self.attestor,
+        )
+        with self.session_factory() as session:
+            definition_row = _definition_for_digest(
+                session,
+                proof.definition_digest,
+            )
+            epoch_id = definition_row.epoch_id
+        snapshot = evidence_repository.load_snapshot(epoch_id)
+        policy = self.load_policy(proof.definition_digest)
+        summaries = self.load_execution_summaries(proof.definition_digest)
+        if snapshot is None or policy is None or not summaries:
+            raise RankingV4EvidenceStateError(
+                "release proof sources are incomplete"
+            )
+        expected = evaluate_prospective_release(
+            snapshot=snapshot,
+            policy=policy,
+            execution_summary=summaries[-1],
+            evaluated_at=proof.evaluated_at,
+            attestor=self.attestor,
+        )
+        if expected != proof:
+            raise RankingV4EvidenceIntegrityError(
+                "release proof does not match an independent gate recomputation"
+            )
+
+        with self.session_factory() as session:
+            _begin_immediate(session)
+            prior_rows = tuple(
+                session.execute(
+                    select(RankingV4ProspectiveReleaseProofRow)
+                    .where(
+                        RankingV4ProspectiveReleaseProofRow.definition_digest
+                        == proof.definition_digest
+                    )
+                    .order_by(
+                        RankingV4ProspectiveReleaseProofRow.checkpoint_common_date_count
+                    )
+                ).scalars()
+            )
+            expected_checkpoint = (
+                80
+                if not prior_rows
+                else 96
+                if prior_rows[-1].checkpoint_common_date_count == 80
+                else 112
+                if prior_rows[-1].checkpoint_common_date_count == 96
+                else None
+            )
+            if expected_checkpoint != proof.checkpoint_common_date_count:
+                raise RankingV4EvidenceConflictError(
+                    "release checkpoints must be appended in preregistered order"
+                )
+            if prior_rows and prior_rows[-1].evaluation_status in {
+                "approved",
+                "rejected",
+            }:
+                raise RankingV4EvidenceConflictError(
+                    "release evaluation is already terminal"
+                )
+            session.add(
+                RankingV4ProspectiveReleaseProofRow(
+                    release_proof_digest=proof.release_proof_digest,
+                    definition_digest=proof.definition_digest,
+                    policy_digest=proof.policy_digest,
+                    inventory_digest=proof.inventory_digest,
+                    evidence_proof_digest=proof.evidence_proof_digest,
+                    execution_summary_digest=proof.execution_summary_digest,
+                    latest_return_record_digest=(
+                        proof.latest_return_record_digest
+                    ),
+                    returns_chain_digest=proof.returns_chain_digest,
+                    code_revision=proof.code_revision,
+                    model_protocol_digest=proof.model_protocol_digest,
+                    experiment_registry_digest=(
+                        proof.experiment_registry_digest
+                    ),
+                    dataset_revision=proof.dataset_revision,
+                    checkpoint_common_date_count=(
+                        proof.checkpoint_common_date_count
+                    ),
+                    completed_trade_count=proof.completed_trade_count,
+                    evaluation_status=proof.evaluation_status,
+                    release_scope=proof.release_scope,
+                    official_release_allowed=proof.official_release_allowed,
+                    payload_json=_dump(proof.stable_payload()),
+                    attestation_json=_dump(
+                        proof.attestation.model_dump(mode="json")
+                    ),
+                    evaluated_at=proof.evaluated_at,
+                )
+            )
+            session.commit()
+        return proof
+
+    def load_release_proofs(
+        self,
+        definition_digest: str,
+    ) -> tuple[RankingV4ProspectiveReleaseProof, ...]:
+        with self.session_factory() as session:
+            rows = tuple(
+                session.execute(
+                    select(RankingV4ProspectiveReleaseProofRow)
+                    .where(
+                        RankingV4ProspectiveReleaseProofRow.definition_digest
+                        == definition_digest
+                    )
+                    .order_by(
+                        RankingV4ProspectiveReleaseProofRow.checkpoint_common_date_count
+                    )
+                ).scalars()
+            )
+        return tuple(_release_proof_from_row(row) for row in rows)
+
     def load_execution_summaries(
         self,
         definition_digest: str,
@@ -341,6 +517,18 @@ def _summary_from_row(
         {
             **json.loads(row.payload_json),
             "summary_digest": row.summary_digest,
+            "attestation": json.loads(row.attestation_json),
+        }
+    )
+
+
+def _release_proof_from_row(
+    row: RankingV4ProspectiveReleaseProofRow,
+) -> RankingV4ProspectiveReleaseProof:
+    return RankingV4ProspectiveReleaseProof.model_validate(
+        {
+            **json.loads(row.payload_json),
+            "release_proof_digest": row.release_proof_digest,
             "attestation": json.loads(row.attestation_json),
         }
     )

@@ -1141,6 +1141,69 @@ class RankingV4ProspectiveExecutionSummaryRow(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
 
 
+class RankingV4ProspectiveReleaseProofRow(Base):
+    __tablename__ = "ranking_v4_prospective_release_proofs"
+    __table_args__ = (
+        UniqueConstraint(
+            "definition_digest",
+            "checkpoint_common_date_count",
+            name="uq_ranking_v4_prospective_release_proofs_checkpoint",
+        ),
+        CheckConstraint(
+            "checkpoint_common_date_count IN (80, 96, 112)",
+            name="ck_ranking_v4_prospective_release_proofs_checkpoint",
+        ),
+        CheckConstraint(
+            "(evaluation_status = 'approved' "
+            "AND release_scope = 'official_paper' "
+            "AND official_release_allowed = 1) "
+            "OR (evaluation_status IN ('continue_collecting', 'rejected') "
+            "AND release_scope = 'shadow_only' "
+            "AND official_release_allowed = 0)",
+            name="ck_ranking_v4_prospective_release_proofs_disposition",
+        ),
+    )
+
+    release_proof_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    definition_digest: Mapped[str] = mapped_column(
+        ForeignKey("ranking_v4_evidence_definitions.definition_digest"),
+        index=True,
+    )
+    policy_digest: Mapped[str] = mapped_column(
+        ForeignKey("ranking_v4_prospective_release_policies.policy_digest"),
+        index=True,
+    )
+    inventory_digest: Mapped[str] = mapped_column(String(64), index=True)
+    evidence_proof_digest: Mapped[str] = mapped_column(
+        ForeignKey("ranking_v4_evidence_proofs.proof_digest"),
+        index=True,
+    )
+    execution_summary_digest: Mapped[str] = mapped_column(
+        ForeignKey(
+            "ranking_v4_prospective_execution_summaries.summary_digest"
+        ),
+        index=True,
+    )
+    latest_return_record_digest: Mapped[str] = mapped_column(
+        ForeignKey("ranking_v4_evidence_returns.record_digest"),
+        index=True,
+    )
+    returns_chain_digest: Mapped[str] = mapped_column(String(64), index=True)
+    code_revision: Mapped[str] = mapped_column(String(40), index=True)
+    model_protocol_digest: Mapped[str] = mapped_column(String(64), index=True)
+    experiment_registry_digest: Mapped[str] = mapped_column(String(64), index=True)
+    dataset_revision: Mapped[int] = mapped_column(Integer, index=True)
+    checkpoint_common_date_count: Mapped[int] = mapped_column(Integer)
+    completed_trade_count: Mapped[int] = mapped_column(Integer)
+    evaluation_status: Mapped[str] = mapped_column(String(32))
+    release_scope: Mapped[str] = mapped_column(String(32))
+    official_release_allowed: Mapped[bool] = mapped_column(Boolean)
+    payload_json: Mapped[str] = mapped_column(Text)
+    attestation_json: Mapped[str] = mapped_column(Text)
+    evaluated_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
 class RankingV3ProductionBatchRow(Base):
     __tablename__ = "ranking_v3_production_batches"
     __table_args__ = (

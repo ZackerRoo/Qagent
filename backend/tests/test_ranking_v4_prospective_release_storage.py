@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -57,7 +57,7 @@ def _definition():
     )
 
 
-def _freeze_with_first_return(evidence_repository):
+def _freeze_with_first_return(evidence_repository, *, return_count: int = 1):
     definition = evidence_repository.freeze_definition(_definition())
     inventory = build_attempt_inventory_snapshot(
         definition=definition,
@@ -84,19 +84,27 @@ def _freeze_with_first_return(evidence_repository):
             start=1,
         )
     )
-    evidence_repository.append_return_record(
-        build_common_date_return_record(
+    previous_digest = None
+    for index in range(return_count):
+        rebalance_date = START + timedelta(days=14 * index)
+        record = evidence_repository.append_return_record(
+            build_common_date_return_record(
             definition=definition,
-            sequence=1,
-            rebalance_date=START,
+            sequence=index + 1,
+            rebalance_date=rebalance_date,
             dataset_revision=8939,
             source_result_digest="v2:first-result",
             model_returns=model_returns,
-            previous_record_digest=None,
-            recorded_at=datetime(2026, 8, 31, tzinfo=timezone.utc),
+            previous_record_digest=previous_digest,
+            recorded_at=datetime.combine(
+                rebalance_date + timedelta(days=30),
+                datetime.min.time(),
+                tzinfo=timezone.utc,
+            ),
             attestor=ATTESTOR,
         )
-    )
+        )
+        previous_digest = record.record_digest
     return definition
 
 
@@ -201,4 +209,67 @@ def test_sqlite_rejects_mutation_of_release_records(tmp_path):
                     "WHERE policy_digest = :digest"
                 ),
                 {"digest": policy.policy_digest},
+            )
+
+
+def test_repository_recomputes_and_persists_checkpoint_release_proof(tmp_path):
+    evidence_repository, release_repository, database_url = _repositories(tmp_path)
+    definition = _freeze_with_first_return(
+        evidence_repository,
+        return_count=80,
+    )
+    latest_date = START + timedelta(days=14 * 79)
+    evaluated_at = datetime.combine(
+        latest_date + timedelta(days=31),
+        datetime.min.time(),
+        tzinfo=timezone.utc,
+    )
+    evidence_repository.create_proof(
+        definition.identity.epoch_id,
+        generated_at=evaluated_at,
+    )
+    policy = release_repository.register_policy(_policy(definition))
+    release_repository.append_execution_summary(
+        build_prospective_execution_summary(
+            definition_digest=definition.definition_digest,
+            policy_digest=policy.policy_digest,
+            sequence=1,
+            source_result_digest="v2:first-result",
+            dataset_revision=8939,
+            execution_start_date=START,
+            execution_end_date=latest_date + timedelta(days=30),
+            latest_mature_rebalance_date=latest_date,
+            common_date_count=80,
+            completed_trade_count=1,
+            valid_outcome_count=8,
+            expected_outcome_count=8,
+            maximum_drawdown_pct=Decimal("-0.25"),
+            previous_summary_digest=None,
+            recorded_at=evaluated_at,
+            attestor=ATTESTOR,
+        )
+    )
+
+    proof = release_repository.evaluate_checkpoint(
+        definition.identity.epoch_id,
+        evaluated_at=evaluated_at,
+    )
+
+    assert proof.evaluation_status == "continue_collecting"
+    assert proof.release_scope == "shadow_only"
+    assert proof.official_release_allowed is False
+    assert release_repository.load_release_proofs(
+        definition.definition_digest
+    ) == (proof,)
+
+    engine = create_db_engine(database_url)
+    with engine.begin() as connection:
+        with pytest.raises(DBAPIError, match="immutable"):
+            connection.execute(
+                text(
+                    "UPDATE ranking_v4_prospective_release_proofs "
+                    "SET official_release_allowed = 1 "
+                    "WHERE release_proof_digest = :digest"
+                ),
+                {"digest": proof.release_proof_digest},
             )

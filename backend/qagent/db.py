@@ -93,7 +93,7 @@ _schema_lock = Lock()
 _initialized_urls: set[str] = set()
 _RANKING_V3_FORWARD_TRIGGER_VERSION = 2
 _RANKING_V3_PRODUCTION_TRIGGER_VERSION = 2
-_RANKING_V4_EVIDENCE_TRIGGER_VERSION = 3
+_RANKING_V4_EVIDENCE_TRIGGER_VERSION = 4
 
 
 def create_db_engine(database_url: str | None = None):
@@ -722,6 +722,7 @@ def _create_immutable_ranking_v4_evidence_triggers(connection) -> None:
         "ranking_v4_evidence_proofs",
         "ranking_v4_prospective_release_policies",
         "ranking_v4_prospective_execution_summaries",
+        "ranking_v4_prospective_release_proofs",
     )
     for table_name in tables:
         if inspector.has_table(table_name):
@@ -931,6 +932,12 @@ def _create_immutable_ranking_v4_evidence_triggers(connection) -> None:
                 "WHERE evidence_return.definition_digest = NEW.definition_digest "
                 "ORDER BY evidence_return.sequence DESC LIMIT 1"
                 ") "
+                "OR NEW.dataset_revision IS NOT ("
+                "SELECT evidence_return.dataset_revision "
+                "FROM ranking_v4_evidence_returns AS evidence_return "
+                "WHERE evidence_return.definition_digest = NEW.definition_digest "
+                "ORDER BY evidence_return.sequence DESC LIMIT 1"
+                ") "
                 "OR NEW.benchmark_evidence_complete <> 1 "
                 "OR NEW.cost_evidence_complete <> 1 "
                 "OR NEW.capital_constraint_evidence_complete <> 1 "
@@ -953,6 +960,94 @@ def _create_immutable_ranking_v4_evidence_triggers(connection) -> None:
                 "OR json_valid(NEW.attestation_json) <> 1 "
                 "BEGIN "
                 "SELECT RAISE(ABORT, 'Ranking V4 prospective execution summary is invalid'); "
+                "END"
+            )
+        )
+
+    if inspector.has_table("ranking_v4_prospective_release_proofs"):
+        connection.execute(
+            text(
+                "CREATE TRIGGER "
+                "trg_ranking_v4_evidence_release_proofs_shape_insert "
+                "BEFORE INSERT ON ranking_v4_prospective_release_proofs "
+                "WHEN length(NEW.release_proof_digest) <> 64 "
+                "OR NEW.checkpoint_common_date_count NOT IN (80, 96, 112) "
+                "OR NEW.checkpoint_common_date_count <> ("
+                "SELECT COUNT(*) FROM ranking_v4_evidence_returns AS evidence_return "
+                "WHERE evidence_return.definition_digest = NEW.definition_digest"
+                ") "
+                "OR NOT EXISTS ("
+                "SELECT 1 FROM ranking_v4_evidence_definitions AS definition "
+                "JOIN ranking_v4_prospective_release_policies AS policy "
+                "ON policy.definition_digest = definition.definition_digest "
+                "WHERE definition.definition_digest = NEW.definition_digest "
+                "AND policy.policy_digest = NEW.policy_digest "
+                "AND definition.code_revision = NEW.code_revision "
+                "AND definition.protocol_digest = NEW.model_protocol_digest "
+                "AND definition.experiment_registry_digest = "
+                "NEW.experiment_registry_digest"
+                ") "
+                "OR NOT EXISTS ("
+                "SELECT 1 FROM ranking_v4_evidence_proofs AS evidence_proof "
+                "WHERE evidence_proof.proof_digest = NEW.evidence_proof_digest "
+                "AND evidence_proof.definition_digest = NEW.definition_digest "
+                "AND evidence_proof.inventory_digest = NEW.inventory_digest "
+                "AND evidence_proof.return_record_count = "
+                "NEW.checkpoint_common_date_count "
+                "AND evidence_proof.returns_chain_digest = "
+                "NEW.returns_chain_digest"
+                ") "
+                "OR NOT EXISTS ("
+                "SELECT 1 FROM ranking_v4_prospective_execution_summaries "
+                "AS summary "
+                "WHERE summary.summary_digest = NEW.execution_summary_digest "
+                "AND summary.definition_digest = NEW.definition_digest "
+                "AND summary.policy_digest = NEW.policy_digest "
+                "AND summary.dataset_revision = NEW.dataset_revision "
+                "AND summary.common_date_count = "
+                "NEW.checkpoint_common_date_count "
+                "AND summary.completed_trade_count = NEW.completed_trade_count"
+                ") "
+                "OR NOT EXISTS ("
+                "SELECT 1 FROM ranking_v4_evidence_returns AS evidence_return "
+                "WHERE evidence_return.record_digest = "
+                "NEW.latest_return_record_digest "
+                "AND evidence_return.definition_digest = NEW.definition_digest "
+                "AND evidence_return.sequence = NEW.checkpoint_common_date_count "
+                "AND evidence_return.dataset_revision = NEW.dataset_revision"
+                ") "
+                "OR NEW.checkpoint_common_date_count <> CASE "
+                "WHEN NOT EXISTS ("
+                "SELECT 1 FROM ranking_v4_prospective_release_proofs AS existing "
+                "WHERE existing.definition_digest = NEW.definition_digest"
+                ") THEN 80 "
+                "WHEN (SELECT MAX(existing.checkpoint_common_date_count) "
+                "FROM ranking_v4_prospective_release_proofs AS existing "
+                "WHERE existing.definition_digest = NEW.definition_digest) = 80 "
+                "THEN 96 "
+                "WHEN (SELECT MAX(existing.checkpoint_common_date_count) "
+                "FROM ranking_v4_prospective_release_proofs AS existing "
+                "WHERE existing.definition_digest = NEW.definition_digest) = 96 "
+                "THEN 112 ELSE -1 END "
+                "OR EXISTS ("
+                "SELECT 1 FROM ranking_v4_prospective_release_proofs AS existing "
+                "WHERE existing.definition_digest = NEW.definition_digest "
+                "AND existing.evaluation_status IN ('approved', 'rejected')"
+                ") "
+                "OR (NEW.official_release_allowed = 1 AND EXISTS ("
+                "SELECT 1 FROM json_each(NEW.payload_json, '$.gates') AS gate "
+                "WHERE json_extract(gate.value, '$.status') <> 'pass'"
+                ")) "
+                "OR (NEW.official_release_allowed = 0 AND NOT EXISTS ("
+                "SELECT 1 FROM json_each(NEW.payload_json, '$.gates') AS gate "
+                "WHERE json_extract(gate.value, '$.status') <> 'pass'"
+                ")) "
+                "OR json_array_length(json_extract(NEW.payload_json, '$.gates')) "
+                "<> 13 "
+                "OR json_valid(NEW.payload_json) <> 1 "
+                "OR json_valid(NEW.attestation_json) <> 1 "
+                "BEGIN "
+                "SELECT RAISE(ABORT, 'Ranking V4 prospective release proof is invalid'); "
                 "END"
             )
         )
