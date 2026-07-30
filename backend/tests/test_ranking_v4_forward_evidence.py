@@ -540,6 +540,13 @@ def test_evidence_status_api_exposes_only_signed_shadow_state(
         "latest_common_date": None,
         "proof_count": 1,
         "latest_proof_digest": proof.proof_digest,
+        "release_policy_digest": None,
+        "registered_checkpoints": [],
+        "execution_summary_count": 0,
+        "latest_execution_summary_digest": None,
+        "release_evaluation_count": 0,
+        "latest_release_proof_digest": None,
+        "release_evaluation_status": None,
         "release_scope": "shadow_only",
         "official_release_allowed": False,
     }

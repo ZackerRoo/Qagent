@@ -240,6 +240,11 @@ class RankingV4ProspectiveExecutionSummary(BaseModel):
     valid_outcome_count: int = Field(ge=0)
     expected_outcome_count: int = Field(ge=0)
     maximum_drawdown_pct: Decimal
+    completed_trade_evidence_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    outcome_coverage_evidence_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    cost_evidence_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    benchmark_evidence_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    capital_constraint_evidence_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     benchmark_evidence_complete: Literal[True] = True
     cost_evidence_complete: Literal[True] = True
     capital_constraint_evidence_complete: Literal[True] = True
@@ -845,6 +850,11 @@ def build_prospective_execution_summary(
     valid_outcome_count: int,
     expected_outcome_count: int,
     maximum_drawdown_pct: Decimal,
+    completed_trade_evidence_digest: str,
+    outcome_coverage_evidence_digest: str,
+    cost_evidence_digest: str,
+    benchmark_evidence_digest: str,
+    capital_constraint_evidence_digest: str,
     previous_summary_digest: str | None,
     recorded_at: datetime,
     attestor: RankingV4EvidenceAttestor,
@@ -866,6 +876,13 @@ def build_prospective_execution_summary(
         "valid_outcome_count": valid_outcome_count,
         "expected_outcome_count": expected_outcome_count,
         "maximum_drawdown_pct": str(maximum_drawdown_pct),
+        "completed_trade_evidence_digest": completed_trade_evidence_digest,
+        "outcome_coverage_evidence_digest": outcome_coverage_evidence_digest,
+        "cost_evidence_digest": cost_evidence_digest,
+        "benchmark_evidence_digest": benchmark_evidence_digest,
+        "capital_constraint_evidence_digest": (
+            capital_constraint_evidence_digest
+        ),
         "benchmark_evidence_complete": True,
         "cost_evidence_complete": True,
         "capital_constraint_evidence_complete": True,

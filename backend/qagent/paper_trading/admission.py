@@ -17,6 +17,7 @@ from qagent.backtesting.ranking_v3_protocol import (
     RANKING_V3_MODEL_VERSION,
     build_ranking_v3_protocol,
 )
+from qagent.backtesting.ranking_v4_protocol import RANKING_V4_MODEL_VERSION
 from qagent.storage.ranking_v3_forward import RankingV3ForwardRepository
 from qagent.storage.ranking_v3_production import RankingV3ProductionRepository
 from qagent.storage.repository import OpportunitySnapshotRecord
@@ -28,6 +29,16 @@ _RANKING_V3_SELECTION_SOURCES = frozenset(
         "ranking-v3",
         "rank_v3",
         "rank-v3",
+    }
+)
+_RANKING_V4_SELECTION_SOURCES = frozenset(
+    {
+        "ranking_v4",
+        "ranking-v4",
+        "rank_v4",
+        "rank-v4",
+        "ranking_v45",
+        "ranking-v45",
     }
 )
 @dataclass(frozen=True)
@@ -66,6 +77,20 @@ def evaluate_paper_snapshot_admission(
         or model_version == RANKING_V3_MODEL_VERSION
         or isinstance(snapshot.card.get("ranking_v3"), Mapping)
     )
+    claims_ranking_v4 = (
+        selection_source in _RANKING_V4_SELECTION_SOURCES
+        or model_version == RANKING_V4_MODEL_VERSION
+        or isinstance(snapshot.card.get("ranking_v4"), Mapping)
+    )
+    if claims_ranking_v4:
+        return _blocked(
+            "ranking_v4 requires an exact signed prospective release and "
+            "authoritative production-batch membership",
+            selection_source=selection_source or "ranking_v4",
+            model_version=model_version or RANKING_V4_MODEL_VERSION,
+            deployment_scope=deployment_scope,
+            admission_source="ranking_v4_production",
+        )
     legacy_source = "legacy_manual" if mode == "manual" else "legacy_unknown"
     protocol = build_ranking_v3_protocol()
     session_factory = getattr(repo, "session_factory", None)
@@ -230,7 +255,12 @@ def evaluate_paper_snapshot_admission(
 def _selection_metadata(card: Mapping[str, object]) -> dict[str, object]:
     nested_sources = [
         value
-        for key in ("paper_admission", "recommendation_provenance", "ranking_v3")
+        for key in (
+            "paper_admission",
+            "recommendation_provenance",
+            "ranking_v3",
+            "ranking_v4",
+        )
         if isinstance((value := card.get(key)), Mapping)
     ]
     sources: list[Mapping[str, object]] = [*nested_sources, card]
@@ -252,6 +282,8 @@ def _selection_metadata(card: Mapping[str, object]) -> dict[str, object]:
                 break
     if isinstance(card.get("ranking_v3"), Mapping):
         metadata.setdefault("selection_source", "ranking_v3")
+    if isinstance(card.get("ranking_v4"), Mapping):
+        metadata.setdefault("selection_source", "ranking_v4")
     return metadata
 
 
@@ -288,6 +320,7 @@ def _blocked(
     model_version: str | None,
     deployment_scope: str | None,
     release_run_id: str | None = None,
+    admission_source: str = "ranking_v3_production",
 ) -> PaperAdmissionDecision:
     return PaperAdmissionDecision(
         eligible=False,
@@ -296,7 +329,7 @@ def _blocked(
         model_version=model_version,
         deployment_scope=deployment_scope,
         release_run_id=release_run_id,
-        admission_source="ranking_v3_production",
+        admission_source=admission_source,
     )
 
 

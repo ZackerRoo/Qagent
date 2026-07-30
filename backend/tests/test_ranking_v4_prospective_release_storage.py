@@ -28,6 +28,13 @@ from qagent.storage.ranking_v4_prospective_release import (
 
 
 ATTESTOR = RankingV4EvidenceAttestor(b"k" * 32)
+RAW_EVIDENCE_DIGESTS = {
+    "completed_trade_evidence_digest": "1" * 64,
+    "outcome_coverage_evidence_digest": "2" * 64,
+    "cost_evidence_digest": "3" * 64,
+    "benchmark_evidence_digest": "4" * 64,
+    "capital_constraint_evidence_digest": "5" * 64,
+}
 FROZEN_AT = datetime(2026, 7, 30, 2, 0, tzinfo=timezone.utc)
 START = date(2026, 7, 31)
 
@@ -136,6 +143,7 @@ def _summary(definition, policy, *, common_date_count=1):
         valid_outcome_count=8,
         expected_outcome_count=8,
         maximum_drawdown_pct=Decimal("-0.25"),
+        **RAW_EVIDENCE_DIGESTS,
         previous_summary_digest=None,
         recorded_at=datetime(2026, 8, 31, tzinfo=timezone.utc),
         attestor=ATTESTOR,
@@ -244,6 +252,7 @@ def test_repository_recomputes_and_persists_checkpoint_release_proof(tmp_path):
             valid_outcome_count=8,
             expected_outcome_count=8,
             maximum_drawdown_pct=Decimal("-0.25"),
+            **RAW_EVIDENCE_DIGESTS,
             previous_summary_digest=None,
             recorded_at=evaluated_at,
             attestor=ATTESTOR,

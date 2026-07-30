@@ -33,6 +33,13 @@ from qagent.security.ranking_v4_attestation import RankingV4EvidenceAttestor
 
 ATTESTOR = RankingV4EvidenceAttestor(b"k" * 32)
 REGISTERED_AT = datetime(2026, 7, 30, 13, 0, tzinfo=timezone.utc)
+RAW_EVIDENCE_DIGESTS = {
+    "completed_trade_evidence_digest": "1" * 64,
+    "outcome_coverage_evidence_digest": "2" * 64,
+    "cost_evidence_digest": "3" * 64,
+    "benchmark_evidence_digest": "4" * 64,
+    "capital_constraint_evidence_digest": "5" * 64,
+}
 
 
 def _definition():
@@ -122,6 +129,7 @@ def test_execution_summary_is_signed_and_chained():
         valid_outcome_count=400,
         expected_outcome_count=400,
         maximum_drawdown_pct=Decimal("-8.5"),
+        **RAW_EVIDENCE_DIGESTS,
         previous_summary_digest=None,
         recorded_at=datetime(2029, 12, 31, tzinfo=timezone.utc),
         attestor=ATTESTOR,
@@ -140,6 +148,7 @@ def test_execution_summary_is_signed_and_chained():
         valid_outcome_count=480,
         expected_outcome_count=480,
         maximum_drawdown_pct=Decimal("-9.25"),
+        **RAW_EVIDENCE_DIGESTS,
         previous_summary_digest=first.summary_digest,
         recorded_at=datetime(2030, 6, 30, tzinfo=timezone.utc),
         attestor=ATTESTOR,
@@ -172,6 +181,7 @@ def test_execution_summary_rejects_missing_predecessor_and_invalid_counts():
         valid_outcome_count=400,
         expected_outcome_count=400,
         maximum_drawdown_pct=Decimal("-8.5"),
+        **RAW_EVIDENCE_DIGESTS,
         previous_summary_digest=None,
         recorded_at=datetime(2029, 12, 31, tzinfo=timezone.utc),
         attestor=ATTESTOR,
@@ -310,6 +320,7 @@ def _checkpoint_evidence(
         valid_outcome_count=100,
         expected_outcome_count=100,
         maximum_drawdown_pct=Decimal("-5"),
+        **RAW_EVIDENCE_DIGESTS,
         previous_summary_digest=None,
         recorded_at=final_timestamp,
         attestor=ATTESTOR,
@@ -395,6 +406,7 @@ def test_release_evaluation_rejects_mismatched_source_summary():
         valid_outcome_count=summary.valid_outcome_count,
         expected_outcome_count=summary.expected_outcome_count,
         maximum_drawdown_pct=summary.maximum_drawdown_pct,
+        **RAW_EVIDENCE_DIGESTS,
         previous_summary_digest=summary.previous_summary_digest,
         recorded_at=summary.recorded_at,
         attestor=ATTESTOR,

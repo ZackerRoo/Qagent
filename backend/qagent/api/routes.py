@@ -200,6 +200,9 @@ from qagent.storage.repository import (
 )
 from qagent.storage.market_cache import MarketDataCacheRepository
 from qagent.storage.ranking_v4_forward_evidence import RankingV4EvidenceRepository
+from qagent.storage.ranking_v4_prospective_release import (
+    RankingV4ProspectiveReleaseRepository,
+)
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
 from qagent.strategy_data.models import FundamentalSnapshot
 from qagent.strategy_data.providers import EmptyStrategyDataProvider, build_strategy_data_provider
@@ -731,6 +734,15 @@ def get_ranking_v4_evidence(epoch_id: str) -> dict[str, object]:
     latest_inventory = snapshot.inventories[-1] if snapshot.inventories else None
     latest_return = snapshot.return_records[-1] if snapshot.return_records else None
     latest_proof = snapshot.proofs[-1] if snapshot.proofs else None
+    release_repository = _ranking_v4_release_repo()
+    policy = release_repository.load_policy(definition.definition_digest)
+    execution_summaries = release_repository.load_execution_summaries(
+        definition.definition_digest
+    )
+    release_proofs = release_repository.load_release_proofs(
+        definition.definition_digest
+    )
+    latest_release = release_proofs[-1] if release_proofs else None
     return {
         "epoch_id": definition.identity.epoch_id,
         "status": "frozen",
@@ -762,8 +774,29 @@ def get_ranking_v4_evidence(epoch_id: str) -> dict[str, object]:
         "latest_proof_digest": (
             latest_proof.proof_digest if latest_proof else None
         ),
-        "release_scope": "shadow_only",
-        "official_release_allowed": False,
+        "release_policy_digest": policy.policy_digest if policy else None,
+        "registered_checkpoints": (
+            list(policy.checkpoint_common_date_counts) if policy else []
+        ),
+        "execution_summary_count": len(execution_summaries),
+        "latest_execution_summary_digest": (
+            execution_summaries[-1].summary_digest
+            if execution_summaries
+            else None
+        ),
+        "release_evaluation_count": len(release_proofs),
+        "latest_release_proof_digest": (
+            latest_release.release_proof_digest if latest_release else None
+        ),
+        "release_evaluation_status": (
+            latest_release.evaluation_status if latest_release else None
+        ),
+        "release_scope": (
+            latest_release.release_scope if latest_release else "shadow_only"
+        ),
+        "official_release_allowed": (
+            latest_release.official_release_allowed if latest_release else False
+        ),
     }
 
 
@@ -2483,6 +2516,11 @@ def _repo() -> QagentRepository:
 def _ranking_v4_evidence_repo() -> RankingV4EvidenceRepository:
     initialize_database()
     return RankingV4EvidenceRepository(create_session_factory())
+
+
+def _ranking_v4_release_repo() -> RankingV4ProspectiveReleaseRepository:
+    initialize_database()
+    return RankingV4ProspectiveReleaseRepository(create_session_factory())
 
 
 def _market_cache_repo() -> MarketDataCacheRepository:

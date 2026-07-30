@@ -47,6 +47,7 @@ from qagent.backtesting.ranking_v3_pbo import (
     RankingV3DatedModelReturn,
     evaluate_ranking_v3_cscv_pbo,
 )
+from qagent.backtesting.ranking_v4_protocol import RANKING_V4_MODEL_VERSION
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.market.calendars import trading_day_offset
 from qagent.paper_trading.admission import evaluate_paper_snapshot_admission
@@ -703,6 +704,47 @@ def test_cached_unreleased_ranking_v3_does_not_fall_back_to_legacy_seed(
     assert seeded.status_code == 200
     assert seeded.json()["created"] == 0
     assert client.get("/api/paper-trades").json()["summary"]["total"] == 0
+
+
+def test_ranking_v4_claim_cannot_fall_back_to_legacy_admission(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'paper-v4-fail-closed.db'}",
+    )
+    _persist_authoritative_opportunities(
+        provider="fixture",
+        cards=[("ranking-v4-shadow-card", "US:V4")],
+    )
+    _patch_authoritative_card(
+        provider="fixture",
+        card_id="ranking-v4-shadow-card",
+        updates={
+            "ranking_v4": {
+                "selection_source": "ranking_v4",
+                "model_version": RANKING_V4_MODEL_VERSION,
+                "deployment_scope": "shadow_only",
+                "official_release_allowed": False,
+            }
+        },
+    )
+    repo = routes._repo()
+    snapshot = repo.list_latest_opportunity_snapshots_by_card_ids(
+        ["ranking-v4-shadow-card"],
+        provider="fixture",
+    )[0]
+
+    decision = evaluate_paper_snapshot_admission(
+        repo,
+        snapshot,
+        provider="fixture",
+    )
+
+    assert decision.eligible is False
+    assert decision.admission_source == "ranking_v4_production"
+    assert "prospective release" in (decision.reason or "")
 
 
 def test_ranking_v3_requires_matching_authoritative_release_proof(tmp_path, monkeypatch):

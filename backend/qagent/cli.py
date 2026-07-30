@@ -9,6 +9,12 @@ from qagent.backtesting.a_share_rules import BrokerFeeRequest
 from qagent.backtesting.ranking_v4_forward_evidence import (
     build_attempt_inventory_snapshot,
     build_prospective_definition,
+    stable_digest,
+)
+from qagent.backtesting.ranking_v4_prospective_release import (
+    REGISTERED_CHECKPOINTS,
+    build_prospective_execution_summary,
+    build_prospective_release_policy,
 )
 from qagent.backtesting.walk_forward import (
     WalkForwardSelectionResult,
@@ -37,6 +43,9 @@ from qagent.storage.repository import QagentRepository
 from qagent.storage.market_cache import MarketDataCacheRepository
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
 from qagent.storage.ranking_v4_forward_evidence import RankingV4EvidenceRepository
+from qagent.storage.ranking_v4_prospective_release import (
+    RankingV4ProspectiveReleaseRepository,
+)
 from qagent.strategy_data.providers import EmptyStrategyDataProvider, build_strategy_data_provider
 
 
@@ -392,6 +401,7 @@ def _append_ranking_v4_evidence_if_registered(
         raise RuntimeError(
             "prospective evidence runtime revisions differ from the frozen code"
         )
+    recorded_at = datetime.now(timezone.utc)
     repository.append_trial_ledger(
         identity.epoch_id,
         attempt_id=result.owner_run_id,
@@ -404,8 +414,149 @@ def _append_ranking_v4_evidence_if_registered(
         execution_start_date=result.start_date,
         source_result_digest=result.reproducibility_digest,
         trial_ledger=result.ranking_v4.trial_ledger,
-        recorded_at=datetime.now(timezone.utc),
+        recorded_at=recorded_at,
     )
+    updated_snapshot = repository.load_snapshot(identity.epoch_id)
+    if updated_snapshot is None or not updated_snapshot.return_records:
+        raise RuntimeError("prospective evidence disappeared after append")
+    release_repository = RankingV4ProspectiveReleaseRepository(
+        session_factory,
+        attestor=repository.attestor,
+    )
+    policy = release_repository.load_policy(snapshot.definition.definition_digest)
+    if policy is None:
+        # Superseded zero-return epochs deliberately have no promotion policy.
+        return
+    summaries = release_repository.load_execution_summaries(
+        snapshot.definition.definition_digest
+    )
+    summary = next(
+        (
+            item
+            for item in summaries
+            if item.source_result_digest == result.reproducibility_digest
+        ),
+        None,
+    )
+    if summary is None:
+        historical = result.ranking_v4.historical_validation
+        raw_evidence = _ranking_v4_raw_execution_evidence(result)
+        summary = release_repository.append_execution_summary(
+            build_prospective_execution_summary(
+                definition_digest=snapshot.definition.definition_digest,
+                policy_digest=policy.policy_digest,
+                sequence=len(summaries) + 1,
+                source_result_digest=result.reproducibility_digest,
+                dataset_revision=result.dataset_revision,
+                execution_start_date=result.start_date,
+                execution_end_date=result.end_date,
+                latest_mature_rebalance_date=(
+                    updated_snapshot.return_records[-1].rebalance_date
+                ),
+                common_date_count=len(updated_snapshot.return_records),
+                completed_trade_count=historical.completed_trade_count,
+                valid_outcome_count=historical.valid_outcome_count,
+                expected_outcome_count=historical.expected_outcome_count,
+                maximum_drawdown_pct=Decimal(
+                    str(result.ranking_v4.metrics.max_drawdown_pct)
+                ),
+                previous_summary_digest=(
+                    summaries[-1].summary_digest if summaries else None
+                ),
+                recorded_at=datetime.now(timezone.utc),
+                attestor=release_repository.attestor,
+                **raw_evidence,
+            )
+        )
+    release_proofs = release_repository.load_release_proofs(
+        snapshot.definition.definition_digest
+    )
+    next_checkpoint_index = len(release_proofs)
+    next_checkpoint = (
+        REGISTERED_CHECKPOINTS[next_checkpoint_index]
+        if next_checkpoint_index < len(REGISTERED_CHECKPOINTS)
+        else None
+    )
+    if next_checkpoint is not None and summary.common_date_count > next_checkpoint:
+        raise RuntimeError(
+            "prospective evidence skipped a preregistered release checkpoint"
+        )
+    if summary.common_date_count == next_checkpoint:
+        release_repository.evaluate_checkpoint(
+            identity.epoch_id,
+            evaluated_at=datetime.now(timezone.utc),
+        )
+
+
+def _ranking_v4_raw_execution_evidence(
+    result: WalkForwardSelectionResult,
+) -> dict[str, str]:
+    ranking_v4 = result.ranking_v4
+    if ranking_v4 is None:
+        raise RuntimeError("Ranking V4 execution evidence is missing")
+    historical = ranking_v4.historical_validation
+    return {
+        "completed_trade_evidence_digest": stable_digest(
+            {
+                "source_result_digest": result.reproducibility_digest,
+                "trades": [
+                    item.model_dump(mode="json")
+                    for item in ranking_v4.portfolio.trades
+                ],
+            }
+        ),
+        "outcome_coverage_evidence_digest": stable_digest(
+            {
+                "source_result_digest": result.reproducibility_digest,
+                "valid_outcome_count": historical.valid_outcome_count,
+                "expected_outcome_count": historical.expected_outcome_count,
+                "evidence_coverage": ranking_v4.evidence_coverage,
+                "snapshots": [
+                    {
+                        "decision_date": item.decision_date.isoformat(),
+                        "ranking_v4_top_5": [
+                            selection.model_dump(mode="json")
+                            for selection in item.ranking_v4_top_5
+                        ],
+                    }
+                    for item in result.snapshots
+                ],
+            }
+        ),
+        "cost_evidence_digest": stable_digest(
+            {
+                "source_result_digest": result.reproducibility_digest,
+                "protocol": ranking_v4.protocol.model_dump(mode="json"),
+                "normal_metrics": ranking_v4.metrics.model_dump(mode="json"),
+                "stress_metrics": ranking_v4.stress_metrics.model_dump(mode="json"),
+                "normal_trade_costs": [
+                    str(item.costs) for item in ranking_v4.portfolio.trades
+                ],
+            }
+        ),
+        "benchmark_evidence_digest": stable_digest(
+            {
+                "source_result_digest": result.reproducibility_digest,
+                "portfolio": (
+                    ranking_v4.constraint_matched_baseline_portfolio.model_dump(
+                        mode="json"
+                    )
+                ),
+                "metrics": (
+                    ranking_v4.constraint_matched_baseline_metrics.model_dump(
+                        mode="json"
+                    )
+                ),
+            }
+        ),
+        "capital_constraint_evidence_digest": stable_digest(
+            {
+                "source_result_digest": result.reproducibility_digest,
+                "portfolio": ranking_v4.portfolio.model_dump(mode="json"),
+                "completed_trade_count": historical.completed_trade_count,
+            }
+        ),
+    }
 
 
 def _ranking_v4_evidence_freeze_command(args: argparse.Namespace) -> int:
@@ -415,6 +566,7 @@ def _ranking_v4_evidence_freeze_command(args: argparse.Namespace) -> int:
     frozen_at = datetime.now(timezone.utc)
     repository = RankingV4EvidenceRepository(session_factory)
     snapshot = repository.load_snapshot(args.epoch_id)
+    created_definition = snapshot is None
     if snapshot is not None:
         definition = snapshot.definition
         if args.code_revision != definition.identity.code_revision:
@@ -455,6 +607,22 @@ def _ranking_v4_evidence_freeze_command(args: argparse.Namespace) -> int:
         snapshot = repository.load_snapshot(args.epoch_id)
         if snapshot is None:
             raise RuntimeError("frozen Ranking V4 evidence definition was not persisted")
+    release_repository = RankingV4ProspectiveReleaseRepository(
+        session_factory,
+        attestor=repository.attestor,
+    )
+    if created_definition:
+        release_repository.register_policy(
+            build_prospective_release_policy(
+                definition_digest=definition.definition_digest,
+                model_protocol_digest=definition.identity.protocol_digest,
+                experiment_registry_digest=(
+                    definition.identity.experiment_registry_digest
+                ),
+                registered_at=frozen_at,
+                attestor=repository.attestor,
+            )
+        )
     if not snapshot.inventories:
         market_date = frozen_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
         if market_date >= definition.identity.evidence_start_date:
@@ -497,12 +665,25 @@ def _ranking_v4_evidence_status_command(args: argparse.Namespace) -> int:
     if snapshot is None:
         print(f"ranking-v4-evidence epoch={args.epoch_id} status=missing")
         return 1
+    release_repository = RankingV4ProspectiveReleaseRepository(
+        create_session_factory()
+    )
+    definition_digest = snapshot.definition.definition_digest
+    policy = release_repository.load_policy(definition_digest)
+    summaries = release_repository.load_execution_summaries(definition_digest)
+    release_proofs = release_repository.load_release_proofs(definition_digest)
+    latest_release = release_proofs[-1] if release_proofs else None
     print(
         f"ranking-v4-evidence epoch={args.epoch_id} status=frozen "
         f"start={snapshot.definition.identity.evidence_start_date.isoformat()} "
         f"inventories={len(snapshot.inventories)} "
         f"common_dates={len(snapshot.return_records)} proofs={len(snapshot.proofs)} "
-        "scope=shadow_only"
+        f"policy={'registered' if policy else 'none'} "
+        f"execution_summaries={len(summaries)} "
+        f"release_evaluations={len(release_proofs)} "
+        f"scope={latest_release.release_scope if latest_release else 'shadow_only'} "
+        f"official_release_allowed="
+        f"{latest_release.official_release_allowed if latest_release else False}"
     )
     return 0
 
