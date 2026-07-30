@@ -95,6 +95,8 @@ def _return_record(
         definition=definition,
         sequence=sequence,
         rebalance_date=rebalance_date,
+        dataset_revision=definition.identity.dataset_revision,
+        source_result_digest="v2:test-result",
         model_returns=_model_returns(definition),
         previous_record_digest=previous,
         recorded_at=FROZEN_AT,
@@ -249,7 +251,7 @@ def test_registered_trial_ledger_appends_only_new_common_dates(tmp_path):
         experiment_registry_digest=(
             definition.identity.experiment_registry_digest
         ),
-        dataset_revision=definition.identity.dataset_revision,
+        dataset_revision=definition.identity.dataset_revision + 1,
         execution_start_date=START,
         source_result_digest="v2:second-result",
         trial_ledger=second_ledger,
@@ -261,6 +263,10 @@ def test_registered_trial_ledger_appends_only_new_common_dates(tmp_path):
     assert tuple(item.rebalance_date for item in snapshot.return_records) == (
         START,
         date(2026, 8, 14),
+    )
+    assert tuple(item.dataset_revision for item in snapshot.return_records) == (
+        definition.identity.dataset_revision,
+        definition.identity.dataset_revision + 1,
     )
     assert all(
         tuple(item.model_id for item in record.model_returns)
@@ -295,10 +301,10 @@ def test_trial_ledger_identity_and_attempt_inventory_fail_closed(tmp_path):
             definition.identity.epoch_id,
             **{**common, "attempt_id": "unregistered-attempt"},
         )
-    with pytest.raises(RankingV4EvidenceIntegrityError, match="identity differs"):
+    with pytest.raises(RankingV4EvidenceIntegrityError, match="predates"):
         repository.append_trial_ledger(
             definition.identity.epoch_id,
-            **{**common, "dataset_revision": 8940},
+            **{**common, "dataset_revision": 8938},
         )
 
 
@@ -331,6 +337,8 @@ def test_return_record_requires_inventory_and_complete_frozen_model_family(tmp_p
             definition=definition,
             sequence=1,
             rebalance_date=START,
+            dataset_revision=definition.identity.dataset_revision,
+            source_result_digest="v2:test-result",
             model_returns=_model_returns(definition)[:-1],
             previous_record_digest=None,
             recorded_at=FROZEN_AT,
@@ -347,6 +355,8 @@ def test_pre_freeze_backfill_duplicate_date_and_chain_gap_fail_closed(tmp_path):
             definition=definition,
             sequence=1,
             rebalance_date=date(2025, 12, 26),
+            dataset_revision=definition.identity.dataset_revision,
+            source_result_digest="v2:test-result",
             model_returns=_model_returns(definition),
             previous_record_digest=None,
             recorded_at=FROZEN_AT,
@@ -422,7 +432,7 @@ def test_sqlite_tables_and_immutable_triggers_reject_direct_mutation(tmp_path):
     repository, database_url = _repository(tmp_path, "sqlite-triggers")
     definition = repository.freeze_definition(_definition())
     inventory = repository.append_inventory(_inventory(definition))
-    repository.append_return_record(_return_record(definition))
+    first_return = repository.append_return_record(_return_record(definition))
     repository.create_proof(
         definition.identity.epoch_id,
         generated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
@@ -442,7 +452,7 @@ def test_sqlite_tables_and_immutable_triggers_reject_direct_mutation(tmp_path):
                 "WHERE component = 'ranking_v4_evidence_triggers'"
             )
         ).scalar_one()
-        assert version == 1
+        assert version == 2
         with pytest.raises(DBAPIError):
             connection.execute(
                 text(
@@ -451,6 +461,28 @@ def test_sqlite_tables_and_immutable_triggers_reject_direct_mutation(tmp_path):
                     "WHERE inventory_digest = :digest"
                 ),
                 {"digest": inventory.inventory_digest},
+            )
+        connection.rollback()
+        with pytest.raises(DBAPIError):
+            connection.execute(
+                text(
+                    "INSERT INTO ranking_v4_evidence_returns ("
+                    "record_digest, definition_digest, sequence, rebalance_date, "
+                    "dataset_revision, previous_record_digest, model_count, "
+                    "payload_json, attestation_json, recorded_at, created_at"
+                    ") VALUES ("
+                    ":record_digest, :definition_digest, 2, '2026-08-14', "
+                    ":dataset_revision, :previous_record_digest, 1, "
+                    "'{\"model_returns\":[{}]}', '{}', "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP"
+                    ")"
+                ),
+                {
+                    "record_digest": "b" * 64,
+                    "definition_digest": definition.definition_digest,
+                    "dataset_revision": definition.identity.dataset_revision,
+                    "previous_record_digest": first_return.record_digest,
+                },
             )
         connection.rollback()
         with pytest.raises(DBAPIError):
@@ -498,6 +530,8 @@ def test_evidence_status_api_exposes_only_signed_shadow_state(
             definition.identity.experiment_registry_digest
         ),
         "dataset_revision": definition.identity.dataset_revision,
+        "base_dataset_revision": definition.identity.dataset_revision,
+        "latest_dataset_revision": definition.identity.dataset_revision,
         "evidence_start_date": START.isoformat(),
         "definition_digest": definition.definition_digest,
         "inventory_count": 1,

@@ -262,9 +262,13 @@ class RankingV4EvidenceRepository:
                 raise RankingV4EvidenceConflictError(
                     "common rebalance dates must be strictly increasing"
                 )
-            if record.dataset_revision != definition.identity.dataset_revision:
+            if record.dataset_revision < definition.identity.dataset_revision:
                 raise RankingV4EvidenceIntegrityError(
-                    "return data revision differs from the frozen definition"
+                    "return data revision predates the frozen baseline"
+                )
+            if latest is not None and record.dataset_revision < latest.dataset_revision:
+                raise RankingV4EvidenceConflictError(
+                    "return data revisions must be monotonic"
                 )
             if tuple(item.model_id for item in record.model_returns) != (
                 definition.registered_model_ids
@@ -395,10 +399,13 @@ class RankingV4EvidenceRepository:
             code_revision != identity.code_revision
             or protocol_digest != identity.protocol_digest
             or experiment_registry_digest != identity.experiment_registry_digest
-            or dataset_revision != identity.dataset_revision
         ):
             raise RankingV4EvidenceIntegrityError(
                 "walk-forward result identity differs from the frozen definition"
+            )
+        if dataset_revision < identity.dataset_revision:
+            raise RankingV4EvidenceIntegrityError(
+                "walk-forward result predates the frozen dataset baseline"
             )
         if execution_start_date != identity.evidence_start_date:
             raise RankingV4EvidenceIntegrityError(
@@ -538,6 +545,8 @@ class RankingV4EvidenceRepository:
                     definition=definition,
                     sequence=next_sequence,
                     rebalance_date=rebalance_date,
+                    dataset_revision=dataset_revision,
+                    source_result_digest=source_result_digest,
                     model_returns=model_returns,
                     previous_record_digest=previous_digest,
                     recorded_at=recorded_at,

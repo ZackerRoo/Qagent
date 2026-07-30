@@ -231,6 +231,7 @@ class RankingV4CommonDateReturnRecord(BaseModel):
     sequence: int = Field(ge=1)
     rebalance_date: date
     dataset_revision: int = Field(ge=1)
+    source_result_digest: str = Field(min_length=1, max_length=160)
     model_returns: tuple[RankingV4ProspectiveModelReturn, ...]
     previous_record_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     record_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -432,6 +433,8 @@ def build_common_date_return_record(
     definition: RankingV4ProspectiveDefinition,
     sequence: int,
     rebalance_date: date,
+    dataset_revision: int,
+    source_result_digest: str,
     model_returns: Sequence[RankingV4ProspectiveModelReturn],
     previous_record_digest: str | None,
     recorded_at: datetime,
@@ -447,12 +450,17 @@ def build_common_date_return_record(
         raise RankingV4EvidenceIntegrityError(
             "historical or pre-freeze returns cannot enter the prospective ledger"
         )
+    if dataset_revision < definition.identity.dataset_revision:
+        raise RankingV4EvidenceIntegrityError(
+            "return data revision predates the frozen baseline"
+        )
     payload = {
         "schema_version": RETURN_RECORD_SCHEMA_VERSION,
         "definition_digest": definition.definition_digest,
         "sequence": sequence,
         "rebalance_date": rebalance_date.isoformat(),
-        "dataset_revision": definition.identity.dataset_revision,
+        "dataset_revision": dataset_revision,
+        "source_result_digest": source_result_digest,
         "model_returns": [item.model_dump(mode="json") for item in ordered],
         "previous_record_digest": previous_record_digest,
         "recorded_at": _utc_json_timestamp(recorded_at),
@@ -557,8 +565,10 @@ def verify_snapshot(
     for expected_sequence, record in enumerate(snapshot.return_records, start=1):
         if record.definition_digest != definition.definition_digest:
             raise RankingV4EvidenceIntegrityError("return definition mismatch")
-        if record.dataset_revision != definition.identity.dataset_revision:
-            raise RankingV4EvidenceIntegrityError("return data revision mismatch")
+        if record.dataset_revision < definition.identity.dataset_revision:
+            raise RankingV4EvidenceIntegrityError(
+                "return data revision predates the frozen baseline"
+            )
         if record.rebalance_date < definition.identity.evidence_start_date:
             raise RankingV4EvidenceIntegrityError("pre-epoch return was persisted")
         if record.sequence != expected_sequence:
@@ -568,6 +578,13 @@ def verify_snapshot(
             raise RankingV4EvidenceIntegrityError("return chain is invalid")
         if previous_record is not None and record.rebalance_date <= previous_record.rebalance_date:
             raise RankingV4EvidenceIntegrityError("return dates must be strictly increasing")
+        if (
+            previous_record is not None
+            and record.dataset_revision < previous_record.dataset_revision
+        ):
+            raise RankingV4EvidenceIntegrityError(
+                "return data revisions are not monotonic"
+            )
         if tuple(item.model_id for item in record.model_returns) != (
             definition.registered_model_ids
         ):

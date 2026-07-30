@@ -740,6 +740,12 @@ def get_ranking_v4_evidence(epoch_id: str) -> dict[str, object]:
             definition.identity.experiment_registry_digest
         ),
         "dataset_revision": definition.identity.dataset_revision,
+        "base_dataset_revision": definition.identity.dataset_revision,
+        "latest_dataset_revision": (
+            latest_return.dataset_revision
+            if latest_return
+            else definition.identity.dataset_revision
+        ),
         "evidence_start_date": (
             definition.identity.evidence_start_date.isoformat()
         ),

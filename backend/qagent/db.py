@@ -93,7 +93,7 @@ _schema_lock = Lock()
 _initialized_urls: set[str] = set()
 _RANKING_V3_FORWARD_TRIGGER_VERSION = 2
 _RANKING_V3_PRODUCTION_TRIGGER_VERSION = 2
-_RANKING_V4_EVIDENCE_TRIGGER_VERSION = 1
+_RANKING_V4_EVIDENCE_TRIGGER_VERSION = 2
 
 
 def create_db_engine(database_url: str | None = None):
@@ -783,7 +783,7 @@ def _create_immutable_ranking_v4_evidence_triggers(connection) -> None:
                 "WHEN NOT EXISTS ("
                 "SELECT 1 FROM ranking_v4_evidence_definitions AS definition "
                 "WHERE definition.definition_digest = NEW.definition_digest "
-                "AND definition.dataset_revision = NEW.dataset_revision "
+                "AND definition.dataset_revision <= NEW.dataset_revision "
                 "AND date(NEW.rebalance_date) >= date(definition.evidence_start_date)"
                 ") "
                 "OR NOT EXISTS ("
@@ -807,9 +807,19 @@ def _create_immutable_ranking_v4_evidence_triggers(connection) -> None:
                 "WHERE existing.definition_digest = NEW.definition_digest "
                 "AND date(existing.rebalance_date) >= date(NEW.rebalance_date)"
                 ") "
+                "OR EXISTS ("
+                "SELECT 1 FROM ranking_v4_evidence_returns AS existing "
+                "WHERE existing.definition_digest = NEW.definition_digest "
+                "AND existing.dataset_revision > NEW.dataset_revision"
+                ") "
                 "OR NEW.model_count < 1 "
                 "OR json_valid(NEW.payload_json) <> 1 "
-                "OR json_array_length(json_extract(NEW.payload_json, '$.model_returns')) "
+                "OR COALESCE(length(json_extract("
+                "NEW.payload_json, '$.source_result_digest'"
+                ")), 0) < 1 "
+                "OR COALESCE(json_array_length(json_extract("
+                "NEW.payload_json, '$.model_returns'"
+                ")), -1) "
                 "<> NEW.model_count "
                 "OR json_valid(NEW.attestation_json) <> 1 "
                 "BEGIN "
