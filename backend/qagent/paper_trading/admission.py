@@ -41,6 +41,17 @@ _RANKING_V4_SELECTION_SOURCES = frozenset(
         "ranking-v45",
     }
 )
+_OFFICIAL_DEPLOYMENT_SCOPES = frozenset(
+    {
+        "official",
+        "official_paper",
+        "paper",
+        "production",
+        "validated",
+    }
+)
+
+
 @dataclass(frozen=True)
 class PaperAdmissionDecision:
     eligible: bool
@@ -83,13 +94,20 @@ def evaluate_paper_snapshot_admission(
         or isinstance(snapshot.card.get("ranking_v4"), Mapping)
     )
     if claims_ranking_v4:
-        return _blocked(
-            "ranking_v4 requires an exact signed prospective release and "
-            "authoritative production-batch membership",
+        if _claims_official_release(metadata, deployment_scope):
+            return _blocked(
+                "ranking_v4 official paper admission requires an exact signed "
+                "release and authoritative production-batch membership",
+                selection_source=selection_source or "ranking_v4",
+                model_version=model_version or RANKING_V4_MODEL_VERSION,
+                deployment_scope=deployment_scope,
+                admission_source="ranking_v4_production",
+            )
+        return _legacy_allowed(
             selection_source=selection_source or "ranking_v4",
             model_version=model_version or RANKING_V4_MODEL_VERSION,
-            deployment_scope=deployment_scope,
-            admission_source="ranking_v4_production",
+            deployment_scope="shadow_only",
+            admission_source="ranking_v4_shadow",
         )
     legacy_source = "legacy_manual" if mode == "manual" else "legacy_unknown"
     protocol = build_ranking_v3_protocol()
@@ -340,3 +358,15 @@ def _normalized(value: object) -> str:
 def _optional_string(value: object) -> str | None:
     result = str(value).strip() if value is not None else ""
     return result or None
+
+
+def _claims_official_release(
+    metadata: Mapping[str, object],
+    deployment_scope: str | None,
+) -> bool:
+    official_release_allowed = metadata.get("official_release_allowed")
+    claims_allowed = (
+        official_release_allowed is True
+        or _normalized(official_release_allowed) in {"1", "true", "yes"}
+    )
+    return claims_allowed or _normalized(deployment_scope) in _OFFICIAL_DEPLOYMENT_SCOPES

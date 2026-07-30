@@ -20,7 +20,11 @@ from qagent.paper_trading.engine import (
 from qagent.providers.cached import CachedMarketDataProvider
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.storage.market_cache import MarketDataCacheRepository
-from qagent.storage.paper import PaperTradeSourceContext, PaperTradingRepository
+from qagent.storage.paper import (
+    PaperTradeAdmissionProof,
+    PaperTradeSourceContext,
+    PaperTradingRepository,
+)
 from qagent.storage.repository import OpportunitySnapshotRecord
 from qagent.storage.tables import OpportunitySnapshotRow, PaperTradeRow, ScanRunRow
 
@@ -1302,6 +1306,7 @@ def test_official_ranking_v3_statistics_exclude_legacy_records(tmp_path):
     assert {item.trade_id for item in ledger.items} == {official.trade_id}
     assert ledger.data_health["paper_reporting_scope"] == "ranking_v3_production"
     assert ledger.data_health["paper_reporting_official"] == "1"
+    assert ledger.data_health["paper_reporting_research_shadow"] == "0"
     assert ledger.data_health["paper_reporting_legacy_manual"] == "1"
     assert ledger.data_health["paper_reporting_legacy_unknown"] == "1"
     assert ledger.data_health["paper_reporting_excluded"] == "2"
@@ -1349,6 +1354,34 @@ def test_paper_reporting_rejects_unproven_official_claim_and_keeps_legacy_report
     assert official.data_health["paper_reporting_invalid_official_claims"] == "1"
     assert legacy.summary.total_trades == 1
     assert legacy.data_health["paper_reporting_scope"] == "legacy_only"
+
+
+def test_paper_reporting_identifies_research_shadow_separately_from_legacy(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    stored = paper_repo.create_trade(
+        source_snapshot_id="ranking-v4-research-shadow",
+        provider="fixture",
+        instrument_id="CN:600002",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("10"),
+        initial_stop=Decimal("9"),
+        target_1=Decimal("12"),
+        rank_score=Decimal("0.80"),
+        admission_proof=PaperTradeAdmissionProof(
+            admission_source="ranking_v4_shadow",
+        ),
+    )
+
+    official = build_official_paper_ledger([stored])
+    research = build_official_paper_ledger([stored], reporting_scope="legacy")
+
+    assert official.summary.total_trades == 0
+    assert official.data_health["paper_reporting_research_shadow"] == "1"
+    assert official.data_health["paper_reporting_legacy_unknown"] == "0"
+    assert research.summary.total_trades == 1
+    assert research.data_health["paper_reporting_research_shadow"] == "1"
 
 
 def test_build_paper_ledger_generates_trade_flows_fees_slippage_and_positions(tmp_path):

@@ -327,7 +327,7 @@ def test_recommendation_calibration_excludes_legacy_when_official_samples_exist(
     definitions = (
         ("official", "ranking_v3_production", 3.0),
         ("manual", "legacy_manual", -20.0),
-        ("unknown", None, -30.0),
+        ("shadow", "ranking_v4_shadow", -30.0),
     )
     for index, (name, admission_source, return_10d) in enumerate(
         definitions,
@@ -379,6 +379,7 @@ def test_recommendation_calibration_excludes_legacy_when_official_samples_exist(
         authenticated_admission_sources={
             "calibration-official": "ranking_v3_production",
             "calibration-manual": "legacy_manual",
+            "calibration-shadow": "ranking_v4_shadow",
         },
     )
 
@@ -389,8 +390,9 @@ def test_recommendation_calibration_excludes_legacy_when_official_samples_exist(
     assert center.data_health["recommendation_calibration_scope"] == ("ranking_v3_production")
     assert center.data_health["recommendation_calibration_source_total"] == "3"
     assert center.data_health["recommendation_calibration_source_official"] == "1"
+    assert center.data_health["recommendation_calibration_source_research_shadow"] == "1"
     assert center.data_health["recommendation_calibration_source_legacy_manual"] == "1"
-    assert center.data_health["recommendation_calibration_source_legacy_unknown"] == "1"
+    assert center.data_health["recommendation_calibration_source_legacy_unknown"] == "0"
     assert center.data_health["recommendation_calibration_source_excluded"] == "2"
     assert center.data_health["recommendation_calibration_samples"] == "1"
 

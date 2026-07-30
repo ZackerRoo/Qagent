@@ -456,11 +456,11 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
                   <td colSpan={15} className="empty-state">
                     {paperScope === "official"
                       ? language === "zh"
-                        ? "尚无通过签名发布门禁的正式模拟交易。旧记录请切换到“验证账本”查看。"
-                        : "No signed official trades yet. Switch to Validation ledger for prior records."
+                        ? "尚无通过签名发布门禁的正式模拟交易。研究记录请切换到“研究模拟”查看。"
+                        : "No signed official trades yet. Switch to Research paper for research records."
                       : language === "zh"
-                        ? "验证账本暂无记录。"
-                        : "No validation records."}
+                        ? "研究模拟暂无记录。"
+                        : "No research paper records."}
                   </td>
                 </tr>
               )}
@@ -1006,8 +1006,8 @@ function PaperRuntimeIdentity({
         </h3>
         <p>
           {zh
-            ? "只有带签名发布证明的模型交易才计入正式收益；旧验证记录继续独立更新，不会混入正式胜率、回撤或权益曲线。"
-            : "Only trades backed by a signed release proof count as official. Legacy validation records update separately and never enter official performance."}
+            ? "只有带签名发布证明的模型交易才计入正式收益；研究模拟继续独立更新，不会混入正式胜率、回撤或权益曲线。"
+            : "Only trades backed by a signed release proof count as official. Research paper trades update separately and never enter official performance."}
         </p>
       </div>
       <div className="paper-runtime-metrics">
@@ -1024,11 +1024,11 @@ function PaperRuntimeIdentity({
           <strong>{authenticated}</strong>
         </span>
         <span>
-          {zh ? "旧验证记录" : "Legacy records"}
+          {zh ? "研究模拟记录" : "Research records"}
           <strong>{legacyTotal}</strong>
         </span>
         <span>
-          {zh ? "旧记录活动中" : "Legacy active"}
+          {zh ? "研究记录活动中" : "Research active"}
           <strong>{legacyActive}</strong>
         </span>
         <span>
@@ -1062,7 +1062,7 @@ function PaperScopeSelector({
           className={scope === "legacy" ? "active" : ""}
           onClick={() => onChange("legacy")}
         >
-          <span>{zh ? "验证账本" : "Validation ledger"}</span>
+          <span>{zh ? "研究模拟" : "Research paper"}</span>
           <strong>{counts.legacy}</strong>
         </button>
         <button
@@ -1079,14 +1079,14 @@ function PaperScopeSelector({
       <div>
         <strong>
           {scope === "legacy"
-            ? zh ? "正在查看原模拟盘记录" : "Showing prior paper-trading records"
+            ? zh ? "正在查看研究模拟记录" : "Showing research paper-trading records"
             : zh ? "正在查看正式认证业绩" : "Showing authenticated performance"}
         </strong>
         <p>
           {scope === "legacy"
             ? zh
-              ? "这些记录仍由自动任务更新，用来检验买点、止损和收益，但不会计入正式模型业绩。"
-              : "These records still update automatically for trigger, stop, and return validation, but do not count as official model performance."
+              ? "这些研究记录由自动任务持续更新，用来检验买点、止损、成交和收益，但不会计入正式模型业绩。"
+              : "These research records update automatically for trigger, stop, fill, and return validation, but do not count as official model performance."
             : zh
               ? "这里只接收通过严格回测门禁并带签名发布证明的交易；当前为空不是数据丢失。"
               : "Only trades from a model that passed strict gates with a signed release proof appear here; an empty ledger does not mean data was lost."}

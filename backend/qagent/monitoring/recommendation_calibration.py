@@ -11,6 +11,9 @@ from qagent.monitoring.outcomes import OpportunityOutcome
 from qagent.storage.repository import OpportunitySnapshotRecord
 
 
+_RESEARCH_SHADOW_ADMISSION_SOURCES = frozenset({"ranking_v4_shadow"})
+
+
 class RecommendationCalibrationSample(BaseModel):
     snapshot_id: str
     instrument_id: str
@@ -166,12 +169,23 @@ def build_recommendation_calibration_center(
             "recommendation_calibration_fail_closed": "true",
             "recommendation_calibration_source_total": str(len(all_samples)),
             "recommendation_calibration_source_official": str(len(official_samples)),
+            "recommendation_calibration_source_research_shadow": str(
+                sum(
+                    item.admission_source in _RESEARCH_SHADOW_ADMISSION_SOURCES
+                    for item in all_samples
+                )
+            ),
             "recommendation_calibration_source_legacy_manual": str(
                 sum(item.admission_source == "legacy_manual" for item in all_samples)
             ),
             "recommendation_calibration_source_legacy_unknown": str(
                 sum(
-                    item.admission_source not in {"ranking_v3_production", "legacy_manual"}
+                    item.admission_source
+                    not in {
+                        "ranking_v3_production",
+                        "legacy_manual",
+                        *_RESEARCH_SHADOW_ADMISSION_SOURCES,
+                    }
                     for item in all_samples
                 )
             ),
@@ -476,6 +490,8 @@ def _authenticated_admission_source(
     if value == "ranking_v3_production":
         return value
     if value == "legacy_manual":
+        return value
+    if value in _RESEARCH_SHADOW_ADMISSION_SOURCES:
         return value
     return "legacy_unknown"
 

@@ -62,6 +62,7 @@ PAPER_RISK_PROBE_NOTE = "风控恢复探针"
 _ENTRY_FILL_UPDATE_KEY = "__paper_entry_fill"
 _EXIT_FILL_UPDATE_KEY = "__paper_exit_fill"
 _DEFERRED_FILL_UPDATE_KEY = "__paper_deferred_fills"
+_RESEARCH_SHADOW_ADMISSION_SOURCES = frozenset({"ranking_v4_shadow"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -1225,8 +1226,17 @@ def _paper_reporting_scope(
         for trade in trades
     )
     legacy_manual = sum(trade.admission_source == "legacy_manual" for trade in trades)
+    research_shadow = sum(
+        trade.admission_source in _RESEARCH_SHADOW_ADMISSION_SOURCES for trade in trades
+    )
     legacy_unknown = sum(
-        trade.admission_source not in {"ranking_v3_production", "legacy_manual"} for trade in trades
+        trade.admission_source
+        not in {
+            "ranking_v3_production",
+            "legacy_manual",
+            *_RESEARCH_SHADOW_ADMISSION_SOURCES,
+        }
+        for trade in trades
     ) + invalid_official_claims
     legacy = [trade for trade in trades if trade.trade_id not in authenticated_ids]
     reporting_trades = (
@@ -1244,6 +1254,7 @@ def _paper_reporting_scope(
         }[reporting_scope],
         "paper_reporting_fail_closed": "true",
         "paper_reporting_official": str(len(official)),
+        "paper_reporting_research_shadow": str(research_shadow),
         "paper_reporting_legacy_manual": str(legacy_manual),
         "paper_reporting_legacy_unknown": str(legacy_unknown),
         "paper_reporting_invalid_official_claims": str(invalid_official_claims),

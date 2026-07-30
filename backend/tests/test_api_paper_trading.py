@@ -706,7 +706,7 @@ def test_cached_unreleased_ranking_v3_does_not_fall_back_to_legacy_seed(
     assert client.get("/api/paper-trades").json()["summary"]["total"] == 0
 
 
-def test_ranking_v4_claim_cannot_fall_back_to_legacy_admission(
+def test_ranking_v4_shadow_claim_is_admitted_to_research_paper_lane(
     tmp_path,
     monkeypatch,
 ):
@@ -742,9 +742,54 @@ def test_ranking_v4_claim_cannot_fall_back_to_legacy_admission(
         provider="fixture",
     )
 
+    assert decision.eligible is True
+    assert decision.reason is None
+    assert decision.admission_source == "ranking_v4_shadow"
+    assert decision.selection_source == "ranking_v4"
+    assert decision.model_version == RANKING_V4_MODEL_VERSION
+    assert decision.deployment_scope == "shadow_only"
+    assert decision.release_proof_digest is None
+
+
+def test_ranking_v4_official_claim_requires_signed_production_membership(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'paper-v4-official-fail-closed.db'}",
+    )
+    _persist_authoritative_opportunities(
+        provider="fixture",
+        cards=[("ranking-v4-official-card", "US:V4-OFFICIAL")],
+    )
+    _patch_authoritative_card(
+        provider="fixture",
+        card_id="ranking-v4-official-card",
+        updates={
+            "ranking_v4": {
+                "selection_source": "ranking_v4",
+                "model_version": RANKING_V4_MODEL_VERSION,
+                "deployment_scope": "official_paper",
+                "official_release_allowed": True,
+            }
+        },
+    )
+    repo = routes._repo()
+    snapshot = repo.list_latest_opportunity_snapshots_by_card_ids(
+        ["ranking-v4-official-card"],
+        provider="fixture",
+    )[0]
+
+    decision = evaluate_paper_snapshot_admission(
+        repo,
+        snapshot,
+        provider="fixture",
+    )
+
     assert decision.eligible is False
     assert decision.admission_source == "ranking_v4_production"
-    assert "prospective release" in (decision.reason or "")
+    assert "signed release" in (decision.reason or "")
 
 
 def test_ranking_v3_requires_matching_authoritative_release_proof(tmp_path, monkeypatch):

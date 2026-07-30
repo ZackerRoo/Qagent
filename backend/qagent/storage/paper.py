@@ -196,7 +196,7 @@ class PaperTradeAdmissionProof(BaseModel):
             if any(value is None for value in production_values):
                 raise ValueError("Ranking V3 paper admission requires a complete production proof")
         elif any(value is not None for value in production_values):
-            raise ValueError("legacy paper admission cannot carry production proof fields")
+            raise ValueError("non-production paper admission cannot carry production proof fields")
         return self
 
 

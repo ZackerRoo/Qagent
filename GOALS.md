@@ -13,6 +13,8 @@ Qagent is research software. It does not guarantee returns and does not place li
 ## Operating Model
 
 - This file is the single roadmap for long-running project coordination.
+- Research paper trading is an evidence-collection lane and does not require formal release approval. Formal gates control validated labels and official reporting, not access to research simulation.
+- Research paper trades must remain visibly marked as `research` or `shadow` and stay excluded from official performance. Qagent never places live brokerage orders.
 - Only one milestone is active at a time.
 - The main thread coordinates objectives, constraints, decisions, evidence, and blockers.
 - Implementation and investigation work should be bounded and return conclusions, changes, evidence, and the recommended next action.
