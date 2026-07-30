@@ -18,8 +18,10 @@ RANKING_V43_EXPERIMENT_REGISTRY_SCHEMA_VERSION = "ranking-v4.3-experiment-regist
 RANKING_V43_EXPERIMENT_REGISTRY_ID = "QAGENT-RANK-V4.3-PRIOR-EVIDENCE-20260729"
 RANKING_V44_EXPERIMENT_REGISTRY_SCHEMA_VERSION = "ranking-v4.4-experiment-registry-v1"
 RANKING_V44_EXPERIMENT_REGISTRY_ID = "QAGENT-RANK-V4.4-PRIOR-EVIDENCE-20260730"
-RANKING_V4_EXPERIMENT_REGISTRY_SCHEMA_VERSION = RANKING_V44_EXPERIMENT_REGISTRY_SCHEMA_VERSION
-RANKING_V4_EXPERIMENT_REGISTRY_ID = RANKING_V44_EXPERIMENT_REGISTRY_ID
+RANKING_V45_EXPERIMENT_REGISTRY_SCHEMA_VERSION = "ranking-v4.5-experiment-registry-v1"
+RANKING_V45_EXPERIMENT_REGISTRY_ID = "QAGENT-RANK-V4.5-PRIOR-EVIDENCE-20260730"
+RANKING_V4_EXPERIMENT_REGISTRY_SCHEMA_VERSION = RANKING_V45_EXPERIMENT_REGISTRY_SCHEMA_VERSION
+RANKING_V4_EXPERIMENT_REGISTRY_ID = RANKING_V45_EXPERIMENT_REGISTRY_ID
 RANKING_V3_REJECTED_EXPERIMENT_ID = "walk-forward-20260726164443-7fd44f0b"
 RANKING_V3_REJECTED_CODE_REVISION = "dbd7fa0f6ec76990eca4de8325e14866dfbfe8e7"
 RANKING_V3_REJECTED_DATASET_REVISION = 8939
@@ -56,6 +58,20 @@ RANKING_V43_REJECTED_HOLM_P_VALUE = Decimal("0.112488751125")
 RANKING_V43_REJECTED_PBO = Decimal("0.214285714286")
 RANKING_V43_REJECTED_COMPLETED_TRADE_COUNT = 35
 RANKING_V43_REJECTED_OFFICIAL_PAPER_TRADE_COUNT = 0
+RANKING_V44_REJECTED_EXPERIMENT_ID = "walk-forward-20260729170841-d15c7837"
+RANKING_V44_REJECTED_CODE_REVISION = "58e55411f9aff59d44fa24c73ac69ce63cbbb2b9"
+RANKING_V44_REJECTED_DATASET_REVISION = 8939
+RANKING_V44_REJECTED_SNAPSHOT_COUNT = 102
+RANKING_V44_REJECTED_CANDIDATE_COVERAGE = Decimal("0.994053")
+RANKING_V44_REJECTED_MODEL_RETURN_PCT = Decimal("1.5683")
+RANKING_V44_REJECTED_STRESS_RETURN_PCT = Decimal("0.808519999196")
+RANKING_V44_REJECTED_BASELINE_RETURN_PCT = Decimal("-33.4016")
+RANKING_V44_REJECTED_BENCHMARK_EXCESS_PCT = Decimal("34.969900030891")
+RANKING_V44_REJECTED_BOOTSTRAP_LOWER_BOUND_PCT = Decimal("0.091982495294")
+RANKING_V44_REJECTED_HOLM_P_VALUE = Decimal("0.10798920108")
+RANKING_V44_REJECTED_PBO = Decimal("0.214285714286")
+RANKING_V44_REJECTED_COMPLETED_TRADE_COUNT = 25
+RANKING_V44_REJECTED_OFFICIAL_PAPER_TRADE_COUNT = 0
 
 _FULL_GIT_REVISION = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -304,16 +320,63 @@ def _ranking_v43_rejected_summary_payload() -> dict[str, object]:
     }
 
 
+def build_ranking_v44_rejected_summary() -> RankingV4ExperimentSummary:
+    payload = _ranking_v44_rejected_summary_payload()
+    summary = RankingV4ExperimentSummary(
+        **payload,
+        summary_digest=_digest(payload),
+    )
+    summary.require_valid()
+    return summary
+
+
+def _ranking_v44_rejected_summary_payload() -> dict[str, object]:
+    return {
+        "summary_schema_version": "ranking-v4.5-predecessor-summary-v1",
+        "experiment_id": RANKING_V44_REJECTED_EXPERIMENT_ID,
+        "model_generation": "ranking_v4",
+        "disposition": "rejected",
+        "evidence_class": "exploratory_development_evidence",
+        "evaluated_on": "2026-07-30",
+        "source_revision": RANKING_V44_REJECTED_CODE_REVISION,
+        "dataset_revision": RANKING_V44_REJECTED_DATASET_REVISION,
+        "configured_snapshot_count": RANKING_V44_REJECTED_SNAPSHOT_COUNT,
+        "completed_snapshot_count": RANKING_V44_REJECTED_SNAPSHOT_COUNT,
+        "candidate_outcome_coverage_ratio": str(RANKING_V44_REJECTED_CANDIDATE_COVERAGE),
+        "historical_portfolio_benchmark_id": "constraint_matched_baseline",
+        "historical_portfolio_benchmark_return_pct": str(RANKING_V44_REJECTED_BASELINE_RETURN_PCT),
+        "historical_model_return_pct": str(RANKING_V44_REJECTED_MODEL_RETURN_PCT),
+        "stress_cost_adjusted_return_pct": str(RANKING_V44_REJECTED_STRESS_RETURN_PCT),
+        "benchmark_excess_return_pct": str(RANKING_V44_REJECTED_BENCHMARK_EXCESS_PCT),
+        "completed_trade_count": RANKING_V44_REJECTED_COMPLETED_TRADE_COUNT,
+        "bootstrap_one_sided_95_lower_bound_pct": str(
+            RANKING_V44_REJECTED_BOOTSTRAP_LOWER_BOUND_PCT
+        ),
+        "official_paper_trade_count": RANKING_V44_REJECTED_OFFICIAL_PAPER_TRADE_COUNT,
+        "failed_gates": [
+            "minimum_completed_trades",
+            "holm_adjusted_significance",
+            "maximum_probability_of_backtest_overfit",
+            "deflated_sharpe_probability",
+        ],
+        "confirmatory_holm_adjusted_p_value": str(RANKING_V44_REJECTED_HOLM_P_VALUE),
+        "deflated_sharpe_probability": None,
+        "probability_of_backtest_overfit": str(RANKING_V44_REJECTED_PBO),
+        "unknown_statistics_policy": "null_means_unobserved_never_zero_or_passed",
+    }
+
+
 def build_ranking_v4_experiment_registry(
     *,
     predecessor_summaries: tuple[RankingV4ExperimentSummary, ...] | None = None,
-    version: Literal["4.1", "4.2", "4.3", "4.4"] = "4.4",
+    version: Literal["4.1", "4.2", "4.3", "4.4", "4.5"] = "4.5",
 ) -> RankingV4ExperimentRegistry:
     summaries = (
         (
             build_ranking_v3_rejected_summary(),
             build_ranking_v4_rejected_summary(),
-            *((build_ranking_v43_rejected_summary(),) if version == "4.4" else ()),
+            *((build_ranking_v43_rejected_summary(),) if version in {"4.4", "4.5"} else ()),
+            *((build_ranking_v44_rejected_summary(),) if version == "4.5" else ()),
         )
         if predecessor_summaries is None
         else tuple(
@@ -338,6 +401,10 @@ def build_ranking_v4_experiment_registry(
     elif version == "4.4":
         schema_version = RANKING_V44_EXPERIMENT_REGISTRY_SCHEMA_VERSION
         registry_id = RANKING_V44_EXPERIMENT_REGISTRY_ID
+        frozen_on = date(2026, 7, 30)
+    elif version == "4.5":
+        schema_version = RANKING_V45_EXPERIMENT_REGISTRY_SCHEMA_VERSION
+        registry_id = RANKING_V45_EXPERIMENT_REGISTRY_ID
         frozen_on = date(2026, 7, 30)
     else:
         raise ValueError("unsupported Ranking V4 experiment registry version")
@@ -413,6 +480,7 @@ def _validate_summary(summary: RankingV4ExperimentSummary) -> None:
         RANKING_V3_REJECTED_EXPERIMENT_ID: _ranking_v3_rejected_summary_payload(),
         RANKING_V4_REJECTED_EXPERIMENT_ID: _ranking_v4_rejected_summary_payload(),
         RANKING_V43_REJECTED_EXPERIMENT_ID: _ranking_v43_rejected_summary_payload(),
+        RANKING_V44_REJECTED_EXPERIMENT_ID: _ranking_v44_rejected_summary_payload(),
     }
     expected = expected_by_experiment_id.get(summary.experiment_id)
     if expected is None:
@@ -431,6 +499,7 @@ def _validate_registry(registry: RankingV4ExperimentRegistry) -> None:
         RANKING_V42_EXPERIMENT_REGISTRY_SCHEMA_VERSION: (RANKING_V42_EXPERIMENT_REGISTRY_ID),
         RANKING_V43_EXPERIMENT_REGISTRY_SCHEMA_VERSION: (RANKING_V43_EXPERIMENT_REGISTRY_ID),
         RANKING_V44_EXPERIMENT_REGISTRY_SCHEMA_VERSION: (RANKING_V44_EXPERIMENT_REGISTRY_ID),
+        RANKING_V45_EXPERIMENT_REGISTRY_SCHEMA_VERSION: (RANKING_V45_EXPERIMENT_REGISTRY_ID),
     }
     expected_id = expected_id_by_schema.get(registry.schema_version)
     if expected_id is None:
@@ -442,6 +511,7 @@ def _validate_registry(registry: RankingV4ExperimentRegistry) -> None:
         RANKING_V42_EXPERIMENT_REGISTRY_SCHEMA_VERSION: date(2026, 7, 29),
         RANKING_V43_EXPERIMENT_REGISTRY_SCHEMA_VERSION: date(2026, 7, 29),
         RANKING_V44_EXPERIMENT_REGISTRY_SCHEMA_VERSION: date(2026, 7, 30),
+        RANKING_V45_EXPERIMENT_REGISTRY_SCHEMA_VERSION: date(2026, 7, 30),
     }[registry.schema_version]
     if registry.frozen_on != expected_frozen_on:
         raise RankingV4ExperimentRegistryError("unexpected Ranking V4 registry freeze date")
@@ -455,6 +525,13 @@ def _validate_registry(registry: RankingV4ExperimentRegistry) -> None:
     }
     if registry.schema_version == RANKING_V44_EXPERIMENT_REGISTRY_SCHEMA_VERSION:
         expected_experiment_ids.add(RANKING_V43_REJECTED_EXPERIMENT_ID)
+    elif registry.schema_version == RANKING_V45_EXPERIMENT_REGISTRY_SCHEMA_VERSION:
+        expected_experiment_ids.update(
+            {
+                RANKING_V43_REJECTED_EXPERIMENT_ID,
+                RANKING_V44_REJECTED_EXPERIMENT_ID,
+            }
+        )
     if {
         item.experiment_id for item in registry.predecessor_summaries
     } != expected_experiment_ids or len(registry.predecessor_summaries) != len(

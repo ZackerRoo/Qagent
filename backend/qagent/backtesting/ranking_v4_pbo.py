@@ -34,8 +34,10 @@ _V43_MATRIX_SCHEMA_VERSION = "ranking-v4.3-real-model-return-matrix-v1"
 _V43_EVIDENCE_SCHEMA_VERSION = "ranking-v4.3-cscv-pbo-evidence-v1"
 _V44_MATRIX_SCHEMA_VERSION = "ranking-v4.4-real-model-return-matrix-v1"
 _V44_EVIDENCE_SCHEMA_VERSION = "ranking-v4.4-cscv-pbo-evidence-v1"
-_MATRIX_SCHEMA_VERSION = _V43_MATRIX_SCHEMA_VERSION
-_EVIDENCE_SCHEMA_VERSION = _V43_EVIDENCE_SCHEMA_VERSION
+_V45_MATRIX_SCHEMA_VERSION = "ranking-v4.5-real-model-return-matrix-v1"
+_V45_EVIDENCE_SCHEMA_VERSION = "ranking-v4.5-cscv-pbo-evidence-v1"
+_MATRIX_SCHEMA_VERSION = _V45_MATRIX_SCHEMA_VERSION
+_EVIDENCE_SCHEMA_VERSION = _V45_EVIDENCE_SCHEMA_VERSION
 _MATRIX_RETURN_SEMANTICS = (
     "caller_supplied_common_rebalance_calendar_with_invalid_or_missing_model_dates_"
     "explicitly_filled_as_cash_zero_return_before_evaluation"
@@ -51,7 +53,7 @@ RANKING_V44_PBO_REMAINDER_POLICY = (
 )
 
 SerializableEvidence: TypeAlias = dict[str, object]
-ProtocolVersion: TypeAlias = Literal["4.1", "4.2", "4.3", "4.4"]
+ProtocolVersion: TypeAlias = Literal["4.1", "4.2", "4.3", "4.4", "4.5"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +92,7 @@ class RankingV4DatedModelReturn:
 def evaluate_ranking_v4_cscv_pbo(
     model_returns: Mapping[str, Sequence[RankingV4DatedModelReturn]],
     *,
-    protocol_version: ProtocolVersion = "4.4",
+    protocol_version: ProtocolVersion = "4.5",
 ) -> SerializableEvidence:
     """Evaluate frozen-family Ranking V4 PBO from a real-date model matrix.
 
@@ -103,7 +105,7 @@ def evaluate_ranking_v4_cscv_pbo(
     config = _pbo_config(protocol_version)
     normalized, rejection_reason = _normalize_matrix(
         model_returns,
-        allow_unavailable=config.version == "4.4",
+        allow_unavailable=config.version in {"4.4", "4.5"},
     )
     if normalized is None:
         return _rejected_evidence(
@@ -120,7 +122,9 @@ def evaluate_ranking_v4_cscv_pbo(
         model_ids,
         rebalance_dates,
         returns_by_model,
-        availability_by_model=(availability_by_model if config.version == "4.4" else None),
+        availability_by_model=(
+            availability_by_model if config.version in {"4.4", "4.5"} else None
+        ),
     )
     matrix_digest = _matrix_digest(
         serialized_matrix,
@@ -658,7 +662,13 @@ def _pbo_config(version: ProtocolVersion) -> _PBOConfig:
                 _V42_MATRIX_SCHEMA_VERSION
                 if version == "4.2"
                 else (
-                    _V43_MATRIX_SCHEMA_VERSION if version == "4.3" else _V44_MATRIX_SCHEMA_VERSION
+                    _V43_MATRIX_SCHEMA_VERSION
+                    if version == "4.3"
+                    else (
+                        _V44_MATRIX_SCHEMA_VERSION
+                        if version == "4.4"
+                        else _V45_MATRIX_SCHEMA_VERSION
+                    )
                 )
             )
         ),
@@ -671,17 +681,25 @@ def _pbo_config(version: ProtocolVersion) -> _PBOConfig:
                 else (
                     _V43_EVIDENCE_SCHEMA_VERSION
                     if version == "4.3"
-                    else _V44_EVIDENCE_SCHEMA_VERSION
+                    else (
+                        _V44_EVIDENCE_SCHEMA_VERSION
+                        if version == "4.4"
+                        else _V45_EVIDENCE_SCHEMA_VERSION
+                    )
                 )
             )
         ),
         matrix_return_semantics=(
-            _V44_MATRIX_RETURN_SEMANTICS if version == "4.4" else _MATRIX_RETURN_SEMANTICS
+            _V44_MATRIX_RETURN_SEMANTICS
+            if version in {"4.4", "4.5"}
+            else _MATRIX_RETURN_SEMANTICS
         ),
         minimum_model_date_coverage_ratio=(
-            RANKING_V44_PBO_MINIMUM_MODEL_DATE_COVERAGE_RATIO if version == "4.4" else None
+            RANKING_V44_PBO_MINIMUM_MODEL_DATE_COVERAGE_RATIO
+            if version in {"4.4", "4.5"}
+            else None
         ),
         equal_block_remainder_policy=(
-            RANKING_V44_PBO_REMAINDER_POLICY if version == "4.4" else None
+            RANKING_V44_PBO_REMAINDER_POLICY if version in {"4.4", "4.5"} else None
         ),
     )

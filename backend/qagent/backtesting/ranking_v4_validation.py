@@ -29,7 +29,7 @@ from qagent.backtesting.ranking_v4_protocol import (
 ValidationStatus = Literal["pass", "insufficient", "fail"]
 GateStatus = Literal["pass", "insufficient", "fail", "unavailable"]
 EvidenceStatus = Literal["pass", "fail", "unavailable"]
-ProtocolVersion: TypeAlias = Literal["4.1", "4.2", "4.3", "4.4"]
+ProtocolVersion: TypeAlias = Literal["4.1", "4.2", "4.3", "4.4", "4.5"]
 
 RANKING_V41_TRIAL_LEDGER_SCHEMA_VERSION = "ranking-v4.1-immutable-trial-ledger-v1"
 RANKING_V41_TRIAL_LEDGER_ID = "QAGENT-RANK-V4.1-ALL-KNOWN-TRIALS"
@@ -43,9 +43,12 @@ RANKING_V43_VALIDATION_SCHEMA_VERSION = "ranking-v4.3-historical-validation-v1"
 RANKING_V44_TRIAL_LEDGER_SCHEMA_VERSION = "ranking-v4.4-immutable-trial-ledger-v1"
 RANKING_V44_TRIAL_LEDGER_ID = "QAGENT-RANK-V4.4-ALL-KNOWN-TRIALS"
 RANKING_V44_VALIDATION_SCHEMA_VERSION = "ranking-v4.4-historical-validation-v1"
-RANKING_V4_TRIAL_LEDGER_SCHEMA_VERSION = RANKING_V44_TRIAL_LEDGER_SCHEMA_VERSION
-RANKING_V4_TRIAL_LEDGER_ID = RANKING_V44_TRIAL_LEDGER_ID
-RANKING_V4_VALIDATION_SCHEMA_VERSION = RANKING_V44_VALIDATION_SCHEMA_VERSION
+RANKING_V45_TRIAL_LEDGER_SCHEMA_VERSION = "ranking-v4.5-immutable-trial-ledger-v1"
+RANKING_V45_TRIAL_LEDGER_ID = "QAGENT-RANK-V4.5-ALL-KNOWN-TRIALS"
+RANKING_V45_VALIDATION_SCHEMA_VERSION = "ranking-v4.5-historical-validation-v1"
+RANKING_V4_TRIAL_LEDGER_SCHEMA_VERSION = RANKING_V45_TRIAL_LEDGER_SCHEMA_VERSION
+RANKING_V4_TRIAL_LEDGER_ID = RANKING_V45_TRIAL_LEDGER_ID
+RANKING_V4_VALIDATION_SCHEMA_VERSION = RANKING_V45_VALIDATION_SCHEMA_VERSION
 
 _V41_PBO_EVIDENCE_SCHEMA_VERSION = "ranking-v4.1-cscv-pbo-evidence-v1"
 _V41_PBO_MATRIX_SCHEMA_VERSION = "ranking-v4.1-real-model-return-matrix-v1"
@@ -55,8 +58,10 @@ _V43_PBO_EVIDENCE_SCHEMA_VERSION = "ranking-v4.3-cscv-pbo-evidence-v1"
 _V43_PBO_MATRIX_SCHEMA_VERSION = "ranking-v4.3-real-model-return-matrix-v1"
 _V44_PBO_EVIDENCE_SCHEMA_VERSION = "ranking-v4.4-cscv-pbo-evidence-v1"
 _V44_PBO_MATRIX_SCHEMA_VERSION = "ranking-v4.4-real-model-return-matrix-v1"
-_PBO_EVIDENCE_SCHEMA_VERSION = _V44_PBO_EVIDENCE_SCHEMA_VERSION
-_PBO_MATRIX_SCHEMA_VERSION = _V44_PBO_MATRIX_SCHEMA_VERSION
+_V45_PBO_EVIDENCE_SCHEMA_VERSION = "ranking-v4.5-cscv-pbo-evidence-v1"
+_V45_PBO_MATRIX_SCHEMA_VERSION = "ranking-v4.5-real-model-return-matrix-v1"
+_PBO_EVIDENCE_SCHEMA_VERSION = _V45_PBO_EVIDENCE_SCHEMA_VERSION
+_PBO_MATRIX_SCHEMA_VERSION = _V45_PBO_MATRIX_SCHEMA_VERSION
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PROTOCOL = build_ranking_v4_protocol()
 _STATISTICS = _PROTOCOL.statistics_definition
@@ -74,6 +79,7 @@ def _current_trial_id(version: ProtocolVersion) -> str:
         "4.2": "ranking_v42_full",
         "4.3": "ranking_v43_full",
         "4.4": "ranking_v44_full",
+        "4.5": "ranking_v45_full",
     }[version]
 
 
@@ -83,6 +89,7 @@ def _trial_ledger_schema_version(version: ProtocolVersion) -> str:
         "4.2": RANKING_V42_TRIAL_LEDGER_SCHEMA_VERSION,
         "4.3": RANKING_V43_TRIAL_LEDGER_SCHEMA_VERSION,
         "4.4": RANKING_V44_TRIAL_LEDGER_SCHEMA_VERSION,
+        "4.5": RANKING_V45_TRIAL_LEDGER_SCHEMA_VERSION,
     }[version]
 
 
@@ -92,6 +99,7 @@ def _trial_ledger_id(version: ProtocolVersion) -> str:
         "4.2": RANKING_V42_TRIAL_LEDGER_ID,
         "4.3": RANKING_V43_TRIAL_LEDGER_ID,
         "4.4": RANKING_V44_TRIAL_LEDGER_ID,
+        "4.5": RANKING_V45_TRIAL_LEDGER_ID,
     }[version]
 
 
@@ -101,6 +109,7 @@ def _validation_schema_version(version: ProtocolVersion) -> str:
         "4.2": RANKING_V42_VALIDATION_SCHEMA_VERSION,
         "4.3": RANKING_V43_VALIDATION_SCHEMA_VERSION,
         "4.4": RANKING_V44_VALIDATION_SCHEMA_VERSION,
+        "4.5": RANKING_V45_VALIDATION_SCHEMA_VERSION,
     }[version]
 
 
@@ -110,6 +119,7 @@ def _pbo_evidence_schema_version(version: ProtocolVersion) -> str:
         "4.2": _V42_PBO_EVIDENCE_SCHEMA_VERSION,
         "4.3": _V43_PBO_EVIDENCE_SCHEMA_VERSION,
         "4.4": _V44_PBO_EVIDENCE_SCHEMA_VERSION,
+        "4.5": _V45_PBO_EVIDENCE_SCHEMA_VERSION,
     }[version]
 
 
@@ -119,6 +129,7 @@ def _pbo_matrix_schema_version(version: ProtocolVersion) -> str:
         "4.2": _V42_PBO_MATRIX_SCHEMA_VERSION,
         "4.3": _V43_PBO_MATRIX_SCHEMA_VERSION,
         "4.4": _V44_PBO_MATRIX_SCHEMA_VERSION,
+        "4.5": _V45_PBO_MATRIX_SCHEMA_VERSION,
     }[version]
 
 
@@ -161,7 +172,7 @@ class RankingV4TrialLedgerEvidence(BaseModel):
     known_trial_ids: tuple[str, ...]
     research_attempt_ids: tuple[str, ...]
     research_attempt_inventory_digest: str
-    current_trial_id: str = "ranking_v44_full"
+    current_trial_id: str = "ranking_v45_full"
     experiment_registry_digest: str
     trial_series: tuple[RankingV4TrialSeries, ...]
     ledger_digest: str
@@ -268,7 +279,7 @@ def build_ranking_v4_trial_ledger(
     experiment_registry_digest: str,
     known_research_attempt_ids: Sequence[str] = (),
     immutable: bool = True,
-    protocol_version: ProtocolVersion = "4.4",
+    protocol_version: ProtocolVersion = "4.5",
 ) -> RankingV4TrialLedgerEvidence:
     """Build digest-backed evidence for every known research attempt.
 
@@ -364,7 +375,7 @@ def evaluate_ranking_v4_historical_validation(
     bootstrap_samples: int = DEFAULT_BOOTSTRAP_SAMPLES,
     permutation_samples: int = DEFAULT_PERMUTATION_SAMPLES,
     seed: int = DEFAULT_RANDOM_SEED,
-    protocol_version: ProtocolVersion = "4.4",
+    protocol_version: ProtocolVersion = "4.5",
 ) -> RankingV4HistoricalValidationEvaluation:
     """Evaluate preregistered V4 historical evidence without granting release.
 
@@ -740,7 +751,7 @@ def _validate_pbo_evidence(
         ]
         | None
     ) = None
-    if protocol_version == "4.4":
+    if protocol_version in {"4.4", "4.5"}:
         sparse_matrix, matrix_reason = _parse_v44_pbo_return_matrix(
             evidence.get("model_return_matrix"),
             expected_ids=model_ids,

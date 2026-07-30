@@ -3816,6 +3816,7 @@ def _ranking_v4_candidate_from_selection(
         constraint_as_of=constraint_as_of,
         cost_as_of=selection.ranking_v4_cost_effective_date,
         primary_strategy_id=selection.primary_strategy_id,
+        primary_channel=selection.ranking_v4_primary_channel,
         factor_signals=selection.factor_signals,
         market_regime=market_regime,
         asset_type=selection.asset_type,
@@ -4676,6 +4677,7 @@ def _build_ranking_v4_observations(
                 benchmark_return_pct=benchmark_return,
                 cost_adjusted_net_excess_return_pct=net_excess,
                 primary_strategy_id=outcome.strategy_id,
+                primary_channel=selection.ranking_v4_primary_channel,
                 factor_signals=selection.factor_signals,
                 market_regime=regime_by_date.get(
                     outcome.signal_date,

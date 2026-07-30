@@ -34,7 +34,7 @@ def _dates(count: int = DATE_COUNT) -> list[date]:
 def _passing_values(count: int = DATE_COUNT) -> dict[str, list[float]]:
     return {
         "constraint_matched_baseline": [0.0] * count,
-        "ranking_v44_full": [
+        "ranking_v45_full": [
             1.1 + [0.0, 0.25, -0.1, 0.15, -0.2, 0.1][index % 6] for index in range(count)
         ],
         "channel_baseline": [0.15 + [0.2, -0.2, 0.1, -0.1][index % 4] for index in range(count)],
@@ -112,7 +112,7 @@ def _passing_inputs(
         complete_trial_matrix,
         experiment_registry_digest=protocol.experiment_registry.registry_digest,
     )
-    challenger_values = selected_values["ranking_v44_full"]
+    challenger_values = selected_values["ranking_v45_full"]
     return {
         "baseline_returns": _observations(selected_values["constraint_matched_baseline"]),
         "challenger_returns": _observations(
@@ -176,13 +176,13 @@ def test_positive_statistics_remain_shadow_only_and_dsr_unavailable_without_audi
     assert result.deflated_sharpe_probability is None
     assert result.positive_subperiod_count == 5
     assert result.subperiod_count == 5
-    assert result.validation_schema_version == "ranking-v4.4-historical-validation-v1"
+    assert result.validation_schema_version == "ranking-v4.5-historical-validation-v1"
     assert inputs["pbo_evidence"]["evidence_schema_version"] == (
-        "ranking-v4.4-cscv-pbo-evidence-v1"
+        "ranking-v4.5-cscv-pbo-evidence-v1"
     )
-    assert inputs["trial_ledger"].schema_version == ("ranking-v4.4-immutable-trial-ledger-v1")
-    assert inputs["trial_ledger"].ledger_id == "QAGENT-RANK-V4.4-ALL-KNOWN-TRIALS"
-    assert inputs["trial_ledger"].current_trial_id == "ranking_v44_full"
+    assert inputs["trial_ledger"].schema_version == ("ranking-v4.5-immutable-trial-ledger-v1")
+    assert inputs["trial_ledger"].ledger_id == "QAGENT-RANK-V4.5-ALL-KNOWN-TRIALS"
+    assert inputs["trial_ledger"].current_trial_id == "ranking_v45_full"
     assert all(gate.status == "pass" for gate in result.gates if gate.key != "deflated_sharpe")
     assert _gate(result, "deflated_sharpe").status == "unavailable"
     assert not any("eligible" in gate.key for gate in result.gates)
@@ -558,8 +558,8 @@ def test_prior_historical_validation_paths_keep_exact_schemas_digests_and_behavi
 ):
     protocol = build_ranking_v4_protocol(version=version)
     dates = _dates()
-    values = {key: series for key, series in _passing_values().items() if key != "ranking_v44_full"}
-    values[current_trial_id] = _passing_values()["ranking_v44_full"]
+    values = {key: series for key, series in _passing_values().items() if key != "ranking_v45_full"}
+    values[current_trial_id] = _passing_values()["ranking_v45_full"]
     matrix = {
         model_id: [
             RankingV4DatedModelReturn(rebalance_date=rebalance_date, net_return=value)

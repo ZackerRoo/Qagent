@@ -16,6 +16,7 @@ from qagent.backtesting.ranking_v4_protocol import (
     RANKING_V42_MODEL_VERSION,
     RANKING_V43_MODEL_VERSION,
     RANKING_V44_MODEL_VERSION,
+    RANKING_V45_MODEL_VERSION,
     RANKING_V4_MODEL_VERSION,
     RANKING_V41_FEATURE_EFFECT_NAMES,
 )
@@ -38,6 +39,8 @@ V41_MINIMUM_TRIGGER_RESIDUAL_VOLATILITY = 0.05
 V42_UTILITY_BLOCK_LENGTH = 3
 V44_UTILITY_STRATEGY_PRIOR_BLOCK_STRENGTH = 4.0
 V44_UTILITY_REGIME_PRIOR_BLOCK_STRENGTH = 3.0
+V45_UTILITY_CHANNEL_PRIOR_BLOCK_STRENGTH = 4.0
+V45_UTILITY_REGIME_PRIOR_BLOCK_STRENGTH = 3.0
 
 
 class RankingV4FeatureVector(BaseModel):
@@ -73,6 +76,7 @@ class RankingV4Candidate(BaseModel):
     constraint_as_of: date | None = None
     cost_as_of: date | None = None
     primary_strategy_id: str | None = None
+    primary_channel: str | None = None
     factor_signals: list[str] = Field(default_factory=list)
     market_regime: str = "unknown"
     asset_type: str = "unknown"
@@ -116,6 +120,7 @@ class ResolvedRankingV4Observation(BaseModel):
     benchmark_return_pct: float | None = None
     cost_adjusted_net_excess_return_pct: float | None = None
     primary_strategy_id: str | None = None
+    primary_channel: str | None = None
     factor_signals: list[str] = Field(default_factory=list)
     market_regime: str = "unknown"
     asset_type: str = "unknown"
@@ -251,6 +256,7 @@ class RankingV4FrozenScoringArtifact(BaseModel):
             RANKING_V42_MODEL_VERSION,
             RANKING_V43_MODEL_VERSION,
             RANKING_V44_MODEL_VERSION,
+            RANKING_V45_MODEL_VERSION,
         }:
             raise ValueError("unsupported Ranking V4 artifact model version")
         if self.training_triggered_observation_count > self.training_observation_count:
@@ -353,12 +359,16 @@ def build_ranking_v4_frozen_scoring_artifact(
         model_version=resolved_model_version,
     )
     realized_utility_dates = (
-        _build_realized_utility_dates(trigger_observations)
+        _build_realized_utility_dates(
+            trigger_observations,
+            model_version=resolved_model_version,
+        )
         if resolved_model_version
         in {
             RANKING_V42_MODEL_VERSION,
             RANKING_V43_MODEL_VERSION,
             RANKING_V44_MODEL_VERSION,
+            RANKING_V45_MODEL_VERSION,
         }
         else []
     )
@@ -548,10 +558,13 @@ def _score_candidate(
         in {
             RANKING_V43_MODEL_VERSION,
             RANKING_V44_MODEL_VERSION,
+            RANKING_V45_MODEL_VERSION,
         }
         and _asset(candidate.asset_type) == "unknown"
     ):
         blocked_reasons.append("asset_type_missing")
+    if model_version == RANKING_V45_MODEL_VERSION and _is_unknown(candidate.primary_channel):
+        blocked_reasons.append("candidate_channel_missing")
     if not candidate.market_regime_features_complete:
         blocked_reasons.append("market_regime_evidence_incomplete")
     if not candidate.point_in_time_evidence_complete:
@@ -875,7 +888,11 @@ def _build_feature_effects(
             base_by_segment=trigger_by_segment,
             decision_date=decision_date,
             asset_stratified=model_version
-            in {RANKING_V43_MODEL_VERSION, RANKING_V44_MODEL_VERSION},
+            in {
+                RANKING_V43_MODEL_VERSION,
+                RANKING_V44_MODEL_VERSION,
+                RANKING_V45_MODEL_VERSION,
+            },
         )
     )
     effects.extend(
@@ -885,7 +902,11 @@ def _build_feature_effects(
             base_by_segment=posterior_by_segment,
             decision_date=decision_date,
             asset_stratified=model_version
-            in {RANKING_V43_MODEL_VERSION, RANKING_V44_MODEL_VERSION},
+            in {
+                RANKING_V43_MODEL_VERSION,
+                RANKING_V44_MODEL_VERSION,
+                RANKING_V45_MODEL_VERSION,
+            },
         )
     )
     return effects
@@ -893,10 +914,15 @@ def _build_feature_effects(
 
 def _build_realized_utility_dates(
     observations: list[ResolvedRankingV4Observation],
+    *,
+    model_version: str,
 ) -> list[RankingV42RealizedUtilityDate]:
     grouped: dict[tuple[str, date], list[ResolvedRankingV4Observation]] = defaultdict(list)
     for observation in observations:
-        for segment in _observation_segments(observation):
+        for segment in _observation_utility_segments(
+            observation,
+            model_version=model_version,
+        ):
             grouped[(segment, observation.signal_date)].append(observation)
 
     result: list[RankingV42RealizedUtilityDate] = []
@@ -927,12 +953,27 @@ def _candidate_realized_utility_lower_bound(
     model_version: str,
 ) -> tuple[float | None, int, int]:
     segments = _candidate_segments(candidate)
+    if model_version == RANKING_V45_MODEL_VERSION:
+        return _candidate_partially_pooled_realized_utility_lower_bound(
+            segments=_candidate_v45_utility_segments(candidate),
+            values_by_segment=values_by_segment,
+            opportunity_cost_pct=opportunity_cost_pct,
+            fixed_penalty_pct=fixed_penalty_pct,
+            child_prior_strengths=(
+                V45_UTILITY_CHANNEL_PRIOR_BLOCK_STRENGTH,
+                V45_UTILITY_REGIME_PRIOR_BLOCK_STRENGTH,
+            ),
+        )
     if model_version == RANKING_V44_MODEL_VERSION:
-        return _candidate_v44_realized_utility_lower_bound(
+        return _candidate_partially_pooled_realized_utility_lower_bound(
             segments=tuple(segment for segment in segments if segment != "global"),
             values_by_segment=values_by_segment,
             opportunity_cost_pct=opportunity_cost_pct,
             fixed_penalty_pct=fixed_penalty_pct,
+            child_prior_strengths=(
+                V44_UTILITY_STRATEGY_PRIOR_BLOCK_STRENGTH,
+                V44_UTILITY_REGIME_PRIOR_BLOCK_STRENGTH,
+            ),
         )
     if model_version == RANKING_V43_MODEL_VERSION:
         segments = tuple(segment for segment in segments if segment != "global")
@@ -953,19 +994,20 @@ def _candidate_realized_utility_lower_bound(
     return None, 0, 0
 
 
-def _candidate_v44_realized_utility_lower_bound(
+def _candidate_partially_pooled_realized_utility_lower_bound(
     *,
     segments: tuple[str, ...],
     values_by_segment: dict[str, list[RankingV42RealizedUtilityDate]],
     opportunity_cost_pct: float,
     fixed_penalty_pct: float,
+    child_prior_strengths: tuple[float, ...],
 ) -> tuple[float | None, int, int]:
     """Asset-isolated partial pooling for nested utility evidence.
 
-    Asset evidence establishes the independent rebalance-date sample. Strategy
-    and regime evidence can move that estimate, but sparse child segments cannot
-    replace the parent estimate outright. The final gate remains the same
-    preregistered one-sided 95% lower bound strictly above zero.
+    Asset evidence establishes the independent rebalance-date sample. Frozen
+    child segments can move that estimate, but sparse children cannot replace
+    the parent estimate outright. The final gate remains the same preregistered
+    one-sided 95% lower bound strictly above zero.
     """
 
     if not segments:
@@ -982,10 +1024,7 @@ def _candidate_v44_realized_utility_lower_bound(
     previous_child_dates: tuple[date, ...] = ()
     for segment, prior_strength in zip(
         segments[1:],
-        (
-            V44_UTILITY_STRATEGY_PRIOR_BLOCK_STRENGTH,
-            V44_UTILITY_REGIME_PRIOR_BLOCK_STRENGTH,
-        ),
+        child_prior_strengths,
         strict=True,
     ):
         child_blocks, _, child_dates = _segment_realized_utility_blocks(
@@ -1203,7 +1242,12 @@ def _candidate_feature_adjustment(
 ) -> tuple[float, float, int]:
     feature_prefix = (
         f"{_asset(candidate.asset_type)}|"
-        if model_version in {RANKING_V43_MODEL_VERSION, RANKING_V44_MODEL_VERSION}
+        if model_version
+        in {
+            RANKING_V43_MODEL_VERSION,
+            RANKING_V44_MODEL_VERSION,
+            RANKING_V45_MODEL_VERSION,
+        }
         else ""
     )
     matched = [
@@ -1365,6 +1409,41 @@ def _observation_segments(
     )
 
 
+def _candidate_v45_utility_segments(
+    candidate: RankingV4Candidate,
+) -> tuple[str, ...]:
+    return (
+        f"asset:{_asset(candidate.asset_type)}",
+        _channel_segment(candidate.asset_type, candidate.primary_channel),
+        _channel_regime_segment(
+            candidate.asset_type,
+            candidate.primary_channel,
+            candidate.market_regime,
+        ),
+    )
+
+
+def _observation_utility_segments(
+    observation: ResolvedRankingV4Observation,
+    *,
+    model_version: str,
+) -> tuple[str, ...]:
+    if model_version == RANKING_V45_MODEL_VERSION:
+        return (
+            f"asset:{_asset(observation.asset_type)}",
+            _channel_segment(
+                observation.asset_type,
+                observation.primary_channel,
+            ),
+            _channel_regime_segment(
+                observation.asset_type,
+                observation.primary_channel,
+                observation.market_regime,
+            ),
+        )
+    return _observation_segments(observation)
+
+
 def _deepest_candidate_value(candidate: RankingV4Candidate, values: dict[str, object]):
     for segment in reversed(_candidate_segments(candidate)):
         if segment in values:
@@ -1392,6 +1471,21 @@ def _regime_segment(
     market_regime: str,
 ) -> str:
     return f"regime:{_asset(asset_type)}:{_value(strategy_id)}:{_value(market_regime)}"
+
+
+def _channel_segment(asset_type: str, primary_channel: str | None) -> str:
+    return f"channel:{_asset(asset_type)}:{_value(primary_channel)}"
+
+
+def _channel_regime_segment(
+    asset_type: str,
+    primary_channel: str | None,
+    market_regime: str,
+) -> str:
+    return (
+        f"channel_regime:{_asset(asset_type)}:"
+        f"{_value(primary_channel)}:{_value(market_regime)}"
+    )
 
 
 def _asset(asset_type: str) -> str:
@@ -1650,6 +1744,8 @@ def _resolve_model_version(model_version: str) -> str:
         return RANKING_V43_MODEL_VERSION
     if model_version in {"4.4", RANKING_V44_MODEL_VERSION}:
         return RANKING_V44_MODEL_VERSION
+    if model_version in {"4.5", RANKING_V45_MODEL_VERSION}:
+        return RANKING_V45_MODEL_VERSION
     raise ValueError("unsupported Ranking V4 model version")
 
 

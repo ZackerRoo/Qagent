@@ -19,6 +19,7 @@ from qagent.backtesting.ranking_v4_protocol import (
     RANKING_V42_MODEL_VERSION,
     RANKING_V43_MODEL_VERSION,
     RANKING_V44_MODEL_VERSION,
+    RANKING_V45_MODEL_VERSION,
 )
 
 
@@ -61,6 +62,7 @@ def _candidate(
     features: RankingV4FeatureVector | None = None,
     incumbent: bool = False,
     asset_type: str = "stock",
+    channel: str | None = "baseline",
 ) -> RankingV4Candidate:
     return RankingV4Candidate(
         instrument_id=instrument_id,
@@ -71,6 +73,7 @@ def _candidate(
         constraint_as_of=evidence_date,
         cost_as_of=evidence_date,
         primary_strategy_id=strategy,
+        primary_channel=channel,
         market_regime=regime,
         asset_type=asset_type,
         industry="电子",
@@ -99,6 +102,7 @@ def _resolved(
     regime: str = "risk_on",
     strategy: str = "breakout_volume_confirmation",
     asset_type: str = "stock",
+    channel: str | None = "baseline",
 ) -> ResolvedRankingV4Observation:
     signal_date = date(2023, 1, 2) + timedelta(days=index)
     if triggered:
@@ -112,6 +116,7 @@ def _resolved(
             benchmark_return_pct=0.5,
             cost_adjusted_net_excess_return_pct=excess,
             primary_strategy_id=strategy,
+            primary_channel=channel,
             market_regime=regime,
             asset_type=asset_type,
             features=_features(),
@@ -126,6 +131,7 @@ def _resolved(
         benchmark_return_pct=0.5,
         cost_adjusted_net_excess_return_pct=None,
         primary_strategy_id=strategy,
+        primary_channel=channel,
         market_regime=regime,
         asset_type=asset_type,
         features=_features(),
@@ -674,6 +680,56 @@ def test_v44_etf_utility_cannot_borrow_stock_asset_evidence():
     assert score.expected_utility_lower_bound_pct is None
     assert score.utility_evidence_date_count == 0
     assert "realized_utility_block_evidence_insufficient" in score.blocked_reasons
+
+
+def test_v45_utility_uses_point_in_time_candidate_channel_evidence():
+    baseline_observations = [
+        _resolved(
+            index,
+            available_at=date(2024, 7, 1),
+            excess=4.0,
+            channel="baseline",
+        )
+        for index in range(MIN_V4_TRAINING_OBSERVATIONS)
+    ]
+    breakout_observations = [
+        _resolved(
+            index + MIN_V4_TRAINING_OBSERVATIONS,
+            available_at=date(2024, 7, 1),
+            excess=-8.0,
+            channel="breakout",
+        )
+        for index in range(30)
+    ]
+
+    decision = score_ranking_v4_candidates(
+        [
+            _candidate("CN:BASELINE", channel="baseline"),
+            _candidate("CN:BREAKOUT", channel="breakout"),
+        ],
+        [*baseline_observations, *breakout_observations],
+        decision_date=date(2025, 1, 2),
+        model_version=RANKING_V45_MODEL_VERSION,
+    )
+    by_id = {item.instrument_id: item for item in decision.candidates}
+
+    assert by_id["CN:BASELINE"].eligible_for_position is True
+    assert by_id["CN:BASELINE"].expected_utility_lower_bound_pct > 0
+    assert by_id["CN:BREAKOUT"].eligible_for_position is False
+    assert by_id["CN:BREAKOUT"].expected_utility_lower_bound_pct < 0
+    assert "utility_lower_bound_not_positive" in by_id["CN:BREAKOUT"].blocked_reasons
+
+
+def test_v45_missing_candidate_channel_fails_closed():
+    score = score_ranking_v4_candidates(
+        [_candidate("CN:NO-CHANNEL", channel=None)],
+        _training(),
+        decision_date=date(2025, 1, 2),
+        model_version=RANKING_V45_MODEL_VERSION,
+    ).candidates[0]
+
+    assert score.eligible_for_position is False
+    assert "candidate_channel_missing" in score.blocked_reasons
 
 
 def test_v42_ignores_unproven_fixed_replacement_cost_and_deducts_only_increment():
