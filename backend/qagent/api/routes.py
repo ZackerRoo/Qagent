@@ -4649,7 +4649,7 @@ def start_paper_trade_session(request: PaperSessionStartRequest) -> dict[str, ob
     )
     cleared = repo.clear_trades() if request.reset_existing else 0
     account = repo.start_account_session(
-        label=request.label.strip() or "A股正式模拟盘",
+        label=request.label.strip() or "A股研究模拟盘",
         initial_capital=initial_capital,
         allocation_per_trade_pct=allocation_per_trade_pct,
         max_positions=request.max_positions,

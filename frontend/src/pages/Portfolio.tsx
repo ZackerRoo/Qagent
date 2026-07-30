@@ -56,7 +56,7 @@ const emptyPosition: Position = {
 };
 
 const defaultPaperSessionForm: PaperSessionStartPayload = {
-  label: "A股正式模拟盘",
+  label: "A股研究模拟盘",
   reset_existing: false,
   initial_capital: "100000",
   allocation_per_trade_pct: "10",
@@ -290,7 +290,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       setLedger(result.ledger);
       setPaperMessage(
         language === "zh"
-          ? `已启动正式模拟盘，清空 ${result.cleared_trades} 条旧记录`
+          ? `已启动研究模拟盘，清空 ${result.cleared_trades} 条旧记录`
           : `Started paper session, cleared ${result.cleared_trades} old records`,
       );
       await load();
@@ -1123,7 +1123,7 @@ function PaperSessionStarter({
       <div className="paper-session-current">
         <div>
           <span className="eyebrow">
-            {language === "zh" ? "正式模拟盘批次" : "Paper Session"}
+            {language === "zh" ? "研究模拟盘批次" : "Research Paper Session"}
           </span>
           <h3>{account?.label ?? form.label}</h3>
           <p>
@@ -1220,7 +1220,7 @@ function PaperSessionStarter({
         <button type="button" className="icon-action" onClick={onStart} disabled={isStarting}>
           {isStarting
             ? language === "zh" ? "启动中" : "Starting"
-            : language === "zh" ? "启动正式模拟盘" : "Start Paper Session"}
+            : language === "zh" ? "启动研究模拟盘" : "Start Research Paper Session"}
         </button>
       </div>
 

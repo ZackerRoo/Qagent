@@ -30,7 +30,7 @@ class PaperTradeFromOpportunityRequest(BaseModel):
 
 
 class PaperSessionStartRequest(BaseModel):
-    label: str = "A股正式模拟盘"
+    label: str = "A股研究模拟盘"
     reset_existing: bool = True
     initial_capital: str = "100000"
     allocation_per_trade_pct: str = "10"

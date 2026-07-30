@@ -1612,7 +1612,7 @@ class PaperAccountSettingsRow(Base):
 
     account_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     session_id: Mapped[str] = mapped_column(String(96), index=True)
-    label: Mapped[str] = mapped_column(String(128), default="正式模拟盘")
+    label: Mapped[str] = mapped_column(String(128), default="研究模拟盘")
     status: Mapped[str] = mapped_column(String(32), default="active", index=True)
     initial_capital: Mapped[Decimal] = mapped_column(Numeric(18, 4))
     allocation_per_trade_pct: Mapped[Decimal] = mapped_column(Numeric(8, 4))

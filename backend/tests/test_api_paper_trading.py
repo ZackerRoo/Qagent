@@ -1251,7 +1251,7 @@ def test_paper_trade_session_start_resets_records_and_saves_rules(tmp_path, monk
     started = client.post(
         "/api/paper-trades/session/start",
         json={
-            "label": "A股正式模拟盘",
+            "label": "A股研究模拟盘",
             "reset_existing": True,
             "initial_capital": "100000",
             "allocation_per_trade_pct": "10",
@@ -1268,7 +1268,7 @@ def test_paper_trade_session_start_resets_records_and_saves_rules(tmp_path, monk
     assert started.status_code == 200
     body = started.json()
     assert body["cleared_trades"] == 1
-    assert body["account"]["label"] == "A股正式模拟盘"
+    assert body["account"]["label"] == "A股研究模拟盘"
     assert body["account"]["status"] == "active"
     assert body["account"]["initial_capital"] == "100000.0000"
     assert body["account"]["max_positions"] == 5
@@ -1276,7 +1276,7 @@ def test_paper_trade_session_start_resets_records_and_saves_rules(tmp_path, monk
     assert body["ledger"]["summary"]["max_positions"] == 5
     assert body["ledger"]["summary"]["transaction_cost_bps"] == 5.0
     assert listed.json()["summary"]["total"] == 0
-    assert session.json()["account"]["label"] == "A股正式模拟盘"
+    assert session.json()["account"]["label"] == "A股研究模拟盘"
     assert ledger.json()["summary"]["take_profit_pct"] == 50.0
     assert ledger.json()["summary"]["max_positions"] == 5
     assert ledger.json()["data_health"]["paper_session_status"] == "active"
