@@ -77,19 +77,21 @@ source-result endpoint.
 
 ## Fixed Checkpoints
 
-Release may be evaluated only at exactly 48, 64, or 80 complete common
+Release may be evaluated only at exactly 80, 96, or 112 complete common
 rebalance dates. These checkpoints are fixed before prospective collection.
 Intermediate observations produce integrity proofs only.
 
-The 48-date minimum is required so the frozen eight-block CSCV/PBO procedure
-has at least 24 common dates in each symmetric half. Evaluating at an
-unregistered date count is fail-closed.
+The 80-date minimum is required so the frozen eight-block CSCV/PBO procedure,
+after its two-cohort purge at every train/test boundary, still has at least 24
+common dates in every symmetric half. A mechanical pre-collection audit showed
+that 48, 56, 64, and 72 dates all remain below this frozen post-purge minimum.
+Evaluating at an unregistered date count is fail-closed.
 
 The familywise positive-edge significance budget is 0.05 across all three
 checkpoints. Each checkpoint therefore requires a Holm-adjusted p-value no
 greater than `0.05 / 3`.
 
-If all gates do not pass by the 80-date checkpoint, the epoch is rejected.
+If all gates do not pass by the 112-date checkpoint, the epoch is rejected.
 Later evidence cannot revive it.
 
 ## Release Gates
@@ -130,4 +132,3 @@ Promotion additionally requires:
   and evidence-chain identities at admission time.
 
 Any missing or stale binding remains `shadow_only`.
-
