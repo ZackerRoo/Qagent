@@ -902,6 +902,148 @@ class RankingV3ForwardReleaseProofRow(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
 
 
+class RankingV4EvidenceDefinitionRow(Base):
+    __tablename__ = "ranking_v4_evidence_definitions"
+    __table_args__ = (
+        UniqueConstraint(
+            "definition_digest",
+            name="uq_ranking_v4_evidence_definitions_digest",
+        ),
+        CheckConstraint(
+            "collection_mode = 'prospective_only_no_backfill'",
+            name="ck_ranking_v4_evidence_definitions_collection_mode",
+        ),
+        CheckConstraint(
+            "release_scope = 'shadow_only'",
+            name="ck_ranking_v4_evidence_definitions_release_scope",
+        ),
+        CheckConstraint(
+            "evidence_start_date > date(frozen_at)",
+            name="ck_ranking_v4_evidence_definitions_forward_start",
+        ),
+    )
+
+    epoch_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    definition_digest: Mapped[str] = mapped_column(String(64), index=True)
+    protocol_id: Mapped[str] = mapped_column(String(96), index=True)
+    protocol_digest: Mapped[str] = mapped_column(String(64), index=True)
+    model_version: Mapped[str] = mapped_column(String(96), index=True)
+    code_revision: Mapped[str] = mapped_column(String(40), index=True)
+    experiment_registry_digest: Mapped[str] = mapped_column(String(64), index=True)
+    dataset_revision: Mapped[int] = mapped_column(Integer, index=True)
+    evidence_start_date: Mapped[date] = mapped_column(Date, index=True)
+    collection_mode: Mapped[str] = mapped_column(String(64))
+    release_scope: Mapped[str] = mapped_column(String(32))
+    registered_model_ids_json: Mapped[str] = mapped_column(Text)
+    payload_json: Mapped[str] = mapped_column(Text)
+    attestation_json: Mapped[str] = mapped_column(Text)
+    frozen_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
+class RankingV4EvidenceInventoryRow(Base):
+    __tablename__ = "ranking_v4_evidence_inventories"
+    __table_args__ = (
+        UniqueConstraint(
+            "definition_digest",
+            "sequence",
+            name="uq_ranking_v4_evidence_inventories_sequence",
+        ),
+        CheckConstraint(
+            "sequence >= 1",
+            name="ck_ranking_v4_evidence_inventories_sequence",
+        ),
+    )
+
+    inventory_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    definition_digest: Mapped[str] = mapped_column(
+        ForeignKey("ranking_v4_evidence_definitions.definition_digest"),
+        index=True,
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    as_of_date: Mapped[date] = mapped_column(Date, index=True)
+    previous_inventory_digest: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    payload_json: Mapped[str] = mapped_column(Text)
+    attestation_json: Mapped[str] = mapped_column(Text)
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
+class RankingV4EvidenceReturnRow(Base):
+    __tablename__ = "ranking_v4_evidence_returns"
+    __table_args__ = (
+        UniqueConstraint(
+            "definition_digest",
+            "sequence",
+            name="uq_ranking_v4_evidence_returns_sequence",
+        ),
+        UniqueConstraint(
+            "definition_digest",
+            "rebalance_date",
+            name="uq_ranking_v4_evidence_returns_date",
+        ),
+        CheckConstraint(
+            "sequence >= 1",
+            name="ck_ranking_v4_evidence_returns_sequence",
+        ),
+    )
+
+    record_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    definition_digest: Mapped[str] = mapped_column(
+        ForeignKey("ranking_v4_evidence_definitions.definition_digest"),
+        index=True,
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    rebalance_date: Mapped[date] = mapped_column(Date, index=True)
+    dataset_revision: Mapped[int] = mapped_column(Integer, index=True)
+    previous_record_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    model_count: Mapped[int] = mapped_column(Integer)
+    payload_json: Mapped[str] = mapped_column(Text)
+    attestation_json: Mapped[str] = mapped_column(Text)
+    recorded_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
+class RankingV4EvidenceProofRow(Base):
+    __tablename__ = "ranking_v4_evidence_proofs"
+    __table_args__ = (
+        UniqueConstraint(
+            "definition_digest",
+            "inventory_digest",
+            "return_record_count",
+            name="uq_ranking_v4_evidence_proofs_state",
+        ),
+        CheckConstraint(
+            "release_scope = 'shadow_only' AND official_release_allowed = 0",
+            name="ck_ranking_v4_evidence_proofs_shadow_only",
+        ),
+        CheckConstraint(
+            "return_record_count >= 0",
+            name="ck_ranking_v4_evidence_proofs_record_count",
+        ),
+    )
+
+    proof_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    definition_digest: Mapped[str] = mapped_column(
+        ForeignKey("ranking_v4_evidence_definitions.definition_digest"),
+        index=True,
+    )
+    inventory_digest: Mapped[str] = mapped_column(String(64), index=True)
+    return_record_count: Mapped[int] = mapped_column(Integer)
+    first_rebalance_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    latest_rebalance_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    returns_chain_digest: Mapped[str] = mapped_column(String(64))
+    release_scope: Mapped[str] = mapped_column(String(32))
+    official_release_allowed: Mapped[bool] = mapped_column(Boolean, default=False)
+    payload_json: Mapped[str] = mapped_column(Text)
+    attestation_json: Mapped[str] = mapped_column(Text)
+    generated_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
 class RankingV3ProductionBatchRow(Base):
     __tablename__ = "ranking_v3_production_batches"
     __table_args__ = (

@@ -1,11 +1,20 @@
 import argparse
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from qagent.backtesting.engine import run_historical_backtest
 from qagent.backtesting.a_share_rules import BrokerFeeRequest
-from qagent.backtesting.walk_forward import run_full_market_walk_forward_selection
+from qagent.backtesting.ranking_v4_forward_evidence import (
+    build_attempt_inventory_snapshot,
+    build_prospective_definition,
+)
+from qagent.backtesting.walk_forward import (
+    WalkForwardSelectionResult,
+    run_full_market_walk_forward_selection,
+    walk_forward_selection_result_digest_is_valid,
+)
 from qagent.briefing.daily import build_daily_brief
 from qagent.briefing.export import render_daily_brief_markdown
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
@@ -20,12 +29,14 @@ from qagent.historical_evidence.providers import (
     build_historical_fundamental_provider,
 )
 from qagent.market.a_share_universe import ResolvedSymbols, resolve_symbol_tokens
+from qagent.market.calendars import trading_day_offset
 from qagent.market.universe import DEFAULT_DEV_UNIVERSE, DEFAULT_FREE_UNIVERSE
 from qagent.providers.factory import build_market_data_provider
 from qagent.providers.status import build_provider_status
 from qagent.storage.repository import QagentRepository
 from qagent.storage.market_cache import MarketDataCacheRepository
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
+from qagent.storage.ranking_v4_forward_evidence import RankingV4EvidenceRepository
 from qagent.strategy_data.providers import EmptyStrategyDataProvider, build_strategy_data_provider
 
 
@@ -83,6 +94,18 @@ def main(argv: list[str] | None = None) -> int:
     walk_parser.add_argument("--lookback-days", type=int, default=400)
     walk_parser.add_argument("--run-id", required=True)
     walk_parser.add_argument("--output", type=Path, default=None)
+    evidence_freeze_parser = subparsers.add_parser("ranking-v4-evidence-freeze")
+    evidence_freeze_parser.add_argument("--epoch-id", required=True)
+    evidence_freeze_parser.add_argument("--code-revision", required=True)
+    evidence_freeze_parser.add_argument("--provider", default="free", choices=["free"])
+    evidence_freeze_parser.add_argument("--dataset-revision", type=int, default=None)
+    evidence_freeze_parser.add_argument(
+        "--evidence-start",
+        type=date.fromisoformat,
+        default=None,
+    )
+    evidence_status_parser = subparsers.add_parser("ranking-v4-evidence-status")
+    evidence_status_parser.add_argument("--epoch-id", required=True)
     args = parser.parse_args(argv)
 
     if args.command == "daily-brief":
@@ -95,6 +118,10 @@ def main(argv: list[str] | None = None) -> int:
         return _backfill_history_command(args)
     if args.command == "walk-forward":
         return _walk_forward_command(args)
+    if args.command == "ranking-v4-evidence-freeze":
+        return _ranking_v4_evidence_freeze_command(args)
+    if args.command == "ranking-v4-evidence-status":
+        return _ranking_v4_evidence_status_command(args)
 
     result = run_daily_scan(DEFAULT_DEV_UNIVERSE, build_market_data_provider("fixture"))
     for card in result.cards:
@@ -319,6 +346,10 @@ def _walk_forward_command(args: argparse.Namespace) -> int:
         lookback_days=args.lookback_days,
     )
     stored = QagentRepository(repository.session_factory).save_walk_forward_run(result)
+    _append_ranking_v4_evidence_if_registered(
+        result,
+        session_factory=repository.session_factory,
+    )
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(result.model_dump_json(indent=2), encoding="utf-8")
@@ -336,6 +367,142 @@ def _walk_forward_command(args: argparse.Namespace) -> int:
         f"equal_weight={result.data_health['walk_forward_equal_weight_benchmark']} "
         f"persisted={stored.run_id} "
         f"digest={result.reproducibility_digest}"
+    )
+    return 0
+
+
+def _append_ranking_v4_evidence_if_registered(
+    result: WalkForwardSelectionResult,
+    *,
+    session_factory,
+) -> None:
+    repository = RankingV4EvidenceRepository(session_factory)
+    snapshot = repository.load_snapshot(result.owner_run_id)
+    if snapshot is None:
+        return
+    if not walk_forward_selection_result_digest_is_valid(result):
+        raise RuntimeError("walk-forward result digest is invalid")
+    if result.ranking_v4 is None:
+        raise RuntimeError("registered forward result has no Ranking V4 evidence")
+    manifest = result.experiment_manifest
+    identity = snapshot.definition.identity
+    if manifest.code_dirty:
+        raise RuntimeError("dirty code cannot enter the prospective evidence ledger")
+    if set(manifest.runtime_revisions) != {identity.code_revision}:
+        raise RuntimeError(
+            "prospective evidence runtime revisions differ from the frozen code"
+        )
+    repository.append_trial_ledger(
+        identity.epoch_id,
+        attempt_id=result.owner_run_id,
+        code_revision=manifest.code_revision,
+        protocol_digest=manifest.ranking_v4_protocol_digest,
+        experiment_registry_digest=(
+            manifest.ranking_v4_experiment_registry_digest
+        ),
+        dataset_revision=result.dataset_revision,
+        execution_start_date=result.start_date,
+        source_result_digest=result.reproducibility_digest,
+        trial_ledger=result.ranking_v4.trial_ledger,
+        recorded_at=datetime.now(timezone.utc),
+    )
+
+
+def _ranking_v4_evidence_freeze_command(args: argparse.Namespace) -> int:
+    initialize_database()
+    session_factory = create_session_factory()
+    replay = ReplayEvidenceRepository(session_factory, args.provider)
+    frozen_at = datetime.now(timezone.utc)
+    repository = RankingV4EvidenceRepository(session_factory)
+    snapshot = repository.load_snapshot(args.epoch_id)
+    if snapshot is not None:
+        definition = snapshot.definition
+        if args.code_revision != definition.identity.code_revision:
+            raise RuntimeError("epoch is frozen to a different code revision")
+        if (
+            args.dataset_revision is not None
+            and args.dataset_revision != definition.identity.dataset_revision
+        ):
+            raise RuntimeError("epoch is frozen to a different dataset revision")
+        if (
+            args.evidence_start is not None
+            and args.evidence_start != definition.identity.evidence_start_date
+        ):
+            raise RuntimeError("epoch is frozen to a different evidence start date")
+    else:
+        dataset_revision = (
+            args.dataset_revision
+            if args.dataset_revision is not None
+            else replay.current_revision()
+        )
+        freeze_market_date = frozen_at.astimezone(
+            ZoneInfo("Asia/Shanghai")
+        ).date()
+        evidence_start = args.evidence_start or trading_day_offset(
+            freeze_market_date,
+            1,
+        )
+        definition = repository.freeze_definition(
+            build_prospective_definition(
+                epoch_id=args.epoch_id,
+                code_revision=args.code_revision,
+                dataset_revision=dataset_revision,
+                evidence_start_date=evidence_start,
+                frozen_at=frozen_at,
+                attestor=repository.attestor,
+            )
+        )
+        snapshot = repository.load_snapshot(args.epoch_id)
+        if snapshot is None:
+            raise RuntimeError("frozen Ranking V4 evidence definition was not persisted")
+    if not snapshot.inventories:
+        market_date = frozen_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
+        if market_date >= definition.identity.evidence_start_date:
+            raise RuntimeError(
+                "attempt inventory was not signed before the prospective epoch started"
+            )
+        prior_attempts = tuple(
+            attempt_id
+            for attempt_id in replay.walk_forward_research_attempt_ids()
+            if attempt_id != args.epoch_id
+        )
+        repository.append_inventory(
+            build_attempt_inventory_snapshot(
+                definition=definition,
+                sequence=1,
+                as_of_date=market_date,
+                pre_epoch_unverifiable_attempt_ids=prior_attempts,
+                prospective_attempts={args.epoch_id: definition.definition_digest},
+                previous_inventory_digest=None,
+                recorded_at=frozen_at,
+                attestor=repository.attestor,
+            )
+        )
+    proof = repository.create_proof(args.epoch_id, generated_at=frozen_at)
+    print(
+        f"ranking-v4-evidence epoch={args.epoch_id} "
+        f"start={definition.identity.evidence_start_date.isoformat()} "
+        f"dataset_revision={definition.identity.dataset_revision} "
+        f"definition={definition.definition_digest} proof={proof.proof_digest} "
+        "scope=shadow_only"
+    )
+    return 0
+
+
+def _ranking_v4_evidence_status_command(args: argparse.Namespace) -> int:
+    initialize_database()
+    snapshot = RankingV4EvidenceRepository(
+        create_session_factory()
+    ).load_snapshot(args.epoch_id)
+    if snapshot is None:
+        print(f"ranking-v4-evidence epoch={args.epoch_id} status=missing")
+        return 1
+    print(
+        f"ranking-v4-evidence epoch={args.epoch_id} status=frozen "
+        f"start={snapshot.definition.identity.evidence_start_date.isoformat()} "
+        f"inventories={len(snapshot.inventories)} "
+        f"common_dates={len(snapshot.return_records)} proofs={len(snapshot.proofs)} "
+        "scope=shadow_only"
     )
     return 0
 

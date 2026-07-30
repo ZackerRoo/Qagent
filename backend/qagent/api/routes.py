@@ -199,6 +199,7 @@ from qagent.storage.repository import (
     WatchlistCreate,
 )
 from qagent.storage.market_cache import MarketDataCacheRepository
+from qagent.storage.ranking_v4_forward_evidence import RankingV4EvidenceRepository
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
 from qagent.strategy_data.models import FundamentalSnapshot
 from qagent.strategy_data.providers import EmptyStrategyDataProvider, build_strategy_data_provider
@@ -716,6 +717,48 @@ def get_walk_forward_job(job_id: str) -> dict[str, object]:
     if job is None:
         raise HTTPException(status_code=404, detail="walk-forward job not found")
     return _walk_forward_job_payload(job)
+
+
+@router.get("/ranking-v4/evidence/{epoch_id}")
+def get_ranking_v4_evidence(epoch_id: str) -> dict[str, object]:
+    snapshot = _ranking_v4_evidence_repo().load_snapshot(epoch_id)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Ranking V4 evidence epoch not found",
+        )
+    definition = snapshot.definition
+    latest_inventory = snapshot.inventories[-1] if snapshot.inventories else None
+    latest_return = snapshot.return_records[-1] if snapshot.return_records else None
+    latest_proof = snapshot.proofs[-1] if snapshot.proofs else None
+    return {
+        "epoch_id": definition.identity.epoch_id,
+        "status": "frozen",
+        "code_revision": definition.identity.code_revision,
+        "protocol_digest": definition.identity.protocol_digest,
+        "experiment_registry_digest": (
+            definition.identity.experiment_registry_digest
+        ),
+        "dataset_revision": definition.identity.dataset_revision,
+        "evidence_start_date": (
+            definition.identity.evidence_start_date.isoformat()
+        ),
+        "definition_digest": definition.definition_digest,
+        "inventory_count": len(snapshot.inventories),
+        "latest_inventory_digest": (
+            latest_inventory.inventory_digest if latest_inventory else None
+        ),
+        "common_date_count": len(snapshot.return_records),
+        "latest_common_date": (
+            latest_return.rebalance_date.isoformat() if latest_return else None
+        ),
+        "proof_count": len(snapshot.proofs),
+        "latest_proof_digest": (
+            latest_proof.proof_digest if latest_proof else None
+        ),
+        "release_scope": "shadow_only",
+        "official_release_allowed": False,
+    }
 
 
 @router.post("/walk-forward/jobs/{job_id}/cancel")
@@ -2429,6 +2472,11 @@ def _decimal_text(value: Decimal | None) -> str | None:
 def _repo() -> QagentRepository:
     initialize_database()
     return QagentRepository(create_session_factory())
+
+
+def _ranking_v4_evidence_repo() -> RankingV4EvidenceRepository:
+    initialize_database()
+    return RankingV4EvidenceRepository(create_session_factory())
 
 
 def _market_cache_repo() -> MarketDataCacheRepository:

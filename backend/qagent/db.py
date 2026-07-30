@@ -93,6 +93,7 @@ _schema_lock = Lock()
 _initialized_urls: set[str] = set()
 _RANKING_V3_FORWARD_TRIGGER_VERSION = 2
 _RANKING_V3_PRODUCTION_TRIGGER_VERSION = 2
+_RANKING_V4_EVIDENCE_TRIGGER_VERSION = 1
 
 
 def create_db_engine(database_url: str | None = None):
@@ -164,6 +165,7 @@ def _apply_additive_migrations(engine: Engine) -> None:
         inspector = inspect(connection)
         _drop_ranking_v3_forward_triggers(connection)
         _drop_ranking_v3_production_triggers(connection)
+        _drop_ranking_v4_evidence_triggers(connection)
         _add_missing_columns(
             connection,
             inspector,
@@ -296,6 +298,8 @@ def _apply_additive_migrations(engine: Engine) -> None:
         _record_ranking_v3_forward_trigger_version(connection)
         _create_immutable_ranking_v3_production_triggers(connection)
         _record_ranking_v3_production_trigger_version(connection)
+        _create_immutable_ranking_v4_evidence_triggers(connection)
+        _record_ranking_v4_evidence_trigger_version(connection)
 
 
 @contextmanager
@@ -634,6 +638,18 @@ def _drop_ranking_v3_production_triggers(connection) -> None:
         connection.execute(text(f'DROP TRIGGER IF EXISTS "{name}"'))
 
 
+def _drop_ranking_v4_evidence_triggers(connection) -> None:
+    names = connection.execute(
+        text(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+            "AND name LIKE 'trg_ranking_v4_evidence_%'"
+        )
+    ).scalars()
+    for name in names:
+        if name.startswith("trg_ranking_v4_evidence_"):
+            connection.execute(text(f'DROP TRIGGER IF EXISTS "{name}"'))
+
+
 def _record_ranking_v3_forward_trigger_version(connection) -> None:
     connection.execute(
         text(
@@ -674,6 +690,158 @@ def _record_ranking_v3_production_trigger_version(connection) -> None:
         ),
         {"version": _RANKING_V3_PRODUCTION_TRIGGER_VERSION},
     )
+
+
+def _record_ranking_v4_evidence_trigger_version(connection) -> None:
+    connection.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS qagent_schema_components ("
+            "component VARCHAR(96) PRIMARY KEY, "
+            "version INTEGER NOT NULL, "
+            "applied_at DATETIME NOT NULL"
+            ")"
+        )
+    )
+    connection.execute(
+        text(
+            "INSERT INTO qagent_schema_components (component, version, applied_at) "
+            "VALUES ('ranking_v4_evidence_triggers', :version, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(component) DO UPDATE SET "
+            "version = excluded.version, applied_at = excluded.applied_at"
+        ),
+        {"version": _RANKING_V4_EVIDENCE_TRIGGER_VERSION},
+    )
+
+
+def _create_immutable_ranking_v4_evidence_triggers(connection) -> None:
+    inspector = inspect(connection)
+    tables = (
+        "ranking_v4_evidence_definitions",
+        "ranking_v4_evidence_inventories",
+        "ranking_v4_evidence_returns",
+        "ranking_v4_evidence_proofs",
+    )
+    for table_name in tables:
+        if inspector.has_table(table_name):
+            _create_immutable_row_triggers(connection, table_name)
+
+    if inspector.has_table("ranking_v4_evidence_definitions"):
+        connection.execute(
+            text(
+                "CREATE TRIGGER trg_ranking_v4_evidence_definitions_shape_insert "
+                "BEFORE INSERT ON ranking_v4_evidence_definitions "
+                "WHEN length(NEW.definition_digest) <> 64 "
+                "OR length(NEW.protocol_digest) <> 64 "
+                "OR length(NEW.code_revision) <> 40 "
+                "OR length(NEW.experiment_registry_digest) <> 64 "
+                "OR NEW.dataset_revision < 1 "
+                "OR NEW.collection_mode <> 'prospective_only_no_backfill' "
+                "OR NEW.release_scope <> 'shadow_only' "
+                "OR date(NEW.evidence_start_date) <= date(NEW.frozen_at) "
+                "OR json_valid(NEW.payload_json) <> 1 "
+                "OR json_valid(NEW.attestation_json) <> 1 "
+                "BEGIN "
+                "SELECT RAISE(ABORT, 'Ranking V4 evidence definition is invalid'); "
+                "END"
+            )
+        )
+
+    if inspector.has_table("ranking_v4_evidence_inventories"):
+        connection.execute(
+            text(
+                "CREATE TRIGGER trg_ranking_v4_evidence_inventories_chain_insert "
+                "BEFORE INSERT ON ranking_v4_evidence_inventories "
+                "WHEN NOT EXISTS ("
+                "SELECT 1 FROM ranking_v4_evidence_definitions AS definition "
+                "WHERE definition.definition_digest = NEW.definition_digest"
+                ") "
+                "OR NEW.sequence <> COALESCE(("
+                "SELECT MAX(existing.sequence) + 1 "
+                "FROM ranking_v4_evidence_inventories AS existing "
+                "WHERE existing.definition_digest = NEW.definition_digest"
+                "), 1) "
+                "OR (NEW.sequence = 1 AND NEW.previous_inventory_digest IS NOT NULL) "
+                "OR (NEW.sequence > 1 AND NEW.previous_inventory_digest IS NOT ("
+                "SELECT existing.inventory_digest "
+                "FROM ranking_v4_evidence_inventories AS existing "
+                "WHERE existing.definition_digest = NEW.definition_digest "
+                "ORDER BY existing.sequence DESC LIMIT 1"
+                ")) "
+                "OR json_valid(NEW.payload_json) <> 1 "
+                "OR json_valid(NEW.attestation_json) <> 1 "
+                "BEGIN "
+                "SELECT RAISE(ABORT, 'Ranking V4 inventory chain is invalid'); "
+                "END"
+            )
+        )
+
+    if inspector.has_table("ranking_v4_evidence_returns"):
+        connection.execute(
+            text(
+                "CREATE TRIGGER trg_ranking_v4_evidence_returns_chain_insert "
+                "BEFORE INSERT ON ranking_v4_evidence_returns "
+                "WHEN NOT EXISTS ("
+                "SELECT 1 FROM ranking_v4_evidence_definitions AS definition "
+                "WHERE definition.definition_digest = NEW.definition_digest "
+                "AND definition.dataset_revision = NEW.dataset_revision "
+                "AND date(NEW.rebalance_date) >= date(definition.evidence_start_date)"
+                ") "
+                "OR NOT EXISTS ("
+                "SELECT 1 FROM ranking_v4_evidence_inventories AS inventory "
+                "WHERE inventory.definition_digest = NEW.definition_digest"
+                ") "
+                "OR NEW.sequence <> COALESCE(("
+                "SELECT MAX(existing.sequence) + 1 "
+                "FROM ranking_v4_evidence_returns AS existing "
+                "WHERE existing.definition_digest = NEW.definition_digest"
+                "), 1) "
+                "OR (NEW.sequence = 1 AND NEW.previous_record_digest IS NOT NULL) "
+                "OR (NEW.sequence > 1 AND NEW.previous_record_digest IS NOT ("
+                "SELECT existing.record_digest "
+                "FROM ranking_v4_evidence_returns AS existing "
+                "WHERE existing.definition_digest = NEW.definition_digest "
+                "ORDER BY existing.sequence DESC LIMIT 1"
+                ")) "
+                "OR EXISTS ("
+                "SELECT 1 FROM ranking_v4_evidence_returns AS existing "
+                "WHERE existing.definition_digest = NEW.definition_digest "
+                "AND date(existing.rebalance_date) >= date(NEW.rebalance_date)"
+                ") "
+                "OR NEW.model_count < 1 "
+                "OR json_valid(NEW.payload_json) <> 1 "
+                "OR json_array_length(json_extract(NEW.payload_json, '$.model_returns')) "
+                "<> NEW.model_count "
+                "OR json_valid(NEW.attestation_json) <> 1 "
+                "BEGIN "
+                "SELECT RAISE(ABORT, 'Ranking V4 return chain is invalid'); "
+                "END"
+            )
+        )
+
+    if inspector.has_table("ranking_v4_evidence_proofs"):
+        connection.execute(
+            text(
+                "CREATE TRIGGER trg_ranking_v4_evidence_proofs_shape_insert "
+                "BEFORE INSERT ON ranking_v4_evidence_proofs "
+                "WHEN NEW.release_scope <> 'shadow_only' "
+                "OR NEW.official_release_allowed <> 0 "
+                "OR NEW.return_record_count <> ("
+                "SELECT COUNT(*) FROM ranking_v4_evidence_returns AS evidence_return "
+                "WHERE evidence_return.definition_digest = NEW.definition_digest"
+                ") "
+                "OR NEW.inventory_digest IS NOT ("
+                "SELECT inventory.inventory_digest "
+                "FROM ranking_v4_evidence_inventories AS inventory "
+                "WHERE inventory.definition_digest = NEW.definition_digest "
+                "ORDER BY inventory.sequence DESC LIMIT 1"
+                ") "
+                "OR json_valid(NEW.payload_json) <> 1 "
+                "OR json_valid(NEW.attestation_json) <> 1 "
+                "BEGIN "
+                "SELECT RAISE(ABORT, 'Ranking V4 evidence proof is invalid'); "
+                "END"
+            )
+        )
 
 
 def _create_immutable_ranking_v3_forward_triggers(connection) -> None:
