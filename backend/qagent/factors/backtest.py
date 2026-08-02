@@ -752,6 +752,10 @@ def _factor_label(factor_id: str) -> str:
         "low_risk": "Low risk",
         "risk_filter": "Risk filter",
         "reversal": "Reversal setup",
+        "profitability": "Profitability research",
+        "growth": "Growth research",
+        "downside_risk": "Downside risk research",
+        "market_adjusted_momentum": "Market-adjusted momentum research",
     }
     return labels.get(factor_id, factor_id)
 

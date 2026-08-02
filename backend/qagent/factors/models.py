@@ -25,6 +25,10 @@ class FactorRanking(BaseModel):
     low_risk_score: float = Field(ge=0.0, le=1.0)
     risk_filter_score: float = Field(default=0.5, ge=0.0, le=1.0)
     reversal_score: float = Field(ge=0.0, le=1.0)
+    profitability_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    growth_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    downside_risk_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    market_adjusted_momentum_score: float = Field(default=0.5, ge=0.0, le=1.0)
     execution_penalty: float = Field(ge=0.0, le=1.0)
     data_completeness: float = Field(ge=0.0, le=1.0)
     factor_exposures: list[FactorExposure]

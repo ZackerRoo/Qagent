@@ -6,6 +6,7 @@ from qagent.factors.engine import (
     A_SHARE_FACTOR_WEIGHTS,
     ETF_FACTOR_WEIGHTS,
     FACTOR_WEIGHTS,
+    RESEARCH_FACTOR_WEIGHTS,
     build_factor_rankings,
 )
 from qagent.strategy_data.models import FundamentalSnapshot
@@ -114,6 +115,93 @@ def test_factor_engine_uses_a_share_valuation_size_and_quality_inputs():
     assert by_symbol["CN:000001"].size_score > by_symbol["CN:300001"].size_score
     assert by_symbol["CN:000001"].quality_score > by_symbol["CN:300001"].quality_score
     assert "shell_size_risk" in by_symbol["CN:300001"].flags
+
+
+def test_research_factors_are_observable_without_changing_ranking_weight():
+    smooth = [10 * (1.003**index) for index in range(140)]
+    volatile = [10 * (1.003**index) * (1.09 if index % 2 else 0.91) for index in range(140)]
+    bars = pd.concat(
+        [
+            _bars("CN:000001", smooth, volume=2_000_000),
+            _bars("CN:300001", volatile, volume=2_000_000),
+        ],
+        ignore_index=True,
+    )
+    fundamentals = [
+        FundamentalSnapshot(
+            instrument_id="CN:000001",
+            as_of_date=date(2026, 6, 30),
+            return_on_equity_pct=22,
+            gross_margin_pct=48,
+            operating_margin_pct=20,
+            net_margin_pct=18,
+            revenue_growth_pct=25,
+            earnings_growth_pct=32,
+        ),
+        FundamentalSnapshot(
+            instrument_id="CN:300001",
+            as_of_date=date(2026, 6, 30),
+            return_on_equity_pct=1,
+            gross_margin_pct=10,
+            operating_margin_pct=-4,
+            net_margin_pct=-6,
+            revenue_growth_pct=-8,
+            earnings_growth_pct=-12,
+        ),
+    ]
+
+    rankings = build_factor_rankings(bars, fundamentals=fundamentals)
+    by_symbol = {ranking.instrument_id: ranking for ranking in rankings}
+    strong = by_symbol["CN:000001"]
+    weak = by_symbol["CN:300001"]
+
+    assert strong.profitability_score > weak.profitability_score
+    assert strong.growth_score > weak.growth_score
+    assert strong.downside_risk_score > weak.downside_risk_score
+    research_exposures = {
+        exposure.factor_id: exposure
+        for exposure in strong.factor_exposures
+        if exposure.factor_id in RESEARCH_FACTOR_WEIGHTS
+    }
+    assert set(research_exposures) == set(RESEARCH_FACTOR_WEIGHTS)
+    assert all(exposure.raw_value is not None for exposure in research_exposures.values())
+    assert all(exposure.weight == 0 for exposure in research_exposures.values())
+
+
+def test_market_adjusted_momentum_is_scored_within_asset_pool():
+    common_returns = [
+        0.002 + (0.008 if index % 4 == 0 else -0.002) for index in range(139)
+    ]
+
+    def prices(alpha: float) -> list[float]:
+        values = [10.0]
+        for market_return in common_returns:
+            values.append(values[-1] * (1 + market_return + alpha))
+        return values
+
+    bars = pd.concat(
+        [
+            _bars("CN:000001", prices(0.0)),
+            _bars("CN:000002", prices(0.0015)),
+            _bars("CN:000003", prices(-0.001)),
+        ],
+        ignore_index=True,
+    )
+
+    rankings = build_factor_rankings(bars)
+    by_symbol = {ranking.instrument_id: ranking for ranking in rankings}
+
+    assert (
+        by_symbol["CN:000002"].market_adjusted_momentum_score
+        > by_symbol["CN:000003"].market_adjusted_momentum_score
+    )
+    exposure = next(
+        item
+        for item in by_symbol["CN:000002"].factor_exposures
+        if item.factor_id == "market_adjusted_momentum"
+    )
+    assert exposure.raw_value is not None
+    assert exposure.weight == 0
 
 
 def test_factor_engine_penalizes_overheated_high_volatility_low_liquidity_names():

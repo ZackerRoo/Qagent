@@ -448,7 +448,13 @@ function findCandidate(items: PaperCandidatePoolItem[] | undefined, status: stri
 }
 
 function isEligibleCandidate(item: PaperCandidatePoolItem) {
-  return !["blocked_by_data", "tracked_before", "active_in_paper", "paused_by_risk"].includes(item.status);
+  return ![
+    "blocked_by_data",
+    "blocked_by_market",
+    "tracked_before",
+    "active_in_paper",
+    "paused_by_risk",
+  ].includes(item.status);
 }
 
 function isActionReady(card: OpportunityCard) {
@@ -534,6 +540,7 @@ function candidateStatusLabel(status: string, language: "zh" | "en") {
     waiting: "等待下一轮",
     active_in_paper: "已在模拟盘",
     paused_by_risk: "风控暂停",
+    blocked_by_market: "市场暂停入场",
     tracked_before: "已跟踪/冷却",
     blocked_by_data: "数据阻断",
   };

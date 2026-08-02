@@ -3747,6 +3747,7 @@ def _paper_candidate_pool_snapshot_items(
     replacee_score = _float_value(replacee.rank_score) if replacee else 0.0
     replacee_pressure = _paper_pending_replacement_pressure(replacee) if replacee else 0.0
     risk_action = risk_gate_health.get("paper_risk_gate_action", "")
+    market_entry_blocked = risk_gate_health.get("paper_market_entry_gate") == "blocked"
     replacement_used = False
     items: list[dict[str, object]] = []
     for snapshot in snapshots:
@@ -3780,6 +3781,9 @@ def _paper_candidate_pool_snapshot_items(
         elif snapshot.snapshot_id in existing_sources:
             status = "tracked_before"
             action = "历史已跟踪"
+        elif market_entry_blocked:
+            status = "blocked_by_market"
+            action = "市场风控暂停入场"
         elif risk_action == "pause_new_entries":
             status = "paused_by_risk"
             action = "风控暂停新增"
@@ -3832,6 +3836,7 @@ def _paper_candidate_pool_snapshot_items(
         if item["status"] in {"waiting", "waiting_for_slot", "replace_candidate", "ready_to_add"}
     )
     replacement_candidates = sum(1 for item in items if item["status"] == "replace_candidate")
+    market_blocked_count = sum(1 for item in items if item["status"] == "blocked_by_market")
     summary = {
         "total_candidates": len(snapshots),
         "shown_candidates": len(items),
@@ -3839,6 +3844,7 @@ def _paper_candidate_pool_snapshot_items(
         "max_positions": account.max_positions,
         "waiting_count": waiting_count,
         "replacement_candidates": replacement_candidates,
+        "market_blocked_count": market_blocked_count,
         "risk_action": risk_action,
         "entry_calibration_action": _paper_entry_calibration_action(items),
         "market_adaptive_action": (
@@ -4231,6 +4237,7 @@ def _paper_seed_snapshots_from_recommendations(
     max_age: timedelta,
     limit: int,
     expected_signal_date: date | None = None,
+    include_market_blocked: bool = False,
 ) -> tuple[list, dict[str, str]]:
     snapshots, health = _paper_seed_snapshots_from_latest_cache(
         repo,
@@ -4239,8 +4246,12 @@ def _paper_seed_snapshots_from_recommendations(
         max_age=max_age,
         limit=limit,
         expected_signal_date=expected_signal_date,
+        include_market_blocked=include_market_blocked,
     )
-    if health.get("paper_market_entry_gate") == "blocked":
+    if (
+        health.get("paper_market_entry_gate") == "blocked"
+        and not include_market_blocked
+    ):
         return [], health
     if health.get("paper_candidate_freshness_gate") == "blocked":
         return [], health
@@ -4340,6 +4351,7 @@ def _paper_seed_snapshots_from_latest_cache(
     max_age: timedelta,
     limit: int,
     expected_signal_date: date | None = None,
+    include_market_blocked: bool = False,
 ) -> tuple[list, dict[str, str]]:
     cached, cache_freshness = _automation_scan_result_cache(
         repo,
@@ -4363,7 +4375,10 @@ def _paper_seed_snapshots_from_latest_cache(
             )
         return [], health
     market_gate_health = _paper_market_entry_gate_from_cache(cached.payload)
-    if market_gate_health.get("paper_market_entry_gate") == "blocked":
+    if (
+        market_gate_health.get("paper_market_entry_gate") == "blocked"
+        and not include_market_blocked
+    ):
         return [], {
             **market_gate_health,
             "automation_seed_source": "latest_recommendation_cache",
@@ -5398,12 +5413,14 @@ def paper_trade_candidate_pool(
         include_etfs=include_etfs,
         max_age=timedelta(days=7),
         limit=max(limit, _paper_candidate_pool_limit(1)),
+        include_market_blocked=True,
     )
+    candidate_gate_health = {**risk_gate_health, **seed_health}
     items, summary = _paper_candidate_pool_snapshot_items(
         paper_repo=paper_repo,
         snapshots=snapshots,
         provider=mode,
-        risk_gate_health=risk_gate_health,
+        risk_gate_health=candidate_gate_health,
         limit=limit,
     )
     data_health = {
@@ -5413,7 +5430,7 @@ def paper_trade_candidate_pool(
             paper_repo=paper_repo,
             snapshots=snapshots,
             provider=mode,
-            risk_gate_health=risk_gate_health,
+            risk_gate_health=candidate_gate_health,
         ),
         "paper_candidate_pool_endpoint": "true",
         "paper_candidate_pool_limit": str(limit),

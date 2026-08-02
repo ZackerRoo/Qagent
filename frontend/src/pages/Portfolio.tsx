@@ -2532,6 +2532,7 @@ function paperCandidateStatusLabel(status: string, language: Language) {
     waiting: { zh: "排队", en: "Waiting" },
     tracked_before: { zh: "已跟踪过", en: "Tracked" },
     paused_by_risk: { zh: "风控暂停", en: "Risk paused" },
+    blocked_by_market: { zh: "市场暂停入场", en: "Market blocked" },
     blocked_by_data: { zh: "数据阻断", en: "Data blocked" },
   };
   return labels[status]?.[zh ? "zh" : "en"] ?? status;

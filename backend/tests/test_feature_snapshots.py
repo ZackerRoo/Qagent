@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from qagent.factors.engine import (
+    RESEARCH_FACTOR_WEIGHTS,
     build_factor_feature_snapshot,
     build_factor_rankings,
     rerank_factor_rankings,
@@ -46,6 +47,7 @@ def _ranking_summary(rankings):
             tuple(
                 (exposure.factor_id, exposure.raw_value, exposure.score)
                 for exposure in ranking.factor_exposures
+                if exposure.factor_id not in RESEARCH_FACTOR_WEIGHTS
             ),
         )
         for ranking in rankings
@@ -164,6 +166,10 @@ def test_global_factor_ranking_is_independent_of_batch_size_and_order():
     assert first_snapshot.universe_digest == reordered_snapshot.universe_digest
     assert first_snapshot.input_digest == reordered_snapshot.input_digest
     assert first_snapshot.cross_sectional_scores == reordered_snapshot.cross_sectional_scores
+    assert not (
+        set(RESEARCH_FACTOR_WEIGHTS)
+        & set(first_snapshot.cross_sectional_scores["CN:000001"])
+    )
 
 
 def test_factor_ranking_uses_instrument_id_as_deterministic_tie_breaker():

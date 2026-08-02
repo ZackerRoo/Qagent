@@ -706,6 +706,54 @@ def test_cached_unreleased_ranking_v3_does_not_fall_back_to_legacy_seed(
     assert client.get("/api/paper-trades").json()["summary"]["total"] == 0
 
 
+def test_risk_off_candidates_remain_visible_without_becoming_seedable(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'paper-risk-off-candidates.db'}",
+    )
+    client = TestClient(create_app())
+    (card,) = _persist_authoritative_opportunities(
+        provider="fixture",
+        cards=[("risk-off-visible-card", "US:RISK-OFF")],
+    )
+    repo = routes._repo()
+    snapshot = repo.list_latest_opportunity_snapshots_by_card_ids(
+        [card.card_id],
+        provider="fixture",
+    )[0]
+    repo.save_scan_result_cache(
+        cache_key=routes.full_market_batch_cache_key("fixture", True),
+        provider="fixture",
+        mode="full_market_batch",
+        symbols=[card.instrument_id],
+        payload={
+            "cards": [snapshot.card],
+            "benchmark_trend": {
+                "state": "risk_off",
+                "entry_allowed": False,
+                "reason": "test market gate",
+            },
+        },
+    )
+
+    pool = client.get(
+        "/api/paper-trades/candidate-pool?provider=fixture&include_etfs=true&limit=10"
+    )
+    seeded = client.post("/api/paper-trades/seed?provider=fixture&limit=5")
+
+    assert pool.status_code == 200
+    assert pool.json()["items"][0]["instrument_id"] == "US:RISK-OFF"
+    assert pool.json()["items"][0]["status"] == "blocked_by_market"
+    assert pool.json()["summary"]["market_blocked_count"] == 1
+    assert pool.json()["data_health"]["paper_market_entry_gate"] == "blocked"
+    assert seeded.status_code == 200
+    assert seeded.json()["created"] == 0
+    assert client.get("/api/paper-trades").json()["summary"]["total"] == 0
+
+
 def test_ranking_v4_shadow_claim_is_admitted_to_research_paper_lane(
     tmp_path,
     monkeypatch,

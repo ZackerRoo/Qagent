@@ -1708,6 +1708,7 @@ function paperAdmissionLabel(status: string, language: "zh" | "en") {
     waiting: { zh: "排队", en: "Queued" },
     tracked_before: { zh: "已跟踪/冷却", en: "Cooling" },
     paused_by_risk: { zh: "风控暂停", en: "Risk paused" },
+    blocked_by_market: { zh: "市场暂停入场", en: "Market blocked" },
     blocked_by_data: { zh: "数据阻断", en: "Data blocked" },
     not_in_pool: { zh: "未入候补", en: "Not queued" },
     unknown: { zh: "待判断", en: "Pending" },
@@ -1734,6 +1735,11 @@ function paperAdmissionExplanation(
     return language === "zh"
       ? "推荐快照与盘中价格口径不一致，禁止加入模拟盘；等待数据源修复或新快照。"
       : "Recommendation and live-price bases disagree; wait for corrected data or a new snapshot.";
+  }
+  if (admission.status === "blocked_by_market") {
+    return language === "zh"
+      ? "候选仍保留展示，但当前市场状态暂停新增仓位；市场门禁解除后会重新评估。"
+      : "The candidate remains visible, but market conditions pause new entries until the next reassessment.";
   }
   if (admission.status === "waiting_for_slot") {
     return language === "zh"

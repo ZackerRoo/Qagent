@@ -1156,6 +1156,10 @@ export type FactorRanking = {
   low_risk_score: number;
   risk_filter_score: number;
   reversal_score: number;
+  profitability_score: number;
+  growth_score: number;
+  downside_risk_score: number;
+  market_adjusted_momentum_score: number;
   execution_penalty: number;
   data_completeness: number;
   factor_exposures: FactorExposure[];
@@ -2098,6 +2102,7 @@ export type PaperCandidatePoolSummary = {
   max_positions: number;
   waiting_count: number;
   replacement_candidates: number;
+  market_blocked_count: number;
   risk_action: string;
   entry_calibration_action: string;
   market_adaptive_action: string;

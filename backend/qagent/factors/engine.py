@@ -10,6 +10,13 @@ from qagent.market.indicators import regression_quality_momentum
 from qagent.strategy_data.models import FundamentalSnapshot
 
 
+RESEARCH_FACTOR_WEIGHTS = {
+    "profitability": 0.0,
+    "growth": 0.0,
+    "downside_risk": 0.0,
+    "market_adjusted_momentum": 0.0,
+}
+
 FACTOR_WEIGHTS = {
     "valuation": 0.08,
     "size": 0.06,
@@ -20,6 +27,7 @@ FACTOR_WEIGHTS = {
     "low_risk": 0.10,
     "risk_filter": 0.06,
     "reversal": 0.06,
+    **RESEARCH_FACTOR_WEIGHTS,
 }
 
 A_SHARE_FACTOR_WEIGHTS = {
@@ -32,6 +40,7 @@ A_SHARE_FACTOR_WEIGHTS = {
     "low_risk": 0.08,
     "risk_filter": 0.08,
     "reversal": 0.04,
+    **RESEARCH_FACTOR_WEIGHTS,
 }
 
 ETF_FACTOR_WEIGHTS = {
@@ -41,15 +50,16 @@ ETF_FACTOR_WEIGHTS = {
     "low_risk": 0.125,
     "risk_filter": 0.125,
     "reversal": 0.0625,
+    **RESEARCH_FACTOR_WEIGHTS,
 }
 
-FACTOR_FEATURE_SET_VERSION = "factor-cross-sectional-v2"
+FACTOR_FEATURE_SET_VERSION = "factor-cross-sectional-v3-research-exposures"
 
 _STOCK_ASSET_TYPES = frozenset({"stock", "equity", "1"})
 _ETF_ASSET_TYPES = frozenset({"etf", "fund", "index_fund", "5"})
 _ETF_SYMBOL_PREFIXES = ("15", "16", "51", "52", "56", "58")
 
-_FACTOR_SCORE_FIELDS = {
+_AUTHORITATIVE_FACTOR_SCORE_FIELDS = {
     "valuation": "valuation_score",
     "size": "size_score",
     "quality": "quality_score",
@@ -59,6 +69,18 @@ _FACTOR_SCORE_FIELDS = {
     "low_risk": "low_risk_score",
     "risk_filter": "risk_filter_score",
     "reversal": "reversal_score",
+}
+
+_RESEARCH_FACTOR_SCORE_FIELDS = {
+    "profitability": "profitability_score",
+    "growth": "growth_score",
+    "downside_risk": "downside_risk_score",
+    "market_adjusted_momentum": "market_adjusted_momentum_score",
+}
+
+_FACTOR_SCORE_FIELDS = {
+    **_AUTHORITATIVE_FACTOR_SCORE_FIELDS,
+    **_RESEARCH_FACTOR_SCORE_FIELDS,
 }
 
 
@@ -75,6 +97,10 @@ class _RawFactors:
     low_risk_raw: float | None
     risk_filter_raw: float | None
     reversal_raw: float | None
+    profitability_raw: float | None
+    growth_raw: float | None
+    downside_risk_raw: float | None
+    market_adjusted_momentum_raw: float | None
     distance_ma20: float | None
     volatility_20d: float | None
     max_drawdown_60d: float | None
@@ -94,18 +120,28 @@ def build_factor_rankings(
     if bars.empty:
         return []
     fundamental_by_id = _latest_fundamentals(fundamentals)
-    raw_items = [
-        _raw_factors(
+    grouped_bars = [
+        (
             symbol,
             frame,
-            fundamental_by_id.get(symbol),
-            asset_type=_asset_type_from_bars(
+            _asset_type_from_bars(
                 symbol,
                 frame,
                 override=(asset_types or {}).get(symbol),
             ),
         )
         for symbol, frame in bars.groupby("instrument_id")
+    ]
+    market_returns = _market_returns_by_asset_type(grouped_bars)
+    raw_items = [
+        _raw_factors(
+            symbol,
+            frame,
+            fundamental_by_id.get(symbol),
+            asset_type=asset_type,
+            market_returns=market_returns.get(asset_type),
+        )
+        for symbol, frame, asset_type in grouped_bars
     ]
     scores = _bucketed_factor_scores(raw_items)
     rankings: list[FactorRanking] = []
@@ -131,6 +167,13 @@ def build_factor_rankings(
                 low_risk_score=round(scores["low_risk"][item.instrument_id], 4),
                 risk_filter_score=round(scores["risk_filter"][item.instrument_id], 4),
                 reversal_score=round(scores["reversal"][item.instrument_id], 4),
+                profitability_score=round(scores["profitability"][item.instrument_id], 4),
+                growth_score=round(scores["growth"][item.instrument_id], 4),
+                downside_risk_score=round(scores["downside_risk"][item.instrument_id], 4),
+                market_adjusted_momentum_score=round(
+                    scores["market_adjusted_momentum"][item.instrument_id],
+                    4,
+                ),
                 execution_penalty=round(penalty, 4),
                 data_completeness=round(item.data_completeness, 4),
                 factor_exposures=_exposures(item, scores, weights),
@@ -167,7 +210,13 @@ def rerank_factor_rankings(
         set(instrument_ids) if instrument_ids is not None else set(ranking_by_id)
     )
     raw_scores = {
-        instrument_id: _raw_exposure_scores(ranking_by_id.get(instrument_id))
+        instrument_id: {
+            factor_id: raw_value
+            for factor_id, raw_value in _raw_exposure_scores(
+                ranking_by_id.get(instrument_id)
+            ).items()
+            if factor_id in _AUTHORITATIVE_FACTOR_SCORE_FIELDS
+        }
         for instrument_id in universe
     }
     cross_sectional_scores = _cross_sectional_scores(raw_scores)
@@ -204,13 +253,19 @@ def build_factor_feature_snapshot(
         set(instrument_ids) if instrument_ids is not None else set(ranking_by_id)
     )
     raw_scores = {
-        instrument_id: _raw_exposure_scores(ranking_by_id.get(instrument_id))
+        instrument_id: {
+            factor_id: raw_value
+            for factor_id, raw_value in _raw_exposure_scores(
+                ranking_by_id.get(instrument_id)
+            ).items()
+            if factor_id in _AUTHORITATIVE_FACTOR_SCORE_FIELDS
+        }
         for instrument_id in universe
     }
     cross_sectional_scores = {
         instrument_id: {
             factor_id: float(getattr(ranking_by_id[instrument_id], score_field))
-            for factor_id, score_field in _FACTOR_SCORE_FIELDS.items()
+            for factor_id, score_field in _AUTHORITATIVE_FACTOR_SCORE_FIELDS.items()
         }
         if instrument_id in ranking_by_id
         else {}
@@ -252,6 +307,7 @@ def _ranking_input_key(ranking: FactorRanking) -> tuple[object, ...]:
                 "" if exposure.raw_value is None else format(exposure.raw_value, ".17g"),
             )
             for exposure in ranking.factor_exposures
+            if exposure.factor_id in _AUTHORITATIVE_FACTOR_SCORE_FIELDS
         )
     )
     return (
@@ -281,6 +337,11 @@ def _raw_exposure_scores(ranking: FactorRanking | None) -> dict[str, float | Non
 def _cross_sectional_scores(
     raw_scores: Mapping[str, Mapping[str, float | None]],
 ) -> dict[str, dict[str, float]]:
+    factor_ids = [
+        factor_id
+        for factor_id in _FACTOR_SCORE_FIELDS
+        if any(factor_id in scores for scores in raw_scores.values())
+    ]
     by_factor = {
         factor_id: _rank_scores(
             {
@@ -288,19 +349,20 @@ def _cross_sectional_scores(
                 for instrument_id, scores in raw_scores.items()
             }
         )
-        for factor_id in _FACTOR_SCORE_FIELDS
+        for factor_id in factor_ids
         if factor_id != "size"
     }
-    by_factor["size"] = _size_scores_from_values(
-        {
-            instrument_id: scores.get("size")
-            for instrument_id, scores in raw_scores.items()
-        }
-    )
+    if "size" in factor_ids:
+        by_factor["size"] = _size_scores_from_values(
+            {
+                instrument_id: scores.get("size")
+                for instrument_id, scores in raw_scores.items()
+            }
+        )
     return {
         instrument_id: {
             factor_id: round(by_factor[factor_id][instrument_id], 4)
-            for factor_id in _FACTOR_SCORE_FIELDS
+            for factor_id in factor_ids
         }
         for instrument_id in raw_scores
     }
@@ -328,10 +390,15 @@ def _rescore_ranking(
     scores: Mapping[str, float],
 ) -> FactorRanking:
     weights = _ranking_factor_weights(ranking)
-    component_score = sum(scores[factor_id] * weight for factor_id, weight in weights.items())
-    factor_score = _clamp(
-        component_score * ranking.data_completeness - ranking.execution_penalty
+    component_score = sum(
+        scores.get(
+            factor_id,
+            float(getattr(ranking, _FACTOR_SCORE_FIELDS[factor_id])),
+        )
+        * weight
+        for factor_id, weight in weights.items()
     )
+    factor_score = _clamp(component_score * ranking.data_completeness - ranking.execution_penalty)
     exposures = [
         exposure.model_copy(
             update={
@@ -352,6 +419,7 @@ def _rescore_ranking(
             **{
                 score_field: round(scores[factor_id], 4)
                 for factor_id, score_field in _FACTOR_SCORE_FIELDS.items()
+                if factor_id in scores
             },
         }
     )
@@ -363,6 +431,7 @@ def _raw_factors(
     fundamental: FundamentalSnapshot | None = None,
     *,
     asset_type: str,
+    market_returns: pd.Series | None = None,
 ) -> _RawFactors:
     ordered = bars.sort_values("trade_date").copy()
     raw_close = pd.to_numeric(ordered["close"], errors="coerce")
@@ -373,12 +442,18 @@ def _raw_factors(
     valuation_raw = _earnings_yield(fundamental)
     size_raw = _float_or_none(fundamental.market_cap if fundamental is not None else None)
     quality_raw = _fundamental_quality(fundamental)
+    profitability_raw = _fundamental_profitability(fundamental)
+    growth_raw = _fundamental_growth(fundamental)
     if valuation_raw is None:
         missing.append("valuation_ep")
     if size_raw is None:
         missing.append("market_cap")
     if quality_raw is None:
         missing.append("quality_fundamentals")
+    if profitability_raw is None:
+        missing.append("profitability_fundamentals")
+    if growth_raw is None:
+        missing.append("growth_fundamentals")
     if len(close) < 20:
         missing.append("20d_return")
     if len(close) < 60:
@@ -439,6 +514,15 @@ def _raw_factors(
     if max_drawdown_60d is not None:
         low_risk_parts.append(max_drawdown_60d)
     low_risk_raw = sum(low_risk_parts) / len(low_risk_parts) if low_risk_parts else None
+    downside_risk_raw = _downside_risk(returns, window=60)
+    market_adjusted_momentum_raw = _market_adjusted_momentum(
+        ordered,
+        market_returns,
+    )
+    if downside_risk_raw is None:
+        missing.append("60d_downside_risk")
+    if market_adjusted_momentum_raw is None:
+        missing.append("market_adjusted_momentum")
 
     ret_5 = _period_return(close, 5)
     reversal_raw = None
@@ -481,6 +565,10 @@ def _raw_factors(
         low_risk_raw=low_risk_raw,
         risk_filter_raw=risk_filter_raw,
         reversal_raw=reversal_raw,
+        profitability_raw=profitability_raw,
+        growth_raw=growth_raw,
+        downside_risk_raw=downside_risk_raw,
+        market_adjusted_momentum_raw=market_adjusted_momentum_raw,
         distance_ma20=distance_ma20,
         volatility_20d=volatility_20d,
         max_drawdown_60d=max_drawdown_60d,
@@ -546,6 +634,110 @@ def _fundamental_quality(fundamental: FundamentalSnapshot | None) -> float | Non
         return None
     weight_sum = sum(weight for _, weight in components)
     return sum(score * weight for score, weight in components) / weight_sum
+
+
+def _fundamental_profitability(fundamental: FundamentalSnapshot | None) -> float | None:
+    if fundamental is None:
+        return None
+    components = []
+    for value, low, high, weight in [
+        (fundamental.return_on_equity_pct, -5, 25, 0.40),
+        (fundamental.gross_margin_pct, 5, 55, 0.25),
+        (fundamental.net_margin_pct, -10, 25, 0.25),
+        (fundamental.operating_margin_pct, -10, 25, 0.10),
+    ]:
+        numeric = _float_or_none(value)
+        if numeric is not None:
+            components.append((_bounded_score(numeric, low, high), weight))
+    return _weighted_available(components)
+
+
+def _fundamental_growth(fundamental: FundamentalSnapshot | None) -> float | None:
+    if fundamental is None:
+        return None
+    components = []
+    revenue_growth = _float_or_none(fundamental.revenue_growth_pct)
+    earnings_growth = _float_or_none(fundamental.earnings_growth_pct)
+    if revenue_growth is not None:
+        components.append((_bounded_score(revenue_growth, -20, 35), 0.45))
+    if earnings_growth is not None:
+        components.append((_bounded_score(earnings_growth, -30, 45), 0.55))
+    return _weighted_available(components)
+
+
+def _market_returns_by_asset_type(
+    grouped_bars: list[tuple[str, pd.DataFrame, str]],
+) -> dict[str, pd.Series]:
+    rows = []
+    for instrument_id, frame, asset_type in grouped_bars:
+        ordered = frame.sort_values("trade_date")
+        closes = pd.to_numeric(ordered["close"], errors="coerce")
+        returns = closes.pct_change(fill_method=None)
+        rows.append(
+            pd.DataFrame(
+                {
+                    "instrument_id": instrument_id,
+                    "asset_type": asset_type,
+                    "trade_date": pd.to_datetime(ordered["trade_date"]),
+                    "return": returns,
+                }
+            )
+        )
+    if not rows:
+        return {}
+    combined = pd.concat(rows, ignore_index=True)
+    combined = combined.replace([float("inf"), float("-inf")], pd.NA).dropna(
+        subset=["return"]
+    )
+    return {
+        asset_type: group.groupby("trade_date")["return"].mean().sort_index()
+        for asset_type, group in combined.groupby("asset_type")
+    }
+
+
+def _market_adjusted_momentum(
+    ordered_bars: pd.DataFrame,
+    market_returns: pd.Series | None,
+) -> float | None:
+    if market_returns is None or market_returns.empty:
+        return None
+    stock = pd.Series(
+        pd.to_numeric(ordered_bars["close"], errors="coerce").to_numpy(),
+        index=pd.to_datetime(ordered_bars["trade_date"]),
+        dtype="float64",
+    ).pct_change(fill_method=None)
+    market = market_returns.copy()
+    market.index = pd.to_datetime(market.index)
+    aligned = (
+        pd.concat(
+            [stock.rename("stock"), market.rename("market")],
+            axis=1,
+        )
+        .replace([float("inf"), float("-inf")], pd.NA)
+        .dropna()
+        .tail(120)
+    )
+    if len(aligned) < 20:
+        return None
+    market_variance = float(aligned["market"].var())
+    if market_variance <= 1e-12:
+        return None
+    beta = float(aligned["stock"].cov(aligned["market"]) / market_variance)
+    residual = aligned["stock"] - beta * aligned["market"]
+    windows = []
+    for window, weight in ((20, 0.30), (60, 0.40), (120, 0.30)):
+        if len(residual) >= window:
+            compounded = float((1 + residual.tail(window).clip(lower=-0.99)).prod() - 1)
+            windows.append((compounded, weight))
+    return _weighted_available(windows)
+
+
+def _downside_risk(returns: pd.Series, *, window: int) -> float | None:
+    if len(returns) < window:
+        return None
+    downside = returns.tail(window).clip(upper=0)
+    semideviation = float((downside.pow(2).mean()) ** 0.5)
+    return -semideviation
 
 
 def _risk_filter_raw(
@@ -676,6 +868,16 @@ def _factor_scores(items: list[_RawFactors]) -> dict[str, dict[str, float]]:
         "low_risk": _rank_scores({item.instrument_id: item.low_risk_raw for item in items}),
         "risk_filter": _rank_scores({item.instrument_id: item.risk_filter_raw for item in items}),
         "reversal": _rank_scores({item.instrument_id: item.reversal_raw for item in items}),
+        "profitability": _rank_scores(
+            {item.instrument_id: item.profitability_raw for item in items}
+        ),
+        "growth": _rank_scores({item.instrument_id: item.growth_raw for item in items}),
+        "downside_risk": _rank_scores(
+            {item.instrument_id: item.downside_risk_raw for item in items}
+        ),
+        "market_adjusted_momentum": _rank_scores(
+            {item.instrument_id: item.market_adjusted_momentum_raw for item in items}
+        ),
     }
 
 
@@ -857,6 +1059,38 @@ def _exposures(
             score=scores["reversal"][item.instrument_id],
             weight=weights["reversal"],
             explanation="Short-term pullback pressure inside an intact trend.",
+        ),
+        FactorExposure(
+            factor_id="profitability",
+            label="Profitability research",
+            raw_value=item.profitability_raw,
+            score=scores["profitability"][item.instrument_id],
+            weight=weights["profitability"],
+            explanation="Research-only profitability exposure from point-in-time ROE and margins; zero ranking weight until forward evidence supports it.",
+        ),
+        FactorExposure(
+            factor_id="growth",
+            label="Growth research",
+            raw_value=item.growth_raw,
+            score=scores["growth"][item.instrument_id],
+            weight=weights["growth"],
+            explanation="Research-only revenue and earnings growth exposure; zero ranking weight until point-in-time coverage and forward evidence are sufficient.",
+        ),
+        FactorExposure(
+            factor_id="downside_risk",
+            label="Downside risk research",
+            raw_value=item.downside_risk_raw,
+            score=scores["downside_risk"][item.instrument_id],
+            weight=weights["downside_risk"],
+            explanation="Research-only 60-session downside semideviation; lower downside volatility scores better and does not change ranking weights.",
+        ),
+        FactorExposure(
+            factor_id="market_adjusted_momentum",
+            label="Market-adjusted momentum research",
+            raw_value=item.market_adjusted_momentum_raw,
+            score=scores["market_adjusted_momentum"][item.instrument_id],
+            weight=weights["market_adjusted_momentum"],
+            explanation="Research-only beta-adjusted 20/60/120-session performance relative to the same asset pool; zero ranking weight while A-share efficacy is tested.",
         ),
     ]
 
