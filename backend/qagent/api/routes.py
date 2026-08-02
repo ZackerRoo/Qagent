@@ -113,6 +113,7 @@ from qagent.market.benchmarks import (
     benchmark_items_for_return_from_bars,
 )
 from qagent.market.cn_context import infer_etf_exposure_group
+from qagent.market.etf_exposure import EtfExposureService
 from qagent.monitoring.outcomes import (
     OpportunityOutcome,
     compute_opportunity_outcome,
@@ -237,6 +238,7 @@ _walk_forward_task_executor: ProcessPoolExecutor | None = None
 _walk_forward_jobs_lock = Lock()
 _submitted_walk_forward_jobs: set[str] = set()
 _automation_scheduler = AutomationScheduler()
+_etf_exposure_service = EtfExposureService()
 _ranking_v3_forward_runtime_lock = Lock()
 _ranking_v3_forward_runtime_status: dict[str, dict[str, object]] = {}
 
@@ -3877,6 +3879,7 @@ def _paper_candidate_pool_snapshot_items(
                 "snapshot_id": snapshot.snapshot_id,
                 "instrument_id": snapshot.instrument_id,
                 "instrument_label": _paper_snapshot_label(snapshot),
+                "asset_type": _paper_snapshot_asset_type(snapshot),
                 "strategy_id": snapshot.primary_strategy_id,
                 "industry": industry,
                 "exposure_group": industry,
@@ -3940,6 +3943,15 @@ def _paper_candidate_pool_snapshot_items(
 def _paper_snapshot_label(snapshot: OpportunitySnapshotRecord) -> str:
     label = snapshot.card.get("instrument_label") or snapshot.card.get("instrument_name")
     return str(label).strip() if label else snapshot.instrument_id
+
+
+def _paper_snapshot_asset_type(snapshot: OpportunitySnapshotRecord) -> str:
+    card = snapshot.card if isinstance(snapshot.card, dict) else {}
+    asset_type = str(card.get("asset_type") or "").strip().lower()
+    if asset_type:
+        return asset_type
+    label = _paper_snapshot_label(snapshot)
+    return "etf" if "ETF" in label.upper() else "unknown"
 
 
 def _paper_entry_gap_pct(
@@ -5659,6 +5671,47 @@ def paper_trade_candidate_pool(
         "summary": summary,
         "data_health": data_health,
     }
+
+
+@router.get("/etf-exposures")
+def etf_exposures(
+    instrument_ids: str,
+    limit: int = 16,
+) -> dict[str, object]:
+    if limit <= 0 or limit > 24:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 24")
+    requested = list(
+        dict.fromkeys(
+            value.strip().upper()
+            for value in instrument_ids.split(",")
+            if value.strip()
+        )
+    )
+    if not requested:
+        raise HTTPException(status_code=400, detail="instrument_ids must not be empty")
+    if len(requested) > limit:
+        raise HTTPException(status_code=400, detail=f"instrument_ids exceeds limit {limit}")
+    catalog = _repo().list_tradable_instruments(asset_types={"etf"}, limit=20_000)
+    names = {
+        item.instrument_id: item.name
+        for item in catalog
+        if item.instrument_id in requested
+    }
+    instruments = [
+        (instrument_id, names[instrument_id])
+        for instrument_id in requested
+        if instrument_id in names
+    ]
+    response = _etf_exposure_service.build_response(instruments)
+    response.data_health.update(
+        {
+            "etf_exposure_requested": str(len(requested)),
+            "etf_exposure_catalog_matched": str(len(instruments)),
+            "etf_exposure_catalog_missing": str(len(requested) - len(instruments)),
+            "etf_exposure_cache": "local_disk",
+        }
+    )
+    return response.model_dump(mode="json")
 
 
 def _paper_asset_types_for_trades(trades) -> dict[str, str]:

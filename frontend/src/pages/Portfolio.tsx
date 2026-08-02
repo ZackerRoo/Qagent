@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { ExternalLink, RefreshCw } from "lucide-react";
 
 import {
   deletePaperTrade,
   fetchAutomationScheduler,
   fetchFactorDiagnostics,
+  fetchEtfExposures,
   fetchPaperCandidatePool,
   fetchPaperDailyReport,
   fetchPaperDualTrack,
@@ -29,6 +30,7 @@ import type {
   AutoProcessingState,
   DataProviderMode,
   FactorDiagnosticsResponse,
+  EtfExposureResponse,
   PaperCandidatePoolResponse,
   PaperDualTrackResponse,
   PaperForwardComparisonResponse,
@@ -104,6 +106,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [ledger, setLedger] = useState<PaperLedgerResponse>();
   const [dailyReport, setDailyReport] = useState<PaperDailyReportResponse>();
   const [candidatePool, setCandidatePool] = useState<PaperCandidatePoolResponse>();
+  const [etfExposure, setEtfExposure] = useState<EtfExposureResponse>();
   const [dualTrack, setDualTrack] = useState<PaperDualTrackResponse>();
   const [forwardComparison, setForwardComparison] = useState<PaperForwardComparisonResponse>();
   const [factorDiagnostics, setFactorDiagnostics] = useState<FactorDiagnosticsResponse>();
@@ -118,6 +121,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [isStartingPaperSession, setIsStartingPaperSession] = useState(false);
   const [isRunningValidation, setIsRunningValidation] = useState(false);
   const [isLoadingFactorDiagnostics, setIsLoadingFactorDiagnostics] = useState(false);
+  const [isLoadingEtfExposure, setIsLoadingEtfExposure] = useState(false);
   const [deletingPaperTradeId, setDeletingPaperTradeId] = useState("");
 
   async function load() {
@@ -290,6 +294,34 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       void loadFactorDiagnostics();
     }
   }, [dataMode, portfolioView]);
+
+  useEffect(() => {
+    const instrumentIds = [...new Set(
+      candidatePool?.items
+        .filter((item) => item.asset_type === "etf")
+        .map((item) => item.instrument_id) ?? [],
+    )].slice(0, 16);
+    if (!instrumentIds.length) {
+      setEtfExposure(undefined);
+      setIsLoadingEtfExposure(false);
+      return;
+    }
+    let cancelled = false;
+    setIsLoadingEtfExposure(true);
+    void fetchEtfExposures(instrumentIds)
+      .then((result) => {
+        if (!cancelled) setEtfExposure(result);
+      })
+      .catch(() => {
+        if (!cancelled) setEtfExposure(undefined);
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingEtfExposure(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [candidatePool]);
 
   async function submit() {
     await savePosition(form);
@@ -595,6 +627,8 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
               ledger={ledger}
               validation={validation}
               candidatePool={candidatePool}
+              etfExposure={etfExposure}
+              loadingEtfExposure={isLoadingEtfExposure}
               language={language}
             />
             <details className="paper-research-drawer">
@@ -1834,12 +1868,16 @@ function PaperReviewDashboard({
   ledger,
   validation,
   candidatePool,
+  etfExposure,
+  loadingEtfExposure,
   language,
 }: {
   report?: PaperDailyReportResponse;
   ledger?: PaperLedgerResponse;
   validation?: PaperValidationResponse;
   candidatePool?: PaperCandidatePoolResponse;
+  etfExposure?: EtfExposureResponse;
+  loadingEtfExposure: boolean;
   language: Language;
 }) {
   if (!report) {
@@ -1903,7 +1941,12 @@ function PaperReviewDashboard({
 
       <PaperControlInsightGrid report={report} language={language} />
 
-      <PaperCandidatePoolPanel candidatePool={candidatePool} language={language} />
+      <PaperCandidatePoolPanel
+        candidatePool={candidatePool}
+        etfExposure={etfExposure}
+        loadingEtfExposure={loadingEtfExposure}
+        language={language}
+      />
       <PaperPostRecommendationLeaderboard report={report} language={language} />
       <PaperAssetGroupCards groups={assetGroups} language={language} />
       <PaperFailureAttributionPanel items={report.failure_attribution} language={language} />
@@ -2165,9 +2208,13 @@ function PaperControlInsightGrid({
 
 function PaperCandidatePoolPanel({
   candidatePool,
+  etfExposure,
+  loadingEtfExposure,
   language,
 }: {
   candidatePool?: PaperCandidatePoolResponse;
+  etfExposure?: EtfExposureResponse;
+  loadingEtfExposure: boolean;
   language: Language;
 }) {
   const [exposureFilter, setExposureFilter] = useState<PaperExposureCategory>("all");
@@ -2325,8 +2372,181 @@ function PaperCandidatePoolPanel({
           </div>
         )}
       </div>
+      <EtfLookThroughPanel
+        exposure={etfExposure}
+        exposureFilter={exposureFilter}
+        loading={loadingEtfExposure}
+        language={language}
+      />
     </section>
   );
+}
+
+function EtfLookThroughPanel({
+  exposure,
+  exposureFilter,
+  loading,
+  language,
+}: {
+  exposure?: EtfExposureResponse;
+  exposureFilter: PaperExposureCategory;
+  loading: boolean;
+  language: Language;
+}) {
+  const profiles = (exposure?.profiles ?? []).filter(
+    (profile) => exposureFilter === "all" || profile.exposure_category === exposureFilter,
+  );
+  const names = new Map(
+    (exposure?.profiles ?? []).map((profile) => [profile.instrument_id, profile.fund_name]),
+  );
+  const visibleIds = new Set(profiles.map((profile) => profile.instrument_id));
+  const overlaps = (exposure?.overlaps ?? []).filter((item) => (
+    visibleIds.has(item.left_instrument_id)
+    && visibleIds.has(item.right_instrument_id)
+    && (item.same_tracking_index || (item.disclosed_overlap_lower_bound_pct ?? 0) >= 5)
+  )).slice(0, 6);
+  const completeCount = profiles.filter((profile) => profile.data_status === "complete").length;
+  const partialCount = profiles.filter((profile) => profile.data_status === "partial").length;
+  const unavailableCount = profiles.filter((profile) => profile.data_status === "unavailable").length;
+  if (!loading && !exposure) return null;
+  return (
+    <div className="paper-etf-lookthrough">
+      <div className="paper-etf-lookthrough-header">
+        <div>
+          <strong>{language === "zh" ? "ETF 穿透暴露" : "ETF look-through"}</strong>
+          <small>
+            {language === "zh"
+              ? "精确跟踪指数、最新季报前十大持仓和行业配置；来源缺失时不推测。"
+              : "Exact tracking index, latest reported top holdings, and sector allocation; missing sources stay unavailable."}
+          </small>
+        </div>
+        {exposure && (
+          <span>
+            {language === "zh"
+              ? `${profiles.length} 只 ETF · ${completeCount} 完整 · ${partialCount} 部分${unavailableCount ? ` · ${unavailableCount} 不可用` : ""}`
+              : `${profiles.length} ETFs · ${completeCount} complete · ${partialCount} partial${unavailableCount ? ` · ${unavailableCount} unavailable` : ""}`}
+          </span>
+        )}
+      </div>
+      {loading && !exposure ? (
+        <div className="mini-curve-empty">
+          {language === "zh" ? "正在读取 ETF 最新披露数据。" : "Loading the latest ETF disclosures."}
+        </div>
+      ) : profiles.length ? (
+        <div className="paper-etf-profile-list">
+          {profiles.map((profile) => (
+            <article key={profile.instrument_id} className="paper-etf-profile-row">
+              <header>
+                <div>
+                  <strong title={profile.fund_name}>{profile.fund_name}</strong>
+                  <small>{profile.instrument_id}</small>
+                </div>
+                <span className={`status-${profile.data_status}`}>
+                  {etfSourceStatusLabel(profile.data_status, language)}
+                </span>
+              </header>
+              <div className="paper-etf-profile-metrics">
+                <div>
+                  <span>{language === "zh" ? "跟踪指数" : "Tracking index"}</span>
+                  <b title={profile.tracking_index ?? undefined}>
+                    {profile.tracking_index ?? (language === "zh" ? "来源未提供" : "Not provided")}
+                  </b>
+                </div>
+                <div>
+                  <span>{language === "zh" ? "市场 / 风格" : "Market / style"}</span>
+                  <b>{profile.market_scope}{profile.style_exposure ? ` · ${profile.style_exposure}` : ""}</b>
+                </div>
+                <div>
+                  <span>{language === "zh" ? "前十大披露覆盖" : "Top-10 disclosed coverage"}</span>
+                  <b>{profile.holdings.length ? `${profile.holdings_coverage_pct.toFixed(2)}%` : "-"}</b>
+                </div>
+              </div>
+              <div className="paper-etf-profile-details">
+                <div>
+                  <span>{language === "zh" ? "主要持仓" : "Top holdings"}</span>
+                  {profile.holdings.length ? profile.holdings.slice(0, 4).map((item) => (
+                    <p key={item.instrument_id}>
+                      <b>{item.name}</b><small>{item.weight_pct.toFixed(2)}%</small>
+                    </p>
+                  )) : (
+                    <p><em>{language === "zh" ? "持仓披露不可用" : "Holdings unavailable"}</em></p>
+                  )}
+                </div>
+                <div>
+                  <span>{language === "zh" ? "行业配置" : "Sector allocation"}</span>
+                  {profile.industries.length ? profile.industries.slice(0, 4).map((item) => (
+                    <p key={item.name}>
+                      <b>{item.name}</b><small>{item.weight_pct.toFixed(2)}%</small>
+                    </p>
+                  )) : (
+                    <p><em>{language === "zh" ? "行业披露不可用" : "Sector data unavailable"}</em></p>
+                  )}
+                </div>
+              </div>
+              <footer>
+                <span>
+                  {language === "zh" ? "持仓期" : "Holdings"} {profile.holdings_as_of ?? "-"}
+                  {" · "}{language === "zh" ? "行业期" : "Sectors"} {profile.industries_as_of ?? "-"}
+                </span>
+                {profile.source_url && (
+                  <a href={profile.source_url} target="_blank" rel="noreferrer">
+                    {language === "zh" ? "披露来源" : "Disclosure source"}
+                    <ExternalLink size={12} aria-hidden="true" />
+                  </a>
+                )}
+              </footer>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="mini-curve-empty">
+          {language === "zh" ? "该分类没有可展示的 ETF 披露数据。" : "No ETF disclosures in this category."}
+        </div>
+      )}
+      {profiles.length >= 2 && (
+        <div className="paper-etf-overlap">
+          <div>
+            <strong>{language === "zh" ? "ETF 重合度" : "ETF overlap"}</strong>
+            <small>
+              {language === "zh"
+                ? "仅基于双方最新披露前十大持仓，数值是可确认的重合下限，不代表完整组合。"
+                : "Based only on both funds' latest disclosed top holdings, so values are confirmed lower bounds."}
+            </small>
+          </div>
+          {overlaps.length ? overlaps.map((item) => (
+            <div key={`${item.left_instrument_id}-${item.right_instrument_id}`} className="paper-etf-overlap-row">
+              <div>
+                <b>{names.get(item.left_instrument_id) ?? item.left_instrument_id}</b>
+                <span>×</span>
+                <b>{names.get(item.right_instrument_id) ?? item.right_instrument_id}</b>
+              </div>
+              <strong>
+                {item.disclosed_overlap_lower_bound_pct != null
+                  ? `${item.disclosed_overlap_lower_bound_pct.toFixed(2)}%`
+                  : "-"}
+              </strong>
+              <small>
+                {item.same_tracking_index
+                  ? (language === "zh" ? "同一跟踪指数" : "Same tracking index")
+                  : (item.shared_constituents.map((shared) => shared.name).join("、")
+                    || (language === "zh" ? "无已披露共同持仓" : "No disclosed shared holdings"))}
+              </small>
+            </div>
+          )) : (
+            <div className="mini-curve-empty">
+              {language === "zh" ? "未发现达到 5% 下限或同指数的 ETF 组合。" : "No same-index or 5%+ lower-bound overlaps."}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function etfSourceStatusLabel(status: string, language: Language): string {
+  if (status === "complete") return language === "zh" ? "披露完整" : "Complete";
+  if (status === "partial") return language === "zh" ? "部分可用" : "Partial";
+  return language === "zh" ? "来源不可用" : "Unavailable";
 }
 
 function paperExposureRows(candidatePool: PaperCandidatePoolResponse, language: Language) {

@@ -50,6 +50,10 @@ const checks = [
   ["portfolio filters ETF exposure categories", files.portfolio.includes("PAPER_EXPOSURE_FILTERS")],
   ["portfolio keeps unknown legacy exposure explicit", files.portfolio.includes("active_industry_unknown_count")],
   ["portfolio subtracts reserved exposure capacity", files.portfolio.includes("occupiedAfterCandidate")],
+  ["client exposes ETF look-through endpoint", files.client.includes("fetchEtfExposures")],
+  ["client serializes ETF instrument ids", files.client.includes('search.set("instrument_ids"')],
+  ["portfolio renders ETF look-through", files.portfolio.includes("EtfLookThroughPanel")],
+  ["portfolio labels top holdings overlap as a lower bound", files.portfolio.includes("重合下限")],
   ["types expose report risk gate", files.portfolio.includes("report.risk_gate")],
   ["types expose failure attribution", files.portfolio.includes("failure_attribution")],
   ["types expose event timeline", files.portfolio.includes("event_timeline")],
@@ -63,6 +67,8 @@ const checks = [
   ["styles include daily decision strip", files.styles.includes(".paper-daily-decision-strip")],
   ["styles include exposure overview", files.styles.includes(".paper-exposure-overview")],
   ["styles include exposure filters", files.styles.includes(".paper-exposure-filters")],
+  ["styles include ETF look-through", files.styles.includes(".paper-etf-lookthrough")],
+  ["styles include ETF overlap rows", files.styles.includes(".paper-etf-overlap-row")],
 ];
 
 const failed = checks.filter(([, passed]) => !passed);

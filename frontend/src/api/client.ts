@@ -19,6 +19,7 @@ import type {
   DailyBriefResponse,
   DeliveriesResponse,
   DeliveryOutboxRecord,
+  EtfExposureResponse,
   FactorBacktestResponse,
   FactorDiagnosticsResponse,
   FullMarketBatchScanJob,
@@ -83,6 +84,7 @@ const latestBatchResultRequests = new Map<string, Promise<FullMarketScanResponse
 type ScanParams = {
   provider?: DataProviderMode;
   instrument_id?: string;
+  instrument_ids?: string;
   symbols?: string;
   q?: string;
   limit?: number;
@@ -170,6 +172,9 @@ function queryString(params?: ScanParams): string {
   }
   if (params.instrument_id) {
     search.set("instrument_id", params.instrument_id);
+  }
+  if (params.instrument_ids?.trim()) {
+    search.set("instrument_ids", params.instrument_ids);
   }
   if (params.symbols?.trim()) {
     search.set("symbols", params.symbols);
@@ -494,6 +499,15 @@ export async function fetchPaperCandidatePool(
     provider,
     include_etfs: true,
     limit: 20,
+  });
+}
+
+export async function fetchEtfExposures(
+  instrumentIds: string[],
+): Promise<EtfExposureResponse> {
+  return apiGet<EtfExposureResponse>("/etf-exposures", {
+    instrument_ids: instrumentIds.join(","),
+    limit: 16,
   });
 }
 

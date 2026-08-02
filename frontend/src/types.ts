@@ -2079,6 +2079,7 @@ export type PaperCandidatePoolItem = {
   snapshot_id: string;
   instrument_id: string;
   instrument_label: string;
+  asset_type: string;
   strategy_id: string | null;
   industry: string | null;
   exposure_group: string | null;
@@ -2123,6 +2124,60 @@ export type PaperCandidatePoolSummary = {
 export type PaperCandidatePoolResponse = {
   items: PaperCandidatePoolItem[];
   summary: PaperCandidatePoolSummary;
+  data_health: Record<string, string>;
+};
+
+export type EtfExposureConstituent = {
+  instrument_id: string;
+  symbol: string;
+  name: string;
+  weight_pct: number;
+};
+
+export type EtfIndustryExposure = {
+  name: string;
+  weight_pct: number;
+};
+
+export type EtfExposureProfile = {
+  instrument_id: string;
+  symbol: string;
+  fund_name: string;
+  fund_type: string | null;
+  tracking_index: string | null;
+  exposure_group: string | null;
+  exposure_category: string;
+  market_scope: string;
+  style_exposure: string | null;
+  holdings: EtfExposureConstituent[];
+  holdings_as_of: string | null;
+  holdings_coverage_pct: number;
+  holdings_scope: string;
+  industries: EtfIndustryExposure[];
+  industries_as_of: string | null;
+  source_provider: string;
+  source_url: string;
+  fetched_at: string;
+  data_status: string;
+  errors: string[];
+};
+
+export type EtfExposureOverlap = {
+  left_instrument_id: string;
+  right_instrument_id: string;
+  same_tracking_index: boolean;
+  disclosed_overlap_lower_bound_pct: number | null;
+  shared_constituents: Array<{
+    instrument_id: string;
+    name: string;
+    minimum_weight_pct: number;
+  }>;
+  status: string;
+};
+
+export type EtfExposureResponse = {
+  profiles: EtfExposureProfile[];
+  overlaps: EtfExposureOverlap[];
   data_health: Record<string, string>;
 };
 
