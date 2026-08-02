@@ -1,6 +1,8 @@
+from decimal import Decimal
 from types import SimpleNamespace
 
 from qagent.api.routes import (
+    _paper_industry_capacity_filter,
     _paper_market_entry_gate_from_cache,
     _paper_strategy_capacity_filter,
 )
@@ -77,3 +79,136 @@ def test_paper_strategy_capacity_counts_open_and_pending_positions():
 
     assert [item.primary_strategy_id for item in selected] == ["quality", "quality"]
     assert health["paper_strategy_capacity_blocked"] == "2"
+
+
+def test_paper_industry_capacity_blocks_third_name_and_missing_industry():
+    trades = [
+        SimpleNamespace(
+            status="open",
+            strategy_id="trend",
+            instrument_id="CN:1",
+            source_snapshot_id="old-1",
+        ),
+        SimpleNamespace(
+            status="pending",
+            strategy_id="quality",
+            instrument_id="CN:2",
+            source_snapshot_id="old-2",
+            signal_date=None,
+            trigger_price=None,
+            latest_price=None,
+            rank_score=0.8,
+        ),
+        SimpleNamespace(
+            status="open",
+            strategy_id="trend",
+            instrument_id="CN:3",
+            source_snapshot_id="old-3",
+        ),
+    ]
+    contexts = {
+        "old-1": SimpleNamespace(industry="银行"),
+        "old-2": SimpleNamespace(industry="银行"),
+        "old-3": SimpleNamespace(industry="unknown"),
+    }
+    paper_repo = SimpleNamespace(
+        list_trades=lambda **_: trades,
+        get_trade_source_context=lambda source_id: contexts[source_id],
+        get_account_settings=lambda: SimpleNamespace(max_positions=10),
+    )
+    snapshots = [
+        SimpleNamespace(
+            instrument_id="CN:4",
+            snapshot_id="new-bank",
+            latest_close=Decimal("10.00"),
+            trigger_price=Decimal("10.10"),
+            card={"market_context": {"industry": "银行"}},
+        ),
+        SimpleNamespace(
+            instrument_id="CN:5",
+            snapshot_id="new-chip-1",
+            latest_close=Decimal("10.00"),
+            trigger_price=Decimal("10.10"),
+            card={"market_context": {"industry": "半导体"}},
+        ),
+        SimpleNamespace(
+            instrument_id="CN:6",
+            snapshot_id="new-chip-2",
+            latest_close=Decimal("10.00"),
+            trigger_price=Decimal("10.10"),
+            card={"market_context": {"industry": "半导体"}},
+        ),
+        SimpleNamespace(
+            instrument_id="CN:7",
+            snapshot_id="new-missing",
+            latest_close=Decimal("10.00"),
+            trigger_price=Decimal("10.10"),
+            card={"market_context": {}},
+        ),
+    ]
+
+    selected, health = _paper_industry_capacity_filter(
+        paper_repo,
+        snapshots,
+        provider="free",
+        max_per_industry=2,
+    )
+
+    assert [item.instrument_id for item in selected] == ["CN:5", "CN:6"]
+    assert health["paper_industry_capacity_blocked"] == "1"
+    assert health["paper_industry_capacity_missing"] == "1"
+    assert health["paper_industry_capacity_active_unknown"] == "1"
+
+
+def test_paper_industry_capacity_allows_same_industry_pending_replacement():
+    trades = [
+        SimpleNamespace(
+            status="pending",
+            strategy_id="trend",
+            instrument_id="CN:1",
+            source_snapshot_id="old-1",
+            signal_date=None,
+            trigger_price=None,
+            latest_price=None,
+            rank_score=0.6,
+        ),
+        SimpleNamespace(
+            status="open",
+            strategy_id="quality",
+            instrument_id="CN:2",
+            source_snapshot_id="old-2",
+        ),
+        SimpleNamespace(
+            status="open",
+            strategy_id="trend",
+            instrument_id="CN:3",
+            source_snapshot_id="old-3",
+        ),
+    ]
+    contexts = {
+        "old-1": SimpleNamespace(industry="银行"),
+        "old-2": SimpleNamespace(industry="银行"),
+        "old-3": SimpleNamespace(industry="电力"),
+    }
+    paper_repo = SimpleNamespace(
+        list_trades=lambda **_: trades,
+        get_trade_source_context=lambda source_id: contexts[source_id],
+        get_account_settings=lambda: SimpleNamespace(max_positions=3),
+    )
+    candidate = SimpleNamespace(
+        instrument_id="CN:4",
+        snapshot_id="new-bank",
+        latest_close=Decimal("10.00"),
+        trigger_price=Decimal("10.10"),
+        card={"market_context": {"industry": "银行"}},
+    )
+
+    selected, health = _paper_industry_capacity_filter(
+        paper_repo,
+        [candidate],
+        provider="free",
+        max_per_industry=2,
+    )
+
+    assert selected == [candidate]
+    assert health["paper_industry_capacity_mode"] == "replacement_only"

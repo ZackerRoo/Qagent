@@ -754,6 +754,76 @@ def test_risk_off_candidates_remain_visible_without_becoming_seedable(
     assert client.get("/api/paper-trades").json()["summary"]["total"] == 0
 
 
+def test_candidate_pool_reports_industry_capacity_block(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'paper-industry-capacity.db'}",
+    )
+    client = TestClient(create_app())
+    cards = _persist_authoritative_opportunities(
+        provider="fixture",
+        cards=[
+            ("bank-card-1", "US:BANK-1"),
+            ("bank-card-2", "US:BANK-2"),
+            ("bank-card-3", "US:BANK-3"),
+        ],
+    )
+    for card in cards:
+        _patch_authoritative_card(
+            provider="fixture",
+            card_id=card.card_id,
+            updates={"market_context": {"industry": "银行"}},
+        )
+    first = client.post(
+        "/api/paper-trades/from-opportunity",
+        json=_opportunity_request(cards[0], provider="fixture"),
+    )
+    second = client.post(
+        "/api/paper-trades/from-opportunity",
+        json=_opportunity_request(cards[1], provider="fixture"),
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+    repo = routes._repo()
+    snapshots = repo.list_latest_opportunity_snapshots_by_card_ids(
+        [card.card_id for card in cards],
+        provider="fixture",
+    )
+    repo.save_scan_result_cache(
+        cache_key=routes.full_market_batch_cache_key("fixture", True),
+        provider="fixture",
+        mode="full_market_batch",
+        symbols=[card.instrument_id for card in cards],
+        payload={
+            "cards": [snapshot.card for snapshot in snapshots],
+            "benchmark_trend": {
+                "state": "risk_on",
+                "entry_allowed": True,
+                "reason": "test",
+            },
+        },
+    )
+
+    pool = client.get(
+        "/api/paper-trades/candidate-pool?provider=fixture&include_etfs=true&limit=10"
+    )
+
+    assert pool.status_code == 200
+    item = next(
+        candidate
+        for candidate in pool.json()["items"]
+        if candidate["instrument_id"] == "US:BANK-3"
+    )
+    assert item["status"] == "blocked_by_industry"
+    assert item["industry"] == "银行"
+    assert item["industry_active_count"] == 2
+    assert item["industry_capacity_used"] == 2
+    assert item["industry_capacity_limit"] == 2
+    assert item["industry_blocked"] is True
+    assert pool.json()["summary"]["industry_blocked_count"] == 1
+
+
 def test_ranking_v4_shadow_claim_is_admitted_to_research_paper_lane(
     tmp_path,
     monkeypatch,

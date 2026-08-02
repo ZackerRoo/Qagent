@@ -451,6 +451,7 @@ function isEligibleCandidate(item: PaperCandidatePoolItem) {
   return ![
     "blocked_by_data",
     "blocked_by_market",
+    "blocked_by_industry",
     "tracked_before",
     "active_in_paper",
     "paused_by_risk",
@@ -541,6 +542,7 @@ function candidateStatusLabel(status: string, language: "zh" | "en") {
     active_in_paper: "已在模拟盘",
     paused_by_risk: "风控暂停",
     blocked_by_market: "市场暂停入场",
+    blocked_by_industry: "行业集中度阻断",
     tracked_before: "已跟踪/冷却",
     blocked_by_data: "数据阻断",
   };

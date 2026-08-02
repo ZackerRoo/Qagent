@@ -213,6 +213,9 @@ from qagent.strategy_data.providers import EmptyStrategyDataProvider, build_stra
 from qagent.strategies.models import StrategyHealth
 
 router = APIRouter()
+
+PAPER_MAX_PER_INDUSTRY = 2
+_UNKNOWN_PAPER_INDUSTRIES = {"", "-", "unknown", "unclassified", "其他", "未知"}
 _task_manager = TaskManager()
 _task_executor = ThreadPoolExecutor(max_workers=2)
 _history_task_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="history-backfill")
@@ -3422,6 +3425,13 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 max_per_strategy=2,
             )
             data_health.update(strategy_capacity_health)
+            snapshots, industry_capacity_health = _paper_industry_capacity_filter(
+                paper_repo,
+                snapshots,
+                provider=mode,
+                max_per_industry=PAPER_MAX_PER_INDUSTRY,
+            )
+            data_health.update(industry_capacity_health)
             pool_health = _paper_candidate_pool_health(
                 paper_repo=paper_repo,
                 snapshots=snapshots,
@@ -3744,6 +3754,18 @@ def _paper_candidate_pool_snapshot_items(
     recently_released = set(recently_released_by_instrument)
     active_count = len(active)
     replacee = _paper_replacement_trade(active)
+    active_industry_counts, active_industry_by_instrument, unknown_active_industries = (
+        _paper_active_industry_counts(paper_repo, active)
+    )
+    available_industry_counts = dict(active_industry_counts)
+    if replacee is not None and active_count >= account.max_positions:
+        replacee_industry = active_industry_by_instrument.get(replacee.instrument_id)
+        if replacee_industry is not None:
+            available_industry_counts[replacee_industry] = max(
+                0,
+                available_industry_counts.get(replacee_industry, 0) - 1,
+            )
+    reserved_industry_counts: dict[str, int] = {}
     replacee_score = _float_value(replacee.rank_score) if replacee else 0.0
     replacee_pressure = _paper_pending_replacement_pressure(replacee) if replacee else 0.0
     risk_action = risk_gate_health.get("paper_risk_gate_action", "")
@@ -3765,6 +3787,25 @@ def _paper_candidate_pool_snapshot_items(
             snapshot,
             latest_value=latest_value,
         )
+        industry = _paper_snapshot_industry(snapshot)
+        industry_active_count = active_industry_counts.get(industry, 0) if industry else 0
+        industry_occupied = (
+            available_industry_counts.get(industry, 0)
+            + reserved_industry_counts.get(industry, 0)
+            if industry
+            else 0
+        )
+        is_untracked_candidate = (
+            active_trade is None
+            and snapshot.instrument_id not in recently_released
+            and snapshot.snapshot_id not in existing_sources
+        )
+        industry_blocked = is_untracked_candidate and (
+            industry is None or industry_occupied >= PAPER_MAX_PER_INDUSTRY
+        )
+        industry_capacity_available = (
+            industry is not None and industry_occupied < PAPER_MAX_PER_INDUSTRY
+        )
         status = "waiting"
         action = "等待下一轮"
         replacement_target = None
@@ -3784,6 +3825,12 @@ def _paper_candidate_pool_snapshot_items(
         elif market_entry_blocked:
             status = "blocked_by_market"
             action = "市场风控暂停入场"
+        elif industry is None:
+            status = "blocked_by_industry"
+            action = "行业数据缺失"
+        elif industry_blocked:
+            status = "blocked_by_industry"
+            action = "行业集中度已达上限"
         elif risk_action == "pause_new_entries":
             status = "paused_by_risk"
             action = "风控暂停新增"
@@ -3807,12 +3854,27 @@ def _paper_candidate_pool_snapshot_items(
         elif active_count >= account.max_positions:
             status = "waiting_for_slot"
             action = "满额等待"
+        if (
+            price_basis_consistent
+            and is_untracked_candidate
+            and industry is not None
+            and not industry_blocked
+        ):
+            reserved_industry_counts[industry] = (
+                reserved_industry_counts.get(industry, 0) + 1
+            )
         items.append(
             {
                 "snapshot_id": snapshot.snapshot_id,
                 "instrument_id": snapshot.instrument_id,
                 "instrument_label": _paper_snapshot_label(snapshot),
                 "strategy_id": snapshot.primary_strategy_id,
+                "industry": industry,
+                "industry_active_count": industry_active_count,
+                "industry_capacity_used": industry_occupied,
+                "industry_capacity_limit": PAPER_MAX_PER_INDUSTRY,
+                "industry_capacity_available": industry_capacity_available,
+                "industry_blocked": industry_blocked,
                 "signal_date": snapshot.signal_date.isoformat() if snapshot.signal_date else None,
                 "rank_score": _float_value(snapshot.rank_score),
                 "priority_score": score,
@@ -3837,6 +3899,10 @@ def _paper_candidate_pool_snapshot_items(
     )
     replacement_candidates = sum(1 for item in items if item["status"] == "replace_candidate")
     market_blocked_count = sum(1 for item in items if item["status"] == "blocked_by_market")
+    industry_blocked_count = sum(1 for item in items if item["industry_blocked"])
+    industry_missing_count = sum(
+        1 for item in items if item["industry"] is None and item["industry_blocked"]
+    )
     summary = {
         "total_candidates": len(snapshots),
         "shown_candidates": len(items),
@@ -3845,6 +3911,11 @@ def _paper_candidate_pool_snapshot_items(
         "waiting_count": waiting_count,
         "replacement_candidates": replacement_candidates,
         "market_blocked_count": market_blocked_count,
+        "industry_capacity_limit": PAPER_MAX_PER_INDUSTRY,
+        "industry_blocked_count": industry_blocked_count,
+        "industry_missing_count": industry_missing_count,
+        "active_industry_unknown_count": unknown_active_industries,
+        "active_industry_counts": dict(sorted(active_industry_counts.items())),
         "risk_action": risk_action,
         "entry_calibration_action": _paper_entry_calibration_action(items),
         "market_adaptive_action": (
@@ -4581,6 +4652,111 @@ def _paper_strategy_capacity_filter(
         "paper_strategy_capacity_already_tracked": str(already_tracked),
         "paper_strategy_capacity_mode": "new_entries",
     }
+
+
+def _paper_industry_capacity_filter(
+    paper_repo: PaperTradingRepository,
+    snapshots: list[OpportunitySnapshotRecord],
+    *,
+    provider: str,
+    max_per_industry: int,
+) -> tuple[list[OpportunitySnapshotRecord], dict[str, str]]:
+    if max_per_industry <= 0:
+        raise ValueError("max_per_industry must be positive")
+    trades = paper_repo.list_trades(limit=1000, provider=provider)
+    active = [trade for trade in trades if trade.status in {"pending", "open"}]
+    active_counts, active_by_instrument, unknown_active = _paper_active_industry_counts(
+        paper_repo,
+        active,
+    )
+    account = paper_repo.get_account_settings()
+    replacee = (
+        _paper_replacement_trade(active)
+        if len(active) >= account.max_positions
+        else None
+    )
+    available_counts = dict(active_counts)
+    if replacee is not None:
+        replacee_industry = active_by_instrument.get(replacee.instrument_id)
+        if replacee_industry is not None:
+            available_counts[replacee_industry] = max(
+                0,
+                available_counts.get(replacee_industry, 0) - 1,
+            )
+
+    active_instruments = {trade.instrument_id for trade in active}
+    existing_sources = {trade.source_snapshot_id for trade in trades}
+    selected_counts: dict[str, int] = {}
+    allowed: list[OpportunitySnapshotRecord] = []
+    blocked = 0
+    missing = 0
+    already_tracked = 0
+    for snapshot in snapshots:
+        if snapshot.instrument_id in active_instruments or snapshot.snapshot_id in existing_sources:
+            already_tracked += 1
+            continue
+        if not _paper_candidate_price_basis_is_consistent(
+            snapshot,
+            latest_value=_paper_snapshot_latest_value(snapshot),
+        ):
+            # The downstream price filter owns this rejection. Do not let an
+            # already-invalid row consume an industry slot ahead of valid rows.
+            allowed.append(snapshot)
+            continue
+        industry = _paper_snapshot_industry(snapshot)
+        if industry is None:
+            missing += 1
+            continue
+        occupied = available_counts.get(industry, 0) + selected_counts.get(industry, 0)
+        if occupied >= max_per_industry:
+            blocked += 1
+            continue
+        allowed.append(snapshot)
+        selected_counts[industry] = selected_counts.get(industry, 0) + 1
+    return allowed, {
+        "paper_industry_capacity_limit": str(max_per_industry),
+        "paper_industry_capacity_blocked": str(blocked),
+        "paper_industry_capacity_missing": str(missing),
+        "paper_industry_capacity_active_known": str(sum(active_counts.values())),
+        "paper_industry_capacity_active_unknown": str(unknown_active),
+        "paper_industry_capacity_already_tracked": str(already_tracked),
+        "paper_industry_capacity_mode": (
+            "replacement_only" if replacee is not None else "new_entries"
+        ),
+    }
+
+
+def _paper_active_industry_counts(
+    paper_repo: PaperTradingRepository,
+    active_trades: list[PaperTradeRecord],
+) -> tuple[dict[str, int], dict[str, str | None], int]:
+    counts: dict[str, int] = {}
+    by_instrument: dict[str, str | None] = {}
+    unknown = 0
+    for trade in active_trades:
+        context = paper_repo.get_trade_source_context(trade.source_snapshot_id)
+        industry = _normalized_paper_industry(context.industry if context else None)
+        by_instrument[trade.instrument_id] = industry
+        if industry is None:
+            unknown += 1
+            continue
+        counts[industry] = counts.get(industry, 0) + 1
+    return counts, by_instrument, unknown
+
+
+def _paper_snapshot_industry(snapshot: OpportunitySnapshotRecord) -> str | None:
+    snapshot_card = getattr(snapshot, "card", None)
+    card = snapshot_card if isinstance(snapshot_card, dict) else {}
+    market_context = card.get("market_context")
+    market_context = market_context if isinstance(market_context, dict) else {}
+    return _normalized_paper_industry(
+        market_context.get("industry") or card.get("industry") or card.get("sector")
+    )
+
+
+def _normalized_paper_industry(value: object) -> str | None:
+    normalized = str(value).strip() if value is not None else ""
+    return None if normalized.lower() in _UNKNOWN_PAPER_INDUSTRIES else normalized
 
 
 def _is_trackable_cached_paper_card(card: dict[str, object]) -> bool:

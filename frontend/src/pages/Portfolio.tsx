@@ -2190,9 +2190,13 @@ function PaperCandidatePoolPanel({
           <small>{language === "zh" ? "远离触发价会降优先级" : "Far triggers lose priority"}</small>
         </div>
         <div>
-          <span>{language === "zh" ? "市场自适应" : "Market adaptive"}</span>
-          <strong>{paperMarketAdaptiveLabel(summary.market_adaptive_action, language)}</strong>
-          <small>{language === "zh" ? "科创/芯片等强主题加权" : "Strong themes get a boost"}</small>
+          <span>{language === "zh" ? "行业分散" : "Industry spread"}</span>
+          <strong>{summary.industry_blocked_count}</strong>
+          <small>
+            {language === "zh"
+              ? `单行业最多 ${summary.industry_capacity_limit} 只`
+              : `Max ${summary.industry_capacity_limit} per industry`}
+          </small>
         </div>
       </div>
       <div className="paper-candidate-list">
@@ -2203,7 +2207,10 @@ function PaperCandidatePoolPanel({
               <strong title={item.instrument_label || item.instrument_id}>
                 {formatInstrumentDisplay(item.instrument_label || item.instrument_id)}
               </strong>
-              <small>{localizeStrategy(item.strategy_id, language)}</small>
+              <small>
+                {localizeStrategy(item.strategy_id, language)}
+                {item.industry ? ` · ${item.industry}` : ` · ${language === "zh" ? "行业未知" : "Unknown industry"}`}
+              </small>
             </div>
             <div className="paper-candidate-metrics">
               <span>{language === "zh" ? "优先级" : "Priority"} <b>{Math.round(item.priority_score * 100)}</b></span>
@@ -2533,6 +2540,7 @@ function paperCandidateStatusLabel(status: string, language: Language) {
     tracked_before: { zh: "已跟踪过", en: "Tracked" },
     paused_by_risk: { zh: "风控暂停", en: "Risk paused" },
     blocked_by_market: { zh: "市场暂停入场", en: "Market blocked" },
+    blocked_by_industry: { zh: "行业集中度阻断", en: "Industry blocked" },
     blocked_by_data: { zh: "数据阻断", en: "Data blocked" },
   };
   return labels[status]?.[zh ? "zh" : "en"] ?? status;
@@ -2544,15 +2552,6 @@ function paperEntryCalibrationLabel(action: string, language: Language) {
     replace_far_pending: { zh: "替换远买点", en: "Replace far entries" },
     tighten_far_triggers: { zh: "收紧远买点", en: "Tighten far triggers" },
     keep_current_trigger: { zh: "规则正常", en: "Keep rules" },
-  };
-  return labels[action]?.[zh ? "zh" : "en"] ?? action;
-}
-
-function paperMarketAdaptiveLabel(action: string, language: Language) {
-  const zh = language === "zh";
-  const labels: Record<string, { zh: string; en: string }> = {
-    theme_boost_enabled: { zh: "强主题加权", en: "Theme boost" },
-    theme_boost_idle: { zh: "无主题加权", en: "No theme boost" },
   };
   return labels[action]?.[zh ? "zh" : "en"] ?? action;
 }

@@ -1709,6 +1709,7 @@ function paperAdmissionLabel(status: string, language: "zh" | "en") {
     tracked_before: { zh: "已跟踪/冷却", en: "Cooling" },
     paused_by_risk: { zh: "风控暂停", en: "Risk paused" },
     blocked_by_market: { zh: "市场暂停入场", en: "Market blocked" },
+    blocked_by_industry: { zh: "行业集中度阻断", en: "Industry blocked" },
     blocked_by_data: { zh: "数据阻断", en: "Data blocked" },
     not_in_pool: { zh: "未入候补", en: "Not queued" },
     unknown: { zh: "待判断", en: "Pending" },
@@ -1740,6 +1741,15 @@ function paperAdmissionExplanation(
     return language === "zh"
       ? "候选仍保留展示，但当前市场状态暂停新增仓位；市场门禁解除后会重新评估。"
       : "The candidate remains visible, but market conditions pause new entries until the next reassessment.";
+  }
+  if (admission.status === "blocked_by_industry") {
+    return admission.industry
+      ? language === "zh"
+        ? `${admission.industry} 已占用或预留 ${admission.industry_capacity_used}/${admission.industry_capacity_limit} 个行业名额，暂不自动新增。`
+        : `${admission.industry} uses or reserves ${admission.industry_capacity_used}/${admission.industry_capacity_limit} industry slots, so no automatic entry is allowed.`
+      : language === "zh"
+        ? "候选缺少行业归属，等待数据补齐后再评估自动入场。"
+        : "Industry classification is missing; automatic entry waits for complete data.";
   }
   if (admission.status === "waiting_for_slot") {
     return language === "zh"

@@ -2080,6 +2080,12 @@ export type PaperCandidatePoolItem = {
   instrument_id: string;
   instrument_label: string;
   strategy_id: string | null;
+  industry: string | null;
+  industry_active_count: number;
+  industry_capacity_used: number;
+  industry_capacity_limit: number;
+  industry_capacity_available: boolean;
+  industry_blocked: boolean;
   signal_date: string | null;
   rank_score: number;
   priority_score: number;
@@ -2103,6 +2109,11 @@ export type PaperCandidatePoolSummary = {
   waiting_count: number;
   replacement_candidates: number;
   market_blocked_count: number;
+  industry_capacity_limit: number;
+  industry_blocked_count: number;
+  industry_missing_count: number;
+  active_industry_unknown_count: number;
+  active_industry_counts: Record<string, number>;
   risk_action: string;
   entry_calibration_action: string;
   market_adaptive_action: string;

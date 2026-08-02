@@ -43,3 +43,34 @@ A research factor remains at zero weight until the fixed local evaluation report
 Failure at a checkpoint keeps the factor observable but unweighted. The system may
 remove an unhelpful research column later, but it must not tune live weights to an
 already inspected historical window.
+
+## Portfolio construction review
+
+The second review compared Qagent with current commercial factor research and mature
+open-source portfolio tooling. The main actionable gap is portfolio concentration,
+not another unvalidated alpha formula:
+
+- MSCI's 2025 A-share review reports rotating factor leadership and material
+  unintended style/industry exposures. Its enhanced examples control those exposures
+  with screens, weights, turnover, transaction-cost, holding and asset constraints.
+- Alphalens emphasizes IC, quantile returns, turnover and decay diagnostics. Qagent's
+  research factor path now covers that evaluation layer, so adding more formulas before
+  enough forward observations would only widen the search space.
+- PyPortfolioOpt and Riskfolio-Lib provide covariance shrinkage, risk parity,
+  hierarchical allocation and factor/class constraints. Those optimizers require more
+  stable covariance and point-in-time industry history than Qagent currently has.
+- Qlib's China benchmark reports model dispersion across multiple seeds. Qagent should
+  adopt that reproducibility discipline before adding a learned ranking model.
+
+Qagent therefore applies its existing deterministic limit of two positions per known
+industry to automatic paper admission. Missing industry classification fails closed
+for new automatic entries. Existing paper positions are preserved and unknown legacy
+industry classifications remain visible as a coverage gap.
+
+### Additional sources
+
+- MSCI, [Are You Really Capturing the Right Factors?](https://www.msci.com/downloads/web/msci-com/research-and-insights/paper/are-you-really-capturing-the-right-factors-unlocking-deeper-insights-in-china-a-share-factor-investing/Enhancing%20factor%20strategies%20China%20A%20share%20market%20final.pdf)
+- MSCI, [Foundations of Factor Investing](https://www.msci.com/documents/1296102/7687410/Factor%2BFramework.pdf/916811a9-94d6-4f26-a0bb-88c0c601ffba)
+- Alphalens, [factor analysis workflow](https://github.com/cloudQuant/alphalens)
+- PyPortfolioOpt, [portfolio optimization toolkit](https://github.com/robertmartin8/PyPortfolioOpt)
+- Riskfolio-Lib, [portfolio optimization and constraints](https://github.com/dcajasn/Riskfolio-Lib)
