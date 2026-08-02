@@ -46,6 +46,10 @@ const checks = [
   ["portfolio tolerates legacy dual-track payloads", files.portfolio.includes("item.calibrated?.average_return_pct")],
   ["portfolio renders daily decision strip", files.portfolio.includes("PaperDailyDecisionStrip")],
   ["portfolio daily strip explains next action", files.portfolio.includes("等待买点，不追高")],
+  ["portfolio renders exposure overview", files.portfolio.includes("paper-exposure-overview")],
+  ["portfolio filters ETF exposure categories", files.portfolio.includes("PAPER_EXPOSURE_FILTERS")],
+  ["portfolio keeps unknown legacy exposure explicit", files.portfolio.includes("active_industry_unknown_count")],
+  ["portfolio subtracts reserved exposure capacity", files.portfolio.includes("occupiedAfterCandidate")],
   ["types expose report risk gate", files.portfolio.includes("report.risk_gate")],
   ["types expose failure attribution", files.portfolio.includes("failure_attribution")],
   ["types expose event timeline", files.portfolio.includes("event_timeline")],
@@ -57,6 +61,8 @@ const checks = [
   ["styles include attribution panel", files.styles.includes(".paper-attribution-grid")],
   ["styles include event timeline", files.styles.includes(".paper-event-timeline")],
   ["styles include daily decision strip", files.styles.includes(".paper-daily-decision-strip")],
+  ["styles include exposure overview", files.styles.includes(".paper-exposure-overview")],
+  ["styles include exposure filters", files.styles.includes(".paper-exposure-filters")],
 ];
 
 const failed = checks.filter(([, passed]) => !passed);

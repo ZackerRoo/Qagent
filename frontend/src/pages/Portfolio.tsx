@@ -73,6 +73,27 @@ const defaultPaperSessionForm: PaperSessionStartPayload = {
 
 type PortfolioView = "account" | "trades" | "research";
 
+type PaperExposureCategory =
+  | "all"
+  | "industry"
+  | "broad"
+  | "strategy"
+  | "cross_border"
+  | "commodity"
+  | "fixed_income"
+  | "unknown";
+
+const PAPER_EXPOSURE_FILTERS: PaperExposureCategory[] = [
+  "all",
+  "industry",
+  "broad",
+  "strategy",
+  "cross_border",
+  "commodity",
+  "fixed_income",
+  "unknown",
+];
+
 export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const { language, t } = useI18n();
   const [positions, setPositions] = useState<Position[]>([]);
@@ -2149,6 +2170,7 @@ function PaperCandidatePoolPanel({
   candidatePool?: PaperCandidatePoolResponse;
   language: Language;
 }) {
+  const [exposureFilter, setExposureFilter] = useState<PaperExposureCategory>("all");
   if (!candidatePool) {
     return (
       <section className="paper-candidate-panel">
@@ -2159,7 +2181,17 @@ function PaperCandidatePoolPanel({
     );
   }
   const summary = candidatePool.summary;
-  const visible = candidatePool.items.slice(0, 6);
+  const remainingPositions = Math.max(0, summary.max_positions - summary.active_count);
+  const exposureRows = paperExposureRows(candidatePool, language);
+  const exposureCategoryCounts = paperExposureCategoryCounts(exposureRows);
+  const filteredRows = exposureRows.filter(
+    (row) => exposureFilter === "all" || row.category === exposureFilter,
+  );
+  const filteredCandidates = candidatePool.items.filter(
+    (item) => exposureFilter === "all"
+      || paperExposureCategory(item.exposure_group ?? item.industry) === exposureFilter,
+  );
+  const visible = filteredCandidates.slice(0, 6);
   return (
     <section className="paper-candidate-panel">
       <div className="paper-ledger-card-header">
@@ -2185,22 +2217,83 @@ function PaperCandidatePoolPanel({
           <small>{language === "zh" ? "只替换低质量等待单" : "Only stale pending names"}</small>
         </div>
         <div>
-          <span>{language === "zh" ? "买点校准" : "Entry calibration"}</span>
-          <strong>{paperEntryCalibrationLabel(summary.entry_calibration_action, language)}</strong>
-          <small>{language === "zh" ? "远离触发价会降优先级" : "Far triggers lose priority"}</small>
+          <span>{language === "zh" ? "剩余仓位" : "Open slots"}</span>
+          <strong>{remainingPositions}</strong>
+          <small>{language === "zh" ? "账户总仓位名额" : "Account-level capacity"}</small>
         </div>
         <div>
-          <span>{language === "zh" ? "暴露分散" : "Exposure spread"}</span>
-          <strong>{summary.industry_blocked_count}</strong>
+          <span>{language === "zh" ? "当前暴露组" : "Active exposures"}</span>
+          <strong>
+            {Object.keys(summary.active_industry_counts).length
+              + (summary.active_industry_unknown_count > 0 ? 1 : 0)}
+          </strong>
           <small>
             {language === "zh"
-              ? `每个暴露组最多 ${summary.industry_capacity_limit} 只`
-              : `Max ${summary.industry_capacity_limit} per exposure`}
+              ? `单组上限 ${summary.industry_capacity_limit} · 阻断 ${summary.industry_blocked_count}`
+              : `Limit ${summary.industry_capacity_limit} · ${summary.industry_blocked_count} blocked`}
           </small>
         </div>
       </div>
+      <div className="paper-exposure-overview">
+        <div className="paper-exposure-toolbar">
+          <div>
+            <strong>{language === "zh" ? "组合暴露" : "Portfolio exposure"}</strong>
+            <small>
+              {language === "zh"
+                ? `持仓与候补按同一风险组统计 · 买点校准 ${paperEntryCalibrationLabel(summary.entry_calibration_action, language)}`
+                : `Active and candidate names share one risk grouping · Entry ${paperEntryCalibrationLabel(summary.entry_calibration_action, language)}`}
+            </small>
+          </div>
+          <div className="paper-exposure-filters" role="tablist" aria-label={language === "zh" ? "暴露分类" : "Exposure categories"}>
+            {PAPER_EXPOSURE_FILTERS.map((category) => {
+              const count = exposureCategoryCounts[category];
+              return (
+                <button
+                  key={category}
+                  type="button"
+                  role="tab"
+                  aria-selected={exposureFilter === category}
+                  className={exposureFilter === category ? "active" : ""}
+                  disabled={category !== "all" && count === 0}
+                  onClick={() => setExposureFilter(category)}
+                >
+                  {paperExposureCategoryLabel(category, language)}
+                  <b>{count}</b>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        {summary.active_industry_unknown_count > 0 && (
+          <div className="paper-exposure-warning">
+            <strong>{language === "zh" ? "未知持仓暴露" : "Unknown active exposure"}</strong>
+            <span>
+              {language === "zh"
+                ? `${summary.active_industry_unknown_count} 笔旧持仓缺少不可变来源分类，保留未知且不参与自动扩容。`
+                : `${summary.active_industry_unknown_count} legacy positions lack immutable source classification and remain unknown.`}
+            </span>
+          </div>
+        )}
+        <div className="paper-exposure-rows">
+          {filteredRows.length ? filteredRows.slice(0, 10).map((row) => (
+            <div key={row.key} className="paper-exposure-row">
+              <div>
+                <strong title={row.group}>{row.group}</strong>
+                <small>{paperExposureCategoryLabel(row.category, language)}</small>
+              </div>
+              <span>{language === "zh" ? "占用" : "Occupied"}<b>{row.active}</b></span>
+              <span>{language === "zh" ? "候选" : "Candidates"}<b>{row.candidates}</b></span>
+              <span>{language === "zh" ? "组内余量" : "Group slots"}<b>{row.remaining}</b></span>
+            </div>
+          )) : (
+            <div className="mini-curve-empty">
+              {language === "zh" ? "该分类暂无暴露记录。" : "No exposure records in this category."}
+            </div>
+          )}
+        </div>
+      </div>
       <div className="paper-candidate-list">
-        {visible.map((item) => (
+        {visible.length ? visible.map((item) => (
           <div key={item.snapshot_id} className={`paper-candidate-item status-${item.status}`}>
             <div>
               <span>{paperCandidateStatusLabel(item.status, language)}</span>
@@ -2226,10 +2319,126 @@ function PaperCandidatePoolPanel({
                 : ""}
             </p>
           </div>
-        ))}
+        )) : (
+          <div className="mini-curve-empty">
+            {language === "zh" ? "该分类暂无候补机会。" : "No candidate opportunities in this category."}
+          </div>
+        )}
       </div>
     </section>
   );
+}
+
+function paperExposureRows(candidatePool: PaperCandidatePoolResponse, language: Language) {
+  const summary = candidatePool.summary;
+  const rows = new Map<string, {
+    key: string;
+    group: string;
+    category: PaperExposureCategory;
+    active: number;
+    candidates: number;
+    remaining: number;
+  }>();
+  for (const [group, active] of Object.entries(summary.active_industry_counts)) {
+    rows.set(group, {
+      key: group,
+      group,
+      category: paperExposureCategory(group),
+      active,
+      candidates: 0,
+      remaining: Math.max(0, summary.industry_capacity_limit - active),
+    });
+  }
+  if (summary.active_industry_unknown_count > 0) {
+    rows.set("__unknown__", {
+      key: "__unknown__",
+      group: language === "zh" ? "未知暴露" : "Unknown exposure",
+      category: "unknown",
+      active: summary.active_industry_unknown_count,
+      candidates: 0,
+      remaining: 0,
+    });
+  }
+  for (const item of candidatePool.items) {
+    if (item.status === "active_in_paper" || item.status === "tracked_before") continue;
+    const exposureGroup = item.exposure_group ?? item.industry;
+    const key = exposureGroup ?? "__unknown__";
+    const reservesCapacity = Boolean(
+      exposureGroup
+      && item.price_basis_consistent
+      && !item.industry_blocked,
+    );
+    const occupiedAfterCandidate = item.industry_capacity_used + (reservesCapacity ? 1 : 0);
+    const existing = rows.get(key);
+    if (existing) {
+      existing.candidates += 1;
+      existing.remaining = Math.min(
+        existing.remaining,
+        Math.max(0, summary.industry_capacity_limit - occupiedAfterCandidate),
+      );
+      continue;
+    }
+    const active = item.industry_active_count ?? 0;
+    rows.set(key, {
+      key,
+      group: exposureGroup ?? (language === "zh" ? "未知暴露" : "Unknown exposure"),
+      category: paperExposureCategory(exposureGroup),
+      active,
+      candidates: 1,
+      remaining: exposureGroup
+        ? Math.max(0, summary.industry_capacity_limit - occupiedAfterCandidate)
+        : 0,
+    });
+  }
+  return [...rows.values()].sort((left, right) => (
+    right.active - left.active
+    || right.candidates - left.candidates
+    || left.group.localeCompare(right.group, "zh-CN")
+  ));
+}
+
+function paperExposureCategoryCounts(
+  rows: ReturnType<typeof paperExposureRows>,
+) {
+  const counts: Record<PaperExposureCategory, number> = {
+    all: rows.length,
+    industry: 0,
+    broad: 0,
+    strategy: 0,
+    cross_border: 0,
+    commodity: 0,
+    fixed_income: 0,
+    unknown: 0,
+  };
+  for (const row of rows) {
+    counts[row.category] += 1;
+  }
+  return counts;
+}
+
+function paperExposureCategory(exposureGroup: string | null | undefined): PaperExposureCategory {
+  const group = exposureGroup?.trim();
+  if (!group) return "unknown";
+  if (group.startsWith("宽基ETF:")) return "broad";
+  if (group.startsWith("策略ETF:") || group.startsWith("主题ETF:")) return "strategy";
+  if (group.startsWith("跨境ETF:")) return "cross_border";
+  if (group.startsWith("商品ETF:")) return "commodity";
+  if (group.startsWith("债券ETF:") || group === "货币ETF") return "fixed_income";
+  return "industry";
+}
+
+function paperExposureCategoryLabel(category: PaperExposureCategory, language: Language) {
+  const labels: Record<PaperExposureCategory, [string, string]> = {
+    all: ["全部", "All"],
+    industry: ["行业", "Sector"],
+    broad: ["宽基", "Broad"],
+    strategy: ["策略/主题", "Strategy"],
+    cross_border: ["跨境", "Cross-border"],
+    commodity: ["商品", "Commodity"],
+    fixed_income: ["固收/现金", "Fixed income"],
+    unknown: ["未知", "Unknown"],
+  };
+  return labels[category][language === "zh" ? 0 : 1];
 }
 
 function PaperPostRecommendationLeaderboard({
