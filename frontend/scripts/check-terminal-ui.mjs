@@ -59,14 +59,15 @@ const requiredSelectors = [
   ".portfolio-plan-card",
   ".context-panel",
   ".recommendation-card",
-  ".terminal-live",
+  ".workspace-status",
 ];
 
 for (const selector of requiredSelectors) {
   assert(styles.includes(selector), `missing terminal selector ${selector}`);
 }
 
-assert(layout.includes("terminal-live"), "Layout must render a live/session terminal status indicator");
+assert(layout.includes("手动模式"), "Layout must render the current manual operating mode");
+assert(layout.includes("workspace-status"), "Layout must render an operational status strip");
 assert(layout.includes("terminal-top-grid"), "Layout must expose a terminal top grid for all pages");
 assert(
   !styles.includes("background: #f5f7fa"),

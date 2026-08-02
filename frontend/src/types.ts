@@ -1649,6 +1649,70 @@ export type PaperLedgerResponse = {
   data_health: Record<string, string>;
 };
 
+export type PaperResearchBaseline = {
+  baseline_id: string;
+  provider: string;
+  paper_session_id: string;
+  walk_forward_run_id: string;
+  start_date: string;
+  definition_digest: string;
+  definition: {
+    schema_version?: string;
+    paper_session?: Record<string, string | number | boolean>;
+    historical_reference?: Record<string, string | number | boolean | null>;
+    model_identity?: Record<string, string | number | boolean | null>;
+    reporting_policy?: Record<string, string | number | boolean | number[]>;
+  };
+  created_at: string;
+};
+
+export type PaperResearchMetricPair = {
+  key: string;
+  label: string;
+  historical: number | null;
+  forward: number | null;
+  unit: string;
+  note: string;
+};
+
+export type PaperResearchCheckpoint = {
+  target_sessions: number;
+  observed_sessions: number;
+  progress_pct: number;
+  status: string;
+  checkpoint_date: string | null;
+  trade_count: number;
+  closed_trade_count: number;
+  total_return_pct: number | null;
+  max_drawdown_pct: number | null;
+  win_rate: number | null;
+  average_return_pct: number | null;
+};
+
+export type PaperForwardFactorResult = {
+  key: string;
+  label: string;
+  sample_count: number;
+  completed_count: number;
+  win_rate: number | null;
+  average_return_pct: number | null;
+  status: string;
+};
+
+export type PaperForwardComparisonResponse = {
+  as_of: string;
+  baseline: PaperResearchBaseline;
+  scope: string;
+  headline: string;
+  observed_sessions: number;
+  metrics: PaperResearchMetricPair[];
+  checkpoints: PaperResearchCheckpoint[];
+  forward_factors: PaperForwardFactorResult[];
+  market_regimes: PaperForwardFactorResult[];
+  warnings: string[];
+  data_health: Record<string, string>;
+};
+
 export type PaperValidationSummary = {
   total_trades: number;
   triggered_trades: number;
@@ -2478,6 +2542,7 @@ export type AutoProcessingSettings = {
   update_paper: boolean;
   run_alerts: boolean;
   queue_alerts: boolean;
+  run_forward_evidence: boolean;
 };
 
 export type AutoProcessingCycleResult = {
@@ -2808,6 +2873,58 @@ export type FactorBacktestResponse = {
   quantile_buckets: FactorQuantileBucket[];
   information_coefficient: FactorInformationCoefficient;
   factor_ic: FactorExposureInformationCoefficient[];
+  data_health: Record<string, string>;
+};
+
+export type FactorMonotonicityDiagnostic = {
+  available: boolean;
+  observed_buckets: number;
+  monotonic_steps: number;
+  expected_steps: number;
+  quantile_return_correlation: number | null;
+  top_bottom_spread_pct: number | null;
+  verdict: string;
+};
+
+export type FactorTurnoverDiagnostic = {
+  rebalance_count: number;
+  average_turnover_rate: number | null;
+  round_trip_cost_bps: number;
+  estimated_cost_drag_pct: number | null;
+  gross_average_return_pct: number | null;
+  net_average_return_pct: number | null;
+  verdict: string;
+};
+
+export type FactorRegimeDiagnostic = {
+  regime: string;
+  sample_count: number;
+  positive_rate: number | null;
+  average_return_pct: number | null;
+};
+
+export type FactorDecayPoint = {
+  forward_days: number;
+  sample_count: number;
+  mean_ic: number | null;
+  mean_rank_ic: number | null;
+  top_bottom_spread_pct: number | null;
+};
+
+export type FactorDecayDiagnostic = {
+  factor_id: string;
+  label: string;
+  points: FactorDecayPoint[];
+  verdict: string;
+};
+
+export type FactorDiagnosticsResponse = {
+  primary_horizon_days: number;
+  primary: FactorBacktestResponse;
+  monotonicity: FactorMonotonicityDiagnostic;
+  decay: FactorDecayDiagnostic[];
+  turnover_cost: FactorTurnoverDiagnostic;
+  market_regimes: FactorRegimeDiagnostic[];
   data_health: Record<string, string>;
 };
 

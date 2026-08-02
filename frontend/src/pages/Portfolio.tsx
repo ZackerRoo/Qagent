@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
+import { RefreshCw } from "lucide-react";
 
 import {
   deletePaperTrade,
   fetchAutomationScheduler,
+  fetchFactorDiagnostics,
   fetchPaperCandidatePool,
   fetchPaperDailyReport,
   fetchPaperDualTrack,
+  fetchPaperForwardComparison,
   fetchPaperLedger,
   fetchPaperSession,
   fetchPaperTrades,
@@ -25,8 +28,10 @@ import { localizeAction, localizeStatus, localizeStrategy } from "../lib/localiz
 import type {
   AutoProcessingState,
   DataProviderMode,
+  FactorDiagnosticsResponse,
   PaperCandidatePoolResponse,
   PaperDualTrackResponse,
+  PaperForwardComparisonResponse,
   PaperLedgerItem,
   PaperDailyReportResponse,
   PaperLedgerPosition,
@@ -66,7 +71,7 @@ const defaultPaperSessionForm: PaperSessionStartPayload = {
   take_profit_pct: "50",
 };
 
-const PAPER_REFRESH_INTERVAL_MS = 300_000;
+type PortfolioView = "account" | "trades" | "research";
 
 export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const { language, t } = useI18n();
@@ -79,6 +84,8 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [dailyReport, setDailyReport] = useState<PaperDailyReportResponse>();
   const [candidatePool, setCandidatePool] = useState<PaperCandidatePoolResponse>();
   const [dualTrack, setDualTrack] = useState<PaperDualTrackResponse>();
+  const [forwardComparison, setForwardComparison] = useState<PaperForwardComparisonResponse>();
+  const [factorDiagnostics, setFactorDiagnostics] = useState<FactorDiagnosticsResponse>();
   const [validation, setValidation] = useState<PaperValidationResponse>();
   const [paperSession, setPaperSession] = useState<PaperSessionResponse>();
   const [automationScheduler, setAutomationScheduler] = useState<AutoProcessingState>();
@@ -86,39 +93,27 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [paperSessionForm, setPaperSessionForm] = useState<PaperSessionStartPayload>(defaultPaperSessionForm);
   const [form, setForm] = useState<Position>(emptyPosition);
   const [paperMessage, setPaperMessage] = useState("");
+  const [portfolioView, setPortfolioView] = useState<PortfolioView>("account");
   const [isStartingPaperSession, setIsStartingPaperSession] = useState(false);
   const [isRunningValidation, setIsRunningValidation] = useState(false);
+  const [isLoadingFactorDiagnostics, setIsLoadingFactorDiagnostics] = useState(false);
   const [deletingPaperTradeId, setDeletingPaperTradeId] = useState("");
 
   async function load() {
-    const results = await Promise.allSettled([
-      fetchPortfolio({ provider: dataMode }),
+    const coreResults = await Promise.allSettled([
       fetchPaperTrades(dataMode, paperScope),
       fetchPaperTrades(dataMode, paperScope === "official" ? "legacy" : "official"),
       fetchPaperSession(dataMode),
       fetchPaperLedger({ provider: dataMode, reportingScope: paperScope }),
-      fetchPaperValidation(dataMode, paperScope),
-      fetchPaperDailyReport(dataMode, paperScope),
-      fetchPaperCandidatePool(dataMode),
-      fetchPaperDualTrack(dataMode),
       fetchAutomationScheduler(),
     ]);
     const [
-      result,
       paperResult,
       otherPaperResult,
       paperSessionResult,
       ledgerResult,
-      validationResult,
-      dailyReportResult,
-      candidatePoolResult,
-      dualTrackResult,
       automationSchedulerResult,
-    ] = results;
-    if (result.status === "fulfilled") {
-      setPortfolio(result.value);
-      setPositions(result.value.positions);
-    }
+    ] = coreResults;
     if (paperResult.status === "fulfilled") {
       setPaper(paperResult.value);
       setPaperExecutionHealth(paperResult.value.data_health);
@@ -139,20 +134,78 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       setPaperSessionForm(formFromPaperSession(paperSessionResult.value));
     }
     if (ledgerResult.status === "fulfilled") setLedger(ledgerResult.value);
+    if (automationSchedulerResult.status === "fulfilled") {
+      setAutomationScheduler(automationSchedulerResult.value);
+    }
+    const failedCore = coreResults.filter((item) => item.status === "rejected");
+    if (failedCore.length) {
+      setPaperMessage(
+        language === "zh"
+          ? `部分模拟盘数据暂未更新（${failedCore.length} 项），其余数据已正常显示。`
+          : `${failedCore.length} paper-trading sections could not refresh; available data is still shown.`,
+      );
+    }
+    void loadResearchSections();
+  }
+
+  async function loadManualPortfolio() {
+    try {
+      const result = await fetchPortfolio({ provider: dataMode });
+      setPortfolio(result);
+      setPositions(result.positions);
+    } catch {
+      setPaperMessage(
+        language === "zh"
+          ? "手动组合暂未更新，模拟盘账户与交易数据不受影响。"
+          : "Manual portfolio could not refresh; paper account and trade data are unaffected.",
+      );
+    }
+  }
+
+  async function loadResearchSections() {
+    const researchResults = await Promise.allSettled([
+      fetchPaperValidation(dataMode, paperScope),
+      fetchPaperDailyReport(dataMode, paperScope),
+      fetchPaperCandidatePool(dataMode),
+      fetchPaperDualTrack(dataMode),
+      fetchPaperForwardComparison(dataMode),
+    ]);
+    const [
+      validationResult,
+      dailyReportResult,
+      candidatePoolResult,
+      dualTrackResult,
+      forwardComparisonResult,
+    ] = researchResults;
     if (validationResult.status === "fulfilled") setValidation(validationResult.value);
     if (dailyReportResult.status === "fulfilled") setDailyReport(dailyReportResult.value);
     if (candidatePoolResult.status === "fulfilled") setCandidatePool(candidatePoolResult.value);
     if (dualTrackResult.status === "fulfilled") setDualTrack(dualTrackResult.value);
-    if (automationSchedulerResult.status === "fulfilled") {
-      setAutomationScheduler(automationSchedulerResult.value);
+    if (forwardComparisonResult.status === "fulfilled") {
+      setForwardComparison(forwardComparisonResult.value);
     }
-    const failed = results.filter((item) => item.status === "rejected");
-    if (failed.length) {
+    const failedResearch = researchResults.filter((item) => item.status === "rejected");
+    if (failedResearch.length) {
       setPaperMessage(
         language === "zh"
-          ? `部分模拟盘数据暂未更新（${failed.length} 项），其余数据已正常显示。`
-          : `${failed.length} paper-trading sections could not refresh; available data is still shown.`,
+          ? `部分研究诊断暂未更新（${failedResearch.length} 项），账户与交易数据不受影响。`
+          : `${failedResearch.length} research sections could not refresh; account and trade data are unaffected.`,
       );
+    }
+  }
+
+  async function loadFactorDiagnostics() {
+    setIsLoadingFactorDiagnostics(true);
+    try {
+      setFactorDiagnostics(await fetchFactorDiagnostics(dataMode));
+    } catch {
+      setPaperMessage(
+        language === "zh"
+          ? "因子诊断暂未更新，模拟盘运行不受影响。"
+          : "Factor diagnostics could not refresh; paper trading is unaffected.",
+      );
+    } finally {
+      setIsLoadingFactorDiagnostics(false);
     }
   }
 
@@ -165,6 +218,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchPaperDailyReport(dataMode, paperScope),
       fetchPaperCandidatePool(dataMode),
       fetchPaperDualTrack(dataMode),
+      fetchPaperForwardComparison(dataMode),
       fetchAutomationScheduler(),
     ]);
     const [
@@ -175,6 +229,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       dailyReportResult,
       candidatePoolResult,
       dualTrackResult,
+      forwardComparisonResult,
       automationSchedulerResult,
     ] = results;
     if (paperResult.status === "fulfilled") {
@@ -197,6 +252,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     if (dailyReportResult.status === "fulfilled") setDailyReport(dailyReportResult.value);
     if (candidatePoolResult.status === "fulfilled") setCandidatePool(candidatePoolResult.value);
     if (dualTrackResult.status === "fulfilled") setDualTrack(dualTrackResult.value);
+    if (forwardComparisonResult.status === "fulfilled") {
+      setForwardComparison(forwardComparisonResult.value);
+    }
     if (automationSchedulerResult.status === "fulfilled") {
       setAutomationScheduler(automationSchedulerResult.value);
     }
@@ -204,20 +262,17 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
 
   useEffect(() => {
     void load();
-    let refreshInFlight = false;
-    const refreshTimer = window.setInterval(() => {
-      if (refreshInFlight || document.visibilityState !== "visible") return;
-      refreshInFlight = true;
-      void refreshPaperRuntime().finally(() => {
-        refreshInFlight = false;
-      });
-    }, PAPER_REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(refreshTimer);
   }, [dataMode, paperScope]);
+
+  useEffect(() => {
+    if (portfolioView === "research") {
+      void loadFactorDiagnostics();
+    }
+  }, [dataMode, portfolioView]);
 
   async function submit() {
     await savePosition(form);
-    await load();
+    await loadManualPortfolio();
   }
 
   async function seedPaper() {
@@ -318,158 +373,237 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     <div className="stack portfolio-page">
       <section className="panel stack paper-ledger-primary-panel">
         <div className="panel-heading">
-          <h2>{t("portfolio.paperTitle")}</h2>
-          <span className="count">{paper?.summary.total ?? 0}</span>
+          <div>
+            <p className="eyebrow">{language === "zh" ? "研究模拟账户" : "Research paper account"}</p>
+            <h2>{t("portfolio.paperTitle")}</h2>
+          </div>
+          <div className="paper-page-actions">
+            <button
+              className="icon-action secondary"
+              type="button"
+              onClick={() => void refreshPaperRuntime()}
+            >
+              <RefreshCw size={15} />
+              {language === "zh" ? "刷新" : "Refresh"}
+            </button>
+            <span className="count">{paper?.summary.total ?? 0}</span>
+          </div>
         </div>
-        <PaperRuntimeIdentity
-          scheduler={automationScheduler}
-          session={paperSession}
-          officialTradeCount={paperScopeCounts.official}
-          legacyTradeCount={paperScopeCounts.legacy}
-          legacyActiveCount={
-            paperScope === "legacy"
-              ? (paper?.summary.pending ?? 0) + (paper?.summary.open ?? 0)
-              : undefined
-          }
-          language={language}
-        />
-        <PaperScopeSelector
-          scope={paperScope}
-          counts={paperScopeCounts}
-          language={language}
-          onChange={(scope) => {
-            if (scope === paperScope) return;
-            setPaper(undefined);
-            setLedger(undefined);
-            setDailyReport(undefined);
-            setValidation(undefined);
-            setPaperScope(scope);
-          }}
-        />
-        {ledger ? (
-          <PaperLedgerDashboard ledger={ledger} language={language} t={t} />
-        ) : (
-          <div className="empty-state">{t("portfolio.noLedger")}</div>
+        <div className="portfolio-view-tabs" role="tablist" aria-label={language === "zh" ? "模拟盘视图" : "Paper views"}>
+          {([
+            ["account", language === "zh" ? "账户" : "Account"],
+            ["trades", language === "zh" ? "交易" : "Trades"],
+            ["research", language === "zh" ? "研究" : "Research"],
+          ] as const).map(([view, label]) => (
+            <button
+              key={view}
+              type="button"
+              role="tab"
+              aria-selected={portfolioView === view}
+              className={portfolioView === view ? "active" : ""}
+              onClick={() => setPortfolioView(view)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <details className="paper-scope-drawer">
+          <summary>
+            <span>
+              {paperScope === "legacy"
+                ? language === "zh" ? "当前：研究模拟" : "Current: Research paper"
+                : language === "zh" ? "当前：正式认证" : "Current: Official"}
+            </span>
+            <small>
+              {language === "zh" ? "查看账本口径与隔离说明" : "View ledger scope and isolation"}
+            </small>
+          </summary>
+          <div className="portfolio-view-stack">
+            <PaperRuntimeIdentity
+              scheduler={automationScheduler}
+              session={paperSession}
+              officialTradeCount={paperScopeCounts.official}
+              legacyTradeCount={paperScopeCounts.legacy}
+              legacyActiveCount={
+                paperScope === "legacy"
+                  ? (paper?.summary.pending ?? 0) + (paper?.summary.open ?? 0)
+                  : undefined
+              }
+              language={language}
+            />
+            <PaperScopeSelector
+              scope={paperScope}
+              counts={paperScopeCounts}
+              language={language}
+              onChange={(scope) => {
+                if (scope === paperScope) return;
+                setPaper(undefined);
+                setLedger(undefined);
+                setDailyReport(undefined);
+                setValidation(undefined);
+                setPaperScope(scope);
+              }}
+            />
+          </div>
+        </details>
+        {paperMessage && <div className="empty-state">{paperMessage}</div>}
+
+        {portfolioView === "account" && (
+          ledger ? (
+            <PaperLedgerDashboard ledger={ledger} language={language} t={t} />
+          ) : (
+            <div className="empty-state">{t("portfolio.noLedger")}</div>
+          )
         )}
-        <PaperDualTrackPanel report={dualTrack} language={language} />
-        <PaperReviewDashboard
-          report={dailyReport}
-          ledger={ledger}
-          validation={validation}
-          candidatePool={candidatePool}
-          language={language}
-        />
-        <PaperDailyReportPanel report={dailyReport} language={language} />
-        <PaperValidationCenter
-          validation={validation}
-          language={language}
-          running={isRunningValidation}
-          onRun={runValidationNow}
-        />
-        <PaperExecutionStatus dataHealth={paperExecutionHealth} language={language} />
-        <div className="metric-grid">
-          <Metric label={t("portfolio.open")} value={paper?.summary.open ?? 0} />
-          <Metric label={t("portfolio.closed")} value={paper?.summary.closed ?? 0} />
-          <Metric label={t("portfolio.targets")} value={paper?.summary.target_hit_count ?? 0} />
-          <Metric
-            label={t("portfolio.winRate")}
-            value={
-              paper?.summary.win_rate != null
-                ? `${(paper.summary.win_rate * 100).toFixed(1)}%`
-                : "-"
-            }
-          />
-        </div>
-        {paperScope === "legacy" && (
-          <div className="form-row">
-            <button type="button" onClick={seedPaper}>
-              {t("portfolio.seedPaper")}
-            </button>
-            <button type="button" onClick={updatePaper}>
-              {t("portfolio.updatePaper")}
-            </button>
+
+        {portfolioView === "trades" && (
+          <div className="portfolio-view-stack">
+            <PaperExecutionStatus dataHealth={paperExecutionHealth} language={language} />
+            <div className="metric-grid">
+              <Metric label={t("portfolio.open")} value={paper?.summary.open ?? 0} />
+              <Metric label={t("portfolio.closed")} value={paper?.summary.closed ?? 0} />
+              <Metric label={t("portfolio.targets")} value={paper?.summary.target_hit_count ?? 0} />
+              <Metric
+                label={t("portfolio.winRate")}
+                value={
+                  paper?.summary.win_rate != null
+                    ? `${(paper.summary.win_rate * 100).toFixed(1)}%`
+                    : "-"
+                }
+              />
+            </div>
+            {paperScope === "legacy" && (
+              <div className="form-row">
+                <button type="button" onClick={seedPaper}>
+                  {t("portfolio.seedPaper")}
+                </button>
+                <button type="button" onClick={updatePaper}>
+                  {t("portfolio.updatePaper")}
+                </button>
+              </div>
+            )}
+            <div className="table-shell">
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t("common.symbol")}</th>
+                    <th>{t("common.status")}</th>
+                    <th>{t("portfolio.signal")}</th>
+                    <th>{t("brief.trigger")}</th>
+                    <th>{t("brief.stop")}</th>
+                    <th>{t("brief.target")}</th>
+                    <th>{t("portfolio.entry")}</th>
+                    <th>{t("portfolio.exit")}</th>
+                    <th>{t("portfolio.latest")}</th>
+                    <th>{t("portfolio.pnl")}</th>
+                    <th>{t("portfolio.paperOutcome")}</th>
+                    <th>{language === "zh" ? "撮合备注" : "Fill note"}</th>
+                    <th>{language === "zh" ? "下一步动作" : "Next action"}</th>
+                    <th>{t("common.strategy")}</th>
+                    <th>{t("common.actions")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(paper?.trades ?? []).map((trade) => (
+                    <tr key={trade.trade_id}>
+                      <td className="ticker" title={formatInstrumentDisplay(trade.instrument_id)}>
+                        {formatInstrumentDisplay(trade.instrument_id)}
+                      </td>
+                      <td>{localizeStatus(trade.status, language)}</td>
+                      <td>{trade.signal_date}</td>
+                      <td>{trade.trigger_price}</td>
+                      <td>{trade.initial_stop ?? "-"}</td>
+                      <td>{trade.target_1 ?? "-"}</td>
+                      <td>{trade.entry_price ?? "-"}</td>
+                      <td>{trade.exit_price ?? "-"}</td>
+                      <td>{trade.latest_price ?? "-"}</td>
+                      <td>{formatPct(trade.realized_return_pct ?? trade.unrealized_return_pct)}</td>
+                      <td>{ledger?.items.find((item) => item.trade_id === trade.trade_id)?.outcome ?? "-"}</td>
+                      <td className="reason-cell">{trade.notes || "-"}</td>
+                      <td className="reason-cell">{paperNextAction(trade, language)}</td>
+                      <td className="reason-cell">{localizeStrategy(trade.strategy_id, language)}</td>
+                      <td>
+                        {paperScope === "legacy" ? (
+                          <button
+                            className="icon-action danger compact-button"
+                            type="button"
+                            onClick={() => removePaperTrade(trade.trade_id)}
+                            disabled={deletingPaperTradeId === trade.trade_id}
+                          >
+                            {deletingPaperTradeId === trade.trade_id
+                              ? t("common.running")
+                              : t("common.delete")}
+                          </button>
+                        ) : (
+                          <span className="status status-ready">
+                            {language === "zh" ? "认证只读" : "Read only"}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                  {(paper?.trades.length ?? 0) === 0 && (
+                    <tr>
+                      <td colSpan={15} className="empty-state">
+                        {paperScope === "official"
+                          ? language === "zh"
+                            ? "尚无通过签名发布门禁的正式模拟交易。研究记录请切换到“研究模拟”查看。"
+                            : "No signed official trades yet. Switch to Research paper for research records."
+                          : language === "zh"
+                            ? "研究模拟暂无记录。"
+                            : "No research paper records."}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
-        {paperMessage && <div className="empty-state">{paperMessage}</div>}
-        <div className="table-shell">
-          <table>
-            <thead>
-              <tr>
-                <th>{t("common.symbol")}</th>
-                <th>{t("common.status")}</th>
-                <th>{t("portfolio.signal")}</th>
-                <th>{t("brief.trigger")}</th>
-                <th>{t("brief.stop")}</th>
-                <th>{t("brief.target")}</th>
-                <th>{t("portfolio.entry")}</th>
-                <th>{t("portfolio.exit")}</th>
-                <th>{t("portfolio.latest")}</th>
-                <th>{t("portfolio.pnl")}</th>
-                <th>{t("portfolio.paperOutcome")}</th>
-                <th>{language === "zh" ? "撮合备注" : "Fill note"}</th>
-                <th>{language === "zh" ? "下一步动作" : "Next action"}</th>
-                <th>{t("common.strategy")}</th>
-                <th>{t("common.actions")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(paper?.trades ?? []).map((trade) => (
-                <tr key={trade.trade_id}>
-                  <td className="ticker" title={formatInstrumentDisplay(trade.instrument_id)}>
-                    {formatInstrumentDisplay(trade.instrument_id)}
-                  </td>
-                  <td>{localizeStatus(trade.status, language)}</td>
-                  <td>{trade.signal_date}</td>
-                  <td>{trade.trigger_price}</td>
-                  <td>{trade.initial_stop ?? "-"}</td>
-                  <td>{trade.target_1 ?? "-"}</td>
-                  <td>{trade.entry_price ?? "-"}</td>
-                  <td>{trade.exit_price ?? "-"}</td>
-                  <td>{trade.latest_price ?? "-"}</td>
-                  <td>{formatPct(trade.realized_return_pct ?? trade.unrealized_return_pct)}</td>
-                  <td>{ledger?.items.find((item) => item.trade_id === trade.trade_id)?.outcome ?? "-"}</td>
-                  <td className="reason-cell">{trade.notes || "-"}</td>
-                  <td className="reason-cell">{paperNextAction(trade, language)}</td>
-                  <td className="reason-cell">{localizeStrategy(trade.strategy_id, language)}</td>
-                  <td>
-                    {paperScope === "legacy" ? (
-                      <button
-                        className="icon-action danger compact-button"
-                        type="button"
-                        onClick={() => removePaperTrade(trade.trade_id)}
-                        disabled={deletingPaperTradeId === trade.trade_id}
-                      >
-                        {deletingPaperTradeId === trade.trade_id
-                          ? t("common.running")
-                          : t("common.delete")}
-                      </button>
-                    ) : (
-                      <span className="status status-ready">
-                        {language === "zh" ? "认证只读" : "Read only"}
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-              {(paper?.trades.length ?? 0) === 0 && (
-                <tr>
-                  <td colSpan={15} className="empty-state">
-                    {paperScope === "official"
-                      ? language === "zh"
-                        ? "尚无通过签名发布门禁的正式模拟交易。研究记录请切换到“研究模拟”查看。"
-                        : "No signed official trades yet. Switch to Research paper for research records."
-                      : language === "zh"
-                        ? "研究模拟暂无记录。"
-                        : "No research paper records."}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+
+        {portfolioView === "research" && (
+          <div className="portfolio-view-stack">
+            <PaperForwardResearchWorkbench
+              comparison={forwardComparison}
+              factors={factorDiagnostics}
+              loadingFactors={isLoadingFactorDiagnostics}
+              language={language}
+            />
+            <PaperReviewDashboard
+              report={dailyReport}
+              ledger={ledger}
+              validation={validation}
+              candidatePool={candidatePool}
+              language={language}
+            />
+            <details className="paper-research-drawer">
+              <summary>{language === "zh" ? "选股、过滤与择时归因" : "Selection, filtering, and timing attribution"}</summary>
+              <PaperDualTrackPanel report={dualTrack} language={language} />
+            </details>
+            <details className="paper-research-drawer">
+              <summary>{language === "zh" ? "每日复盘与正式验证" : "Daily review and formal validation"}</summary>
+              <div className="portfolio-view-stack">
+                <PaperDailyReportPanel report={dailyReport} language={language} />
+                <PaperValidationCenter
+                  validation={validation}
+                  language={language}
+                  running={isRunningValidation}
+                  onRun={runValidationNow}
+                />
+              </div>
+            </details>
+          </div>
+        )}
       </section>
 
-      <details className="panel stack compact-drawer manual-portfolio-drawer">
+      <details
+        className="panel stack compact-drawer manual-portfolio-drawer"
+        onToggle={(event) => {
+          if (event.currentTarget.open && !portfolio) {
+            void loadManualPortfolio();
+          }
+        }}
+      >
         <summary>
           <div>
             <p className="eyebrow">{language === "zh" ? "手动组合" : "Manual Portfolio"}</p>
@@ -577,7 +711,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
             <p className="eyebrow">{language === "zh" ? "模拟盘设置" : "Paper Settings"}</p>
             <h2>{language === "zh" ? "资金、手续费、仓位参数" : "Capital, cost, position rules"}</h2>
           </div>
-          <span className="count">{positions.length}</span>
+          <span className="count">{paperSession ? 1 : 0}</span>
         </summary>
         <PaperSessionStarter
           session={paperSession}
@@ -589,6 +723,294 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
         />
       </details>
     </div>
+  );
+}
+
+function PaperForwardResearchWorkbench({
+  comparison,
+  factors,
+  loadingFactors,
+  language,
+}: {
+  comparison?: PaperForwardComparisonResponse;
+  factors?: FactorDiagnosticsResponse;
+  loadingFactors: boolean;
+  language: Language;
+}) {
+  if (!comparison) {
+    return (
+      <section className="panel stack paper-forward-workbench">
+        <div className="mini-curve-empty">
+          {language === "zh"
+            ? "研究基线尚未冻结或对照报告正在加载。"
+            : "The research baseline is not frozen yet or the comparison is loading."}
+        </div>
+      </section>
+    );
+  }
+  const historical = comparison.baseline.definition.historical_reference ?? {};
+  const model = comparison.baseline.definition.model_identity ?? {};
+  const factorRows = factors?.decay.slice(0, 10) ?? [];
+  const primaryFactorById = new Map(
+    (factors?.primary.factor_ic ?? []).map((item) => [item.factor_id, item]),
+  );
+  const turnover = factors?.turnover_cost;
+  const monotonicity = factors?.monotonicity;
+
+  return (
+    <section className="panel stack paper-forward-workbench">
+      <div className="section-header paper-forward-heading">
+        <div>
+          <p className="eyebrow">
+            {language === "zh" ? "前向研究基线" : "Forward research baseline"}
+          </p>
+          <h2>{language === "zh" ? "历史与模拟盘对照" : "Historical vs paper comparison"}</h2>
+          <p>{comparison.headline}</p>
+        </div>
+        <div className="paper-forward-status">
+          <span className="status status-ready">
+            {language === "zh" ? "基线已冻结" : "Baseline frozen"}
+          </span>
+          <strong>{comparison.observed_sessions}</strong>
+          <small>{language === "zh" ? "个交易日" : "sessions"}</small>
+        </div>
+      </div>
+
+      <div className="paper-baseline-strip">
+        <span>
+          <small>{language === "zh" ? "研究起点" : "Research start"}</small>
+          <strong>{comparison.baseline.start_date}</strong>
+        </span>
+        <span>
+          <small>Walk-forward</small>
+          <strong>{comparison.baseline.walk_forward_run_id.replace("walk-forward-", "")}</strong>
+        </span>
+        <span>
+          <small>{language === "zh" ? "历史数据修订" : "Dataset revision"}</small>
+          <strong>{String(historical.dataset_revision ?? "-")}</strong>
+        </span>
+        <span>
+          <small>{language === "zh" ? "代码身份" : "Code identity"}</small>
+          <strong>{shortDigest(String(model.code_revision ?? ""))}</strong>
+        </span>
+        <span>
+          <small>{language === "zh" ? "基线摘要" : "Baseline digest"}</small>
+          <strong>{shortDigest(comparison.baseline.definition_digest)}</strong>
+        </span>
+      </div>
+
+      <div className="paper-forward-comparison">
+        <div className="paper-research-subhead">
+          <div>
+            <h3>{language === "zh" ? "同口径表现" : "Comparable performance"}</h3>
+            <p>
+              {language === "zh"
+                ? "历史列为冻结的样本外参照，前向列只来自本地模拟成交。"
+                : "Historical values are frozen out-of-sample references; forward values come only from local paper fills."}
+            </p>
+          </div>
+          <span className="status status-pending">research / shadow</span>
+        </div>
+        <div className="table-shell">
+          <table className="paper-comparison-table">
+            <thead>
+              <tr>
+                <th>{language === "zh" ? "指标" : "Metric"}</th>
+                <th>{language === "zh" ? "历史参照" : "Historical"}</th>
+                <th>{language === "zh" ? "前向模拟" : "Forward paper"}</th>
+                <th>{language === "zh" ? "口径" : "Scope"}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {comparison.metrics.map((metric) => (
+                <tr key={metric.key}>
+                  <td className="ticker">{metric.label}</td>
+                  <td>{formatResearchMetric(metric.historical, metric.unit)}</td>
+                  <td className={metric.key.includes("return") && (metric.forward ?? 0) < 0 ? "negative" : ""}>
+                    {formatResearchMetric(metric.forward, metric.unit)}
+                  </td>
+                  <td className="reason-cell">{metric.note}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="paper-checkpoint-section">
+        <div className="paper-research-subhead">
+          <div>
+            <h3>{language === "zh" ? "20 / 40 / 60 日检查点" : "20 / 40 / 60 session checkpoints"}</h3>
+            <p>
+              {language === "zh"
+                ? "检查点固定在冻结基线后，不因当前盈亏移动。"
+                : "Checkpoints stay fixed after the baseline freeze."}
+            </p>
+          </div>
+        </div>
+        <div className="paper-checkpoint-grid">
+          {comparison.checkpoints.map((checkpoint) => (
+            <div className="paper-checkpoint" key={checkpoint.target_sessions}>
+              <div className="paper-checkpoint-title">
+                <strong>{checkpoint.target_sessions}D</strong>
+                <span className={`status status-${checkpoint.status === "completed" ? "ready" : "pending"}`}>
+                  {checkpoint.status === "completed"
+                    ? language === "zh" ? "已完成" : "Complete"
+                    : language === "zh" ? "累积中" : "Tracking"}
+                </span>
+              </div>
+              <div className="paper-progress-track" aria-label={`${checkpoint.progress_pct}%`}>
+                <span style={{ width: `${checkpoint.progress_pct}%` }} />
+              </div>
+              <div className="paper-checkpoint-stats">
+                <span>
+                  <small>{language === "zh" ? "进度" : "Progress"}</small>
+                  <strong>{checkpoint.observed_sessions}/{checkpoint.target_sessions}</strong>
+                </span>
+                <span>
+                  <small>{language === "zh" ? "已结束" : "Closed"}</small>
+                  <strong>{checkpoint.closed_trade_count}</strong>
+                </span>
+                <span>
+                  <small>{language === "zh" ? "收益" : "Return"}</small>
+                  <strong>{formatPct(checkpoint.total_return_pct)}</strong>
+                </span>
+                <span>
+                  <small>{language === "zh" ? "回撤" : "Drawdown"}</small>
+                  <strong>{formatPct(checkpoint.max_drawdown_pct)}</strong>
+                </span>
+              </div>
+              <small className="paper-checkpoint-date">
+                {checkpoint.checkpoint_date
+                  ? `${language === "zh" ? "截至" : "As of"} ${checkpoint.checkpoint_date}`
+                  : language === "zh" ? "等待交易日成熟" : "Awaiting mature sessions"}
+              </small>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="paper-factor-section">
+        <div className="paper-research-subhead">
+          <div>
+            <h3>{language === "zh" ? "因子质量诊断" : "Factor quality diagnostics"}</h3>
+            <p>
+              {loadingFactors
+                ? language === "zh" ? "正在计算多周期因子诊断。" : "Computing multi-horizon diagnostics."
+                : language === "zh"
+                  ? "IC、Rank IC、分组单调性、衰减和成本使用同一历史截面。"
+                  : "IC, Rank IC, monotonicity, decay, and cost share one historical cross-section."}
+            </p>
+          </div>
+          <div className="paper-factor-summary">
+            <span>
+              <small>{language === "zh" ? "五分组单调" : "Monotonic steps"}</small>
+              <strong>
+                {monotonicity?.available
+                  ? `${monotonicity.monotonic_steps}/${monotonicity.expected_steps}`
+                  : "-"}
+              </strong>
+            </span>
+            <span>
+              <small>{language === "zh" ? "平均换手" : "Avg turnover"}</small>
+              <strong>{formatRate(turnover?.average_turnover_rate ?? null)}</strong>
+            </span>
+            <span>
+              <small>{language === "zh" ? "成本后均值" : "Net mean"}</small>
+              <strong>{formatPct(turnover?.net_average_return_pct ?? null)}</strong>
+            </span>
+          </div>
+        </div>
+        <div className="table-shell">
+          <table className="paper-factor-table">
+            <thead>
+              <tr>
+                <th>{language === "zh" ? "因子" : "Factor"}</th>
+                <th>IC</th>
+                <th>Rank IC</th>
+                <th>{language === "zh" ? "多空差" : "Top-bottom"}</th>
+                <th>5D</th>
+                <th>10D</th>
+                <th>20D</th>
+                <th>40D</th>
+                <th>{language === "zh" ? "衰减" : "Decay"}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {factorRows.map((row) => {
+                const primary = primaryFactorById.get(row.factor_id);
+                return (
+                  <tr key={row.factor_id}>
+                    <td className="ticker">{factorLabel(row.factor_id, row.label, language)}</td>
+                    <td>{formatCoefficient(primary?.mean_ic ?? null)}</td>
+                    <td>{formatCoefficient(primary?.mean_rank_ic ?? null)}</td>
+                    <td>{formatPct(primary?.top_bottom_spread_pct ?? null)}</td>
+                    {[5, 10, 20, 40].map((days) => (
+                      <td key={days}>
+                        {formatCoefficient(
+                          row.points.find((point) => point.forward_days === days)?.mean_rank_ic ?? null,
+                        )}
+                      </td>
+                    ))}
+                    <td>
+                      <span className={`status status-${factorDecayTone(row.verdict)}`}>
+                        {factorDecayLabel(row.verdict, language)}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+              {!factorRows.length && (
+                <tr>
+                  <td colSpan={9} className="empty-state">
+                    {loadingFactors
+                      ? language === "zh" ? "正在计算。" : "Calculating."
+                      : language === "zh" ? "当前样本不足以形成因子诊断。" : "Insufficient factor evidence."}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div className="paper-regime-row">
+          {(factors?.market_regimes ?? []).map((regime) => (
+            <span key={regime.regime}>
+              <small>{marketRegimeLabel(regime.regime, language)}</small>
+              <strong>{formatPct(regime.average_return_pct)}</strong>
+              <em>{regime.sample_count} {language === "zh" ? "笔" : "samples"}</em>
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="paper-forward-factors">
+        <div className="paper-research-subhead">
+          <div>
+            <h3>{language === "zh" ? "前向成交分组" : "Forward fill groups"}</h3>
+            <p>
+              {language === "zh"
+                ? "这里只评价已经真实触发的模拟成交；少于 5 笔标记为样本不足。"
+                : "Only actual paper fills are evaluated; fewer than five completed trades stay insufficient."}
+            </p>
+          </div>
+        </div>
+        <div className="paper-forward-factor-grid">
+          {comparison.forward_factors.slice(0, 8).map((factor) => (
+            <span key={factor.key}>
+              <small>{factor.label}</small>
+              <strong>{formatPct(factor.average_return_pct)}</strong>
+              <em>
+                {factor.completed_count}/{factor.sample_count} · {formatRate(factor.win_rate)}
+              </em>
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="paper-forward-warnings">
+        {comparison.warnings.map((warning) => <span key={warning}>{warning}</span>)}
+      </div>
+    </section>
   );
 }
 
@@ -2724,7 +3146,7 @@ function PaperTransactionsPanel({
   language: Language;
   t: (key: TranslationKey) => string;
 }) {
-  const shown = transactions.slice(-20).reverse();
+  const shown = transactions.slice(-8).reverse();
   return (
     <div className="paper-ledger-card">
       <div className="paper-ledger-card-header">
@@ -2929,6 +3351,84 @@ function formatPct(value: number | null): string {
 
 function formatPctValue(value: number | null): string {
   return formatPct(value);
+}
+
+function formatResearchMetric(value: number | null, unit: string): string {
+  if (value == null) {
+    return "-";
+  }
+  if (unit === "%" || unit === "历史% / 前向元") {
+    return `${value.toFixed(2)}${unit === "%" ? "%" : ""}`;
+  }
+  if (unit === "元") {
+    return new Intl.NumberFormat("zh-CN", {
+      style: "currency",
+      currency: "CNY",
+      maximumFractionDigits: 0,
+    }).format(value);
+  }
+  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
+}
+
+function formatCoefficient(value: number | null): string {
+  return value == null ? "-" : value.toFixed(3);
+}
+
+function shortDigest(value: string): string {
+  if (!value) {
+    return "-";
+  }
+  return value.length > 12 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
+}
+
+function factorLabel(factorId: string, fallback: string, language: Language): string {
+  if (language !== "zh") {
+    return fallback;
+  }
+  const labels: Record<string, string> = {
+    momentum: "动量",
+    trend_quality: "趋势质量",
+    quality: "质量",
+    liquidity: "流动性",
+    low_risk: "低波动",
+    risk_filter: "风险过滤",
+    valuation: "估值",
+    size: "市值",
+    reversal: "反转/回踩",
+  };
+  return labels[factorId] ?? fallback;
+}
+
+function factorDecayLabel(verdict: string, language: Language): string {
+  const labels: Record<string, [string, string]> = {
+    stable: ["稳定", "Stable"],
+    decays: ["衰减", "Decays"],
+    reverses: ["反转", "Reverses"],
+    insufficient: ["不足", "Insufficient"],
+  };
+  const value = labels[verdict] ?? [verdict, verdict];
+  return language === "zh" ? value[0] : value[1];
+}
+
+function factorDecayTone(verdict: string): string {
+  if (verdict === "stable") {
+    return "ready";
+  }
+  if (verdict === "reverses") {
+    return "danger";
+  }
+  return "pending";
+}
+
+function marketRegimeLabel(regime: string, language: Language): string {
+  const labels: Record<string, [string, string]> = {
+    risk_on: ["风险偏好", "Risk-on"],
+    neutral: ["中性", "Neutral"],
+    risk_off: ["风险规避", "Risk-off"],
+    unknown: ["未知", "Unknown"],
+  };
+  const value = labels[regime] ?? [regime, regime];
+  return language === "zh" ? value[0] : value[1];
 }
 
 function formatMoney(value: string | number | null, language: string): string {

@@ -287,6 +287,40 @@ def test_full_market_batch_job_resumes_from_persisted_batch_checkpoints(
     assert restored.data_health["full_market_checkpoint_batches_restored"] == "2"
 
 
+def test_full_market_batch_job_stops_before_execution_when_aborted(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'abort-batch.db'}")
+    initialize_database()
+    repo = QagentRepository(create_session_factory())
+    job = repo.create_full_market_scan_job(
+        provider="fixture",
+        symbols=["US:TEST"],
+        batch_size=1,
+        include_etfs=True,
+        sync_if_empty=False,
+    )
+    repo.update_full_market_scan_job(
+        job.job_id,
+        status="queued",
+        data_health={"automatic_scan_aborted": "true"},
+    )
+    monkeypatch.setattr(
+        full_market,
+        "build_market_data_provider",
+        lambda provider: (_ for _ in ()).throw(
+            AssertionError("aborted scan must not build a market provider")
+        ),
+    )
+
+    full_market.run_full_market_batch_scan_job(job.job_id, top_cards_limit=5)
+
+    stopped = repo.get_full_market_scan_job(job.job_id)
+    assert stopped is not None
+    assert stopped.status == "failed"
+
+
 def test_full_market_batch_with_scan_errors_is_persisted_but_not_complete(
     tmp_path,
     monkeypatch,

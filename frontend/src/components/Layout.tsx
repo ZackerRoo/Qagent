@@ -4,12 +4,18 @@ import {
   BookOpenCheck,
   Briefcase,
   CalendarDays,
+  ChevronDown,
+  Database,
   History,
   ListFilter,
+  Menu,
+  MessageSquareText,
   Newspaper,
   Plus,
   Settings,
+  SlidersHorizontal,
   Star,
+  X,
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 
@@ -26,18 +32,23 @@ import { formatInstrumentDisplay } from "../lib/instruments";
 import { localizeProfile } from "../lib/localize";
 import { researchProfiles } from "../lib/profiles";
 
-const nav = [
+const primaryNav = [
   { id: "today", labelKey: "nav.today", icon: CalendarDays },
+  { id: "portfolio", labelKey: "nav.portfolio", icon: Briefcase },
+  { id: "opportunities", labelKey: "nav.opportunities", icon: ListFilter },
+  { id: "history", labelKey: "nav.history", icon: History },
+] as const;
+
+const secondaryNav = [
   { id: "brief", labelKey: "nav.brief", icon: Newspaper },
   { id: "overview", labelKey: "nav.overview", icon: Activity },
-  { id: "opportunities", labelKey: "nav.opportunities", icon: ListFilter },
   { id: "watchlist", labelKey: "nav.watchlist", icon: Star },
-  { id: "portfolio", labelKey: "nav.portfolio", icon: Briefcase },
   { id: "alerts", labelKey: "nav.alerts", icon: Bell },
-  { id: "history", labelKey: "nav.history", icon: History },
   { id: "review", labelKey: "nav.review", icon: BookOpenCheck },
   { id: "settings", labelKey: "nav.settings", icon: Settings },
 ] as const;
+
+const nav = [...primaryNav, ...secondaryNav] as const;
 
 export type PageId = (typeof nav)[number]["id"];
 
@@ -50,6 +61,8 @@ type Props = {
   universes: UniverseRecord[];
   selectedUniverseId: string;
   profile: ResearchProfile;
+  resultStatus: "loading" | "ready" | "error";
+  opportunityCount: number;
   onSymbolsChange(value: string): void;
   onUniverseChange(value: string): void;
   onDataModeChange(mode: DataProviderMode): void;
@@ -66,6 +79,8 @@ export function Layout({
   universes,
   selectedUniverseId,
   profile,
+  resultStatus,
+  opportunityCount,
   onSymbolsChange,
   onUniverseChange,
   onDataModeChange,
@@ -77,6 +92,7 @@ export function Layout({
   const [instrumentQuery, setInstrumentQuery] = useState("");
   const [instrumentOptions, setInstrumentOptions] = useState<TradableInstrument[]>([]);
   const [selectedLabels, setSelectedLabels] = useState<Record<string, string>>({});
+  const [agentOpen, setAgentOpen] = useState(false);
   const visibleUniverses = universes.filter((universe) => universe.universe_id !== "fixture_dev");
   const selectedUniverseValue = visibleUniverses.some(
     (universe) => universe.universe_id === selectedUniverseId,
@@ -130,13 +146,14 @@ export function Layout({
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${agentOpen ? "agent-is-open" : ""}`}>
       <nav className="side-nav">
         <div className="brand">
           <span>Q</span>
           <strong>Qagent</strong>
         </div>
-        {nav.map((item) => {
+        <p className="nav-section-label">{language === "zh" ? "工作台" : "Workspace"}</p>
+        {primaryNav.map((item) => {
           const Icon = item.icon;
           const label = t(item.labelKey as TranslationKey);
           return (
@@ -152,23 +169,78 @@ export function Layout({
             </button>
           );
         })}
+        <details className="nav-more">
+          <summary>
+            <Menu size={17} />
+            <span>{language === "zh" ? "更多工具" : "More tools"}</span>
+            <ChevronDown className="nav-more-chevron" size={14} />
+          </summary>
+          <div className="nav-more-list">
+            {secondaryNav.map((item) => {
+              const Icon = item.icon;
+              const label = t(item.labelKey as TranslationKey);
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={page === item.id ? "active" : ""}
+                  onClick={() => onPageChange(item.id)}
+                  title={label}
+                >
+                  <Icon size={17} />
+                  <span>{label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </details>
       </nav>
       <main className="workspace">
         <header className="top-bar">
           <div className="top-title">
-            <p className="eyebrow">Qagent</p>
+            <p className="eyebrow">
+              {language === "zh" ? "A股研究模拟工作台" : "A-share research workspace"}
+            </p>
             <h1>{pageTitle}</h1>
           </div>
-          <div className="top-tools terminal-top-grid">
-            <div className="session-strip">
-              <span className="terminal-live">LIVE</span>
-              <span>{t("top.dailyScan")}</span>
-              <span>{t("top.alerts")}</span>
-              <span>{t("top.freeData")}</span>
-              <span>
-                {t("top.profile")}: {localizeProfile(profile, language)}
-              </span>
-            </div>
+          <div className="workspace-status">
+            <span className="workspace-status-item is-manual">
+              <i />
+              {language === "zh" ? "手动模式" : "Manual mode"}
+            </span>
+            <span className="workspace-status-item">
+              <Database size={14} />
+              {language === "zh" ? "本地数据" : "Local data"}
+            </span>
+            <span className={`workspace-status-item result-${resultStatus}`}>
+              {formatResultStatus(resultStatus, opportunityCount, language)}
+            </span>
+            <button
+              type="button"
+              className={agentOpen ? "workspace-icon-button active" : "workspace-icon-button"}
+              onClick={() => setAgentOpen((current) => !current)}
+              title={language === "zh" ? "研究助手" : "Research assistant"}
+              aria-label={language === "zh" ? "研究助手" : "Research assistant"}
+              aria-pressed={agentOpen}
+            >
+              <MessageSquareText size={17} />
+            </button>
+          </div>
+          <details className="workspace-controls">
+            <summary>
+              <SlidersHorizontal size={16} />
+              <span>{language === "zh" ? "范围与偏好" : "Scope and preferences"}</span>
+              <small>
+                {formatSelectedControlSummary(
+                  selectedUniverseValue,
+                  visibleUniverses,
+                  profile,
+                  language,
+                )}
+              </small>
+              <ChevronDown size={15} />
+            </summary>
+            <div className="top-tools terminal-top-grid">
             <div className="scan-controls">
               <div className="segment language-toggle" aria-label="Language">
                 <button
@@ -249,10 +321,24 @@ export function Layout({
               />
             </div>
           </div>
+          </details>
         </header>
         {children}
       </main>
-      {rightPanel}
+      {agentOpen && (
+        <div className="agent-drawer">
+          <button
+            type="button"
+            className="agent-drawer-close"
+            onClick={() => setAgentOpen(false)}
+            title={language === "zh" ? "关闭研究助手" : "Close research assistant"}
+            aria-label={language === "zh" ? "关闭研究助手" : "Close research assistant"}
+          >
+            <X size={17} />
+          </button>
+          {rightPanel}
+        </div>
+      )}
     </div>
   );
 }
@@ -348,4 +434,29 @@ function formatSelectedSymbols(
     return labels.join(", ");
   }
   return `${labels.slice(0, 3).join(", ")} 等 ${labels.length} 个`;
+}
+
+function formatResultStatus(
+  status: "loading" | "ready" | "error",
+  count: number,
+  language: "zh" | "en",
+): string {
+  if (status === "loading") {
+    return language === "zh" ? "结果载入中" : "Loading result";
+  }
+  if (status === "error") {
+    return language === "zh" ? "结果待重试" : "Result unavailable";
+  }
+  return language === "zh" ? `${count} 个候选` : `${count} candidates`;
+}
+
+function formatSelectedControlSummary(
+  selectedUniverseId: string,
+  universes: UniverseRecord[],
+  profile: ResearchProfile,
+  language: "zh" | "en",
+): string {
+  const universe = universes.find((item) => item.universe_id === selectedUniverseId);
+  const universeLabel = universe ? formatUniverseName(universe, language) : selectedUniverseId;
+  return `${universeLabel} · ${localizeProfile(profile, language)}`;
 }

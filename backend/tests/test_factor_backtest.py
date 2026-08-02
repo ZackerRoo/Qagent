@@ -2,7 +2,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from qagent.factors.backtest import run_factor_backtest
+from qagent.factors.backtest import run_factor_backtest, run_factor_diagnostics
 from qagent.strategy_data.models import FundamentalSnapshot
 
 
@@ -155,3 +155,35 @@ def test_factor_backtest_uses_point_in_time_historical_fundamentals():
     assert result.data_health["historical_fundamentals"] == str(len(fundamentals))
     assert result.data_health["fundamental_mode"] == "point_in_time"
     assert all(signal.instrument_id != "CN:688981" for signal in result.signals)
+
+
+def test_factor_diagnostics_cover_monotonicity_decay_turnover_and_regimes():
+    bars = pd.concat(
+        [
+            _bars("CN:000001", [10 + index * 0.09 for index in range(240)], 3_000_000),
+            _bars("CN:300750", [12 + index * 0.05 for index in range(240)], 2_000_000),
+            _bars("CN:600519", [20 + index * 0.01 for index in range(240)], 1_500_000),
+            _bars("CN:688981", [25 - index * 0.025 for index in range(240)], 1_000_000),
+        ],
+        ignore_index=True,
+    )
+
+    result = run_factor_diagnostics(
+        bars,
+        horizons=(5, 10, 20, 40),
+        primary_horizon_days=20,
+        step_days=10,
+        top_n=3,
+        round_trip_cost_bps=20,
+    )
+
+    assert result.primary.information_coefficient.sample_count > 0
+    assert result.monotonicity.available is True
+    assert result.monotonicity.observed_buckets >= 3
+    assert result.decay
+    assert {point.forward_days for point in result.decay[0].points} == {5, 10, 20, 40}
+    assert result.turnover_cost.rebalance_count > 0
+    assert result.turnover_cost.average_turnover_rate is not None
+    assert result.turnover_cost.estimated_cost_drag_pct is not None
+    assert result.market_regimes
+    assert result.data_health["factor_diagnostics"] == "ready"

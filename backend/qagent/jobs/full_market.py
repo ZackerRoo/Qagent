@@ -209,6 +209,15 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     job = repo.get_full_market_scan_job(job_id)
     if job is None:
         return
+    if job.data_health.get("automatic_scan_aborted") == "true":
+        if job.status in {"queued", "running"}:
+            repo.update_full_market_scan_job(
+                job_id,
+                status="failed",
+                message="Full-market scan stopped before execution",
+                data_health=job.data_health,
+            )
+        return
     repo.update_full_market_scan_job(
         job_id,
         status="running",
@@ -293,6 +302,18 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
 
     restored_batches = 0
     for batch_index, batch in enumerate(_chunks(job.symbols, job.batch_size), start=1):
+        current = repo.get_full_market_scan_job(job_id)
+        if (
+            current is not None
+            and current.data_health.get("automatic_scan_aborted") == "true"
+        ):
+            repo.update_full_market_scan_job(
+                job_id,
+                status="failed",
+                message="Full-market scan stopped at batch boundary",
+                data_health=current.data_health,
+            )
+            return
         completed_batches = batch_index
         checkpoint = _load_full_market_batch_checkpoint(
             repo,

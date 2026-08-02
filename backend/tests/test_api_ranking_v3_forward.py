@@ -390,3 +390,44 @@ def test_free_automation_cycle_runs_forward_shadow_without_seeding_paper(
     assert cycle.data_health["ranking_v3_forward_state"] == "shadow_running"
     assert cycle.data_health["ranking_v3_forward_processed_sessions"] == "1"
     assert cycle.data_health["ranking_v3_forward_release_proof"] == "false"
+
+
+def test_paper_only_automation_cycle_does_not_run_forward_evidence(monkeypatch):
+    repo = SimpleNamespace()
+    paper_repo = SimpleNamespace(list_trades=lambda **_: [])
+    monkeypatch.setattr(routes, "_repo", lambda: repo)
+    monkeypatch.setattr(routes, "_paper_repo", lambda: paper_repo)
+    monkeypatch.setattr(
+        routes,
+        "_paper_seed_risk_gate",
+        lambda *_: (
+            True,
+            {
+                "paper_risk_gate_action": "allow_new_entries",
+                "paper_risk_gate_reason": "test",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_ranking_v3_forward_context",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("paper-only scheduler must not inspect forward evidence")
+        ),
+    )
+
+    cycle = routes._run_auto_processing_cycle(
+        AutoProcessingSettings(
+            provider="free",
+            run_scan=False,
+            seed_paper=False,
+            update_paper=False,
+            run_alerts=False,
+            run_forward_evidence=False,
+        )
+    )
+
+    assert cycle.errors == []
+    assert cycle.data_health["automation_run_forward_evidence"] == "false"
+    assert cycle.data_health["ranking_v3_forward_state"] == "disabled"
+    assert cycle.data_health["ranking_v3_forward_processed_sessions"] == "0"

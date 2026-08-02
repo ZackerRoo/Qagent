@@ -20,6 +20,7 @@ import type {
   DeliveriesResponse,
   DeliveryOutboxRecord,
   FactorBacktestResponse,
+  FactorDiagnosticsResponse,
   FullMarketBatchScanJob,
   FullMarketScanResponse,
   HistoricalBackfillJob,
@@ -34,6 +35,8 @@ import type {
   PaperDailyReportResponse,
   PaperDualTrackResponse,
   PaperLedgerResponse,
+  PaperForwardComparisonResponse,
+  PaperResearchBaseline,
   PaperSeedResponse,
   PaperSessionResponse,
   PaperSessionStartPayload,
@@ -106,6 +109,7 @@ type ScanParams = {
   reporting_scope?: PaperReportingScope;
   seed_limit?: number;
   update_paper?: boolean;
+  run_forward_evidence?: boolean;
   initial_capital?: string | number;
   allocation_per_trade_pct?: string | number;
   risk_per_trade_pct?: string | number;
@@ -430,6 +434,24 @@ export async function fetchPaperLedger(params: PaperLedgerRequest = {}): Promise
     slippage_bps: params.slippageBps,
     take_profit_pct: params.takeProfitPct,
     limit: 500,
+  });
+}
+
+export async function freezePaperResearchBaseline(
+  provider: DataProviderMode,
+): Promise<PaperResearchBaseline> {
+  return apiPost<PaperResearchBaseline>(
+    `/paper-trades/research-baseline/freeze?provider=${provider}&limit=1000`,
+    {},
+  );
+}
+
+export async function fetchPaperForwardComparison(
+  provider: DataProviderMode,
+): Promise<PaperForwardComparisonResponse> {
+  return apiGet<PaperForwardComparisonResponse>("/paper-trades/forward-comparison", {
+    provider,
+    limit: 1000,
   });
 }
 
@@ -788,6 +810,22 @@ export async function fetchFactorBacktest(
   });
 }
 
+export async function fetchFactorDiagnostics(
+  provider: DataProviderMode,
+  symbols?: string,
+  scanLimit?: number,
+): Promise<FactorDiagnosticsResponse> {
+  return apiGet<FactorDiagnosticsResponse>("/factors/diagnostics", {
+    provider,
+    symbols,
+    step_days: 10,
+    top_n: 5,
+    scan_limit: scanLimit ?? (provider === "free" ? 50 : undefined),
+    transaction_cost_bps: 5,
+    slippage_bps: 5,
+  });
+}
+
 export async function fetchPortfolioBacktest(
   provider: DataProviderMode,
   symbols?: string,
@@ -1026,14 +1064,15 @@ export async function runAutomationSchedulerOnce(
       symbols,
       interval_seconds: 1800,
       include_etfs: true,
-      run_scan: true,
+      run_scan: false,
       scan_max_age_minutes: 240,
       batch_size: 200,
       seed_paper: true,
       seed_limit: 5,
       update_paper: true,
-      run_alerts: true,
-      queue_alerts: true,
+      run_alerts: false,
+      queue_alerts: false,
+      run_forward_evidence: false,
     })}`,
     {},
   );
@@ -1049,14 +1088,15 @@ export async function startAutomationScheduler(
       symbols,
       interval_seconds: 1800,
       include_etfs: true,
-      run_scan: true,
+      run_scan: false,
       scan_max_age_minutes: 240,
       batch_size: 200,
       seed_paper: true,
       seed_limit: 5,
       update_paper: true,
-      run_alerts: true,
-      queue_alerts: true,
+      run_alerts: false,
+      queue_alerts: false,
+      run_forward_evidence: false,
     })}`,
     {},
   );

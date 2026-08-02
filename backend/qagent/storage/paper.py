@@ -1,4 +1,5 @@
 import json
+import hashlib
 from datetime import date, datetime
 from decimal import Decimal
 from uuid import uuid4
@@ -12,6 +13,7 @@ from qagent.execution.rules import is_tick_aligned
 from qagent.storage.tables import (
     OpportunitySnapshotRow,
     PaperAccountSettingsRow,
+    PaperResearchBaselineRow,
     PaperTradeEventRow,
     PaperTradeRow,
     ScanRunRow,
@@ -214,6 +216,19 @@ class PaperAccountSettings(BaseModel):
     started_at: datetime
 
 
+class PaperResearchBaseline(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    baseline_id: str
+    provider: str
+    paper_session_id: str
+    walk_forward_run_id: str
+    start_date: date
+    definition_digest: str
+    definition: dict[str, object]
+    created_at: datetime
+
+
 class PaperTradeSourceContext(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -373,6 +388,75 @@ class PaperTradingRepository:
             session.refresh(row)
             return self._trade_from_row(row)
 
+    def get_research_baseline(
+        self,
+        *,
+        provider: str,
+        paper_session_id: str | None = None,
+    ) -> PaperResearchBaseline | None:
+        with self.session_factory() as session:
+            query = session.query(PaperResearchBaselineRow).filter(
+                PaperResearchBaselineRow.provider == provider
+            )
+            if paper_session_id:
+                query = query.filter(
+                    PaperResearchBaselineRow.paper_session_id == paper_session_id
+                )
+            row = (
+                query.order_by(
+                    PaperResearchBaselineRow.created_at.desc(),
+                    PaperResearchBaselineRow.baseline_id.desc(),
+                )
+                .first()
+            )
+            return self._research_baseline_from_row(row) if row is not None else None
+
+    def freeze_research_baseline(
+        self,
+        *,
+        baseline_id: str,
+        provider: str,
+        paper_session_id: str,
+        walk_forward_run_id: str,
+        start_date: date,
+        definition: dict[str, object],
+    ) -> PaperResearchBaseline:
+        encoded = json.dumps(
+            definition,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        definition_digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        with self.session_factory() as session:
+            existing = session.get(PaperResearchBaselineRow, baseline_id)
+            if existing is not None:
+                if (
+                    existing.provider != provider
+                    or existing.paper_session_id != paper_session_id
+                    or existing.walk_forward_run_id != walk_forward_run_id
+                    or existing.start_date != start_date
+                    or existing.definition_digest != definition_digest
+                    or existing.definition_json != encoded
+                ):
+                    raise ValueError(
+                        "paper research baseline already exists with a different definition"
+                    )
+                return self._research_baseline_from_row(existing)
+            row = PaperResearchBaselineRow(
+                baseline_id=baseline_id,
+                provider=provider,
+                paper_session_id=paper_session_id,
+                walk_forward_run_id=walk_forward_run_id,
+                start_date=start_date,
+                definition_digest=definition_digest,
+                definition_json=encoded,
+            )
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return self._research_baseline_from_row(row)
+
     def get_trade_by_source_snapshot_id(
         self,
         source_snapshot_id: str,
@@ -391,6 +475,24 @@ class PaperTradingRepository:
                 if row is not None
                 else None
             )
+
+    @staticmethod
+    def _research_baseline_from_row(
+        row: PaperResearchBaselineRow,
+    ) -> PaperResearchBaseline:
+        definition = json.loads(row.definition_json)
+        if not isinstance(definition, dict):
+            raise ValueError(f"paper research baseline {row.baseline_id} is malformed")
+        return PaperResearchBaseline(
+            baseline_id=row.baseline_id,
+            provider=row.provider,
+            paper_session_id=row.paper_session_id,
+            walk_forward_run_id=row.walk_forward_run_id,
+            start_date=row.start_date,
+            definition_digest=row.definition_digest,
+            definition=definition,
+            created_at=row.created_at,
+        )
 
     def get_trade(self, trade_id: str) -> PaperTradeRecord | None:
         with self.session_factory() as session:

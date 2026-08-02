@@ -593,7 +593,7 @@ function AutomaticProcessingPanel({
     <div className="auto-processing-panel">
       <div className="auto-processing-head">
         <div>
-          <span>{language === "zh" ? "自动处理系统" : "Automatic Processing"}</span>
+          <span>{language === "zh" ? "本地模拟盘自动更新" : "Local Paper Automation"}</span>
           <strong>
             {enabled
               ? language === "zh"
@@ -609,7 +609,7 @@ function AutomaticProcessingPanel({
             {busy ? (language === "zh" ? "处理中" : "Running") : language === "zh" ? "立即执行一轮" : "Run once"}
           </button>
           <button type="button" onClick={onStart} disabled={busy || enabled}>
-            {language === "zh" ? "开启自动处理" : "Start loop"}
+            {language === "zh" ? "每 30 分钟运行" : "Run every 30 min"}
           </button>
           <button type="button" onClick={onStop} disabled={busy || !enabled}>
             {language === "zh" ? "停止" : "Stop"}
@@ -631,8 +631,8 @@ function AutomaticProcessingPanel({
           <strong>{state?.run_count ?? 0}</strong>
         </div>
         <div>
-          <span>{language === "zh" ? "扫描状态" : "Scan status"}</span>
-          <strong>{localizeAutomationScanStatus(result?.scan_status, language)}</strong>
+          <span>{language === "zh" ? "任务范围" : "Task scope"}</span>
+          <strong>{language === "zh" ? "模拟撮合与持仓风控" : "Paper fills and position risk"}</strong>
         </div>
         <div>
           <span>{language === "zh" ? "模拟盘" : "Paper"}</span>
@@ -645,8 +645,8 @@ function AutomaticProcessingPanel({
           </strong>
         </div>
         <div>
-          <span>{language === "zh" ? "提醒触发" : "Alerts"}</span>
-          <strong>{result?.alerts_triggered ?? "-"}</strong>
+          <span>{language === "zh" ? "研究验证" : "Research validation"}</span>
+          <strong>{language === "zh" ? "隔离关闭" : "Isolated off"}</strong>
         </div>
       </div>
 
@@ -701,21 +701,6 @@ function formatInterval(value: number | undefined, language: "zh" | "en"): strin
   }
   const hours = Math.round(minutes / 60);
   return language === "zh" ? `${hours} 小时` : `${hours}h`;
-}
-
-function localizeAutomationScanStatus(value: string | undefined, language: "zh" | "en"): string {
-  const labels: Record<string, { zh: string; en: string }> = {
-    disabled: { zh: "未扫描", en: "Disabled" },
-    completed: { zh: "已完成", en: "Completed" },
-    queued: { zh: "已排队", en: "Queued" },
-    already_running: { zh: "已有任务运行", en: "Already running" },
-    cache_fresh: { zh: "缓存仍新鲜", en: "Cache fresh" },
-    failed: { zh: "失败", en: "Failed" },
-  };
-  if (!value) {
-    return "-";
-  }
-  return labels[value]?.[language] ?? value;
 }
 
 function formatNumber(value: number, language: "zh" | "en"): string {

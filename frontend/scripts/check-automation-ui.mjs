@@ -22,7 +22,8 @@ assert(settings.includes("AutomaticProcessingPanel"), "Settings must render auto
 assert(settings.includes("runAutomationCycleNow"), "Settings must expose run-once automatic processing");
 assert(settings.includes("startAutomationLoop"), "Settings must expose start automatic loop");
 assert(settings.includes("stopAutomationLoop"), "Settings must expose stop automatic loop");
-assert(settings.includes("自动处理系统"), "Settings must explain automatic processing in Chinese");
+assert(settings.includes("本地模拟盘自动更新"), "Settings must explain local paper automation in Chinese");
+assert(client.includes("run_forward_evidence: false"), "Paper scheduler must isolate forward evidence");
 assert(client.includes("fetchAutomationScheduler"), "Client must fetch automation scheduler state");
 assert(client.includes("runAutomationSchedulerOnce"), "Client must run one automation cycle");
 assert(client.includes("startAutomationScheduler"), "Client must start automation scheduler");

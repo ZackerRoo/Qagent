@@ -374,6 +374,8 @@ export default function App() {
       universes={universes}
       selectedUniverseId={selectedUniverseId}
       profile={profile}
+      resultStatus={latestResultStatus}
+      opportunityCount={profiledOpportunities.length}
       onSymbolsChange={setSymbols}
       onUniverseChange={handleUniverseChange}
       onDataModeChange={handleDataModeChange}

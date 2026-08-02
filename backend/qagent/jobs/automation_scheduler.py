@@ -22,6 +22,7 @@ class AutoProcessingSettings(BaseModel):
     update_paper: bool = True
     run_alerts: bool = True
     queue_alerts: bool = True
+    run_forward_evidence: bool = True
 
 
 class AutoProcessingCycleResult(BaseModel):

@@ -13,7 +13,12 @@ from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.automation_scheduler import AutomationScheduler, AutoProcessingSettings
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.storage.repository import QagentRepository
-from qagent.storage.tables import OpportunitySnapshotRow, PaperTradeRow, ScanRunRow
+from qagent.storage.tables import (
+    FullMarketScanJobRow,
+    OpportunitySnapshotRow,
+    PaperTradeRow,
+    ScanRunRow,
+)
 
 
 def test_automation_reuses_same_market_day_cache_after_ttl(monkeypatch):
@@ -43,6 +48,138 @@ def test_automation_reuses_same_market_day_cache_after_ttl(monkeypatch):
     assert result is cache
     assert freshness == "same_market_day"
     assert repo.max_ages == [timedelta(hours=4), timedelta(days=1)]
+
+
+def test_latest_completed_a_share_session_changes_after_close(monkeypatch):
+    sessions = [date(2026, 7, 30), date(2026, 7, 31)]
+    monkeypatch.setattr(
+        routes,
+        "trading_sessions_in_range",
+        lambda *_: sessions,
+    )
+
+    before_close = routes._latest_completed_a_share_session(
+        datetime(2026, 7, 31, 14, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    )
+    after_close = routes._latest_completed_a_share_session(
+        datetime(2026, 7, 31, 15, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    )
+
+    assert before_close == date(2026, 7, 30)
+    assert after_close == date(2026, 7, 31)
+
+
+def test_automatic_full_scan_is_deferred_during_market_session(monkeypatch):
+    monkeypatch.setattr(
+        routes,
+        "trading_sessions_in_range",
+        lambda *_: [date(2026, 7, 31)],
+    )
+
+    market_open = routes._automatic_full_scan_window(
+        datetime(2026, 7, 31, 14, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    )
+    settlement_window = routes._automatic_full_scan_window(
+        datetime(2026, 7, 31, 15, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    )
+    after_close = routes._automatic_full_scan_window(
+        datetime(2026, 7, 31, 15, 45, tzinfo=ZoneInfo("Asia/Shanghai"))
+    )
+
+    assert market_open == (False, "market_session_open")
+    assert settlement_window == (False, "market_session_open")
+    assert after_close == (True, "ready")
+
+
+def test_stale_automatic_full_scan_restarts_same_job_from_checkpoints(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = f"sqlite:///{tmp_path / 'stale-scan-resume.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    repo = QagentRepository(create_session_factory(database_url))
+    job = repo.create_full_market_scan_job(
+        provider="free",
+        symbols=["CN:000001", "CN:000002"],
+        batch_size=1,
+        include_etfs=True,
+        sync_if_empty=False,
+    )
+    stale_at = datetime.now(timezone.utc) - timedelta(hours=2)
+    with repo.session_factory() as session:
+        session.execute(
+            FullMarketScanJobRow.__table__.update()
+            .where(FullMarketScanJobRow.job_id == job.job_id)
+            .values(
+                status="running",
+                scanned_symbols=1,
+                completed_batches=1,
+                updated_at=stale_at,
+            )
+        )
+        session.commit()
+    terminated = []
+    submitted = []
+    monkeypatch.setattr(
+        routes,
+        "_terminate_full_market_executor",
+        lambda: terminated.append(job.job_id) or True,
+    )
+    monkeypatch.setattr(
+        routes,
+        "_submit_full_market_scan_job",
+        lambda job_id: submitted.append(job_id) or True,
+    )
+
+    status, started, job_id = routes._maybe_start_automatic_full_scan(
+        repo,
+        AutoProcessingSettings(
+            provider="free",
+            interval_seconds=1800,
+            scan_max_age_minutes=240,
+        ),
+    )
+
+    assert (status, started, job_id) == ("resumed_stale", True, job.job_id)
+    assert terminated == [job.job_id]
+    assert submitted == [job.job_id]
+    resumed = repo.get_full_market_scan_job(job.job_id)
+    assert resumed is not None
+    assert resumed.status == "queued"
+    assert resumed.completed_batches == 1
+    assert resumed.data_health["full_market_restart_recovery"] == (
+        "stale_checkpoint_resume"
+    )
+
+
+def test_automation_blocks_stale_signal_cache_without_signal_day_fallback():
+    cache = SimpleNamespace(
+        created_at=datetime.now(timezone.utc),
+        payload={"data_health": {"full_market_signal_date": "2026-07-29"}},
+    )
+
+    class StubRepo:
+        def get_recent_scan_result_cache(self, *, cache_key, max_age):
+            assert cache_key == "full_market_batch:free:true"
+            return cache
+
+        def list_latest_signal_opportunity_snapshots(self, **_):
+            raise AssertionError("stale signal-day fallback must remain disabled")
+
+    snapshots, health = routes._paper_seed_snapshots_from_recommendations(
+        StubRepo(),
+        mode="free",
+        include_etfs=True,
+        max_age=timedelta(hours=4),
+        limit=5,
+        expected_signal_date=date(2026, 7, 30),
+    )
+
+    assert snapshots == []
+    assert health["paper_candidate_freshness_gate"] == "blocked"
+    assert health["paper_candidate_expected_signal_date"] == "2026-07-30"
+    assert health["automation_seed_cache_freshness"] == "stale_signal_retry_window"
 
 
 def test_research_automation_passes_authoritative_repository_to_seed(

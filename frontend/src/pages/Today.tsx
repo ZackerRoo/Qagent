@@ -108,7 +108,6 @@ export function Today({
   const [bulkPaperMessage, setBulkPaperMessage] = useState("");
   const timerRef = useRef<number | null>(null);
   const batchTimerRef = useRef<number | null>(null);
-  const autoPaperTimerRef = useRef<number | null>(null);
 
   const cards = useMemo(
     () => applyResearchProfile(result?.cards ?? [], profile),
@@ -362,16 +361,12 @@ export function Today({
     void loadFollowthrough();
     void refreshFullScanJob();
     void loadAutoPaperStatus();
-    autoPaperTimerRef.current = window.setInterval(() => void loadAutoPaperStatus(), 15000);
     return () => {
       if (timerRef.current !== null) {
         window.clearTimeout(timerRef.current);
       }
       if (batchTimerRef.current !== null) {
         window.clearTimeout(batchTimerRef.current);
-      }
-      if (autoPaperTimerRef.current !== null) {
-        window.clearInterval(autoPaperTimerRef.current);
       }
     };
   }, [dataMode, includeEtfs]);
@@ -446,37 +441,52 @@ export function Today({
           bulkPaperMessage={bulkPaperMessage}
         />
 
-        <DecisionAutomationCenterPanel
-          cards={decisionCards}
-          result={result}
-          followthrough={followthrough}
-          candidatePool={paperCandidatePool}
-          selectedCard={safeSelectedCard}
-          onSelect={onSelect}
+        <AutoPaperStatusStrip
+          scheduler={automationScheduler}
+          validation={paperValidation}
+          fullScanJob={fullScanJob}
+          language={language}
         />
 
-        <div className="dashboard-secondary-grid">
-          <AutoPaperStatusStrip
-            scheduler={automationScheduler}
-            validation={paperValidation}
-            fullScanJob={fullScanJob}
-            language={language}
-          />
+        <details className="panel today-operations-drawer">
+          <summary>
+            <div>
+              <p className="eyebrow">
+                {language === "zh" ? "研究诊断" : "Research diagnostics"}
+              </p>
+              <h2>
+                {language === "zh" ? "自动决策、验证与风险" : "Automation, validation, and risk"}
+              </h2>
+            </div>
+            <span className="count">{language === "zh" ? "展开" : "Open"}</span>
+          </summary>
+          <div className="today-operations-stack">
+            <DecisionAutomationCenterPanel
+              cards={decisionCards}
+              result={result}
+              followthrough={followthrough}
+              candidatePool={paperCandidatePool}
+              selectedCard={safeSelectedCard}
+              onSelect={onSelect}
+            />
 
-          <TodayValidationSnapshot
-            validation={paperValidation}
-            followthrough={followthrough}
-            language={language}
-            onNavigate={onNavigate}
-          />
+            <div className="dashboard-secondary-grid">
+              <TodayValidationSnapshot
+                validation={paperValidation}
+                followthrough={followthrough}
+                language={language}
+                onNavigate={onNavigate}
+              />
 
-          <TodayRiskBrief
-            cards={decisionCards}
-            result={result}
-            language={language}
-            onNavigate={onNavigate}
-          />
-        </div>
+              <TodayRiskBrief
+                cards={decisionCards}
+                result={result}
+                language={language}
+                onNavigate={onNavigate}
+              />
+            </div>
+          </div>
+        </details>
 
         <TodayAdvancedAnalysis
           cards={decisionCards}

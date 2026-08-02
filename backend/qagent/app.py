@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from qagent.api.routes import (
+    _terminate_full_market_executor,
     restore_automation_scheduler_from_storage,
     restore_full_market_scan_job_from_storage,
     restore_historical_backfill_from_storage,
@@ -20,7 +21,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     restore_walk_forward_job_from_storage()
     restore_full_market_scan_job_from_storage()
     restore_automation_scheduler_from_storage()
-    yield
+    try:
+        yield
+    finally:
+        _terminate_full_market_executor()
 
 
 def create_app() -> FastAPI:

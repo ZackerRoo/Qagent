@@ -440,7 +440,7 @@ def test_full_market_batch_scan_endpoint_creates_background_job(tmp_path, monkey
         def submit(self, fn, *args, **kwargs):
             submitted.append((fn, args, kwargs))
 
-    monkeypatch.setattr(routes, "_task_executor", FakeExecutor())
+    monkeypatch.setattr(routes, "_full_market_task_executor", FakeExecutor())
     client = TestClient(create_app())
 
     response = client.post(
@@ -568,6 +568,40 @@ def test_running_full_market_scan_is_resubmitted_after_service_restart(
     assert current.data_health["full_market_restart_recovery"] == (
         "queued_for_checkpoint_resume"
     )
+
+
+def test_aborted_full_market_scan_is_not_restored_after_service_restart(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'abort-restore.db'}")
+    repo = routes._repo()
+    job = repo.create_full_market_scan_job(
+        provider="free",
+        symbols=["CN:000001"],
+        batch_size=1,
+        include_etfs=True,
+        sync_if_empty=False,
+    )
+    repo.update_full_market_scan_job(
+        job.job_id,
+        status="running",
+        data_health={"automatic_scan_aborted": "true"},
+    )
+    submitted = []
+    monkeypatch.setattr(
+        routes,
+        "_submit_full_market_scan_job",
+        lambda job_id: submitted.append(job_id) or True,
+    )
+
+    restored = routes.restore_full_market_scan_job_from_storage()
+
+    assert restored == []
+    assert submitted == []
+    current = repo.get_full_market_scan_job(job.job_id)
+    assert current is not None
+    assert current.status == "failed"
 
 
 def test_full_market_worker_failure_is_persisted_and_releases_submission(

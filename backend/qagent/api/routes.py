@@ -1,6 +1,6 @@
 from copy import deepcopy
 from collections.abc import Mapping
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import json
@@ -69,7 +69,7 @@ from qagent.config import get_settings
 from qagent.data_management import build_historical_coverage_manifest
 from qagent.db import create_session_factory, initialize_database
 from qagent.domain.models import OpportunityCard, PortfolioPlan, SectorStrength
-from qagent.factors.backtest import run_factor_backtest
+from qagent.factors.backtest import run_factor_backtest, run_factor_diagnostics
 from qagent.jobs.automation import run_research_automation
 from qagent.jobs.automation_scheduler import (
     AutoProcessingCycleResult,
@@ -182,6 +182,10 @@ from qagent.research.market_intelligence import (
     build_market_intelligence_center,
 )
 from qagent.research.operational_readiness import build_operational_readiness_center
+from qagent.research.paper_forward_report import (
+    build_paper_forward_comparison,
+    build_paper_research_baseline_definition,
+)
 from qagent.storage.paper import (
     PaperAccountSettings,
     PaperTradeAdmissionProof,
@@ -216,6 +220,7 @@ _historical_jobs_lock = Lock()
 _submitted_historical_jobs: set[str] = set()
 _full_market_jobs_lock = Lock()
 _submitted_full_market_jobs: set[str] = set()
+_full_market_task_executor: ProcessPoolExecutor | None = None
 _walk_forward_task_executor: ProcessPoolExecutor | None = None
 _walk_forward_jobs_lock = Lock()
 _submitted_walk_forward_jobs: set[str] = set()
@@ -238,6 +243,44 @@ def _walk_forward_executor() -> ProcessPoolExecutor:
             mp_context=get_context("spawn"),
         )
     return _walk_forward_task_executor
+
+
+def _full_market_executor() -> ProcessPoolExecutor:
+    """Keep long provider scans isolated from the API and scheduler process."""
+
+    global _full_market_task_executor
+    if _full_market_task_executor is None:
+        _full_market_task_executor = ProcessPoolExecutor(
+            max_workers=1,
+            mp_context=get_context("spawn"),
+        )
+    return _full_market_task_executor
+
+
+def _release_full_market_submission(job_id: str) -> None:
+    with _full_market_jobs_lock:
+        _submitted_full_market_jobs.discard(job_id)
+
+
+def _terminate_full_market_executor() -> bool:
+    """Terminate a stalled scan worker without taking down the API scheduler."""
+
+    global _full_market_task_executor
+    with _full_market_jobs_lock:
+        executor = _full_market_task_executor
+        _full_market_task_executor = None
+        _submitted_full_market_jobs.clear()
+    if executor is None:
+        return False
+    terminated = False
+    for process in list(getattr(executor, "_processes", {}).values()):
+        if process.is_alive():
+            process.terminate()
+            terminated = True
+    shutdown = getattr(executor, "shutdown", None)
+    if callable(shutdown):
+        shutdown(wait=False, cancel_futures=True)
+    return terminated
 
 
 def _terminate_walk_forward_executor() -> bool:
@@ -275,7 +318,14 @@ def _submit_full_market_scan_job(job_id: str) -> bool:
             },
         )
     try:
-        _task_executor.submit(_run_submitted_full_market_scan_job, job_id)
+        future = _full_market_executor().submit(
+            _run_submitted_full_market_scan_job,
+            job_id,
+        )
+        if future is not None and hasattr(future, "add_done_callback"):
+            future.add_done_callback(
+                lambda _future: _release_full_market_submission(job_id)
+            )
     except Exception:
         with _full_market_jobs_lock:
             _submitted_full_market_jobs.discard(job_id)
@@ -312,6 +362,15 @@ def restore_full_market_scan_job_from_storage() -> list[str]:
     for provider in ("free", "fixture"):
         job = repo.get_latest_full_market_scan_job(provider=provider)
         if job is None:
+            continue
+        if job.data_health.get("automatic_scan_aborted") == "true":
+            if job.status in {"queued", "running"}:
+                repo.update_full_market_scan_job(
+                    job.job_id,
+                    status="failed",
+                    message="Aborted full-market scan was not restored",
+                    data_health=job.data_health,
+                )
             continue
         recoverable = job.status == "running" or (
             job.status == "queued" and job.data_health.get("full_market_worker_submitted") == "true"
@@ -2770,6 +2829,99 @@ def factor_backtest(
     return payload
 
 
+@router.get("/factors/diagnostics")
+def factor_diagnostics(
+    provider: str = "fixture",
+    symbols: str | None = None,
+    start: date | None = None,
+    end: date | None = None,
+    step_days: int = 10,
+    top_n: int = 5,
+    scan_limit: int | None = None,
+    transaction_cost_bps: float = 5.0,
+    slippage_bps: float = 5.0,
+) -> dict[str, object]:
+    mode = provider.strip().lower()
+    if step_days <= 0 or step_days > 120:
+        raise HTTPException(status_code=400, detail="step_days must be between 1 and 120")
+    if top_n <= 0 or top_n > 50:
+        raise HTTPException(status_code=400, detail="top_n must be between 1 and 50")
+    if transaction_cost_bps < 0 or slippage_bps < 0:
+        raise HTTPException(status_code=400, detail="cost inputs must be non-negative")
+    resolved = _resolve_symbols_with_limit(
+        mode,
+        symbols,
+        scan_limit,
+        include_supplements=scan_limit is None,
+    )
+    instrument_ids = resolved.symbols
+    start_date, end_date = _factor_backtest_dates(mode, start, end)
+    bars = build_market_data_provider(mode).get_daily_bars(
+        instrument_ids,
+        start_date,
+        end_date,
+    )
+    live_fundamentals: list[FundamentalSnapshot] = []
+    fundamental_errors: list[str] = []
+    try:
+        live_fundamentals = build_strategy_data_provider(mode).get_fundamentals(
+            instrument_ids,
+            start=start_date,
+            end=end_date,
+        )
+    except Exception as exc:
+        fundamental_errors.append(f"live fundamentals: {exc}")
+    repo = _repo()
+    if live_fundamentals:
+        try:
+            repo.upsert_fundamental_snapshots(mode, live_fundamentals)
+        except Exception as exc:
+            fundamental_errors.append(f"store fundamentals: {exc}")
+    try:
+        stored_fundamentals = repo.list_fundamental_snapshots(
+            provider_mode=mode,
+            instrument_ids=instrument_ids,
+            start=start_date,
+            end=end_date,
+        )
+    except Exception as exc:
+        stored_fundamentals = []
+        fundamental_errors.append(f"load fundamentals: {exc}")
+    fundamentals = _merge_fundamental_snapshots(
+        stored_fundamentals,
+        live_fundamentals,
+    )
+    result = run_factor_diagnostics(
+        bars,
+        fundamentals=fundamentals,
+        step_days=step_days,
+        top_n=top_n,
+        round_trip_cost_bps=2 * (transaction_cost_bps + slippage_bps),
+    )
+    payload = result.model_dump(mode="json")
+    payload["primary"]["signals"] = [
+        _attach_instrument_label(signal)
+        for signal in payload["primary"].get("signals", [])
+    ]
+    payload["data_health"].update(
+        {
+            **resolved.data_health,
+            "factor_diagnostics_provider": mode,
+            "factor_diagnostics_start": start_date.isoformat(),
+            "factor_diagnostics_end": end_date.isoformat(),
+            "fundamental_live_rows": str(len(live_fundamentals)),
+            "fundamental_stored_rows": str(len(stored_fundamentals)),
+            "fundamental_point_in_time_rows": str(len(fundamentals)),
+            "fundamental_store": "sqlite",
+        }
+    )
+    if fundamental_errors:
+        payload["data_health"]["fundamental_errors"] = " | ".join(
+            fundamental_errors[:3]
+        )
+    return payload
+
+
 def _merge_fundamental_snapshots(
     *groups: list[FundamentalSnapshot],
 ) -> list[FundamentalSnapshot]:
@@ -3038,6 +3190,7 @@ def run_automation_scheduler_once(
     update_paper: bool = True,
     run_alerts: bool = True,
     queue_alerts: bool = True,
+    run_forward_evidence: bool = True,
 ) -> dict[str, object]:
     settings = _auto_processing_settings(
         provider=provider,
@@ -3054,6 +3207,7 @@ def run_automation_scheduler_once(
         update_paper=update_paper,
         run_alerts=run_alerts,
         queue_alerts=queue_alerts,
+        run_forward_evidence=run_forward_evidence,
     )
     state = _automation_scheduler.run_once(settings, _run_auto_processing_cycle)
     return state.model_dump(mode="json")
@@ -3075,6 +3229,7 @@ def start_automation_scheduler(
     update_paper: bool = True,
     run_alerts: bool = True,
     queue_alerts: bool = True,
+    run_forward_evidence: bool = True,
 ) -> dict[str, object]:
     settings = _auto_processing_settings(
         provider=provider,
@@ -3091,6 +3246,7 @@ def start_automation_scheduler(
         update_paper=update_paper,
         run_alerts=run_alerts,
         queue_alerts=queue_alerts,
+        run_forward_evidence=run_forward_evidence,
     )
     state = _automation_scheduler.start(settings, _run_auto_processing_cycle)
     _persist_automation_scheduler_state(state)
@@ -3142,6 +3298,7 @@ def _auto_processing_settings(
     update_paper: bool,
     run_alerts: bool,
     queue_alerts: bool,
+    run_forward_evidence: bool,
 ) -> AutoProcessingSettings:
     try:
         return AutoProcessingSettings(
@@ -3159,6 +3316,7 @@ def _auto_processing_settings(
             update_paper=update_paper,
             run_alerts=run_alerts,
             queue_alerts=queue_alerts,
+            run_forward_evidence=run_forward_evidence,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -3167,6 +3325,11 @@ def _auto_processing_settings(
 def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessingCycleResult:
     started_at = datetime.now(timezone.utc)
     mode = settings.provider.strip().lower()
+    expected_signal_date = (
+        _latest_completed_a_share_session()
+        if mode == "free" and settings.run_scan
+        else None
+    )
     repo = _repo()
     paper_repo = _paper_repo()
     errors: list[str] = []
@@ -3177,7 +3340,12 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
         "automation_seed_paper": str(settings.seed_paper).lower(),
         "automation_update_paper": str(settings.update_paper).lower(),
         "automation_run_alerts": str(settings.run_alerts).lower(),
+        "automation_run_forward_evidence": str(settings.run_forward_evidence).lower(),
     }
+    if expected_signal_date is not None:
+        data_health["automation_expected_signal_date"] = (
+            expected_signal_date.isoformat()
+        )
     scan_status = "disabled"
     scan_started = False
     scan_job_id: str | None = None
@@ -3239,6 +3407,7 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 include_etfs=settings.include_etfs,
                 max_age=timedelta(minutes=max(settings.scan_max_age_minutes, 1)),
                 limit=candidate_pool_limit,
+                expected_signal_date=expected_signal_date,
             )
             snapshots, production_health = _ranking_v3_production_seed_scope(
                 repo,
@@ -3390,7 +3559,7 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
         except Exception as exc:
             errors.append(f"alerts: {exc}")
 
-    if mode == "free":
+    if mode == "free" and settings.run_forward_evidence:
         try:
             forward_context = _ranking_v3_forward_context(repo)
             forward_results = (
@@ -3432,6 +3601,16 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             data_health["ranking_v3_forward_state"] = "error"
             data_health["ranking_v3_forward_error"] = str(exc)
             errors.append(f"ranking_v3_forward: {exc}")
+    elif mode == "free":
+        data_health.update(
+            {
+                "ranking_v3_forward_state": "disabled",
+                "ranking_v3_forward_processed_sessions": "0",
+                "ranking_v3_forward_sessions": "0",
+                "ranking_v3_forward_completed_trades": "0",
+                "ranking_v3_forward_release_proof": "false",
+            }
+        )
 
     # Seeding and price updates can change active capacity. Keep the gate that
     # governed this cycle for auditability, then publish the post-cycle gate as
@@ -4051,6 +4230,7 @@ def _paper_seed_snapshots_from_recommendations(
     include_etfs: bool,
     max_age: timedelta,
     limit: int,
+    expected_signal_date: date | None = None,
 ) -> tuple[list, dict[str, str]]:
     snapshots, health = _paper_seed_snapshots_from_latest_cache(
         repo,
@@ -4058,8 +4238,11 @@ def _paper_seed_snapshots_from_recommendations(
         include_etfs=include_etfs,
         max_age=max_age,
         limit=limit,
+        expected_signal_date=expected_signal_date,
     )
     if health.get("paper_market_entry_gate") == "blocked":
+        return [], health
+    if health.get("paper_candidate_freshness_gate") == "blocked":
         return [], health
     cache_is_authoritative = health.get("automation_seed_source") == ("latest_recommendation_cache")
     snapshots, cache_blocked = _filter_governed_paper_snapshots(
@@ -4156,14 +4339,29 @@ def _paper_seed_snapshots_from_latest_cache(
     include_etfs: bool,
     max_age: timedelta,
     limit: int,
+    expected_signal_date: date | None = None,
 ) -> tuple[list, dict[str, str]]:
     cached, cache_freshness = _automation_scan_result_cache(
         repo,
         cache_key=full_market_batch_cache_key(mode, include_etfs),
         max_age=max_age,
+        expected_signal_date=expected_signal_date,
     )
     if cached is None:
-        return [], {}
+        health = {
+            "automation_seed_source": "fresh_recommendation_cache_unavailable",
+            "automation_seed_cache_freshness": cache_freshness,
+        }
+        if expected_signal_date is not None:
+            health.update(
+                {
+                    "paper_candidate_freshness_gate": "blocked",
+                    "paper_candidate_expected_signal_date": (
+                        expected_signal_date.isoformat()
+                    ),
+                }
+            )
+        return [], health
     market_gate_health = _paper_market_entry_gate_from_cache(cached.payload)
     if market_gate_health.get("paper_market_entry_gate") == "blocked":
         return [], {
@@ -4206,6 +4404,22 @@ def _paper_seed_snapshots_from_latest_cache(
         snapshot = snapshot.model_copy(update=updates)
         selected.append(snapshot)
         seen_snapshot_ids.add(snapshot.snapshot_id)
+    if expected_signal_date is not None:
+        mismatched = [
+            snapshot
+            for snapshot in selected
+            if snapshot.signal_date != expected_signal_date
+        ]
+        if mismatched:
+            return [], {
+                **market_gate_health,
+                "automation_seed_source": "latest_recommendation_cache",
+                "automation_seed_cache_id": cached.cache_id,
+                "automation_seed_cache_freshness": cache_freshness,
+                "paper_candidate_freshness_gate": "blocked",
+                "paper_candidate_expected_signal_date": expected_signal_date.isoformat(),
+                "paper_candidate_signal_date_mismatch": str(len(mismatched)),
+            }
     if not selected:
         if ranked:
             return [], {
@@ -4404,14 +4618,66 @@ def _a_share_today() -> date:
     return datetime.now(ZoneInfo("Asia/Shanghai")).date()
 
 
+def _latest_completed_a_share_session(now: datetime | None = None) -> date | None:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    local_now = current.astimezone(ZoneInfo("Asia/Shanghai"))
+    today = local_now.date()
+    sessions = trading_sessions_in_range(today - timedelta(days=14), today)
+    if not sessions:
+        return None
+    if (
+        sessions[-1] == today
+        and local_now.timetz().replace(tzinfo=None) < time(hour=15, minute=30)
+    ):
+        sessions = sessions[:-1]
+    return sessions[-1] if sessions else None
+
+
+def _automatic_full_scan_window(now: datetime | None = None) -> tuple[bool, str]:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    local_now = current.astimezone(ZoneInfo("Asia/Shanghai"))
+    today = local_now.date()
+    sessions = trading_sessions_in_range(today, today)
+    local_time = local_now.timetz().replace(tzinfo=None)
+    if sessions and time(hour=9, minute=15) <= local_time < time(hour=15, minute=45):
+        return False, "market_session_open"
+    return True, "ready"
+
+
+def _scan_cache_signal_date(cached: ScanResultCacheRecord) -> date | None:
+    payload = cached.payload if isinstance(cached.payload, Mapping) else {}
+    health = payload.get("data_health")
+    raw_value = (
+        health.get("full_market_signal_date")
+        if isinstance(health, Mapping)
+        else None
+    )
+    if not isinstance(raw_value, str):
+        return None
+    try:
+        return date.fromisoformat(raw_value)
+    except ValueError:
+        return None
+
+
 def _automation_scan_result_cache(
     repo: QagentRepository,
     *,
     cache_key: str,
     max_age: timedelta,
+    expected_signal_date: date | None = None,
 ) -> tuple[ScanResultCacheRecord | None, str]:
     cached = repo.get_recent_scan_result_cache(cache_key=cache_key, max_age=max_age)
     if cached is not None:
+        if (
+            expected_signal_date is not None
+            and _scan_cache_signal_date(cached) != expected_signal_date
+        ):
+            return None, "stale_signal_retry_window"
         return cached, "age_window"
 
     # A scan produced after the current A-share session remains the latest
@@ -4423,6 +4689,11 @@ def _automation_scan_result_cache(
     )
     if market_day_cache is None:
         return None, "missing"
+    if (
+        expected_signal_date is not None
+        and _scan_cache_signal_date(market_day_cache) != expected_signal_date
+    ):
+        return None, "stale_signal_date"
     created_at = market_day_cache.created_at
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=timezone.utc)
@@ -4438,25 +4709,46 @@ def _maybe_start_automatic_full_scan(
     mode = settings.provider.strip().lower()
     latest = repo.get_latest_full_market_scan_job(provider=mode)
     if latest and latest.status in {"queued", "running"}:
-        if not _full_market_scan_job_is_stale(latest, settings):
+        if latest.data_health.get("automatic_scan_aborted") == "true":
+            latest = repo.update_full_market_scan_job(
+                latest.job_id,
+                status="failed",
+                message="Aborted full-market scan ignored by automation scheduler",
+                data_health=latest.data_health,
+            )
+        elif not _full_market_scan_job_is_stale(latest, settings):
             return "already_running", False, latest.job_id
-        repo.update_full_market_scan_job(
-            latest.job_id,
-            status="failed",
-            message="Stale full-market scan reset by automation scheduler",
-            data_health={
-                **latest.data_health,
-                "full_market_stale_reset": "true",
-                "full_market_stale_reset_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
-    cached, _ = _automation_scan_result_cache(
+        else:
+            _terminate_full_market_executor()
+            repo.update_full_market_scan_job(
+                latest.job_id,
+                status="queued",
+                message="Stale full-market scan queued for checkpoint resume",
+                data_health={
+                    **latest.data_health,
+                    "full_market_stale_reset": "true",
+                    "full_market_stale_reset_at": datetime.now(timezone.utc).isoformat(),
+                    "full_market_restart_recovery": "stale_checkpoint_resume",
+                },
+            )
+            submitted = _submit_full_market_scan_job(latest.job_id)
+            return "resumed_stale", submitted, latest.job_id
+    expected_signal_date = (
+        _latest_completed_a_share_session() if mode == "free" else None
+    )
+    cached, freshness = _automation_scan_result_cache(
         repo,
         cache_key=full_market_batch_cache_key(mode, settings.include_etfs),
         max_age=timedelta(minutes=settings.scan_max_age_minutes),
+        expected_signal_date=expected_signal_date,
     )
     if cached is not None:
         return "cache_fresh", False, latest.job_id if latest else None
+    if freshness == "stale_signal_retry_window":
+        return "waiting_market_data", False, latest.job_id if latest else None
+    scan_allowed, _ = _automatic_full_scan_window()
+    if not scan_allowed:
+        return "deferred_market_session", False, latest.job_id if latest else None
 
     summary = repo.tradable_catalog_summary()
     if settings.sync_if_empty and summary.total_count == 0:
@@ -4483,9 +4775,7 @@ def _full_market_scan_job_is_stale(job, settings: AutoProcessingSettings) -> boo
     if job.status not in {"queued", "running"}:
         return False
     updated_at = _as_utc_datetime(job.updated_at)
-    stale_after = timedelta(
-        seconds=max(settings.interval_seconds * 2, settings.scan_max_age_minutes * 60, 30 * 60)
-    )
+    stale_after = timedelta(seconds=max(settings.interval_seconds * 2, 30 * 60))
     if datetime.now(timezone.utc) - updated_at > stale_after:
         return True
     if job.total_symbols > 0 and job.scanned_symbols >= job.total_symbols:
@@ -4729,6 +5019,122 @@ def paper_trade_ledger(
         }
     )
     return ledger.model_dump(mode="json")
+
+
+@router.post("/paper-trades/research-baseline/freeze")
+def freeze_paper_research_baseline(
+    provider: str = "free",
+    limit: int = 1000,
+) -> dict[str, object]:
+    if limit <= 0 or limit > 1000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+    mode = provider.strip().lower()
+    paper_repo = _paper_repo()
+    account = paper_repo.get_account_settings()
+    existing = paper_repo.get_research_baseline(
+        provider=mode,
+        paper_session_id=account.session_id,
+    )
+    if existing is not None:
+        return existing.model_dump(mode="json")
+    runs = [
+        run
+        for run in _repo().list_walk_forward_runs(provider=mode, limit=20)
+        if run.status == "succeeded"
+    ]
+    if not runs:
+        raise HTTPException(
+            status_code=409,
+            detail="a completed walk-forward run is required before freezing the baseline",
+        )
+    trades = paper_repo.list_trades(limit=limit, provider=mode)
+    start_date, definition = build_paper_research_baseline_definition(
+        account=account,
+        walk_forward_run=runs[0],
+        trades=trades,
+    )
+    try:
+        baseline = paper_repo.freeze_research_baseline(
+            baseline_id=f"paper-research-{account.session_id}",
+            provider=mode,
+            paper_session_id=account.session_id,
+            walk_forward_run_id=runs[0].run_id,
+            start_date=start_date,
+            definition=definition,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return baseline.model_dump(mode="json")
+
+
+@router.get("/paper-trades/forward-comparison")
+def paper_trade_forward_comparison(
+    provider: str = "free",
+    limit: int = 1000,
+) -> dict[str, object]:
+    if limit <= 0 or limit > 1000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+    mode = provider.strip().lower()
+    paper_repo = _paper_repo()
+    account = paper_repo.get_account_settings()
+    baseline = paper_repo.get_research_baseline(
+        provider=mode,
+        paper_session_id=account.session_id,
+    )
+    if baseline is None:
+        raise HTTPException(
+            status_code=404,
+            detail="paper research baseline has not been frozen for the active session",
+        )
+    trades = paper_repo.list_trades(limit=limit, provider=mode)
+    ledger = build_paper_ledger(
+        trades,
+        initial_capital=account.initial_capital,
+        allocation_per_trade_pct=account.allocation_per_trade_pct,
+        max_positions=account.max_positions,
+        transaction_cost_bps=account.transaction_cost_bps,
+        slippage_bps=account.slippage_bps,
+        take_profit_pct=account.take_profit_pct,
+        reporting_scope="legacy",
+    )
+    validation = build_paper_validation(trades, ledger)
+    report_date = _paper_report_date(trades)
+    benchmark_bars = _market_cache_repo().load_daily_bars(
+        mode,
+        benchmark_ids() + benchmark_proxy_ids(),
+        baseline.start_date,
+        report_date,
+    )
+    market_sessions = (
+        sorted(set(benchmark_bars["trade_date"].tolist()))
+        if not benchmark_bars.empty
+        else []
+    )
+    contexts = {
+        trade.trade_id: context
+        for trade in trades
+        if (
+            context := paper_repo.get_trade_source_context(trade.source_snapshot_id)
+        )
+        is not None
+    }
+    report = build_paper_forward_comparison(
+        baseline=baseline,
+        ledger=ledger,
+        validation=validation,
+        trades=trades,
+        market_sessions=market_sessions,
+        source_contexts=contexts,
+    )
+    report.data_health.update(
+        {
+            "paper_forward_provider": mode,
+            "paper_forward_reporting_scope": "legacy_research_only",
+            "paper_forward_source_contexts": str(len(contexts)),
+            "paper_forward_official_metrics_excluded": "true",
+        }
+    )
+    return report.model_dump(mode="json")
 
 
 @router.get("/paper-trades/validation")

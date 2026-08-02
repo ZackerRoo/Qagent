@@ -300,6 +300,7 @@ def _apply_additive_migrations(engine: Engine) -> None:
         _record_ranking_v3_production_trigger_version(connection)
         _create_immutable_ranking_v4_evidence_triggers(connection)
         _record_ranking_v4_evidence_trigger_version(connection)
+        _create_immutable_paper_research_baseline_triggers(connection)
 
 
 @contextmanager
@@ -352,6 +353,22 @@ def _backfill_dataset_revision(connection, table_name: str) -> None:
             f"WHERE historical_data_revisions.provider_mode = {table_name}.provider_mode"
             "), 0) WHERE dataset_revision = 0"
         )
+    )
+
+
+def _create_immutable_paper_research_baseline_triggers(connection) -> None:
+    table_name = "paper_research_baselines"
+    if not inspect(connection).has_table(table_name):
+        return
+    connection.exec_driver_sql(
+        "CREATE TRIGGER IF NOT EXISTS trg_paper_research_baselines_immutable_update "
+        f"BEFORE UPDATE ON {table_name} BEGIN "
+        "SELECT RAISE(ABORT, 'paper research baselines are immutable'); END"
+    )
+    connection.exec_driver_sql(
+        "CREATE TRIGGER IF NOT EXISTS trg_paper_research_baselines_immutable_delete "
+        f"BEFORE DELETE ON {table_name} BEGIN "
+        "SELECT RAISE(ABORT, 'paper research baselines are immutable'); END"
     )
 
 

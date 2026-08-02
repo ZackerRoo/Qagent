@@ -73,6 +73,58 @@ class FactorBacktestResult(BaseModel):
     data_health: dict[str, str]
 
 
+class FactorMonotonicityDiagnostic(BaseModel):
+    available: bool
+    observed_buckets: int
+    monotonic_steps: int
+    expected_steps: int
+    quantile_return_correlation: float | None
+    top_bottom_spread_pct: float | None
+    verdict: str
+
+
+class FactorTurnoverDiagnostic(BaseModel):
+    rebalance_count: int
+    average_turnover_rate: float | None
+    round_trip_cost_bps: float
+    estimated_cost_drag_pct: float | None
+    gross_average_return_pct: float | None
+    net_average_return_pct: float | None
+    verdict: str
+
+
+class FactorRegimeDiagnostic(BaseModel):
+    regime: str
+    sample_count: int
+    positive_rate: float | None
+    average_return_pct: float | None
+
+
+class FactorDecayPoint(BaseModel):
+    forward_days: int
+    sample_count: int
+    mean_ic: float | None
+    mean_rank_ic: float | None
+    top_bottom_spread_pct: float | None
+
+
+class FactorDecayDiagnostic(BaseModel):
+    factor_id: str
+    label: str
+    points: list[FactorDecayPoint]
+    verdict: str
+
+
+class FactorDiagnosticsResult(BaseModel):
+    primary_horizon_days: int
+    primary: FactorBacktestResult
+    monotonicity: FactorMonotonicityDiagnostic
+    decay: list[FactorDecayDiagnostic]
+    turnover_cost: FactorTurnoverDiagnostic
+    market_regimes: list[FactorRegimeDiagnostic]
+    data_health: dict[str, str]
+
+
 def run_factor_backtest(
     bars: pd.DataFrame,
     forward_days: int = 20,
@@ -177,6 +229,267 @@ def run_factor_backtest(
             ),
             "fundamental_mode": "point_in_time" if fundamental_history else "price_only",
         },
+    )
+
+
+def run_factor_diagnostics(
+    bars: pd.DataFrame,
+    *,
+    fundamentals: (
+        list[FundamentalSnapshot]
+        | dict[str, FundamentalSnapshot | list[FundamentalSnapshot]]
+        | None
+    ) = None,
+    horizons: tuple[int, ...] = (5, 10, 20, 40),
+    primary_horizon_days: int = 20,
+    step_days: int = 10,
+    top_n: int = 5,
+    round_trip_cost_bps: float = 20.0,
+) -> FactorDiagnosticsResult:
+    normalized_horizons = tuple(sorted(set(horizons)))
+    if primary_horizon_days not in normalized_horizons:
+        normalized_horizons = tuple(
+            sorted((*normalized_horizons, primary_horizon_days))
+        )
+    results = {
+        horizon: run_factor_backtest(
+            bars,
+            forward_days=horizon,
+            step_days=step_days,
+            top_n=top_n,
+            fundamentals=fundamentals,
+        )
+        for horizon in normalized_horizons
+    }
+    primary = results[primary_horizon_days]
+    return FactorDiagnosticsResult(
+        primary_horizon_days=primary_horizon_days,
+        primary=primary,
+        monotonicity=_monotonicity_diagnostic(primary),
+        decay=_decay_diagnostics(results),
+        turnover_cost=_turnover_diagnostic(
+            primary,
+            round_trip_cost_bps=round_trip_cost_bps,
+        ),
+        market_regimes=_regime_diagnostics(bars, primary.signals),
+        data_health={
+            "factor_diagnostics": (
+                "ready" if primary.information_coefficient.sample_count else "insufficient"
+            ),
+            "factor_diagnostics_horizons": ",".join(
+                str(item) for item in normalized_horizons
+            ),
+            "factor_diagnostics_primary_horizon": str(primary_horizon_days),
+            "factor_diagnostics_step_days": str(step_days),
+            "factor_diagnostics_top_n": str(top_n),
+            "factor_diagnostics_round_trip_cost_bps": f"{round_trip_cost_bps:.4f}",
+            "factor_diagnostics_regimes": str(
+                len(_regime_diagnostics(bars, primary.signals))
+            ),
+        },
+    )
+
+
+def _monotonicity_diagnostic(
+    result: FactorBacktestResult,
+) -> FactorMonotonicityDiagnostic:
+    buckets = [
+        bucket
+        for bucket in sorted(result.quantile_buckets, key=lambda item: item.quantile)
+        if bucket.avg_forward_return_pct is not None
+    ]
+    if len(buckets) < 3:
+        return FactorMonotonicityDiagnostic(
+            available=False,
+            observed_buckets=len(buckets),
+            monotonic_steps=0,
+            expected_steps=max(len(buckets) - 1, 0),
+            quantile_return_correlation=None,
+            top_bottom_spread_pct=result.information_coefficient.top_bottom_spread_pct,
+            verdict="insufficient",
+        )
+    returns = pd.Series(
+        [bucket.avg_forward_return_pct for bucket in buckets],
+        dtype="float64",
+    )
+    quantiles = pd.Series([bucket.quantile for bucket in buckets], dtype="float64")
+    monotonic_steps = sum(
+        1 for left, right in zip(returns.tolist(), returns.tolist()[1:]) if left >= right
+    )
+    expected_steps = len(buckets) - 1
+    correlation = quantiles.rank().corr(returns.rank())
+    spread = result.information_coefficient.top_bottom_spread_pct
+    verdict = (
+        "monotonic"
+        if monotonic_steps == expected_steps and spread is not None and spread > 0
+        else "mixed"
+    )
+    return FactorMonotonicityDiagnostic(
+        available=True,
+        observed_buckets=len(buckets),
+        monotonic_steps=monotonic_steps,
+        expected_steps=expected_steps,
+        quantile_return_correlation=(
+            round(float(correlation), 4) if pd.notna(correlation) else None
+        ),
+        top_bottom_spread_pct=spread,
+        verdict=verdict,
+    )
+
+
+def _decay_diagnostics(
+    results: dict[int, FactorBacktestResult],
+) -> list[FactorDecayDiagnostic]:
+    factor_ids = sorted(
+        {
+            factor.factor_id
+            for result in results.values()
+            for factor in result.factor_ic
+        }
+    )
+    diagnostics: list[FactorDecayDiagnostic] = []
+    for factor_id in factor_ids:
+        points: list[FactorDecayPoint] = []
+        label = factor_id
+        for horizon, result in sorted(results.items()):
+            factor = next(
+                (item for item in result.factor_ic if item.factor_id == factor_id),
+                None,
+            )
+            if factor is None:
+                continue
+            label = factor.label
+            points.append(
+                FactorDecayPoint(
+                    forward_days=horizon,
+                    sample_count=factor.sample_count,
+                    mean_ic=factor.mean_ic,
+                    mean_rank_ic=factor.mean_rank_ic,
+                    top_bottom_spread_pct=factor.top_bottom_spread_pct,
+                )
+            )
+        diagnostics.append(
+            FactorDecayDiagnostic(
+                factor_id=factor_id,
+                label=label,
+                points=points,
+                verdict=_decay_verdict(points),
+            )
+        )
+    diagnostics.sort(
+        key=lambda item: (
+            next(
+                (
+                    point.mean_rank_ic
+                    for point in item.points
+                    if point.forward_days == 20 and point.mean_rank_ic is not None
+                ),
+                -999,
+            )
+        ),
+        reverse=True,
+    )
+    return diagnostics
+
+
+def _decay_verdict(points: list[FactorDecayPoint]) -> str:
+    values = [point.mean_rank_ic for point in points if point.mean_rank_ic is not None]
+    if len(values) < 2:
+        return "insufficient"
+    nonzero_signs = {1 if value > 0 else -1 for value in values if value != 0}
+    if len(nonzero_signs) > 1:
+        return "reverses"
+    if abs(values[-1]) >= abs(values[0]) * 0.5:
+        return "stable"
+    return "decays"
+
+
+def _turnover_diagnostic(
+    result: FactorBacktestResult,
+    *,
+    round_trip_cost_bps: float,
+) -> FactorTurnoverDiagnostic:
+    holdings: list[set[str]] = []
+    for signal_date in sorted({signal.signal_date for signal in result.signals}):
+        holdings.append(
+            {
+                signal.instrument_id
+                for signal in result.signals
+                if signal.signal_date == signal_date
+            }
+        )
+    turnovers: list[float] = []
+    for previous, current in zip(holdings, holdings[1:]):
+        denominator = max(len(previous), len(current), 1)
+        turnovers.append(1 - len(previous & current) / denominator)
+    average_turnover = _average(turnovers)
+    cost_drag = (
+        round(average_turnover * round_trip_cost_bps / 100, 4)
+        if average_turnover is not None
+        else None
+    )
+    gross = result.summary.avg_forward_return_pct
+    net = (
+        round(gross - cost_drag, 4)
+        if gross is not None and cost_drag is not None
+        else None
+    )
+    if average_turnover is None:
+        verdict = "insufficient"
+    elif net is not None and net > 0:
+        verdict = "cost_resilient"
+    else:
+        verdict = "cost_fragile"
+    return FactorTurnoverDiagnostic(
+        rebalance_count=len(turnovers),
+        average_turnover_rate=average_turnover,
+        round_trip_cost_bps=round(round_trip_cost_bps, 4),
+        estimated_cost_drag_pct=cost_drag,
+        gross_average_return_pct=gross,
+        net_average_return_pct=net,
+        verdict=verdict,
+    )
+
+
+def _regime_diagnostics(
+    bars: pd.DataFrame,
+    signals: list[FactorBacktestSignal],
+) -> list[FactorRegimeDiagnostic]:
+    if bars.empty or not signals:
+        return []
+    ordered = bars.copy()
+    ordered["trade_date"] = pd.to_datetime(ordered["trade_date"]).dt.date
+    ordered = ordered.sort_values(["instrument_id", "trade_date"])
+    ordered["market_trailing_return"] = ordered.groupby("instrument_id")["close"].pct_change(20)
+    market_returns = (
+        ordered.groupby("trade_date")["market_trailing_return"].mean().dropna().to_dict()
+    )
+    grouped: dict[str, list[float]] = {}
+    for signal in signals:
+        if signal.forward_return_pct is None:
+            continue
+        trailing_return = market_returns.get(signal.signal_date)
+        if trailing_return is None:
+            regime = "unknown"
+        elif trailing_return > 0.02:
+            regime = "risk_on"
+        elif trailing_return < -0.02:
+            regime = "risk_off"
+        else:
+            regime = "neutral"
+        grouped.setdefault(regime, []).append(signal.forward_return_pct)
+    order = {"risk_on": 0, "neutral": 1, "risk_off": 2, "unknown": 3}
+    return sorted(
+        [
+            FactorRegimeDiagnostic(
+                regime=regime,
+                sample_count=len(values),
+                positive_rate=_positive_rate(values),
+                average_return_pct=_average(values),
+            )
+            for regime, values in grouped.items()
+        ],
+        key=lambda item: order.get(item.regime, 99),
     )
 
 

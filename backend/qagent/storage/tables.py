@@ -1625,3 +1625,16 @@ class PaperAccountSettingsRow(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
+
+
+class PaperResearchBaselineRow(Base):
+    __tablename__ = "paper_research_baselines"
+
+    baseline_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    paper_session_id: Mapped[str] = mapped_column(String(96), index=True)
+    walk_forward_run_id: Mapped[str] = mapped_column(String(96), index=True)
+    start_date: Mapped[date] = mapped_column(Date)
+    definition_digest: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    definition_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
