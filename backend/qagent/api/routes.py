@@ -112,6 +112,7 @@ from qagent.market.benchmarks import (
     build_benchmark_comparison_for_card,
     benchmark_items_for_return_from_bars,
 )
+from qagent.market.cn_context import infer_etf_exposure_group
 from qagent.monitoring.outcomes import (
     OpportunityOutcome,
     compute_opportunity_outcome,
@@ -215,7 +216,15 @@ from qagent.strategies.models import StrategyHealth
 router = APIRouter()
 
 PAPER_MAX_PER_INDUSTRY = 2
-_UNKNOWN_PAPER_INDUSTRIES = {"", "-", "unknown", "unclassified", "其他", "未知"}
+_UNKNOWN_PAPER_INDUSTRIES = {
+    "",
+    "-",
+    "unknown",
+    "unclassified",
+    "其他",
+    "未知",
+    "未知etf暴露",
+}
 _task_manager = TaskManager()
 _task_executor = ThreadPoolExecutor(max_workers=2)
 _history_task_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="history-backfill")
@@ -3870,6 +3879,7 @@ def _paper_candidate_pool_snapshot_items(
                 "instrument_label": _paper_snapshot_label(snapshot),
                 "strategy_id": snapshot.primary_strategy_id,
                 "industry": industry,
+                "exposure_group": industry,
                 "industry_active_count": industry_active_count,
                 "industry_capacity_used": industry_occupied,
                 "industry_capacity_limit": PAPER_MAX_PER_INDUSTRY,
@@ -4735,7 +4745,12 @@ def _paper_active_industry_counts(
     unknown = 0
     for trade in active_trades:
         context = paper_repo.get_trade_source_context(trade.source_snapshot_id)
-        industry = _normalized_paper_industry(context.industry if context else None)
+        context_card = getattr(context, "card", None) if context is not None else None
+        industry = _paper_card_exposure_group(
+            context_card if isinstance(context_card, dict) else {},
+            current_industry=getattr(context, "industry", None),
+            instrument_id=trade.instrument_id,
+        )
         by_instrument[trade.instrument_id] = industry
         if industry is None:
             unknown += 1
@@ -4749,9 +4764,37 @@ def _paper_snapshot_industry(snapshot: OpportunitySnapshotRecord) -> str | None:
     card = snapshot_card if isinstance(snapshot_card, dict) else {}
     market_context = card.get("market_context")
     market_context = market_context if isinstance(market_context, dict) else {}
-    return _normalized_paper_industry(
-        market_context.get("industry") or card.get("industry") or card.get("sector")
+    return _paper_card_exposure_group(
+        card,
+        current_industry=(
+            market_context.get("industry") or card.get("industry") or card.get("sector")
+        ),
+        instrument_id=snapshot.instrument_id,
     )
+
+
+def _paper_card_exposure_group(
+    card: dict[str, object],
+    *,
+    current_industry: object,
+    instrument_id: str,
+) -> str | None:
+    normalized = _normalized_paper_industry(current_industry)
+    market_context = card.get("market_context")
+    market_context = market_context if isinstance(market_context, dict) else {}
+    asset_type = str(card.get("asset_type") or "").strip().lower()
+    board = str(market_context.get("board") or "").strip().lower()
+    label_value = card.get("instrument_label") or card.get("instrument_name")
+    label = str(label_value).strip() if label_value else ""
+    is_etf = (
+        asset_type == "etf"
+        or board == "etf"
+        or "ETF" in label.upper()
+        or (normalized or "").lower() in {"指数etf", "etf", "未知etf暴露"}
+    )
+    if not is_etf:
+        return normalized
+    return infer_etf_exposure_group(label, current_industry=normalized)
 
 
 def _normalized_paper_industry(value: object) -> str | None:

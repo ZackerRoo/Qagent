@@ -817,6 +817,7 @@ def test_candidate_pool_reports_industry_capacity_block(tmp_path, monkeypatch):
     )
     assert item["status"] == "blocked_by_industry"
     assert item["industry"] == "银行"
+    assert item["exposure_group"] == "银行"
     assert item["industry_active_count"] == 2
     assert item["industry_capacity_used"] == 2
     assert item["industry_capacity_limit"] == 2

@@ -1743,13 +1743,14 @@ function paperAdmissionExplanation(
       : "The candidate remains visible, but market conditions pause new entries until the next reassessment.";
   }
   if (admission.status === "blocked_by_industry") {
-    return admission.industry
+    const exposureGroup = admission.exposure_group ?? admission.industry;
+    return exposureGroup
       ? language === "zh"
-        ? `${admission.industry} 已占用或预留 ${admission.industry_capacity_used}/${admission.industry_capacity_limit} 个行业名额，暂不自动新增。`
-        : `${admission.industry} uses or reserves ${admission.industry_capacity_used}/${admission.industry_capacity_limit} industry slots, so no automatic entry is allowed.`
+        ? `${exposureGroup} 已占用或预留 ${admission.industry_capacity_used}/${admission.industry_capacity_limit} 个暴露组名额，暂不自动新增。`
+        : `${exposureGroup} uses or reserves ${admission.industry_capacity_used}/${admission.industry_capacity_limit} exposure slots, so no automatic entry is allowed.`
       : language === "zh"
-        ? "候选缺少行业归属，等待数据补齐后再评估自动入场。"
-        : "Industry classification is missing; automatic entry waits for complete data.";
+        ? "候选缺少可验证的风险暴露归属，等待数据补齐后再评估自动入场。"
+        : "Risk-exposure classification is missing; automatic entry waits for complete data.";
   }
   if (admission.status === "waiting_for_slot") {
     return language === "zh"

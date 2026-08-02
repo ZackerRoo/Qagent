@@ -455,11 +455,15 @@ def test_automation_scheduler_seeds_latest_signal_day_not_latest_inserted_rows(
                     initial_stop=Decimal("1.95"),
                     target_1=Decimal("2.40"),
                     card_json=json.dumps(
-                        {
-                            "instrument_id": instrument_id,
-                            "instrument_label": instrument_id,
-                            "market_context": {"industry": "指数ETF"},
-                        },
+                            {
+                                "instrument_id": instrument_id,
+                                "instrument_label": f"科创50ETF {instrument_id}",
+                                "asset_type": "etf",
+                                "market_context": {
+                                    "industry": "指数ETF",
+                                    "board": "ETF",
+                                },
+                            },
                         sort_keys=True,
                     ),
                     created_at=created_at,

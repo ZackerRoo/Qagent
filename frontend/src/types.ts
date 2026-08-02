@@ -2081,6 +2081,7 @@ export type PaperCandidatePoolItem = {
   instrument_label: string;
   strategy_id: string | null;
   industry: string | null;
+  exposure_group: string | null;
   industry_active_count: number;
   industry_capacity_used: number;
   industry_capacity_limit: number;

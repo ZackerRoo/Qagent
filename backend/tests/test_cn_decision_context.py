@@ -1,5 +1,9 @@
 from qagent.jobs.daily_scan import run_daily_scan
-from qagent.market.cn_context import build_market_context
+from qagent.market.cn_context import (
+    UNKNOWN_ETF_EXPOSURE,
+    build_market_context,
+    infer_etf_exposure_group,
+)
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.recommendations.cn_execution import build_trading_constraints
 
@@ -44,12 +48,33 @@ def test_market_context_covers_core_etfs_and_ai_compute_theme_names():
     etf = build_market_context("CN:510300", instrument_label="沪深300ETF 510300.SH")
     optical = build_market_context("CN:002281", instrument_label="光迅科技 002281.SZ")
 
-    assert etf.industry == "指数ETF"
+    assert etf.industry == "宽基ETF:沪深300"
     assert "沪深300ETF" in etf.index_memberships
     assert "指数工具" in etf.themes
     assert optical.industry == "光通信"
     assert "AI算力供应链" in optical.themes
     assert "CPO" in optical.themes
+
+
+def test_etf_exposure_groups_cover_broad_factor_cross_border_and_sector_products():
+    assert infer_etf_exposure_group("中证A50ETF易方达") == "宽基ETF:中证A50"
+    assert infer_etf_exposure_group("300自由现金流ETF摩根") == "策略ETF:自由现金流"
+    assert infer_etf_exposure_group("中证红利ETF招商") == "策略ETF:红利"
+    assert infer_etf_exposure_group("纳指科技ETF景顺") == "跨境ETF:美股科技"
+    assert infer_etf_exposure_group("美国50ETF易方达") == "跨境ETF:美国宽基"
+    assert infer_etf_exposure_group("标普生物科技ETF嘉实") == "跨境ETF:美国医药"
+    assert infer_etf_exposure_group("港股央企红利ETF永赢") == "跨境ETF:港股红利"
+    assert infer_etf_exposure_group("科技ETF华宝") == "人工智能/计算机"
+    assert infer_etf_exposure_group("银行ETF", current_industry="指数ETF") == "银行"
+    assert infer_etf_exposure_group("测试ETF", current_industry="指数ETF") is None
+    assert infer_etf_exposure_group("芯片ETF", current_industry="半导体") == "半导体"
+
+
+def test_unknown_etf_exposure_is_explicit_and_has_no_fake_benchmark():
+    context = build_market_context("CN:159999", instrument_label="测试ETF 159999.SZ")
+
+    assert context.industry == UNKNOWN_ETF_EXPOSURE
+    assert context.index_memberships == []
 
 
 def test_daily_scan_cards_include_cn_constraints_context_and_chinese_summary():

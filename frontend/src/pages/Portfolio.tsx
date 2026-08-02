@@ -2190,12 +2190,12 @@ function PaperCandidatePoolPanel({
           <small>{language === "zh" ? "远离触发价会降优先级" : "Far triggers lose priority"}</small>
         </div>
         <div>
-          <span>{language === "zh" ? "行业分散" : "Industry spread"}</span>
+          <span>{language === "zh" ? "暴露分散" : "Exposure spread"}</span>
           <strong>{summary.industry_blocked_count}</strong>
           <small>
             {language === "zh"
-              ? `单行业最多 ${summary.industry_capacity_limit} 只`
-              : `Max ${summary.industry_capacity_limit} per industry`}
+              ? `每个暴露组最多 ${summary.industry_capacity_limit} 只`
+              : `Max ${summary.industry_capacity_limit} per exposure`}
           </small>
         </div>
       </div>
@@ -2209,7 +2209,9 @@ function PaperCandidatePoolPanel({
               </strong>
               <small>
                 {localizeStrategy(item.strategy_id, language)}
-                {item.industry ? ` · ${item.industry}` : ` · ${language === "zh" ? "行业未知" : "Unknown industry"}`}
+                {(item.exposure_group ?? item.industry)
+                  ? ` · ${item.exposure_group ?? item.industry}`
+                  : ` · ${language === "zh" ? "暴露未知" : "Unknown exposure"}`}
               </small>
             </div>
             <div className="paper-candidate-metrics">

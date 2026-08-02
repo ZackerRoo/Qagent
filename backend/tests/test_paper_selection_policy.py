@@ -2,8 +2,10 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from qagent.api.routes import (
+    _paper_active_industry_counts,
     _paper_industry_capacity_filter,
     _paper_market_entry_gate_from_cache,
+    _paper_snapshot_industry,
     _paper_strategy_capacity_filter,
 )
 
@@ -212,3 +214,61 @@ def test_paper_industry_capacity_allows_same_industry_pending_replacement():
 
     assert selected == [candidate]
     assert health["paper_industry_capacity_mode"] == "replacement_only"
+
+
+def test_paper_etf_exposure_group_reclassifies_old_snapshots_and_frozen_contexts():
+    a50 = SimpleNamespace(
+        instrument_id="CN:563080",
+        card={
+            "instrument_label": "中证A50ETF易方达",
+            "asset_type": "etf",
+            "market_context": {"industry": "指数ETF", "board": "ETF"},
+        },
+    )
+    dividend = SimpleNamespace(
+        instrument_id="CN:515080",
+        card={
+            "instrument_label": "中证红利ETF招商",
+            "asset_type": "etf",
+            "market_context": {"industry": "指数ETF", "board": "ETF"},
+        },
+    )
+    unknown = SimpleNamespace(
+        instrument_id="CN:159999",
+        card={
+            "instrument_label": "测试ETF",
+            "asset_type": "etf",
+            "market_context": {"industry": "指数ETF", "board": "ETF"},
+        },
+    )
+
+    assert _paper_snapshot_industry(a50) == "宽基ETF:中证A50"
+    assert _paper_snapshot_industry(dividend) == "策略ETF:红利"
+    assert _paper_snapshot_industry(unknown) is None
+
+    trades = [
+        SimpleNamespace(
+            status="open",
+            instrument_id="CN:563080",
+            source_snapshot_id="old-a50",
+        )
+    ]
+    contexts = {
+        "old-a50": SimpleNamespace(
+            industry="指数ETF",
+            card={
+                "instrument_label": "中证A50ETF易方达",
+                "asset_type": "etf",
+                "market_context": {"industry": "指数ETF", "board": "ETF"},
+            },
+        )
+    }
+    repo = SimpleNamespace(
+        get_trade_source_context=lambda source_id: contexts[source_id],
+    )
+
+    counts, by_instrument, unknown_count = _paper_active_industry_counts(repo, trades)
+
+    assert counts == {"宽基ETF:中证A50": 1}
+    assert by_instrument == {"CN:563080": "宽基ETF:中证A50"}
+    assert unknown_count == 0
