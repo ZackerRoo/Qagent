@@ -2134,6 +2134,7 @@ function PaperReviewDashboard({
       />
       <PaperPostRecommendationLeaderboard report={report} language={language} />
       <PaperAssetGroupCards groups={assetGroups} language={language} />
+      <PaperExecutionEvidencePanel summary={report.execution_evidence} language={language} />
       <PaperFailureAttributionPanel items={report.failure_attribution} language={language} />
       <PaperTradeDiagnosticsPanel items={report.trade_diagnostics ?? []} language={language} />
 
@@ -3015,6 +3016,57 @@ function PaperFailureAttributionPanel({
   );
 }
 
+function PaperExecutionEvidencePanel({
+  summary,
+  language,
+}: {
+  summary: PaperDailyReportResponse["execution_evidence"];
+  language: Language;
+}) {
+  return (
+    <section className={`paper-execution-evidence-panel verdict-${summary.verdict}`}>
+      <div className="paper-ledger-card-header">
+        <div>
+          <h3>{language === "zh" ? "执行证据口径" : "Execution evidence"}</h3>
+          <p>{summary.summary}</p>
+        </div>
+        <strong>
+          {summary.comparable_closed_trades}/{summary.closed_trades}
+        </strong>
+      </div>
+      <div className="paper-execution-evidence-metrics">
+        <span>
+          {language === "zh" ? "完整闭环" : "Audited closes"}
+          <b>{summary.audited_closed_trades}</b>
+        </span>
+        <span>
+          {language === "zh" ? "部分证据" : "Partial"}
+          <b>{summary.partial_closed_trades}</b>
+        </span>
+        <span>
+          {language === "zh" ? "旧记录" : "Legacy"}
+          <b>{summary.legacy_closed_trades}</b>
+        </span>
+        <span>
+          {language === "zh" ? "可比样本" : "Comparable"}
+          <b>{summary.comparable_closed_trades}</b>
+        </span>
+        <span>
+          {language === "zh" ? "已审计持仓" : "Audited entries"}
+          <b>{summary.audited_open_entries}</b>
+        </span>
+      </div>
+      {summary.legacy_closed_trades > 0 && (
+        <p className="paper-execution-evidence-note">
+          {language === "zh"
+            ? "旧记录继续参与保守收益和回撤统计，但不会触发当前策略调权。"
+            : "Legacy records remain in conservative P&L and drawdown, but cannot drive current strategy attribution."}
+        </p>
+      )}
+    </section>
+  );
+}
+
 function PaperTradeDiagnosticsPanel({
   items,
   language,
@@ -3044,6 +3096,9 @@ function PaperTradeDiagnosticsPanel({
             <div className="paper-diagnostic-symbol">
               <strong>{formatInstrumentDisplay(item.instrument_label)}</strong>
               <span>{localizeStrategy(item.strategy_id, language)}</span>
+              <small className={`paper-evidence-badge evidence-${item.execution_evidence_status}`}>
+                {item.execution_evidence_label}
+              </small>
             </div>
             <div className="paper-diagnostic-cause">
               <span>{item.root_cause_label}</span>

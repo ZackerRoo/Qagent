@@ -1822,7 +1822,7 @@ def test_paper_daily_report_explains_risk_gate_failures_and_event_timeline(tmp_p
     )
 
 
-def test_paper_daily_report_attributes_overheated_high_volatility_stop(tmp_path):
+def test_paper_daily_report_does_not_attribute_legacy_stop_to_current_strategy(tmp_path):
     repo = make_repo(tmp_path)
     paper_repo = PaperTradingRepository(repo.session_factory)
     stopped = paper_repo.create_trade(
@@ -1871,17 +1871,104 @@ def test_paper_daily_report_attributes_overheated_high_volatility_stop(tmp_path)
 
     diagnostic = report.trade_diagnostics[0]
     assert diagnostic.instrument_label == "中芯国际 688981.SH"
-    assert diagnostic.root_cause == "risk_filter_failure"
-    assert diagnostic.severity == "critical"
+    assert diagnostic.root_cause == "legacy_execution_evidence"
+    assert diagnostic.severity == "warning"
     assert diagnostic.factor_signals == ["high_volatility", "overextended"]
+    assert diagnostic.execution_evidence_status == "legacy_unverified"
+    assert diagnostic.strategy_attribution_eligible is False
+    assert report.execution_evidence.legacy_closed_trades == 1
+    assert report.execution_evidence.comparable_closed_trades == 0
     assert any(
-        item.dimension == "cause" and item.key == "risk_filter_failure"
+        item.dimension == "cause" and item.key == "legacy_execution_evidence"
         for item in report.failure_attribution
     )
     assert any(
         item.dimension == "signal" and item.key == "high_volatility"
         for item in report.failure_attribution
     )
+
+
+def test_paper_daily_report_attributes_audited_stop_to_current_strategy(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    stopped = paper_repo.create_trade(
+        source_snapshot_id="diagnostic-audited-risk-filter",
+        provider="free",
+        instrument_id="CN:688981",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("100.00"),
+        initial_stop=Decimal("95.00"),
+        target_1=Decimal("110.00"),
+        rank_score=Decimal("0.86"),
+    )
+    update_paper_trades(
+        paper_repo,
+        provider=DailyRowsProvider(
+            [
+                {
+                    "instrument_id": "CN:688981",
+                    "trade_date": date(2026, 7, 2),
+                    "open": Decimal("100.00"),
+                    "high": Decimal("101.00"),
+                    "low": Decimal("99.00"),
+                    "close": Decimal("100.00"),
+                    "volume": 100_000,
+                    "previous_close": Decimal("99.00"),
+                }
+            ]
+        ),
+        provider_mode="free",
+        as_of=datetime(2026, 7, 2, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    update_paper_trades(
+        paper_repo,
+        provider=DailyRowsProvider(
+            [
+                {
+                    "instrument_id": "CN:688981",
+                    "trade_date": date(2026, 7, 3),
+                    "open": Decimal("94.00"),
+                    "high": Decimal("96.00"),
+                    "low": Decimal("93.00"),
+                    "close": Decimal("94.00"),
+                    "volume": 100_000,
+                    "previous_close": Decimal("100.00"),
+                }
+            ]
+        ),
+        provider_mode="free",
+        as_of=datetime(2026, 7, 3, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    trades = paper_repo.list_trades(limit=10)
+    ledger = build_paper_ledger(trades)
+    validation = build_paper_validation(trades, ledger, as_of=date(2026, 7, 3))
+    report = build_paper_daily_report(
+        trades=trades,
+        ledger=ledger,
+        validation=validation,
+        as_of=date(2026, 7, 3),
+        source_context_by_trade={
+            stopped.trade_id: PaperTradeSourceContext(
+                source_snapshot_id=stopped.source_snapshot_id,
+                created_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                signal_date=date(2026, 7, 1),
+                source_status="frozen",
+                card={
+                    "instrument_label": "中芯国际 688981.SH",
+                    "factor_flags": ["high_volatility", "overextended"],
+                },
+            )
+        },
+    )
+
+    diagnostic = report.trade_diagnostics[0]
+    assert diagnostic.root_cause == "risk_filter_failure"
+    assert diagnostic.execution_evidence_status == "complete"
+    assert diagnostic.strategy_attribution_eligible is True
+    assert report.execution_evidence.audited_closed_trades == 1
+    assert report.execution_evidence.comparable_closed_trades == 1
+    assert report.data_health["paper_execution_evidence_comparable_closed"] == "1"
 
 
 def test_paper_daily_report_does_not_diagnose_pending_trade_as_failure(tmp_path):

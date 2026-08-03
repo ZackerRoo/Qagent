@@ -478,8 +478,22 @@ class PaperTradeDiagnostic(BaseModel):
     source_themes: list[str] = Field(default_factory=list)
     source_market_regime: str = "unknown"
     source_context_status: str = "unknown"
+    execution_evidence_status: str = "legacy_unverified"
+    execution_evidence_label: str = "旧成交记录"
+    strategy_attribution_eligible: bool = False
     evidence: list[str]
     action: str
+
+
+class PaperExecutionEvidenceSummary(BaseModel):
+    closed_trades: int = 0
+    audited_closed_trades: int = 0
+    partial_closed_trades: int = 0
+    legacy_closed_trades: int = 0
+    comparable_closed_trades: int = 0
+    audited_open_entries: int = 0
+    verdict: str = "building_sample"
+    summary: str = "暂无完整闭环成交，继续积累统一执行样本。"
 
 
 class PaperEventTimelineItem(BaseModel):
@@ -528,6 +542,9 @@ class PaperDailyReport(BaseModel):
         )
     )
     failure_attribution: list[PaperFailureAttributionItem]
+    execution_evidence: PaperExecutionEvidenceSummary = Field(
+        default_factory=PaperExecutionEvidenceSummary
+    )
     trade_diagnostics: list[PaperTradeDiagnostic] = Field(default_factory=list)
     event_timeline: list[PaperEventTimelineItem]
     new_opportunities: list[PaperDailyReportItem]
@@ -1144,9 +1161,11 @@ def build_paper_daily_report(
     market_context = _paper_market_context(benchmark)
     trigger_quality = _paper_trigger_quality(trades)
     source_contexts = source_context_by_trade or {}
+    trade_by_id = {trade.trade_id: trade for trade in trades}
     trade_diagnostics = _paper_trade_diagnostics(
         ledger.items,
         source_context_by_trade=source_contexts,
+        trade_by_id=trade_by_id,
     )
     return PaperDailyReport(
         report_date=report_date,
@@ -1179,6 +1198,10 @@ def build_paper_daily_report(
             source_context_by_trade=source_contexts,
             trade_diagnostics=trade_diagnostics,
         ),
+        execution_evidence=_paper_execution_evidence_summary(
+            trades,
+            source_context_by_trade=source_contexts,
+        ),
         trade_diagnostics=trade_diagnostics,
         event_timeline=_paper_event_timeline(
             trades=trades,
@@ -1203,6 +1226,7 @@ def build_paper_daily_report(
         data_health={
             **ledger.data_health,
             "paper_daily_report": "ready",
+            **_paper_execution_evidence_health(trades, source_contexts),
             "paper_daily_report_date": report_date.isoformat(),
             "paper_daily_report_trades": str(len(trades)),
             "paper_daily_report_non_official_excluded": str(len(all_trades) - len(trades)),
@@ -1744,6 +1768,104 @@ def _paper_source_context_health(
     }
 
 
+def _paper_execution_evidence_status(trade: PaperTradeRecord) -> str:
+    facts = trade.execution_facts
+    if facts is None:
+        return "legacy_unverified"
+    entry_is_unified = facts.entry.source == "unified_execution"
+    if trade.status in EXECUTED_CLOSED_STATUSES:
+        if facts.exit is None:
+            return "partial"
+        if entry_is_unified and facts.exit.source == "unified_execution":
+            return "complete"
+        return "partial"
+    return "entry_audited" if entry_is_unified else "partial"
+
+
+def _paper_execution_evidence_label(status: str) -> str:
+    return {
+        "complete": "完整统一成交事实",
+        "partial": "部分成交事实",
+        "entry_audited": "买入成交已审计",
+        "legacy_unverified": "旧成交记录",
+    }.get(status, "成交证据未知")
+
+
+def _paper_execution_evidence_note(status: str) -> str:
+    return {
+        "complete": "买入和卖出均由统一执行引擎保存不可变成交事实",
+        "partial": "仅部分成交由统一执行引擎保存，另一端来自旧记录推断",
+        "entry_audited": "买入已保存统一执行事实，等待卖出后形成完整闭环",
+        "legacy_unverified": "缺少统一执行引擎的买卖成交事实",
+    }.get(status, "成交证据状态未知")
+
+
+def _paper_execution_evidence_summary(
+    trades: list[PaperTradeRecord],
+    *,
+    source_context_by_trade: Mapping[str, PaperTradeSourceContext],
+) -> PaperExecutionEvidenceSummary:
+    closed = [trade for trade in trades if _is_executed_closed_trade(trade)]
+    statuses = {trade.trade_id: _paper_execution_evidence_status(trade) for trade in closed}
+    audited = sum(status == "complete" for status in statuses.values())
+    partial = sum(status == "partial" for status in statuses.values())
+    legacy = sum(status == "legacy_unverified" for status in statuses.values())
+    comparable = sum(
+        statuses[trade.trade_id] == "complete"
+        and (context := source_context_by_trade.get(trade.trade_id)) is not None
+        and context.source_status == "frozen"
+        for trade in closed
+    )
+    audited_open = sum(
+        trade.status == "open"
+        and _paper_execution_evidence_status(trade) == "entry_audited"
+        for trade in trades
+    )
+    if not closed:
+        verdict = "building_sample"
+        summary = "暂无完整闭环成交，继续积累统一执行样本。"
+    elif comparable == len(closed):
+        verdict = "fully_audited"
+        summary = f"{comparable} 笔闭环均具备冻结信号与完整统一成交事实。"
+    else:
+        verdict = "mixed_evidence"
+        summary = (
+            f"{len(closed)} 笔闭环中，{audited} 笔成交事实完整、{partial} 笔部分完整、"
+            f"{legacy} 笔为旧记录；只有 {comparable} 笔可用于当前执行合同的策略归因。"
+        )
+    return PaperExecutionEvidenceSummary(
+        closed_trades=len(closed),
+        audited_closed_trades=audited,
+        partial_closed_trades=partial,
+        legacy_closed_trades=legacy,
+        comparable_closed_trades=comparable,
+        audited_open_entries=audited_open,
+        verdict=verdict,
+        summary=summary,
+    )
+
+
+def _paper_execution_evidence_health(
+    trades: list[PaperTradeRecord],
+    source_context_by_trade: Mapping[str, PaperTradeSourceContext],
+) -> dict[str, str]:
+    summary = _paper_execution_evidence_summary(
+        trades,
+        source_context_by_trade=source_context_by_trade,
+    )
+    return {
+        "paper_execution_evidence_verdict": summary.verdict,
+        "paper_execution_evidence_closed": str(summary.closed_trades),
+        "paper_execution_evidence_audited_closed": str(summary.audited_closed_trades),
+        "paper_execution_evidence_partial_closed": str(summary.partial_closed_trades),
+        "paper_execution_evidence_legacy_closed": str(summary.legacy_closed_trades),
+        "paper_execution_evidence_comparable_closed": str(
+            summary.comparable_closed_trades
+        ),
+        "paper_execution_evidence_audited_open": str(summary.audited_open_entries),
+    }
+
+
 def _paper_source_market_context(
     context: PaperTradeSourceContext | None,
 ) -> PaperMarketContext:
@@ -1777,6 +1899,7 @@ def _paper_trade_diagnostics(
     items: list[PaperLedgerItem],
     *,
     source_context_by_trade: Mapping[str, PaperTradeSourceContext],
+    trade_by_id: Mapping[str, PaperTradeRecord],
 ) -> list[PaperTradeDiagnostic]:
     diagnostics = []
     for item in items:
@@ -1795,6 +1918,32 @@ def _paper_trade_diagnostics(
         )
         if cause == "waiting":
             continue
+        trade = trade_by_id.get(item.trade_id)
+        evidence_status = (
+            _paper_execution_evidence_status(trade)
+            if trade is not None
+            else "legacy_unverified"
+        )
+        strategy_attribution_eligible = (
+            evidence_status == "complete"
+            and context is not None
+            and context.source_status == "frozen"
+        )
+        evidence_note = _paper_execution_evidence_note(evidence_status)
+        if (
+            item.status in EXECUTED_CLOSED_STATUSES
+            and not strategy_attribution_eligible
+        ):
+            cause = "legacy_execution_evidence"
+            label = "旧成交证据不完整"
+            severity = "warning"
+            evidence = [
+                evidence_note,
+                "盈亏继续保留在保守风险统计，但不能代表当前统一执行规则",
+            ]
+            action = "不据此调整当前策略；等待冻结信号与完整成交事实的新闭环样本。"
+        elif evidence_note not in evidence:
+            evidence = [evidence_note, *evidence]
         diagnostics.append(
             PaperTradeDiagnostic(
                 trade_id=item.trade_id,
@@ -1811,6 +1960,9 @@ def _paper_trade_diagnostics(
                 source_themes=context.themes if context is not None else [],
                 source_market_regime=source_market_context.regime,
                 source_context_status=context.source_status if context is not None else "unknown",
+                execution_evidence_status=evidence_status,
+                execution_evidence_label=_paper_execution_evidence_label(evidence_status),
+                strategy_attribution_eligible=strategy_attribution_eligible,
                 evidence=evidence,
                 action=action,
             )
@@ -1928,7 +2080,7 @@ def _paper_trade_root_cause(
         "选股信号失效",
         "critical" if item.status == "stopped" else "warning",
         ["触发后走势未按推荐方向延续"] + signal_evidence,
-        "降低对应策略和因子权重，等待样本外重新验证。",
+        "保留为有效失败样本；达到固定检查点后再决定是否调整策略或因子权重。",
     )
 
 

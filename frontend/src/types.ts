@@ -1955,8 +1955,26 @@ export type PaperTradeDiagnostic = {
   root_cause_label: string;
   severity: string;
   factor_signals: string[];
+  source_industry: string;
+  source_themes: string[];
+  source_market_regime: string;
+  source_context_status: string;
+  execution_evidence_status: string;
+  execution_evidence_label: string;
+  strategy_attribution_eligible: boolean;
   evidence: string[];
   action: string;
+};
+
+export type PaperExecutionEvidenceSummary = {
+  closed_trades: number;
+  audited_closed_trades: number;
+  partial_closed_trades: number;
+  legacy_closed_trades: number;
+  comparable_closed_trades: number;
+  audited_open_entries: number;
+  verdict: string;
+  summary: string;
 };
 
 export type PaperEventTimelineItem = {
@@ -1982,6 +2000,7 @@ export type PaperDailyReportResponse = {
   market_context: PaperMarketContext;
   trigger_quality: PaperTriggerQualitySummary;
   failure_attribution: PaperFailureAttributionItem[];
+  execution_evidence: PaperExecutionEvidenceSummary;
   trade_diagnostics: PaperTradeDiagnostic[];
   event_timeline: PaperEventTimelineItem[];
   new_opportunities: PaperDailyReportItem[];
