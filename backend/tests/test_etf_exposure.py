@@ -210,3 +210,21 @@ def test_paper_candidate_asset_type_keeps_unknown_sources_explicit():
     assert routes._paper_snapshot_asset_type(
         SimpleNamespace(card={}, instrument_id="CN:000001")
     ) == "unknown"
+
+
+def test_empty_paper_portfolio_lookthrough_endpoint(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'empty-lookthrough.db'}",
+    )
+
+    response = TestClient(create_app()).get(
+        "/api/paper-trades/look-through-risk?provider=free&reporting_scope=legacy"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["status"] == "empty"
+    assert payload["summary"]["position_count"] == 0
+    assert payload["warnings"] == []
+    assert payload["data_health"]["portfolio_lookthrough_mode"] == "advisory_only"

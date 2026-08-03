@@ -50,6 +50,7 @@ import type {
   PaperValidationResponse,
   ParameterSensitivityResponse,
   PortfolioBacktestResponse,
+  PortfolioLookThroughRiskResponse,
   OverviewResponse,
   PortfolioResponse,
   Position,
@@ -508,6 +509,17 @@ export async function fetchEtfExposures(
   return apiGet<EtfExposureResponse>("/etf-exposures", {
     instrument_ids: instrumentIds.join(","),
     limit: 16,
+  });
+}
+
+export async function fetchPaperLookThroughRisk(
+  provider: DataProviderMode,
+  reportingScope: PaperReportingScope = "legacy",
+): Promise<PortfolioLookThroughRiskResponse> {
+  return apiGet<PortfolioLookThroughRiskResponse>("/paper-trades/look-through-risk", {
+    provider,
+    reporting_scope: reportingScope,
+    limit: 500,
   });
 }
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ExternalLink, RefreshCw } from "lucide-react";
+import { AlertTriangle, ExternalLink, Layers3, RefreshCw } from "lucide-react";
 
 import {
   deletePaperTrade,
@@ -11,6 +11,7 @@ import {
   fetchPaperDualTrack,
   fetchPaperForwardComparison,
   fetchPaperLedger,
+  fetchPaperLookThroughRisk,
   fetchPaperSession,
   fetchPaperTrades,
   fetchPaperValidation,
@@ -38,6 +39,7 @@ import type {
   PaperDailyReportResponse,
   PaperLedgerPosition,
   PaperLedgerResponse,
+  PortfolioLookThroughRiskResponse,
   PaperLedgerTransaction,
   PaperReportingScope,
   PaperSessionResponse,
@@ -104,6 +106,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [paperScope, setPaperScope] = useState<PaperReportingScope>("legacy");
   const [paperScopeCounts, setPaperScopeCounts] = useState({ official: 0, legacy: 0 });
   const [ledger, setLedger] = useState<PaperLedgerResponse>();
+  const [lookThroughRisk, setLookThroughRisk] = useState<PortfolioLookThroughRiskResponse>();
   const [dailyReport, setDailyReport] = useState<PaperDailyReportResponse>();
   const [candidatePool, setCandidatePool] = useState<PaperCandidatePoolResponse>();
   const [etfExposure, setEtfExposure] = useState<EtfExposureResponse>();
@@ -130,6 +133,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchPaperTrades(dataMode, paperScope === "official" ? "legacy" : "official"),
       fetchPaperSession(dataMode),
       fetchPaperLedger({ provider: dataMode, reportingScope: paperScope }),
+      fetchPaperLookThroughRisk(dataMode, paperScope),
       fetchAutomationScheduler(),
     ]);
     const [
@@ -137,6 +141,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       otherPaperResult,
       paperSessionResult,
       ledgerResult,
+      lookThroughResult,
       automationSchedulerResult,
     ] = coreResults;
     if (paperResult.status === "fulfilled") {
@@ -159,6 +164,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       setPaperSessionForm(formFromPaperSession(paperSessionResult.value));
     }
     if (ledgerResult.status === "fulfilled") setLedger(ledgerResult.value);
+    if (lookThroughResult.status === "fulfilled") setLookThroughRisk(lookThroughResult.value);
     if (automationSchedulerResult.status === "fulfilled") {
       setAutomationScheduler(automationSchedulerResult.value);
     }
@@ -239,6 +245,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchPaperTrades(dataMode, paperScope),
       fetchPaperTrades(dataMode, paperScope === "official" ? "legacy" : "official"),
       fetchPaperLedger({ provider: dataMode, reportingScope: paperScope }),
+      fetchPaperLookThroughRisk(dataMode, paperScope),
       fetchPaperValidation(dataMode, paperScope),
       fetchPaperDailyReport(dataMode, paperScope),
       fetchPaperCandidatePool(dataMode),
@@ -250,6 +257,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       paperResult,
       otherPaperResult,
       ledgerResult,
+      lookThroughResult,
       validationResult,
       dailyReportResult,
       candidatePoolResult,
@@ -273,6 +281,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       }));
     }
     if (ledgerResult.status === "fulfilled") setLedger(ledgerResult.value);
+    if (lookThroughResult.status === "fulfilled") setLookThroughRisk(lookThroughResult.value);
     if (validationResult.status === "fulfilled") setValidation(validationResult.value);
     if (dailyReportResult.status === "fulfilled") setDailyReport(dailyReportResult.value);
     if (candidatePoolResult.status === "fulfilled") setCandidatePool(candidatePoolResult.value);
@@ -346,9 +355,10 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
         : `Updated ${result.summary.total} trades, ${result.summary.closed} closed, ${result.data_health.paper_execution_fills_deferred ?? "0"} fills deferred`,
     );
     setPaperExecutionHealth(result.data_health);
-    const [paperResult, ledgerResult, validationResult, dailyReportResult, candidatePoolResult, dualTrackResult] = await Promise.all([
+    const [paperResult, ledgerResult, lookThroughResult, validationResult, dailyReportResult, candidatePoolResult, dualTrackResult] = await Promise.all([
       fetchPaperTrades(dataMode, paperScope),
       fetchPaperLedger({ provider: dataMode, reportingScope: paperScope }),
+      fetchPaperLookThroughRisk(dataMode, paperScope),
       fetchPaperValidation(dataMode, paperScope),
       fetchPaperDailyReport(dataMode, paperScope),
       fetchPaperCandidatePool(dataMode),
@@ -356,6 +366,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     ]);
     setPaper(paperResult);
     setLedger(ledgerResult);
+    setLookThroughRisk(lookThroughResult);
     setValidation(validationResult);
     setDailyReport(dailyReportResult);
     setCandidatePool(candidatePoolResult);
@@ -492,6 +503,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
                 if (scope === paperScope) return;
                 setPaper(undefined);
                 setLedger(undefined);
+                setLookThroughRisk(undefined);
                 setDailyReport(undefined);
                 setValidation(undefined);
                 setPaperScope(scope);
@@ -503,7 +515,10 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
 
         {portfolioView === "account" && (
           ledger ? (
-            <PaperLedgerDashboard ledger={ledger} language={language} t={t} />
+            <div className="portfolio-view-stack">
+              <PaperLedgerDashboard ledger={ledger} language={language} t={t} />
+              <PaperPortfolioLookThroughPanel risk={lookThroughRisk} language={language} />
+            </div>
           ) : (
             <div className="empty-state">{t("portfolio.noLedger")}</div>
           )
@@ -779,6 +794,176 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       </details>
     </div>
   );
+}
+
+function PaperPortfolioLookThroughPanel({
+  risk,
+  language,
+}: {
+  risk?: PortfolioLookThroughRiskResponse;
+  language: Language;
+}) {
+  if (!risk) {
+    return (
+      <section className="paper-portfolio-lookthrough is-loading">
+        <div className="mini-curve-empty">
+          {language === "zh" ? "正在聚合当前持仓穿透风险。" : "Aggregating current portfolio look-through risk."}
+        </div>
+      </section>
+    );
+  }
+  const summary = risk.summary;
+  if (summary.position_count === 0) {
+    return (
+      <section className="paper-portfolio-lookthrough is-empty">
+        <div className="paper-lookthrough-heading">
+          <Layers3 size={18} aria-hidden="true" />
+          <div>
+            <strong>{language === "zh" ? "组合穿透风险" : "Portfolio look-through risk"}</strong>
+            <small>{language === "zh" ? "当前没有已成交持仓。" : "There are no filled open positions."}</small>
+          </div>
+        </div>
+      </section>
+    );
+  }
+  const industries = risk.industries.slice(0, 6);
+  const indices = risk.indices.slice(0, 5);
+  const underlyings = risk.underlying_exposures.slice(0, 6);
+  return (
+    <section className="paper-portfolio-lookthrough">
+      <div className="paper-lookthrough-heading">
+        <Layers3 size={18} aria-hidden="true" />
+        <div>
+          <strong>{language === "zh" ? "组合穿透风险" : "Portfolio look-through risk"}</strong>
+          <small>
+            {language === "zh"
+              ? "只统计当前已成交持仓；ETF 成分为最新披露前十大下限，提示不会自动拦截交易。"
+              : "Filled positions only. ETF constituents are latest disclosed top-10 lower bounds; alerts do not block trades."}
+          </small>
+        </div>
+        <span className={`status status-${summary.warning_count ? "warning" : "ready"}`}>
+          {language === "zh" ? `${summary.warning_count} 项提示` : `${summary.warning_count} alerts`}
+        </span>
+      </div>
+
+      <div className="paper-lookthrough-summary">
+        <span><small>{language === "zh" ? "当前持仓" : "Positions"}</small><strong>{summary.position_count}</strong></span>
+        <span><small>{language === "zh" ? "总权益仓位" : "Invested"}</small><strong>{summary.invested_weight_pct.toFixed(2)}%</strong></span>
+        <span><small>ETF</small><strong>{summary.etf_weight_pct.toFixed(2)}%</strong></span>
+        <span><small>{language === "zh" ? "已知行业覆盖" : "Known sectors"}</small><strong>{summary.industry_known_weight_pct.toFixed(2)}%</strong></span>
+        <span><small>{language === "zh" ? "已知成分下限" : "Known constituents"}</small><strong>{summary.constituent_known_weight_pct.toFixed(2)}%</strong></span>
+      </div>
+
+      {risk.warnings.length > 0 && (
+        <div className="paper-lookthrough-warnings">
+          {risk.warnings.slice(0, 6).map((warning, index) => (
+            <div key={`${warning.kind}-${warning.label}-${index}`} className={`tone-${warning.severity}`}>
+              <AlertTriangle size={15} aria-hidden="true" />
+              <span>{paperLookThroughWarningText(warning, language)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="paper-lookthrough-grid">
+        <div className="paper-lookthrough-section">
+          <header>
+            <strong>{language === "zh" ? "行业暴露" : "Sector exposure"}</strong>
+            <small>{language === "zh" ? "占总权益" : "% of total equity"}</small>
+          </header>
+          {industries.map((item) => (
+            <div key={item.key} className="paper-lookthrough-bar-row">
+              <span title={item.label}>{item.label}</span>
+              <div><i style={{ width: `${Math.min(item.weight_pct, 100)}%` }} /></div>
+              <b>{item.weight_pct.toFixed(2)}%</b>
+            </div>
+          ))}
+        </div>
+
+        <div className="paper-lookthrough-section">
+          <header>
+            <strong>{language === "zh" ? "指数与市场" : "Index and market"}</strong>
+            <small>{language === "zh" ? "ETF 整体权重" : "Whole ETF weights"}</small>
+          </header>
+          {indices.length ? indices.map((item) => (
+            <div key={item.key} className="paper-lookthrough-index-row">
+              <span title={item.label}>{item.label}</span>
+              <small>{language === "zh" ? `${item.source_count} 个来源` : `${item.source_count} sources`}</small>
+              <b>{item.weight_pct.toFixed(2)}%</b>
+            </div>
+          )) : (
+            <p className="paper-lookthrough-none">{language === "zh" ? "当前持仓没有 ETF。" : "No ETFs are currently held."}</p>
+          )}
+          <div className="paper-lookthrough-tags">
+            {risk.markets.slice(0, 4).map((item) => (
+              <span key={item.key}>{item.label}<b>{item.weight_pct.toFixed(1)}%</b></span>
+            ))}
+            {risk.styles.filter((item) => !item.key.startsWith("__unknown")).slice(0, 3).map((item) => (
+              <span key={`style-${item.key}`}>{item.label}<b>{item.weight_pct.toFixed(1)}%</b></span>
+            ))}
+          </div>
+        </div>
+
+        <div className="paper-lookthrough-section is-wide">
+          <header>
+            <strong>{language === "zh" ? "已知底层成分" : "Known underlying exposure"}</strong>
+            <small>{language === "zh" ? "个股直持 + ETF 已披露部分" : "Direct stock + disclosed ETF holdings"}</small>
+          </header>
+          <div className="paper-lookthrough-underlyings">
+            {underlyings.map((item) => (
+              <div key={item.instrument_id}>
+                <span title={item.name}>{formatInstrumentDisplay(item.name || item.instrument_id)}</span>
+                <small>
+                  {language === "zh"
+                    ? `直持 ${item.direct_weight_pct.toFixed(2)}% · ETF ${item.etf_weight_pct.toFixed(2)}%`
+                    : `Direct ${item.direct_weight_pct.toFixed(2)}% · ETF ${item.etf_weight_pct.toFixed(2)}%`}
+                </small>
+                <b>{item.known_weight_pct.toFixed(2)}%</b>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function paperLookThroughWarningText(
+  warning: PortfolioLookThroughRiskResponse["warnings"][number],
+  language: Language,
+): string {
+  const weight = warning.weight_pct != null ? `${warning.weight_pct.toFixed(2)}%` : "-";
+  if (warning.kind === "industry_concentration") {
+    return language === "zh"
+      ? `${warning.label}的已知穿透权重达到 ${weight}。`
+      : `${warning.label} known look-through weight reaches ${weight}.`;
+  }
+  if (warning.kind === "same_tracking_index") {
+    return language === "zh"
+      ? `${warning.instrument_ids.length} 只 ETF 共同跟踪 ${warning.label}，合计占总权益 ${weight}。`
+      : `${warning.instrument_ids.length} ETFs track ${warning.label}, totaling ${weight} of equity.`;
+  }
+  if (warning.kind === "direct_etf_overlap") {
+    return language === "zh"
+      ? `${warning.label}同时被直接持有并出现在 ETF 披露成分中，已知合计 ${weight}。`
+      : `${warning.label} is held directly and through disclosed ETF constituents, known total ${weight}.`;
+  }
+  if (warning.kind === "underlying_concentration") {
+    return language === "zh"
+      ? `${warning.label}的已知底层权重达到 ${weight}。`
+      : `${warning.label} known underlying weight reaches ${weight}.`;
+  }
+  if (warning.kind === "etf_constituent_overlap") {
+    return language === "zh"
+      ? `两只 ETF 的已披露共同成分至少重复占用总权益 ${weight}。`
+      : `Two ETFs have confirmed disclosed overlap equal to at least ${weight} of equity.`;
+  }
+  if (warning.kind === "missing_etf_disclosure") {
+    return language === "zh"
+      ? `${weight} 的总权益仓位缺少可用 ETF 穿透来源，已保持未知。`
+      : `${weight} of equity lacks usable ETF look-through disclosure and remains unknown.`;
+  }
+  return warning.label;
 }
 
 function PaperForwardResearchWorkbench({

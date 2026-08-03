@@ -2181,6 +2181,64 @@ export type EtfExposureResponse = {
   data_health: Record<string, string>;
 };
 
+export type PortfolioLookThroughBucket = {
+  key: string;
+  label: string;
+  weight_pct: number;
+  source_count: number;
+  instrument_ids: string[];
+};
+
+export type PortfolioUnderlyingExposure = {
+  instrument_id: string;
+  name: string;
+  known_weight_pct: number;
+  direct_weight_pct: number;
+  etf_weight_pct: number;
+  source_count: number;
+  source_instrument_ids: string[];
+};
+
+export type PortfolioEtfOverlap = {
+  left_instrument_id: string;
+  right_instrument_id: string;
+  same_tracking_index: boolean;
+  portfolio_overlap_lower_bound_pct: number | null;
+  shared_constituents: string[];
+};
+
+export type PortfolioLookThroughWarning = {
+  kind: string;
+  severity: "info" | "watch";
+  label: string;
+  weight_pct: number | null;
+  instrument_ids: string[];
+  related_names: string[];
+};
+
+export type PortfolioLookThroughRiskResponse = {
+  summary: {
+    position_count: number;
+    stock_position_count: number;
+    etf_position_count: number;
+    invested_weight_pct: number;
+    etf_weight_pct: number;
+    industry_known_weight_pct: number;
+    constituent_known_weight_pct: number;
+    unavailable_etf_weight_pct: number;
+    warning_count: number;
+    status: string;
+  };
+  industries: PortfolioLookThroughBucket[];
+  indices: PortfolioLookThroughBucket[];
+  markets: PortfolioLookThroughBucket[];
+  styles: PortfolioLookThroughBucket[];
+  underlying_exposures: PortfolioUnderlyingExposure[];
+  etf_overlaps: PortfolioEtfOverlap[];
+  warnings: PortfolioLookThroughWarning[];
+  data_health: Record<string, string>;
+};
+
 export type PaperAccountSettings = {
   account_id: string;
   session_id: string;

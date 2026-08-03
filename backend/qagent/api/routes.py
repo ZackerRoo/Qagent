@@ -127,6 +127,10 @@ from qagent.monitoring.recommendation_calibration import (
 )
 from qagent.monitoring.signal_monitor import SignalMonitorCenter, build_signal_monitor_center
 from qagent.monitoring.portfolio import PositionInput, analyze_position_risk
+from qagent.monitoring.lookthrough import (
+    PortfolioLookThroughHolding,
+    build_portfolio_lookthrough_risk,
+)
 from qagent.monitoring.alerts import AlertRule, suggest_alert_rules
 from qagent.paper_trading.engine import (
     PaperDailyReport,
@@ -5709,6 +5713,110 @@ def etf_exposures(
             "etf_exposure_catalog_matched": str(len(instruments)),
             "etf_exposure_catalog_missing": str(len(requested) - len(instruments)),
             "etf_exposure_cache": "local_disk",
+        }
+    )
+    return response.model_dump(mode="json")
+
+
+@router.get("/paper-trades/look-through-risk")
+def paper_trade_look_through_risk(
+    provider: str | None = None,
+    reporting_scope: str = "official",
+    limit: int = 500,
+) -> dict[str, object]:
+    if limit <= 0 or limit > 1000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+    mode = provider.strip().lower() if provider else None
+    scope = _paper_reporting_scope_value(reporting_scope)
+    paper_repo = _paper_repo()
+    account = paper_repo.get_account_settings()
+    trades = paper_repo.list_trades(limit=limit, provider=mode)
+    _, authenticated_ids, authentication_health = _paper_reporting_trades(
+        trades,
+        reporting_scope=scope,
+    )
+    ledger = build_paper_ledger(
+        trades,
+        initial_capital=account.initial_capital,
+        allocation_per_trade_pct=account.allocation_per_trade_pct,
+        max_positions=account.max_positions,
+        transaction_cost_bps=account.transaction_cost_bps,
+        slippage_bps=account.slippage_bps,
+        take_profit_pct=account.take_profit_pct,
+        reporting_scope=scope,
+        authenticated_trade_ids=authenticated_ids,
+    )
+    trade_by_id = {trade.trade_id: trade for trade in trades}
+    position_ids = {position.instrument_id for position in ledger.positions}
+    catalog = {
+        item.instrument_id: item
+        for item in _repo().list_tradable_instruments(limit=20_000)
+        if item.instrument_id in position_ids
+    }
+    holdings: list[PortfolioLookThroughHolding] = []
+    etf_instruments: list[tuple[str, str]] = []
+    for position in ledger.positions:
+        trade = trade_by_id.get(position.trade_id)
+        instrument = catalog.get(position.instrument_id)
+        context = (
+            paper_repo.get_trade_source_context(trade.source_snapshot_id)
+            if trade is not None
+            else None
+        )
+        context_card = getattr(context, "card", None) if context is not None else None
+        card = context_card if isinstance(context_card, dict) else {}
+        card_asset_type = str(card.get("asset_type") or "").strip().lower()
+        asset_type = str(
+            getattr(instrument, "asset_type", "") or card_asset_type or "unknown"
+        ).strip().lower()
+        label = str(
+            getattr(instrument, "label", "")
+            or card.get("instrument_label")
+            or position.instrument_id
+        )
+        market_context = card.get("market_context")
+        market_context = market_context if isinstance(market_context, dict) else {}
+        exposure_group = _paper_card_exposure_group(
+            card,
+            current_industry=(
+                market_context.get("industry")
+                or card.get("industry")
+                or card.get("sector")
+            ),
+            instrument_id=position.instrument_id,
+        )
+        holdings.append(
+            PortfolioLookThroughHolding(
+                trade_id=position.trade_id,
+                instrument_id=position.instrument_id,
+                instrument_label=label,
+                asset_type=asset_type,
+                weight_pct=position.weight_pct,
+                exposure_group=exposure_group,
+            )
+        )
+        if asset_type == "etf":
+            etf_instruments.append(
+                (
+                    position.instrument_id,
+                    str(getattr(instrument, "name", "") or label),
+                )
+            )
+
+    etf_response = _etf_exposure_service.build_response(etf_instruments)
+    response = build_portfolio_lookthrough_risk(
+        holdings,
+        etf_response.profiles,
+        etf_response.overlaps,
+    )
+    response.data_health.update(
+        {
+            **authentication_health,
+            **etf_response.data_health,
+            "paper_provider_filter": mode or "all",
+            "paper_reporting_scope": scope,
+            "portfolio_lookthrough_catalog_matched": str(len(catalog)),
+            "portfolio_lookthrough_position_count": str(len(holdings)),
         }
     )
     return response.model_dump(mode="json")
