@@ -83,17 +83,8 @@ class AutomationScheduler:
             return self._state_unlocked()
 
     def refresh_if_due(self, runner: CycleRunner) -> AutoProcessingState:
-        now = _utc_now()
-        should_run = False
-        settings: AutoProcessingSettings | None = None
-        with self._lock:
-            if self._enabled and self._status != "running":
-                settings = self._settings
-                should_run = self._next_run_at is not None and self._next_run_at <= now
-
-        if should_run and settings is not None:
-            self._execute(settings, runner)
-
+        # Status reads may restore a missing loop, but the request thread must never
+        # execute a potentially slow processing cycle itself.
         self._ensure_loop_thread(runner)
         with self._lock:
             return self._state_unlocked()

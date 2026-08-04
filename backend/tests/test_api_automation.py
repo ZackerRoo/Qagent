@@ -1,4 +1,5 @@
 import json
+import time
 from types import SimpleNamespace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -1327,6 +1328,12 @@ def test_automation_scheduler_state_runs_overdue_cycle(tmp_path, monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body["enabled"] is True
-    assert body["run_count"] == 1
-    assert body["last_completed_at"] is not None
-    assert datetime.fromisoformat(body["next_run_at"]) > datetime.now(timezone.utc)
+    deadline = time.monotonic() + 2.0
+    while scheduler.state().run_count < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    completed = scheduler.state()
+    assert completed.run_count == 1
+    assert completed.last_completed_at is not None
+    assert completed.next_run_at is not None
+    assert completed.next_run_at > datetime.now(timezone.utc)
+    scheduler.stop()
