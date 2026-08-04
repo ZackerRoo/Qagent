@@ -5,12 +5,13 @@ from qagent.api.routes import (
     _paper_active_industry_counts,
     _paper_industry_capacity_filter,
     _paper_market_entry_gate_from_cache,
+    _paper_merge_market_risk_gate,
     _paper_snapshot_industry,
     _paper_strategy_capacity_filter,
 )
 
 
-def test_cached_risk_off_market_blocks_new_paper_entries():
+def test_cached_risk_off_market_throttles_research_paper_entries():
     health = _paper_market_entry_gate_from_cache(
         {
             "benchmark_trend": {
@@ -21,8 +22,40 @@ def test_cached_risk_off_market_blocks_new_paper_entries():
         }
     )
 
-    assert health["paper_market_entry_gate"] == "blocked"
+    assert health["paper_market_entry_gate"] == "throttled"
     assert health["paper_market_entry_gate_state"] == "risk_off"
+    assert health["paper_market_entry_gate_max_new_entries"] == "1"
+    assert health["paper_market_entry_gate_position_size_multiplier"] == "0.3500"
+
+    merged = _paper_merge_market_risk_gate(
+        {
+            "paper_risk_gate_action": "allow_new_entries",
+            "paper_risk_gate_reason": "within limits",
+            "paper_risk_gate_max_new_entries": "5",
+            "paper_risk_gate_position_size_multiplier": "1.0000",
+        },
+        health,
+    )
+    assert merged["paper_risk_gate_action"] == "throttle_new_entries"
+    assert merged["paper_risk_gate_max_new_entries"] == "1"
+    assert merged["paper_risk_gate_position_size_multiplier"] == "0.3500"
+
+
+def test_cached_extreme_market_still_blocks_research_paper_entries():
+    health = _paper_market_entry_gate_from_cache(
+        {
+            "benchmark_trend": {
+                "state": "extreme_risk",
+                "entry_allowed": False,
+                "hard_block": True,
+                "reason": "market data or execution halted",
+            }
+        }
+    )
+
+    assert health["paper_market_entry_gate"] == "blocked"
+    assert health["paper_market_entry_gate_max_new_entries"] == "0"
+    assert health["paper_market_entry_gate_position_size_multiplier"] == "0.0000"
 
 
 def test_paper_strategy_capacity_counts_open_and_pending_positions():

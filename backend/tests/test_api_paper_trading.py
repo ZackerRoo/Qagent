@@ -706,7 +706,7 @@ def test_cached_unreleased_ranking_v3_does_not_fall_back_to_legacy_seed(
     assert client.get("/api/paper-trades").json()["summary"]["total"] == 0
 
 
-def test_risk_off_candidates_remain_visible_without_becoming_seedable(
+def test_risk_off_candidates_allow_one_reduced_size_research_probe(
     tmp_path,
     monkeypatch,
 ):
@@ -718,6 +718,11 @@ def test_risk_off_candidates_remain_visible_without_becoming_seedable(
     (card,) = _persist_authoritative_opportunities(
         provider="fixture",
         cards=[("risk-off-visible-card", "US:RISK-OFF")],
+    )
+    _patch_authoritative_card(
+        provider="fixture",
+        card_id=card.card_id,
+        updates={"market_context": {"industry": "宽基ETF"}},
     )
     repo = routes._repo()
     snapshot = repo.list_latest_opportunity_snapshots_by_card_ids(
@@ -743,15 +748,37 @@ def test_risk_off_candidates_remain_visible_without_becoming_seedable(
         "/api/paper-trades/candidate-pool?provider=fixture&include_etfs=true&limit=10"
     )
     seeded = client.post("/api/paper-trades/seed?provider=fixture&limit=5")
+    report = client.get(
+        "/api/paper-trades/daily-report?provider=fixture&reporting_scope=legacy"
+    )
+    post_seed_pool = client.get(
+        "/api/paper-trades/candidate-pool?provider=fixture&include_etfs=true&limit=10"
+    )
 
     assert pool.status_code == 200
     assert pool.json()["items"][0]["instrument_id"] == "US:RISK-OFF"
-    assert pool.json()["items"][0]["status"] == "blocked_by_market"
-    assert pool.json()["summary"]["market_blocked_count"] == 1
-    assert pool.json()["data_health"]["paper_market_entry_gate"] == "blocked"
+    assert pool.json()["items"][0]["status"] == "ready_to_add"
+    assert pool.json()["summary"]["market_blocked_count"] == 0
+    assert pool.json()["summary"]["risk_action"] == "throttle_new_entries"
+    assert pool.json()["data_health"]["paper_market_entry_gate"] == "throttled"
     assert seeded.status_code == 200
-    assert seeded.json()["created"] == 0
-    assert client.get("/api/paper-trades").json()["summary"]["total"] == 0
+    assert seeded.json()["created"] == 1
+    assert report.status_code == 200
+    assert report.json()["risk_gate"]["action"] == "throttle_new_entries"
+    assert report.json()["risk_gate"]["max_new_entries"] == 1
+    assert report.json()["risk_gate"]["position_size_multiplier"] == 0.35
+    assert post_seed_pool.status_code == 200
+    assert post_seed_pool.json()["items"][0]["status"] == "active_in_paper"
+    assert (
+        post_seed_pool.json()["data_health"]["paper_market_probe_remaining_today"]
+        == "0"
+    )
+    trades = client.get(
+        "/api/paper-trades?provider=fixture&reporting_scope=legacy"
+    ).json()["trades"]
+    assert len(trades) == 1
+    assert trades[0]["allocation_multiplier"] == "0.3500"
+    assert "风控恢复探针" in trades[0]["notes"]
 
 
 def test_candidate_pool_reports_industry_capacity_block(tmp_path, monkeypatch):

@@ -970,6 +970,110 @@ def test_automation_scheduler_allows_one_recovery_probe_when_ledger_drawdown_is_
     assert "automation_seed_skipped_by_risk_gate" not in second_result["data_health"]
 
 
+def test_automation_scheduler_allows_only_one_daily_risk_off_probe(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = f"sqlite:///{tmp_path / 'automation-market-probe.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    repo = QagentRepository(session_factory)
+    now = datetime.now(timezone.utc)
+    today = routes._a_share_today()
+    card = {
+        "card_id": "card-market-probe",
+        "instrument_id": "CN:159999",
+        "asset_type": "ETF",
+        "rank_score": 0.95,
+        "strategy_score": 0.95,
+        "score": 0.95,
+        "market_context": {"industry": "宽基ETF"},
+        "entry_plan": {"trigger_price": "1.02"},
+        "decision": {"risk_status": "clear", "action": "watch_trigger"},
+        "trading_status": {"latest_close": "1.00"},
+    }
+    with session_factory() as session:
+        session.add(
+            ScanRunRow(
+                run_id="scan-market-probe",
+                provider="free",
+                mode="full_market",
+                symbols=json.dumps(["CN:159999"]),
+                scanned=1,
+                cards=1,
+                data_health="{}",
+                created_at=now,
+            )
+        )
+        session.add(
+            OpportunitySnapshotRow(
+                snapshot_id="scan-market-probe:card-1",
+                run_id="scan-market-probe",
+                card_id="card-market-probe",
+                instrument_id="CN:159999",
+                market="CN",
+                status="setup_ready",
+                signal_date=today,
+                latest_close=Decimal("1.00"),
+                primary_strategy_id="factor_rotation_watch",
+                score=Decimal("0.95"),
+                strategy_score=Decimal("0.95"),
+                rank_score=Decimal("0.95"),
+                trigger_price=Decimal("1.02"),
+                initial_stop=Decimal("0.96"),
+                target_1=Decimal("1.12"),
+                card_json=json.dumps(card, sort_keys=True),
+                created_at=now,
+            )
+        )
+        session.commit()
+    repo.save_scan_result_cache(
+        cache_key=routes.full_market_batch_cache_key("free", True),
+        provider="free",
+        mode="full_market_batch",
+        symbols=["CN:159999"],
+        payload={
+            "cards": [card],
+            "benchmark_trend": {
+                "state": "risk_off",
+                "entry_allowed": False,
+                "reason": "4/4 benchmarks below trend",
+            },
+        },
+    )
+
+    client = TestClient(create_app())
+    first = client.post(
+        "/api/automation/scheduler/run-once"
+        "?provider=free&include_etfs=true&run_scan=false&run_alerts=false"
+        "&update_paper=false&seed_paper=true&seed_limit=5"
+    )
+    second = client.post(
+        "/api/automation/scheduler/run-once"
+        "?provider=free&include_etfs=true&run_scan=false&run_alerts=false"
+        "&update_paper=false&seed_paper=true&seed_limit=5"
+    )
+
+    assert first.status_code == 200
+    first_result = first.json()["last_result"]
+    assert first_result["paper_created"] == 1
+    assert first_result["data_health"]["paper_market_entry_gate"] == "throttled"
+    assert first_result["data_health"]["paper_risk_gate_action"] == "throttle_new_entries"
+    assert first_result["data_health"]["automation_seed_effective_limit"] == "1"
+    assert first_result["data_health"]["paper_market_probe_remaining_today"] == "0"
+    assert second.status_code == 200
+    second_result = second.json()["last_result"]
+    assert second_result["paper_created"] == 0
+    assert second_result["data_health"]["paper_risk_gate_action"] == "throttle_new_entries"
+    assert second_result["data_health"]["paper_market_probe_remaining_today"] == "0"
+    with session_factory() as session:
+        trade = session.query(PaperTradeRow).filter_by(instrument_id="CN:159999").one()
+        assert trade.allocation_multiplier == Decimal("0.3500")
+        assert "风控恢复探针" in trade.notes
+
+
 def test_automation_scheduler_replaces_stale_pending_with_strong_candidate(
     tmp_path,
     monkeypatch,

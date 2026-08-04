@@ -221,6 +221,9 @@ from qagent.strategies.models import StrategyHealth
 router = APIRouter()
 
 PAPER_MAX_PER_INDUSTRY = 2
+PAPER_RISK_OFF_MAX_NEW_ENTRIES = 1
+PAPER_RISK_OFF_POSITION_SIZE_MULTIPLIER = Decimal("0.35")
+PAPER_RISK_OFF_MIN_PRIORITY_SCORE = 0.65
 _UNKNOWN_PAPER_INDUSTRIES = {
     "",
     "-",
@@ -3427,6 +3430,11 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 limit=candidate_pool_limit,
                 expected_signal_date=expected_signal_date,
             )
+            risk_gate_health = _paper_merge_market_risk_gate(
+                risk_gate_health,
+                seed_health,
+            )
+            data_health.update(risk_gate_health)
             snapshots, production_health = _ranking_v3_production_seed_scope(
                 repo,
                 snapshots,
@@ -3447,6 +3455,23 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 max_per_industry=PAPER_MAX_PER_INDUSTRY,
             )
             data_health.update(industry_capacity_health)
+            snapshots, market_probe_health = _paper_market_probe_snapshots(
+                paper_repo,
+                snapshots,
+                provider=mode,
+                risk_gate_health=risk_gate_health,
+                signal_date=expected_signal_date or _a_share_today(),
+            )
+            data_health.update(market_probe_health)
+            effective_seed_limit = _paper_seed_limit_from_risk_gate(
+                settings.seed_limit,
+                risk_gate_health,
+            )
+            effective_active_limit = _paper_seed_active_limit_from_risk_gate(
+                paper_repo,
+                settings.seed_limit,
+                risk_gate_health,
+            )
             pool_health = _paper_candidate_pool_health(
                 paper_repo=paper_repo,
                 snapshots=snapshots,
@@ -3518,7 +3543,7 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 max_signal_age_days=None,
                 signal_date_override=tracking_signal_date,
                 notes=(
-                    "风控恢复探针；风险收缩小仓位：本轮最多 1 笔，收益回撤改善后恢复正常额度。"
+                    "风控恢复探针；研究模拟盘风险收缩小仓位：单日最多 1 笔，风险状态改善后恢复正常额度。"
                     if risk_gate_health.get("paper_risk_gate_action") == "throttle_new_entries"
                     else ""
                 ),
@@ -3529,6 +3554,15 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 ),
                 admission_repo=repo,
             )
+            if risk_gate_health.get("paper_market_entry_gate") == "throttled":
+                _, post_seed_market_probe_health = _paper_market_probe_snapshots(
+                    paper_repo,
+                    snapshots,
+                    provider=mode,
+                    risk_gate_health=risk_gate_health,
+                    signal_date=expected_signal_date or _a_share_today(),
+                )
+                data_health.update(post_seed_market_probe_health)
             paper_created += seed_result.created
             data_health["automation_seed_snapshots"] = str(len(snapshots))
             data_health["automation_seed_effective_limit"] = str(effective_seed_limit)
@@ -3642,6 +3676,15 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
     # the current state consumed by the dashboard and the next scheduler run.
     applied_risk_gate_health = dict(risk_gate_health)
     _, final_risk_gate_health = _paper_seed_risk_gate(paper_repo, mode)
+    applied_market_gate_health = {
+        key: value
+        for key, value in applied_risk_gate_health.items()
+        if key.startswith("paper_market_entry_gate")
+    }
+    final_risk_gate_health = _paper_merge_market_risk_gate(
+        final_risk_gate_health,
+        applied_market_gate_health,
+    )
     if final_risk_gate_health != applied_risk_gate_health:
         for key, value in applied_risk_gate_health.items():
             suffix = key.removeprefix("paper_risk_gate_")
@@ -3750,6 +3793,87 @@ def _paper_candidate_pool_limit(effective_seed_limit: int) -> int:
     return max(30, min(120, max(1, effective_seed_limit) * 12))
 
 
+def _paper_merge_market_risk_gate(
+    risk_gate_health: dict[str, str],
+    market_gate_health: dict[str, str],
+) -> dict[str, str]:
+    merged = {**risk_gate_health, **market_gate_health}
+    if market_gate_health.get("paper_market_entry_gate") != "throttled":
+        return merged
+    if merged.get("paper_risk_gate_action") in {"capacity_full", "pause_new_entries"}:
+        return merged
+
+    try:
+        existing_max = int(merged.get("paper_risk_gate_max_new_entries", "999"))
+    except ValueError:
+        existing_max = 999
+    try:
+        existing_multiplier = Decimal(
+            merged.get("paper_risk_gate_position_size_multiplier", "1.0")
+        )
+    except (ArithmeticError, ValueError):
+        existing_multiplier = Decimal("1.0")
+    market_reason = market_gate_health.get("paper_market_entry_gate_reason", "")
+    performance_reason = risk_gate_health.get("paper_risk_gate_reason", "")
+    reasons = [reason for reason in (performance_reason, market_reason) if reason]
+    merged.update(
+        {
+            "paper_risk_gate_action": "throttle_new_entries",
+            "paper_risk_gate_reason": "；".join(dict.fromkeys(reasons)),
+            "paper_risk_gate_recovery_state": "market_probe",
+            "paper_risk_gate_max_new_entries": str(
+                min(existing_max, PAPER_RISK_OFF_MAX_NEW_ENTRIES)
+            ),
+            "paper_risk_gate_position_size_multiplier": f"{min(existing_multiplier, PAPER_RISK_OFF_POSITION_SIZE_MULTIPLIER):.4f}",
+        }
+    )
+    return merged
+
+
+def _paper_market_probe_snapshots(
+    paper_repo: PaperTradingRepository,
+    snapshots: list[OpportunitySnapshotRecord],
+    *,
+    provider: str,
+    risk_gate_health: dict[str, str],
+    signal_date: date,
+) -> tuple[list[OpportunitySnapshotRecord], dict[str, str]]:
+    if risk_gate_health.get("paper_market_entry_gate") != "throttled":
+        return snapshots, {}
+
+    qualified = [
+        snapshot
+        for snapshot in snapshots
+        if _paper_snapshot_priority_score(snapshot) >= PAPER_RISK_OFF_MIN_PRIORITY_SCORE
+    ]
+    probes_today = sum(
+        1
+        for trade in paper_repo.list_trades(limit=1000, provider=provider)
+        if trade.signal_date == signal_date and "风控恢复探针" in trade.notes
+    )
+    remaining = max(PAPER_RISK_OFF_MAX_NEW_ENTRIES - probes_today, 0)
+    selected = qualified if remaining > 0 else []
+    return selected, {
+        "paper_market_probe_min_priority_score": f"{PAPER_RISK_OFF_MIN_PRIORITY_SCORE:.4f}",
+        "paper_market_probe_qualified": str(len(qualified)),
+        "paper_market_probe_filtered": str(len(snapshots) - len(qualified)),
+        "paper_market_probe_existing_today": str(probes_today),
+        "paper_market_probe_remaining_today": str(remaining),
+    }
+
+
+def _paper_market_probe_signal_date(
+    snapshots: list[OpportunitySnapshotRecord],
+    *,
+    provider: str,
+) -> date:
+    if provider == "fixture":
+        signal_dates = [snapshot.signal_date for snapshot in snapshots]
+        if signal_dates:
+            return max(signal_dates)
+    return _a_share_today()
+
+
 def _paper_candidate_pool_snapshot_items(
     *,
     paper_repo: PaperTradingRepository,
@@ -3785,6 +3909,11 @@ def _paper_candidate_pool_snapshot_items(
     replacee_pressure = _paper_pending_replacement_pressure(replacee) if replacee else 0.0
     risk_action = risk_gate_health.get("paper_risk_gate_action", "")
     market_entry_blocked = risk_gate_health.get("paper_market_entry_gate") == "blocked"
+    market_entry_throttled = risk_gate_health.get("paper_market_entry_gate") == "throttled"
+    market_probe_budget_exhausted = (
+        market_entry_throttled
+        and risk_gate_health.get("paper_market_probe_remaining_today") == "0"
+    )
     replacement_used = False
     items: list[dict[str, object]] = []
     for snapshot in snapshots:
@@ -3840,6 +3969,12 @@ def _paper_candidate_pool_snapshot_items(
         elif market_entry_blocked:
             status = "blocked_by_market"
             action = "市场风控暂停入场"
+        elif market_probe_budget_exhausted:
+            status = "blocked_by_market"
+            action = "今日风险探针额度已用完"
+        elif market_entry_throttled and score < PAPER_RISK_OFF_MIN_PRIORITY_SCORE:
+            status = "blocked_by_market"
+            action = "防守行情仅允许高质量小仓探针"
         elif industry is None:
             status = "blocked_by_industry"
             action = "行业数据缺失"
@@ -4619,12 +4754,99 @@ def _paper_market_entry_gate_from_cache(
         }
     state = _string_value(trend.get("state")) or "unknown"
     entry_allowed = trend.get("entry_allowed")
-    blocked = entry_allowed is False or state == "risk_off"
-    return {
-        "paper_market_entry_gate": "blocked" if blocked else "allowed",
-        "paper_market_entry_gate_state": state,
-        "paper_market_entry_gate_reason": _string_value(trend.get("reason")),
+    hard_blocked = trend.get("hard_block") is True or state in {
+        "extreme_risk",
+        "market_halt",
     }
+    throttled = not hard_blocked and (entry_allowed is False or state == "risk_off")
+    gate = "blocked" if hard_blocked else "throttled" if throttled else "allowed"
+    max_new_entries = (
+        0 if hard_blocked else PAPER_RISK_OFF_MAX_NEW_ENTRIES if throttled else None
+    )
+    reason = _string_value(trend.get("reason"))
+    if throttled:
+        reason = (
+            f"{reason}；研究模拟盘仅允许单日 1 笔高质量小仓探针。"
+            if reason
+            else "风险规避行情，研究模拟盘仅允许单日 1 笔高质量小仓探针。"
+        )
+    return {
+        "paper_market_entry_gate": gate,
+        "paper_market_entry_gate_state": state,
+        "paper_market_entry_gate_reason": reason,
+        "paper_market_entry_gate_max_new_entries": (
+            str(max_new_entries) if max_new_entries is not None else ""
+        ),
+        "paper_market_entry_gate_position_size_multiplier": (
+            "0.0000"
+            if hard_blocked
+            else f"{PAPER_RISK_OFF_POSITION_SIZE_MULTIPLIER:.4f}"
+            if throttled
+            else "1.0000"
+        ),
+    }
+
+
+def _paper_market_entry_gate_from_latest_cache(
+    repo: QagentRepository,
+    *,
+    mode: str,
+    include_etfs: bool = True,
+) -> dict[str, str]:
+    cached, freshness = _automation_scan_result_cache(
+        repo,
+        cache_key=full_market_batch_cache_key(mode, include_etfs),
+        max_age=timedelta(days=7),
+    )
+    if cached is None:
+        return {}
+    return {
+        **_paper_market_entry_gate_from_cache(cached.payload),
+        "paper_market_entry_gate_cache_freshness": freshness,
+    }
+
+
+def _paper_apply_risk_gate_health_to_report(
+    report: PaperDailyReport,
+    risk_gate_health: dict[str, str],
+) -> None:
+    if risk_gate_health.get("paper_risk_gate_action") != "throttle_new_entries":
+        return
+    risk_gate = report.risk_gate
+    risk_gate.action = "throttle_new_entries"
+    risk_gate.can_add_entries = True
+    risk_gate.title = "风险规避期研究探针"
+    risk_gate.reason = risk_gate_health.get(
+        "paper_risk_gate_reason",
+        "风险规避行情，仅允许小仓位研究探针。",
+    )
+    risk_gate.reasons = list(dict.fromkeys([*risk_gate.reasons, "market_risk_off"]))
+    risk_gate.recovery_conditions = list(
+        dict.fromkeys(
+            [
+                *risk_gate.recovery_conditions,
+                "市场基准恢复趋势后解除研究探针限额",
+            ]
+        )
+    )
+    risk_gate.recovery_state = "market_probe"
+    try:
+        risk_gate.max_new_entries = int(
+            risk_gate_health.get("paper_risk_gate_max_new_entries", "1")
+        )
+    except ValueError:
+        risk_gate.max_new_entries = PAPER_RISK_OFF_MAX_NEW_ENTRIES
+    try:
+        risk_gate.position_size_multiplier = float(
+            risk_gate_health.get(
+                "paper_risk_gate_position_size_multiplier",
+                str(PAPER_RISK_OFF_POSITION_SIZE_MULTIPLIER),
+            )
+        )
+    except ValueError:
+        risk_gate.position_size_multiplier = float(
+            PAPER_RISK_OFF_POSITION_SIZE_MULTIPLIER
+        )
 
 
 def _paper_strategy_capacity_filter(
@@ -5105,14 +5327,25 @@ def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, o
         raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
     mode = provider.strip().lower()
     repo = _repo()
-    snapshots, _ = _paper_seed_snapshots_from_recommendations(
+    paper_repo = _paper_repo()
+    allow_seed, risk_gate_health = _paper_seed_risk_gate(paper_repo, mode)
+    snapshots, seed_health = _paper_seed_snapshots_from_recommendations(
         repo,
         mode=mode,
         include_etfs=True,
         max_age=timedelta(days=7),
         limit=limit,
     )
-    paper_repo = _paper_repo()
+    risk_gate_health = _paper_merge_market_risk_gate(risk_gate_health, seed_health)
+    if not allow_seed and risk_gate_health.get("paper_risk_gate_action") != "capacity_full":
+        snapshots = []
+    snapshots, _ = _paper_market_probe_snapshots(
+        paper_repo,
+        snapshots,
+        provider=mode,
+        risk_gate_health=risk_gate_health,
+        signal_date=_paper_market_probe_signal_date(snapshots, provider=mode),
+    )
     recently_released = _paper_recently_released_instruments(
         paper_repo.list_trades(limit=1000, provider=mode)
     )
@@ -5120,14 +5353,26 @@ def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, o
         snapshot for snapshot in snapshots if snapshot.instrument_id not in recently_released
     ]
     account = paper_repo.get_account_settings()
+    effective_limit = _paper_seed_limit_from_risk_gate(limit, risk_gate_health)
+    throttled = risk_gate_health.get("paper_risk_gate_action") == "throttle_new_entries"
     result = seed_paper_trades_from_snapshots(
         paper_repo,
         snapshots,
         provider=mode,
-        max_created=limit,
+        max_created=effective_limit,
         max_active_trades=account.max_positions,
         max_signal_age_days=None,
         signal_date_override=_a_share_today() if mode != "fixture" else None,
+        notes=(
+            "风控恢复探针；研究模拟盘风险收缩小仓位：单日最多 1 笔。"
+            if throttled
+            else ""
+        ),
+        allocation_multiplier=Decimal(
+            risk_gate_health.get("paper_risk_gate_position_size_multiplier", "1.0")
+            if throttled
+            else "1.0"
+        ),
         admission_repo=repo,
     )
     return result.model_dump(mode="json")
@@ -5553,6 +5798,15 @@ def paper_trade_daily_report(
         source_context_by_trade=source_context_by_trade,
     )
     _, risk_gate_health = _paper_seed_risk_gate(repo, mode)
+    market_gate_health = _paper_market_entry_gate_from_latest_cache(
+        _repo(),
+        mode=mode,
+    )
+    risk_gate_health = _paper_merge_market_risk_gate(
+        risk_gate_health,
+        market_gate_health,
+    )
+    _paper_apply_risk_gate_health_to_report(report, risk_gate_health)
     report.data_health.update(
         {
             "paper_daily_benchmarks_source": "market_cache_only",
@@ -5650,7 +5904,15 @@ def paper_trade_candidate_pool(
         limit=max(limit, _paper_candidate_pool_limit(1)),
         include_market_blocked=True,
     )
-    candidate_gate_health = {**risk_gate_health, **seed_health}
+    candidate_gate_health = _paper_merge_market_risk_gate(risk_gate_health, seed_health)
+    _, market_probe_health = _paper_market_probe_snapshots(
+        paper_repo,
+        snapshots,
+        provider=mode,
+        risk_gate_health=candidate_gate_health,
+        signal_date=_paper_market_probe_signal_date(snapshots, provider=mode),
+    )
+    candidate_gate_health.update(market_probe_health)
     items, summary = _paper_candidate_pool_snapshot_items(
         paper_repo=paper_repo,
         snapshots=snapshots,
@@ -5659,8 +5921,7 @@ def paper_trade_candidate_pool(
         limit=limit,
     )
     data_health = {
-        **risk_gate_health,
-        **seed_health,
+        **candidate_gate_health,
         **_paper_candidate_pool_health(
             paper_repo=paper_repo,
             snapshots=snapshots,
