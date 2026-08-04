@@ -3530,7 +3530,7 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 before_price_filter - len(snapshots)
             )
             tracking_signal_date = (
-                _a_share_today()
+                expected_signal_date or _a_share_today()
                 if seed_health.get("automation_seed_source") == "latest_recommendation_cache"
                 else None
             )
@@ -3871,6 +3871,8 @@ def _paper_market_probe_signal_date(
         signal_dates = [snapshot.signal_date for snapshot in snapshots]
         if signal_dates:
             return max(signal_dates)
+    if provider == "free":
+        return _latest_completed_a_share_session() or _a_share_today()
     return _a_share_today()
 
 
@@ -3914,6 +3916,15 @@ def _paper_candidate_pool_snapshot_items(
         market_entry_throttled
         and risk_gate_health.get("paper_market_probe_remaining_today") == "0"
     )
+    expected_signal_date = None
+    expected_signal_date_value = risk_gate_health.get(
+        "paper_candidate_expected_signal_date"
+    )
+    if expected_signal_date_value:
+        try:
+            expected_signal_date = date.fromisoformat(expected_signal_date_value)
+        except ValueError:
+            expected_signal_date = None
     replacement_used = False
     items: list[dict[str, object]] = []
     for snapshot in snapshots:
@@ -3944,6 +3955,10 @@ def _paper_candidate_pool_snapshot_items(
             and snapshot.instrument_id not in recently_released
             and snapshot.snapshot_id not in existing_sources
         )
+        signal_date_fresh = (
+            expected_signal_date is None
+            or snapshot.signal_date == expected_signal_date
+        )
         industry_blocked = is_untracked_candidate and (
             industry is None or industry_occupied >= PAPER_MAX_PER_INDUSTRY
         )
@@ -3966,6 +3981,9 @@ def _paper_candidate_pool_snapshot_items(
         elif snapshot.snapshot_id in existing_sources:
             status = "tracked_before"
             action = "历史已跟踪"
+        elif is_untracked_candidate and not signal_date_fresh:
+            status = "blocked_by_data"
+            action = "数据待刷新：信号日期不是最新交易日"
         elif market_entry_blocked:
             status = "blocked_by_market"
             action = "市场风控暂停入场"
@@ -4006,6 +4024,7 @@ def _paper_candidate_pool_snapshot_items(
             action = "满额等待"
         if (
             price_basis_consistent
+            and signal_date_fresh
             and is_untracked_candidate
             and industry is not None
             and not industry_blocked
@@ -4028,6 +4047,7 @@ def _paper_candidate_pool_snapshot_items(
                 "industry_capacity_available": industry_capacity_available,
                 "industry_blocked": industry_blocked,
                 "signal_date": snapshot.signal_date.isoformat() if snapshot.signal_date else None,
+                "signal_date_fresh": signal_date_fresh,
                 "rank_score": _float_value(snapshot.rank_score),
                 "priority_score": score,
                 "market_theme_boost": theme_boost,
@@ -4051,6 +4071,7 @@ def _paper_candidate_pool_snapshot_items(
     )
     replacement_candidates = sum(1 for item in items if item["status"] == "replace_candidate")
     market_blocked_count = sum(1 for item in items if item["status"] == "blocked_by_market")
+    data_blocked_count = sum(1 for item in items if item["status"] == "blocked_by_data")
     industry_blocked_count = sum(1 for item in items if item["industry_blocked"])
     industry_missing_count = sum(
         1 for item in items if item["industry"] is None and item["industry_blocked"]
@@ -4063,6 +4084,7 @@ def _paper_candidate_pool_snapshot_items(
         "waiting_count": waiting_count,
         "replacement_candidates": replacement_candidates,
         "market_blocked_count": market_blocked_count,
+        "data_blocked_count": data_blocked_count,
         "industry_capacity_limit": PAPER_MAX_PER_INDUSTRY,
         "industry_blocked_count": industry_blocked_count,
         "industry_missing_count": industry_missing_count,
@@ -4651,6 +4673,7 @@ def _paper_seed_snapshots_from_latest_cache(
         snapshot = snapshot.model_copy(update=updates)
         selected.append(snapshot)
         seen_snapshot_ids.add(snapshot.snapshot_id)
+    freshness_health: dict[str, str] = {}
     if expected_signal_date is not None:
         mismatched = [
             snapshot
@@ -4658,14 +4681,29 @@ def _paper_seed_snapshots_from_latest_cache(
             if snapshot.signal_date != expected_signal_date
         ]
         if mismatched:
-            return [], {
+            selected = [
+                snapshot
+                for snapshot in selected
+                if snapshot.signal_date == expected_signal_date
+            ]
+            freshness_health = {
                 **market_gate_health,
                 "automation_seed_source": "latest_recommendation_cache",
                 "automation_seed_cache_id": cached.cache_id,
                 "automation_seed_cache_freshness": cache_freshness,
-                "paper_candidate_freshness_gate": "blocked",
+                "paper_candidate_freshness_gate": (
+                    "filtered" if selected else "blocked"
+                ),
                 "paper_candidate_expected_signal_date": expected_signal_date.isoformat(),
                 "paper_candidate_signal_date_mismatch": str(len(mismatched)),
+            }
+            if not selected:
+                return [], freshness_health
+        else:
+            freshness_health = {
+                "paper_candidate_freshness_gate": "fresh",
+                "paper_candidate_expected_signal_date": expected_signal_date.isoformat(),
+                "paper_candidate_signal_date_mismatch": "0",
             }
     if not selected:
         if ranked:
@@ -4679,6 +4717,7 @@ def _paper_seed_snapshots_from_latest_cache(
         return [], {}
     return selected, {
         **market_gate_health,
+        **freshness_health,
         "automation_seed_source": "latest_recommendation_cache",
         "automation_seed_cache_id": cached.cache_id,
         "automation_seed_cache_freshness": cache_freshness,
@@ -5355,6 +5394,10 @@ def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, o
     account = paper_repo.get_account_settings()
     effective_limit = _paper_seed_limit_from_risk_gate(limit, risk_gate_health)
     throttled = risk_gate_health.get("paper_risk_gate_action") == "throttle_new_entries"
+    tracking_signal_date = _paper_market_probe_signal_date(
+        snapshots,
+        provider=mode,
+    )
     result = seed_paper_trades_from_snapshots(
         paper_repo,
         snapshots,
@@ -5362,7 +5405,7 @@ def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, o
         max_created=effective_limit,
         max_active_trades=account.max_positions,
         max_signal_age_days=None,
-        signal_date_override=_a_share_today() if mode != "fixture" else None,
+        signal_date_override=tracking_signal_date if mode != "fixture" else None,
         notes=(
             "风控恢复探针；研究模拟盘风险收缩小仓位：单日最多 1 笔。"
             if throttled
@@ -5905,6 +5948,26 @@ def paper_trade_candidate_pool(
         include_market_blocked=True,
     )
     candidate_gate_health = _paper_merge_market_risk_gate(risk_gate_health, seed_health)
+    expected_signal_date = (
+        _latest_completed_a_share_session() if mode == "free" else None
+    )
+    if expected_signal_date is not None:
+        signal_date_mismatch = sum(
+            1
+            for snapshot in snapshots
+            if snapshot.signal_date != expected_signal_date
+        )
+        candidate_gate_health.update(
+            {
+                "paper_candidate_freshness_gate": (
+                    "filtered" if signal_date_mismatch else "fresh"
+                ),
+                "paper_candidate_expected_signal_date": (
+                    expected_signal_date.isoformat()
+                ),
+                "paper_candidate_signal_date_mismatch": str(signal_date_mismatch),
+            }
+        )
     _, market_probe_health = _paper_market_probe_snapshots(
         paper_repo,
         snapshots,

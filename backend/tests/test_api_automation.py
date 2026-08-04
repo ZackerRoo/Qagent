@@ -994,15 +994,22 @@ def test_automation_scheduler_allows_only_one_daily_risk_off_probe(
         "decision": {"risk_status": "clear", "action": "watch_trigger"},
         "trading_status": {"latest_close": "1.00"},
     }
+    stale_card = {
+        **card,
+        "card_id": "card-market-probe-stale",
+        "instrument_id": "CN:159998",
+        "rank_score": 0.99,
+    }
+    monkeypatch.setattr(routes, "_latest_completed_a_share_session", lambda: today)
     with session_factory() as session:
         session.add(
             ScanRunRow(
                 run_id="scan-market-probe",
                 provider="free",
                 mode="full_market",
-                symbols=json.dumps(["CN:159999"]),
-                scanned=1,
-                cards=1,
+                symbols=json.dumps(["CN:159998", "CN:159999"]),
+                scanned=2,
+                cards=2,
                 data_health="{}",
                 created_at=now,
             )
@@ -1028,40 +1035,76 @@ def test_automation_scheduler_allows_only_one_daily_risk_off_probe(
                 created_at=now,
             )
         )
+        session.add(
+            OpportunitySnapshotRow(
+                snapshot_id="scan-market-probe:card-stale",
+                run_id="scan-market-probe",
+                card_id="card-market-probe-stale",
+                instrument_id="CN:159998",
+                market="CN",
+                status="setup_ready",
+                signal_date=today - timedelta(days=1),
+                latest_close=Decimal("1.00"),
+                primary_strategy_id="factor_rotation_watch",
+                score=Decimal("0.99"),
+                strategy_score=Decimal("0.99"),
+                rank_score=Decimal("0.99"),
+                trigger_price=Decimal("1.02"),
+                initial_stop=Decimal("0.96"),
+                target_1=Decimal("1.12"),
+                card_json=json.dumps(stale_card, sort_keys=True),
+                created_at=now,
+            )
+        )
         session.commit()
     repo.save_scan_result_cache(
         cache_key=routes.full_market_batch_cache_key("free", True),
         provider="free",
         mode="full_market_batch",
-        symbols=["CN:159999"],
+        symbols=["CN:159998", "CN:159999"],
         payload={
-            "cards": [card],
+            "cards": [stale_card, card],
             "benchmark_trend": {
                 "state": "risk_off",
                 "entry_allowed": False,
                 "reason": "4/4 benchmarks below trend",
             },
+            "data_health": {"full_market_signal_date": today.isoformat()},
         },
     )
 
     client = TestClient(create_app())
+    candidate_pool = client.get(
+        "/api/paper-trades/candidate-pool?provider=free&include_etfs=true&limit=10"
+    )
     first = client.post(
         "/api/automation/scheduler/run-once"
-        "?provider=free&include_etfs=true&run_scan=false&run_alerts=false"
+        "?provider=free&include_etfs=true&run_scan=true&run_alerts=false"
         "&update_paper=false&seed_paper=true&seed_limit=5"
     )
     second = client.post(
         "/api/automation/scheduler/run-once"
-        "?provider=free&include_etfs=true&run_scan=false&run_alerts=false"
+        "?provider=free&include_etfs=true&run_scan=true&run_alerts=false"
         "&update_paper=false&seed_paper=true&seed_limit=5"
     )
 
+    assert candidate_pool.status_code == 200
+    stale_item = next(
+        item
+        for item in candidate_pool.json()["items"]
+        if item["instrument_id"] == "CN:159998"
+    )
+    assert stale_item["status"] == "blocked_by_data"
+    assert stale_item["signal_date_fresh"] is False
+    assert candidate_pool.json()["summary"]["data_blocked_count"] == 1
     assert first.status_code == 200
     first_result = first.json()["last_result"]
     assert first_result["paper_created"] == 1
     assert first_result["data_health"]["paper_market_entry_gate"] == "throttled"
     assert first_result["data_health"]["paper_risk_gate_action"] == "throttle_new_entries"
     assert first_result["data_health"]["automation_seed_effective_limit"] == "1"
+    assert first_result["data_health"]["paper_candidate_freshness_gate"] == "filtered"
+    assert first_result["data_health"]["paper_candidate_signal_date_mismatch"] == "1"
     assert first_result["data_health"]["paper_market_probe_remaining_today"] == "0"
     assert second.status_code == 200
     second_result = second.json()["last_result"]
