@@ -91,6 +91,9 @@ class SQLiteScaledDecimal(TypeDecorator[Decimal]):
 
 _schema_lock = Lock()
 _initialized_urls: set[str] = set()
+_default_engine_lock = Lock()
+_default_engine: Engine | None = None
+_default_engine_url: str | None = None
 _RANKING_V3_FORWARD_TRIGGER_VERSION = 2
 _RANKING_V3_PRODUCTION_TRIGGER_VERSION = 2
 _RANKING_V4_EVIDENCE_TRIGGER_VERSION = 4
@@ -99,6 +102,26 @@ _RANKING_V4_EVIDENCE_TRIGGER_VERSION = 4
 def create_db_engine(database_url: str | None = None):
     settings = get_settings()
     url = database_url or settings.database_url
+    if database_url is None:
+        return _shared_default_engine(url)
+    return _build_db_engine(url)
+
+
+def _shared_default_engine(url: str) -> Engine:
+    """Reuse the runtime engine so request-local repositories do not churn engines."""
+
+    global _default_engine, _default_engine_url
+    with _default_engine_lock:
+        if _default_engine is not None and _default_engine_url == url:
+            return _default_engine
+        if _default_engine is not None:
+            _default_engine.dispose()
+        _default_engine = _build_db_engine(url)
+        _default_engine_url = url
+        return _default_engine
+
+
+def _build_db_engine(url: str) -> Engine:
     parsed = make_url(url)
     is_file_sqlite = parsed.drivername.startswith("sqlite") and parsed.database not in (
         None,
@@ -136,7 +159,7 @@ def initialize_database(database_url: str | None = None):
     from qagent.storage import tables as _tables  # noqa: F401
 
     url = database_url or get_settings().database_url
-    engine = create_db_engine(url)
+    engine = create_db_engine(database_url)
     with _schema_lock:
         if url not in _initialized_urls:
             if engine.dialect.name.startswith("sqlite"):

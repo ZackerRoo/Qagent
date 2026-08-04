@@ -124,6 +124,15 @@ def test_create_db_engine_configures_sqlite_for_local_concurrency(tmp_path):
     assert isinstance(engine.pool, NullPool)
 
 
+def test_default_session_factories_reuse_runtime_engine(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'shared-runtime.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    first = create_session_factory()
+    second = create_session_factory()
+
+    assert first.kw["bind"] is second.kw["bind"]
+
+
 def test_repository_adds_and_lists_alert_rules(tmp_path):
     repo = make_repo(tmp_path)
 

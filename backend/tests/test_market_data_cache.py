@@ -372,6 +372,32 @@ class CountingProvider:
         return bars.groupby("instrument_id", as_index=False).tail(1).reset_index(drop=True)
 
 
+class BatchCountingProvider(CountingProvider):
+    def __init__(self):
+        super().__init__()
+        self.batch_calls = 0
+
+    def get_historical_daily_bars(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> pd.DataFrame:
+        self.batch_calls += 1
+        return self.fixture.get_daily_bars(instrument_ids, start, end)
+
+
+class EmptyBatchProvider(BatchCountingProvider):
+    def get_historical_daily_bars(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> pd.DataFrame:
+        self.batch_calls += 1
+        return pd.DataFrame()
+
+
 def test_cached_provider_uses_cached_daily_bars_for_same_range(tmp_path):
     repo = make_cache_repo(tmp_path)
     inner = CountingProvider()
@@ -386,3 +412,35 @@ def test_cached_provider_uses_cached_daily_bars_for_same_range(tmp_path):
     assert [event.status for event in provider.last_cache_events] == ["miss", "hit"]
     assert provider.cache_stats()["hits"] == 1
     assert provider.cache_stats()["misses"] == 1
+
+
+def test_cached_provider_prefetches_batch_before_per_symbol_reads(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    inner = BatchCountingProvider()
+    provider = CachedMarketDataProvider(inner, cache=repo, provider_mode="fixture")
+    instrument_ids = ["US:TEST", "CN:000001"]
+    start = date(2026, 1, 1)
+    end = date(2026, 1, 20)
+
+    provider.prefetch_daily_bars(instrument_ids, start, end)
+    bars = provider.get_daily_bars(instrument_ids, start, end)
+
+    assert inner.batch_calls == 1
+    assert inner.calls == 0
+    assert set(bars["instrument_id"]) == set(instrument_ids)
+
+
+def test_cached_provider_does_not_repeat_empty_batch_prefetch_per_symbol(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    inner = EmptyBatchProvider()
+    provider = CachedMarketDataProvider(inner, cache=repo, provider_mode="fixture")
+    instrument_ids = ["US:MISS", "CN:999999"]
+    start = date(2026, 1, 1)
+    end = date(2026, 1, 20)
+
+    provider.prefetch_daily_bars(instrument_ids, start, end)
+    bars = provider.get_daily_bars(instrument_ids, start, end)
+
+    assert bars.empty
+    assert inner.batch_calls == 1
+    assert inner.calls == 0

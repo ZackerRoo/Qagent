@@ -330,6 +330,16 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
             aggregate_health["full_market_checkpoint_batches_restored"] = str(restored_batches)
         else:
             try:
+                prefetch = getattr(provider, "prefetch_daily_bars", None)
+                if callable(prefetch):
+                    try:
+                        prefetch(
+                            batch,
+                            start=date(2026, 1, 1),
+                            end=date(2026, 12, 31),
+                        )
+                    except Exception as exc:
+                        aggregate_health[f"batch_{batch_index}_prefetch_error"] = str(exc)[:500]
                 scan = run_daily_scan(
                     batch,
                     provider,
