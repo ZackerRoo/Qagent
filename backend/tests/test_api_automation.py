@@ -92,6 +92,166 @@ def test_automatic_full_scan_is_deferred_during_market_session(monkeypatch):
     assert after_close == (True, "ready")
 
 
+def test_automatic_full_scan_queues_one_post_close_candidate_refresh(monkeypatch):
+    expected = date(2026, 7, 31)
+    cached = SimpleNamespace(
+        payload={
+            "cards": [
+                {
+                    "card_id": "stale-card",
+                    "entry_plan": {"trigger_price": "10.00"},
+                    "decision": {"risk_status": "clear", "action": "watch_trigger"},
+                }
+            ]
+        }
+    )
+    latest = SimpleNamespace(
+        job_id="old-scan",
+        status="succeeded",
+        finished_at=datetime(
+            2026,
+            7,
+            31,
+            15,
+            30,
+            tzinfo=ZoneInfo("Asia/Shanghai"),
+        ),
+        data_health={"full_market_signal_date": expected.isoformat()},
+    )
+    queued = SimpleNamespace(job_id="candidate-refresh")
+
+    class StubRepo:
+        def __init__(self):
+            self.updated = None
+
+        def get_latest_full_market_scan_job(self, *, provider):
+            assert provider == "free"
+            return latest
+
+        def list_latest_opportunity_snapshots_by_card_ids(self, card_ids, provider):
+            assert card_ids == ["stale-card"]
+            assert provider == "free"
+            return [
+                SimpleNamespace(card_id="stale-card", signal_date=date(2026, 7, 30))
+            ]
+
+        def tradable_catalog_summary(self):
+            return SimpleNamespace(total_count=2)
+
+        def create_full_market_scan_job(self, **kwargs):
+            assert kwargs["symbols"] == ["CN:000001", "CN:000002"]
+            return queued
+
+        def update_full_market_scan_job(self, job_id, **kwargs):
+            self.updated = (job_id, kwargs)
+            return queued
+
+    repo = StubRepo()
+    submitted = []
+    monkeypatch.setattr(routes, "_latest_completed_a_share_session", lambda: expected)
+    monkeypatch.setattr(
+        routes,
+        "_automation_scan_result_cache",
+        lambda *_args, **_kwargs: (cached, "age_window"),
+    )
+    monkeypatch.setattr(routes, "_automatic_full_scan_window", lambda: (True, "ready"))
+    monkeypatch.setattr(
+        routes,
+        "build_full_market_batch_symbols",
+        lambda **_: ["CN:000001", "CN:000002"],
+    )
+    monkeypatch.setattr(
+        routes,
+        "_submit_full_market_scan_job",
+        lambda job_id: submitted.append(job_id) or True,
+    )
+
+    status, started, job_id = routes._maybe_start_automatic_full_scan(
+        repo,
+        AutoProcessingSettings(provider="free"),
+    )
+
+    assert (status, started, job_id) == (
+        "queued_candidate_refresh",
+        True,
+        "candidate-refresh",
+    )
+    assert submitted == ["candidate-refresh"]
+    assert repo.updated[0] == "candidate-refresh"
+    assert repo.updated[1]["data_health"] == {
+        "automatic_candidate_freshness_state": "stale",
+        "automatic_candidate_expected_signal_date": "2026-07-31",
+        "automatic_candidate_cache_cards": "1",
+        "automatic_candidate_snapshots": "1",
+        "automatic_candidate_current_snapshots": "0",
+        "automatic_candidate_stale_snapshots": "1",
+        "automatic_candidate_missing_snapshots": "0",
+        "automatic_candidate_refresh": "true",
+    }
+
+
+def test_automatic_full_scan_does_not_repeat_post_close_candidate_refresh(monkeypatch):
+    expected = date(2026, 7, 31)
+    cached = SimpleNamespace(
+        payload={
+            "cards": [
+                {
+                    "card_id": "stale-card",
+                    "entry_plan": {"trigger_price": "10.00"},
+                    "decision": {"risk_status": "clear", "action": "watch_trigger"},
+                }
+            ]
+        }
+    )
+    latest = SimpleNamespace(
+        job_id="post-close-scan",
+        status="succeeded",
+        finished_at=datetime(
+            2026,
+            7,
+            31,
+            16,
+            0,
+            tzinfo=ZoneInfo("Asia/Shanghai"),
+        ),
+        data_health={"full_market_signal_date": expected.isoformat()},
+    )
+
+    class StubRepo:
+        def get_latest_full_market_scan_job(self, *, provider):
+            return latest
+
+        def list_latest_opportunity_snapshots_by_card_ids(self, card_ids, provider):
+            return [
+                SimpleNamespace(card_id="stale-card", signal_date=date(2026, 7, 30))
+            ]
+
+    submitted = []
+    monkeypatch.setattr(routes, "_latest_completed_a_share_session", lambda: expected)
+    monkeypatch.setattr(
+        routes,
+        "_automation_scan_result_cache",
+        lambda *_args, **_kwargs: (cached, "age_window"),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_submit_full_market_scan_job",
+        lambda job_id: submitted.append(job_id) or True,
+    )
+
+    status, started, job_id = routes._maybe_start_automatic_full_scan(
+        StubRepo(),
+        AutoProcessingSettings(provider="free"),
+    )
+
+    assert (status, started, job_id) == (
+        "candidate_data_stale_after_retry",
+        False,
+        "post-close-scan",
+    )
+    assert submitted == []
+
+
 def test_stale_automatic_full_scan_restarts_same_job_from_checkpoints(
     tmp_path,
     monkeypatch,

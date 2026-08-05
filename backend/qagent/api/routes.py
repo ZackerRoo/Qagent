@@ -224,6 +224,7 @@ PAPER_MAX_PER_INDUSTRY = 2
 PAPER_RISK_OFF_MAX_NEW_ENTRIES = 1
 PAPER_RISK_OFF_POSITION_SIZE_MULTIPLIER = Decimal("0.35")
 PAPER_RISK_OFF_MIN_PRIORITY_SCORE = 0.65
+PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME = time(hour=15, minute=45)
 _UNKNOWN_PAPER_INDUSTRIES = {
     "",
     "-",
@@ -5154,9 +5155,84 @@ def _automatic_full_scan_window(now: datetime | None = None) -> tuple[bool, str]
     today = local_now.date()
     sessions = trading_sessions_in_range(today, today)
     local_time = local_now.timetz().replace(tzinfo=None)
-    if sessions and time(hour=9, minute=15) <= local_time < time(hour=15, minute=45):
+    if (
+        sessions
+        and time(hour=9, minute=15)
+        <= local_time
+        < PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME
+    ):
         return False, "market_session_open"
     return True, "ready"
+
+
+def _cached_paper_candidate_signal_date_health(
+    repo: QagentRepository,
+    cached: ScanResultCacheRecord,
+    *,
+    provider: str,
+    expected_signal_date: date,
+) -> dict[str, str]:
+    raw_cards = cached.payload.get("cards")
+    if not isinstance(raw_cards, list):
+        return {"automatic_candidate_freshness_state": "empty"}
+    card_ids = list(
+        dict.fromkeys(
+            _string_value(card.get("card_id"))
+            for card in raw_cards
+            if isinstance(card, dict) and _is_trackable_cached_paper_card(card)
+        )
+    )
+    card_ids = [card_id for card_id in card_ids if card_id]
+    if not card_ids:
+        return {
+            "automatic_candidate_freshness_state": "empty",
+            "automatic_candidate_cache_cards": "0",
+        }
+    snapshots = repo.list_latest_opportunity_snapshots_by_card_ids(
+        card_ids,
+        provider=provider,
+    )
+    current_count = sum(
+        1 for snapshot in snapshots if snapshot.signal_date == expected_signal_date
+    )
+    stale_count = sum(
+        1 for snapshot in snapshots if snapshot.signal_date != expected_signal_date
+    )
+    missing_count = max(len(card_ids) - len(snapshots), 0)
+    if current_count == 0:
+        state = "stale"
+    elif stale_count or missing_count:
+        state = "partial"
+    else:
+        state = "fresh"
+    return {
+        "automatic_candidate_freshness_state": state,
+        "automatic_candidate_expected_signal_date": expected_signal_date.isoformat(),
+        "automatic_candidate_cache_cards": str(len(card_ids)),
+        "automatic_candidate_snapshots": str(len(snapshots)),
+        "automatic_candidate_current_snapshots": str(current_count),
+        "automatic_candidate_stale_snapshots": str(stale_count),
+        "automatic_candidate_missing_snapshots": str(missing_count),
+    }
+
+
+def _full_market_scan_is_post_close_candidate_refresh(
+    job: object,
+    *,
+    expected_signal_date: date,
+) -> bool:
+    finished_at = getattr(job, "finished_at", None)
+    data_health = getattr(job, "data_health", {})
+    if finished_at is None or not isinstance(data_health, Mapping):
+        return False
+    if data_health.get("full_market_signal_date") != expected_signal_date.isoformat():
+        return False
+    cutoff = datetime.combine(
+        expected_signal_date,
+        PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME,
+        tzinfo=ZoneInfo("Asia/Shanghai"),
+    ).astimezone(timezone.utc)
+    return _as_utc_datetime(finished_at) >= cutoff
 
 
 def _scan_cache_signal_date(cached: ScanResultCacheRecord) -> date | None:
@@ -5253,8 +5329,27 @@ def _maybe_start_automatic_full_scan(
         max_age=timedelta(minutes=settings.scan_max_age_minutes),
         expected_signal_date=expected_signal_date,
     )
+    candidate_refresh_health: dict[str, str] = {}
+    candidate_refresh_needed = False
     if cached is not None:
-        return "cache_fresh", False, latest.job_id if latest else None
+        if expected_signal_date is not None:
+            candidate_refresh_health = _cached_paper_candidate_signal_date_health(
+                repo,
+                cached,
+                provider=mode,
+                expected_signal_date=expected_signal_date,
+            )
+            candidate_refresh_needed = (
+                candidate_refresh_health.get("automatic_candidate_freshness_state")
+                == "stale"
+            )
+        if not candidate_refresh_needed:
+            return "cache_fresh", False, latest.job_id if latest else None
+        if latest and _full_market_scan_is_post_close_candidate_refresh(
+            latest,
+            expected_signal_date=expected_signal_date,
+        ):
+            return "candidate_data_stale_after_retry", False, latest.job_id
     if freshness == "stale_signal_retry_window":
         return "waiting_market_data", False, latest.job_id if latest else None
     scan_allowed, _ = _automatic_full_scan_window()
@@ -5278,8 +5373,23 @@ def _maybe_start_automatic_full_scan(
         include_etfs=settings.include_etfs,
         sync_if_empty=settings.sync_if_empty,
     )
+    if candidate_refresh_needed:
+        updated = repo.update_full_market_scan_job(
+            job.job_id,
+            message="Queued post-close refresh for stale paper candidates",
+            data_health={
+                **candidate_refresh_health,
+                "automatic_candidate_refresh": "true",
+            },
+        )
+        if updated is not None:
+            job = updated
     _submit_full_market_scan_job(job.job_id)
-    return "queued", True, job.job_id
+    return (
+        "queued_candidate_refresh" if candidate_refresh_needed else "queued",
+        True,
+        job.job_id,
+    )
 
 
 def _full_market_scan_job_is_stale(job, settings: AutoProcessingSettings) -> bool:
