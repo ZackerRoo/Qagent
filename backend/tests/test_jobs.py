@@ -1,4 +1,5 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -112,6 +113,50 @@ def test_research_bars_derive_adjusted_ohlc_from_legacy_factor():
     assert research.iloc[0]["high"] == 5.25
     assert research.iloc[0]["low"] == 4.9
     assert research.iloc[0]["close"] == 5.1
+
+
+def test_feature_snapshot_as_of_ignores_uncompleted_trade_dates():
+    items = [
+        _scan_item_with_trade_date("CN:000001", date(2026, 8, 5)),
+        _scan_item_with_trade_date("CN:000002", date(2026, 8, 6)),
+    ]
+
+    as_of = full_market._feature_snapshot_as_of(
+        items,
+        instrument_ids={"CN:000001", "CN:000002"},
+        fallback=date(2026, 8, 6),
+        not_after=date(2026, 8, 5),
+    )
+
+    assert as_of == date(2026, 8, 5)
+    assert (
+        full_market._future_trade_date_count(
+            items,
+            instrument_ids={"CN:000001", "CN:000002"},
+            after=date(2026, 8, 5),
+        )
+        == 1
+    )
+
+
+def test_feature_snapshot_as_of_clamps_future_fallback():
+    as_of = full_market._feature_snapshot_as_of(
+        [],
+        instrument_ids=set(),
+        fallback=date(2026, 8, 6),
+        not_after=date(2026, 8, 5),
+    )
+
+    assert as_of == date(2026, 8, 5)
+
+
+def test_latest_completed_a_share_session_excludes_open_session():
+    assert full_market._latest_completed_a_share_session(
+        datetime(2026, 8, 6, 11, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    ) == date(2026, 8, 5)
+    assert full_market._latest_completed_a_share_session(
+        datetime(2026, 8, 6, 15, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    ) == date(2026, 8, 6)
 
 
 def test_daily_scan_adds_benchmark_comparison_and_quick_brief():
@@ -680,6 +725,12 @@ def _scan_item(instrument_id: str, status: str) -> ScanItem:
         latest_close="10.00",
         latest_trade_date=date(2026, 3, 20),
     )
+
+
+def _scan_item_with_trade_date(instrument_id: str, trade_date: date) -> ScanItem:
+    item = _scan_item(instrument_id, "watch")
+    item.latest_trade_date = trade_date
+    return item
 
 
 def _theme_bars(instrument_id: str, direction: int = 1) -> pd.DataFrame:

@@ -1,4 +1,5 @@
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
@@ -20,6 +21,7 @@ from qagent.market.benchmark_trend import (
     benchmark_trend_data_health,
     build_benchmark_trend_snapshot,
 )
+from qagent.market.calendars import trading_sessions_in_range
 from qagent.market.tradable import load_cn_tradable_instruments
 from qagent.monitoring.drift import (
     DriftSnapshotMetadata,
@@ -436,10 +438,19 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     all_cards = final_policy.cards
     all_governance = final_policy.audits
     aggregate_health.update(final_policy.data_health)
+    feature_as_of_cap = (
+        _latest_completed_a_share_session() if job.provider == "free" else None
+    )
+    future_trade_dates_ignored = _future_trade_date_count(
+        all_items,
+        instrument_ids=set(card_universe),
+        after=feature_as_of_cap,
+    )
     feature_as_of = _feature_snapshot_as_of(
         all_items,
         instrument_ids=set(card_universe),
         fallback=job.created_at.date(),
+        not_after=feature_as_of_cap,
     )
     feature_snapshot = build_factor_feature_snapshot(
         global_factor_rankings,
@@ -462,6 +473,10 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
                 "preserve_batch_calibration_reconcile_latest_governance"
             ),
             "full_market_final_policy_reconciled": "true",
+            "full_market_feature_as_of_cap": (
+                feature_as_of_cap.isoformat() if feature_as_of_cap is not None else "none"
+            ),
+            "full_market_future_trade_dates_ignored": str(future_trade_dates_ignored),
         }
     )
 
@@ -807,13 +822,50 @@ def _feature_snapshot_as_of(
     *,
     instrument_ids: set[str],
     fallback: date,
+    not_after: date | None = None,
 ) -> date:
     trade_dates = [
         item.latest_trade_date
         for item in items
-        if item.instrument_id in instrument_ids and item.latest_trade_date is not None
+        if item.instrument_id in instrument_ids
+        and item.latest_trade_date is not None
+        and (not_after is None or item.latest_trade_date <= not_after)
     ]
-    return max(trade_dates, default=fallback)
+    effective_fallback = min(fallback, not_after) if not_after is not None else fallback
+    return max(trade_dates, default=effective_fallback)
+
+
+def _future_trade_date_count(
+    items: list[ScanItem],
+    *,
+    instrument_ids: set[str],
+    after: date | None,
+) -> int:
+    if after is None:
+        return 0
+    return sum(
+        item.instrument_id in instrument_ids
+        and item.latest_trade_date is not None
+        and item.latest_trade_date > after
+        for item in items
+    )
+
+
+def _latest_completed_a_share_session(now: datetime | None = None) -> date | None:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    local_now = current.astimezone(ZoneInfo("Asia/Shanghai"))
+    today = local_now.date()
+    sessions = trading_sessions_in_range(today - timedelta(days=14), today)
+    if not sessions:
+        return None
+    if (
+        sessions[-1] == today
+        and local_now.timetz().replace(tzinfo=None) < time(hour=15, minute=30)
+    ):
+        sessions = sessions[:-1]
+    return sessions[-1] if sessions else None
 
 
 def _feature_dataset_revision(
