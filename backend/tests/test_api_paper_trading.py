@@ -706,7 +706,7 @@ def test_cached_unreleased_ranking_v3_does_not_fall_back_to_legacy_seed(
     assert client.get("/api/paper-trades").json()["summary"]["total"] == 0
 
 
-def test_risk_off_candidates_allow_one_reduced_size_research_probe(
+def test_risk_off_candidates_allow_batch_reduced_size_research_entries(
     tmp_path,
     monkeypatch,
 ):
@@ -715,27 +715,31 @@ def test_risk_off_candidates_allow_one_reduced_size_research_probe(
         f"sqlite:///{tmp_path / 'paper-risk-off-candidates.db'}",
     )
     client = TestClient(create_app())
-    (card,) = _persist_authoritative_opportunities(
+    cards = _persist_authoritative_opportunities(
         provider="fixture",
-        cards=[("risk-off-visible-card", "US:RISK-OFF")],
+        cards=[
+            ("risk-off-visible-card-1", "US:RISK-OFF-1"),
+            ("risk-off-visible-card-2", "US:RISK-OFF-2"),
+        ],
     )
-    _patch_authoritative_card(
-        provider="fixture",
-        card_id=card.card_id,
-        updates={"market_context": {"industry": "宽基ETF"}},
-    )
+    for card in cards:
+        _patch_authoritative_card(
+            provider="fixture",
+            card_id=card.card_id,
+            updates={"market_context": {"industry": "宽基ETF"}},
+        )
     repo = routes._repo()
-    snapshot = repo.list_latest_opportunity_snapshots_by_card_ids(
-        [card.card_id],
+    snapshots = repo.list_latest_opportunity_snapshots_by_card_ids(
+        [card.card_id for card in cards],
         provider="fixture",
-    )[0]
+    )
     repo.save_scan_result_cache(
         cache_key=routes.full_market_batch_cache_key("fixture", True),
         provider="fixture",
         mode="full_market_batch",
-        symbols=[card.instrument_id],
+        symbols=[card.instrument_id for card in cards],
         payload={
-            "cards": [snapshot.card],
+            "cards": [snapshot.card for snapshot in snapshots],
             "benchmark_trend": {
                 "state": "risk_off",
                 "entry_allowed": False,
@@ -756,29 +760,34 @@ def test_risk_off_candidates_allow_one_reduced_size_research_probe(
     )
 
     assert pool.status_code == 200
-    assert pool.json()["items"][0]["instrument_id"] == "US:RISK-OFF"
-    assert pool.json()["items"][0]["status"] == "ready_to_add"
+    assert {item["instrument_id"] for item in pool.json()["items"]} == {
+        "US:RISK-OFF-1",
+        "US:RISK-OFF-2",
+    }
+    assert {item["status"] for item in pool.json()["items"]} == {"ready_to_add"}
     assert pool.json()["summary"]["market_blocked_count"] == 0
     assert pool.json()["summary"]["risk_action"] == "throttle_new_entries"
     assert pool.json()["data_health"]["paper_market_entry_gate"] == "throttled"
     assert seeded.status_code == 200
-    assert seeded.json()["created"] == 1
+    assert seeded.json()["created"] == 2
     assert report.status_code == 200
     assert report.json()["risk_gate"]["action"] == "throttle_new_entries"
-    assert report.json()["risk_gate"]["max_new_entries"] == 1
+    assert report.json()["risk_gate"]["max_new_entries"] == 3
     assert report.json()["risk_gate"]["position_size_multiplier"] == 0.35
     assert post_seed_pool.status_code == 200
-    assert post_seed_pool.json()["items"][0]["status"] == "active_in_paper"
+    assert {item["status"] for item in post_seed_pool.json()["items"]} == {
+        "active_in_paper"
+    }
     assert (
         post_seed_pool.json()["data_health"]["paper_market_probe_remaining_today"]
-        == "0"
+        == "3"
     )
     trades = client.get(
         "/api/paper-trades?provider=fixture&reporting_scope=legacy"
     ).json()["trades"]
-    assert len(trades) == 1
-    assert trades[0]["allocation_multiplier"] == "0.3500"
-    assert "风控恢复探针" in trades[0]["notes"]
+    assert len(trades) == 2
+    assert all(trade["allocation_multiplier"] == "0.3500" for trade in trades)
+    assert all("防守行情研究仓位" in trade["notes"] for trade in trades)
 
 
 def test_candidate_pool_reports_industry_capacity_block(tmp_path, monkeypatch):

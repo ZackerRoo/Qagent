@@ -6,12 +6,28 @@ from qagent.api.routes import (
     _paper_industry_capacity_filter,
     _paper_market_entry_gate_from_cache,
     _paper_merge_market_risk_gate,
+    _paper_seed_active_limit_from_risk_gate,
     _paper_snapshot_industry,
     _paper_strategy_capacity_filter,
 )
 
 
-def test_cached_risk_off_market_throttles_research_paper_entries():
+def test_paper_active_limit_uses_account_capacity_not_per_run_seed_limit():
+    paper_repo = SimpleNamespace(
+        get_account_settings=lambda: SimpleNamespace(max_positions=10)
+    )
+
+    assert (
+        _paper_seed_active_limit_from_risk_gate(
+            paper_repo,
+            configured_limit=5,
+            risk_gate_health={"paper_risk_gate_action": "allow_new_entries"},
+        )
+        == 10
+    )
+
+
+def test_cached_risk_off_market_reduces_size_without_reducing_entry_capacity():
     health = _paper_market_entry_gate_from_cache(
         {
             "benchmark_trend": {
@@ -24,7 +40,7 @@ def test_cached_risk_off_market_throttles_research_paper_entries():
 
     assert health["paper_market_entry_gate"] == "throttled"
     assert health["paper_market_entry_gate_state"] == "risk_off"
-    assert health["paper_market_entry_gate_max_new_entries"] == "1"
+    assert health["paper_market_entry_gate_max_new_entries"] == ""
     assert health["paper_market_entry_gate_position_size_multiplier"] == "0.3500"
 
     merged = _paper_merge_market_risk_gate(
@@ -37,7 +53,7 @@ def test_cached_risk_off_market_throttles_research_paper_entries():
         health,
     )
     assert merged["paper_risk_gate_action"] == "throttle_new_entries"
-    assert merged["paper_risk_gate_max_new_entries"] == "1"
+    assert merged["paper_risk_gate_max_new_entries"] == "5"
     assert merged["paper_risk_gate_position_size_multiplier"] == "0.3500"
 
 

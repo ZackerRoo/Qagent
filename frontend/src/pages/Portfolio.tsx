@@ -2380,11 +2380,11 @@ function PaperControlInsightGrid({
         <strong>{paperRecommendationState(report.risk_gate, language)}</strong>
         <p>
           {language === "zh"
-            ? "今日推荐会先经过模拟盘风控、市场归因和买点质量检查；恢复期只让最高质量机会进入验证。"
+            ? "今日推荐会先经过模拟盘风控、市场归因和买点质量检查；合格机会可按剩余仓位批量进入验证。"
             : "New recommendations pass through paper risk, market attribution, and trigger-quality checks before entering validation."}
         </p>
         <div className="paper-control-stats">
-          <small>{language === "zh" ? "试单上限" : "Probe"} <b>{report.risk_gate.max_new_entries}</b></small>
+          <small>{language === "zh" ? "单轮新增" : "Per run"} <b>{report.risk_gate.max_new_entries}</b></small>
           <small>{language === "zh" ? "恢复分" : "Score"} <b>{Math.round(report.risk_gate.recovery_score * 100)}</b></small>
         </div>
       </div>

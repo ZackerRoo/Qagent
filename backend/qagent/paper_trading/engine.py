@@ -1572,7 +1572,7 @@ def _paper_risk_gate_status(
             position_size_multiplier=0.0,
         )
 
-    max_new_entries = min(available_slots, 1)
+    max_new_entries = available_slots
     position_size_multiplier = 0.35 if severe or recovery_score < 0.45 else 0.5
     probe_note = (
         "已有恢复探针，继续允许新候选以小仓位进入"
@@ -1588,7 +1588,7 @@ def _paper_risk_gate_status(
         reason="；".join(reasons) + f"；{probe_note}，不会因收益回撤永久停止买入。",
         reasons=reasons,
         recovery_conditions=[
-            f"每轮最多新增 {max_new_entries} 笔，优先当前最高质量机会",
+            f"可按剩余仓位一次新增 {max_new_entries} 笔，优先当前最高质量机会",
             f"新增仓位按正常额度的 {position_size_multiplier:.0%} 执行",
             "已有持仓继续按止损、止盈和 T+1 规则更新",
             "收益、回撤和触发质量恢复后，再切回正常新增额度",

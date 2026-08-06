@@ -1804,7 +1804,7 @@ def test_paper_daily_report_explains_risk_gate_failures_and_event_timeline(tmp_p
 
     assert report.risk_gate.action == "throttle_new_entries"
     assert report.risk_gate.can_add_entries is True
-    assert report.risk_gate.max_new_entries == 1
+    assert report.risk_gate.max_new_entries == 4
     assert report.risk_gate.position_size_multiplier == 0.35
     assert report.risk_gate.reasons
     assert any(item.dimension == "strategy" for item in report.failure_attribution)

@@ -1219,7 +1219,7 @@ def test_automation_scheduler_backfills_closed_paper_slot_from_deeper_cache_cand
     assert active == {"CN:688002", "CN:688003"}
 
 
-def test_automation_scheduler_allows_one_recovery_probe_when_ledger_drawdown_is_high(
+def test_automation_scheduler_keeps_reduced_size_capacity_when_drawdown_is_high(
     tmp_path,
     monkeypatch,
 ):
@@ -1311,13 +1311,13 @@ def test_automation_scheduler_allows_one_recovery_probe_when_ledger_drawdown_is_
     health = body["last_result"]["data_health"]
     assert body["last_result"]["paper_created"] == 1
     assert health["paper_risk_gate_action"] == "throttle_new_entries"
-    assert health["paper_risk_gate_max_new_entries"] == "1"
+    assert health["paper_risk_gate_max_new_entries"] == "4"
     assert health["paper_risk_gate_position_size_multiplier"] == "0.3500"
     trades = client.get(
         "/api/paper-trades?provider=free&limit=20&reporting_scope=legacy"
     ).json()["trades"]
     probe = next(trade for trade in trades if trade["instrument_id"] == "CN:688999")
-    assert "风控恢复探针" in probe["notes"]
+    assert "防守行情研究仓位" in probe["notes"]
 
     second = client.post(
         "/api/automation/scheduler/run-once"
@@ -1331,7 +1331,7 @@ def test_automation_scheduler_allows_one_recovery_probe_when_ledger_drawdown_is_
     assert "automation_seed_skipped_by_risk_gate" not in second_result["data_health"]
 
 
-def test_automation_scheduler_allows_only_one_daily_risk_off_probe(
+def test_automation_scheduler_risk_off_uses_capacity_instead_of_daily_quota(
     tmp_path,
     monkeypatch,
 ):
@@ -1463,19 +1463,19 @@ def test_automation_scheduler_allows_only_one_daily_risk_off_probe(
     assert first_result["paper_created"] == 1
     assert first_result["data_health"]["paper_market_entry_gate"] == "throttled"
     assert first_result["data_health"]["paper_risk_gate_action"] == "throttle_new_entries"
-    assert first_result["data_health"]["automation_seed_effective_limit"] == "1"
+    assert first_result["data_health"]["automation_seed_effective_limit"] == "5"
     assert first_result["data_health"]["paper_candidate_freshness_gate"] == "filtered"
     assert first_result["data_health"]["paper_candidate_signal_date_mismatch"] == "1"
-    assert first_result["data_health"]["paper_market_probe_remaining_today"] == "0"
+    assert first_result["data_health"]["paper_market_probe_remaining_today"] == "4"
     assert second.status_code == 200
     second_result = second.json()["last_result"]
     assert second_result["paper_created"] == 0
     assert second_result["data_health"]["paper_risk_gate_action"] == "throttle_new_entries"
-    assert second_result["data_health"]["paper_market_probe_remaining_today"] == "0"
+    assert second_result["data_health"]["paper_market_probe_remaining_today"] == "4"
     with session_factory() as session:
         trade = session.query(PaperTradeRow).filter_by(instrument_id="CN:159999").one()
         assert trade.allocation_multiplier == Decimal("0.3500")
-        assert "风控恢复探针" in trade.notes
+        assert "防守行情研究仓位" in trade.notes
 
 
 def test_automation_scheduler_replaces_stale_pending_with_strong_candidate(

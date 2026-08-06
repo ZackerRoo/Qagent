@@ -18,7 +18,7 @@ class AutoProcessingSettings(BaseModel):
     max_symbols: int | None = Field(default=None, ge=1, le=20_000)
     sync_if_empty: bool = True
     seed_paper: bool = True
-    seed_limit: int = Field(default=5, ge=1, le=50)
+    seed_limit: int = Field(default=10, ge=1, le=50)
     update_paper: bool = True
     run_alerts: bool = True
     queue_alerts: bool = True
