@@ -366,10 +366,13 @@ def test_automatic_full_scan_queues_one_post_close_candidate_refresh(monkeypatch
         "automatic_candidate_stale_snapshots": "1",
         "automatic_candidate_missing_snapshots": "0",
         "automatic_candidate_refresh": "true",
+        "automatic_candidate_refresh_attempt": "1",
     }
 
 
-def test_automatic_full_scan_does_not_repeat_post_close_candidate_refresh(monkeypatch):
+def test_automatic_full_scan_does_not_repeat_second_post_close_candidate_refresh(
+    monkeypatch,
+):
     expected = date(2026, 7, 31)
     cached = SimpleNamespace(
         payload={
@@ -393,7 +396,11 @@ def test_automatic_full_scan_does_not_repeat_post_close_candidate_refresh(monkey
             0,
             tzinfo=ZoneInfo("Asia/Shanghai"),
         ),
-        data_health={"full_market_signal_date": expected.isoformat()},
+        data_health={
+            "full_market_signal_date": expected.isoformat(),
+            "automatic_candidate_refresh": "true",
+            "automatic_candidate_refresh_attempt": "2",
+        },
     )
 
     class StubRepo:
@@ -429,6 +436,114 @@ def test_automatic_full_scan_does_not_repeat_post_close_candidate_refresh(monkey
         "post-close-scan",
     )
     assert submitted == []
+
+
+def test_automatic_full_scan_retries_partial_candidates_after_settlement(monkeypatch):
+    expected = date(2026, 7, 31)
+    cached = SimpleNamespace(
+        payload={
+            "cards": [
+                {
+                    "card_id": card_id,
+                    "entry_plan": {"trigger_price": "10.00"},
+                    "decision": {"risk_status": "clear", "action": "watch_trigger"},
+                }
+                for card_id in ("current-card", "stale-card")
+            ]
+        }
+    )
+    latest = SimpleNamespace(
+        job_id="first-refresh",
+        status="succeeded",
+        finished_at=datetime(
+            2026,
+            7,
+            31,
+            16,
+            0,
+            tzinfo=ZoneInfo("Asia/Shanghai"),
+        ),
+        data_health={
+            "full_market_signal_date": expected.isoformat(),
+            "automatic_candidate_refresh": "true",
+            "automatic_candidate_refresh_attempt": "1",
+        },
+    )
+    queued = SimpleNamespace(job_id="settlement-retry")
+
+    class StubRepo:
+        def __init__(self):
+            self.updated = None
+
+        def get_latest_full_market_scan_job(self, *, provider):
+            return latest
+
+        def list_latest_opportunity_snapshots_by_card_ids(self, card_ids, provider):
+            return [
+                SimpleNamespace(card_id="current-card", signal_date=expected),
+                SimpleNamespace(
+                    card_id="stale-card",
+                    signal_date=expected - timedelta(days=1),
+                ),
+            ]
+
+        def tradable_catalog_summary(self):
+            return SimpleNamespace(total_count=2)
+
+        def create_full_market_scan_job(self, **kwargs):
+            return queued
+
+        def update_full_market_scan_job(self, job_id, **kwargs):
+            self.updated = (job_id, kwargs)
+            return queued
+
+    repo = StubRepo()
+    submitted = []
+    monkeypatch.setattr(routes, "_latest_completed_a_share_session", lambda: expected)
+    monkeypatch.setattr(
+        routes,
+        "_automation_scan_result_cache",
+        lambda *_args, **_kwargs: (cached, "age_window"),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_automatic_candidate_settlement_retry_ready",
+        lambda: True,
+    )
+    monkeypatch.setattr(routes, "_automatic_full_scan_window", lambda: (True, "ready"))
+    monkeypatch.setattr(
+        routes,
+        "build_full_market_batch_symbols",
+        lambda **_: ["CN:000001", "CN:000002"],
+    )
+    monkeypatch.setattr(
+        routes,
+        "_submit_full_market_scan_job",
+        lambda job_id: submitted.append(job_id) or True,
+    )
+
+    status, started, job_id = routes._maybe_start_automatic_full_scan(
+        repo,
+        AutoProcessingSettings(provider="free"),
+    )
+
+    assert (status, started, job_id) == (
+        "queued_candidate_refresh",
+        True,
+        "settlement-retry",
+    )
+    assert submitted == ["settlement-retry"]
+    assert repo.updated[1]["data_health"] == {
+        "automatic_candidate_freshness_state": "partial",
+        "automatic_candidate_expected_signal_date": "2026-07-31",
+        "automatic_candidate_cache_cards": "2",
+        "automatic_candidate_snapshots": "2",
+        "automatic_candidate_current_snapshots": "1",
+        "automatic_candidate_stale_snapshots": "1",
+        "automatic_candidate_missing_snapshots": "0",
+        "automatic_candidate_refresh": "true",
+        "automatic_candidate_refresh_attempt": "2",
+    }
 
 
 def test_stale_automatic_full_scan_restarts_same_job_from_checkpoints(

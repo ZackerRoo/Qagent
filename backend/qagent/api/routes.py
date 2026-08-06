@@ -224,6 +224,8 @@ PAPER_MAX_PER_INDUSTRY = 2
 PAPER_RISK_OFF_POSITION_SIZE_MULTIPLIER = Decimal("0.35")
 PAPER_RISK_OFF_MIN_PRIORITY_SCORE = 0.65
 PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME = time(hour=15, minute=45)
+PAPER_CANDIDATE_SETTLEMENT_RETRY_TIME = time(hour=18)
+PAPER_CANDIDATE_MAX_REFRESH_ATTEMPTS = 2
 _UNKNOWN_PAPER_INDUSTRIES = {
     "",
     "-",
@@ -5267,6 +5269,29 @@ def _full_market_scan_is_post_close_candidate_refresh(
     return _as_utc_datetime(finished_at) >= cutoff
 
 
+def _automatic_candidate_refresh_attempt(job: object) -> int:
+    data_health = getattr(job, "data_health", {})
+    if not isinstance(data_health, Mapping):
+        return 1
+    raw_attempt = data_health.get("automatic_candidate_refresh_attempt", "1")
+    try:
+        return max(int(raw_attempt), 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _automatic_candidate_settlement_retry_ready(
+    now: datetime | None = None,
+) -> bool:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    local_time = current.astimezone(ZoneInfo("Asia/Shanghai")).timetz().replace(
+        tzinfo=None
+    )
+    return local_time >= PAPER_CANDIDATE_SETTLEMENT_RETRY_TIME
+
+
 def _scan_cache_signal_date(cached: ScanResultCacheRecord) -> date | None:
     payload = cached.payload if isinstance(cached.payload, Mapping) else {}
     health = payload.get("data_health")
@@ -5368,6 +5393,7 @@ def _maybe_start_automatic_full_scan(
     )
     candidate_refresh_health: dict[str, str] = {}
     candidate_refresh_needed = False
+    candidate_refresh_attempt = 1
     if cached is not None:
         if expected_signal_date is not None:
             candidate_refresh_health = _cached_paper_candidate_signal_date_health(
@@ -5376,17 +5402,21 @@ def _maybe_start_automatic_full_scan(
                 provider=mode,
                 expected_signal_date=expected_signal_date,
             )
-            candidate_refresh_needed = (
-                candidate_refresh_health.get("automatic_candidate_freshness_state")
-                == "stale"
-            )
+            candidate_refresh_needed = candidate_refresh_health.get(
+                "automatic_candidate_freshness_state"
+            ) in {"stale", "partial"}
         if not candidate_refresh_needed:
             return "cache_fresh", False, latest.job_id if latest else None
         if latest and _full_market_scan_is_post_close_candidate_refresh(
             latest,
             expected_signal_date=expected_signal_date,
         ):
-            return "candidate_data_stale_after_retry", False, latest.job_id
+            previous_attempt = _automatic_candidate_refresh_attempt(latest)
+            if previous_attempt >= PAPER_CANDIDATE_MAX_REFRESH_ATTEMPTS:
+                return "candidate_data_stale_after_retry", False, latest.job_id
+            if not _automatic_candidate_settlement_retry_ready():
+                return "waiting_candidate_data_settlement", False, latest.job_id
+            candidate_refresh_attempt = previous_attempt + 1
     if freshness == "stale_signal_retry_window":
         return "waiting_market_data", False, latest.job_id if latest else None
     scan_allowed, _ = _automatic_full_scan_window()
@@ -5417,6 +5447,9 @@ def _maybe_start_automatic_full_scan(
             data_health={
                 **candidate_refresh_health,
                 "automatic_candidate_refresh": "true",
+                "automatic_candidate_refresh_attempt": str(
+                    candidate_refresh_attempt
+                ),
             },
         )
         if updated is not None:
