@@ -51,6 +51,40 @@ def test_automation_reuses_same_market_day_cache_after_ttl(monkeypatch):
     assert repo.max_ages == [timedelta(hours=4), timedelta(days=1)]
 
 
+def test_automation_reuses_previous_calendar_day_for_same_completed_session():
+    expected_session = date(2026, 8, 5)
+    cache = SimpleNamespace(
+        created_at=datetime(2026, 8, 5, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+        payload={
+            "data_health": {
+                "full_market_signal_date": expected_session.isoformat(),
+            }
+        },
+    )
+
+    class StubRepo:
+        def __init__(self):
+            self.max_ages: list[timedelta] = []
+
+        def get_recent_scan_result_cache(self, *, cache_key, max_age):
+            assert cache_key == "full_market_batch:free:true"
+            self.max_ages.append(max_age)
+            return cache if max_age >= timedelta(days=1) else None
+
+    repo = StubRepo()
+
+    result, freshness = routes._automation_scan_result_cache(
+        repo,
+        cache_key="full_market_batch:free:true",
+        max_age=timedelta(hours=4),
+        expected_signal_date=expected_session,
+    )
+
+    assert result is cache
+    assert freshness == "same_completed_session"
+    assert repo.max_ages == [timedelta(hours=4), timedelta(days=1)]
+
+
 def test_latest_completed_a_share_session_changes_after_close(monkeypatch):
     sessions = [date(2026, 7, 30), date(2026, 7, 31)]
     monkeypatch.setattr(
@@ -312,6 +346,28 @@ def test_stale_automatic_full_scan_restarts_same_job_from_checkpoints(
     assert resumed.data_health["full_market_restart_recovery"] == (
         "stale_checkpoint_resume"
     )
+
+
+def test_finalizing_full_market_scan_uses_extended_stale_timeout():
+    now = datetime.now(timezone.utc)
+    settings = AutoProcessingSettings(provider="free", interval_seconds=1800)
+    recently_finalizing = SimpleNamespace(
+        status="running",
+        updated_at=now - timedelta(minutes=90),
+        total_symbols=7050,
+        scanned_symbols=7050,
+        total_batches=36,
+        completed_batches=36,
+    )
+    abandoned_finalizing = SimpleNamespace(
+        **{
+            **recently_finalizing.__dict__,
+            "updated_at": now - timedelta(hours=3),
+        }
+    )
+
+    assert routes._full_market_scan_job_is_stale(recently_finalizing, settings) is False
+    assert routes._full_market_scan_job_is_stale(abandoned_finalizing, settings) is True
 
 
 def test_automation_blocks_stale_signal_cache_without_signal_day_fallback():

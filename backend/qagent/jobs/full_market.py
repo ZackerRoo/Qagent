@@ -400,6 +400,24 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
             data_health=aggregate_health,
         )
 
+    finalizing_started_at = datetime.now(timezone.utc)
+    aggregate_health.update(
+        {
+            "full_market_worker_phase": "finalizing",
+            "full_market_finalizing_started_at": finalizing_started_at.isoformat(),
+        }
+    )
+    repo.update_full_market_scan_job(
+        job_id,
+        status="running",
+        scanned_symbols=scanned_symbols,
+        completed_batches=completed_batches,
+        cards=len(all_cards),
+        errors=error_count,
+        message="Finalizing full-market rankings and recommendation policy",
+        data_health=aggregate_health,
+    )
+
     card_universe = sorted({card.instrument_id for card in all_cards})
     global_factor_rankings = rerank_factor_rankings(
         all_factor_rankings,

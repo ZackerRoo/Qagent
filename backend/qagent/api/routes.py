@@ -5281,6 +5281,11 @@ def _automation_scan_result_cache(
         and _scan_cache_signal_date(market_day_cache) != expected_signal_date
     ):
         return None, "stale_signal_date"
+    if expected_signal_date is not None:
+        # Before the current session closes, yesterday remains the latest
+        # completed A-share session. Keep that cache authoritative across
+        # midnight instead of launching another scan for the same signal day.
+        return market_day_cache, "same_completed_session"
     created_at = market_day_cache.created_at
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=timezone.utc)
@@ -5396,13 +5401,23 @@ def _full_market_scan_job_is_stale(job, settings: AutoProcessingSettings) -> boo
     if job.status not in {"queued", "running"}:
         return False
     updated_at = _as_utc_datetime(job.updated_at)
+    elapsed = datetime.now(timezone.utc) - updated_at
+    if (
+        job.total_symbols > 0
+        and job.scanned_symbols >= job.total_symbols
+        and job.total_batches > 0
+        and job.completed_batches >= job.total_batches
+    ):
+        # Global reranking and final policy reconciliation are CPU-heavy for
+        # the complete universe. A ten-minute timeout caused the scheduler to
+        # repeatedly kill and replay this phase from checkpoints.
+        finalizing_stale_after = max(
+            timedelta(hours=2),
+            timedelta(seconds=max(settings.interval_seconds * 4, 0)),
+        )
+        return elapsed > finalizing_stale_after
     stale_after = timedelta(seconds=max(settings.interval_seconds * 2, 30 * 60))
-    if datetime.now(timezone.utc) - updated_at > stale_after:
-        return True
-    if job.total_symbols > 0 and job.scanned_symbols >= job.total_symbols:
-        if job.total_batches > 0 and job.completed_batches >= job.total_batches:
-            return datetime.now(timezone.utc) - updated_at > timedelta(minutes=10)
-    return False
+    return elapsed > stale_after
 
 
 def _as_utc_datetime(value: datetime) -> datetime:

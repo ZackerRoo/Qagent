@@ -195,6 +195,8 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
         == "preserve_batch_calibration_reconcile_latest_governance"
     )
     assert cached.payload["data_health"]["full_market_final_policy_reconciled"] == "true"
+    assert cached.payload["data_health"]["full_market_worker_phase"] == "finalizing"
+    assert cached.payload["data_health"]["full_market_finalizing_started_at"]
     assert cached.payload["strategy_health"]
     assert any(item["curve"] for item in cached.payload["strategy_health"])
     assert cached.payload["cards"][0]["confidence_explanation"]

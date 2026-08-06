@@ -1,3 +1,5 @@
+from collections import Counter
+
 from qagent.domain.models import OpportunityCard
 
 
@@ -33,11 +35,27 @@ def classify_opportunity(card: OpportunityCard) -> OpportunityCard:
 def sort_recommendation_cards(cards: list[OpportunityCard | None]) -> list[OpportunityCard]:
     remaining = [classify_opportunity(card) for card in cards if card is not None]
     ordered: list[OpportunityCard] = []
+    bucket_counts: Counter[str] = Counter()
+    industry_counts: Counter[str] = Counter()
+    selected_buckets: set[str] = set()
     while remaining:
-        selected = max(remaining, key=lambda card: _adjusted_priority(card, ordered))
+        selected_index = max(
+            range(len(remaining)),
+            key=lambda index: _adjusted_priority_from_counts(
+                remaining[index],
+                bucket_counts=bucket_counts,
+                industry_counts=industry_counts,
+                selected_buckets=selected_buckets,
+            ),
+        )
+        selected = remaining.pop(selected_index)
         selected.rotation_note = _rotation_note(selected, ordered)
         ordered.append(selected)
-        remaining.remove(selected)
+        bucket_counts[selected.opportunity_bucket] += 1
+        selected_buckets.add(selected.opportunity_bucket)
+        industry = selected.market_context.industry if selected.market_context else ""
+        if industry:
+            industry_counts[industry] += 1
     return ordered
 
 
@@ -82,6 +100,27 @@ def _tags(card: OpportunityCard) -> list[str]:
 
 
 def _adjusted_priority(card: OpportunityCard, selected: list[OpportunityCard]) -> float:
+    bucket_counts = Counter(item.opportunity_bucket for item in selected)
+    industry_counts = Counter(
+        item.market_context.industry
+        for item in selected
+        if item.market_context and item.market_context.industry
+    )
+    return _adjusted_priority_from_counts(
+        card,
+        bucket_counts=bucket_counts,
+        industry_counts=industry_counts,
+        selected_buckets=set(bucket_counts),
+    )
+
+
+def _adjusted_priority_from_counts(
+    card: OpportunityCard,
+    *,
+    bucket_counts: Counter[str],
+    industry_counts: Counter[str],
+    selected_buckets: set[str],
+) -> float:
     conviction = card.decision.conviction_score if card.decision else 0.0
     base = card.rank_score * 0.45 + card.factor_score * 0.35 + conviction * 0.2
     bucket_boost = {
@@ -93,18 +132,11 @@ def _adjusted_priority(card: OpportunityCard, selected: list[OpportunityCard]) -
         "risk_filtered": -0.22,
     }.get(card.opportunity_bucket, 0.0)
     coverage_boost = 0.0
-    selected_buckets = {item.opportunity_bucket for item in selected}
     if card.opportunity_bucket in {"etf_index", "theme_growth"} and card.opportunity_bucket not in selected_buckets:
         coverage_boost += 0.18
-    bucket_penalty = sum(
-        1 for item in selected if item.opportunity_bucket == card.opportunity_bucket
-    ) * 0.06
+    bucket_penalty = bucket_counts[card.opportunity_bucket] * 0.06
     industry = card.market_context.industry if card.market_context else ""
-    industry_penalty = sum(
-        1
-        for item in selected
-        if industry and item.market_context and item.market_context.industry == industry
-    ) * 0.05
+    industry_penalty = industry_counts[industry] * 0.05 if industry else 0.0
     return round(base + bucket_boost + coverage_boost - bucket_penalty - industry_penalty, 6)
 
 
