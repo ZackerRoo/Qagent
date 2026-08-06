@@ -13,6 +13,7 @@ from qagent.app import create_app
 from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.automation_scheduler import AutomationScheduler, AutoProcessingSettings
 from qagent.providers.fixtures import FixtureMarketDataProvider
+from qagent.storage.paper import PaperTradingRepository
 from qagent.storage.repository import QagentRepository
 from qagent.storage.tables import (
     FullMarketScanJobRow,
@@ -102,6 +103,150 @@ def test_latest_completed_a_share_session_changes_after_close(monkeypatch):
 
     assert before_close == date(2026, 7, 30)
     assert after_close == date(2026, 7, 31)
+
+
+def test_paper_risk_gate_uses_only_current_model_cohort(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'paper-cohort-risk.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    repo = QagentRepository(create_session_factory(database_url))
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    now = datetime.now(timezone.utc)
+    current_health = {
+        "full_market_scan_complete": "true",
+        "feature_set_version": "factor-v3",
+        "recommendation_policy_entrypoint": "final-policy-v1",
+        "dynamic_calibration_merge_policy": "fixed",
+    }
+    old_health = {**current_health, "feature_set_version": "factor-v2"}
+    with repo.session_factory() as session:
+        session.add_all(
+            [
+                ScanRunRow(
+                    run_id="scan-risk-old",
+                    provider="free",
+                    mode="full_market_batch",
+                    symbols="[]",
+                    scanned=4,
+                    cards=4,
+                    data_health=json.dumps(old_health),
+                    created_at=now - timedelta(days=1),
+                ),
+                ScanRunRow(
+                    run_id="scan-risk-current",
+                    provider="free",
+                    mode="full_market_batch",
+                    symbols="[]",
+                    scanned=1,
+                    cards=1,
+                    data_health=json.dumps(current_health),
+                    created_at=now,
+                ),
+            ]
+        )
+        for index in range(4):
+            snapshot_id = f"snapshot-risk-old-{index}"
+            session.add(
+                OpportunitySnapshotRow(
+                    snapshot_id=snapshot_id,
+                    run_id="scan-risk-old",
+                    card_id=f"card-risk-old-{index}",
+                    instrument_id=f"CN:00000{index + 1}",
+                    market="CN",
+                    status="watch",
+                    signal_date=date(2026, 8, 4),
+                    latest_close=Decimal("10"),
+                    primary_strategy_id="trend_momentum_stage2",
+                    score=Decimal("0.7"),
+                    strategy_score=Decimal("0.7"),
+                    rank_score=Decimal("0.7"),
+                    trigger_price=Decimal("10"),
+                    initial_stop=Decimal("9"),
+                    target_1=Decimal("12"),
+                    card_json="{}",
+                    created_at=now - timedelta(days=1),
+                )
+            )
+            session.add(
+                PaperTradeRow(
+                    trade_id=f"paper-risk-old-{index}",
+                    source_snapshot_id=snapshot_id,
+                    provider="free",
+                    instrument_id=f"CN:00000{index + 1}",
+                    strategy_id="trend_momentum_stage2",
+                    status="stopped",
+                    signal_date=date(2026, 8, 4),
+                    trigger_price=Decimal("10"),
+                    initial_stop=Decimal("9"),
+                    target_1=Decimal("12"),
+                    rank_score=Decimal("0.7"),
+                    allocation_multiplier=Decimal("1"),
+                    entry_date=date(2026, 8, 5),
+                    entry_price=Decimal("10"),
+                    exit_date=date(2026, 8, 5),
+                    exit_price=Decimal("9"),
+                    latest_date=date(2026, 8, 5),
+                    latest_price=Decimal("9"),
+                    realized_return_pct=Decimal("-10"),
+                    holding_days=1,
+                    notes="old cohort loss",
+                )
+            )
+        session.add(
+            OpportunitySnapshotRow(
+                snapshot_id="snapshot-risk-current",
+                run_id="scan-risk-current",
+                card_id="card-risk-current",
+                instrument_id="CN:688001",
+                market="CN",
+                status="watch",
+                signal_date=date(2026, 8, 5),
+                latest_close=Decimal("10"),
+                primary_strategy_id="trend_momentum_stage2",
+                score=Decimal("0.8"),
+                strategy_score=Decimal("0.8"),
+                rank_score=Decimal("0.8"),
+                trigger_price=Decimal("10"),
+                initial_stop=Decimal("9"),
+                target_1=Decimal("12"),
+                card_json="{}",
+                created_at=now,
+            )
+        )
+        session.add(
+            PaperTradeRow(
+                trade_id="paper-risk-current",
+                source_snapshot_id="snapshot-risk-current",
+                provider="free",
+                instrument_id="CN:688001",
+                strategy_id="trend_momentum_stage2",
+                status="open",
+                signal_date=date(2026, 8, 5),
+                trigger_price=Decimal("10"),
+                initial_stop=Decimal("9"),
+                target_1=Decimal("12"),
+                rank_score=Decimal("0.8"),
+                allocation_multiplier=Decimal("1"),
+                entry_date=date(2026, 8, 6),
+                entry_price=Decimal("10"),
+                latest_date=date(2026, 8, 6),
+                latest_price=Decimal("10.20"),
+                unrealized_return_pct=Decimal("2"),
+                holding_days=0,
+                notes="current cohort",
+            )
+        )
+        session.commit()
+
+    allowed, health = routes._paper_seed_risk_gate(repo, paper_repo, "free")
+
+    assert allowed is True
+    assert health["paper_risk_gate_action"] == "allow_new_entries"
+    assert health["paper_risk_gate_scope"] == "current_model_cohort"
+    assert health["paper_risk_gate_scope_trades"] == "1"
+    assert health["paper_risk_gate_excluded_other_cohort"] == "4"
+    assert health["paper_risk_gate_unclassified_trades"] == "0"
+    assert health["paper_risk_gate_feature_set_version"] == "factor-v3"
 
 
 def test_automatic_full_scan_is_deferred_during_market_session(monkeypatch):

@@ -63,6 +63,7 @@ from qagent.research.market_intelligence import (
 )
 from qagent.research.operational_readiness import build_operational_readiness_center
 from qagent.storage.repository import (
+    paper_model_cohort_from_data_health,
     QagentRepository,
     TradableCatalogSummary,
 )
@@ -593,6 +594,19 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         "scanned": str(scanned_symbols),
         "cards": str(len(visible_cards)),
     }
+    paper_model_cohort = paper_model_cohort_from_data_health(payload_data_health)
+    if paper_model_cohort is not None:
+        payload_data_health.update(
+            {
+                "paper_model_cohort_id": paper_model_cohort.cohort_id,
+                "paper_model_cohort_feature_set_version": (
+                    paper_model_cohort.feature_set_version
+                ),
+                "paper_model_cohort_recommendation_policy": (
+                    paper_model_cohort.recommendation_policy_entrypoint
+                ),
+            }
+        )
     manual_action_center = build_manual_action_center(
         cards=visible_cards,
         market_intelligence=market_intelligence,

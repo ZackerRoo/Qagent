@@ -1,4 +1,5 @@
-from datetime import date, timedelta
+import json
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from sqlalchemy.pool import NullPool
 from qagent.db import Base, create_db_engine, create_session_factory, initialize_database
 from qagent.storage.repository import (
     AlertRuleCreate,
+    paper_model_cohort_from_data_health,
     PositionCreate,
     QagentRepository,
     WatchlistCreate,
@@ -64,6 +66,97 @@ def test_repository_adds_and_lists_positions(tmp_path):
     assert position.instrument_id == "US:TEST"
     assert position.entry_price == Decimal("82.00")
     assert repo.list_positions()[0].strategy_tag == "breakout"
+
+
+def test_repository_scopes_paper_model_cohorts_by_scan_identity(tmp_path):
+    repo = make_repo(tmp_path)
+    now = datetime.now(timezone.utc)
+    old_health = {
+        "full_market_scan_complete": "true",
+        "feature_set_version": "factor-v2",
+        "recommendation_policy_entrypoint": "final-policy-v1",
+        "dynamic_calibration_merge_policy": "fixed",
+    }
+    current_health = {
+        **old_health,
+        "feature_set_version": "factor-v3",
+    }
+    with repo.session_factory() as session:
+        session.add_all(
+            [
+                ScanRunRow(
+                    run_id="scan-old-cohort",
+                    provider="free",
+                    mode="full_market_batch",
+                    symbols="[]",
+                    scanned=1,
+                    cards=1,
+                    data_health=json.dumps(old_health),
+                    created_at=now - timedelta(days=1),
+                ),
+                ScanRunRow(
+                    run_id="scan-current-cohort",
+                    provider="free",
+                    mode="full_market_batch",
+                    symbols="[]",
+                    scanned=1,
+                    cards=1,
+                    data_health=json.dumps(current_health),
+                    created_at=now,
+                ),
+                OpportunitySnapshotRow(
+                    snapshot_id="snapshot-old-cohort",
+                    run_id="scan-old-cohort",
+                    card_id="card-old-cohort",
+                    instrument_id="CN:000001",
+                    market="CN",
+                    status="watch",
+                    signal_date=date(2026, 8, 4),
+                    latest_close=Decimal("10"),
+                    primary_strategy_id="trend_momentum_stage2",
+                    score=Decimal("0.7"),
+                    strategy_score=Decimal("0.7"),
+                    rank_score=Decimal("0.7"),
+                    trigger_price=Decimal("10"),
+                    initial_stop=Decimal("9"),
+                    target_1=Decimal("12"),
+                    card_json="{}",
+                    created_at=now - timedelta(days=1),
+                ),
+                OpportunitySnapshotRow(
+                    snapshot_id="snapshot-current-cohort",
+                    run_id="scan-current-cohort",
+                    card_id="card-current-cohort",
+                    instrument_id="CN:000002",
+                    market="CN",
+                    status="watch",
+                    signal_date=date(2026, 8, 5),
+                    latest_close=Decimal("10"),
+                    primary_strategy_id="trend_momentum_stage2",
+                    score=Decimal("0.8"),
+                    strategy_score=Decimal("0.8"),
+                    rank_score=Decimal("0.8"),
+                    trigger_price=Decimal("10"),
+                    initial_stop=Decimal("9"),
+                    target_1=Decimal("12"),
+                    card_json="{}",
+                    created_at=now,
+                ),
+            ]
+        )
+        session.commit()
+
+    current = repo.get_current_paper_model_cohort("free")
+    cohorts = repo.get_paper_model_cohorts_for_snapshots(
+        ["snapshot-old-cohort", "snapshot-current-cohort", "snapshot-missing"]
+    )
+
+    assert current is not None
+    assert current.feature_set_version == "factor-v3"
+    assert current == paper_model_cohort_from_data_health(current_health)
+    assert cohorts["snapshot-current-cohort"] == current
+    assert cohorts["snapshot-old-cohort"] != current
+    assert cohorts["snapshot-missing"] is None
 
 
 def test_repository_upserts_and_filters_point_in_time_fundamentals(tmp_path):

@@ -240,6 +240,11 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
         == "preserve_batch_calibration_reconcile_latest_governance"
     )
     assert cached.payload["data_health"]["full_market_final_policy_reconciled"] == "true"
+    assert len(cached.payload["data_health"]["paper_model_cohort_id"]) == 64
+    assert (
+        cached.payload["data_health"]["paper_model_cohort_feature_set_version"]
+        == cached.payload["data_health"]["feature_set_version"]
+    )
     assert cached.payload["data_health"]["full_market_worker_phase"] == "finalizing"
     assert cached.payload["data_health"]["full_market_finalizing_started_at"]
     assert cached.payload["strategy_health"]

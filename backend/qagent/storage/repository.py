@@ -318,6 +318,39 @@ class ScanRunRecord(BaseModel):
     created_at: datetime
 
 
+class PaperModelCohortRecord(BaseModel):
+    cohort_id: str
+    feature_set_version: str
+    recommendation_policy_entrypoint: str
+    calibration_merge_policy: str
+
+
+def paper_model_cohort_from_data_health(
+    data_health: dict[str, str],
+) -> PaperModelCohortRecord | None:
+    feature_set_version = str(data_health.get("feature_set_version") or "").strip()
+    recommendation_policy_entrypoint = str(
+        data_health.get("recommendation_policy_entrypoint") or ""
+    ).strip()
+    if not feature_set_version or not recommendation_policy_entrypoint:
+        return None
+    calibration_merge_policy = str(
+        data_health.get("dynamic_calibration_merge_policy") or "unspecified"
+    ).strip()
+    identity = {
+        "schema_version": "paper-model-cohort-v1",
+        "feature_set_version": feature_set_version,
+        "recommendation_policy_entrypoint": recommendation_policy_entrypoint,
+        "calibration_merge_policy": calibration_merge_policy,
+    }
+    return PaperModelCohortRecord(
+        cohort_id=_canonical_digest(identity),
+        feature_set_version=feature_set_version,
+        recommendation_policy_entrypoint=recommendation_policy_entrypoint,
+        calibration_merge_policy=calibration_merge_policy,
+    )
+
+
 class ScanResultCacheRecord(BaseModel):
     cache_id: str
     cache_key: str
@@ -1983,6 +2016,58 @@ class QagentRepository:
                 .all()
             )
             return [self._scan_run_from_row(row) for row in rows]
+
+    def get_current_paper_model_cohort(
+        self,
+        provider: str,
+    ) -> PaperModelCohortRecord | None:
+        with self.session_factory() as session:
+            rows = (
+                session.query(ScanRunRow)
+                .filter(
+                    ScanRunRow.provider == provider,
+                    ScanRunRow.mode == "full_market_batch",
+                )
+                .order_by(ScanRunRow.created_at.desc(), ScanRunRow.run_id.desc())
+                .limit(50)
+                .all()
+            )
+            for row in rows:
+                try:
+                    health = json.loads(row.data_health or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if health.get("full_market_scan_complete") != "true":
+                    continue
+                cohort = paper_model_cohort_from_data_health(health)
+                if cohort is not None:
+                    return cohort
+        return None
+
+    def get_paper_model_cohorts_for_snapshots(
+        self,
+        snapshot_ids: Sequence[str],
+    ) -> dict[str, PaperModelCohortRecord | None]:
+        unique_ids = sorted(set(snapshot_ids))
+        result: dict[str, PaperModelCohortRecord | None] = {
+            snapshot_id: None for snapshot_id in unique_ids
+        }
+        if not unique_ids:
+            return result
+        with self.session_factory() as session:
+            rows = (
+                session.query(OpportunitySnapshotRow.snapshot_id, ScanRunRow.data_health)
+                .join(ScanRunRow, OpportunitySnapshotRow.run_id == ScanRunRow.run_id)
+                .filter(OpportunitySnapshotRow.snapshot_id.in_(unique_ids))
+                .all()
+            )
+            for snapshot_id, raw_health in rows:
+                try:
+                    health = json.loads(raw_health or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                result[snapshot_id] = paper_model_cohort_from_data_health(health)
+        return result
 
     def save_scan_result_cache(
         self,

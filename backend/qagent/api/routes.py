@@ -3403,7 +3403,7 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             scan_status = "failed"
             errors.append(f"scan: {exc}")
 
-    allow_seed_paper, risk_gate_health = _paper_seed_risk_gate(paper_repo, mode)
+    allow_seed_paper, risk_gate_health = _paper_seed_risk_gate(repo, paper_repo, mode)
     data_health.update(risk_gate_health)
     # A full book still needs to evaluate replacement candidates. The risk
     # gate may prevent direct admission, but it must not bypass the
@@ -3676,7 +3676,7 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
     # governed this cycle for auditability, then publish the post-cycle gate as
     # the current state consumed by the dashboard and the next scheduler run.
     applied_risk_gate_health = dict(risk_gate_health)
-    _, final_risk_gate_health = _paper_seed_risk_gate(paper_repo, mode)
+    _, final_risk_gate_health = _paper_seed_risk_gate(repo, paper_repo, mode)
     applied_market_gate_health = {
         key: value
         for key, value in applied_risk_gate_health.items()
@@ -3721,15 +3721,34 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
 
 
 def _paper_seed_risk_gate(
+    repo: QagentRepository,
     paper_repo: PaperTradingRepository,
     mode: str,
 ) -> tuple[bool, dict[str, str]]:
-    trades = paper_repo.list_trades(limit=1000, provider=mode)
-    if not trades:
+    all_trades = paper_repo.list_trades(limit=1000, provider=mode)
+    if not all_trades:
         return True, {
             "paper_risk_gate_action": "allow_new_entries",
             "paper_risk_gate_reason": "no_paper_history",
+            "paper_risk_gate_scope": "no_paper_history",
         }
+    current_cohort = repo.get_current_paper_model_cohort(mode)
+    cohort_by_snapshot = repo.get_paper_model_cohorts_for_snapshots(
+        [trade.source_snapshot_id for trade in all_trades]
+    )
+    if current_cohort is None:
+        trades = all_trades
+        scope = "all_history_fallback"
+    else:
+        trades = [
+            trade
+            for trade in all_trades
+            if (
+                cohort := cohort_by_snapshot.get(trade.source_snapshot_id)
+            ) is not None
+            and cohort.cohort_id == current_cohort.cohort_id
+        ]
+        scope = "current_model_cohort"
     account = paper_repo.get_account_settings()
     ledger = build_paper_ledger(
         trades,
@@ -3743,9 +3762,16 @@ def _paper_seed_risk_gate(
     )
     risk_gate = build_paper_risk_gate_status(ledger)
     summary = ledger.summary
-    return risk_gate.can_add_entries, {
+    unclassified_trades = sum(
+        cohort_by_snapshot.get(trade.source_snapshot_id) is None for trade in all_trades
+    )
+    health = {
         "paper_risk_gate_action": risk_gate.action,
         "paper_risk_gate_reason": risk_gate.reason,
+        "paper_risk_gate_scope": scope,
+        "paper_risk_gate_scope_trades": str(len(trades)),
+        "paper_risk_gate_excluded_other_cohort": str(len(all_trades) - len(trades)),
+        "paper_risk_gate_unclassified_trades": str(unclassified_trades),
         "paper_risk_gate_recovery_state": risk_gate.recovery_state,
         "paper_risk_gate_recovery_score": f"{risk_gate.recovery_score:.4f}",
         "paper_risk_gate_max_new_entries": str(risk_gate.max_new_entries),
@@ -3758,6 +3784,19 @@ def _paper_seed_risk_gate(
             f"{summary.win_rate:.4f}" if summary.win_rate is not None else ""
         ),
     }
+    if current_cohort is not None:
+        health.update(
+            {
+                "paper_risk_gate_model_cohort_id": current_cohort.cohort_id,
+                "paper_risk_gate_feature_set_version": (
+                    current_cohort.feature_set_version
+                ),
+                "paper_risk_gate_recommendation_policy": (
+                    current_cohort.recommendation_policy_entrypoint
+                ),
+            }
+        )
+    return risk_gate.can_add_entries, health
 
 
 def _paper_seed_limit_from_risk_gate(
@@ -5492,7 +5531,7 @@ def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, o
     mode = provider.strip().lower()
     repo = _repo()
     paper_repo = _paper_repo()
-    allow_seed, risk_gate_health = _paper_seed_risk_gate(paper_repo, mode)
+    allow_seed, risk_gate_health = _paper_seed_risk_gate(repo, paper_repo, mode)
     snapshots, seed_health = _paper_seed_snapshots_from_recommendations(
         repo,
         mode=mode,
@@ -5965,7 +6004,7 @@ def paper_trade_daily_report(
         asset_type_by_instrument=asset_type_by_instrument,
         source_context_by_trade=source_context_by_trade,
     )
-    _, risk_gate_health = _paper_seed_risk_gate(repo, mode)
+    _, risk_gate_health = _paper_seed_risk_gate(_repo(), repo, mode)
     market_gate_health = _paper_market_entry_gate_from_latest_cache(
         _repo(),
         mode=mode,
@@ -6063,7 +6102,7 @@ def paper_trade_candidate_pool(
     mode = provider.strip().lower()
     repo = _repo()
     paper_repo = _paper_repo()
-    _, risk_gate_health = _paper_seed_risk_gate(paper_repo, mode)
+    _, risk_gate_health = _paper_seed_risk_gate(repo, paper_repo, mode)
     snapshots, seed_health = _paper_seed_snapshots_from_recommendations(
         repo,
         mode=mode,
