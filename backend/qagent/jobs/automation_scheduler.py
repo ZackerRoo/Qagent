@@ -60,6 +60,7 @@ class AutomationScheduler:
         self._lock = Lock()
         self._run_lock = Lock()
         self._stop_event = Event()
+        self._wake_event = Event()
         self._thread: Thread | None = None
         self._settings = AutoProcessingSettings()
         self._enabled = False
@@ -100,6 +101,7 @@ class AutomationScheduler:
             self._last_error = None
             self._next_run_at = _utc_now()
             self._stop_event.clear()
+            self._wake_event.clear()
             self._thread = Thread(target=self._loop, args=(runner,), daemon=True)
             self._thread.start()
             return self._state_unlocked()
@@ -111,6 +113,7 @@ class AutomationScheduler:
             self._status = "idle"
             self._next_run_at = None
             self._stop_event.set()
+            self._wake_event.set()
             thread = self._thread
         if thread and thread.is_alive():
             thread.join(timeout=1.0)
@@ -133,9 +136,9 @@ class AutomationScheduler:
                 next_run_at = self._next_run_at
             if next_run_at is not None:
                 wait_seconds = (next_run_at - _utc_now()).total_seconds()
-                if wait_seconds > 0 and self._stop_event.wait(wait_seconds):
-                    break
                 if wait_seconds > 0:
+                    self._wake_event.wait(wait_seconds)
+                    self._wake_event.clear()
                     continue
             self._execute(settings, runner)
         with self._lock:
@@ -149,8 +152,11 @@ class AutomationScheduler:
             if not self._enabled:
                 return
             if self._thread is not None and self._thread.is_alive():
+                if self._next_run_at is not None and self._next_run_at <= _utc_now():
+                    self._wake_event.set()
                 return
             self._stop_event.clear()
+            self._wake_event.clear()
             self._thread = Thread(target=self._loop, args=(runner,), daemon=True)
             self._thread.start()
 
