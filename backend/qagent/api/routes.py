@@ -222,7 +222,6 @@ router = APIRouter()
 
 PAPER_MAX_PER_INDUSTRY = 2
 PAPER_RISK_OFF_POSITION_SIZE_MULTIPLIER = Decimal("0.35")
-PAPER_RISK_OFF_MIN_PRIORITY_SCORE = 0.65
 PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME = time(hour=15, minute=45)
 PAPER_CANDIDATE_SETTLEMENT_RETRY_TIME = time(hour=18)
 PAPER_CANDIDATE_MAX_REFRESH_ATTEMPTS = 2
@@ -3876,11 +3875,11 @@ def _paper_market_probe_snapshots(
     if risk_gate_health.get("paper_market_entry_gate") != "throttled":
         return snapshots, {}
 
-    qualified = [
-        snapshot
-        for snapshot in snapshots
-        if _paper_snapshot_priority_score(snapshot) >= PAPER_RISK_OFF_MIN_PRIORITY_SCORE
-    ]
+    # Research paper trading needs observations from every market regime. The
+    # regular recommendation, governance, freshness, and concentration gates
+    # already apply before this point, so risk-off changes sizing rather than
+    # applying a second score cutoff.
+    qualified = list(snapshots)
     trades = paper_repo.list_trades(limit=1000, provider=provider)
     research_entries_today = sum(
         1
@@ -3896,9 +3895,10 @@ def _paper_market_probe_snapshots(
     available_slots = max(account.max_positions - active_count, 0)
     selected = qualified if available_slots > 0 else []
     return selected, {
-        "paper_market_probe_min_priority_score": f"{PAPER_RISK_OFF_MIN_PRIORITY_SCORE:.4f}",
+        "paper_market_probe_policy": "all_eligible_candidates_reduced_size",
+        "paper_market_probe_min_priority_score": "disabled_for_research",
         "paper_market_probe_qualified": str(len(qualified)),
-        "paper_market_probe_filtered": str(len(snapshots) - len(qualified)),
+        "paper_market_probe_filtered": "0",
         "paper_market_probe_existing_today": str(research_entries_today),
         "paper_market_probe_remaining_today": str(available_slots),
         "paper_market_research_available_slots": str(available_slots),
@@ -3955,7 +3955,6 @@ def _paper_candidate_pool_snapshot_items(
     replacee_pressure = _paper_pending_replacement_pressure(replacee) if replacee else 0.0
     risk_action = risk_gate_health.get("paper_risk_gate_action", "")
     market_entry_blocked = risk_gate_health.get("paper_market_entry_gate") == "blocked"
-    market_entry_throttled = risk_gate_health.get("paper_market_entry_gate") == "throttled"
     expected_signal_date = None
     expected_signal_date_value = risk_gate_health.get(
         "paper_candidate_expected_signal_date"
@@ -4027,9 +4026,6 @@ def _paper_candidate_pool_snapshot_items(
         elif market_entry_blocked:
             status = "blocked_by_market"
             action = "市场风控暂停入场"
-        elif market_entry_throttled and score < PAPER_RISK_OFF_MIN_PRIORITY_SCORE:
-            status = "blocked_by_market"
-            action = "防守行情仅允许高质量小仓研究单"
         elif industry is None:
             status = "blocked_by_industry"
             action = "行业数据缺失"
@@ -4840,9 +4836,9 @@ def _paper_market_entry_gate_from_cache(
     reason = _string_value(trend.get("reason"))
     if throttled:
         reason = (
-            f"{reason}；研究模拟盘保留高质量候选，按 35% 仓位补至账户上限。"
+            f"{reason}；研究模拟盘保留当日有效候选，按 35% 仓位补至账户上限。"
             if reason
-            else "风险规避行情，研究模拟盘保留高质量候选，按 35% 仓位补至账户上限。"
+            else "风险规避行情，研究模拟盘保留当日有效候选，按 35% 仓位补至账户上限。"
         )
     return {
         "paper_market_entry_gate": gate,

@@ -1462,9 +1462,9 @@ def test_automation_scheduler_risk_off_uses_capacity_instead_of_daily_quota(
         "card_id": "card-market-probe",
         "instrument_id": "CN:159999",
         "asset_type": "ETF",
-        "rank_score": 0.95,
-        "strategy_score": 0.95,
-        "score": 0.95,
+        "rank_score": 0.55,
+        "strategy_score": 0.55,
+        "score": 0.55,
         "market_context": {"industry": "宽基ETF"},
         "entry_plan": {"trigger_price": "1.02"},
         "decision": {"risk_status": "clear", "action": "watch_trigger"},
@@ -1501,9 +1501,9 @@ def test_automation_scheduler_risk_off_uses_capacity_instead_of_daily_quota(
                 signal_date=today,
                 latest_close=Decimal("1.00"),
                 primary_strategy_id="factor_rotation_watch",
-                score=Decimal("0.95"),
-                strategy_score=Decimal("0.95"),
-                rank_score=Decimal("0.95"),
+                score=Decimal("0.55"),
+                strategy_score=Decimal("0.55"),
+                rank_score=Decimal("0.55"),
                 trigger_price=Decimal("1.02"),
                 initial_stop=Decimal("0.96"),
                 target_1=Decimal("1.12"),
@@ -1572,7 +1572,15 @@ def test_automation_scheduler_risk_off_uses_capacity_instead_of_daily_quota(
     )
     assert stale_item["status"] == "blocked_by_data"
     assert stale_item["signal_date_fresh"] is False
+    current_item = next(
+        item
+        for item in candidate_pool.json()["items"]
+        if item["instrument_id"] == "CN:159999"
+    )
+    assert current_item["priority_score"] < 0.65
+    assert current_item["status"] == "ready_to_add"
     assert candidate_pool.json()["summary"]["data_blocked_count"] == 1
+    assert candidate_pool.json()["summary"]["market_blocked_count"] == 0
     assert first.status_code == 200
     first_result = first.json()["last_result"]
     assert first_result["paper_created"] == 1
@@ -1581,6 +1589,14 @@ def test_automation_scheduler_risk_off_uses_capacity_instead_of_daily_quota(
     assert first_result["data_health"]["automation_seed_effective_limit"] == "5"
     assert first_result["data_health"]["paper_candidate_freshness_gate"] == "filtered"
     assert first_result["data_health"]["paper_candidate_signal_date_mismatch"] == "1"
+    assert first_result["data_health"]["paper_market_probe_policy"] == (
+        "all_eligible_candidates_reduced_size"
+    )
+    assert first_result["data_health"]["paper_market_probe_min_priority_score"] == (
+        "disabled_for_research"
+    )
+    assert first_result["data_health"]["paper_market_probe_qualified"] == "1"
+    assert first_result["data_health"]["paper_market_probe_filtered"] == "0"
     assert first_result["data_health"]["paper_market_probe_remaining_today"] == "4"
     assert second.status_code == 200
     second_result = second.json()["last_result"]
