@@ -5546,6 +5546,75 @@ def paper_trades(
     }
 
 
+def _paper_account_scope_status(
+    trades: list[PaperTradeRecord],
+    *,
+    scope: str,
+    max_positions: int,
+    authenticated_trade_ids: set[str],
+) -> dict[str, object]:
+    summary = summarize_paper_trades(
+        trades,
+        reporting_scope=scope,
+        authenticated_trade_ids=authenticated_trade_ids,
+    )
+    active = summary.pending + summary.open
+    return {
+        **summary.model_dump(mode="json"),
+        "active": active,
+        "remaining": max(0, max_positions - active),
+        "max_positions": max_positions,
+    }
+
+
+@router.get("/paper-trades/account-status")
+def paper_trade_account_status(provider: str | None = None) -> dict[str, object]:
+    mode = provider.strip().lower() if provider else None
+    paper_repo = _paper_repo()
+    account = paper_repo.get_account_settings()
+    trades = paper_repo.list_trades(limit=1000, provider=mode)
+    active_by_id = {
+        trade.trade_id: trade
+        for status in ("pending", "open")
+        for trade in paper_repo.list_trades(status=status, limit=5000, provider=mode)
+    }
+    trades_by_id = {trade.trade_id: trade for trade in trades}
+    trades_by_id.update(active_by_id)
+    scoped_trades = list(trades_by_id.values())
+    _, authenticated_ids, authentication_health = _paper_reporting_trades(
+        scoped_trades,
+        reporting_scope="official",
+    )
+    return {
+        "account": account.model_dump(mode="json"),
+        "research": _paper_account_scope_status(
+            scoped_trades,
+            scope="legacy",
+            max_positions=account.max_positions,
+            authenticated_trade_ids=authenticated_ids,
+        ),
+        "official": _paper_account_scope_status(
+            scoped_trades,
+            scope="official",
+            max_positions=account.max_positions,
+            authenticated_trade_ids=authenticated_ids,
+        ),
+        "manual": {
+            "count": len(_repo().list_positions()),
+            "uses_paper_capacity": False,
+        },
+        "data_health": {
+            **_paper_account_data_health(account),
+            **authentication_health,
+            "paper_provider_filter": mode or "all",
+            "paper_account_status_trade_limit": "1000",
+            "paper_account_status_truncated": str(len(trades) >= 1000).lower(),
+            "paper_account_active_trade_limit": "5000_per_status",
+            "manual_positions_are_separate": "true",
+        },
+    }
+
+
 @router.post("/paper-trades/seed")
 def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, object]:
     if limit <= 0 or limit > 500:

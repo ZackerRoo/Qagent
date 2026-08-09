@@ -1529,6 +1529,23 @@ export type PaperTradingSummary = {
   average_unrealized_return_pct: number | null;
 };
 
+export type PaperAccountScopeStatus = PaperTradingSummary & {
+  active: number;
+  remaining: number;
+  max_positions: number;
+};
+
+export type PaperAccountStatusResponse = {
+  account: PaperAccountSettings;
+  research: PaperAccountScopeStatus;
+  official: PaperAccountScopeStatus;
+  manual: {
+    count: number;
+    uses_paper_capacity: boolean;
+  };
+  data_health: Record<string, string>;
+};
+
 export type PaperTradesResponse = {
   summary: PaperTradingSummary;
   trades: PaperTrade[];

@@ -16151,6 +16151,81 @@ td {
   width: auto;
 }
 
+.paper-account-capacity {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--terminal-border-soft);
+  border-bottom: 1px solid var(--terminal-border-soft);
+  padding: 10px 0;
+}
+
+.paper-account-capacity-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.paper-account-capacity-heading > div {
+  display: grid;
+  gap: 2px;
+}
+
+.paper-account-capacity-heading strong {
+  color: var(--terminal-text);
+  font-size: 12px;
+}
+
+.paper-account-capacity-heading small,
+.paper-account-capacity-heading > span,
+.manual-portfolio-note {
+  color: var(--terminal-muted);
+  font-size: 11px;
+}
+
+.paper-account-capacity-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgba(9, 14, 20, 0.46);
+}
+
+.paper-account-capacity-grid > div {
+  display: grid;
+  min-width: 0;
+  min-height: 54px;
+  align-content: center;
+  gap: 3px;
+  border-right: 1px solid var(--terminal-border-soft);
+  padding: 8px 10px;
+}
+
+.paper-account-capacity-grid > div:last-child {
+  border-right: 0;
+}
+
+.paper-account-capacity-grid small {
+  overflow: hidden;
+  color: var(--terminal-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.paper-account-capacity-grid strong {
+  color: var(--terminal-cyan);
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.manual-portfolio-note {
+  margin: 0;
+  border-left: 2px solid var(--terminal-cyan);
+  padding-left: 9px;
+}
+
 .portfolio-view-stack,
 .today-operations-stack {
   display: grid;
@@ -16410,6 +16485,28 @@ td {
 
   .portfolio-view-tabs button {
     min-width: 0;
+  }
+
+  .paper-account-capacity-heading {
+    display: grid;
+    gap: 4px;
+  }
+
+  .paper-account-capacity-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .paper-account-capacity-grid > div {
+    border-bottom: 1px solid var(--terminal-border-soft);
+  }
+
+  .paper-account-capacity-grid > div:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .paper-account-capacity-grid > div:last-child {
+    grid-column: 1 / -1;
+    border-bottom: 0;
   }
 
   .today-operations-drawer .dashboard-secondary-grid {

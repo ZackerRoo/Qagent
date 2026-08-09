@@ -33,6 +33,7 @@ import type {
   OpportunityHistoryResponse,
   OutcomesResponse,
   PaperCandidatePoolResponse,
+  PaperAccountStatusResponse,
   PaperDailyReportResponse,
   PaperDualTrackResponse,
   PaperLedgerResponse,
@@ -416,6 +417,12 @@ export async function fetchPaperTrades(
     reporting_scope: reportingScope,
     limit: 100,
   });
+}
+
+export async function fetchPaperAccountStatus(
+  provider?: DataProviderMode,
+): Promise<PaperAccountStatusResponse> {
+  return apiGet<PaperAccountStatusResponse>("/paper-trades/account-status", { provider });
 }
 
 type PaperLedgerRequest = {

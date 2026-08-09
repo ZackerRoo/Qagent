@@ -10,11 +10,14 @@ const files = {
 
 const checks = [
   ["client exposes fetchPaperLedger", files.client.includes("fetchPaperLedger")],
+  ["client exposes paper account status", files.client.includes("fetchPaperAccountStatus")],
   ["client exposes fetchPaperValidation", files.client.includes("fetchPaperValidation")],
   ["client exposes runPaperValidation", files.client.includes("runPaperValidation")],
   ["client exposes fetchPaperSession", files.client.includes("fetchPaperSession")],
   ["client exposes startPaperSession", files.client.includes("startPaperSession")],
   ["portfolio renders paper session starter", files.portfolio.includes("PaperSessionStarter")],
+  ["portfolio renders active paper capacity", files.portfolio.includes("PaperAccountCapacityStrip")],
+  ["portfolio separates manual capacity", files.portfolio.includes("不占自动模拟盘名额")],
   ["portfolio exposes validation and official ledgers", files.portfolio.includes("PaperScopeSelector")],
   ["portfolio defaults to visible validation records", files.portfolio.includes('useState<PaperReportingScope>("legacy")')],
   ["portfolio keeps official and legacy API scopes isolated", files.client.includes("reporting_scope: reportingScope")],
@@ -26,6 +29,7 @@ const checks = [
   ["portfolio shows 5/10/20 day validation", files.portfolio.includes("validation.windows")],
   ["portfolio can reset development records", files.portfolio.includes("reset_existing")],
   ["styles include paper session starter", files.styles.includes(".paper-session-starter")],
+  ["styles include paper account capacity", files.styles.includes(".paper-account-capacity")],
   ["styles include paper ledger scope selector", files.styles.includes(".paper-scope-selector")],
   ["styles include validation center", files.styles.includes(".paper-validation-center")],
   ["styles include validation window cards", files.styles.includes(".paper-validation-windows")],

@@ -7,6 +7,7 @@ import {
   fetchFactorDiagnostics,
   fetchEtfExposures,
   fetchPaperCandidatePool,
+  fetchPaperAccountStatus,
   fetchPaperDailyReport,
   fetchPaperDualTrack,
   fetchPaperForwardComparison,
@@ -33,6 +34,7 @@ import type {
   FactorDiagnosticsResponse,
   EtfExposureResponse,
   PaperCandidatePoolResponse,
+  PaperAccountStatusResponse,
   PaperDualTrackResponse,
   PaperForwardComparisonResponse,
   PaperLedgerItem,
@@ -103,6 +105,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [positions, setPositions] = useState<Position[]>([]);
   const [portfolio, setPortfolio] = useState<PortfolioResponse>();
   const [paper, setPaper] = useState<PaperTradesResponse>();
+  const [paperAccountStatus, setPaperAccountStatus] = useState<PaperAccountStatusResponse>();
   const [paperScope, setPaperScope] = useState<PaperReportingScope>("legacy");
   const [paperScopeCounts, setPaperScopeCounts] = useState({ official: 0, legacy: 0 });
   const [ledger, setLedger] = useState<PaperLedgerResponse>();
@@ -131,6 +134,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     const coreResults = await Promise.allSettled([
       fetchPaperTrades(dataMode, paperScope),
       fetchPaperTrades(dataMode, paperScope === "official" ? "legacy" : "official"),
+      fetchPaperAccountStatus(dataMode),
       fetchPaperSession(dataMode),
       fetchPaperLedger({ provider: dataMode, reportingScope: paperScope }),
       fetchPaperLookThroughRisk(dataMode, paperScope),
@@ -139,6 +143,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     const [
       paperResult,
       otherPaperResult,
+      paperAccountStatusResult,
       paperSessionResult,
       ledgerResult,
       lookThroughResult,
@@ -158,6 +163,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
         ...current,
         [otherScope]: otherPaperResult.value.summary.total,
       }));
+    }
+    if (paperAccountStatusResult.status === "fulfilled") {
+      setPaperAccountStatus(paperAccountStatusResult.value);
     }
     if (paperSessionResult.status === "fulfilled") {
       setPaperSession(paperSessionResult.value);
@@ -181,9 +189,13 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
 
   async function loadManualPortfolio() {
     try {
-      const result = await fetchPortfolio({ provider: dataMode });
+      const [result, accountStatus] = await Promise.all([
+        fetchPortfolio({ provider: dataMode }),
+        fetchPaperAccountStatus(dataMode),
+      ]);
       setPortfolio(result);
       setPositions(result.positions);
+      setPaperAccountStatus(accountStatus);
     } catch {
       setPaperMessage(
         language === "zh"
@@ -244,6 +256,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     const results = await Promise.allSettled([
       fetchPaperTrades(dataMode, paperScope),
       fetchPaperTrades(dataMode, paperScope === "official" ? "legacy" : "official"),
+      fetchPaperAccountStatus(dataMode),
       fetchPaperLedger({ provider: dataMode, reportingScope: paperScope }),
       fetchPaperLookThroughRisk(dataMode, paperScope),
       fetchPaperValidation(dataMode, paperScope),
@@ -256,6 +269,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     const [
       paperResult,
       otherPaperResult,
+      paperAccountStatusResult,
       ledgerResult,
       lookThroughResult,
       validationResult,
@@ -279,6 +293,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
         ...current,
         [otherScope]: otherPaperResult.value.summary.total,
       }));
+    }
+    if (paperAccountStatusResult.status === "fulfilled") {
+      setPaperAccountStatus(paperAccountStatusResult.value);
     }
     if (ledgerResult.status === "fulfilled") setLedger(ledgerResult.value);
     if (lookThroughResult.status === "fulfilled") setLookThroughRisk(lookThroughResult.value);
@@ -355,8 +372,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
         : `Updated ${result.summary.total} trades, ${result.summary.closed} closed, ${result.data_health.paper_execution_fills_deferred ?? "0"} fills deferred`,
     );
     setPaperExecutionHealth(result.data_health);
-    const [paperResult, ledgerResult, lookThroughResult, validationResult, dailyReportResult, candidatePoolResult, dualTrackResult] = await Promise.all([
+    const [paperResult, accountStatusResult, ledgerResult, lookThroughResult, validationResult, dailyReportResult, candidatePoolResult, dualTrackResult] = await Promise.all([
       fetchPaperTrades(dataMode, paperScope),
+      fetchPaperAccountStatus(dataMode),
       fetchPaperLedger({ provider: dataMode, reportingScope: paperScope }),
       fetchPaperLookThroughRisk(dataMode, paperScope),
       fetchPaperValidation(dataMode, paperScope),
@@ -365,6 +383,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchPaperDualTrack(dataMode),
     ]);
     setPaper(paperResult);
+    setPaperAccountStatus(accountStatusResult);
     setLedger(ledgerResult);
     setLookThroughRisk(lookThroughResult);
     setValidation(validationResult);
@@ -433,6 +452,10 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     }
   }
 
+  const activePaperStatus = paperScope === "legacy"
+    ? paperAccountStatus?.research
+    : paperAccountStatus?.official;
+
   return (
     <div className="stack portfolio-page">
       <section className="panel stack paper-ledger-primary-panel">
@@ -450,7 +473,12 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
               <RefreshCw size={15} />
               {language === "zh" ? "刷新" : "Refresh"}
             </button>
-            <span className="count">{paper?.summary.total ?? 0}</span>
+            <span
+              className="count"
+              title={language === "zh" ? "当前占用名额 / 最大名额" : "Active slots / maximum slots"}
+            >
+              {activePaperStatus ? `${activePaperStatus.active}/${activePaperStatus.max_positions}` : "-"}
+            </span>
           </div>
         </div>
         <div className="portfolio-view-tabs" role="tablist" aria-label={language === "zh" ? "模拟盘视图" : "Paper views"}>
@@ -511,6 +539,11 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
             />
           </div>
         </details>
+        <PaperAccountCapacityStrip
+          status={activePaperStatus}
+          manualCount={paperAccountStatus?.manual.count ?? positions.length}
+          language={language}
+        />
         {paperMessage && <div className="empty-state">{paperMessage}</div>}
 
         {portfolioView === "account" && (
@@ -676,12 +709,17 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       >
         <summary>
           <div>
-            <p className="eyebrow">{language === "zh" ? "手动组合" : "Manual Portfolio"}</p>
-            <h2>{t("portfolio.title")}</h2>
+            <p className="eyebrow">{language === "zh" ? "独立记录" : "Separate records"}</p>
+            <h2>{language === "zh" ? "手工组合（不占自动模拟盘名额）" : "Manual portfolio (separate from paper capacity)"}</h2>
           </div>
-          <span className="count">{positions.length}</span>
+          <span className="count">{paperAccountStatus?.manual.count ?? positions.length}</span>
         </summary>
         <div className="drawer-stack">
+        <p className="manual-portfolio-note">
+          {language === "zh"
+            ? `这里仅用于手工录入和跟踪，不参与自动模拟盘的 ${paperAccountStatus?.account.max_positions ?? 10} 个仓位名额。`
+            : `Manual tracking only; these records do not consume the ${paperAccountStatus?.account.max_positions ?? 10} automatic paper-trading slots.`}
+        </p>
         {portfolio && <DataHealth data={portfolio.data_health} language={language} />}
         <div className="form-row portfolio-form">
           <input
@@ -793,6 +831,54 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
         />
       </details>
     </div>
+  );
+}
+
+function PaperAccountCapacityStrip({
+  status,
+  manualCount,
+  language,
+}: {
+  status?: PaperAccountStatusResponse["research"];
+  manualCount: number;
+  language: Language;
+}) {
+  const metrics = [
+    [language === "zh" ? "已开仓" : "Open", status?.open ?? "-"],
+    [language === "zh" ? "待成交" : "Pending", status?.pending ?? "-"],
+    [language === "zh" ? "已占用" : "Active", status?.active ?? "-"],
+    [language === "zh" ? "剩余名额" : "Remaining", status?.remaining ?? "-"],
+    [language === "zh" ? "名额上限" : "Maximum", status?.max_positions ?? "-"],
+  ];
+  return (
+    <section
+      className="paper-account-capacity"
+      aria-label={language === "zh" ? "自动模拟盘仓位容量" : "Automatic paper capacity"}
+    >
+      <div className="paper-account-capacity-heading">
+        <div>
+          <strong>{language === "zh" ? "自动模拟盘名额" : "Automatic paper capacity"}</strong>
+          <small>
+            {language === "zh"
+              ? "已占用 = 已开仓 + 待成交"
+              : "Active slots = open positions + pending entries"}
+          </small>
+        </div>
+        <span>
+          {language === "zh"
+            ? `手工组合 ${manualCount} 笔，不占自动模拟盘名额`
+            : `${manualCount} manual records do not consume paper slots`}
+        </span>
+      </div>
+      <div className="paper-account-capacity-grid">
+        {metrics.map(([label, value]) => (
+          <div key={label}>
+            <small>{label}</small>
+            <strong>{value}</strong>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 

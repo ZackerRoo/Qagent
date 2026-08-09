@@ -1437,6 +1437,93 @@ def test_paper_trade_session_start_resets_records_and_saves_rules(tmp_path, monk
     assert ledger.json()["data_health"]["paper_session_status"] == "active"
 
 
+def test_paper_account_status_separates_active_capacity_from_manual_positions(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'paper-account-status.db'}",
+    )
+    client = TestClient(create_app())
+    started = client.post(
+        "/api/paper-trades/session/start",
+        json={
+            "label": "A股研究模拟盘",
+            "reset_existing": False,
+            "initial_capital": "100000",
+            "allocation_per_trade_pct": "10",
+            "max_positions": 10,
+            "transaction_cost_bps": "5",
+            "slippage_bps": "5",
+            "take_profit_pct": "50",
+        },
+    )
+    assert started.status_code == 200
+
+    pending = routes._paper_repo().create_trade(
+        source_snapshot_id="account-status-pending",
+        provider="fixture",
+        instrument_id="CN:000001",
+        strategy_id="trend_momentum",
+        signal_date=date(2026, 8, 3),
+        trigger_price=Decimal("12.00"),
+        initial_stop=Decimal("11.40"),
+        target_1=Decimal("13.20"),
+        rank_score=Decimal("0.80"),
+    )
+    opened = routes._paper_repo().create_trade(
+        source_snapshot_id="account-status-open",
+        provider="fixture",
+        instrument_id="US:TEST",
+        strategy_id="trend_momentum",
+        signal_date=date(2026, 8, 3),
+        trigger_price=Decimal("82.00"),
+        initial_stop=Decimal("78.00"),
+        target_1=Decimal("90.00"),
+        rank_score=Decimal("0.82"),
+    )
+    routes._paper_repo().update_trade(
+        opened.trade_id,
+        status="open",
+        entry_date=date(2026, 8, 4),
+        entry_price=Decimal("82.00"),
+        latest_date=date(2026, 8, 4),
+        latest_price=Decimal("82.00"),
+        unrealized_return_pct=0.0,
+        holding_days=0,
+    )
+    assert pending.status == "pending"
+    manual = client.post(
+        "/api/positions",
+        json={
+            "instrument_id": "CN:600519",
+            "shares": "100",
+            "entry_price": "1400",
+            "entry_date": "2026-08-04",
+            "strategy_tag": "manual",
+            "initial_stop": "1300",
+            "target_1": "1550",
+            "thesis": "manual tracking only",
+        },
+    )
+    assert manual.status_code == 200
+
+    response = client.get("/api/paper-trades/account-status?provider=fixture")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["account"]["max_positions"] == 10
+    assert body["research"]["pending"] == 1
+    assert body["research"]["open"] == 1
+    assert body["research"]["active"] == 2
+    assert body["research"]["remaining"] == 8
+    assert body["official"]["active"] == 0
+    assert body["official"]["remaining"] == 10
+    assert body["manual"] == {"count": 1, "uses_paper_capacity": False}
+    assert body["data_health"]["manual_positions_are_separate"] == "true"
+
+
 def test_paper_trade_api_returns_ledger_metrics(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'paper-ledger.db'}")
     client = TestClient(create_app())
