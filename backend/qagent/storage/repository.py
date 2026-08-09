@@ -63,6 +63,16 @@ WALK_FORWARD_RUN_STORAGE_SCHEMA = "walk-forward-run-storage-v2"
 WALK_FORWARD_RUN_STORAGE_SCHEMA_KEY = "_qagent_walk_forward_storage_schema"
 
 
+def _full_market_checkpoint_job_id(cache_key: str, *, prefix: str) -> str | None:
+    if not cache_key.startswith(prefix):
+        return None
+    remainder = cache_key[len(prefix) :]
+    job_id, separator, batch_index = remainder.rpartition(":")
+    if not separator or not job_id or not batch_index.isdigit():
+        return None
+    return job_id
+
+
 def _canonical_digest(payload: object) -> str:
     encoded = json.dumps(
         payload,
@@ -359,6 +369,36 @@ class ScanResultCacheRecord(BaseModel):
     symbols: list[str]
     payload: dict[str, object]
     created_at: datetime
+
+
+class ScanCheckpointMaintenanceReport(BaseModel):
+    schema_version: str = "scan-checkpoint-maintenance-v1"
+    dry_run: bool
+    retention_days: int
+    cutoff: datetime
+    active_job_ids: list[str]
+    total_checkpoint_rows: int
+    protected_active_rows: int
+    protected_recent_rows: int
+    protected_unrecognized_rows: int
+    eligible_rows: int
+    eligible_succeeded_rows: int
+    eligible_expired_terminal_rows: int
+    eligible_payload_bytes: int
+    deleted_rows: int
+    deleted_payload_bytes: int
+    sqlite_page_size: int
+    sqlite_page_count: int
+    sqlite_freelist_count: int
+    sqlite_reusable_bytes: int
+    protected_evidence_domains: list[str] = Field(
+        default_factory=lambda: [
+            "paper_trades_and_events",
+            "walk_forward_runs_and_evidence",
+            "historical_replay_and_tradability",
+            "opportunity_and_scan_run_snapshots",
+        ]
+    )
 
 
 class ScanRunSnapshotBundle(BaseModel):
@@ -2132,6 +2172,133 @@ class QagentRepository:
                 return None
             return self._scan_result_cache_from_row(row)
 
+    def maintain_full_market_scan_checkpoints(
+        self,
+        *,
+        retention_days: int = 14,
+        dry_run: bool = True,
+        now: datetime | None = None,
+    ) -> ScanCheckpointMaintenanceReport:
+        if retention_days < 1 or retention_days > 90:
+            raise ValueError("retention_days must be between 1 and 90")
+        current = now or datetime.now(timezone.utc)
+        cutoff = current - timedelta(days=retention_days)
+        prefix = "full_market_batch_checkpoint:"
+        terminal_statuses = {"succeeded", "failed", "cancelled"}
+
+        with self.session_factory() as session:
+            job_statuses = {
+                job_id: status
+                for job_id, status in session.query(
+                    FullMarketScanJobRow.job_id,
+                    FullMarketScanJobRow.status,
+                ).all()
+            }
+            active_job_ids = sorted(
+                job_id
+                for job_id, status in job_statuses.items()
+                if status in {"queued", "running"}
+            )
+            rows = (
+                session.query(
+                    ScanResultCacheRow.cache_id,
+                    ScanResultCacheRow.cache_key,
+                    ScanResultCacheRow.created_at,
+                    func.length(ScanResultCacheRow.payload_json),
+                    func.length(ScanResultCacheRow.symbols),
+                )
+                .filter(ScanResultCacheRow.mode == "full_market_batch_checkpoint")
+                .all()
+            )
+
+            protected_active_rows = 0
+            protected_recent_rows = 0
+            protected_unrecognized_rows = 0
+            eligible_ids: list[str] = []
+            eligible_succeeded_rows = 0
+            eligible_expired_terminal_rows = 0
+            eligible_payload_bytes = 0
+            for cache_id, cache_key, created_at, payload_bytes, symbols_bytes in rows:
+                job_id = _full_market_checkpoint_job_id(cache_key, prefix=prefix)
+                status = job_statuses.get(job_id) if job_id is not None else None
+                if status in {"queued", "running"}:
+                    protected_active_rows += 1
+                    continue
+                if status == "succeeded":
+                    eligible_succeeded_rows += 1
+                    eligible_ids.append(cache_id)
+                    eligible_payload_bytes += int(payload_bytes or 0) + int(symbols_bytes or 0)
+                    continue
+                cache_created_at = (
+                    created_at.replace(tzinfo=timezone.utc)
+                    if created_at.tzinfo is None or created_at.utcoffset() is None
+                    else created_at.astimezone(timezone.utc)
+                )
+                if cache_created_at >= cutoff:
+                    protected_recent_rows += 1
+                    continue
+                if status not in terminal_statuses:
+                    protected_unrecognized_rows += 1
+                    continue
+                eligible_expired_terminal_rows += 1
+                eligible_ids.append(cache_id)
+                eligible_payload_bytes += int(payload_bytes or 0) + int(symbols_bytes or 0)
+
+            deleted_rows = 0
+            deleted_payload_bytes = 0
+            if not dry_run and eligible_ids:
+                deleted_rows = (
+                    session.query(ScanResultCacheRow)
+                    .filter(ScanResultCacheRow.cache_id.in_(eligible_ids))
+                    .delete(synchronize_session=False)
+                )
+                deleted_payload_bytes = eligible_payload_bytes
+                session.commit()
+
+            page_size = int(session.execute(text("PRAGMA page_size")).scalar_one())
+            page_count = int(session.execute(text("PRAGMA page_count")).scalar_one())
+            freelist_count = int(session.execute(text("PRAGMA freelist_count")).scalar_one())
+            return ScanCheckpointMaintenanceReport(
+                dry_run=dry_run,
+                retention_days=retention_days,
+                cutoff=cutoff,
+                active_job_ids=active_job_ids,
+                total_checkpoint_rows=len(rows),
+                protected_active_rows=protected_active_rows,
+                protected_recent_rows=protected_recent_rows,
+                protected_unrecognized_rows=protected_unrecognized_rows,
+                eligible_rows=len(eligible_ids),
+                eligible_succeeded_rows=eligible_succeeded_rows,
+                eligible_expired_terminal_rows=eligible_expired_terminal_rows,
+                eligible_payload_bytes=eligible_payload_bytes,
+                deleted_rows=deleted_rows,
+                deleted_payload_bytes=deleted_payload_bytes,
+                sqlite_page_size=page_size,
+                sqlite_page_count=page_count,
+                sqlite_freelist_count=freelist_count,
+                sqlite_reusable_bytes=page_size * freelist_count,
+            )
+
+    def delete_succeeded_full_market_scan_checkpoints(self, job_id: str) -> int:
+        """Discard recovery-only checkpoints after the final result is durable."""
+
+        with self.session_factory() as session:
+            job = session.get(FullMarketScanJobRow, job_id)
+            if job is None or job.status != "succeeded":
+                return 0
+            deleted = (
+                session.query(ScanResultCacheRow)
+                .filter(
+                    ScanResultCacheRow.mode == "full_market_batch_checkpoint",
+                    ScanResultCacheRow.cache_key.like(
+                        f"full_market_batch_checkpoint:{job_id}:%"
+                    ),
+                )
+                .delete(synchronize_session=False)
+            )
+            session.commit()
+            return int(deleted)
+
     def update_scan_result_cache_payload(
         self,
         cache_id: str,
@@ -2316,6 +2483,9 @@ class QagentRepository:
         include_etfs: bool,
         sync_if_empty: bool,
     ) -> FullMarketScanJobRecord:
+        # A new job supersedes recovery data from successful jobs. Failed and
+        # cancelled jobs retain their checkpoints for the normal diagnosis window.
+        self.maintain_full_market_scan_checkpoints(retention_days=14, dry_run=False)
         now = datetime.now(timezone.utc)
         total_symbols = len(symbols)
         total_batches = (total_symbols + batch_size - 1) // batch_size if batch_size > 0 else 0

@@ -150,6 +150,10 @@ from qagent.paper_trading.dual_track import (
     build_dual_track_report,
     select_daily_top_recommendations,
 )
+from qagent.paper_trading.execution_audit import (
+    PaperExecutionRuleAudit,
+    build_paper_execution_rule_audit,
+)
 from qagent.providers.factory import build_market_data_provider
 from qagent.providers.status import build_provider_status
 from qagent.recommendations.enrichment import enrich_opportunity_card
@@ -205,6 +209,7 @@ from qagent.storage.repository import (
     OpportunitySnapshotRecord,
     PositionCreate,
     QagentRepository,
+    ScanCheckpointMaintenanceReport,
     ScanResultCacheRecord,
     WatchlistCreate,
 )
@@ -460,6 +465,39 @@ def clear_data_cache(
         instrument_id=instrument_id.strip().upper() if instrument_id else None,
     )
     return {"deleted": deleted}
+
+
+@router.get(
+    "/storage/full-market-checkpoints",
+    response_model=ScanCheckpointMaintenanceReport,
+)
+def full_market_checkpoint_storage(
+    retention_days: int = 14,
+) -> ScanCheckpointMaintenanceReport:
+    try:
+        return _repo().maintain_full_market_scan_checkpoints(
+            retention_days=retention_days,
+            dry_run=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/storage/full-market-checkpoints/maintenance",
+    response_model=ScanCheckpointMaintenanceReport,
+)
+def maintain_full_market_checkpoint_storage(
+    retention_days: int = 14,
+    dry_run: bool = True,
+) -> ScanCheckpointMaintenanceReport:
+    try:
+        return _repo().maintain_full_market_scan_checkpoints(
+            retention_days=retention_days,
+            dry_run=dry_run,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/historical-data/coverage")
@@ -5613,6 +5651,19 @@ def paper_trade_account_status(provider: str | None = None) -> dict[str, object]
             "manual_positions_are_separate": "true",
         },
     }
+
+
+@router.get(
+    "/paper-trades/execution-audit",
+    response_model=PaperExecutionRuleAudit,
+)
+def paper_trade_execution_audit(provider: str | None = None) -> PaperExecutionRuleAudit:
+    mode = provider.strip().lower() if provider else None
+    paper_repo = _paper_repo()
+    return build_paper_execution_rule_audit(
+        paper_repo.list_trades(limit=5000, provider=mode),
+        paper_repo.get_account_settings(),
+    )
 
 
 @router.post("/paper-trades/seed")
