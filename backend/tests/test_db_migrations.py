@@ -80,6 +80,38 @@ def _downgrade_revision_primary_keys(connection) -> None:
         connection.execute(text(f"DROP TABLE {backup}"))
 
 
+def test_initialize_database_replaces_legacy_unique_factor_model_digest_index(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'factor-model-index.db'}"
+    initialize_database(database_url)
+    engine = create_db_engine(database_url)
+    index_name = "ix_factor_research_model_artifacts_model_digest"
+    with engine.begin() as connection:
+        connection.execute(text(f"DROP INDEX {index_name}"))
+        connection.execute(
+            text(
+                f"CREATE UNIQUE INDEX {index_name} "
+                "ON factor_research_model_artifacts (model_digest)"
+            )
+        )
+        legacy = next(
+            item
+            for item in inspect(connection).get_indexes("factor_research_model_artifacts")
+            if item["name"] == index_name
+        )
+        assert legacy["unique"] == 1
+
+    db._initialized_urls.discard(database_url)
+    initialize_database(database_url)
+
+    with engine.connect() as connection:
+        repaired = next(
+            item
+            for item in inspect(connection).get_indexes("factor_research_model_artifacts")
+            if item["name"] == index_name
+        )
+    assert repaired["unique"] == 0
+
+
 def test_initialize_database_repairs_legacy_scoped_baostock_index_counts(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'legacy-index-counts.db'}"
     engine = create_db_engine(database_url)

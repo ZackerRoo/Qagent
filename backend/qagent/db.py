@@ -311,6 +311,7 @@ def _apply_additive_migrations(engine: Engine) -> None:
         _rebuild_revision_scoped_tables(connection)
         _rebuild_ranking_v3_forward_gate_evidence_kind(connection)
         _repair_legacy_scoped_index_snapshot_counts(connection)
+        _repair_factor_research_model_digest_index(connection)
         _create_missing_metadata_indexes(connection)
         _drop_obsolete_walk_forward_indexes(connection)
         _create_strategy_governance_indexes(connection)
@@ -1756,6 +1757,22 @@ def _create_missing_metadata_indexes(connection) -> None:
             continue
         for index in table.indexes:
             index.create(connection, checkfirst=True)
+
+
+def _repair_factor_research_model_digest_index(connection) -> None:
+    table_name = "factor_research_model_artifacts"
+    index_name = "ix_factor_research_model_artifacts_model_digest"
+    inspector = inspect(connection)
+    if not inspector.has_table(table_name):
+        return
+    current = next(
+        (item for item in inspector.get_indexes(table_name) if item["name"] == index_name),
+        None,
+    )
+    if current is None or not current.get("unique"):
+        return
+    quoted_index = connection.dialect.identifier_preparer.quote(index_name)
+    connection.execute(text(f"DROP INDEX {quoted_index}"))
 
 
 def _repair_legacy_scoped_index_snapshot_counts(connection) -> None:
