@@ -7,6 +7,7 @@ import json
 import math
 from multiprocessing import get_context
 from threading import Lock
+from time import monotonic
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -265,6 +266,12 @@ _submitted_historical_jobs: set[str] = set()
 _full_market_jobs_lock = Lock()
 _submitted_full_market_jobs: set[str] = set()
 _full_market_task_executor: ProcessPoolExecutor | None = None
+_latest_full_market_result_lock = Lock()
+_latest_full_market_result_cache: dict[
+    tuple[str, str, bool, int, int],
+    tuple[float, dict[str, object]],
+] = {}
+_LATEST_FULL_MARKET_RESULT_CACHE_TTL_SECONDS = 10.0
 _walk_forward_task_executor: ProcessPoolExecutor | None = None
 _walk_forward_jobs_lock = Lock()
 _submitted_walk_forward_jobs: set[str] = set()
@@ -7662,25 +7669,52 @@ def latest_full_market_batch_scan_result(
         raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
     mode = provider.strip().lower()
     repo = _repo()
-    cached = repo.get_recent_scan_result_cache(
-        cache_key=full_market_batch_cache_key(provider, include_etfs),
-        max_age=timedelta(minutes=cache_ttl_minutes),
+    bind = repo.session_factory.kw.get("bind")
+    database_identity = str(getattr(bind, "url", "unknown"))
+    response_cache_key = (
+        database_identity,
+        mode,
+        include_etfs,
+        limit,
+        cache_ttl_minutes,
     )
-    if cached is None:
-        raise HTTPException(status_code=404, detail="full-market batch result not found")
-    payload = deepcopy(cached.payload)
-    invalidated_filtered = _filter_recent_invalidated_payload_cards(
-        payload,
-        provider=mode,
-    )
-    _limit_full_market_batch_payload(payload, limit=limit)
-    _hydrate_full_market_batch_payload(payload, repo, mode, cache_ttl_minutes)
-    data_health = payload.setdefault("data_health", {})
-    if isinstance(data_health, dict):
-        data_health["scan_result_cache"] = "hit"
-        data_health["scan_result_cache_id"] = cached.cache_id
-        data_health["paper_invalidated_cards_filtered"] = str(invalidated_filtered)
-    return payload
+    with _latest_full_market_result_lock:
+        now = monotonic()
+        cached_response = _latest_full_market_result_cache.get(response_cache_key)
+        if cached_response is not None and now - cached_response[0] <= (
+            _LATEST_FULL_MARKET_RESULT_CACHE_TTL_SECONDS
+        ):
+            payload = deepcopy(cached_response[1])
+            data_health = payload.setdefault("data_health", {})
+            if isinstance(data_health, dict):
+                data_health["full_market_response_cache"] = "hit"
+            return payload
+
+        cached = repo.get_recent_scan_result_cache(
+            cache_key=full_market_batch_cache_key(provider, include_etfs),
+            max_age=timedelta(minutes=cache_ttl_minutes),
+        )
+        if cached is None:
+            raise HTTPException(status_code=404, detail="full-market batch result not found")
+        payload = deepcopy(cached.payload)
+        invalidated_filtered = _filter_recent_invalidated_payload_cards(
+            payload,
+            provider=mode,
+        )
+        _limit_full_market_batch_payload(payload, limit=limit)
+        _hydrate_full_market_batch_payload(payload, repo, mode, cache_ttl_minutes)
+        data_health = payload.setdefault("data_health", {})
+        if isinstance(data_health, dict):
+            data_health["scan_result_cache"] = "hit"
+            data_health["scan_result_cache_id"] = cached.cache_id
+            data_health["paper_invalidated_cards_filtered"] = str(invalidated_filtered)
+            data_health["full_market_response_cache"] = "miss"
+        _latest_full_market_result_cache.clear()
+        _latest_full_market_result_cache[response_cache_key] = (
+            monotonic(),
+            deepcopy(payload),
+        )
+        return payload
 
 
 def _limit_full_market_batch_payload(payload: dict[str, object], *, limit: int) -> None:
@@ -7741,32 +7775,17 @@ def _limit_full_market_batch_payload(payload: dict[str, object], *, limit: int) 
 
     data_health = payload.get("data_health")
     if isinstance(data_health, dict):
-        gate_decisions = data_health.get("strategy_governance_gate_decisions")
-        if isinstance(gate_decisions, str):
-            try:
-                parsed_gate_decisions = json.loads(gate_decisions)
-            except (TypeError, ValueError):
-                parsed_gate_decisions = None
-            if isinstance(parsed_gate_decisions, dict):
-                data_health["strategy_governance_gate_decisions"] = json.dumps(
-                    {
-                        card_id: value
-                        for card_id, value in parsed_gate_decisions.items()
-                        if card_id in visible_card_ids
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-        for key in (
-            "errors",
-            "scan_error_samples",
-            "a_share_enhanced_errors",
-            "full_market_worker_error",
-        ):
-            value = data_health.get(key)
-            if isinstance(value, str) and len(value) > 2_000:
-                data_health[key] = f"{value[:2_000]}..."
-        data_health["full_market_response_card_limit"] = str(limit)
+        _limit_full_market_data_health(data_health, visible_card_ids, limit)
+
+    market_intelligence = payload.get("market_intelligence")
+    if isinstance(market_intelligence, dict):
+        intelligence_health = market_intelligence.get("data_health")
+        if isinstance(intelligence_health, dict):
+            _limit_full_market_data_health(
+                intelligence_health,
+                visible_card_ids,
+                limit,
+            )
 
     for key in (
         "manual_action_center",
@@ -7777,6 +7796,39 @@ def _limit_full_market_batch_payload(payload: dict[str, object], *, limit: int) 
         "research_center",
     ):
         payload.pop(key, None)
+
+
+def _limit_full_market_data_health(
+    data_health: dict[str, object],
+    visible_card_ids: set[str],
+    limit: int,
+) -> None:
+    gate_decisions = data_health.get("strategy_governance_gate_decisions")
+    if isinstance(gate_decisions, str):
+        try:
+            parsed_gate_decisions = json.loads(gate_decisions)
+        except (TypeError, ValueError):
+            parsed_gate_decisions = None
+        if isinstance(parsed_gate_decisions, dict):
+            data_health["strategy_governance_gate_decisions"] = json.dumps(
+                {
+                    card_id: value
+                    for card_id, value in parsed_gate_decisions.items()
+                    if card_id in visible_card_ids
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+    for key in (
+        "errors",
+        "scan_error_samples",
+        "a_share_enhanced_errors",
+        "full_market_worker_error",
+    ):
+        value = data_health.get(key)
+        if isinstance(value, str) and len(value) > 2_000:
+            data_health[key] = f"{value[:2_000]}..."
+    data_health["full_market_response_card_limit"] = str(limit)
 
 
 def _reset_abandoned_full_market_job(repo: QagentRepository, job):

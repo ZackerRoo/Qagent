@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 import json
 import time
@@ -765,6 +766,16 @@ def test_full_market_batch_latest_result_honors_card_limit(tmp_path, monkeypatch
                     card.instrument_id: {} for card in scan.cards
                 },
             },
+            "market_intelligence": {
+                "data_health": {
+                    "strategy_governance_gate_decisions": json.dumps(
+                        {
+                            card.card_id: {"gate_decision": "observe"}
+                            for card in scan.cards
+                        }
+                    ),
+                },
+            },
             "data_health": {
                 "provider": "fixture",
                 "errors": "x" * 3_000,
@@ -796,6 +807,68 @@ def test_full_market_batch_latest_result_honors_card_limit(tmp_path, monkeypatch
     assert set(json.loads(body["data_health"]["strategy_governance_gate_decisions"])) <= {
         body["cards"][0]["card_id"]
     }
+    assert set(
+        json.loads(
+            body["market_intelligence"]["data_health"][
+                "strategy_governance_gate_decisions"
+            ]
+        )
+    ) <= {body["cards"][0]["card_id"]}
+
+
+def test_full_market_batch_latest_result_coalesces_concurrent_reads(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'coalesced-batch.db'}")
+    repo = routes._repo()
+    scan = run_daily_scan(["US:TEST", "CN:000001"], FixtureMarketDataProvider())
+    repo.save_scan_result_cache(
+        cache_key=routes.full_market_batch_cache_key("fixture", True),
+        provider="fixture",
+        mode="full_market_batch",
+        symbols=["US:TEST", "CN:000001"],
+        payload={
+            "symbols": ["US:TEST", "CN:000001"],
+            "cards": [card.model_dump(mode="json") for card in scan.cards],
+            "items": [],
+            "strategy_health": [],
+            "factor_rankings": [],
+            "sector_strength": [],
+            "portfolio_plan": scan.portfolio_plan.model_dump(mode="json"),
+            "data_health": {"provider": "fixture"},
+        },
+    )
+    hydrate_calls: list[bool] = []
+
+    def slow_hydrate(*_args, **_kwargs):
+        hydrate_calls.append(True)
+        time.sleep(0.05)
+
+    monkeypatch.setattr(routes, "_hydrate_full_market_batch_payload", slow_hydrate)
+    client = TestClient(create_app())
+    path = (
+        "/api/full-market/batch-scan/latest-result"
+        "?provider=fixture&include_etfs=true&limit=1"
+    )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        responses = list(executor.map(lambda _index: client.get(path), range(8)))
+
+    response_errors = [
+        (response.status_code, response.text)
+        for response in responses
+        if response.status_code != 200
+    ]
+    assert not response_errors
+    assert all(len(response.json()["cards"]) == 1 for response in responses)
+    assert len(hydrate_calls) == 1
+    cache_states = [
+        response.json()["data_health"]["full_market_response_cache"]
+        for response in responses
+    ]
+    assert cache_states.count("miss") == 1
+    assert cache_states.count("hit") == 7
 
 
 def test_full_market_batch_latest_result_uses_card_calibration_when_no_health_cache(
