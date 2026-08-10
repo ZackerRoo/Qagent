@@ -313,6 +313,10 @@ def build_factor_research_dataset(
 
 def neutralize_research_features(frame: pd.DataFrame) -> pd.DataFrame:
     normalized = frame.copy()
+    for feature in FEATURE_COLUMNS:
+        normalized[feature] = pd.to_numeric(normalized[feature], errors="coerce").astype(
+            "float64"
+        )
     for _, indexes in normalized.groupby("signal_date").groups.items():
         group = normalized.loc[indexes]
         size = pd.to_numeric(group["log_market_cap"], errors="coerce")

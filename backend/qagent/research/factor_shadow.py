@@ -109,8 +109,9 @@ def score_factor_shadow_run(
         import lightgbm as lgb
     except ImportError as error:  # pragma: no cover - dependency is exercised in integration.
         raise RuntimeError("lightgbm dependency is unavailable") from error
+    model_frame = frame.loc[:, list(FEATURE_COLUMNS)].astype("float64")
     predictions = [
-        lgb.Booster(model_str=model.model_text).predict(frame[list(FEATURE_COLUMNS)])
+        lgb.Booster(model_str=model.model_text).predict(model_frame)
         for model in bundle.models
     ]
     frame["challenger_score"] = np.mean(np.vstack(predictions), axis=0)

@@ -118,6 +118,25 @@ def test_neutralization_removes_cross_sectional_size_loading():
     assert normalized["momentum_20"].std() == pytest.approx(1.0, rel=0.02)
 
 
+def test_neutralization_keeps_all_missing_feature_columns_numeric():
+    rows = []
+    for index in range(10):
+        row = {
+            "signal_date": date(2025, 1, 2),
+            "instrument_id": f"CN:{index:06d}",
+            "industry": "行业A",
+            "log_market_cap": 18 + index / 10,
+        }
+        for feature in FEATURE_COLUMNS:
+            row[feature] = float(index) if feature == "momentum_20" else None
+        rows.append(row)
+
+    normalized = neutralize_research_features(pd.DataFrame(rows))
+
+    assert all(str(dtype) == "float64" for dtype in normalized[list(FEATURE_COLUMNS)].dtypes)
+    assert normalized["return_on_equity"].isna().all()
+
+
 def test_replay_factor_rows_use_volume_price_turnover_proxy():
     rows = [
         ReplayFactorBarReadRow(
