@@ -8,11 +8,13 @@ from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.storage.tables import (
     FactorResearchExperimentRow,
     FactorResearchModelArtifactRow,
+    FactorShadowOutcomeRow,
     FactorShadowScoreRow,
 )
 
@@ -77,6 +79,36 @@ class FactorShadowRun(BaseModel):
     mean_feature_coverage: float
     top_scores: list[FactorShadowScore] = Field(default_factory=list)
     created_at: datetime
+
+
+class FactorShadowRunRef(BaseModel):
+    experiment_id: str
+    scan_job_id: str
+    signal_date: date
+    dataset_revision: int
+    model_digest: str
+    scored_instruments: int
+    created_at: datetime
+
+
+class FactorShadowOutcome(BaseModel):
+    experiment_id: str
+    scan_job_id: str
+    instrument_id: str
+    horizon_sessions: int = Field(gt=0)
+    signal_date: date
+    entry_date: date
+    outcome_date: date
+    benchmark_id: str
+    instrument_return_pct: float
+    benchmark_return_pct: float
+    excess_return_pct: float
+    net_excess_return_pct: float
+    round_trip_cost_bps: float = Field(ge=0)
+    signal_dataset_revision: int
+    model_digest: str
+    source_digest: str
+    created_at: datetime | None = None
 
 
 class FactorResearchRepository:
@@ -337,6 +369,149 @@ class FactorResearchRepository:
             )
             return _shadow_run_from_rows(rows, top_limit=top_limit)
 
+    def latest_model_shadow_runs(self, provider_mode: str) -> list[FactorShadowRunRef]:
+        bundle = self.latest_model_bundle(provider_mode)
+        if bundle is None:
+            return []
+        with self.session_factory() as session:
+            rows = (
+                session.query(
+                    FactorShadowScoreRow.experiment_id,
+                    FactorShadowScoreRow.scan_job_id,
+                    FactorShadowScoreRow.signal_date,
+                    FactorShadowScoreRow.dataset_revision,
+                    FactorShadowScoreRow.model_digest,
+                    func.count(FactorShadowScoreRow.instrument_id),
+                    func.max(FactorShadowScoreRow.created_at),
+                )
+                .filter(
+                    FactorShadowScoreRow.experiment_id
+                    == bundle.experiment.experiment_id
+                )
+                .group_by(
+                    FactorShadowScoreRow.experiment_id,
+                    FactorShadowScoreRow.scan_job_id,
+                    FactorShadowScoreRow.signal_date,
+                    FactorShadowScoreRow.dataset_revision,
+                    FactorShadowScoreRow.model_digest,
+                )
+                .order_by(FactorShadowScoreRow.signal_date.asc())
+                .all()
+            )
+        return [
+            FactorShadowRunRef(
+                experiment_id=row[0],
+                scan_job_id=row[1],
+                signal_date=row[2],
+                dataset_revision=row[3],
+                model_digest=row[4],
+                scored_instruments=int(row[5]),
+                created_at=row[6],
+            )
+            for row in rows
+        ]
+
+    def shadow_scores(
+        self,
+        experiment_id: str,
+        scan_job_id: str,
+    ) -> list[FactorShadowScore]:
+        with self.session_factory() as session:
+            rows = (
+                session.query(FactorShadowScoreRow)
+                .filter(
+                    FactorShadowScoreRow.experiment_id == experiment_id,
+                    FactorShadowScoreRow.scan_job_id == scan_job_id,
+                )
+                .order_by(FactorShadowScoreRow.challenger_rank.asc())
+                .all()
+            )
+        return [_shadow_score_from_row(row) for row in rows]
+
+    def record_shadow_outcomes(
+        self,
+        outcomes: list[FactorShadowOutcome],
+    ) -> int:
+        if not outcomes:
+            return 0
+        inserted = 0
+        now = datetime.now(timezone.utc)
+        with self.session_factory() as session:
+            for item in outcomes:
+                identity = (
+                    item.experiment_id,
+                    item.scan_job_id,
+                    item.instrument_id,
+                    item.horizon_sessions,
+                )
+                existing = session.get(FactorShadowOutcomeRow, identity)
+                if existing is not None:
+                    if _outcome_identity_payload(_outcome_from_row(existing)) != (
+                        _outcome_identity_payload(item)
+                    ):
+                        raise ValueError(
+                            "factor shadow outcome retry does not match immutable row"
+                        )
+                    continue
+                session.add(
+                    FactorShadowOutcomeRow(
+                        experiment_id=item.experiment_id,
+                        scan_job_id=item.scan_job_id,
+                        instrument_id=item.instrument_id,
+                        horizon_sessions=item.horizon_sessions,
+                        signal_date=item.signal_date,
+                        entry_date=item.entry_date,
+                        outcome_date=item.outcome_date,
+                        benchmark_id=item.benchmark_id,
+                        instrument_return_pct=Decimal(
+                            str(item.instrument_return_pct)
+                        ),
+                        benchmark_return_pct=Decimal(
+                            str(item.benchmark_return_pct)
+                        ),
+                        excess_return_pct=Decimal(str(item.excess_return_pct)),
+                        net_excess_return_pct=Decimal(
+                            str(item.net_excess_return_pct)
+                        ),
+                        round_trip_cost_bps=Decimal(
+                            str(item.round_trip_cost_bps)
+                        ),
+                        signal_dataset_revision=item.signal_dataset_revision,
+                        model_digest=item.model_digest,
+                        source_digest=item.source_digest,
+                        created_at=item.created_at or now,
+                    )
+                )
+                inserted += 1
+            session.commit()
+        return inserted
+
+    def shadow_outcomes(
+        self,
+        experiment_id: str,
+        *,
+        scan_job_id: str | None = None,
+        horizon_sessions: int | None = None,
+    ) -> list[FactorShadowOutcome]:
+        with self.session_factory() as session:
+            query = session.query(FactorShadowOutcomeRow).filter(
+                FactorShadowOutcomeRow.experiment_id == experiment_id
+            )
+            if scan_job_id is not None:
+                query = query.filter(
+                    FactorShadowOutcomeRow.scan_job_id == scan_job_id
+                )
+            if horizon_sessions is not None:
+                query = query.filter(
+                    FactorShadowOutcomeRow.horizon_sessions == horizon_sessions
+                )
+            rows = query.order_by(
+                FactorShadowOutcomeRow.signal_date,
+                FactorShadowOutcomeRow.horizon_sessions,
+                FactorShadowOutcomeRow.instrument_id,
+            ).all()
+        return [_outcome_from_row(row) for row in rows]
+
 
 def _required_row(session: Session, experiment_id: str) -> FactorResearchExperimentRow:
     row = session.get(FactorResearchExperimentRow, experiment_id)
@@ -421,6 +596,32 @@ def _shadow_run_from_rows(
         top_scores=[_shadow_score_from_row(row) for row in rows[: max(0, top_limit)]],
         created_at=max(row.created_at for row in rows),
     )
+
+
+def _outcome_from_row(row: FactorShadowOutcomeRow) -> FactorShadowOutcome:
+    return FactorShadowOutcome(
+        experiment_id=row.experiment_id,
+        scan_job_id=row.scan_job_id,
+        instrument_id=row.instrument_id,
+        horizon_sessions=row.horizon_sessions,
+        signal_date=row.signal_date,
+        entry_date=row.entry_date,
+        outcome_date=row.outcome_date,
+        benchmark_id=row.benchmark_id,
+        instrument_return_pct=float(row.instrument_return_pct),
+        benchmark_return_pct=float(row.benchmark_return_pct),
+        excess_return_pct=float(row.excess_return_pct),
+        net_excess_return_pct=float(row.net_excess_return_pct),
+        round_trip_cost_bps=float(row.round_trip_cost_bps),
+        signal_dataset_revision=row.signal_dataset_revision,
+        model_digest=row.model_digest,
+        source_digest=row.source_digest,
+        created_at=row.created_at,
+    )
+
+
+def _outcome_identity_payload(item: FactorShadowOutcome) -> dict[str, Any]:
+    return item.model_dump(mode="json", exclude={"created_at"})
 
 
 def _canonical_json(value: Any) -> str:

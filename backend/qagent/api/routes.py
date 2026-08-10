@@ -77,6 +77,10 @@ from qagent.research.factor_experiments import (
     execute_factor_research_experiment,
     resolved_config,
 )
+from qagent.research.factor_shadow_outcomes import (
+    build_factor_shadow_evaluation,
+    resolve_factor_shadow_outcomes,
+)
 from qagent.jobs.automation import run_research_automation
 from qagent.jobs.automation_scheduler import (
     AutoProcessingCycleResult,
@@ -3036,6 +3040,51 @@ def latest_factor_research_shadow(provider: str = "free", top_limit: int = 20):
     }
 
 
+@router.get("/factor-research/shadow/evaluation")
+def factor_research_shadow_evaluation(
+    provider: str = "free",
+    as_of_date: date | None = None,
+):
+    mode = provider.strip().lower()
+    effective_as_of = as_of_date or _latest_completed_a_share_session() or date.today()
+    evaluation = build_factor_shadow_evaluation(
+        create_session_factory(),
+        provider_mode=mode,
+        as_of_date=effective_as_of,
+    )
+    return {
+        "evaluation": evaluation,
+        "data_health": evaluation.data_health,
+    }
+
+
+@router.post("/factor-research/shadow/outcomes/resolve")
+def resolve_factor_research_shadow_outcomes(
+    provider: str = "free",
+    as_of_date: date | None = None,
+):
+    mode = provider.strip().lower()
+    effective_as_of = as_of_date or _latest_completed_a_share_session() or date.today()
+    resolution = resolve_factor_shadow_outcomes(
+        create_session_factory(),
+        provider_mode=mode,
+        as_of_date=effective_as_of,
+    )
+    evaluation = build_factor_shadow_evaluation(
+        create_session_factory(),
+        provider_mode=mode,
+        as_of_date=effective_as_of,
+    )
+    return {
+        "resolution": resolution,
+        "evaluation": evaluation,
+        "data_health": {
+            **resolution.data_health,
+            **evaluation.data_health,
+        },
+    }
+
+
 @router.get("/factor-research/experiments/{experiment_id}")
 def factor_research_experiment(experiment_id: str):
     experiment = _factor_research_repo().get(experiment_id)
@@ -3752,6 +3801,28 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
         )
         paper_total = summary.total
         paper_closed = summary.closed
+
+    if mode == "free":
+        try:
+            factor_shadow_as_of = (
+                expected_signal_date
+                or _latest_completed_a_share_session()
+                or date.today()
+            )
+            shadow_resolution = resolve_factor_shadow_outcomes(
+                create_session_factory(),
+                provider_mode=mode,
+                as_of_date=factor_shadow_as_of,
+            )
+            data_health.update(shadow_resolution.data_health)
+            if shadow_resolution.next_maturity_date is not None:
+                data_health["factor_shadow_outcome_next_maturity_date"] = (
+                    shadow_resolution.next_maturity_date.isoformat()
+                )
+        except Exception as exc:
+            data_health["factor_shadow_outcome_status"] = "error"
+            data_health["factor_shadow_outcome_error"] = str(exc)
+            errors.append(f"factor_shadow_outcomes: {exc}")
 
     if settings.run_alerts:
         try:

@@ -24,6 +24,7 @@ import type {
   FactorDiagnosticsResponse,
   FactorResearchExperiment,
   FactorResearchExperimentsResponse,
+  FactorShadowEvaluationResponse,
   FactorShadowResponse,
   FullMarketBatchScanJob,
   FullMarketScanResponse,
@@ -882,6 +883,14 @@ export async function fetchFactorResearchShadow(
   return apiGet<FactorShadowResponse>("/factor-research/shadow/latest", {
     provider,
     top_limit: 20,
+  });
+}
+
+export async function fetchFactorShadowEvaluation(
+  provider: DataProviderMode,
+): Promise<FactorShadowEvaluationResponse> {
+  return apiGet<FactorShadowEvaluationResponse>("/factor-research/shadow/evaluation", {
+    provider,
   });
 }
 

@@ -3,10 +3,12 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import {
   createPaperTradeFromOpportunity,
   fetchAutomationScheduler,
+  fetchFactorShadowEvaluation,
   fetchFullMarketBatchScan,
   fetchLatestFullMarketBatchResult,
   fetchLatestFullMarketBatchScan,
   fetchMarketBars,
+  fetchPaperAccountStatus,
   fetchPaperCandidatePool,
   fetchPaperValidation,
   fetchRecommendationFollowThrough,
@@ -44,10 +46,12 @@ import type {
   AutoProcessingState,
   ConfidenceDriver,
   DataProviderMode,
+  FactorShadowEvaluationResponse,
   FullMarketBatchScanJob,
   FullMarketScanResponse,
   MarketBarsResponse,
   OpportunityCard,
+  PaperAccountStatusResponse,
   PaperCandidatePoolItem,
   PaperCandidatePoolResponse,
   PaperValidationResponse,
@@ -102,6 +106,9 @@ export function Today({
     useState<RecommendationFollowThroughCenterResponse>();
   const [automationScheduler, setAutomationScheduler] = useState<AutoProcessingState>();
   const [paperValidation, setPaperValidation] = useState<PaperValidationResponse>();
+  const [paperAccountStatus, setPaperAccountStatus] = useState<PaperAccountStatusResponse>();
+  const [factorShadowEvaluation, setFactorShadowEvaluation] =
+    useState<FactorShadowEvaluationResponse>();
   const [paperCandidatePool, setPaperCandidatePool] = useState<PaperCandidatePoolResponse>();
   const [isStartingFullScan, setIsStartingFullScan] = useState(false);
   const [isBulkPaperTracking, setIsBulkPaperTracking] = useState(false);
@@ -198,18 +205,25 @@ export function Today({
 
   async function loadAutoPaperStatus() {
     try {
-      const [scheduler, validation, candidatePool] = await Promise.all([
+      const [scheduler, validation, accountStatus, candidatePool, shadowEvaluation] =
+        await Promise.all([
         fetchAutomationScheduler(),
-        fetchPaperValidation(dataMode),
+        fetchPaperValidation(dataMode, "legacy"),
+        fetchPaperAccountStatus(dataMode),
         fetchPaperCandidatePool(dataMode),
+        fetchFactorShadowEvaluation(dataMode),
       ]);
       setAutomationScheduler(scheduler);
       setPaperValidation(validation);
+      setPaperAccountStatus(accountStatus);
       setPaperCandidatePool(candidatePool);
+      setFactorShadowEvaluation(shadowEvaluation);
     } catch {
       setAutomationScheduler(undefined);
       setPaperValidation(undefined);
+      setPaperAccountStatus(undefined);
       setPaperCandidatePool(undefined);
+      setFactorShadowEvaluation(undefined);
     }
   }
 
@@ -444,6 +458,8 @@ export function Today({
         <AutoPaperStatusStrip
           scheduler={automationScheduler}
           validation={paperValidation}
+          accountStatus={paperAccountStatus}
+          shadowEvaluation={factorShadowEvaluation}
           fullScanJob={fullScanJob}
           language={language}
         />
@@ -1195,17 +1211,23 @@ function TodayAdvancedAnalysis({
 function AutoPaperStatusStrip({
   scheduler,
   validation,
+  accountStatus,
+  shadowEvaluation,
   fullScanJob,
   language,
 }: {
   scheduler?: AutoProcessingState;
   validation?: PaperValidationResponse;
+  accountStatus?: PaperAccountStatusResponse;
+  shadowEvaluation?: FactorShadowEvaluationResponse;
   fullScanJob?: FullMarketBatchScanJob;
   language: "zh" | "en";
 }) {
   const enabled = scheduler?.enabled ?? false;
   const summary = validation?.summary;
   const age = validation?.sample_age;
+  const currentModel = accountStatus?.current_model;
+  const shadow = shadowEvaluation?.evaluation;
   const fullScanActive = fullScanJob ? isFullScanActive(fullScanJob) : false;
   return (
     <section className={`panel auto-paper-status-strip ${enabled ? "is-running" : "is-stopped"}`}>
@@ -1235,16 +1257,20 @@ function AutoPaperStatusStrip({
           value={enabled ? formatMaybeDateTime(scheduler?.next_run_at, language) : "-"}
         />
         <AutoPaperMetric
-          label={language === "zh" ? "模拟记录" : "Trades"}
-          value={summary?.total_trades ?? "-"}
+          label={language === "zh" ? "研究记录" : "Research trades"}
+          value={accountStatus?.research.total ?? summary?.total_trades ?? "-"}
         />
         <AutoPaperMetric
-          label={language === "zh" ? "已闭环" : "Closed"}
-          value={summary?.closed_trades ?? "-"}
+          label={language === "zh" ? "当前模型持仓" : "Current positions"}
+          value={
+            currentModel && accountStatus
+              ? `${currentModel.active}/${accountStatus.research.max_positions}`
+              : "-"
+          }
         />
         <AutoPaperMetric
-          label={language === "zh" ? "当前收益" : "Return"}
-          value={summary ? formatNumber(summary.total_return_pct, "%") : "-"}
+          label={language === "zh" ? "当前模型闭环" : "Model closed"}
+          value={currentModel?.closed ?? "-"}
         />
         <AutoPaperMetric
           label={language === "zh" ? "全量扫描" : "Full scan"}
@@ -1271,6 +1297,28 @@ function AutoPaperStatusStrip({
             20D <strong>{age.mature_20d}</strong>
             {age.days_to_next_20d != null && ` / ${language === "zh" ? "还差" : "next"} ${age.days_to_next_20d}D`}
           </span>
+        </div>
+      )}
+
+      {shadow && (
+        <div className="factor-shadow-maturity-strip">
+          <span>
+            {language === "zh" ? "因子影子" : "Factor shadow"}{" "}
+            <strong>{localizeShadowStatus(shadow.status, language)}</strong>
+          </span>
+          <span>
+            {language === "zh" ? "下一成熟日" : "Next maturity"}{" "}
+            <strong>{formatMaybeDate(shadow.next_maturity_date, language)}</strong>
+          </span>
+          {shadow.horizons.map((horizon) => (
+            <span key={horizon.horizon_sessions}>
+              {horizon.horizon_sessions}D{" "}
+              <strong>
+                {horizon.completed_instruments}/{horizon.expected_instruments}
+              </strong>{" "}
+              · {Math.round(horizon.outcome_coverage * 100)}%
+            </span>
+          ))}
         </div>
       )}
     </section>
@@ -2578,6 +2626,16 @@ function formatMaybeDateTime(value: string | null | undefined, language: "zh" | 
   });
 }
 
+function formatMaybeDate(value: string | null | undefined, language: "zh" | "en"): string {
+  if (!value) {
+    return "-";
+  }
+  return new Date(`${value}T00:00:00`).toLocaleDateString(
+    language === "zh" ? "zh-CN" : "en-US",
+    { month: "2-digit", day: "2-digit" },
+  );
+}
+
 function formatIntervalSeconds(value: number, language: "zh" | "en"): string {
   if (value < 60) {
     return language === "zh" ? `${value}秒` : `${value}s`;
@@ -2602,6 +2660,20 @@ function localizeScanJobStatus(status: string, language: "zh" | "en"): string {
     running: "Running",
     succeeded: "Done",
     failed: "Failed",
+  };
+  return (language === "zh" ? zh : en)[status] ?? status;
+}
+
+function localizeShadowStatus(status: string, language: "zh" | "en"): string {
+  const zh: Record<string, string> = {
+    not_started: "尚未开始",
+    collecting: "积累中",
+    ready: "已成熟",
+  };
+  const en: Record<string, string> = {
+    not_started: "Not started",
+    collecting: "Collecting",
+    ready: "Ready",
   };
   return (language === "zh" ? zh : en)[status] ?? status;
 }

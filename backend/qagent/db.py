@@ -327,6 +327,7 @@ def _apply_additive_migrations(engine: Engine) -> None:
         _create_immutable_paper_research_baseline_triggers(connection)
         _create_immutable_row_triggers(connection, "factor_research_model_artifacts")
         _create_immutable_row_triggers(connection, "factor_shadow_scores")
+        _create_immutable_row_triggers(connection, "factor_shadow_outcomes")
 
 
 @contextmanager

@@ -1,7 +1,11 @@
 from datetime import date
 from decimal import Decimal
 
-from qagent.strategy_data.providers import FixtureStrategyDataProvider
+from qagent.strategy_data.models import FundamentalSnapshot
+from qagent.strategy_data.providers import (
+    FixtureStrategyDataProvider,
+    StoredFundamentalStrategyDataProvider,
+)
 
 
 def test_fixture_strategy_data_provider_returns_complete_us_earnings_event():
@@ -74,3 +78,33 @@ def test_fixture_strategy_data_provider_returns_analyst_insight():
     assert insight.target_upside_pct == Decimal("28.0")
     assert insight.total_ratings == 25
     assert insight.bullish_rating_ratio == Decimal("0.8")
+
+
+def test_stored_fundamental_provider_keeps_latest_point_in_time_snapshot_available():
+    provider = StoredFundamentalStrategyDataProvider(
+        [
+            FundamentalSnapshot(
+                instrument_id="CN:000001",
+                as_of_date=date(2025, 12, 31),
+                revenue_growth_pct=Decimal("12.5"),
+                pe_ratio=Decimal("8.2"),
+                provider="sqlite_point_in_time",
+            )
+        ]
+    )
+
+    snapshots = provider.get_fundamentals(
+        ["CN:000001", "CN:000002"],
+        start=date(2026, 7, 1),
+        end=date(2026, 8, 10),
+    )
+    before_snapshot = provider.get_fundamentals(
+        ["CN:000001"],
+        start=date(2025, 1, 1),
+        end=date(2025, 12, 30),
+    )
+
+    assert len(snapshots) == 1
+    assert snapshots[0].as_of_date == date(2025, 12, 31)
+    assert snapshots[0].revenue_growth_pct == Decimal("12.5")
+    assert before_snapshot == []

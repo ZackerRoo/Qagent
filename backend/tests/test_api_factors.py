@@ -88,6 +88,10 @@ def test_factor_research_experiment_api_starts_empty_and_isolated(tmp_path, monk
 
     response = client.get("/api/factor-research/experiments")
     shadow = client.get("/api/factor-research/shadow/latest")
+    evaluation = client.get("/api/factor-research/shadow/evaluation?provider=fixture")
+    resolution = client.post(
+        "/api/factor-research/shadow/outcomes/resolve?provider=fixture"
+    )
     missing = client.get("/api/factor-research/experiments/not-found")
 
     assert response.status_code == 200
@@ -96,4 +100,9 @@ def test_factor_research_experiment_api_starts_empty_and_isolated(tmp_path, monk
     assert shadow.status_code == 200
     assert shadow.json()["run"] is None
     assert shadow.json()["data_health"]["paper_order_effect"] == "none"
+    assert evaluation.status_code == 200
+    assert evaluation.json()["evaluation"]["status"] == "not_started"
+    assert resolution.status_code == 200
+    assert resolution.json()["resolution"]["status"] == "not_started"
+    assert resolution.json()["evaluation"]["status"] == "not_started"
     assert missing.status_code == 404

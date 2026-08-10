@@ -1705,3 +1705,38 @@ Index(
     FactorShadowScoreRow.scan_job_id,
     FactorShadowScoreRow.challenger_rank,
 )
+
+
+class FactorShadowOutcomeRow(Base):
+    __tablename__ = "factor_shadow_outcomes"
+
+    experiment_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("factor_research_experiments.experiment_id"),
+        primary_key=True,
+        index=True,
+    )
+    scan_job_id: Mapped[str] = mapped_column(String(96), primary_key=True, index=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
+    horizon_sessions: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    signal_date: Mapped[date] = mapped_column(Date, index=True)
+    entry_date: Mapped[date] = mapped_column(Date)
+    outcome_date: Mapped[date] = mapped_column(Date, index=True)
+    benchmark_id: Mapped[str] = mapped_column(String(64), index=True)
+    instrument_return_pct: Mapped[Decimal] = mapped_column(Numeric(20, 10))
+    benchmark_return_pct: Mapped[Decimal] = mapped_column(Numeric(20, 10))
+    excess_return_pct: Mapped[Decimal] = mapped_column(Numeric(20, 10))
+    net_excess_return_pct: Mapped[Decimal] = mapped_column(Numeric(20, 10))
+    round_trip_cost_bps: Mapped[Decimal] = mapped_column(Numeric(12, 4))
+    signal_dataset_revision: Mapped[int] = mapped_column(Integer, index=True)
+    model_digest: Mapped[str] = mapped_column(String(64), index=True)
+    source_digest: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
+Index(
+    "ix_factor_shadow_outcomes_latest",
+    FactorShadowOutcomeRow.outcome_date.desc(),
+    FactorShadowOutcomeRow.horizon_sessions,
+    FactorShadowOutcomeRow.scan_job_id,
+)

@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -10,6 +11,8 @@ from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.daily_scan import ScanItem
 from qagent.market.sector_strength import build_sector_strength
 from qagent.storage.repository import QagentRepository
+from qagent.storage.replay_evidence import ReplayEvidenceRepository
+from qagent.strategy_data.models import FundamentalSnapshot
 
 
 def test_daily_scan_returns_cards_for_fixture_universe():
@@ -299,6 +302,68 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
     )
     assert len(snapshots) == len(cached.payload["cards"])
     assert all(snapshot.latest_close is not None for snapshot in snapshots)
+
+
+def test_full_market_batch_uses_frozen_point_in_time_fundamentals(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'full-batch-fundamentals.db'}",
+    )
+    initialize_database()
+    session_factory = create_session_factory()
+    repo = QagentRepository(session_factory)
+    evidence = ReplayEvidenceRepository(session_factory, "fixture")
+    evidence.upsert_fundamentals(
+        [
+            FundamentalSnapshot(
+                instrument_id="US:TEST",
+                as_of_date=date(2025, 12, 31),
+                revenue_growth_pct=Decimal("21.5"),
+                return_on_equity_pct=Decimal("18.0"),
+                pe_ratio=Decimal("12.0"),
+                provider="fixture",
+            )
+        ],
+        revision=1,
+    )
+    job = repo.create_full_market_scan_job(
+        provider="fixture",
+        symbols=["US:TEST"],
+        batch_size=1,
+        include_etfs=False,
+        sync_if_empty=False,
+    )
+    monkeypatch.setattr(
+        full_market,
+        "build_market_data_provider",
+        lambda provider: FixtureMarketDataProvider(),
+    )
+    real_run_daily_scan = full_market.run_daily_scan
+    captured: list[FundamentalSnapshot] = []
+
+    def capture_fundamentals(*args, **kwargs):
+        strategy_provider = kwargs["strategy_data_provider"]
+        captured.extend(
+            strategy_provider.get_fundamentals(
+                ["US:TEST"],
+                start=date(2026, 1, 1),
+                end=date(2026, 8, 10),
+            )
+        )
+        return real_run_daily_scan(*args, **kwargs)
+
+    monkeypatch.setattr(full_market, "run_daily_scan", capture_fundamentals)
+
+    full_market.run_full_market_batch_scan_job(job.job_id, top_cards_limit=5)
+
+    finished = repo.get_full_market_scan_job(job.job_id)
+    assert finished is not None
+    assert finished.status == "succeeded"
+    assert len(captured) == 1
+    assert captured[0].as_of_date == date(2025, 12, 31)
+    assert captured[0].revenue_growth_pct == Decimal("21.5")
+    assert finished.data_health["full_market_fundamental_source"] == ("sqlite_point_in_time")
+    assert finished.data_health["full_market_fundamental_dataset_revision"] == "1"
 
 
 def test_full_market_batch_job_resumes_from_persisted_batch_checkpoints(

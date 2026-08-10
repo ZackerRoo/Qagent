@@ -3220,6 +3220,40 @@ export type FactorShadowResponse = {
   data_health: Record<string, string>;
 };
 
+export type FactorShadowHorizonEvaluation = {
+  horizon_sessions: number;
+  status: "pending" | "partial" | "ready";
+  matured_runs: number;
+  expected_instruments: number;
+  completed_instruments: number;
+  outcome_coverage: number;
+  mean_baseline_rank_ic: number | null;
+  mean_challenger_rank_ic: number | null;
+  baseline_top_excess_return_pct: number | null;
+  challenger_top_excess_return_pct: number | null;
+  challenger_top_net_excess_return_pct: number | null;
+  baseline_average_turnover_rate: number | null;
+  challenger_average_turnover_rate: number | null;
+  challenger_max_industry_concentration: number | null;
+};
+
+export type FactorShadowEvaluation = {
+  status: "not_started" | "collecting" | "ready";
+  experiment_id: string | null;
+  model_digest: string | null;
+  as_of_date: string;
+  run_count: number;
+  signal_dates: string[];
+  next_maturity_date: string | null;
+  horizons: FactorShadowHorizonEvaluation[];
+  data_health: Record<string, string>;
+};
+
+export type FactorShadowEvaluationResponse = {
+  evaluation: FactorShadowEvaluation;
+  data_health: Record<string, string>;
+};
+
 export type DailyBriefOpportunity = {
   instrument_id: string;
   instrument_label: string | null;

@@ -234,6 +234,32 @@ class EmptyStrategyDataProvider(BaseStrategyDataProvider):
     name = "empty_strategy_data"
 
 
+class StoredFundamentalStrategyDataProvider(BaseStrategyDataProvider):
+    """Serve an already frozen point-in-time fundamental snapshot from memory."""
+
+    name = "stored_point_in_time_fundamentals"
+
+    def __init__(self, snapshots: list[FundamentalSnapshot]):
+        super().__init__()
+        self._by_instrument = {item.instrument_id: item for item in snapshots}
+
+    def get_fundamentals(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> list[FundamentalSnapshot]:
+        del start
+        return [
+            snapshot
+            for instrument_id in instrument_ids
+            if (
+                (snapshot := self._by_instrument.get(instrument_id)) is not None
+                and snapshot.as_of_date <= end
+            )
+        ]
+
+
 class FmpStrategyDataProvider(BaseStrategyDataProvider):
     name = "fmp"
 

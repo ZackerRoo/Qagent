@@ -760,6 +760,7 @@ def test_paper_candidate_requires_latest_price_for_entry_validation():
 
 def test_automation_cycle_publishes_post_cycle_risk_gate(monkeypatch):
     paper_repo = SimpleNamespace(list_trades=lambda **_: [])
+    shadow_resolution_calls = []
     gates = iter(
         [
             (
@@ -783,6 +784,17 @@ def test_automation_cycle_publishes_post_cycle_risk_gate(monkeypatch):
     monkeypatch.setattr(routes, "_repo", lambda: SimpleNamespace())
     monkeypatch.setattr(routes, "_paper_repo", lambda: paper_repo)
     monkeypatch.setattr(routes, "_paper_seed_risk_gate", lambda *_: next(gates))
+    monkeypatch.setattr(
+        routes,
+        "resolve_factor_shadow_outcomes",
+        lambda *args, **kwargs: (
+            shadow_resolution_calls.append((args, kwargs))
+            or SimpleNamespace(
+                data_health={"factor_shadow_outcome_status": "not_started"},
+                next_maturity_date=None,
+            )
+        ),
+    )
 
     result = routes._run_auto_processing_cycle(
         AutoProcessingSettings(
@@ -797,6 +809,9 @@ def test_automation_cycle_publishes_post_cycle_risk_gate(monkeypatch):
     assert result.data_health["paper_risk_gate_max_new_entries"] == "1"
     assert result.data_health["paper_risk_gate_applied_action"] == "capacity_full"
     assert result.data_health["paper_risk_gate_applied_max_new_entries"] == "0"
+    assert result.data_health["factor_shadow_outcome_status"] == "not_started"
+    assert len(shadow_resolution_calls) == 1
+    assert shadow_resolution_calls[0][1]["provider_mode"] == "free"
 
 
 def test_paper_candidate_recovers_latest_price_from_card():

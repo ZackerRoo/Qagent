@@ -63,6 +63,7 @@ from qagent.research.market_intelligence import (
 )
 from qagent.research.operational_readiness import build_operational_readiness_center
 from qagent.research.factor_shadow import score_factor_shadow_run
+from qagent.storage.replay_evidence import ReplayEvidenceRepository
 from qagent.storage.repository import (
     paper_model_cohort_from_data_health,
     QagentRepository,
@@ -70,7 +71,7 @@ from qagent.storage.repository import (
 )
 from qagent.storage.paper import PaperTradingRepository
 from qagent.strategies.models import StrategyHealth, StrategyHealthPoint
-from qagent.strategy_data.providers import EmptyStrategyDataProvider
+from qagent.strategy_data.providers import StoredFundamentalStrategyDataProvider
 
 
 class TradableCatalogSyncResult(BaseModel):
@@ -181,11 +182,22 @@ def run_full_market_scan(
         repo,
         provider_mode,
     )
+    session_factory = create_session_factory()
+    replay_evidence = ReplayEvidenceRepository(session_factory, provider_mode)
+    fundamental_as_of = _latest_completed_a_share_session() or date.today()
+    fundamental_revision = replay_evidence.current_revision()
+    stored_fundamentals = replay_evidence.fundamentals_as_of(
+        symbols,
+        fundamental_as_of,
+        fundamental_revision,
+    )
     scan = run_daily_scan(
         symbols,
         provider,
         mode=provider_mode,
-        strategy_data_provider=EmptyStrategyDataProvider(),
+        strategy_data_provider=StoredFundamentalStrategyDataProvider(
+            list(stored_fundamentals.values())
+        ),
         recommendation_feedback_center=feedback_center,
         paper_trading_report=paper_report,
         walk_forward_validation=walk_forward_validation,
@@ -197,6 +209,10 @@ def run_full_market_scan(
             "full_market_catalog_total": str(summary.total_count),
             "full_market_requested": str(len(symbols)),
             "full_market_include_etfs": str(include_etfs).lower(),
+            "full_market_fundamental_source": "sqlite_point_in_time",
+            "full_market_fundamental_as_of": fundamental_as_of.isoformat(),
+            "full_market_fundamental_dataset_revision": str(fundamental_revision),
+            "full_market_fundamental_instruments": str(len(stored_fundamentals)),
         }
     )
     scan.data_health.update(sync_health)
@@ -232,6 +248,13 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         },
     )
     provider = build_market_data_provider(job.provider)
+    session_factory = create_session_factory()
+    replay_evidence = ReplayEvidenceRepository(session_factory, job.provider)
+    fundamental_as_of = _frozen_full_market_fundamental_as_of(job.data_health)
+    fundamental_revision = _frozen_full_market_fundamental_revision(
+        job.data_health,
+        replay_evidence.current_revision(),
+    )
     feedback_center = build_recent_recommendation_feedback_center(
         repo=repo,
         provider=job.provider,
@@ -262,6 +285,9 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         "full_market_batches_complete": "false",
         "full_market_scan_complete": "false",
         "full_market_include_etfs": str(job.include_etfs).lower(),
+        "full_market_fundamental_source": "sqlite_point_in_time",
+        "full_market_fundamental_as_of": fundamental_as_of.isoformat(),
+        "full_market_fundamental_dataset_revision": str(fundamental_revision),
     }
     scanned_symbols = 0
     completed_batches = 0
@@ -334,6 +360,11 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
             aggregate_health["full_market_checkpoint_batches_restored"] = str(restored_batches)
         else:
             try:
+                stored_fundamentals = replay_evidence.fundamentals_as_of(
+                    batch,
+                    fundamental_as_of,
+                    fundamental_revision,
+                )
                 prefetch = getattr(provider, "prefetch_daily_bars", None)
                 if callable(prefetch):
                     try:
@@ -348,7 +379,9 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
                     batch,
                     provider,
                     mode=job.provider,
-                    strategy_data_provider=EmptyStrategyDataProvider(),
+                    strategy_data_provider=StoredFundamentalStrategyDataProvider(
+                        list(stored_fundamentals.values())
+                    ),
                     recommendation_feedback_center=feedback_center,
                     paper_trading_report=paper_report,
                     walk_forward_validation=walk_forward_validation,
@@ -470,6 +503,19 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         instrument_ids=card_universe,
     )
     aggregate_health.update(feature_snapshot_data_health(feature_snapshot))
+    fundamental_feature_rows = sum(
+        any(
+            ranking.research_features.get(feature) is not None
+            for feature in (
+                "earnings_yield",
+                "return_on_equity",
+                "gross_margin",
+                "revenue_growth",
+                "earnings_growth",
+            )
+        )
+        for ranking in global_shadow_rankings
+    )
     aggregate_health.update(
         {
             "factor_rankings": str(len(global_factor_rankings)),
@@ -485,6 +531,12 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
                 feature_as_of_cap.isoformat() if feature_as_of_cap is not None else "none"
             ),
             "full_market_future_trade_dates_ignored": str(future_trade_dates_ignored),
+            "factor_research_fundamental_rows": str(fundamental_feature_rows),
+            "factor_research_fundamental_coverage": (
+                f"{fundamental_feature_rows / len(global_shadow_rankings):.6f}"
+                if global_shadow_rankings
+                else "0.000000"
+            ),
         }
     )
     for key in [item for item in aggregate_health if item.startswith("factor_shadow_")]:
@@ -917,6 +969,21 @@ def _latest_completed_a_share_session(now: datetime | None = None) -> date | Non
     ):
         sessions = sessions[:-1]
     return sessions[-1] if sessions else None
+
+
+def _frozen_full_market_fundamental_as_of(data_health: dict[str, str]) -> date:
+    raw = data_health.get("full_market_fundamental_as_of")
+    if raw:
+        return date.fromisoformat(raw)
+    return _latest_completed_a_share_session() or date.today()
+
+
+def _frozen_full_market_fundamental_revision(
+    data_health: dict[str, str],
+    current_revision: int,
+) -> int:
+    raw = data_health.get("full_market_fundamental_dataset_revision")
+    return int(raw) if raw else current_revision
 
 
 def _feature_dataset_revision(

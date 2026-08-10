@@ -7,6 +7,8 @@ from hashlib import sha256
 import numpy as np
 import pandas as pd
 import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import DatabaseError
 
 from qagent.db import create_session_factory, initialize_database
 from qagent.factors.models import FactorExposure, FactorRanking
@@ -21,7 +23,16 @@ from qagent.research.factor_experiments import (
     neutralize_research_features,
 )
 from qagent.research.factor_shadow import score_factor_shadow_run
-from qagent.storage.factor_research import FactorResearchRepository
+from qagent.research.factor_shadow_outcomes import (
+    build_factor_shadow_evaluation,
+    factor_shadow_outcome_dates,
+    resolve_factor_shadow_outcomes,
+)
+from qagent.storage.factor_research import (
+    FactorResearchRepository,
+    FactorShadowScore,
+)
+from qagent.storage.market_cache import MarketDataCacheRepository
 from qagent.storage.replay_evidence import ReplayFactorBarReadRow
 
 
@@ -176,9 +187,7 @@ def test_lightgbm_challenger_uses_purged_time_split():
             for feature in FEATURE_COLUMNS:
                 row[feature] = rng.normal()
             row["target_excess_return_pct"] = (
-                1.5 * row["momentum_20"]
-                - 0.8 * row["volatility_20"] ** 2
-                + rng.normal(0, 0.3)
+                1.5 * row["momentum_20"] - 0.8 * row["volatility_20"] ** 2 + rng.normal(0, 0.3)
             )
             rows.append(row)
     frame = pd.DataFrame(rows)
@@ -275,9 +284,7 @@ def test_lightgbm_shadow_scores_are_persisted_without_paper_activation(tmp_path)
                     explanation="fixture",
                 )
             ],
-            research_features={
-                feature: float(rng.normal()) for feature in FEATURE_COLUMNS
-            },
+            research_features={feature: float(rng.normal()) for feature in FEATURE_COLUMNS},
         )
         for index in range(25)
     ]
@@ -315,3 +322,188 @@ def test_lightgbm_shadow_scores_are_persisted_without_paper_activation(tmp_path)
             model_digest=result.run.model_digest,
             scores=result.run.top_scores,
         )
+
+
+def test_factor_shadow_outcomes_resolve_only_after_maturity_and_are_immutable(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'factor-shadow-outcomes.db'}"
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    store = FactorResearchRepository(session_factory)
+    model_text = "fixture frozen factor model"
+    model_digest = sha256(model_text.encode("utf-8")).hexdigest()
+    experiment = store.create(
+        experiment_name="outcome fixture",
+        provider_mode="fixture",
+        model_family="baseline+lightgbm",
+        benchmark_id="CN:000300.IDX",
+        dataset_revision=7,
+        start_date=date(2024, 1, 1),
+        end_date=date(2025, 1, 1),
+        code_revision="c" * 40,
+        config={"top_fraction": 0.2, "round_trip_cost_bps": 10},
+    )
+    store.mark_running(experiment.experiment_id)
+    store.complete(
+        experiment.experiment_id,
+        metrics={"activation_allowed": False},
+        data_health={},
+        artifacts={"paper_model_unchanged": True},
+        model_artifacts=[
+            {
+                "seed": 7,
+                "feature_set_version": FACTOR_RESEARCH_VERSION,
+                "feature_contract_digest": factor_research_feature_contract_digest(),
+                "model_digest": model_digest,
+                "model_text": model_text,
+            }
+        ],
+    )
+    bundle = store.latest_model_bundle("fixture")
+    assert bundle is not None
+    signal_date = date(2026, 7, 1)
+    scores = [
+        FactorShadowScore(
+            instrument_id=f"CN:{index:06d}",
+            baseline_score=float(10 - index),
+            challenger_score=float(index),
+            baseline_rank=index + 1,
+            challenger_rank=10 - index,
+            feature_coverage=1.0,
+            industry=f"industry-{index % 2}",
+        )
+        for index in range(10)
+    ]
+    store.record_shadow_scores(
+        experiment_id=experiment.experiment_id,
+        scan_job_id="scan-outcome-1",
+        signal_date=signal_date,
+        dataset_revision=7,
+        model_digest=bundle.aggregate_model_digest,
+        scores=scores,
+    )
+    entry_date, outcome_date = factor_shadow_outcome_dates(signal_date, 5)
+    bars = []
+    for index, score in enumerate(scores):
+        bars.extend(
+            _factor_shadow_price_rows(
+                score.instrument_id,
+                entry_date,
+                outcome_date,
+                outcome_close=Decimal(101 + index),
+            )
+        )
+    bars.extend(
+        _factor_shadow_price_rows(
+            "CN:000300.IDX",
+            entry_date,
+            outcome_date,
+            outcome_close=Decimal("101"),
+        )
+    )
+    MarketDataCacheRepository(session_factory).save_daily_bars(
+        "fixture",
+        pd.DataFrame(bars),
+    )
+
+    pending = resolve_factor_shadow_outcomes(
+        session_factory,
+        provider_mode="fixture",
+        as_of_date=entry_date,
+        horizons=(5,),
+    )
+    resolved = resolve_factor_shadow_outcomes(
+        session_factory,
+        provider_mode="fixture",
+        as_of_date=outcome_date,
+        horizons=(5,),
+    )
+    evaluation = build_factor_shadow_evaluation(
+        session_factory,
+        provider_mode="fixture",
+        as_of_date=outcome_date,
+        horizons=(5,),
+    )
+    retried = resolve_factor_shadow_outcomes(
+        session_factory,
+        provider_mode="fixture",
+        as_of_date=outcome_date,
+        horizons=(5,),
+    )
+
+    assert pending.status == "waiting_for_maturity"
+    assert pending.outcomes_inserted == 0
+    assert pending.next_maturity_date == outcome_date
+    assert resolved.status == "recorded"
+    assert resolved.outcomes_inserted == 10
+    assert resolved.unresolved_prices == 0
+    assert retried.status == "up_to_date"
+    assert retried.outcomes_inserted == 0
+    assert retried.outcomes_existing == 10
+    assert evaluation.status == "ready"
+    horizon = evaluation.horizons[0]
+    assert horizon.status == "ready"
+    assert horizon.outcome_coverage == 1.0
+    assert horizon.mean_baseline_rank_ic == pytest.approx(-1.0)
+    assert horizon.mean_challenger_rank_ic == pytest.approx(1.0)
+    assert horizon.challenger_top_net_excess_return_pct == pytest.approx(8.4)
+
+    stored = store.shadow_outcomes(experiment.experiment_id)
+    with pytest.raises(ValueError, match="immutable row"):
+        store.record_shadow_outcomes(
+            [stored[0].model_copy(update={"instrument_return_pct": 999.0})]
+        )
+    with session_factory() as session, pytest.raises(DatabaseError, match="immutable"):
+        session.execute(
+            text(
+                "UPDATE factor_shadow_outcomes "
+                "SET instrument_return_pct = 999 "
+                "WHERE experiment_id = :experiment_id"
+            ),
+            {"experiment_id": experiment.experiment_id},
+        )
+        session.commit()
+
+
+def _factor_shadow_price_rows(
+    instrument_id: str,
+    entry_date: date,
+    outcome_date: date,
+    *,
+    outcome_close: Decimal,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "instrument_id": instrument_id,
+            "trade_date": entry_date,
+            "open": Decimal("100"),
+            "high": Decimal("101"),
+            "low": Decimal("99"),
+            "close": Decimal("100"),
+            "volume": Decimal("1000000"),
+            "turnover": Decimal("100000000"),
+            "provider": "fixture",
+            "adjusted_open": Decimal("100"),
+            "adjusted_high": Decimal("101"),
+            "adjusted_low": Decimal("99"),
+            "adjusted_close": Decimal("100"),
+            "adjustment_factor": Decimal("1"),
+            "adjustment_type": "forward",
+        },
+        {
+            "instrument_id": instrument_id,
+            "trade_date": outcome_date,
+            "open": outcome_close,
+            "high": outcome_close + Decimal("1"),
+            "low": outcome_close - Decimal("1"),
+            "close": outcome_close,
+            "volume": Decimal("1000000"),
+            "turnover": Decimal("100000000"),
+            "provider": "fixture",
+            "adjusted_open": outcome_close,
+            "adjusted_high": outcome_close + Decimal("1"),
+            "adjusted_low": outcome_close - Decimal("1"),
+            "adjusted_close": outcome_close,
+            "adjustment_factor": Decimal("1"),
+            "adjustment_type": "forward",
+        },
+    ]
