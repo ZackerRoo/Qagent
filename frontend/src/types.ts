@@ -2715,6 +2715,29 @@ export type ClearDataCacheResponse = {
   deleted: number;
 };
 
+export type ScanCheckpointMaintenanceReport = {
+  schema_version: string;
+  dry_run: boolean;
+  retention_days: number;
+  cutoff: string;
+  active_job_ids: string[];
+  total_checkpoint_rows: number;
+  protected_active_rows: number;
+  protected_recent_rows: number;
+  protected_unrecognized_rows: number;
+  eligible_rows: number;
+  eligible_succeeded_rows: number;
+  eligible_expired_terminal_rows: number;
+  eligible_payload_bytes: number;
+  deleted_rows: number;
+  deleted_payload_bytes: number;
+  sqlite_page_size: number;
+  sqlite_page_count: number;
+  sqlite_freelist_count: number;
+  sqlite_reusable_bytes: number;
+  protected_evidence_domains: string[];
+};
+
 export type AutomationSummary = {
   provider: string;
   symbols: number;

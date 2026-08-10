@@ -199,6 +199,40 @@ def test_market_data_cache_loads_latest_daily_bar_per_instrument(tmp_path):
     ]
 
 
+def test_market_data_cache_latest_daily_bar_skips_invalid_newer_rows(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "CN:000001",
+                "trade_date": date(2026, 1, 5),
+                "open": 10.0,
+                "high": 10.5,
+                "low": 9.8,
+                "close": 10.2,
+                "volume": 800_000,
+                "provider": "fixture",
+            },
+            {
+                "instrument_id": "CN:000001",
+                "trade_date": date(2026, 1, 6),
+                "open": 0.0,
+                "high": 0.0,
+                "low": 0.0,
+                "close": 0.0,
+                "volume": 0,
+                "provider": "fixture",
+            },
+        ]
+    )
+    repo.save_daily_bars("fixture", bars)
+
+    latest = repo.load_latest_daily_bars("fixture", ["CN:000001"])
+
+    assert latest["trade_date"].tolist() == [date(2026, 1, 5)]
+    assert latest["close"].tolist() == [10.2]
+
+
 def test_market_data_cache_coerces_missing_volume_to_zero(tmp_path):
     repo = make_cache_repo(tmp_path)
     bars = pd.DataFrame(

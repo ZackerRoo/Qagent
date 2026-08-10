@@ -846,14 +846,17 @@ def test_full_market_batch_latest_result_coalesces_concurrent_reads(
         time.sleep(0.05)
 
     monkeypatch.setattr(routes, "_hydrate_full_market_batch_payload", slow_hydrate)
-    client = TestClient(create_app())
     path = (
         "/api/full-market/batch-scan/latest-result"
         "?provider=fixture&include_etfs=true&limit=1"
     )
 
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        responses = list(executor.map(lambda _index: client.get(path), range(8)))
+    # Start the TestClient portal before worker threads use it. Lazy startup from
+    # several threads can yield framework-level 404 responses unrelated to the
+    # endpoint under test.
+    with TestClient(create_app()) as client:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            responses = list(executor.map(lambda _index: client.get(path), range(8)))
 
     response_errors = [
         (response.status_code, response.text)

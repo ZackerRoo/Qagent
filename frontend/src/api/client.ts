@@ -66,6 +66,7 @@ import type {
   RecommendationClosureResponse,
   RecommendationFollowThroughCenterResponse,
   RankingV3ForwardStateResponse,
+  ScanCheckpointMaintenanceReport,
   ScanRunsResponse,
   ScanTask,
   ScanTasksResponse,
@@ -138,6 +139,8 @@ type ScanParams = {
   force_restart?: boolean;
   auto_validate?: boolean;
   cache_ttl_minutes?: number;
+  retention_days?: number;
+  dry_run?: boolean;
 };
 
 type RequestOptions = {
@@ -285,6 +288,12 @@ function queryString(params?: ScanParams): string {
   }
   if (params.cache_ttl_minutes !== undefined) {
     search.set("cache_ttl_minutes", String(params.cache_ttl_minutes));
+  }
+  if (params.retention_days !== undefined) {
+    search.set("retention_days", String(params.retention_days));
+  }
+  if (params.dry_run !== undefined) {
+    search.set("dry_run", String(params.dry_run));
   }
   if (params.scan_limit) {
     search.set("scan_limit", String(params.scan_limit));
@@ -715,18 +724,52 @@ export async function fetchLatestFullMarketBatchResult(
   if (active) {
     return active;
   }
-  const request = apiGet<FullMarketScanResponse>("/full-market/batch-scan/latest-result", {
+  const request = fetchLatestFullMarketBatchResultWithRetry(
     provider,
-    include_etfs: includeEtfs,
-    cache_ttl_minutes: 7 * 24 * 60,
-    limit: cardLimit,
-  });
+    includeEtfs,
+    cardLimit,
+  );
   latestBatchResultRequests.set(key, request);
   request.then(
     () => latestBatchResultRequests.delete(key),
     () => latestBatchResultRequests.delete(key),
   );
   return request;
+}
+
+async function fetchLatestFullMarketBatchResultWithRetry(
+  provider: DataProviderMode,
+  includeEtfs: boolean,
+  cardLimit: number,
+): Promise<FullMarketScanResponse> {
+  const params = {
+    provider,
+    include_etfs: includeEtfs,
+    cache_ttl_minutes: 7 * 24 * 60,
+    limit: cardLimit,
+  };
+  try {
+    return await apiGet<FullMarketScanResponse>(
+      "/full-market/batch-scan/latest-result",
+      params,
+    );
+  } catch (caught) {
+    if (!isTransientLatestResultError(caught)) {
+      throw caught;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 900));
+    return apiGet<FullMarketScanResponse>(
+      "/full-market/batch-scan/latest-result",
+      params,
+    );
+  }
+}
+
+function isTransientLatestResultError(caught: unknown): boolean {
+  if (!(caught instanceof ApiRequestError)) {
+    return true;
+  }
+  return caught.status === 429 || caught.status >= 500;
 }
 
 export async function startTodayScanTask(
@@ -1114,6 +1157,27 @@ export async function clearDataCache(
   provider?: DataProviderMode,
 ): Promise<ClearDataCacheResponse> {
   return apiDelete<ClearDataCacheResponse>("/data-cache", provider ? { provider } : undefined);
+}
+
+export async function fetchFullMarketCheckpointStorage(
+  retentionDays = 14,
+): Promise<ScanCheckpointMaintenanceReport> {
+  return apiGet<ScanCheckpointMaintenanceReport>("/storage/full-market-checkpoints", {
+    retention_days: retentionDays,
+  });
+}
+
+export async function maintainFullMarketCheckpointStorage(
+  retentionDays = 14,
+  dryRun = false,
+): Promise<ScanCheckpointMaintenanceReport> {
+  return apiPost<ScanCheckpointMaintenanceReport>(
+    `/storage/full-market-checkpoints/maintenance${queryString({
+      retention_days: retentionDays,
+      dry_run: dryRun,
+    })}`,
+    {},
+  );
 }
 
 export async function runAutomation(

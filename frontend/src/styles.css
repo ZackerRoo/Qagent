@@ -366,6 +366,13 @@ h3 {
   min-width: 0;
 }
 
+.panel-heading-actions,
+.storage-maintenance-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .regime-grid,
 .metric-grid,
 .settings-list {

@@ -320,25 +320,27 @@ class MarketDataCacheRepository:
             return pd.DataFrame(columns=BAR_COLUMNS)
         unique_ids = sorted(set(instrument_ids))
         with self.session_factory() as session:
-            rows = (
-                session.query(MarketBarCacheRow)
-                .filter(
-                    MarketBarCacheRow.provider_mode == provider_mode,
-                    MarketBarCacheRow.instrument_id.in_(unique_ids),
-                    *_valid_cached_ohlc_filters(),
+            # The composite primary key starts with provider and instrument, so
+            # one bounded index seek per requested instrument is substantially
+            # cheaper on the multi-gigabyte local cache than materializing a
+            # grouped MAX subquery across the full table.
+            rows = [
+                row
+                for instrument_id in unique_ids
+                if (
+                    row := session.query(MarketBarCacheRow)
+                    .filter(
+                        MarketBarCacheRow.provider_mode == provider_mode,
+                        MarketBarCacheRow.instrument_id == instrument_id,
+                        *_valid_cached_ohlc_filters(),
+                    )
+                    .order_by(MarketBarCacheRow.trade_date.desc())
+                    .first()
                 )
-                .order_by(
-                    MarketBarCacheRow.instrument_id,
-                    MarketBarCacheRow.trade_date.desc(),
-                )
-                .all()
-            )
+                is not None
+            ]
         if not rows:
             return pd.DataFrame(columns=BAR_COLUMNS)
-
-        latest_by_instrument: dict[str, MarketBarCacheRow] = {}
-        for row in rows:
-            latest_by_instrument.setdefault(row.instrument_id, row)
 
         frame = pd.DataFrame(
             [
@@ -359,7 +361,7 @@ class MarketDataCacheRepository:
                     "adjustment_factor": row.adjustment_factor,
                     "adjustment_type": row.adjustment_type,
                 }
-                for row in latest_by_instrument.values()
+                for row in rows
             ],
             columns=BAR_COLUMNS,
         )

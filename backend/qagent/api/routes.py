@@ -271,7 +271,7 @@ _latest_full_market_result_cache: dict[
     tuple[str, str, bool, int, int],
     tuple[float, dict[str, object]],
 ] = {}
-_LATEST_FULL_MARKET_RESULT_CACHE_TTL_SECONDS = 10.0
+_LATEST_FULL_MARKET_RESULT_CACHE_TTL_SECONDS = 60.0
 _walk_forward_task_executor: ProcessPoolExecutor | None = None
 _walk_forward_jobs_lock = Lock()
 _submitted_walk_forward_jobs: set[str] = set()
@@ -7684,7 +7684,7 @@ def latest_full_market_batch_scan_result(
         if cached_response is not None and now - cached_response[0] <= (
             _LATEST_FULL_MARKET_RESULT_CACHE_TTL_SECONDS
         ):
-            payload = deepcopy(cached_response[1])
+            payload = _clone_latest_full_market_result_payload(cached_response[1])
             data_health = payload.setdefault("data_health", {})
             if isinstance(data_health, dict):
                 data_health["full_market_response_cache"] = "hit"
@@ -7696,7 +7696,9 @@ def latest_full_market_batch_scan_result(
         )
         if cached is None:
             raise HTTPException(status_code=404, detail="full-market batch result not found")
-        payload = deepcopy(cached.payload)
+        # The repository returns a newly decoded JSON object for every read, so
+        # this request owns the payload and can safely hydrate it in place.
+        payload = cached.payload
         invalidated_filtered = _filter_recent_invalidated_payload_cards(
             payload,
             provider=mode,
@@ -7712,9 +7714,21 @@ def latest_full_market_batch_scan_result(
         _latest_full_market_result_cache.clear()
         _latest_full_market_result_cache[response_cache_key] = (
             monotonic(),
-            deepcopy(payload),
+            payload,
         )
         return payload
+
+
+def _clone_latest_full_market_result_payload(
+    payload: dict[str, object],
+) -> dict[str, object]:
+    """Clone only mutable response metadata while reusing immutable scan sections."""
+
+    cloned = dict(payload)
+    data_health = payload.get("data_health")
+    if isinstance(data_health, dict):
+        cloned["data_health"] = dict(data_health)
+    return cloned
 
 
 def _limit_full_market_batch_payload(payload: dict[str, object], *, limit: int) -> None:

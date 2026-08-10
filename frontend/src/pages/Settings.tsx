@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
+import { RefreshCw, Trash2 } from "lucide-react";
 
 import {
   clearDataCache,
   fetchAutomationScheduler,
   fetchDataCache,
+  fetchFullMarketCheckpointStorage,
   fetchProviderStatus,
   fetchTradableCatalog,
+  maintainFullMarketCheckpointStorage,
   runFullMarketScan,
   runAutomation,
   runAutomationSchedulerOnce,
@@ -28,6 +31,7 @@ import type {
   DataProviderMode,
   MarketDataCacheResponse,
   ProviderStatusResponse,
+  ScanCheckpointMaintenanceReport,
   TradableCatalogResponse,
   UniverseCreate,
   UniverseRecord,
@@ -66,6 +70,9 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
   const [universeForm, setUniverseForm] = useState<UniverseCreate>(emptyUniverse);
   const [saveMessage, setSaveMessage] = useState("");
   const [cacheMessage, setCacheMessage] = useState("");
+  const [storageHealth, setStorageHealth] = useState<ScanCheckpointMaintenanceReport>();
+  const [storageBusy, setStorageBusy] = useState(false);
+  const [storageMessage, setStorageMessage] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -94,6 +101,9 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
     void fetchAutomationScheduler()
       .then(apply(setAutomationScheduler))
       .catch((caught) => fail(caught, "Failed to load automatic processing"));
+    void fetchFullMarketCheckpointStorage()
+      .then(apply(setStorageHealth))
+      .catch((caught) => fail(caught, "Failed to load storage health"));
 
     return () => {
       cancelled = true;
@@ -122,6 +132,37 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
       setDataCache(await fetchDataCache(dataMode));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Failed to clear data cache");
+    }
+  }
+
+  async function refreshStorageHealth() {
+    try {
+      setError("");
+      setStorageBusy(true);
+      setStorageHealth(await fetchFullMarketCheckpointStorage());
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to load storage health");
+    } finally {
+      setStorageBusy(false);
+    }
+  }
+
+  async function maintainCheckpointStorage() {
+    try {
+      setError("");
+      setStorageMessage("");
+      setStorageBusy(true);
+      const result = await maintainFullMarketCheckpointStorage(14, false);
+      setStorageHealth(await fetchFullMarketCheckpointStorage());
+      setStorageMessage(
+        language === "zh"
+          ? `已安全清理 ${result.deleted_rows} 个旧检查点，释放 ${formatStorageBytes(result.deleted_payload_bytes)}`
+          : `Removed ${result.deleted_rows} old checkpoints and released ${formatStorageBytes(result.deleted_payload_bytes)}`,
+      );
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to maintain storage");
+    } finally {
+      setStorageBusy(false);
     }
   }
 
@@ -523,6 +564,74 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
 
       <section className="panel">
         <div className="panel-heading">
+          <div>
+            <p className="eyebrow">{language === "zh" ? "本地 SQLite" : "Local SQLite"}</p>
+            <h2>{language === "zh" ? "存储健康" : "Storage health"}</h2>
+          </div>
+          <div className="panel-heading-actions">
+            <span className="count">
+              {storageHealth
+                ? formatStorageBytes(storageHealth.sqlite_page_count * storageHealth.sqlite_page_size)
+                : "-"}
+            </span>
+            <button
+              className="icon-action"
+              type="button"
+              onClick={() => void refreshStorageHealth()}
+              disabled={storageBusy}
+              title={language === "zh" ? "刷新存储健康" : "Refresh storage health"}
+              aria-label={language === "zh" ? "刷新存储健康" : "Refresh storage health"}
+            >
+              <RefreshCw size={16} />
+            </button>
+          </div>
+        </div>
+        {storageHealth ? (
+          <>
+            <div className="settings-list">
+              <div>
+                <span>{language === "zh" ? "扫描检查点" : "Scan checkpoints"}</span>
+                <strong>{storageHealth.total_checkpoint_rows}</strong>
+              </div>
+              <div>
+                <span>{language === "zh" ? "可安全清理" : "Safe to remove"}</span>
+                <strong>{storageHealth.eligible_rows}</strong>
+              </div>
+              <div>
+                <span>{language === "zh" ? "活动任务保护" : "Active-job protected"}</span>
+                <strong>{storageHealth.protected_active_rows}</strong>
+              </div>
+              <div>
+                <span>{language === "zh" ? "近期数据保护" : "Recent protected"}</span>
+                <strong>{storageHealth.protected_recent_rows}</strong>
+              </div>
+              <div>
+                <span>{language === "zh" ? "SQLite 可复用空间" : "SQLite reusable"}</span>
+                <strong>{formatStorageBytes(storageHealth.sqlite_reusable_bytes)}</strong>
+              </div>
+            </div>
+            <div className="form-row">
+              <button
+                className="storage-maintenance-action"
+                type="button"
+                onClick={() => void maintainCheckpointStorage()}
+                disabled={storageBusy || storageHealth.eligible_rows === 0}
+              >
+                <Trash2 size={16} />
+                {language === "zh" ? "安全清理旧检查点" : "Remove old checkpoints"}
+              </button>
+            </div>
+          </>
+        ) : (
+          <div className="empty-state">
+            {language === "zh" ? "正在读取存储状态" : "Loading storage status"}
+          </div>
+        )}
+        {storageMessage && <div className="empty-state">{storageMessage}</div>}
+      </section>
+
+      <section className="panel">
+        <div className="panel-heading">
           <h2>{t("settings.cache")}</h2>
           <span className="count">{dataCache?.summaries.length ?? 0}</span>
         </div>
@@ -705,6 +814,16 @@ function formatInterval(value: number | undefined, language: "zh" | "en"): strin
 
 function formatNumber(value: number, language: "zh" | "en"): string {
   return new Intl.NumberFormat(language === "zh" ? "zh-CN" : "en-US").format(value);
+}
+
+function formatStorageBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const exponent = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  const amount = value / 1024 ** exponent;
+  return `${amount >= 10 || exponent === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[exponent]}`;
 }
 
 function formatAssetType(value: string, language: "zh" | "en"): string {
