@@ -10,6 +10,7 @@ import {
   fetchPaperAccountStatus,
   fetchPaperDailyReport,
   fetchPaperDualTrack,
+  fetchPaperExecutionAudit,
   fetchPaperForwardComparison,
   fetchPaperLedger,
   fetchPaperLookThroughRisk,
@@ -36,6 +37,7 @@ import type {
   PaperCandidatePoolResponse,
   PaperAccountStatusResponse,
   PaperDualTrackResponse,
+  PaperExecutionAuditResponse,
   PaperForwardComparisonResponse,
   PaperLedgerItem,
   PaperDailyReportResponse,
@@ -71,7 +73,7 @@ const defaultPaperSessionForm: PaperSessionStartPayload = {
   reset_existing: false,
   initial_capital: "100000",
   allocation_per_trade_pct: "10",
-  max_positions: 5,
+  max_positions: 10,
   transaction_cost_bps: "5",
   slippage_bps: "5",
   take_profit_pct: "50",
@@ -114,6 +116,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [candidatePool, setCandidatePool] = useState<PaperCandidatePoolResponse>();
   const [etfExposure, setEtfExposure] = useState<EtfExposureResponse>();
   const [dualTrack, setDualTrack] = useState<PaperDualTrackResponse>();
+  const [executionAudit, setExecutionAudit] = useState<PaperExecutionAuditResponse>();
   const [forwardComparison, setForwardComparison] = useState<PaperForwardComparisonResponse>();
   const [factorDiagnostics, setFactorDiagnostics] = useState<FactorDiagnosticsResponse>();
   const [validation, setValidation] = useState<PaperValidationResponse>();
@@ -139,6 +142,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchPaperLedger({ provider: dataMode, reportingScope: paperScope }),
       fetchPaperLookThroughRisk(dataMode, paperScope),
       fetchAutomationScheduler(),
+      fetchPaperExecutionAudit(dataMode),
     ]);
     const [
       paperResult,
@@ -148,6 +152,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       ledgerResult,
       lookThroughResult,
       automationSchedulerResult,
+      executionAuditResult,
     ] = coreResults;
     if (paperResult.status === "fulfilled") {
       setPaper(paperResult.value);
@@ -175,6 +180,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     if (lookThroughResult.status === "fulfilled") setLookThroughRisk(lookThroughResult.value);
     if (automationSchedulerResult.status === "fulfilled") {
       setAutomationScheduler(automationSchedulerResult.value);
+    }
+    if (executionAuditResult.status === "fulfilled") {
+      setExecutionAudit(executionAuditResult.value);
     }
     const failedCore = coreResults.filter((item) => item.status === "rejected");
     if (failedCore.length) {
@@ -265,6 +273,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchPaperDualTrack(dataMode),
       fetchPaperForwardComparison(dataMode),
       fetchAutomationScheduler(),
+      fetchPaperExecutionAudit(dataMode),
     ]);
     const [
       paperResult,
@@ -278,6 +287,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       dualTrackResult,
       forwardComparisonResult,
       automationSchedulerResult,
+      executionAuditResult,
     ] = results;
     if (paperResult.status === "fulfilled") {
       setPaper(paperResult.value);
@@ -308,6 +318,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     }
     if (automationSchedulerResult.status === "fulfilled") {
       setAutomationScheduler(automationSchedulerResult.value);
+    }
+    if (executionAuditResult.status === "fulfilled") {
+      setExecutionAudit(executionAuditResult.value);
     }
   }
 
@@ -547,6 +560,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
         {paperScope === "legacy" && (
           <PaperCurrentModelStrip
             status={paperAccountStatus?.current_model}
+            observation={paperAccountStatus?.observation}
             scanStatus={automationScheduler?.last_result?.scan_status}
             language={language}
           />
@@ -566,6 +580,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
 
         {portfolioView === "trades" && (
           <div className="portfolio-view-stack">
+            <PaperExecutionAuditPanel audit={executionAudit} language={language} />
             <PaperExecutionStatus dataHealth={paperExecutionHealth} language={language} />
             <div className="metric-grid">
               <Metric label={t("portfolio.open")} value={paper?.summary.open ?? 0} />
@@ -891,10 +906,12 @@ function PaperAccountCapacityStrip({
 
 function PaperCurrentModelStrip({
   status,
+  observation,
   scanStatus,
   language,
 }: {
   status?: PaperAccountStatusResponse["current_model"];
+  observation?: PaperAccountStatusResponse["observation"];
   scanStatus?: string;
   language: Language;
 }) {
@@ -908,7 +925,12 @@ function PaperCurrentModelStrip({
     );
   }
   const metrics = [
-    [zh ? "批次记录" : "Cohort records", status.total],
+    [
+      zh ? "账户完整交易日" : "Account sessions",
+      observation?.account_completed_sessions ?? "-",
+    ],
+    [zh ? "模型扫描交易日" : "Model scan sessions", status.completed_scan_sessions],
+    [zh ? "模型成交交易日" : "Model trade sessions", status.completed_trade_sessions],
     [zh ? "活动持仓" : "Active", status.active],
     [zh ? "已闭环" : "Closed", status.closed],
     [
@@ -921,6 +943,7 @@ function PaperCurrentModelStrip({
         ? "-"
         : `${status.average_realized_return_pct.toFixed(2)}%`,
     ],
+    [zh ? "候选刷新" : "Candidates", paperCandidateRefreshLabel(scanStatus, language)],
   ];
   return (
     <section className="paper-current-model-strip">
@@ -931,8 +954,8 @@ function PaperCurrentModelStrip({
         </div>
         <small>
           {zh
-            ? `旧批次 ${status.excluded_other_cohort} 条已从当前模型判断中隔离`
-            : `${status.excluded_other_cohort} older records excluded from current-model decisions`}
+            ? `账户起点 ${observation?.account_start_date ?? "-"} · 模型扫描起点 ${status.scan_start_date ?? "-"} · 旧批次隔离 ${status.excluded_other_cohort} 条`
+            : `Account ${observation?.account_start_date ?? "-"} · model scan ${status.scan_start_date ?? "-"} · ${status.excluded_other_cohort} older records isolated`}
         </small>
       </div>
       <div className="paper-current-model-metrics">
@@ -942,15 +965,11 @@ function PaperCurrentModelStrip({
             <strong>{value}</strong>
           </span>
         ))}
-        <span>
-          <small>{zh ? "候选刷新" : "Candidates"}</small>
-          <strong>{paperCandidateRefreshLabel(scanStatus, language)}</strong>
-        </span>
       </div>
       <p>
         {zh
-          ? `当前统计只评价同一模型批次；完整历史账本仍保留在下方用于资金核算。批次 ${status.cohort_id.slice(0, 8)}。`
-          : `This summary evaluates one model cohort only. The full historical ledger remains below for accounting. Cohort ${status.cohort_id.slice(0, 8)}.`}
+          ? `完整交易日截至 ${observation?.as_of_completed_session ?? "-"}${observation?.current_session_in_progress ? "，今日仍在进行中" : ""}。当前统计只评价同一模型批次；完整历史账本仍保留用于资金核算。批次 ${status.cohort_id.slice(0, 8)}。`
+          : `Completed through ${observation?.as_of_completed_session ?? "-"}${observation?.current_session_in_progress ? "; today is still in progress" : ""}. This summary evaluates one model cohort while the full ledger remains available. Cohort ${status.cohort_id.slice(0, 8)}.`}
       </p>
     </section>
   );
@@ -1156,6 +1175,9 @@ function PaperForwardResearchWorkbench({
   );
   const turnover = factors?.turnover_cost;
   const monotonicity = factors?.monotonicity;
+  const nonSessionCacheDates = Number(
+    comparison.data_health.paper_forward_cache_non_session_dates ?? 0,
+  );
 
   return (
     <section className="panel stack paper-forward-workbench">
@@ -1196,6 +1218,16 @@ function PaperForwardResearchWorkbench({
         <span>
           <small>{language === "zh" ? "基线摘要" : "Baseline digest"}</small>
           <strong>{shortDigest(comparison.baseline.definition_digest)}</strong>
+        </span>
+        <span>
+          <small>{language === "zh" ? "交易日历" : "Trading calendar"}</small>
+          <strong>XSHG</strong>
+        </span>
+        <span>
+          <small>{language === "zh" ? "缓存异常日期" : "Invalid cache dates"}</small>
+          <strong className={nonSessionCacheDates ? "negative" : ""}>
+            {nonSessionCacheDates}
+          </strong>
         </span>
       </div>
 
@@ -1740,6 +1772,105 @@ function dualTrackAttribution(value: string) {
 
 function formatRate(value: number | null | undefined) {
   return value == null || Number.isNaN(value) ? "-" : `${(value * 100).toFixed(1)}%`;
+}
+
+function PaperExecutionAuditPanel({
+  audit,
+  language,
+}: {
+  audit?: PaperExecutionAuditResponse;
+  language: Language;
+}) {
+  const zh = language === "zh";
+  if (!audit) {
+    return (
+      <section className="paper-execution-audit is-loading">
+        {zh ? "正在核对模拟成交证据。" : "Auditing paper execution evidence."}
+      </section>
+    );
+  }
+  const violations = audit.checks.reduce((total, check) => total + check.violations, 0);
+  const coverage = audit.entered_trades
+    ? audit.execution_fact_trades / audit.entered_trades
+    : null;
+  return (
+    <section className={`paper-execution-audit audit-${audit.verdict}`}>
+      <div className="paper-execution-audit-heading">
+        <div>
+          <span className="eyebrow">{zh ? "成交真实性审计" : "Execution evidence audit"}</span>
+          <h3>{executionAuditVerdict(audit.verdict, language)}</h3>
+          <p>
+            {zh
+              ? "新成交冻结数量、价格、费用、滑点和 A 股规则；旧记录保留但不伪造证据。"
+              : "New fills freeze quantity, price, fees, slippage, and A-share rules; legacy records remain unmodified."}
+          </p>
+        </div>
+        <span className={`status status-${audit.verdict === "pass" ? "ready" : audit.verdict === "fail" ? "error" : "pending"}`}>
+          {audit.verdict}
+        </span>
+      </div>
+      <div className="paper-execution-audit-metrics">
+        <span>
+          <small>{zh ? "已入场" : "Entered"}</small>
+          <strong>{audit.entered_trades}</strong>
+        </span>
+        <span>
+          <small>{zh ? "事实覆盖" : "Fact coverage"}</small>
+          <strong>{formatRate(coverage)}</strong>
+        </span>
+        <span>
+          <small>{zh ? "旧记录未核验" : "Legacy unverified"}</small>
+          <strong>{audit.legacy_unverified_trades}</strong>
+        </span>
+        <span>
+          <small>{zh ? "规则违规" : "Violations"}</small>
+          <strong>{violations}</strong>
+        </span>
+      </div>
+      <div className="paper-execution-audit-checks">
+        {audit.checks.map((check) => (
+          <span key={check.key} title={check.detail}>
+            <i className={`audit-dot audit-dot-${executionAuditTone(check.status)}`} />
+            <small>{check.label}</small>
+            <strong>{executionAuditStatus(check.status, language)}</strong>
+          </span>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function executionAuditTone(status: string) {
+  if (status === "pass" || status === "engine_enforced" || status === "configured") return "ready";
+  if (status === "fail") return "error";
+  return "pending";
+}
+
+function executionAuditStatus(status: string, language: Language) {
+  if (language !== "zh") return status.replace(/_/g, " ");
+  const labels: Record<string, string> = {
+    pass: "通过",
+    fail: "异常",
+    partial: "部分覆盖",
+    not_applicable: "暂无样本",
+    engine_enforced: "撮合器执行",
+    configured: "已配置",
+  };
+  return labels[status] ?? status;
+}
+
+function executionAuditVerdict(verdict: string, language: Language) {
+  if (language !== "zh") {
+    return verdict === "pass"
+      ? "Execution evidence complete"
+      : verdict === "fail"
+        ? "Execution evidence has violations"
+        : "Execution evidence is still accumulating";
+  }
+  if (verdict === "pass") return "成交证据完整";
+  if (verdict === "fail") return "成交证据存在异常";
+  if (verdict === "building_sample") return "等待首批成交证据";
+  return "新成交已核验，旧记录保持未核验";
 }
 
 function PaperExecutionStatus({

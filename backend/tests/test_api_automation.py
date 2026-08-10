@@ -114,6 +114,7 @@ def test_paper_risk_gate_uses_only_current_model_cohort(tmp_path, monkeypatch):
     now = datetime.now(timezone.utc)
     current_health = {
         "full_market_scan_complete": "true",
+        "full_market_signal_date": "2026-08-05",
         "feature_set_version": "factor-v3",
         "recommendation_policy_entrypoint": "final-policy-v1",
         "dynamic_calibration_merge_policy": "fixed",
@@ -251,6 +252,7 @@ def test_paper_risk_gate_uses_only_current_model_cohort(tmp_path, monkeypatch):
         repo,
         paper_repo.list_trades(limit=1000, provider="free"),
         provider="free",
+        as_of_completed_session=date(2026, 8, 7),
     )
     assert current_model is not None
     assert current_model["total"] == 1
@@ -259,6 +261,10 @@ def test_paper_risk_gate_uses_only_current_model_cohort(tmp_path, monkeypatch):
     assert current_model["excluded_other_cohort"] == 4
     assert current_model["unclassified"] == 0
     assert current_model["feature_set_version"] == "factor-v3"
+    assert current_model["scan_start_date"] == date(2026, 8, 5)
+    assert current_model["trade_start_date"] == date(2026, 8, 5)
+    assert current_model["completed_scan_sessions"] == 3
+    assert current_model["completed_trade_sessions"] == 3
 
 
 def test_automatic_full_scan_is_deferred_during_market_session(monkeypatch):

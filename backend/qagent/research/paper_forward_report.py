@@ -163,6 +163,7 @@ def build_paper_forward_comparison(
     validation: PaperValidationResult,
     trades: list[PaperTradeRecord],
     market_sessions: list[date],
+    market_calendar_source: str = "exchange_calendars:XSHG",
     source_contexts: dict[str, PaperTradeSourceContext],
 ) -> PaperForwardComparisonReport:
     sessions = sorted(
@@ -172,7 +173,7 @@ def build_paper_forward_comparison(
             if baseline.start_date <= session <= _report_date(ledger, baseline.start_date)
         }
     )
-    calendar_source = "market_cache"
+    calendar_source = market_calendar_source
     if not sessions:
         sessions = sorted(
             {
@@ -266,8 +267,8 @@ def build_paper_forward_comparison(
         "该报告是研究模拟盘诊断，不代表已验证推荐或正式发布。",
         "前向样本只使用本地模拟盘真实触发记录，不回填历史结果。",
     ]
-    if calendar_source != "market_cache":
-        warnings.append("交易日历缺少完整市场缓存，检查点进度暂按账本日期估算。")
+    if calendar_source == "ledger_curve_fallback":
+        warnings.append("交易所日历未形成有效检查点，进度暂按账本日期估算。")
     if ledger.summary.closed_trades < 20:
         warnings.append("已结束成交少于 20 笔，胜率和因子分组仍容易被少数交易主导。")
     return PaperForwardComparisonReport(

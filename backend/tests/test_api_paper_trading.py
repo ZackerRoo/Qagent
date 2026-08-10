@@ -1521,8 +1521,28 @@ def test_paper_account_status_separates_active_capacity_from_manual_positions(
     assert body["official"]["active"] == 0
     assert body["official"]["remaining"] == 10
     assert body["current_model"] is None
+    assert body["observation"]["calendar"] == "XSHG"
+    assert body["observation"]["account_completed_sessions"] >= 0
     assert body["manual"] == {"count": 1, "uses_paper_capacity": False}
     assert body["data_health"]["manual_positions_are_separate"] == "true"
+
+
+def test_paper_forward_calendar_uses_exchange_sessions_and_flags_cache_dates():
+    sessions, unexpected = routes._paper_forward_calendar(
+        start_date=date(2026, 7, 2),
+        report_date=date(2026, 8, 10),
+        completed_session=date(2026, 8, 7),
+        cached_dates={
+            date(2026, 7, 2),
+            date(2026, 7, 5),
+            date(2026, 8, 10),
+        },
+    )
+
+    assert len(sessions) == 27
+    assert sessions[0] == date(2026, 7, 2)
+    assert sessions[-1] == date(2026, 8, 7)
+    assert unexpected == [date(2026, 7, 5)]
 
 
 def test_paper_trade_api_returns_ledger_metrics(tmp_path, monkeypatch):

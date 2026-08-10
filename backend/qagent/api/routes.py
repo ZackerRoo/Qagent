@@ -207,11 +207,13 @@ from qagent.storage.ranking_v3_production import RankingV3ProductionRepository
 from qagent.storage.repository import (
     AlertRuleCreate,
     OpportunitySnapshotRecord,
+    PaperModelCohortRecord,
     PositionCreate,
     QagentRepository,
     ScanCheckpointMaintenanceReport,
     ScanResultCacheRecord,
     WatchlistCreate,
+    paper_model_cohort_from_data_health,
 )
 from qagent.storage.market_cache import MarketDataCacheRepository
 from qagent.storage.ranking_v4_forward_evidence import RankingV4EvidenceRepository
@@ -5618,6 +5620,7 @@ def _paper_current_model_status(
     trades: list[PaperTradeRecord],
     *,
     provider: str | None,
+    as_of_completed_session: date | None = None,
 ) -> dict[str, object] | None:
     if provider is None:
         return None
@@ -5636,17 +5639,88 @@ def _paper_current_model_status(
         and cohort.cohort_id == current_cohort.cohort_id
     ]
     summary = summarize_paper_trades(current_trades, reporting_scope="all")
+    scan_start_date = _paper_model_cohort_scan_start(
+        repo,
+        provider=provider,
+        cohort=current_cohort,
+    )
+    trade_start_date = min(
+        (trade.signal_date for trade in current_trades),
+        default=None,
+    )
+    completed_session = as_of_completed_session or _latest_completed_a_share_session()
     return {
         **summary.model_dump(mode="json"),
         "active": summary.pending + summary.open,
         "cohort_id": current_cohort.cohort_id,
         "feature_set_version": current_cohort.feature_set_version,
         "recommendation_policy": current_cohort.recommendation_policy_entrypoint,
+        "scan_start_date": scan_start_date,
+        "trade_start_date": trade_start_date,
+        "completed_scan_sessions": _paper_completed_session_count(
+            scan_start_date,
+            completed_session,
+        ),
+        "completed_trade_sessions": _paper_completed_session_count(
+            trade_start_date,
+            completed_session,
+        ),
         "excluded_other_cohort": len(trades) - len(current_trades),
         "unclassified": sum(
             cohorts_by_snapshot.get(trade.source_snapshot_id) is None
             for trade in trades
         ),
+    }
+
+
+def _paper_model_cohort_scan_start(
+    repo: QagentRepository,
+    *,
+    provider: str,
+    cohort: PaperModelCohortRecord,
+) -> date | None:
+    signal_dates: list[date] = []
+    for run in repo.list_scan_runs(limit=500, provider=provider):
+        if run.mode != "full_market_batch":
+            continue
+        run_cohort = paper_model_cohort_from_data_health(run.data_health)
+        if run_cohort is None or run_cohort.cohort_id != cohort.cohort_id:
+            continue
+        raw_signal_date = str(run.data_health.get("full_market_signal_date") or "").strip()
+        if not raw_signal_date:
+            continue
+        try:
+            signal_dates.append(date.fromisoformat(raw_signal_date))
+        except ValueError:
+            continue
+    return min(signal_dates, default=None)
+
+
+def _paper_completed_session_count(start: date | None, end: date | None) -> int:
+    if start is None or end is None or end < start:
+        return 0
+    return len(trading_sessions_in_range(start, end))
+
+
+def _paper_observation_status(
+    account: PaperAccountSettings,
+    *,
+    as_of_completed_session: date | None,
+) -> dict[str, object]:
+    today = _a_share_today()
+    today_is_session = bool(trading_sessions_in_range(today, today))
+    return {
+        "account_start_date": account.started_at.date(),
+        "account_completed_sessions": _paper_completed_session_count(
+            account.started_at.date(),
+            as_of_completed_session,
+        ),
+        "as_of_completed_session": as_of_completed_session,
+        "current_session_date": today if today_is_session else None,
+        "current_session_in_progress": bool(
+            today_is_session and as_of_completed_session != today
+        ),
+        "calendar": "XSHG",
     }
 
 
@@ -5665,6 +5739,7 @@ def paper_trade_account_status(provider: str | None = None) -> dict[str, object]
     trades_by_id = {trade.trade_id: trade for trade in trades}
     trades_by_id.update(active_by_id)
     scoped_trades = list(trades_by_id.values())
+    completed_session = _latest_completed_a_share_session()
     _, authenticated_ids, authentication_health = _paper_reporting_trades(
         scoped_trades,
         reporting_scope="official",
@@ -5687,6 +5762,11 @@ def paper_trade_account_status(provider: str | None = None) -> dict[str, object]
             repo,
             scoped_trades,
             provider=mode,
+            as_of_completed_session=completed_session,
+        ),
+        "observation": _paper_observation_status(
+            account,
+            as_of_completed_session=completed_session,
         ),
         "manual": {
             "count": len(repo.list_positions()),
@@ -5994,16 +6074,27 @@ def paper_trade_forward_comparison(
     )
     validation = build_paper_validation(trades, ledger)
     report_date = _paper_report_date(trades)
+    completed_session = _latest_completed_a_share_session()
     benchmark_bars = _market_cache_repo().load_daily_bars(
         mode,
         benchmark_ids() + benchmark_proxy_ids(),
         baseline.start_date,
         report_date,
     )
-    market_sessions = (
-        sorted(set(benchmark_bars["trade_date"].tolist()))
+    cached_dates = (
+        {
+            value.date() if isinstance(value, datetime) else value
+            for value in benchmark_bars["trade_date"].tolist()
+            if isinstance(value, date)
+        }
         if not benchmark_bars.empty
-        else []
+        else set()
+    )
+    market_sessions, unexpected_cached_dates = _paper_forward_calendar(
+        start_date=baseline.start_date,
+        report_date=report_date,
+        completed_session=completed_session,
+        cached_dates=cached_dates,
     )
     contexts = {
         trade.trade_id: context
@@ -6019,14 +6110,28 @@ def paper_trade_forward_comparison(
         validation=validation,
         trades=trades,
         market_sessions=market_sessions,
+        market_calendar_source="exchange_calendars:XSHG",
         source_contexts=contexts,
     )
+    if unexpected_cached_dates:
+        report.warnings.append(
+            "行情缓存包含非交易所交易日日期，检查点已改用 XSHG 日历，异常缓存不会计入进度。"
+        )
     report.data_health.update(
         {
             "paper_forward_provider": mode,
             "paper_forward_reporting_scope": "legacy_research_only",
             "paper_forward_source_contexts": str(len(contexts)),
             "paper_forward_official_metrics_excluded": "true",
+            "paper_forward_completed_session": (
+                completed_session.isoformat() if completed_session is not None else ""
+            ),
+            "paper_forward_cache_non_session_dates": str(
+                len(unexpected_cached_dates)
+            ),
+            "paper_forward_cache_non_session_date_samples": ",".join(
+                value.isoformat() for value in unexpected_cached_dates[:5]
+            ),
         }
     )
     return report.model_dump(mode="json")
@@ -6124,6 +6229,19 @@ def _paper_report_date(trades) -> date:
         if value is not None
     ]
     return max(dates) if dates else _a_share_today()
+
+
+def _paper_forward_calendar(
+    *,
+    start_date: date,
+    report_date: date,
+    completed_session: date | None,
+    cached_dates: set[date],
+) -> tuple[list[date], list[date]]:
+    calendar_end = min(report_date, completed_session or report_date)
+    sessions = trading_sessions_in_range(start_date, calendar_end)
+    valid_cached_range = set(trading_sessions_in_range(start_date, report_date))
+    return sessions, sorted(cached_dates - valid_cached_range)
 
 
 @router.get("/paper-trades/daily-report")

@@ -233,3 +233,6 @@ def test_forward_report_builds_historical_comparison_and_checkpoints():
     assert report.checkpoints[0].status == "tracking"
     assert report.forward_factors[0].completed_count == 2
     assert report.market_regimes
+    assert report.data_health["paper_forward_calendar_source"] == (
+        "exchange_calendars:XSHG"
+    )

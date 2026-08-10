@@ -36,6 +36,7 @@ import type {
   PaperAccountStatusResponse,
   PaperDailyReportResponse,
   PaperDualTrackResponse,
+  PaperExecutionAuditResponse,
   PaperLedgerResponse,
   PaperForwardComparisonResponse,
   PaperResearchBaseline,
@@ -423,6 +424,12 @@ export async function fetchPaperAccountStatus(
   provider?: DataProviderMode,
 ): Promise<PaperAccountStatusResponse> {
   return apiGet<PaperAccountStatusResponse>("/paper-trades/account-status", { provider });
+}
+
+export async function fetchPaperExecutionAudit(
+  provider?: DataProviderMode,
+): Promise<PaperExecutionAuditResponse> {
+  return apiGet<PaperExecutionAuditResponse>("/paper-trades/execution-audit", { provider });
 }
 
 type PaperLedgerRequest = {

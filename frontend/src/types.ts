@@ -1540,8 +1540,21 @@ export type PaperCurrentModelStatus = PaperTradingSummary & {
   cohort_id: string;
   feature_set_version: string;
   recommendation_policy: string;
+  scan_start_date: string | null;
+  trade_start_date: string | null;
+  completed_scan_sessions: number;
+  completed_trade_sessions: number;
   excluded_other_cohort: number;
   unclassified: number;
+};
+
+export type PaperObservationStatus = {
+  account_start_date: string;
+  account_completed_sessions: number;
+  as_of_completed_session: string | null;
+  current_session_date: string | null;
+  current_session_in_progress: boolean;
+  calendar: string;
 };
 
 export type PaperAccountStatusResponse = {
@@ -1549,11 +1562,35 @@ export type PaperAccountStatusResponse = {
   research: PaperAccountScopeStatus;
   official: PaperAccountScopeStatus;
   current_model: PaperCurrentModelStatus | null;
+  observation: PaperObservationStatus;
   manual: {
     count: number;
     uses_paper_capacity: boolean;
   };
   data_health: Record<string, string>;
+};
+
+export type PaperExecutionAuditCheck = {
+  key: string;
+  label: string;
+  status: string;
+  applicable_trades: number;
+  audited_trades: number;
+  violations: number;
+  detail: string;
+};
+
+export type PaperExecutionAuditResponse = {
+  schema_version: string;
+  generated_at: string;
+  account_id: string;
+  session_id: string;
+  total_trades: number;
+  entered_trades: number;
+  execution_fact_trades: number;
+  legacy_unverified_trades: number;
+  verdict: string;
+  checks: PaperExecutionAuditCheck[];
 };
 
 export type PaperTradesResponse = {
