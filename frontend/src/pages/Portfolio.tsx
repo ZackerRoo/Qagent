@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, ExternalLink, Layers3, RefreshCw } from "lucide-react";
+import { AlertTriangle, BrainCircuit, ExternalLink, Layers3, Play, RefreshCw } from "lucide-react";
 
 import {
   deletePaperTrade,
   fetchAutomationScheduler,
   fetchFactorDiagnostics,
+  fetchFactorResearchExperiments,
   fetchEtfExposures,
   fetchPaperCandidatePool,
   fetchPaperAccountStatus,
@@ -22,6 +23,7 @@ import {
   savePosition,
   seedPaperTrades,
   startPaperSession,
+  startFactorResearchExperiment,
   updatePaperTrades,
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
@@ -33,6 +35,7 @@ import type {
   AutoProcessingState,
   DataProviderMode,
   FactorDiagnosticsResponse,
+  FactorResearchExperiment,
   EtfExposureResponse,
   PaperCandidatePoolResponse,
   PaperAccountStatusResponse,
@@ -119,6 +122,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [executionAudit, setExecutionAudit] = useState<PaperExecutionAuditResponse>();
   const [forwardComparison, setForwardComparison] = useState<PaperForwardComparisonResponse>();
   const [factorDiagnostics, setFactorDiagnostics] = useState<FactorDiagnosticsResponse>();
+  const [factorResearchExperiments, setFactorResearchExperiments] = useState<FactorResearchExperiment[]>([]);
   const [validation, setValidation] = useState<PaperValidationResponse>();
   const [paperSession, setPaperSession] = useState<PaperSessionResponse>();
   const [automationScheduler, setAutomationScheduler] = useState<AutoProcessingState>();
@@ -130,6 +134,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [isStartingPaperSession, setIsStartingPaperSession] = useState(false);
   const [isRunningValidation, setIsRunningValidation] = useState(false);
   const [isLoadingFactorDiagnostics, setIsLoadingFactorDiagnostics] = useState(false);
+  const [isRunningFactorResearch, setIsRunningFactorResearch] = useState(false);
   const [isLoadingEtfExposure, setIsLoadingEtfExposure] = useState(false);
   const [deletingPaperTradeId, setDeletingPaperTradeId] = useState("");
 
@@ -220,6 +225,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchPaperCandidatePool(dataMode),
       fetchPaperDualTrack(dataMode),
       fetchPaperForwardComparison(dataMode),
+      fetchFactorResearchExperiments(),
     ]);
     const [
       validationResult,
@@ -227,6 +233,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       candidatePoolResult,
       dualTrackResult,
       forwardComparisonResult,
+      factorResearchResult,
     ] = researchResults;
     if (validationResult.status === "fulfilled") setValidation(validationResult.value);
     if (dailyReportResult.status === "fulfilled") setDailyReport(dailyReportResult.value);
@@ -234,6 +241,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     if (dualTrackResult.status === "fulfilled") setDualTrack(dualTrackResult.value);
     if (forwardComparisonResult.status === "fulfilled") {
       setForwardComparison(forwardComparisonResult.value);
+    }
+    if (factorResearchResult.status === "fulfilled") {
+      setFactorResearchExperiments(factorResearchResult.value.experiments);
     }
     const failedResearch = researchResults.filter((item) => item.status === "rejected");
     if (failedResearch.length) {
@@ -257,6 +267,30 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       );
     } finally {
       setIsLoadingFactorDiagnostics(false);
+    }
+  }
+
+  async function runFactorResearch() {
+    setIsRunningFactorResearch(true);
+    try {
+      const experiment = await startFactorResearchExperiment(dataMode);
+      setFactorResearchExperiments((current) => [
+        experiment,
+        ...current.filter((item) => item.experiment_id !== experiment.experiment_id),
+      ]);
+      setPaperMessage(
+        language === "zh"
+          ? "全量中性化因子实验已进入后台队列；模拟盘模型和持仓保持不变。"
+          : "The full neutralized-factor experiment is queued; paper model and positions are unchanged.",
+      );
+    } catch {
+      setPaperMessage(
+        language === "zh"
+          ? "因子实验未能启动，可能已有一个实验在运行。"
+          : "The factor experiment could not start; another run may already be active.",
+      );
+    } finally {
+      setIsRunningFactorResearch(false);
     }
   }
 
@@ -333,6 +367,31 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       void loadFactorDiagnostics();
     }
   }, [dataMode, portfolioView]);
+
+  useEffect(() => {
+    const active = factorResearchExperiments.some((item) =>
+      item.status === "queued" || item.status === "running"
+    );
+    if (portfolioView !== "research" || !active) return;
+    let cancelled = false;
+    let timer = 0;
+    const pollResearchExperiment = () => {
+      timer = window.setTimeout(() => {
+        void fetchFactorResearchExperiments()
+          .then((result) => {
+            if (!cancelled) setFactorResearchExperiments(result.experiments);
+          })
+          .finally(() => {
+            if (!cancelled) pollResearchExperiment();
+          });
+      }, 5000);
+    };
+    pollResearchExperiment();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [factorResearchExperiments, portfolioView]);
 
   useEffect(() => {
     const instrumentIds = [...new Set(
@@ -686,6 +745,12 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
 
         {portfolioView === "research" && (
           <div className="portfolio-view-stack">
+            <FactorModelResearchPanel
+              experiment={factorResearchExperiments[0]}
+              running={isRunningFactorResearch}
+              onRun={runFactorResearch}
+              language={language}
+            />
             <PaperForwardResearchWorkbench
               comparison={forwardComparison}
               factors={factorDiagnostics}
@@ -1143,6 +1208,134 @@ function paperLookThroughWarningText(
       : `${weight} of equity lacks usable ETF look-through disclosure and remains unknown.`;
   }
   return warning.label;
+}
+
+function FactorModelResearchPanel({
+  experiment,
+  running,
+  onRun,
+  language,
+}: {
+  experiment?: FactorResearchExperiment;
+  running: boolean;
+  onRun: () => Promise<void>;
+  language: Language;
+}) {
+  const active = experiment?.status === "queued" || experiment?.status === "running";
+  const baseline = experiment?.metrics?.baseline;
+  const challenger = experiment?.metrics?.lightgbm_challenger;
+  const importance = experiment?.artifacts.feature_importance?.slice(0, 6) ?? [];
+  const statusLabel = !experiment
+    ? language === "zh" ? "尚未运行" : "Not run"
+    : experiment.status === "succeeded"
+      ? language === "zh" ? "已完成" : "Complete"
+      : experiment.status === "failed"
+        ? language === "zh" ? "失败" : "Failed"
+        : language === "zh" ? "运行中" : "Running";
+
+  return (
+    <section className="panel stack factor-model-research">
+      <div className="section-header factor-model-heading">
+        <div>
+          <p className="eyebrow">
+            <BrainCircuit size={14} />
+            {language === "zh" ? "选股模型实验" : "Selection model research"}
+          </p>
+          <h2>{language === "zh" ? "当前基线 vs LightGBM" : "Current baseline vs LightGBM"}</h2>
+          <p>
+            {language === "zh"
+              ? "冻结历史数据上的全量截面对照，结果只进入研究记录。"
+              : "A full cross-sectional comparison on frozen history, recorded for research only."}
+          </p>
+        </div>
+        <div className="factor-model-actions">
+          <span className={`status status-${experiment?.status === "failed" ? "danger" : active ? "pending" : "ready"}`}>
+            {statusLabel}
+          </span>
+          <button
+            className="icon-action"
+            type="button"
+            onClick={() => void onRun()}
+            disabled={running || active}
+            title={language === "zh" ? "运行全量研究实验" : "Run full research experiment"}
+          >
+            {active ? <RefreshCw size={15} /> : <Play size={15} />}
+            {active
+              ? language === "zh" ? "计算中" : "Running"
+              : language === "zh" ? "运行实验" : "Run experiment"}
+          </button>
+        </div>
+      </div>
+
+      <div className="factor-model-meta">
+        <span><small>{language === "zh" ? "数据修订" : "Revision"}</small><strong>{experiment?.dataset_revision ?? "-"}</strong></span>
+        <span><small>{language === "zh" ? "样本区间" : "Window"}</small><strong>{experiment ? `${experiment.start_date} / ${experiment.end_date}` : "-"}</strong></span>
+        <span><small>{language === "zh" ? "基准" : "Benchmark"}</small><strong>{experiment?.benchmark_id ?? "CN:000300.IDX"}</strong></span>
+        <span><small>{language === "zh" ? "截面" : "Cross-sections"}</small><strong>{baseline?.cross_sections ?? "-"}</strong></span>
+        <span><small>{language === "zh" ? "模型隔离" : "Isolation"}</small><strong>research only</strong></span>
+      </div>
+
+      {baseline && challenger && (
+        <div className="table-shell">
+          <table className="factor-model-table">
+            <thead>
+              <tr>
+                <th>{language === "zh" ? "模型" : "Model"}</th>
+                <th>IC</th>
+                <th>Rank IC</th>
+                <th>{language === "zh" ? "正 Rank IC" : "Positive Rank IC"}</th>
+                <th>{language === "zh" ? "成本后头部超额" : "Net top excess"}</th>
+                <th>{language === "zh" ? "平均换手" : "Turnover"}</th>
+                <th>{language === "zh" ? "头部回撤" : "Top drawdown"}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                [language === "zh" ? "当前因子基线" : "Current factor baseline", baseline],
+                ["LightGBM challenger", challenger],
+              ].map(([label, metric]) => {
+                const row = metric as typeof baseline;
+                return (
+                  <tr key={String(label)}>
+                    <td className="ticker">{String(label)}</td>
+                    <td>{formatCoefficient(row.mean_ic)}</td>
+                    <td>{formatCoefficient(row.mean_rank_ic)}</td>
+                    <td>{formatRate(row.positive_rank_ic_rate)}</td>
+                    <td>{formatPct(row.net_top_bucket_excess_return_pct)}</td>
+                    <td>{formatRate(row.average_turnover_rate)}</td>
+                    <td>{formatPct(row.top_bucket_max_drawdown_pct)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {importance.length > 0 && (
+        <div className="factor-importance-row">
+          {importance.map((item) => (
+            <span key={item.feature}>
+              <small>{factorResearchFeatureLabel(item.feature, language)}</small>
+              <strong>{item.importance.toFixed(0)}</strong>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {experiment?.metrics && (
+        <div className="factor-model-verdict">
+          <strong>
+            {experiment.metrics.challenger_stronger_on_frozen_test
+              ? language === "zh" ? "Challenger 在冻结测试集更强" : "Challenger is stronger on the frozen test set"
+              : language === "zh" ? "当前基线暂时领先" : "Current baseline remains ahead"}
+          </strong>
+          <span>{language === "zh" ? "不会自动替换模拟盘模型" : "No automatic paper-model replacement"}</span>
+        </div>
+      )}
+      {experiment?.error && <div className="inline-error">{experiment.error}</div>}
+    </section>
+  );
 }
 
 function PaperForwardResearchWorkbench({
@@ -4395,6 +4588,30 @@ function factorLabel(factorId: string, fallback: string, language: Language): st
     reversal: "反转/回踩",
   };
   return labels[factorId] ?? fallback;
+}
+
+function factorResearchFeatureLabel(feature: string, language: Language): string {
+  if (language !== "zh") return feature.replace(/_/g, " ");
+  const labels: Record<string, string> = {
+    momentum_20: "20日动量",
+    momentum_60: "60日动量",
+    momentum_120: "120日动量",
+    return_5: "5日收益",
+    trend_slope_60: "60日趋势",
+    trend_r2_60: "趋势质量",
+    volatility_20: "20日波动",
+    downside_risk_60: "下行风险",
+    max_drawdown_60: "60日回撤",
+    turnover_log_20: "成交额",
+    volume_ratio_5_20: "量比",
+    distance_ma20: "均线距离",
+    earnings_yield: "盈利收益率",
+    return_on_equity: "ROE",
+    gross_margin: "毛利率",
+    revenue_growth: "营收增长",
+    earnings_growth: "利润增长",
+  };
+  return labels[feature] ?? feature;
 }
 
 function factorDecayLabel(verdict: string, language: Language): string {

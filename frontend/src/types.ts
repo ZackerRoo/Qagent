@@ -3141,6 +3141,56 @@ export type FactorDiagnosticsResponse = {
   data_health: Record<string, string>;
 };
 
+export type FactorResearchModelMetrics = {
+  sample_rows: number;
+  cross_sections: number;
+  mean_ic: number | null;
+  mean_rank_ic: number | null;
+  positive_rank_ic_rate: number | null;
+  gross_top_bucket_excess_return_pct: number | null;
+  average_turnover_rate: number | null;
+  estimated_cost_drag_pct: number | null;
+  net_top_bucket_excess_return_pct: number | null;
+  top_bucket_max_drawdown_pct: number | null;
+};
+
+export type FactorResearchExperiment = {
+  experiment_id: string;
+  experiment_name: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  provider_mode: string;
+  model_family: string;
+  benchmark_id: string;
+  dataset_revision: number;
+  start_date: string;
+  end_date: string;
+  code_revision: string;
+  config_digest: string;
+  config: Record<string, unknown>;
+  metrics: {
+    baseline: FactorResearchModelMetrics;
+    lightgbm_challenger: FactorResearchModelMetrics;
+    challenger_stronger_on_frozen_test: boolean;
+    activation_allowed: boolean;
+    disposition: string;
+  } | null;
+  data_health: Record<string, string | number | boolean>;
+  artifacts: {
+    split?: Record<string, string | number>;
+    feature_importance?: Array<{ feature: string; importance: number }>;
+    paper_model_unchanged?: boolean;
+  };
+  error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+};
+
+export type FactorResearchExperimentsResponse = {
+  experiments: FactorResearchExperiment[];
+  data_health: Record<string, string>;
+};
+
 export type DailyBriefOpportunity = {
   instrument_id: string;
   instrument_label: string | null;

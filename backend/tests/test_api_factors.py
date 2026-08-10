@@ -77,3 +77,19 @@ def test_factor_backtest_uses_stored_point_in_time_fundamentals(tmp_path, monkey
     assert health["fundamental_stored_rows"] == "2"
     assert health["historical_fundamentals"] == "2"
     assert health["fundamental_mode"] == "point_in_time"
+
+
+def test_factor_research_experiment_api_starts_empty_and_isolated(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'factor-research-api.db'}",
+    )
+    client = TestClient(create_app())
+
+    response = client.get("/api/factor-research/experiments")
+    missing = client.get("/api/factor-research/experiments/not-found")
+
+    assert response.status_code == 200
+    assert response.json()["experiments"] == []
+    assert response.json()["data_health"]["paper_model_isolation"] == "unchanged"
+    assert missing.status_code == 404

@@ -22,6 +22,8 @@ import type {
   EtfExposureResponse,
   FactorBacktestResponse,
   FactorDiagnosticsResponse,
+  FactorResearchExperiment,
+  FactorResearchExperimentsResponse,
   FullMarketBatchScanJob,
   FullMarketScanResponse,
   HistoricalBackfillJob,
@@ -863,6 +865,29 @@ export async function fetchFactorDiagnostics(
     scan_limit: scanLimit ?? (provider === "free" ? 50 : undefined),
     transaction_cost_bps: 5,
     slippage_bps: 5,
+  });
+}
+
+export async function fetchFactorResearchExperiments(
+  limit = 10,
+): Promise<FactorResearchExperimentsResponse> {
+  return apiGet<FactorResearchExperimentsResponse>("/factor-research/experiments", { limit });
+}
+
+export async function startFactorResearchExperiment(
+  providerMode: DataProviderMode,
+): Promise<FactorResearchExperiment> {
+  return apiPost<FactorResearchExperiment>("/factor-research/experiments", {
+    provider_mode: providerMode,
+    start_date: "2021-11-01",
+    end_date: "2025-12-31",
+    benchmark_id: "CN:000300.IDX",
+    rebalance_step_sessions: 10,
+    horizon_sessions: 20,
+    minimum_history_sessions: 120,
+    top_fraction: 0.1,
+    round_trip_cost_bps: 10,
+    seeds: [7, 19, 42],
   });
 }
 

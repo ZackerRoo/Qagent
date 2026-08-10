@@ -12,6 +12,7 @@
     "check:automation-ui": "node scripts/check-automation-ui.mjs",
     "check:backtest-ui": "node scripts/check-backtest-ui.mjs",
     "check:strategy-governance-ui": "node scripts/check-strategy-governance-ui.mjs",
+    "check:factor-research-ui": "node scripts/check-factor-research-ui.mjs",
     "check:dashboard-noise-ui": "node scripts/check-dashboard-noise-ui.mjs",
     "check:today-ui": "node scripts/check-today-ui.mjs",
     "check:terminal-ui": "node scripts/check-terminal-ui.mjs",

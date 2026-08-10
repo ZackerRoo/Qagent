@@ -18,6 +18,7 @@ from qagent.api.schemas import (
     AgentQueryRequest,
     AgentQueryResponse,
     AlertEvaluationRequest,
+    FactorResearchExperimentRequest,
     PaperSessionStartRequest,
     PaperTradeFromOpportunityRequest,
     StrategyGovernanceResponse,
@@ -70,6 +71,12 @@ from qagent.data_management import build_historical_coverage_manifest
 from qagent.db import create_session_factory, initialize_database
 from qagent.domain.models import OpportunityCard, PortfolioPlan, SectorStrength
 from qagent.factors.backtest import run_factor_backtest, run_factor_diagnostics
+from qagent.research.factor_experiments import (
+    FactorResearchConfig,
+    current_code_revision,
+    execute_factor_research_experiment,
+    resolved_config,
+)
 from qagent.jobs.automation import run_research_automation
 from qagent.jobs.automation_scheduler import (
     AutoProcessingCycleResult,
@@ -220,6 +227,7 @@ from qagent.storage.ranking_v4_forward_evidence import RankingV4EvidenceReposito
 from qagent.storage.ranking_v4_prospective_release import (
     RankingV4ProspectiveReleaseRepository,
 )
+from qagent.storage.factor_research import FactorResearchRepository
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
 from qagent.strategy_data.models import FundamentalSnapshot
 from qagent.strategy_data.providers import EmptyStrategyDataProvider, build_strategy_data_provider
@@ -244,6 +252,10 @@ _UNKNOWN_PAPER_INDUSTRIES = {
 _task_manager = TaskManager()
 _task_executor = ThreadPoolExecutor(max_workers=2)
 _history_task_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="history-backfill")
+_factor_research_task_executor = ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="factor-research",
+)
 _historical_jobs_lock = Lock()
 _submitted_historical_jobs: set[str] = set()
 _full_market_jobs_lock = Lock()
@@ -252,6 +264,8 @@ _full_market_task_executor: ProcessPoolExecutor | None = None
 _walk_forward_task_executor: ProcessPoolExecutor | None = None
 _walk_forward_jobs_lock = Lock()
 _submitted_walk_forward_jobs: set[str] = set()
+_factor_research_jobs_lock = Lock()
+_submitted_factor_research_jobs: set[str] = set()
 _automation_scheduler = AutomationScheduler()
 _etf_exposure_service = EtfExposureService()
 _ranking_v3_forward_runtime_lock = Lock()
@@ -284,6 +298,11 @@ def _full_market_executor() -> ProcessPoolExecutor:
             mp_context=get_context("spawn"),
         )
     return _full_market_task_executor
+
+
+def _release_factor_research_submission(experiment_id: str) -> None:
+    with _factor_research_jobs_lock:
+        _submitted_factor_research_jobs.discard(experiment_id)
 
 
 def _release_full_market_submission(job_id: str) -> None:
@@ -2649,6 +2668,11 @@ def _market_cache_repo() -> MarketDataCacheRepository:
     return MarketDataCacheRepository(create_session_factory())
 
 
+def _factor_research_repo() -> FactorResearchRepository:
+    initialize_database()
+    return FactorResearchRepository(create_session_factory())
+
+
 def _paper_repo() -> PaperTradingRepository:
     initialize_database()
     return PaperTradingRepository(create_session_factory())
@@ -2982,6 +3006,71 @@ def factor_diagnostics(
             fundamental_errors[:3]
         )
     return payload
+
+
+@router.get("/factor-research/experiments")
+def factor_research_experiments(limit: int = 20):
+    return {
+        "experiments": _factor_research_repo().list(limit=min(max(limit, 1), 100)),
+        "data_health": {
+            "factor_research_recorder": "sqlite",
+            "paper_model_isolation": "unchanged",
+        },
+    }
+
+
+@router.get("/factor-research/experiments/{experiment_id}")
+def factor_research_experiment(experiment_id: str):
+    experiment = _factor_research_repo().get(experiment_id)
+    if experiment is None:
+        raise HTTPException(status_code=404, detail="factor research experiment not found")
+    return experiment
+
+
+@router.post("/factor-research/experiments", status_code=202)
+def start_factor_research_experiment(request: FactorResearchExperimentRequest):
+    initialize_database()
+    session_factory = create_session_factory()
+    store = FactorResearchRepository(session_factory)
+    active = store.active()
+    if active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"factor research experiment {active.experiment_id} is already active",
+        )
+    try:
+        config = resolved_config(
+            session_factory,
+            FactorResearchConfig.model_validate(request.model_dump()),
+        )
+        revision = current_code_revision()
+    except (RuntimeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    experiment = store.create(
+        experiment_name="A-share neutralized factor baseline vs LightGBM",
+        provider_mode=config.provider_mode,
+        model_family="baseline+lightgbm",
+        benchmark_id=config.benchmark_id,
+        dataset_revision=int(config.dataset_revision or 0),
+        start_date=config.start_date,
+        end_date=config.end_date,
+        code_revision=revision,
+        config=config.model_dump(mode="json"),
+    )
+    with _factor_research_jobs_lock:
+        _submitted_factor_research_jobs.add(experiment.experiment_id)
+    future = _factor_research_task_executor.submit(
+        execute_factor_research_experiment,
+        session_factory,
+        experiment.experiment_id,
+        config,
+    )
+    future.add_done_callback(
+        lambda _future, experiment_id=experiment.experiment_id: (
+            _release_factor_research_submission(experiment_id)
+        )
+    )
+    return experiment
 
 
 def _merge_fundamental_snapshots(

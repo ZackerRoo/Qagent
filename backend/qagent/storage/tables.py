@@ -1638,3 +1638,27 @@ class PaperResearchBaselineRow(Base):
     definition_digest: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     definition_json: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class FactorResearchExperimentRow(Base):
+    __tablename__ = "factor_research_experiments"
+
+    experiment_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    experiment_name: Mapped[str] = mapped_column(String(128), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    provider_mode: Mapped[str] = mapped_column(String(32), index=True)
+    model_family: Mapped[str] = mapped_column(String(64), index=True)
+    benchmark_id: Mapped[str] = mapped_column(String(64))
+    dataset_revision: Mapped[int] = mapped_column(Integer, index=True)
+    start_date: Mapped[date] = mapped_column(Date)
+    end_date: Mapped[date] = mapped_column(Date)
+    code_revision: Mapped[str] = mapped_column(String(40), index=True)
+    config_digest: Mapped[str] = mapped_column(String(64), index=True)
+    config_json: Mapped[str] = mapped_column(Text)
+    metrics_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    data_health_json: Mapped[str] = mapped_column(Text, default="{}")
+    artifacts_json: Mapped[str] = mapped_column(Text, default="{}")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)

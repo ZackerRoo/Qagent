@@ -4,6 +4,7 @@ import pandas as pd
 from pydantic import BaseModel
 
 from qagent.factors.engine import build_factor_rankings
+from qagent.market.calendars import trading_sessions_in_range
 from qagent.strategy_data.models import FundamentalSnapshot
 
 
@@ -152,11 +153,36 @@ def run_factor_backtest(
         )
     ordered = bars.copy()
     ordered["trade_date"] = pd.to_datetime(ordered["trade_date"]).dt.date
+    non_session_rows = 0
+    if any(str(item).startswith("CN:") for item in ordered["instrument_id"].unique()):
+        sessions = set(
+            trading_sessions_in_range(
+                min(ordered["trade_date"]),
+                max(ordered["trade_date"]),
+            )
+        )
+        non_session_rows = int((~ordered["trade_date"].isin(sessions)).sum())
+        ordered = ordered[ordered["trade_date"].isin(sessions)].copy()
+    adjusted_rows = 0
+    if "adjusted_close" in ordered.columns:
+        adjusted = pd.to_numeric(ordered["adjusted_close"], errors="coerce")
+        adjusted_rows = int(adjusted.notna().sum())
+        ordered["close"] = adjusted.combine_first(
+            pd.to_numeric(ordered["close"], errors="coerce")
+        )
     dates = sorted(ordered["trade_date"].unique())
     signals: list[FactorBacktestSignal] = []
     ic_rows: list[dict[str, float]] = []
     min_history_days = _minimum_history_days(forward_days)
-    for date_index in range(min_history_days, max(min_history_days, len(dates) - forward_days), step_days):
+    effective_min_history_days = min(
+        min_history_days,
+        max(20, len(dates) - forward_days - 1),
+    )
+    for date_index in range(
+        effective_min_history_days,
+        max(effective_min_history_days, len(dates) - forward_days),
+        step_days,
+    ):
         signal_date = dates[date_index]
         future_date = dates[date_index + forward_days]
         history = ordered[ordered["trade_date"] <= signal_date]
@@ -220,6 +246,7 @@ def run_factor_backtest(
             "step_days": str(step_days),
             "top_n": str(top_n),
             "min_history_days": str(min_history_days),
+            "effective_min_history_days": str(effective_min_history_days),
             "signals": str(len(signals)),
             "ic_samples": str(len(ic_rows)),
             "quantile_buckets": str(len(quantile_buckets)),
@@ -228,6 +255,12 @@ def run_factor_backtest(
                 sum(len(items) for items in fundamental_history.values())
             ),
             "fundamental_mode": "point_in_time" if fundamental_history else "price_only",
+            "market_calendar": "XSHG" if non_session_rows or any(
+                str(item).startswith("CN:") for item in ordered["instrument_id"].unique()
+            ) else "input_dates",
+            "non_session_rows_excluded": str(non_session_rows),
+            "adjusted_close_rows": str(adjusted_rows),
+            "forward_return_scope": "absolute_legacy_diagnostic",
         },
     )
 

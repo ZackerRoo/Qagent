@@ -187,3 +187,25 @@ def test_factor_diagnostics_cover_monotonicity_decay_turnover_and_regimes():
     assert result.turnover_cost.estimated_cost_drag_pct is not None
     assert result.market_regimes
     assert result.data_health["factor_diagnostics"] == "ready"
+
+
+def test_factor_backtest_excludes_non_xshg_dates_and_uses_adjusted_close():
+    bars = pd.concat(
+        [
+            _bars("CN:000001", [10 + index * 0.08 for index in range(180)]),
+            _bars("CN:600519", [20 - index * 0.02 for index in range(180)]),
+        ],
+        ignore_index=True,
+    )
+    sunday = date(2026, 4, 19)
+    duplicate = bars[bars["trade_date"] == bars["trade_date"].max()].copy()
+    duplicate["trade_date"] = sunday
+    bars = pd.concat([bars, duplicate], ignore_index=True)
+    bars["adjusted_close"] = bars["close"] * 0.5
+
+    result = run_factor_backtest(bars, forward_days=10, step_days=20, top_n=2)
+
+    assert all(signal.signal_date != sunday for signal in result.signals)
+    assert int(result.data_health["non_session_rows_excluded"]) >= 2
+    assert int(result.data_health["adjusted_close_rows"]) > 0
+    assert result.data_health["market_calendar"] == "XSHG"

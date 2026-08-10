@@ -1,3 +1,5 @@
+from datetime import date
+
 from pydantic import BaseModel, Field
 
 
@@ -46,3 +48,18 @@ class StrategyGovernanceResponse(BaseModel):
     recent_events: list[dict[str, object]] = Field(default_factory=list)
     gate_reasons: list[dict[str, object]] = Field(default_factory=list)
     data_health: dict[str, str] = Field(default_factory=dict)
+
+
+class FactorResearchExperimentRequest(BaseModel):
+    provider_mode: str = "free"
+    start_date: date = date(2021, 11, 1)
+    end_date: date = date(2025, 12, 31)
+    dataset_revision: int | None = None
+    benchmark_id: str = "CN:000300.IDX"
+    rebalance_step_sessions: int = Field(default=10, ge=5, le=60)
+    horizon_sessions: int = Field(default=20, ge=5, le=60)
+    minimum_history_sessions: int = Field(default=120, ge=60, le=260)
+    top_fraction: float = Field(default=0.10, gt=0, le=0.30)
+    round_trip_cost_bps: float = Field(default=10.0, ge=0, le=100)
+    max_instruments: int | None = Field(default=None, ge=50)
+    seeds: list[int] = Field(default_factory=lambda: [7, 19, 42], min_length=1, max_length=10)
