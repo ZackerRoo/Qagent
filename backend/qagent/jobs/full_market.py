@@ -487,6 +487,8 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
             "full_market_future_trade_dates_ignored": str(future_trade_dates_ignored),
         }
     )
+    for key in [item for item in aggregate_health if item.startswith("factor_shadow_")]:
+        aggregate_health.pop(key)
     factor_shadow = None
     try:
         stock_ids = {
