@@ -1535,10 +1535,20 @@ export type PaperAccountScopeStatus = PaperTradingSummary & {
   max_positions: number;
 };
 
+export type PaperCurrentModelStatus = PaperTradingSummary & {
+  active: number;
+  cohort_id: string;
+  feature_set_version: string;
+  recommendation_policy: string;
+  excluded_other_cohort: number;
+  unclassified: number;
+};
+
 export type PaperAccountStatusResponse = {
   account: PaperAccountSettings;
   research: PaperAccountScopeStatus;
   official: PaperAccountScopeStatus;
+  current_model: PaperCurrentModelStatus | null;
   manual: {
     count: number;
     uses_paper_capacity: boolean;

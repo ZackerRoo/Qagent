@@ -21,6 +21,7 @@ def test_benchmark_trend_blocks_entries_when_three_indexes_are_below_ma60():
     assert snapshot.valid_benchmarks == 4
     assert snapshot.below_average_count == 3
     assert snapshot.entry_allowed is False
+    assert snapshot.reason.endswith("常规仓位进入防守模式。")
 
 
 def test_benchmark_trend_keeps_entries_when_market_is_mixed():

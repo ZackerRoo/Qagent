@@ -5447,7 +5447,15 @@ def _maybe_start_automatic_full_scan(
         ):
             previous_attempt = _automatic_candidate_refresh_attempt(latest)
             if previous_attempt >= PAPER_CANDIDATE_MAX_REFRESH_ATTEMPTS:
-                return "candidate_data_stale_after_retry", False, latest.job_id
+                freshness_state = candidate_refresh_health.get(
+                    "automatic_candidate_freshness_state"
+                )
+                status = (
+                    "candidate_data_partially_stale_filtered"
+                    if freshness_state == "partial"
+                    else "candidate_data_stale_after_retry"
+                )
+                return status, False, latest.job_id
             if not _automatic_candidate_settlement_retry_ready():
                 return "waiting_candidate_data_settlement", False, latest.job_id
             candidate_refresh_attempt = previous_attempt + 1
@@ -5605,10 +5613,48 @@ def _paper_account_scope_status(
     }
 
 
+def _paper_current_model_status(
+    repo: QagentRepository,
+    trades: list[PaperTradeRecord],
+    *,
+    provider: str | None,
+) -> dict[str, object] | None:
+    if provider is None:
+        return None
+    current_cohort = repo.get_current_paper_model_cohort(provider)
+    if current_cohort is None:
+        return None
+    cohorts_by_snapshot = repo.get_paper_model_cohorts_for_snapshots(
+        [trade.source_snapshot_id for trade in trades]
+    )
+    current_trades = [
+        trade
+        for trade in trades
+        if (
+            cohort := cohorts_by_snapshot.get(trade.source_snapshot_id)
+        ) is not None
+        and cohort.cohort_id == current_cohort.cohort_id
+    ]
+    summary = summarize_paper_trades(current_trades, reporting_scope="all")
+    return {
+        **summary.model_dump(mode="json"),
+        "active": summary.pending + summary.open,
+        "cohort_id": current_cohort.cohort_id,
+        "feature_set_version": current_cohort.feature_set_version,
+        "recommendation_policy": current_cohort.recommendation_policy_entrypoint,
+        "excluded_other_cohort": len(trades) - len(current_trades),
+        "unclassified": sum(
+            cohorts_by_snapshot.get(trade.source_snapshot_id) is None
+            for trade in trades
+        ),
+    }
+
+
 @router.get("/paper-trades/account-status")
 def paper_trade_account_status(provider: str | None = None) -> dict[str, object]:
     mode = provider.strip().lower() if provider else None
     paper_repo = _paper_repo()
+    repo = _repo()
     account = paper_repo.get_account_settings()
     trades = paper_repo.list_trades(limit=1000, provider=mode)
     active_by_id = {
@@ -5637,8 +5683,13 @@ def paper_trade_account_status(provider: str | None = None) -> dict[str, object]
             max_positions=account.max_positions,
             authenticated_trade_ids=authenticated_ids,
         ),
+        "current_model": _paper_current_model_status(
+            repo,
+            scoped_trades,
+            provider=mode,
+        ),
         "manual": {
-            "count": len(_repo().list_positions()),
+            "count": len(repo.list_positions()),
             "uses_paper_capacity": False,
         },
         "data_health": {

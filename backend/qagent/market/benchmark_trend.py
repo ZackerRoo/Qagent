@@ -73,7 +73,7 @@ def build_benchmark_trend_snapshot(
         entry_allowed = False
         reason = (
             f"{below}/{valid} 个宽基指数低于 {lookback_sessions} 日均线，"
-            "暂停新增仓位。"
+            "常规仓位进入防守模式。"
         )
     elif above >= risk_off_below_count:
         state = BenchmarkTrendState.RISK_ON

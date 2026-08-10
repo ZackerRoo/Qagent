@@ -1520,6 +1520,7 @@ def test_paper_account_status_separates_active_capacity_from_manual_positions(
     assert body["research"]["remaining"] == 8
     assert body["official"]["active"] == 0
     assert body["official"]["remaining"] == 10
+    assert body["current_model"] is None
     assert body["manual"] == {"count": 1, "uses_paper_capacity": False}
     assert body["data_health"]["manual_positions_are_separate"] == "true"
 

@@ -544,6 +544,13 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
           manualCount={paperAccountStatus?.manual.count ?? positions.length}
           language={language}
         />
+        {paperScope === "legacy" && (
+          <PaperCurrentModelStrip
+            status={paperAccountStatus?.current_model}
+            scanStatus={automationScheduler?.last_result?.scan_status}
+            language={language}
+          />
+        )}
         {paperMessage && <div className="empty-state">{paperMessage}</div>}
 
         {portfolioView === "account" && (
@@ -878,6 +885,73 @@ function PaperAccountCapacityStrip({
           </div>
         ))}
       </div>
+    </section>
+  );
+}
+
+function PaperCurrentModelStrip({
+  status,
+  scanStatus,
+  language,
+}: {
+  status?: PaperAccountStatusResponse["current_model"];
+  scanStatus?: string;
+  language: Language;
+}) {
+  const zh = language === "zh";
+  if (!status) {
+    return (
+      <section className="paper-current-model-strip is-empty">
+        <strong>{zh ? "当前模型批次尚未识别" : "Current model cohort unavailable"}</strong>
+        <span>{paperCandidateRefreshLabel(scanStatus, language)}</span>
+      </section>
+    );
+  }
+  const metrics = [
+    [zh ? "批次记录" : "Cohort records", status.total],
+    [zh ? "活动持仓" : "Active", status.active],
+    [zh ? "已闭环" : "Closed", status.closed],
+    [
+      zh ? "闭环胜率" : "Win rate",
+      status.win_rate == null ? "-" : `${(status.win_rate * 100).toFixed(1)}%`,
+    ],
+    [
+      zh ? "平均已实现" : "Avg realized",
+      status.average_realized_return_pct == null
+        ? "-"
+        : `${status.average_realized_return_pct.toFixed(2)}%`,
+    ],
+  ];
+  return (
+    <section className="paper-current-model-strip">
+      <div className="paper-current-model-heading">
+        <div>
+          <span>{zh ? "当前模型批次" : "Current model cohort"}</span>
+          <strong>{status.feature_set_version}</strong>
+        </div>
+        <small>
+          {zh
+            ? `旧批次 ${status.excluded_other_cohort} 条已从当前模型判断中隔离`
+            : `${status.excluded_other_cohort} older records excluded from current-model decisions`}
+        </small>
+      </div>
+      <div className="paper-current-model-metrics">
+        {metrics.map(([label, value]) => (
+          <span key={label}>
+            <small>{label}</small>
+            <strong>{value}</strong>
+          </span>
+        ))}
+        <span>
+          <small>{zh ? "候选刷新" : "Candidates"}</small>
+          <strong>{paperCandidateRefreshLabel(scanStatus, language)}</strong>
+        </span>
+      </div>
+      <p>
+        {zh
+          ? `当前统计只评价同一模型批次；完整历史账本仍保留在下方用于资金核算。批次 ${status.cohort_id.slice(0, 8)}。`
+          : `This summary evaluates one model cohort only. The full historical ledger remains below for accounting. Cohort ${status.cohort_id.slice(0, 8)}.`}
+      </p>
     </section>
   );
 }
@@ -1742,6 +1816,10 @@ function PaperRuntimeIdentity({
   const nextRun = scheduler?.next_run_at
     ? new Date(scheduler.next_run_at).toLocaleString()
     : "-";
+  const candidateRefresh = paperCandidateRefreshLabel(
+    cycle?.scan_status,
+    zh ? "zh" : "en",
+  );
 
   return (
     <div className="paper-runtime-identity">
@@ -1782,6 +1860,10 @@ function PaperRuntimeIdentity({
         <span>
           {zh ? "下次运行" : "Next cycle"}
           <strong>{nextRun}</strong>
+        </span>
+        <span>
+          {zh ? "候选刷新" : "Candidates"}
+          <strong>{candidateRefresh}</strong>
         </span>
       </div>
     </div>
@@ -3272,6 +3354,34 @@ function paperRiskGateCopy(health: Record<string, string>, language: Language) {
       ? "The paper ledger is under pressure, but opportunities remain eligible with fewer and smaller entries."
       : "Drawdown and win rate are within limits; new opportunities can still enter the ledger.",
   };
+}
+
+function paperCandidateRefreshLabel(
+  status: string | undefined,
+  language: Language,
+): string {
+  const zh = language === "zh";
+  const labels: Record<string, { zh: string; en: string }> = {
+    cache_fresh: { zh: "已是最新", en: "Current" },
+    queued: { zh: "已排队扫描", en: "Scan queued" },
+    queued_candidate_refresh: { zh: "候选刷新中", en: "Refreshing" },
+    already_running: { zh: "扫描进行中", en: "Scanning" },
+    resumed_stale: { zh: "恢复扫描中", en: "Resuming" },
+    waiting_candidate_data_settlement: { zh: "等待数据结算", en: "Awaiting settlement" },
+    waiting_market_data: { zh: "等待行情数据", en: "Awaiting market data" },
+    deferred_market_session: { zh: "等待扫描窗口", en: "Awaiting scan window" },
+    candidate_data_partially_stale_filtered: {
+      zh: "有效候选已保留",
+      en: "Usable candidates kept",
+    },
+    candidate_data_stale_after_retry: {
+      zh: "旧候选已过滤",
+      en: "Stale candidates filtered",
+    },
+    disabled: { zh: "扫描未启用", en: "Scan disabled" },
+  };
+  if (!status) return "-";
+  return labels[status]?.[zh ? "zh" : "en"] ?? status;
 }
 
 function triggerQualityLabel(verdict: string, language: Language) {

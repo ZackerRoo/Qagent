@@ -247,6 +247,18 @@ def test_paper_risk_gate_uses_only_current_model_cohort(tmp_path, monkeypatch):
     assert health["paper_risk_gate_excluded_other_cohort"] == "4"
     assert health["paper_risk_gate_unclassified_trades"] == "0"
     assert health["paper_risk_gate_feature_set_version"] == "factor-v3"
+    current_model = routes._paper_current_model_status(
+        repo,
+        paper_repo.list_trades(limit=1000, provider="free"),
+        provider="free",
+    )
+    assert current_model is not None
+    assert current_model["total"] == 1
+    assert current_model["open"] == 1
+    assert current_model["active"] == 1
+    assert current_model["excluded_other_cohort"] == 4
+    assert current_model["unclassified"] == 0
+    assert current_model["feature_set_version"] == "factor-v3"
 
 
 def test_automatic_full_scan_is_deferred_during_market_session(monkeypatch):
@@ -381,7 +393,12 @@ def test_automatic_full_scan_does_not_repeat_second_post_close_candidate_refresh
                     "card_id": "stale-card",
                     "entry_plan": {"trigger_price": "10.00"},
                     "decision": {"risk_status": "clear", "action": "watch_trigger"},
-                }
+                },
+                {
+                    "card_id": "current-card",
+                    "entry_plan": {"trigger_price": "11.00"},
+                    "decision": {"risk_status": "clear", "action": "watch_trigger"},
+                },
             ]
         }
     )
@@ -436,6 +453,29 @@ def test_automatic_full_scan_does_not_repeat_second_post_close_candidate_refresh
         "post-close-scan",
     )
     assert submitted == []
+
+    class PartialStubRepo(StubRepo):
+        def list_latest_opportunity_snapshots_by_card_ids(self, card_ids, provider):
+            return [
+                SimpleNamespace(card_id="current-card", signal_date=expected),
+                SimpleNamespace(
+                    card_id="stale-card",
+                    signal_date=expected - timedelta(days=1),
+                ),
+            ]
+
+    partial_status, partial_started, partial_job_id = (
+        routes._maybe_start_automatic_full_scan(
+            PartialStubRepo(),
+            AutoProcessingSettings(provider="free"),
+        )
+    )
+
+    assert (partial_status, partial_started, partial_job_id) == (
+        "candidate_data_partially_stale_filtered",
+        False,
+        "post-close-scan",
+    )
 
 
 def test_automatic_full_scan_retries_partial_candidates_after_settlement(monkeypatch):
