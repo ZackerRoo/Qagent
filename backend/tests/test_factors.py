@@ -9,6 +9,7 @@ from qagent.factors.engine import (
     RESEARCH_FACTOR_WEIGHTS,
     build_factor_rankings,
 )
+from qagent.factors.research_contract import FEATURE_COLUMNS
 from qagent.strategy_data.models import FundamentalSnapshot
 
 
@@ -166,6 +167,10 @@ def test_research_factors_are_observable_without_changing_ranking_weight():
     assert set(research_exposures) == set(RESEARCH_FACTOR_WEIGHTS)
     assert all(exposure.raw_value is not None for exposure in research_exposures.values())
     assert all(exposure.weight == 0 for exposure in research_exposures.values())
+    assert set(strong.research_features) == set(FEATURE_COLUMNS)
+    assert strong.research_features["momentum_120"] is not None
+    assert strong.research_features["trend_slope_60"] is not None
+    assert strong.research_features["return_on_equity"] == 22.0
 
 
 def test_market_adjusted_momentum_is_scored_within_asset_pool():

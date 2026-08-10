@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import math
 import subprocess
 from bisect import bisect_right
 from collections import defaultdict
 from datetime import date
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -15,6 +17,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.market.calendars import trading_day_offset, trading_sessions_in_range
+from qagent.factors.research_contract import (
+    BASELINE_SIGNS,
+    FACTOR_RESEARCH_VERSION,
+    FEATURE_COLUMNS,
+)
 from qagent.storage.factor_research import FactorResearchRepository
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
 from qagent.storage.repository import QagentRepository
@@ -22,46 +29,7 @@ from qagent.storage.tables import HistoricalIndustrySnapshotRow
 from qagent.strategy_data.models import FundamentalSnapshot
 
 
-FACTOR_RESEARCH_VERSION = "factor-research-v1-xshg-neutralized"
 DEFAULT_BENCHMARK_ID = "CN:000300.IDX"
-FEATURE_COLUMNS = (
-    "momentum_20",
-    "momentum_60",
-    "momentum_120",
-    "return_5",
-    "trend_slope_60",
-    "trend_r2_60",
-    "volatility_20",
-    "downside_risk_60",
-    "max_drawdown_60",
-    "turnover_log_20",
-    "volume_ratio_5_20",
-    "distance_ma20",
-    "earnings_yield",
-    "return_on_equity",
-    "gross_margin",
-    "revenue_growth",
-    "earnings_growth",
-)
-BASELINE_SIGNS = {
-    "momentum_20": 1.0,
-    "momentum_60": 1.0,
-    "momentum_120": 1.0,
-    "return_5": -0.5,
-    "trend_slope_60": 1.0,
-    "trend_r2_60": 1.0,
-    "volatility_20": -1.0,
-    "downside_risk_60": -1.0,
-    "max_drawdown_60": 1.0,
-    "turnover_log_20": 0.5,
-    "volume_ratio_5_20": 0.25,
-    "distance_ma20": 0.25,
-    "earnings_yield": 1.0,
-    "return_on_equity": 1.0,
-    "gross_margin": 0.5,
-    "revenue_growth": 0.5,
-    "earnings_growth": 0.5,
-}
 
 
 class FactorResearchConfig(BaseModel):
@@ -89,6 +57,7 @@ class FactorResearchRunOutput(BaseModel):
     metrics: dict[str, Any]
     data_health: dict[str, Any]
     artifacts: dict[str, Any]
+    model_artifacts: list[dict[str, Any]] = Field(default_factory=list, exclude=True)
 
 
 def current_code_revision() -> str:
@@ -135,6 +104,7 @@ def execute_factor_research_experiment(
             metrics=output.metrics,
             data_health=output.data_health,
             artifacts=output.artifacts,
+            model_artifacts=output.model_artifacts,
         )
     except Exception as error:
         store.fail(
@@ -151,7 +121,7 @@ def run_factor_research(
 ) -> FactorResearchRunOutput:
     config = resolved_config(session_factory, config)
     frame, data_health = build_factor_research_dataset(session_factory, config)
-    metrics, artifacts = compare_baseline_and_lightgbm(frame, config)
+    metrics, artifacts, model_artifacts = compare_baseline_and_lightgbm(frame, config)
     data_health.update(
         {
             "factor_research": "ready",
@@ -164,6 +134,7 @@ def run_factor_research(
         metrics=metrics,
         data_health=data_health,
         artifacts=artifacts,
+        model_artifacts=model_artifacts,
     )
 
 
@@ -383,7 +354,7 @@ def neutralize_research_features(frame: pd.DataFrame) -> pd.DataFrame:
 def compare_baseline_and_lightgbm(
     frame: pd.DataFrame,
     config: FactorResearchConfig,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     dates = sorted(frame["signal_date"].unique())
     if len(dates) < 15:
         raise ValueError("at least 15 cross-sections are required")
@@ -410,6 +381,8 @@ def compare_baseline_and_lightgbm(
     predictions: list[np.ndarray] = []
     importance = np.zeros(len(FEATURE_COLUMNS), dtype="float64")
     best_iterations: list[int] = []
+    model_artifacts: list[dict[str, Any]] = []
+    feature_contract_digest = factor_research_feature_contract_digest()
     for seed in config.seeds:
         train_data = lgb.Dataset(
             train[list(FEATURE_COLUMNS)],
@@ -452,6 +425,16 @@ def compare_baseline_and_lightgbm(
         best_iteration = int(model.best_iteration or 500)
         predictions.append(
             model.predict(test[list(FEATURE_COLUMNS)], num_iteration=best_iteration)
+        )
+        model_text = model.model_to_string(num_iteration=best_iteration)
+        model_artifacts.append(
+            {
+                "seed": seed,
+                "feature_set_version": FACTOR_RESEARCH_VERSION,
+                "feature_contract_digest": feature_contract_digest,
+                "model_digest": sha256(model_text.encode("utf-8")).hexdigest(),
+                "model_text": model_text,
+            }
         )
         importance += model.feature_importance(importance_type="gain")
         best_iterations.append(best_iteration)
@@ -509,8 +492,21 @@ def compare_baseline_and_lightgbm(
         "best_iterations": best_iterations,
         "feature_importance": feature_importance,
         "paper_model_unchanged": True,
+        "shadow_model_persisted": True,
+        "feature_contract_digest": feature_contract_digest,
     }
-    return _json_safe(metrics), _json_safe(artifacts)
+    return _json_safe(metrics), _json_safe(artifacts), model_artifacts
+
+
+def factor_research_feature_contract_digest() -> str:
+    payload = {
+        "feature_set_version": FACTOR_RESEARCH_VERSION,
+        "features": list(FEATURE_COLUMNS),
+        "neutralization": "cross_sectional_winsorize_then_size_and_industry_residual",
+        "missing_values": "lightgbm_native_nan",
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _model_metrics(
@@ -623,7 +619,9 @@ def _feature_row(
             float(np.std(np.minimum(returns[-60:], 0))) if len(returns) >= 60 else np.nan
         ),
         "max_drawdown_60": _price_max_drawdown(history[-60:]),
-        "turnover_log_20": math.log1p(float(np.mean(turnovers[signal_index - 19 : signal_index + 1]))),
+        "turnover_log_20": math.log1p(
+            float(np.mean(turnovers[signal_index - 19 : signal_index + 1]))
+        ),
         "volume_ratio_5_20": _safe_ratio(
             float(np.mean(volumes[signal_index - 4 : signal_index + 1])),
             float(np.mean(volumes[signal_index - 19 : signal_index + 1])),

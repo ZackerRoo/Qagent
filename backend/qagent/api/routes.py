@@ -3019,6 +3019,23 @@ def factor_research_experiments(limit: int = 20):
     }
 
 
+@router.get("/factor-research/shadow/latest")
+def latest_factor_research_shadow(provider: str = "free", top_limit: int = 20):
+    run = _factor_research_repo().latest_shadow_run(
+        provider,
+        top_limit=min(max(top_limit, 1), 100),
+    )
+    return {
+        "run": run,
+        "data_health": {
+            "factor_shadow_recorder": "sqlite_append_only",
+            "factor_shadow_status": "ready" if run is not None else "not_started",
+            "paper_model_isolation": "unchanged",
+            "paper_order_effect": "none",
+        },
+    }
+
+
 @router.get("/factor-research/experiments/{experiment_id}")
 def factor_research_experiment(experiment_id: str):
     experiment = _factor_research_repo().get(experiment_id)

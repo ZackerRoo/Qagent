@@ -1,10 +1,13 @@
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
+import math
 
+import numpy as np
 import pandas as pd
 
 from qagent.factors.models import FactorExposure, FactorRanking
+from qagent.factors.research_contract import FEATURE_COLUMNS
 from qagent.features import FeatureSnapshot, build_feature_snapshot
 from qagent.market.indicators import regression_quality_momentum
 from qagent.strategy_data.models import FundamentalSnapshot
@@ -106,6 +109,7 @@ class _RawFactors:
     max_drawdown_60d: float | None
     volume_ratio_5_20: float | None
     market_cap: float | None
+    research_features: dict[str, float | None]
     data_completeness: float
     missing_data: list[str]
     flags: list[str]
@@ -177,6 +181,7 @@ def build_factor_rankings(
                 execution_penalty=round(penalty, 4),
                 data_completeness=round(item.data_completeness, 4),
                 factor_exposures=_exposures(item, scores, weights),
+                research_features=item.research_features,
                 flags=item.flags,
                 missing_data=item.missing_data,
             )
@@ -552,6 +557,19 @@ def _raw_factors(
         volume_ratio_5_20=volume_ratio_5_20,
         market_cap=size_raw if is_a_share_stock else None,
     )
+    research_features = _research_feature_values(
+        ordered=ordered,
+        close=close,
+        volume=volume,
+        fundamental=fundamental,
+        ret_5=ret_5,
+        ret_20=ret_20,
+        ret_60=ret_60,
+        ret_120=ret_120,
+        distance_ma20=distance_ma20,
+        volume_ratio_5_20=volume_ratio_5_20,
+        max_drawdown_60d=max_drawdown_60d,
+    )
     completeness = _data_completeness(missing, asset_type=asset_type)
     return _RawFactors(
         instrument_id=instrument_id,
@@ -574,10 +592,77 @@ def _raw_factors(
         max_drawdown_60d=max_drawdown_60d,
         volume_ratio_5_20=volume_ratio_5_20,
         market_cap=size_raw,
+        research_features=research_features,
         data_completeness=max(0.2, completeness),
         missing_data=sorted(set(missing)),
         flags=sorted(set(flags)),
     )
+
+
+def _research_feature_values(
+    *,
+    ordered: pd.DataFrame,
+    close: pd.Series,
+    volume: pd.Series,
+    fundamental: FundamentalSnapshot | None,
+    ret_5: float | None,
+    ret_20: float | None,
+    ret_60: float | None,
+    ret_120: float | None,
+    distance_ma20: float | None,
+    volume_ratio_5_20: float | None,
+    max_drawdown_60d: float | None,
+) -> dict[str, float | None]:
+    returns = close.pct_change(fill_method=None).dropna().to_numpy(dtype="float64")
+    trend_slope, trend_r2 = _annualized_log_trend(close.tail(60))
+    aligned = ordered.loc[close.index]
+    raw_close = pd.to_numeric(aligned["close"], errors="coerce")
+    aligned_volume = pd.to_numeric(aligned["volume"], errors="coerce")
+    turnover = (raw_close * aligned_volume).dropna().tail(20)
+    pe = _float_or_none(fundamental.pe_ratio if fundamental is not None else None)
+    values = {
+        "momentum_20": ret_20,
+        "momentum_60": ret_60,
+        "momentum_120": ret_120,
+        "return_5": ret_5,
+        "trend_slope_60": trend_slope,
+        "trend_r2_60": trend_r2,
+        "volatility_20": (float(np.std(returns[-20:])) if len(returns) >= 20 else None),
+        "downside_risk_60": (
+            float(np.std(np.minimum(returns[-60:], 0))) if len(returns) >= 60 else None
+        ),
+        "max_drawdown_60": max_drawdown_60d,
+        "turnover_log_20": (math.log1p(float(turnover.mean())) if len(turnover) >= 20 else None),
+        "volume_ratio_5_20": volume_ratio_5_20,
+        "distance_ma20": distance_ma20,
+        "earnings_yield": 1 / pe if pe is not None and pe > 0 else None,
+        "return_on_equity": _float_or_none(
+            fundamental.return_on_equity_pct if fundamental is not None else None
+        ),
+        "gross_margin": _float_or_none(
+            fundamental.gross_margin_pct if fundamental is not None else None
+        ),
+        "revenue_growth": _float_or_none(
+            fundamental.revenue_growth_pct if fundamental is not None else None
+        ),
+        "earnings_growth": _float_or_none(
+            fundamental.earnings_growth_pct if fundamental is not None else None
+        ),
+    }
+    return {feature: values.get(feature) for feature in FEATURE_COLUMNS}
+
+
+def _annualized_log_trend(values: pd.Series) -> tuple[float | None, float | None]:
+    clean = pd.to_numeric(values, errors="coerce").dropna()
+    if len(clean) < 20 or (clean <= 0).any():
+        return None, None
+    x = np.arange(len(clean), dtype="float64")
+    y = clean.map(math.log).to_numpy(dtype="float64")
+    slope, intercept = np.polyfit(x, y, 1)
+    fitted = slope * x + intercept
+    residual = float(((y - fitted) ** 2).sum())
+    total = float(((y - y.mean()) ** 2).sum())
+    return float(math.expm1(float(slope) * 252)), 1 - residual / total if total > 0 else 0.0
 
 
 def _latest_fundamentals(

@@ -86,6 +86,14 @@ class HistoricalEvidenceProvider(Protocol):
     ) -> HistoricalCorporateActionBatch:
         ...
 
+    def get_industry_evidence(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> HistoricalEvidenceBundle:
+        ...
+
 
 class BaoStockHistoricalEvidenceProvider:
     name = "baostock_historical_evidence"
@@ -544,6 +552,56 @@ class BaoStockHistoricalEvidenceProvider:
             "historical_evidence_index_memberships": str(
                 len(bundle.index_memberships)
             ),
+            "historical_evidence_errors": str(len(bundle.errors)),
+        }
+        return bundle
+
+    def get_industry_evidence(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> HistoricalEvidenceBundle:
+        symbols = sorted({item for item in instrument_ids if item.startswith("CN:")})
+        selected = set(symbols)
+        snapshot_dates = historical_snapshot_dates(start, end)
+        bundle = HistoricalEvidenceBundle()
+        self.last_errors = []
+        if not symbols:
+            return bundle
+        with serialized_baostock_session():
+            logged_in = False
+            try:
+                login = self._call(self.client.login)
+                if getattr(login, "error_code", "1") != "0":
+                    self.last_errors.append(
+                        "baostock industry login: "
+                        f"{getattr(login, 'error_msg', 'login failed')}"
+                    )
+                else:
+                    logged_in = True
+                    for snapshot_date in snapshot_dates:
+                        try:
+                            bundle.industries.extend(
+                                self._load_industries(selected, snapshot_date)
+                            )
+                        except Exception as exc:
+                            self.last_errors.append(
+                                f"industry {snapshot_date.isoformat()}: {exc}"
+                            )
+            except Exception as exc:
+                self.last_errors.append(f"baostock industry login: {exc}")
+            finally:
+                if logged_in:
+                    try:
+                        self._call(self.client.logout)
+                    except Exception as exc:
+                        self.last_errors.append(f"baostock industry logout: {exc}")
+        bundle.errors = list(self.last_errors)
+        bundle.data_health = {
+            "historical_evidence_provider": self.name,
+            "historical_evidence_industries": str(len(bundle.industries)),
+            "historical_evidence_industry_dates": str(len(snapshot_dates)),
             "historical_evidence_errors": str(len(bundle.errors)),
         }
         return bundle

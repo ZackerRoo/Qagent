@@ -324,6 +324,8 @@ def _apply_additive_migrations(engine: Engine) -> None:
         _create_immutable_ranking_v4_evidence_triggers(connection)
         _record_ranking_v4_evidence_trigger_version(connection)
         _create_immutable_paper_research_baseline_triggers(connection)
+        _create_immutable_row_triggers(connection, "factor_research_model_artifacts")
+        _create_immutable_row_triggers(connection, "factor_shadow_scores")
 
 
 @contextmanager

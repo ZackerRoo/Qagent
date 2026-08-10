@@ -87,9 +87,13 @@ def test_factor_research_experiment_api_starts_empty_and_isolated(tmp_path, monk
     client = TestClient(create_app())
 
     response = client.get("/api/factor-research/experiments")
+    shadow = client.get("/api/factor-research/shadow/latest")
     missing = client.get("/api/factor-research/experiments/not-found")
 
     assert response.status_code == 200
     assert response.json()["experiments"] == []
     assert response.json()["data_health"]["paper_model_isolation"] == "unchanged"
+    assert shadow.status_code == 200
+    assert shadow.json()["run"] is None
+    assert shadow.json()["data_health"]["paper_order_effect"] == "none"
     assert missing.status_code == 404

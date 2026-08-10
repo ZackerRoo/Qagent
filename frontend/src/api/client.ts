@@ -24,6 +24,7 @@ import type {
   FactorDiagnosticsResponse,
   FactorResearchExperiment,
   FactorResearchExperimentsResponse,
+  FactorShadowResponse,
   FullMarketBatchScanJob,
   FullMarketScanResponse,
   HistoricalBackfillJob,
@@ -128,6 +129,7 @@ type ScanParams = {
   take_profit_pct?: string | number;
   days?: number;
   top_n?: number;
+  top_limit?: number;
   asset_type?: string;
   include_full_etfs?: boolean;
   include_etfs?: boolean;
@@ -872,6 +874,15 @@ export async function fetchFactorResearchExperiments(
   limit = 10,
 ): Promise<FactorResearchExperimentsResponse> {
   return apiGet<FactorResearchExperimentsResponse>("/factor-research/experiments", { limit });
+}
+
+export async function fetchFactorResearchShadow(
+  provider: DataProviderMode,
+): Promise<FactorShadowResponse> {
+  return apiGet<FactorShadowResponse>("/factor-research/shadow/latest", {
+    provider,
+    top_limit: 20,
+  });
 }
 
 export async function startFactorResearchExperiment(

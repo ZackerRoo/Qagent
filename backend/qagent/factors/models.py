@@ -32,5 +32,6 @@ class FactorRanking(BaseModel):
     execution_penalty: float = Field(ge=0.0, le=1.0)
     data_completeness: float = Field(ge=0.0, le=1.0)
     factor_exposures: list[FactorExposure]
+    research_features: dict[str, float | None] = Field(default_factory=dict)
     flags: list[str] = Field(default_factory=list)
     missing_data: list[str] = Field(default_factory=list)

@@ -1662,3 +1662,46 @@ class FactorResearchExperimentRow(Base):
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
+class FactorResearchModelArtifactRow(Base):
+    __tablename__ = "factor_research_model_artifacts"
+
+    experiment_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("factor_research_experiments.experiment_id"),
+        primary_key=True,
+        index=True,
+    )
+    seed: Mapped[int] = mapped_column(Integer, primary_key=True)
+    feature_set_version: Mapped[str] = mapped_column(String(96), index=True)
+    feature_contract_digest: Mapped[str] = mapped_column(String(64), index=True)
+    model_digest: Mapped[str] = mapped_column(String(64), index=True)
+    model_text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
+class FactorShadowScoreRow(Base):
+    __tablename__ = "factor_shadow_scores"
+
+    experiment_id: Mapped[str] = mapped_column(String(96), primary_key=True, index=True)
+    scan_job_id: Mapped[str] = mapped_column(String(96), primary_key=True, index=True)
+    instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
+    signal_date: Mapped[date] = mapped_column(Date, index=True)
+    baseline_score: Mapped[Decimal] = mapped_column(Numeric(20, 10))
+    challenger_score: Mapped[Decimal] = mapped_column(Numeric(20, 10))
+    baseline_rank: Mapped[int] = mapped_column(Integer, index=True)
+    challenger_rank: Mapped[int] = mapped_column(Integer, index=True)
+    feature_coverage: Mapped[Decimal] = mapped_column(Numeric(8, 6))
+    industry: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    dataset_revision: Mapped[int] = mapped_column(Integer, index=True)
+    model_digest: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
+Index(
+    "ix_factor_shadow_scores_latest",
+    FactorShadowScoreRow.signal_date.desc(),
+    FactorShadowScoreRow.scan_job_id,
+    FactorShadowScoreRow.challenger_rank,
+)

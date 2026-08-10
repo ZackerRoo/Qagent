@@ -3179,6 +3179,8 @@ export type FactorResearchExperiment = {
     split?: Record<string, string | number>;
     feature_importance?: Array<{ feature: string; importance: number }>;
     paper_model_unchanged?: boolean;
+    shadow_model_persisted?: boolean;
+    feature_contract_digest?: string;
   };
   error: string | null;
   started_at: string | null;
@@ -3188,6 +3190,33 @@ export type FactorResearchExperiment = {
 
 export type FactorResearchExperimentsResponse = {
   experiments: FactorResearchExperiment[];
+  data_health: Record<string, string>;
+};
+
+export type FactorShadowScore = {
+  instrument_id: string;
+  baseline_score: number;
+  challenger_score: number;
+  baseline_rank: number;
+  challenger_rank: number;
+  feature_coverage: number;
+  industry: string | null;
+};
+
+export type FactorShadowRun = {
+  experiment_id: string;
+  scan_job_id: string;
+  signal_date: string;
+  dataset_revision: number;
+  model_digest: string;
+  scored_instruments: number;
+  mean_feature_coverage: number;
+  top_scores: FactorShadowScore[];
+  created_at: string;
+};
+
+export type FactorShadowResponse = {
+  run: FactorShadowRun | null;
   data_health: Record<string, string>;
 };
 

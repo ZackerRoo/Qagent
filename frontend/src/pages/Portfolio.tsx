@@ -6,6 +6,7 @@ import {
   fetchAutomationScheduler,
   fetchFactorDiagnostics,
   fetchFactorResearchExperiments,
+  fetchFactorResearchShadow,
   fetchEtfExposures,
   fetchPaperCandidatePool,
   fetchPaperAccountStatus,
@@ -36,6 +37,7 @@ import type {
   DataProviderMode,
   FactorDiagnosticsResponse,
   FactorResearchExperiment,
+  FactorShadowResponse,
   EtfExposureResponse,
   PaperCandidatePoolResponse,
   PaperAccountStatusResponse,
@@ -123,6 +125,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [forwardComparison, setForwardComparison] = useState<PaperForwardComparisonResponse>();
   const [factorDiagnostics, setFactorDiagnostics] = useState<FactorDiagnosticsResponse>();
   const [factorResearchExperiments, setFactorResearchExperiments] = useState<FactorResearchExperiment[]>([]);
+  const [factorShadow, setFactorShadow] = useState<FactorShadowResponse>();
   const [validation, setValidation] = useState<PaperValidationResponse>();
   const [paperSession, setPaperSession] = useState<PaperSessionResponse>();
   const [automationScheduler, setAutomationScheduler] = useState<AutoProcessingState>();
@@ -226,6 +229,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchPaperDualTrack(dataMode),
       fetchPaperForwardComparison(dataMode),
       fetchFactorResearchExperiments(),
+      fetchFactorResearchShadow(dataMode),
     ]);
     const [
       validationResult,
@@ -234,6 +238,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       dualTrackResult,
       forwardComparisonResult,
       factorResearchResult,
+      factorShadowResult,
     ] = researchResults;
     if (validationResult.status === "fulfilled") setValidation(validationResult.value);
     if (dailyReportResult.status === "fulfilled") setDailyReport(dailyReportResult.value);
@@ -244,6 +249,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     }
     if (factorResearchResult.status === "fulfilled") {
       setFactorResearchExperiments(factorResearchResult.value.experiments);
+    }
+    if (factorShadowResult.status === "fulfilled") {
+      setFactorShadow(factorShadowResult.value);
     }
     const failedResearch = researchResults.filter((item) => item.status === "rejected");
     if (failedResearch.length) {
@@ -747,6 +755,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
           <div className="portfolio-view-stack">
             <FactorModelResearchPanel
               experiment={factorResearchExperiments[0]}
+              shadow={factorShadow}
               running={isRunningFactorResearch}
               onRun={runFactorResearch}
               language={language}
@@ -1212,11 +1221,13 @@ function paperLookThroughWarningText(
 
 function FactorModelResearchPanel({
   experiment,
+  shadow,
   running,
   onRun,
   language,
 }: {
   experiment?: FactorResearchExperiment;
+  shadow?: FactorShadowResponse;
   running: boolean;
   onRun: () => Promise<void>;
   language: Language;
@@ -1274,6 +1285,32 @@ function FactorModelResearchPanel({
         <span><small>{language === "zh" ? "截面" : "Cross-sections"}</small><strong>{baseline?.cross_sections ?? "-"}</strong></span>
         <span><small>{language === "zh" ? "模型隔离" : "Isolation"}</small><strong>research only</strong></span>
       </div>
+
+      <div className="factor-model-verdict">
+        <strong>
+          {shadow?.run
+            ? language === "zh"
+              ? `影子评分已记录 ${shadow.run.scored_instruments} 只股票`
+              : `${shadow.run.scored_instruments} stocks recorded in shadow scoring`
+            : language === "zh" ? "等待下一次全量扫描生成影子评分" : "Waiting for the next full scan"}
+        </strong>
+        <span>
+          {shadow?.run
+            ? `${shadow.run.signal_date} · ${language === "zh" ? "特征覆盖" : "feature coverage"} ${(shadow.run.mean_feature_coverage * 100).toFixed(1)}%`
+            : language === "zh" ? "只记录候选排序，不改变模拟盘交易" : "Records ranks only; paper orders stay unchanged"}
+        </span>
+      </div>
+
+      {(shadow?.run?.top_scores.length ?? 0) > 0 && (
+        <div className="factor-importance-row">
+          {shadow?.run?.top_scores.slice(0, 6).map((item) => (
+            <span key={item.instrument_id}>
+              <small>#{item.challenger_rank} {item.industry ?? (language === "zh" ? "行业待补" : "Sector pending")}</small>
+              <strong>{item.instrument_id.replace("CN:", "")}</strong>
+            </span>
+          ))}
+        </div>
+      )}
 
       {baseline && challenger && (
         <div className="table-shell">

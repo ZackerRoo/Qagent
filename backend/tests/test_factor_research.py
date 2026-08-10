@@ -2,20 +2,25 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from qagent.db import create_session_factory, initialize_database
+from qagent.factors.models import FactorExposure, FactorRanking
+from qagent.factors.research_contract import FACTOR_RESEARCH_VERSION
 from qagent.research.factor_experiments import (
     FEATURE_COLUMNS,
     FactorResearchConfig,
     _attach_excess_labels,
     _prepare_instrument_rows,
     compare_baseline_and_lightgbm,
+    factor_research_feature_contract_digest,
     neutralize_research_features,
 )
+from qagent.research.factor_shadow import score_factor_shadow_run
 from qagent.storage.factor_research import FactorResearchRepository
 from qagent.storage.replay_evidence import ReplayFactorBarReadRow
 
@@ -165,10 +170,129 @@ def test_lightgbm_challenger_uses_purged_time_split():
         seeds=[7],
     )
 
-    metrics, artifacts = compare_baseline_and_lightgbm(frame, config)
+    metrics, artifacts, model_artifacts = compare_baseline_and_lightgbm(frame, config)
 
     assert metrics["activation_allowed"] is False
     assert metrics["lightgbm_challenger"]["cross_sections"] >= 2
     assert artifacts["split"]["purge_cross_sections"] == 2
     assert artifacts["paper_model_unchanged"] is True
     assert artifacts["feature_importance"]
+    assert artifacts["shadow_model_persisted"] is True
+    assert len(model_artifacts) == 1
+    assert model_artifacts[0]["model_digest"]
+    assert "tree" in model_artifacts[0]["model_text"]
+
+
+def test_lightgbm_shadow_scores_are_persisted_without_paper_activation(tmp_path):
+    lightgbm = pytest.importorskip("lightgbm")
+    database_url = f"sqlite:///{tmp_path / 'factor-shadow.db'}"
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    store = FactorResearchRepository(session_factory)
+    rng = np.random.default_rng(17)
+    training = pd.DataFrame(
+        rng.normal(size=(120, len(FEATURE_COLUMNS))),
+        columns=list(FEATURE_COLUMNS),
+    )
+    label = 1.2 * training["momentum_20"] - 0.7 * training["volatility_20"]
+    model = lightgbm.train(
+        {
+            "objective": "regression_l1",
+            "verbosity": -1,
+            "num_threads": 1,
+            "seed": 17,
+        },
+        lightgbm.Dataset(training, label=label),
+        num_boost_round=12,
+    )
+    model_text = model.model_to_string()
+    experiment = store.create(
+        experiment_name="shadow fixture",
+        provider_mode="fixture",
+        model_family="baseline+lightgbm",
+        benchmark_id="CN:000300.IDX",
+        dataset_revision=0,
+        start_date=date(2024, 1, 1),
+        end_date=date(2025, 1, 1),
+        code_revision="b" * 40,
+        config={"paper_model_unchanged": True},
+    )
+    store.mark_running(experiment.experiment_id)
+    store.complete(
+        experiment.experiment_id,
+        metrics={"activation_allowed": False},
+        data_health={},
+        artifacts={"paper_model_unchanged": True},
+        model_artifacts=[
+            {
+                "seed": 17,
+                "feature_set_version": FACTOR_RESEARCH_VERSION,
+                "feature_contract_digest": factor_research_feature_contract_digest(),
+                "model_digest": sha256(model_text.encode("utf-8")).hexdigest(),
+                "model_text": model_text,
+            }
+        ],
+    )
+    rankings = [
+        FactorRanking(
+            instrument_id=f"CN:{index:06d}",
+            factor_score=0.5,
+            factor_rank=index + 1,
+            percentile=0.5,
+            momentum_score=0.5,
+            trend_quality_score=0.5,
+            liquidity_score=0.5,
+            low_risk_score=0.5,
+            reversal_score=0.5,
+            execution_penalty=0.0,
+            data_completeness=1.0,
+            factor_exposures=[
+                FactorExposure(
+                    factor_id="size",
+                    label="size",
+                    raw_value=float(10_000_000_000 + index * 1_000_000),
+                    score=0.5,
+                    weight=0.0,
+                    explanation="fixture",
+                )
+            ],
+            research_features={
+                feature: float(rng.normal()) for feature in FEATURE_COLUMNS
+            },
+        )
+        for index in range(25)
+    ]
+
+    result = score_factor_shadow_run(
+        session_factory,
+        provider_mode="fixture",
+        scan_job_id="scan-fixture-1",
+        signal_date=date(2026, 8, 10),
+        rankings=rankings,
+        stock_ids={item.instrument_id for item in rankings},
+    )
+    retried = score_factor_shadow_run(
+        session_factory,
+        provider_mode="fixture",
+        scan_job_id="scan-fixture-1",
+        signal_date=date(2026, 8, 10),
+        rankings=rankings,
+        stock_ids={item.instrument_id for item in rankings},
+    )
+
+    assert result.status == "recorded"
+    assert result.run is not None
+    assert result.run.scored_instruments == 25
+    assert len(result.run.top_scores) == 20
+    assert result.data_health["factor_shadow_paper_isolation"] == "true"
+    assert retried.run == result.run
+    assert store.latest_shadow_run("fixture") == result.run
+    with pytest.raises(ValueError, match="retry identity"):
+        store.record_shadow_scores(
+            experiment_id=experiment.experiment_id,
+            scan_job_id="scan-fixture-1",
+            signal_date=date(2026, 8, 11),
+            dataset_revision=0,
+            model_digest=result.run.model_digest,
+            scores=result.run.top_scores,
+        )

@@ -62,6 +62,7 @@ from qagent.research.market_intelligence import (
     build_market_intelligence_center,
 )
 from qagent.research.operational_readiness import build_operational_readiness_center
+from qagent.research.factor_shadow import score_factor_shadow_run
 from qagent.storage.repository import (
     paper_model_cohort_from_data_health,
     QagentRepository,
@@ -421,6 +422,11 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         data_health=aggregate_health,
     )
 
+    research_universe = sorted({item.instrument_id for item in all_factor_rankings})
+    global_shadow_rankings = rerank_factor_rankings(
+        all_factor_rankings,
+        instrument_ids=research_universe,
+    )
     card_universe = sorted({card.instrument_id for card in all_cards})
     global_factor_rankings = rerank_factor_rankings(
         all_factor_rankings,
@@ -467,6 +473,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     aggregate_health.update(
         {
             "factor_rankings": str(len(global_factor_rankings)),
+            "factor_shadow_universe_rankings": str(len(global_shadow_rankings)),
             "factor_ranking_scope": "full_card_universe",
             "factor_ranking_normalization": "global_second_pass",
             "factor_ranking_tie_breaker": "instrument_id_asc",
@@ -480,6 +487,33 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
             "full_market_future_trade_dates_ignored": str(future_trade_dates_ignored),
         }
     )
+    factor_shadow = None
+    try:
+        stock_ids = {
+            item.instrument_id
+            for item in repo.list_tradable_instruments(
+                asset_types={"stock"},
+                limit=20_000,
+            )
+        }
+        factor_shadow_result = score_factor_shadow_run(
+            create_session_factory(),
+            provider_mode=job.provider,
+            scan_job_id=job.job_id,
+            signal_date=feature_as_of,
+            rankings=global_shadow_rankings,
+            stock_ids=stock_ids,
+        )
+        aggregate_health.update(factor_shadow_result.data_health)
+        factor_shadow = factor_shadow_result.model_dump(mode="json")
+    except Exception as exc:
+        aggregate_health.update(
+            {
+                "factor_shadow_status": "error",
+                "factor_shadow_error": str(exc)[:500],
+                "factor_shadow_paper_isolation": "true",
+            }
+        )
 
     cache_key = _full_market_batch_cache_key(job.provider, job.include_etfs)
     previous_cache = repo.get_recent_scan_result_cache(
@@ -655,6 +689,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         "feature_drift": feature_drift,
         "a_share_market_state": market_state.model_dump(mode="json"),
         "benchmark_trend": benchmark_trend.model_dump(mode="json"),
+        "factor_shadow": factor_shadow,
         "data_health": payload_data_health,
     }
     repo.save_scan_run(
