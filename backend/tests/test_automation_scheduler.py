@@ -6,6 +6,7 @@ from qagent.jobs.automation_scheduler import (
     AutoProcessingCycleResult,
     AutoProcessingSettings,
 )
+from qagent.jobs import automation_scheduler as scheduler_module
 
 
 def test_refresh_if_due_runs_overdue_cycle_off_caller_thread():
@@ -82,6 +83,49 @@ def test_refresh_if_due_wakes_live_thread_after_wall_clock_deadline_passes():
     state = scheduler.refresh_if_due(runner)
 
     assert state.enabled is True
+    assert completed.wait(timeout=1.0)
+    assert scheduler.state().run_count == 1
+    scheduler.stop()
+
+
+def test_loop_rechecks_wall_clock_without_status_request(monkeypatch):
+    scheduler = AutomationScheduler()
+    settings = AutoProcessingSettings(
+        provider="fixture",
+        symbols="US:TEST",
+        interval_seconds=60,
+        run_scan=False,
+        seed_paper=False,
+        update_paper=False,
+        run_alerts=False,
+    )
+    current_time = [datetime(2026, 8, 11, 1, 0, tzinfo=timezone.utc)]
+    completed = Event()
+
+    monkeypatch.setattr(scheduler_module, "_utc_now", lambda: current_time[0])
+    monkeypatch.setattr(
+        scheduler_module,
+        "SCHEDULER_CLOCK_RECHECK_SECONDS",
+        0.01,
+    )
+
+    def runner(cycle_settings: AutoProcessingSettings) -> AutoProcessingCycleResult:
+        completed.set()
+        return AutoProcessingCycleResult(
+            provider=cycle_settings.provider,
+            started_at=current_time[0],
+            finished_at=current_time[0],
+            scan_status="skipped",
+        )
+
+    with scheduler._lock:
+        scheduler._enabled = True
+        scheduler._settings = settings
+        scheduler._next_run_at = current_time[0] + timedelta(hours=1)
+    scheduler._ensure_loop_thread(runner)
+
+    current_time[0] += timedelta(hours=2)
+
     assert completed.wait(timeout=1.0)
     assert scheduler.state().run_count == 1
     scheduler.stop()

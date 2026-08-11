@@ -53,6 +53,7 @@ class AutoProcessingState(BaseModel):
 
 
 CycleRunner = Callable[[AutoProcessingSettings], AutoProcessingCycleResult]
+SCHEDULER_CLOCK_RECHECK_SECONDS = 5.0
 
 
 class AutomationScheduler:
@@ -137,7 +138,15 @@ class AutomationScheduler:
             if next_run_at is not None:
                 wait_seconds = (next_run_at - _utc_now()).total_seconds()
                 if wait_seconds > 0:
-                    self._wake_event.wait(wait_seconds)
+                    # Event.wait() uses a relative monotonic timeout. That
+                    # timeout may pause while a Mac sleeps, so a single long
+                    # wait can remain pending even after the wall-clock
+                    # deadline has passed. Recheck UTC in short slices so the
+                    # scheduler compensates promptly after wake without an API
+                    # request having to nudge it.
+                    self._wake_event.wait(
+                        min(wait_seconds, SCHEDULER_CLOCK_RECHECK_SECONDS)
+                    )
                     self._wake_event.clear()
                     continue
             self._execute(settings, runner)
