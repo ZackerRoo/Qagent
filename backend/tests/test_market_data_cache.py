@@ -432,6 +432,36 @@ class EmptyBatchProvider(BatchCountingProvider):
         return pd.DataFrame()
 
 
+class IncrementalBatchProvider(CountingProvider):
+    def __init__(self):
+        super().__init__()
+        self.batch_requests: list[tuple[tuple[str, ...], date, date]] = []
+
+    def get_historical_daily_bars(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> pd.DataFrame:
+        self.batch_requests.append((tuple(instrument_ids), start, end))
+        return pd.DataFrame(
+            [
+                {
+                    "instrument_id": instrument_id,
+                    "trade_date": trade_date.date(),
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.8,
+                    "close": 10.2,
+                    "volume": 800_000,
+                    "provider": self.name,
+                }
+                for instrument_id in instrument_ids
+                for trade_date in pd.date_range(start, end, freq="B")
+            ]
+        )
+
+
 def test_cached_provider_uses_cached_daily_bars_for_same_range(tmp_path):
     repo = make_cache_repo(tmp_path)
     inner = CountingProvider()
@@ -477,4 +507,88 @@ def test_cached_provider_does_not_repeat_empty_batch_prefetch_per_symbol(tmp_pat
 
     assert bars.empty
     assert inner.batch_calls == 1
+    assert inner.calls == 0
+
+
+def test_cached_provider_prefetches_only_missing_tail_sessions(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    inner = IncrementalBatchProvider()
+    provider = CachedMarketDataProvider(inner, cache=repo, provider_mode="free")
+    instrument_ids = ["CN:000001", "CN:000002"]
+
+    provider.prefetch_daily_bars(
+        instrument_ids,
+        date(2026, 1, 1),
+        date(2026, 1, 5),
+    )
+    provider.prefetch_daily_bars(
+        instrument_ids,
+        date(2026, 1, 1),
+        date(2026, 1, 7),
+    )
+    second_stats = provider.prefetch_stats()
+    provider.prefetch_daily_bars(
+        instrument_ids,
+        date(2026, 1, 1),
+        date(2026, 1, 7),
+    )
+
+    assert inner.batch_requests == [
+        (("CN:000001", "CN:000002"), date(2026, 1, 1), date(2026, 1, 5)),
+        (("CN:000001", "CN:000002"), date(2026, 1, 6), date(2026, 1, 7)),
+    ]
+    assert second_stats["mode"] == "incremental_tail"
+    assert second_stats["refresh_candidates"] == 2
+    assert second_stats["cold_starts"] == 0
+    assert second_stats["request_groups"] == 1
+    assert second_stats["refreshed"] == 2
+    assert second_stats["stale_after_refresh"] == 0
+    assert provider.prefetch_stats()["already_current"] == 2
+
+    bars = repo.load_daily_bars(
+        "free",
+        instrument_ids,
+        date(2026, 1, 1),
+        date(2026, 1, 7),
+    )
+    assert bars.groupby("instrument_id")["trade_date"].max().to_dict() == {
+        "CN:000001": date(2026, 1, 7),
+        "CN:000002": date(2026, 1, 7),
+    }
+    assert not bars.duplicated(["instrument_id", "trade_date"]).any()
+
+
+def test_cached_provider_repairs_internal_gaps_when_tail_is_current(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    inner = IncrementalBatchProvider()
+    provider = CachedMarketDataProvider(inner, cache=repo, provider_mode="free")
+    instrument_id = "CN:000001"
+    start = date(2026, 1, 1)
+    end = date(2026, 1, 9)
+    repo.save_daily_bars(
+        "free",
+        pd.DataFrame(
+            [
+                {
+                    "instrument_id": instrument_id,
+                    "trade_date": end,
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.8,
+                    "close": 10.2,
+                    "volume": 800_000,
+                    "provider": "fixture",
+                }
+            ]
+        ),
+    )
+    repo.record_coverage("free", instrument_id, start, end, row_count=1)
+
+    provider.prefetch_daily_bars([instrument_id], start, end)
+
+    assert inner.batch_requests == [((instrument_id,), start, end)]
+    assert provider.prefetch_stats()["gap_repairs"] == 1
+    assert provider.prefetch_stats()["refreshed"] == 1
+    bars = provider.get_daily_bars([instrument_id], start, end)
+    assert not bars.empty
     assert inner.calls == 0

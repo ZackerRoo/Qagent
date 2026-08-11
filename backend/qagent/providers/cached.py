@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 from pydantic import BaseModel
@@ -33,6 +33,7 @@ class CachedMarketDataProvider:
         self._prefetched_empty_ranges: set[tuple[str, date, date]] = set()
         self._pending_prefetch_errors: list[str] = []
         self._pending_prefetch_fallback_instruments: list[str] = []
+        self.last_prefetch_stats: dict[str, int | str] = _empty_prefetch_stats()
 
     def reset_cache_stats(self) -> None:
         self.last_cache_events = []
@@ -47,6 +48,9 @@ class CachedMarketDataProvider:
             "misses": sum(1 for event in self.last_cache_events if event.status == "miss"),
             "rows": sum(event.rows for event in self.last_cache_events),
         }
+
+    def prefetch_stats(self) -> dict[str, int | str]:
+        return dict(self.last_prefetch_stats)
 
     def get_daily_bars(
         self,
@@ -159,44 +163,112 @@ class CachedMarketDataProvider:
                 instrument_id,
                 start,
                 end,
+                minimum_session_coverage=(
+                    0.95 if instrument_id.startswith("CN:") else None
+                ),
                 maximum_trailing_session_gap=(
-                    1 if instrument_id.startswith("CN:") else None
+                    0 if instrument_id.startswith("CN:") else None
                 ),
             )
         ]
+        latest_dates = self.cache.latest_trade_dates(
+            self.provider_mode,
+            missing,
+            not_after=end,
+        )
+        refresh_groups: dict[date, list[str]] = {}
+        for instrument_id in missing:
+            latest = latest_dates.get(instrument_id)
+            # A current tail with unusable coverage means the gap is inside the
+            # cached history, so repair the requested range instead of skipping it.
+            refresh_start = (
+                start
+                if latest is None or latest >= end
+                else max(start, latest + timedelta(days=1))
+            )
+            if refresh_start <= end:
+                refresh_groups.setdefault(refresh_start, []).append(instrument_id)
+
+        self.last_prefetch_stats = {
+            "mode": "incremental_tail",
+            "requested": len(requested),
+            "already_current": len(requested) - len(missing),
+            "refresh_candidates": len(missing),
+            "cold_starts": sum(instrument_id not in latest_dates for instrument_id in missing),
+            "gap_repairs": sum(latest_dates.get(instrument_id) == end for instrument_id in missing),
+            "request_groups": len(refresh_groups),
+            "fetched_rows": 0,
+            "refreshed": 0,
+            "stale_after_refresh": 0,
+        }
         if not missing:
             return
 
         getter = getattr(self.provider, "get_historical_daily_bars", None)
-        fetched = (
-            getter(missing, start, end)
-            if callable(getter)
-            else self.provider.get_daily_bars(missing, start, end)
-        )
-        self._pending_prefetch_errors = list(getattr(self.provider, "last_errors", []))
+        frames: list[pd.DataFrame] = []
+        errors: list[str] = []
+        fallback_instruments: list[str] = []
+        for refresh_start, group in sorted(refresh_groups.items()):
+            fetched_group = (
+                getter(group, refresh_start, end)
+                if callable(getter)
+                else self.provider.get_daily_bars(group, refresh_start, end)
+            )
+            errors.extend(getattr(self.provider, "last_errors", []))
+            fallback_instruments.extend(
+                getattr(self.provider, "last_fallback_instruments", [])
+            )
+            if not fetched_group.empty:
+                frames.append(fetched_group)
+        self._pending_prefetch_errors = list(dict.fromkeys(errors))
         self._pending_prefetch_fallback_instruments = list(
-            getattr(self.provider, "last_fallback_instruments", [])
+            dict.fromkeys(fallback_instruments)
         )
+        fetched = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=BAR_COLUMNS)
         self.cache.save_daily_bars(self.provider_mode, fetched)
-        fetched_counts = (
-            fetched.groupby("instrument_id").size().to_dict()
-            if not fetched.empty and "instrument_id" in fetched.columns
-            else {}
+        cached_counts = self.cache.count_daily_bars_by_instrument(
+            self.provider_mode,
+            requested,
+            start,
+            end,
         )
         for instrument_id in missing:
-            row_count = int(fetched_counts.get(instrument_id, 0))
             self.cache.record_coverage(
                 self.provider_mode,
                 instrument_id,
                 start,
                 end,
-                row_count=row_count,
+                row_count=int(cached_counts.get(instrument_id, 0)),
             )
+        usable_after_refresh = {
+            instrument_id: self.cache.has_usable_coverage(
+                self.provider_mode,
+                instrument_id,
+                start,
+                end,
+                minimum_session_coverage=(
+                    0.95 if instrument_id.startswith("CN:") else None
+                ),
+                maximum_trailing_session_gap=(
+                    0 if instrument_id.startswith("CN:") else None
+                ),
+            )
+            for instrument_id in missing
+        }
+        for instrument_id, usable in usable_after_refresh.items():
             coverage_key = (instrument_id, start, end)
-            if row_count == 0:
-                self._prefetched_empty_ranges.add(coverage_key)
-            else:
+            if usable:
                 self._prefetched_empty_ranges.discard(coverage_key)
+            else:
+                self._prefetched_empty_ranges.add(coverage_key)
+        refreshed = sum(usable_after_refresh.values())
+        self.last_prefetch_stats.update(
+            {
+                "fetched_rows": len(fetched),
+                "refreshed": refreshed,
+                "stale_after_refresh": len(missing) - refreshed,
+            }
+        )
 
     def get_snapshot(self, instrument_ids: list[str]) -> pd.DataFrame:
         bars = self.get_daily_bars(instrument_ids, date(1900, 1, 1), date.today())
@@ -216,3 +288,18 @@ class CachedMarketDataProvider:
         frame = getter(instrument_ids, start, end)
         self.last_errors.extend(getattr(self.provider, "last_errors", []))
         return frame
+
+
+def _empty_prefetch_stats() -> dict[str, int | str]:
+    return {
+        "mode": "not_run",
+        "requested": 0,
+        "already_current": 0,
+        "refresh_candidates": 0,
+        "cold_starts": 0,
+        "gap_repairs": 0,
+        "request_groups": 0,
+        "fetched_rows": 0,
+        "refreshed": 0,
+        "stale_after_refresh": 0,
+    }

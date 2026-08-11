@@ -1695,6 +1695,67 @@ details.compact-data-health:not([open]) > .data-health-details {
   font-size: 13px;
 }
 
+.market-data-reliability-strip {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border-block: 1px solid var(--terminal-border-soft);
+  background: rgba(9, 14, 20, 0.42);
+}
+
+.market-data-reliability-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+}
+
+.market-data-reliability-summary h2 {
+  margin: 3px 0 2px;
+  color: var(--terminal-text);
+  font-size: 16px;
+}
+
+.market-data-reliability-summary p {
+  margin: 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.market-data-state-badge {
+  min-width: 64px;
+  padding: 5px 8px;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 6px;
+  color: var(--terminal-muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.market-data-reliability-strip.state-ready .market-data-state-badge {
+  border-color: rgba(61, 214, 140, 0.42);
+  color: var(--terminal-green);
+}
+
+.market-data-reliability-strip.state-watch .market-data-state-badge,
+.market-data-reliability-strip.state-pending .market-data-state-badge {
+  border-color: rgba(244, 197, 66, 0.42);
+  color: var(--terminal-yellow);
+}
+
+.market-data-reliability-strip.state-risk .market-data-state-badge {
+  border-color: rgba(255, 91, 119, 0.42);
+  color: var(--terminal-red);
+}
+
+.market-data-reliability-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+
 .how-to-use-panel {
   border-color: rgba(77, 212, 255, 0.28);
   background:
@@ -8483,6 +8544,8 @@ details.compact-data-health:not([open]) > .data-health-details {
   .auto-paper-status-head,
   .auto-paper-status-grid,
   .auto-paper-age-strip,
+  .market-data-reliability-summary,
+  .market-data-reliability-grid,
   .followthrough-hero,
   .followthrough-grid,
   .followthrough-outcome,

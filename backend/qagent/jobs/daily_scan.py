@@ -343,6 +343,15 @@ def run_daily_scan(
         data_health["market_cache_hits"] = str(stats["hits"])
         data_health["market_cache_misses"] = str(stats["misses"])
         data_health["market_cache_rows"] = str(stats["rows"])
+    prefetch_stats = getattr(provider, "prefetch_stats", None)
+    if callable(prefetch_stats):
+        stats = prefetch_stats()
+        data_health.update(
+            {
+                f"market_cache_prefetch_{key}": str(value)
+                for key, value in stats.items()
+            }
+        )
     if scan_error_samples:
         data_health["scan_errors"] = str(len(scan_error_samples))
         data_health["scan_error_samples"] = " | ".join(scan_error_samples[:3])

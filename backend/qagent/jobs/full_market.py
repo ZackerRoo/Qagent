@@ -292,6 +292,8 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     scanned_symbols = 0
     completed_batches = 0
     error_count = 0
+    scan_end = _frozen_full_market_scan_end(job.data_health, job.created_at)
+    aggregate_health["full_market_expected_trade_date"] = scan_end.isoformat()
 
     if (
         job.completed_batches > 0
@@ -371,7 +373,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
                         prefetch(
                             batch,
                             start=date(2026, 1, 1),
-                            end=date(2026, 12, 31),
+                            end=scan_end,
                         )
                     except Exception as exc:
                         aggregate_health[f"batch_{batch_index}_prefetch_error"] = str(exc)[:500]
@@ -386,6 +388,8 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
                     paper_trading_report=paper_report,
                     walk_forward_validation=walk_forward_validation,
                     strategy_governance_context=governance_context,
+                    start=date(2026, 1, 1),
+                    end=scan_end,
                 )
             except Exception as exc:
                 batch_errors = len(batch)
@@ -678,10 +682,21 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         "full_market_signal_date": feature_as_of.isoformat(),
         "full_market_scan_started_at": scan_started_at.isoformat(),
         "full_market_scan_completed_at": scan_completed_at.isoformat(),
+        "full_market_scan_duration_seconds": (
+            f"{(scan_completed_at - scan_started_at).total_seconds():.3f}"
+        ),
         "sector_strength": str(len(sector_strength)),
         "scanned": str(scanned_symbols),
         "cards": str(len(visible_cards)),
     }
+    payload_data_health.update(
+        _market_data_reliability_health(
+            all_items,
+            expected_trade_date=scan_end,
+            error_count=error_count,
+            provider_error_count=_int_health(aggregate_health, "provider_error_count"),
+        )
+    )
     paper_model_cohort = paper_model_cohort_from_data_health(payload_data_health)
     if paper_model_cohort is not None:
         payload_data_health.update(
@@ -978,6 +993,21 @@ def _frozen_full_market_fundamental_as_of(data_health: dict[str, str]) -> date:
     return _latest_completed_a_share_session() or date.today()
 
 
+def _frozen_full_market_scan_end(
+    data_health: dict[str, str],
+    created_at: datetime,
+) -> date:
+    raw = data_health.get("full_market_expected_trade_date")
+    if raw:
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            pass
+    return _latest_completed_a_share_session() or created_at.astimezone(
+        ZoneInfo("Asia/Shanghai")
+    ).date()
+
+
 def _frozen_full_market_fundamental_revision(
     data_health: dict[str, str],
     current_revision: int,
@@ -1262,6 +1292,45 @@ def _rejection_status_rank(status: str) -> int:
 def _chunks(items: list[str], size: int):
     for index in range(0, len(items), size):
         yield items[index : index + size]
+
+
+def _market_data_reliability_health(
+    items: list[ScanItem],
+    *,
+    expected_trade_date: date,
+    error_count: int,
+    provider_error_count: int,
+) -> dict[str, str]:
+    dated = [item for item in items if item.latest_trade_date is not None]
+    current = sum(item.latest_trade_date == expected_trade_date for item in dated)
+    stale = sum(item.latest_trade_date < expected_trade_date for item in dated)
+    future = sum(item.latest_trade_date > expected_trade_date for item in dated)
+    missing = len(items) - len(dated)
+    coverage = current / len(items) if items else 0.0
+    source_counts: dict[str, int] = {}
+    for item in items:
+        source = item.provider or "missing"
+        source_counts[source] = source_counts.get(source, 0) + 1
+    source_mix = ",".join(
+        f"{source}={count}"
+        for source, count in sorted(source_counts.items(), key=lambda value: (-value[1], value[0]))
+    )
+    if error_count > 0 or not items or coverage < 0.80:
+        state = "risk"
+    elif provider_error_count > 0 or coverage < 0.98 or stale > 0 or missing > 0:
+        state = "watch"
+    else:
+        state = "ready"
+    return {
+        "market_data_reliability_state": state,
+        "market_data_expected_trade_date": expected_trade_date.isoformat(),
+        "market_data_latest_session_current": str(current),
+        "market_data_latest_session_stale": str(stale),
+        "market_data_latest_session_missing": str(missing),
+        "market_data_latest_session_future": str(future),
+        "market_data_latest_session_coverage": f"{coverage:.6f}",
+        "market_data_source_mix": source_mix,
+    }
 
 
 def _merge_health(target: dict[str, str], source: dict[str, str]) -> None:

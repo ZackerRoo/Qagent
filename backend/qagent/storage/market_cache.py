@@ -367,6 +367,73 @@ class MarketDataCacheRepository:
         )
         return _normalize_bars(frame)
 
+    def latest_trade_dates(
+        self,
+        provider_mode: str,
+        instrument_ids: list[str],
+        *,
+        not_after: date | None = None,
+    ) -> dict[str, date]:
+        """Return the latest valid cached session without materializing price history."""
+
+        result: dict[str, date] = {}
+        unique_ids = sorted(set(instrument_ids))
+        with self.session_factory() as session:
+            for offset in range(0, len(unique_ids), SQLITE_SAFE_VARIABLE_LIMIT):
+                chunk = unique_ids[offset : offset + SQLITE_SAFE_VARIABLE_LIMIT]
+                query = (
+                    session.query(
+                        MarketBarCacheRow.instrument_id,
+                        func.max(MarketBarCacheRow.trade_date),
+                    )
+                    .filter(
+                        MarketBarCacheRow.provider_mode == provider_mode,
+                        MarketBarCacheRow.instrument_id.in_(chunk),
+                        *_valid_cached_ohlc_filters(),
+                    )
+                )
+                if not_after is not None:
+                    query = query.filter(MarketBarCacheRow.trade_date <= not_after)
+                for instrument_id, latest_trade_date in query.group_by(
+                    MarketBarCacheRow.instrument_id
+                ):
+                    if latest_trade_date is not None:
+                        result[str(instrument_id)] = latest_trade_date
+        return result
+
+    def count_daily_bars_by_instrument(
+        self,
+        provider_mode: str,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> dict[str, int]:
+        """Count valid cached rows for coverage bookkeeping in bounded batches."""
+
+        result = {instrument_id: 0 for instrument_id in set(instrument_ids)}
+        unique_ids = sorted(result)
+        with self.session_factory() as session:
+            for offset in range(0, len(unique_ids), SQLITE_SAFE_VARIABLE_LIMIT):
+                chunk = unique_ids[offset : offset + SQLITE_SAFE_VARIABLE_LIMIT]
+                rows = (
+                    session.query(
+                        MarketBarCacheRow.instrument_id,
+                        func.count(MarketBarCacheRow.trade_date),
+                    )
+                    .filter(
+                        MarketBarCacheRow.provider_mode == provider_mode,
+                        MarketBarCacheRow.instrument_id.in_(chunk),
+                        MarketBarCacheRow.trade_date >= start,
+                        MarketBarCacheRow.trade_date <= end,
+                        *_valid_cached_ohlc_filters(),
+                    )
+                    .group_by(MarketBarCacheRow.instrument_id)
+                    .all()
+                )
+                for instrument_id, row_count in rows:
+                    result[str(instrument_id)] = int(row_count)
+        return result
+
     def list_summaries(
         self,
         provider_mode: str | None = None,

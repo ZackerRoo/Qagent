@@ -7,6 +7,11 @@ from decimal import Decimal
 import pytest
 
 from qagent.db import Base, create_db_engine, create_session_factory
+from qagent.jobs.daily_scan import ScanItem
+from qagent.jobs.full_market import (
+    _frozen_full_market_scan_end,
+    _market_data_reliability_health,
+)
 from qagent.storage.repository import QagentRepository
 from qagent.storage.tables import OpportunitySnapshotRow, ScanRunRow
 
@@ -252,3 +257,76 @@ def test_complete_empty_candidate_batch_uses_explicit_signal_date(tmp_path):
     assert bundle is not None
     assert bundle.run.run_id == "complete-empty"
     assert bundle.snapshots == []
+
+
+def test_market_data_reliability_health_reports_complete_latest_session():
+    health = _market_data_reliability_health(
+        [
+            ScanItem(
+                instrument_id="CN:000001",
+                status="watch",
+                reason="ready",
+                bars=400,
+                signals=1,
+                latest_trade_date=SIGNAL_DATE,
+                provider="akshare",
+            ),
+            ScanItem(
+                instrument_id="CN:000002",
+                status="watch",
+                reason="ready",
+                bars=400,
+                signals=1,
+                latest_trade_date=SIGNAL_DATE,
+                provider="baostock",
+            ),
+        ],
+        expected_trade_date=SIGNAL_DATE,
+        error_count=0,
+        provider_error_count=0,
+    )
+
+    assert health["market_data_reliability_state"] == "ready"
+    assert health["market_data_latest_session_current"] == "2"
+    assert health["market_data_latest_session_coverage"] == "1.000000"
+    assert health["market_data_source_mix"] == "akshare=1,baostock=1"
+
+
+def test_market_data_reliability_health_fails_closed_for_stale_or_missing_data():
+    health = _market_data_reliability_health(
+        [
+            ScanItem(
+                instrument_id="CN:000001",
+                status="watch",
+                reason="stale",
+                bars=400,
+                signals=0,
+                latest_trade_date=SIGNAL_DATE - timedelta(days=1),
+                provider="akshare",
+            ),
+            ScanItem(
+                instrument_id="CN:000002",
+                status="no_data",
+                reason="missing",
+                bars=0,
+                signals=0,
+            ),
+        ],
+        expected_trade_date=SIGNAL_DATE,
+        error_count=0,
+        provider_error_count=0,
+    )
+
+    assert health["market_data_reliability_state"] == "risk"
+    assert health["market_data_latest_session_stale"] == "1"
+    assert health["market_data_latest_session_missing"] == "1"
+    assert health["market_data_latest_session_coverage"] == "0.000000"
+
+
+def test_full_market_scan_resume_keeps_frozen_expected_trade_date():
+    created_at = datetime(2026, 7, 30, 1, 0, tzinfo=timezone.utc)
+
+    assert _frozen_full_market_scan_end(
+        {"full_market_expected_trade_date": SIGNAL_DATE.isoformat()},
+        created_at,
+    ) == SIGNAL_DATE

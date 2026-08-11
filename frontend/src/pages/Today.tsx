@@ -464,6 +464,11 @@ export function Today({
           language={language}
         />
 
+        <MarketDataReliabilityStrip
+          dataHealth={result?.data_health ?? {}}
+          language={language}
+        />
+
         <details className="panel today-operations-drawer">
           <summary>
             <div>
@@ -1340,6 +1345,93 @@ function AutoPaperMetric({
       <strong>{value}</strong>
     </div>
   );
+}
+
+function MarketDataReliabilityStrip({
+  dataHealth,
+  language,
+}: {
+  dataHealth: Record<string, string>;
+  language: "zh" | "en";
+}) {
+  const reportedState = dataHealth.market_data_reliability_state;
+  const state = reportedState === "ready" || reportedState === "watch" || reportedState === "risk"
+    ? reportedState
+    : "pending";
+  const coverage = healthNumber(dataHealth.market_data_latest_session_coverage);
+  const current = dataHealth.market_data_latest_session_current ?? "-";
+  const stale = dataHealth.market_data_latest_session_stale ?? "-";
+  const missing = dataHealth.market_data_latest_session_missing ?? "-";
+  const refreshed = dataHealth.market_cache_prefetch_refreshed ?? "-";
+  const providerErrors = dataHealth.provider_error_count ?? dataHealth.provider_errors ?? "0";
+  const labels = {
+    ready: language === "zh" ? "最新" : "Current",
+    watch: language === "zh" ? "需关注" : "Watch",
+    risk: language === "zh" ? "异常" : "Risk",
+    pending: language === "zh" ? "待更新" : "Pending",
+  };
+  const summaries = {
+    ready: language === "zh"
+      ? "最新交易日覆盖完整，行情缓存已通过增量刷新校验。"
+      : "Latest-session coverage is complete and the incremental cache passed validation.",
+    watch: language === "zh"
+      ? "部分行情尚未覆盖最新交易日，候选结果需要结合缺口查看。"
+      : "Some instruments do not cover the latest session; review the gaps with the candidates.",
+    risk: language === "zh"
+      ? "最新行情覆盖不足或存在扫描错误，本轮结果不会被当作完整数据。"
+      : "Latest coverage is insufficient or scan errors exist; this result is not treated as complete.",
+    pending: language === "zh"
+      ? "当前结果生成于运行时数据审计上线前，下次全市场扫描将补齐覆盖指标。"
+      : "This result predates runtime data auditing; the next full scan will populate coverage metrics.",
+  };
+
+  return (
+    <section className={`market-data-reliability-strip state-${state}`}>
+      <div className="market-data-reliability-summary">
+        <div>
+          <span className="eyebrow">{language === "zh" ? "行情数据" : "Market data"}</span>
+          <h2>{labels[state]}</h2>
+          <p>{summaries[state]}</p>
+        </div>
+        <span className="market-data-state-badge">{labels[state]}</span>
+      </div>
+      <div className="market-data-reliability-grid">
+        <AutoPaperMetric
+          label={language === "zh" ? "目标交易日" : "Expected session"}
+          value={dataHealth.market_data_expected_trade_date ?? dataHealth.full_market_signal_date ?? "-"}
+        />
+        <AutoPaperMetric
+          label={language === "zh" ? "最新覆盖率" : "Latest coverage"}
+          value={coverage == null ? "-" : `${(coverage * 100).toFixed(1)}%`}
+        />
+        <AutoPaperMetric
+          label={language === "zh" ? "当前 / 陈旧" : "Current / stale"}
+          value={`${current} / ${stale}`}
+        />
+        <AutoPaperMetric
+          label={language === "zh" ? "缺失行情" : "Missing bars"}
+          value={missing}
+        />
+        <AutoPaperMetric
+          label={language === "zh" ? "本次增量更新" : "Tail refreshed"}
+          value={refreshed}
+        />
+        <AutoPaperMetric
+          label={language === "zh" ? "数据源异常" : "Provider errors"}
+          value={providerErrors}
+          tone={Number(providerErrors) > 0 ? "running" : "neutral"}
+        />
+      </div>
+    </section>
+  );
+}
+
+function healthNumber(value?: string): number | null {
+  if (value == null || value.trim() === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function HowToUseTodayPanel({
