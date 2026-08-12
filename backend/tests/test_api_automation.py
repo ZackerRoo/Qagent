@@ -11,7 +11,12 @@ import qagent.api.routes as routes
 import qagent.jobs.automation as research_automation
 from qagent.app import create_app
 from qagent.db import create_session_factory, initialize_database
-from qagent.jobs.automation_scheduler import AutomationScheduler, AutoProcessingSettings
+from qagent.jobs.automation_scheduler import (
+    AutoProcessingCycleResult,
+    AutoProcessingSettings,
+    AutoProcessingState,
+    AutomationScheduler,
+)
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.storage.paper import PaperTradingRepository
 from qagent.storage.repository import QagentRepository
@@ -287,6 +292,81 @@ def test_automatic_full_scan_is_deferred_during_market_session(monkeypatch):
     assert market_open == (False, "market_session_open")
     assert settlement_window == (False, "market_session_open")
     assert after_close == (True, "ready")
+
+
+def test_automation_runtime_health_explains_pending_close_and_source_fallbacks(
+    monkeypatch,
+):
+    now = datetime(2026, 7, 31, 14, 40, tzinfo=ZoneInfo("Asia/Shanghai"))
+    expected = date(2026, 7, 30)
+    state = AutoProcessingState(
+        enabled=True,
+        status="idle",
+        settings=AutoProcessingSettings(interval_seconds=1800),
+        next_run_at=datetime(
+            2026,
+            7,
+            31,
+            15,
+            20,
+            tzinfo=ZoneInfo("Asia/Shanghai"),
+        ),
+        last_result=AutoProcessingCycleResult(
+            provider="free",
+            started_at=now - timedelta(minutes=1),
+            finished_at=now,
+            scan_status="cache_fresh",
+            data_health={
+                "fuyao_telemetry": "idle",
+                "fuyao_requests": "0",
+            },
+        ),
+    )
+    latest = SimpleNamespace(
+        job_id="latest-scan",
+        status="succeeded",
+        finished_at=datetime(
+            2026,
+            7,
+            30,
+            19,
+            0,
+            tzinfo=ZoneInfo("Asia/Shanghai"),
+        ),
+        total_symbols=7050,
+        scanned_symbols=7050,
+        total_batches=36,
+        completed_batches=36,
+        errors=0,
+        data_health={
+            "full_market_signal_date": expected.isoformat(),
+            "provider_error_count": "12",
+            "tickflow_fallback_count": "3",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_latest_completed_a_share_session",
+        lambda _now=None: expected,
+    )
+    monkeypatch.setattr(
+        routes,
+        "trading_sessions_in_range",
+        lambda *_: [date(2026, 7, 31)],
+    )
+
+    health = routes._automation_runtime_health(state, latest, now=now)
+
+    assert health["state"] == "watch"
+    assert health["summary_code"] == "source_fallback"
+    assert health["scan_requirement"] == "current_session_pending_close"
+    assert health["expected_signal_date"] == "2026-07-30"
+    assert health["latest_scan_matches_expected"] is True
+    assert health["scan_next_check_at"] == "2026-07-31T07:50:00+00:00"
+    assert health["latest_scan_scanned_symbols"] == 7050
+    assert health["latest_scan_provider_fallbacks"] == 12
+    assert health["latest_scan_tickflow_fallbacks"] == 3
+    assert health["latest_scan_terminal_errors"] == 0
 
 
 def test_automatic_full_scan_queues_one_post_close_candidate_refresh(monkeypatch):
@@ -795,6 +875,14 @@ def test_automation_cycle_publishes_post_cycle_risk_gate(monkeypatch):
             )
         ),
     )
+    monkeypatch.setattr(
+        routes,
+        "resolve_fuyao_shadow_outcomes",
+        lambda *args, **kwargs: SimpleNamespace(
+            data_health={"fuyao_shadow_status": "not_started"},
+            next_maturity_date=None,
+        ),
+    )
 
     result = routes._run_auto_processing_cycle(
         AutoProcessingSettings(
@@ -810,8 +898,80 @@ def test_automation_cycle_publishes_post_cycle_risk_gate(monkeypatch):
     assert result.data_health["paper_risk_gate_applied_action"] == "capacity_full"
     assert result.data_health["paper_risk_gate_applied_max_new_entries"] == "0"
     assert result.data_health["factor_shadow_outcome_status"] == "not_started"
+    assert result.data_health["fuyao_shadow_status"] == "not_started"
     assert len(shadow_resolution_calls) == 1
     assert shadow_resolution_calls[0][1]["provider_mode"] == "free"
+
+
+def test_automation_cycle_captures_fuyao_only_after_matching_daily_scan(monkeypatch):
+    signal_date = date(2026, 8, 12)
+    latest_scan = SimpleNamespace(
+        status="succeeded",
+        data_health={"full_market_signal_date": signal_date.isoformat()},
+    )
+    repo = SimpleNamespace(get_latest_full_market_scan_job=lambda **_: latest_scan)
+    paper_repo = SimpleNamespace(list_trades=lambda **_: [])
+    captured: list[dict[str, object]] = []
+
+    monkeypatch.setattr(routes, "_latest_completed_a_share_session", lambda *args: signal_date)
+    monkeypatch.setattr(routes, "_repo", lambda: repo)
+    monkeypatch.setattr(routes, "_paper_repo", lambda: paper_repo)
+    monkeypatch.setattr(routes, "_maybe_start_automatic_full_scan", lambda *_: ("current", False, None))
+    monkeypatch.setattr(
+        routes,
+        "_paper_seed_risk_gate",
+        lambda *_: (True, {"paper_risk_gate_action": "allow"}),
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_settings",
+        lambda: SimpleNamespace(
+            fuyao_api_key="configured-test-key",
+            fuyao_base_url="https://example.test",
+            fuyao_timeout_seconds=5,
+        ),
+    )
+    monkeypatch.setattr(routes, "FuyaoClient", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        routes,
+        "capture_fuyao_market_research",
+        lambda *args, **kwargs: (
+            captured.append(kwargs)
+            or SimpleNamespace(
+                status="recorded",
+                snapshot=SimpleNamespace(snapshot_id="fuyao-market-test"),
+                errors=[],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "resolve_factor_shadow_outcomes",
+        lambda *args, **kwargs: SimpleNamespace(data_health={}, next_maturity_date=None),
+    )
+    monkeypatch.setattr(
+        routes,
+        "resolve_fuyao_shadow_outcomes",
+        lambda *args, **kwargs: SimpleNamespace(data_health={}, next_maturity_date=None),
+    )
+
+    result = routes._run_auto_processing_cycle(
+        AutoProcessingSettings(
+            provider="free",
+            run_scan=True,
+            seed_paper=False,
+            update_paper=False,
+            run_alerts=False,
+            run_forward_evidence=False,
+        )
+    )
+
+    assert len(captured) == 1
+    assert captured[0]["trade_date"] == signal_date
+    assert captured[0]["reuse_existing"] is True
+    assert result.data_health["fuyao_market_research_status"] == "recorded"
+    assert result.data_health["fuyao_market_research_snapshot_id"] == "fuyao-market-test"
+    assert result.data_health["fuyao_market_research_decision_weight"] == "none"
 
 
 def test_paper_candidate_recovers_latest_price_from_card():
@@ -1991,6 +2151,8 @@ def test_automation_scheduler_start_and_stop_are_visible(tmp_path, monkeypatch):
     assert started.json()["next_run_at"] is not None
     assert state.status_code == 200
     assert state.json()["enabled"] is True
+    assert state.json()["runtime_health"]["scheduler_enabled"] is True
+    assert state.json()["runtime_health"]["observed_at"]
     assert stopped.status_code == 200
     assert stopped.json()["enabled"] is False
     assert stopped.json()["next_run_at"] is None

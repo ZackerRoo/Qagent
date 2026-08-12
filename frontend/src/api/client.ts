@@ -29,7 +29,9 @@ import type {
   FullMarketBatchScanJob,
   FullMarketScanResponse,
   FuyaoCapabilityManifest,
+  FuyaoMarketResearchResponse,
   FuyaoResearchResponse,
+  FuyaoShadowEvaluationResponse,
   HistoricalBackfillJob,
   InstrumentSearchResponse,
   IntradayRadarResponse,
@@ -1164,6 +1166,26 @@ export async function fetchFuyaoOpportunityResearch(
   return apiGet<FuyaoResearchResponse>(
     path,
     { instrument_id: instrumentId },
+    options,
+  );
+}
+
+export async function fetchLatestFuyaoMarketResearch(
+  options?: RequestOptions,
+): Promise<FuyaoMarketResearchResponse> {
+  return apiGet<FuyaoMarketResearchResponse>(
+    "/fuyao/research/market/latest",
+    undefined,
+    options,
+  );
+}
+
+export async function fetchFuyaoShadowEvaluation(
+  options?: RequestOptions,
+): Promise<FuyaoShadowEvaluationResponse> {
+  return apiGet<FuyaoShadowEvaluationResponse>(
+    "/fuyao/research/market/shadow-evaluation",
+    undefined,
     options,
   );
 }

@@ -4,6 +4,8 @@ import {
   createPaperTradeFromOpportunity,
   fetchAutomationScheduler,
   fetchFactorShadowEvaluation,
+  fetchFuyaoShadowEvaluation,
+  fetchLatestFuyaoMarketResearch,
   fetchFuyaoOpportunityResearch,
   fetchFullMarketBatchScan,
   fetchLatestFullMarketBatchResult,
@@ -45,13 +47,16 @@ import {
 import { applyResearchProfile } from "../lib/profiles";
 import type {
   AutoProcessingState,
+  AutomationRuntimeHealth,
   ConfidenceDriver,
   DataProviderMode,
   FactorShadowEvaluationResponse,
   FullMarketBatchScanJob,
   FullMarketScanResponse,
+  FuyaoMarketResearchResponse,
   FuyaoResearchMetric,
   FuyaoResearchResponse,
+  FuyaoShadowEvaluationResponse,
   MarketBarsResponse,
   OpportunityCard,
   PaperAccountStatusResponse,
@@ -112,12 +117,18 @@ export function Today({
   const [paperAccountStatus, setPaperAccountStatus] = useState<PaperAccountStatusResponse>();
   const [factorShadowEvaluation, setFactorShadowEvaluation] =
     useState<FactorShadowEvaluationResponse>();
+  const [fuyaoMarketResearch, setFuyaoMarketResearch] =
+    useState<FuyaoMarketResearchResponse>();
+  const [fuyaoShadowEvaluation, setFuyaoShadowEvaluation] =
+    useState<FuyaoShadowEvaluationResponse>();
   const [paperCandidatePool, setPaperCandidatePool] = useState<PaperCandidatePoolResponse>();
   const [isStartingFullScan, setIsStartingFullScan] = useState(false);
   const [isBulkPaperTracking, setIsBulkPaperTracking] = useState(false);
   const [bulkPaperMessage, setBulkPaperMessage] = useState("");
+  const [runtimeStatusError, setRuntimeStatusError] = useState("");
   const timerRef = useRef<number | null>(null);
   const batchTimerRef = useRef<number | null>(null);
+  const runtimeStatusTimerRef = useRef<number | null>(null);
 
   const cards = useMemo(
     () => applyResearchProfile(result?.cards ?? [], profile),
@@ -207,26 +218,68 @@ export function Today({
   }
 
   async function loadAutoPaperStatus() {
-    try {
-      const [scheduler, validation, accountStatus, candidatePool, shadowEvaluation] =
-        await Promise.all([
+    const [
+      scheduler,
+      validation,
+      accountStatus,
+      candidatePool,
+      shadowEvaluation,
+      marketResearch,
+      fuyaoShadow,
+    ] =
+      await Promise.allSettled([
         fetchAutomationScheduler(),
         fetchPaperValidation(dataMode, "legacy"),
         fetchPaperAccountStatus(dataMode),
         fetchPaperCandidatePool(dataMode),
         fetchFactorShadowEvaluation(dataMode),
+        fetchLatestFuyaoMarketResearch(),
+        fetchFuyaoShadowEvaluation(),
       ]);
-      setAutomationScheduler(scheduler);
-      setPaperValidation(validation);
-      setPaperAccountStatus(accountStatus);
-      setPaperCandidatePool(candidatePool);
-      setFactorShadowEvaluation(shadowEvaluation);
-    } catch {
-      setAutomationScheduler(undefined);
-      setPaperValidation(undefined);
-      setPaperAccountStatus(undefined);
-      setPaperCandidatePool(undefined);
-      setFactorShadowEvaluation(undefined);
+    if (scheduler.status === "fulfilled") {
+      setAutomationScheduler(scheduler.value);
+      setRuntimeStatusError("");
+    } else {
+      setRuntimeStatusError("scheduler_unavailable");
+    }
+    if (validation.status === "fulfilled") setPaperValidation(validation.value);
+    if (accountStatus.status === "fulfilled") setPaperAccountStatus(accountStatus.value);
+    if (candidatePool.status === "fulfilled") setPaperCandidatePool(candidatePool.value);
+    if (shadowEvaluation.status === "fulfilled") {
+      setFactorShadowEvaluation(shadowEvaluation.value);
+    }
+    if (marketResearch.status === "fulfilled") {
+      setFuyaoMarketResearch(marketResearch.value);
+    }
+    if (fuyaoShadow.status === "fulfilled") {
+      setFuyaoShadowEvaluation(fuyaoShadow.value);
+    }
+  }
+
+  async function refreshRuntimeStatus() {
+    const [scheduler, scanJob, marketResearch, fuyaoShadow] = await Promise.allSettled([
+      fetchAutomationScheduler(),
+      fetchLatestFullMarketBatchScan(dataMode),
+      fetchLatestFuyaoMarketResearch(),
+      fetchFuyaoShadowEvaluation(),
+    ]);
+    if (scheduler.status === "fulfilled") {
+      setAutomationScheduler(scheduler.value);
+      setRuntimeStatusError("");
+    } else {
+      setRuntimeStatusError("scheduler_unavailable");
+    }
+    if (scanJob.status === "fulfilled") {
+      setFullScanJob(scanJob.value);
+      if (isFullScanActive(scanJob.value)) {
+        scheduleFullScanPoll(scanJob.value.job_id);
+      }
+    }
+    if (marketResearch.status === "fulfilled") {
+      setFuyaoMarketResearch(marketResearch.value);
+    }
+    if (fuyaoShadow.status === "fulfilled") {
+      setFuyaoShadowEvaluation(fuyaoShadow.value);
     }
   }
 
@@ -378,12 +431,19 @@ export function Today({
     void loadFollowthrough();
     void refreshFullScanJob();
     void loadAutoPaperStatus();
+    runtimeStatusTimerRef.current = window.setInterval(
+      () => void refreshRuntimeStatus(),
+      60_000,
+    );
     return () => {
       if (timerRef.current !== null) {
         window.clearTimeout(timerRef.current);
       }
       if (batchTimerRef.current !== null) {
         window.clearTimeout(batchTimerRef.current);
+      }
+      if (runtimeStatusTimerRef.current !== null) {
+        window.clearInterval(runtimeStatusTimerRef.current);
       }
     };
   }, [dataMode, includeEtfs]);
@@ -469,7 +529,18 @@ export function Today({
 
         <MarketDataReliabilityStrip
           dataHealth={result?.data_health ?? {}}
+          scheduler={automationScheduler}
+          fullScanJob={fullScanJob}
+          runtimeError={runtimeStatusError}
           language={language}
+        />
+
+        <FuyaoMarketSentimentPanel
+          research={fuyaoMarketResearch}
+          shadow={fuyaoShadowEvaluation}
+          language={language}
+          onSelect={onSelect}
+          cards={decisionCards}
         />
 
         <details className="panel today-operations-drawer">
@@ -1352,81 +1423,412 @@ function AutoPaperMetric({
 
 function MarketDataReliabilityStrip({
   dataHealth,
+  scheduler,
+  fullScanJob,
+  runtimeError,
   language,
 }: {
   dataHealth: Record<string, string>;
+  scheduler?: AutoProcessingState;
+  fullScanJob?: FullMarketBatchScanJob;
+  runtimeError: string;
   language: "zh" | "en";
 }) {
-  const reportedState = dataHealth.market_data_reliability_state;
-  const state = reportedState === "ready" || reportedState === "watch" || reportedState === "risk"
-    ? reportedState
-    : "pending";
-  const coverage = healthNumber(dataHealth.market_data_latest_session_coverage);
-  const current = dataHealth.market_data_latest_session_current ?? "-";
-  const stale = dataHealth.market_data_latest_session_stale ?? "-";
-  const missing = dataHealth.market_data_latest_session_missing ?? "-";
-  const refreshed = dataHealth.market_cache_prefetch_refreshed ?? "-";
-  const providerErrors = dataHealth.provider_error_count ?? dataHealth.provider_errors ?? "0";
+  const runtime = scheduler?.runtime_health;
+  const reportedState = runtime?.state ?? dataHealth.market_data_reliability_state;
+  const state: "ready" | "watch" | "risk" | "pending" =
+    reportedState === "ready" || reportedState === "watch" || reportedState === "risk"
+      ? reportedState
+      : "pending";
+  const coverage = healthNumber(
+    runtime?.market_data_latest_session_coverage
+      ?? dataHealth.market_data_latest_session_coverage,
+  );
+  const current = runtime?.market_data_latest_session_current
+    ?? dataHealth.market_data_latest_session_current
+    ?? "-";
+  const stale = runtime?.market_data_latest_session_stale
+    ?? dataHealth.market_data_latest_session_stale
+    ?? "-";
+  const missing = runtime?.market_data_latest_session_missing
+    ?? dataHealth.market_data_latest_session_missing
+    ?? "-";
+  const refreshed = runtime?.market_cache_prefetch_refreshed
+    ?? dataHealth.market_cache_prefetch_refreshed
+    ?? "-";
+  const providerFallbacks = runtime?.latest_scan_provider_fallbacks
+    ?? Number(dataHealth.provider_error_count ?? dataHealth.provider_errors ?? 0);
+  const tickflowFallbacks = runtime?.latest_scan_tickflow_fallbacks
+    ?? Number(dataHealth.tickflow_fallback_count ?? 0);
+  const terminalErrors = runtime?.latest_scan_terminal_errors ?? fullScanJob?.errors ?? 0;
   const labels = {
-    ready: language === "zh" ? "最新" : "Current",
+    ready: language === "zh" ? "正常" : "Healthy",
     watch: language === "zh" ? "需关注" : "Watch",
     risk: language === "zh" ? "异常" : "Risk",
     pending: language === "zh" ? "待更新" : "Pending",
   };
-  const summaries = {
-    ready: language === "zh"
-      ? "最新交易日覆盖完整，行情缓存已通过增量刷新校验。"
-      : "Latest-session coverage is complete and the incremental cache passed validation.",
-    watch: language === "zh"
-      ? "部分行情尚未覆盖最新交易日，候选结果需要结合缺口查看。"
-      : "Some instruments do not cover the latest session; review the gaps with the candidates.",
-    risk: language === "zh"
-      ? "最新行情覆盖不足或存在扫描错误，本轮结果不会被当作完整数据。"
-      : "Latest coverage is insufficient or scan errors exist; this result is not treated as complete.",
-    pending: language === "zh"
-      ? "当前结果生成于运行时数据审计上线前，下次全市场扫描将补齐覆盖指标。"
-      : "This result predates runtime data auditing; the next full scan will populate coverage metrics.",
-  };
+  const scanProgress = runtime
+    ? `${runtime.latest_scan_scanned_symbols}/${runtime.latest_scan_total_symbols} · ${runtime.latest_scan_completed_batches}/${runtime.latest_scan_total_batches}`
+    : fullScanJob
+      ? `${fullScanJob.scanned_symbols}/${fullScanJob.total_symbols} · ${fullScanJob.completed_batches}/${fullScanJob.total_batches}`
+      : "-";
 
   return (
     <section className={`market-data-reliability-strip state-${state}`}>
       <div className="market-data-reliability-summary">
         <div>
-          <span className="eyebrow">{language === "zh" ? "行情数据" : "Market data"}</span>
+          <span className="eyebrow">
+            {language === "zh" ? "运行与数据" : "Runtime and data"}
+          </span>
           <h2>{labels[state]}</h2>
-          <p>{summaries[state]}</p>
+          <p>{runtimeHealthSummary(runtime, runtimeError, language)}</p>
         </div>
         <span className="market-data-state-badge">{labels[state]}</span>
       </div>
       <div className="market-data-reliability-grid">
         <AutoPaperMetric
-          label={language === "zh" ? "目标交易日" : "Expected session"}
-          value={dataHealth.market_data_expected_trade_date ?? dataHealth.full_market_signal_date ?? "-"}
+          label={language === "zh" ? "自动调度" : "Scheduler"}
+          value={schedulerHealthLabel(runtime, language)}
         />
         <AutoPaperMetric
-          label={language === "zh" ? "最新覆盖率" : "Latest coverage"}
-          value={coverage == null ? "-" : `${(coverage * 100).toFixed(1)}%`}
+          label={language === "zh" ? "每日全扫" : "Daily scan"}
+          value={scanRequirementLabel(runtime?.scan_requirement, language)}
         />
         <AutoPaperMetric
-          label={language === "zh" ? "当前 / 陈旧" : "Current / stale"}
-          value={`${current} / ${stale}`}
+          label={language === "zh" ? "下次检查" : "Next check"}
+          value={formatMaybeDateTime(
+            runtime?.scan_next_check_at ?? scheduler?.next_run_at,
+            language,
+          )}
         />
         <AutoPaperMetric
-          label={language === "zh" ? "缺失行情" : "Missing bars"}
-          value={missing}
+          label={language === "zh" ? "股票 / 批次" : "Symbols / batches"}
+          value={scanProgress}
         />
         <AutoPaperMetric
-          label={language === "zh" ? "本次增量更新" : "Tail refreshed"}
-          value={refreshed}
+          label={language === "zh" ? "扶摇" : "Fuyao"}
+          value={fuyaoHealthLabel(runtime, language)}
         />
         <AutoPaperMetric
-          label={language === "zh" ? "数据源异常" : "Provider errors"}
-          value={providerErrors}
-          tone={Number(providerErrors) > 0 ? "running" : "neutral"}
+          label={language === "zh" ? "降级 / 失败" : "Fallback / failed"}
+          value={`${providerFallbacks + tickflowFallbacks} / ${terminalErrors}`}
+          tone={terminalErrors > 0 ? "running" : "neutral"}
         />
+      </div>
+      <div className="runtime-data-health-audit">
+        <span>
+          {language === "zh" ? "数据日" : "Session"}{" "}
+          <strong>
+            {runtime?.latest_scan_signal_date
+              ?? dataHealth.full_market_signal_date
+              ?? "-"}
+          </strong>
+          {runtime?.expected_signal_date && ` / ${runtime.expected_signal_date}`}
+        </span>
+        <span>
+          {language === "zh" ? "最新覆盖" : "Coverage"}{" "}
+          <strong>{coverage == null ? "-" : `${(coverage * 100).toFixed(1)}%`}</strong>
+        </span>
+        <span>
+          {language === "zh" ? "当前 / 陈旧 / 缺失" : "Current / stale / missing"}{" "}
+          <strong>{`${current} / ${stale} / ${missing}`}</strong>
+        </span>
+        <span>
+          {language === "zh" ? "增量更新" : "Tail refreshed"}{" "}
+          <strong>{refreshed}</strong>
+        </span>
+        <span>
+          {language === "zh" ? "上次全扫" : "Last full scan"}{" "}
+          <strong>
+            {formatMaybeDateTime(
+              runtime?.latest_scan_finished_at ?? fullScanJob?.finished_at,
+              language,
+            )}
+          </strong>
+        </span>
       </div>
     </section>
   );
+}
+
+function FuyaoMarketSentimentPanel({
+  research,
+  shadow,
+  language,
+  onSelect,
+  cards,
+}: {
+  research?: FuyaoMarketResearchResponse;
+  shadow?: FuyaoShadowEvaluationResponse;
+  language: "zh" | "en";
+  onSelect(card: OpportunityCard): void;
+  cards: OpportunityCard[];
+}) {
+  const sentiment = research?.sections.derived_sentiment;
+  const evaluation = shadow?.evaluation;
+  const cardByInstrument = new Map(cards.map((card) => [card.instrument_id, card]));
+  const stateLabels: Record<string, string> = language === "zh"
+    ? {
+        very_active: "高度活跃",
+        active: "活跃",
+        balanced: "均衡",
+        quiet: "偏冷",
+      }
+    : {
+        very_active: "Very active",
+        active: "Active",
+        balanced: "Balanced",
+        quiet: "Quiet",
+      };
+
+  if (!sentiment) {
+    return (
+      <section className="fuyao-market-sentiment state-pending">
+        <div className="fuyao-market-sentiment-head">
+          <div>
+            <span className="eyebrow">
+              {language === "zh" ? "扶摇市场研究 · 不参与交易" : "Fuyao market research · no order effect"}
+            </span>
+            <h2>{language === "zh" ? "等待首个市场情绪快照" : "Waiting for the first market snapshot"}</h2>
+            <p>
+              {language === "zh"
+                ? "每日全市场扫描完成后保存涨停、热榜、异动和龙虎榜研究证据。"
+                : "Limit-up, hot-list, anomaly, and dragon-tiger evidence is saved after the daily scan."}
+            </p>
+          </div>
+          <span className="fuyao-market-state-badge">
+            {language === "zh" ? "待采集" : "Pending"}
+          </span>
+        </div>
+      </section>
+    );
+  }
+
+  const metrics = [
+    [language === "zh" ? "活跃度" : "Activity", `${(sentiment.activity_score * 100).toFixed(0)}%`],
+    [language === "zh" ? "涨停 / 最高连板" : "Limit-up / max boards", `${sentiment.limit_up_count} / ${sentiment.max_board_count}`],
+    [language === "zh" ? "热门 / 飙升" : "Hot / rising", `${sentiment.hot_stock_count} / ${sentiment.skyrocket_count}`],
+    [language === "zh" ? "异动 / 龙虎榜" : "Anomaly / dragon-tiger", `${sentiment.anomaly_count} / ${sentiment.dragon_tiger_count}`],
+    [language === "zh" ? "来源覆盖" : "Source coverage", `${(sentiment.section_coverage * 100).toFixed(0)}%`],
+    [language === "zh" ? "研究信号" : "Research signals", `${sentiment.signals.length}`],
+  ];
+
+  return (
+    <section className={`fuyao-market-sentiment state-${sentiment.state}`}>
+      <div className="fuyao-market-sentiment-head">
+        <div>
+          <span className="eyebrow">
+            {language === "zh" ? "扶摇市场研究 · 不参与交易" : "Fuyao market research · no order effect"}
+          </span>
+          <h2>{stateLabels[sentiment.state] ?? sentiment.state}</h2>
+          <p>
+            {language === "zh" ? "数据日" : "Session"} {sentiment.trade_date}
+            {research.freshness !== "live"
+              ? ` · ${language === "zh" ? "已保存快照" : "saved snapshot"}`
+              : ""}
+          </p>
+        </div>
+        <span className="fuyao-market-state-badge">
+          {stateLabels[sentiment.state] ?? sentiment.state}
+        </span>
+      </div>
+
+      <div className="fuyao-market-metrics">
+        {metrics.map(([label, value]) => (
+          <div key={label}>
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </div>
+        ))}
+      </div>
+
+      {sentiment.top_themes.length > 0 && (
+        <div className="fuyao-market-themes">
+          <span>{language === "zh" ? "高频主题" : "Frequent themes"}</span>
+          <div>
+            {sentiment.top_themes.slice(0, 8).map((theme) => (
+              <span key={theme.name}>{theme.name} · {theme.mentions}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {sentiment.leaders.length > 0 && (
+        <div className="fuyao-market-leaders">
+          <span>{language === "zh" ? "研究关注" : "Research watch"}</span>
+          <div>
+            {sentiment.leaders.slice(0, 8).map((leader) => {
+              const card = cardByInstrument.get(leader.instrument_id);
+              const content = (
+                <>
+                  <strong>{leader.instrument_label ?? leader.instrument_id}</strong>
+                  <small>{leader.instrument_id} · {(leader.score * 100).toFixed(0)}</small>
+                </>
+              );
+              return card ? (
+                <button key={leader.instrument_id} type="button" onClick={() => onSelect(card)}>
+                  {content}
+                </button>
+              ) : (
+                <span key={leader.instrument_id}>{content}</span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="fuyao-shadow-strip">
+        <div>
+          <span>{language === "zh" ? "前向影子评估" : "Forward shadow evaluation"}</span>
+          <strong>{fuyaoShadowStatusLabel(evaluation?.status, language)}</strong>
+          <small>
+            {language === "zh" ? "快照" : "Snapshots"} {evaluation?.snapshot_count ?? 0}
+            {evaluation?.next_maturity_date
+              ? ` · ${language === "zh" ? "下次成熟" : "Next maturity"} ${evaluation.next_maturity_date}`
+              : ""}
+          </small>
+        </div>
+        <div className="fuyao-shadow-horizons">
+          {(evaluation?.horizons ?? []).map((horizon) => (
+            <span key={horizon.horizon_sessions}>
+              <small>{horizon.horizon_sessions}{language === "zh" ? "日" : "d"}</small>
+              <strong>{formatSignedPercent(horizon.average_net_excess_return_pct)}</strong>
+              <small>{horizon.completed_signals}/{horizon.expected_signals}</small>
+            </span>
+          ))}
+          {(!evaluation || evaluation.horizons.length === 0) && (
+            <span>
+              <small>{language === "zh" ? "尚无成熟结果" : "No matured outcomes"}</small>
+            </span>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function fuyaoShadowStatusLabel(
+  status: string | undefined,
+  language: "zh" | "en",
+): string {
+  const labels: Record<string, [string, string]> = {
+    ready: ["已形成评估", "Ready"],
+    collecting: ["采集中", "Collecting"],
+    not_started: ["尚未开始", "Not started"],
+  };
+  const value = labels[status ?? "not_started"] ?? [status ?? "尚未开始", status ?? "Not started"];
+  return language === "zh" ? value[0] : value[1];
+}
+
+function runtimeHealthSummary(
+  runtime: AutomationRuntimeHealth | undefined,
+  runtimeError: string,
+  language: "zh" | "en",
+): string {
+  if (!runtime) {
+    return runtimeError
+      ? (language === "zh"
+          ? "运行状态暂时读取失败，页面保留最近一次扫描结果。"
+          : "Runtime status is temporarily unavailable; the latest scan remains visible.")
+      : (language === "zh"
+          ? "正在读取调度器、全市场扫描和数据源状态。"
+          : "Loading scheduler, full-market scan, and provider status.");
+  }
+  const nextCheck = formatMaybeDateTime(runtime.scan_next_check_at, language);
+  const summaries: Record<string, string> = language === "zh"
+    ? {
+        scheduler_disabled: "自动处理已停用，不会继续更新候选或模拟持仓。",
+        scheduler_error: "上轮自动处理出现错误，系统保留最近有效结果并等待下一轮。",
+        scan_failed: "最近全市场批次失败，本轮结果不会被当作完整扫描。",
+        fuyao_error: "扶摇请求失败；候选研究会保留最近保存快照，不影响既有排序。",
+        scheduler_overdue: "调度检查已超过计划时间，后台恢复线程正在补偿执行。",
+        scan_due: `当前交易日数据已结算，预计 ${nextCheck} 再检查并启动全扫。`,
+        source_fallback: `全市场扫描已完成，部分上游调用由缓存或备用源承接；${nextCheck} 继续检查。`,
+        fuyao_partial: "扶摇部分接口可用，缺失研究字段会明确标记或使用最近保存快照。",
+        candidate_freshness_filtered: "部分旧候选已被过滤，系统不会把过期候选作为今天的新机会。",
+      }
+    : {
+        scheduler_disabled: "Automatic processing is disabled; candidates and paper positions will not update.",
+        scheduler_error: "The previous cycle failed; the latest valid result is retained for the next retry.",
+        scan_failed: "The latest full-market batch failed and is not treated as a complete scan.",
+        fuyao_error: "Fuyao failed; saved research remains available without changing ranking.",
+        scheduler_overdue: "The scheduler is overdue and its recovery loop is compensating.",
+        scan_due: `The session has settled; the next scan check is ${nextCheck}.`,
+        source_fallback: `The scan completed with upstream fallbacks; the next check is ${nextCheck}.`,
+        fuyao_partial: "Some Fuyao sections are unavailable and are explicitly marked or served from saved research.",
+        candidate_freshness_filtered: "Stale candidates were filtered and are not treated as today's opportunities.",
+      };
+  if (summaries[runtime.summary_code]) {
+    return summaries[runtime.summary_code];
+  }
+  if (runtime.scan_requirement === "current_session_pending_close") {
+    return language === "zh"
+      ? `上一完整交易日结果有效；今日收盘后由 ${nextCheck} 的调度检查决定是否启动全扫。`
+      : `The previous completed session is current; the ${nextCheck} check will evaluate today's scan.`;
+  }
+  if (runtime.scan_requirement === "waiting_settlement") {
+    return language === "zh"
+      ? `今日已收盘，系统等待 ${runtime.scan_post_close_time} 后的数据结算窗口。`
+      : `The market is closed; the system is waiting for the ${runtime.scan_post_close_time} settlement window.`;
+  }
+  if (runtime.scan_requirement === "running") {
+    return language === "zh" ? "全市场扫描正在后台运行。" : "The full-market scan is running.";
+  }
+  return language === "zh"
+    ? "调度器、全市场扫描和数据源均处于预期状态。"
+    : "Scheduler, full-market scan, and providers are operating as expected.";
+}
+
+function schedulerHealthLabel(
+  runtime: AutomationRuntimeHealth | undefined,
+  language: "zh" | "en",
+): string {
+  if (!runtime) return "-";
+  if (!runtime.scheduler_enabled) return language === "zh" ? "已停用" : "Disabled";
+  if (runtime.scheduler_status === "running") return language === "zh" ? "运行中" : "Running";
+  if (runtime.scheduler_overdue_seconds > 0) {
+    return language === "zh"
+      ? `延迟 ${Math.ceil(runtime.scheduler_overdue_seconds / 60)} 分钟`
+      : `${Math.ceil(runtime.scheduler_overdue_seconds / 60)}m overdue`;
+  }
+  return language === "zh"
+    ? `正常 · ${Math.round(runtime.scheduler_interval_seconds / 60)} 分钟`
+    : `Healthy · ${Math.round(runtime.scheduler_interval_seconds / 60)}m`;
+}
+
+function scanRequirementLabel(
+  requirement: string | undefined,
+  language: "zh" | "en",
+): string {
+  const labels: Record<string, [string, string]> = {
+    current: ["最新", "Current"],
+    current_session_pending_close: ["等待今日收盘", "Awaiting close"],
+    waiting_settlement: ["等待数据结算", "Settling"],
+    due: ["待执行", "Due"],
+    running: ["扫描中", "Running"],
+    failed: ["失败", "Failed"],
+    missing: ["暂无结果", "Missing"],
+  };
+  const label = labels[requirement ?? ""] ?? ["待确认", "Pending"];
+  return language === "zh" ? label[0] : label[1];
+}
+
+function fuyaoHealthLabel(
+  runtime: AutomationRuntimeHealth | undefined,
+  language: "zh" | "en",
+): string {
+  if (!runtime || runtime.fuyao_state === "unavailable") return "-";
+  if (runtime.fuyao_state === "idle" || runtime.fuyao_requests === 0) {
+    return language === "zh" ? "本轮无需调用" : "No call needed";
+  }
+  if (runtime.fuyao_state === "ready") {
+    return language === "zh"
+      ? `${runtime.fuyao_successes}/${runtime.fuyao_requests} 成功`
+      : `${runtime.fuyao_successes}/${runtime.fuyao_requests} succeeded`;
+  }
+  return language === "zh"
+    ? `${runtime.fuyao_successes}/${runtime.fuyao_requests} · ${runtime.fuyao_errors} 失败`
+    : `${runtime.fuyao_successes}/${runtime.fuyao_requests} · ${runtime.fuyao_errors} failed`;
 }
 
 function healthNumber(value?: string): number | null {
@@ -2272,6 +2674,9 @@ function FuyaoResearchPanel({
   const timestamp = research?.snapshot?.source_timestamp
     ?? research?.snapshot?.observed_at
     ?? null;
+  const metricGroups = research ? groupFuyaoResearchMetrics(research, language) : [];
+  const evidence = research ? fuyaoResearchEvidence(research, language) : [];
+  const quality = research?.quality_comparison;
 
   return (
     <div className={`fuyao-research-panel ${isStale ? "is-stale" : ""}`}>
@@ -2289,14 +2694,43 @@ function FuyaoResearchPanel({
         <p>{language === "zh" ? "正在读取候选的行情、估值与基本面。" : "Loading market, valuation and fundamental data."}</p>
       )}
       {status === "error" && <p>{error}</p>}
-      {research && research.summary.metrics.length > 0 && (
-        <div className="fuyao-research-metrics">
-          {research.summary.metrics.slice(0, 10).map((metric) => (
-            <div key={metric.key}>
-              <span>{metric.label}</span>
-              <strong>{formatFuyaoMetric(metric)}</strong>
+      {metricGroups.length > 0 && (
+        <div className="fuyao-research-groups">
+          {metricGroups.map((group) => (
+            <div className="fuyao-research-group" key={group.key}>
+              <span>{group.label}</span>
+              <div className="fuyao-research-metrics">
+                {group.metrics.map((metric) => (
+                  <div key={metric.key}>
+                    <span>{metric.label}</span>
+                    <strong>{formatFuyaoMetric(metric)}</strong>
+                  </div>
+                ))}
+              </div>
             </div>
           ))}
+        </div>
+      )}
+      {evidence.length > 0 && (
+        <div className="fuyao-research-evidence">
+          <span>{language === "zh" ? "已读取证据" : "Evidence loaded"}</span>
+          <div>{evidence.map((item) => <span key={item}>{item}</span>)}</div>
+        </div>
+      )}
+      {quality && (
+        <div className={`fuyao-quality-comparison state-${quality.state}`}>
+          <div>
+            <span>{language === "zh" ? "行情交叉核对" : "Quote reconciliation"}</span>
+            <strong>{fuyaoQualityLabel(quality.state, language)}</strong>
+          </div>
+          <p>
+            {language === "zh" ? "扶摇" : "Fuyao"} {formatOptionalPrice(quality.fuyao_price)}
+            {quality.fuyao_timestamp ? ` (${quality.fuyao_timestamp.slice(0, 10)})` : ""}
+            {" · "}
+            {language === "zh" ? "本地日线" : "Local daily"} {formatOptionalPrice(quality.reference_price)}
+            {quality.reference_trade_date ? ` (${quality.reference_trade_date})` : ""}
+            {quality.difference_pct === null ? "" : ` · ${formatSignedPercent(quality.difference_pct)}`}
+          </p>
         </div>
       )}
       {research?.summary.notes.map((note) => <p key={note}>{note}</p>)}
@@ -2312,6 +2746,109 @@ function FuyaoResearchPanel({
       )}
     </div>
   );
+}
+
+function groupFuyaoResearchMetrics(
+  research: FuyaoResearchResponse,
+  language: "zh" | "en",
+): Array<{ key: string; label: string; metrics: FuyaoResearchMetric[] }> {
+  const definitions = [
+    {
+      key: "market",
+      label: language === "zh" ? "行情" : "Market",
+      keys: new Set(["latest_price", "change_pct", "turnover"]),
+    },
+    {
+      key: "valuation",
+      label: language === "zh" ? "估值" : "Valuation",
+      keys: new Set(["pe_ttm", "pb_mrq", "ps_ttm"]),
+    },
+    {
+      key: "fundamental",
+      label: language === "zh" ? "基本面" : "Fundamentals",
+      keys: new Set(["revenue_yoy", "net_profit_yoy", "gross_margin", "roe"]),
+    },
+    {
+      key: "performance",
+      label: language === "zh" ? "收益与持仓" : "Returns and holdings",
+      keys: new Set(["return_month", "return_nowyear", "return_year", "holdings_count", "top_holding", "top_holding_ratio"]),
+    },
+    {
+      key: "attention",
+      label: language === "zh" ? "市场关注" : "Attention",
+      keys: new Set(["hot_rank"]),
+    },
+  ];
+  const assigned = new Set<string>();
+  const groups = definitions.map((definition) => {
+    const metrics = research.summary.metrics.filter((metric) => definition.keys.has(metric.key));
+    metrics.forEach((metric) => assigned.add(metric.key));
+    return { key: definition.key, label: definition.label, metrics };
+  }).filter((group) => group.metrics.length > 0);
+  const other = research.summary.metrics.filter((metric) => !assigned.has(metric.key));
+  if (other.length > 0) {
+    groups.push({ key: "other", label: language === "zh" ? "其他" : "Other", metrics: other });
+  }
+  return groups;
+}
+
+function fuyaoResearchEvidence(
+  research: FuyaoResearchResponse,
+  language: "zh" | "en",
+): string[] {
+  const labels: Record<string, [string, string]> = {
+    anomaly_analysis: ["异动解读", "Anomaly notes"],
+    corporate_actions: ["公司行动", "Corporate actions"],
+    financial_indicators: ["财务指标", "Financial indicators"],
+    holdings: ["基金持仓", "Fund holdings"],
+    holders: ["持有人结构", "Holder structure"],
+    hot_rank_trend: ["热度轨迹", "Hot-rank history"],
+    nav: ["基金净值", "Fund NAV"],
+  };
+  return Object.entries(labels).flatMap(([key, pair]) => {
+    const section = research.sections[key];
+    if (section === undefined) {
+      return [];
+    }
+    const count = fuyaoSectionCount(section);
+    const label = language === "zh" ? pair[0] : pair[1];
+    return [count === null ? label : `${label} ${count}`];
+  });
+}
+
+function fuyaoSectionCount(section: unknown): number | null {
+  if (!section || typeof section !== "object" || Array.isArray(section)) {
+    return null;
+  }
+  const value = section as Record<string, unknown>;
+  for (const key of ["item", "stock_items", "hot_money_items"]) {
+    if (Array.isArray(value[key])) {
+      return value[key].length;
+    }
+  }
+  if (Array.isArray(value.abilities)) {
+    return value.abilities.length;
+  }
+  return null;
+}
+
+function fuyaoQualityLabel(
+  state: string,
+  language: "zh" | "en",
+): string {
+  const labels: Record<string, [string, string]> = {
+    aligned: ["同日一致", "Same-session aligned"],
+    watch: ["需复核", "Review"],
+    mismatch: ["差异较大", "Mismatch"],
+    different_sessions: ["交易日不同", "Different sessions"],
+    insufficient: ["证据不足", "Insufficient"],
+  };
+  const value = labels[state] ?? [state, state];
+  return language === "zh" ? value[0] : value[1];
+}
+
+function formatOptionalPrice(value: number | null): string {
+  return value === null || Number.isNaN(value) ? "-" : value.toFixed(3);
 }
 
 function formatFuyaoMetric(metric: FuyaoResearchMetric): string {

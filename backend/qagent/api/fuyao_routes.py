@@ -16,6 +16,15 @@ from qagent.providers.fuyao import (
     fuyao_capability_manifest,
     to_fuyao_thscode,
 )
+from qagent.research.fuyao_market_sentiment import (
+    capture_fuyao_market_research,
+    latest_fuyao_market_research,
+)
+from qagent.research.fuyao_shadow_outcomes import (
+    build_fuyao_shadow_evaluation,
+    resolve_fuyao_shadow_outcomes,
+)
+from qagent.storage.market_cache import MarketDataCacheRepository
 from qagent.storage.fuyao_research import (
     FuyaoResearchRepository,
     FuyaoResearchSnapshot,
@@ -173,7 +182,7 @@ def stock_research(
                     limit=statement_limit,
                 ),
             )
-    return _finalize_research_response(
+    response = _finalize_research_response(
         "stock",
         {"instrument_id": instrument_id.strip().upper(), "thscode": thscode},
         sections,
@@ -181,6 +190,11 @@ def stock_research(
         client=client,
         persist=True,
     )
+    response["quality_comparison"] = _quote_quality_comparison(
+        instrument_id.strip().upper(),
+        response,
+    )
+    return response
 
 
 @router.get("/research/market")
@@ -188,58 +202,62 @@ def market_research(
     period: Literal["day", "hour"] = "day",
     trade_date: date | None = None,
     include_historical_hot_list: bool = False,
+    refresh: bool = False,
 ) -> dict[str, object]:
     if include_historical_hot_list and trade_date is None:
         raise HTTPException(
             status_code=422,
             detail="trade_date is required when include_historical_hot_list is true",
         )
-    client = _configured_client()
-    sections: dict[str, object] = {}
-    errors: list[dict[str, object]] = []
-    _collect(
-        sections,
-        errors,
-        "limit_up_pool",
-        lambda: client.get_limit_up_pool(trade_date=trade_date),
+    resolved_date = trade_date or date.today()
+    initialize_database()
+    capture = capture_fuyao_market_research(
+        create_session_factory(),
+        client=_configured_client(),
+        trade_date=resolved_date,
+        period=period,
+        include_historical_hot_list=include_historical_hot_list,
+        reuse_existing=not refresh,
     )
-    _collect(sections, errors, "limit_up_ladder", client.get_limit_up_ladder)
-    _collect(
-        sections,
-        errors,
-        "hot_stock_list",
-        lambda: client.get_hot_stock_list(period=period),
+    return capture.response
+
+
+@router.get("/research/market/latest")
+def latest_market_research(include_raw: bool = False) -> dict[str, object]:
+    initialize_database()
+    latest = latest_fuyao_market_research(create_session_factory())
+    if latest is None:
+        raise HTTPException(status_code=404, detail="Fuyao market research has not started")
+    return latest if include_raw else _compact_market_research(latest)
+
+
+@router.get("/research/market/shadow-evaluation")
+def market_shadow_evaluation(as_of_date: date | None = None) -> dict[str, object]:
+    initialize_database()
+    evaluation = build_fuyao_shadow_evaluation(
+        create_session_factory(),
+        as_of_date=as_of_date or date.today(),
     )
-    _collect(
-        sections,
-        errors,
-        "skyrocket_list",
-        lambda: client.get_skyrocket_list(period=period),
+    return {"evaluation": evaluation.model_dump(mode="json")}
+
+
+@router.post("/research/market/shadow-outcomes/resolve")
+def resolve_market_shadow_outcomes(as_of_date: date | None = None) -> dict[str, object]:
+    initialize_database()
+    resolved_date = as_of_date or date.today()
+    resolution = resolve_fuyao_shadow_outcomes(
+        create_session_factory(),
+        provider_mode="free",
+        as_of_date=resolved_date,
     )
-    _collect(sections, errors, "anomaly_analysis", client.get_anomaly_analysis)
-    _collect(
-        sections,
-        errors,
-        "dragon_tiger",
-        lambda: client.get_dragon_tiger(trade_date=trade_date),
+    evaluation = build_fuyao_shadow_evaluation(
+        create_session_factory(),
+        as_of_date=resolved_date,
     )
-    if include_historical_hot_list:
-        assert trade_date is not None
-        _collect(
-            sections,
-            errors,
-            "hot_stock_history",
-            lambda: client.get_hot_stock_history(trade_date),
-        )
-    return _research_response(
-        "market",
-        {
-            "period": period,
-            "trade_date": trade_date.isoformat() if trade_date else None,
-        },
-        sections,
-        errors,
-    )
+    return {
+        "resolution": resolution.model_dump(mode="json"),
+        "evaluation": evaluation.model_dump(mode="json"),
+    }
 
 
 @router.get("/research/index-catalog")
@@ -339,7 +357,7 @@ def fund_research(
                 today,
             ),
         )
-    return _finalize_research_response(
+    response = _finalize_research_response(
         "fund",
         {"instrument_id": instrument_id.strip().upper(), "thscode": thscode},
         sections,
@@ -347,6 +365,11 @@ def fund_research(
         client=client,
         persist=True,
     )
+    response["quality_comparison"] = _quote_quality_comparison(
+        instrument_id.strip().upper(),
+        response,
+    )
+    return response
 
 
 def _configured_client() -> FuyaoClient:
@@ -689,6 +712,106 @@ def _safe_number(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _quote_quality_comparison(
+    instrument_id: str,
+    response: dict[str, object],
+) -> dict[str, object]:
+    summary = response.get("summary")
+    metrics = summary.get("metrics") if isinstance(summary, dict) else None
+    fuyao_price = next(
+        (
+            _safe_number(metric.get("value"))
+            for metric in metrics
+            if isinstance(metric, dict) and metric.get("key") == "latest_price"
+        ),
+        None,
+    ) if isinstance(metrics, list) else None
+    cache = MarketDataCacheRepository(create_session_factory())
+    frame = cache.load_latest_daily_bars("free", [instrument_id])
+    if frame.empty or fuyao_price is None:
+        return {
+            "state": "insufficient",
+            "fuyao_price": fuyao_price,
+            "reference_price": None,
+            "difference_pct": None,
+            "classification": "research_only",
+        }
+    row = frame.iloc[0]
+    reference_price = _safe_number(row.get("close"))
+    reference_date = row.get("trade_date")
+    source = response.get("source")
+    raw_source_timestamp = (
+        source.get("data_timestamp") if isinstance(source, dict) else None
+    )
+    if raw_source_timestamp is None:
+        snapshot = response.get("snapshot")
+        raw_source_timestamp = (
+            snapshot.get("source_timestamp") if isinstance(snapshot, dict) else None
+        )
+    source_date = _timestamp_date(raw_source_timestamp)
+    difference_pct = (
+        (fuyao_price / reference_price - 1.0) * 100.0
+        if reference_price is not None and reference_price > 0
+        else None
+    )
+    same_session = source_date is not None and source_date == reference_date
+    if difference_pct is None:
+        state = "insufficient"
+    elif not same_session:
+        state = "different_sessions"
+    elif abs(difference_pct) <= 0.5:
+        state = "aligned"
+    elif abs(difference_pct) <= 1.0:
+        state = "watch"
+    else:
+        state = "mismatch"
+    return {
+        "state": state,
+        "fuyao_price": fuyao_price,
+        "fuyao_timestamp": raw_source_timestamp,
+        "reference_price": reference_price,
+        "reference_trade_date": (
+            reference_date.isoformat() if isinstance(reference_date, date) else None
+        ),
+        "reference_provider": str(row.get("provider") or "free"),
+        "difference_pct": round(difference_pct, 6) if difference_pct is not None else None,
+        "same_session": same_session,
+        "classification": "research_only",
+    }
+
+
+def _timestamp_date(value: object) -> date | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if len(text) < 10:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def _compact_market_research(response: dict[str, object]) -> dict[str, object]:
+    compact = dict(response)
+    sections = response.get("sections")
+    derived = sections.get("derived_sentiment") if isinstance(sections, dict) else None
+    compact["sections"] = (
+        {"derived_sentiment": derived} if isinstance(derived, dict) else {}
+    )
+    compact["raw_sections_included"] = False
+    compact["raw_sections_available"] = (
+        sorted(
+            key
+            for key in sections
+            if isinstance(key, str) and key != "derived_sentiment"
+        )
+        if isinstance(sections, dict)
+        else []
+    )
+    return compact
 
 
 def _optional_text(value: object) -> str | None:

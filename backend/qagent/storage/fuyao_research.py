@@ -118,6 +118,41 @@ class FuyaoResearchRepository:
             ).first()
             return _from_row(row) if row is not None else None
 
+    def latest_for_type(self, research_type: str) -> FuyaoResearchSnapshot | None:
+        normalized_type = research_type.strip().lower()
+        with self.session_factory() as session:
+            row = session.scalars(
+                select(FuyaoResearchSnapshotRow)
+                .where(FuyaoResearchSnapshotRow.research_type == normalized_type)
+                .order_by(
+                    FuyaoResearchSnapshotRow.observed_at.desc(),
+                    FuyaoResearchSnapshotRow.created_at.desc(),
+                )
+                .limit(1)
+            ).first()
+            return _from_row(row) if row is not None else None
+
+    def list_for_type(
+        self,
+        research_type: str,
+        *,
+        limit: int = 250,
+    ) -> list[FuyaoResearchSnapshot]:
+        if limit <= 0 or limit > 2_000:
+            raise ValueError("limit must be between 1 and 2000")
+        normalized_type = research_type.strip().lower()
+        with self.session_factory() as session:
+            rows = session.scalars(
+                select(FuyaoResearchSnapshotRow)
+                .where(FuyaoResearchSnapshotRow.research_type == normalized_type)
+                .order_by(
+                    FuyaoResearchSnapshotRow.observed_at.desc(),
+                    FuyaoResearchSnapshotRow.created_at.desc(),
+                )
+                .limit(limit)
+            ).all()
+            return [_from_row(row) for row in rows]
+
 
 def _matching_row(
     session: Session,

@@ -19,9 +19,11 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - Optional Fuyao/THS read-only integration: live A-share, index, and ETF snapshots
   for paper pricing; bounded per-symbol daily fallback; ETF holdings fallback; and
   separate research APIs for financials, valuations, constituents, fund data,
-  limit-up lists, hot lists, anomalies, and dragon-tiger data. Fuyao research data
-  is not applied directly to ranking weights and the public API exposes daily bars,
-  not minute bars.
+  limit-up lists, hot lists, anomalies, and dragon-tiger data. Daily market research
+  snapshots are immutable, shown separately in the Today workspace, and evaluated
+  after 5/10/20 trading sessions against the CSI 300 with next-open execution and
+  explicit costs. Fuyao research data is not applied directly to ranking weights or
+  paper orders, and the public API exposes daily bars, not minute bars.
 - Local A-share tradable catalog sync backed by free `akshare` stock and ETF directories; current free sync covers A-share stocks plus listed ETFs and stores them in SQLite for search and scan sampling.
 - US free market data via `yfinance` remains available for explicit symbols, but is not the default dashboard route.
 - Strategy registry covering trend momentum, breakout + volume, healthy pullback, GF-DMA health, catalyst transmission, PEAD, analyst revisions, TAM-adjusted PEG, Bayesian growth valuation, sector regime, short squeeze risk, options flow, and insider/institutional confirmation.
@@ -146,6 +148,8 @@ curl 'http://127.0.0.1:8000/api/fuyao/capabilities'
 curl 'http://127.0.0.1:8000/api/fuyao/research/stock?instrument_id=CN:600519'
 curl 'http://127.0.0.1:8000/api/fuyao/research/fund?instrument_id=CN:510300'
 curl 'http://127.0.0.1:8000/api/fuyao/research/market?period=day'
+curl 'http://127.0.0.1:8000/api/fuyao/research/market/latest'
+curl 'http://127.0.0.1:8000/api/fuyao/research/market/shadow-evaluation'
 curl -X POST 'http://127.0.0.1:8000/api/paper-trades/seed?provider=fixture'
 curl -X POST 'http://127.0.0.1:8000/api/paper-trades/update?provider=fixture'
 curl 'http://127.0.0.1:8000/api/paper-trades'

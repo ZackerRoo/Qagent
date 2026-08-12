@@ -69,6 +69,15 @@ assert(today.includes("TodayAdvancedAnalysis"), "Today page must keep advanced a
 assert(today.includes("HowToUseTodayPanel"), "Today page must render the how-to-use guide");
 assert(today.includes("AutoPaperStatusStrip"), "Today page must render automatic paper status strip");
 assert(today.includes("MarketDataReliabilityStrip"), "Today page must render runtime market-data reliability");
+assert(today.includes("FuyaoMarketSentimentPanel"), "Today page must render Fuyao market sentiment research");
+assert(today.includes("扶摇市场研究 · 不参与交易"), "Fuyao market sentiment must be labeled research-only");
+assert(today.includes("fuyao-shadow-horizons"), "Today page must expose 5/10/20 session Fuyao shadow outcomes");
+assert(today.includes("groupFuyaoResearchMetrics"), "Fuyao candidate research must group market, valuation, and fundamentals");
+assert(today.includes("行情交叉核对"), "Fuyao candidate research must expose cross-source quote reconciliation");
+assert(today.includes("runtime_health"), "Runtime data health must consume the scheduler health snapshot");
+assert(today.includes("scan_next_check_at"), "Runtime data health must show the next automatic scan check");
+assert(today.includes("latest_scan_provider_fallbacks"), "Runtime data health must separate provider fallbacks from batch failures");
+assert(today.includes("60_000"), "Runtime scheduler and scan status must refresh once per minute");
 assert(today.includes("market_data_latest_session_coverage"), "Market-data reliability must expose latest-session coverage");
 assert(today.includes("market_cache_prefetch_refreshed"), "Market-data reliability must expose incremental cache refreshes");
 assert(today.includes("fetchAutomationScheduler"), "Today page must load automation scheduler state");
@@ -214,6 +223,8 @@ assert(styles.includes(".automation-action-strip"), "CSS must define decision au
 assert(styles.includes(".today-trade-ticket"), "CSS must define selected opportunity ticket");
 assert(styles.includes(".today-validation-snapshot"), "CSS must define compact validation snapshot");
 assert(styles.includes(".today-risk-brief"), "CSS must define compact risk brief");
+assert(styles.includes(".fuyao-market-sentiment"), "CSS must style Fuyao market sentiment without a nested dashboard card");
+assert(styles.includes(".fuyao-research-groups"), "CSS must style grouped Fuyao candidate research");
 assert(styles.includes(".today-advanced-analysis"), "CSS must define collapsed advanced analysis");
 assert(styles.includes(".how-to-use-panel"), "CSS must define how-to-use guide layout");
 assert(styles.includes(".auto-paper-status-strip"), "CSS must define automatic paper status strip");

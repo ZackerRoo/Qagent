@@ -2751,7 +2751,7 @@ export type FuyaoResearchResponse = {
   decision_weight_applied: false;
   paper_order_side_effect: false;
   status: "ready" | "partial" | "stale" | "unavailable";
-  freshness: "live" | "stored_fallback" | "unavailable";
+  freshness: "live" | "stored" | "stored_fallback" | "unavailable";
   identity: Record<string, unknown>;
   sections: Record<string, unknown>;
   summary: FuyaoResearchSummary;
@@ -2763,6 +2763,101 @@ export type FuyaoResearchResponse = {
     request_id?: string;
   }>;
   snapshot?: FuyaoResearchSnapshotReference | null;
+  quality_comparison?: FuyaoQuoteQualityComparison;
+};
+
+export type FuyaoQuoteQualityComparison = {
+  state: "aligned" | "watch" | "mismatch" | "different_sessions" | "insufficient";
+  fuyao_price: number | null;
+  fuyao_timestamp?: string | null;
+  reference_price: number | null;
+  reference_trade_date?: string | null;
+  reference_provider?: string | null;
+  difference_pct: number | null;
+  same_session?: boolean;
+  classification: "research_only";
+};
+
+export type FuyaoMarketTheme = {
+  name: string;
+  mentions: number;
+  leaders: string[];
+};
+
+export type FuyaoMarketSignal = {
+  instrument_id: string;
+  instrument_label: string | null;
+  score: number;
+  limit_up: boolean;
+  board_count: number;
+  hot_rank: number | null;
+  skyrocket_rank: number | null;
+  anomaly_count: number;
+  dragon_tiger: boolean;
+  themes: string[];
+  evidence: string[];
+};
+
+export type FuyaoMarketSentiment = {
+  contract: string;
+  trade_date: string;
+  state: "very_active" | "active" | "balanced" | "quiet";
+  activity_score: number;
+  limit_up_count: number;
+  max_board_count: number;
+  hot_stock_count: number;
+  skyrocket_count: number;
+  anomaly_count: number;
+  dragon_tiger_count: number;
+  section_coverage: number;
+  available_sections: string[];
+  missing_sections: string[];
+  top_themes: FuyaoMarketTheme[];
+  leaders: FuyaoMarketSignal[];
+  signals: FuyaoMarketSignal[];
+  source_timestamps: string[];
+  classification: "research_only";
+  decision_weight_applied: false;
+  paper_order_side_effect: false;
+};
+
+export type FuyaoMarketResearchResponse = FuyaoResearchResponse & {
+  research_type: "market";
+  raw_sections_included?: boolean;
+  raw_sections_available?: string[];
+  sections: Record<string, unknown> & {
+    derived_sentiment?: FuyaoMarketSentiment;
+  };
+};
+
+export type FuyaoShadowHorizonEvaluation = {
+  horizon_sessions: number;
+  status: string;
+  matured_snapshots: number;
+  expected_signals: number;
+  completed_signals: number;
+  outcome_coverage: number;
+  mean_rank_ic: number | null;
+  average_excess_return_pct: number | null;
+  average_net_excess_return_pct: number | null;
+  top_quintile_net_excess_return_pct: number | null;
+  positive_excess_rate: number | null;
+};
+
+export type FuyaoShadowEvaluationResponse = {
+  evaluation: {
+    status: string;
+    as_of_date: string;
+    contract: string;
+    snapshot_count: number;
+    signal_dates: string[];
+    next_maturity_date: string | null;
+    horizons: FuyaoShadowHorizonEvaluation[];
+    classification: "research_only";
+    decision_weight_applied: false;
+    paper_order_side_effect: false;
+    data_health: Record<string, string>;
+  };
 };
 
 export type MarketDataCacheSummary = {
@@ -2864,6 +2959,51 @@ export type AutoProcessingCycleResult = {
   data_health: Record<string, string>;
 };
 
+export type AutomationRuntimeHealth = {
+  state: "ready" | "watch" | "risk" | string;
+  summary_code: string;
+  reason_codes: string[];
+  observed_at: string;
+  market_date: string;
+  expected_signal_date: string | null;
+  scheduler_enabled: boolean;
+  scheduler_status: string;
+  scheduler_interval_seconds: number;
+  scheduler_overdue_seconds: number;
+  scheduler_cycle_errors: number;
+  scan_window: string;
+  scan_requirement: string;
+  scan_next_check_at: string | null;
+  scan_post_close_time: string;
+  scan_settlement_retry_time: string;
+  automation_scan_status: string;
+  latest_scan_job_id: string | null;
+  latest_scan_status: string | null;
+  latest_scan_signal_date: string | null;
+  latest_scan_matches_expected: boolean;
+  latest_scan_finished_at: string | null;
+  latest_scan_total_symbols: number;
+  latest_scan_scanned_symbols: number;
+  latest_scan_total_batches: number;
+  latest_scan_completed_batches: number;
+  latest_scan_terminal_errors: number;
+  latest_scan_provider_fallbacks: number;
+  latest_scan_tickflow_fallbacks: number;
+  market_data_reliability_state: string | null;
+  market_data_latest_session_coverage: string | null;
+  market_data_latest_session_current: string | null;
+  market_data_latest_session_stale: string | null;
+  market_data_latest_session_missing: string | null;
+  market_cache_prefetch_refreshed: string | null;
+  fuyao_state: string;
+  fuyao_requests: number;
+  fuyao_successes: number;
+  fuyao_errors: number;
+  fuyao_retries: number;
+  fuyao_latency_ms_average: string | null;
+  fuyao_last_data_timestamp: string | null;
+};
+
 export type AutoProcessingState = {
   enabled: boolean;
   status: string;
@@ -2874,6 +3014,7 @@ export type AutoProcessingState = {
   next_run_at: string | null;
   last_error: string | null;
   last_result: AutoProcessingCycleResult | null;
+  runtime_health?: AutomationRuntimeHealth;
 };
 
 export type StrategyPerformance = {

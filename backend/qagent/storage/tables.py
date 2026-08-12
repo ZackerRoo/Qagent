@@ -1782,3 +1782,60 @@ Index(
     FuyaoResearchSnapshotRow.identity_digest,
     FuyaoResearchSnapshotRow.observed_at.desc(),
 )
+
+
+class FuyaoShadowOutcomeRow(Base):
+    __tablename__ = "fuyao_shadow_outcomes"
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_id",
+            "instrument_id",
+            "horizon_sessions",
+            name="uq_fuyao_shadow_outcome",
+        ),
+        CheckConstraint(
+            "classification = 'research_only'",
+            name="ck_fuyao_shadow_outcome_classification",
+        ),
+        CheckConstraint(
+            "decision_weight_applied = 0",
+            name="ck_fuyao_shadow_outcome_no_decision_weight",
+        ),
+    )
+
+    outcome_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("fuyao_research_snapshots.snapshot_id"),
+        index=True,
+    )
+    instrument_id: Mapped[str] = mapped_column(String(32), index=True)
+    signal_date: Mapped[date] = mapped_column(Date, index=True)
+    horizon_sessions: Mapped[int] = mapped_column(Integer, index=True)
+    entry_date: Mapped[date] = mapped_column(Date)
+    outcome_date: Mapped[date] = mapped_column(Date, index=True)
+    signal_score: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(18, 10))
+    entry_adjusted_open: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(20, 8))
+    exit_adjusted_close: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(20, 8))
+    benchmark_id: Mapped[str] = mapped_column(String(32))
+    benchmark_entry_adjusted_open: Mapped[Decimal] = mapped_column(
+        SQLiteScaledDecimal(20, 8)
+    )
+    benchmark_exit_adjusted_close: Mapped[Decimal] = mapped_column(
+        SQLiteScaledDecimal(20, 8)
+    )
+    instrument_return_pct: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(18, 10))
+    benchmark_return_pct: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(18, 10))
+    excess_return_pct: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(18, 10))
+    net_excess_return_pct: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(18, 10))
+    round_trip_cost_bps: Mapped[Decimal] = mapped_column(SQLiteScaledDecimal(12, 4))
+    source_digest: Mapped[str] = mapped_column(String(64))
+    classification: Mapped[str] = mapped_column(String(32), default="research_only")
+    decision_weight_applied: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
+Index(
+    "ix_fuyao_shadow_outcome_evaluation",
+    FuyaoShadowOutcomeRow.horizon_sessions,
+    FuyaoShadowOutcomeRow.outcome_date,
+)

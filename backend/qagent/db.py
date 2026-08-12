@@ -248,6 +248,14 @@ def _apply_additive_migrations(engine: Engine) -> None:
                 "last_lease_heartbeat_at": "DATETIME",
             },
         )
+        _add_missing_columns(
+            connection,
+            inspector,
+            "fuyao_shadow_outcomes",
+            {
+                "round_trip_cost_bps": "BIGINT NOT NULL DEFAULT 200000",
+            },
+        )
         added_event_columns = _add_missing_columns(
             connection,
             inspector,
@@ -329,6 +337,7 @@ def _apply_additive_migrations(engine: Engine) -> None:
         _create_immutable_row_triggers(connection, "factor_shadow_scores")
         _create_immutable_row_triggers(connection, "factor_shadow_outcomes")
         _create_immutable_row_triggers(connection, "fuyao_research_snapshots")
+        _create_immutable_row_triggers(connection, "fuyao_shadow_outcomes")
 
 
 @contextmanager

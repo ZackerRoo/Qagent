@@ -82,10 +82,15 @@ from qagent.research.factor_shadow_outcomes import (
     build_factor_shadow_evaluation,
     resolve_factor_shadow_outcomes,
 )
+from qagent.research.fuyao_market_sentiment import capture_fuyao_market_research
+from qagent.research.fuyao_shadow_outcomes import (
+    resolve_fuyao_shadow_outcomes,
+)
 from qagent.jobs.automation import run_research_automation
 from qagent.jobs.automation_scheduler import (
     AutoProcessingCycleResult,
     AutoProcessingSettings,
+    AutoProcessingState,
     AutomationScheduler,
 )
 from qagent.providers.fuyao import (
@@ -3472,7 +3477,13 @@ def run_automation(
 
 @router.get("/automation/scheduler")
 def automation_scheduler_state() -> dict[str, object]:
-    return _automation_scheduler.refresh_if_due(_run_auto_processing_cycle).model_dump(mode="json")
+    state = _automation_scheduler.refresh_if_due(_run_auto_processing_cycle)
+    payload = state.model_dump(mode="json")
+    payload["runtime_health"] = _automation_runtime_health(
+        state,
+        _repo().get_latest_full_market_scan_job(provider=state.settings.provider),
+    )
+    return payload
 
 
 @router.post("/automation/scheduler/run-once")
@@ -3681,6 +3692,49 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
         except Exception as exc:
             scan_status = "failed"
             errors.append(f"scan: {exc}")
+
+    if mode == "free" and expected_signal_date is not None:
+        latest_scan = repo.get_latest_full_market_scan_job(provider=mode)
+        latest_signal_date = (
+            latest_scan.data_health.get("full_market_signal_date")
+            if latest_scan is not None
+            else None
+        )
+        if (
+            latest_scan is not None
+            and latest_scan.status == "succeeded"
+            and latest_signal_date == expected_signal_date.isoformat()
+        ):
+            fuyao_settings = get_settings()
+            if fuyao_settings.fuyao_api_key:
+                try:
+                    capture = capture_fuyao_market_research(
+                        create_session_factory(),
+                        client=FuyaoClient(
+                            fuyao_settings.fuyao_api_key,
+                            base_url=fuyao_settings.fuyao_base_url,
+                            request_timeout_seconds=fuyao_settings.fuyao_timeout_seconds,
+                        ),
+                        trade_date=expected_signal_date,
+                        reuse_existing=True,
+                    )
+                    data_health["fuyao_market_research_status"] = capture.status
+                    if capture.snapshot is not None:
+                        data_health["fuyao_market_research_snapshot_id"] = (
+                            capture.snapshot.snapshot_id
+                        )
+                    data_health["fuyao_market_research_errors"] = str(
+                        len(capture.errors)
+                    )
+                    data_health["fuyao_market_research_decision_weight"] = "none"
+                except Exception as exc:
+                    data_health["fuyao_market_research_status"] = "error"
+                    data_health["fuyao_market_research_error"] = str(exc)
+                    errors.append(f"fuyao_market_research: {exc}")
+            else:
+                data_health["fuyao_market_research_status"] = "missing_config"
+        else:
+            data_health["fuyao_market_research_status"] = "waiting_full_scan"
 
     allow_seed_paper, risk_gate_health = _paper_seed_risk_gate(repo, paper_repo, mode)
     data_health.update(risk_gate_health)
@@ -3910,6 +3964,27 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             data_health["factor_shadow_outcome_status"] = "error"
             data_health["factor_shadow_outcome_error"] = str(exc)
             errors.append(f"factor_shadow_outcomes: {exc}")
+
+        try:
+            fuyao_shadow_as_of = (
+                expected_signal_date
+                or _latest_completed_a_share_session()
+                or date.today()
+            )
+            fuyao_shadow_resolution = resolve_fuyao_shadow_outcomes(
+                create_session_factory(),
+                provider_mode=mode,
+                as_of_date=fuyao_shadow_as_of,
+            )
+            data_health.update(fuyao_shadow_resolution.data_health)
+            if fuyao_shadow_resolution.next_maturity_date is not None:
+                data_health["fuyao_shadow_next_maturity_date"] = (
+                    fuyao_shadow_resolution.next_maturity_date.isoformat()
+                )
+        except Exception as exc:
+            data_health["fuyao_shadow_status"] = "error"
+            data_health["fuyao_shadow_error"] = str(exc)
+            errors.append(f"fuyao_shadow_outcomes: {exc}")
 
     if settings.run_alerts:
         try:
@@ -5768,6 +5843,239 @@ def _maybe_start_automatic_full_scan(
         True,
         job.job_id,
     )
+
+
+def _automation_runtime_health(
+    state: AutoProcessingState,
+    latest_scan: object | None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    local_now = current.astimezone(ZoneInfo("Asia/Shanghai"))
+    today = local_now.date()
+    expected_session = _latest_completed_a_share_session(current)
+    today_is_session = today in trading_sessions_in_range(today, today)
+    scan_allowed, scan_window = _automatic_full_scan_window(current)
+
+    latest_health = getattr(latest_scan, "data_health", {})
+    if not isinstance(latest_health, Mapping):
+        latest_health = {}
+    last_result = state.last_result
+    cycle_health = last_result.data_health if last_result is not None else {}
+    latest_status = _string_value(getattr(latest_scan, "status", None)) or None
+    latest_signal_date = _string_value(latest_health.get("full_market_signal_date")) or None
+    latest_matches_expected = bool(
+        expected_session is not None
+        and latest_signal_date == expected_session.isoformat()
+    )
+    scan_requirement = _automatic_scan_requirement(
+        latest_status=latest_status,
+        latest_matches_expected=latest_matches_expected,
+        expected_session=expected_session,
+        today=today,
+        today_is_session=today_is_session,
+        local_time=local_now.timetz().replace(tzinfo=None),
+        scan_allowed=scan_allowed,
+    )
+    next_check_at = _next_automatic_scan_check(
+        state,
+        current=current,
+        today_is_session=today_is_session,
+    )
+
+    next_run_at = state.next_run_at
+    overdue_seconds = 0
+    if (
+        state.enabled
+        and state.status != "running"
+        and next_run_at is not None
+        and _as_utc_datetime(next_run_at) < current
+    ):
+        overdue_seconds = max(
+            int((current - _as_utc_datetime(next_run_at)).total_seconds()),
+            0,
+        )
+
+    terminal_scan_errors = _int_value(getattr(latest_scan, "errors", 0))
+    provider_fallbacks = _int_value(latest_health.get("provider_error_count"))
+    tickflow_fallbacks = _int_value(latest_health.get("tickflow_fallback_count"))
+    fuyao_state = _string_value(cycle_health.get("fuyao_telemetry")) or "unavailable"
+    cycle_errors = len(last_result.errors) if last_result is not None else 0
+    latest_reliability = _string_value(
+        latest_health.get("market_data_reliability_state")
+    )
+    automation_scan_status = (
+        last_result.scan_status if last_result is not None else "not_started"
+    )
+
+    risk_reasons = []
+    watch_reasons = []
+    if not state.enabled:
+        risk_reasons.append("scheduler_disabled")
+    if state.last_error or cycle_errors:
+        risk_reasons.append("scheduler_error")
+    if latest_status == "failed" or terminal_scan_errors:
+        risk_reasons.append("scan_failed")
+    if fuyao_state == "error":
+        risk_reasons.append("fuyao_error")
+    if overdue_seconds > max(state.settings.interval_seconds, 60):
+        risk_reasons.append("scheduler_overdue")
+    elif overdue_seconds:
+        watch_reasons.append("scheduler_overdue")
+    if scan_requirement in {"due", "missing"}:
+        watch_reasons.append("scan_due")
+    if provider_fallbacks or tickflow_fallbacks:
+        watch_reasons.append("source_fallback")
+    if fuyao_state == "partial":
+        watch_reasons.append("fuyao_partial")
+    if latest_reliability in {"watch", "risk"}:
+        (risk_reasons if latest_reliability == "risk" else watch_reasons).append(
+            "market_data_reliability"
+        )
+    if automation_scan_status in {
+        "candidate_data_partially_stale_filtered",
+        "candidate_data_stale_after_retry",
+    }:
+        watch_reasons.append("candidate_freshness_filtered")
+
+    health_state = "risk" if risk_reasons else "watch" if watch_reasons else "ready"
+    reason_codes = list(dict.fromkeys([*risk_reasons, *watch_reasons]))
+    summary_code = reason_codes[0] if reason_codes else scan_requirement
+    latest_finished_at = getattr(latest_scan, "finished_at", None)
+
+    return {
+        "state": health_state,
+        "summary_code": summary_code,
+        "reason_codes": reason_codes,
+        "observed_at": current.isoformat(),
+        "market_date": today.isoformat(),
+        "expected_signal_date": (
+            expected_session.isoformat() if expected_session is not None else None
+        ),
+        "scheduler_enabled": state.enabled,
+        "scheduler_status": state.status,
+        "scheduler_interval_seconds": state.settings.interval_seconds,
+        "scheduler_overdue_seconds": overdue_seconds,
+        "scheduler_cycle_errors": cycle_errors,
+        "scan_window": scan_window,
+        "scan_requirement": scan_requirement,
+        "scan_next_check_at": (
+            next_check_at.isoformat() if next_check_at is not None else None
+        ),
+        "scan_post_close_time": PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME.strftime(
+            "%H:%M"
+        ),
+        "scan_settlement_retry_time": PAPER_CANDIDATE_SETTLEMENT_RETRY_TIME.strftime(
+            "%H:%M"
+        ),
+        "automation_scan_status": automation_scan_status,
+        "latest_scan_job_id": getattr(latest_scan, "job_id", None),
+        "latest_scan_status": latest_status,
+        "latest_scan_signal_date": latest_signal_date,
+        "latest_scan_matches_expected": latest_matches_expected,
+        "latest_scan_finished_at": (
+            _as_utc_datetime(latest_finished_at).isoformat()
+            if isinstance(latest_finished_at, datetime)
+            else None
+        ),
+        "latest_scan_total_symbols": _int_value(
+            getattr(latest_scan, "total_symbols", 0)
+        ),
+        "latest_scan_scanned_symbols": _int_value(
+            getattr(latest_scan, "scanned_symbols", 0)
+        ),
+        "latest_scan_total_batches": _int_value(
+            getattr(latest_scan, "total_batches", 0)
+        ),
+        "latest_scan_completed_batches": _int_value(
+            getattr(latest_scan, "completed_batches", 0)
+        ),
+        "latest_scan_terminal_errors": terminal_scan_errors,
+        "latest_scan_provider_fallbacks": provider_fallbacks,
+        "latest_scan_tickflow_fallbacks": tickflow_fallbacks,
+        "market_data_reliability_state": latest_reliability or None,
+        "market_data_latest_session_coverage": latest_health.get(
+            "market_data_latest_session_coverage"
+        ),
+        "market_data_latest_session_current": latest_health.get(
+            "market_data_latest_session_current"
+        ),
+        "market_data_latest_session_stale": latest_health.get(
+            "market_data_latest_session_stale"
+        ),
+        "market_data_latest_session_missing": latest_health.get(
+            "market_data_latest_session_missing"
+        ),
+        "market_cache_prefetch_refreshed": latest_health.get(
+            "market_cache_prefetch_refreshed"
+        ),
+        "fuyao_state": fuyao_state,
+        "fuyao_requests": _int_value(cycle_health.get("fuyao_requests")),
+        "fuyao_successes": _int_value(cycle_health.get("fuyao_successes")),
+        "fuyao_errors": _int_value(cycle_health.get("fuyao_errors")),
+        "fuyao_retries": _int_value(cycle_health.get("fuyao_retries")),
+        "fuyao_latency_ms_average": cycle_health.get("fuyao_latency_ms_average"),
+        "fuyao_last_data_timestamp": cycle_health.get("fuyao_last_data_timestamp"),
+    }
+
+
+def _automatic_scan_requirement(
+    *,
+    latest_status: str | None,
+    latest_matches_expected: bool,
+    expected_session: date | None,
+    today: date,
+    today_is_session: bool,
+    local_time: time,
+    scan_allowed: bool,
+) -> str:
+    if latest_status in {"queued", "running"}:
+        return "running"
+    if latest_status == "failed":
+        return "failed"
+    if expected_session is None:
+        return "missing"
+    if latest_matches_expected:
+        if (
+            today_is_session
+            and expected_session < today
+            and local_time < PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME
+        ):
+            return "current_session_pending_close"
+        return "current"
+    if not scan_allowed:
+        return "waiting_settlement"
+    return "due"
+
+
+def _next_automatic_scan_check(
+    state: AutoProcessingState,
+    *,
+    current: datetime,
+    today_is_session: bool,
+) -> datetime | None:
+    if not state.enabled or not state.settings.run_scan or state.next_run_at is None:
+        return None
+    candidate = max(_as_utc_datetime(state.next_run_at), current)
+    local_now = current.astimezone(ZoneInfo("Asia/Shanghai"))
+    if not today_is_session:
+        return candidate
+    cutoff = datetime.combine(
+        local_now.date(),
+        PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME,
+        tzinfo=ZoneInfo("Asia/Shanghai"),
+    ).astimezone(timezone.utc)
+    if candidate >= cutoff or local_now.timetz().replace(tzinfo=None) >= cutoff.astimezone(
+        ZoneInfo("Asia/Shanghai")
+    ).timetz().replace(tzinfo=None):
+        return candidate
+    interval = max(state.settings.interval_seconds, 1)
+    steps = math.ceil((cutoff - candidate).total_seconds() / interval)
+    return candidate + timedelta(seconds=max(steps, 0) * interval)
 
 
 def _full_market_scan_job_is_stale(job, settings: AutoProcessingSettings) -> bool:

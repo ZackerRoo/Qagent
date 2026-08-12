@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+from datetime import date
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+import pandas as pd
 
 from qagent.api import fuyao_routes
 from qagent.app import create_app
+from qagent.db import create_session_factory, initialize_database
 from qagent.providers.fuyao import FuyaoProviderError
+from qagent.storage.market_cache import MarketDataCacheRepository
 
 
 class StubFuyaoClient:
+    last_request = SimpleNamespace(
+        request_id="fuyao-test-request",
+        timestamp="2026-08-12T15:00:00+08:00",
+    )
+
     def search_tickers(self, query, **kwargs):
         return {"item": [{"thscode": "600519.SH", "name": "贵州茅台"}], "query": query}
 
@@ -179,6 +188,31 @@ def test_fuyao_stock_research_rejects_etf_and_index_ids(monkeypatch, tmp_path):
     assert "does not accept index" in index.json()["detail"]
 
 
+def test_fuyao_market_research_reuses_complete_snapshot_unless_refreshed(
+    monkeypatch,
+    tmp_path,
+):
+    client = _client(monkeypatch, tmp_path)
+    reuse_values: list[bool] = []
+
+    def capture_stub(*args, **kwargs):
+        reuse_values.append(bool(kwargs["reuse_existing"]))
+        return SimpleNamespace(response={"reuse_existing": kwargs["reuse_existing"]})
+
+    monkeypatch.setattr(fuyao_routes, "capture_fuyao_market_research", capture_stub)
+
+    reused = client.get("/api/fuyao/research/market?trade_date=2026-08-12")
+    refreshed = client.get(
+        "/api/fuyao/research/market?trade_date=2026-08-12&refresh=true"
+    )
+
+    assert reused.status_code == 200
+    assert reused.json()["reuse_existing"] is True
+    assert refreshed.status_code == 200
+    assert refreshed.json()["reuse_existing"] is False
+    assert reuse_values == [True, False]
+
+
 def test_fuyao_market_and_fund_research_endpoints_preserve_raw_sections(monkeypatch, tmp_path):
     client = _client(monkeypatch, tmp_path)
 
@@ -188,12 +222,61 @@ def test_fuyao_market_and_fund_research_endpoints_preserve_raw_sections(monkeypa
     assert market.status_code == 200
     assert market.json()["status"] == "partial"
     assert market.json()["sections"]["limit_up_pool"]["item"][0]["thscode"] == "000001.SZ"
+    assert market.json()["sections"]["derived_sentiment"]["classification"] == "research_only"
+    assert market.json()["decision_weight_applied"] is False
+    assert market.json()["paper_order_side_effect"] is False
+    assert market.json()["snapshot"]["persisted"] is True
+    latest = client.get("/api/fuyao/research/market/latest")
+    latest_raw = client.get("/api/fuyao/research/market/latest?include_raw=true")
+    evaluation = client.get("/api/fuyao/research/market/shadow-evaluation")
+    assert latest.status_code == 200
+    assert latest.json()["snapshot"]["snapshot_id"] == market.json()["snapshot"]["snapshot_id"]
+    assert latest.json()["raw_sections_included"] is False
+    assert set(latest.json()["sections"]) == {"derived_sentiment"}
+    assert "limit_up_pool" in latest.json()["raw_sections_available"]
+    assert latest_raw.status_code == 200
+    assert "limit_up_pool" in latest_raw.json()["sections"]
+    assert evaluation.status_code == 200
+    assert evaluation.json()["evaluation"]["snapshot_count"] == 1
+    assert evaluation.json()["evaluation"]["decision_weight_applied"] is False
     assert fund.status_code == 200
     assert fund.json()["status"] == "ready"
     assert fund.json()["sections"]["holdings"]["item"][0]["hold_ratio"] == 4.0
     assert {
         metric["key"] for metric in fund.json()["summary"]["metrics"]
     } >= {"latest_price", "holdings_count", "top_holding_ratio"}
+
+
+def test_fuyao_stock_research_reconciles_same_session_local_close(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    initialize_database()
+    MarketDataCacheRepository(create_session_factory()).save_daily_bars(
+        "free",
+        pd.DataFrame(
+            [
+                {
+                    "instrument_id": "CN:600519",
+                    "trade_date": date(2026, 8, 12),
+                    "open": 1490.0,
+                    "high": 1510.0,
+                    "low": 1480.0,
+                    "close": 1500.0,
+                    "volume": 1000,
+                    "turnover": 1_500_000,
+                    "provider": "fixture",
+                }
+            ]
+        ),
+    )
+
+    response = client.get("/api/fuyao/research/stock?instrument_id=CN:600519")
+
+    assert response.status_code == 200
+    quality = response.json()["quality_comparison"]
+    assert quality["state"] == "aligned"
+    assert quality["same_session"] is True
+    assert quality["difference_pct"] == 0.0
+    assert quality["classification"] == "research_only"
 
 
 def test_fuyao_research_falls_back_to_latest_persisted_snapshot(monkeypatch, tmp_path):
