@@ -342,6 +342,12 @@ def test_automation_runtime_health_explains_pending_close_and_source_fallbacks(
             "full_market_signal_date": expected.isoformat(),
             "provider_error_count": "12",
             "tickflow_fallback_count": "3",
+            "market_data_stale_source_mix": "baostock=20,akshare=2",
+            "market_data_stale_age_mix": "1_session=22",
+            "market_data_missing_reason_mix": "no_daily_bars=4",
+            "market_data_problem_status_mix": "watch=22,no_data=4",
+            "market_data_problem_samples": "CN:000001,CN:000002",
+            "market_data_recovery_action": "settlement_retry_then_provider_repair",
         },
     )
     monkeypatch.setattr(
@@ -367,6 +373,90 @@ def test_automation_runtime_health_explains_pending_close_and_source_fallbacks(
     assert health["latest_scan_provider_fallbacks"] == 12
     assert health["latest_scan_tickflow_fallbacks"] == 3
     assert health["latest_scan_terminal_errors"] == 0
+    assert health["market_data_stale_source_mix"] == "baostock=20,akshare=2"
+    assert health["market_data_stale_age_mix"] == "1_session=22"
+    assert health["market_data_missing_reason_mix"] == "no_daily_bars=4"
+    assert health["market_data_problem_samples"] == "CN:000001,CN:000002"
+    assert (
+        health["market_data_recovery_action"]
+        == "settlement_retry_then_provider_repair"
+    )
+
+
+def test_automation_runtime_health_retains_succeeded_evidence_during_new_scan(
+    monkeypatch,
+):
+    now = datetime(2026, 8, 12, 18, 10, tzinfo=ZoneInfo("Asia/Shanghai"))
+    expected = date(2026, 8, 12)
+    state = AutoProcessingState(
+        enabled=True,
+        status="idle",
+        settings=AutoProcessingSettings(interval_seconds=1800),
+        next_run_at=now + timedelta(minutes=20),
+        last_result=AutoProcessingCycleResult(
+            provider="free",
+            started_at=now - timedelta(minutes=1),
+            finished_at=now,
+            scan_status="running",
+            data_health={"fuyao_telemetry": "idle"},
+        ),
+    )
+    running = SimpleNamespace(
+        job_id="running-scan",
+        status="running",
+        finished_at=None,
+        total_symbols=7050,
+        scanned_symbols=400,
+        total_batches=36,
+        completed_batches=2,
+        errors=0,
+        data_health={},
+    )
+    evidence = SimpleNamespace(
+        job_id="succeeded-scan",
+        status="succeeded",
+        finished_at=now - timedelta(hours=2),
+        errors=0,
+        data_health={
+            "full_market_signal_date": expected.isoformat(),
+            "market_data_reliability_state": "risk",
+            "market_data_latest_session_coverage": "0.106667",
+            "market_data_latest_session_current": "752",
+            "market_data_latest_session_stale": "6041",
+            "market_data_latest_session_missing": "257",
+            "market_data_recovery_action": "settlement_retry_then_provider_repair",
+            "automatic_candidate_refresh_attempt": "2",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "_latest_completed_a_share_session",
+        lambda _now=None: expected,
+    )
+    monkeypatch.setattr(
+        routes,
+        "trading_sessions_in_range",
+        lambda *_: [expected],
+    )
+
+    health = routes._automation_runtime_health(
+        state,
+        running,
+        reliability_scan=evidence,
+        now=now,
+    )
+
+    assert health["state"] == "risk"
+    assert health["scan_requirement"] == "running"
+    assert health["latest_scan_job_id"] == "running-scan"
+    assert health["latest_scan_scanned_symbols"] == 400
+    assert health["market_data_reliability_job_id"] == "succeeded-scan"
+    assert health["market_data_latest_session_coverage"] == "0.106667"
+    assert health["market_data_latest_session_stale"] == "6041"
+    assert health["market_data_refresh_attempt"] == 2
+    assert health["latest_scan_finished_at"] == (
+        now - timedelta(hours=2)
+    ).astimezone(timezone.utc).isoformat()
 
 
 def test_automatic_full_scan_queues_one_post_close_candidate_refresh(monkeypatch):

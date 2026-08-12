@@ -453,6 +453,41 @@ def test_repository_tracks_full_market_batch_scan_jobs(tmp_path):
     assert latest.job_id == job.job_id
 
 
+def test_repository_keeps_latest_succeeded_scan_as_reliability_evidence(tmp_path):
+    repo = make_repo(tmp_path)
+    succeeded = repo.create_full_market_scan_job(
+        provider="free",
+        symbols=["CN:000001"],
+        batch_size=1,
+        include_etfs=True,
+        sync_if_empty=True,
+    )
+    repo.update_full_market_scan_job(
+        succeeded.job_id,
+        status="succeeded",
+        scanned_symbols=1,
+        completed_batches=1,
+        data_health={"market_data_reliability_state": "risk"},
+    )
+    running = repo.create_full_market_scan_job(
+        provider="free",
+        symbols=["CN:000002"],
+        batch_size=1,
+        include_etfs=True,
+        sync_if_empty=True,
+    )
+    repo.update_full_market_scan_job(running.job_id, status="running")
+
+    latest = repo.get_latest_full_market_scan_job(provider="free")
+    evidence = repo.get_latest_succeeded_full_market_scan_job(provider="free")
+
+    assert latest is not None
+    assert latest.job_id == running.job_id
+    assert evidence is not None
+    assert evidence.job_id == succeeded.job_id
+    assert evidence.data_health["market_data_reliability_state"] == "risk"
+
+
 def test_scan_result_cache_retains_only_latest_versions_per_key(tmp_path):
     repo = make_repo(tmp_path)
 

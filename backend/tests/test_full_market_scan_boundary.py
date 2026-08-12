@@ -290,6 +290,9 @@ def test_market_data_reliability_health_reports_complete_latest_session():
     assert health["market_data_latest_session_current"] == "2"
     assert health["market_data_latest_session_coverage"] == "1.000000"
     assert health["market_data_source_mix"] == "akshare=1,baostock=1"
+    assert health["market_data_current_source_mix"] == "akshare=1,baostock=1"
+    assert health["market_data_stale_source_mix"] == ""
+    assert health["market_data_recovery_action"] == "none"
 
 
 def test_market_data_reliability_health_fails_closed_for_stale_or_missing_data():
@@ -321,6 +324,15 @@ def test_market_data_reliability_health_fails_closed_for_stale_or_missing_data()
     assert health["market_data_latest_session_stale"] == "1"
     assert health["market_data_latest_session_missing"] == "1"
     assert health["market_data_latest_session_coverage"] == "0.000000"
+    assert health["market_data_stale_source_mix"] == "akshare=1"
+    assert health["market_data_stale_age_mix"] == "1_session=1"
+    assert health["market_data_missing_reason_mix"] == "no_data=1"
+    assert health["market_data_problem_status_mix"] == "no_data=1,watch=1"
+    assert health["market_data_problem_samples"] == "CN:000002,CN:000001"
+    assert (
+        health["market_data_recovery_action"]
+        == "settlement_retry_then_provider_repair"
+    )
 
 
 def test_full_market_scan_resume_keeps_frozen_expected_trade_date():

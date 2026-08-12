@@ -3478,10 +3478,18 @@ def run_automation(
 @router.get("/automation/scheduler")
 def automation_scheduler_state() -> dict[str, object]:
     state = _automation_scheduler.refresh_if_due(_run_auto_processing_cycle)
+    repo = _repo()
+    latest_scan = repo.get_latest_full_market_scan_job(
+        provider=state.settings.provider
+    )
+    reliability_scan = repo.get_latest_succeeded_full_market_scan_job(
+        provider=state.settings.provider
+    )
     payload = state.model_dump(mode="json")
     payload["runtime_health"] = _automation_runtime_health(
         state,
-        _repo().get_latest_full_market_scan_job(provider=state.settings.provider),
+        latest_scan,
+        reliability_scan=reliability_scan,
     )
     return payload
 
@@ -5849,6 +5857,7 @@ def _automation_runtime_health(
     state: AutoProcessingState,
     latest_scan: object | None,
     *,
+    reliability_scan: object | None = None,
     now: datetime | None = None,
 ) -> dict[str, object]:
     current = now or datetime.now(timezone.utc)
@@ -5861,13 +5870,16 @@ def _automation_runtime_health(
     today_is_session = today in trading_sessions_in_range(today, today)
     scan_allowed, scan_window = _automatic_full_scan_window(current)
 
-    latest_health = getattr(latest_scan, "data_health", {})
-    if not isinstance(latest_health, Mapping):
-        latest_health = {}
+    evidence_scan = reliability_scan or latest_scan
+    evidence_health = getattr(evidence_scan, "data_health", {})
+    if not isinstance(evidence_health, Mapping):
+        evidence_health = {}
     last_result = state.last_result
     cycle_health = last_result.data_health if last_result is not None else {}
     latest_status = _string_value(getattr(latest_scan, "status", None)) or None
-    latest_signal_date = _string_value(latest_health.get("full_market_signal_date")) or None
+    latest_signal_date = (
+        _string_value(evidence_health.get("full_market_signal_date")) or None
+    )
     latest_matches_expected = bool(
         expected_session is not None
         and latest_signal_date == expected_session.isoformat()
@@ -5901,12 +5913,12 @@ def _automation_runtime_health(
         )
 
     terminal_scan_errors = _int_value(getattr(latest_scan, "errors", 0))
-    provider_fallbacks = _int_value(latest_health.get("provider_error_count"))
-    tickflow_fallbacks = _int_value(latest_health.get("tickflow_fallback_count"))
+    provider_fallbacks = _int_value(evidence_health.get("provider_error_count"))
+    tickflow_fallbacks = _int_value(evidence_health.get("tickflow_fallback_count"))
     fuyao_state = _string_value(cycle_health.get("fuyao_telemetry")) or "unavailable"
     cycle_errors = len(last_result.errors) if last_result is not None else 0
     latest_reliability = _string_value(
-        latest_health.get("market_data_reliability_state")
+        evidence_health.get("market_data_reliability_state")
     )
     automation_scan_status = (
         last_result.scan_status if last_result is not None else "not_started"
@@ -5945,7 +5957,7 @@ def _automation_runtime_health(
     health_state = "risk" if risk_reasons else "watch" if watch_reasons else "ready"
     reason_codes = list(dict.fromkeys([*risk_reasons, *watch_reasons]))
     summary_code = reason_codes[0] if reason_codes else scan_requirement
-    latest_finished_at = getattr(latest_scan, "finished_at", None)
+    latest_finished_at = getattr(evidence_scan, "finished_at", None)
 
     return {
         "state": health_state,
@@ -5997,20 +6009,46 @@ def _automation_runtime_health(
         "latest_scan_terminal_errors": terminal_scan_errors,
         "latest_scan_provider_fallbacks": provider_fallbacks,
         "latest_scan_tickflow_fallbacks": tickflow_fallbacks,
+        "market_data_reliability_job_id": getattr(evidence_scan, "job_id", None),
         "market_data_reliability_state": latest_reliability or None,
-        "market_data_latest_session_coverage": latest_health.get(
+        "market_data_latest_session_coverage": evidence_health.get(
             "market_data_latest_session_coverage"
         ),
-        "market_data_latest_session_current": latest_health.get(
+        "market_data_latest_session_current": evidence_health.get(
             "market_data_latest_session_current"
         ),
-        "market_data_latest_session_stale": latest_health.get(
+        "market_data_latest_session_stale": evidence_health.get(
             "market_data_latest_session_stale"
         ),
-        "market_data_latest_session_missing": latest_health.get(
+        "market_data_latest_session_missing": evidence_health.get(
             "market_data_latest_session_missing"
         ),
-        "market_cache_prefetch_refreshed": latest_health.get(
+        "market_data_source_mix": evidence_health.get("market_data_source_mix"),
+        "market_data_current_source_mix": evidence_health.get(
+            "market_data_current_source_mix"
+        ),
+        "market_data_stale_source_mix": evidence_health.get(
+            "market_data_stale_source_mix"
+        ),
+        "market_data_stale_age_mix": evidence_health.get(
+            "market_data_stale_age_mix"
+        ),
+        "market_data_missing_reason_mix": evidence_health.get(
+            "market_data_missing_reason_mix"
+        ),
+        "market_data_problem_status_mix": evidence_health.get(
+            "market_data_problem_status_mix"
+        ),
+        "market_data_problem_samples": evidence_health.get(
+            "market_data_problem_samples"
+        ),
+        "market_data_recovery_action": evidence_health.get(
+            "market_data_recovery_action"
+        ),
+        "market_data_refresh_attempt": _int_value(
+            evidence_health.get("automatic_candidate_refresh_attempt")
+        ),
+        "market_cache_prefetch_refreshed": evidence_health.get(
             "market_cache_prefetch_refreshed"
         ),
         "fuyao_state": fuyao_state,

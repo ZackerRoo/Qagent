@@ -229,6 +229,17 @@ assert(styles.includes(".today-advanced-analysis"), "CSS must define collapsed a
 assert(styles.includes(".how-to-use-panel"), "CSS must define how-to-use guide layout");
 assert(styles.includes(".auto-paper-status-strip"), "CSS must define automatic paper status strip");
 assert(styles.includes(".market-data-reliability-strip"), "CSS must define market-data reliability strip");
+assert(today.includes("market-data-reliability-breakdown"), "Today page must explain stale and missing market data");
+assert(today.includes("marketDataRecoveryLabel"), "Today page must show the configured recovery action");
+assert(
+  today.includes("Settlement retry complete; repair missing sources next"),
+  "Today page must distinguish a completed settlement retry from the next repair step",
+);
+assert(
+  today.includes('runtime.reason_codes.includes("market_data_reliability")'),
+  "Today page must explain that a running scan retains prior reliability evidence",
+);
+assert(styles.includes(".market-data-reliability-breakdown"), "CSS must style market-data reliability diagnostics");
 assert(styles.includes(".today-paper-admission-card"), "CSS must define paper admission explanation card");
 assert(styles.includes(".today-paper-admission-mini"), "CSS must define compact paper admission labels");
 assert(styles.includes(".manual-action-center"), "CSS must define manual action center layout");

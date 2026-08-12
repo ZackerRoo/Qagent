@@ -1,3 +1,4 @@
+from collections import Counter
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -1307,13 +1308,41 @@ def _market_data_reliability_health(
     future = sum(item.latest_trade_date > expected_trade_date for item in dated)
     missing = len(items) - len(dated)
     coverage = current / len(items) if items else 0.0
-    source_counts: dict[str, int] = {}
-    for item in items:
-        source = item.provider or "missing"
-        source_counts[source] = source_counts.get(source, 0) + 1
-    source_mix = ",".join(
-        f"{source}={count}"
-        for source, count in sorted(source_counts.items(), key=lambda value: (-value[1], value[0]))
+    source_counts = Counter(item.provider or "missing" for item in items)
+    current_source_counts = Counter(
+        item.provider or "missing"
+        for item in items
+        if item.latest_trade_date == expected_trade_date
+    )
+    stale_source_counts = Counter(
+        item.provider or "missing"
+        for item in items
+        if item.latest_trade_date is not None
+        and item.latest_trade_date < expected_trade_date
+    )
+    missing_reason_counts = Counter(
+        _market_data_problem_reason(item)
+        for item in items
+        if item.latest_trade_date is None
+    )
+    stale_trade_dates = Counter(
+        item.latest_trade_date
+        for item in items
+        if item.latest_trade_date is not None
+        and item.latest_trade_date < expected_trade_date
+    )
+    stale_age_counts: Counter[str] = Counter()
+    for latest_trade_date, count in stale_trade_dates.items():
+        stale_age_counts[
+            _market_data_stale_age_bucket(latest_trade_date, expected_trade_date)
+        ] += count
+    problem_items = [
+        item for item in items if item.latest_trade_date != expected_trade_date
+    ]
+    problem_status_counts = Counter(item.status for item in problem_items)
+    problem_samples = ",".join(
+        item.instrument_id
+        for item in sorted(problem_items, key=_market_data_problem_sort_key)[:12]
     )
     if error_count > 0 or not items or coverage < 0.80:
         state = "risk"
@@ -1329,8 +1358,89 @@ def _market_data_reliability_health(
         "market_data_latest_session_missing": str(missing),
         "market_data_latest_session_future": str(future),
         "market_data_latest_session_coverage": f"{coverage:.6f}",
-        "market_data_source_mix": source_mix,
+        "market_data_source_mix": _market_data_count_mix(source_counts),
+        "market_data_current_source_mix": _market_data_count_mix(
+            current_source_counts
+        ),
+        "market_data_stale_source_mix": _market_data_count_mix(stale_source_counts),
+        "market_data_stale_age_mix": _market_data_count_mix(stale_age_counts),
+        "market_data_missing_reason_mix": _market_data_count_mix(
+            missing_reason_counts
+        ),
+        "market_data_problem_status_mix": _market_data_count_mix(
+            problem_status_counts
+        ),
+        "market_data_problem_samples": problem_samples,
+        "market_data_recovery_action": _market_data_recovery_action(
+            stale=stale,
+            missing=missing,
+            future=future,
+            error_count=error_count,
+            provider_error_count=provider_error_count,
+        ),
     }
+
+
+def _market_data_count_mix(counts: Counter[str]) -> str:
+    return ",".join(
+        f"{key}={count}"
+        for key, count in sorted(
+            counts.items(),
+            key=lambda value: (-value[1], value[0]),
+        )
+    )
+
+
+def _market_data_problem_reason(item: ScanItem) -> str:
+    blocker = next(
+        (candidate.code for candidate in item.blockers if candidate.severity == "block"),
+        None,
+    )
+    return blocker or item.rejection_category or item.status or "unknown"
+
+
+def _market_data_stale_age_bucket(latest: date, expected: date) -> str:
+    try:
+        sessions = trading_sessions_in_range(latest, expected)
+        lag = max(len(sessions) - 1, 1)
+    except ValueError:
+        lag = max((expected - latest).days, 1)
+    if lag <= 1:
+        return "1_session"
+    if lag <= 5:
+        return "2_5_sessions"
+    if lag <= 20:
+        return "6_20_sessions"
+    return "over_20_sessions"
+
+
+def _market_data_problem_sort_key(item: ScanItem) -> tuple[int, date, str]:
+    if item.latest_trade_date is None:
+        return (0, date.min, item.instrument_id)
+    return (1, item.latest_trade_date, item.instrument_id)
+
+
+def _market_data_recovery_action(
+    *,
+    stale: int,
+    missing: int,
+    future: int,
+    error_count: int,
+    provider_error_count: int,
+) -> str:
+    if future:
+        return "reject_future_data"
+    if error_count:
+        return "scan_error_retry"
+    if stale and missing:
+        return "settlement_retry_then_provider_repair"
+    if stale:
+        return "settlement_retry"
+    if missing:
+        return "provider_fallback_repair"
+    if provider_error_count:
+        return "provider_backoff_retry"
+    return "none"
 
 
 def _merge_health(target: dict[str, str], source: dict[str, str]) -> None:

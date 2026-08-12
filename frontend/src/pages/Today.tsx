@@ -1453,6 +1453,32 @@ function MarketDataReliabilityStrip({
   const missing = runtime?.market_data_latest_session_missing
     ?? dataHealth.market_data_latest_session_missing
     ?? "-";
+  const staleSourceMix = runtime?.market_data_stale_source_mix
+    ?? dataHealth.market_data_stale_source_mix
+    ?? "";
+  const staleAgeMix = runtime?.market_data_stale_age_mix
+    ?? dataHealth.market_data_stale_age_mix
+    ?? "";
+  const missingReasonMix = runtime?.market_data_missing_reason_mix
+    ?? dataHealth.market_data_missing_reason_mix
+    ?? "";
+  const problemSamples = runtime?.market_data_problem_samples
+    ?? dataHealth.market_data_problem_samples
+    ?? "";
+  const reportedRecoveryAction = runtime?.market_data_recovery_action
+    ?? dataHealth.market_data_recovery_action;
+  const refreshAttempt = runtime?.market_data_refresh_attempt
+    ?? Number(dataHealth.automatic_candidate_refresh_attempt ?? 0);
+  const staleCount = Number(stale);
+  const missingCount = Number(missing);
+  const recoveryAction = reportedRecoveryAction
+    ?? (staleCount > 0 && missingCount > 0
+      ? "settlement_retry_then_provider_repair"
+      : staleCount > 0
+        ? "settlement_retry"
+        : missingCount > 0
+          ? "provider_fallback_repair"
+          : "none");
   const refreshed = runtime?.market_cache_prefetch_refreshed
     ?? dataHealth.market_cache_prefetch_refreshed
     ?? "-";
@@ -1547,8 +1573,96 @@ function MarketDataReliabilityStrip({
           </strong>
         </span>
       </div>
+      {state !== "ready" && (
+        <div className="market-data-reliability-breakdown">
+          <span>
+            <small>{language === "zh" ? "陈旧来源" : "Stale sources"}</small>
+            <strong>{formatHealthCountMix(staleSourceMix)}</strong>
+          </span>
+          <span>
+            <small>{language === "zh" ? "过期深度" : "Staleness depth"}</small>
+            <strong>{formatStaleAgeMix(staleAgeMix, language)}</strong>
+          </span>
+          <span>
+            <small>{language === "zh" ? "缺失原因" : "Missing reasons"}</small>
+            <strong>{formatHealthCountMix(missingReasonMix)}</strong>
+          </span>
+          <span>
+            <small>{language === "zh" ? "恢复动作" : "Recovery action"}</small>
+            <strong>
+              {marketDataRecoveryLabel(recoveryAction, language, refreshAttempt)}
+            </strong>
+          </span>
+          {problemSamples && (
+            <span className="is-samples">
+              <small>{language === "zh" ? "问题样本" : "Problem samples"}</small>
+              <strong>{problemSamples.split(",").slice(0, 6).join(" · ")}</strong>
+            </span>
+          )}
+        </div>
+      )}
     </section>
   );
+}
+
+function formatHealthCountMix(value: string): string {
+  if (!value) {
+    return "-";
+  }
+  return value
+    .split(",")
+    .filter(Boolean)
+    .slice(0, 4)
+    .map((item) => item.replace("=", " "))
+    .join(" · ");
+}
+
+function formatStaleAgeMix(value: string, language: "zh" | "en"): string {
+  if (!value) {
+    return "-";
+  }
+  const labels: Record<string, [string, string]> = {
+    "1_session": ["1个交易日", "1 session"],
+    "2_5_sessions": ["2-5个交易日", "2-5 sessions"],
+    "6_20_sessions": ["6-20个交易日", "6-20 sessions"],
+    "over_20_sessions": ["超过20日", "Over 20 sessions"],
+  };
+  return value
+    .split(",")
+    .filter(Boolean)
+    .slice(0, 4)
+    .map((item) => {
+      const [key, count] = item.split("=");
+      const label = labels[key];
+      return `${label ? label[language === "zh" ? 0 : 1] : key} ${count ?? ""}`.trim();
+    })
+    .join(" · ");
+}
+
+function marketDataRecoveryLabel(
+  value: string,
+  language: "zh" | "en",
+  refreshAttempt = 0,
+): string {
+  if (value === "settlement_retry_then_provider_repair" && refreshAttempt >= 2) {
+    return language === "zh"
+      ? "已完成结算补扫，下一步修复缺失源"
+      : "Settlement retry complete; repair missing sources next";
+  }
+  const labels: Record<string, [string, string]> = {
+    none: ["无需处理", "No action"],
+    settlement_retry: ["等待结算后补扫", "Retry after settlement"],
+    settlement_retry_then_provider_repair: [
+      "结算补扫后修复缺失源",
+      "Retry after settlement, then repair missing sources",
+    ],
+    provider_fallback_repair: ["修复备用源", "Repair provider fallback"],
+    provider_backoff_retry: ["限流退避后重试", "Retry after provider backoff"],
+    scan_error_retry: ["修复扫描错误后重试", "Fix scan errors and retry"],
+    reject_future_data: ["隔离未来日期数据", "Quarantine future-dated data"],
+  };
+  const label = labels[value] ?? [value || "-", value || "-"];
+  return language === "zh" ? label[0] : label[1];
 }
 
 function FuyaoMarketSentimentPanel({
@@ -1735,6 +1849,22 @@ function runtimeHealthSummary(
           : "Loading scheduler, full-market scan, and provider status.");
   }
   const nextCheck = formatMaybeDateTime(runtime.scan_next_check_at, language);
+  if (
+    runtime.scan_requirement === "running"
+    && runtime.reason_codes.includes("market_data_reliability")
+  ) {
+    return language === "zh"
+      ? "当前全市场扫描正在后台运行；上一轮成功结果的数据覆盖需修复，完成后会自动重新评估。"
+      : "The full-market scan is running; the previous successful result has a coverage issue and will be reassessed on completion.";
+  }
+  if (
+    runtime.scan_requirement === "running"
+    && runtime.reason_codes.includes("source_fallback")
+  ) {
+    return language === "zh"
+      ? "当前全市场扫描正在后台运行；上一轮部分上游调用由缓存或备用源承接，完成后会重新评估。"
+      : "The full-market scan is running; the previous result used upstream fallbacks and will be reassessed on completion.";
+  }
   const summaries: Record<string, string> = language === "zh"
     ? {
         scheduler_disabled: "自动处理已停用，不会继续更新候选或模拟持仓。",
@@ -1743,6 +1873,7 @@ function runtimeHealthSummary(
         fuyao_error: "扶摇请求失败；候选研究会保留最近保存快照，不影响既有排序。",
         scheduler_overdue: "调度检查已超过计划时间，后台恢复线程正在补偿执行。",
         scan_due: `当前交易日数据已结算，预计 ${nextCheck} 再检查并启动全扫。`,
+        market_data_reliability: "最近成功全扫的数据覆盖不足，系统会按恢复动作补扫或修复来源。",
         source_fallback: `全市场扫描已完成，部分上游调用由缓存或备用源承接；${nextCheck} 继续检查。`,
         fuyao_partial: "扶摇部分接口可用，缺失研究字段会明确标记或使用最近保存快照。",
         candidate_freshness_filtered: "部分旧候选已被过滤，系统不会把过期候选作为今天的新机会。",
@@ -1754,6 +1885,7 @@ function runtimeHealthSummary(
         fuyao_error: "Fuyao failed; saved research remains available without changing ranking.",
         scheduler_overdue: "The scheduler is overdue and its recovery loop is compensating.",
         scan_due: `The session has settled; the next scan check is ${nextCheck}.`,
+        market_data_reliability: "The latest successful scan has insufficient data coverage and requires the configured recovery action.",
         source_fallback: `The scan completed with upstream fallbacks; the next check is ${nextCheck}.`,
         fuyao_partial: "Some Fuyao sections are unavailable and are explicitly marked or served from saved research.",
         candidate_freshness_filtered: "Stale candidates were filtered and are not treated as today's opportunities.",

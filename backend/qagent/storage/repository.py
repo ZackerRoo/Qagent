@@ -2583,6 +2583,24 @@ class QagentRepository:
                 return None
             return self._full_market_scan_job_from_row(row)
 
+    def get_latest_succeeded_full_market_scan_job(
+        self,
+        provider: str | None = None,
+    ) -> FullMarketScanJobRecord | None:
+        with self.session_factory() as session:
+            query = session.query(FullMarketScanJobRow).filter(
+                FullMarketScanJobRow.status == "succeeded"
+            )
+            if provider:
+                query = query.filter(FullMarketScanJobRow.provider == provider)
+            row = query.order_by(
+                FullMarketScanJobRow.created_at.desc(),
+                FullMarketScanJobRow.job_id.desc(),
+            ).first()
+            if row is None:
+                return None
+            return self._full_market_scan_job_from_row(row)
+
     def create_historical_backfill_job(
         self,
         provider: str,
