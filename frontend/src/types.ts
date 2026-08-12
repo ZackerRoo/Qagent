@@ -2697,6 +2697,30 @@ export type ProviderStatusResponse = {
   providers: ProviderStatus[];
 };
 
+export type FuyaoCapabilityGroup = {
+  id: string;
+  name: string;
+  capabilities: string[];
+  qagent_role: string;
+};
+
+export type FuyaoCapabilityManifest = {
+  provider_id: "fuyao";
+  configured: boolean;
+  source_role: string;
+  execution_enabled: boolean;
+  decision_weight_applied: boolean;
+  groups: FuyaoCapabilityGroup[];
+  supported_intervals: string[];
+  minute_bars_supported: boolean;
+  full_market_export: {
+    api_key_supported: boolean;
+    browser_session_required: boolean;
+    qagent_automatic_import_enabled: boolean;
+  };
+  planned_or_unavailable: string[];
+};
+
 export type MarketDataCacheSummary = {
   provider_mode: string;
   instrument_id: string;

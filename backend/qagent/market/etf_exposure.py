@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+from threading import Lock
 import time
 from typing import Callable
 
@@ -16,10 +17,11 @@ import pandas as pd
 from pydantic import BaseModel, Field
 
 from qagent.market.cn_context import infer_etf_exposure
+from qagent.providers.fuyao import FuyaoClient, from_fuyao_thscode, to_fuyao_thscode
 
 
 EASTMONEY_FUND_BASE = "https://fundf10.eastmoney.com"
-ETF_EXPOSURE_CACHE_VERSION = 3
+ETF_EXPOSURE_CACHE_VERSION = 4
 ETF_EXPOSURE_CACHE_TTL_SECONDS = 24 * 60 * 60
 
 
@@ -88,12 +90,15 @@ class EtfExposureService:
         cache_dir: Path | None = None,
         clock: Callable[[], datetime] | None = None,
         cache_ttl_seconds: int = ETF_EXPOSURE_CACHE_TTL_SECONDS,
+        fuyao_client: FuyaoClient | None = None,
     ) -> None:
         self.http_get = http_get
         self.industry_loader = industry_loader
         self.cache_dir = cache_dir or _default_cache_dir()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.cache_ttl_seconds = cache_ttl_seconds
+        self.fuyao_client = fuyao_client
+        self._fuyao_lock = Lock()
 
     def build_response(
         self,
@@ -114,6 +119,7 @@ class EtfExposureService:
         with ThreadPoolExecutor(max_workers=min(max_workers, len(unique))) as executor:
             profiles = list(executor.map(lambda item: self.load_profile(*item), unique))
         overlaps = build_etf_overlaps(profiles)
+        sources = sorted({profile.source_provider for profile in profiles})
         return EtfExposureResponse(
             profiles=profiles,
             overlaps=overlaps,
@@ -129,8 +135,10 @@ class EtfExposureService:
                     sum(profile.data_status == "unavailable" for profile in profiles)
                 ),
                 "etf_exposure_overlaps": str(len(overlaps)),
-                "etf_exposure_source": "eastmoney_fund_disclosure",
-                "etf_holdings_scope": "latest_quarterly_top10",
+                "etf_exposure_source": ",".join(sources),
+                "etf_holdings_scope": ",".join(
+                    sorted({profile.holdings_scope for profile in profiles})
+                ),
             },
         )
 
@@ -153,6 +161,7 @@ class EtfExposureService:
         holdings_as_of = None
         industries: list[EtfIndustryExposure] = []
         industries_as_of = None
+        sources: list[str] = []
         try:
             metadata = self._load_basic_metadata(symbol)
         except Exception as exc:
@@ -165,6 +174,26 @@ class EtfExposureService:
             industries, industries_as_of = self._load_industries(symbol)
         except Exception as exc:
             errors.append(f"industries:{type(exc).__name__}")
+
+        if metadata or holdings or industries:
+            sources.append("eastmoney_fund_disclosure")
+        if self.fuyao_client is not None and (not metadata or not holdings):
+            try:
+                with self._fuyao_lock:
+                    fuyao_metadata, fuyao_holdings, fuyao_errors = self._load_fuyao_profile(
+                        instrument_id,
+                        include_metadata=not metadata,
+                        include_holdings=not holdings,
+                    )
+                errors.extend(fuyao_errors)
+                if not metadata:
+                    metadata = fuyao_metadata
+                if not holdings:
+                    holdings = fuyao_holdings
+                if fuyao_metadata or fuyao_holdings:
+                    sources.append("fuyao_fund_api")
+            except Exception as exc:
+                errors.append(f"fuyao_fund:{type(exc).__name__}")
 
         resolved_name = metadata.get("基金简称") or fund_name or instrument_id
         tracking_index = _clean_tracking_index(metadata.get("跟踪标的"))
@@ -183,10 +212,19 @@ class EtfExposureService:
             holdings=holdings,
             holdings_as_of=holdings_as_of,
             holdings_coverage_pct=round(sum(item.weight_pct for item in holdings), 4),
-            holdings_scope="latest_quarterly_top10" if holdings else "unavailable",
+            holdings_scope=(
+                "disclosed_top_holdings_no_report_date"
+                if holdings and holdings_as_of is None and "fuyao_fund_api" in sources
+                else "latest_quarterly_top10" if holdings else "unavailable"
+            ),
             industries=industries,
             industries_as_of=industries_as_of,
-            source_url=f"{EASTMONEY_FUND_BASE}/jbgk_{symbol}.html",
+            source_provider="+".join(dict.fromkeys(sources)) or "unavailable",
+            source_url=(
+                f"{self.fuyao_client.base_url}/docs/api-reference/fund-holdings/"
+                if sources == ["fuyao_fund_api"] and self.fuyao_client is not None
+                else f"{EASTMONEY_FUND_BASE}/jbgk_{symbol}.html"
+            ),
             fetched_at=self.clock(),
             data_status=_profile_status(
                 metadata,
@@ -199,6 +237,64 @@ class EtfExposureService:
         )
         self._write_cache(profile)
         return profile
+
+    def _load_fuyao_profile(
+        self,
+        instrument_id: str,
+        *,
+        include_metadata: bool,
+        include_holdings: bool,
+    ) -> tuple[dict[str, str], list[EtfConstituent], list[str]]:
+        if self.fuyao_client is None:
+            return {}, [], []
+        thscode = to_fuyao_thscode(instrument_id)
+        errors: list[str] = []
+        profile_data: dict[str, object] = {}
+        holdings_data: dict[str, object] = {}
+        if include_metadata:
+            try:
+                profile_data = self.fuyao_client.get_fund_profile(thscode)
+            except Exception as exc:
+                errors.append(f"fuyao_profile:{type(exc).__name__}")
+        if include_holdings:
+            try:
+                holdings_data = self.fuyao_client.get_fund_holdings(thscode)
+            except Exception as exc:
+                errors.append(f"fuyao_holdings:{type(exc).__name__}")
+
+        metadata: dict[str, str] = {}
+        profile_items = profile_data.get("item")
+        if isinstance(profile_items, list) and profile_items and isinstance(profile_items[0], dict):
+            item = profile_items[0]
+            fund_name = _text(item.get("fund_name"))
+            if fund_name:
+                metadata["基金简称"] = fund_name
+            metadata["基金类型"] = "场内基金"
+
+        holdings: list[EtfConstituent] = []
+        raw_holdings = holdings_data.get("item")
+        if isinstance(raw_holdings, list):
+            for item in raw_holdings:
+                if not isinstance(item, dict):
+                    continue
+                thscode_value = _text(item.get("thscode"))
+                weight = _percentage(item.get("hold_ratio"))
+                if not thscode_value or weight is None:
+                    continue
+                try:
+                    holding_instrument_id = from_fuyao_thscode(thscode_value)
+                except ValueError:
+                    continue
+                holdings.append(
+                    EtfConstituent(
+                        instrument_id=holding_instrument_id,
+                        symbol=_text(item.get("ticker")) or thscode_value.split(".", 1)[0],
+                        name=_text(item.get("stock_name")),
+                        weight_pct=weight,
+                    )
+                )
+        holdings.sort(key=lambda item: (-item.weight_pct, item.symbol))
+        return metadata, holdings[:10], errors
 
     def _load_basic_metadata(self, symbol: str) -> dict[str, str]:
         url = f"{EASTMONEY_FUND_BASE}/jbgk_{symbol}.html"

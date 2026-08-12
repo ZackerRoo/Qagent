@@ -84,6 +84,24 @@ def build_provider_status(settings: Settings | None = None) -> list[ProviderStat
             capabilities=["a_share_financials", "money_flow", "dragon_tiger"],
             notes="Configured by token, but deeper normalized adapters are still provider-dependent.",
         ),
+        _keyed_status(
+            provider_id="fuyao",
+            name="扶摇同花顺金融数据 API",
+            configured=bool(settings.fuyao_api_key),
+            capabilities=[
+                "cn_snapshot_read_only",
+                "cn_daily_ohlcv_fallback",
+                "index_data",
+                "fund_and_etf_data",
+                "financials_and_valuations",
+                "special_data",
+            ],
+            notes=(
+                "最新行情优先用于模拟盘定价，小批量日线作为三级兜底；财务、估值、"
+                "基金持仓和情绪数据仅用于研究展示，不直接改变选股权重。"
+                "不提供分钟 K 线，也不连接券商执行。"
+            ),
+        ),
     ]
 
 

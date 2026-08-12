@@ -6,6 +6,7 @@ import {
   fetchAutomationScheduler,
   fetchDataCache,
   fetchFullMarketCheckpointStorage,
+  fetchFuyaoCapabilities,
   fetchProviderStatus,
   fetchTradableCatalog,
   maintainFullMarketCheckpointStorage,
@@ -29,6 +30,7 @@ import type {
   AutomationRunResponse,
   AutoProcessingState,
   DataProviderMode,
+  FuyaoCapabilityManifest,
   MarketDataCacheResponse,
   ProviderStatusResponse,
   ScanCheckpointMaintenanceReport,
@@ -56,6 +58,7 @@ const emptyUniverse: UniverseCreate = {
 export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props) {
   const { language, t } = useI18n();
   const [providerStatus, setProviderStatus] = useState<ProviderStatusResponse>();
+  const [fuyaoCapabilities, setFuyaoCapabilities] = useState<FuyaoCapabilityManifest>();
   const [dataCache, setDataCache] = useState<MarketDataCacheResponse>();
   const [automationResult, setAutomationResult] = useState<AutomationRunResponse>();
   const [automationScheduler, setAutomationScheduler] = useState<AutoProcessingState>();
@@ -92,6 +95,9 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
     void fetchProviderStatus()
       .then(apply(setProviderStatus))
       .catch((caught) => fail(caught, "Failed to load provider status"));
+    void fetchFuyaoCapabilities()
+      .then(apply(setFuyaoCapabilities))
+      .catch((caught) => fail(caught, "Failed to load Fuyao capabilities"));
     void fetchDataCache(dataMode)
       .then(apply(setDataCache))
       .catch((caught) => fail(caught, "Failed to load data cache"));
@@ -562,6 +568,74 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
         )}
       </section>
 
+      <section className="panel stack">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">{language === "zh" ? "扶摇数据源" : "Fuyao data source"}</p>
+            <h2>{language === "zh" ? "接入能力与边界" : "Integrated capabilities"}</h2>
+          </div>
+          <span className={`status status-${fuyaoCapabilities?.configured ? "ready" : "missing_config"}`}>
+            {fuyaoCapabilities?.configured
+              ? language === "zh" ? "已配置" : "Configured"
+              : language === "zh" ? "未配置" : "Not configured"}
+          </span>
+        </div>
+        <div className="settings-list">
+          <div>
+            <span>{language === "zh" ? "模拟盘行情" : "Paper market data"}</span>
+            <strong>{language === "zh" ? "实时快照优先，小批量日线三级兜底" : "Live snapshot first, bounded tertiary daily fallback"}</strong>
+          </div>
+          <div>
+            <span>{language === "zh" ? "研究数据" : "Research data"}</span>
+            <strong>{language === "zh" ? "只读，不直接改变选股权重" : "Read-only; no direct ranking weight"}</strong>
+          </div>
+          <div>
+            <span>{language === "zh" ? "行情周期" : "Market interval"}</span>
+            <strong>{fuyaoCapabilities?.supported_intervals.join(", ") || "1d"}</strong>
+          </div>
+          <div>
+            <span>{language === "zh" ? "分钟行情" : "Minute bars"}</span>
+            <strong>{language === "zh" ? "不支持" : "Unavailable"}</strong>
+          </div>
+          <div>
+            <span>{language === "zh" ? "全市场数据包" : "Full-market export"}</span>
+            <strong>{language === "zh" ? "需浏览器会话，未自动导入" : "Browser session required; not auto-imported"}</strong>
+          </div>
+          <div>
+            <span>{language === "zh" ? "券商执行" : "Broker execution"}</span>
+            <strong>{language === "zh" ? "未接入" : "Not connected"}</strong>
+          </div>
+        </div>
+        {!fuyaoCapabilities?.groups.length ? (
+          <div className="empty-state">{t("common.loading")}</div>
+        ) : (
+          <div className="table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th>{language === "zh" ? "分组" : "Group"}</th>
+                  <th>{language === "zh" ? "Qagent 用途" : "Qagent role"}</th>
+                  <th>{t("settings.capabilities")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {fuyaoCapabilities.groups.map((group) => (
+                  <tr key={group.id}>
+                    <td>{formatFuyaoGroup(group.id, group.name, language)}</td>
+                    <td>{formatFuyaoRole(group.qagent_role, language)}</td>
+                    <td className="reason-cell">
+                      {group.capabilities
+                        .map((item) => localizeCapability(item, language))
+                        .join(language === "zh" ? "、" : ", ")}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
       <section className="panel">
         <div className="panel-heading">
           <div>
@@ -679,6 +753,39 @@ export function Settings({ dataMode, symbols, universes, onSaveUniverse }: Props
       </section>
     </div>
   );
+}
+
+function formatFuyaoGroup(id: string, name: string, language: "zh" | "en"): string {
+  const labels: Record<string, { zh: string; en: string }> = {
+    market_data: { zh: "A股行情与交易日历", en: "A-share market data" },
+    fundamentals: { zh: "财务与估值研究", en: "Financials and valuations" },
+    index: { zh: "指数与板块", en: "Indices and sectors" },
+    fund: { zh: "ETF与基金", en: "ETFs and funds" },
+    special_data: { zh: "市场情绪与异动", en: "Sentiment and anomalies" },
+  };
+  return labels[id]?.[language] ?? name;
+}
+
+function formatFuyaoRole(value: string, language: "zh" | "en"): string {
+  const labels: Record<string, { zh: string; en: string }> = {
+    live_snapshot_and_tertiary_daily_fallback: {
+      zh: "模拟盘实时定价与日线兜底",
+      en: "Paper pricing and daily fallback",
+    },
+    research_enrichment_only: {
+      zh: "只读研究补充",
+      en: "Read-only research enrichment",
+    },
+    research_and_market_data_fallback: {
+      zh: "指数研究与行情兜底",
+      en: "Index research and market fallback",
+    },
+    etf_research_and_market_data_fallback: {
+      zh: "ETF研究、持仓与行情兜底",
+      en: "ETF research, holdings and market fallback",
+    },
+  };
+  return labels[value]?.[language] ?? value;
 }
 
 function AutomaticProcessingPanel({

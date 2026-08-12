@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from qagent.config import get_settings
+from qagent.config import Settings, WORKSPACE_ROOT, get_settings
 
 
 def test_default_database_path_is_workspace_scoped(monkeypatch):
@@ -12,3 +12,7 @@ def test_default_database_path_is_workspace_scoped(monkeypatch):
     assert settings.database_url == f"sqlite:///{workspace_root / 'data' / 'qagent.db'}"
     assert settings.data_dir == workspace_root / "data"
     assert settings.walk_forward_snapshot_workers == 1
+
+
+def test_settings_env_file_is_workspace_scoped():
+    assert Settings.model_config["env_file"] == WORKSPACE_ROOT / ".env"

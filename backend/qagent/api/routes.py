@@ -88,6 +88,7 @@ from qagent.jobs.automation_scheduler import (
     AutoProcessingSettings,
     AutomationScheduler,
 )
+from qagent.providers.fuyao import FuyaoClient, FuyaoProviderError, FuyaoSnapshotProvider
 from qagent.jobs.daily_scan import DailyScanResult, run_daily_scan
 from qagent.jobs.full_market import (
     build_full_market_batch_symbols,
@@ -278,7 +279,23 @@ _submitted_walk_forward_jobs: set[str] = set()
 _factor_research_jobs_lock = Lock()
 _submitted_factor_research_jobs: set[str] = set()
 _automation_scheduler = AutomationScheduler()
-_etf_exposure_service = EtfExposureService()
+
+
+def _build_etf_exposure_service() -> EtfExposureService:
+    settings = get_settings()
+    fuyao_client = (
+        FuyaoClient(
+            settings.fuyao_api_key,
+            base_url=settings.fuyao_base_url,
+            request_timeout_seconds=settings.fuyao_timeout_seconds,
+        )
+        if settings.fuyao_api_key
+        else None
+    )
+    return EtfExposureService(fuyao_client=fuyao_client)
+
+
+_etf_exposure_service = _build_etf_exposure_service()
 _ranking_v3_forward_runtime_lock = Lock()
 _ranking_v3_forward_runtime_status: dict[str, dict[str, object]] = {}
 
@@ -473,6 +490,60 @@ def health() -> dict[str, str]:
 @router.get("/provider-status")
 def provider_status() -> dict[str, list[object]]:
     return {"providers": [status.model_dump(mode="json") for status in build_provider_status()]}
+
+
+@router.get("/provider-status/fuyao/probe")
+def fuyao_provider_probe(
+    instrument_ids: str = "CN:600519",
+) -> dict[str, object]:
+    settings = get_settings()
+    if not settings.fuyao_api_key:
+        raise HTTPException(status_code=409, detail="Fuyao API key is not configured")
+
+    requested = [
+        item.strip().upper()
+        for item in instrument_ids.split(",")
+        if item.strip()
+    ]
+    if not requested:
+        raise HTTPException(status_code=422, detail="At least one instrument_id is required")
+    if len(requested) > 20:
+        raise HTTPException(status_code=422, detail="Fuyao probe accepts at most 20 instruments")
+    if len(set(requested)) != len(requested):
+        raise HTTPException(status_code=422, detail="Fuyao probe instrument_ids must be unique")
+
+    provider = FuyaoSnapshotProvider(
+        settings.fuyao_api_key,
+        base_url=settings.fuyao_base_url,
+        request_timeout_seconds=settings.fuyao_timeout_seconds,
+    )
+    try:
+        frame = provider.get_snapshot(requested)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except FuyaoProviderError as exc:
+        detail: dict[str, object] = {
+            "message": str(exc),
+            "provider_code": exc.code,
+        }
+        if exc.request_id:
+            detail["request_id"] = exc.request_id
+        raise HTTPException(status_code=502, detail=detail) from exc
+
+    metadata = provider.last_request
+    return {
+        "provider": provider.name,
+        "configured": True,
+        "source_role": "live_snapshot_and_tertiary_daily_fallback",
+        "execution_enabled": False,
+        "paper_market_data_enabled": True,
+        "minute_bars_supported": False,
+        "requested": requested,
+        "received": len(frame),
+        "request_id": metadata.request_id if metadata else None,
+        "data_timestamp": metadata.timestamp if metadata else None,
+        "items": frame.to_dict(orient="records"),
+    }
 
 
 @router.get("/data-cache")

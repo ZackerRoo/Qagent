@@ -16,6 +16,12 @@ It is not an auto-trading or direct stock-picking system. The product is designe
 - One-command automation runner for scan history, daily brief save/queue, optional alerts, optional backtest validation, and optional outbox sending.
 - A-share free market data via `akshare`, with `baostock` fallback and no-key
   TickFlow daily bars as the final whole-instrument fallback.
+- Optional Fuyao/THS read-only integration: live A-share, index, and ETF snapshots
+  for paper pricing; bounded per-symbol daily fallback; ETF holdings fallback; and
+  separate research APIs for financials, valuations, constituents, fund data,
+  limit-up lists, hot lists, anomalies, and dragon-tiger data. Fuyao research data
+  is not applied directly to ranking weights and the public API exposes daily bars,
+  not minute bars.
 - Local A-share tradable catalog sync backed by free `akshare` stock and ETF directories; current free sync covers A-share stocks plus listed ETFs and stores them in SQLite for search and scan sampling.
 - US free market data via `yfinance` remains available for explicit symbols, but is not the default dashboard route.
 - Strategy registry covering trend momentum, breakout + volume, healthy pullback, GF-DMA health, catalyst transmission, PEAD, analyst revisions, TAM-adjusted PEG, Bayesian growth valuation, sector regime, short squeeze risk, options flow, and insider/institutional confirmation.
@@ -104,6 +110,7 @@ export QAGENT_FMP_API_KEY="..."
 export QAGENT_FINNHUB_API_KEY="..."
 export QAGENT_ALPHA_VANTAGE_API_KEY="..."
 export QAGENT_TUSHARE_TOKEN="..."
+export QAGENT_FUYAO_API_KEY="..."
 export QAGENT_SEC_USER_AGENT="Qagent research app you@example.com"
 ```
 
@@ -135,6 +142,10 @@ curl 'http://127.0.0.1:8000/api/factors/backtest?provider=fixture&symbols=CN:000
 curl 'http://127.0.0.1:8000/api/scan-runs'
 curl 'http://127.0.0.1:8000/api/outcomes?provider=fixture'
 curl 'http://127.0.0.1:8000/api/strategy-performance?provider=fixture'
+curl 'http://127.0.0.1:8000/api/fuyao/capabilities'
+curl 'http://127.0.0.1:8000/api/fuyao/research/stock?instrument_id=CN:600519'
+curl 'http://127.0.0.1:8000/api/fuyao/research/fund?instrument_id=CN:510300'
+curl 'http://127.0.0.1:8000/api/fuyao/research/market?period=day'
 curl -X POST 'http://127.0.0.1:8000/api/paper-trades/seed?provider=fixture'
 curl -X POST 'http://127.0.0.1:8000/api/paper-trades/update?provider=fixture'
 curl 'http://127.0.0.1:8000/api/paper-trades'

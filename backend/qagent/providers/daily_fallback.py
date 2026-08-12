@@ -15,10 +15,12 @@ class DailyFallbackMarketDataProvider:
         fallback: MarketDataProvider,
         *,
         name: str | None = None,
+        max_fallback_instruments: int | None = None,
     ):
         self.primary = primary
         self.fallback = fallback
         self.name = name or primary.name
+        self.max_fallback_instruments = max_fallback_instruments
         self.last_errors: list[str] = []
         self.last_fallback_instruments: list[str] = []
 
@@ -85,6 +87,17 @@ class DailyFallbackMarketDataProvider:
         missing = [instrument_id for instrument_id in requested if instrument_id not in primary_ids]
         if not missing:
             self.last_errors = primary_errors
+            return _normalized_result(primary_bars)
+
+        if (
+            self.max_fallback_instruments is not None
+            and len(missing) > self.max_fallback_instruments
+        ):
+            self.last_errors = primary_errors + [
+                "daily fallback skipped: "
+                f"{len(missing)} instruments exceeds the configured "
+                f"limit of {self.max_fallback_instruments}"
+            ]
             return _normalized_result(primary_bars)
 
         fallback_getter = getattr(self.fallback, method_name, None)

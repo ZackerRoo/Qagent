@@ -12,6 +12,7 @@ def test_build_provider_status_marks_configured_vendor_keys():
             fmp_api_key="fmp",
             finnhub_api_key="finnhub",
             tushare_token="tushare",
+            fuyao_api_key="fuyao",
             sec_user_agent="qagent-test contact@example.com",
         )
     )
@@ -25,12 +26,14 @@ def test_build_provider_status_marks_configured_vendor_keys():
     assert by_id["cninfo"].status == "ready"
     assert by_id["tushare"].status == "configured"
     assert by_id["tickflow_free"].status == "ready"
+    assert by_id["fuyao"].status == "ready"
+    assert "cn_snapshot_read_only" in by_id["fuyao"].capabilities
     assert "cn_daily_ohlcv_fallback" in by_id["tickflow_free"].capabilities
     assert "fundamentals" in by_id["alpha_vantage"].capabilities
 
 
 def test_build_provider_status_marks_missing_vendor_keys():
-    statuses = build_provider_status(Settings())
+    statuses = build_provider_status(Settings(_env_file=None))
 
     by_id = {status.provider_id: status for status in statuses}
     assert by_id["alpha_vantage"].status == "missing_config"
@@ -40,6 +43,7 @@ def test_build_provider_status_marks_missing_vendor_keys():
     assert by_id["yfinance"].status == "ready"
     assert by_id["akshare_baostock"].status == "ready"
     assert by_id["tickflow_free"].status == "ready"
+    assert by_id["fuyao"].status == "missing_config"
 
 
 def test_provider_status_api_returns_readiness(monkeypatch):

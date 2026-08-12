@@ -151,6 +151,59 @@ def test_etf_exposure_fails_closed_when_sources_are_unavailable(tmp_path: Path):
     ]
 
 
+def test_etf_exposure_uses_fuyao_when_disclosure_sources_are_unavailable(tmp_path: Path):
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("source unavailable")
+
+    class StubFuyaoClient:
+        base_url = "https://fuyao.example"
+
+        def get_fund_profile(self, thscode):
+            assert thscode == "510300.SH"
+            return {
+                "timestamp": 1,
+                "item": [{"thscode": thscode, "fund_name": "沪深300ETF测试"}],
+            }
+
+        def get_fund_holdings(self, thscode):
+            assert thscode == "510300.SH"
+            return {
+                "timestamp": 0,
+                "item": [
+                    {
+                        "thscode": "600519.SH",
+                        "ticker": "600519",
+                        "stock_name": "贵州茅台",
+                        "hold_ratio": 5.25,
+                    }
+                ],
+            }
+
+    service = EtfExposureService(
+        http_get=unavailable,
+        industry_loader=unavailable,
+        cache_dir=tmp_path,
+        clock=lambda: datetime(2026, 8, 12, tzinfo=timezone.utc),
+        fuyao_client=StubFuyaoClient(),
+    )
+
+    profile = service.load_profile("CN:510300", "沪深300ETF")
+
+    assert profile.fund_name == "沪深300ETF测试"
+    assert profile.source_provider == "fuyao_fund_api"
+    assert profile.source_url == "https://fuyao.example/docs/api-reference/fund-holdings/"
+    assert profile.holdings_scope == "disclosed_top_holdings_no_report_date"
+    assert profile.holdings_as_of is None
+    assert profile.holdings_coverage_pct == 5.25
+    assert profile.holdings[0].instrument_id == "CN:600519"
+    assert profile.data_status == "partial"
+    assert profile.errors == [
+        "basic_metadata:RuntimeError",
+        "holdings:RuntimeError",
+        "industries:RuntimeError",
+    ]
+
+
 def test_etf_exposure_api_only_admits_catalogued_etfs(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'etf-api.db'}")
     routes._repo().replace_tradable_instruments(

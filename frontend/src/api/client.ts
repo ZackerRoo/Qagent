@@ -28,6 +28,7 @@ import type {
   FactorShadowResponse,
   FullMarketBatchScanJob,
   FullMarketScanResponse,
+  FuyaoCapabilityManifest,
   HistoricalBackfillJob,
   InstrumentSearchResponse,
   IntradayRadarResponse,
@@ -1145,6 +1146,10 @@ export async function markDeliverySent(deliveryId: string): Promise<DeliveryOutb
 
 export async function fetchProviderStatus(): Promise<ProviderStatusResponse> {
   return apiGet<ProviderStatusResponse>("/provider-status");
+}
+
+export async function fetchFuyaoCapabilities(): Promise<FuyaoCapabilityManifest> {
+  return apiGet<FuyaoCapabilityManifest>("/fuyao/capabilities");
 }
 
 export async function fetchDataCache(

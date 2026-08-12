@@ -231,6 +231,30 @@ def test_daily_fallback_only_requests_symbols_missing_from_primary():
     assert provider.last_errors == []
 
 
+def test_daily_fallback_skips_large_missing_batches_when_bounded():
+    requested = [f"CN:{index:06d}" for index in range(25)]
+    primary = StubDailyProvider("primary", {})
+    fallback = StubDailyProvider("fallback", {item: 20.0 for item in requested})
+    provider = DailyFallbackMarketDataProvider(
+        primary,
+        fallback,
+        max_fallback_instruments=20,
+    )
+
+    bars = provider.get_daily_bars(
+        requested,
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+    assert bars.empty
+    assert fallback.daily_calls == []
+    assert provider.last_fallback_instruments == []
+    assert provider.last_errors == [
+        "daily fallback skipped: 25 instruments exceeds the configured limit of 20"
+    ]
+
+
 def test_daily_fallback_uses_historical_contract_and_never_falls_back_minutes():
     primary = StubDailyProvider("primary", {})
     fallback = StubDailyProvider("fallback", {"CN:600000": 20.0})

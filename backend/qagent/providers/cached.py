@@ -271,10 +271,12 @@ class CachedMarketDataProvider:
         )
 
     def get_snapshot(self, instrument_ids: list[str]) -> pd.DataFrame:
-        bars = self.get_daily_bars(instrument_ids, date(1900, 1, 1), date.today())
-        if bars.empty:
-            return bars
-        return bars.groupby("instrument_id", as_index=False).tail(1).reset_index(drop=True)
+        snapshot = self.provider.get_snapshot(instrument_ids)
+        self.last_errors = list(getattr(self.provider, "last_errors", []))
+        self.last_fallback_instruments = list(
+            getattr(self.provider, "last_fallback_instruments", [])
+        )
+        return snapshot
 
     def get_minute_bars(
         self,

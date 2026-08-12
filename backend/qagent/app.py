@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
+from qagent.api.fuyao_routes import router as fuyao_router
 from qagent.api.routes import (
     _terminate_full_market_executor,
     restore_automation_scheduler_from_storage,
@@ -43,6 +44,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(router, prefix="/api")
+    app.include_router(fuyao_router, prefix="/api")
     return app
 
 

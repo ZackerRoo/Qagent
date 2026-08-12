@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     fmp_api_key: str | None = None
     finnhub_api_key: str | None = None
     tushare_token: str | None = None
+    fuyao_api_key: str | None = None
+    fuyao_base_url: str = "https://fuyao.aicubes.cn"
+    fuyao_timeout_seconds: int = Field(default=8, ge=1, le=30)
     sec_user_agent: str = "Qagent research app contact@example.com"
     a_share_enhanced_data_enabled: bool = True
     a_share_enhanced_max_cards: int = 10
@@ -23,7 +26,10 @@ class Settings(BaseSettings):
     a_share_enhanced_cache_ttl_hours: int = 6
     walk_forward_snapshot_workers: int = Field(default=1, ge=1, le=4)
 
-    model_config = SettingsConfigDict(env_prefix="QAGENT_", env_file=".env")
+    model_config = SettingsConfigDict(
+        env_prefix="QAGENT_",
+        env_file=WORKSPACE_ROOT / ".env",
+    )
 
 
 def get_settings() -> Settings:

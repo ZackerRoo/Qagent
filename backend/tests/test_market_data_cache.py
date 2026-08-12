@@ -38,6 +38,35 @@ def test_market_data_cache_saves_and_loads_daily_bars(tmp_path):
     assert summaries[0].source_providers == ["fixture"]
 
 
+def test_cached_provider_delegates_snapshot_to_live_provider(tmp_path):
+    repo = make_cache_repo(tmp_path)
+
+    class LiveSnapshotProvider(CountingProvider):
+        def get_snapshot(self, instrument_ids: list[str]) -> pd.DataFrame:
+            return pd.DataFrame(
+                [
+                    {
+                        "instrument_id": instrument_ids[0],
+                        "trade_date": date(2026, 8, 12),
+                        "open": 10.0,
+                        "high": 10.5,
+                        "low": 9.9,
+                        "close": 10.4,
+                        "volume": 1_000,
+                        "provider": "live_snapshot",
+                    }
+                ]
+            )
+
+    provider = LiveSnapshotProvider()
+    cached = CachedMarketDataProvider(provider, repo, "free")
+
+    snapshot = cached.get_snapshot(["CN:000001"])
+
+    assert snapshot.iloc[0]["provider"] == "live_snapshot"
+    assert provider.calls == 0
+
+
 def test_market_data_cache_chunks_bulk_upserts_below_sqlite_variable_limit(tmp_path):
     repo = make_cache_repo(tmp_path)
     bars = pd.DataFrame(
