@@ -37,6 +37,8 @@ import { applyResearchProfile } from "./lib/profiles";
 
 const DEFAULT_SYMBOLS = "CN:ALL";
 const LATEST_RESULT_TIMEOUT_MS = 60_000;
+const INITIAL_RESULT_CARD_LIMIT = 10;
+const EXPANDED_RESULT_CARD_LIMIT = 30;
 
 export default function App() {
   const [page, setPage] = useState<PageId>("today");
@@ -86,7 +88,7 @@ export default function App() {
     setLatestFullMarketResult(undefined);
     try {
       const result = await withLatestResultTimeout(
-        fetchLatestFullMarketBatchResult(mode, true),
+        fetchLatestFullMarketBatchResult(mode, true, INITIAL_RESULT_CARD_LIMIT),
       );
       if (requestId !== latestResultRequestRef.current) {
         return;
@@ -94,6 +96,7 @@ export default function App() {
       setLatestFullMarketResult(result);
       setLatestResultStatus("ready");
       applyDashboardResult(result);
+      void loadExpandedDashboard(mode, requestId);
     } catch (caught) {
       if (requestId !== latestResultRequestRef.current) {
         return;
@@ -105,6 +108,24 @@ export default function App() {
       setOverview(undefined);
       setOpportunities(undefined);
       setRadar(undefined);
+    }
+  }
+
+  async function loadExpandedDashboard(mode: DataProviderMode, requestId: number) {
+    try {
+      const result = await fetchLatestFullMarketBatchResult(
+        mode,
+        true,
+        EXPANDED_RESULT_CARD_LIMIT,
+      );
+      if (requestId !== latestResultRequestRef.current) {
+        return;
+      }
+      setLatestFullMarketResult(result);
+      applyDashboardResult(result);
+    } catch {
+      // The compact result is already usable. Keep it visible if background
+      // enrichment is temporarily unavailable.
     }
   }
 

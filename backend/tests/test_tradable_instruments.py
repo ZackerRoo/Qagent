@@ -36,6 +36,35 @@ def test_load_cn_tradable_instruments_combines_a_shares_and_etfs(monkeypatch):
     assert format_instrument_label("CN:688981") == "中芯国际 688981.SH"
 
 
+def test_load_cn_tradable_instruments_excludes_terminal_names_but_keeps_st(monkeypatch):
+    def fake_stocks():
+        return pd.DataFrame(
+            {
+                "code": ["000001", "000004", "600193", "920305"],
+                "name": ["平安银行", "国华退", "退市创兴", "*ST云创"],
+            }
+        )
+
+    def fake_etfs():
+        return pd.DataFrame({"代码": ["560650"], "名称": ["核心50ETF民生加银"]})
+
+    monkeypatch.setattr(
+        "qagent.market.tradable.ak",
+        SimpleNamespace(stock_info_a_code_name=fake_stocks, fund_etf_spot_em=fake_etfs),
+    )
+
+    catalog = load_cn_tradable_instruments()
+
+    assert [item.instrument_id for item in catalog.items] == [
+        "CN:000001",
+        "CN:920305",
+        "CN:560650",
+    ]
+    assert catalog.data_health["tradable_inactive_excluded"] == "2"
+    assert "CN:000004:国华退" in catalog.data_health["tradable_inactive_samples"]
+    assert "CN:600193:退市创兴" in catalog.data_health["tradable_inactive_samples"]
+
+
 def test_search_cn_tradable_instruments_matches_name_code_and_label(monkeypatch):
     def fake_stocks():
         return pd.DataFrame(
@@ -99,9 +128,7 @@ def test_sync_cn_tradable_catalog_persists_full_stock_and_etf_universe(monkeypat
         return pd.DataFrame({"code": ["000001", "688981"], "name": ["平安银行", "中芯国际"]})
 
     def fake_etfs():
-        return pd.DataFrame(
-            {"代码": ["588000", "512480"], "名称": ["科创50ETF", "半导体ETF"]}
-        )
+        return pd.DataFrame({"代码": ["588000", "512480"], "名称": ["科创50ETF", "半导体ETF"]})
 
     monkeypatch.setattr(
         "qagent.market.tradable.ak",
@@ -123,6 +150,44 @@ def test_sync_cn_tradable_catalog_persists_full_stock_and_etf_universe(monkeypat
     assert search.items[0].asset_type == "etf"
     assert "CN:588000" in symbols
     assert "CN:000001" in symbols
+
+
+def test_sync_cn_tradable_catalog_retains_previous_on_source_fallback(monkeypatch, tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'tradable-fail-closed.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", db_url)
+    monkeypatch.setenv("QAGENT_TRADABLE_CACHE_DIR", str(tmp_path / "tradable-cache"))
+
+    monkeypatch.setattr(
+        "qagent.market.tradable.ak",
+        SimpleNamespace(
+            stock_info_a_code_name=lambda: pd.DataFrame(
+                {"code": ["000001", "688981"], "name": ["平安银行", "中芯国际"]}
+            ),
+            fund_etf_spot_em=lambda: pd.DataFrame({"代码": ["588000"], "名称": ["科创50ETF"]}),
+        ),
+    )
+    initialize_database(db_url)
+    repo = QagentRepository(create_session_factory(db_url))
+    first = sync_cn_tradable_catalog(repo=repo)
+    assert first.summary.total_count == 3
+
+    def unavailable():
+        raise RuntimeError("directory unavailable")
+
+    monkeypatch.setattr(
+        "qagent.market.tradable.ak",
+        SimpleNamespace(stock_info_a_code_name=unavailable, fund_etf_spot_em=unavailable),
+    )
+    retained = sync_cn_tradable_catalog(repo=repo)
+
+    assert retained.summary.total_count == 3
+    assert retained.data_health["tradable_sync_status"] == "retained_previous"
+    assert "stock_source_not_live" in retained.data_health["tradable_sync_rejection_reasons"]
+    assert {item.instrument_id for item in repo.list_tradable_instruments(limit=10)} == {
+        "CN:000001",
+        "CN:688981",
+        "CN:588000",
+    }
 
 
 def test_build_full_market_symbols_keeps_stock_coverage_when_etfs_are_many(monkeypatch, tmp_path):
@@ -165,8 +230,29 @@ def test_build_full_market_symbols_keeps_stock_coverage_when_etfs_are_many(monke
     symbols = build_full_market_symbols(repo=repo, max_symbols=6)
 
     assert len(symbols) == 6
-    assert sum(symbol in {"CN:510300", "CN:510500", "CN:512480", "CN:588000", "CN:588080", "CN:159915", "CN:159995"} for symbol in symbols) <= 2
-    assert sum(symbol in {"CN:000001", "CN:000063", "CN:300750", "CN:600519", "CN:688981"} for symbol in symbols) >= 4
+    assert (
+        sum(
+            symbol
+            in {
+                "CN:510300",
+                "CN:510500",
+                "CN:512480",
+                "CN:588000",
+                "CN:588080",
+                "CN:159915",
+                "CN:159995",
+            }
+            for symbol in symbols
+        )
+        <= 2
+    )
+    assert (
+        sum(
+            symbol in {"CN:000001", "CN:000063", "CN:300750", "CN:600519", "CN:688981"}
+            for symbol in symbols
+        )
+        >= 4
+    )
 
 
 def test_tradable_catalog_api_syncs_searches_and_scans(monkeypatch, tmp_path):

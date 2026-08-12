@@ -1473,9 +1473,9 @@ function MarketDataReliabilityStrip({
   const missingCount = Number(missing);
   const recoveryAction = reportedRecoveryAction
     ?? (staleCount > 0 && missingCount > 0
-      ? "settlement_retry_then_provider_repair"
+      ? "quarantine_until_next_daily_scan"
       : staleCount > 0
-        ? "settlement_retry"
+        ? "quarantine_until_next_daily_scan"
         : missingCount > 0
           ? "provider_fallback_repair"
           : "none");
@@ -1670,6 +1670,10 @@ function marketDataRecoveryLabel(
     settlement_retry_then_provider_repair: [
       "结算补扫后修复缺失源",
       "Retry after settlement, then repair missing sources",
+    ],
+    quarantine_until_next_daily_scan: [
+      "隔离异常标的，下一交易日再全扫",
+      "Quarantine affected symbols until the next daily scan",
     ],
     provider_fallback_repair: ["修复备用源", "Repair provider fallback"],
     provider_backoff_retry: ["限流退避后重试", "Retry after provider backoff"],

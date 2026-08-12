@@ -3,7 +3,6 @@ from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-import json
 import math
 from multiprocessing import get_context
 from threading import Lock
@@ -102,8 +101,11 @@ from qagent.providers.fuyao import (
 )
 from qagent.jobs.daily_scan import DailyScanResult, run_daily_scan
 from qagent.jobs.full_market import (
+    build_full_market_batch_presentation_payload,
     build_full_market_batch_symbols,
     full_market_batch_cache_key,
+    full_market_batch_presentation_cache_key,
+    limit_full_market_batch_payload,
     run_full_market_batch_scan_job,
     run_full_market_scan,
     sync_cn_tradable_catalog,
@@ -255,8 +257,6 @@ router = APIRouter()
 PAPER_MAX_PER_INDUSTRY = 2
 PAPER_RISK_OFF_POSITION_SIZE_MULTIPLIER = Decimal("0.35")
 PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME = time(hour=15, minute=45)
-PAPER_CANDIDATE_SETTLEMENT_RETRY_TIME = time(hour=18)
-PAPER_CANDIDATE_MAX_REFRESH_ATTEMPTS = 3
 _UNKNOWN_PAPER_INDUSTRIES = {
     "",
     "-",
@@ -5463,46 +5463,6 @@ def _cached_paper_candidate_signal_date_health(
     }
 
 
-def _full_market_scan_is_post_close_candidate_refresh(
-    job: object,
-    *,
-    expected_signal_date: date,
-) -> bool:
-    finished_at = getattr(job, "finished_at", None)
-    data_health = getattr(job, "data_health", {})
-    if finished_at is None or not isinstance(data_health, Mapping):
-        return False
-    if data_health.get("full_market_signal_date") != expected_signal_date.isoformat():
-        return False
-    cutoff = datetime.combine(
-        expected_signal_date,
-        PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME,
-        tzinfo=ZoneInfo("Asia/Shanghai"),
-    ).astimezone(timezone.utc)
-    return _as_utc_datetime(finished_at) >= cutoff
-
-
-def _automatic_candidate_refresh_attempt(job: object) -> int:
-    data_health = getattr(job, "data_health", {})
-    if not isinstance(data_health, Mapping):
-        return 1
-    raw_attempt = data_health.get("automatic_candidate_refresh_attempt", "1")
-    try:
-        return max(int(raw_attempt), 1)
-    except (TypeError, ValueError):
-        return 1
-
-
-def _automatic_candidate_settlement_retry_ready(
-    now: datetime | None = None,
-) -> bool:
-    current = now or datetime.now(timezone.utc)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
-    local_time = current.astimezone(ZoneInfo("Asia/Shanghai")).timetz().replace(tzinfo=None)
-    return local_time >= PAPER_CANDIDATE_SETTLEMENT_RETRY_TIME
-
-
 def _scan_cache_signal_date(cached: ScanResultCacheRecord) -> date | None:
     payload = cached.payload if isinstance(cached.payload, Mapping) else {}
     health = payload.get("data_health")
@@ -5598,7 +5558,6 @@ def _maybe_start_automatic_full_scan(
     )
     candidate_refresh_health: dict[str, str] = {}
     candidate_refresh_needed = False
-    candidate_refresh_attempt = 1
     if cached is not None:
         if expected_signal_date is not None:
             candidate_refresh_health = _cached_paper_candidate_signal_date_health(
@@ -5612,24 +5571,24 @@ def _maybe_start_automatic_full_scan(
             ) in {"stale", "partial"}
         if not candidate_refresh_needed:
             return "cache_fresh", False, latest.job_id if latest else None
-        if latest and _full_market_scan_is_post_close_candidate_refresh(
-            latest,
-            expected_signal_date=expected_signal_date,
-        ):
-            previous_attempt = _automatic_candidate_refresh_attempt(latest)
-            if previous_attempt >= PAPER_CANDIDATE_MAX_REFRESH_ATTEMPTS:
-                freshness_state = candidate_refresh_health.get(
-                    "automatic_candidate_freshness_state"
-                )
-                status = (
-                    "candidate_data_partially_stale_filtered"
-                    if freshness_state == "partial"
-                    else "candidate_data_stale_after_retry"
-                )
-                return status, False, latest.job_id
-            if not _automatic_candidate_settlement_retry_ready():
-                return "waiting_candidate_data_settlement", False, latest.job_id
-            candidate_refresh_attempt = previous_attempt + 1
+        freshness_state = candidate_refresh_health.get("automatic_candidate_freshness_state")
+        status = (
+            "candidate_data_partially_stale_filtered"
+            if freshness_state == "partial"
+            else "candidate_data_stale_filtered"
+        )
+        update_job = getattr(repo, "update_full_market_scan_job", None)
+        if latest is not None and callable(update_job):
+            update_job(
+                latest.job_id,
+                data_health={
+                    **latest.data_health,
+                    **candidate_refresh_health,
+                    "automatic_candidate_refresh": "filtered_no_rescan",
+                    "automatic_full_scan_policy": "once_per_completed_session",
+                },
+            )
+        return status, False, latest.job_id if latest else None
     if freshness == "stale_signal_retry_window":
         return "waiting_market_data", False, latest.job_id if latest else None
     scan_allowed, _ = _automatic_full_scan_window()
@@ -5637,8 +5596,28 @@ def _maybe_start_automatic_full_scan(
         return "deferred_market_session", False, latest.job_id if latest else None
 
     summary = repo.tradable_catalog_summary()
-    if settings.sync_if_empty and summary.total_count == 0:
-        sync_cn_tradable_catalog(repo=repo, include_full_etfs=settings.include_etfs)
+    catalog_sync_health: dict[str, str] = {}
+    sync_due = _automatic_tradable_catalog_sync_due(
+        summary,
+        expected_signal_date=expected_signal_date,
+    )
+    if (settings.sync_if_empty and summary.total_count == 0) or (
+        mode == "free" and settings.sync_catalog_daily and sync_due
+    ):
+        try:
+            sync_result = sync_cn_tradable_catalog(
+                repo=repo,
+                include_full_etfs=settings.include_etfs,
+            )
+            summary = sync_result.summary
+            catalog_sync_health = sync_result.data_health
+        except Exception as exc:
+            catalog_sync_health = {
+                "tradable_sync_status": "error_retained_previous",
+                "tradable_sync_error": str(exc)[:500],
+            }
+            if summary.total_count == 0:
+                raise
     symbols = build_full_market_batch_symbols(
         repo=repo,
         include_etfs=settings.include_etfs,
@@ -5653,24 +5632,37 @@ def _maybe_start_automatic_full_scan(
         include_etfs=settings.include_etfs,
         sync_if_empty=settings.sync_if_empty,
     )
-    if candidate_refresh_needed:
+    if catalog_sync_health:
         updated = repo.update_full_market_scan_job(
             job.job_id,
-            message="Queued post-close refresh for stale paper candidates",
+            message="Queued daily full-market verification after catalog refresh",
             data_health={
-                **candidate_refresh_health,
-                "automatic_candidate_refresh": "true",
-                "automatic_candidate_refresh_attempt": str(candidate_refresh_attempt),
+                **catalog_sync_health,
+                "automatic_full_scan_policy": "once_per_completed_session",
             },
         )
         if updated is not None:
             job = updated
     _submit_full_market_scan_job(job.job_id)
-    return (
-        "queued_candidate_refresh" if candidate_refresh_needed else "queued",
-        True,
-        job.job_id,
-    )
+    return "queued", True, job.job_id
+
+
+def _automatic_tradable_catalog_sync_due(
+    summary,
+    *,
+    expected_signal_date: date | None,
+) -> bool:
+    if summary.total_count == 0:
+        return True
+    if not hasattr(summary, "last_synced_at"):
+        return False
+    last_synced_at = summary.last_synced_at
+    if last_synced_at is None:
+        return True
+    if expected_signal_date is None:
+        return False
+    synced_at = _as_utc_datetime(last_synced_at).astimezone(ZoneInfo("Asia/Shanghai"))
+    return synced_at.date() < expected_signal_date
 
 
 def _automation_runtime_health(
@@ -5763,6 +5755,7 @@ def _automation_runtime_health(
         )
     if automation_scan_status in {
         "candidate_data_partially_stale_filtered",
+        "candidate_data_stale_filtered",
         "candidate_data_stale_after_retry",
     }:
         watch_reasons.append("candidate_freshness_filtered")
@@ -5790,7 +5783,8 @@ def _automation_runtime_health(
         "scan_requirement": scan_requirement,
         "scan_next_check_at": (next_check_at.isoformat() if next_check_at is not None else None),
         "scan_post_close_time": PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME.strftime("%H:%M"),
-        "scan_settlement_retry_time": PAPER_CANDIDATE_SETTLEMENT_RETRY_TIME.strftime("%H:%M"),
+        "scan_frequency_policy": "once_per_completed_session",
+        "market_data_refresh_policy": "incremental_tail",
         "automation_scan_status": automation_scan_status,
         "latest_scan_job_id": getattr(latest_scan, "job_id", None),
         "latest_scan_status": latest_status,
@@ -5827,7 +5821,7 @@ def _automation_runtime_health(
         "market_data_missing_reason_mix": evidence_health.get("market_data_missing_reason_mix"),
         "market_data_problem_status_mix": evidence_health.get("market_data_problem_status_mix"),
         "market_data_problem_samples": evidence_health.get("market_data_problem_samples"),
-        "market_data_recovery_action": evidence_health.get("market_data_recovery_action"),
+        "market_data_recovery_action": _runtime_market_data_recovery_action(evidence_health),
         "market_data_refresh_attempt": _int_value(
             evidence_health.get("automatic_candidate_refresh_attempt")
         ),
@@ -5852,6 +5846,13 @@ def _automation_runtime_health(
         "fuyao_latency_ms_average": cycle_health.get("fuyao_latency_ms_average"),
         "fuyao_last_data_timestamp": cycle_health.get("fuyao_last_data_timestamp"),
     }
+
+
+def _runtime_market_data_recovery_action(evidence_health: dict[str, object]) -> object:
+    action = evidence_health.get("market_data_recovery_action")
+    if action in {"settlement_retry", "settlement_retry_then_provider_repair"}:
+        return "quarantine_until_next_daily_scan"
+    return action
 
 
 def _automatic_scan_requirement(
@@ -7881,15 +7882,35 @@ def latest_full_market_batch_scan_result(
                 data_health["full_market_response_cache"] = "hit"
             return payload
 
-        cached = repo.get_recent_scan_result_cache(
-            cache_key=full_market_batch_cache_key(provider, include_etfs),
-            max_age=timedelta(minutes=cache_ttl_minutes),
-        )
+        cached = None
+        if limit <= 30:
+            cached = repo.get_recent_scan_result_cache(
+                cache_key=full_market_batch_presentation_cache_key(provider, include_etfs),
+                max_age=timedelta(minutes=cache_ttl_minutes),
+            )
+        cache_source = "presentation"
+        if cached is None:
+            cache_source = "full"
+            cached = repo.get_recent_scan_result_cache(
+                cache_key=full_market_batch_cache_key(provider, include_etfs),
+                max_age=timedelta(minutes=cache_ttl_minutes),
+            )
         if cached is None:
             raise HTTPException(status_code=404, detail="full-market batch result not found")
         # The repository returns a newly decoded JSON object for every read, so
         # this request owns the payload and can safely hydrate it in place.
         payload = cached.payload
+        if cache_source == "full" and limit <= 30:
+            presentation = build_full_market_batch_presentation_payload(payload)
+            cached = repo.save_scan_result_cache(
+                cache_key=full_market_batch_presentation_cache_key(provider, include_etfs),
+                provider=mode,
+                mode="full_market_batch_presentation",
+                symbols=cached.symbols,
+                payload=presentation,
+            )
+            payload = cached.payload
+            cache_source = "presentation_built"
         invalidated_filtered = _filter_recent_invalidated_payload_cards(
             payload,
             provider=mode,
@@ -7902,6 +7923,7 @@ def latest_full_market_batch_scan_result(
             data_health["scan_result_cache_id"] = cached.cache_id
             data_health["paper_invalidated_cards_filtered"] = str(invalidated_filtered)
             data_health["full_market_response_cache"] = "miss"
+            data_health["full_market_response_source"] = cache_source
         _latest_full_market_result_cache.clear()
         _latest_full_market_result_cache[response_cache_key] = (
             monotonic(),
@@ -7923,117 +7945,7 @@ def _clone_latest_full_market_result_payload(
 
 
 def _limit_full_market_batch_payload(payload: dict[str, object], *, limit: int) -> None:
-    raw_cards = payload.get("cards")
-    if not isinstance(raw_cards, list):
-        return
-    payload["cards"] = raw_cards[:limit]
-    visible_card_ids = {
-        str(card.get("card_id"))
-        for card in payload["cards"]
-        if isinstance(card, dict) and card.get("card_id")
-    }
-    visible_instrument_ids = {
-        str(card.get("instrument_id"))
-        for card in payload["cards"]
-        if isinstance(card, dict) and card.get("instrument_id")
-    }
-
-    for key in ("items", "factor_rankings"):
-        values = payload.get(key)
-        if isinstance(values, list):
-            payload[key] = [
-                value
-                for value in values
-                if isinstance(value, dict)
-                and str(value.get("instrument_id")) in visible_instrument_ids
-            ]
-
-    governance = payload.get("strategy_governance")
-    if isinstance(governance, list):
-        payload["strategy_governance"] = [
-            value
-            for value in governance
-            if isinstance(value, dict) and str(value.get("card_id")) in visible_card_ids
-        ]
-
-    feature_snapshot = payload.get("feature_snapshot")
-    if isinstance(feature_snapshot, dict):
-        for key in ("raw_scores", "cross_sectional_scores"):
-            values = feature_snapshot.get(key)
-            if isinstance(values, dict):
-                feature_snapshot[key] = {
-                    instrument_id: value
-                    for instrument_id, value in values.items()
-                    if instrument_id in visible_instrument_ids
-                }
-
-    portfolio_plan = payload.get("portfolio_plan")
-    if isinstance(portfolio_plan, dict):
-        constraints = portfolio_plan.get("constraint_results")
-        if isinstance(constraints, list):
-            portfolio_plan["constraint_results"] = [
-                value
-                for value in constraints
-                if isinstance(value, dict)
-                and str(value.get("instrument_id")) in visible_instrument_ids
-            ]
-
-    data_health = payload.get("data_health")
-    if isinstance(data_health, dict):
-        _limit_full_market_data_health(data_health, visible_card_ids, limit)
-
-    market_intelligence = payload.get("market_intelligence")
-    if isinstance(market_intelligence, dict):
-        intelligence_health = market_intelligence.get("data_health")
-        if isinstance(intelligence_health, dict):
-            _limit_full_market_data_health(
-                intelligence_health,
-                visible_card_ids,
-                limit,
-            )
-
-    for key in (
-        "manual_action_center",
-        "signal_monitor",
-        "decision_quality_center",
-        "operational_readiness_center",
-        "alpha_quality_center",
-        "research_center",
-    ):
-        payload.pop(key, None)
-
-
-def _limit_full_market_data_health(
-    data_health: dict[str, object],
-    visible_card_ids: set[str],
-    limit: int,
-) -> None:
-    gate_decisions = data_health.get("strategy_governance_gate_decisions")
-    if isinstance(gate_decisions, str):
-        try:
-            parsed_gate_decisions = json.loads(gate_decisions)
-        except (TypeError, ValueError):
-            parsed_gate_decisions = None
-        if isinstance(parsed_gate_decisions, dict):
-            data_health["strategy_governance_gate_decisions"] = json.dumps(
-                {
-                    card_id: value
-                    for card_id, value in parsed_gate_decisions.items()
-                    if card_id in visible_card_ids
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-    for key in (
-        "errors",
-        "scan_error_samples",
-        "a_share_enhanced_errors",
-        "full_market_worker_error",
-    ):
-        value = data_health.get(key)
-        if isinstance(value, str) and len(value) > 2_000:
-            data_health[key] = f"{value[:2_000]}..."
-    data_health["full_market_response_card_limit"] = str(limit)
+    limit_full_market_batch_payload(payload, limit=limit)
 
 
 def _reset_abandoned_full_market_job(repo: QagentRepository, job):
@@ -8501,7 +8413,11 @@ def _hydrate_full_market_batch_payload(
     _attach_market_intelligence_payload(payload)
     _attach_recommendation_quality_payload(payload)
     _attach_probability_forecast_payload(payload)
-    _attach_card_briefs_and_cached_benchmarks(payload, provider)
+    if _restore_governance_card_payload(payload):
+        data_health["strategy_governance_source"] = "saved_scan_result"
+    else:
+        _attach_card_briefs_and_cached_benchmarks(payload, provider)
+        data_health["strategy_governance_source"] = "read_time_fallback"
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)

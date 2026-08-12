@@ -386,7 +386,7 @@ def test_automation_runtime_health_explains_pending_close_and_source_fallbacks(
     assert health["market_cache_snapshot_repair_repaired"] == "22"
     assert health["market_cache_snapshot_repair_unrecovered"] == "4"
     assert health["market_cache_snapshot_repair_errors"] == "4"
-    assert health["market_data_recovery_action"] == "settlement_retry_then_provider_repair"
+    assert health["market_data_recovery_action"] == "quarantine_until_next_daily_scan"
 
 
 def test_automation_runtime_health_retains_succeeded_evidence_during_new_scan(
@@ -460,13 +460,14 @@ def test_automation_runtime_health_retains_succeeded_evidence_during_new_scan(
     assert health["market_data_latest_session_coverage"] == "0.106667"
     assert health["market_data_latest_session_stale"] == "6041"
     assert health["market_data_refresh_attempt"] == 2
+    assert health["market_data_recovery_action"] == "quarantine_until_next_daily_scan"
     assert (
         health["latest_scan_finished_at"]
         == (now - timedelta(hours=2)).astimezone(timezone.utc).isoformat()
     )
 
 
-def test_automatic_full_scan_queues_one_post_close_candidate_refresh(monkeypatch):
+def test_automatic_full_scan_filters_stale_candidates_without_market_rescan(monkeypatch):
     expected = date(2026, 7, 31)
     cached = SimpleNamespace(
         payload={
@@ -544,23 +545,36 @@ def test_automatic_full_scan_queues_one_post_close_candidate_refresh(monkeypatch
     )
 
     assert (status, started, job_id) == (
-        "queued_candidate_refresh",
-        True,
-        "candidate-refresh",
+        "candidate_data_stale_filtered",
+        False,
+        "old-scan",
     )
-    assert submitted == ["candidate-refresh"]
-    assert repo.updated[0] == "candidate-refresh"
-    assert repo.updated[1]["data_health"] == {
-        "automatic_candidate_freshness_state": "stale",
-        "automatic_candidate_expected_signal_date": "2026-07-31",
-        "automatic_candidate_cache_cards": "1",
-        "automatic_candidate_snapshots": "1",
-        "automatic_candidate_current_snapshots": "0",
-        "automatic_candidate_stale_snapshots": "1",
-        "automatic_candidate_missing_snapshots": "0",
-        "automatic_candidate_refresh": "true",
-        "automatic_candidate_refresh_attempt": "1",
-    }
+    assert submitted == []
+    assert repo.updated[0] == "old-scan"
+    health = repo.updated[1]["data_health"]
+    assert health["automatic_candidate_freshness_state"] == "stale"
+    assert health["automatic_candidate_stale_snapshots"] == "1"
+    assert health["automatic_candidate_refresh"] == "filtered_no_rescan"
+    assert health["automatic_full_scan_policy"] == "once_per_completed_session"
+
+
+def test_automatic_tradable_catalog_sync_is_due_once_per_completed_session():
+    expected = date(2026, 8, 12)
+
+    assert routes._automatic_tradable_catalog_sync_due(
+        SimpleNamespace(
+            total_count=7_000,
+            last_synced_at=datetime(2026, 8, 11, 8, tzinfo=timezone.utc),
+        ),
+        expected_signal_date=expected,
+    )
+    assert not routes._automatic_tradable_catalog_sync_due(
+        SimpleNamespace(
+            total_count=7_000,
+            last_synced_at=datetime(2026, 8, 12, 8, tzinfo=timezone.utc),
+        ),
+        expected_signal_date=expected,
+    )
 
 
 def test_automatic_full_scan_does_not_repeat_final_post_close_candidate_repair(
@@ -627,7 +641,7 @@ def test_automatic_full_scan_does_not_repeat_final_post_close_candidate_repair(
     )
 
     assert (status, started, job_id) == (
-        "candidate_data_stale_after_retry",
+        "candidate_data_stale_filtered",
         False,
         "post-close-scan",
     )
@@ -659,7 +673,7 @@ def test_automatic_full_scan_does_not_repeat_final_post_close_candidate_repair(
     ("previous_attempt", "next_attempt", "queued_job_id"),
     [(1, 2, "settlement-retry"), (2, 3, "provider-repair")],
 )
-def test_automatic_full_scan_retries_partial_candidates_through_provider_repair(
+def test_automatic_full_scan_never_retries_partial_candidates_with_full_rescan(
     monkeypatch,
     previous_attempt,
     next_attempt,
@@ -731,11 +745,6 @@ def test_automatic_full_scan_retries_partial_candidates_through_provider_repair(
         "_automation_scan_result_cache",
         lambda *_args, **_kwargs: (cached, "age_window"),
     )
-    monkeypatch.setattr(
-        routes,
-        "_automatic_candidate_settlement_retry_ready",
-        lambda: True,
-    )
     monkeypatch.setattr(routes, "_automatic_full_scan_window", lambda: (True, "ready"))
     monkeypatch.setattr(
         routes,
@@ -754,22 +763,17 @@ def test_automatic_full_scan_retries_partial_candidates_through_provider_repair(
     )
 
     assert (status, started, job_id) == (
-        "queued_candidate_refresh",
-        True,
-        queued_job_id,
+        "candidate_data_partially_stale_filtered",
+        False,
+        "first-refresh",
     )
-    assert submitted == [queued_job_id]
-    assert repo.updated[1]["data_health"] == {
-        "automatic_candidate_freshness_state": "partial",
-        "automatic_candidate_expected_signal_date": "2026-07-31",
-        "automatic_candidate_cache_cards": "2",
-        "automatic_candidate_snapshots": "2",
-        "automatic_candidate_current_snapshots": "1",
-        "automatic_candidate_stale_snapshots": "1",
-        "automatic_candidate_missing_snapshots": "0",
-        "automatic_candidate_refresh": "true",
-        "automatic_candidate_refresh_attempt": str(next_attempt),
-    }
+    assert submitted == []
+    health = repo.updated[1]["data_health"]
+    assert health["automatic_candidate_freshness_state"] == "partial"
+    assert health["automatic_candidate_current_snapshots"] == "1"
+    assert health["automatic_candidate_stale_snapshots"] == "1"
+    assert health["automatic_candidate_refresh"] == "filtered_no_rescan"
+    assert health["automatic_full_scan_policy"] == "once_per_completed_session"
 
 
 def test_stale_automatic_full_scan_restarts_same_job_from_checkpoints(

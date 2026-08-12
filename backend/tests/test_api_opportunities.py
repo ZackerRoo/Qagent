@@ -313,8 +313,7 @@ def test_today_scan_task_returns_recent_sqlite_cache_without_recompute(tmp_path,
     client = TestClient(create_app())
 
     response = client.post(
-        "/api/scan-tasks/today"
-        "?provider=free&max_symbols=30&include_etfs=true&cache_ttl_minutes=60"
+        "/api/scan-tasks/today?provider=free&max_symbols=30&include_etfs=true&cache_ttl_minutes=60"
     )
 
     assert response.status_code == 200
@@ -349,8 +348,7 @@ def test_today_scan_task_reuses_recent_scan_run_when_result_cache_is_empty(tmp_p
     client = TestClient(create_app())
 
     response = client.post(
-        "/api/scan-tasks/today"
-        "?provider=free&max_symbols=1&include_etfs=true&cache_ttl_minutes=60"
+        "/api/scan-tasks/today?provider=free&max_symbols=1&include_etfs=true&cache_ttl_minutes=60"
     )
 
     assert response.status_code == 200
@@ -390,8 +388,7 @@ def test_today_scan_task_reuses_latest_full_market_batch_cache(tmp_path, monkeyp
     monkeypatch.setattr(routes, "_full_market_scan_payload", unexpected_full_market_scan_payload)
 
     response = TestClient(create_app()).post(
-        "/api/scan-tasks/today"
-        "?provider=free&max_symbols=1&include_etfs=true&cache_ttl_minutes=60"
+        "/api/scan-tasks/today?provider=free&max_symbols=1&include_etfs=true&cache_ttl_minutes=60"
     )
 
     assert response.status_code == 200
@@ -445,8 +442,7 @@ def test_full_market_batch_scan_endpoint_creates_background_job(tmp_path, monkey
     client = TestClient(create_app())
 
     response = client.post(
-        "/api/full-market/batch-scan"
-        "?provider=free&batch_size=2&max_symbols=3&include_etfs=true"
+        "/api/full-market/batch-scan?provider=free&batch_size=2&max_symbols=3&include_etfs=true"
     )
 
     assert response.status_code == 200
@@ -488,9 +484,7 @@ def test_latest_full_market_scan_marks_abandoned_job_failed(tmp_path, monkeypatc
         )
         session.commit()
 
-    response = TestClient(create_app()).get(
-        "/api/full-market/batch-scan/latest?provider=free"
-    )
+    response = TestClient(create_app()).get("/api/full-market/batch-scan/latest?provider=free")
 
     assert response.status_code == 200
     assert response.json()["status"] == "failed"
@@ -519,9 +513,7 @@ def test_full_market_scan_stays_running_while_final_result_is_publishing(
         message="Completed batch 2/2",
     )
 
-    response = TestClient(create_app()).get(
-        "/api/full-market/batch-scan/latest?provider=free"
-    )
+    response = TestClient(create_app()).get("/api/full-market/batch-scan/latest?provider=free")
 
     assert response.status_code == 200
     assert response.json()["status"] == "running"
@@ -566,9 +558,7 @@ def test_running_full_market_scan_is_resubmitted_after_service_restart(
     current = repo.get_full_market_scan_job(job.job_id)
     assert current is not None
     assert current.status == "queued"
-    assert current.data_health["full_market_restart_recovery"] == (
-        "queued_for_checkpoint_resume"
-    )
+    assert current.data_health["full_market_restart_recovery"] == ("queued_for_checkpoint_resume")
 
 
 def test_aborted_full_market_scan_is_not_restored_after_service_restart(
@@ -755,24 +745,17 @@ def test_full_market_batch_latest_result_honors_card_limit(tmp_path, monkeypatch
             "cards": [card.model_dump(mode="json") for card in scan.cards],
             "items": [item.model_dump(mode="json") for item in scan.items],
             "strategy_health": [item.model_dump(mode="json") for item in scan.strategy_health],
-            "factor_rankings": [
-                item.model_dump(mode="json") for item in scan.factor_rankings
-            ],
+            "factor_rankings": [item.model_dump(mode="json") for item in scan.factor_rankings],
             "sector_strength": [],
             "portfolio_plan": scan.portfolio_plan.model_dump(mode="json"),
             "feature_snapshot": {
                 "raw_scores": {card.instrument_id: {} for card in scan.cards},
-                "cross_sectional_scores": {
-                    card.instrument_id: {} for card in scan.cards
-                },
+                "cross_sectional_scores": {card.instrument_id: {} for card in scan.cards},
             },
             "market_intelligence": {
                 "data_health": {
                     "strategy_governance_gate_decisions": json.dumps(
-                        {
-                            card.card_id: {"gate_decision": "observe"}
-                            for card in scan.cards
-                        }
+                        {card.card_id: {"gate_decision": "observe"} for card in scan.cards}
                     ),
                 },
             },
@@ -780,18 +763,14 @@ def test_full_market_batch_latest_result_honors_card_limit(tmp_path, monkeypatch
                 "provider": "fixture",
                 "errors": "x" * 3_000,
                 "strategy_governance_gate_decisions": json.dumps(
-                    {
-                        card.card_id: {"gate_decision": "observe"}
-                        for card in scan.cards
-                    }
+                    {card.card_id: {"gate_decision": "observe"} for card in scan.cards}
                 ),
             },
         },
     )
 
     response = TestClient(create_app()).get(
-        "/api/full-market/batch-scan/latest-result"
-        "?provider=fixture&include_etfs=true&limit=1"
+        "/api/full-market/batch-scan/latest-result?provider=fixture&include_etfs=true&limit=1"
     )
 
     assert response.status_code == 200
@@ -799,21 +778,76 @@ def test_full_market_batch_latest_result_honors_card_limit(tmp_path, monkeypatch
     assert len(body["cards"]) == 1
     visible_instrument_ids = {card["instrument_id"] for card in body["cards"]}
     assert {item["instrument_id"] for item in body["items"]} <= visible_instrument_ids
-    assert {
-        item["instrument_id"] for item in body["factor_rankings"]
-    } <= visible_instrument_ids
+    assert {item["instrument_id"] for item in body["factor_rankings"]} <= visible_instrument_ids
     assert set(body["feature_snapshot"]["raw_scores"]) <= visible_instrument_ids
     assert len(body["data_health"]["errors"]) == 2_003
     assert set(json.loads(body["data_health"]["strategy_governance_gate_decisions"])) <= {
         body["cards"][0]["card_id"]
     }
     assert set(
-        json.loads(
-            body["market_intelligence"]["data_health"][
-                "strategy_governance_gate_decisions"
-            ]
-        )
+        json.loads(body["market_intelligence"]["data_health"]["strategy_governance_gate_decisions"])
     ) <= {body["cards"][0]["card_id"]}
+    presentation = repo.get_recent_scan_result_cache(
+        cache_key=routes.full_market_batch_presentation_cache_key("fixture", True),
+        max_age=timedelta(minutes=60),
+    )
+    assert presentation is not None
+    assert presentation.mode == "full_market_batch_presentation"
+    assert "manual_action_center" not in presentation.payload
+
+
+def test_full_market_batch_latest_result_restores_saved_governance(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'saved-governance.db'}")
+    repo = routes._repo()
+    scan = run_daily_scan(["US:TEST", "CN:000001"], FixtureMarketDataProvider())
+    cards = [card.model_dump(mode="json") for card in scan.cards]
+    repo.save_scan_result_cache(
+        cache_key=routes.full_market_batch_cache_key("fixture", True),
+        provider="fixture",
+        mode="full_market_batch",
+        symbols=["US:TEST", "CN:000001"],
+        payload={
+            "symbols": ["US:TEST", "CN:000001"],
+            "cards": cards,
+            "items": [],
+            "strategy_health": [],
+            "factor_rankings": [],
+            "sector_strength": [],
+            "portfolio_plan": scan.portfolio_plan.model_dump(mode="json"),
+            "strategy_governance": [
+                {
+                    "card_id": card["card_id"],
+                    "instrument_id": card["instrument_id"],
+                    "gate_decision": {
+                        "action": "observe",
+                        "allowed": True,
+                        "paper_candidate_eligible": True,
+                        "reason": "saved",
+                    },
+                }
+                for card in cards
+            ],
+            "data_health": {"provider": "fixture"},
+        },
+    )
+
+    def fail_read_time_governance(*_args, **_kwargs):
+        raise AssertionError("saved governance must not be recomputed while reading")
+
+    monkeypatch.setattr(
+        routes,
+        "_attach_card_briefs_and_cached_benchmarks",
+        fail_read_time_governance,
+    )
+    response = TestClient(create_app()).get(
+        "/api/full-market/batch-scan/latest-result?provider=fixture&include_etfs=true&limit=1"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data_health"]["strategy_governance_source"] == "saved_scan_result"
+    assert len(body["strategy_governance"]) == 1
+    assert body["strategy_governance"][0]["gate_decision"]["reason"] == "saved"
 
 
 def test_full_market_batch_latest_result_coalesces_concurrent_reads(
@@ -846,10 +880,7 @@ def test_full_market_batch_latest_result_coalesces_concurrent_reads(
         time.sleep(0.05)
 
     monkeypatch.setattr(routes, "_hydrate_full_market_batch_payload", slow_hydrate)
-    path = (
-        "/api/full-market/batch-scan/latest-result"
-        "?provider=fixture&include_etfs=true&limit=1"
-    )
+    path = "/api/full-market/batch-scan/latest-result?provider=fixture&include_etfs=true&limit=1"
 
     # Start the TestClient portal before worker threads use it. Lazy startup from
     # several threads can yield framework-level 404 responses unrelated to the
@@ -867,8 +898,7 @@ def test_full_market_batch_latest_result_coalesces_concurrent_reads(
     assert all(len(response.json()["cards"]) == 1 for response in responses)
     assert len(hydrate_calls) == 1
     cache_states = [
-        response.json()["data_health"]["full_market_response_cache"]
-        for response in responses
+        response.json()["data_health"]["full_market_response_cache"] for response in responses
     ]
     assert cache_states.count("miss") == 1
     assert cache_states.count("hit") == 7
@@ -911,7 +941,9 @@ def test_full_market_batch_latest_result_uses_card_calibration_when_no_health_ca
     body = response.json()
     assert body["strategy_health"]
     assert body["strategy_health"][0]["strategy_id"] == card["strategy_calibration"]["strategy_id"]
-    assert body["strategy_health"][0]["sample_count"] == card["strategy_calibration"]["sample_count"]
+    assert (
+        body["strategy_health"][0]["sample_count"] == card["strategy_calibration"]["sample_count"]
+    )
     assert body["strategy_health"][0]["curve"] == []
     assert body["data_health"]["strategy_health_source"] == "card_strategy_calibration"
     assert body["cards"][0]["probability_forecast"]
@@ -931,7 +963,11 @@ def test_full_market_batch_latest_result_refreshes_paper_account_health(
     stale_operational["checks"] = [
         {
             **check,
-            "evidence": ["模拟记录 0 条", "已闭环 0 条", "支持现金、仓位、交易流水、手续费/滑点和收益曲线"],
+            "evidence": [
+                "模拟记录 0 条",
+                "已闭环 0 条",
+                "支持现金、仓位、交易流水、手续费/滑点和收益曲线",
+            ],
         }
         if check["key"] == "paper_account"
         else check
@@ -978,10 +1014,7 @@ def test_full_market_batch_latest_result_refreshes_paper_account_health(
         },
     )
     assert created.status_code == 200
-    assert (
-        client.get("/api/paper-trades?reporting_scope=legacy").json()["summary"]["total"]
-        == 1
-    )
+    assert client.get("/api/paper-trades?reporting_scope=legacy").json()["summary"]["total"] == 1
 
     response = client.get(
         "/api/full-market/batch-scan/latest-result?provider=fixture&include_etfs=true"
@@ -991,7 +1024,9 @@ def test_full_market_batch_latest_result_refreshes_paper_account_health(
     body = response.json()
     assert body["data_health"]["paper_total"] == "0"
     paper_check = next(
-        item for item in body["operational_readiness_center"]["checks"] if item["key"] == "paper_account"
+        item
+        for item in body["operational_readiness_center"]["checks"]
+        if item["key"] == "paper_account"
     )
     assert "模拟记录 0 条" in paper_check["evidence"]
 
@@ -1060,8 +1095,7 @@ def test_daily_brief_delivery_api_queues_lists_and_marks_sent(tmp_path, monkeypa
     saved = save_response.json()
 
     queue_response = client.post(
-        f"/api/daily-brief/runs/{saved['brief_id']}/deliveries"
-        "?channel=markdown&recipient=local"
+        f"/api/daily-brief/runs/{saved['brief_id']}/deliveries?channel=markdown&recipient=local"
     )
     list_response = client.get("/api/deliveries?status=queued")
     sent_response = client.post(f"/api/deliveries/{queue_response.json()['delivery_id']}/mark-sent")

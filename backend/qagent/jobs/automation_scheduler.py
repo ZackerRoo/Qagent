@@ -17,6 +17,7 @@ class AutoProcessingSettings(BaseModel):
     batch_size: int = Field(default=200, ge=1, le=1000)
     max_symbols: int | None = Field(default=None, ge=1, le=20_000)
     sync_if_empty: bool = True
+    sync_catalog_daily: bool = True
     seed_paper: bool = True
     seed_limit: int = Field(default=10, ge=1, le=50)
     update_paper: bool = True
@@ -144,9 +145,7 @@ class AutomationScheduler:
                     # deadline has passed. Recheck UTC in short slices so the
                     # scheduler compensates promptly after wake without an API
                     # request having to nudge it.
-                    self._wake_event.wait(
-                        min(wait_seconds, SCHEDULER_CLOCK_RECHECK_SECONDS)
-                    )
+                    self._wake_event.wait(min(wait_seconds, SCHEDULER_CLOCK_RECHECK_SECONDS))
                     self._wake_event.clear()
                     continue
             self._execute(settings, runner)

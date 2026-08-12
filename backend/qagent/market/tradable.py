@@ -41,7 +41,7 @@ FALLBACK_ETF_NAMES = {
     "159949": "创业板50ETF",
 }
 
-_CACHE_VERSION = 1
+_CACHE_VERSION = 2
 _CACHE_TTL_SECONDS = 12 * 60 * 60
 _MEMORY_CACHE: dict[tuple[bool], tuple[float, TradableInstrumentCatalog]] = {}
 
@@ -63,11 +63,19 @@ def load_cn_tradable_instruments(
 
     errors: list[str] = []
     stock_names = _load_a_share_names(errors)
+    stock_source_status = "live" if stock_names else "fallback"
     etf_names = _load_etf_names(errors) if include_full_etfs else FALLBACK_ETF_NAMES
+    etf_source_status = (
+        "live" if include_full_etfs and etf_names else "fallback" if include_full_etfs else "core"
+    )
     if not stock_names:
         stock_names = FALLBACK_STOCK_NAMES
     if not etf_names:
         etf_names = FALLBACK_ETF_NAMES
+
+    stock_names, excluded_stocks = _exclude_inactive_names(stock_names, asset_type="stock")
+    etf_names, excluded_etfs = _exclude_inactive_names(etf_names, asset_type="etf")
+    excluded = [*excluded_stocks, *excluded_etfs]
 
     merged_names = {**stock_names, **etf_names}
     register_cn_instrument_names(merged_names)
@@ -88,9 +96,16 @@ def load_cn_tradable_instruments(
         "tradable_etfs": str(len(etf_names)),
         "tradable_total": str(len(items)),
         "tradable_source": "akshare",
+        "tradable_stock_source_status": stock_source_status,
+        "tradable_etf_source_status": etf_source_status,
         "tradable_etf_coverage": "full" if include_full_etfs else "core",
         "tradable_cache": "miss" if use_cache else "off",
+        "tradable_inactive_excluded": str(len(excluded)),
     }
+    if excluded:
+        data_health["tradable_inactive_samples"] = ",".join(
+            f"CN:{symbol}:{name}" for symbol, name in excluded[:20]
+        )
     if errors:
         data_health["tradable_errors"] = " | ".join(errors[:3])
     catalog = TradableInstrumentCatalog(items=items, data_health=data_health)
@@ -143,7 +158,9 @@ def _load_etf_names(errors: list[str]) -> dict[str, str]:
     except Exception as exc:
         errors.append(f"etf_names: {exc}")
         return {}
-    return _normalize_code_name_frame(raw, ["代码", "code", "基金代码"], ["名称", "name", "基金简称"])
+    return _normalize_code_name_frame(
+        raw, ["代码", "code", "基金代码"], ["名称", "name", "基金简称"]
+    )
 
 
 def _normalize_code_name_frame(
@@ -162,6 +179,30 @@ def _normalize_code_name_frame(
         if len(symbol) == 6 and symbol.isdigit() and name:
             names[symbol] = name
     return names
+
+
+def _exclude_inactive_names(
+    names: dict[str, str],
+    *,
+    asset_type: str,
+) -> tuple[dict[str, str], list[tuple[str, str]]]:
+    active: dict[str, str] = {}
+    excluded: list[tuple[str, str]] = []
+    for symbol, name in names.items():
+        if _is_inactive_name(name, asset_type=asset_type):
+            excluded.append((symbol, name))
+        else:
+            active[symbol] = name
+    return active, excluded
+
+
+def _is_inactive_name(name: str, *, asset_type: str) -> bool:
+    """Identify terminal exchange names without treating ordinary ST names as inactive."""
+
+    normalized = "".join(name.upper().split())
+    if asset_type != "stock":
+        return False
+    return normalized.startswith("退市") or normalized.endswith("退")
 
 
 def _instrument(symbol: str, name: str, asset_type: str, source: str) -> TradableInstrument:

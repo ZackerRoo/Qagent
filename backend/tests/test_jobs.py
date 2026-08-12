@@ -274,6 +274,18 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
     assert cached.payload["data_health"]["full_market_snapshot_items"] == str(
         len(cached.payload["cards"])
     )
+    presentation = repo.get_recent_scan_result_cache(
+        cache_key=full_market.full_market_batch_presentation_cache_key("fixture", True),
+        max_age=timedelta(minutes=60),
+    )
+    assert presentation is not None
+    assert presentation.mode == "full_market_batch_presentation"
+    assert presentation.payload["cards"]
+    assert "manual_action_center" not in presentation.payload
+    assert "decision_quality_center" not in presentation.payload
+    finished_job = repo.get_full_market_scan_job(job.job_id)
+    assert finished_job is not None
+    assert finished_job.data_health["full_market_checkpoint_cleanup_rows"] == "2"
 
     runs = repo.list_scan_runs(provider="fixture", limit=10)
     assert len(runs) == 1
@@ -384,6 +396,11 @@ def test_full_market_batch_job_resumes_from_persisted_batch_checkpoints(
         full_market,
         "build_market_data_provider",
         lambda provider: FixtureMarketDataProvider(),
+    )
+    monkeypatch.setattr(
+        QagentRepository,
+        "delete_succeeded_full_market_scan_checkpoints",
+        lambda self, job_id: 0,
     )
     full_market.run_full_market_batch_scan_job(job.job_id, top_cards_limit=5)
 

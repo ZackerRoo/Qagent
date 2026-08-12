@@ -1,5 +1,7 @@
 from collections import Counter
+from copy import deepcopy
 from datetime import date, datetime, time, timedelta, timezone
+import json
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
@@ -92,19 +94,68 @@ def sync_cn_tradable_catalog(
     include_full_etfs: bool = True,
     use_cache: bool = False,
 ) -> TradableCatalogSyncResult:
+    previous = repo.tradable_catalog_summary()
     catalog = load_cn_tradable_instruments(
         include_full_etfs=include_full_etfs,
         use_cache=use_cache,
     )
+    rejection_reasons = _tradable_catalog_sync_rejection_reasons(
+        previous,
+        catalog,
+        include_full_etfs=include_full_etfs,
+    )
+    if rejection_reasons:
+        return TradableCatalogSyncResult(
+            summary=previous,
+            data_health={
+                **catalog.data_health,
+                "tradable_catalog": "sqlite",
+                "tradable_sync_status": "retained_previous",
+                "tradable_sync_rejection_reasons": " | ".join(rejection_reasons),
+                "tradable_sync_previous_total": str(previous.total_count),
+                "tradable_sync_candidate_total": str(len(catalog.items)),
+                "tradable_synced": "0",
+            },
+        )
     summary = repo.replace_tradable_instruments(catalog.items, catalog.data_health)
     return TradableCatalogSyncResult(
         summary=summary,
         data_health={
             **catalog.data_health,
             "tradable_catalog": "sqlite",
+            "tradable_sync_status": "updated",
+            "tradable_sync_previous_total": str(previous.total_count),
+            "tradable_sync_candidate_total": str(len(catalog.items)),
             "tradable_synced": str(summary.total_count),
         },
     )
+
+
+def _tradable_catalog_sync_rejection_reasons(
+    previous: TradableCatalogSummary,
+    catalog,
+    *,
+    include_full_etfs: bool,
+) -> list[str]:
+    if previous.total_count == 0:
+        return []
+
+    stock_count = sum(item.asset_type == "stock" for item in catalog.items)
+    etf_count = sum(item.asset_type == "etf" for item in catalog.items)
+    reasons: list[str] = []
+    if catalog.data_health.get("tradable_stock_source_status") != "live":
+        reasons.append("stock_source_not_live")
+    if include_full_etfs and catalog.data_health.get("tradable_etf_source_status") != "live":
+        reasons.append("etf_source_not_live")
+    if previous.stock_count >= 1_000 and stock_count < max(1_000, int(previous.stock_count * 0.8)):
+        reasons.append(f"stock_coverage_drop:{previous.stock_count}->{stock_count}")
+    if (
+        include_full_etfs
+        and previous.etf_count >= 50
+        and etf_count < max(50, int(previous.etf_count * 0.6))
+    ):
+        reasons.append(f"etf_coverage_drop:{previous.etf_count}->{etf_count}")
+    return reasons
 
 
 def build_full_market_symbols(
@@ -779,9 +830,21 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         symbols=job.symbols,
         payload=payload,
     )
+    presentation_cache_key = full_market_batch_presentation_cache_key(
+        job.provider,
+        job.include_etfs,
+    )
+    repo.save_scan_result_cache(
+        cache_key=presentation_cache_key,
+        provider=job.provider,
+        mode="full_market_batch_presentation",
+        symbols=job.symbols,
+        payload=build_full_market_batch_presentation_payload(payload),
+    )
+    final_status = "succeeded" if scan_complete else "failed"
     repo.update_full_market_scan_job(
         job_id,
-        status="succeeded" if scan_complete else "failed",
+        status=final_status,
         scanned_symbols=scanned_symbols,
         completed_batches=completed_batches,
         cards=len(visible_cards),
@@ -794,10 +857,152 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         data_health=payload["data_health"],
         result_cache_key=cache_key,
     )
+    if scan_complete:
+        deleted_checkpoints = repo.delete_succeeded_full_market_scan_checkpoints(job_id)
+        repo.update_full_market_scan_job(
+            job_id,
+            status=final_status,
+            data_health={
+                **payload["data_health"],
+                "full_market_checkpoint_cleanup_rows": str(deleted_checkpoints),
+                "full_market_presentation_cache_key": presentation_cache_key,
+            },
+        )
 
 
 def full_market_batch_cache_key(provider: str, include_etfs: bool = True) -> str:
     return _full_market_batch_cache_key(provider, include_etfs)
+
+
+def full_market_batch_presentation_cache_key(
+    provider: str,
+    include_etfs: bool = True,
+) -> str:
+    return f"full_market_batch_presentation:{provider.strip().lower()}:{str(include_etfs).lower()}"
+
+
+def build_full_market_batch_presentation_payload(
+    payload: dict[str, object],
+    *,
+    limit: int = 30,
+) -> dict[str, object]:
+    presentation = deepcopy(payload)
+    limit_full_market_batch_payload(presentation, limit=limit)
+    data_health = presentation.setdefault("data_health", {})
+    if isinstance(data_health, dict):
+        data_health["scan_result_cache"] = "full_market_batch_presentation"
+        data_health["full_market_presentation_card_limit"] = str(limit)
+    return presentation
+
+
+def limit_full_market_batch_payload(payload: dict[str, object], *, limit: int) -> None:
+    raw_cards = payload.get("cards")
+    if not isinstance(raw_cards, list):
+        return
+    payload["cards"] = raw_cards[:limit]
+    visible_card_ids = {
+        str(card.get("card_id"))
+        for card in payload["cards"]
+        if isinstance(card, dict) and card.get("card_id")
+    }
+    visible_instrument_ids = {
+        str(card.get("instrument_id"))
+        for card in payload["cards"]
+        if isinstance(card, dict) and card.get("instrument_id")
+    }
+
+    for key in ("items", "factor_rankings"):
+        values = payload.get(key)
+        if isinstance(values, list):
+            payload[key] = [
+                value
+                for value in values
+                if isinstance(value, dict)
+                and str(value.get("instrument_id")) in visible_instrument_ids
+            ]
+
+    governance = payload.get("strategy_governance")
+    if isinstance(governance, list):
+        payload["strategy_governance"] = [
+            value
+            for value in governance
+            if isinstance(value, dict) and str(value.get("card_id")) in visible_card_ids
+        ]
+
+    feature_snapshot = payload.get("feature_snapshot")
+    if isinstance(feature_snapshot, dict):
+        for key in ("raw_scores", "cross_sectional_scores"):
+            values = feature_snapshot.get(key)
+            if isinstance(values, dict):
+                feature_snapshot[key] = {
+                    instrument_id: value
+                    for instrument_id, value in values.items()
+                    if instrument_id in visible_instrument_ids
+                }
+
+    portfolio_plan = payload.get("portfolio_plan")
+    if isinstance(portfolio_plan, dict):
+        constraints = portfolio_plan.get("constraint_results")
+        if isinstance(constraints, list):
+            portfolio_plan["constraint_results"] = [
+                value
+                for value in constraints
+                if isinstance(value, dict)
+                and str(value.get("instrument_id")) in visible_instrument_ids
+            ]
+
+    data_health = payload.get("data_health")
+    if isinstance(data_health, dict):
+        _limit_full_market_data_health(data_health, visible_card_ids, limit)
+
+    market_intelligence = payload.get("market_intelligence")
+    if isinstance(market_intelligence, dict):
+        intelligence_health = market_intelligence.get("data_health")
+        if isinstance(intelligence_health, dict):
+            _limit_full_market_data_health(intelligence_health, visible_card_ids, limit)
+
+    for key in (
+        "manual_action_center",
+        "signal_monitor",
+        "decision_quality_center",
+        "operational_readiness_center",
+        "alpha_quality_center",
+        "research_center",
+    ):
+        payload.pop(key, None)
+
+
+def _limit_full_market_data_health(
+    data_health: dict[str, object],
+    visible_card_ids: set[str],
+    limit: int,
+) -> None:
+    gate_decisions = data_health.get("strategy_governance_gate_decisions")
+    if isinstance(gate_decisions, str):
+        try:
+            parsed_gate_decisions = json.loads(gate_decisions)
+        except (TypeError, ValueError):
+            parsed_gate_decisions = None
+        if isinstance(parsed_gate_decisions, dict):
+            data_health["strategy_governance_gate_decisions"] = json.dumps(
+                {
+                    card_id: value
+                    for card_id, value in parsed_gate_decisions.items()
+                    if card_id in visible_card_ids
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+    for key in (
+        "errors",
+        "scan_error_samples",
+        "a_share_enhanced_errors",
+        "full_market_worker_error",
+    ):
+        value = data_health.get(key)
+        if isinstance(value, str) and len(value) > 2_000:
+            data_health[key] = f"{value[:2_000]}..."
+    data_health["full_market_response_card_limit"] = str(limit)
 
 
 def _full_market_batch_checkpoint_key(job_id: str, batch_index: int) -> str:
@@ -1421,11 +1626,11 @@ def _market_data_recovery_action(
     if error_count:
         return "scan_error_retry"
     if stale and missing:
-        return "settlement_retry_then_provider_repair"
+        return "quarantine_until_next_daily_scan"
     if stale:
-        return "settlement_retry"
+        return "quarantine_until_next_daily_scan"
     if missing:
-        return "provider_fallback_repair"
+        return "quarantine_until_next_daily_scan"
     if provider_error_count:
         return "provider_backoff_retry"
     return "none"

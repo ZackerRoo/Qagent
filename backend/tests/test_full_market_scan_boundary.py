@@ -329,10 +329,7 @@ def test_market_data_reliability_health_fails_closed_for_stale_or_missing_data()
     assert health["market_data_missing_reason_mix"] == "no_data=1"
     assert health["market_data_problem_status_mix"] == "no_data=1,watch=1"
     assert health["market_data_problem_samples"] == "CN:000002,CN:000001"
-    assert (
-        health["market_data_recovery_action"]
-        == "settlement_retry_then_provider_repair"
-    )
+    assert health["market_data_recovery_action"] == "quarantine_until_next_daily_scan"
 
 
 def test_full_market_scan_resume_keeps_frozen_expected_trade_date():
