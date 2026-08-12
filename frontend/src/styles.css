@@ -3681,6 +3681,92 @@ details.compact-data-health:not([open]) > .data-health-details {
   font-size: 12px;
 }
 
+.fuyao-research-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px 0;
+  border-top: 1px solid var(--terminal-border);
+  border-bottom: 1px solid var(--terminal-border);
+}
+
+.fuyao-research-panel.is-stale {
+  border-color: rgba(244, 197, 66, 0.46);
+}
+
+.fuyao-research-heading,
+.fuyao-research-status {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.fuyao-research-heading > div:first-child,
+.fuyao-research-status {
+  display: grid;
+  gap: 3px;
+}
+
+.fuyao-research-heading span,
+.fuyao-research-panel p,
+.fuyao-research-status small,
+.fuyao-research-scope {
+  margin: 0;
+  color: var(--terminal-muted);
+  font-size: 12px;
+}
+
+.fuyao-research-heading strong {
+  color: var(--terminal-text);
+  font-size: 14px;
+}
+
+.fuyao-research-status {
+  justify-items: end;
+  text-align: right;
+}
+
+.fuyao-research-status > span {
+  color: var(--terminal-blue);
+  font-weight: 700;
+}
+
+.fuyao-research-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 6px;
+  background: var(--terminal-border-soft);
+}
+
+.fuyao-research-metrics > div {
+  display: grid;
+  min-width: 0;
+  min-height: 58px;
+  align-content: center;
+  gap: 4px;
+  padding: 9px 10px;
+  background: var(--terminal-panel);
+}
+
+.fuyao-research-metrics span {
+  overflow-wrap: anywhere;
+  color: var(--terminal-muted);
+  font-size: 11px;
+}
+
+.fuyao-research-metrics strong {
+  overflow-wrap: anywhere;
+  color: var(--terminal-text);
+  font-size: 13px;
+}
+
+.fuyao-research-scope {
+  display: block;
+}
+
 .pre-trade-risk-panel,
 .recommendation-score-breakdown,
 .account-scenario-panel {

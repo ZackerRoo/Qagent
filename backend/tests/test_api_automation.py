@@ -907,6 +907,66 @@ def test_automation_scheduler_run_once_updates_paper_status(tmp_path, monkeypatc
     assert body["next_run_at"] is None
 
 
+def test_automation_cycle_publishes_paper_provider_telemetry(monkeypatch):
+    paper_repo = SimpleNamespace(list_trades=lambda **_: [])
+    market_provider = object()
+    telemetry_calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(routes, "_repo", lambda: SimpleNamespace())
+    monkeypatch.setattr(routes, "_paper_repo", lambda: paper_repo)
+    monkeypatch.setattr(
+        routes,
+        "_paper_seed_risk_gate",
+        lambda *_: (True, {"paper_risk_gate_action": "allow"}),
+    )
+    monkeypatch.setattr(
+        routes,
+        "build_market_data_provider",
+        lambda mode: market_provider,
+    )
+    monkeypatch.setattr(
+        routes,
+        "reset_fuyao_telemetry",
+        lambda provider: telemetry_calls.append(("reset", provider)) or 1,
+    )
+    monkeypatch.setattr(
+        routes,
+        "update_paper_trades",
+        lambda repo, *, provider, provider_mode: SimpleNamespace(
+            summary=SimpleNamespace(total=3, closed=1),
+            data_health={"paper_update": "ready"},
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "fuyao_telemetry_data_health",
+        lambda provider: (
+            telemetry_calls.append(("publish", provider))
+            or {"fuyao_telemetry": "ready", "fuyao_requests": "2"}
+        ),
+    )
+
+    result = routes._run_auto_processing_cycle(
+        AutoProcessingSettings(
+            provider="fixture",
+            run_scan=False,
+            seed_paper=False,
+            update_paper=True,
+            run_alerts=False,
+        )
+    )
+
+    assert telemetry_calls == [
+        ("reset", market_provider),
+        ("publish", market_provider),
+    ]
+    assert result.paper_total == 3
+    assert result.paper_closed == 1
+    assert result.data_health["paper_update"] == "ready"
+    assert result.data_health["fuyao_telemetry"] == "ready"
+    assert result.data_health["fuyao_requests"] == "2"
+
+
 def test_automation_scheduler_seeds_latest_signal_day_not_latest_inserted_rows(
     tmp_path,
     monkeypatch,

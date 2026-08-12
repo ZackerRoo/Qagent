@@ -1740,3 +1740,45 @@ Index(
     FactorShadowOutcomeRow.horizon_sessions,
     FactorShadowOutcomeRow.scan_job_id,
 )
+
+
+class FuyaoResearchSnapshotRow(Base):
+    __tablename__ = "fuyao_research_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "research_type",
+            "identity_digest",
+            "payload_digest",
+            name="uq_fuyao_research_snapshot_content",
+        ),
+        CheckConstraint(
+            "classification = 'research_only'",
+            name="ck_fuyao_research_snapshot_classification",
+        ),
+        CheckConstraint(
+            "decision_weight_applied = 0",
+            name="ck_fuyao_research_snapshot_no_decision_weight",
+        ),
+    )
+
+    snapshot_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), default="fuyao", index=True)
+    research_type: Mapped[str] = mapped_column(String(64), index=True)
+    identity_digest: Mapped[str] = mapped_column(String(64), index=True)
+    identity_json: Mapped[str] = mapped_column(Text)
+    classification: Mapped[str] = mapped_column(String(32), default="research_only")
+    decision_weight_applied: Mapped[bool] = mapped_column(Boolean, default=False)
+    payload_digest: Mapped[str] = mapped_column(String(64), index=True)
+    source_request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_timestamp: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    observed_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
+Index(
+    "ix_fuyao_research_snapshot_latest",
+    FuyaoResearchSnapshotRow.research_type,
+    FuyaoResearchSnapshotRow.identity_digest,
+    FuyaoResearchSnapshotRow.observed_at.desc(),
+)

@@ -4,6 +4,7 @@ import {
   createPaperTradeFromOpportunity,
   fetchAutomationScheduler,
   fetchFactorShadowEvaluation,
+  fetchFuyaoOpportunityResearch,
   fetchFullMarketBatchScan,
   fetchLatestFullMarketBatchResult,
   fetchLatestFullMarketBatchScan,
@@ -49,6 +50,8 @@ import type {
   FactorShadowEvaluationResponse,
   FullMarketBatchScanJob,
   FullMarketScanResponse,
+  FuyaoResearchMetric,
+  FuyaoResearchResponse,
   MarketBarsResponse,
   OpportunityCard,
   PaperAccountStatusResponse,
@@ -1999,6 +2002,11 @@ function SelectedOpportunityWorkup({
   const [isAddingPaper, setIsAddingPaper] = useState(false);
   const [alertMessage, setAlertMessage] = useState("");
   const [isSavingAlerts, setIsSavingAlerts] = useState(false);
+  const [fuyaoResearch, setFuyaoResearch] = useState<FuyaoResearchResponse>();
+  const [fuyaoResearchStatus, setFuyaoResearchStatus] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
+  const [fuyaoResearchError, setFuyaoResearchError] = useState("");
   const execution = card.execution_plan;
   const confidence = card.confidence_explanation;
   const actionLabel =
@@ -2038,6 +2046,43 @@ function SelectedOpportunityWorkup({
   }));
   const canTrack =
     isTrackablePaperCard(card);
+
+  useEffect(() => {
+    const supported =
+      dataMode === "free" &&
+      card.instrument_id.startsWith("CN:") &&
+      ["stock", "etf"].includes(card.asset_type.toLowerCase());
+    if (!supported) {
+      setFuyaoResearch(undefined);
+      setFuyaoResearchStatus("idle");
+      setFuyaoResearchError("");
+      return;
+    }
+
+    const controller = new AbortController();
+    setFuyaoResearch(undefined);
+    setFuyaoResearchStatus("loading");
+    setFuyaoResearchError("");
+    void fetchFuyaoOpportunityResearch(
+      card.instrument_id,
+      card.asset_type,
+      { signal: controller.signal },
+    )
+      .then((response) => {
+        setFuyaoResearch(response);
+        setFuyaoResearchStatus("ready");
+      })
+      .catch((caught) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        setFuyaoResearchStatus("error");
+        setFuyaoResearchError(
+          caught instanceof Error ? caught.message : "Fuyao research unavailable",
+        );
+      });
+    return () => controller.abort();
+  }, [card.asset_type, card.instrument_id, dataMode]);
 
   async function addPaperTracking() {
     if (!canTrack) {
@@ -2110,6 +2155,13 @@ function SelectedOpportunityWorkup({
       <p className="workup-headline">
         {formatInstrumentText(localizeReason(headline, language), card.instrument_id, card.instrument_label)}
       </p>
+
+      <FuyaoResearchPanel
+        research={fuyaoResearch}
+        status={fuyaoResearchStatus}
+        error={fuyaoResearchError}
+        language={language}
+      />
 
       <SignalHubPanel
         hub={card.signal_hub}
@@ -2190,6 +2242,107 @@ function SelectedOpportunityWorkup({
       </div>
     </section>
   );
+}
+
+function FuyaoResearchPanel({
+  research,
+  status,
+  error,
+  language,
+}: {
+  research?: FuyaoResearchResponse;
+  status: "idle" | "loading" | "ready" | "error";
+  error: string;
+  language: "zh" | "en";
+}) {
+  if (status === "idle") {
+    return null;
+  }
+  const isStale = research?.freshness === "stored_fallback";
+  const heading = language === "zh" ? "扶摇研究数据" : "Fuyao research data";
+  const stateLabel = status === "loading"
+    ? (language === "zh" ? "读取中" : "Loading")
+    : status === "error"
+      ? (language === "zh" ? "暂不可用" : "Unavailable")
+      : isStale
+        ? (language === "zh" ? "最近保存" : "Saved snapshot")
+        : research?.status === "partial"
+          ? (language === "zh" ? "部分可用" : "Partial")
+          : (language === "zh" ? "实时读取" : "Live");
+  const timestamp = research?.snapshot?.source_timestamp
+    ?? research?.snapshot?.observed_at
+    ?? null;
+
+  return (
+    <div className={`fuyao-research-panel ${isStale ? "is-stale" : ""}`}>
+      <div className="fuyao-research-heading">
+        <div>
+          <span>{heading}</span>
+          <strong>{research?.summary.title ?? stateLabel}</strong>
+        </div>
+        <div className="fuyao-research-status">
+          <span>{stateLabel}</span>
+          {timestamp && <small>{formatResearchTimestamp(timestamp)}</small>}
+        </div>
+      </div>
+      {status === "loading" && (
+        <p>{language === "zh" ? "正在读取候选的行情、估值与基本面。" : "Loading market, valuation and fundamental data."}</p>
+      )}
+      {status === "error" && <p>{error}</p>}
+      {research && research.summary.metrics.length > 0 && (
+        <div className="fuyao-research-metrics">
+          {research.summary.metrics.slice(0, 10).map((metric) => (
+            <div key={metric.key}>
+              <span>{metric.label}</span>
+              <strong>{formatFuyaoMetric(metric)}</strong>
+            </div>
+          ))}
+        </div>
+      )}
+      {research?.summary.notes.map((note) => <p key={note}>{note}</p>)}
+      {research && (
+        <small className="fuyao-research-scope">
+          {language === "zh"
+            ? "仅用于研究解释，不改变当前排序或模拟成交。"
+            : "Research context only; current ranking and paper orders are unchanged."}
+          {research.snapshot?.payload_digest
+            ? ` ${research.snapshot.payload_digest.slice(0, 10)}`
+            : ""}
+        </small>
+      )}
+    </div>
+  );
+}
+
+function formatFuyaoMetric(metric: FuyaoResearchMetric): string {
+  if (typeof metric.value === "string") {
+    return `${metric.value}${metric.unit ?? ""}`;
+  }
+  if (metric.key === "turnover") {
+    return new Intl.NumberFormat("zh-CN", {
+      notation: "compact",
+      maximumFractionDigits: 2,
+    }).format(metric.value);
+  }
+  if (metric.key.includes("rank") || metric.key.endsWith("count")) {
+    return `${Math.round(metric.value)}${metric.unit ?? ""}`;
+  }
+  return `${metric.value.toLocaleString("zh-CN", {
+    maximumFractionDigits: 2,
+  })}${metric.unit ?? ""}`;
+}
+
+function formatResearchTimestamp(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function PreTradeRiskPanel({ card }: { card: OpportunityCard }) {

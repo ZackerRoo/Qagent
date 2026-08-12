@@ -2721,6 +2721,50 @@ export type FuyaoCapabilityManifest = {
   planned_or_unavailable: string[];
 };
 
+export type FuyaoResearchMetric = {
+  key: string;
+  label: string;
+  value: number | string;
+  unit: string | null;
+};
+
+export type FuyaoResearchSummary = {
+  title: string | null;
+  metrics: FuyaoResearchMetric[];
+  notes: string[];
+};
+
+export type FuyaoResearchSnapshotReference = {
+  snapshot_id?: string;
+  payload_digest?: string;
+  observed_at?: string;
+  source_timestamp?: string | null;
+  source_request_id?: string | null;
+  persisted: boolean;
+  error?: string;
+};
+
+export type FuyaoResearchResponse = {
+  provider: "fuyao";
+  research_type: "stock" | "fund" | "index" | string;
+  classification: "research_only";
+  decision_weight_applied: false;
+  paper_order_side_effect: false;
+  status: "ready" | "partial" | "stale" | "unavailable";
+  freshness: "live" | "stored_fallback" | "unavailable";
+  identity: Record<string, unknown>;
+  sections: Record<string, unknown>;
+  summary: FuyaoResearchSummary;
+  source: Record<string, unknown>;
+  errors: Array<{
+    section: string;
+    code: string | number;
+    message: string;
+    request_id?: string;
+  }>;
+  snapshot?: FuyaoResearchSnapshotReference | null;
+};
+
 export type MarketDataCacheSummary = {
   provider_mode: string;
   instrument_id: string;

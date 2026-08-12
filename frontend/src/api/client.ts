@@ -29,6 +29,7 @@ import type {
   FullMarketBatchScanJob,
   FullMarketScanResponse,
   FuyaoCapabilityManifest,
+  FuyaoResearchResponse,
   HistoricalBackfillJob,
   InstrumentSearchResponse,
   IntradayRadarResponse,
@@ -1150,6 +1151,21 @@ export async function fetchProviderStatus(): Promise<ProviderStatusResponse> {
 
 export async function fetchFuyaoCapabilities(): Promise<FuyaoCapabilityManifest> {
   return apiGet<FuyaoCapabilityManifest>("/fuyao/capabilities");
+}
+
+export async function fetchFuyaoOpportunityResearch(
+  instrumentId: string,
+  assetType: string,
+  options?: RequestOptions,
+): Promise<FuyaoResearchResponse> {
+  const path = assetType.trim().toLowerCase() === "etf"
+    ? "/fuyao/research/fund"
+    : "/fuyao/research/stock";
+  return apiGet<FuyaoResearchResponse>(
+    path,
+    { instrument_id: instrumentId },
+    options,
+  );
 }
 
 export async function fetchDataCache(

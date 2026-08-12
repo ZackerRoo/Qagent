@@ -11,7 +11,9 @@ from qagent.providers.fuyao import (
     FuyaoMarketDataProvider,
     FuyaoProviderError,
     FuyaoSnapshotProvider,
+    fuyao_telemetry_data_health,
     fuyao_capability_manifest,
+    reset_fuyao_telemetry,
     to_fuyao_thscode,
 )
 
@@ -121,6 +123,22 @@ def test_fuyao_snapshot_provider_retries_rate_limit_once():
 
     assert len(frame) == 1
     assert len(session.calls) == 2
+    health = fuyao_telemetry_data_health(
+        SimpleNamespace(
+            snapshot_provider=provider,
+            fallback=provider,
+            providers_by_market={"CN": provider},
+        )
+    )
+    assert health["fuyao_clients"] == "1"
+    assert health["fuyao_requests"] == "1"
+    assert health["fuyao_attempts"] == "2"
+    assert health["fuyao_successes"] == "1"
+    assert health["fuyao_retries"] == "1"
+    assert health["fuyao_last_request_id"] == "request-123"
+
+    assert reset_fuyao_telemetry(provider) == 1
+    assert fuyao_telemetry_data_health(provider)["fuyao_telemetry"] == "idle"
 
 
 def test_fuyao_snapshot_provider_redacts_key_from_business_error():

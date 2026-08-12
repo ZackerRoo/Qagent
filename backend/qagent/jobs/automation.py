@@ -19,6 +19,7 @@ from qagent.paper_trading.engine import (
     update_paper_trades,
 )
 from qagent.providers.base import MarketDataProvider
+from qagent.providers.fuyao import fuyao_telemetry_data_health
 from qagent.providers.status import build_provider_status
 from qagent.storage.paper import PaperTradingRepository
 from qagent.storage.repository import QagentRepository
@@ -203,7 +204,11 @@ def run_research_automation(
         backtest=backtest_result,
         alert_run=alert_result,
         paper_update=paper_update,
-        data_health={**scan_result.data_health, **data_health},
+        data_health={
+            **scan_result.data_health,
+            **data_health,
+            **fuyao_telemetry_data_health(provider),
+        },
     )
 
 

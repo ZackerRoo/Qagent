@@ -98,7 +98,26 @@ class StubFuyaoClient:
         return {"item": []}
 
 
-def _client(monkeypatch) -> TestClient:
+class UnavailableFuyaoClient:
+    telemetry_snapshot = None
+    last_request = None
+
+    def __getattr__(self, name):
+        def fail(*args, **kwargs):
+            raise FuyaoProviderError(
+                f"{name} unavailable",
+                code="upstream_unavailable",
+                request_id="req-down",
+            )
+
+        return fail
+
+
+def _client(monkeypatch, tmp_path) -> TestClient:
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'fuyao-research-api.db'}",
+    )
     monkeypatch.setattr(fuyao_routes, "_configured_client", lambda: StubFuyaoClient())
     return TestClient(create_app())
 
@@ -118,8 +137,8 @@ def test_fuyao_capability_api_does_not_require_a_key(monkeypatch):
     assert body["minute_bars_supported"] is False
 
 
-def test_fuyao_stock_research_is_partial_and_has_no_decision_side_effect(monkeypatch):
-    response = _client(monkeypatch).get(
+def test_fuyao_stock_research_is_partial_and_has_no_decision_side_effect(monkeypatch, tmp_path):
+    response = _client(monkeypatch, tmp_path).get(
         "/api/fuyao/research/stock",
         params={"instrument_id": "CN:600519", "include_statements": True},
     )
@@ -133,6 +152,11 @@ def test_fuyao_stock_research_is_partial_and_has_no_decision_side_effect(monkeyp
     assert body["identity"]["thscode"] == "600519.SH"
     assert "valuation" in body["sections"]
     assert "income_statement" in body["sections"]
+    assert body["freshness"] == "live"
+    assert body["snapshot"]["persisted"] is True
+    assert {
+        metric["key"] for metric in body["summary"]["metrics"]
+    } >= {"latest_price", "pe_ttm", "hot_rank"}
     assert body["errors"] == [
         {
             "section": "anomaly_analysis",
@@ -143,8 +167,8 @@ def test_fuyao_stock_research_is_partial_and_has_no_decision_side_effect(monkeyp
     ]
 
 
-def test_fuyao_stock_research_rejects_etf_and_index_ids(monkeypatch):
-    client = _client(monkeypatch)
+def test_fuyao_stock_research_rejects_etf_and_index_ids(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
 
     etf = client.get("/api/fuyao/research/stock?instrument_id=CN:510300")
     index = client.get("/api/fuyao/research/stock?instrument_id=CN:000300.IDX")
@@ -155,8 +179,8 @@ def test_fuyao_stock_research_rejects_etf_and_index_ids(monkeypatch):
     assert "does not accept index" in index.json()["detail"]
 
 
-def test_fuyao_market_and_fund_research_endpoints_preserve_raw_sections(monkeypatch):
-    client = _client(monkeypatch)
+def test_fuyao_market_and_fund_research_endpoints_preserve_raw_sections(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
 
     market = client.get("/api/fuyao/research/market?period=hour")
     fund = client.get("/api/fuyao/research/fund?instrument_id=CN:510300")
@@ -167,10 +191,34 @@ def test_fuyao_market_and_fund_research_endpoints_preserve_raw_sections(monkeypa
     assert fund.status_code == 200
     assert fund.json()["status"] == "ready"
     assert fund.json()["sections"]["holdings"]["item"][0]["hold_ratio"] == 4.0
+    assert {
+        metric["key"] for metric in fund.json()["summary"]["metrics"]
+    } >= {"latest_price", "holdings_count", "top_holding_ratio"}
 
 
-def test_fuyao_catalog_calendar_and_paginated_snapshot_endpoints(monkeypatch):
-    client = _client(monkeypatch)
+def test_fuyao_research_falls_back_to_latest_persisted_snapshot(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    first = client.get("/api/fuyao/research/stock?instrument_id=CN:600519")
+    snapshot_id = first.json()["snapshot"]["snapshot_id"]
+    monkeypatch.setattr(
+        fuyao_routes,
+        "_configured_client",
+        lambda: UnavailableFuyaoClient(),
+    )
+
+    fallback = client.get("/api/fuyao/research/stock?instrument_id=CN:600519")
+
+    assert fallback.status_code == 200
+    body = fallback.json()
+    assert body["status"] == "stale"
+    assert body["freshness"] == "stored_fallback"
+    assert body["summary"]["metrics"]
+    assert body["snapshot"]["snapshot_id"] == snapshot_id
+    assert body["errors"]
+
+
+def test_fuyao_catalog_calendar_and_paginated_snapshot_endpoints(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
 
     tickers = client.get("/api/fuyao/tickers?asset_type=stock&limit=20&offset=40")
     calendar = client.get("/api/fuyao/market/trading-calendar")
@@ -184,8 +232,8 @@ def test_fuyao_catalog_calendar_and_paginated_snapshot_endpoints(monkeypatch):
     assert market.json()["sections"]["snapshot"]["offset"] == 200
 
 
-def test_fuyao_historical_hot_list_requires_explicit_date(monkeypatch):
-    client = _client(monkeypatch)
+def test_fuyao_historical_hot_list_requires_explicit_date(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
 
     missing = client.get(
         "/api/fuyao/research/market?include_historical_hot_list=true"

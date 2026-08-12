@@ -34,6 +34,10 @@ from qagent.market.tradability import evaluate_tradability
 from qagent.market.trading_status import evaluate_trading_status
 from qagent.monitoring.signal_monitor import SignalMonitorCenter, build_signal_monitor_center
 from qagent.providers.base import MarketDataProvider
+from qagent.providers.fuyao import (
+    fuyao_telemetry_data_health,
+    reset_fuyao_telemetry,
+)
 from qagent.recommendations.calibration import apply_strategy_calibration
 from qagent.recommendations.brief import apply_recommendation_briefs
 from qagent.recommendations.cn_execution import build_trading_constraints
@@ -163,6 +167,7 @@ def run_daily_scan(
     reset_cache_stats = getattr(provider, "reset_cache_stats", None)
     if callable(reset_cache_stats):
         reset_cache_stats()
+    reset_fuyao_telemetry(provider)
 
     for instrument_id in instrument_ids:
         try:
@@ -455,6 +460,7 @@ def run_daily_scan(
         as_of=end,
     )
     data_health.update(operational_readiness_center.data_health)
+    data_health.update(fuyao_telemetry_data_health(provider))
 
     return DailyScanResult(
         cards=cards,

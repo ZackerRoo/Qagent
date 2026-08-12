@@ -88,7 +88,13 @@ from qagent.jobs.automation_scheduler import (
     AutoProcessingSettings,
     AutomationScheduler,
 )
-from qagent.providers.fuyao import FuyaoClient, FuyaoProviderError, FuyaoSnapshotProvider
+from qagent.providers.fuyao import (
+    FuyaoClient,
+    FuyaoProviderError,
+    FuyaoSnapshotProvider,
+    fuyao_telemetry_data_health,
+    reset_fuyao_telemetry,
+)
 from qagent.jobs.daily_scan import DailyScanResult, run_daily_scan
 from qagent.jobs.full_market import (
     build_full_market_batch_symbols,
@@ -3856,14 +3862,17 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
     paper_closed = 0
     if settings.update_paper:
         try:
+            paper_market_provider = build_market_data_provider(mode)
+            reset_fuyao_telemetry(paper_market_provider)
             paper_update = update_paper_trades(
                 paper_repo,
-                provider=build_market_data_provider(mode),
+                provider=paper_market_provider,
                 provider_mode=mode,
             )
             paper_total = paper_update.summary.total
             paper_closed = paper_update.summary.closed
             data_health.update(paper_update.data_health)
+            data_health.update(fuyao_telemetry_data_health(paper_market_provider))
         except Exception as exc:
             errors.append(f"paper_update: {exc}")
             summary = summarize_paper_trades(

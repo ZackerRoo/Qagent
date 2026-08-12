@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time as datetime_time, timedelta
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
 import math
 import time
+from threading import Lock
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
@@ -128,6 +129,22 @@ class FuyaoRequestMetadata:
     path: str
 
 
+@dataclass(frozen=True)
+class FuyaoTelemetrySnapshot:
+    requests: int
+    attempts: int
+    successes: int
+    errors: int
+    retries: int
+    latency_ms_total: float
+    latency_ms_last: float | None
+    last_path: str | None
+    last_request_id: str | None
+    last_data_timestamp: str | None
+    last_error_code: str | None
+    last_completed_at: str | None
+
+
 class FuyaoClient:
     """Validated read-only client for the currently published Fuyao REST API."""
 
@@ -154,6 +171,44 @@ class FuyaoClient:
         self.session = session or requests.Session()
         self.last_errors: list[str] = []
         self.last_request: FuyaoRequestMetadata | None = None
+        self._telemetry_lock = Lock()
+        self.reset_telemetry()
+
+    def reset_telemetry(self) -> None:
+        with self._telemetry_lock:
+            self._telemetry_requests = 0
+            self._telemetry_attempts = 0
+            self._telemetry_successes = 0
+            self._telemetry_errors = 0
+            self._telemetry_retries = 0
+            self._telemetry_latency_ms_total = 0.0
+            self._telemetry_latency_ms_last: float | None = None
+            self._telemetry_last_path: str | None = None
+            self._telemetry_last_request_id: str | None = None
+            self._telemetry_last_data_timestamp: str | None = None
+            self._telemetry_last_error_code: str | None = None
+            self._telemetry_last_completed_at: str | None = None
+
+    def telemetry_snapshot(self) -> FuyaoTelemetrySnapshot:
+        with self._telemetry_lock:
+            return FuyaoTelemetrySnapshot(
+                requests=self._telemetry_requests,
+                attempts=self._telemetry_attempts,
+                successes=self._telemetry_successes,
+                errors=self._telemetry_errors,
+                retries=self._telemetry_retries,
+                latency_ms_total=round(self._telemetry_latency_ms_total, 3),
+                latency_ms_last=(
+                    round(self._telemetry_latency_ms_last, 3)
+                    if self._telemetry_latency_ms_last is not None
+                    else None
+                ),
+                last_path=self._telemetry_last_path,
+                last_request_id=self._telemetry_last_request_id,
+                last_data_timestamp=self._telemetry_last_data_timestamp,
+                last_error_code=self._telemetry_last_error_code,
+                last_completed_at=self._telemetry_last_completed_at,
+            )
 
     def request_data(
         self,
@@ -531,7 +586,10 @@ class FuyaoClient:
         endpoint = f"{self.base_url}{path}"
         request_params = {key: value for key, value in (params or {}).items() if value is not None}
         last_error: FuyaoProviderError | None = None
+        started_at = time.perf_counter()
+        self._telemetry_begin(path)
         for attempt in range(1, self.max_attempts + 1):
+            self._telemetry_attempt()
             try:
                 response = self.session.get(
                     endpoint,
@@ -547,17 +605,36 @@ class FuyaoClient:
                     code="transport_error",
                 )
                 if attempt < self.max_attempts:
+                    self._telemetry_retry()
                     self._sleep_before_retry(attempt)
                     continue
+                self._telemetry_finish(
+                    started_at,
+                    success=False,
+                    error_code=last_error.code,
+                )
                 raise last_error from exc
 
             if not isinstance(payload, dict):
-                raise FuyaoProviderError(
+                last_error = FuyaoProviderError(
                     f"Fuyao returned a non-object response for {path}",
                     code="invalid_response",
                 )
+                self._telemetry_finish(
+                    started_at,
+                    success=False,
+                    error_code=last_error.code,
+                )
+                raise last_error
             code = payload.get("code")
             if code == 0:
+                metadata = _request_metadata(payload, path)
+                self._telemetry_finish(
+                    started_at,
+                    success=True,
+                    request_id=metadata.request_id,
+                    data_timestamp=metadata.timestamp,
+                )
                 return payload
 
             request_id = _request_id(payload)
@@ -568,16 +645,67 @@ class FuyaoClient:
                 request_id=request_id,
             )
             if code in RETRIABLE_BUSINESS_CODES and attempt < self.max_attempts:
+                self._telemetry_retry()
                 self._sleep_before_retry(attempt)
                 continue
+            self._telemetry_finish(
+                started_at,
+                success=False,
+                request_id=request_id,
+                error_code=last_error.code,
+            )
             raise last_error
 
         assert last_error is not None
+        self._telemetry_finish(
+            started_at,
+            success=False,
+            request_id=last_error.request_id,
+            error_code=last_error.code,
+        )
         raise last_error
 
     def _sleep_before_retry(self, attempt: int) -> None:
         if self.retry_backoff_seconds:
             time.sleep(self.retry_backoff_seconds * attempt)
+
+    def _telemetry_begin(self, path: str) -> None:
+        with self._telemetry_lock:
+            self._telemetry_requests += 1
+            self._telemetry_last_path = path
+
+    def _telemetry_attempt(self) -> None:
+        with self._telemetry_lock:
+            self._telemetry_attempts += 1
+
+    def _telemetry_retry(self) -> None:
+        with self._telemetry_lock:
+            self._telemetry_retries += 1
+
+    def _telemetry_finish(
+        self,
+        started_at: float,
+        *,
+        success: bool,
+        request_id: str | None = None,
+        data_timestamp: str | None = None,
+        error_code: int | str | None = None,
+    ) -> None:
+        elapsed_ms = max((time.perf_counter() - started_at) * 1_000, 0.0)
+        with self._telemetry_lock:
+            if success:
+                self._telemetry_successes += 1
+                self._telemetry_last_error_code = None
+            else:
+                self._telemetry_errors += 1
+                self._telemetry_last_error_code = (
+                    str(error_code) if error_code is not None else "unknown"
+                )
+            self._telemetry_latency_ms_total += elapsed_ms
+            self._telemetry_latency_ms_last = elapsed_ms
+            self._telemetry_last_request_id = request_id
+            self._telemetry_last_data_timestamp = data_timestamp
+            self._telemetry_last_completed_at = datetime.now(timezone.utc).isoformat()
 
 
 class FuyaoSnapshotProvider(FuyaoClient):
@@ -812,6 +940,95 @@ class FuyaoMarketDataProvider(FuyaoClient):
                 "adjustment_factor": None,
                 "adjustment_type": None,
             }
+
+
+def reset_fuyao_telemetry(provider: object) -> int:
+    clients = _fuyao_clients(provider)
+    for client in clients:
+        client.reset_telemetry()
+    return len(clients)
+
+
+def fuyao_telemetry_data_health(provider: object) -> dict[str, str]:
+    snapshots = [client.telemetry_snapshot() for client in _fuyao_clients(provider)]
+    if not snapshots:
+        return {}
+
+    requests = sum(item.requests for item in snapshots)
+    attempts = sum(item.attempts for item in snapshots)
+    successes = sum(item.successes for item in snapshots)
+    errors = sum(item.errors for item in snapshots)
+    retries = sum(item.retries for item in snapshots)
+    latency_total = sum(item.latency_ms_total for item in snapshots)
+    latest = max(
+        snapshots,
+        key=lambda item: item.last_completed_at or "",
+    )
+    state = (
+        "idle"
+        if requests == 0
+        else "error"
+        if errors and not successes
+        else "partial"
+        if errors
+        else "ready"
+    )
+    health = {
+        "fuyao_telemetry": state,
+        "fuyao_clients": str(len(snapshots)),
+        "fuyao_requests": str(requests),
+        "fuyao_attempts": str(attempts),
+        "fuyao_successes": str(successes),
+        "fuyao_errors": str(errors),
+        "fuyao_retries": str(retries),
+        "fuyao_latency_ms_total": f"{latency_total:.3f}",
+        "fuyao_latency_ms_average": (
+            f"{latency_total / requests:.3f}" if requests else "0.000"
+        ),
+    }
+    optional = {
+        "fuyao_latency_ms_last": latest.latency_ms_last,
+        "fuyao_last_path": latest.last_path,
+        "fuyao_last_request_id": latest.last_request_id,
+        "fuyao_last_data_timestamp": latest.last_data_timestamp,
+        "fuyao_last_error_code": latest.last_error_code,
+        "fuyao_last_completed_at": latest.last_completed_at,
+    }
+    health.update(
+        {
+            key: f"{value:.3f}" if isinstance(value, float) else str(value)
+            for key, value in optional.items()
+            if value is not None
+        }
+    )
+    return health
+
+
+def _fuyao_clients(provider: object) -> list[FuyaoClient]:
+    stack = [provider]
+    seen: set[int] = set()
+    clients: list[FuyaoClient] = []
+    while stack:
+        current = stack.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, FuyaoClient):
+            clients.append(current)
+        for attribute in (
+            "provider",
+            "market_data_provider",
+            "snapshot_provider",
+            "primary",
+            "fallback",
+        ):
+            child = getattr(current, attribute, None)
+            if child is not None:
+                stack.append(child)
+        providers_by_market = getattr(current, "providers_by_market", None)
+        if isinstance(providers_by_market, dict):
+            stack.extend(providers_by_market.values())
+    return clients
 
 
 def fuyao_capability_manifest(*, configured: bool) -> dict[str, object]:
