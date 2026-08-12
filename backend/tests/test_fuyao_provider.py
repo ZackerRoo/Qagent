@@ -142,9 +142,7 @@ def test_fuyao_snapshot_provider_retries_rate_limit_once():
 
 
 def test_fuyao_snapshot_provider_redacts_key_from_business_error():
-    session = FakeSession(
-        [{"code": 2001, "message": "bad secret-key", "request_id": "auth-1"}]
-    )
+    session = FakeSession([{"code": 2001, "message": "bad secret-key", "request_id": "auth-1"}])
     provider = FuyaoSnapshotProvider("secret-key", session=session, max_attempts=1)
 
     with pytest.raises(FuyaoProviderError) as captured:
@@ -220,6 +218,28 @@ def test_fuyao_market_provider_routes_stock_index_and_etf_snapshots():
         "/api/a-share-index/prices/snapshot",
         "/api/fund/market/snapshot",
     ]
+
+
+def test_fuyao_market_provider_isolates_bad_symbol_in_snapshot_batch():
+    session = FakeSession(
+        [
+            {"code": 1002, "message": "Unknown thscode", "request_id": "batch"},
+            _success_payload(_snapshot_item("600519.SH", 1500.0)),
+            {"code": 1002, "message": "Unknown thscode", "request_id": "single"},
+        ]
+    )
+    provider = FuyaoMarketDataProvider(
+        "secret-key",
+        session=session,
+        max_attempts=1,
+    )
+
+    frame = provider.get_snapshot(["CN:600519", "CN:000004"])
+
+    assert frame["instrument_id"].tolist() == ["CN:600519"]
+    assert len(session.calls) == 3
+    assert len(provider.last_errors) == 1
+    assert provider.last_errors[0].startswith("CN:000004: fuyao snapshot:")
 
 
 def test_fuyao_capability_manifest_is_explicit_about_boundaries():

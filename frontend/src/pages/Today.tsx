@@ -1482,6 +1482,15 @@ function MarketDataReliabilityStrip({
   const refreshed = runtime?.market_cache_prefetch_refreshed
     ?? dataHealth.market_cache_prefetch_refreshed
     ?? "-";
+  const snapshotRepairRequested = runtime?.market_cache_snapshot_repair_requested
+    ?? dataHealth.market_cache_prefetch_snapshot_requested
+    ?? "0";
+  const snapshotRepairRepaired = runtime?.market_cache_snapshot_repair_repaired
+    ?? dataHealth.market_cache_prefetch_snapshot_repaired
+    ?? "0";
+  const snapshotRepairUnrecovered = runtime?.market_cache_snapshot_repair_unrecovered
+    ?? dataHealth.market_cache_prefetch_snapshot_unrecovered
+    ?? "0";
   const providerFallbacks = runtime?.latest_scan_provider_fallbacks
     ?? Number(dataHealth.provider_error_count ?? dataHealth.provider_errors ?? 0);
   const tickflowFallbacks = runtime?.latest_scan_tickflow_fallbacks
@@ -1562,6 +1571,12 @@ function MarketDataReliabilityStrip({
         <span>
           {language === "zh" ? "增量更新" : "Tail refreshed"}{" "}
           <strong>{refreshed}</strong>
+        </span>
+        <span>
+          {language === "zh" ? "同日来源修复" : "Same-session repair"}{" "}
+          <strong>{`${snapshotRepairRepaired}/${snapshotRepairRequested}`}</strong>
+          {Number(snapshotRepairUnrecovered) > 0
+            && ` · ${language === "zh" ? "隔离" : "quarantined"} ${snapshotRepairUnrecovered}`}
         </span>
         <span>
           {language === "zh" ? "上次全扫" : "Last full scan"}{" "}
@@ -1646,8 +1661,8 @@ function marketDataRecoveryLabel(
 ): string {
   if (value === "settlement_retry_then_provider_repair" && refreshAttempt >= 2) {
     return language === "zh"
-      ? "已完成结算补扫，下一步修复缺失源"
-      : "Settlement retry complete; repair missing sources next";
+      ? "已启用同日来源修复，未恢复标的继续隔离"
+      : "Same-session source repair enabled; unresolved symbols remain quarantined";
   }
   const labels: Record<string, [string, string]> = {
     none: ["无需处理", "No action"],

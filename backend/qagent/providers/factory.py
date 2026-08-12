@@ -50,11 +50,22 @@ def build_market_data_provider(provider_mode: str) -> MarketDataProvider:
                 name="free",
             ),
             mode,
+            enable_recent_tail_snapshot_repair=bool(settings.fuyao_api_key),
         )
     raise ValueError(f"unsupported provider mode: {provider_mode}")
 
 
-def _with_market_cache(provider: MarketDataProvider, provider_mode: str) -> MarketDataProvider:
+def _with_market_cache(
+    provider: MarketDataProvider,
+    provider_mode: str,
+    *,
+    enable_recent_tail_snapshot_repair: bool = False,
+) -> MarketDataProvider:
     initialize_database()
     cache = MarketDataCacheRepository(create_session_factory())
-    return CachedMarketDataProvider(provider, cache=cache, provider_mode=provider_mode)
+    return CachedMarketDataProvider(
+        provider,
+        cache=cache,
+        provider_mode=provider_mode,
+        enable_recent_tail_snapshot_repair=enable_recent_tail_snapshot_repair,
+    )

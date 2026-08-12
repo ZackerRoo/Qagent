@@ -158,9 +158,7 @@ def test_market_data_cache_clears_invalid_adjusted_ohlc(tmp_path):
     )
 
     assert repo.save_daily_bars("free", bars) == 1
-    loaded = repo.load_daily_bars(
-        "free", ["CN:601288"], date(2014, 7, 24), date(2014, 7, 24)
-    )
+    loaded = repo.load_daily_bars("free", ["CN:601288"], date(2014, 7, 24), date(2014, 7, 24))
 
     assert loaded.iloc[0]["close"] == 2.45
     assert pd.isna(loaded.iloc[0]["adjusted_close"])
@@ -348,9 +346,7 @@ def test_market_data_cache_drops_structurally_invalid_ohlc_rows(tmp_path):
     )
 
     saved = repo.save_daily_bars("free", bars)
-    loaded = repo.load_daily_bars(
-        "free", ["CN:159560"], date(2026, 7, 14), date(2026, 7, 15)
-    )
+    loaded = repo.load_daily_bars("free", ["CN:159560"], date(2026, 7, 14), date(2026, 7, 15))
 
     assert saved == 1
     assert loaded["trade_date"].tolist() == [date(2026, 7, 14)]
@@ -374,9 +370,7 @@ def test_market_data_cache_rejects_stale_cn_trailing_coverage(tmp_path):
         ]
     )
     repo.save_daily_bars("free", bars)
-    repo.record_coverage(
-        "free", "CN:159582", date(2026, 7, 1), date(2026, 7, 8), len(bars)
-    )
+    repo.record_coverage("free", "CN:159582", date(2026, 7, 1), date(2026, 7, 8), len(bars))
 
     assert not repo.has_usable_coverage(
         "free",
@@ -489,6 +483,69 @@ class IncrementalBatchProvider(CountingProvider):
                 for trade_date in pd.date_range(start, end, freq="B")
             ]
         )
+
+
+class TailSnapshotRepairProvider(CountingProvider):
+    def __init__(self, snapshot_date: date):
+        super().__init__()
+        self.snapshot_date = snapshot_date
+        self.snapshot_calls: list[list[str]] = []
+
+    def get_historical_daily_bars(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> pd.DataFrame:
+        del instrument_ids, start, end
+        return pd.DataFrame()
+
+    def get_snapshot(self, instrument_ids: list[str]) -> pd.DataFrame:
+        self.snapshot_calls.append(instrument_ids)
+        return pd.DataFrame(
+            [
+                {
+                    "instrument_id": instrument_id,
+                    "trade_date": self.snapshot_date,
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.8,
+                    "close": 10.2,
+                    "volume": 800_000,
+                    "turnover": 8_000_000,
+                    "provider": "fuyao_realtime",
+                }
+                for instrument_id in instrument_ids
+            ]
+        )
+
+
+class PartialStaleBatchProvider(CountingProvider):
+    def _partial(self, instrument_ids: list[str]) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "instrument_id": instrument_id,
+                    "trade_date": date(2026, 1, 5),
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.8,
+                    "close": 10.2,
+                    "volume": 800_000,
+                    "provider": self.name,
+                }
+                for instrument_id in instrument_ids
+            ]
+        )
+
+    def get_historical_daily_bars(self, instrument_ids, start, end):
+        del start, end
+        return self._partial(instrument_ids)
+
+    def get_daily_bars(self, instrument_ids, start, end):
+        del start, end
+        self.calls += 1
+        return self._partial(instrument_ids)
 
 
 def test_cached_provider_uses_cached_daily_bars_for_same_range(tmp_path):
@@ -621,3 +678,102 @@ def test_cached_provider_repairs_internal_gaps_when_tail_is_current(tmp_path):
     bars = provider.get_daily_bars([instrument_id], start, end)
     assert not bars.empty
     assert inner.calls == 0
+
+
+def test_cached_provider_repairs_stale_tail_from_exact_session_snapshot(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    expected = date(2026, 8, 12)
+    instrument_id = "CN:300229"
+    repo.save_daily_bars(
+        "free",
+        pd.DataFrame(
+            [
+                {
+                    "instrument_id": instrument_id,
+                    "trade_date": date(2026, 8, 11),
+                    "open": 9.8,
+                    "high": 10.1,
+                    "low": 9.7,
+                    "close": 10.0,
+                    "volume": 700_000,
+                    "provider": "baostock_paired",
+                }
+            ]
+        ),
+    )
+    inner = TailSnapshotRepairProvider(expected)
+    provider = CachedMarketDataProvider(
+        inner,
+        cache=repo,
+        provider_mode="free",
+        enable_recent_tail_snapshot_repair=True,
+    )
+
+    provider.prefetch_daily_bars(
+        [instrument_id],
+        date(2026, 8, 10),
+        expected,
+        repair_recent_tail=True,
+    )
+
+    bars = repo.load_daily_bars(
+        "free",
+        [instrument_id],
+        date(2026, 8, 10),
+        expected,
+    )
+    latest = bars.sort_values("trade_date").iloc[-1]
+    assert inner.snapshot_calls == [[instrument_id]]
+    assert latest["trade_date"] == expected
+    assert latest["provider"] == "fuyao_realtime"
+    assert float(latest["adjusted_close"]) == float(latest["close"])
+    assert latest["adjustment_type"] == "snapshot_qfq_anchor"
+    assert provider.prefetch_stats()["snapshot_requested"] == 1
+    assert provider.prefetch_stats()["snapshot_repaired"] == 1
+    assert provider.prefetch_stats()["snapshot_unrecovered"] == 0
+
+
+def test_cached_provider_quarantines_snapshot_outside_expected_session(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    expected = date(2026, 8, 12)
+    instrument_id = "CN:300229"
+    inner = TailSnapshotRepairProvider(date(2026, 8, 13))
+    provider = CachedMarketDataProvider(
+        inner,
+        cache=repo,
+        provider_mode="free",
+        enable_recent_tail_snapshot_repair=True,
+    )
+
+    provider.prefetch_daily_bars(
+        [instrument_id],
+        date(2026, 8, 10),
+        expected,
+        repair_recent_tail=True,
+    )
+
+    assert repo.load_daily_bars(
+        "free",
+        [instrument_id],
+        date(2026, 8, 10),
+        date(2026, 8, 13),
+    ).empty
+    assert provider.prefetch_stats()["snapshot_requested"] == 1
+    assert provider.prefetch_stats()["snapshot_repaired"] == 0
+    assert provider.prefetch_stats()["snapshot_unrecovered"] == 1
+
+
+def test_cached_provider_does_not_treat_partial_stale_history_as_empty(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    inner = PartialStaleBatchProvider()
+    provider = CachedMarketDataProvider(inner, cache=repo, provider_mode="free")
+    instrument_id = "CN:000001"
+    start = date(2026, 1, 1)
+    end = date(2026, 1, 9)
+
+    provider.prefetch_daily_bars([instrument_id], start, end)
+    bars = provider.get_daily_bars([instrument_id], start, end)
+
+    assert not bars.empty
+    assert bars["trade_date"].tolist() == [date(2026, 1, 5)]
+    assert inner.calls == 1

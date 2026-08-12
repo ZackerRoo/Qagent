@@ -3005,6 +3005,10 @@ export type AutomationRuntimeHealth = {
   market_data_recovery_action: string | null;
   market_data_refresh_attempt: number;
   market_cache_prefetch_refreshed: string | null;
+  market_cache_snapshot_repair_requested: string | null;
+  market_cache_snapshot_repair_repaired: string | null;
+  market_cache_snapshot_repair_unrecovered: string | null;
+  market_cache_snapshot_repair_errors: string | null;
   fuyao_state: string;
   fuyao_requests: number;
   fuyao_successes: number;

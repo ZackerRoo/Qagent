@@ -35,6 +35,7 @@ from qagent.paper_trading.engine import (
     build_paper_validation,
 )
 from qagent.providers.factory import build_market_data_provider
+from qagent.providers.fuyao import reset_fuyao_telemetry
 from qagent.recommendations.portfolio import build_portfolio_plan
 from qagent.recommendations.brief import apply_recommendation_briefs
 from qagent.recommendations.feedback import (
@@ -336,10 +337,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     restored_batches = 0
     for batch_index, batch in enumerate(_chunks(job.symbols, job.batch_size), start=1):
         current = repo.get_full_market_scan_job(job_id)
-        if (
-            current is not None
-            and current.data_health.get("automatic_scan_aborted") == "true"
-        ):
+        if current is not None and current.data_health.get("automatic_scan_aborted") == "true":
             repo.update_full_market_scan_job(
                 job_id,
                 status="failed",
@@ -363,6 +361,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
             aggregate_health["full_market_checkpoint_batches_restored"] = str(restored_batches)
         else:
             try:
+                reset_fuyao_telemetry(provider)
                 stored_fundamentals = replay_evidence.fundamentals_as_of(
                     batch,
                     fundamental_as_of,
@@ -375,6 +374,13 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
                             batch,
                             start=date(2026, 1, 1),
                             end=scan_end,
+                            repair_recent_tail=(
+                                _int_health(
+                                    job.data_health,
+                                    "automatic_candidate_refresh_attempt",
+                                )
+                                >= 2
+                            ),
                         )
                     except Exception as exc:
                         aggregate_health[f"batch_{batch_index}_prefetch_error"] = str(exc)[:500]
@@ -389,6 +395,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
                     paper_trading_report=paper_report,
                     walk_forward_validation=walk_forward_validation,
                     strategy_governance_context=governance_context,
+                    reset_market_provider_telemetry=False,
                     start=date(2026, 1, 1),
                     end=scan_end,
                 )
@@ -483,9 +490,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     all_cards = final_policy.cards
     all_governance = final_policy.audits
     aggregate_health.update(final_policy.data_health)
-    feature_as_of_cap = (
-        _latest_completed_a_share_session() if job.provider == "free" else None
-    )
+    feature_as_of_cap = _latest_completed_a_share_session() if job.provider == "free" else None
     future_trade_dates_ignored = _future_trade_date_count(
         all_items,
         instrument_ids=set(card_universe),
@@ -703,9 +708,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         payload_data_health.update(
             {
                 "paper_model_cohort_id": paper_model_cohort.cohort_id,
-                "paper_model_cohort_feature_set_version": (
-                    paper_model_cohort.feature_set_version
-                ),
+                "paper_model_cohort_feature_set_version": (paper_model_cohort.feature_set_version),
                 "paper_model_cohort_recommendation_policy": (
                     paper_model_cohort.recommendation_policy_entrypoint
                 ),
@@ -979,10 +982,7 @@ def _latest_completed_a_share_session(now: datetime | None = None) -> date | Non
     sessions = trading_sessions_in_range(today - timedelta(days=14), today)
     if not sessions:
         return None
-    if (
-        sessions[-1] == today
-        and local_now.timetz().replace(tzinfo=None) < time(hour=15, minute=30)
-    ):
+    if sessions[-1] == today and local_now.timetz().replace(tzinfo=None) < time(hour=15, minute=30):
         sessions = sessions[:-1]
     return sessions[-1] if sessions else None
 
@@ -1004,9 +1004,10 @@ def _frozen_full_market_scan_end(
             return date.fromisoformat(raw)
         except ValueError:
             pass
-    return _latest_completed_a_share_session() or created_at.astimezone(
-        ZoneInfo("Asia/Shanghai")
-    ).date()
+    return (
+        _latest_completed_a_share_session()
+        or created_at.astimezone(ZoneInfo("Asia/Shanghai")).date()
+    )
 
 
 def _frozen_full_market_fundamental_revision(
@@ -1317,32 +1318,25 @@ def _market_data_reliability_health(
     stale_source_counts = Counter(
         item.provider or "missing"
         for item in items
-        if item.latest_trade_date is not None
-        and item.latest_trade_date < expected_trade_date
+        if item.latest_trade_date is not None and item.latest_trade_date < expected_trade_date
     )
     missing_reason_counts = Counter(
-        _market_data_problem_reason(item)
-        for item in items
-        if item.latest_trade_date is None
+        _market_data_problem_reason(item) for item in items if item.latest_trade_date is None
     )
     stale_trade_dates = Counter(
         item.latest_trade_date
         for item in items
-        if item.latest_trade_date is not None
-        and item.latest_trade_date < expected_trade_date
+        if item.latest_trade_date is not None and item.latest_trade_date < expected_trade_date
     )
     stale_age_counts: Counter[str] = Counter()
     for latest_trade_date, count in stale_trade_dates.items():
-        stale_age_counts[
-            _market_data_stale_age_bucket(latest_trade_date, expected_trade_date)
-        ] += count
-    problem_items = [
-        item for item in items if item.latest_trade_date != expected_trade_date
-    ]
+        stale_age_counts[_market_data_stale_age_bucket(latest_trade_date, expected_trade_date)] += (
+            count
+        )
+    problem_items = [item for item in items if item.latest_trade_date != expected_trade_date]
     problem_status_counts = Counter(item.status for item in problem_items)
     problem_samples = ",".join(
-        item.instrument_id
-        for item in sorted(problem_items, key=_market_data_problem_sort_key)[:12]
+        item.instrument_id for item in sorted(problem_items, key=_market_data_problem_sort_key)[:12]
     )
     if error_count > 0 or not items or coverage < 0.80:
         state = "risk"
@@ -1359,17 +1353,11 @@ def _market_data_reliability_health(
         "market_data_latest_session_future": str(future),
         "market_data_latest_session_coverage": f"{coverage:.6f}",
         "market_data_source_mix": _market_data_count_mix(source_counts),
-        "market_data_current_source_mix": _market_data_count_mix(
-            current_source_counts
-        ),
+        "market_data_current_source_mix": _market_data_count_mix(current_source_counts),
         "market_data_stale_source_mix": _market_data_count_mix(stale_source_counts),
         "market_data_stale_age_mix": _market_data_count_mix(stale_age_counts),
-        "market_data_missing_reason_mix": _market_data_count_mix(
-            missing_reason_counts
-        ),
-        "market_data_problem_status_mix": _market_data_count_mix(
-            problem_status_counts
-        ),
+        "market_data_missing_reason_mix": _market_data_count_mix(missing_reason_counts),
+        "market_data_problem_status_mix": _market_data_count_mix(problem_status_counts),
         "market_data_problem_samples": problem_samples,
         "market_data_recovery_action": _market_data_recovery_action(
             stale=stale,
@@ -1628,14 +1616,12 @@ def _load_paper_feedback_report(
         trades = paper_repo.list_trades(limit=500, provider=provider.strip().lower())
         if not trades:
             return None
-        authenticated_ids, authentication_health = (
-            authenticated_ranking_v3_paper_trade_ids(repo, trades)
+        authenticated_ids, authentication_health = authenticated_ranking_v3_paper_trade_ids(
+            repo, trades
         )
         if not authenticated_ids:
             return None
-        reporting_trades = [
-            trade for trade in trades if trade.trade_id in authenticated_ids
-        ]
+        reporting_trades = [trade for trade in trades if trade.trade_id in authenticated_ids]
         account = paper_repo.get_account_settings()
         ledger = build_paper_ledger(
             trades,

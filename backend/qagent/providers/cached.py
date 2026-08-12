@@ -22,10 +22,15 @@ class CachedMarketDataProvider:
         provider: MarketDataProvider,
         cache: MarketDataCacheRepository,
         provider_mode: str,
+        *,
+        enable_recent_tail_snapshot_repair: bool = False,
+        snapshot_repair_batch_size: int = 50,
     ):
         self.provider = provider
         self.cache = cache
         self.provider_mode = provider_mode
+        self.enable_recent_tail_snapshot_repair = enable_recent_tail_snapshot_repair
+        self.snapshot_repair_batch_size = max(1, snapshot_repair_batch_size)
         self.name = provider.name
         self.last_errors: list[str] = []
         self.last_cache_events: list[MarketDataCacheEvent] = []
@@ -66,9 +71,7 @@ class CachedMarketDataProvider:
                 instrument_id,
                 start,
                 end,
-                maximum_trailing_session_gap=(
-                    1 if instrument_id.startswith("CN:") else None
-                ),
+                maximum_trailing_session_gap=(1 if instrument_id.startswith("CN:") else None),
             ):
                 cached = self.cache.load_daily_bars(
                     self.provider_mode,
@@ -140,15 +143,19 @@ class CachedMarketDataProvider:
                     frames.append(persisted)
         if not frames:
             return pd.DataFrame(columns=BAR_COLUMNS)
-        return pd.concat(frames, ignore_index=True).sort_values(
-            ["instrument_id", "trade_date"]
-        ).reset_index(drop=True)
+        return (
+            pd.concat(frames, ignore_index=True)
+            .sort_values(["instrument_id", "trade_date"])
+            .reset_index(drop=True)
+        )
 
     def prefetch_daily_bars(
         self,
         instrument_ids: list[str],
         start: date,
         end: date,
+        *,
+        repair_recent_tail: bool = False,
     ) -> None:
         """Fill cache misses in one provider batch before per-symbol analysis."""
 
@@ -163,12 +170,8 @@ class CachedMarketDataProvider:
                 instrument_id,
                 start,
                 end,
-                minimum_session_coverage=(
-                    0.95 if instrument_id.startswith("CN:") else None
-                ),
-                maximum_trailing_session_gap=(
-                    0 if instrument_id.startswith("CN:") else None
-                ),
+                minimum_session_coverage=(0.95 if instrument_id.startswith("CN:") else None),
+                maximum_trailing_session_gap=(0 if instrument_id.startswith("CN:") else None),
             )
         ]
         latest_dates = self.cache.latest_trade_dates(
@@ -182,9 +185,7 @@ class CachedMarketDataProvider:
             # A current tail with unusable coverage means the gap is inside the
             # cached history, so repair the requested range instead of skipping it.
             refresh_start = (
-                start
-                if latest is None or latest >= end
-                else max(start, latest + timedelta(days=1))
+                start if latest is None or latest >= end else max(start, latest + timedelta(days=1))
             )
             if refresh_start <= end:
                 refresh_groups.setdefault(refresh_start, []).append(instrument_id)
@@ -200,6 +201,14 @@ class CachedMarketDataProvider:
             "fetched_rows": 0,
             "refreshed": 0,
             "stale_after_refresh": 0,
+            "snapshot_repair_enabled": str(
+                repair_recent_tail and self.enable_recent_tail_snapshot_repair
+            ).lower(),
+            "snapshot_requested": 0,
+            "snapshot_rows": 0,
+            "snapshot_repaired": 0,
+            "snapshot_unrecovered": 0,
+            "snapshot_errors": 0,
         }
         if not missing:
             return
@@ -215,17 +224,42 @@ class CachedMarketDataProvider:
                 else self.provider.get_daily_bars(group, refresh_start, end)
             )
             errors.extend(getattr(self.provider, "last_errors", []))
-            fallback_instruments.extend(
-                getattr(self.provider, "last_fallback_instruments", [])
-            )
+            fallback_instruments.extend(getattr(self.provider, "last_fallback_instruments", []))
             if not fetched_group.empty:
                 frames.append(fetched_group)
-        self._pending_prefetch_errors = list(dict.fromkeys(errors))
-        self._pending_prefetch_fallback_instruments = list(
-            dict.fromkeys(fallback_instruments)
+        fetched = (
+            pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=BAR_COLUMNS)
         )
-        fetched = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=BAR_COLUMNS)
         self.cache.save_daily_bars(self.provider_mode, fetched)
+        if repair_recent_tail and self.enable_recent_tail_snapshot_repair:
+            latest_after_history = self.cache.latest_trade_dates(
+                self.provider_mode,
+                missing,
+                not_after=end,
+            )
+            snapshot_targets = [
+                instrument_id
+                for instrument_id in missing
+                if instrument_id.startswith("CN:")
+                and latest_after_history.get(instrument_id) != end
+            ]
+            snapshot_frame, snapshot_errors, snapshot_fallbacks = (
+                self._repair_recent_tail_from_snapshot(snapshot_targets, end=end)
+            )
+            errors.extend(snapshot_errors)
+            fallback_instruments.extend(snapshot_fallbacks)
+            repaired_ids = _instrument_ids_on_date(snapshot_frame, end)
+            self.last_prefetch_stats.update(
+                {
+                    "snapshot_requested": len(snapshot_targets),
+                    "snapshot_rows": len(snapshot_frame),
+                    "snapshot_repaired": len(repaired_ids),
+                    "snapshot_unrecovered": len(snapshot_targets) - len(repaired_ids),
+                    "snapshot_errors": len(snapshot_errors),
+                }
+            )
+        self._pending_prefetch_errors = list(dict.fromkeys(errors))
+        self._pending_prefetch_fallback_instruments = list(dict.fromkeys(fallback_instruments))
         cached_counts = self.cache.count_daily_bars_by_instrument(
             self.provider_mode,
             requested,
@@ -246,12 +280,8 @@ class CachedMarketDataProvider:
                 instrument_id,
                 start,
                 end,
-                minimum_session_coverage=(
-                    0.95 if instrument_id.startswith("CN:") else None
-                ),
-                maximum_trailing_session_gap=(
-                    0 if instrument_id.startswith("CN:") else None
-                ),
+                minimum_session_coverage=(0.95 if instrument_id.startswith("CN:") else None),
+                maximum_trailing_session_gap=(0 if instrument_id.startswith("CN:") else None),
             )
             for instrument_id in missing
         }
@@ -259,8 +289,12 @@ class CachedMarketDataProvider:
             coverage_key = (instrument_id, start, end)
             if usable:
                 self._prefetched_empty_ranges.discard(coverage_key)
-            else:
+            elif cached_counts.get(instrument_id, 0) == 0:
                 self._prefetched_empty_ranges.add(coverage_key)
+            else:
+                # Partial histories and stale tails remain useful evidence. Only
+                # suppress a per-symbol retry when the batch produced zero rows.
+                self._prefetched_empty_ranges.discard(coverage_key)
         refreshed = sum(usable_after_refresh.values())
         self.last_prefetch_stats.update(
             {
@@ -268,6 +302,42 @@ class CachedMarketDataProvider:
                 "refreshed": refreshed,
                 "stale_after_refresh": len(missing) - refreshed,
             }
+        )
+
+    def _repair_recent_tail_from_snapshot(
+        self,
+        instrument_ids: list[str],
+        *,
+        end: date,
+    ) -> tuple[pd.DataFrame, list[str], list[str]]:
+        if not instrument_ids:
+            return pd.DataFrame(columns=BAR_COLUMNS), [], []
+        snapshot_getter = getattr(self.provider, "get_repair_snapshot", None)
+        if not callable(snapshot_getter):
+            snapshot_getter = getattr(self.provider, "get_snapshot", None)
+        if not callable(snapshot_getter):
+            return pd.DataFrame(columns=BAR_COLUMNS), [], []
+
+        frames: list[pd.DataFrame] = []
+        errors: list[str] = []
+        fallback_instruments: list[str] = []
+        for offset in range(0, len(instrument_ids), self.snapshot_repair_batch_size):
+            batch = instrument_ids[offset : offset + self.snapshot_repair_batch_size]
+            snapshot = snapshot_getter(batch)
+            errors.extend(getattr(self.provider, "last_errors", []))
+            fallback_instruments.extend(getattr(self.provider, "last_fallback_instruments", []))
+            normalized = _normalized_snapshot_tail(snapshot, batch, expected=end)
+            if not normalized.empty:
+                frames.append(normalized)
+
+        combined = (
+            pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=BAR_COLUMNS)
+        )
+        self.cache.save_daily_bars(self.provider_mode, combined)
+        return (
+            combined,
+            list(dict.fromkeys(errors)),
+            list(dict.fromkeys(fallback_instruments)),
         )
 
     def get_snapshot(self, instrument_ids: list[str]) -> pd.DataFrame:
@@ -304,4 +374,61 @@ def _empty_prefetch_stats() -> dict[str, int | str]:
         "fetched_rows": 0,
         "refreshed": 0,
         "stale_after_refresh": 0,
+        "snapshot_repair_enabled": "false",
+        "snapshot_requested": 0,
+        "snapshot_rows": 0,
+        "snapshot_repaired": 0,
+        "snapshot_unrecovered": 0,
+        "snapshot_errors": 0,
     }
+
+
+def _normalized_snapshot_tail(
+    frame: pd.DataFrame,
+    requested: list[str],
+    *,
+    expected: date,
+) -> pd.DataFrame:
+    if frame.empty or not {"instrument_id", "trade_date"}.issubset(frame.columns):
+        return pd.DataFrame(columns=BAR_COLUMNS)
+    normalized = frame.copy()
+    normalized["instrument_id"] = normalized["instrument_id"].astype(str)
+    normalized["trade_date"] = pd.to_datetime(normalized["trade_date"], errors="coerce").dt.date
+    normalized = normalized.loc[
+        normalized["instrument_id"].isin(requested) & normalized["trade_date"].eq(expected)
+    ].copy()
+    if normalized.empty:
+        return pd.DataFrame(columns=BAR_COLUMNS)
+    for column in BAR_COLUMNS:
+        if column not in normalized.columns:
+            normalized[column] = None
+    # A forward-adjusted series is anchored to the latest raw close. The
+    # explicit marker keeps this same-day snapshot repair auditable and allows
+    # a settled paired history row to replace it on the next refresh.
+    for field in ("open", "high", "low", "close"):
+        adjusted_field = f"adjusted_{field}"
+        normalized[adjusted_field] = normalized[adjusted_field].where(
+            normalized[adjusted_field].notna(),
+            normalized[field],
+        )
+    normalized["adjustment_factor"] = normalized["adjustment_factor"].where(
+        normalized["adjustment_factor"].notna(),
+        1.0,
+    )
+    normalized["adjustment_type"] = normalized["adjustment_type"].where(
+        normalized["adjustment_type"].notna(),
+        "snapshot_qfq_anchor",
+    )
+    return (
+        normalized[BAR_COLUMNS]
+        .drop_duplicates(subset=["instrument_id", "trade_date"], keep="last")
+        .sort_values(["instrument_id", "trade_date"])
+        .reset_index(drop=True)
+    )
+
+
+def _instrument_ids_on_date(frame: pd.DataFrame, expected: date) -> set[str]:
+    if frame.empty:
+        return set()
+    trade_dates = pd.to_datetime(frame["trade_date"], errors="coerce").dt.date
+    return set(frame.loc[trade_dates.eq(expected), "instrument_id"].astype(str))

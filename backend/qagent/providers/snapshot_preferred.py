@@ -74,6 +74,23 @@ class SnapshotPreferredMarketDataProvider:
         self.last_errors = _unrecovered_errors(primary_errors, recovered) + fallback_errors
         return _normalized_snapshot(primary, fallback)
 
+    def get_repair_snapshot(self, instrument_ids: list[str]) -> pd.DataFrame:
+        """Load the preferred quote source without repeating the history chain."""
+
+        requested = list(dict.fromkeys(instrument_ids))
+        if (
+            self.max_preferred_instruments is not None
+            and len(requested) > self.max_preferred_instruments
+        ):
+            raise ValueError(
+                "repair snapshot batch exceeds preferred source limit: "
+                f"{len(requested)} > {self.max_preferred_instruments}"
+            )
+        primary = self.snapshot_provider.get_snapshot(requested)
+        self.last_errors = list(getattr(self.snapshot_provider, "last_errors", []))
+        self.last_fallback_instruments = []
+        return _normalized_snapshot(primary)
+
     def get_minute_bars(
         self,
         instrument_ids: list[str],

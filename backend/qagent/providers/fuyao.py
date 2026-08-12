@@ -918,6 +918,19 @@ class FuyaoMarketDataProvider(FuyaoClient):
                 request_id=self.last_request.request_id if self.last_request else None,
             )
         except Exception as exc:
+            if len(instrument_ids) > 1:
+                midpoint = len(instrument_ids) // 2
+                self._load_snapshot_group(
+                    instrument_ids[:midpoint],
+                    loader,
+                    rows_by_instrument,
+                )
+                self._load_snapshot_group(
+                    instrument_ids[midpoint:],
+                    loader,
+                    rows_by_instrument,
+                )
+                return
             self.last_errors.extend(f"{item}: fuyao snapshot: {exc}" for item in instrument_ids)
             return
         trade_date = datetime.fromtimestamp(timestamp_ms / 1000, tz=SHANGHAI_TZ).date()
@@ -982,9 +995,7 @@ def fuyao_telemetry_data_health(provider: object) -> dict[str, str]:
         "fuyao_errors": str(errors),
         "fuyao_retries": str(retries),
         "fuyao_latency_ms_total": f"{latency_total:.3f}",
-        "fuyao_latency_ms_average": (
-            f"{latency_total / requests:.3f}" if requests else "0.000"
-        ),
+        "fuyao_latency_ms_average": (f"{latency_total / requests:.3f}" if requests else "0.000"),
     }
     optional = {
         "fuyao_latency_ms_last": latest.latency_ms_last,
@@ -1412,7 +1423,9 @@ def _financial_indicator_values(data: dict[str, Any]) -> dict[str, str]:
 
 def _valid_report(report: str) -> bool:
     year, separator, quarter = report.partition("-")
-    return separator == "-" and len(year) == 4 and year.isdigit() and quarter in {"1", "2", "3", "4"}
+    return (
+        separator == "-" and len(year) == 4 and year.isdigit() and quarter in {"1", "2", "3", "4"}
+    )
 
 
 def _is_index_instrument(instrument_id: str) -> bool:

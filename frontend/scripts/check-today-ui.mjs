@@ -80,6 +80,8 @@ assert(today.includes("latest_scan_provider_fallbacks"), "Runtime data health mu
 assert(today.includes("60_000"), "Runtime scheduler and scan status must refresh once per minute");
 assert(today.includes("market_data_latest_session_coverage"), "Market-data reliability must expose latest-session coverage");
 assert(today.includes("market_cache_prefetch_refreshed"), "Market-data reliability must expose incremental cache refreshes");
+assert(today.includes("market_cache_snapshot_repair_requested"), "Market-data reliability must expose same-session repair requests");
+assert(today.includes("同日来源修复"), "Market-data reliability must label same-session source repair");
 assert(today.includes("fetchAutomationScheduler"), "Today page must load automation scheduler state");
 assert(today.includes("fetchPaperValidation"), "Today page must load paper validation state");
 assert(today.includes("fetchPaperCandidatePool"), "Today page must load paper-trading candidate admission state");
@@ -232,8 +234,8 @@ assert(styles.includes(".market-data-reliability-strip"), "CSS must define marke
 assert(today.includes("market-data-reliability-breakdown"), "Today page must explain stale and missing market data");
 assert(today.includes("marketDataRecoveryLabel"), "Today page must show the configured recovery action");
 assert(
-  today.includes("Settlement retry complete; repair missing sources next"),
-  "Today page must distinguish a completed settlement retry from the next repair step",
+  today.includes("Same-session source repair enabled; unresolved symbols remain quarantined"),
+  "Today page must distinguish completed source repair from quarantined symbols",
 );
 assert(
   today.includes('runtime.reason_codes.includes("market_data_reliability")'),

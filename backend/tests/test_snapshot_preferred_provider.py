@@ -87,3 +87,16 @@ def test_snapshot_preferred_skips_live_source_for_large_batches():
     assert frame["provider"].unique().tolist() == ["history"]
     assert history.snapshot_calls == [requested]
     assert live.snapshot_calls == []
+
+
+def test_snapshot_repair_never_repeats_history_fallback():
+    history = StubProvider("history", {"CN:600519": 1400.0})
+    live = StubProvider("live", {"CN:000001": 10.5})
+    provider = SnapshotPreferredMarketDataProvider(history, live)
+
+    frame = provider.get_repair_snapshot(["CN:000001", "CN:600519"])
+
+    assert frame["instrument_id"].tolist() == ["CN:000001"]
+    assert live.snapshot_calls == [["CN:000001", "CN:600519"]]
+    assert history.snapshot_calls == []
+    assert provider.last_errors == ["CN:600519: unavailable"]

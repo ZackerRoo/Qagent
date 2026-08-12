@@ -15,9 +15,7 @@ class CompositeMarketDataProvider:
         self.last_errors: list[str] = []
         self.last_fallback_instruments: list[str] = []
 
-    def get_daily_bars(
-        self, instrument_ids: list[str], start: date, end: date
-    ) -> pd.DataFrame:
+    def get_daily_bars(self, instrument_ids: list[str], start: date, end: date) -> pd.DataFrame:
         self.last_errors = []
         self.last_fallback_instruments = []
         frames: list[pd.DataFrame] = []
@@ -45,6 +43,27 @@ class CompositeMarketDataProvider:
             self.last_fallback_instruments.extend(
                 getattr(provider, "last_fallback_instruments", [])
             )
+            if not snapshot.empty:
+                frames.append(snapshot)
+        if not frames:
+            return pd.DataFrame(columns=BAR_COLUMNS)
+        return pd.concat(frames, ignore_index=True)
+
+    def get_repair_snapshot(self, instrument_ids: list[str]) -> pd.DataFrame:
+        """Use each market's dedicated repair source without nested fallbacks."""
+
+        self.last_errors = []
+        self.last_fallback_instruments = []
+        frames: list[pd.DataFrame] = []
+        for market, market_instruments in self._group_by_market(instrument_ids).items():
+            provider = self._provider_for_market(market)
+            getter = getattr(provider, "get_repair_snapshot", None)
+            snapshot = (
+                getter(market_instruments)
+                if callable(getter)
+                else provider.get_snapshot(market_instruments)
+            )
+            self.last_errors.extend(getattr(provider, "last_errors", []))
             if not snapshot.empty:
                 frames.append(snapshot)
         if not frames:

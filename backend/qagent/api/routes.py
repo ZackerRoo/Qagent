@@ -256,7 +256,7 @@ PAPER_MAX_PER_INDUSTRY = 2
 PAPER_RISK_OFF_POSITION_SIZE_MULTIPLIER = Decimal("0.35")
 PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME = time(hour=15, minute=45)
 PAPER_CANDIDATE_SETTLEMENT_RETRY_TIME = time(hour=18)
-PAPER_CANDIDATE_MAX_REFRESH_ATTEMPTS = 2
+PAPER_CANDIDATE_MAX_REFRESH_ATTEMPTS = 3
 _UNKNOWN_PAPER_INDUSTRIES = {
     "",
     "-",
@@ -410,9 +410,7 @@ def _submit_full_market_scan_job(job_id: str) -> bool:
             job_id,
         )
         if future is not None and hasattr(future, "add_done_callback"):
-            future.add_done_callback(
-                lambda _future: _release_full_market_submission(job_id)
-            )
+            future.add_done_callback(lambda _future: _release_full_market_submission(job_id))
     except Exception:
         with _full_market_jobs_lock:
             _submitted_full_market_jobs.discard(job_id)
@@ -511,11 +509,7 @@ def fuyao_provider_probe(
     if not settings.fuyao_api_key:
         raise HTTPException(status_code=409, detail="Fuyao API key is not configured")
 
-    requested = [
-        item.strip().upper()
-        for item in instrument_ids.split(",")
-        if item.strip()
-    ]
+    requested = [item.strip().upper() for item in instrument_ids.split(",") if item.strip()]
     if not requested:
         raise HTTPException(status_code=422, detail="At least one instrument_id is required")
     if len(requested) > 20:
@@ -815,8 +809,8 @@ def _reusable_walk_forward_checkpoints(
             job.status != "succeeded"
             or not job.checkpoints
             or not _walk_forward_selection_manifest_payload_matches(
-            job.experiment_manifest,
-            manifest,
+                job.experiment_manifest,
+                manifest,
             )
         ):
             continue
@@ -969,21 +963,15 @@ def get_ranking_v4_evidence(epoch_id: str) -> dict[str, object]:
     latest_proof = snapshot.proofs[-1] if snapshot.proofs else None
     release_repository = _ranking_v4_release_repo()
     policy = release_repository.load_policy(definition.definition_digest)
-    execution_summaries = release_repository.load_execution_summaries(
-        definition.definition_digest
-    )
-    release_proofs = release_repository.load_release_proofs(
-        definition.definition_digest
-    )
+    execution_summaries = release_repository.load_execution_summaries(definition.definition_digest)
+    release_proofs = release_repository.load_release_proofs(definition.definition_digest)
     latest_release = release_proofs[-1] if release_proofs else None
     return {
         "epoch_id": definition.identity.epoch_id,
         "status": "frozen",
         "code_revision": definition.identity.code_revision,
         "protocol_digest": definition.identity.protocol_digest,
-        "experiment_registry_digest": (
-            definition.identity.experiment_registry_digest
-        ),
+        "experiment_registry_digest": (definition.identity.experiment_registry_digest),
         "dataset_revision": definition.identity.dataset_revision,
         "base_dataset_revision": definition.identity.dataset_revision,
         "latest_dataset_revision": (
@@ -991,42 +979,28 @@ def get_ranking_v4_evidence(epoch_id: str) -> dict[str, object]:
             if latest_return
             else definition.identity.dataset_revision
         ),
-        "evidence_start_date": (
-            definition.identity.evidence_start_date.isoformat()
-        ),
+        "evidence_start_date": (definition.identity.evidence_start_date.isoformat()),
         "definition_digest": definition.definition_digest,
         "inventory_count": len(snapshot.inventories),
         "latest_inventory_digest": (
             latest_inventory.inventory_digest if latest_inventory else None
         ),
         "common_date_count": len(snapshot.return_records),
-        "latest_common_date": (
-            latest_return.rebalance_date.isoformat() if latest_return else None
-        ),
+        "latest_common_date": (latest_return.rebalance_date.isoformat() if latest_return else None),
         "proof_count": len(snapshot.proofs),
-        "latest_proof_digest": (
-            latest_proof.proof_digest if latest_proof else None
-        ),
+        "latest_proof_digest": (latest_proof.proof_digest if latest_proof else None),
         "release_policy_digest": policy.policy_digest if policy else None,
-        "registered_checkpoints": (
-            list(policy.checkpoint_common_date_counts) if policy else []
-        ),
+        "registered_checkpoints": (list(policy.checkpoint_common_date_counts) if policy else []),
         "execution_summary_count": len(execution_summaries),
         "latest_execution_summary_digest": (
-            execution_summaries[-1].summary_digest
-            if execution_summaries
-            else None
+            execution_summaries[-1].summary_digest if execution_summaries else None
         ),
         "release_evaluation_count": len(release_proofs),
         "latest_release_proof_digest": (
             latest_release.release_proof_digest if latest_release else None
         ),
-        "release_evaluation_status": (
-            latest_release.evaluation_status if latest_release else None
-        ),
-        "release_scope": (
-            latest_release.release_scope if latest_release else "shadow_only"
-        ),
+        "release_evaluation_status": (latest_release.evaluation_status if latest_release else None),
+        "release_scope": (latest_release.release_scope if latest_release else "shadow_only"),
         "official_release_allowed": (
             latest_release.official_release_allowed if latest_release else False
         ),
@@ -1218,9 +1192,7 @@ def run_ranking_v3_forward_once(
     return {
         **state,
         "processed_session_count": len(processed),
-        "processed_session_dates": [
-            result.session_date.isoformat() for result in processed
-        ],
+        "processed_session_dates": [result.session_date.isoformat() for result in processed],
     }
 
 
@@ -1274,9 +1246,8 @@ def _ranking_v3_forward_context(
         existing = RankingV3ForwardRepository(repo.session_factory).load_snapshot(
             RankingV3ForwardIdentity.from_protocol(protocol)
         )
-        if (
-            existing is not None
-            and existing.ledger.data_revision != ranking_v3_data_revision(record)
+        if existing is not None and existing.ledger.data_revision != ranking_v3_data_revision(
+            record
         ):
             continue
         return record, ranking, protocol
@@ -1345,9 +1316,7 @@ def _ranking_v3_forward_state_payload(
         "protocol_id": protocol.protocol_id,
         "model_version": protocol.model_version,
         "required_sessions": protocol.thresholds.minimum_forward_shadow_sessions,
-        "collection_target_sessions": (
-            protocol.thresholds.minimum_forward_shadow_sessions
-        ),
+        "collection_target_sessions": (protocol.thresholds.minimum_forward_shadow_sessions),
         "required_completed_trades": protocol.thresholds.minimum_forward_shadow_trades,
         "maximum_sessions": protocol.thresholds.maximum_forward_shadow_sessions,
         "release_proof_available": False,
@@ -1360,11 +1329,7 @@ def _ranking_v3_forward_state_payload(
         today = _a_share_today()
         payload = {
             **base,
-            "state": (
-                "waiting_start"
-                if today < protocol.prospective_shadow_start
-                else "ready"
-            ),
+            "state": ("waiting_start" if today < protocol.prospective_shadow_start else "ready"),
             "status": "pending",
             "phase": "waiting_collection",
             "reason": (
@@ -1393,15 +1358,10 @@ def _ranking_v3_forward_state_payload(
         evidence_authority=RankingV3RepositoryEvidenceAuthority(repo),
     )
     evaluation = validator.inspect()
-    pending_count = sum(
-        candidate.outcome_status == "pending" for candidate in snapshot.candidates
-    )
+    pending_count = sum(candidate.outcome_status == "pending" for candidate in snapshot.candidates)
     if evaluation.status in {"approved", "rejected"}:
         phase = evaluation.status
-    elif (
-        evaluation.metrics.session_count
-        < protocol.thresholds.minimum_forward_shadow_sessions
-    ):
+    elif evaluation.metrics.session_count < protocol.thresholds.minimum_forward_shadow_sessions:
         phase = "candidate_collection"
     else:
         phase = "liquidation"
@@ -1429,9 +1389,7 @@ def _ranking_v3_forward_state_payload(
         ),
         "release_proof_available": evaluation.release_proof is not None,
         "release_proof_digest": (
-            evaluation.release_proof.proof_digest
-            if evaluation.release_proof is not None
-            else None
+            evaluation.release_proof.proof_digest if evaluation.release_proof is not None else None
         ),
         "production": _ranking_v3_production_state_payload(
             repo,
@@ -1513,9 +1471,7 @@ def _ranking_v3_production_state_payload(
             else "approved model is waiting for the latest complete full-market scan"
         ),
         "paper_admission_enforced": True,
-        "target_session_date": (
-            target_session.isoformat() if target_session is not None else None
-        ),
+        "target_session_date": (target_session.isoformat() if target_session is not None else None),
         "latest_session_date": latest.session_date.isoformat(),
         "selected_count": latest.selected_count,
         "batch_fact_digest": latest.fact_digest,
@@ -1531,9 +1487,7 @@ def _ranking_v3_forward_runtime_status_for(
     protocol: RankingV3Protocol,
 ) -> dict[str, object] | None:
     with _ranking_v3_forward_runtime_lock:
-        status = _ranking_v3_forward_runtime_status.get(
-            _ranking_v3_forward_runtime_key(protocol)
-        )
+        status = _ranking_v3_forward_runtime_status.get(_ranking_v3_forward_runtime_key(protocol))
         return dict(status) if status is not None else None
 
 
@@ -1546,9 +1500,7 @@ def _set_ranking_v3_forward_waiting_snapshot(
         "forward validation is waiting and no session was fabricated"
     )
     with _ranking_v3_forward_runtime_lock:
-        _ranking_v3_forward_runtime_status[
-            _ranking_v3_forward_runtime_key(protocol)
-        ] = {
+        _ranking_v3_forward_runtime_status[_ranking_v3_forward_runtime_key(protocol)] = {
             "state": "waiting_snapshot",
             "status": "pending",
             "phase": "waiting_snapshot",
@@ -1603,9 +1555,7 @@ def _run_ranking_v3_forward_catch_up(
         return []
     results = []
     for current_session in trading_sessions_in_range(start_date, latest_available):
-        current_snapshot = store.load_snapshot(
-            RankingV3ForwardIdentity.from_protocol(protocol)
-        )
+        current_snapshot = store.load_snapshot(RankingV3ForwardIdentity.from_protocol(protocol))
         sessions = (
             sorted(
                 current_snapshot.sessions,
@@ -2156,25 +2106,16 @@ def _historical_validation_readiness(
             total,
         ),
         "adjusted": _scope_ratio(
-            sum(
-                (item.adjustment_coverage_ratio or 0) >= 0.95
-                for item in adjusted
-            ),
+            sum((item.adjustment_coverage_ratio or 0) >= 0.95 for item in adjusted),
             adjusted_total,
             empty_scope_ready=total > 0,
         ),
         "tradability": _scope_ratio(
-            sum(
-                item.tradability_coverage_ratio >= 0.95
-                for item in instruments
-            ),
+            sum(item.tradability_coverage_ratio >= 0.95 for item in instruments),
             total,
         ),
         "universe": _scope_ratio(
-            sum(
-                _historical_item_covers_start(item, "universe", start)
-                for item in instruments
-            ),
+            sum(_historical_item_covers_start(item, "universe", start) for item in instruments),
             total,
         ),
         "profile": _scope_ratio(
@@ -2182,10 +2123,7 @@ def _historical_validation_readiness(
             total,
         ),
         "fundamental": _scope_ratio(
-            sum(
-                _historical_item_covers_start(item, "fundamental", start)
-                for item in stocks
-            ),
+            sum(_historical_item_covers_start(item, "fundamental", start) for item in stocks),
             stock_total,
             empty_scope_ready=True,
         ),
@@ -2198,37 +2136,23 @@ def _historical_validation_readiness(
     benchmark_ready, benchmark_total = _fraction_value(
         data_health.get("historical_benchmark_price_ready", "0/0")
     )
-    benchmark_ratio = (
-        benchmark_ready / benchmark_total if benchmark_total > 0 else 0.0
-    )
-    index_ready = _integer_value(
-        data_health.get("historical_benchmark_ready")
-    )
-    index_expected = _integer_value(
-        data_health.get("historical_index_expected_snapshots")
-    )
+    benchmark_ratio = benchmark_ready / benchmark_total if benchmark_total > 0 else 0.0
+    index_ready = _integer_value(data_health.get("historical_benchmark_ready"))
+    index_expected = _integer_value(data_health.get("historical_index_expected_snapshots"))
     index_ratio = index_ready / index_expected if index_expected > 0 else 0.0
 
     ready_counts = {
         "bars": sum(item.bar_coverage_ratio >= 0.95 for item in instruments),
-        "adjusted": sum(
-            (item.adjustment_coverage_ratio or 0) >= 0.95 for item in adjusted
-        ),
-        "tradability": sum(
-            item.tradability_coverage_ratio >= 0.95 for item in instruments
-        ),
+        "adjusted": sum((item.adjustment_coverage_ratio or 0) >= 0.95 for item in adjusted),
+        "tradability": sum(item.tradability_coverage_ratio >= 0.95 for item in instruments),
         "universe": sum(
-            _historical_item_covers_start(item, "universe", start)
-            for item in instruments
+            _historical_item_covers_start(item, "universe", start) for item in instruments
         ),
         "profile": sum(item.profile_rows > 0 for item in instruments),
         "fundamental": sum(
-            _historical_item_covers_start(item, "fundamental", start)
-            for item in stocks
+            _historical_item_covers_start(item, "fundamental", start) for item in stocks
         ),
-        "industry": sum(
-            getattr(item, "industry_rows", 0) > 0 for item in stocks
-        ),
+        "industry": sum(getattr(item, "industry_rows", 0) > 0 for item in stocks),
     }
     denominators = {
         "bars": total,
@@ -2249,9 +2173,7 @@ def _historical_validation_readiness(
         "industry": MIN_FULL_MARKET_COVERAGE_RATIO,
     }
     blockers = [
-        f"{key}<{minimum:.0%}"
-        for key, minimum in requirements.items()
-        if ratios[key] < minimum
+        f"{key}<{minimum:.0%}" for key, minimum in requirements.items() if ratios[key] < minimum
     ]
     if index_ratio < 1:
         blockers.append("index<100%")
@@ -2291,12 +2213,8 @@ def _historical_validation_readiness(
         "validation_pipeline_index_coverage": f"{index_ratio:.4f}",
         "validation_pipeline_benchmark_coverage": f"{benchmark_ratio:.4f}",
         "validation_pipeline_reference_request_status": reference_status,
-        "validation_pipeline_critical_reference_error_count": str(
-            len(critical_reference_errors)
-        ),
-        "validation_pipeline_critical_reference_errors": " | ".join(
-            critical_reference_errors[:10]
-        ),
+        "validation_pipeline_critical_reference_error_count": str(len(critical_reference_errors)),
+        "validation_pipeline_critical_reference_errors": " | ".join(critical_reference_errors[:10]),
         "validation_pipeline_etf_constituent_gate": "not_required",
         "validation_pipeline_etf_constituent_requirement": (
             "optional_point_in_time_holdings_with_pairwise_correlation_fallback"
@@ -2304,9 +2222,7 @@ def _historical_validation_readiness(
         "validation_pipeline_etf_constituent_scope": str(len(etfs)),
         "validation_pipeline_etf_constituent_coverage": "not_applicable",
         "validation_pipeline_index_ready": f"{index_ready}/{index_expected}",
-        "validation_pipeline_benchmark_ready": (
-            f"{benchmark_ready}/{benchmark_total}"
-        ),
+        "validation_pipeline_benchmark_ready": (f"{benchmark_ready}/{benchmark_total}"),
     }
     for key, minimum in requirements.items():
         denominator = denominators[key]
@@ -2317,13 +2233,9 @@ def _historical_validation_readiness(
             if ratios[key] >= minimum
             else "insufficient"
         )
-        readiness[f"validation_pipeline_{key}_ready"] = (
-            f"{ready_counts[key]}/{denominator}"
-        )
+        readiness[f"validation_pipeline_{key}_ready"] = f"{ready_counts[key]}/{denominator}"
         readiness[f"validation_pipeline_{key}_threshold"] = f"{minimum:.4f}"
-    readiness["validation_pipeline_index_gate"] = (
-        "ready" if index_ratio >= 1 else "insufficient"
-    )
+    readiness["validation_pipeline_index_gate"] = "ready" if index_ratio >= 1 else "insufficient"
     readiness["validation_pipeline_index_threshold"] = "1.0000"
     readiness["validation_pipeline_benchmark_gate"] = (
         "ready" if benchmark_ratio >= 1 else "insufficient"
@@ -2333,21 +2245,14 @@ def _historical_validation_readiness(
 
 
 def _historical_item_covers_start(item, evidence: str, start: date) -> bool:
-    rows_attribute = (
-        "universe_snapshot_rows"
-        if evidence == "universe"
-        else f"{evidence}_rows"
-    )
+    rows_attribute = "universe_snapshot_rows" if evidence == "universe" else f"{evidence}_rows"
     rows = getattr(item, rows_attribute, 0)
     first_date = getattr(item, f"first_{evidence}_date", None)
     listing_date = getattr(item, "listing_date", None)
     return bool(
         rows > 0
         and first_date is not None
-        and (
-            (listing_date is not None and listing_date > start)
-            or first_date <= start
-        )
+        and ((listing_date is not None and listing_date > start) or first_date <= start)
     )
 
 
@@ -2370,10 +2275,10 @@ def _critical_historical_reference_errors(
 ) -> list[str]:
     critical: list[str] = []
     reference_status = data_health.get("historical_reference_request_status")
-    if (
-        backfill_status == "succeeded_with_errors"
-        or reference_status in {"failed", "succeeded_with_errors"}
-    ):
+    if backfill_status == "succeeded_with_errors" or reference_status in {
+        "failed",
+        "succeeded_with_errors",
+    }:
         markers = ("reference", "industry", "index", "benchmark")
         critical.extend(
             str(error)
@@ -2381,18 +2286,8 @@ def _critical_historical_reference_errors(
             if any(marker in str(error).lower() for marker in markers)
         )
         reference_errors = data_health.get("historical_reference_errors", "")
-        critical.extend(
-            error.strip()
-            for error in reference_errors.split(" | ")
-            if error.strip()
-        )
-        if (
-            _integer_value(
-                data_health.get("historical_reference_error_count")
-            )
-            > 0
-            and not critical
-        ):
+        critical.extend(error.strip() for error in reference_errors.split(" | ") if error.strip())
+        if _integer_value(data_health.get("historical_reference_error_count")) > 0 and not critical:
             critical.append("historical reference request reported errors")
     return list(dict.fromkeys(critical))
 
@@ -3079,8 +2974,7 @@ def factor_diagnostics(
     )
     payload = result.model_dump(mode="json")
     payload["primary"]["signals"] = [
-        _attach_instrument_label(signal)
-        for signal in payload["primary"].get("signals", [])
+        _attach_instrument_label(signal) for signal in payload["primary"].get("signals", [])
     ]
     payload["data_health"].update(
         {
@@ -3095,9 +2989,7 @@ def factor_diagnostics(
         }
     )
     if fundamental_errors:
-        payload["data_health"]["fundamental_errors"] = " | ".join(
-            fundamental_errors[:3]
-        )
+        payload["data_health"]["fundamental_errors"] = " | ".join(fundamental_errors[:3])
     return payload
 
 
@@ -3221,8 +3113,8 @@ def start_factor_research_experiment(request: FactorResearchExperimentRequest):
         config,
     )
     future.add_done_callback(
-        lambda _future, experiment_id=experiment.experiment_id: (
-            _release_factor_research_submission(experiment_id)
+        lambda _future, experiment_id=experiment.experiment_id: _release_factor_research_submission(
+            experiment_id
         )
     )
     return experiment
@@ -3479,9 +3371,7 @@ def run_automation(
 def automation_scheduler_state() -> dict[str, object]:
     state = _automation_scheduler.refresh_if_due(_run_auto_processing_cycle)
     repo = _repo()
-    latest_scan = repo.get_latest_full_market_scan_job(
-        provider=state.settings.provider
-    )
+    latest_scan = repo.get_latest_full_market_scan_job(provider=state.settings.provider)
     reliability_scan = repo.get_latest_succeeded_full_market_scan_job(
         provider=state.settings.provider
     )
@@ -3646,9 +3536,7 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
     started_at = datetime.now(timezone.utc)
     mode = settings.provider.strip().lower()
     expected_signal_date = (
-        _latest_completed_a_share_session()
-        if mode == "free" and settings.run_scan
-        else None
+        _latest_completed_a_share_session() if mode == "free" and settings.run_scan else None
     )
     repo = _repo()
     paper_repo = _paper_repo()
@@ -3663,9 +3551,7 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
         "automation_run_forward_evidence": str(settings.run_forward_evidence).lower(),
     }
     if expected_signal_date is not None:
-        data_health["automation_expected_signal_date"] = (
-            expected_signal_date.isoformat()
-        )
+        data_health["automation_expected_signal_date"] = expected_signal_date.isoformat()
     scan_status = "disabled"
     scan_started = False
     scan_job_id: str | None = None
@@ -3731,9 +3617,7 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                         data_health["fuyao_market_research_snapshot_id"] = (
                             capture.snapshot.snapshot_id
                         )
-                    data_health["fuyao_market_research_errors"] = str(
-                        len(capture.errors)
-                    )
+                    data_health["fuyao_market_research_errors"] = str(len(capture.errors))
                     data_health["fuyao_market_research_decision_weight"] = "none"
                 except Exception as exc:
                     data_health["fuyao_market_research_status"] = "error"
@@ -3954,9 +3838,7 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
     if mode == "free":
         try:
             factor_shadow_as_of = (
-                expected_signal_date
-                or _latest_completed_a_share_session()
-                or date.today()
+                expected_signal_date or _latest_completed_a_share_session() or date.today()
             )
             shadow_resolution = resolve_factor_shadow_outcomes(
                 create_session_factory(),
@@ -3975,9 +3857,7 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
 
         try:
             fuyao_shadow_as_of = (
-                expected_signal_date
-                or _latest_completed_a_share_session()
-                or date.today()
+                expected_signal_date or _latest_completed_a_share_session() or date.today()
             )
             fuyao_shadow_resolution = resolve_fuyao_shadow_outcomes(
                 create_session_factory(),
@@ -4021,13 +3901,9 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             )
             forward_state = _ranking_v3_forward_state_payload(repo, forward_context)
             data_health["ranking_v3_forward_state"] = str(forward_state["state"])
-            data_health["ranking_v3_forward_processed_sessions"] = str(
-                len(forward_results)
-            )
+            data_health["ranking_v3_forward_processed_sessions"] = str(len(forward_results))
             if forward_state.get("validation_run_id"):
-                data_health["ranking_v3_forward_run_id"] = str(
-                    forward_state["validation_run_id"]
-                )
+                data_health["ranking_v3_forward_run_id"] = str(forward_state["validation_run_id"])
             evaluation = forward_state.get("evaluation")
             metrics = (
                 evaluation.get("metrics")
@@ -4035,9 +3911,7 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 and isinstance(evaluation.get("metrics"), Mapping)
                 else {}
             )
-            data_health["ranking_v3_forward_sessions"] = str(
-                metrics.get("session_count", 0)
-            )
+            data_health["ranking_v3_forward_sessions"] = str(metrics.get("session_count", 0))
             data_health["ranking_v3_forward_completed_trades"] = str(
                 metrics.get("completed_trade_count", 0)
             )
@@ -4130,9 +4004,7 @@ def _paper_seed_risk_gate(
         trades = [
             trade
             for trade in all_trades
-            if (
-                cohort := cohort_by_snapshot.get(trade.source_snapshot_id)
-            ) is not None
+            if (cohort := cohort_by_snapshot.get(trade.source_snapshot_id)) is not None
             and cohort.cohort_id == current_cohort.cohort_id
         ]
         scope = "current_model_cohort"
@@ -4175,9 +4047,7 @@ def _paper_seed_risk_gate(
         health.update(
             {
                 "paper_risk_gate_model_cohort_id": current_cohort.cohort_id,
-                "paper_risk_gate_feature_set_version": (
-                    current_cohort.feature_set_version
-                ),
+                "paper_risk_gate_feature_set_version": (current_cohort.feature_set_version),
                 "paper_risk_gate_recommendation_policy": (
                     current_cohort.recommendation_policy_entrypoint
                 ),
@@ -4231,9 +4101,7 @@ def _paper_merge_market_risk_gate(
     except ValueError:
         existing_max = 999
     try:
-        existing_multiplier = Decimal(
-            merged.get("paper_risk_gate_position_size_multiplier", "1.0")
-        )
+        existing_multiplier = Decimal(merged.get("paper_risk_gate_position_size_multiplier", "1.0"))
     except (ArithmeticError, ValueError):
         existing_multiplier = Decimal("1.0")
     market_reason = market_gate_health.get("paper_market_entry_gate_reason", "")
@@ -4272,10 +4140,7 @@ def _paper_market_probe_snapshots(
         1
         for trade in trades
         if trade.signal_date == signal_date
-        and (
-            "风控恢复探针" in trade.notes
-            or "防守行情研究仓位" in trade.notes
-        )
+        and ("风控恢复探针" in trade.notes or "防守行情研究仓位" in trade.notes)
     )
     active_count = sum(1 for trade in trades if trade.status in {"pending", "open"})
     account = paper_repo.get_account_settings()
@@ -4343,9 +4208,7 @@ def _paper_candidate_pool_snapshot_items(
     risk_action = risk_gate_health.get("paper_risk_gate_action", "")
     market_entry_blocked = risk_gate_health.get("paper_market_entry_gate") == "blocked"
     expected_signal_date = None
-    expected_signal_date_value = risk_gate_health.get(
-        "paper_candidate_expected_signal_date"
-    )
+    expected_signal_date_value = risk_gate_health.get("paper_candidate_expected_signal_date")
     if expected_signal_date_value:
         try:
             expected_signal_date = date.fromisoformat(expected_signal_date_value)
@@ -4371,8 +4234,7 @@ def _paper_candidate_pool_snapshot_items(
         industry = _paper_snapshot_industry(snapshot)
         industry_active_count = active_industry_counts.get(industry, 0) if industry else 0
         industry_occupied = (
-            available_industry_counts.get(industry, 0)
-            + reserved_industry_counts.get(industry, 0)
+            available_industry_counts.get(industry, 0) + reserved_industry_counts.get(industry, 0)
             if industry
             else 0
         )
@@ -4382,8 +4244,7 @@ def _paper_candidate_pool_snapshot_items(
             and snapshot.snapshot_id not in existing_sources
         )
         signal_date_fresh = (
-            expected_signal_date is None
-            or snapshot.signal_date == expected_signal_date
+            expected_signal_date is None or snapshot.signal_date == expected_signal_date
         )
         industry_blocked = is_untracked_candidate and (
             industry is None or industry_occupied >= PAPER_MAX_PER_INDUSTRY
@@ -4449,9 +4310,7 @@ def _paper_candidate_pool_snapshot_items(
             and industry is not None
             and not industry_blocked
         ):
-            reserved_industry_counts[industry] = (
-                reserved_industry_counts.get(industry, 0) + 1
-            )
+            reserved_industry_counts[industry] = reserved_industry_counts.get(industry, 0) + 1
         items.append(
             {
                 "snapshot_id": snapshot.snapshot_id,
@@ -4922,10 +4781,7 @@ def _paper_seed_snapshots_from_recommendations(
         expected_signal_date=expected_signal_date,
         include_market_blocked=include_market_blocked,
     )
-    if (
-        health.get("paper_market_entry_gate") == "blocked"
-        and not include_market_blocked
-    ):
+    if health.get("paper_market_entry_gate") == "blocked" and not include_market_blocked:
         return [], health
     if health.get("paper_candidate_freshness_gate") == "blocked":
         return [], health
@@ -5042,9 +4898,7 @@ def _paper_seed_snapshots_from_latest_cache(
             health.update(
                 {
                     "paper_candidate_freshness_gate": "blocked",
-                    "paper_candidate_expected_signal_date": (
-                        expected_signal_date.isoformat()
-                    ),
+                    "paper_candidate_expected_signal_date": (expected_signal_date.isoformat()),
                 }
             )
         return [], health
@@ -5096,24 +4950,18 @@ def _paper_seed_snapshots_from_latest_cache(
     freshness_health: dict[str, str] = {}
     if expected_signal_date is not None:
         mismatched = [
-            snapshot
-            for snapshot in selected
-            if snapshot.signal_date != expected_signal_date
+            snapshot for snapshot in selected if snapshot.signal_date != expected_signal_date
         ]
         if mismatched:
             selected = [
-                snapshot
-                for snapshot in selected
-                if snapshot.signal_date == expected_signal_date
+                snapshot for snapshot in selected if snapshot.signal_date == expected_signal_date
             ]
             freshness_health = {
                 **market_gate_health,
                 "automation_seed_source": "latest_recommendation_cache",
                 "automation_seed_cache_id": cached.cache_id,
                 "automation_seed_cache_freshness": cache_freshness,
-                "paper_candidate_freshness_gate": (
-                    "filtered" if selected else "blocked"
-                ),
+                "paper_candidate_freshness_gate": ("filtered" if selected else "blocked"),
                 "paper_candidate_expected_signal_date": expected_signal_date.isoformat(),
                 "paper_candidate_signal_date_mismatch": str(len(mismatched)),
             }
@@ -5301,9 +5149,7 @@ def _paper_apply_risk_gate_health_to_report(
             )
         )
     except ValueError:
-        risk_gate.position_size_multiplier = float(
-            PAPER_RISK_OFF_POSITION_SIZE_MULTIPLIER
-        )
+        risk_gate.position_size_multiplier = float(PAPER_RISK_OFF_POSITION_SIZE_MULTIPLIER)
 
 
 def _paper_strategy_capacity_filter(
@@ -5375,11 +5221,7 @@ def _paper_industry_capacity_filter(
         active,
     )
     account = paper_repo.get_account_settings()
-    replacee = (
-        _paper_replacement_trade(active)
-        if len(active) >= account.max_positions
-        else None
-    )
+    replacee = _paper_replacement_trade(active) if len(active) >= account.max_positions else None
     available_counts = dict(active_counts)
     if replacee is not None:
         replacee_industry = active_by_instrument.get(replacee.instrument_id)
@@ -5556,10 +5398,7 @@ def _latest_completed_a_share_session(now: datetime | None = None) -> date | Non
     sessions = trading_sessions_in_range(today - timedelta(days=14), today)
     if not sessions:
         return None
-    if (
-        sessions[-1] == today
-        and local_now.timetz().replace(tzinfo=None) < time(hour=15, minute=30)
-    ):
+    if sessions[-1] == today and local_now.timetz().replace(tzinfo=None) < time(hour=15, minute=30):
         sessions = sessions[:-1]
     return sessions[-1] if sessions else None
 
@@ -5572,12 +5411,7 @@ def _automatic_full_scan_window(now: datetime | None = None) -> tuple[bool, str]
     today = local_now.date()
     sessions = trading_sessions_in_range(today, today)
     local_time = local_now.timetz().replace(tzinfo=None)
-    if (
-        sessions
-        and time(hour=9, minute=15)
-        <= local_time
-        < PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME
-    ):
+    if sessions and time(hour=9, minute=15) <= local_time < PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME:
         return False, "market_session_open"
     return True, "ready"
 
@@ -5609,12 +5443,8 @@ def _cached_paper_candidate_signal_date_health(
         card_ids,
         provider=provider,
     )
-    current_count = sum(
-        1 for snapshot in snapshots if snapshot.signal_date == expected_signal_date
-    )
-    stale_count = sum(
-        1 for snapshot in snapshots if snapshot.signal_date != expected_signal_date
-    )
+    current_count = sum(1 for snapshot in snapshots if snapshot.signal_date == expected_signal_date)
+    stale_count = sum(1 for snapshot in snapshots if snapshot.signal_date != expected_signal_date)
     missing_count = max(len(card_ids) - len(snapshots), 0)
     if current_count == 0:
         state = "stale"
@@ -5669,20 +5499,14 @@ def _automatic_candidate_settlement_retry_ready(
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
-    local_time = current.astimezone(ZoneInfo("Asia/Shanghai")).timetz().replace(
-        tzinfo=None
-    )
+    local_time = current.astimezone(ZoneInfo("Asia/Shanghai")).timetz().replace(tzinfo=None)
     return local_time >= PAPER_CANDIDATE_SETTLEMENT_RETRY_TIME
 
 
 def _scan_cache_signal_date(cached: ScanResultCacheRecord) -> date | None:
     payload = cached.payload if isinstance(cached.payload, Mapping) else {}
     health = payload.get("data_health")
-    raw_value = (
-        health.get("full_market_signal_date")
-        if isinstance(health, Mapping)
-        else None
-    )
+    raw_value = health.get("full_market_signal_date") if isinstance(health, Mapping) else None
     if not isinstance(raw_value, str):
         return None
     try:
@@ -5765,9 +5589,7 @@ def _maybe_start_automatic_full_scan(
             )
             submitted = _submit_full_market_scan_job(latest.job_id)
             return "resumed_stale", submitted, latest.job_id
-    expected_signal_date = (
-        _latest_completed_a_share_session() if mode == "free" else None
-    )
+    expected_signal_date = _latest_completed_a_share_session() if mode == "free" else None
     cached, freshness = _automation_scan_result_cache(
         repo,
         cache_key=full_market_batch_cache_key(mode, settings.include_etfs),
@@ -5838,9 +5660,7 @@ def _maybe_start_automatic_full_scan(
             data_health={
                 **candidate_refresh_health,
                 "automatic_candidate_refresh": "true",
-                "automatic_candidate_refresh_attempt": str(
-                    candidate_refresh_attempt
-                ),
+                "automatic_candidate_refresh_attempt": str(candidate_refresh_attempt),
             },
         )
         if updated is not None:
@@ -5877,12 +5697,9 @@ def _automation_runtime_health(
     last_result = state.last_result
     cycle_health = last_result.data_health if last_result is not None else {}
     latest_status = _string_value(getattr(latest_scan, "status", None)) or None
-    latest_signal_date = (
-        _string_value(evidence_health.get("full_market_signal_date")) or None
-    )
+    latest_signal_date = _string_value(evidence_health.get("full_market_signal_date")) or None
     latest_matches_expected = bool(
-        expected_session is not None
-        and latest_signal_date == expected_session.isoformat()
+        expected_session is not None and latest_signal_date == expected_session.isoformat()
     )
     scan_requirement = _automatic_scan_requirement(
         latest_status=latest_status,
@@ -5917,12 +5734,8 @@ def _automation_runtime_health(
     tickflow_fallbacks = _int_value(evidence_health.get("tickflow_fallback_count"))
     fuyao_state = _string_value(cycle_health.get("fuyao_telemetry")) or "unavailable"
     cycle_errors = len(last_result.errors) if last_result is not None else 0
-    latest_reliability = _string_value(
-        evidence_health.get("market_data_reliability_state")
-    )
-    automation_scan_status = (
-        last_result.scan_status if last_result is not None else "not_started"
-    )
+    latest_reliability = _string_value(evidence_health.get("market_data_reliability_state"))
+    automation_scan_status = last_result.scan_status if last_result is not None else "not_started"
 
     risk_reasons = []
     watch_reasons = []
@@ -5975,15 +5788,9 @@ def _automation_runtime_health(
         "scheduler_cycle_errors": cycle_errors,
         "scan_window": scan_window,
         "scan_requirement": scan_requirement,
-        "scan_next_check_at": (
-            next_check_at.isoformat() if next_check_at is not None else None
-        ),
-        "scan_post_close_time": PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME.strftime(
-            "%H:%M"
-        ),
-        "scan_settlement_retry_time": PAPER_CANDIDATE_SETTLEMENT_RETRY_TIME.strftime(
-            "%H:%M"
-        ),
+        "scan_next_check_at": (next_check_at.isoformat() if next_check_at is not None else None),
+        "scan_post_close_time": PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME.strftime("%H:%M"),
+        "scan_settlement_retry_time": PAPER_CANDIDATE_SETTLEMENT_RETRY_TIME.strftime("%H:%M"),
         "automation_scan_status": automation_scan_status,
         "latest_scan_job_id": getattr(latest_scan, "job_id", None),
         "latest_scan_status": latest_status,
@@ -5994,18 +5801,10 @@ def _automation_runtime_health(
             if isinstance(latest_finished_at, datetime)
             else None
         ),
-        "latest_scan_total_symbols": _int_value(
-            getattr(latest_scan, "total_symbols", 0)
-        ),
-        "latest_scan_scanned_symbols": _int_value(
-            getattr(latest_scan, "scanned_symbols", 0)
-        ),
-        "latest_scan_total_batches": _int_value(
-            getattr(latest_scan, "total_batches", 0)
-        ),
-        "latest_scan_completed_batches": _int_value(
-            getattr(latest_scan, "completed_batches", 0)
-        ),
+        "latest_scan_total_symbols": _int_value(getattr(latest_scan, "total_symbols", 0)),
+        "latest_scan_scanned_symbols": _int_value(getattr(latest_scan, "scanned_symbols", 0)),
+        "latest_scan_total_batches": _int_value(getattr(latest_scan, "total_batches", 0)),
+        "latest_scan_completed_batches": _int_value(getattr(latest_scan, "completed_batches", 0)),
         "latest_scan_terminal_errors": terminal_scan_errors,
         "latest_scan_provider_fallbacks": provider_fallbacks,
         "latest_scan_tickflow_fallbacks": tickflow_fallbacks,
@@ -6017,39 +5816,33 @@ def _automation_runtime_health(
         "market_data_latest_session_current": evidence_health.get(
             "market_data_latest_session_current"
         ),
-        "market_data_latest_session_stale": evidence_health.get(
-            "market_data_latest_session_stale"
-        ),
+        "market_data_latest_session_stale": evidence_health.get("market_data_latest_session_stale"),
         "market_data_latest_session_missing": evidence_health.get(
             "market_data_latest_session_missing"
         ),
         "market_data_source_mix": evidence_health.get("market_data_source_mix"),
-        "market_data_current_source_mix": evidence_health.get(
-            "market_data_current_source_mix"
-        ),
-        "market_data_stale_source_mix": evidence_health.get(
-            "market_data_stale_source_mix"
-        ),
-        "market_data_stale_age_mix": evidence_health.get(
-            "market_data_stale_age_mix"
-        ),
-        "market_data_missing_reason_mix": evidence_health.get(
-            "market_data_missing_reason_mix"
-        ),
-        "market_data_problem_status_mix": evidence_health.get(
-            "market_data_problem_status_mix"
-        ),
-        "market_data_problem_samples": evidence_health.get(
-            "market_data_problem_samples"
-        ),
-        "market_data_recovery_action": evidence_health.get(
-            "market_data_recovery_action"
-        ),
+        "market_data_current_source_mix": evidence_health.get("market_data_current_source_mix"),
+        "market_data_stale_source_mix": evidence_health.get("market_data_stale_source_mix"),
+        "market_data_stale_age_mix": evidence_health.get("market_data_stale_age_mix"),
+        "market_data_missing_reason_mix": evidence_health.get("market_data_missing_reason_mix"),
+        "market_data_problem_status_mix": evidence_health.get("market_data_problem_status_mix"),
+        "market_data_problem_samples": evidence_health.get("market_data_problem_samples"),
+        "market_data_recovery_action": evidence_health.get("market_data_recovery_action"),
         "market_data_refresh_attempt": _int_value(
             evidence_health.get("automatic_candidate_refresh_attempt")
         ),
-        "market_cache_prefetch_refreshed": evidence_health.get(
-            "market_cache_prefetch_refreshed"
+        "market_cache_prefetch_refreshed": evidence_health.get("market_cache_prefetch_refreshed"),
+        "market_cache_snapshot_repair_requested": evidence_health.get(
+            "market_cache_prefetch_snapshot_requested"
+        ),
+        "market_cache_snapshot_repair_repaired": evidence_health.get(
+            "market_cache_prefetch_snapshot_repaired"
+        ),
+        "market_cache_snapshot_repair_unrecovered": evidence_health.get(
+            "market_cache_prefetch_snapshot_unrecovered"
+        ),
+        "market_cache_snapshot_repair_errors": evidence_health.get(
+            "market_cache_prefetch_snapshot_errors"
         ),
         "fuyao_state": fuyao_state,
         "fuyao_requests": _int_value(cycle_health.get("fuyao_requests")),
@@ -6243,9 +6036,7 @@ def _paper_current_model_status(
     current_trades = [
         trade
         for trade in trades
-        if (
-            cohort := cohorts_by_snapshot.get(trade.source_snapshot_id)
-        ) is not None
+        if (cohort := cohorts_by_snapshot.get(trade.source_snapshot_id)) is not None
         and cohort.cohort_id == current_cohort.cohort_id
     ]
     summary = summarize_paper_trades(current_trades, reporting_scope="all")
@@ -6277,8 +6068,7 @@ def _paper_current_model_status(
         ),
         "excluded_other_cohort": len(trades) - len(current_trades),
         "unclassified": sum(
-            cohorts_by_snapshot.get(trade.source_snapshot_id) is None
-            for trade in trades
+            cohorts_by_snapshot.get(trade.source_snapshot_id) is None for trade in trades
         ),
     }
 
@@ -6327,9 +6117,7 @@ def _paper_observation_status(
         ),
         "as_of_completed_session": as_of_completed_session,
         "current_session_date": today if today_is_session else None,
-        "current_session_in_progress": bool(
-            today_is_session and as_of_completed_session != today
-        ),
+        "current_session_in_progress": bool(today_is_session and as_of_completed_session != today),
         "calendar": "XSHG",
     }
 
@@ -6709,10 +6497,7 @@ def paper_trade_forward_comparison(
     contexts = {
         trade.trade_id: context
         for trade in trades
-        if (
-            context := paper_repo.get_trade_source_context(trade.source_snapshot_id)
-        )
-        is not None
+        if (context := paper_repo.get_trade_source_context(trade.source_snapshot_id)) is not None
     }
     report = build_paper_forward_comparison(
         baseline=baseline,
@@ -6736,9 +6521,7 @@ def paper_trade_forward_comparison(
             "paper_forward_completed_session": (
                 completed_session.isoformat() if completed_session is not None else ""
             ),
-            "paper_forward_cache_non_session_dates": str(
-                len(unexpected_cached_dates)
-            ),
+            "paper_forward_cache_non_session_dates": str(len(unexpected_cached_dates)),
             "paper_forward_cache_non_session_date_samples": ",".join(
                 value.isoformat() for value in unexpected_cached_dates[:5]
             ),
@@ -7033,23 +6816,15 @@ def paper_trade_candidate_pool(
         include_market_blocked=True,
     )
     candidate_gate_health = _paper_merge_market_risk_gate(risk_gate_health, seed_health)
-    expected_signal_date = (
-        _latest_completed_a_share_session() if mode == "free" else None
-    )
+    expected_signal_date = _latest_completed_a_share_session() if mode == "free" else None
     if expected_signal_date is not None:
         signal_date_mismatch = sum(
-            1
-            for snapshot in snapshots
-            if snapshot.signal_date != expected_signal_date
+            1 for snapshot in snapshots if snapshot.signal_date != expected_signal_date
         )
         candidate_gate_health.update(
             {
-                "paper_candidate_freshness_gate": (
-                    "filtered" if signal_date_mismatch else "fresh"
-                ),
-                "paper_candidate_expected_signal_date": (
-                    expected_signal_date.isoformat()
-                ),
+                "paper_candidate_freshness_gate": ("filtered" if signal_date_mismatch else "fresh"),
+                "paper_candidate_expected_signal_date": (expected_signal_date.isoformat()),
                 "paper_candidate_signal_date_mismatch": str(signal_date_mismatch),
             }
         )
@@ -7094,22 +6869,14 @@ def etf_exposures(
     if limit <= 0 or limit > 24:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 24")
     requested = list(
-        dict.fromkeys(
-            value.strip().upper()
-            for value in instrument_ids.split(",")
-            if value.strip()
-        )
+        dict.fromkeys(value.strip().upper() for value in instrument_ids.split(",") if value.strip())
     )
     if not requested:
         raise HTTPException(status_code=400, detail="instrument_ids must not be empty")
     if len(requested) > limit:
         raise HTTPException(status_code=400, detail=f"instrument_ids exceeds limit {limit}")
     catalog = _repo().list_tradable_instruments(asset_types={"etf"}, limit=20_000)
-    names = {
-        item.instrument_id: item.name
-        for item in catalog
-        if item.instrument_id in requested
-    }
+    names = {item.instrument_id: item.name for item in catalog if item.instrument_id in requested}
     instruments = [
         (instrument_id, names[instrument_id])
         for instrument_id in requested
@@ -7175,9 +6942,11 @@ def paper_trade_look_through_risk(
         context_card = getattr(context, "card", None) if context is not None else None
         card = context_card if isinstance(context_card, dict) else {}
         card_asset_type = str(card.get("asset_type") or "").strip().lower()
-        asset_type = str(
-            getattr(instrument, "asset_type", "") or card_asset_type or "unknown"
-        ).strip().lower()
+        asset_type = (
+            str(getattr(instrument, "asset_type", "") or card_asset_type or "unknown")
+            .strip()
+            .lower()
+        )
         label = str(
             getattr(instrument, "label", "")
             or card.get("instrument_label")
@@ -7188,9 +6957,7 @@ def paper_trade_look_through_risk(
         exposure_group = _paper_card_exposure_group(
             card,
             current_industry=(
-                market_context.get("industry")
-                or card.get("industry")
-                or card.get("sector")
+                market_context.get("industry") or card.get("industry") or card.get("sector")
             ),
             instrument_id=position.instrument_id,
         )
@@ -7379,9 +7146,7 @@ def create_paper_trade_from_opportunity(
             admission_source=admission.admission_source,
             production_identity_digest=admission.production_identity_digest,
             production_batch_fact_digest=admission.production_batch_fact_digest,
-            production_selection_item_digest=(
-                admission.production_selection_item_digest
-            ),
+            production_selection_item_digest=(admission.production_selection_item_digest),
             release_proof_digest=admission.release_proof_digest,
         ),
     )

@@ -74,7 +74,12 @@ from qagent.research.operational_readiness import (
 )
 from qagent.monitoring.recommendation_calibration import RecommendationCalibrationCenter
 from qagent.signals.engine import SignalEngine
-from qagent.strategy_data.models import AnalystInsight, EarningsEvent, FilingEvent, FundamentalSnapshot
+from qagent.strategy_data.models import (
+    AnalystInsight,
+    EarningsEvent,
+    FilingEvent,
+    FundamentalSnapshot,
+)
 from qagent.strategy_data.providers import StrategyDataProvider, build_strategy_data_provider
 from qagent.strategies.evaluator import StrategyEvaluator
 from qagent.strategies.health import build_strategy_health_from_bars
@@ -142,6 +147,7 @@ def run_daily_scan(
     walk_forward_validation: Mapping[str, object] | None = None,
     strategy_governance_context: StrategyGovernanceContext | None = None,
     factor_rankings_override: list[FactorRanking] | None = None,
+    reset_market_provider_telemetry: bool = True,
     start: date = date(2026, 1, 1),
     end: date = date(2026, 12, 31),
 ) -> DailyScanResult:
@@ -162,12 +168,15 @@ def run_daily_scan(
     card_generator = OpportunityCardGenerator(strategy_evaluator)
     strategy_mode = provider.name if mode == "development" else mode
     strategy_provider = strategy_data_provider or build_strategy_data_provider(strategy_mode)
-    enhanced_provider = a_share_enhanced_provider or build_a_share_enhanced_provider(mode, provider.name)
+    enhanced_provider = a_share_enhanced_provider or build_a_share_enhanced_provider(
+        mode, provider.name
+    )
     scan_error_samples: list[str] = []
     reset_cache_stats = getattr(provider, "reset_cache_stats", None)
     if callable(reset_cache_stats):
         reset_cache_stats()
-    reset_fuyao_telemetry(provider)
+    if reset_market_provider_telemetry:
+        reset_fuyao_telemetry(provider)
 
     for instrument_id in instrument_ids:
         try:
@@ -352,10 +361,7 @@ def run_daily_scan(
     if callable(prefetch_stats):
         stats = prefetch_stats()
         data_health.update(
-            {
-                f"market_cache_prefetch_{key}": str(value)
-                for key, value in stats.items()
-            }
+            {f"market_cache_prefetch_{key}": str(value) for key, value in stats.items()}
         )
     if scan_error_samples:
         data_health["scan_errors"] = str(len(scan_error_samples))
@@ -364,14 +370,10 @@ def run_daily_scan(
     if provider_errors:
         data_health["provider_error_count"] = str(len(provider_errors))
         data_health["errors"] = " | ".join(provider_errors[:3])
-    fallback_instruments = list(
-        dict.fromkeys(getattr(provider, "last_fallback_instruments", []))
-    )
+    fallback_instruments = list(dict.fromkeys(getattr(provider, "last_fallback_instruments", [])))
     if fallback_instruments:
         data_health["tickflow_fallback_count"] = str(len(fallback_instruments))
-        data_health["tickflow_fallback_instruments"] = ",".join(
-            fallback_instruments[:10]
-        )
+        data_health["tickflow_fallback_instruments"] = ",".join(fallback_instruments[:10])
     strategy_provider_errors = getattr(strategy_provider, "last_errors", [])
     if strategy_provider_errors:
         data_health["strategy_data_errors"] = " | ".join(strategy_provider_errors[:3])
@@ -487,18 +489,18 @@ def _scan_error_item(instrument_id: str, exc: Exception) -> ScanItem:
         reason=f"Instrument scan failed: {exc}",
         bars=0,
         signals=0,
-            blockers=[
-                ScanBlocker(
-                    code="instrument_scan_error",
-                    severity="block",
-                    title="Instrument scan error",
-                    message=str(exc),
-                )
-            ],
-            rejection_category="scan_error",
-            rejection_score=1.0,
-            remediation="重试行情源或暂时移出该标的，避免单只数据异常影响全市场排序。",
-        )
+        blockers=[
+            ScanBlocker(
+                code="instrument_scan_error",
+                severity="block",
+                title="Instrument scan error",
+                message=str(exc),
+            )
+        ],
+        rejection_category="scan_error",
+        rejection_score=1.0,
+        remediation="重试行情源或暂时移出该标的，避免单只数据异常影响全市场排序。",
+    )
 
 
 def _factor_rankings_from_bars(
@@ -564,11 +566,9 @@ def _load_a_share_enhanced_snapshots(
     limit = top_n if top_n is not None else get_settings().a_share_enhanced_max_cards
     if limit <= 0:
         return 0, {}
-    instrument_ids = [
-        card.instrument_id
-        for card in cards
-        if card.instrument_id.startswith("CN:")
-    ][:limit]
+    instrument_ids = [card.instrument_id for card in cards if card.instrument_id.startswith("CN:")][
+        :limit
+    ]
     if not instrument_ids:
         return 0, {}
     try:
@@ -697,7 +697,11 @@ def _rejection_category(blockers: list[ScanBlocker]) -> str:
         return "data_quality"
     if "strategy_data_missing" in codes:
         return "data_missing"
-    if "no_active_signals" in codes or "no_strategy_passed" in codes or "signal_threshold_not_met" in codes:
+    if (
+        "no_active_signals" in codes
+        or "no_strategy_passed" in codes
+        or "signal_threshold_not_met" in codes
+    ):
         return "weak_signal"
     return "not_ranked"
 
@@ -852,12 +856,18 @@ def _a_share_data_readiness(
         else "partial"
         if data_health.get("provider") in {"free", "fixture"}
         else "missing",
-        "a_share_suspension": "ready" if any(item.trading_status for item in cn_items) else "missing",
+        "a_share_suspension": "ready"
+        if any(item.trading_status for item in cn_items)
+        else "missing",
         "a_share_price_limit": "ready" if price_limit_ready else "missing",
         "a_share_industry": "ready" if industry_ready else "missing",
         "a_share_liquidity": "ready" if liquidity_ready else "partial" if cn_items else "missing",
         "a_share_turnover": "partial" if liquidity_ready else "missing",
-        "a_share_index_constituents": "ready" if index_ready else "partial" if has_etf else "missing",
+        "a_share_index_constituents": "ready"
+        if index_ready
+        else "partial"
+        if has_etf
+        else "missing",
         "a_share_fund_flow": "ready" if data_health.get("fund_flow") else "missing",
         "a_share_announcements": "ready"
         if _int_health(data_health, "strategy_announcements") > 0
@@ -932,13 +942,7 @@ def _setup_blockers(
                 message="No strategy in the registry passed its preconditions.",
             )
         )
-    missing = sorted(
-        {
-            item
-            for evaluation in evaluations
-            for item in evaluation.missing_data
-        }
-    )
+    missing = sorted({item for evaluation in evaluations for item in evaluation.missing_data})
     if missing:
         blockers.append(
             ScanBlocker(
@@ -977,7 +981,9 @@ def _available_strategy_data(
     if any(snapshot.has_valuation_inputs for snapshot in fundamentals):
         available.append("valuation_multiples")
     if any(
-        snapshot.market_cap is not None and snapshot.has_growth_inputs and snapshot.has_valuation_inputs
+        snapshot.market_cap is not None
+        and snapshot.has_growth_inputs
+        and snapshot.has_valuation_inputs
         for snapshot in fundamentals
     ):
         available.append("tam_assumptions")

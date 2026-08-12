@@ -6,6 +6,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
+import pytest
 
 import qagent.api.routes as routes
 import qagent.jobs.automation as research_automation
@@ -348,6 +349,10 @@ def test_automation_runtime_health_explains_pending_close_and_source_fallbacks(
             "market_data_problem_status_mix": "watch=22,no_data=4",
             "market_data_problem_samples": "CN:000001,CN:000002",
             "market_data_recovery_action": "settlement_retry_then_provider_repair",
+            "market_cache_prefetch_snapshot_requested": "26",
+            "market_cache_prefetch_snapshot_repaired": "22",
+            "market_cache_prefetch_snapshot_unrecovered": "4",
+            "market_cache_prefetch_snapshot_errors": "4",
         },
     )
     monkeypatch.setattr(
@@ -377,10 +382,11 @@ def test_automation_runtime_health_explains_pending_close_and_source_fallbacks(
     assert health["market_data_stale_age_mix"] == "1_session=22"
     assert health["market_data_missing_reason_mix"] == "no_daily_bars=4"
     assert health["market_data_problem_samples"] == "CN:000001,CN:000002"
-    assert (
-        health["market_data_recovery_action"]
-        == "settlement_retry_then_provider_repair"
-    )
+    assert health["market_cache_snapshot_repair_requested"] == "26"
+    assert health["market_cache_snapshot_repair_repaired"] == "22"
+    assert health["market_cache_snapshot_repair_unrecovered"] == "4"
+    assert health["market_cache_snapshot_repair_errors"] == "4"
+    assert health["market_data_recovery_action"] == "settlement_retry_then_provider_repair"
 
 
 def test_automation_runtime_health_retains_succeeded_evidence_during_new_scan(
@@ -454,9 +460,10 @@ def test_automation_runtime_health_retains_succeeded_evidence_during_new_scan(
     assert health["market_data_latest_session_coverage"] == "0.106667"
     assert health["market_data_latest_session_stale"] == "6041"
     assert health["market_data_refresh_attempt"] == 2
-    assert health["latest_scan_finished_at"] == (
-        now - timedelta(hours=2)
-    ).astimezone(timezone.utc).isoformat()
+    assert (
+        health["latest_scan_finished_at"]
+        == (now - timedelta(hours=2)).astimezone(timezone.utc).isoformat()
+    )
 
 
 def test_automatic_full_scan_queues_one_post_close_candidate_refresh(monkeypatch):
@@ -498,9 +505,7 @@ def test_automatic_full_scan_queues_one_post_close_candidate_refresh(monkeypatch
         def list_latest_opportunity_snapshots_by_card_ids(self, card_ids, provider):
             assert card_ids == ["stale-card"]
             assert provider == "free"
-            return [
-                SimpleNamespace(card_id="stale-card", signal_date=date(2026, 7, 30))
-            ]
+            return [SimpleNamespace(card_id="stale-card", signal_date=date(2026, 7, 30))]
 
         def tradable_catalog_summary(self):
             return SimpleNamespace(total_count=2)
@@ -558,7 +563,7 @@ def test_automatic_full_scan_queues_one_post_close_candidate_refresh(monkeypatch
     }
 
 
-def test_automatic_full_scan_does_not_repeat_second_post_close_candidate_refresh(
+def test_automatic_full_scan_does_not_repeat_final_post_close_candidate_repair(
     monkeypatch,
 ):
     expected = date(2026, 7, 31)
@@ -592,7 +597,7 @@ def test_automatic_full_scan_does_not_repeat_second_post_close_candidate_refresh
         data_health={
             "full_market_signal_date": expected.isoformat(),
             "automatic_candidate_refresh": "true",
-            "automatic_candidate_refresh_attempt": "2",
+            "automatic_candidate_refresh_attempt": "3",
         },
     )
 
@@ -601,9 +606,7 @@ def test_automatic_full_scan_does_not_repeat_second_post_close_candidate_refresh
             return latest
 
         def list_latest_opportunity_snapshots_by_card_ids(self, card_ids, provider):
-            return [
-                SimpleNamespace(card_id="stale-card", signal_date=date(2026, 7, 30))
-            ]
+            return [SimpleNamespace(card_id="stale-card", signal_date=date(2026, 7, 30))]
 
     submitted = []
     monkeypatch.setattr(routes, "_latest_completed_a_share_session", lambda: expected)
@@ -640,11 +643,9 @@ def test_automatic_full_scan_does_not_repeat_second_post_close_candidate_refresh
                 ),
             ]
 
-    partial_status, partial_started, partial_job_id = (
-        routes._maybe_start_automatic_full_scan(
-            PartialStubRepo(),
-            AutoProcessingSettings(provider="free"),
-        )
+    partial_status, partial_started, partial_job_id = routes._maybe_start_automatic_full_scan(
+        PartialStubRepo(),
+        AutoProcessingSettings(provider="free"),
     )
 
     assert (partial_status, partial_started, partial_job_id) == (
@@ -654,7 +655,16 @@ def test_automatic_full_scan_does_not_repeat_second_post_close_candidate_refresh
     )
 
 
-def test_automatic_full_scan_retries_partial_candidates_after_settlement(monkeypatch):
+@pytest.mark.parametrize(
+    ("previous_attempt", "next_attempt", "queued_job_id"),
+    [(1, 2, "settlement-retry"), (2, 3, "provider-repair")],
+)
+def test_automatic_full_scan_retries_partial_candidates_through_provider_repair(
+    monkeypatch,
+    previous_attempt,
+    next_attempt,
+    queued_job_id,
+):
     expected = date(2026, 7, 31)
     cached = SimpleNamespace(
         payload={
@@ -682,10 +692,10 @@ def test_automatic_full_scan_retries_partial_candidates_after_settlement(monkeyp
         data_health={
             "full_market_signal_date": expected.isoformat(),
             "automatic_candidate_refresh": "true",
-            "automatic_candidate_refresh_attempt": "1",
+            "automatic_candidate_refresh_attempt": str(previous_attempt),
         },
     )
-    queued = SimpleNamespace(job_id="settlement-retry")
+    queued = SimpleNamespace(job_id=queued_job_id)
 
     class StubRepo:
         def __init__(self):
@@ -746,9 +756,9 @@ def test_automatic_full_scan_retries_partial_candidates_after_settlement(monkeyp
     assert (status, started, job_id) == (
         "queued_candidate_refresh",
         True,
-        "settlement-retry",
+        queued_job_id,
     )
-    assert submitted == ["settlement-retry"]
+    assert submitted == [queued_job_id]
     assert repo.updated[1]["data_health"] == {
         "automatic_candidate_freshness_state": "partial",
         "automatic_candidate_expected_signal_date": "2026-07-31",
@@ -758,7 +768,7 @@ def test_automatic_full_scan_retries_partial_candidates_after_settlement(monkeyp
         "automatic_candidate_stale_snapshots": "1",
         "automatic_candidate_missing_snapshots": "0",
         "automatic_candidate_refresh": "true",
-        "automatic_candidate_refresh_attempt": "2",
+        "automatic_candidate_refresh_attempt": str(next_attempt),
     }
 
 
@@ -819,9 +829,7 @@ def test_stale_automatic_full_scan_restarts_same_job_from_checkpoints(
     assert resumed is not None
     assert resumed.status == "queued"
     assert resumed.completed_batches == 1
-    assert resumed.data_health["full_market_restart_recovery"] == (
-        "stale_checkpoint_resume"
-    )
+    assert resumed.data_health["full_market_restart_recovery"] == ("stale_checkpoint_resume")
 
 
 def test_finalizing_full_market_scan_uses_extended_stale_timeout():
@@ -1006,7 +1014,9 @@ def test_automation_cycle_captures_fuyao_only_after_matching_daily_scan(monkeypa
     monkeypatch.setattr(routes, "_latest_completed_a_share_session", lambda *args: signal_date)
     monkeypatch.setattr(routes, "_repo", lambda: repo)
     monkeypatch.setattr(routes, "_paper_repo", lambda: paper_repo)
-    monkeypatch.setattr(routes, "_maybe_start_automatic_full_scan", lambda *_: ("current", False, None))
+    monkeypatch.setattr(
+        routes, "_maybe_start_automatic_full_scan", lambda *_: ("current", False, None)
+    )
     monkeypatch.setattr(
         routes,
         "_paper_seed_risk_gate",
@@ -1121,9 +1131,7 @@ def test_automation_scheduler_run_once_updates_paper_status(tmp_path, monkeypatc
     database_url = f"sqlite:///{tmp_path / 'automation-scheduler-run-once.db'}"
     monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
     client = TestClient(create_app())
-    card = client.get("/api/opportunities?provider=fixture&symbols=US:TEST").json()[
-        "cards"
-    ][0]
+    card = client.get("/api/opportunities?provider=fixture&symbols=US:TEST").json()["cards"][0]
     created = client.post(
         "/api/paper-trades/from-opportunity",
         json={
@@ -1303,15 +1311,15 @@ def test_automation_scheduler_seeds_latest_signal_day_not_latest_inserted_rows(
                     initial_stop=Decimal("1.95"),
                     target_1=Decimal("2.40"),
                     card_json=json.dumps(
-                            {
-                                "instrument_id": instrument_id,
-                                "instrument_label": f"科创50ETF {instrument_id}",
-                                "asset_type": "etf",
-                                "market_context": {
-                                    "industry": "指数ETF",
-                                    "board": "ETF",
-                                },
+                        {
+                            "instrument_id": instrument_id,
+                            "instrument_label": f"科创50ETF {instrument_id}",
+                            "asset_type": "etf",
+                            "market_context": {
+                                "industry": "指数ETF",
+                                "board": "ETF",
                             },
+                        },
                         sort_keys=True,
                     ),
                     created_at=created_at,
@@ -1331,9 +1339,7 @@ def test_automation_scheduler_seeds_latest_signal_day_not_latest_inserted_rows(
     assert body["last_result"]["paper_created"] == 2
     assert body["last_result"]["data_health"]["automation_seed_latest_signal_date"] == "2026-07-01"
 
-    trades = client.get(
-        "/api/paper-trades?limit=10&reporting_scope=legacy"
-    ).json()["trades"]
+    trades = client.get("/api/paper-trades?limit=10&reporting_scope=legacy").json()["trades"]
     assert [trade["instrument_id"] for trade in trades] == ["CN:588190", "CN:588850"]
     assert {trade["signal_date"] for trade in trades} == {"2026-07-01"}
 
@@ -1473,9 +1479,7 @@ def test_automation_scheduler_seeds_from_cached_recommendation_order(tmp_path, m
         == "latest_recommendation_cache"
     )
 
-    trades = client.get(
-        "/api/paper-trades?limit=10&reporting_scope=legacy"
-    ).json()["trades"]
+    trades = client.get("/api/paper-trades?limit=10&reporting_scope=legacy").json()["trades"]
     assert {trade["instrument_id"] for trade in trades} == {"CN:002747", "CN:688052"}
     assert {trade["signal_date"] for trade in trades} == {
         datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
@@ -1698,9 +1702,7 @@ def test_automation_scheduler_backfills_closed_paper_slot_from_deeper_cache_cand
 
     assert second.status_code == 200
     assert second.json()["last_result"]["paper_created"] == 1
-    trades = client.get(
-        "/api/paper-trades?limit=10&reporting_scope=legacy"
-    ).json()["trades"]
+    trades = client.get("/api/paper-trades?limit=10&reporting_scope=legacy").json()["trades"]
     active = {trade["instrument_id"] for trade in trades if trade["status"] in {"pending", "open"}}
     assert active == {"CN:688002", "CN:688003"}
 
@@ -1799,9 +1801,9 @@ def test_automation_scheduler_keeps_reduced_size_capacity_when_drawdown_is_high(
     assert health["paper_risk_gate_action"] == "throttle_new_entries"
     assert health["paper_risk_gate_max_new_entries"] == "4"
     assert health["paper_risk_gate_position_size_multiplier"] == "0.3500"
-    trades = client.get(
-        "/api/paper-trades?provider=free&limit=20&reporting_scope=legacy"
-    ).json()["trades"]
+    trades = client.get("/api/paper-trades?provider=free&limit=20&reporting_scope=legacy").json()[
+        "trades"
+    ]
     probe = next(trade for trade in trades if trade["instrument_id"] == "CN:688999")
     assert "防守行情研究仓位" in probe["notes"]
 
@@ -1937,16 +1939,12 @@ def test_automation_scheduler_risk_off_uses_capacity_instead_of_daily_quota(
 
     assert candidate_pool.status_code == 200
     stale_item = next(
-        item
-        for item in candidate_pool.json()["items"]
-        if item["instrument_id"] == "CN:159998"
+        item for item in candidate_pool.json()["items"] if item["instrument_id"] == "CN:159998"
     )
     assert stale_item["status"] == "blocked_by_data"
     assert stale_item["signal_date_fresh"] is False
     current_item = next(
-        item
-        for item in candidate_pool.json()["items"]
-        if item["instrument_id"] == "CN:159999"
+        item for item in candidate_pool.json()["items"] if item["instrument_id"] == "CN:159999"
     )
     assert current_item["priority_score"] < 0.65
     assert current_item["status"] == "ready_to_add"
@@ -2213,9 +2211,9 @@ def test_automation_scheduler_replaces_stale_pending_with_strong_candidate(
     post_stale_item = next(item for item in pool["items"] if item["instrument_id"] == "CN:159558")
     assert post_stale_item["status"] == "blocked_by_data"
     assert post_stale_item["price_basis_consistent"] is False
-    trades = client.get(
-        "/api/paper-trades?provider=free&limit=20&reporting_scope=legacy"
-    ).json()["trades"]
+    trades = client.get("/api/paper-trades?provider=free&limit=20&reporting_scope=legacy").json()[
+        "trades"
+    ]
     by_id = {trade["trade_id"]: trade for trade in trades}
     assert by_id["paper-stale-pending"]["status"] == "replaced"
     assert "候补替换" in by_id["paper-stale-pending"]["notes"]
