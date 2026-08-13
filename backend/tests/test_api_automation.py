@@ -555,7 +555,110 @@ def test_automatic_full_scan_filters_stale_candidates_without_market_rescan(monk
     assert health["automatic_candidate_freshness_state"] == "stale"
     assert health["automatic_candidate_stale_snapshots"] == "1"
     assert health["automatic_candidate_refresh"] == "filtered_no_rescan"
-    assert health["automatic_full_scan_policy"] == "once_per_completed_session"
+    assert health["automatic_full_scan_policy"] == (
+        "once_per_completed_session_with_bounded_repair"
+    )
+
+
+def test_automatic_market_data_repair_waits_for_settlement_and_is_bounded():
+    expected = date(2026, 8, 13)
+    low_coverage = SimpleNamespace(
+        status="succeeded",
+        data_health={
+            "full_market_signal_date": expected.isoformat(),
+            "market_data_latest_session_coverage": "0.306125",
+        },
+    )
+
+    assert routes._automatic_market_data_repair_needed(
+        low_coverage,
+        expected_signal_date=expected,
+        now=datetime(2026, 8, 13, 17, 59, tzinfo=ZoneInfo("Asia/Shanghai")),
+    ) == (False, "waiting_settlement")
+    assert routes._automatic_market_data_repair_needed(
+        low_coverage,
+        expected_signal_date=expected,
+        now=datetime(2026, 8, 13, 18, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    ) == (True, "coverage_below_threshold")
+
+    low_coverage.data_health["automatic_candidate_refresh_attempt"] = "2"
+    assert routes._automatic_market_data_repair_needed(
+        low_coverage,
+        expected_signal_date=expected,
+        now=datetime(2026, 8, 13, 18, 30, tzinfo=ZoneInfo("Asia/Shanghai")),
+    ) == (False, "repair_exhausted")
+
+
+def test_automatic_full_scan_queues_one_low_coverage_market_data_repair(monkeypatch):
+    expected = date(2026, 8, 13)
+    cached = SimpleNamespace(payload={"cards": []})
+    latest = SimpleNamespace(
+        job_id="first-scan",
+        status="succeeded",
+        data_health={
+            "full_market_signal_date": expected.isoformat(),
+            "market_data_latest_session_coverage": "0.306125",
+        },
+    )
+    queued = SimpleNamespace(job_id="bounded-repair")
+
+    class StubRepo:
+        def __init__(self):
+            self.updated = None
+
+        def get_latest_full_market_scan_job(self, *, provider):
+            return latest
+
+        def tradable_catalog_summary(self):
+            return SimpleNamespace(total_count=2)
+
+        def create_full_market_scan_job(self, **kwargs):
+            assert kwargs["symbols"] == ["CN:000001", "CN:000002"]
+            return queued
+
+        def update_full_market_scan_job(self, job_id, **kwargs):
+            self.updated = (job_id, kwargs)
+            return queued
+
+    repo = StubRepo()
+    submitted = []
+    monkeypatch.setattr(routes, "_latest_completed_a_share_session", lambda: expected)
+    monkeypatch.setattr(
+        routes,
+        "_automation_scan_result_cache",
+        lambda *_args, **_kwargs: (cached, "age_window"),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_automatic_market_data_repair_needed",
+        lambda *_args, **_kwargs: (True, "coverage_below_threshold"),
+    )
+    monkeypatch.setattr(routes, "_automatic_full_scan_window", lambda: (True, "ready"))
+    monkeypatch.setattr(
+        routes,
+        "build_full_market_batch_symbols",
+        lambda **_: ["CN:000001", "CN:000002"],
+    )
+    monkeypatch.setattr(
+        routes,
+        "_submit_full_market_scan_job",
+        lambda job_id: submitted.append(job_id) or True,
+    )
+
+    status, started, job_id = routes._maybe_start_automatic_full_scan(
+        repo,
+        AutoProcessingSettings(provider="free"),
+    )
+
+    assert (status, started, job_id) == ("queued_market_data_repair", True, "bounded-repair")
+    assert submitted == ["bounded-repair"]
+    assert repo.updated[0] == "bounded-repair"
+    health = repo.updated[1]["data_health"]
+    assert health["automatic_market_data_repair"] == "true"
+    assert health["automatic_candidate_refresh_attempt"] == "2"
+    assert health["automatic_full_scan_policy"] == (
+        "once_per_completed_session_with_bounded_repair"
+    )
 
 
 def test_automatic_tradable_catalog_sync_is_due_once_per_completed_session():
@@ -773,7 +876,9 @@ def test_automatic_full_scan_never_retries_partial_candidates_with_full_rescan(
     assert health["automatic_candidate_current_snapshots"] == "1"
     assert health["automatic_candidate_stale_snapshots"] == "1"
     assert health["automatic_candidate_refresh"] == "filtered_no_rescan"
-    assert health["automatic_full_scan_policy"] == "once_per_completed_session"
+    assert health["automatic_full_scan_policy"] == (
+        "once_per_completed_session_with_bounded_repair"
+    )
 
 
 def test_stale_automatic_full_scan_restarts_same_job_from_checkpoints(

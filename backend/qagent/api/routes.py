@@ -1,7 +1,7 @@
 from copy import deepcopy
 from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import math
 from multiprocessing import get_context
@@ -257,6 +257,9 @@ router = APIRouter()
 PAPER_MAX_PER_INDUSTRY = 2
 PAPER_RISK_OFF_POSITION_SIZE_MULTIPLIER = Decimal("0.35")
 PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME = time(hour=15, minute=45)
+PAPER_MARKET_DATA_REPAIR_TIME = time(hour=18)
+PAPER_MARKET_DATA_MIN_COVERAGE = Decimal("0.80")
+PAPER_MARKET_DATA_MAX_SCAN_ATTEMPTS = 2
 _UNKNOWN_PAPER_INDUSTRIES = {
     "",
     "-",
@@ -5475,6 +5478,49 @@ def _scan_cache_signal_date(cached: ScanResultCacheRecord) -> date | None:
         return None
 
 
+def _automatic_market_data_repair_attempt(job: object | None) -> int:
+    if job is None:
+        return 1
+    data_health = getattr(job, "data_health", {})
+    if not isinstance(data_health, Mapping):
+        return 1
+    raw_attempt = data_health.get("automatic_candidate_refresh_attempt", "1")
+    try:
+        return max(int(raw_attempt), 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _automatic_market_data_repair_needed(
+    job: object | None,
+    *,
+    expected_signal_date: date | None,
+    now: datetime | None = None,
+) -> tuple[bool, str]:
+    if job is None or expected_signal_date is None or getattr(job, "status", None) != "succeeded":
+        return False, "not_applicable"
+    data_health = getattr(job, "data_health", {})
+    if not isinstance(data_health, Mapping):
+        return False, "missing_health"
+    if data_health.get("full_market_signal_date") != expected_signal_date.isoformat():
+        return False, "different_signal_date"
+    try:
+        coverage = Decimal(str(data_health.get("market_data_latest_session_coverage", "1")))
+    except (InvalidOperation, TypeError, ValueError):
+        return False, "invalid_coverage"
+    if coverage >= PAPER_MARKET_DATA_MIN_COVERAGE:
+        return False, "coverage_sufficient"
+    if _automatic_market_data_repair_attempt(job) >= PAPER_MARKET_DATA_MAX_SCAN_ATTEMPTS:
+        return False, "repair_exhausted"
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    local_time = current.astimezone(ZoneInfo("Asia/Shanghai")).timetz().replace(tzinfo=None)
+    if local_time < PAPER_MARKET_DATA_REPAIR_TIME:
+        return False, "waiting_settlement"
+    return True, "coverage_below_threshold"
+
+
 def _automation_scan_result_cache(
     repo: QagentRepository,
     *,
@@ -5558,6 +5604,8 @@ def _maybe_start_automatic_full_scan(
     )
     candidate_refresh_health: dict[str, str] = {}
     candidate_refresh_needed = False
+    market_data_repair_needed = False
+    market_data_repair_reason = "not_applicable"
     if cached is not None:
         if expected_signal_date is not None:
             candidate_refresh_health = _cached_paper_candidate_signal_date_health(
@@ -5569,26 +5617,39 @@ def _maybe_start_automatic_full_scan(
             candidate_refresh_needed = candidate_refresh_health.get(
                 "automatic_candidate_freshness_state"
             ) in {"stale", "partial"}
-        if not candidate_refresh_needed:
-            return "cache_fresh", False, latest.job_id if latest else None
-        freshness_state = candidate_refresh_health.get("automatic_candidate_freshness_state")
-        status = (
-            "candidate_data_partially_stale_filtered"
-            if freshness_state == "partial"
-            else "candidate_data_stale_filtered"
+        market_data_repair_needed, market_data_repair_reason = _automatic_market_data_repair_needed(
+            latest,
+            expected_signal_date=expected_signal_date,
         )
-        update_job = getattr(repo, "update_full_market_scan_job", None)
-        if latest is not None and callable(update_job):
-            update_job(
-                latest.job_id,
-                data_health={
-                    **latest.data_health,
-                    **candidate_refresh_health,
-                    "automatic_candidate_refresh": "filtered_no_rescan",
-                    "automatic_full_scan_policy": "once_per_completed_session",
-                },
+        if market_data_repair_reason == "waiting_settlement":
+            status = "waiting_market_data_settlement" if candidate_refresh_needed else "cache_fresh"
+            return status, False, latest.job_id if latest else None
+        if market_data_repair_needed:
+            cached = None
+        elif not candidate_refresh_needed:
+            return "cache_fresh", False, latest.job_id if latest else None
+        else:
+            freshness_state = candidate_refresh_health.get("automatic_candidate_freshness_state")
+            status = (
+                "candidate_data_partially_stale_filtered"
+                if freshness_state == "partial"
+                else "candidate_data_stale_filtered"
             )
-        return status, False, latest.job_id if latest else None
+            update_job = getattr(repo, "update_full_market_scan_job", None)
+            if latest is not None and callable(update_job):
+                update_job(
+                    latest.job_id,
+                    data_health={
+                        **latest.data_health,
+                        **candidate_refresh_health,
+                        "automatic_candidate_refresh": "filtered_no_rescan",
+                        "automatic_market_data_repair": market_data_repair_reason,
+                        "automatic_full_scan_policy": (
+                            "once_per_completed_session_with_bounded_repair"
+                        ),
+                    },
+                )
+            return status, False, latest.job_id if latest else None
     if freshness == "stale_signal_retry_window":
         return "waiting_market_data", False, latest.job_id if latest else None
     scan_allowed, _ = _automatic_full_scan_window()
@@ -5632,19 +5693,38 @@ def _maybe_start_automatic_full_scan(
         include_etfs=settings.include_etfs,
         sync_if_empty=settings.sync_if_empty,
     )
-    if catalog_sync_health:
+    if catalog_sync_health or market_data_repair_needed:
+        job_health = {
+            **catalog_sync_health,
+            "automatic_full_scan_policy": "once_per_completed_session_with_bounded_repair",
+        }
+        if market_data_repair_needed:
+            job_health.update(
+                {
+                    **candidate_refresh_health,
+                    "automatic_market_data_repair": "true",
+                    "automatic_candidate_refresh_attempt": str(
+                        _automatic_market_data_repair_attempt(latest) + 1
+                    ),
+                }
+            )
         updated = repo.update_full_market_scan_job(
             job.job_id,
-            message="Queued daily full-market verification after catalog refresh",
-            data_health={
-                **catalog_sync_health,
-                "automatic_full_scan_policy": "once_per_completed_session",
-            },
+            message=(
+                "Queued bounded same-session market-data repair"
+                if market_data_repair_needed
+                else "Queued daily full-market verification after catalog refresh"
+            ),
+            data_health=job_health,
         )
         if updated is not None:
             job = updated
     _submit_full_market_scan_job(job.job_id)
-    return "queued", True, job.job_id
+    return (
+        ("queued_market_data_repair" if market_data_repair_needed else "queued"),
+        True,
+        job.job_id,
+    )
 
 
 def _automatic_tradable_catalog_sync_due(
@@ -5783,8 +5863,9 @@ def _automation_runtime_health(
         "scan_requirement": scan_requirement,
         "scan_next_check_at": (next_check_at.isoformat() if next_check_at is not None else None),
         "scan_post_close_time": PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME.strftime("%H:%M"),
-        "scan_frequency_policy": "once_per_completed_session",
+        "scan_frequency_policy": "once_per_completed_session_with_bounded_repair",
         "market_data_refresh_policy": "incremental_tail",
+        "scan_market_data_repair_time": PAPER_MARKET_DATA_REPAIR_TIME.strftime("%H:%M"),
         "automation_scan_status": automation_scan_status,
         "latest_scan_job_id": getattr(latest_scan, "job_id", None),
         "latest_scan_status": latest_status,
