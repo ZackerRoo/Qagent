@@ -62,6 +62,8 @@ PAPER_RISK_PROBE_NOTE = "风控恢复探针"
 _ENTRY_FILL_UPDATE_KEY = "__paper_entry_fill"
 _EXIT_FILL_UPDATE_KEY = "__paper_exit_fill"
 _DEFERRED_FILL_UPDATE_KEY = "__paper_deferred_fills"
+_TERMINAL_REASON_UPDATE_KEY = "__paper_terminal_reason"
+_LEGACY_MARKET_REDUCED_NOTE = "防守行情研究仓位"
 _RESEARCH_SHADOW_ADMISSION_SOURCES = frozenset({"ranking_v4_shadow"})
 
 
@@ -96,6 +98,7 @@ class PaperSeedResult(BaseModel):
     scanned: int
     created: int
     skipped: int
+    skipped_unaffordable: int = 0
 
 
 class PaperTradingSummary(BaseModel):
@@ -574,12 +577,14 @@ def seed_paper_trades_from_snapshots(
         raise ValueError("allocation_multiplier must be between 0 and 1")
     created = 0
     skipped = 0
+    skipped_unaffordable = 0
     existing_trades = repo.list_trades(limit=1000, provider=provider)
     existing = {trade.source_snapshot_id for trade in existing_trades}
     active_instruments = {
         trade.instrument_id for trade in existing_trades if trade.status in OPEN_STATUSES
     }
     active_count = sum(1 for trade in existing_trades if trade.status in OPEN_STATUSES)
+    account_settings = repo.get_account_settings()
     current_date = _a_share_local_datetime(as_of).date()
     for snapshot in snapshots:
         if max_created is not None and created >= max_created:
@@ -617,6 +622,14 @@ def seed_paper_trades_from_snapshots(
         if not admission.eligible:
             skipped += 1
             continue
+        if not paper_snapshot_round_lot_is_affordable(
+            snapshot,
+            account_settings,
+            allocation_multiplier,
+        ):
+            skipped += 1
+            skipped_unaffordable += 1
+            continue
         repo.create_trade(
             source_snapshot_id=snapshot.snapshot_id,
             provider=provider,
@@ -639,7 +652,12 @@ def seed_paper_trades_from_snapshots(
         )
         created += 1
         active_instruments.add(snapshot.instrument_id)
-    return PaperSeedResult(scanned=len(snapshots), created=created, skipped=skipped)
+    return PaperSeedResult(
+        scanned=len(snapshots),
+        created=created,
+        skipped=skipped,
+        skipped_unaffordable=skipped_unaffordable,
+    )
 
 
 def paper_snapshot_price_basis_is_consistent(
@@ -686,6 +704,9 @@ def update_paper_trades(
     repaired_invalid_dates = _repair_impossible_trade_dates(repo, trades)
     if repaired_invalid_dates:
         trades = repo.list_trades(limit=1000, provider=provider_mode)
+    restored_standard_allocations = _restore_pending_market_reduced_allocations(repo, trades)
+    if restored_standard_allocations:
+        trades = repo.list_trades(limit=1000, provider=provider_mode)
     active = [trade for trade in trades if trade.status in OPEN_STATUSES]
     execution_time = _a_share_local_datetime(as_of)
     execution_session = _a_share_execution_session(execution_time)
@@ -694,6 +715,7 @@ def update_paper_trades(
     minute_rows = 0
     daily_fallback_checked = 0
     daily_fallback_rows = 0
+    unaffordable_missed = 0
     for trade in active:
         source_context = repo.get_trade_source_context(trade.source_snapshot_id)
         execution_context = _paper_execution_context(
@@ -701,6 +723,23 @@ def update_paper_trades(
             account_settings,
             source_context,
         )
+        if (
+            trade.status == "pending"
+            and execution_context is not None
+            and _paper_entry_quantity(trade, execution_context) <= 0
+        ):
+            _persist_paper_trade_update(
+                repo,
+                trade,
+                _unaffordable_round_lot_update(
+                    trade,
+                    execution_context,
+                    invalidated_on=execution_time.date(),
+                ),
+                execution_context,
+            )
+            unaffordable_missed += 1
+            continue
         minute_update, checked, rows, minute_deferred = _try_evaluate_trade_with_minutes(
             repo,
             provider,
@@ -759,8 +798,10 @@ def update_paper_trades(
         "paper_minute_rows": str(minute_rows),
         "paper_daily_fallback_checked": str(daily_fallback_checked),
         "paper_daily_fallback_rows": str(daily_fallback_rows),
+        "paper_unaffordable_pending_missed": str(unaffordable_missed),
         "paper_repaired_invalid_dates": str(repaired_invalid_dates),
         "paper_repaired_replaced_statuses": str(repaired_replaced_statuses),
+        "paper_restored_standard_allocations": str(restored_standard_allocations),
         "paper_price_basis_invalidated": str(
             max(
                 sum(1 for trade in refreshed if trade.status == "invalidated") - invalidated_before,
@@ -834,6 +875,37 @@ def _repair_impossible_trade_dates(
         )
         repaired += 1
     return repaired
+
+
+def _restore_pending_market_reduced_allocations(
+    repo: PaperTradingRepository,
+    trades: list[PaperTradeRecord],
+) -> int:
+    restored = 0
+    for trade in trades:
+        if (
+            trade.status != "pending"
+            or trade.allocation_multiplier >= Decimal("1")
+            or _LEGACY_MARKET_REDUCED_NOTE not in trade.notes
+        ):
+            continue
+        note = _append_note(
+            trade.notes,
+            "市场状态改为仅供研究归因，未成交订单恢复标准仓位。",
+        )
+        repo.update_trade(
+            trade.trade_id,
+            allocation_multiplier=Decimal("1"),
+            notes=note,
+            event_metadata=PaperTradeEventMetadata(
+                idempotency_key=f"paper-policy:{trade.trade_id}:standard-allocation",
+                reason_code="paper_trade.market_risk_sizing_removed",
+                note=note,
+                source="paper_policy_migration",
+            ),
+        )
+        restored += 1
+    return restored
 
 
 def paper_execution_data_health(
@@ -3476,6 +3548,54 @@ def _paper_entry_quantity(
     )
 
 
+def paper_snapshot_round_lot_is_affordable(
+    snapshot: OpportunitySnapshotRecord,
+    account: PaperAccountSettings,
+    allocation_multiplier: Decimal,
+) -> bool:
+    if not snapshot.instrument_id.upper().startswith("CN:"):
+        return True
+    if snapshot.trigger_price is None or snapshot.trigger_price <= 0:
+        return False
+    card = snapshot.card if isinstance(snapshot.card, dict) else {}
+    constraints = _mapping(card.get("trading_constraints"))
+    overrides = _mapping(card.get("execution_rules") or card.get("execution"))
+    lot_size = _positive_int(overrides.get("lot_size") or constraints.get("min_lot")) or 100
+    allocation = execution_money(
+        account.initial_capital
+        * account.allocation_per_trade_pct
+        / Decimal("100")
+        * allocation_multiplier
+    )
+    return round_lot(int(allocation / snapshot.trigger_price), lot_size) > 0
+
+
+def _unaffordable_round_lot_update(
+    trade: PaperTradeRecord,
+    context: _PaperExecutionContext,
+    *,
+    invalidated_on: date,
+) -> dict[str, object]:
+    minimum_notional = execution_money(trade.trigger_price * context.rules.lot_size)
+    return {
+        "status": "missed_entry",
+        "latest_date": trade.latest_date or invalidated_on,
+        "latest_price": trade.latest_price or trade.trigger_price,
+        "exit_date": invalidated_on,
+        "exit_price": None,
+        "realized_return_pct": None,
+        "holding_days": 0,
+        "notes": _append_note(
+            trade.notes,
+            (
+                f"模拟盘分配资金 {context.allocation:.2f} 元不足以按触发价买入"
+                f"最小一手（需 {minimum_notional:.2f} 元），记为未成交并释放名额。"
+            ),
+        ),
+        _TERMINAL_REASON_UPDATE_KEY: "paper_trade.entry_allocation_below_round_lot",
+    }
+
+
 def _paper_position_quantity(
     trade: PaperTradeRecord,
     context: _PaperExecutionContext,
@@ -3796,12 +3916,20 @@ def _persist_paper_trade_update(
     entry_fill = changes.pop(_ENTRY_FILL_UPDATE_KEY, None)
     exit_fill = changes.pop(_EXIT_FILL_UPDATE_KEY, None)
     changes.pop(_DEFERRED_FILL_UPDATE_KEY, None)
+    terminal_reason = changes.pop(_TERMINAL_REASON_UPDATE_KEY, None)
     if entry_fill is not None and not isinstance(entry_fill, _PaperMatchedFill):
         raise TypeError("paper entry fill evidence has an invalid type")
     if exit_fill is not None and not isinstance(exit_fill, _PaperMatchedFill):
         raise TypeError("paper exit fill evidence has an invalid type")
 
     metadata = None
+    if terminal_reason is not None:
+        metadata = PaperTradeEventMetadata(
+            idempotency_key=f"paper-terminal:{trade.trade_id}:{terminal_reason}",
+            reason_code=str(terminal_reason),
+            note=str(changes.get("notes", trade.notes)),
+            source="unified_execution",
+        )
     if context is not None and (entry_fill is not None or exit_fill is not None):
         facts = _paper_execution_facts(
             trade,

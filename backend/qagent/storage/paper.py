@@ -66,6 +66,7 @@ PAPER_TRADE_EVENT_FIELDS = frozenset(
         "unrealized_return_pct",
         "realized_return_pct",
         "holding_days",
+        "allocation_multiplier",
     }
 )
 

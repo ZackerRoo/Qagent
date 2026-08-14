@@ -8,6 +8,7 @@ import {
   fetchFactorResearchExperiments,
   fetchFactorResearchShadow,
   fetchEtfExposures,
+  fetchInstrumentLabels,
   fetchPaperCandidatePool,
   fetchPaperAccountStatus,
   fetchPaperDailyReport,
@@ -30,7 +31,11 @@ import {
 import { DataHealth } from "../components/DataHealth";
 import { useI18n } from "../i18n";
 import type { Language, TranslationKey } from "../i18n/catalog";
-import { formatInstrumentDisplay } from "../lib/instruments";
+import {
+  formatInstrumentDisplay,
+  hasInstrumentLabel,
+  registerInstrumentLabels,
+} from "../lib/instruments";
 import { localizeAction, localizeStatus, localizeStrategy } from "../lib/localize";
 import type {
   AutoProcessingState,
@@ -140,6 +145,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [isRunningFactorResearch, setIsRunningFactorResearch] = useState(false);
   const [isLoadingEtfExposure, setIsLoadingEtfExposure] = useState(false);
   const [deletingPaperTradeId, setDeletingPaperTradeId] = useState("");
+  const [, setInstrumentLabelNonce] = useState(0);
 
   async function load() {
     const coreResults = await Promise.allSettled([
@@ -369,6 +375,28 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   useEffect(() => {
     void load();
   }, [dataMode, paperScope]);
+
+  useEffect(() => {
+    const instrumentIds = [...new Set([
+      ...(ledger?.positions.map((position) => position.instrument_id) ?? []),
+      ...(ledger?.transactions.map((transaction) => transaction.instrument_id) ?? []),
+    ])].filter((instrumentId) => !hasInstrumentLabel(instrumentId));
+    if (!instrumentIds.length) return;
+
+    let cancelled = false;
+    void fetchInstrumentLabels(instrumentIds)
+      .then((result) => {
+        if (cancelled) return;
+        const loaded = registerInstrumentLabels(result.labels ?? {});
+        if (loaded > 0) setInstrumentLabelNonce((value) => value + 1);
+      })
+      .catch(() => {
+        // Keep the code fallback when catalog labels are temporarily unavailable.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ledger]);
 
   useEffect(() => {
     if (portfolioView === "research") {
@@ -3768,6 +3796,7 @@ function paperCandidateStatusLabel(status: string, language: Language) {
     tracked_before: { zh: "已跟踪过", en: "Tracked" },
     paused_by_risk: { zh: "风控暂停", en: "Risk paused" },
     blocked_by_market: { zh: "市场暂停入场", en: "Market blocked" },
+    blocked_by_allocation: { zh: "资金不足一手", en: "Below one lot" },
     blocked_by_industry: { zh: "行业集中度阻断", en: "Industry blocked" },
     blocked_by_data: { zh: "数据阻断", en: "Data blocked" },
   };
@@ -4343,7 +4372,7 @@ function PaperPositionsPanel({
         <div className="mini-curve-empty">{t("portfolio.noOpenPaperPositions")}</div>
       ) : (
         <div className="paper-position-grid">
-          {positions.slice(0, 8).map((position) => (
+          {positions.map((position) => (
             <div className="paper-position-card" key={position.trade_id}>
               <div>
                 <strong title={formatInstrumentDisplay(position.instrument_id)}>

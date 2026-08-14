@@ -2177,6 +2177,7 @@ export type PaperCandidatePoolItem = {
   market_theme_boost: number;
   entry_gap_pct: number | null;
   price_basis_consistent: boolean;
+  round_lot_affordable: boolean;
   trigger_price: string | null;
   latest_close: string | null;
   status: string;
@@ -2194,6 +2195,7 @@ export type PaperCandidatePoolSummary = {
   waiting_count: number;
   replacement_candidates: number;
   market_blocked_count: number;
+  allocation_blocked_count: number;
   industry_capacity_limit: number;
   industry_blocked_count: number;
   industry_missing_count: number;

@@ -51,7 +51,7 @@ from qagent.backtesting.ranking_v4_protocol import RANKING_V4_MODEL_VERSION
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.market.calendars import trading_day_offset
 from qagent.paper_trading.admission import evaluate_paper_snapshot_admission
-from qagent.paper_trading.engine import seed_paper_trades_from_snapshots
+from qagent.paper_trading.engine import seed_paper_trades_from_snapshots, update_paper_trades
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.storage.ranking_v3_forward import RankingV3ForwardRepository
 from qagent.storage.ranking_v3_production import RankingV3ProductionRepository
@@ -706,7 +706,7 @@ def test_cached_unreleased_ranking_v3_does_not_fall_back_to_legacy_seed(
     assert client.get("/api/paper-trades").json()["summary"]["total"] == 0
 
 
-def test_risk_off_candidates_allow_batch_reduced_size_research_entries(
+def test_risk_off_candidates_allow_standard_size_research_entries(
     tmp_path,
     monkeypatch,
 ):
@@ -766,14 +766,14 @@ def test_risk_off_candidates_allow_batch_reduced_size_research_entries(
     }
     assert {item["status"] for item in pool.json()["items"]} == {"ready_to_add"}
     assert pool.json()["summary"]["market_blocked_count"] == 0
-    assert pool.json()["summary"]["risk_action"] == "throttle_new_entries"
-    assert pool.json()["data_health"]["paper_market_entry_gate"] == "throttled"
+    assert pool.json()["summary"]["risk_action"] == "allow_new_entries"
+    assert pool.json()["data_health"]["paper_market_entry_gate"] == "observed"
     assert seeded.status_code == 200
     assert seeded.json()["created"] == 2
     assert report.status_code == 200
-    assert report.json()["risk_gate"]["action"] == "throttle_new_entries"
+    assert report.json()["risk_gate"]["action"] == "allow_new_entries"
     assert report.json()["risk_gate"]["max_new_entries"] == 3
-    assert report.json()["risk_gate"]["position_size_multiplier"] == 0.35
+    assert report.json()["risk_gate"]["position_size_multiplier"] == 1.0
     assert post_seed_pool.status_code == 200
     assert {item["status"] for item in post_seed_pool.json()["items"]} == {
         "active_in_paper"
@@ -786,8 +786,8 @@ def test_risk_off_candidates_allow_batch_reduced_size_research_entries(
         "/api/paper-trades?provider=fixture&reporting_scope=legacy"
     ).json()["trades"]
     assert len(trades) == 2
-    assert all(trade["allocation_multiplier"] == "0.3500" for trade in trades)
-    assert all("防守行情研究仓位" in trade["notes"] for trade in trades)
+    assert all(trade["allocation_multiplier"] == "1.0000" for trade in trades)
+    assert all("防守行情研究仓位" not in trade["notes"] for trade in trades)
 
 
 def test_candidate_pool_reports_industry_capacity_block(tmp_path, monkeypatch):
@@ -1525,6 +1525,142 @@ def test_paper_account_status_separates_active_capacity_from_manual_positions(
     assert body["observation"]["account_completed_sessions"] >= 0
     assert body["manual"] == {"count": 1, "uses_paper_capacity": False}
     assert body["data_health"]["manual_positions_are_separate"] == "true"
+
+
+def test_paper_update_marks_pending_a_share_missed_when_allocation_cannot_buy_one_lot(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'paper-unaffordable-pending.db'}",
+    )
+    TestClient(create_app())
+    repo = routes._paper_repo()
+    trade = repo.create_trade(
+        source_snapshot_id="unaffordable-pending",
+        provider="fixture",
+        instrument_id="CN:688578",
+        strategy_id="tam_adj_peg_growth",
+        signal_date=date(2026, 8, 11),
+        trigger_price=Decimal("117.97"),
+        initial_stop=Decimal("110.00"),
+        target_1=Decimal("130.00"),
+        rank_score=Decimal("0.80"),
+        allocation_multiplier=Decimal("0.35"),
+    )
+
+    result = update_paper_trades(
+        repo,
+        FixtureMarketDataProvider(),
+        provider_mode="fixture",
+        as_of=datetime(2026, 8, 13, 16, 0, tzinfo=timezone.utc),
+    )
+
+    updated = repo.get_trade(trade.trade_id)
+    assert updated is not None
+    assert updated.status == "missed_entry"
+    assert updated.exit_price is None
+    assert "分配资金 3500.00 元" in updated.notes
+    assert "最小一手（需 11797.00 元）" in updated.notes
+    assert result.data_health["paper_unaffordable_pending_missed"] == "1"
+    assert result.data_health["paper_price_basis_invalidated"] == "0"
+    events = repo.list_trade_events(trade.trade_id)
+    assert events[-1].reason_code == "paper_trade.entry_allocation_below_round_lot"
+
+
+def test_paper_update_restores_legacy_risk_off_pending_trade_to_standard_allocation(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'paper-restore-risk-off-allocation.db'}",
+    )
+    TestClient(create_app())
+    repo = routes._paper_repo()
+    trade = repo.create_trade(
+        source_snapshot_id="legacy-risk-off-pending",
+        provider="fixture",
+        instrument_id="CN:688278",
+        strategy_id="tam_adj_peg_growth",
+        signal_date=date(2026, 8, 11),
+        trigger_price=Decimal("60.47"),
+        initial_stop=Decimal("56.00"),
+        target_1=Decimal("70.00"),
+        rank_score=Decimal("0.80"),
+        allocation_multiplier=Decimal("0.35"),
+        notes="防守行情研究仓位；合格候选可按剩余仓位批量进入。",
+    )
+
+    result = update_paper_trades(
+        repo,
+        FixtureMarketDataProvider(),
+        provider_mode="fixture",
+        as_of=datetime(2026, 8, 13, 16, 0, tzinfo=timezone.utc),
+    )
+
+    updated = repo.get_trade(trade.trade_id)
+    assert updated is not None
+    assert updated.allocation_multiplier == Decimal("1.0000")
+    assert updated.status == "pending"
+    assert "未成交订单恢复标准仓位" in updated.notes
+    assert result.data_health["paper_restored_standard_allocations"] == "1"
+    assert result.data_health["paper_unaffordable_pending_missed"] == "0"
+    events = repo.list_trade_events(trade.trade_id)
+    assert events[-1].event_type == "execution_updated"
+    assert events[-1].reason_code == "paper_trade.market_risk_sizing_removed"
+
+
+def test_paper_seed_skips_a_share_candidate_when_allocation_cannot_buy_one_lot(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'paper-unaffordable-seed.db'}",
+    )
+    TestClient(create_app())
+    _persist_authoritative_opportunities(
+        provider="fixture",
+        cards=[("card_unaffordable_seed_0001", "CN:688578")],
+    )
+    snapshot = routes._repo().list_opportunity_snapshots(
+        limit=1,
+        provider="fixture",
+    )[0].model_copy(
+        update={
+            "trigger_price": Decimal("117.97"),
+            "latest_close": Decimal("117.97"),
+        }
+    )
+    pool_items, pool_summary = routes._paper_candidate_pool_snapshot_items(
+        paper_repo=routes._paper_repo(),
+        snapshots=[snapshot],
+        provider="fixture",
+        risk_gate_health={
+            "paper_risk_gate_action": "throttle_new_entries",
+            "paper_risk_gate_position_size_multiplier": "0.35",
+        },
+        limit=1,
+    )
+
+    result = seed_paper_trades_from_snapshots(
+        routes._paper_repo(),
+        [snapshot],
+        provider="fixture",
+        max_created=1,
+        allocation_multiplier=Decimal("0.35"),
+        admission_repo=routes._repo(),
+    )
+
+    assert result.created == 0
+    assert result.skipped == 1
+    assert result.skipped_unaffordable == 1
+    assert pool_items[0]["status"] == "blocked_by_allocation"
+    assert pool_items[0]["round_lot_affordable"] is False
+    assert pool_summary["allocation_blocked_count"] == 1
+    assert routes._paper_repo().list_trades(limit=10, provider="fixture") == []
 
 
 def test_paper_forward_calendar_uses_exchange_sessions_and_flags_cache_dates():

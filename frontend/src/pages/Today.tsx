@@ -2405,6 +2405,7 @@ function paperAdmissionLabel(status: string, language: "zh" | "en") {
     tracked_before: { zh: "已跟踪/冷却", en: "Cooling" },
     paused_by_risk: { zh: "风控暂停", en: "Risk paused" },
     blocked_by_market: { zh: "市场暂停入场", en: "Market blocked" },
+    blocked_by_allocation: { zh: "资金不足一手", en: "Below one lot" },
     blocked_by_industry: { zh: "行业集中度阻断", en: "Industry blocked" },
     blocked_by_data: { zh: "数据阻断", en: "Data blocked" },
     not_in_pool: { zh: "未入候补", en: "Not queued" },
@@ -2437,6 +2438,11 @@ function paperAdmissionExplanation(
     return language === "zh"
       ? "候选仍保留展示，但当前市场状态暂停新增仓位；市场门禁解除后会重新评估。"
       : "The candidate remains visible, but market conditions pause new entries until the next reassessment.";
+  }
+  if (admission.status === "blocked_by_allocation") {
+    return language === "zh"
+      ? "当前单笔模拟仓位不足以买入 A 股最小一手，本轮不会创建无法成交的等待单。"
+      : "The current paper allocation cannot buy one A-share lot, so no unfillable pending order is created.";
   }
   if (admission.status === "blocked_by_industry") {
     const exposureGroup = admission.exposure_group ?? admission.industry;

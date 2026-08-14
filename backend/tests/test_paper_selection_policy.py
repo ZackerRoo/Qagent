@@ -27,7 +27,7 @@ def test_paper_active_limit_uses_account_capacity_not_per_run_seed_limit():
     )
 
 
-def test_cached_risk_off_market_reduces_size_without_reducing_entry_capacity():
+def test_cached_risk_off_market_is_observational_for_research_paper():
     health = _paper_market_entry_gate_from_cache(
         {
             "benchmark_trend": {
@@ -38,10 +38,10 @@ def test_cached_risk_off_market_reduces_size_without_reducing_entry_capacity():
         }
     )
 
-    assert health["paper_market_entry_gate"] == "throttled"
+    assert health["paper_market_entry_gate"] == "observed"
     assert health["paper_market_entry_gate_state"] == "risk_off"
     assert health["paper_market_entry_gate_max_new_entries"] == ""
-    assert health["paper_market_entry_gate_position_size_multiplier"] == "0.3500"
+    assert health["paper_market_entry_gate_position_size_multiplier"] == "1.0000"
 
     merged = _paper_merge_market_risk_gate(
         {
@@ -52,9 +52,9 @@ def test_cached_risk_off_market_reduces_size_without_reducing_entry_capacity():
         },
         health,
     )
-    assert merged["paper_risk_gate_action"] == "throttle_new_entries"
+    assert merged["paper_risk_gate_action"] == "allow_new_entries"
     assert merged["paper_risk_gate_max_new_entries"] == "5"
-    assert merged["paper_risk_gate_position_size_multiplier"] == "0.3500"
+    assert merged["paper_risk_gate_position_size_multiplier"] == "1.0000"
 
 
 def test_cached_extreme_market_still_blocks_research_paper_entries():

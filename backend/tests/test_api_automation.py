@@ -1914,7 +1914,7 @@ def test_automation_scheduler_keeps_reduced_size_capacity_when_drawdown_is_high(
         "trades"
     ]
     probe = next(trade for trade in trades if trade["instrument_id"] == "CN:688999")
-    assert "防守行情研究仓位" in probe["notes"]
+    assert "账户表现触发风险收缩" in probe["notes"]
 
     second = client.post(
         "/api/automation/scheduler/run-once"
@@ -2062,13 +2062,13 @@ def test_automation_scheduler_risk_off_uses_capacity_instead_of_daily_quota(
     assert first.status_code == 200
     first_result = first.json()["last_result"]
     assert first_result["paper_created"] == 1
-    assert first_result["data_health"]["paper_market_entry_gate"] == "throttled"
-    assert first_result["data_health"]["paper_risk_gate_action"] == "throttle_new_entries"
+    assert first_result["data_health"]["paper_market_entry_gate"] == "observed"
+    assert first_result["data_health"]["paper_risk_gate_action"] == "allow_new_entries"
     assert first_result["data_health"]["automation_seed_effective_limit"] == "5"
     assert first_result["data_health"]["paper_candidate_freshness_gate"] == "filtered"
     assert first_result["data_health"]["paper_candidate_signal_date_mismatch"] == "1"
     assert first_result["data_health"]["paper_market_probe_policy"] == (
-        "all_eligible_candidates_reduced_size"
+        "all_eligible_candidates_standard_size"
     )
     assert first_result["data_health"]["paper_market_probe_min_priority_score"] == (
         "disabled_for_research"
@@ -2079,12 +2079,12 @@ def test_automation_scheduler_risk_off_uses_capacity_instead_of_daily_quota(
     assert second.status_code == 200
     second_result = second.json()["last_result"]
     assert second_result["paper_created"] == 0
-    assert second_result["data_health"]["paper_risk_gate_action"] == "throttle_new_entries"
+    assert second_result["data_health"]["paper_risk_gate_action"] == "allow_new_entries"
     assert second_result["data_health"]["paper_market_probe_remaining_today"] == "4"
     with session_factory() as session:
         trade = session.query(PaperTradeRow).filter_by(instrument_id="CN:159999").one()
-        assert trade.allocation_multiplier == Decimal("0.3500")
-        assert "防守行情研究仓位" in trade.notes
+        assert trade.allocation_multiplier == Decimal("1.0000")
+        assert "防守行情研究仓位" not in trade.notes
 
 
 def test_automation_scheduler_replaces_stale_pending_with_strong_candidate(

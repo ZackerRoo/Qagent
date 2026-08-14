@@ -11,7 +11,7 @@ from sqlalchemy.engine import Dialect
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import NullPool, QueuePool
 from sqlalchemy.types import TypeDecorator
 
 from qagent.config import get_settings
@@ -97,6 +97,9 @@ _default_engine_url: str | None = None
 _RANKING_V3_FORWARD_TRIGGER_VERSION = 2
 _RANKING_V3_PRODUCTION_TRIGGER_VERSION = 2
 _RANKING_V4_EVIDENCE_TRIGGER_VERSION = 4
+_RUNTIME_SQLITE_POOL_SIZE = 8
+_RUNTIME_SQLITE_MAX_OVERFLOW = 4
+_RUNTIME_SQLITE_POOL_TIMEOUT_SECONDS = 5
 
 
 def create_db_engine(database_url: str | None = None):
@@ -116,12 +119,12 @@ def _shared_default_engine(url: str) -> Engine:
             return _default_engine
         if _default_engine is not None:
             _default_engine.dispose()
-        _default_engine = _build_db_engine(url)
+        _default_engine = _build_db_engine(url, runtime_pool=True)
         _default_engine_url = url
         return _default_engine
 
 
-def _build_db_engine(url: str) -> Engine:
+def _build_db_engine(url: str, *, runtime_pool: bool = False) -> Engine:
     parsed = make_url(url)
     is_file_sqlite = parsed.drivername.startswith("sqlite") and parsed.database not in (
         None,
@@ -132,9 +135,23 @@ def _build_db_engine(url: str) -> Engine:
     if is_file_sqlite:
         Path(parsed.database).expanduser().parent.mkdir(parents=True, exist_ok=True)
         engine_kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
-        # API repositories create short-lived engines. Do not leave one pooled
-        # SQLite descriptor behind for every request.
-        engine_kwargs["poolclass"] = NullPool
+        if runtime_pool:
+            # Browser polling creates many short repository sessions. Reusing a
+            # bounded set of SQLite connections avoids an open/close storm on
+            # large local databases while keeping writer concurrency bounded.
+            engine_kwargs.update(
+                {
+                    "poolclass": QueuePool,
+                    "pool_size": _RUNTIME_SQLITE_POOL_SIZE,
+                    "max_overflow": _RUNTIME_SQLITE_MAX_OVERFLOW,
+                    "pool_timeout": _RUNTIME_SQLITE_POOL_TIMEOUT_SECONDS,
+                    "pool_use_lifo": True,
+                    "pool_pre_ping": True,
+                }
+            )
+        else:
+            # Explicit URLs are used by isolated tests and worker jobs.
+            engine_kwargs["poolclass"] = NullPool
     engine = create_engine(url, future=True, **engine_kwargs)
     if is_file_sqlite:
         _configure_sqlite_pragmas(engine)

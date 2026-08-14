@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 from sqlalchemy import text
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import NullPool, QueuePool
 
 from qagent.db import Base, create_db_engine, create_session_factory, initialize_database
 from qagent.storage.repository import (
@@ -224,6 +224,9 @@ def test_default_session_factories_reuse_runtime_engine(tmp_path, monkeypatch):
     second = create_session_factory()
 
     assert first.kw["bind"] is second.kw["bind"]
+    assert isinstance(first.kw["bind"].pool, QueuePool)
+    assert first.kw["bind"].pool.size() == 8
+    assert first.kw["bind"].pool._max_overflow == 4
 
 
 def test_repository_adds_and_lists_alert_rules(tmp_path):

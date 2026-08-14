@@ -44,6 +44,8 @@ const checks = [
   ["portfolio renders return bars", files.portfolio.includes("paper-return-bars")],
   ["portfolio renders transaction ledger", files.portfolio.includes("PaperTransactionsPanel")],
   ["portfolio renders validation positions", files.portfolio.includes("PaperPositionsPanel")],
+  ["portfolio renders every open paper position", !files.portfolio.includes("positions.slice(0, 8)")],
+  ["portfolio hydrates paper instrument labels", files.portfolio.includes("fetchInstrumentLabels(instrumentIds)")],
   ["portfolio renders structured risk gate", files.portfolio.includes("PaperRiskGatePanel")],
   ["portfolio renders failure attribution", files.portfolio.includes("PaperFailureAttributionPanel")],
   ["portfolio renders event timeline", files.portfolio.includes("PaperEventTimelinePanel")],

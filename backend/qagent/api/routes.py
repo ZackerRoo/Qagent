@@ -166,6 +166,7 @@ from qagent.paper_trading.engine import (
     build_paper_validation,
     paper_execution_data_health,
     paper_price_basis_gap_limit,
+    paper_snapshot_round_lot_is_affordable,
     paper_snapshot_price_basis_is_consistent,
     seed_paper_trades_from_snapshots,
     update_paper_trades,
@@ -255,7 +256,7 @@ from qagent.strategies.models import StrategyHealth
 router = APIRouter()
 
 PAPER_MAX_PER_INDUSTRY = 2
-PAPER_RISK_OFF_POSITION_SIZE_MULTIPLIER = Decimal("0.35")
+PAPER_RISK_THROTTLE_FALLBACK_MULTIPLIER = Decimal("0.35")
 PAPER_CANDIDATE_POST_CLOSE_REFRESH_TIME = time(hour=15, minute=45)
 PAPER_MARKET_DATA_REPAIR_TIME = time(hour=18)
 PAPER_MARKET_DATA_MIN_COVERAGE = Decimal("0.80")
@@ -3670,6 +3671,23 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 provider=mode,
             )
             data_health.update(production_health)
+            seed_allocation_multiplier = _paper_seed_allocation_multiplier(
+                risk_gate_health
+            )
+            account = paper_repo.get_account_settings()
+            before_affordability_filter = len(snapshots)
+            snapshots = [
+                snapshot
+                for snapshot in snapshots
+                if paper_snapshot_round_lot_is_affordable(
+                    snapshot,
+                    account,
+                    seed_allocation_multiplier,
+                )
+            ]
+            data_health["paper_unaffordable_candidate_blocked"] = str(
+                before_affordability_filter - len(snapshots)
+            )
             snapshots, strategy_capacity_health = _paper_strategy_capacity_filter(
                 paper_repo,
                 snapshots,
@@ -3772,18 +3790,18 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 max_signal_age_days=None,
                 signal_date_override=tracking_signal_date,
                 notes=(
-                    "防守行情研究仓位；合格候选可按剩余仓位批量进入，单笔为正常仓位的 35%。"
+                    "账户表现触发风险收缩；合格候选按剩余仓位进入。"
                     if risk_gate_health.get("paper_risk_gate_action") == "throttle_new_entries"
                     else ""
                 ),
                 allocation_multiplier=Decimal(
-                    risk_gate_health.get("paper_risk_gate_position_size_multiplier", "1.0")
+                    str(seed_allocation_multiplier)
                     if risk_gate_health.get("paper_risk_gate_action") == "throttle_new_entries"
                     else "1.0"
                 ),
                 admission_repo=repo,
             )
-            if risk_gate_health.get("paper_market_entry_gate") == "throttled":
+            if risk_gate_health.get("paper_market_entry_gate") == "observed":
                 _, post_seed_market_probe_health = _paper_market_probe_snapshots(
                     paper_repo,
                     snapshots,
@@ -3794,6 +3812,10 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 data_health.update(post_seed_market_probe_health)
             paper_created += seed_result.created
             data_health["automation_seed_snapshots"] = str(len(snapshots))
+            data_health["automation_seed_skipped"] = str(seed_result.skipped)
+            data_health["automation_seed_skipped_unaffordable"] = str(
+                seed_result.skipped_unaffordable
+            )
             data_health["automation_seed_effective_limit"] = str(effective_seed_limit)
             data_health["automation_seed_active_limit"] = str(effective_active_limit)
             data_health["automation_seed_candidate_pool_limit"] = str(candidate_pool_limit)
@@ -4075,6 +4097,15 @@ def _paper_seed_limit_from_risk_gate(
     return max(1, min(configured_limit, max_new))
 
 
+def _paper_seed_allocation_multiplier(risk_gate_health: dict[str, str]) -> Decimal:
+    if risk_gate_health.get("paper_risk_gate_action") != "throttle_new_entries":
+        return Decimal("1")
+    try:
+        return Decimal(risk_gate_health.get("paper_risk_gate_position_size_multiplier", "1"))
+    except (ArithmeticError, ValueError):
+        return Decimal("1")
+
+
 def _paper_seed_active_limit_from_risk_gate(
     paper_repo: PaperTradingRepository,
     configured_limit: int,
@@ -4093,33 +4124,10 @@ def _paper_merge_market_risk_gate(
     risk_gate_health: dict[str, str],
     market_gate_health: dict[str, str],
 ) -> dict[str, str]:
-    merged = {**risk_gate_health, **market_gate_health}
-    if market_gate_health.get("paper_market_entry_gate") != "throttled":
-        return merged
-    if merged.get("paper_risk_gate_action") in {"capacity_full", "pause_new_entries"}:
-        return merged
-
-    try:
-        existing_max = int(merged.get("paper_risk_gate_max_new_entries", "999"))
-    except ValueError:
-        existing_max = 999
-    try:
-        existing_multiplier = Decimal(merged.get("paper_risk_gate_position_size_multiplier", "1.0"))
-    except (ArithmeticError, ValueError):
-        existing_multiplier = Decimal("1.0")
-    market_reason = market_gate_health.get("paper_market_entry_gate_reason", "")
-    performance_reason = risk_gate_health.get("paper_risk_gate_reason", "")
-    reasons = [reason for reason in (performance_reason, market_reason) if reason]
-    merged.update(
-        {
-            "paper_risk_gate_action": "throttle_new_entries",
-            "paper_risk_gate_reason": "；".join(dict.fromkeys(reasons)),
-            "paper_risk_gate_recovery_state": "market_reduced_size",
-            "paper_risk_gate_max_new_entries": str(existing_max),
-            "paper_risk_gate_position_size_multiplier": f"{min(existing_multiplier, PAPER_RISK_OFF_POSITION_SIZE_MULTIPLIER):.4f}",
-        }
-    )
-    return merged
+    # Market regime is an attribution dimension for research paper trading.
+    # It must not change sample admission or sizing; account-performance risk
+    # controls remain authoritative and are preserved from risk_gate_health.
+    return {**risk_gate_health, **market_gate_health}
 
 
 def _paper_market_probe_snapshots(
@@ -4130,27 +4138,20 @@ def _paper_market_probe_snapshots(
     risk_gate_health: dict[str, str],
     signal_date: date,
 ) -> tuple[list[OpportunitySnapshotRecord], dict[str, str]]:
-    if risk_gate_health.get("paper_market_entry_gate") != "throttled":
+    if risk_gate_health.get("paper_market_entry_gate") != "observed":
         return snapshots, {}
 
     # Research paper trading needs observations from every market regime. The
     # regular recommendation, governance, freshness, and concentration gates
-    # already apply before this point, so risk-off changes sizing rather than
-    # applying a second score cutoff.
+    # already apply before this point. Risk-off is retained only as a label.
     qualified = list(snapshots)
     trades = paper_repo.list_trades(limit=1000, provider=provider)
-    research_entries_today = sum(
-        1
-        for trade in trades
-        if trade.signal_date == signal_date
-        and ("风控恢复探针" in trade.notes or "防守行情研究仓位" in trade.notes)
-    )
+    research_entries_today = sum(1 for trade in trades if trade.signal_date == signal_date)
     active_count = sum(1 for trade in trades if trade.status in {"pending", "open"})
     account = paper_repo.get_account_settings()
     available_slots = max(account.max_positions - active_count, 0)
-    selected = qualified if available_slots > 0 else []
-    return selected, {
-        "paper_market_probe_policy": "all_eligible_candidates_reduced_size",
+    return qualified, {
+        "paper_market_probe_policy": "all_eligible_candidates_standard_size",
         "paper_market_probe_min_priority_score": "disabled_for_research",
         "paper_market_probe_qualified": str(len(qualified)),
         "paper_market_probe_filtered": "0",
@@ -4210,6 +4211,7 @@ def _paper_candidate_pool_snapshot_items(
     replacee_pressure = _paper_pending_replacement_pressure(replacee) if replacee else 0.0
     risk_action = risk_gate_health.get("paper_risk_gate_action", "")
     market_entry_blocked = risk_gate_health.get("paper_market_entry_gate") == "blocked"
+    allocation_multiplier = _paper_seed_allocation_multiplier(risk_gate_health)
     expected_signal_date = None
     expected_signal_date_value = risk_gate_health.get("paper_candidate_expected_signal_date")
     if expected_signal_date_value:
@@ -4233,6 +4235,11 @@ def _paper_candidate_pool_snapshot_items(
         price_basis_consistent = _paper_candidate_price_basis_is_consistent(
             snapshot,
             latest_value=latest_value,
+        )
+        round_lot_affordable = paper_snapshot_round_lot_is_affordable(
+            snapshot,
+            account,
+            allocation_multiplier,
         )
         industry = _paper_snapshot_industry(snapshot)
         industry_active_count = active_industry_counts.get(industry, 0) if industry else 0
@@ -4274,6 +4281,9 @@ def _paper_candidate_pool_snapshot_items(
         elif is_untracked_candidate and not signal_date_fresh:
             status = "blocked_by_data"
             action = "数据待刷新：信号日期不是最新交易日"
+        elif not round_lot_affordable:
+            status = "blocked_by_allocation"
+            action = "仓位金额不足一手"
         elif market_entry_blocked:
             status = "blocked_by_market"
             action = "市场风控暂停入场"
@@ -4310,6 +4320,7 @@ def _paper_candidate_pool_snapshot_items(
             price_basis_consistent
             and signal_date_fresh
             and is_untracked_candidate
+            and round_lot_affordable
             and industry is not None
             and not industry_blocked
         ):
@@ -4335,6 +4346,7 @@ def _paper_candidate_pool_snapshot_items(
                 "market_theme_boost": theme_boost,
                 "entry_gap_pct": entry_gap_pct,
                 "price_basis_consistent": price_basis_consistent,
+                "round_lot_affordable": round_lot_affordable,
                 "trigger_price": str(snapshot.trigger_price)
                 if snapshot.trigger_price is not None
                 else None,
@@ -4354,6 +4366,9 @@ def _paper_candidate_pool_snapshot_items(
     replacement_candidates = sum(1 for item in items if item["status"] == "replace_candidate")
     market_blocked_count = sum(1 for item in items if item["status"] == "blocked_by_market")
     data_blocked_count = sum(1 for item in items if item["status"] == "blocked_by_data")
+    allocation_blocked_count = sum(
+        1 for item in items if item["status"] == "blocked_by_allocation"
+    )
     industry_blocked_count = sum(1 for item in items if item["industry_blocked"])
     industry_missing_count = sum(
         1 for item in items if item["industry"] is None and item["industry_blocked"]
@@ -4367,6 +4382,7 @@ def _paper_candidate_pool_snapshot_items(
         "replacement_candidates": replacement_candidates,
         "market_blocked_count": market_blocked_count,
         "data_blocked_count": data_blocked_count,
+        "allocation_blocked_count": allocation_blocked_count,
         "industry_capacity_limit": PAPER_MAX_PER_INDUSTRY,
         "industry_blocked_count": industry_blocked_count,
         "industry_missing_count": industry_missing_count,
@@ -5068,15 +5084,15 @@ def _paper_market_entry_gate_from_cache(
         "extreme_risk",
         "market_halt",
     }
-    throttled = not hard_blocked and (entry_allowed is False or state == "risk_off")
-    gate = "blocked" if hard_blocked else "throttled" if throttled else "allowed"
+    observed = not hard_blocked and (entry_allowed is False or state == "risk_off")
+    gate = "blocked" if hard_blocked else "observed" if observed else "allowed"
     max_new_entries = 0 if hard_blocked else None
     reason = _string_value(trend.get("reason"))
-    if throttled:
+    if observed:
         reason = (
-            f"{reason}；研究模拟盘保留当日有效候选，按 35% 仓位补至账户上限。"
+            f"{reason}；该状态仅用于研究归因，模拟盘仍按标准仓位执行。"
             if reason
-            else "风险规避行情，研究模拟盘保留当日有效候选，按 35% 仓位补至账户上限。"
+            else "风险规避行情仅用于研究归因，模拟盘仍按标准仓位执行。"
         )
     return {
         "paper_market_entry_gate": gate,
@@ -5088,8 +5104,6 @@ def _paper_market_entry_gate_from_cache(
         "paper_market_entry_gate_position_size_multiplier": (
             "0.0000"
             if hard_blocked
-            else f"{PAPER_RISK_OFF_POSITION_SIZE_MULTIPLIER:.4f}"
-            if throttled
             else "1.0000"
         ),
     }
@@ -5123,21 +5137,15 @@ def _paper_apply_risk_gate_health_to_report(
     risk_gate = report.risk_gate
     risk_gate.action = "throttle_new_entries"
     risk_gate.can_add_entries = True
-    risk_gate.title = "风险规避期小仓位采样"
+    risk_gate.title = "账户表现触发风险收缩"
     risk_gate.reason = risk_gate_health.get(
         "paper_risk_gate_reason",
-        "风险规避行情，合格候选可以小仓位补至账户上限。",
+        "模拟账户表现低于风控阈值，合格候选可以小仓位补至账户上限。",
     )
-    risk_gate.reasons = list(dict.fromkeys([*risk_gate.reasons, "market_risk_off"]))
-    risk_gate.recovery_conditions = list(
-        dict.fromkeys(
-            [
-                *risk_gate.recovery_conditions,
-                "市场基准恢复趋势后恢复正常仓位倍率",
-            ]
-        )
+    risk_gate.recovery_state = risk_gate_health.get(
+        "paper_risk_gate_recovery_state",
+        "throttled",
     )
-    risk_gate.recovery_state = "market_reduced_size"
     max_new_entries = risk_gate_health.get("paper_risk_gate_max_new_entries")
     if max_new_entries:
         try:
@@ -5148,11 +5156,11 @@ def _paper_apply_risk_gate_health_to_report(
         risk_gate.position_size_multiplier = float(
             risk_gate_health.get(
                 "paper_risk_gate_position_size_multiplier",
-                str(PAPER_RISK_OFF_POSITION_SIZE_MULTIPLIER),
+                str(PAPER_RISK_THROTTLE_FALLBACK_MULTIPLIER),
             )
         )
     except ValueError:
-        risk_gate.position_size_multiplier = float(PAPER_RISK_OFF_POSITION_SIZE_MULTIPLIER)
+        risk_gate.position_size_multiplier = float(PAPER_RISK_THROTTLE_FALLBACK_MULTIPLIER)
 
 
 def _paper_strategy_capacity_filter(
@@ -6324,7 +6332,7 @@ def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, o
         max_signal_age_days=None,
         signal_date_override=tracking_signal_date if mode != "fixture" else None,
         notes=(
-            "防守行情研究仓位；合格候选可按剩余仓位批量进入，单笔为正常仓位的 35%。"
+            "账户表现触发风险收缩；合格候选按剩余仓位进入。"
             if throttled
             else ""
         ),
