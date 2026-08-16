@@ -60,6 +60,10 @@ def test_positions_api_adds_and_lists_positions(tmp_path, monkeypatch):
     assert body["positions"][0]["instrument_id"] == "US:TEST"
     assert body["positions"][0]["strategy_tag"] == "breakout"
 
+    portfolio_list_response = client.get("/api/portfolio/positions")
+    assert portfolio_list_response.status_code == 200
+    assert portfolio_list_response.json() == body
+
 
 def test_portfolio_api_returns_position_risk(tmp_path, monkeypatch):
     monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'api-portfolio.db'}")

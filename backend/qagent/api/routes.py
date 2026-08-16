@@ -9987,6 +9987,12 @@ def positions() -> dict[str, list[object]]:
     }
 
 
+@router.get("/portfolio/positions")
+def portfolio_positions() -> dict[str, list[object]]:
+    """Backward-compatible alias for consumers requesting /portfolio/positions."""
+    return positions()
+
+
 @router.post("/positions")
 def upsert_position(position: PositionCreate) -> dict[str, object]:
     saved = _repo().upsert_position(position)
