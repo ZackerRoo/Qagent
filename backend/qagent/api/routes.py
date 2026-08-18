@@ -79,6 +79,7 @@ from qagent.research.factor_experiments import (
 )
 from qagent.research.factor_shadow_outcomes import (
     build_factor_shadow_evaluation,
+    refresh_factor_shadow_benchmark_cache,
     resolve_factor_shadow_outcomes,
 )
 from qagent.research.fuyao_market_sentiment import capture_fuyao_market_research
@@ -3865,6 +3866,13 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             factor_shadow_as_of = (
                 expected_signal_date or _latest_completed_a_share_session() or date.today()
             )
+            benchmark_refresh = refresh_factor_shadow_benchmark_cache(
+                create_session_factory(),
+                provider_mode=mode,
+                market_provider=build_market_data_provider(mode),
+                as_of_date=factor_shadow_as_of,
+            )
+            data_health.update(benchmark_refresh.data_health)
             shadow_resolution = resolve_factor_shadow_outcomes(
                 create_session_factory(),
                 provider_mode=mode,

@@ -26,6 +26,7 @@ from qagent.research.factor_shadow import score_factor_shadow_run
 from qagent.research.factor_shadow_outcomes import (
     build_factor_shadow_evaluation,
     factor_shadow_outcome_dates,
+    refresh_factor_shadow_benchmark_cache,
     resolve_factor_shadow_outcomes,
 )
 from qagent.storage.factor_research import (
@@ -392,23 +393,42 @@ def test_factor_shadow_outcomes_resolve_only_after_maturity_and_are_immutable(tm
                 outcome_close=Decimal(101 + index),
             )
         )
-    bars.extend(
-        _factor_shadow_price_rows(
-            "CN:000300.IDX",
-            entry_date,
-            outcome_date,
-            outcome_close=Decimal("101"),
-        )
+    benchmark_bars = _factor_shadow_price_rows(
+        "CN:000300.IDX",
+        entry_date,
+        outcome_date,
+        outcome_close=Decimal("101"),
     )
-    MarketDataCacheRepository(session_factory).save_daily_bars(
+    cache = MarketDataCacheRepository(session_factory)
+    cache.save_daily_bars(
         "fixture",
         pd.DataFrame(bars),
     )
+
+    class BenchmarkPrefetchProvider:
+        def __init__(self):
+            self.calls: list[tuple[list[str], date, date]] = []
+
+        def prefetch_daily_bars(self, instrument_ids, start, end):
+            self.calls.append((instrument_ids, start, end))
+            cache.save_daily_bars("fixture", pd.DataFrame(benchmark_bars))
+
+        def prefetch_stats(self):
+            return {"refreshed": 1, "stale_after_refresh": 0}
+
+    benchmark_provider = BenchmarkPrefetchProvider()
 
     pending = resolve_factor_shadow_outcomes(
         session_factory,
         provider_mode="fixture",
         as_of_date=entry_date,
+        horizons=(5,),
+    )
+    refresh = refresh_factor_shadow_benchmark_cache(
+        session_factory,
+        provider_mode="fixture",
+        market_provider=benchmark_provider,
+        as_of_date=outcome_date,
         horizons=(5,),
     )
     resolved = resolve_factor_shadow_outcomes(
@@ -433,6 +453,9 @@ def test_factor_shadow_outcomes_resolve_only_after_maturity_and_are_immutable(tm
     assert pending.status == "waiting_for_maturity"
     assert pending.outcomes_inserted == 0
     assert pending.next_maturity_date == outcome_date
+    assert refresh.status == "refreshed"
+    assert benchmark_provider.calls == [(["CN:000300.IDX"], entry_date, outcome_date)]
+    assert refresh.data_health["factor_shadow_benchmark_prefetch_refreshed"] == "1"
     assert resolved.status == "recorded"
     assert resolved.outcomes_inserted == 10
     assert resolved.unresolved_prices == 0

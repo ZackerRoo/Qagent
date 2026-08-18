@@ -38,6 +38,14 @@ class FactorShadowOutcomeResolution(BaseModel):
     data_health: dict[str, str] = Field(default_factory=dict)
 
 
+class FactorShadowBenchmarkRefresh(BaseModel):
+    status: str
+    benchmark_id: str | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    data_health: dict[str, str] = Field(default_factory=dict)
+
+
 class FactorShadowHorizonEvaluation(BaseModel):
     horizon_sessions: int
     status: str
@@ -65,6 +73,82 @@ class FactorShadowEvaluation(BaseModel):
     next_maturity_date: date | None = None
     horizons: list[FactorShadowHorizonEvaluation] = Field(default_factory=list)
     data_health: dict[str, str] = Field(default_factory=dict)
+
+
+def refresh_factor_shadow_benchmark_cache(
+    session_factory: sessionmaker[Session],
+    *,
+    provider_mode: str,
+    market_provider: object,
+    as_of_date: date,
+    horizons: tuple[int, ...] = FACTOR_SHADOW_HORIZONS,
+) -> FactorShadowBenchmarkRefresh:
+    """Refresh only the benchmark bars needed by already-matured shadow runs."""
+
+    store = FactorResearchRepository(session_factory)
+    bundle = store.latest_model_bundle(provider_mode)
+    runs = store.latest_model_shadow_runs(provider_mode)
+    if bundle is None or not runs:
+        return FactorShadowBenchmarkRefresh(
+            status="not_started",
+            data_health={"factor_shadow_benchmark_refresh": "not_started"},
+        )
+
+    windows = [
+        factor_shadow_outcome_dates(run.signal_date, horizon)
+        for run in runs
+        for horizon in sorted(set(horizons))
+        if factor_shadow_outcome_dates(run.signal_date, horizon)[1] <= as_of_date
+    ]
+    if not windows:
+        return FactorShadowBenchmarkRefresh(
+            status="waiting_for_maturity",
+            benchmark_id=bundle.experiment.benchmark_id,
+            data_health={"factor_shadow_benchmark_refresh": "waiting_for_maturity"},
+        )
+
+    start_date = min(entry_date for entry_date, _ in windows)
+    end_date = max(outcome_date for _, outcome_date in windows)
+    prefetch = getattr(market_provider, "prefetch_daily_bars", None)
+    if not callable(prefetch):
+        return FactorShadowBenchmarkRefresh(
+            status="unsupported_provider",
+            benchmark_id=bundle.experiment.benchmark_id,
+            start_date=start_date,
+            end_date=end_date,
+            data_health={"factor_shadow_benchmark_refresh": "unsupported_provider"},
+        )
+
+    try:
+        prefetch([bundle.experiment.benchmark_id], start=start_date, end=end_date)
+    except Exception as exc:
+        return FactorShadowBenchmarkRefresh(
+            status="error",
+            benchmark_id=bundle.experiment.benchmark_id,
+            start_date=start_date,
+            end_date=end_date,
+            data_health={
+                "factor_shadow_benchmark_refresh": "error",
+                "factor_shadow_benchmark_refresh_error": str(exc)[:500],
+            },
+        )
+
+    stats_getter = getattr(market_provider, "prefetch_stats", None)
+    stats = stats_getter() if callable(stats_getter) else {}
+    return FactorShadowBenchmarkRefresh(
+        status="refreshed",
+        benchmark_id=bundle.experiment.benchmark_id,
+        start_date=start_date,
+        end_date=end_date,
+        data_health={
+            "factor_shadow_benchmark_refresh": "refreshed",
+            "factor_shadow_benchmark_id": bundle.experiment.benchmark_id,
+            "factor_shadow_benchmark_refresh_start": start_date.isoformat(),
+            "factor_shadow_benchmark_refresh_end": end_date.isoformat(),
+            "factor_shadow_benchmark_prefetch_refreshed": str(stats.get("refreshed", 0)),
+            "factor_shadow_benchmark_prefetch_stale": str(stats.get("stale_after_refresh", 0)),
+        },
+    )
 
 
 def resolve_factor_shadow_outcomes(
