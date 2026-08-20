@@ -46,6 +46,15 @@ class FactorShadowBenchmarkRefresh(BaseModel):
     data_health: dict[str, str] = Field(default_factory=dict)
 
 
+class FactorShadowAttributionGroup(BaseModel):
+    key: str
+    label: str
+    sample_count: int
+    average_excess_return_pct: float | None
+    average_net_excess_return_pct: float | None
+    positive_net_excess_rate: float | None
+
+
 class FactorShadowHorizonEvaluation(BaseModel):
     horizon_sessions: int
     status: str
@@ -61,6 +70,8 @@ class FactorShadowHorizonEvaluation(BaseModel):
     baseline_average_turnover_rate: float | None = None
     challenger_average_turnover_rate: float | None = None
     challenger_max_industry_concentration: float | None = None
+    challenger_rank_buckets: list[FactorShadowAttributionGroup] = Field(default_factory=list)
+    challenger_industries: list[FactorShadowAttributionGroup] = Field(default_factory=list)
 
 
 class FactorShadowEvaluation(BaseModel):
@@ -423,6 +434,10 @@ def _evaluate_horizon(
     challenger_industry_concentrations: list[float] = []
     baseline_sets: list[set[str]] = []
     challenger_sets: list[set[str]] = []
+    challenger_rank_outcomes: dict[str, list[FactorShadowOutcome]] = {
+        f"q{bucket}": [] for bucket in range(1, 6)
+    }
+    challenger_industry_outcomes: dict[str, list[FactorShadowOutcome]] = {}
 
     for run in matured:
         scores = scores_by_run.get(run.scan_job_id, [])
@@ -450,6 +465,11 @@ def _evaluate_horizon(
                 baseline_ics.append(baseline_ic)
             if challenger_ic is not None:
                 challenger_ics.append(challenger_ic)
+        for score, outcome in completed_pairs:
+            bucket = min(5, int((score.challenger_rank - 1) * 5 / len(scores)) + 1)
+            challenger_rank_outcomes[f"q{bucket}"].append(outcome)
+            industry = (score.industry or "unknown").strip() or "unknown"
+            challenger_industry_outcomes.setdefault(industry, []).append(outcome)
 
         top_count = max(1, math.ceil(len(scores) * max(min(top_fraction, 1.0), 0.0)))
         baseline_top = sorted(scores, key=lambda item: item.baseline_rank)[:top_count]
@@ -507,7 +527,58 @@ def _evaluate_horizon(
             if challenger_industry_concentrations
             else None
         ),
+        challenger_rank_buckets=_shadow_attribution_groups(
+            challenger_rank_outcomes,
+            labels={
+                "q1": "Q1（最高分）",
+                "q2": "Q2",
+                "q3": "Q3",
+                "q4": "Q4",
+                "q5": "Q5（最低分）",
+            },
+            order=[f"q{bucket}" for bucket in range(1, 6)],
+        ),
+        challenger_industries=_shadow_attribution_groups(
+            challenger_industry_outcomes,
+            labels={},
+            limit=8,
+        ),
     )
+
+
+def _shadow_attribution_groups(
+    outcomes_by_group: dict[str, list[FactorShadowOutcome]],
+    *,
+    labels: dict[str, str],
+    order: list[str] | None = None,
+    limit: int | None = None,
+) -> list[FactorShadowAttributionGroup]:
+    keys = order or sorted(
+        outcomes_by_group,
+        key=lambda key: (-len(outcomes_by_group[key]), key),
+    )
+    if limit is not None:
+        keys = keys[:limit]
+    groups: list[FactorShadowAttributionGroup] = []
+    for key in keys:
+        outcomes = outcomes_by_group.get(key, [])
+        excess = [item.excess_return_pct for item in outcomes]
+        net_excess = [item.net_excess_return_pct for item in outcomes]
+        groups.append(
+            FactorShadowAttributionGroup(
+                key=key,
+                label=labels.get(key, key),
+                sample_count=len(outcomes),
+                average_excess_return_pct=_rounded_mean(excess),
+                average_net_excess_return_pct=_rounded_mean(net_excess),
+                positive_net_excess_rate=(
+                    round(sum(value > 0 for value in net_excess) / len(net_excess), 6)
+                    if net_excess
+                    else None
+                ),
+            )
+        )
+    return groups
 
 
 def _load_cached_bars(

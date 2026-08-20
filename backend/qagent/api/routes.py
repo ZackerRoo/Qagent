@@ -6661,6 +6661,7 @@ def paper_trade_current_model_evaluation(
             "observed_sessions": 0,
             "metrics": [],
             "benchmark": None,
+            "attribution": [],
             "checkpoints": [],
             "warnings": ["需要先完成一轮包含模型身份的全市场扫描。"],
             "data_health": {
@@ -6713,12 +6714,18 @@ def paper_trade_current_model_evaluation(
         take_profit_pct=account.take_profit_pct,
         reporting_scope="legacy",
     )
+    contexts = {
+        trade.trade_id: context
+        for trade in trades
+        if (context := paper_repo.get_trade_source_context(trade.source_snapshot_id)) is not None
+    }
     report = build_paper_current_model_evaluation(
         cohort_id=current_cohort.cohort_id,
         feature_set_version=current_cohort.feature_set_version,
         recommendation_policy=current_cohort.recommendation_policy_entrypoint,
         ledger=ledger,
         trades=trades,
+        source_contexts=contexts,
         market_sessions=market_sessions,
         benchmark_bars=benchmark_bars,
         scan_start_date=scan_start,
@@ -6742,6 +6749,7 @@ def paper_trade_current_model_evaluation(
                 completed_session.isoformat() if completed_session is not None else ""
             ),
             "paper_current_model_benchmark_rows": str(len(benchmark_bars)),
+            "paper_current_model_source_contexts": str(len(contexts)),
         }
     )
     return report.model_dump(mode="json")

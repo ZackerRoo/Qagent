@@ -1800,6 +1800,19 @@ export type PaperCurrentModelBenchmark = {
   positive_excess_rate: number | null;
 };
 
+export type PaperCurrentModelAttributionGroup = {
+  dimension: "strategy" | "market_regime" | "industry" | "factor";
+  key: string;
+  label: string;
+  sample_count: number;
+  completed_count: number;
+  benchmark_compared_count: number;
+  win_rate: number | null;
+  average_return_pct: number | null;
+  average_excess_return_pct: number | null;
+  status: "ready" | "insufficient";
+};
+
 export type PaperCurrentModelEvaluationResponse = {
   as_of: string;
   scope: string;
@@ -1811,6 +1824,7 @@ export type PaperCurrentModelEvaluationResponse = {
   observed_sessions: number;
   metrics: PaperCurrentModelMetric[];
   benchmark: PaperCurrentModelBenchmark | null;
+  attribution: PaperCurrentModelAttributionGroup[];
   checkpoints: PaperResearchCheckpoint[];
   warnings: string[];
   data_health: Record<string, string>;
@@ -3503,6 +3517,15 @@ export type FactorShadowResponse = {
   data_health: Record<string, string>;
 };
 
+export type FactorShadowAttributionGroup = {
+  key: string;
+  label: string;
+  sample_count: number;
+  average_excess_return_pct: number | null;
+  average_net_excess_return_pct: number | null;
+  positive_net_excess_rate: number | null;
+};
+
 export type FactorShadowHorizonEvaluation = {
   horizon_sessions: number;
   status: "pending" | "partial" | "ready";
@@ -3518,6 +3541,8 @@ export type FactorShadowHorizonEvaluation = {
   baseline_average_turnover_rate: number | null;
   challenger_average_turnover_rate: number | null;
   challenger_max_industry_concentration: number | null;
+  challenger_rank_buckets: FactorShadowAttributionGroup[];
+  challenger_industries: FactorShadowAttributionGroup[];
 };
 
 export type FactorShadowEvaluation = {

@@ -87,6 +87,19 @@ class PaperCurrentModelBenchmark(BaseModel):
     positive_excess_rate: float | None
 
 
+class PaperCurrentModelAttributionGroup(BaseModel):
+    dimension: str
+    key: str
+    label: str
+    sample_count: int
+    completed_count: int
+    benchmark_compared_count: int
+    win_rate: float | None
+    average_return_pct: float | None
+    average_excess_return_pct: float | None
+    status: str
+
+
 class PaperCurrentModelEvaluation(BaseModel):
     as_of: date
     scope: str = "current_model_cohort"
@@ -98,6 +111,7 @@ class PaperCurrentModelEvaluation(BaseModel):
     observed_sessions: int
     metrics: list[PaperCurrentModelMetric]
     benchmark: PaperCurrentModelBenchmark | None
+    attribution: list[PaperCurrentModelAttributionGroup] = Field(default_factory=list)
     checkpoints: list[PaperResearchCheckpoint]
     warnings: list[str]
     data_health: dict[str, str]
@@ -344,10 +358,12 @@ def build_paper_current_model_evaluation(
     market_sessions: list[date],
     benchmark_bars: pd.DataFrame,
     scan_start_date: date,
+    source_contexts: dict[str, PaperTradeSourceContext] | None = None,
     as_of_date: date | None = None,
 ) -> PaperCurrentModelEvaluation:
     """Evaluate only the active model cohort against a matched broad-market return."""
-    as_of = min(_report_date(ledger, scan_start_date), as_of_date or _report_date(ledger, scan_start_date))
+    report_date = _report_date(ledger, scan_start_date)
+    as_of = min(report_date, as_of_date or report_date)
     entered_items = [
         item
         for item in ledger.items
@@ -417,6 +433,13 @@ def build_paper_current_model_evaluation(
         warnings.append("已结束成交少于 20 笔，胜率和超额收益尚不稳定。")
     if benchmark is not None and benchmark.coverage_pct < 100:
         warnings.append("部分成交缺少同日期基准价格，未纳入超额收益计算。")
+    attribution = _current_model_attribution(
+        entered_items,
+        trades,
+        source_contexts or {},
+        closed_items=closed_items,
+        benchmark_returns=benchmark_returns,
+    )
     return PaperCurrentModelEvaluation(
         as_of=as_of,
         status=status,
@@ -478,6 +501,7 @@ def build_paper_current_model_evaluation(
             ),
         ],
         benchmark=benchmark,
+        attribution=attribution,
         checkpoints=[
             _checkpoint(target_sessions=target, sessions=market_sessions, ledger=ledger)
             for target in CHECKPOINT_SESSIONS
@@ -525,6 +549,72 @@ def _matched_benchmark_return(
     if entry is None or end is None or pd.isna(entry) or pd.isna(end) or entry <= 0:
         return None
     return round((float(end) / float(entry) - 1) * 100, 4)
+
+
+def _current_model_attribution(
+    entered_items: list[PaperLedgerItem],
+    trades: list[PaperTradeRecord],
+    source_contexts: dict[str, PaperTradeSourceContext],
+    *,
+    closed_items: list[PaperLedgerItem],
+    benchmark_returns: dict[str, float],
+) -> list[PaperCurrentModelAttributionGroup]:
+    """Group actual current-cohort fills by the facts known at signal time."""
+    items_by_trade = {item.trade_id: item for item in entered_items}
+    closed_by_trade = {item.trade_id: item for item in closed_items}
+    groups: dict[tuple[str, str], list[PaperLedgerItem]] = {}
+    for trade in trades:
+        item = items_by_trade.get(trade.trade_id)
+        if item is None:
+            continue
+        context = source_contexts.get(trade.trade_id)
+        values = {
+            "strategy": [trade.strategy_id or "unknown"],
+            "market_regime": [context.market_regime if context is not None else "unknown"],
+            "industry": [context.industry if context is not None else "unknown"],
+            "factor": context.factor_ids if context is not None else ["unknown"],
+        }
+        for dimension, keys in values.items():
+            for key in sorted({value.strip() or "unknown" for value in keys}):
+                groups.setdefault((dimension, key), []).append(item)
+
+    results: list[PaperCurrentModelAttributionGroup] = []
+    dimension_order = {"strategy": 0, "market_regime": 1, "industry": 2, "factor": 3}
+    for (dimension, key), items in groups.items():
+        completed = [closed_by_trade[item.trade_id] for item in items if item.trade_id in closed_by_trade]
+        returns = [item.return_pct for item in completed if item.return_pct is not None]
+        excess = [
+            item.return_pct - benchmark_returns[item.trade_id]
+            for item in completed
+            if item.return_pct is not None and item.trade_id in benchmark_returns
+        ]
+        results.append(
+            PaperCurrentModelAttributionGroup(
+                dimension=dimension,
+                key=key,
+                label=_diagnostic_label(key),
+                sample_count=len(items),
+                completed_count=len(completed),
+                benchmark_compared_count=len(excess),
+                win_rate=(
+                    round(sum(value > 0 for value in returns) / len(returns) * 100, 2)
+                    if returns
+                    else None
+                ),
+                average_return_pct=round(mean(returns), 4) if returns else None,
+                average_excess_return_pct=round(mean(excess), 4) if excess else None,
+                status="ready" if len(completed) >= 5 else "insufficient",
+            )
+        )
+    return sorted(
+        results,
+        key=lambda item: (
+            dimension_order.get(item.dimension, 99),
+            -item.completed_count,
+            -item.sample_count,
+            item.key,
+        ),
+    )
 
 
 def _current_model_headline(

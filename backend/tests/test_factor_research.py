@@ -469,6 +469,15 @@ def test_factor_shadow_outcomes_resolve_only_after_maturity_and_are_immutable(tm
     assert horizon.mean_baseline_rank_ic == pytest.approx(-1.0)
     assert horizon.mean_challenger_rank_ic == pytest.approx(1.0)
     assert horizon.challenger_top_net_excess_return_pct == pytest.approx(8.4)
+    assert [item.key for item in horizon.challenger_rank_buckets] == [
+        "q1",
+        "q2",
+        "q3",
+        "q4",
+        "q5",
+    ]
+    assert sum(item.sample_count for item in horizon.challenger_rank_buckets) == 10
+    assert horizon.challenger_industries
 
     stored = store.shadow_outcomes(experiment.experiment_id)
     with pytest.raises(ValueError, match="immutable row"):

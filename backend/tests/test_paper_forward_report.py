@@ -269,6 +269,19 @@ def test_current_model_evaluation_is_cohort_scoped_and_uses_matched_benchmark():
             for index, close in enumerate((100.0, 101.0, 102.0, 103.0, 104.0))
         ]
     )
+    contexts = {
+        trade.trade_id: PaperTradeSourceContext(
+            source_snapshot_id=trade.source_snapshot_id,
+            created_at=datetime.now(timezone.utc),
+            signal_date=trade.signal_date,
+            industry="医药" if index < 2 else "电子",
+            market_regime="risk_on" if index < 2 else "neutral",
+            factor_ids=["momentum", "quality"],
+            source_status="frozen",
+            card={},
+        )
+        for index, trade in enumerate(trades)
+    }
 
     report = build_paper_current_model_evaluation(
         cohort_id="cohort-current",
@@ -276,6 +289,7 @@ def test_current_model_evaluation_is_cohort_scoped_and_uses_matched_benchmark():
         recommendation_policy="final-policy-v1",
         ledger=ledger,
         trades=trades,
+        source_contexts=contexts,
         market_sessions=[start + timedelta(days=index) for index in range(5)],
         benchmark_bars=benchmark_bars,
         scan_start_date=start,
@@ -290,4 +304,11 @@ def test_current_model_evaluation_is_cohort_scoped_and_uses_matched_benchmark():
     assert report.benchmark.closed_compared_trades == 2
     assert report.benchmark.coverage_pct == 100.0
     assert report.benchmark.average_excess_return_pct is not None
+    assert {group.dimension for group in report.attribution} == {
+        "strategy",
+        "market_regime",
+        "industry",
+        "factor",
+    }
+    assert next(group for group in report.attribution if group.dimension == "strategy").completed_count == 2
     assert report.data_health["paper_current_model_scope"] == "current_model_cohort"

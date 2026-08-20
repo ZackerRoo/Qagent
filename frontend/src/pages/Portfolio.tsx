@@ -7,6 +7,7 @@ import {
   fetchFactorDiagnostics,
   fetchFactorResearchExperiments,
   fetchFactorResearchShadow,
+  fetchFactorShadowEvaluation,
   fetchEtfExposures,
   fetchInstrumentLabels,
   fetchPaperCandidatePool,
@@ -44,6 +45,7 @@ import type {
   FactorDiagnosticsResponse,
   FactorResearchExperiment,
   FactorShadowResponse,
+  FactorShadowEvaluationResponse,
   EtfExposureResponse,
   PaperCandidatePoolResponse,
   PaperAccountStatusResponse,
@@ -134,6 +136,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [factorDiagnostics, setFactorDiagnostics] = useState<FactorDiagnosticsResponse>();
   const [factorResearchExperiments, setFactorResearchExperiments] = useState<FactorResearchExperiment[]>([]);
   const [factorShadow, setFactorShadow] = useState<FactorShadowResponse>();
+  const [factorShadowEvaluation, setFactorShadowEvaluation] = useState<FactorShadowEvaluationResponse>();
   const [validation, setValidation] = useState<PaperValidationResponse>();
   const [paperSession, setPaperSession] = useState<PaperSessionResponse>();
   const [automationScheduler, setAutomationScheduler] = useState<AutoProcessingState>();
@@ -240,6 +243,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchPaperCurrentModelEvaluation(dataMode),
       fetchFactorResearchExperiments(),
       fetchFactorResearchShadow(dataMode),
+      fetchFactorShadowEvaluation(dataMode),
     ]);
     const [
       validationResult,
@@ -250,6 +254,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       currentModelEvaluationResult,
       factorResearchResult,
       factorShadowResult,
+      factorShadowEvaluationResult,
     ] = researchResults;
     if (validationResult.status === "fulfilled") setValidation(validationResult.value);
     if (dailyReportResult.status === "fulfilled") setDailyReport(dailyReportResult.value);
@@ -266,6 +271,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     }
     if (factorShadowResult.status === "fulfilled") {
       setFactorShadow(factorShadowResult.value);
+    }
+    if (factorShadowEvaluationResult.status === "fulfilled") {
+      setFactorShadowEvaluation(factorShadowEvaluationResult.value);
     }
     const failedResearch = researchResults.filter((item) => item.status === "rejected");
     if (failedResearch.length) {
@@ -804,6 +812,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
             <PaperForwardResearchWorkbench
               comparison={forwardComparison}
               currentModel={currentModelEvaluation}
+              factorShadowEvaluation={factorShadowEvaluation?.evaluation}
               factors={factorDiagnostics}
               loadingFactors={isLoadingFactorDiagnostics}
               language={language}
@@ -1420,12 +1429,14 @@ function FactorModelResearchPanel({
 function PaperForwardResearchWorkbench({
   comparison,
   currentModel,
+  factorShadowEvaluation,
   factors,
   loadingFactors,
   language,
 }: {
   comparison?: PaperForwardComparisonResponse;
   currentModel?: PaperCurrentModelEvaluationResponse;
+  factorShadowEvaluation?: FactorShadowEvaluationResponse["evaluation"];
   factors?: FactorDiagnosticsResponse;
   loadingFactors: boolean;
   language: Language;
@@ -1434,6 +1445,9 @@ function PaperForwardResearchWorkbench({
     return (
       <section className="panel stack paper-forward-workbench">
         {currentModel && <PaperCurrentModelAccuracyPanel report={currentModel} language={language} />}
+        {factorShadowEvaluation && (
+          <FactorShadowAttributionPanel evaluation={factorShadowEvaluation} language={language} />
+        )}
         <div className="mini-curve-empty">
           {language === "zh"
             ? "研究基线尚未冻结或对照报告正在加载。"
@@ -1457,6 +1471,9 @@ function PaperForwardResearchWorkbench({
   return (
     <section className="panel stack paper-forward-workbench">
       {currentModel && <PaperCurrentModelAccuracyPanel report={currentModel} language={language} />}
+      {factorShadowEvaluation && (
+        <FactorShadowAttributionPanel evaluation={factorShadowEvaluation} language={language} />
+      )}
       <div className="section-header paper-forward-heading">
         <div>
           <p className="eyebrow">
@@ -1730,6 +1747,12 @@ function PaperCurrentModelAccuracyPanel({
   language: Language;
 }) {
   const benchmark = report.benchmark;
+  const attributionDimensions = [
+    ["strategy", language === "zh" ? "策略" : "Strategy"],
+    ["market_regime", language === "zh" ? "市场状态" : "Market regime"],
+    ["industry", language === "zh" ? "行业" : "Industry"],
+    ["factor", language === "zh" ? "因子" : "Factor"],
+  ] as const;
   return (
     <div className="paper-current-model-evaluation">
       <div className="paper-research-subhead">
@@ -1807,9 +1830,163 @@ function PaperCurrentModelAccuracyPanel({
         </div>
       )}
 
+      {report.attribution.length > 0 && (
+        <div className="paper-attribution-section">
+          <div className="paper-attribution-heading">
+            <div>
+              <h4>{language === "zh" ? "当前模型归因" : "Current-model attribution"}</h4>
+              <p>
+                {language === "zh"
+                  ? "只按信号生成时已冻结的策略、市场状态、行业和因子分组；少于 5 笔已结束成交不作判断。"
+                  : "Uses only signal-time strategy, regime, industry, and factor snapshots; groups with fewer than five closed fills remain descriptive."}
+              </p>
+            </div>
+          </div>
+          <div className="paper-attribution-grid">
+            {attributionDimensions.map(([dimension, title]) => {
+              const groups = report.attribution
+                .filter((group) => group.dimension === dimension)
+                .sort((left, right) => right.sample_count - left.sample_count || left.label.localeCompare(right.label))
+                .slice(0, 6);
+              if (groups.length === 0) return null;
+              return (
+                <div key={dimension} className="paper-attribution-table-wrap">
+                  <h5>{title}</h5>
+                  <table className="paper-attribution-table">
+                    <thead>
+                      <tr>
+                        <th>{language === "zh" ? "分组" : "Group"}</th>
+                        <th>{language === "zh" ? "已结束/样本" : "Closed / sampled"}</th>
+                        <th>{language === "zh" ? "平均超额" : "Average excess"}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {groups.map((group) => {
+                        const label = dimension === "strategy"
+                          ? localizeStrategy(group.key, language)
+                          : dimension === "market_regime"
+                            ? marketRegimeLabel(group.key, language)
+                            : dimension === "factor"
+                              ? factorLabel(group.key, group.label, language)
+                              : group.label;
+                        return (
+                          <tr key={group.key}>
+                            <td>{label}</td>
+                            <td>
+                              {group.completed_count}/{group.sample_count}
+                              {group.status === "insufficient" && (
+                                <small>{language === "zh" ? "样本不足" : "Insufficient"}</small>
+                              )}
+                            </td>
+                            <td className={(group.average_excess_return_pct ?? 0) < 0 ? "negative" : ""}>
+                              {formatPct(group.average_excess_return_pct)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <div className="paper-forward-warnings">
         {report.warnings.map((warning) => <span key={warning}>{warning}</span>)}
       </div>
+    </div>
+  );
+}
+
+function FactorShadowAttributionPanel({
+  evaluation,
+  language,
+}: {
+  evaluation: FactorShadowEvaluationResponse["evaluation"];
+  language: Language;
+}) {
+  const horizon = evaluation.horizons.find((item) => item.horizon_sessions === 5)
+    ?? evaluation.horizons[0];
+  if (!horizon) return null;
+  return (
+    <div className="factor-shadow-attribution">
+      <div className="paper-research-subhead">
+        <div>
+          <p className="eyebrow">{language === "zh" ? "因子影子归因" : "Factor shadow attribution"}</p>
+          <h3>{language === "zh" ? "分位与行业的成熟结果" : "Mature results by rank and industry"}</h3>
+          <p>
+            {language === "zh"
+              ? `仅展示已成熟的 ${horizon.horizon_sessions} 个交易日结果，不会自动替换当前模拟盘模型。`
+              : `Only matured ${horizon.horizon_sessions}-session outcomes are shown; the paper model is not replaced automatically.`}
+          </p>
+        </div>
+        <div className="paper-forward-status">
+          <span className={`status status-${horizon.status === "ready" ? "ready" : "pending"}`}>
+            {horizon.status === "ready"
+              ? language === "zh" ? "结果齐全" : "Complete"
+              : language === "zh" ? "结果积累中" : "Collecting"}
+          </span>
+          <strong>{horizon.completed_instruments}</strong>
+          <small>{language === "zh" ? `/${horizon.expected_instruments} 个结果` : `/${horizon.expected_instruments} outcomes`}</small>
+        </div>
+      </div>
+      <div className="factor-shadow-attribution-grid">
+        <FactorShadowAttributionTable
+          title={language === "zh" ? "挑战者分位" : "Challenger rank buckets"}
+          groups={horizon.challenger_rank_buckets}
+          language={language}
+        />
+        <FactorShadowAttributionTable
+          title={language === "zh" ? "行业覆盖" : "Industry coverage"}
+          groups={horizon.challenger_industries}
+          language={language}
+        />
+      </div>
+    </div>
+  );
+}
+
+function FactorShadowAttributionTable({
+  title,
+  groups,
+  language,
+}: {
+  title: string;
+  groups: FactorShadowEvaluationResponse["evaluation"]["horizons"][number]["challenger_rank_buckets"];
+  language: Language;
+}) {
+  return (
+    <div className="factor-shadow-attribution-table-wrap">
+      <h4>{title}</h4>
+      <table className="paper-attribution-table">
+        <thead>
+          <tr>
+            <th>{language === "zh" ? "分组" : "Group"}</th>
+            <th>{language === "zh" ? "样本" : "Samples"}</th>
+            <th>{language === "zh" ? "成本后超额" : "Net excess"}</th>
+            <th>{language === "zh" ? "正超额" : "Positive"}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {groups.map((group) => (
+            <tr key={group.key}>
+              <td>{group.label}</td>
+              <td>{group.sample_count}</td>
+              <td className={(group.average_net_excess_return_pct ?? 0) < 0 ? "negative" : ""}>
+                {formatPct(group.average_net_excess_return_pct)}
+              </td>
+              <td>{formatRate(group.positive_net_excess_rate)}</td>
+            </tr>
+          ))}
+          {groups.length === 0 && (
+            <tr>
+              <td colSpan={4}>{language === "zh" ? "暂无成熟结果。" : "No matured outcomes yet."}</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
     </div>
   );
 }
