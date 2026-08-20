@@ -36,7 +36,7 @@ assert(app.includes('useState<DataProviderMode>("free")'), "App must default to 
 assert(app.includes('useState("free_default")'), "App must default to free_default universe");
 assert(
   app.includes("void loadCachedDashboard(dataMode);") &&
-    app.includes("fetchLatestFullMarketBatchResult(mode, true)"),
+    /fetchLatestFullMarketBatchResult\(\s*mode,\s*true(?:,\s*INITIAL_RESULT_CARD_LIMIT)?\s*\)/s.test(app),
   "App initial dashboard load must use the default free A-share data mode",
 );
 assert(catalog.includes('"top.eyebrow": "A 股"'), "Chinese eyebrow must present A-share focus");

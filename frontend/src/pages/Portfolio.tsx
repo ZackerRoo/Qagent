@@ -11,6 +11,7 @@ import {
   fetchInstrumentLabels,
   fetchPaperCandidatePool,
   fetchPaperAccountStatus,
+  fetchPaperCurrentModelEvaluation,
   fetchPaperDailyReport,
   fetchPaperDualTrack,
   fetchPaperExecutionAudit,
@@ -46,6 +47,7 @@ import type {
   EtfExposureResponse,
   PaperCandidatePoolResponse,
   PaperAccountStatusResponse,
+  PaperCurrentModelEvaluationResponse,
   PaperDualTrackResponse,
   PaperExecutionAuditResponse,
   PaperForwardComparisonResponse,
@@ -128,6 +130,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [dualTrack, setDualTrack] = useState<PaperDualTrackResponse>();
   const [executionAudit, setExecutionAudit] = useState<PaperExecutionAuditResponse>();
   const [forwardComparison, setForwardComparison] = useState<PaperForwardComparisonResponse>();
+  const [currentModelEvaluation, setCurrentModelEvaluation] = useState<PaperCurrentModelEvaluationResponse>();
   const [factorDiagnostics, setFactorDiagnostics] = useState<FactorDiagnosticsResponse>();
   const [factorResearchExperiments, setFactorResearchExperiments] = useState<FactorResearchExperiment[]>([]);
   const [factorShadow, setFactorShadow] = useState<FactorShadowResponse>();
@@ -234,6 +237,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchPaperCandidatePool(dataMode),
       fetchPaperDualTrack(dataMode),
       fetchPaperForwardComparison(dataMode),
+      fetchPaperCurrentModelEvaluation(dataMode),
       fetchFactorResearchExperiments(),
       fetchFactorResearchShadow(dataMode),
     ]);
@@ -243,6 +247,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       candidatePoolResult,
       dualTrackResult,
       forwardComparisonResult,
+      currentModelEvaluationResult,
       factorResearchResult,
       factorShadowResult,
     ] = researchResults;
@@ -252,6 +257,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     if (dualTrackResult.status === "fulfilled") setDualTrack(dualTrackResult.value);
     if (forwardComparisonResult.status === "fulfilled") {
       setForwardComparison(forwardComparisonResult.value);
+    }
+    if (currentModelEvaluationResult.status === "fulfilled") {
+      setCurrentModelEvaluation(currentModelEvaluationResult.value);
     }
     if (factorResearchResult.status === "fulfilled") {
       setFactorResearchExperiments(factorResearchResult.value.experiments);
@@ -320,6 +328,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchPaperCandidatePool(dataMode),
       fetchPaperDualTrack(dataMode),
       fetchPaperForwardComparison(dataMode),
+      fetchPaperCurrentModelEvaluation(dataMode),
       fetchAutomationScheduler(),
       fetchPaperExecutionAudit(dataMode),
     ]);
@@ -334,6 +343,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       candidatePoolResult,
       dualTrackResult,
       forwardComparisonResult,
+      currentModelEvaluationResult,
       automationSchedulerResult,
       executionAuditResult,
     ] = results;
@@ -363,6 +373,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     if (dualTrackResult.status === "fulfilled") setDualTrack(dualTrackResult.value);
     if (forwardComparisonResult.status === "fulfilled") {
       setForwardComparison(forwardComparisonResult.value);
+    }
+    if (currentModelEvaluationResult.status === "fulfilled") {
+      setCurrentModelEvaluation(currentModelEvaluationResult.value);
     }
     if (automationSchedulerResult.status === "fulfilled") {
       setAutomationScheduler(automationSchedulerResult.value);
@@ -790,6 +803,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
             />
             <PaperForwardResearchWorkbench
               comparison={forwardComparison}
+              currentModel={currentModelEvaluation}
               factors={factorDiagnostics}
               loadingFactors={isLoadingFactorDiagnostics}
               language={language}
@@ -1405,11 +1419,13 @@ function FactorModelResearchPanel({
 
 function PaperForwardResearchWorkbench({
   comparison,
+  currentModel,
   factors,
   loadingFactors,
   language,
 }: {
   comparison?: PaperForwardComparisonResponse;
+  currentModel?: PaperCurrentModelEvaluationResponse;
   factors?: FactorDiagnosticsResponse;
   loadingFactors: boolean;
   language: Language;
@@ -1417,6 +1433,7 @@ function PaperForwardResearchWorkbench({
   if (!comparison) {
     return (
       <section className="panel stack paper-forward-workbench">
+        {currentModel && <PaperCurrentModelAccuracyPanel report={currentModel} language={language} />}
         <div className="mini-curve-empty">
           {language === "zh"
             ? "研究基线尚未冻结或对照报告正在加载。"
@@ -1439,6 +1456,7 @@ function PaperForwardResearchWorkbench({
 
   return (
     <section className="panel stack paper-forward-workbench">
+      {currentModel && <PaperCurrentModelAccuracyPanel report={currentModel} language={language} />}
       <div className="section-header paper-forward-heading">
         <div>
           <p className="eyebrow">
@@ -1701,6 +1719,98 @@ function PaperForwardResearchWorkbench({
         {comparison.warnings.map((warning) => <span key={warning}>{warning}</span>)}
       </div>
     </section>
+  );
+}
+
+function PaperCurrentModelAccuracyPanel({
+  report,
+  language,
+}: {
+  report: PaperCurrentModelEvaluationResponse;
+  language: Language;
+}) {
+  const benchmark = report.benchmark;
+  return (
+    <div className="paper-current-model-evaluation">
+      <div className="paper-research-subhead">
+        <div>
+          <p className="eyebrow">
+            {language === "zh" ? "当前模型独立评估" : "Current model evaluation"}
+          </p>
+          <h3>{language === "zh" ? "推荐准确率与基准归因" : "Recommendation accuracy and benchmark attribution"}</h3>
+          <p>{report.headline}</p>
+        </div>
+        <div className="paper-forward-status">
+          <span className={`status status-${report.status === "ready" ? "ready" : "pending"}`}>
+            {report.status === "ready"
+              ? language === "zh" ? "样本可评估" : "Evaluable"
+              : language === "zh" ? "样本累积中" : "Collecting"}
+          </span>
+          <strong>{report.observed_sessions}</strong>
+          <small>{language === "zh" ? "个交易日" : "sessions"}</small>
+        </div>
+      </div>
+
+      <div className="paper-current-model-meta">
+        <span>
+          <small>{language === "zh" ? "特征集" : "Feature set"}</small>
+          <strong>{report.feature_set_version ?? "-"}</strong>
+        </span>
+        <span>
+          <small>{language === "zh" ? "推荐策略" : "Recommendation policy"}</small>
+          <strong>{report.recommendation_policy ?? "-"}</strong>
+        </span>
+        <span>
+          <small>{language === "zh" ? "评估截至" : "As of"}</small>
+          <strong>{report.as_of}</strong>
+        </span>
+        <span>
+          <small>{language === "zh" ? "基准覆盖" : "Benchmark coverage"}</small>
+          <strong>{benchmark ? `${benchmark.coverage_pct.toFixed(1)}%` : "-"}</strong>
+        </span>
+      </div>
+
+      <div className="paper-current-model-metrics">
+        {report.metrics.map((metric) => (
+          <span key={metric.key}>
+            <small>{metric.label}</small>
+            <strong className={metric.value !== null && metric.value < 0 ? "negative" : ""}>
+              {formatResearchMetric(metric.value, metric.unit)}
+            </strong>
+            <em>{metric.note}</em>
+          </span>
+        ))}
+      </div>
+
+      {benchmark && (
+        <div className="paper-current-model-benchmark">
+          <span>
+            <small>{language === "zh" ? "比较基准" : "Benchmark"}</small>
+            <strong>{benchmark.name}</strong>
+          </span>
+          <span>
+            <small>{language === "zh" ? "已结束可比样本" : "Closed comparable"}</small>
+            <strong>{benchmark.closed_compared_trades}</strong>
+          </span>
+          <span>
+            <small>{language === "zh" ? "基准平均收益" : "Benchmark average"}</small>
+            <strong className={(benchmark.average_benchmark_return_pct ?? 0) < 0 ? "negative" : ""}>
+              {formatPct(benchmark.average_benchmark_return_pct)}
+            </strong>
+          </span>
+          <span>
+            <small>{language === "zh" ? "平均超额" : "Average excess"}</small>
+            <strong className={(benchmark.average_excess_return_pct ?? 0) < 0 ? "negative" : ""}>
+              {formatPct(benchmark.average_excess_return_pct)}
+            </strong>
+          </span>
+        </div>
+      )}
+
+      <div className="paper-forward-warnings">
+        {report.warnings.map((warning) => <span key={warning}>{warning}</span>)}
+      </div>
+    </div>
   );
 }
 

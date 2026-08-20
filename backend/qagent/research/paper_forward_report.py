@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import date
 from statistics import mean
 
+import pandas as pd
 from pydantic import BaseModel, Field
 
+from qagent.market.benchmarks import CN_BENCHMARKS, benchmark_frames_from_bars
 from qagent.paper_trading.engine import PaperLedger, PaperLedgerItem, PaperValidationResult
 from qagent.storage.paper import (
     PaperAccountSettings,
@@ -62,6 +64,41 @@ class PaperForwardComparisonReport(BaseModel):
     checkpoints: list[PaperResearchCheckpoint]
     forward_factors: list[PaperForwardFactorResult]
     market_regimes: list[PaperForwardFactorResult]
+    warnings: list[str]
+    data_health: dict[str, str]
+
+
+class PaperCurrentModelMetric(BaseModel):
+    key: str
+    label: str
+    value: float | int | None
+    unit: str
+    note: str
+
+
+class PaperCurrentModelBenchmark(BaseModel):
+    benchmark_id: str
+    name: str
+    compared_trades: int
+    closed_compared_trades: int
+    coverage_pct: float
+    average_benchmark_return_pct: float | None
+    average_excess_return_pct: float | None
+    positive_excess_rate: float | None
+
+
+class PaperCurrentModelEvaluation(BaseModel):
+    as_of: date
+    scope: str = "current_model_cohort"
+    status: str
+    headline: str
+    cohort_id: str | None
+    feature_set_version: str | None
+    recommendation_policy: str | None
+    observed_sessions: int
+    metrics: list[PaperCurrentModelMetric]
+    benchmark: PaperCurrentModelBenchmark | None
+    checkpoints: list[PaperResearchCheckpoint]
     warnings: list[str]
     data_health: dict[str, str]
 
@@ -295,6 +332,216 @@ def build_paper_forward_comparison(
             "paper_forward_validation_verdict": validation.summary.verdict,
         },
     )
+
+
+def build_paper_current_model_evaluation(
+    *,
+    cohort_id: str,
+    feature_set_version: str,
+    recommendation_policy: str,
+    ledger: PaperLedger,
+    trades: list[PaperTradeRecord],
+    market_sessions: list[date],
+    benchmark_bars: pd.DataFrame,
+    scan_start_date: date,
+    as_of_date: date | None = None,
+) -> PaperCurrentModelEvaluation:
+    """Evaluate only the active model cohort against a matched broad-market return."""
+    as_of = min(_report_date(ledger, scan_start_date), as_of_date or _report_date(ledger, scan_start_date))
+    entered_items = [
+        item
+        for item in ledger.items
+        if item.entry_date is not None and item.entry_price is not None and item.return_pct is not None
+    ]
+    closed_items = [
+        item
+        for item in entered_items
+        if item.status in EXECUTED_TERMINAL_STATUSES
+        and item.exit_date is not None
+        and item.exit_date <= as_of
+    ]
+    closed_returns = [item.return_pct for item in closed_items if item.return_pct is not None]
+    frames = benchmark_frames_from_bars(benchmark_bars)
+    primary = CN_BENCHMARKS[0]
+    primary_frame = frames.get(primary.benchmark_id, pd.DataFrame())
+    benchmark_returns: dict[str, float] = {}
+    for item in closed_items:
+        result = _matched_benchmark_return(primary_frame, item.entry_date, item.exit_date)
+        if result is not None:
+            benchmark_returns[item.trade_id] = result
+
+    closed_excess = [
+        item.return_pct - benchmark_returns[item.trade_id]
+        for item in closed_items
+        if item.return_pct is not None and item.trade_id in benchmark_returns
+    ]
+    closed_benchmark_returns = [
+        benchmark_returns[item.trade_id]
+        for item in closed_items
+        if item.trade_id in benchmark_returns
+    ]
+    benchmark = (
+        PaperCurrentModelBenchmark(
+            benchmark_id=primary.benchmark_id,
+            name=primary.name,
+            compared_trades=len(closed_items),
+            closed_compared_trades=len(closed_excess),
+            coverage_pct=round(len(benchmark_returns) / len(closed_items) * 100, 2)
+            if closed_items
+            else 0.0,
+            average_benchmark_return_pct=(
+                round(mean(closed_benchmark_returns), 4) if closed_benchmark_returns else None
+            ),
+            average_excess_return_pct=round(mean(closed_excess), 4) if closed_excess else None,
+            positive_excess_rate=(
+                round(sum(value > 0 for value in closed_excess) / len(closed_excess), 4)
+                if closed_excess
+                else None
+            ),
+        )
+        if entered_items
+        else None
+    )
+    status = "ready" if len(closed_excess) >= 20 else "collecting"
+    headline = _current_model_headline(
+        closed_count=len(closed_items),
+        benchmark=benchmark,
+        status=status,
+    )
+    warnings = [
+        "仅统计当前模型 cohort，不混入旧模型或未归类交易。",
+        "基准比较只使用最近完成交易日前已结束成交的实际入场日至退出日，并以沪深300为参照。",
+        "该报告用于研究模拟盘评估，不代表已验证推荐或正式发布。",
+    ]
+    if len(closed_items) < 20:
+        warnings.append("已结束成交少于 20 笔，胜率和超额收益尚不稳定。")
+    if benchmark is not None and benchmark.coverage_pct < 100:
+        warnings.append("部分成交缺少同日期基准价格，未纳入超额收益计算。")
+    return PaperCurrentModelEvaluation(
+        as_of=as_of,
+        status=status,
+        headline=headline,
+        cohort_id=cohort_id,
+        feature_set_version=feature_set_version,
+        recommendation_policy=recommendation_policy,
+        observed_sessions=len(market_sessions),
+        metrics=[
+            PaperCurrentModelMetric(
+                key="entered_trades",
+                label="已成交样本",
+                value=len(entered_items),
+                unit="笔",
+                note="只含已有实际入场价格的当前模型模拟成交。",
+            ),
+            PaperCurrentModelMetric(
+                key="closed_trades",
+                label="已结束样本（截至最近收盘）",
+                value=len(closed_items),
+                unit="笔",
+                note="只含止盈、止损或时间退出的真实成交。",
+            ),
+            PaperCurrentModelMetric(
+                key="win_rate",
+                label="已结束胜率",
+                value=(
+                    round(sum(value > 0 for value in closed_returns) / len(closed_returns) * 100, 2)
+                    if closed_returns
+                    else None
+                ),
+                unit="%",
+                note="按已结束成交的成本后收益计算。",
+            ),
+            PaperCurrentModelMetric(
+                key="average_return_pct",
+                label="平均已结束收益",
+                value=round(mean(closed_returns), 4) if closed_returns else None,
+                unit="%",
+                note="按每笔实际执行后的收益计算。",
+            ),
+            PaperCurrentModelMetric(
+                key="average_excess_return_pct",
+                label="相对沪深300平均超额",
+                value=benchmark.average_excess_return_pct if benchmark is not None else None,
+                unit="%",
+                note="同一持有区间内，成交收益减去沪深300收益。",
+            ),
+            PaperCurrentModelMetric(
+                key="positive_excess_rate",
+                label="跑赢沪深300比例",
+                value=(
+                    round(benchmark.positive_excess_rate * 100, 2)
+                    if benchmark is not None and benchmark.positive_excess_rate is not None
+                    else None
+                ),
+                unit="%",
+                note="仅基准价格齐全的已结束成交计入。",
+            ),
+        ],
+        benchmark=benchmark,
+        checkpoints=[
+            _checkpoint(target_sessions=target, sessions=market_sessions, ledger=ledger)
+            for target in CHECKPOINT_SESSIONS
+        ],
+        warnings=warnings,
+        data_health={
+            "paper_current_model_evaluation": "ready",
+            "paper_current_model_scope": "current_model_cohort",
+            "paper_current_model_records": str(len(trades)),
+            "paper_current_model_entered": str(len(entered_items)),
+            "paper_current_model_closed": str(len(closed_items)),
+            "paper_current_model_benchmark_id": primary.benchmark_id,
+            "paper_current_model_benchmark_coverage": (
+                f"{benchmark.coverage_pct:.2f}" if benchmark is not None else "0.00"
+            ),
+            "paper_current_model_calendar_source": "exchange_calendars:XSHG",
+        },
+    )
+
+
+def _matched_benchmark_return(
+    frame: pd.DataFrame,
+    entry_date: date,
+    end_date: date,
+) -> float | None:
+    if frame.empty or end_date < entry_date:
+        return None
+    normalized = frame.copy()
+    normalized["trade_date"] = pd.to_datetime(normalized["trade_date"]).dt.date
+    adjusted = (
+        normalized["adjusted_close"]
+        if "adjusted_close" in normalized.columns
+        else pd.Series(index=normalized.index, dtype="float64")
+    )
+    close = (
+        normalized["close"]
+        if "close" in normalized.columns
+        else pd.Series(index=normalized.index, dtype="float64")
+    )
+    prices = normalized.assign(
+        reference_price=adjusted.where(adjusted.notna(), close)
+    ).set_index("trade_date")["reference_price"]
+    entry = prices.get(entry_date)
+    end = prices.get(end_date)
+    if entry is None or end is None or pd.isna(entry) or pd.isna(end) or entry <= 0:
+        return None
+    return round((float(end) / float(entry) - 1) * 100, 4)
+
+
+def _current_model_headline(
+    *,
+    closed_count: int,
+    benchmark: PaperCurrentModelBenchmark | None,
+    status: str,
+) -> str:
+    if closed_count == 0:
+        return "当前模型已有持仓，但尚无已结束成交，暂不能评价推荐准确性。"
+    if status != "ready":
+        return f"当前模型已结束 {closed_count} 笔成交，样本仍在累积，暂不评价稳定准确性。"
+    if benchmark is None or benchmark.average_excess_return_pct is None:
+        return "当前模型样本已达到观察门槛，但基准数据不足，暂不能判断相对准确性。"
+    if benchmark.average_excess_return_pct > 0:
+        return "当前模型在已结束样本中平均跑赢沪深300，继续观察后续检查点的稳定性。"
+    return "当前模型在已结束样本中未跑赢沪深300，应优先分析选股、择时与退出归因。"
 
 
 def _checkpoint(

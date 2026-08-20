@@ -1781,6 +1781,41 @@ export type PaperForwardComparisonResponse = {
   data_health: Record<string, string>;
 };
 
+export type PaperCurrentModelMetric = {
+  key: string;
+  label: string;
+  value: number | null;
+  unit: string;
+  note: string;
+};
+
+export type PaperCurrentModelBenchmark = {
+  benchmark_id: string;
+  name: string;
+  compared_trades: number;
+  closed_compared_trades: number;
+  coverage_pct: number;
+  average_benchmark_return_pct: number | null;
+  average_excess_return_pct: number | null;
+  positive_excess_rate: number | null;
+};
+
+export type PaperCurrentModelEvaluationResponse = {
+  as_of: string;
+  scope: string;
+  status: string;
+  headline: string;
+  cohort_id: string | null;
+  feature_set_version: string | null;
+  recommendation_policy: string | null;
+  observed_sessions: number;
+  metrics: PaperCurrentModelMetric[];
+  benchmark: PaperCurrentModelBenchmark | null;
+  checkpoints: PaperResearchCheckpoint[];
+  warnings: string[];
+  data_health: Record<string, string>;
+};
+
 export type PaperValidationSummary = {
   total_trades: number;
   triggered_trades: number;

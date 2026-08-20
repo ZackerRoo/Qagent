@@ -221,6 +221,7 @@ from qagent.research.market_intelligence import (
 )
 from qagent.research.operational_readiness import build_operational_readiness_center
 from qagent.research.paper_forward_report import (
+    build_paper_current_model_evaluation,
     build_paper_forward_comparison,
     build_paper_research_baseline_definition,
 )
@@ -6623,6 +6624,124 @@ def paper_trade_forward_comparison(
             "paper_forward_cache_non_session_date_samples": ",".join(
                 value.isoformat() for value in unexpected_cached_dates[:5]
             ),
+        }
+    )
+    return report.model_dump(mode="json")
+
+
+@router.get("/paper-trades/current-model-evaluation")
+def paper_trade_current_model_evaluation(
+    provider: str = "free",
+    limit: int = 1000,
+) -> dict[str, object]:
+    if limit <= 0 or limit > 1000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+    mode = provider.strip().lower()
+    paper_repo = _paper_repo()
+    repo = _repo()
+    account = paper_repo.get_account_settings()
+    all_trades = paper_repo.list_trades(limit=limit, provider=mode)
+    active_by_id = {
+        trade.trade_id: trade
+        for status in ("pending", "open")
+        for trade in paper_repo.list_trades(status=status, limit=5000, provider=mode)
+    }
+    trades_by_id = {trade.trade_id: trade for trade in all_trades}
+    trades_by_id.update(active_by_id)
+    current_cohort = repo.get_current_paper_model_cohort(mode)
+    if current_cohort is None:
+        return {
+            "as_of": _a_share_today(),
+            "scope": "current_model_cohort",
+            "status": "not_started",
+            "headline": "当前没有可识别的模型 cohort，暂不能生成独立准确率报告。",
+            "cohort_id": None,
+            "feature_set_version": None,
+            "recommendation_policy": None,
+            "observed_sessions": 0,
+            "metrics": [],
+            "benchmark": None,
+            "checkpoints": [],
+            "warnings": ["需要先完成一轮包含模型身份的全市场扫描。"],
+            "data_health": {
+                "paper_current_model_evaluation": "not_started",
+                "paper_current_model_scope": "current_model_cohort",
+            },
+        }
+    cohort_by_snapshot = repo.get_paper_model_cohorts_for_snapshots(
+        [trade.source_snapshot_id for trade in trades_by_id.values()]
+    )
+    trades = [
+        trade
+        for trade in trades_by_id.values()
+        if (cohort := cohort_by_snapshot.get(trade.source_snapshot_id)) is not None
+        and cohort.cohort_id == current_cohort.cohort_id
+    ]
+    scan_start = _paper_model_cohort_scan_start(
+        repo,
+        provider=mode,
+        cohort=current_cohort,
+    ) or min((trade.signal_date for trade in trades), default=_a_share_today())
+    report_date = _paper_report_date(trades)
+    completed_session = _latest_completed_a_share_session()
+    observation_date = min(report_date, completed_session or report_date)
+    benchmark_bars = _market_cache_repo().load_daily_bars(
+        mode,
+        benchmark_ids() + benchmark_proxy_ids(),
+        scan_start,
+        observation_date,
+    )
+    market_sessions, unexpected_cached_dates = _paper_forward_calendar(
+        start_date=scan_start,
+        report_date=observation_date,
+        completed_session=completed_session,
+        cached_dates={
+            value.date() if isinstance(value, datetime) else value
+            for value in benchmark_bars["trade_date"].tolist()
+            if isinstance(value, date)
+        }
+        if not benchmark_bars.empty
+        else set(),
+    )
+    ledger = build_paper_ledger(
+        trades,
+        initial_capital=account.initial_capital,
+        allocation_per_trade_pct=account.allocation_per_trade_pct,
+        max_positions=account.max_positions,
+        transaction_cost_bps=account.transaction_cost_bps,
+        slippage_bps=account.slippage_bps,
+        take_profit_pct=account.take_profit_pct,
+        reporting_scope="legacy",
+    )
+    report = build_paper_current_model_evaluation(
+        cohort_id=current_cohort.cohort_id,
+        feature_set_version=current_cohort.feature_set_version,
+        recommendation_policy=current_cohort.recommendation_policy_entrypoint,
+        ledger=ledger,
+        trades=trades,
+        market_sessions=market_sessions,
+        benchmark_bars=benchmark_bars,
+        scan_start_date=scan_start,
+        as_of_date=observation_date,
+    )
+    if unexpected_cached_dates:
+        report.warnings.append(
+            "行情缓存包含非交易所交易日日期，检查点已改用 XSHG 日历。"
+        )
+    report.data_health.update(
+        {
+            "paper_current_model_provider": mode,
+            "paper_current_model_excluded_other_cohort": str(len(trades_by_id) - len(trades)),
+            "paper_current_model_unclassified": str(
+                sum(
+                    cohort_by_snapshot.get(trade.source_snapshot_id) is None
+                    for trade in trades_by_id.values()
+                )
+            ),
+            "paper_current_model_completed_session": (
+                completed_session.isoformat() if completed_session is not None else ""
+            ),
+            "paper_current_model_benchmark_rows": str(len(benchmark_bars)),
         }
     )
     return report.model_dump(mode="json")

@@ -42,6 +42,7 @@ import type {
   OutcomesResponse,
   PaperCandidatePoolResponse,
   PaperAccountStatusResponse,
+  PaperCurrentModelEvaluationResponse,
   PaperDailyReportResponse,
   PaperDualTrackResponse,
   PaperExecutionAuditResponse,
@@ -488,6 +489,15 @@ export async function fetchPaperForwardComparison(
   provider: DataProviderMode,
 ): Promise<PaperForwardComparisonResponse> {
   return apiGet<PaperForwardComparisonResponse>("/paper-trades/forward-comparison", {
+    provider,
+    limit: 1000,
+  });
+}
+
+export async function fetchPaperCurrentModelEvaluation(
+  provider: DataProviderMode,
+): Promise<PaperCurrentModelEvaluationResponse> {
+  return apiGet<PaperCurrentModelEvaluationResponse>("/paper-trades/current-model-evaluation", {
     provider,
     limit: 1000,
   });

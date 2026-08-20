@@ -1,10 +1,12 @@
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
+import pandas as pd
 import pytest
 
 from qagent.paper_trading.engine import build_paper_ledger, build_paper_validation
 from qagent.research.paper_forward_report import (
+    build_paper_current_model_evaluation,
     build_paper_forward_comparison,
     build_paper_research_baseline_definition,
 )
@@ -236,3 +238,56 @@ def test_forward_report_builds_historical_comparison_and_checkpoints():
     assert report.data_health["paper_forward_calendar_source"] == (
         "exchange_calendars:XSHG"
     )
+
+
+def test_current_model_evaluation_is_cohort_scoped_and_uses_matched_benchmark():
+    start = date(2026, 8, 3)
+    trades = [
+        _trade("trade-000001", start, status="target_1_hit", realized_return_pct=4.0),
+        _trade("trade-000002", start + timedelta(days=1), status="stopped", realized_return_pct=-2.0),
+        _trade("trade-000003", start + timedelta(days=2), status="open", realized_return_pct=None),
+    ]
+    account = _account()
+    ledger = build_paper_ledger(
+        trades,
+        initial_capital=account.initial_capital,
+        allocation_per_trade_pct=account.allocation_per_trade_pct,
+        max_positions=account.max_positions,
+        transaction_cost_bps=account.transaction_cost_bps,
+        slippage_bps=account.slippage_bps,
+        take_profit_pct=account.take_profit_pct,
+        reporting_scope="legacy",
+    )
+    benchmark_bars = pd.DataFrame(
+        [
+            {
+                "instrument_id": "CN:000300.IDX",
+                "trade_date": start + timedelta(days=index),
+                "close": close,
+                "adjusted_close": close,
+            }
+            for index, close in enumerate((100.0, 101.0, 102.0, 103.0, 104.0))
+        ]
+    )
+
+    report = build_paper_current_model_evaluation(
+        cohort_id="cohort-current",
+        feature_set_version="factor-v3",
+        recommendation_policy="final-policy-v1",
+        ledger=ledger,
+        trades=trades,
+        market_sessions=[start + timedelta(days=index) for index in range(5)],
+        benchmark_bars=benchmark_bars,
+        scan_start_date=start,
+    )
+
+    assert report.scope == "current_model_cohort"
+    assert report.status == "collecting"
+    assert report.metrics[0].value == 3
+    assert report.metrics[1].value == 2
+    assert report.benchmark is not None
+    assert report.benchmark.name == "沪深300"
+    assert report.benchmark.closed_compared_trades == 2
+    assert report.benchmark.coverage_pct == 100.0
+    assert report.benchmark.average_excess_return_pct is not None
+    assert report.data_health["paper_current_model_scope"] == "current_model_cohort"
