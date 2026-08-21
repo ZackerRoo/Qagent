@@ -83,6 +83,7 @@ from qagent.research.factor_shadow_outcomes import (
     resolve_factor_shadow_outcomes,
 )
 from qagent.research.fuyao_market_sentiment import capture_fuyao_market_research
+from qagent.research.fuyao_theme_strength import capture_fuyao_theme_strength
 from qagent.research.fuyao_shadow_outcomes import (
     resolve_fuyao_shadow_outcomes,
 )
@@ -91,6 +92,7 @@ from qagent.jobs.automation_scheduler import (
     AutoProcessingCycleResult,
     AutoProcessingSettings,
     AutoProcessingState,
+    AutomationSchedulerCheckpoint,
     AutomationScheduler,
 )
 from qagent.providers.fuyao import (
@@ -3426,6 +3428,7 @@ def run_automation_scheduler_once(
         run_forward_evidence=run_forward_evidence,
     )
     state = _automation_scheduler.run_once(settings, _run_auto_processing_cycle)
+    _persist_automation_scheduler_state(state)
     return state.model_dump(mode="json")
 
 
@@ -3464,8 +3467,11 @@ def start_automation_scheduler(
         queue_alerts=queue_alerts,
         run_forward_evidence=run_forward_evidence,
     )
+    _attach_automation_scheduler_state_listener()
     state = _automation_scheduler.start(settings, _run_auto_processing_cycle)
-    _persist_automation_scheduler_state(state)
+    # The loop may finish its immediate cycle before this request returns.
+    # Persist a fresh snapshot so this request cannot overwrite that checkpoint.
+    _persist_automation_scheduler_state(_automation_scheduler.state())
     return state.model_dump(mode="json")
 
 
@@ -3483,8 +3489,11 @@ def restore_automation_scheduler_from_storage() -> None:
         return
     try:
         settings = AutoProcessingSettings.model_validate(saved.settings)
+        checkpoint = AutomationSchedulerCheckpoint.model_validate(saved.runtime)
     except ValueError:
         return
+    _attach_automation_scheduler_state_listener()
+    _automation_scheduler.restore_checkpoint(checkpoint)
     if saved.enabled:
         _automation_scheduler.start(settings, _run_auto_processing_cycle)
     else:
@@ -3495,7 +3504,18 @@ def _persist_automation_scheduler_state(state) -> None:
     _repo().save_automation_scheduler_state(
         enabled=state.enabled,
         settings=state.settings.model_dump(mode="json"),
+        runtime=AutomationSchedulerCheckpoint(
+            run_count=state.run_count,
+            last_started_at=state.last_started_at,
+            last_completed_at=state.last_completed_at,
+            last_error=state.last_error,
+            last_result=state.last_result,
+        ).model_dump(mode="json"),
     )
+
+
+def _attach_automation_scheduler_state_listener() -> None:
+    _automation_scheduler.set_state_listener(_persist_automation_scheduler_state)
 
 
 def _auto_processing_settings(
@@ -3608,13 +3628,14 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             fuyao_settings = get_settings()
             if fuyao_settings.fuyao_api_key:
                 try:
+                    fuyao_client = FuyaoClient(
+                        fuyao_settings.fuyao_api_key,
+                        base_url=fuyao_settings.fuyao_base_url,
+                        request_timeout_seconds=fuyao_settings.fuyao_timeout_seconds,
+                    )
                     capture = capture_fuyao_market_research(
                         create_session_factory(),
-                        client=FuyaoClient(
-                            fuyao_settings.fuyao_api_key,
-                            base_url=fuyao_settings.fuyao_base_url,
-                            request_timeout_seconds=fuyao_settings.fuyao_timeout_seconds,
-                        ),
+                        client=fuyao_client,
                         trade_date=expected_signal_date,
                         reuse_existing=True,
                     )
@@ -3625,6 +3646,26 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                         )
                     data_health["fuyao_market_research_errors"] = str(len(capture.errors))
                     data_health["fuyao_market_research_decision_weight"] = "none"
+                    try:
+                        theme_capture = capture_fuyao_theme_strength(
+                            create_session_factory(),
+                            client=fuyao_client,
+                            trade_date=expected_signal_date,
+                            reuse_existing=True,
+                        )
+                        data_health["fuyao_theme_research_status"] = theme_capture.status
+                        if theme_capture.snapshot is not None:
+                            data_health["fuyao_theme_research_snapshot_id"] = (
+                                theme_capture.snapshot.snapshot_id
+                            )
+                        data_health["fuyao_theme_research_errors"] = str(
+                            len(theme_capture.errors)
+                        )
+                        data_health["fuyao_theme_research_decision_weight"] = "none"
+                    except Exception as exc:
+                        data_health["fuyao_theme_research_status"] = "error"
+                        data_health["fuyao_theme_research_error"] = str(exc)
+                        errors.append(f"fuyao_theme_research: {exc}")
                 except Exception as exc:
                     data_health["fuyao_market_research_status"] = "error"
                     data_health["fuyao_market_research_error"] = str(exc)

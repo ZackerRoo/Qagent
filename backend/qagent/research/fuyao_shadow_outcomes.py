@@ -387,9 +387,11 @@ def _return_pct(entry: float, exit_: float) -> float:
 
 
 def _spearman(scores: list[float], returns: list[float]) -> float | None:
-    value = pd.Series(scores, dtype="float64").corr(
-        pd.Series(returns, dtype="float64"),
-        method="spearman",
+    if len(scores) != len(returns) or len(scores) < 2:
+        return None
+    value = pd.Series(scores, dtype="float64").rank(method="average").corr(
+        pd.Series(returns, dtype="float64").rank(method="average"),
+        method="pearson",
     )
     return round(float(value), 10) if pd.notna(value) and np.isfinite(value) else None
 

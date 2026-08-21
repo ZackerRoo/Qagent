@@ -6,6 +6,7 @@ import {
   fetchFactorShadowEvaluation,
   fetchFuyaoShadowEvaluation,
   fetchLatestFuyaoMarketResearch,
+  fetchLatestFuyaoThemeStrength,
   fetchFuyaoOpportunityResearch,
   fetchFullMarketBatchScan,
   fetchLatestFullMarketBatchResult,
@@ -57,6 +58,7 @@ import type {
   FuyaoResearchMetric,
   FuyaoResearchResponse,
   FuyaoShadowEvaluationResponse,
+  FuyaoThemeResearchResponse,
   MarketBarsResponse,
   OpportunityCard,
   PaperAccountStatusResponse,
@@ -119,6 +121,8 @@ export function Today({
     useState<FactorShadowEvaluationResponse>();
   const [fuyaoMarketResearch, setFuyaoMarketResearch] =
     useState<FuyaoMarketResearchResponse>();
+  const [fuyaoThemeResearch, setFuyaoThemeResearch] =
+    useState<FuyaoThemeResearchResponse>();
   const [fuyaoShadowEvaluation, setFuyaoShadowEvaluation] =
     useState<FuyaoShadowEvaluationResponse>();
   const [paperCandidatePool, setPaperCandidatePool] = useState<PaperCandidatePoolResponse>();
@@ -225,6 +229,7 @@ export function Today({
       candidatePool,
       shadowEvaluation,
       marketResearch,
+      themeResearch,
       fuyaoShadow,
     ] =
       await Promise.allSettled([
@@ -234,6 +239,7 @@ export function Today({
         fetchPaperCandidatePool(dataMode),
         fetchFactorShadowEvaluation(dataMode),
         fetchLatestFuyaoMarketResearch(),
+        fetchLatestFuyaoThemeStrength(),
         fetchFuyaoShadowEvaluation(),
       ]);
     if (scheduler.status === "fulfilled") {
@@ -251,16 +257,20 @@ export function Today({
     if (marketResearch.status === "fulfilled") {
       setFuyaoMarketResearch(marketResearch.value);
     }
+    if (themeResearch.status === "fulfilled") {
+      setFuyaoThemeResearch(themeResearch.value);
+    }
     if (fuyaoShadow.status === "fulfilled") {
       setFuyaoShadowEvaluation(fuyaoShadow.value);
     }
   }
 
   async function refreshRuntimeStatus() {
-    const [scheduler, scanJob, marketResearch, fuyaoShadow] = await Promise.allSettled([
+    const [scheduler, scanJob, marketResearch, themeResearch, fuyaoShadow] = await Promise.allSettled([
       fetchAutomationScheduler(),
       fetchLatestFullMarketBatchScan(dataMode),
       fetchLatestFuyaoMarketResearch(),
+      fetchLatestFuyaoThemeStrength(),
       fetchFuyaoShadowEvaluation(),
     ]);
     if (scheduler.status === "fulfilled") {
@@ -277,6 +287,9 @@ export function Today({
     }
     if (marketResearch.status === "fulfilled") {
       setFuyaoMarketResearch(marketResearch.value);
+    }
+    if (themeResearch.status === "fulfilled") {
+      setFuyaoThemeResearch(themeResearch.value);
     }
     if (fuyaoShadow.status === "fulfilled") {
       setFuyaoShadowEvaluation(fuyaoShadow.value);
@@ -542,6 +555,8 @@ export function Today({
           onSelect={onSelect}
           cards={decisionCards}
         />
+
+        <FuyaoThemeStrengthPanel research={fuyaoThemeResearch} language={language} />
 
         <details className="panel today-operations-drawer">
           <summary>
@@ -1834,6 +1849,112 @@ function FuyaoMarketSentimentPanel({
               <small>{language === "zh" ? "尚无成熟结果" : "No matured outcomes"}</small>
             </span>
           )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function FuyaoThemeStrengthPanel({
+  research,
+  language,
+}: {
+  research?: FuyaoThemeResearchResponse;
+  language: "zh" | "en";
+}) {
+  const snapshot = research?.sections.theme_strength;
+  if (!snapshot) {
+    return (
+      <section className="fuyao-market-sentiment state-pending">
+        <div className="fuyao-market-sentiment-head">
+          <div>
+            <span className="eyebrow">
+              {language === "zh" ? "扶摇板块研究 · 不参与交易" : "Fuyao theme research · no order effect"}
+            </span>
+            <h2>{language === "zh" ? "等待首个板块强弱快照" : "Waiting for the first theme-strength snapshot"}</h2>
+            <p>
+              {language === "zh"
+                ? "每日全市场扫描完成后，保存行业和概念指数相对沪深300的强弱及领先主题成分。"
+                : "After each daily scan, industry and concept strength versus CSI 300 is saved with leading-theme constituents."}
+            </p>
+          </div>
+          <span className="fuyao-market-state-badge">
+            {language === "zh" ? "待采集" : "Pending"}
+          </span>
+        </div>
+      </section>
+    );
+  }
+
+  const metrics = [
+    [language === "zh" ? "指数覆盖" : "Index coverage", `${(snapshot.coverage * 100).toFixed(0)}%`],
+    [language === "zh" ? "已取 / 目录" : "Captured / catalog", `${snapshot.snapshot_count} / ${snapshot.catalog_count}`],
+    [language === "zh" ? "沪深300" : "CSI 300", formatSignedPercent(snapshot.benchmark_change_pct)],
+    [language === "zh" ? "领先主题" : "Leading themes", `${snapshot.leading_themes.length}`],
+  ];
+  const categoryLabel = (category: string) => {
+    if (language === "zh") return category === "industry" ? "行业" : "概念";
+    return category === "industry" ? "Industry" : "Concept";
+  };
+
+  return (
+    <section className="fuyao-market-sentiment state-balanced fuyao-theme-strength">
+      <div className="fuyao-market-sentiment-head">
+        <div>
+          <span className="eyebrow">
+            {language === "zh" ? "扶摇板块研究 · 不参与交易" : "Fuyao theme research · no order effect"}
+          </span>
+          <h2>{language === "zh" ? "行业与概念强弱" : "Industry and concept strength"}</h2>
+          <p>
+            {language === "zh" ? "数据日" : "Session"} {snapshot.trade_date}
+            {research.freshness !== "live"
+              ? ` · ${language === "zh" ? "已保存快照" : "saved snapshot"}`
+              : ""}
+          </p>
+        </div>
+        <span className="fuyao-market-state-badge">
+          {language === "zh" ? "研究观察" : "Research"}
+        </span>
+      </div>
+
+      <div className="fuyao-market-metrics fuyao-theme-metrics">
+        {metrics.map(([label, value]) => (
+          <div key={label}>
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </div>
+        ))}
+      </div>
+
+      <div className="fuyao-theme-leaders">
+        <span>{language === "zh" ? "相对沪深300领先" : "Leaders versus CSI 300"}</span>
+        <div>
+          {snapshot.leading_themes.map((theme) => (
+            <article key={theme.thscode}>
+              <header>
+                <div>
+                  <strong>{theme.name}</strong>
+                  <small>{categoryLabel(theme.category)} · {theme.thscode}</small>
+                </div>
+                <b>{formatSignedPercent(theme.relative_1d_pct)}</b>
+              </header>
+              <p>
+                {language === "zh" ? "5日" : "5d"} {formatSignedPercent(theme.relative_5d_pct)}
+                <span> · </span>
+                {language === "zh" ? "20日" : "20d"} {formatSignedPercent(theme.relative_20d_pct)}
+                {theme.constituent_count !== null
+                  ? ` · ${language === "zh" ? "成分" : "Constituents"} ${theme.constituent_count}`
+                  : ""}
+              </p>
+              {theme.constituents.length > 0 && (
+                <div className="fuyao-theme-constituents">
+                  {theme.constituents.slice(0, 5).map((item) => (
+                    <span key={item.instrument_id}>{item.label ?? item.instrument_id}</span>
+                  ))}
+                </div>
+              )}
+            </article>
+          ))}
         </div>
       </div>
     </section>

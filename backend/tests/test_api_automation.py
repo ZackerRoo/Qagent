@@ -2389,6 +2389,35 @@ def test_automation_scheduler_restores_enabled_state_after_app_restart(
     assert body["next_run_at"] is not None
 
 
+def test_automation_scheduler_persists_completed_cycle_checkpoint_after_restart(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = f"sqlite:///{tmp_path / 'automation-scheduler-checkpoint.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    scheduler = AutomationScheduler()
+    monkeypatch.setattr(routes, "_automation_scheduler", scheduler)
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/api/automation/scheduler/run-once"
+            "?provider=fixture&symbols=US:TEST&run_scan=false&seed_paper=false"
+            "&update_paper=false&run_alerts=false&queue_alerts=false"
+        )
+        assert response.status_code == 200
+        assert response.json()["last_completed_at"] is not None
+
+    monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
+    with TestClient(create_app()) as restarted_client:
+        restored = restarted_client.get("/api/automation/scheduler")
+
+    assert restored.status_code == 200
+    body = restored.json()
+    assert body["run_count"] == 1
+    assert body["last_completed_at"] is not None
+    assert body["last_result"]["provider"] == "fixture"
+
+
 def test_automation_scheduler_restores_stopped_state_after_app_restart(
     tmp_path,
     monkeypatch,

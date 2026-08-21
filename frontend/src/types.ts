@@ -2881,6 +2881,49 @@ export type FuyaoMarketResearchResponse = FuyaoResearchResponse & {
   };
 };
 
+export type FuyaoThemeConstituent = {
+  instrument_id: string;
+  label: string | null;
+};
+
+export type FuyaoThemeStrength = {
+  thscode: string;
+  name: string;
+  category: "industry" | "cn_concept";
+  last_price: number | null;
+  change_pct: number | null;
+  relative_1d_pct: number | null;
+  relative_5d_pct: number | null;
+  relative_20d_pct: number | null;
+  constituent_count: number | null;
+  constituents: FuyaoThemeConstituent[];
+  constituent_snapshot: boolean;
+};
+
+export type FuyaoThemeStrengthSnapshot = {
+  contract: string;
+  trade_date: string;
+  benchmark_thscode: string;
+  benchmark_last_price: number | null;
+  benchmark_change_pct: number | null;
+  catalog_count: number;
+  snapshot_count: number;
+  coverage: number;
+  leading_theme_limit: number;
+  themes: FuyaoThemeStrength[];
+  leading_themes: FuyaoThemeStrength[];
+  classification: "research_only";
+  decision_weight_applied: false;
+  paper_order_side_effect: false;
+};
+
+export type FuyaoThemeResearchResponse = FuyaoResearchResponse & {
+  research_type: "theme_strength";
+  sections: Record<string, unknown> & {
+    theme_strength?: FuyaoThemeStrengthSnapshot;
+  };
+};
+
 export type FuyaoShadowHorizonEvaluation = {
   horizon_sessions: number;
   status: string;

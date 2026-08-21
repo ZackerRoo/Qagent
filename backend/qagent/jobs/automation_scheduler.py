@@ -53,12 +53,23 @@ class AutoProcessingState(BaseModel):
     last_result: AutoProcessingCycleResult | None = None
 
 
+class AutomationSchedulerCheckpoint(BaseModel):
+    """Completed-cycle state that remains meaningful across an API restart."""
+
+    run_count: int = Field(default=0, ge=0)
+    last_started_at: datetime | None = None
+    last_completed_at: datetime | None = None
+    last_error: str | None = None
+    last_result: AutoProcessingCycleResult | None = None
+
+
 CycleRunner = Callable[[AutoProcessingSettings], AutoProcessingCycleResult]
+StateListener = Callable[[AutoProcessingState], None]
 SCHEDULER_CLOCK_RECHECK_SECONDS = 5.0
 
 
 class AutomationScheduler:
-    def __init__(self) -> None:
+    def __init__(self, state_listener: StateListener | None = None) -> None:
         self._lock = Lock()
         self._run_lock = Lock()
         self._stop_event = Event()
@@ -73,6 +84,7 @@ class AutomationScheduler:
         self._next_run_at: datetime | None = None
         self._last_error: str | None = None
         self._last_result: AutoProcessingCycleResult | None = None
+        self._state_listener = state_listener
 
     def state(self) -> AutoProcessingState:
         with self._lock:
@@ -84,6 +96,20 @@ class AutomationScheduler:
             if not self._enabled:
                 self._next_run_at = None
             return self._state_unlocked()
+
+    def set_state_listener(self, listener: StateListener | None) -> None:
+        with self._lock:
+            self._state_listener = listener
+
+    def restore_checkpoint(self, checkpoint: AutomationSchedulerCheckpoint) -> None:
+        """Restore only completed-cycle facts; scheduling always restarts from now."""
+
+        with self._lock:
+            self._run_count = checkpoint.run_count
+            self._last_started_at = checkpoint.last_started_at
+            self._last_completed_at = checkpoint.last_completed_at
+            self._last_error = checkpoint.last_error
+            self._last_result = checkpoint.last_result
 
     def refresh_if_due(self, runner: CycleRunner) -> AutoProcessingState:
         # Status reads may restore a missing loop, but the request thread must never
@@ -100,7 +126,6 @@ class AutomationScheduler:
                 return self._state_unlocked()
             self._enabled = True
             self._status = "idle"
-            self._last_error = None
             self._next_run_at = _utc_now()
             self._stop_event.clear()
             self._wake_event.clear()
@@ -204,7 +229,20 @@ class AutomationScheduler:
                     if self._enabled
                     else None
                 )
+            self._notify_state_listener()
             self._run_lock.release()
+
+    def _notify_state_listener(self) -> None:
+        with self._lock:
+            listener = self._state_listener
+            state = self._state_unlocked()
+        if listener is None:
+            return
+        try:
+            listener(state)
+        except Exception:
+            # A telemetry checkpoint must never stop the processing loop.
+            return
 
     def _state_unlocked(self) -> AutoProcessingState:
         return AutoProcessingState(

@@ -213,6 +213,26 @@ def test_fuyao_market_research_reuses_complete_snapshot_unless_refreshed(
     assert reuse_values == [True, False]
 
 
+def test_fuyao_theme_research_reuses_daily_snapshot_unless_refreshed(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    reuse_values: list[bool] = []
+
+    def capture_stub(*args, **kwargs):
+        reuse_values.append(bool(kwargs["reuse_existing"]))
+        return SimpleNamespace(response={"reuse_existing": kwargs["reuse_existing"]})
+
+    monkeypatch.setattr(fuyao_routes, "capture_fuyao_theme_strength", capture_stub)
+
+    reused = client.get("/api/fuyao/research/themes?trade_date=2026-08-12")
+    refreshed = client.get("/api/fuyao/research/themes?trade_date=2026-08-12&refresh=true")
+
+    assert reused.status_code == 200
+    assert reused.json()["reuse_existing"] is True
+    assert refreshed.status_code == 200
+    assert refreshed.json()["reuse_existing"] is False
+    assert reuse_values == [True, False]
+
+
 def test_fuyao_market_and_fund_research_endpoints_preserve_raw_sections(monkeypatch, tmp_path):
     client = _client(monkeypatch, tmp_path)
 

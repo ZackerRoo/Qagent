@@ -32,6 +32,7 @@ import type {
   FuyaoMarketResearchResponse,
   FuyaoResearchResponse,
   FuyaoShadowEvaluationResponse,
+  FuyaoThemeResearchResponse,
   HistoricalBackfillJob,
   InstrumentSearchResponse,
   IntradayRadarResponse,
@@ -1185,6 +1186,16 @@ export async function fetchLatestFuyaoMarketResearch(
 ): Promise<FuyaoMarketResearchResponse> {
   return apiGet<FuyaoMarketResearchResponse>(
     "/fuyao/research/market/latest",
+    undefined,
+    options,
+  );
+}
+
+export async function fetchLatestFuyaoThemeStrength(
+  options?: RequestOptions,
+): Promise<FuyaoThemeResearchResponse> {
+  return apiGet<FuyaoThemeResearchResponse>(
+    "/fuyao/research/themes/latest",
     undefined,
     options,
   );

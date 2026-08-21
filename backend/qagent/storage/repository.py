@@ -627,6 +627,7 @@ class WalkForwardJobRecord(BaseModel):
 class AutomationSchedulerStateRecord(BaseModel):
     enabled: bool
     settings: dict[str, object]
+    runtime: dict[str, object] = Field(default_factory=dict)
     updated_at: datetime
 
 
@@ -1338,22 +1339,27 @@ class QagentRepository:
         *,
         enabled: bool,
         settings: dict[str, object],
+        runtime: dict[str, object] | None = None,
     ) -> AutomationSchedulerStateRecord:
         with self.session_factory() as session:
             now = datetime.now(timezone.utc)
+            state_json = json.dumps(
+                {"runtime": runtime or {}, "settings": settings},
+                sort_keys=True,
+            )
             row = session.get(AutomationSchedulerStateRow, "default")
             if row is None:
                 row = AutomationSchedulerStateRow(
                     state_id="default",
                     enabled=enabled,
-                    settings_json=json.dumps(settings, sort_keys=True),
+                    settings_json=state_json,
                     created_at=now,
                     updated_at=now,
                 )
                 session.add(row)
             else:
                 row.enabled = enabled
-                row.settings_json = json.dumps(settings, sort_keys=True)
+                row.settings_json = state_json
                 row.updated_at = now
             session.commit()
             session.refresh(row)
@@ -3838,12 +3844,20 @@ class QagentRepository:
         row: AutomationSchedulerStateRow,
     ) -> AutomationSchedulerStateRecord:
         try:
-            settings = json.loads(row.settings_json or "{}")
+            payload = json.loads(row.settings_json or "{}")
         except json.JSONDecodeError:
-            settings = {}
+            payload = {}
+        if isinstance(payload, dict) and isinstance(payload.get("settings"), dict):
+            settings = payload["settings"]
+            runtime = payload.get("runtime")
+        else:
+            # Records written before runtime checkpoints stored settings directly.
+            settings = payload
+            runtime = {}
         return AutomationSchedulerStateRecord(
             enabled=row.enabled,
             settings=settings if isinstance(settings, dict) else {},
+            runtime=runtime if isinstance(runtime, dict) else {},
             updated_at=row.updated_at,
         )
 

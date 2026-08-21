@@ -24,6 +24,10 @@ from qagent.research.fuyao_shadow_outcomes import (
     build_fuyao_shadow_evaluation,
     resolve_fuyao_shadow_outcomes,
 )
+from qagent.research.fuyao_theme_strength import (
+    capture_fuyao_theme_strength,
+    latest_fuyao_theme_strength,
+)
 from qagent.storage.market_cache import MarketDataCacheRepository
 from qagent.storage.fuyao_research import (
     FuyaoResearchRepository,
@@ -229,6 +233,34 @@ def latest_market_research(include_raw: bool = False) -> dict[str, object]:
     if latest is None:
         raise HTTPException(status_code=404, detail="Fuyao market research has not started")
     return latest if include_raw else _compact_market_research(latest)
+
+
+@router.get("/research/themes")
+def theme_strength_research(
+    trade_date: date | None = None,
+    leading_theme_limit: int = 8,
+    constituent_display_limit: int = 30,
+    refresh: bool = False,
+) -> dict[str, object]:
+    initialize_database()
+    capture = capture_fuyao_theme_strength(
+        create_session_factory(),
+        client=_configured_client(),
+        trade_date=trade_date or date.today(),
+        leading_theme_limit=leading_theme_limit,
+        constituent_display_limit=constituent_display_limit,
+        reuse_existing=not refresh,
+    )
+    return capture.response
+
+
+@router.get("/research/themes/latest")
+def latest_theme_strength_research() -> dict[str, object]:
+    initialize_database()
+    latest = latest_fuyao_theme_strength(create_session_factory())
+    if latest is None:
+        raise HTTPException(status_code=404, detail="Fuyao theme research has not started")
+    return latest
 
 
 @router.get("/research/market/shadow-evaluation")

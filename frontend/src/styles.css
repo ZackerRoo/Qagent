@@ -1870,6 +1870,10 @@ details.compact-data-health:not([open]) > .data-health-details {
   border-block: 1px solid var(--terminal-border-soft);
 }
 
+.fuyao-theme-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .fuyao-market-metrics > div {
   display: grid;
   min-width: 0;
@@ -1952,6 +1956,78 @@ details.compact-data-health:not([open]) > .data-health-details {
   font-size: 10px;
 }
 
+.fuyao-theme-leaders {
+  display: grid;
+  grid-template-columns: 116px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.fuyao-theme-leaders > span {
+  color: var(--terminal-muted);
+  font-size: 11px;
+}
+
+.fuyao-theme-leaders > div {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.fuyao-theme-leaders article {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 4px;
+}
+
+.fuyao-theme-leaders header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.fuyao-theme-leaders header > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.fuyao-theme-leaders strong,
+.fuyao-theme-leaders b {
+  color: var(--terminal-text);
+  font-size: 12px;
+}
+
+.fuyao-theme-leaders b {
+  color: var(--terminal-yellow);
+  white-space: nowrap;
+}
+
+.fuyao-theme-leaders small,
+.fuyao-theme-leaders p {
+  margin: 0;
+  color: var(--terminal-muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.fuyao-theme-constituents {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.fuyao-theme-constituents span {
+  padding: 2px 5px;
+  border: 1px solid rgba(77, 212, 255, 0.25);
+  border-radius: 3px;
+  color: var(--terminal-blue);
+  font-size: 10px;
+}
+
 .fuyao-shadow-strip {
   display: grid;
   grid-template-columns: minmax(180px, 0.7fr) minmax(0, 1.3fr);
@@ -1991,6 +2067,10 @@ details.compact-data-health:not([open]) > .data-health-details {
   .fuyao-market-metrics > div:nth-child(4) {
     border-left: 0;
   }
+
+  .fuyao-theme-leaders > div {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 720px) {
@@ -2016,7 +2096,8 @@ details.compact-data-health:not([open]) > .data-health-details {
   }
 
   .fuyao-market-themes,
-  .fuyao-market-leaders {
+  .fuyao-market-leaders,
+  .fuyao-theme-leaders {
     grid-template-columns: 1fr;
   }
 }

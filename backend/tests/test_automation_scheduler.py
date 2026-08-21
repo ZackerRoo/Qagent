@@ -3,6 +3,7 @@ from threading import Event, get_ident
 
 from qagent.jobs.automation_scheduler import (
     AutomationScheduler,
+    AutomationSchedulerCheckpoint,
     AutoProcessingCycleResult,
     AutoProcessingSettings,
 )
@@ -129,3 +130,28 @@ def test_loop_rechecks_wall_clock_without_status_request(monkeypatch):
     assert completed.wait(timeout=1.0)
     assert scheduler.state().run_count == 1
     scheduler.stop()
+
+
+def test_scheduler_restores_completed_cycle_checkpoint():
+    scheduler = AutomationScheduler()
+    now = datetime.now(timezone.utc)
+    checkpoint = AutomationSchedulerCheckpoint(
+        run_count=7,
+        last_started_at=now - timedelta(seconds=2),
+        last_completed_at=now,
+        last_result=AutoProcessingCycleResult(
+            provider="free",
+            started_at=now - timedelta(seconds=2),
+            finished_at=now,
+            scan_status="completed",
+            paper_created=3,
+        ),
+    )
+
+    scheduler.restore_checkpoint(checkpoint)
+    state = scheduler.state()
+
+    assert state.run_count == 7
+    assert state.last_completed_at == now
+    assert state.last_result is not None
+    assert state.last_result.paper_created == 3
