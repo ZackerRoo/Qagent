@@ -162,6 +162,23 @@ def test_latest_completed_a_share_session_excludes_open_session():
     ) == date(2026, 8, 6)
 
 
+def test_full_market_tail_snapshot_repair_requires_post_close_current_session():
+    scan_end = date(2026, 8, 6)
+
+    assert full_market._full_market_tail_is_settled(
+        scan_end,
+        datetime(2026, 8, 6, 15, 44, tzinfo=ZoneInfo("Asia/Shanghai")),
+    ) is False
+    assert full_market._full_market_tail_is_settled(
+        scan_end,
+        datetime(2026, 8, 6, 15, 45, tzinfo=ZoneInfo("Asia/Shanghai")),
+    ) is True
+    assert full_market._full_market_tail_is_settled(
+        scan_end,
+        datetime(2026, 8, 7, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    ) is False
+
+
 def test_daily_scan_adds_benchmark_comparison_and_quick_brief():
     result = run_daily_scan(
         instrument_ids=["CN:000001"],

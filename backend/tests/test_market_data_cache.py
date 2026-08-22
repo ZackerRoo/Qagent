@@ -490,6 +490,7 @@ class TailSnapshotRepairProvider(CountingProvider):
         super().__init__()
         self.snapshot_date = snapshot_date
         self.snapshot_calls: list[list[str]] = []
+        self.history_calls: list[list[str]] = []
 
     def get_historical_daily_bars(
         self,
@@ -497,7 +498,8 @@ class TailSnapshotRepairProvider(CountingProvider):
         start: date,
         end: date,
     ) -> pd.DataFrame:
-        del instrument_ids, start, end
+        del start, end
+        self.history_calls.append(instrument_ids)
         return pd.DataFrame()
 
     def get_snapshot(self, instrument_ids: list[str]) -> pd.DataFrame:
@@ -514,6 +516,44 @@ class TailSnapshotRepairProvider(CountingProvider):
                     "volume": 800_000,
                     "turnover": 8_000_000,
                     "provider": "fuyao_realtime",
+                }
+                for instrument_id in instrument_ids
+            ]
+        )
+
+
+class SettledTailHistoryRetryProvider(TailSnapshotRepairProvider):
+    def __init__(self, expected: date):
+        super().__init__(expected + pd.Timedelta(days=1))
+        self.expected = expected
+        self.history_calls: list[list[str]] = []
+
+    def get_historical_daily_bars(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> pd.DataFrame:
+        self.history_calls.append(instrument_ids)
+        if len(self.history_calls) == 1:
+            return pd.DataFrame()
+        return pd.DataFrame(
+            [
+                {
+                    "instrument_id": instrument_id,
+                    "trade_date": self.expected,
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.8,
+                    "close": 10.2,
+                    "volume": 800_000,
+                    "provider": "baostock_paired",
+                    "adjusted_open": 10.0,
+                    "adjusted_high": 10.5,
+                    "adjusted_low": 9.8,
+                    "adjusted_close": 10.2,
+                    "adjustment_factor": 1.0,
+                    "adjustment_type": "qfq",
                 }
                 for instrument_id in instrument_ids
             ]
@@ -690,6 +730,16 @@ def test_cached_provider_repairs_stale_tail_from_exact_session_snapshot(tmp_path
             [
                 {
                     "instrument_id": instrument_id,
+                    "trade_date": date(2026, 8, 10),
+                    "open": 9.7,
+                    "high": 10.0,
+                    "low": 9.6,
+                    "close": 9.9,
+                    "volume": 680_000,
+                    "provider": "baostock_paired",
+                },
+                {
+                    "instrument_id": instrument_id,
                     "trade_date": date(2026, 8, 11),
                     "open": 9.8,
                     "high": 10.1,
@@ -724,6 +774,7 @@ def test_cached_provider_repairs_stale_tail_from_exact_session_snapshot(tmp_path
     )
     latest = bars.sort_values("trade_date").iloc[-1]
     assert inner.snapshot_calls == [[instrument_id]]
+    assert inner.history_calls == []
     assert latest["trade_date"] == expected
     assert latest["provider"] == "fuyao_realtime"
     assert float(latest["adjusted_close"]) == float(latest["close"])
@@ -761,6 +812,35 @@ def test_cached_provider_quarantines_snapshot_outside_expected_session(tmp_path)
     assert provider.prefetch_stats()["snapshot_requested"] == 1
     assert provider.prefetch_stats()["snapshot_repaired"] == 0
     assert provider.prefetch_stats()["snapshot_unrecovered"] == 1
+
+
+def test_cached_provider_retries_unresolved_settled_tail_in_fresh_history_session(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    expected = date(2026, 8, 12)
+    instrument_ids = ["CN:300229", "CN:300230"]
+    inner = SettledTailHistoryRetryProvider(expected)
+    provider = CachedMarketDataProvider(
+        inner,
+        cache=repo,
+        provider_mode="free",
+        enable_recent_tail_snapshot_repair=True,
+    )
+
+    provider.prefetch_daily_bars(
+        instrument_ids,
+        date(2026, 8, 10),
+        expected,
+        repair_recent_tail=True,
+    )
+
+    bars = repo.load_daily_bars("free", instrument_ids, expected, expected)
+    assert set(bars["instrument_id"]) == set(instrument_ids)
+    assert bars["provider"].unique().tolist() == ["baostock_paired"]
+    assert inner.history_calls == [instrument_ids, instrument_ids]
+    assert provider.prefetch_stats()["snapshot_unrecovered"] == 2
+    assert provider.prefetch_stats()["settled_tail_retry_requested"] == 2
+    assert provider.prefetch_stats()["settled_tail_retry_repaired"] == 2
+    assert provider.prefetch_stats()["settled_tail_retry_unrecovered"] == 0
 
 
 def test_cached_provider_does_not_treat_partial_stale_history_as_empty(tmp_path):

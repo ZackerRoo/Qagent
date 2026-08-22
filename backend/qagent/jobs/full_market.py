@@ -425,13 +425,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
                             batch,
                             start=date(2026, 1, 1),
                             end=scan_end,
-                            repair_recent_tail=(
-                                _int_health(
-                                    job.data_health,
-                                    "automatic_candidate_refresh_attempt",
-                                )
-                                >= 2
-                            ),
+                            repair_recent_tail=_full_market_tail_is_settled(scan_end),
                         )
                     except Exception as exc:
                         aggregate_health[f"batch_{batch_index}_prefetch_error"] = str(exc)[:500]
@@ -1190,6 +1184,22 @@ def _latest_completed_a_share_session(now: datetime | None = None) -> date | Non
     if sessions[-1] == today and local_now.timetz().replace(tzinfo=None) < time(hour=15, minute=30):
         sessions = sessions[:-1]
     return sessions[-1] if sessions else None
+
+
+def _full_market_tail_is_settled(
+    scan_end: date,
+    now: datetime | None = None,
+) -> bool:
+    """Only query a snapshot for today's completed A-share session."""
+
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    local_now = current.astimezone(ZoneInfo("Asia/Shanghai"))
+    return scan_end == local_now.date() and local_now.timetz().replace(tzinfo=None) >= time(
+        hour=15,
+        minute=45,
+    )
 
 
 def _frozen_full_market_fundamental_as_of(data_health: dict[str, str]) -> date:

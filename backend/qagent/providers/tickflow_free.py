@@ -1,5 +1,6 @@
 from datetime import date, datetime, time, timedelta, timezone
 import math
+from time import monotonic
 
 import pandas as pd
 import requests
@@ -10,6 +11,7 @@ from qagent.providers.free_cn import BAR_COLUMNS
 
 DEFAULT_TICKFLOW_FREE_BASE_URL = "https://free-api.tickflow.org"
 DEFAULT_TICKFLOW_TIMEOUT_SECONDS = 6
+DEFAULT_FAILURE_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 300.0
 MAX_KLINE_COUNT = 10_000
 
 
@@ -23,12 +25,20 @@ class TickFlowFreeDailyProvider:
         *,
         base_url: str = DEFAULT_TICKFLOW_FREE_BASE_URL,
         request_timeout_seconds: int = DEFAULT_TICKFLOW_TIMEOUT_SECONDS,
+        failure_circuit_breaker_cooldown_seconds: float = (
+            DEFAULT_FAILURE_CIRCUIT_BREAKER_COOLDOWN_SECONDS
+        ),
         session: requests.Session | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.request_timeout_seconds = max(1, request_timeout_seconds)
+        self.failure_circuit_breaker_cooldown_seconds = max(
+            0.0,
+            failure_circuit_breaker_cooldown_seconds,
+        )
         self.session = session or requests.Session()
         self.last_errors: list[str] = []
+        self.source_circuit_open_until = 0.0
 
     def get_daily_bars(
         self,
@@ -39,10 +49,20 @@ class TickFlowFreeDailyProvider:
         self.last_errors = []
         frames: list[pd.DataFrame] = []
         for instrument_id in dict.fromkeys(instrument_ids):
+            if self._source_circuit_open():
+                self.last_errors.append(
+                    f"{instrument_id}: tickflow_free skipped after rate limit; "
+                    f"retry in {self.source_circuit_retry_after_seconds():.0f}s"
+                )
+                continue
             try:
                 frame = self._load_instrument(instrument_id, start, end)
             except Exception as exc:
                 self.last_errors.append(f"{instrument_id}: tickflow_free: {exc}")
+                if _is_rate_limit_error(exc):
+                    self.source_circuit_open_until = (
+                        monotonic() + self.failure_circuit_breaker_cooldown_seconds
+                    )
                 continue
             if not frame.empty:
                 frames.append(frame)
@@ -82,6 +102,13 @@ class TickFlowFreeDailyProvider:
         del instrument_ids, start, end
         return pd.DataFrame(columns=MINUTE_BAR_COLUMNS)
 
+    def _source_circuit_open(self) -> bool:
+        return self.source_circuit_retry_after_seconds() > 0
+
+    def source_circuit_retry_after_seconds(self, instrument_id: str | None = None) -> float:
+        del instrument_id
+        return max(0.0, self.source_circuit_open_until - monotonic())
+
     def _load_instrument(
         self,
         instrument_id: str,
@@ -106,6 +133,10 @@ class TickFlowFreeDailyProvider:
                 self.last_errors.append(
                     f"{instrument_id}: tickflow_free adjusted history: {exc}"
                 )
+                if _is_rate_limit_error(exc):
+                    self.source_circuit_open_until = (
+                        monotonic() + self.failure_circuit_breaker_cooldown_seconds
+                    )
                 adjusted = pd.DataFrame()
             adjustment_type = "forward"
             provider_name = "tickflow_free_paired"
@@ -245,3 +276,8 @@ def _normalize_kline_payload(data: dict, start: date, end: date) -> pd.DataFrame
 def _date_to_epoch_ms(value: date, *, end_of_day: bool = False) -> int:
     moment = datetime.combine(value, time.max if end_of_day else time.min, tzinfo=timezone.utc)
     return int(moment.timestamp() * 1000)
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) == 429

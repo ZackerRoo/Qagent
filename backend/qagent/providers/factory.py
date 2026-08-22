@@ -23,6 +23,7 @@ def build_market_data_provider(provider_mode: str) -> MarketDataProvider:
             FreeCnMarketDataProvider(),
             TickFlowFreeDailyProvider(),
             name="free_cn",
+            max_fallback_instruments=20,
         )
         if settings.fuyao_api_key:
             fuyao = FuyaoMarketDataProvider(

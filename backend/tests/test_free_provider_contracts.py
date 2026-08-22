@@ -10,6 +10,35 @@ import requests
 import qagent.providers.free_cn as free_cn
 from qagent.providers.free_cn import FreeCnMarketDataProvider
 from qagent.providers.free_us import FreeUsMarketDataProvider
+from qagent.providers.tickflow_free import TickFlowFreeDailyProvider
+
+
+def test_tickflow_provider_opens_circuit_after_rate_limit():
+    calls: list[str] = []
+
+    class RateLimitedSession:
+        def get(self, url, **kwargs):
+            calls.append(url)
+            error = requests.HTTPError("429 too many requests")
+            error.response = SimpleNamespace(status_code=429)
+            raise error
+
+    provider = TickFlowFreeDailyProvider(
+        session=RateLimitedSession(),
+        failure_circuit_breaker_cooldown_seconds=60,
+    )
+
+    bars = provider.get_historical_daily_bars(
+        ["CN:000001", "CN:000002", "CN:000003"],
+        date(2026, 1, 1),
+        date(2026, 1, 2),
+    )
+
+    assert bars.empty
+    assert len(calls) == 1
+    assert "CN:000001: tickflow_free: 429 too many requests" in provider.last_errors[0]
+    assert "CN:000002: tickflow_free skipped after rate limit" in provider.last_errors[1]
+    assert provider.source_circuit_retry_after_seconds() > 0
 
 
 def test_free_us_provider_normalizes_yfinance_download(monkeypatch):
