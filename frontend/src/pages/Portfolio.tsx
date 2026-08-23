@@ -1959,12 +1959,37 @@ function FactorShadowAttributionPanel({
               {language === "zh" ? "每期净超额中位数" : "Median net excess"}
               <strong>{formatShadowReturn(horizon.challenger_median_session_net_excess_return_pct, language)}</strong>
             </span>
+            <span>
+              {language === "zh" ? "换入相对替换胜率" : "Selection lift"}
+              <strong>{formatShadowPercent(horizon.challenger_selection_lift_win_rate, language)}</strong>
+            </span>
           </div>
           <p>
             {promotion.reasons.map((reason) => localizeShadowPromotionReason(reason, language)).join(language === "zh" ? "；" : "; ")}
           </p>
         </div>
       )}
+      <div className="factor-shadow-selection-lift">
+        <div>
+          <span>{language === "zh" ? "挑战者换入标的" : "Challenger additions"}</span>
+          <strong>{formatShadowReturn(horizon.challenger_addition_net_excess_return_pct, language)}</strong>
+          <small>{language === "zh" ? `${horizon.challenger_addition_count} 个成熟结果` : `${horizon.challenger_addition_count} mature outcomes`}</small>
+        </div>
+        <div>
+          <span>{language === "zh" ? "基准被替换标的" : "Baseline removals"}</span>
+          <strong>{formatShadowReturn(horizon.challenger_removal_net_excess_return_pct, language)}</strong>
+          <small>{language === "zh" ? `${horizon.challenger_removal_count} 个成熟结果` : `${horizon.challenger_removal_count} mature outcomes`}</small>
+        </div>
+        <div>
+          <span>{language === "zh" ? "每期选股增益中位数" : "Median selection lift"}</span>
+          <strong>{formatShadowReturn(horizon.challenger_median_selection_lift_pct, language)}</strong>
+          <small>
+            {language === "zh"
+              ? `${horizon.challenger_selection_lift_session_count} 个可比截面`
+              : `${horizon.challenger_selection_lift_session_count} comparable sessions`}
+          </small>
+        </div>
+      </div>
       <div className="factor-shadow-attribution-grid">
         <FactorShadowAttributionTable
           title={language === "zh" ? "挑战者分位" : "Challenger rank buckets"}
@@ -2017,6 +2042,15 @@ function localizeShadowPromotionReason(reason: string, language: Language) {
     "5d_rank_ic_not_above_baseline": "5日排序IC未持续优于基准",
     "10d_rank_ic_not_above_baseline": "10日排序IC未持续优于基准",
     "20d_rank_ic_not_above_baseline": "20日排序IC未持续优于基准",
+    "5d_selection_lift_missing": "5日缺少换入与替换标的的同日对照",
+    "10d_selection_lift_missing": "10日缺少换入与替换标的的同日对照",
+    "20d_selection_lift_missing": "20日缺少换入与替换标的的同日对照",
+    "5d_selection_lift_not_stable": "5日换入标的相对替换标的优势不稳定",
+    "10d_selection_lift_not_stable": "10日换入标的相对替换标的优势不稳定",
+    "20d_selection_lift_not_stable": "20日换入标的相对替换标的优势不稳定",
+    "5d_selection_lift_not_positive": "5日换入标的的每期选股增益中位数未转正",
+    "10d_selection_lift_not_positive": "10日换入标的的每期选股增益中位数未转正",
+    "20d_selection_lift_not_positive": "20日换入标的的每期选股增益中位数未转正",
     "all_preregistered_shadow_evidence_checks_passed": "已满足预注册影子证据，仍需人工复核后才可变更模型",
   };
   if (language === "zh") return zh[reason] ?? reason;

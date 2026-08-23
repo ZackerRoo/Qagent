@@ -3588,6 +3588,13 @@ export type FactorShadowHorizonEvaluation = {
   challenger_session_outperformance_rate: number | null;
   challenger_rank_ic_win_rate: number | null;
   challenger_median_session_net_excess_return_pct: number | null;
+  challenger_addition_count: number;
+  challenger_removal_count: number;
+  challenger_addition_net_excess_return_pct: number | null;
+  challenger_removal_net_excess_return_pct: number | null;
+  challenger_selection_lift_session_count: number;
+  challenger_selection_lift_win_rate: number | null;
+  challenger_median_selection_lift_pct: number | null;
   challenger_rank_buckets: FactorShadowAttributionGroup[];
   challenger_industries: FactorShadowAttributionGroup[];
 };

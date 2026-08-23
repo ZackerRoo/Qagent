@@ -30,6 +30,7 @@ FACTOR_SHADOW_ENTRY_WAIT_SESSIONS = 1
 FACTOR_SHADOW_PROMOTION_MIN_MATURED_RUNS = 20
 FACTOR_SHADOW_PROMOTION_MIN_OUTCOME_COVERAGE = 0.95
 FACTOR_SHADOW_PROMOTION_MIN_SESSION_EDGE_RATE = 0.55
+FACTOR_SHADOW_PROMOTION_MIN_SELECTION_LIFT_RATE = 0.55
 
 
 class FactorShadowOutcomeResolution(BaseModel):
@@ -80,6 +81,13 @@ class FactorShadowHorizonEvaluation(BaseModel):
     challenger_session_outperformance_rate: float | None = None
     challenger_rank_ic_win_rate: float | None = None
     challenger_median_session_net_excess_return_pct: float | None = None
+    challenger_addition_count: int = 0
+    challenger_removal_count: int = 0
+    challenger_addition_net_excess_return_pct: float | None = None
+    challenger_removal_net_excess_return_pct: float | None = None
+    challenger_selection_lift_session_count: int = 0
+    challenger_selection_lift_win_rate: float | None = None
+    challenger_median_selection_lift_pct: float | None = None
     challenger_rank_buckets: list[FactorShadowAttributionGroup] = Field(default_factory=list)
     challenger_industries: list[FactorShadowAttributionGroup] = Field(default_factory=list)
 
@@ -457,6 +465,10 @@ def _evaluate_horizon(
     challenger_session_net_excess: list[float] = []
     challenger_session_outperformed: list[bool] = []
     challenger_rank_ic_wins: list[bool] = []
+    challenger_addition_net_excess: list[float] = []
+    challenger_removal_net_excess: list[float] = []
+    challenger_selection_lifts: list[float] = []
+    challenger_selection_lift_wins: list[bool] = []
     baseline_sets: list[set[str]] = []
     challenger_sets: list[set[str]] = []
     challenger_rank_outcomes: dict[str, list[FactorShadowOutcome]] = {
@@ -501,8 +513,10 @@ def _evaluate_horizon(
         top_count = max(1, math.ceil(len(scores) * max(min(top_fraction, 1.0), 0.0)))
         baseline_top = sorted(scores, key=lambda item: item.baseline_rank)[:top_count]
         challenger_top = sorted(scores, key=lambda item: item.challenger_rank)[:top_count]
-        baseline_sets.append({item.instrument_id for item in baseline_top})
-        challenger_sets.append({item.instrument_id for item in challenger_top})
+        baseline_ids = {item.instrument_id for item in baseline_top}
+        challenger_ids = {item.instrument_id for item in challenger_top}
+        baseline_sets.append(baseline_ids)
+        challenger_sets.append(challenger_ids)
         baseline_top_outcomes = [
             outcome
             for score in baseline_top
@@ -539,6 +553,41 @@ def _evaluate_horizon(
             challenger_session_outperformed.append(
                 challenger_session_net > baseline_session_net
             )
+        addition_outcomes = [
+            outcome
+            for score in challenger_top
+            if score.instrument_id not in baseline_ids
+            if (
+                outcome := outcomes_by_key.get(
+                    (run.scan_job_id, score.instrument_id, horizon_sessions)
+                )
+            )
+            is not None
+        ]
+        removal_outcomes = [
+            outcome
+            for score in baseline_top
+            if score.instrument_id not in challenger_ids
+            if (
+                outcome := outcomes_by_key.get(
+                    (run.scan_job_id, score.instrument_id, horizon_sessions)
+                )
+            )
+            is not None
+        ]
+        challenger_addition_net_excess.extend(
+            outcome.net_excess_return_pct for outcome in addition_outcomes
+        )
+        challenger_removal_net_excess.extend(
+            outcome.net_excess_return_pct for outcome in removal_outcomes
+        )
+        if addition_outcomes and removal_outcomes:
+            selection_lift = float(
+                np.mean([outcome.net_excess_return_pct for outcome in addition_outcomes])
+                - np.mean([outcome.net_excess_return_pct for outcome in removal_outcomes])
+            )
+            challenger_selection_lifts.append(selection_lift)
+            challenger_selection_lift_wins.append(selection_lift > 0)
         industries = [item.industry for item in challenger_top if item.industry]
         if industries:
             counts = pd.Series(industries).value_counts()
@@ -583,6 +632,29 @@ def _evaluate_horizon(
         challenger_median_session_net_excess_return_pct=(
             round(float(np.median(challenger_session_net_excess)), 10)
             if challenger_session_net_excess
+            else None
+        ),
+        challenger_addition_count=len(challenger_addition_net_excess),
+        challenger_removal_count=len(challenger_removal_net_excess),
+        challenger_addition_net_excess_return_pct=_rounded_mean(
+            challenger_addition_net_excess
+        ),
+        challenger_removal_net_excess_return_pct=_rounded_mean(
+            challenger_removal_net_excess
+        ),
+        challenger_selection_lift_session_count=len(challenger_selection_lifts),
+        challenger_selection_lift_win_rate=(
+            round(
+                sum(challenger_selection_lift_wins)
+                / len(challenger_selection_lift_wins),
+                6,
+            )
+            if challenger_selection_lift_wins
+            else None
+        ),
+        challenger_median_selection_lift_pct=(
+            round(float(np.median(challenger_selection_lifts)), 10)
+            if challenger_selection_lifts
             else None
         ),
         challenger_rank_buckets=_shadow_attribution_groups(
@@ -643,6 +715,19 @@ def _assess_shadow_promotion(
             or evaluation.mean_challenger_rank_ic <= evaluation.mean_baseline_rank_ic
         ):
             reasons.append(f"{prefix}_rank_ic_not_above_baseline")
+        if (
+            evaluation.challenger_selection_lift_win_rate is None
+            or evaluation.challenger_median_selection_lift_pct is None
+        ):
+            reasons.append(f"{prefix}_selection_lift_missing")
+        else:
+            if (
+                evaluation.challenger_selection_lift_win_rate
+                < FACTOR_SHADOW_PROMOTION_MIN_SELECTION_LIFT_RATE
+            ):
+                reasons.append(f"{prefix}_selection_lift_not_stable")
+            if evaluation.challenger_median_selection_lift_pct <= 0:
+                reasons.append(f"{prefix}_selection_lift_not_positive")
 
     if reasons:
         return FactorShadowPromotionAssessment(

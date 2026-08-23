@@ -477,6 +477,13 @@ def test_factor_shadow_outcomes_resolve_only_after_maturity_and_are_immutable(tm
     assert horizon.challenger_session_outperformance_rate == 1.0
     assert horizon.challenger_rank_ic_win_rate == 1.0
     assert horizon.challenger_median_session_net_excess_return_pct == pytest.approx(8.4)
+    assert horizon.challenger_addition_count == 2
+    assert horizon.challenger_removal_count == 2
+    assert horizon.challenger_addition_net_excess_return_pct == pytest.approx(8.4)
+    assert horizon.challenger_removal_net_excess_return_pct == pytest.approx(0.4)
+    assert horizon.challenger_selection_lift_session_count == 1
+    assert horizon.challenger_selection_lift_win_rate == 1.0
+    assert horizon.challenger_median_selection_lift_pct == pytest.approx(8.0)
     assert [item.key for item in horizon.challenger_rank_buckets] == [
         "q1",
         "q2",
