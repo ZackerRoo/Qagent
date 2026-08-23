@@ -9625,6 +9625,58 @@ details.compact-data-health:not([open]) > .data-health-details {
   line-height: 1.45;
 }
 
+.factor-shadow-promotion {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 18px;
+  align-items: center;
+  padding: 11px 12px;
+  border: 1px solid var(--terminal-border-soft);
+  border-left: 3px solid var(--terminal-cyan);
+  background: color-mix(in srgb, var(--terminal-cyan) 5%, transparent);
+}
+
+.factor-shadow-promotion > div:first-child {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.factor-shadow-promotion > div:first-child strong {
+  color: var(--terminal-text);
+  font-size: 13px;
+}
+
+.factor-shadow-promotion small,
+.factor-shadow-promotion p {
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.factor-shadow-promotion p {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.factor-shadow-promotion-metrics {
+  display: flex;
+  gap: 14px;
+}
+
+.factor-shadow-promotion-metrics span {
+  display: grid;
+  gap: 2px;
+  color: var(--terminal-muted);
+  font-size: 11px;
+}
+
+.factor-shadow-promotion-metrics strong {
+  color: var(--terminal-text);
+  font-size: 13px;
+}
+
 .paper-attribution-grid,
 .factor-shadow-attribution-grid {
   display: grid;
@@ -9890,6 +9942,14 @@ details.compact-data-health:not([open]) > .data-health-details {
     grid-template-columns: auto auto auto;
     align-items: center;
     justify-items: start;
+  }
+
+  .factor-shadow-promotion {
+    grid-template-columns: 1fr;
+  }
+
+  .factor-shadow-promotion-metrics {
+    justify-content: space-between;
   }
 
   .paper-baseline-strip,

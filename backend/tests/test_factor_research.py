@@ -463,12 +463,20 @@ def test_factor_shadow_outcomes_resolve_only_after_maturity_and_are_immutable(tm
     assert retried.outcomes_inserted == 0
     assert retried.outcomes_existing == 10
     assert evaluation.status == "ready"
+    assert evaluation.promotion is not None
+    assert evaluation.promotion.status == "collecting"
+    assert evaluation.promotion.action == "keep_shadow_only"
+    assert "5d_matured_runs_below_minimum" in evaluation.promotion.reasons
     horizon = evaluation.horizons[0]
     assert horizon.status == "ready"
     assert horizon.outcome_coverage == 1.0
     assert horizon.mean_baseline_rank_ic == pytest.approx(-1.0)
     assert horizon.mean_challenger_rank_ic == pytest.approx(1.0)
     assert horizon.challenger_top_net_excess_return_pct == pytest.approx(8.4)
+    assert horizon.challenger_session_count == 1
+    assert horizon.challenger_session_outperformance_rate == 1.0
+    assert horizon.challenger_rank_ic_win_rate == 1.0
+    assert horizon.challenger_median_session_net_excess_return_pct == pytest.approx(8.4)
     assert [item.key for item in horizon.challenger_rank_buckets] == [
         "q1",
         "q2",

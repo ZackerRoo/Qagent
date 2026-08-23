@@ -24,6 +24,12 @@ from qagent.storage.market_cache import BAR_COLUMNS, MarketDataCacheRepository
 FACTOR_SHADOW_OUTCOME_CONTRACT = "factor-shadow-outcome-v1-next-open-adjusted"
 FACTOR_SHADOW_HORIZONS = (5, 10, 20)
 FACTOR_SHADOW_ENTRY_WAIT_SESSIONS = 1
+# Shadow evidence is deliberately harder to promote than to record. These
+# thresholds only determine whether a frozen challenger merits manual review;
+# they never change paper-trading weights or admission by themselves.
+FACTOR_SHADOW_PROMOTION_MIN_MATURED_RUNS = 20
+FACTOR_SHADOW_PROMOTION_MIN_OUTCOME_COVERAGE = 0.95
+FACTOR_SHADOW_PROMOTION_MIN_SESSION_EDGE_RATE = 0.55
 
 
 class FactorShadowOutcomeResolution(BaseModel):
@@ -70,8 +76,22 @@ class FactorShadowHorizonEvaluation(BaseModel):
     baseline_average_turnover_rate: float | None = None
     challenger_average_turnover_rate: float | None = None
     challenger_max_industry_concentration: float | None = None
+    challenger_session_count: int = 0
+    challenger_session_outperformance_rate: float | None = None
+    challenger_rank_ic_win_rate: float | None = None
+    challenger_median_session_net_excess_return_pct: float | None = None
     challenger_rank_buckets: list[FactorShadowAttributionGroup] = Field(default_factory=list)
     challenger_industries: list[FactorShadowAttributionGroup] = Field(default_factory=list)
+
+
+class FactorShadowPromotionAssessment(BaseModel):
+    """Non-binding evidence assessment for a frozen factor challenger."""
+
+    status: str
+    action: str
+    eligible_for_manual_review: bool = False
+    required_horizons: tuple[int, ...] = FACTOR_SHADOW_HORIZONS
+    reasons: list[str] = Field(default_factory=list)
 
 
 class FactorShadowEvaluation(BaseModel):
@@ -83,6 +103,7 @@ class FactorShadowEvaluation(BaseModel):
     signal_dates: list[date] = Field(default_factory=list)
     next_maturity_date: date | None = None
     horizons: list[FactorShadowHorizonEvaluation] = Field(default_factory=list)
+    promotion: FactorShadowPromotionAssessment | None = None
     data_health: dict[str, str] = Field(default_factory=dict)
 
 
@@ -385,6 +406,7 @@ def build_factor_shadow_evaluation(
         signal_dates=sorted({run.signal_date for run in runs}),
         next_maturity_date=min(next_dates, default=None),
         horizons=evaluations,
+        promotion=_assess_shadow_promotion(evaluations),
         data_health={
             "factor_shadow_evaluation_status": status,
             "factor_shadow_evaluation_runs": str(len(runs)),
@@ -432,6 +454,9 @@ def _evaluate_horizon(
     challenger_top_excess: list[float] = []
     challenger_top_net_excess: list[float] = []
     challenger_industry_concentrations: list[float] = []
+    challenger_session_net_excess: list[float] = []
+    challenger_session_outperformed: list[bool] = []
+    challenger_rank_ic_wins: list[bool] = []
     baseline_sets: list[set[str]] = []
     challenger_sets: list[set[str]] = []
     challenger_rank_outcomes: dict[str, list[FactorShadowOutcome]] = {
@@ -465,6 +490,8 @@ def _evaluate_horizon(
                 baseline_ics.append(baseline_ic)
             if challenger_ic is not None:
                 challenger_ics.append(challenger_ic)
+            if baseline_ic is not None and challenger_ic is not None:
+                challenger_rank_ic_wins.append(challenger_ic > baseline_ic)
         for score, outcome in completed_pairs:
             bucket = min(5, int((score.challenger_rank - 1) * 5 / len(scores)) + 1)
             challenger_rank_outcomes[f"q{bucket}"].append(outcome)
@@ -501,6 +528,17 @@ def _evaluate_horizon(
         challenger_top_net_excess.extend(
             item.net_excess_return_pct for item in challenger_top_outcomes
         )
+        if baseline_top_outcomes and challenger_top_outcomes:
+            baseline_session_net = float(
+                np.mean([item.net_excess_return_pct for item in baseline_top_outcomes])
+            )
+            challenger_session_net = float(
+                np.mean([item.net_excess_return_pct for item in challenger_top_outcomes])
+            )
+            challenger_session_net_excess.append(challenger_session_net)
+            challenger_session_outperformed.append(
+                challenger_session_net > baseline_session_net
+            )
         industries = [item.industry for item in challenger_top if item.industry]
         if industries:
             counts = pd.Series(industries).value_counts()
@@ -527,6 +565,26 @@ def _evaluate_horizon(
             if challenger_industry_concentrations
             else None
         ),
+        challenger_session_count=len(challenger_session_net_excess),
+        challenger_session_outperformance_rate=(
+            round(
+                sum(challenger_session_outperformed)
+                / len(challenger_session_outperformed),
+                6,
+            )
+            if challenger_session_outperformed
+            else None
+        ),
+        challenger_rank_ic_win_rate=(
+            round(sum(challenger_rank_ic_wins) / len(challenger_rank_ic_wins), 6)
+            if challenger_rank_ic_wins
+            else None
+        ),
+        challenger_median_session_net_excess_return_pct=(
+            round(float(np.median(challenger_session_net_excess)), 10)
+            if challenger_session_net_excess
+            else None
+        ),
         challenger_rank_buckets=_shadow_attribution_groups(
             challenger_rank_outcomes,
             labels={
@@ -543,6 +601,60 @@ def _evaluate_horizon(
             labels={},
             limit=8,
         ),
+    )
+
+
+def _assess_shadow_promotion(
+    evaluations: list[FactorShadowHorizonEvaluation],
+) -> FactorShadowPromotionAssessment:
+    """Require broad, repeated evidence before a challenger can be reviewed.
+
+    The explicit result closes a gap between raw shadow aggregates and a
+    decision-ready research record. It is intentionally non-binding: a later
+    human-reviewed experiment remains necessary before any model activation.
+    """
+
+    by_horizon = {item.horizon_sessions: item for item in evaluations}
+    reasons: list[str] = []
+    for horizon in FACTOR_SHADOW_HORIZONS:
+        evaluation = by_horizon.get(horizon)
+        prefix = f"{horizon}d"
+        if evaluation is None or evaluation.status == "pending":
+            reasons.append(f"{prefix}_outcomes_not_matured")
+            continue
+        if evaluation.matured_runs < FACTOR_SHADOW_PROMOTION_MIN_MATURED_RUNS:
+            reasons.append(f"{prefix}_matured_runs_below_minimum")
+        if evaluation.outcome_coverage < FACTOR_SHADOW_PROMOTION_MIN_OUTCOME_COVERAGE:
+            reasons.append(f"{prefix}_outcome_coverage_below_minimum")
+        if evaluation.challenger_session_outperformance_rate is None:
+            reasons.append(f"{prefix}_session_comparison_missing")
+        elif (
+            evaluation.challenger_session_outperformance_rate
+            < FACTOR_SHADOW_PROMOTION_MIN_SESSION_EDGE_RATE
+        ):
+            reasons.append(f"{prefix}_session_edge_not_stable")
+        if evaluation.challenger_median_session_net_excess_return_pct is None:
+            reasons.append(f"{prefix}_session_return_missing")
+        elif evaluation.challenger_median_session_net_excess_return_pct <= 0:
+            reasons.append(f"{prefix}_median_session_net_excess_not_positive")
+        if (
+            evaluation.mean_challenger_rank_ic is None
+            or evaluation.mean_baseline_rank_ic is None
+            or evaluation.mean_challenger_rank_ic <= evaluation.mean_baseline_rank_ic
+        ):
+            reasons.append(f"{prefix}_rank_ic_not_above_baseline")
+
+    if reasons:
+        return FactorShadowPromotionAssessment(
+            status="collecting",
+            action="keep_shadow_only",
+            reasons=reasons,
+        )
+    return FactorShadowPromotionAssessment(
+        status="eligible_for_manual_review",
+        action="manual_review_required",
+        eligible_for_manual_review=True,
+        reasons=["all_preregistered_shadow_evidence_checks_passed"],
     )
 
 

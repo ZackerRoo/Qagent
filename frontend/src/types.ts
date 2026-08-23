@@ -3584,8 +3584,20 @@ export type FactorShadowHorizonEvaluation = {
   baseline_average_turnover_rate: number | null;
   challenger_average_turnover_rate: number | null;
   challenger_max_industry_concentration: number | null;
+  challenger_session_count: number;
+  challenger_session_outperformance_rate: number | null;
+  challenger_rank_ic_win_rate: number | null;
+  challenger_median_session_net_excess_return_pct: number | null;
   challenger_rank_buckets: FactorShadowAttributionGroup[];
   challenger_industries: FactorShadowAttributionGroup[];
+};
+
+export type FactorShadowPromotionAssessment = {
+  status: "collecting" | "eligible_for_manual_review";
+  action: "keep_shadow_only" | "manual_review_required";
+  eligible_for_manual_review: boolean;
+  required_horizons: number[];
+  reasons: string[];
 };
 
 export type FactorShadowEvaluation = {
@@ -3597,6 +3609,7 @@ export type FactorShadowEvaluation = {
   signal_dates: string[];
   next_maturity_date: string | null;
   horizons: FactorShadowHorizonEvaluation[];
+  promotion: FactorShadowPromotionAssessment | null;
   data_health: Record<string, string>;
 };
 

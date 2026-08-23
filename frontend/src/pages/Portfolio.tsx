@@ -1910,6 +1910,7 @@ function FactorShadowAttributionPanel({
   const horizon = evaluation.horizons.find((item) => item.horizon_sessions === 5)
     ?? evaluation.horizons[0];
   if (!horizon) return null;
+  const promotion = evaluation.promotion;
   return (
     <div className="factor-shadow-attribution">
       <div className="paper-research-subhead">
@@ -1932,6 +1933,38 @@ function FactorShadowAttributionPanel({
           <small>{language === "zh" ? `/${horizon.expected_instruments} 个结果` : `/${horizon.expected_instruments} outcomes`}</small>
         </div>
       </div>
+      {promotion && (
+        <div className="factor-shadow-promotion" aria-live="polite">
+          <div>
+            <span className={`status status-${promotion.eligible_for_manual_review ? "ready" : "pending"}`}>
+              {promotion.eligible_for_manual_review
+                ? language === "zh" ? "可人工复核" : "Ready for review"
+                : language === "zh" ? "继续影子" : "Keep shadowing"}
+            </span>
+            <strong>
+              {language === "zh" ? "挑战者稳定性" : "Challenger stability"}
+            </strong>
+            <small>
+              {language === "zh"
+                ? `${horizon.matured_runs} 个成熟截面 · 覆盖 ${Math.round(horizon.outcome_coverage * 100)}%`
+                : `${horizon.matured_runs} mature sessions · ${Math.round(horizon.outcome_coverage * 100)}% coverage`}
+            </small>
+          </div>
+          <div className="factor-shadow-promotion-metrics">
+            <span>
+              {language === "zh" ? "相对基准胜率" : "Edge sessions"}
+              <strong>{formatShadowPercent(horizon.challenger_session_outperformance_rate, language)}</strong>
+            </span>
+            <span>
+              {language === "zh" ? "每期净超额中位数" : "Median net excess"}
+              <strong>{formatShadowReturn(horizon.challenger_median_session_net_excess_return_pct, language)}</strong>
+            </span>
+          </div>
+          <p>
+            {promotion.reasons.map((reason) => localizeShadowPromotionReason(reason, language)).join(language === "zh" ? "；" : "; ")}
+          </p>
+        </div>
+      )}
       <div className="factor-shadow-attribution-grid">
         <FactorShadowAttributionTable
           title={language === "zh" ? "挑战者分位" : "Challenger rank buckets"}
@@ -1946,6 +1979,48 @@ function FactorShadowAttributionPanel({
       </div>
     </div>
   );
+}
+
+function formatShadowPercent(value: number | null, language: Language) {
+  if (value == null) return "-";
+  return `${(value * 100).toFixed(0)}${language === "zh" ? "%" : "%"}`;
+}
+
+function formatShadowReturn(value: number | null, language: Language) {
+  if (value == null) return "-";
+  return `${value > 0 ? "+" : ""}${value.toFixed(2)}${language === "zh" ? "%" : "%"}`;
+}
+
+function localizeShadowPromotionReason(reason: string, language: Language) {
+  const zh: Record<string, string> = {
+    "5d_outcomes_not_matured": "5日结果尚未成熟",
+    "10d_outcomes_not_matured": "10日结果尚未成熟",
+    "20d_outcomes_not_matured": "20日结果尚未成熟",
+    "5d_matured_runs_below_minimum": "5日成熟截面不足20次",
+    "10d_matured_runs_below_minimum": "10日成熟截面不足20次",
+    "20d_matured_runs_below_minimum": "20日成熟截面不足20次",
+    "5d_outcome_coverage_below_minimum": "5日结果覆盖未达95%",
+    "10d_outcome_coverage_below_minimum": "10日结果覆盖未达95%",
+    "20d_outcome_coverage_below_minimum": "20日结果覆盖未达95%",
+    "5d_session_edge_not_stable": "5日相对基准优势不稳定",
+    "10d_session_edge_not_stable": "10日相对基准优势不稳定",
+    "20d_session_edge_not_stable": "20日相对基准优势不稳定",
+    "5d_session_comparison_missing": "5日缺少按期对照结果",
+    "10d_session_comparison_missing": "10日缺少按期对照结果",
+    "20d_session_comparison_missing": "20日缺少按期对照结果",
+    "5d_session_return_missing": "5日缺少按期成本后收益",
+    "10d_session_return_missing": "10日缺少按期成本后收益",
+    "20d_session_return_missing": "20日缺少按期成本后收益",
+    "5d_median_session_net_excess_not_positive": "5日每期成本后超额中位数未转正",
+    "10d_median_session_net_excess_not_positive": "10日每期成本后超额中位数未转正",
+    "20d_median_session_net_excess_not_positive": "20日每期成本后超额中位数未转正",
+    "5d_rank_ic_not_above_baseline": "5日排序IC未持续优于基准",
+    "10d_rank_ic_not_above_baseline": "10日排序IC未持续优于基准",
+    "20d_rank_ic_not_above_baseline": "20日排序IC未持续优于基准",
+    "all_preregistered_shadow_evidence_checks_passed": "已满足预注册影子证据，仍需人工复核后才可变更模型",
+  };
+  if (language === "zh") return zh[reason] ?? reason;
+  return reason.replace(/_/g, " ");
 }
 
 function FactorShadowAttributionTable({
