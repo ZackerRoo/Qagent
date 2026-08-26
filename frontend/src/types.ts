@@ -3649,6 +3649,31 @@ export type FactorResearchExperimentsResponse = {
   data_health: Record<string, string>;
 };
 
+export type ExperimentLibraryArtifact = {
+  artifact_id: string;
+  artifact_type: "strategy_configuration" | "paper_model_cohort" | "factor_research" | "walk_forward_validation" | "paper_forward_baseline";
+  label: string;
+  scope: "current_paper" | "research_shadow" | "historical_development";
+  status: string;
+  created_at: string;
+  identity_digest: string | null;
+  dataset_revision: number | null;
+  code_revision: string | null;
+  evaluation_window: string | null;
+  evidence: Record<string, string>;
+  note: string;
+};
+
+export type ExperimentLibraryReport = {
+  schema_version: string;
+  scope: "research_only";
+  provider: string;
+  generated_at: string;
+  artifacts: ExperimentLibraryArtifact[];
+  warnings: string[];
+  data_health: Record<string, string>;
+};
+
 export type FactorShadowScore = {
   instrument_id: string;
   baseline_score: number;

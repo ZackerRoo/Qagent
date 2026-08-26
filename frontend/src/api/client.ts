@@ -24,6 +24,7 @@ import type {
   FactorDiagnosticsResponse,
   FactorResearchExperiment,
   FactorResearchExperimentsResponse,
+  ExperimentLibraryReport,
   FactorShadowEvaluationResponse,
   FactorShadowResponse,
   FullMarketBatchScanJob,
@@ -950,6 +951,15 @@ export async function fetchFactorResearchExperiments(
   limit = 10,
 ): Promise<FactorResearchExperimentsResponse> {
   return apiGet<FactorResearchExperimentsResponse>("/factor-research/experiments", { limit });
+}
+
+export async function fetchExperimentLibrary(
+  provider: DataProviderMode,
+): Promise<ExperimentLibraryReport> {
+  return apiGet<ExperimentLibraryReport>("/research/experiment-library", {
+    provider,
+    limit: 20,
+  });
 }
 
 export async function fetchFactorResearchShadow(

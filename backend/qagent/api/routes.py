@@ -217,6 +217,7 @@ from qagent.research.alpha_quality import build_alpha_quality_center
 from qagent.research.command_center import build_research_command_center
 from qagent.research.capacity_stress import build_capacity_stress_report
 from qagent.research.decision_quality import build_decision_quality_center
+from qagent.research.experiment_library import build_experiment_library
 from qagent.research.market_intelligence import MarketIntelligenceCenter
 from qagent.research.market_intelligence import (
     apply_market_intelligence_to_cards,
@@ -3012,6 +3013,29 @@ def factor_research_experiments(limit: int = 20):
             "paper_model_isolation": "unchanged",
         },
     }
+
+
+@router.get("/research/experiment-library")
+def research_experiment_library(
+    provider: str = "free",
+    limit: int = 20,
+) -> dict[str, object]:
+    if limit <= 0 or limit > 100:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 100")
+    mode = provider.strip().lower()
+    paper_repo = _paper_repo()
+    account = paper_repo.get_account_settings()
+    report = build_experiment_library(
+        provider=mode,
+        scan_runs=_repo().list_scan_runs(provider=mode, limit=100),
+        factor_experiments=_factor_research_repo().list(limit=limit),
+        walk_forward_runs=_repo().list_walk_forward_runs(provider=mode, limit=limit),
+        paper_baseline=paper_repo.get_research_baseline(
+            provider=mode,
+            paper_session_id=account.session_id,
+        ),
+    )
+    return report.model_dump(mode="json")
 
 
 @router.get("/factor-research/shadow/latest")

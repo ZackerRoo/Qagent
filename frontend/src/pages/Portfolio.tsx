@@ -5,6 +5,7 @@ import {
   deletePaperTrade,
   fetchAutomationScheduler,
   fetchFactorDiagnostics,
+  fetchExperimentLibrary,
   fetchFactorResearchExperiments,
   fetchFactorResearchShadow,
   fetchFactorShadowEvaluation,
@@ -45,6 +46,7 @@ import type {
   AutoProcessingState,
   DataProviderMode,
   FactorDiagnosticsResponse,
+  ExperimentLibraryReport,
   FactorResearchExperiment,
   FactorShadowResponse,
   FactorShadowEvaluationResponse,
@@ -141,6 +143,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [capacityResearch, setCapacityResearch] = useState<CapacityStressReport>();
   const [factorDiagnostics, setFactorDiagnostics] = useState<FactorDiagnosticsResponse>();
   const [factorResearchExperiments, setFactorResearchExperiments] = useState<FactorResearchExperiment[]>([]);
+  const [experimentLibrary, setExperimentLibrary] = useState<ExperimentLibraryReport>();
   const [factorShadow, setFactorShadow] = useState<FactorShadowResponse>();
   const [factorShadowEvaluation, setFactorShadowEvaluation] = useState<FactorShadowEvaluationResponse>();
   const [validation, setValidation] = useState<PaperValidationResponse>();
@@ -252,6 +255,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchPaperCurrentModelEvaluation(dataMode),
       fetchPaperCapacityResearch(dataMode),
       fetchFactorResearchExperiments(),
+      fetchExperimentLibrary(dataMode),
       fetchFactorResearchShadow(dataMode),
       fetchFactorShadowEvaluation(dataMode),
     ]);
@@ -264,6 +268,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       currentModelEvaluationResult,
       capacityResearchResult,
       factorResearchResult,
+      experimentLibraryResult,
       factorShadowResult,
       factorShadowEvaluationResult,
     ] = researchResults;
@@ -282,6 +287,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     }
     if (factorResearchResult.status === "fulfilled") {
       setFactorResearchExperiments(factorResearchResult.value.experiments);
+    }
+    if (experimentLibraryResult.status === "fulfilled") {
+      setExperimentLibrary(experimentLibraryResult.value);
     }
     if (factorShadowResult.status === "fulfilled") {
       setFactorShadow(factorShadowResult.value);
@@ -866,6 +874,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
 
         {portfolioView === "research" && (
           <div className="portfolio-view-stack">
+            <ExperimentLibraryPanel report={experimentLibrary} language={language} />
             <FactorModelResearchPanel
               experiment={factorResearchExperiments[0]}
               shadow={factorShadow}
@@ -1477,6 +1486,90 @@ function paperLookThroughWarningText(
       : `${weight} of equity lacks usable ETF look-through disclosure and remains unknown.`;
   }
   return warning.label;
+}
+
+function ExperimentLibraryPanel({
+  report,
+  language,
+}: {
+  report?: ExperimentLibraryReport;
+  language: Language;
+}) {
+  const artifacts = report?.artifacts ?? [];
+  return (
+    <section className="panel stack experiment-library-panel">
+      <div className="section-header">
+        <div>
+          <p className="eyebrow"><Layers3 size={14} />{language === "zh" ? "实验产物库" : "Experiment library"}</p>
+          <h2>{language === "zh" ? "策略、实验与验证的可追溯索引" : "Traceable strategy, experiment, and validation index"}</h2>
+          <p>{language === "zh" ? "只读取 SQLite 中已保存的身份与结果摘要，不会启动任务或改动模拟盘。" : "Reads persisted SQLite identities and summaries only; it does not start jobs or change paper trading."}</p>
+        </div>
+        <span className="status status-ready">{artifacts.length} {language === "zh" ? "项产物" : "artifacts"}</span>
+      </div>
+      <div className="experiment-library-scopes">
+        <span><small>{language === "zh" ? "当前模拟盘" : "Current paper"}</small><strong>{artifacts.filter((item) => item.scope === "current_paper").length}</strong></span>
+        <span><small>{language === "zh" ? "研究影子" : "Research shadow"}</small><strong>{artifacts.filter((item) => item.scope === "research_shadow").length}</strong></span>
+        <span><small>{language === "zh" ? "历史开发" : "Historical development"}</small><strong>{artifacts.filter((item) => item.scope === "historical_development").length}</strong></span>
+      </div>
+      {artifacts.length ? (
+        <div className="experiment-library-list">
+          {artifacts.map((artifact) => (
+            <article className="experiment-library-item" key={artifact.artifact_id}>
+              <div className="experiment-library-title">
+                <strong>{experimentArtifactLabel(artifact.artifact_type, language)}</strong>
+                <span className={`status status-${artifact.status === "failed" || artifact.status === "rejected" ? "danger" : artifact.status === "collecting_forward_evidence" ? "pending" : "ready"}`}>
+                  {experimentArtifactStatus(artifact.status, language)}
+                </span>
+              </div>
+              <span className="experiment-library-name">{artifact.label}</span>
+              <small>{experimentArtifactScope(artifact.scope, language)} · {artifact.evaluation_window ?? "-"}</small>
+              <div className="experiment-library-evidence">
+                {Object.entries(artifact.evidence).slice(0, 4).map(([key, value]) => (
+                  <span key={key}><small>{key.replace(/_/g, " ")}</small><strong>{value}</strong></span>
+                ))}
+              </div>
+              <p>{artifact.note}</p>
+              {artifact.identity_digest && <code title={artifact.identity_digest}>{artifact.identity_digest.slice(0, 12)}...</code>}
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state">{language === "zh" ? "尚无可读取的实验产物；后续完成扫描或研究后会自动出现。" : "No persisted artifacts yet; completed scans and research will appear here."}</div>
+      )}
+      {report?.warnings.map((warning) => <div className="experiment-library-note" key={warning}>{warning}</div>)}
+    </section>
+  );
+}
+
+function experimentArtifactLabel(type: string, language: Language): string {
+  const labels: Record<string, [string, string]> = {
+    strategy_configuration: ["冻结策略配置", "Frozen strategy configuration"],
+    paper_model_cohort: ["模拟盘模型 cohort", "Paper model cohort"],
+    factor_research: ["因子模型实验", "Factor model experiment"],
+    walk_forward_validation: ["Walk-forward 验证", "Walk-forward validation"],
+    paper_forward_baseline: ["前向比较基线", "Forward comparison baseline"],
+  };
+  return labels[type]?.[language === "zh" ? 0 : 1] ?? type;
+}
+
+function experimentArtifactScope(scope: string, language: Language): string {
+  const labels: Record<string, [string, string]> = {
+    current_paper: ["当前模拟盘", "Current paper"],
+    research_shadow: ["研究影子", "Research shadow"],
+    historical_development: ["历史开发", "Historical development"],
+  };
+  return labels[scope]?.[language === "zh" ? 0 : 1] ?? scope;
+}
+
+function experimentArtifactStatus(status: string, language: Language): string {
+  const labels: Record<string, [string, string]> = {
+    frozen: ["已冻结", "Frozen"],
+    collecting_forward_evidence: ["收集前向证据", "Collecting forward evidence"],
+    succeeded: ["已完成", "Complete"],
+    rejected: ["已拒绝", "Rejected"],
+    failed: ["失败", "Failed"],
+  };
+  return labels[status]?.[language === "zh" ? 0 : 1] ?? status;
 }
 
 function FactorModelResearchPanel({

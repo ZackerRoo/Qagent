@@ -87,6 +87,7 @@ def test_factor_research_experiment_api_starts_empty_and_isolated(tmp_path, monk
     client = TestClient(create_app())
 
     response = client.get("/api/factor-research/experiments")
+    library = client.get("/api/research/experiment-library?provider=fixture")
     shadow = client.get("/api/factor-research/shadow/latest")
     evaluation = client.get("/api/factor-research/shadow/evaluation?provider=fixture")
     resolution = client.post(
@@ -97,6 +98,9 @@ def test_factor_research_experiment_api_starts_empty_and_isolated(tmp_path, monk
     assert response.status_code == 200
     assert response.json()["experiments"] == []
     assert response.json()["data_health"]["paper_model_isolation"] == "unchanged"
+    assert library.status_code == 200
+    assert library.json()["artifacts"] == []
+    assert library.json()["data_health"]["experiment_library_changes_paper_execution"] == "false"
     assert shadow.status_code == 200
     assert shadow.json()["run"] is None
     assert shadow.json()["data_health"]["paper_order_effect"] == "none"

@@ -9364,6 +9364,140 @@ details.compact-data-health:not([open]) > .data-health-details {
   overflow: hidden;
 }
 
+.experiment-library-panel {
+  overflow: hidden;
+}
+
+.experiment-library-panel .eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.experiment-library-panel .section-header p:last-child {
+  max-width: 760px;
+  margin: 6px 0 0;
+  color: var(--terminal-muted);
+}
+
+.experiment-library-scopes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.experiment-library-scopes > span,
+.experiment-library-evidence > span {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 10px 12px;
+  border-right: 1px solid var(--terminal-border-soft);
+}
+
+.experiment-library-scopes > span:last-child,
+.experiment-library-evidence > span:last-child {
+  border-right: 0;
+}
+
+.experiment-library-scopes small,
+.experiment-library-evidence small {
+  color: var(--terminal-muted-2);
+  font-size: 11px;
+}
+
+.experiment-library-scopes strong {
+  color: var(--terminal-cyan);
+}
+
+.experiment-library-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.experiment-library-item {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+  padding: 13px;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.experiment-library-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.experiment-library-title strong,
+.experiment-library-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.experiment-library-name {
+  color: var(--terminal-text);
+  font-size: 13px;
+}
+
+.experiment-library-item > small,
+.experiment-library-item > p {
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.experiment-library-item > p {
+  margin: 0;
+}
+
+.experiment-library-item code {
+  overflow: hidden;
+  color: var(--terminal-muted-2);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.experiment-library-evidence {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.experiment-library-evidence > span:nth-child(2n) {
+  border-right: 0;
+}
+
+.experiment-library-evidence > span:nth-child(n + 3) {
+  border-top: 1px solid var(--terminal-border-soft);
+}
+
+.experiment-library-evidence strong {
+  overflow: hidden;
+  color: var(--terminal-text);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.experiment-library-note {
+  padding: 10px 12px;
+  border-left: 3px solid var(--terminal-yellow);
+  color: var(--terminal-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .factor-model-heading {
   align-items: flex-start;
   gap: 20px;
@@ -10049,6 +10183,10 @@ details.compact-data-health:not([open]) > .data-health-details {
     grid-template-columns: 1fr;
   }
 
+  .experiment-library-list {
+    grid-template-columns: 1fr;
+  }
+
   .factor-shadow-selection-lift > div {
     border-right: 0;
     border-bottom: 1px solid var(--terminal-border-soft);
@@ -10088,7 +10226,8 @@ details.compact-data-health:not([open]) > .data-health-details {
   .paper-attribution-grid,
   .factor-shadow-attribution-grid,
   .factor-model-meta,
-  .factor-importance-row {
+  .factor-importance-row,
+  .experiment-library-scopes {
     grid-template-columns: 1fr;
   }
 
@@ -10104,10 +10243,19 @@ details.compact-data-health:not([open]) > .data-health-details {
     border-bottom: 1px solid var(--terminal-border-soft);
   }
 
+  .experiment-library-scopes > span {
+    border-right: 0;
+    border-bottom: 1px solid var(--terminal-border-soft);
+  }
+
   .paper-baseline-strip > span:last-child,
   .paper-checkpoint:last-child,
   .factor-model-meta > span:last-child,
   .factor-importance-row > span:last-child {
+    border-bottom: 0;
+  }
+
+  .experiment-library-scopes > span:last-child {
     border-bottom: 0;
   }
 
