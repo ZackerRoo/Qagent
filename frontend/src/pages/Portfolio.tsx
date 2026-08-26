@@ -20,6 +20,7 @@ import {
   fetchPaperLedger,
   fetchPaperLookThroughRisk,
   fetchPaperSession,
+  fetchPaperTradeEvents,
   fetchPaperTrades,
   fetchPaperValidation,
   fetchPortfolio,
@@ -63,6 +64,7 @@ import type {
   PaperSessionResponse,
   PaperSessionStartPayload,
   PaperTrade,
+  PaperTradeEventsResponse,
   PaperTradesResponse,
   PaperValidationResponse,
   PortfolioResponse,
@@ -151,6 +153,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [isRunningFactorResearch, setIsRunningFactorResearch] = useState(false);
   const [isLoadingEtfExposure, setIsLoadingEtfExposure] = useState(false);
   const [deletingPaperTradeId, setDeletingPaperTradeId] = useState("");
+  const [selectedPaperTradeId, setSelectedPaperTradeId] = useState("");
+  const [paperTradeEvents, setPaperTradeEvents] = useState<PaperTradeEventsResponse>();
+  const [isLoadingPaperTradeEvents, setIsLoadingPaperTradeEvents] = useState(false);
   const [, setInstrumentLabelNonce] = useState(0);
 
   async function load() {
@@ -398,6 +403,11 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   }, [dataMode, paperScope]);
 
   useEffect(() => {
+    setSelectedPaperTradeId("");
+    setPaperTradeEvents(undefined);
+  }, [dataMode, paperScope]);
+
+  useEffect(() => {
     const instrumentIds = [...new Set([
       ...(ledger?.positions.map((position) => position.instrument_id) ?? []),
       ...(ledger?.transactions.map((transaction) => transaction.instrument_id) ?? []),
@@ -578,6 +588,28 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       setPaperMessage(caught instanceof Error ? caught.message : "Failed to delete paper trade");
     } finally {
       setDeletingPaperTradeId("");
+    }
+  }
+
+  async function togglePaperTradeTimeline(tradeId: string) {
+    if (selectedPaperTradeId === tradeId) {
+      setSelectedPaperTradeId("");
+      setPaperTradeEvents(undefined);
+      return;
+    }
+    setSelectedPaperTradeId(tradeId);
+    setPaperTradeEvents(undefined);
+    setIsLoadingPaperTradeEvents(true);
+    try {
+      setPaperTradeEvents(await fetchPaperTradeEvents(tradeId));
+    } catch {
+      setPaperMessage(
+        language === "zh"
+          ? "交易轨迹暂未加载，模拟盘记录未受影响。"
+          : "The trade timeline could not load; paper records are unaffected.",
+      );
+    } finally {
+      setIsLoadingPaperTradeEvents(false);
     }
   }
 
@@ -762,22 +794,33 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
                       <td className="reason-cell">{paperNextAction(trade, language)}</td>
                       <td className="reason-cell">{localizeStrategy(trade.strategy_id, language)}</td>
                       <td>
-                        {paperScope === "legacy" ? (
+                        <div className="paper-trade-actions">
                           <button
-                            className="icon-action danger compact-button"
+                            className="compact-button"
                             type="button"
-                            onClick={() => removePaperTrade(trade.trade_id)}
-                            disabled={deletingPaperTradeId === trade.trade_id}
+                            onClick={() => void togglePaperTradeTimeline(trade.trade_id)}
                           >
-                            {deletingPaperTradeId === trade.trade_id
-                              ? t("common.running")
-                              : t("common.delete")}
+                            {selectedPaperTradeId === trade.trade_id
+                              ? language === "zh" ? "收起轨迹" : "Hide timeline"
+                              : language === "zh" ? "查看轨迹" : "Timeline"}
                           </button>
-                        ) : (
-                          <span className="status status-ready">
-                            {language === "zh" ? "认证只读" : "Read only"}
-                          </span>
-                        )}
+                          {paperScope === "legacy" ? (
+                            <button
+                              className="icon-action danger compact-button"
+                              type="button"
+                              onClick={() => removePaperTrade(trade.trade_id)}
+                              disabled={deletingPaperTradeId === trade.trade_id}
+                            >
+                              {deletingPaperTradeId === trade.trade_id
+                                ? t("common.running")
+                                : t("common.delete")}
+                            </button>
+                          ) : (
+                            <span className="status status-ready">
+                              {language === "zh" ? "认证只读" : "Read only"}
+                            </span>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -797,6 +840,13 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
                 </tbody>
               </table>
             </div>
+            {selectedPaperTradeId && (
+              <PaperTradeTimelinePanel
+                response={paperTradeEvents}
+                loading={isLoadingPaperTradeEvents}
+                language={language}
+              />
+            )}
           </div>
         )}
 
@@ -1027,6 +1077,71 @@ function PaperAccountCapacityStrip({
       </div>
     </section>
   );
+}
+
+function PaperTradeTimelinePanel({
+  response,
+  loading,
+  language,
+}: {
+  response?: PaperTradeEventsResponse;
+  loading: boolean;
+  language: Language;
+}) {
+  const zh = language === "zh";
+  if (loading) {
+    return <section className="paper-trade-timeline is-loading">{zh ? "正在读取交易轨迹。" : "Loading trade timeline."}</section>;
+  }
+  if (!response) return null;
+  return (
+    <section className="paper-trade-timeline">
+      <div className="paper-trade-timeline-heading">
+        <div>
+          <span>{zh ? "模拟交易轨迹" : "Paper trade timeline"}</span>
+          <strong>{formatInstrumentDisplay(response.instrument_id)}</strong>
+        </div>
+        <small>{zh ? `${response.events.length} 个追加事件` : `${response.events.length} append-only events`}</small>
+      </div>
+      <ol>
+        {response.events.map((event) => (
+          <li key={event.event_id}>
+            <span className="paper-trade-timeline-sequence">{event.sequence}</span>
+            <div>
+              <strong>{paperTradeEventLabel(event.event_type, language)}</strong>
+              <small>
+                {event.from_status && event.from_status !== event.to_status
+                  ? `${localizeStatus(event.from_status, language)} -> ${localizeStatus(event.to_status, language)}`
+                  : localizeStatus(event.to_status, language)}
+                {event.trade_date ? ` · ${event.trade_date}` : ""}
+                {event.price ? ` · ${event.price}` : ""}
+              </small>
+              {(event.reason_code || event.note) && (
+                <p>{[event.reason_code, event.note].filter(Boolean).join(" · ")}</p>
+              )}
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function paperTradeEventLabel(eventType: string, language: Language) {
+  const labels: Record<string, [string, string]> = {
+    created: ["创建候选", "Candidate created"],
+    signal: ["生成信号", "Signal generated"],
+    entry: ["模拟入场", "Paper entry"],
+    mark: ["价格更新", "Price marked"],
+    exit: ["模拟退出", "Paper exit"],
+    status_changed: ["状态变化", "Status changed"],
+    status_corrected: ["状态修正", "Status corrected"],
+    execution_updated: ["撮合更新", "Execution updated"],
+    deleted: ["已删除", "Deleted"],
+    session_reset: ["账户重置", "Session reset"],
+    legacy_snapshot: ["历史快照", "Legacy snapshot"],
+  };
+  const label = labels[eventType];
+  return label ? label[language === "zh" ? 0 : 1] : eventType;
 }
 
 function PaperCurrentModelStrip({

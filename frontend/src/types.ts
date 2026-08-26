@@ -1513,6 +1513,32 @@ export type PaperTrade = {
   notes: string;
 };
 
+export type PaperTradeEvent = {
+  event_id: string;
+  trade_id: string;
+  instrument_id: string;
+  sequence: number;
+  idempotency_key: string;
+  event_type: string;
+  from_status: string | null;
+  to_status: string;
+  occurred_at: string;
+  trade_date: string | null;
+  price: string | null;
+  reason_code: string | null;
+  note: string;
+  source: string;
+  created_at: string;
+};
+
+export type PaperTradeEventsResponse = {
+  trade_id: string;
+  instrument_id: string;
+  status: string;
+  events: PaperTradeEvent[];
+  data_health: Record<string, string>;
+};
+
 export type PaperTradingSummary = {
   total: number;
   pending: number;

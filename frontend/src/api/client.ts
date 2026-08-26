@@ -56,6 +56,7 @@ import type {
   PaperSessionStartResponse,
   PaperTradeFromOpportunityPayload,
   PaperTradeFromOpportunityResponse,
+  PaperTradeEventsResponse,
   PaperReportingScope,
   PaperTradesResponse,
   PaperUpdateResponse,
@@ -438,6 +439,12 @@ export async function fetchPaperTrades(
     reporting_scope: reportingScope,
     limit: 100,
   });
+}
+
+export async function fetchPaperTradeEvents(
+  tradeId: string,
+): Promise<PaperTradeEventsResponse> {
+  return apiGet<PaperTradeEventsResponse>(`/paper-trades/${encodeURIComponent(tradeId)}/events`);
 }
 
 export async function fetchPaperAccountStatus(
