@@ -258,6 +258,7 @@ def test_paper_risk_gate_uses_only_current_model_cohort(tmp_path, monkeypatch):
         repo,
         paper_repo.list_trades(limit=1000, provider="free"),
         provider="free",
+        account=paper_repo.get_account_settings(),
         as_of_completed_session=date(2026, 8, 7),
     )
     assert current_model is not None
@@ -271,6 +272,22 @@ def test_paper_risk_gate_uses_only_current_model_cohort(tmp_path, monkeypatch):
     assert current_model["trade_start_date"] == date(2026, 8, 5)
     assert current_model["completed_scan_sessions"] == 3
     assert current_model["completed_trade_sessions"] == 3
+    assert current_model["strategy_card"] == {
+        "schema_version": "paper-strategy-version-card-v1",
+        "cohort_id": current_model["cohort_id"],
+        "effective_from": date(2026, 8, 5),
+        "provider": "free",
+        "feature_set_version": "factor-v3",
+        "recommendation_policy": "final-policy-v1",
+        "calibration_merge_policy": "fixed",
+        "execution": {
+            "max_positions": 5,
+            "allocation_per_trade_pct": Decimal("10"),
+            "transaction_cost_bps": Decimal("0"),
+            "slippage_bps": Decimal("0"),
+            "take_profit_pct": Decimal("100"),
+        },
+    }
 
 
 def test_automatic_full_scan_is_deferred_during_market_session(monkeypatch):

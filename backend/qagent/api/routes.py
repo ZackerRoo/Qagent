@@ -6170,6 +6170,7 @@ def _paper_current_model_status(
     trades: list[PaperTradeRecord],
     *,
     provider: str | None,
+    account: PaperAccountSettings,
     as_of_completed_session: date | None = None,
 ) -> dict[str, object] | None:
     if provider is None:
@@ -6197,6 +6198,22 @@ def _paper_current_model_status(
         default=None,
     )
     completed_session = as_of_completed_session or _latest_completed_a_share_session()
+    strategy_card = {
+        "schema_version": "paper-strategy-version-card-v1",
+        "cohort_id": current_cohort.cohort_id,
+        "effective_from": scan_start_date,
+        "provider": provider,
+        "feature_set_version": current_cohort.feature_set_version,
+        "recommendation_policy": current_cohort.recommendation_policy_entrypoint,
+        "calibration_merge_policy": current_cohort.calibration_merge_policy,
+        "execution": {
+            "max_positions": account.max_positions,
+            "allocation_per_trade_pct": account.allocation_per_trade_pct,
+            "transaction_cost_bps": account.transaction_cost_bps,
+            "slippage_bps": account.slippage_bps,
+            "take_profit_pct": account.take_profit_pct,
+        },
+    }
     return {
         **summary.model_dump(mode="json"),
         "active": summary.pending + summary.open,
@@ -6217,6 +6234,7 @@ def _paper_current_model_status(
         "unclassified": sum(
             cohorts_by_snapshot.get(trade.source_snapshot_id) is None for trade in trades
         ),
+        "strategy_card": strategy_card,
     }
 
 
@@ -6307,6 +6325,7 @@ def paper_trade_account_status(provider: str | None = None) -> dict[str, object]
             repo,
             scoped_trades,
             provider=mode,
+            account=account,
             as_of_completed_session=completed_session,
         ),
         "observation": _paper_observation_status(

@@ -1546,6 +1546,25 @@ export type PaperCurrentModelStatus = PaperTradingSummary & {
   completed_trade_sessions: number;
   excluded_other_cohort: number;
   unclassified: number;
+  strategy_card: PaperStrategyVersionCard;
+};
+
+export type PaperStrategyVersionCard = {
+  schema_version: "paper-strategy-version-card-v1";
+  cohort_id: string;
+  effective_from: string | null;
+  provider: string;
+  feature_set_version: string;
+  recommendation_policy: string;
+  calibration_merge_policy: string;
+  execution: Pick<
+    PaperAccountSettings,
+    | "max_positions"
+    | "allocation_per_trade_pct"
+    | "transaction_cost_bps"
+    | "slippage_bps"
+    | "take_profit_pct"
+  >;
 };
 
 export type PaperObservationStatus = {

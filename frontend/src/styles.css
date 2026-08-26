@@ -10001,6 +10001,7 @@ details.compact-data-health:not([open]) > .data-health-details {
   .paper-current-model-meta,
   .paper-current-model-metrics,
   .paper-current-model-benchmark,
+  .paper-strategy-version-metrics,
   .paper-attribution-grid,
   .factor-shadow-attribution-grid,
   .factor-model-meta,
@@ -10013,6 +10014,7 @@ details.compact-data-health:not([open]) > .data-health-details {
   .paper-current-model-meta > span,
   .paper-current-model-metrics > span,
   .paper-current-model-benchmark > span,
+  .paper-strategy-version-metrics > span,
   .factor-model-meta > span,
   .factor-importance-row > span {
     border-right: 0;
@@ -17291,6 +17293,57 @@ td {
   margin: 0;
 }
 
+.paper-strategy-version-card {
+  display: grid;
+  gap: 7px;
+}
+
+.paper-strategy-version-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.paper-strategy-version-heading span,
+.paper-strategy-version-heading small,
+.paper-strategy-version-metrics small {
+  color: var(--terminal-muted);
+  font-size: 10px;
+}
+
+.paper-strategy-version-heading span {
+  color: var(--terminal-text);
+  font-weight: 600;
+}
+
+.paper-strategy-version-metrics {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  border-top: 1px solid var(--terminal-border-soft);
+  border-bottom: 1px solid var(--terminal-border-soft);
+}
+
+.paper-strategy-version-metrics > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  border-right: 1px solid var(--terminal-border-soft);
+  padding: 8px 10px;
+}
+
+.paper-strategy-version-metrics > span:last-child {
+  border-right: 0;
+}
+
+.paper-strategy-version-metrics strong {
+  overflow: hidden;
+  color: var(--terminal-text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .paper-execution-audit {
   display: grid;
   gap: 10px;
@@ -17682,7 +17735,15 @@ td {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .paper-strategy-version-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .paper-current-model-metrics > span:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .paper-strategy-version-metrics > span:nth-child(2n) {
     border-right: 0;
   }
 

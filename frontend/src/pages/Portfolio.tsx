@@ -1070,6 +1070,16 @@ function PaperCurrentModelStrip({
     ],
     [zh ? "候选刷新" : "Candidates", paperCandidateRefreshLabel(scanStatus, language)],
   ];
+  const version = status.strategy_card;
+  const executionMetrics = [
+    [zh ? "策略入口" : "Policy", version.recommendation_policy],
+    [zh ? "校准方式" : "Calibration", version.calibration_merge_policy],
+    [zh ? "持仓上限" : "Position limit", version.execution.max_positions],
+    [zh ? "单笔配比" : "Allocation", `${version.execution.allocation_per_trade_pct}%`],
+    [zh ? "单边成本" : "One-way cost", `${version.execution.transaction_cost_bps} bps`],
+    [zh ? "单边滑点" : "One-way slippage", `${version.execution.slippage_bps} bps`],
+    [zh ? "止盈阈值" : "Take profit", `${version.execution.take_profit_pct}%`],
+  ];
   return (
     <section className="paper-current-model-strip">
       <div className="paper-current-model-heading">
@@ -1090,6 +1100,24 @@ function PaperCurrentModelStrip({
             <strong>{value}</strong>
           </span>
         ))}
+      </div>
+      <div className="paper-strategy-version-card">
+        <div className="paper-strategy-version-heading">
+          <span>{zh ? "策略版本卡" : "Strategy version card"}</span>
+          <small>
+            {zh
+              ? `生效 ${version.effective_from ?? "-"} · 数据源 ${version.provider} · 身份 ${version.cohort_id.slice(0, 8)}`
+              : `Effective ${version.effective_from ?? "-"} · provider ${version.provider} · identity ${version.cohort_id.slice(0, 8)}`}
+          </small>
+        </div>
+        <div className="paper-strategy-version-metrics">
+          {executionMetrics.map(([label, value]) => (
+            <span key={label}>
+              <small>{label}</small>
+              <strong>{value}</strong>
+            </span>
+          ))}
+        </div>
       </div>
       <p>
         {zh
