@@ -1915,6 +1915,37 @@ export type PaperCurrentModelEvaluationResponse = {
   data_health: Record<string, string>;
 };
 
+export type CapacityStressHolding = {
+  trade_id: string;
+  instrument_id: string;
+  instrument_label: string | null;
+  asset_type: string;
+  status: string;
+  allocation: string;
+  avg_amount_20d: string | null;
+  participation_rate_pct: number | null;
+  estimated_impact_bps: number | null;
+  capacity_status: "within_limit" | "review" | "exceeds_execution_limit" | "missing_adv";
+  note: string;
+};
+
+export type CapacityStressReport = {
+  as_of: string;
+  scope: "research_only";
+  model_version: string;
+  headline: string;
+  active_holdings: number;
+  holdings_with_adv: number;
+  aggregate_allocation: string;
+  weighted_participation_rate_pct: number | null;
+  weighted_estimated_impact_bps: number | null;
+  review_count: number;
+  blocked_count: number;
+  holdings: CapacityStressHolding[];
+  warnings: string[];
+  data_health: Record<string, string>;
+};
+
 export type PaperValidationSummary = {
   total_trades: number;
   triggered_trades: number;

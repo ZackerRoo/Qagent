@@ -44,6 +44,7 @@ import type {
   PaperCandidatePoolResponse,
   PaperAccountStatusResponse,
   PaperCurrentModelEvaluationResponse,
+  CapacityStressReport,
   PaperDailyReportResponse,
   PaperDualTrackResponse,
   PaperExecutionAuditResponse,
@@ -506,6 +507,15 @@ export async function fetchPaperCurrentModelEvaluation(
   provider: DataProviderMode,
 ): Promise<PaperCurrentModelEvaluationResponse> {
   return apiGet<PaperCurrentModelEvaluationResponse>("/paper-trades/current-model-evaluation", {
+    provider,
+    limit: 1000,
+  });
+}
+
+export async function fetchPaperCapacityResearch(
+  provider: DataProviderMode,
+): Promise<CapacityStressReport> {
+  return apiGet<CapacityStressReport>("/paper-trades/capacity-research", {
     provider,
     limit: 1000,
   });

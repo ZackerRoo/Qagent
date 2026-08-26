@@ -11,6 +11,7 @@ import {
   fetchEtfExposures,
   fetchInstrumentLabels,
   fetchPaperCandidatePool,
+  fetchPaperCapacityResearch,
   fetchPaperAccountStatus,
   fetchPaperCurrentModelEvaluation,
   fetchPaperDailyReport,
@@ -49,6 +50,8 @@ import type {
   FactorShadowEvaluationResponse,
   EtfExposureResponse,
   PaperCandidatePoolResponse,
+  CapacityStressReport,
+  CapacityStressHolding,
   PaperAccountStatusResponse,
   PaperCurrentModelEvaluationResponse,
   PaperDualTrackResponse,
@@ -135,6 +138,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [executionAudit, setExecutionAudit] = useState<PaperExecutionAuditResponse>();
   const [forwardComparison, setForwardComparison] = useState<PaperForwardComparisonResponse>();
   const [currentModelEvaluation, setCurrentModelEvaluation] = useState<PaperCurrentModelEvaluationResponse>();
+  const [capacityResearch, setCapacityResearch] = useState<CapacityStressReport>();
   const [factorDiagnostics, setFactorDiagnostics] = useState<FactorDiagnosticsResponse>();
   const [factorResearchExperiments, setFactorResearchExperiments] = useState<FactorResearchExperiment[]>([]);
   const [factorShadow, setFactorShadow] = useState<FactorShadowResponse>();
@@ -246,6 +250,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchPaperDualTrack(dataMode),
       fetchPaperForwardComparison(dataMode),
       fetchPaperCurrentModelEvaluation(dataMode),
+      fetchPaperCapacityResearch(dataMode),
       fetchFactorResearchExperiments(),
       fetchFactorResearchShadow(dataMode),
       fetchFactorShadowEvaluation(dataMode),
@@ -257,6 +262,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       dualTrackResult,
       forwardComparisonResult,
       currentModelEvaluationResult,
+      capacityResearchResult,
       factorResearchResult,
       factorShadowResult,
       factorShadowEvaluationResult,
@@ -270,6 +276,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     }
     if (currentModelEvaluationResult.status === "fulfilled") {
       setCurrentModelEvaluation(currentModelEvaluationResult.value);
+    }
+    if (capacityResearchResult.status === "fulfilled") {
+      setCapacityResearch(capacityResearchResult.value);
     }
     if (factorResearchResult.status === "fulfilled") {
       setFactorResearchExperiments(factorResearchResult.value.experiments);
@@ -342,6 +351,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchPaperDualTrack(dataMode),
       fetchPaperForwardComparison(dataMode),
       fetchPaperCurrentModelEvaluation(dataMode),
+      fetchPaperCapacityResearch(dataMode),
       fetchAutomationScheduler(),
       fetchPaperExecutionAudit(dataMode),
     ]);
@@ -357,6 +367,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       dualTrackResult,
       forwardComparisonResult,
       currentModelEvaluationResult,
+      capacityResearchResult,
       automationSchedulerResult,
       executionAuditResult,
     ] = results;
@@ -389,6 +400,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     }
     if (currentModelEvaluationResult.status === "fulfilled") {
       setCurrentModelEvaluation(currentModelEvaluationResult.value);
+    }
+    if (capacityResearchResult.status === "fulfilled") {
+      setCapacityResearch(capacityResearchResult.value);
     }
     if (automationSchedulerResult.status === "fulfilled") {
       setAutomationScheduler(automationSchedulerResult.value);
@@ -862,6 +876,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
             <PaperForwardResearchWorkbench
               comparison={forwardComparison}
               currentModel={currentModelEvaluation}
+              capacityResearch={capacityResearch}
               factorShadowEvaluation={factorShadowEvaluation?.evaluation}
               factors={factorDiagnostics}
               loadingFactors={isLoadingFactorDiagnostics}
@@ -1623,6 +1638,7 @@ function FactorModelResearchPanel({
 function PaperForwardResearchWorkbench({
   comparison,
   currentModel,
+  capacityResearch,
   factorShadowEvaluation,
   factors,
   loadingFactors,
@@ -1630,6 +1646,7 @@ function PaperForwardResearchWorkbench({
 }: {
   comparison?: PaperForwardComparisonResponse;
   currentModel?: PaperCurrentModelEvaluationResponse;
+  capacityResearch?: CapacityStressReport;
   factorShadowEvaluation?: FactorShadowEvaluationResponse["evaluation"];
   factors?: FactorDiagnosticsResponse;
   loadingFactors: boolean;
@@ -1638,6 +1655,12 @@ function PaperForwardResearchWorkbench({
   if (!comparison) {
     return (
       <section className="panel stack paper-forward-workbench">
+        <PaperResearchComparisonMatrix
+          currentModel={currentModel}
+          factorShadowEvaluation={factorShadowEvaluation}
+          language={language}
+        />
+        {capacityResearch && <CapacityStressPanel report={capacityResearch} language={language} />}
         {currentModel && <PaperCurrentModelAccuracyPanel report={currentModel} language={language} />}
         {factorShadowEvaluation && (
           <FactorShadowAttributionPanel evaluation={factorShadowEvaluation} language={language} />
@@ -1664,6 +1687,12 @@ function PaperForwardResearchWorkbench({
 
   return (
     <section className="panel stack paper-forward-workbench">
+      <PaperResearchComparisonMatrix
+        currentModel={currentModel}
+        factorShadowEvaluation={factorShadowEvaluation}
+        language={language}
+      />
+      {capacityResearch && <CapacityStressPanel report={capacityResearch} language={language} />}
       {currentModel && <PaperCurrentModelAccuracyPanel report={currentModel} language={language} />}
       {factorShadowEvaluation && (
         <FactorShadowAttributionPanel evaluation={factorShadowEvaluation} language={language} />
@@ -1928,6 +1957,154 @@ function PaperForwardResearchWorkbench({
 
       <div className="paper-forward-warnings">
         {comparison.warnings.map((warning) => <span key={warning}>{warning}</span>)}
+      </div>
+    </section>
+  );
+}
+
+function PaperResearchComparisonMatrix({
+  currentModel,
+  factorShadowEvaluation,
+  language,
+}: {
+  currentModel?: PaperCurrentModelEvaluationResponse;
+  factorShadowEvaluation?: FactorShadowEvaluationResponse["evaluation"];
+  language: Language;
+}) {
+  const horizon = factorShadowEvaluation?.horizons.find((item) => item.horizon_sessions === 10)
+    ?? factorShadowEvaluation?.horizons[0];
+  const currentExcess = currentModel?.metrics.find(
+    (metric) => metric.key === "average_excess_return_pct",
+  )?.value;
+  const currentClosed = currentModel?.metrics.find(
+    (metric) => metric.key === "closed_trades",
+  )?.value;
+  const rows = [
+    {
+      key: "baseline",
+      label: language === "zh" ? "基准因子" : "Baseline factor",
+      source: language === "zh" ? "同日横截面影子结果" : "Same-date shadow cross-section",
+      outcome: formatPct(horizon?.baseline_top_excess_return_pct ?? null),
+      sample: horizon ? `${horizon.completed_instruments}/${horizon.expected_instruments}` : "-",
+      comparable: language === "zh" ? "与 challenger 同口径" : "Comparable with challenger",
+    },
+    {
+      key: "challenger",
+      label: language === "zh" ? "Challenger" : "Challenger",
+      source: language === "zh" ? "同日横截面影子结果" : "Same-date shadow cross-section",
+      outcome: formatPct(horizon?.challenger_top_net_excess_return_pct ?? null),
+      sample: horizon ? `${horizon.completed_instruments}/${horizon.expected_instruments}` : "-",
+      comparable: language === "zh" ? "与基准因子同口径" : "Comparable with baseline",
+    },
+    {
+      key: "current",
+      label: language === "zh" ? "当前纸面模型" : "Current paper model",
+      source: language === "zh" ? "真实纸面成交与沪深300" : "Actual paper fills vs CSI 300",
+      outcome: formatPct(currentExcess ?? null),
+      sample: currentClosed == null ? "-" : String(currentClosed),
+      comparable: language === "zh" ? "独立实盘样本，不与影子数值直接相减" : "Independent fills; do not subtract from shadow values",
+    },
+  ];
+  return (
+    <section className="paper-research-matrix">
+      <div className="paper-research-subhead">
+        <div>
+          <p className="eyebrow">{language === "zh" ? "研究比较" : "Research comparison"}</p>
+          <h3>{language === "zh" ? "基准、当前模型与 challenger" : "Baseline, current model, and challenger"}</h3>
+          <p>
+            {language === "zh"
+              ? "影子基准与 challenger 使用同一信号日、股票池和成本口径；当前模型只作为真实纸面成交的独立核验。"
+              : "Baseline and challenger share signal dates, universe, and cost assumptions; the current model is an independent paper-fill check."}
+          </p>
+        </div>
+        <span className="status status-pending">research / shadow</span>
+      </div>
+      <div className="table-shell">
+        <table className="paper-research-matrix-table">
+          <thead>
+            <tr>
+              <th>{language === "zh" ? "轨道" : "Track"}</th>
+              <th>{language === "zh" ? "来源与口径" : "Source and method"}</th>
+              <th>{language === "zh" ? "核心结果" : "Core result"}</th>
+              <th>{language === "zh" ? "成熟样本" : "Mature samples"}</th>
+              <th>{language === "zh" ? "可比性" : "Comparability"}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.key}>
+                <td className="ticker">{row.label}</td>
+                <td>{row.source}</td>
+                <td className={row.outcome.startsWith("-") ? "negative" : ""}>{row.outcome}</td>
+                <td>{row.sample}</td>
+                <td className="reason-cell">{row.comparable}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {horizon && (
+        <small className="paper-research-matrix-note">
+          {language === "zh"
+            ? `影子结果采用 ${horizon.horizon_sessions} 个交易日持有期，覆盖率 ${(horizon.outcome_coverage * 100).toFixed(1)}%，成熟运行 ${horizon.matured_runs} 次。`
+            : `Shadow results use ${horizon.horizon_sessions} sessions, ${(horizon.outcome_coverage * 100).toFixed(1)}% coverage, and ${horizon.matured_runs} mature runs.`}
+        </small>
+      )}
+    </section>
+  );
+}
+
+function CapacityStressPanel({ report, language }: { report: CapacityStressReport; language: Language }) {
+  return (
+    <section className="capacity-stress-panel">
+      <div className="paper-research-subhead">
+        <div>
+          <p className="eyebrow">{language === "zh" ? "A股容量研究" : "A-share capacity research"}</p>
+          <h3>{language === "zh" ? "仓位参与率与冲击成本压力" : "Participation and impact-cost pressure"}</h3>
+          <p>{report.headline}</p>
+        </div>
+        <span className={`status status-${report.blocked_count ? "blocked" : "ready"}`}>
+          {report.blocked_count
+            ? language === "zh" ? "需关注" : "Review"
+            : language === "zh" ? "研究正常" : "Research clear"}
+        </span>
+      </div>
+      <div className="capacity-stress-summary">
+        <span><small>{language === "zh" ? "活动仓位" : "Active"}</small><strong>{report.active_holdings}</strong></span>
+        <span><small>{language === "zh" ? "成交额覆盖" : "ADV coverage"}</small><strong>{report.holdings_with_adv}/{report.active_holdings}</strong></span>
+        <span><small>{language === "zh" ? "加权参与率" : "Weighted participation"}</small><strong>{formatPct(report.weighted_participation_rate_pct)}</strong></span>
+        <span><small>{language === "zh" ? "估算冲击成本" : "Estimated impact"}</small><strong>{report.weighted_estimated_impact_bps == null ? "-" : `${report.weighted_estimated_impact_bps.toFixed(2)} bps`}</strong></span>
+      </div>
+      {report.holdings.length > 0 && (
+        <div className="table-shell">
+          <table className="capacity-stress-table">
+            <thead>
+              <tr>
+                <th>{language === "zh" ? "标的" : "Instrument"}</th>
+                <th>{language === "zh" ? "分配金额" : "Allocation"}</th>
+                <th>{language === "zh" ? "20日成交额" : "20D turnover"}</th>
+                <th>{language === "zh" ? "参与率" : "Participation"}</th>
+                <th>{language === "zh" ? "冲击成本" : "Impact"}</th>
+                <th>{language === "zh" ? "研究结论" : "Research conclusion"}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.holdings.map((holding) => (
+                <tr key={holding.trade_id}>
+                  <td className="ticker">{holding.instrument_label ?? holding.instrument_id}<small>{holding.instrument_label ? holding.instrument_id : holding.asset_type}</small></td>
+                  <td>{formatMoney(holding.allocation, language)}</td>
+                  <td>{holding.avg_amount_20d == null ? "-" : formatMoney(holding.avg_amount_20d, language)}</td>
+                  <td>{formatPct(holding.participation_rate_pct)}</td>
+                  <td>{holding.estimated_impact_bps == null ? "-" : `${holding.estimated_impact_bps.toFixed(2)} bps`}</td>
+                  <td><span className={`status status-${capacityStatusTone(holding.capacity_status)}`}>{capacityStatusLabel(holding.capacity_status, language)}</span><small>{holding.note}</small></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div className="paper-forward-warnings">
+        {report.warnings.map((warning) => <span key={warning}>{warning}</span>)}
       </div>
     </section>
   );
@@ -5289,6 +5466,29 @@ function factorDecayTone(verdict: string): string {
     return "danger";
   }
   return "pending";
+}
+
+function capacityStatusTone(status: CapacityStressHolding["capacity_status"]): string {
+  if (status === "within_limit") return "ready";
+  if (status === "review") return "pending";
+  if (status === "exceeds_execution_limit") return "blocked";
+  return "neutral";
+}
+
+function capacityStatusLabel(status: CapacityStressHolding["capacity_status"], language: Language): string {
+  const zh: Record<CapacityStressHolding["capacity_status"], string> = {
+    within_limit: "容量正常",
+    review: "需要关注",
+    exceeds_execution_limit: "超过上限",
+    missing_adv: "缺少成交额",
+  };
+  const en: Record<CapacityStressHolding["capacity_status"], string> = {
+    within_limit: "Within limit",
+    review: "Review",
+    exceeds_execution_limit: "Over limit",
+    missing_adv: "ADV missing",
+  };
+  return (language === "zh" ? zh : en)[status];
 }
 
 function marketRegimeLabel(regime: string, language: Language): string {

@@ -215,6 +215,7 @@ from qagent.recommendations.signal_hub import build_signal_hub
 from qagent.research.action_center import build_manual_action_center
 from qagent.research.alpha_quality import build_alpha_quality_center
 from qagent.research.command_center import build_research_command_center
+from qagent.research.capacity_stress import build_capacity_stress_report
 from qagent.research.decision_quality import build_decision_quality_center
 from qagent.research.market_intelligence import MarketIntelligenceCenter
 from qagent.research.market_intelligence import (
@@ -6818,6 +6819,36 @@ def paper_trade_current_model_evaluation(
             ),
             "paper_current_model_benchmark_rows": str(len(benchmark_bars)),
             "paper_current_model_source_contexts": str(len(contexts)),
+        }
+    )
+    return report.model_dump(mode="json")
+
+
+@router.get("/paper-trades/capacity-research")
+def paper_trade_capacity_research(
+    provider: str = "free",
+    limit: int = 1000,
+) -> dict[str, object]:
+    if limit <= 0 or limit > 1000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+    mode = provider.strip().lower()
+    paper_repo = _paper_repo()
+    account = paper_repo.get_account_settings()
+    trades = paper_repo.list_trades(limit=limit, provider=mode)
+    contexts = {
+        trade.trade_id: context
+        for trade in trades
+        if (context := paper_repo.get_trade_source_context(trade.source_snapshot_id)) is not None
+    }
+    report = build_capacity_stress_report(
+        account=account,
+        trades=trades,
+        source_contexts=contexts,
+    )
+    report.data_health.update(
+        {
+            "capacity_stress_provider": mode,
+            "capacity_stress_source_contexts": str(len(contexts)),
         }
     )
     return report.model_dump(mode="json")
