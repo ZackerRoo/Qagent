@@ -589,6 +589,30 @@ def test_automatic_market_data_repair_waits_for_settlement_and_is_bounded():
     ) == (False, "repair_exhausted")
 
 
+def test_automatic_market_data_repair_repairs_stale_data_above_coverage_floor():
+    expected = date(2026, 8, 13)
+    partial = SimpleNamespace(
+        status="succeeded",
+        data_health={
+            "full_market_signal_date": expected.isoformat(),
+            "market_data_latest_session_coverage": "0.939033",
+            "market_data_latest_session_stale": "435",
+            "market_data_latest_session_missing": "0",
+        },
+    )
+
+    assert routes._automatic_market_data_repair_needed(
+        partial,
+        expected_signal_date=expected,
+        now=datetime(2026, 8, 13, 17, 59, tzinfo=ZoneInfo("Asia/Shanghai")),
+    ) == (False, "waiting_settlement")
+    assert routes._automatic_market_data_repair_needed(
+        partial,
+        expected_signal_date=expected,
+        now=datetime(2026, 8, 13, 18, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    ) == (True, "stale_or_missing_data")
+
+
 def test_automatic_full_scan_queues_one_low_coverage_market_data_repair(monkeypatch):
     expected = date(2026, 8, 13)
     cached = SimpleNamespace(payload={"cards": []})

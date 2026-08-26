@@ -5566,7 +5566,12 @@ def _automatic_market_data_repair_needed(
         coverage = Decimal(str(data_health.get("market_data_latest_session_coverage", "1")))
     except (InvalidOperation, TypeError, ValueError):
         return False, "invalid_coverage"
-    if coverage >= PAPER_MARKET_DATA_MIN_COVERAGE:
+    try:
+        stale = max(int(str(data_health.get("market_data_latest_session_stale", "0"))), 0)
+        missing = max(int(str(data_health.get("market_data_latest_session_missing", "0"))), 0)
+    except (TypeError, ValueError):
+        return False, "invalid_freshness_counts"
+    if coverage >= PAPER_MARKET_DATA_MIN_COVERAGE and stale == 0 and missing == 0:
         return False, "coverage_sufficient"
     if _automatic_market_data_repair_attempt(job) >= PAPER_MARKET_DATA_MAX_SCAN_ATTEMPTS:
         return False, "repair_exhausted"
@@ -5576,7 +5581,9 @@ def _automatic_market_data_repair_needed(
     local_time = current.astimezone(ZoneInfo("Asia/Shanghai")).timetz().replace(tzinfo=None)
     if local_time < PAPER_MARKET_DATA_REPAIR_TIME:
         return False, "waiting_settlement"
-    return True, "coverage_below_threshold"
+    if coverage < PAPER_MARKET_DATA_MIN_COVERAGE:
+        return True, "coverage_below_threshold"
+    return True, "stale_or_missing_data"
 
 
 def _automation_scan_result_cache(
