@@ -515,6 +515,14 @@ def test_paper_trade_from_opportunity_creates_once_and_rejects_blocked(tmp_path,
     assert events.status_code == 200
     assert events.json()["data_health"]["paper_event_ledger"] == "append_only"
     assert events.json()["events"][0]["event_type"] == "created"
+    evidence = events.json()["decision_evidence"]
+    assert evidence["source"]["status"] == "frozen"
+    assert evidence["source"]["snapshot_id"] == created.json()["trade"]["source_snapshot_id"]
+    assert evidence["candidate"]["action"] == "watch_trigger"
+    assert Decimal(evidence["price_basis"]["trade_trigger_price"]) == Decimal(
+        opportunity["trigger_price"]
+    )
+    assert evidence["strategy_configuration"]["status"] == "legacy_unfrozen"
 
 
 def test_paper_trade_from_opportunity_requires_authoritative_snapshot(tmp_path, monkeypatch):

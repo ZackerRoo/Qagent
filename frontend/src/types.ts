@@ -1536,7 +1536,47 @@ export type PaperTradeEventsResponse = {
   instrument_id: string;
   status: string;
   events: PaperTradeEvent[];
+  decision_evidence: PaperTradeDecisionEvidence | null;
   data_health: Record<string, string>;
+};
+
+export type PaperTradeDecisionEvidence = {
+  source: {
+    snapshot_id?: string;
+    run_id?: string | null;
+    status: string;
+    signal_date?: string | null;
+    latest_close?: string | null;
+    industry?: string;
+    themes?: string[];
+    market_regime?: string;
+    factor_ids?: string[];
+  };
+  candidate: {
+    card_status?: string;
+    action?: string;
+    action_label?: string;
+    strategy_id?: string | null;
+    rank_score?: number | null;
+    factor_rank?: number | null;
+    factor_percentile?: number | null;
+    quality_tier?: string;
+    quality_summary?: string;
+    governance_action?: string;
+    paper_candidate_eligible?: boolean;
+    governance_reason?: string;
+    pre_trade_status?: string;
+    pre_trade_can_buy?: boolean;
+    pre_trade_next_action?: string;
+    tradability_status?: string;
+    tradability_summary?: string;
+  };
+  price_basis: Record<string, string | null>;
+  strategy_configuration: {
+    status: string;
+    digest: string | null;
+    configuration: Record<string, unknown>;
+  };
 };
 
 export type PaperTradingSummary = {

@@ -54,8 +54,14 @@ from qagent.recommendations.governance import (
     recommendation_policy_data_health,
 )
 from qagent.recommendations.probability import probability_calibration_data_health
-from qagent.recommendations.quality_gate import recommendation_quality_data_health
+from qagent.recommendations.quality_gate import (
+    recommendation_quality_data_health,
+    recommendation_score_weights,
+)
 from qagent.recommendations.rotation import sort_recommendation_cards
+from qagent.recommendations.strategy_configuration import (
+    build_paper_strategy_configuration,
+)
 from qagent.recommendations.selection import (
     select_strategy_diversified,
     strategy_concentration,
@@ -747,6 +753,40 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
             error_count=error_count,
             provider_error_count=_int_health(aggregate_health, "provider_error_count"),
         )
+    )
+    paper_account = PaperTradingRepository(repo.session_factory).get_account_settings()
+    paper_strategy_configuration, paper_strategy_configuration_digest = (
+        build_paper_strategy_configuration(
+            provider=job.provider,
+            signal_date=feature_as_of,
+            symbols=job.symbols,
+            include_etfs=job.include_etfs,
+            feature_set_version=str(payload_data_health.get("feature_set_version") or "unknown"),
+            recommendation_policy=str(
+                payload_data_health.get("recommendation_policy_entrypoint") or "unknown"
+            ),
+            calibration_merge_policy=str(
+                payload_data_health.get("dynamic_calibration_merge_policy") or "unknown"
+            ),
+            quality_weights=recommendation_score_weights("CN"),
+            governance_source=final_governance_context.source,
+            governance_strategies=final_governance_context.strategies,
+            account=paper_account,
+        )
+    )
+    payload_data_health.update(
+        {
+            "paper_strategy_configuration_schema": paper_strategy_configuration[
+                "schema_version"
+            ],
+            "paper_strategy_configuration_digest": paper_strategy_configuration_digest,
+            "paper_strategy_configuration_json": json.dumps(
+                paper_strategy_configuration,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        }
     )
     paper_model_cohort = paper_model_cohort_from_data_health(payload_data_health)
     if paper_model_cohort is not None:

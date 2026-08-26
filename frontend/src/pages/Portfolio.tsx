@@ -1093,6 +1093,9 @@ function PaperTradeTimelinePanel({
     return <section className="paper-trade-timeline is-loading">{zh ? "正在读取交易轨迹。" : "Loading trade timeline."}</section>;
   }
   if (!response) return null;
+  const evidence = response.decision_evidence;
+  const candidate = evidence?.candidate;
+  const price = evidence?.price_basis;
   return (
     <section className="paper-trade-timeline">
       <div className="paper-trade-timeline-heading">
@@ -1102,6 +1105,54 @@ function PaperTradeTimelinePanel({
         </div>
         <small>{zh ? `${response.events.length} 个追加事件` : `${response.events.length} append-only events`}</small>
       </div>
+      {evidence && (
+        <div className="paper-trade-evidence-grid">
+          <div>
+            <small>{zh ? "候选依据" : "Candidate"}</small>
+            <strong>{candidate?.action_label || candidate?.action || "-"}</strong>
+            <span>
+              {[
+                candidate?.strategy_id,
+                candidate?.factor_rank != null ? `${zh ? "因子排名" : "Factor rank"} ${candidate.factor_rank}` : null,
+                candidate?.quality_tier,
+              ]
+                .filter(Boolean)
+                .join(" · ") || "-"}
+            </span>
+          </div>
+          <div>
+            <small>{zh ? "过滤状态" : "Filter state"}</small>
+            <strong>
+              {candidate?.paper_candidate_eligible === true
+                ? zh ? "允许研究模拟" : "Research eligible"
+                : candidate?.paper_candidate_eligible === false
+                  ? zh ? "已阻断" : "Blocked"
+                  : "-"}
+            </strong>
+            <span>{candidate?.governance_reason || candidate?.pre_trade_next_action || "-"}</span>
+          </div>
+          <div>
+            <small>{zh ? "价格依据" : "Price basis"}</small>
+            <strong>{`${zh ? "触发" : "Trigger"} ${price?.trade_trigger_price || "-"}`}</strong>
+            <span>
+              {`${zh ? "快照收盘" : "Snapshot close"} ${price?.snapshot_latest_close || "-"} · ${zh ? "止损" : "Stop"} ${price?.trade_initial_stop || "-"} · ${zh ? "目标" : "Target"} ${price?.trade_target_1 || "-"}`}
+            </span>
+          </div>
+          <div>
+            <small>{zh ? "配置快照" : "Config snapshot"}</small>
+            <strong>
+              {evidence.strategy_configuration.status === "frozen"
+                ? zh ? "已冻结" : "Frozen"
+                : zh ? "历史未冻结" : "Legacy unfrozen"}
+            </strong>
+            <span>
+              {evidence.strategy_configuration.digest
+                ? evidence.strategy_configuration.digest.slice(0, 12)
+                : zh ? "不将旧记录伪装为新配置" : "Historic record is not backfilled"}
+            </span>
+          </div>
+        </div>
+      )}
       <ol>
         {response.events.map((event) => (
           <li key={event.event_id}>

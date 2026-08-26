@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+import json
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -261,6 +262,17 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
     )
     assert cached.payload["data_health"]["full_market_final_policy_reconciled"] == "true"
     assert len(cached.payload["data_health"]["paper_model_cohort_id"]) == 64
+    assert (
+        cached.payload["data_health"]["paper_strategy_configuration_schema"]
+        == "paper-strategy-configuration-v1"
+    )
+    assert len(cached.payload["data_health"]["paper_strategy_configuration_digest"]) == 64
+    frozen_configuration = json.loads(
+        cached.payload["data_health"]["paper_strategy_configuration_json"]
+    )
+    assert frozen_configuration["universe"]["symbol_count"] == len(job.symbols)
+    assert frozen_configuration["selection"]["max_per_strategy"] == 2
+    assert frozen_configuration["execution"]["max_holding_sessions"] == 20
     assert (
         cached.payload["data_health"]["paper_model_cohort_feature_set_version"]
         == cached.payload["data_health"]["feature_set_version"]

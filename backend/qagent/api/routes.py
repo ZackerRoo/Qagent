@@ -231,6 +231,7 @@ from qagent.storage.paper import (
     PaperAccountSettings,
     PaperTradeAdmissionProof,
     PaperTradeRecord,
+    PaperTradeSourceContext,
     PaperTradingRepository,
 )
 from qagent.storage.ranking_v3_forward import RankingV3ForwardRepository
@@ -7314,11 +7315,109 @@ def paper_trade_events(trade_id: str) -> dict[str, object]:
         "instrument_id": trade.instrument_id if trade is not None else events[-1].instrument_id,
         "status": trade.status if trade is not None else events[-1].to_status,
         "events": [event.model_dump(mode="json") for event in events],
+        "decision_evidence": (
+            _paper_trade_decision_evidence(
+                trade,
+                repo.get_trade_source_context(trade.source_snapshot_id),
+            )
+            if trade is not None
+            else None
+        ),
         "data_health": {
             "paper_event_ledger": "append_only",
             "paper_event_count": str(len(events)),
         },
     }
+
+
+def _paper_trade_decision_evidence(
+    trade: PaperTradeRecord,
+    context: PaperTradeSourceContext | None,
+) -> dict[str, object]:
+    if context is None:
+        return {
+            "source": {"status": "missing"},
+            "candidate": {},
+            "price_basis": _paper_trade_price_basis(trade, {}),
+            "strategy_configuration": {
+                "status": "missing",
+                "digest": None,
+                "configuration": {},
+            },
+        }
+    card = context.card if isinstance(context.card, dict) else {}
+    decision = _paper_mapping(card.get("decision"))
+    governance = _paper_mapping(card.get("strategy_governance"))
+    gate_decision = _paper_mapping(governance.get("gate_decision"))
+    quality = _paper_mapping(card.get("recommendation_quality"))
+    pre_trade_risk = _paper_mapping(card.get("pre_trade_risk"))
+    tradability = _paper_mapping(card.get("tradability"))
+    return {
+        "source": {
+            "snapshot_id": context.source_snapshot_id,
+            "run_id": context.source_run_id,
+            "status": context.source_status,
+            "signal_date": context.signal_date,
+            "latest_close": context.latest_close,
+            "industry": context.industry,
+            "themes": context.themes,
+            "market_regime": context.market_regime,
+            "factor_ids": context.factor_ids,
+        },
+        "candidate": {
+            "card_status": card.get("status"),
+            "action": decision.get("action"),
+            "action_label": decision.get("action_label"),
+            "strategy_id": card.get("primary_strategy_id") or trade.strategy_id,
+            "rank_score": card.get("rank_score"),
+            "factor_rank": card.get("factor_rank"),
+            "factor_percentile": card.get("factor_percentile"),
+            "quality_tier": quality.get("tier"),
+            "quality_summary": quality.get("summary"),
+            "governance_action": gate_decision.get("action"),
+            "paper_candidate_eligible": gate_decision.get("paper_candidate_eligible"),
+            "governance_reason": gate_decision.get("reason"),
+            "pre_trade_status": pre_trade_risk.get("status"),
+            "pre_trade_can_buy": pre_trade_risk.get("can_buy"),
+            "pre_trade_next_action": pre_trade_risk.get("next_action"),
+            "tradability_status": tradability.get("status"),
+            "tradability_summary": tradability.get("summary"),
+        },
+        "price_basis": _paper_trade_price_basis(trade, card, context=context),
+        "strategy_configuration": {
+            "status": context.strategy_configuration_status,
+            "digest": context.strategy_configuration_digest,
+            "configuration": context.strategy_configuration,
+        },
+    }
+
+
+def _paper_trade_price_basis(
+    trade: PaperTradeRecord,
+    card: Mapping[str, object],
+    *,
+    context: PaperTradeSourceContext | None = None,
+) -> dict[str, object]:
+    entry_plan = _paper_mapping(card.get("entry_plan"))
+    exit_plan = _paper_mapping(card.get("exit_plan"))
+    return {
+        "snapshot_latest_close": context.latest_close if context is not None else None,
+        "candidate_trigger_price": entry_plan.get("trigger_price"),
+        "candidate_no_chase_above": entry_plan.get("no_chase_above"),
+        "candidate_initial_stop": exit_plan.get("initial_stop"),
+        "candidate_target_1": exit_plan.get("target_1"),
+        "candidate_time_stop": exit_plan.get("time_stop"),
+        "trade_trigger_price": trade.trigger_price,
+        "trade_initial_stop": trade.initial_stop,
+        "trade_target_1": trade.target_1,
+        "entry_price": trade.entry_price,
+        "latest_price": trade.latest_price,
+        "exit_price": trade.exit_price,
+    }
+
+
+def _paper_mapping(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, Mapping) else {}
 
 
 @router.delete("/paper-trades/{trade_id}")

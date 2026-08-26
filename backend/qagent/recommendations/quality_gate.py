@@ -456,7 +456,17 @@ def _score_components(
 
 
 def _quality_weights(card: OpportunityCard) -> dict[str, float]:
-    if card.market.value == "CN":
+    return recommendation_score_weights(card.market.value)
+
+
+def recommendation_score_weights(market: str) -> dict[str, float]:
+    """Return the explicit score weights used by the recommendation gate.
+
+    Keeping this public lets a scan freeze the exact score recipe that produced
+    its paper-trading candidates instead of duplicating the weights elsewhere.
+    """
+
+    if market.strip().upper() == "CN":
         return {
             "momentum": 0.14,
             "trend": 0.20,

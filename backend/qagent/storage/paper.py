@@ -19,6 +19,7 @@ from qagent.storage.tables import (
     ScanRunRow,
     utc_now,
 )
+from qagent.recommendations.strategy_configuration import parse_paper_strategy_configuration
 
 
 PAPER_EXECUTION_FACTS_NOTE_PREFIX = "[paper_execution_facts:v1]"
@@ -233,8 +234,9 @@ class PaperResearchBaseline(BaseModel):
 class PaperTradeSourceContext(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    schema_version: str = "paper-source-context-v1"
+    schema_version: str = "paper-source-context-v2"
     source_snapshot_id: str
+    source_run_id: str | None = None
     created_at: datetime
     signal_date: date | None = None
     latest_close: Decimal | None = None
@@ -243,6 +245,9 @@ class PaperTradeSourceContext(BaseModel):
     market_regime: str = "unknown"
     factor_ids: list[str] = Field(default_factory=list)
     source_status: str = "unknown"
+    strategy_configuration: dict[str, object] = Field(default_factory=dict)
+    strategy_configuration_digest: str | None = None
+    strategy_configuration_status: str = "legacy_unfrozen"
     card: dict[str, object]
 
 
@@ -350,6 +355,7 @@ class PaperTradingRepository:
                 source_snapshot_id=source_snapshot_id,
                 signal_date=signal_date,
                 source_status="frozen" if snapshot is not None else "unknown",
+                strategy_configuration=_strategy_configuration_from_snapshot(session, snapshot),
             )
             row = PaperTradeRow(
                 trade_id=f"paper-{uuid4().hex[:12]}",
@@ -544,6 +550,7 @@ class PaperTradingRepository:
                 source_snapshot_id=source_snapshot_id,
                 signal_date=None,
                 source_status="snapshot_only",
+                strategy_configuration=_strategy_configuration_from_snapshot(session, row),
             )
 
     def list_trades(
@@ -1080,6 +1087,7 @@ def _source_context_from_snapshot(
     source_snapshot_id: str,
     signal_date: date | None,
     source_status: str,
+    strategy_configuration: tuple[dict[str, object], str] | None = None,
     fallback_created_at: datetime | None = None,
 ) -> PaperTradeSourceContext:
     card = _snapshot_card(snapshot)
@@ -1096,6 +1104,7 @@ def _source_context_from_snapshot(
     )
     return PaperTradeSourceContext(
         source_snapshot_id=source_snapshot_id,
+        source_run_id=snapshot.run_id if snapshot is not None else None,
         created_at=(
             snapshot.created_at
             if snapshot is not None
@@ -1108,7 +1117,31 @@ def _source_context_from_snapshot(
         market_regime=_source_market_regime(card),
         factor_ids=_source_factor_ids(card),
         source_status=source_status,
+        strategy_configuration=(strategy_configuration[0] if strategy_configuration else {}),
+        strategy_configuration_digest=(strategy_configuration[1] if strategy_configuration else None),
+        strategy_configuration_status=(
+            "frozen" if strategy_configuration else "legacy_unfrozen"
+        ),
         card=card,
+    )
+
+
+def _strategy_configuration_from_snapshot(
+    session: Session,
+    snapshot: OpportunitySnapshotRow | None,
+) -> tuple[dict[str, object], str] | None:
+    if snapshot is None:
+        return None
+    run = session.get(ScanRunRow, snapshot.run_id)
+    if run is None:
+        return None
+    try:
+        health = json.loads(run.data_health or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return parse_paper_strategy_configuration(
+        health.get("paper_strategy_configuration_json"),
+        health.get("paper_strategy_configuration_digest"),
     )
 
 
