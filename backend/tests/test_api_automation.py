@@ -1948,14 +1948,14 @@ def test_automation_scheduler_keeps_reduced_size_capacity_when_drawdown_is_high(
     body = response.json()
     health = body["last_result"]["data_health"]
     assert body["last_result"]["paper_created"] == 1
-    assert health["paper_risk_gate_action"] == "throttle_new_entries"
+    assert health["paper_risk_gate_action"] == "allow_new_entries"
     assert health["paper_risk_gate_max_new_entries"] == "4"
-    assert health["paper_risk_gate_position_size_multiplier"] == "0.3500"
+    assert health["paper_risk_gate_position_size_multiplier"] == "1.0000"
     trades = client.get("/api/paper-trades?provider=free&limit=20&reporting_scope=legacy").json()[
         "trades"
     ]
     probe = next(trade for trade in trades if trade["instrument_id"] == "CN:688999")
-    assert "账户表现触发风险收缩" in probe["notes"]
+    assert "账户表现触发风险收缩" not in (probe["notes"] or "")
 
     second = client.post(
         "/api/automation/scheduler/run-once"
@@ -1965,7 +1965,7 @@ def test_automation_scheduler_keeps_reduced_size_capacity_when_drawdown_is_high(
     assert second.status_code == 200
     second_result = second.json()["last_result"]
     assert second_result["paper_created"] == 0
-    assert second_result["data_health"]["paper_risk_gate_action"] == "throttle_new_entries"
+    assert second_result["data_health"]["paper_risk_gate_action"] == "allow_new_entries"
     assert "automation_seed_skipped_by_risk_gate" not in second_result["data_health"]
 
 

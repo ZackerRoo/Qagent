@@ -1802,10 +1802,10 @@ def test_paper_daily_report_explains_risk_gate_failures_and_event_timeline(tmp_p
         asset_type_by_instrument={"CN:002747": "stock", "CN:588850": "etf"},
     )
 
-    assert report.risk_gate.action == "throttle_new_entries"
+    assert report.risk_gate.action == "allow_new_entries"
     assert report.risk_gate.can_add_entries is True
     assert report.risk_gate.max_new_entries == 4
-    assert report.risk_gate.position_size_multiplier == 0.35
+    assert report.risk_gate.position_size_multiplier == 1.0
     assert report.risk_gate.reasons
     assert any(item.dimension == "strategy" for item in report.failure_attribution)
     assert any(

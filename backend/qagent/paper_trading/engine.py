@@ -1600,7 +1600,6 @@ def _paper_risk_gate_status(
         )
 
     recovery_score = _paper_recovery_score(summary, market_context, trigger_quality)
-    severe = _paper_risk_gate_is_severe(summary)
     if not reasons:
         return PaperRiskGateStatus(
             action="allow_new_entries",
@@ -1617,12 +1616,11 @@ def _paper_risk_gate_status(
             position_size_multiplier=1.0,
         )
 
-    # Performance deterioration should reduce risk exposure, not make the
-    # signal engine blind. Mature paper brokers keep accepting orders while
-    # risk models adjust target weights or enforce a small admission budget.
-    # A hard stop is reserved for operational constraints such as no slot or
-    # missing market data, not for a single return threshold.
-    probe_state, _ = _paper_risk_probe_state(ledger)
+    # Research-paper performance is diagnostic evidence, not an execution
+    # throttle. Reducing entries after a short drawdown would confound stock
+    # selection, sizing, and admission frequency in the forward sample.
+    # Operational constraints such as no slot or unavailable market data still
+    # block execution elsewhere in the matching and admission pipeline.
     available_slots = max(
         summary.max_positions - summary.open_trades - summary.pending_trades,
         0,
@@ -1644,31 +1642,22 @@ def _paper_risk_gate_status(
             position_size_multiplier=0.0,
         )
 
-    max_new_entries = available_slots
-    position_size_multiplier = 0.35 if severe or recovery_score < 0.45 else 0.5
-    probe_note = (
-        "已有恢复探针，继续允许新候选以小仓位进入"
-        if probe_state == "active"
-        else "上一笔恢复探针已完成，当前交易日仍允许小仓位验证"
-        if probe_state == "cooldown"
-        else "当前没有恢复探针，先用小仓位验证新机会"
-    )
     return PaperRiskGateStatus(
-        action="throttle_new_entries",
+        action="allow_new_entries",
         can_add_entries=True,
-        title="风险收缩，允许小仓位新增",
-        reason="；".join(reasons) + f"；{probe_note}，不会因收益回撤永久停止买入。",
+        title="账户表现需观察，新增保持标准规则",
+        reason="；".join(reasons) + "；仅作为研究归因，合格候选仍按标准仓位和可用空位进入。",
         reasons=reasons,
         recovery_conditions=[
-            f"可按剩余仓位一次新增 {max_new_entries} 笔，优先当前最高质量机会",
-            f"新增仓位按正常额度的 {position_size_multiplier:.0%} 执行",
+            f"可按剩余仓位一次新增 {available_slots} 笔，优先当前最高质量机会",
+            "新增仓位按账户标准额度执行",
             "已有持仓继续按止损、止盈和 T+1 规则更新",
-            "收益、回撤和触发质量恢复后，再切回正常新增额度",
+            "持续观察收益、回撤和触发质量，但不以此改变研究样本准入",
         ],
-        recovery_state="throttled",
+        recovery_state="observed",
         recovery_score=recovery_score,
-        max_new_entries=max_new_entries,
-        position_size_multiplier=position_size_multiplier,
+        max_new_entries=available_slots,
+        position_size_multiplier=1.0,
     )
 
 
