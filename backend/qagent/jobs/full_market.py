@@ -756,14 +756,13 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         }
     )
     visible_cards = ranked_cards[:top_cards_limit]
-    aggregate_health.update(
-        enrich_full_market_visible_cards(
-            visible_cards,
-            provider_mode=job.provider,
-            market_provider_name=provider.name,
-            as_of=scan_end,
-        )
+    visible_enhancement_health = enrich_full_market_visible_cards(
+        visible_cards,
+        provider_mode=job.provider,
+        market_provider_name=provider.name,
+        as_of=scan_end,
     )
+    aggregate_health.update(visible_enhancement_health)
     brief_health = apply_recommendation_briefs(all_cards)
     visible_card_ids = {card.card_id for card in visible_cards}
     visible_governance = [audit for audit in all_governance if audit.card_id in visible_card_ids]
@@ -787,6 +786,10 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     payload_data_health = {
         **aggregate_health,
         **market_intelligence.data_health,
+        # Batch scans intentionally disable per-batch enhancement. The final
+        # visible-card pass is authoritative and must win over those aggregate
+        # placeholder fields.
+        **visible_enhancement_health,
         **recommendation_quality_data_health(visible_cards),
         **probability_calibration_data_health(visible_cards),
         **recommendation_feedback_data_health(visible_cards),

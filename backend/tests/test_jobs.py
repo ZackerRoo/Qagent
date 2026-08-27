@@ -225,6 +225,15 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
         "build_market_data_provider",
         lambda provider: FixtureMarketDataProvider(),
     )
+    monkeypatch.setattr(
+        full_market,
+        "enrich_full_market_visible_cards",
+        lambda cards, **_kwargs: {
+            "a_share_enhanced_provider": "authoritative_visible_pass",
+            "a_share_enhanced_coverage": "1.000000",
+            "a_share_enhanced_scope": "full_market_visible_cards_after_global_ranking",
+        },
+    )
     shadow_card_orders = []
     build_shadow = full_market._paper_calibration_shadow_payload
 
@@ -284,6 +293,11 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
     assert cached.payload["factor_rankings"]
     assert len(cached.payload["factor_rankings"]) == len(cached.payload["cards"])
     assert cached.payload["data_health"]["factor_ranking_scope"] == "full_card_universe"
+    assert (
+        cached.payload["data_health"]["a_share_enhanced_provider"]
+        == "authoritative_visible_pass"
+    )
+    assert cached.payload["data_health"]["a_share_enhanced_coverage"] == "1.000000"
     assert cached.payload["data_health"]["factor_ranking_normalization"] == "global_second_pass"
     assert cached.payload["data_health"]["feature_set_version"]
     assert len(cached.payload["data_health"]["feature_universe_digest"]) == 64
