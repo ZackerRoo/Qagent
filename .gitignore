@@ -10,6 +10,7 @@ node_modules/
 dist/
 data/*.db
 data/*.db-*
+data/*.sidecar.sqlite3
 data/*.log
 data/*.pid
 data/outbox*/

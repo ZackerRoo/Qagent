@@ -3,7 +3,11 @@ import sqlite3
 
 import pytest
 
-from qagent.jobs.tickflow_cache_repair import REPAIR_VERSION, repair_tickflow_cache_dates
+from qagent.jobs.tickflow_cache_repair import (
+    REPAIR_VERSION,
+    _create_repair_plan,
+    repair_tickflow_cache_dates,
+)
 from qagent.providers.tickflow_free import TICKFLOW_PAIRED_SOURCE_PROVIDER
 
 
@@ -144,6 +148,34 @@ def test_tickflow_cache_repair_defaults_to_dry_run(tmp_path):
             ("tickflow_free_paired",),
         ).fetchone()[0] == 2
         assert connection.execute("SELECT COUNT(*) FROM market_data_cache_spans").fetchone()[0] == 2
+
+
+def test_tickflow_cache_repair_plan_indexes_join_keys(tmp_path):
+    database = tmp_path / "qagent.db"
+    _create_cache_database(database)
+
+    with sqlite3.connect(database) as connection:
+        _create_repair_plan(connection, "free")
+        indexes = {
+            row[0]: row[1]
+            for row in connection.execute(
+                """
+                SELECT name, sql
+                FROM sqlite_temp_master
+                WHERE type = 'index'
+                  AND tbl_name = 'tickflow_date_repair_plan'
+                """
+            )
+        }
+
+    assert "tickflow_date_repair_plan_instrument" in indexes
+    assert "provider_mode, instrument_id" in indexes[
+        "tickflow_date_repair_plan_instrument"
+    ]
+    assert "tickflow_date_repair_plan_original_row" in indexes
+    assert "original_trade_date" in indexes[
+        "tickflow_date_repair_plan_original_row"
+    ]
 
 
 def test_tickflow_cache_repair_backs_up_prefers_non_tickflow_and_is_idempotent(tmp_path):

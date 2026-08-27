@@ -288,6 +288,22 @@ def _create_repair_plan(connection: sqlite3.Connection, provider_mode: str) -> N
         """,
         (*source_parameters, provider_mode, *legacy_sources),
     )
+    connection.execute(
+        """
+        CREATE INDEX tickflow_date_repair_plan_instrument
+        ON tickflow_date_repair_plan (provider_mode, instrument_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX tickflow_date_repair_plan_original_row
+        ON tickflow_date_repair_plan (
+            provider_mode,
+            instrument_id,
+            original_trade_date
+        )
+        """
+    )
 
 
 def _insert_repaired_rows(connection: sqlite3.Connection) -> int:
