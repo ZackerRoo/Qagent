@@ -378,22 +378,32 @@ def test_full_market_a_share_readiness_uses_the_whole_universe():
 
 
 def test_full_market_health_merges_fuyao_error_category_counts():
-    health = {"fuyao_error_category_mix": "unsupported_asset=3,symbol_not_found=1"}
+    health = {
+        "fuyao_error_category_mix": "unsupported_asset=3,symbol_not_found=1",
+        "fuyao_degraded_snapshot_field_mix": "volume=3,turnover=1",
+    }
 
     _merge_health(
         health,
-        {"fuyao_error_category_mix": "unsupported_asset=2,timeout=4"},
+        {
+            "fuyao_error_category_mix": "unsupported_asset=2,timeout=4",
+            "fuyao_degraded_snapshot_field_mix": "volume=2,high=4",
+        },
     )
 
     assert health["fuyao_error_category_mix"] == (
         "unsupported_asset=5,timeout=4,symbol_not_found=1"
     )
+    assert health["fuyao_degraded_snapshot_field_mix"] == ("volume=5,high=4,turnover=1")
 
 
 def test_full_market_scan_resume_keeps_frozen_expected_trade_date():
     created_at = datetime(2026, 7, 30, 1, 0, tzinfo=timezone.utc)
 
-    assert _frozen_full_market_scan_end(
-        {"full_market_expected_trade_date": SIGNAL_DATE.isoformat()},
-        created_at,
-    ) == SIGNAL_DATE
+    assert (
+        _frozen_full_market_scan_end(
+            {"full_market_expected_trade_date": SIGNAL_DATE.isoformat()},
+            created_at,
+        )
+        == SIGNAL_DATE
+    )

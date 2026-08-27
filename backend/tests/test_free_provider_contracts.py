@@ -8,6 +8,7 @@ import pytest
 import requests
 
 import qagent.providers.free_cn as free_cn
+from qagent.providers.daily_fallback import DailyFallbackMarketDataProvider
 from qagent.providers.free_cn import FreeCnMarketDataProvider
 from qagent.providers.free_us import FreeUsMarketDataProvider
 from qagent.providers.tickflow_free import TickFlowFreeDailyProvider
@@ -484,9 +485,12 @@ def test_free_cn_provider_circuit_breaker_skips_after_consecutive_source_failure
 
     fake_ak = SimpleNamespace(stock_zh_a_hist=fake_zh_a_hist)
     fake_bs = SimpleNamespace(
-        login=lambda: login_calls.append("login") or SimpleNamespace(
-            error_code="1",
-            error_msg="login failed",
+        login=lambda: (
+            login_calls.append("login")
+            or SimpleNamespace(
+                error_code="1",
+                error_msg="login failed",
+            )
         ),
         logout=lambda: None,
     )
@@ -515,9 +519,12 @@ def test_free_cn_provider_circuit_breaker_half_opens_after_cooldown(monkeypatch)
         raise ConnectionError("source closed connection")
 
     fake_bs = SimpleNamespace(
-        login=lambda: login_calls.append("login") or SimpleNamespace(
-            error_code="1",
-            error_msg="login failed",
+        login=lambda: (
+            login_calls.append("login")
+            or SimpleNamespace(
+                error_code="1",
+                error_msg="login failed",
+            )
         ),
         logout=lambda: None,
     )
@@ -554,15 +561,17 @@ def test_free_cn_provider_falls_back_to_baostock(monkeypatch):
 
         def __init__(self, adjustflag):
             scale = Decimal("0.8") if adjustflag == "2" else Decimal("1")
-            self.rows = [[
-                "2026-01-05",
-                str(Decimal("11.42") * scale),
-                str(Decimal("11.51") * scale),
-                str(Decimal("11.41") * scale),
-                str(Decimal("11.50") * scale),
-                "87549118",
-                "1000000000",
-            ]]
+            self.rows = [
+                [
+                    "2026-01-05",
+                    str(Decimal("11.42") * scale),
+                    str(Decimal("11.51") * scale),
+                    str(Decimal("11.41") * scale),
+                    str(Decimal("11.50") * scale),
+                    "87549118",
+                    "1000000000",
+                ]
+            ]
             self.index = -1
 
         def next(self):
@@ -596,6 +605,122 @@ def test_free_cn_provider_falls_back_to_baostock(monkeypatch):
     assert bars.iloc[0]["close"] == 11.5
     assert bars.iloc[0]["adjusted_close"] == 9.2
     assert provider.last_errors == []
+
+
+def test_free_cn_provider_skips_baostock_for_beijing_exchange_without_opening_circuit(
+    monkeypatch,
+):
+    akshare_calls: list[str] = []
+    baostock_calls: list[str] = []
+
+    def fake_zh_a_hist(symbol, period, start_date, end_date, adjust):
+        del period, start_date, end_date, adjust
+        akshare_calls.append(symbol)
+        raise ConnectionError("source closed connection")
+
+    def fake_baostock(symbol, start, end, request_timeout_seconds):
+        del start, end, request_timeout_seconds
+        baostock_calls.append(symbol)
+        return pd.DataFrame(
+            [
+                {
+                    "trade_date": date(2026, 1, 5),
+                    "open": 10.0,
+                    "high": 10.0,
+                    "low": 10.0,
+                    "close": 10.0,
+                    "volume": 100,
+                    "turnover": 1000,
+                    "provider": "baostock_paired",
+                    "adjusted_open": 10.0,
+                    "adjusted_high": 10.0,
+                    "adjusted_low": 10.0,
+                    "adjusted_close": 10.0,
+                    "adjustment_factor": 1.0,
+                    "adjustment_type": "qfq",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(
+        "qagent.providers.free_cn.ak",
+        SimpleNamespace(stock_zh_a_hist=fake_zh_a_hist),
+    )
+    monkeypatch.setattr(
+        FreeCnMarketDataProvider,
+        "_load_baostock",
+        staticmethod(fake_baostock),
+    )
+
+    provider = FreeCnMarketDataProvider()
+    bars = provider.get_daily_bars(
+        ["CN:920011", "CN:920012", "CN:920028", "CN:000001"],
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+    assert bars["instrument_id"].tolist() == ["CN:000001"]
+    assert akshare_calls == ["920011", "920012", "920028", "000001"]
+    assert baostock_calls == ["000001"]
+    assert provider.consecutive_source_failures == 0
+    assert provider.source_circuit_retry_after_seconds() == 0
+    assert all("Beijing Stock Exchange is unsupported" in error for error in provider.last_errors)
+
+
+def test_free_cn_historical_batch_routes_beijing_exchange_to_later_fallback(monkeypatch):
+    baostock_calls: list[str] = []
+
+    monkeypatch.setattr(
+        "qagent.providers.free_cn.bs",
+        SimpleNamespace(
+            login=lambda: baostock_calls.append("login"),
+            logout=lambda: baostock_calls.append("logout"),
+        ),
+    )
+
+    class BeijingExchangeFallback:
+        name = "beijing_exchange_fallback"
+        last_errors: list[str] = []
+
+        def get_historical_daily_bars(self, instrument_ids, start, end):
+            del start, end
+            return pd.DataFrame(
+                [
+                    {
+                        "instrument_id": instrument_id,
+                        "trade_date": date(2026, 1, 5),
+                        "open": 10.0,
+                        "high": 10.0,
+                        "low": 10.0,
+                        "close": 10.0,
+                        "volume": 100,
+                        "turnover": 1000,
+                        "provider": self.name,
+                        "adjusted_open": 10.0,
+                        "adjusted_high": 10.0,
+                        "adjusted_low": 10.0,
+                        "adjusted_close": 10.0,
+                        "adjustment_factor": 1.0,
+                        "adjustment_type": "none",
+                    }
+                    for instrument_id in instrument_ids
+                ]
+            )
+
+    provider = DailyFallbackMarketDataProvider(
+        FreeCnMarketDataProvider(),
+        BeijingExchangeFallback(),
+    )
+    bars = provider.get_historical_daily_bars(
+        ["CN:920011"],
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+    assert baostock_calls == []
+    assert bars["instrument_id"].tolist() == ["CN:920011"]
+    assert bars["provider"].tolist() == ["beijing_exchange_fallback"]
+    assert provider.last_fallback_instruments == ["CN:920011"]
 
 
 def test_free_cn_provider_bounds_complete_baostock_history_reads(monkeypatch):

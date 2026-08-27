@@ -61,9 +61,7 @@ class FreeCnMarketDataProvider:
         self.consecutive_source_failures = 0
         self.source_circuit_open_until = 0.0
 
-    def get_daily_bars(
-        self, instrument_ids: list[str], start: date, end: date
-    ) -> pd.DataFrame:
+    def get_daily_bars(self, instrument_ids: list[str], start: date, end: date) -> pd.DataFrame:
         self.last_errors = []
         frames: list[pd.DataFrame] = []
         for instrument_id in instrument_ids:
@@ -110,11 +108,15 @@ class FreeCnMarketDataProvider:
                     else:
                         self._record_source_success()
                         normalized["instrument_id"] = instrument_id
-                        normalized["trade_date"] = pd.to_datetime(
-                            normalized["trade_date"]
-                        ).dt.date
+                        normalized["trade_date"] = pd.to_datetime(normalized["trade_date"]).dt.date
                         frames.append(normalized[BAR_COLUMNS])
                         continue
+                if _is_beijing_exchange_symbol(symbol):
+                    source_errors.append(
+                        "baostock: skipped because Beijing Stock Exchange is unsupported"
+                    )
+                    self.last_errors.append(f"{instrument_id}: {'; '.join(source_errors)}")
+                    continue
                 try:
                     normalized = self._load_baostock(
                         symbol,
@@ -150,6 +152,7 @@ class FreeCnMarketDataProvider:
             for instrument_id in dict.fromkeys(instrument_ids)
             if instrument_id.startswith("CN:")
             and not _is_index_symbol(instrument_id.split(":", 1)[1])
+            and not _is_beijing_exchange_symbol(instrument_id.split(":", 1)[1])
         ]
         if not symbols:
             return pd.DataFrame(columns=BAR_COLUMNS)
@@ -163,8 +166,7 @@ class FreeCnMarketDataProvider:
                     login = bs.login()
             except Exception as exc:
                 self.last_errors.extend(
-                    f"{instrument_id}: baostock batch login: {exc}"
-                    for instrument_id, _ in symbols
+                    f"{instrument_id}: baostock batch login: {exc}" for instrument_id, _ in symbols
                 )
                 self._record_source_failure()
                 return pd.DataFrame(columns=BAR_COLUMNS)
@@ -202,9 +204,7 @@ class FreeCnMarketDataProvider:
                     if normalized.empty:
                         continue
                     normalized["instrument_id"] = instrument_id
-                    normalized["trade_date"] = pd.to_datetime(
-                        normalized["trade_date"]
-                    ).dt.date
+                    normalized["trade_date"] = pd.to_datetime(normalized["trade_date"]).dt.date
                     frames.append(normalized[BAR_COLUMNS])
             finally:
                 try:
@@ -312,12 +312,12 @@ class FreeCnMarketDataProvider:
                 adjust="",
             )
             adjusted = loader(
-                    symbol=symbol,
-                    period="daily",
-                    start_date=start.strftime("%Y%m%d"),
-                    end_date=end.strftime("%Y%m%d"),
-                    adjust="qfq",
-                )
+                symbol=symbol,
+                period="daily",
+                start_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"),
+                adjust="qfq",
+            )
         if raw.empty:
             return pd.DataFrame(columns=BAR_COLUMNS)
         return _merge_raw_adjusted_frames(raw, adjusted, provider_name)
@@ -345,14 +345,11 @@ class FreeCnMarketDataProvider:
         if raw.empty:
             try:
                 with _bounded_network_calls(request_timeout_seconds):
-                    raw = ak.stock_zh_index_daily(
-                        symbol=_to_sina_index_symbol(symbol)
-                    )
+                    raw = ak.stock_zh_index_daily(symbol=_to_sina_index_symbol(symbol))
             except Exception as fallback_exc:
                 if primary_error is not None:
                     raise RuntimeError(
-                        f"eastmoney index: {primary_error}; "
-                        f"sina index: {fallback_exc}"
+                        f"eastmoney index: {primary_error}; sina index: {fallback_exc}"
                     ) from fallback_exc
                 raise
             provider_name = "akshare_sina_index"
@@ -370,12 +367,8 @@ class FreeCnMarketDataProvider:
                 "成交额": "turnover",
             }
         ).copy()
-        normalized["trade_date"] = pd.to_datetime(
-            normalized["trade_date"], errors="coerce"
-        ).dt.date
-        normalized = normalized.loc[
-            normalized["trade_date"].between(start, end)
-        ].copy()
+        normalized["trade_date"] = pd.to_datetime(normalized["trade_date"], errors="coerce").dt.date
+        normalized = normalized.loc[normalized["trade_date"].between(start, end)].copy()
         normalized["provider"] = provider_name
         for column in ("open", "high", "low", "close"):
             normalized[f"adjusted_{column}"] = normalized[column]
@@ -489,9 +482,7 @@ class FreeCnMarketDataProvider:
         factor = adjusted_close.div(close.where(close.ne(0)))
         normalized["adjustment_factor"] = factor
         for column in ("open", "high", "low"):
-            normalized[f"adjusted_{column}"] = _finite_numeric(
-                normalized[column]
-            ).mul(factor)
+            normalized[f"adjusted_{column}"] = _finite_numeric(normalized[column]).mul(factor)
         normalized["adjustment_type"] = "qfq"
         return _coerce_bar_types(normalized)
 
@@ -587,6 +578,10 @@ def _is_etf_symbol(symbol: str) -> bool:
     return symbol.startswith(("15", "16", "51", "52", "56", "58"))
 
 
+def _is_beijing_exchange_symbol(symbol: str) -> bool:
+    return symbol.startswith(("4", "8", "92"))
+
+
 def _is_index_symbol(symbol: str) -> bool:
     return symbol.upper().endswith(".IDX")
 
@@ -640,9 +635,7 @@ def _merge_raw_adjusted_frames(
     }
     raw_frame = raw.rename(columns=rename).copy()
     adjusted_frame = adjusted.rename(columns=rename).copy()
-    raw_frame["trade_date"] = pd.to_datetime(
-        raw_frame["trade_date"], errors="coerce"
-    ).dt.date
+    raw_frame["trade_date"] = pd.to_datetime(raw_frame["trade_date"], errors="coerce").dt.date
     if "trade_date" not in adjusted_frame.columns:
         adjusted_frame["trade_date"] = pd.Series(dtype=object)
     adjusted_frame["trade_date"] = pd.to_datetime(
@@ -676,9 +669,7 @@ def _merge_raw_adjusted_frames(
     )
     raw_close = _finite_numeric(merged["close"])
     adjusted_close = _finite_numeric(merged["adjusted_close"])
-    merged["adjustment_factor"] = adjusted_close.div(
-        raw_close.where(raw_close.ne(0))
-    )
+    merged["adjustment_factor"] = adjusted_close.div(raw_close.where(raw_close.ne(0)))
     merged["adjustment_type"] = merged["adjusted_close"].map(
         lambda value: "qfq" if pd.notna(value) else None
     )
@@ -691,9 +682,7 @@ def _coerce_minute_bar_types(frame: pd.DataFrame) -> pd.DataFrame:
     for column in ["open", "high", "low", "close", "volume"]:
         normalized[column] = _finite_numeric(normalized[column])
     normalized["volume"] = normalized["volume"].fillna(0)
-    normalized = normalized.dropna(
-        subset=["timestamp", "open", "high", "low", "close"]
-    )
+    normalized = normalized.dropna(subset=["timestamp", "open", "high", "low", "close"])
     return normalized[_valid_ohlc_mask(normalized)]
 
 

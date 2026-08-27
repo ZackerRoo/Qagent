@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
+from http.client import RemoteDisconnected
 import math
 import time
 from threading import Lock
@@ -164,6 +165,8 @@ class FuyaoTelemetrySnapshot:
     negative_capability_expired: int
     negative_capability_reprobes: int
     negative_capability_success_clears: int
+    degraded_snapshot_rows: int
+    degraded_snapshot_fields: dict[str, int]
 
 
 class FuyaoClient:
@@ -216,6 +219,8 @@ class FuyaoClient:
             self._telemetry_negative_capability_expired = 0
             self._telemetry_negative_capability_reprobes = 0
             self._telemetry_negative_capability_success_clears = 0
+            self._telemetry_degraded_snapshot_rows = 0
+            self._telemetry_degraded_snapshot_fields: Counter[str] = Counter()
 
     def telemetry_snapshot(self) -> FuyaoTelemetrySnapshot:
         with self._telemetry_lock:
@@ -243,6 +248,8 @@ class FuyaoClient:
                 negative_capability_success_clears=(
                     self._telemetry_negative_capability_success_clears
                 ),
+                degraded_snapshot_rows=self._telemetry_degraded_snapshot_rows,
+                degraded_snapshot_fields=dict(self._telemetry_degraded_snapshot_fields),
             )
 
     def request_data(
@@ -636,7 +643,7 @@ class FuyaoClient:
                 )
                 response.raise_for_status()
                 payload = response.json()
-            except (requests.RequestException, ValueError) as exc:
+            except (requests.RequestException, RemoteDisconnected, ValueError) as exc:
                 error_category = (
                     "timeout" if isinstance(exc, requests.Timeout) else "transport_error"
                 )
@@ -786,6 +793,20 @@ class FuyaoClient:
             self._telemetry_negative_capability_reprobes += int(reprobe)
             self._telemetry_negative_capability_success_clears += int(success_clear)
 
+    def _telemetry_snapshot_degradation(self, fields: tuple[str, ...]) -> None:
+        if not fields:
+            return
+        with self._telemetry_lock:
+            self._telemetry_degraded_snapshot_rows += 1
+            self._telemetry_degraded_snapshot_fields.update(fields)
+
+    def _record_snapshot_degradations(
+        self,
+        degradations: list[tuple[str, tuple[str, ...]]],
+    ) -> None:
+        for _instrument_id, fields in degradations:
+            self._telemetry_snapshot_degradation(fields)
+
     def _telemetry_finish(
         self,
         started_at: float,
@@ -850,13 +871,16 @@ class FuyaoSnapshotProvider(FuyaoClient):
             timestamp=timestamp,
             path="/api/a-share/prices/snapshot",
         )
+        degradations: list[tuple[str, tuple[str, ...]]] = []
         rows = _strict_snapshot_rows(
             items,
             request_map=request_map,
             timestamp=timestamp,
             provider_name=self.name,
             request_id=self.last_request.request_id,
+            degradation_sink=degradations,
         )
+        self._record_snapshot_degradations(degradations)
         return pd.DataFrame(rows, columns=FUYAO_SNAPSHOT_COLUMNS)
 
     def _request_snapshot(self, thscodes: list[str]) -> dict[str, Any]:
@@ -1016,12 +1040,14 @@ class FuyaoMarketDataProvider(FuyaoClient):
                     request_id=self.last_request.request_id if self.last_request else None,
                 )
             timestamp = _timestamp_iso(timestamp_ms)
+            degradations: list[tuple[str, tuple[str, ...]]] = []
             rows = _strict_snapshot_rows(
                 items,
                 request_map=request_map,
                 timestamp=timestamp,
                 provider_name="fuyao_realtime",
                 request_id=self.last_request.request_id if self.last_request else None,
+                degradation_sink=degradations,
             )
         except Exception as exc:
             if len(instrument_ids) > 1:
@@ -1039,6 +1065,7 @@ class FuyaoMarketDataProvider(FuyaoClient):
                 return
             self.last_errors.extend(f"{item}: fuyao snapshot: {exc}" for item in instrument_ids)
             return
+        self._record_snapshot_degradations(degradations)
         trade_date = datetime.fromtimestamp(timestamp_ms / 1000, tz=SHANGHAI_TZ).date()
         for row in rows:
             instrument_id = str(row["instrument_id"])
@@ -1084,10 +1111,13 @@ def fuyao_telemetry_data_health(provider: object) -> dict[str, str]:
     negative_capability_success_clears = sum(
         item.negative_capability_success_clears for item in snapshots
     )
+    degraded_snapshot_rows = sum(item.degraded_snapshot_rows for item in snapshots)
+    degraded_snapshot_fields: Counter[str] = Counter()
     latency_total = sum(item.latency_ms_total for item in snapshots)
     error_categories: Counter[str] = Counter()
     for item in snapshots:
         error_categories.update(item.error_categories)
+        degraded_snapshot_fields.update(item.degraded_snapshot_fields)
     latest = max(
         snapshots,
         key=lambda item: item.last_completed_at or "",
@@ -1114,6 +1144,8 @@ def fuyao_telemetry_data_health(provider: object) -> dict[str, str]:
         "fuyao_negative_capability_expired": str(negative_capability_expired),
         "fuyao_negative_capability_reprobes": str(negative_capability_reprobes),
         "fuyao_negative_capability_success_clears": str(negative_capability_success_clears),
+        "fuyao_degraded_snapshot_rows": str(degraded_snapshot_rows),
+        "fuyao_degraded_snapshot_field_mix": _count_mix(degraded_snapshot_fields),
         "fuyao_latency_ms_total": f"{latency_total:.3f}",
         "fuyao_latency_ms_average": (f"{latency_total / requests:.3f}" if requests else "0.000"),
     }
@@ -1309,6 +1341,7 @@ def _strict_snapshot_rows(
     timestamp: str,
     provider_name: str,
     request_id: str | None,
+    degradation_sink: list[tuple[str, tuple[str, ...]]] | None = None,
 ) -> list[dict[str, Any]]:
     rows: dict[str, dict[str, Any]] = {}
     for item in items:
@@ -1331,12 +1364,15 @@ def _strict_snapshot_rows(
                 code="invalid_response",
                 request_id=request_id,
             )
-        rows[thscode] = _normalize_snapshot_item(
+        row, degraded_fields = _normalize_snapshot_item(
             item,
             instrument_id=request_map[thscode],
             timestamp=timestamp,
             provider_name=provider_name,
         )
+        rows[thscode] = row
+        if degraded_fields and degradation_sink is not None:
+            degradation_sink.append((request_map[thscode], degraded_fields))
     missing = [thscode for thscode in request_map if thscode not in rows]
     if missing:
         raise FuyaoProviderError(
@@ -1353,24 +1389,87 @@ def _normalize_snapshot_item(
     instrument_id: str,
     timestamp: str,
     provider_name: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], tuple[str, ...]]:
     thscode = str(item["thscode"]).strip().upper()
-    return {
+    degraded_fields: list[str] = []
+    close = _required_snapshot_price(item, "last_price")
+    previous_close = _optional_snapshot_number(
+        item,
+        "prev_price",
+        degraded_fields,
+        positive=True,
+    )
+    open_price = _optional_snapshot_number(
+        item,
+        "open_price",
+        degraded_fields,
+        positive=True,
+    )
+    if open_price is None:
+        # Previous close is the closest session-boundary proxy. A valid last price
+        # is the final fallback when the upstream open and previous close are unusable.
+        open_price = previous_close if previous_close is not None else close
+
+    high = _optional_snapshot_number(
+        item,
+        "high_price",
+        degraded_fields,
+        positive=True,
+    )
+    minimum_high = max(open_price, close)
+    if high is None or high < minimum_high:
+        _mark_degraded(degraded_fields, "high_price")
+        high = minimum_high
+
+    low = _optional_snapshot_number(
+        item,
+        "low_price",
+        degraded_fields,
+        positive=True,
+    )
+    maximum_low = min(open_price, close)
+    if low is None or low > maximum_low:
+        _mark_degraded(degraded_fields, "low_price")
+        low = maximum_low
+
+    price_change = _optional_snapshot_number(item, "price_change", degraded_fields)
+    if price_change is None and previous_close is not None:
+        price_change = close - previous_close
+    change_ratio = _optional_snapshot_number(
+        item,
+        "price_change_ratio_pct",
+        degraded_fields,
+    )
+    if change_ratio is None and previous_close is not None:
+        change_ratio = (close - previous_close) / previous_close * 100
+
+    row = {
         "instrument_id": instrument_id,
         "timestamp": timestamp,
-        "open": _number(item, "open_price"),
-        "high": _number(item, "high_price"),
-        "low": _number(item, "low_price"),
-        "close": _number(item, "last_price"),
-        "previous_close": _number(item, "prev_price"),
-        "price_change": _number(item, "price_change"),
-        "price_change_ratio_pct": _number(item, "price_change_ratio_pct"),
-        "volume": _number(item, "volume"),
-        "turnover": _number(item, "turnover"),
+        "open": open_price,
+        "high": high,
+        "low": low,
+        "close": close,
+        "previous_close": previous_close,
+        "price_change": price_change,
+        "price_change_ratio_pct": change_ratio,
+        "volume": _optional_snapshot_number(
+            item,
+            "volume",
+            degraded_fields,
+            non_negative=True,
+        ),
+        "turnover": _optional_snapshot_number(
+            item,
+            "turnover",
+            degraded_fields,
+            non_negative=True,
+        ),
         "provider": provider_name,
         "thscode": thscode,
         "ticker": str(item.get("ticker", thscode.split(".", 1)[0])).strip(),
     }
+    return row, tuple(degraded_fields)
 
 
 def _normalize_history_data(data: dict[str, Any], start: date, end: date) -> pd.DataFrame:
@@ -1552,6 +1651,40 @@ def _timestamp_iso(timestamp_ms: int) -> str:
 
 def _number(item: dict[str, Any], field: str) -> float:
     return _finite_number(item.get(field), field=field)
+
+
+def _required_snapshot_price(item: dict[str, Any], field: str) -> float:
+    number = _number(item, field)
+    if number <= 0:
+        raise FuyaoProviderError(
+            f"Fuyao critical field {field} must be positive",
+            code="invalid_response",
+        )
+    return number
+
+
+def _optional_snapshot_number(
+    item: dict[str, Any],
+    field: str,
+    degraded_fields: list[str],
+    *,
+    positive: bool = False,
+    non_negative: bool = False,
+) -> float | None:
+    try:
+        number = _number(item, field)
+    except FuyaoProviderError:
+        _mark_degraded(degraded_fields, field)
+        return None
+    if (positive and number <= 0) or (non_negative and number < 0):
+        _mark_degraded(degraded_fields, field)
+        return None
+    return number
+
+
+def _mark_degraded(degraded_fields: list[str], field: str) -> None:
+    if field not in degraded_fields:
+        degraded_fields.append(field)
 
 
 def _finite_number(

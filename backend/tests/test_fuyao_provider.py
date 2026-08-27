@@ -1,4 +1,5 @@
 from datetime import date
+from http.client import RemoteDisconnected
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -107,6 +108,72 @@ def test_fuyao_snapshot_provider_normalizes_response_and_preserves_order():
     assert session.calls[0][1]["headers"] == {"X-api-key": "secret-key"}
 
 
+def test_fuyao_snapshot_provider_degrades_noncritical_numeric_fields():
+    item = _snapshot_item("600519.SH", 1500.0)
+    item.update(
+        {
+            "open_price": "--",
+            "price_change": "unavailable",
+            "price_change_ratio_pct": None,
+            "volume": "unknown",
+        }
+    )
+    provider = FuyaoSnapshotProvider(
+        "secret-key",
+        session=FakeSession([_success_payload(item)]),
+        max_attempts=1,
+    )
+
+    frame = provider.get_snapshot(["CN:600519"])
+
+    row = frame.iloc[0]
+    assert row["close"] == 1500.0
+    assert row["open"] == 1498.5
+    assert row["previous_close"] == 1498.5
+    assert row["price_change"] == 1.5
+    assert row["price_change_ratio_pct"] == pytest.approx(1.5 / 1498.5 * 100)
+    assert pd.isna(row["volume"])
+    assert provider.last_errors == []
+    health = fuyao_telemetry_data_health(provider)
+    assert health["fuyao_telemetry"] == "ready"
+    assert health["fuyao_errors"] == "0"
+    assert health["fuyao_degraded_snapshot_rows"] == "1"
+    assert health["fuyao_degraded_snapshot_field_mix"] == (
+        "open_price=1,price_change=1,price_change_ratio_pct=1,volume=1"
+    )
+
+
+def test_fuyao_snapshot_provider_uses_last_price_when_open_and_previous_close_are_bad():
+    item = _snapshot_item("600519.SH", 1500.0)
+    item["open_price"] = "--"
+    item["prev_price"] = None
+    provider = FuyaoSnapshotProvider(
+        "secret-key",
+        session=FakeSession([_success_payload(item)]),
+        max_attempts=1,
+    )
+
+    row = provider.get_snapshot(["CN:600519"]).iloc[0]
+
+    assert row["close"] == 1500.0
+    assert row["open"] == 1500.0
+    assert pd.isna(row["previous_close"])
+
+
+@pytest.mark.parametrize("last_price", ["--", None, 0, float("nan")])
+def test_fuyao_snapshot_provider_fails_closed_on_invalid_last_price(last_price):
+    item = _snapshot_item("600519.SH", 1500.0)
+    item["last_price"] = last_price
+    provider = FuyaoSnapshotProvider(
+        "secret-key",
+        session=FakeSession([_success_payload(item)]),
+        max_attempts=1,
+    )
+
+    with pytest.raises(FuyaoProviderError, match="last_price"):
+        provider.get_snapshot(["CN:600519"])
+
+
 def test_fuyao_snapshot_provider_retries_rate_limit_once():
     session = FakeSession(
         [
@@ -141,6 +208,61 @@ def test_fuyao_snapshot_provider_retries_rate_limit_once():
 
     assert reset_fuyao_telemetry(provider) == 1
     assert fuyao_telemetry_data_health(provider)["fuyao_telemetry"] == "idle"
+
+
+def test_fuyao_client_retries_remote_disconnect_with_bounded_transport_retry():
+    class RemoteDisconnectThenSuccessSession(FakeSession):
+        def get(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            if len(self.calls) == 1:
+                raise RemoteDisconnected("peer closed connection")
+            return FakeResponse(_success_payload(_snapshot_item("600519.SH", 1500.0)))
+
+    session = RemoteDisconnectThenSuccessSession([])
+    provider = FuyaoSnapshotProvider(
+        "secret-key",
+        base_url="https://remote-disconnect-retry.example",
+        session=session,
+        max_attempts=2,
+        retry_backoff_seconds=0,
+    )
+
+    frame = provider.get_snapshot(["CN:600519"])
+
+    assert frame["close"].tolist() == [1500.0]
+    assert len(session.calls) == 2
+    health = fuyao_telemetry_data_health(provider)
+    assert health["fuyao_attempts"] == "2"
+    assert health["fuyao_retries"] == "1"
+
+
+def test_fuyao_remote_disconnect_never_populates_negative_capability_cache():
+    class RemoteDisconnectSession(FakeSession):
+        def get(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            raise RemoteDisconnected("peer closed connection")
+
+    base_url = "https://remote-disconnect-no-negative.example"
+    failing = FuyaoClient(
+        "secret-key",
+        base_url=base_url,
+        session=RemoteDisconnectSession([]),
+        max_attempts=1,
+    )
+    with pytest.raises(FuyaoProviderError, match="transport layer"):
+        failing.get_stock_snapshot_data(["600519.SH"])
+
+    recovery_session = FakeSession([_success_payload()])
+    recovery = FuyaoClient(
+        "secret-key",
+        base_url=base_url,
+        session=recovery_session,
+        max_attempts=1,
+    )
+    recovery.get_stock_snapshot_data(["600519.SH"])
+
+    assert len(recovery_session.calls) == 1
+    assert fuyao_telemetry_data_health(recovery)["fuyao_negative_capability_skips"] == "0"
 
 
 def test_fuyao_snapshot_provider_redacts_key_from_business_error():

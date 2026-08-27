@@ -789,9 +789,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     )
     payload_data_health.update(
         {
-            "paper_strategy_configuration_schema": paper_strategy_configuration[
-                "schema_version"
-            ],
+            "paper_strategy_configuration_schema": paper_strategy_configuration["schema_version"],
             "paper_strategy_configuration_digest": paper_strategy_configuration_digest,
             "paper_strategy_configuration_json": json.dumps(
                 paper_strategy_configuration,
@@ -1642,13 +1640,9 @@ def _market_data_reliability_health(
         "market_data_stale_age_mix": _market_data_count_mix(stale_age_counts),
         "market_data_missing_reason_mix": _market_data_count_mix(missing_reason_counts),
         "market_data_asset_type_mix": _market_data_count_mix(asset_type_counts),
-        "market_data_current_asset_type_mix": _market_data_count_mix(
-            current_asset_type_counts
-        ),
+        "market_data_current_asset_type_mix": _market_data_count_mix(current_asset_type_counts),
         "market_data_stale_asset_type_mix": _market_data_count_mix(stale_asset_type_counts),
-        "market_data_missing_asset_type_mix": _market_data_count_mix(
-            missing_asset_type_counts
-        ),
+        "market_data_missing_asset_type_mix": _market_data_count_mix(missing_asset_type_counts),
         "market_data_problem_status_mix": _market_data_count_mix(problem_status_counts),
         "market_data_problem_samples": problem_samples,
         "market_data_recovery_action": _market_data_recovery_action(
@@ -1814,7 +1808,10 @@ def _merge_health(target: dict[str, str], source: dict[str, str]) -> None:
         current = target.get(key)
         if key == "dynamic_calibration_passes":
             target[key] = "1"
-        elif key == "fuyao_error_category_mix":
+        elif key in {
+            "fuyao_error_category_mix",
+            "fuyao_degraded_snapshot_field_mix",
+        }:
             target[key] = _merge_health_count_mixes(current, str(value))
         elif current is not None and str(current).isdigit() and str(value).isdigit():
             target[key] = str(int(current) + int(str(value)))
