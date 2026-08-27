@@ -5324,6 +5324,8 @@ def _paper_industry_capacity_filter(
     provider: str,
     max_per_industry: int,
 ) -> tuple[list[OpportunitySnapshotRecord], dict[str, str]]:
+    """Keep industry concentration as an exposure observation, not admission control."""
+
     if max_per_industry <= 0:
         raise ValueError("max_per_industry must be positive")
     trades = paper_repo.list_trades(limit=1000, provider=provider)
@@ -5347,7 +5349,7 @@ def _paper_industry_capacity_filter(
     existing_sources = {trade.source_snapshot_id for trade in trades}
     selected_counts: dict[str, int] = {}
     allowed: list[OpportunitySnapshotRecord] = []
-    blocked = 0
+    would_exceed = 0
     missing = 0
     already_tracked = 0
     for snapshot in snapshots:
@@ -5365,23 +5367,22 @@ def _paper_industry_capacity_filter(
         industry = _paper_snapshot_industry(snapshot)
         if industry is None:
             missing += 1
+            allowed.append(snapshot)
             continue
         occupied = available_counts.get(industry, 0) + selected_counts.get(industry, 0)
         if occupied >= max_per_industry:
-            blocked += 1
-            continue
+            would_exceed += 1
         allowed.append(snapshot)
         selected_counts[industry] = selected_counts.get(industry, 0) + 1
     return allowed, {
         "paper_industry_capacity_limit": str(max_per_industry),
-        "paper_industry_capacity_blocked": str(blocked),
+        "paper_industry_capacity_blocked": "0",
+        "paper_industry_capacity_would_exceed": str(would_exceed),
         "paper_industry_capacity_missing": str(missing),
         "paper_industry_capacity_active_known": str(sum(active_counts.values())),
         "paper_industry_capacity_active_unknown": str(unknown_active),
         "paper_industry_capacity_already_tracked": str(already_tracked),
-        "paper_industry_capacity_mode": (
-            "replacement_only" if replacee is not None else "new_entries"
-        ),
+        "paper_industry_capacity_mode": "advisory_only",
     }
 
 

@@ -132,7 +132,7 @@ def test_paper_strategy_capacity_counts_open_and_pending_positions():
     assert health["paper_strategy_capacity_blocked"] == "2"
 
 
-def test_paper_industry_capacity_blocks_third_name_and_missing_industry():
+def test_paper_industry_capacity_is_advisory_for_new_paper_entries():
     trades = [
         SimpleNamespace(
             status="open",
@@ -205,13 +205,14 @@ def test_paper_industry_capacity_blocks_third_name_and_missing_industry():
         max_per_industry=2,
     )
 
-    assert [item.instrument_id for item in selected] == ["CN:5", "CN:6"]
-    assert health["paper_industry_capacity_blocked"] == "1"
+    assert [item.instrument_id for item in selected] == ["CN:4", "CN:5", "CN:6", "CN:7"]
+    assert health["paper_industry_capacity_blocked"] == "0"
+    assert health["paper_industry_capacity_would_exceed"] == "1"
     assert health["paper_industry_capacity_missing"] == "1"
     assert health["paper_industry_capacity_active_unknown"] == "1"
 
 
-def test_paper_industry_capacity_allows_same_industry_pending_replacement():
+def test_paper_industry_capacity_keeps_replacement_exposure_advisory():
     trades = [
         SimpleNamespace(
             status="pending",
@@ -262,7 +263,7 @@ def test_paper_industry_capacity_allows_same_industry_pending_replacement():
     )
 
     assert selected == [candidate]
-    assert health["paper_industry_capacity_mode"] == "replacement_only"
+    assert health["paper_industry_capacity_mode"] == "advisory_only"
 
 
 def test_paper_etf_exposure_group_reclassifies_old_snapshots_and_frozen_contexts():
