@@ -25,10 +25,12 @@ from qagent.recommendations.feedback import (
     apply_recommendation_feedback_calibration,
     apply_recommendation_feedback_quality_gate,
     apply_paper_trading_feedback,
+    build_recent_recommendation_feedback_center,
     paper_trading_feedback_data_health,
     recommendation_feedback_data_health,
     walk_forward_feedback_data_health,
 )
+from qagent.recommendations import feedback as feedback_module
 from qagent.recommendations.quality_gate import apply_recommendation_quality_gate
 from qagent.storage.repository import OpportunitySnapshotRecord
 
@@ -38,6 +40,81 @@ OFFICIAL_CALIBRATION_HEALTH = {
     "recommendation_calibration_fail_closed": "true",
     "recommendation_calibration_source_official": "10",
 }
+
+
+def _snapshot(
+    snapshot_id: str,
+    instrument_id: str,
+    signal_date: date,
+) -> OpportunitySnapshotRecord:
+    return OpportunitySnapshotRecord(
+        snapshot_id=snapshot_id,
+        run_id="scan-run",
+        card_id=f"card-{snapshot_id}",
+        instrument_id=instrument_id,
+        market="CN",
+        status="watch",
+        signal_date=signal_date,
+        latest_close=Decimal("10"),
+        primary_strategy_id="trend",
+        score=Decimal("0.7"),
+        strategy_score=Decimal("0.7"),
+        rank_score=Decimal("0.7"),
+        trigger_price=Decimal("10"),
+        initial_stop=Decimal("9"),
+        target_1=Decimal("12"),
+        card={},
+    )
+
+
+def test_recent_feedback_uses_bounded_real_dates_instead_of_sentinel_range(monkeypatch):
+    snapshots = [
+        _snapshot("snapshot-old", "CN:600000", date(2026, 5, 8)),
+        _snapshot("snapshot-new", "CN:000001", date(2026, 7, 20)),
+    ]
+
+    class Repo:
+        def list_opportunity_snapshots(self, *, provider: str, limit: int):
+            assert provider == "free"
+            assert limit == 150
+            return snapshots
+
+    class Provider:
+        def __init__(self):
+            self.request = None
+
+        def get_daily_bars(self, instrument_ids, start, end):
+            self.request = (instrument_ids, start, end)
+            return pd.DataFrame()
+
+    monkeypatch.setattr(
+        feedback_module,
+        "authenticated_ranking_v3_snapshot_sources",
+        lambda _repo, snapshot_ids: (
+            {snapshot_id: "ranking_v3" for snapshot_id in snapshot_ids},
+            {"authenticated": "true"},
+        ),
+    )
+    provider = Provider()
+
+    center = build_recent_recommendation_feedback_center(
+        repo=Repo(),
+        provider="free",
+        market_provider=provider,
+        as_of=date(2026, 8, 28),
+    )
+
+    assert provider.request == (
+        ["CN:600000", "CN:000001"],
+        date(2026, 5, 8),
+        date(2026, 8, 28),
+    )
+    assert center is not None
+    assert center.data_health["feedback_bar_range_policy"] == (
+        "earliest_signal_to_evaluation_date"
+    )
+    assert center.data_health["feedback_bar_start"] == "2026-05-08"
+    assert center.data_health["feedback_bar_end"] == "2026-08-28"
 
 
 def test_recommendation_feedback_promotes_working_signals_and_demotes_failed_signals():

@@ -29,6 +29,7 @@ def build_recent_recommendation_feedback_center(
     provider: str,
     market_provider: MarketDataProvider,
     limit: int = 150,
+    as_of: date | None = None,
 ) -> RecommendationCalibrationCenter | None:
     snapshots = repo.list_opportunity_snapshots(provider=provider, limit=limit)
     if not snapshots:
@@ -40,10 +41,20 @@ def build_recent_recommendation_feedback_center(
         )
     )
     instrument_ids = list(dict.fromkeys(snapshot.instrument_id for snapshot in snapshots))
+    feedback_as_of = as_of or date.today()
+    eligible_signal_dates = [
+        snapshot.signal_date
+        for snapshot in snapshots
+        if snapshot.signal_date is not None and snapshot.signal_date <= feedback_as_of
+    ]
+    # A 1900-2100 sentinel range makes every current cache look incomplete and
+    # forces a slow network request per instrument. Outcomes only need bars from
+    # the earliest recorded signal through the real evaluation date.
+    feedback_start = min(eligible_signal_dates, default=feedback_as_of)
     bars = market_provider.get_daily_bars(
         instrument_ids,
-        start=date(1900, 1, 1),
-        end=date(2100, 1, 1),
+        start=feedback_start,
+        end=feedback_as_of,
     )
     pairs = []
     for snapshot in snapshots:
@@ -57,6 +68,9 @@ def build_recent_recommendation_feedback_center(
         data_health={
             "feedback_provider": provider,
             "feedback_snapshots": str(len(snapshots)),
+            "feedback_bar_start": feedback_start.isoformat(),
+            "feedback_bar_end": feedback_as_of.isoformat(),
+            "feedback_bar_range_policy": "earliest_signal_to_evaluation_date",
             **authentication_health,
         },
         authenticated_admission_sources=authenticated_sources,
