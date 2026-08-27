@@ -12,6 +12,7 @@ from qagent.jobs.full_market import (
     _full_market_a_share_readiness_health,
     _frozen_full_market_scan_end,
     _market_data_reliability_health,
+    _merge_health,
 )
 from qagent.storage.repository import QagentRepository
 from qagent.storage.tables import OpportunitySnapshotRow, ScanRunRow
@@ -374,6 +375,19 @@ def test_full_market_a_share_readiness_uses_the_whole_universe():
     assert health["a_share_stale_bars"] == "1"
     assert health["a_share_missing_bars"] == "1"
     assert health["a_share_adjusted_price_coverage"] == "2/2"
+
+
+def test_full_market_health_merges_fuyao_error_category_counts():
+    health = {"fuyao_error_category_mix": "unsupported_asset=3,symbol_not_found=1"}
+
+    _merge_health(
+        health,
+        {"fuyao_error_category_mix": "unsupported_asset=2,timeout=4"},
+    )
+
+    assert health["fuyao_error_category_mix"] == (
+        "unsupported_asset=5,timeout=4,symbol_not_found=1"
+    )
 
 
 def test_full_market_scan_resume_keeps_frozen_expected_trade_date():

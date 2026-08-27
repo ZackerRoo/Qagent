@@ -1814,12 +1814,28 @@ def _merge_health(target: dict[str, str], source: dict[str, str]) -> None:
         current = target.get(key)
         if key == "dynamic_calibration_passes":
             target[key] = "1"
+        elif key == "fuyao_error_category_mix":
+            target[key] = _merge_health_count_mixes(current, str(value))
         elif current is not None and str(current).isdigit() and str(value).isdigit():
             target[key] = str(int(current) + int(str(value)))
         elif key == "errors" and current:
             target[key] = f"{current} | {value}"
         else:
             target[key] = str(value)
+
+
+def _merge_health_count_mixes(current: str | None, value: str) -> str:
+    counts: Counter[str] = Counter()
+    for raw_mix in (current or "", value):
+        for raw_item in raw_mix.split(","):
+            key, separator, raw_count = raw_item.strip().rpartition("=")
+            if not separator or not key:
+                continue
+            try:
+                counts[key] += int(raw_count)
+            except ValueError:
+                continue
+    return _market_data_count_mix(counts)
 
 
 def _merge_strategy_health(batches: list[list[StrategyHealth]]) -> list[StrategyHealth]:
