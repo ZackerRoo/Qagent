@@ -2156,6 +2156,11 @@ def test_paper_trade_freezes_normalized_point_in_time_source_context(tmp_path):
             ],
         },
     )
+    with repo.session_factory() as session:
+        run = session.get(ScanRunRow, "scan-minute")
+        assert run is not None
+        run.data_health = json.dumps({"market_intelligence_regime": "risk_on"})
+        session.commit()
 
     trade = paper_repo.create_trade(
         source_snapshot_id=snapshot_id,
@@ -2200,6 +2205,111 @@ def test_paper_trade_freezes_normalized_point_in_time_source_context(tmp_path):
     assert frozen.factor_ids == context.factor_ids
 
 
+def test_paper_trade_freezes_scan_run_market_regime_without_changing_plan(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    snapshot_id = _insert_cn_snapshot(
+        repo,
+        instrument_id="CN:688009",
+        created_at=datetime(2026, 7, 1, 7, 0, tzinfo=timezone.utc),
+        trigger_price=Decimal("75.25"),
+        no_chase_above=Decimal("77.50"),
+        card_overrides={
+            "market_context": {"industry": "电子", "themes": ["国产替代"]},
+            "factor_flags": ["trend_quality"],
+        },
+    )
+    with repo.session_factory() as session:
+        run = session.get(ScanRunRow, "scan-minute")
+        assert run is not None
+        run.data_health = json.dumps(
+            {"market_intelligence_regime": "constructive"}
+        )
+        session.commit()
+
+    trade = paper_repo.create_trade(
+        source_snapshot_id=snapshot_id,
+        provider="free",
+        instrument_id="CN:688009",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 2),
+        trigger_price=Decimal("75.25"),
+        initial_stop=Decimal("70.00"),
+        target_1=Decimal("84.00"),
+        rank_score=Decimal("0.8765"),
+        allocation_multiplier=Decimal("0.75"),
+    )
+
+    assert trade.trigger_price == Decimal("75.25")
+    assert trade.initial_stop == Decimal("70.00")
+    assert trade.target_1 == Decimal("84.00")
+    assert trade.rank_score == Decimal("0.8765")
+    assert trade.allocation_multiplier == Decimal("0.75")
+    context = paper_repo.get_trade_source_context(snapshot_id)
+    assert context is not None
+    assert context.market_regime == "constructive"
+
+    with repo.session_factory() as session:
+        run = session.get(ScanRunRow, "scan-minute")
+        snapshot = session.get(OpportunitySnapshotRow, snapshot_id)
+        assert run is not None
+        assert snapshot is not None
+        run.data_health = json.dumps({"market_intelligence_regime": "risk_off"})
+        card = json.loads(snapshot.card_json)
+        card["market_regime"] = "risk_on"
+        snapshot.card_json = json.dumps(card, sort_keys=True)
+        session.commit()
+
+    frozen = paper_repo.get_trade_source_context(snapshot_id)
+    assert frozen is not None
+    assert frozen.market_regime == "constructive"
+
+
+@pytest.mark.parametrize(
+    "data_health",
+    [
+        "{broken",
+        "[]",
+        "{}",
+        '{"market_intelligence_regime": []}',
+        '{"market_intelligence_regime": "not-a-regime"}',
+    ],
+)
+def test_paper_trade_keeps_unknown_when_scan_run_regime_is_invalid(
+    tmp_path,
+    data_health,
+):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    snapshot_id = _insert_cn_snapshot(
+        repo,
+        instrument_id="CN:688010",
+        created_at=datetime(2026, 7, 1, 7, 0, tzinfo=timezone.utc),
+        trigger_price=Decimal("25"),
+        no_chase_above=Decimal("26"),
+    )
+    with repo.session_factory() as session:
+        run = session.get(ScanRunRow, "scan-minute")
+        assert run is not None
+        run.data_health = data_health
+        session.commit()
+
+    trade = paper_repo.create_trade(
+        source_snapshot_id=snapshot_id,
+        provider="free",
+        instrument_id="CN:688010",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 2),
+        trigger_price=Decimal("25"),
+        initial_stop=Decimal("23"),
+        target_1=Decimal("29"),
+    )
+
+    context = paper_repo.get_trade_source_context(trade.source_snapshot_id)
+    assert context is not None
+    assert context.market_regime == "unknown"
+
+
 def test_legacy_paper_trade_without_frozen_context_stays_unknown(tmp_path):
     repo = make_repo(tmp_path)
     paper_repo = PaperTradingRepository(repo.session_factory)
@@ -2234,6 +2344,9 @@ def test_legacy_paper_trade_without_frozen_context_stays_unknown(tmp_path):
                 notes="旧记录没有冻结上下文事件。",
             )
         )
+        run = session.get(ScanRunRow, "scan-minute")
+        assert run is not None
+        run.data_health = json.dumps({"market_intelligence_regime": "risk_off"})
         session.commit()
 
     context = paper_repo.get_trade_source_context(snapshot_id)

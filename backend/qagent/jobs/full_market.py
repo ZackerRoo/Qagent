@@ -4,8 +4,15 @@ from datetime import date, datetime, time, timedelta, timezone
 import json
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 from pydantic import BaseModel, Field
 
+from qagent.backtesting.baseline_challenger import (
+    BASELINE_CHALLENGER_VERSION,
+    MIN_BASELINE_TRAINING_SAMPLES,
+    BaselineCandidate,
+    BaselineDecision,
+)
 from qagent.db import create_session_factory, initialize_database
 from qagent.domain.models import OpportunityCard, SectorStrength
 from qagent.factors.engine import build_factor_feature_snapshot, rerank_factor_rankings
@@ -24,6 +31,7 @@ from qagent.market.benchmark_trend import (
     benchmark_trend_data_health,
     build_benchmark_trend_snapshot,
 )
+from qagent.market.benchmarks import CN_BENCHMARKS
 from qagent.market.calendars import trading_sessions_in_range
 from qagent.market.tradable import load_cn_tradable_instruments
 from qagent.monitoring.drift import (
@@ -73,6 +81,11 @@ from qagent.research.market_intelligence import (
 )
 from qagent.research.operational_readiness import build_operational_readiness_center
 from qagent.research.factor_shadow import score_factor_shadow_runs
+from qagent.research.paper_calibration_shadow import (
+    PaperCalibrationShadowReport,
+    build_paper_calibration_shadow_report,
+)
+from qagent.storage.market_cache import MarketDataCacheRepository
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
 from qagent.storage.repository import (
     paper_model_cohort_from_data_health,
@@ -810,6 +823,25 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
                 ),
             }
         )
+    paper_calibration_shadow = _safe_paper_calibration_shadow_payload(
+        repo,
+        provider=job.provider,
+        cards=visible_cards,
+        decision_date=feature_as_of,
+        current_market_regime=market_state.state.value,
+        current_cohort_id=(
+            paper_model_cohort.cohort_id if paper_model_cohort is not None else None
+        ),
+    )
+    shadow_health = paper_calibration_shadow.get("data_health")
+    if isinstance(shadow_health, dict):
+        payload_data_health.update(
+            {
+                str(key): str(value)
+                for key, value in shadow_health.items()
+                if str(key).startswith("paper_calibration_shadow_")
+            }
+        )
     manual_action_center = build_manual_action_center(
         cards=visible_cards,
         market_intelligence=market_intelligence,
@@ -859,6 +891,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         "a_share_market_state": market_state.model_dump(mode="json"),
         "benchmark_trend": benchmark_trend.model_dump(mode="json"),
         "factor_shadow": factor_shadow,
+        "paper_calibration_shadow": paper_calibration_shadow,
         "data_health": payload_data_health,
     }
     repo.save_scan_run(
@@ -2054,3 +2087,138 @@ def _load_paper_feedback_report(
         )
     except Exception:
         return None
+
+
+def _paper_calibration_shadow_payload(
+    repo: QagentRepository,
+    *,
+    provider: str,
+    cards: list[OpportunityCard],
+    decision_date: date,
+    current_market_regime: str,
+    current_cohort_id: str | None,
+) -> dict[str, object]:
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    trades = paper_repo.list_trades(limit=5_000, provider=provider)
+    cohort_records = repo.get_paper_model_cohorts_for_snapshots(
+        [trade.source_snapshot_id for trade in trades]
+    )
+    cohort_id_by_snapshot = {
+        snapshot_id: cohort.cohort_id if cohort is not None else None
+        for snapshot_id, cohort in cohort_records.items()
+    }
+    current_trades = [
+        trade
+        for trade in trades
+        if current_cohort_id is not None
+        and cohort_id_by_snapshot.get(trade.source_snapshot_id) == current_cohort_id
+    ]
+    contexts = {
+        trade.trade_id: context
+        for trade in current_trades
+        if (context := paper_repo.get_trade_source_context(trade.source_snapshot_id))
+        is not None
+    }
+    benchmark_id = CN_BENCHMARKS[0].benchmark_id
+    eligible_dates = [
+        value
+        for trade in current_trades
+        if trade.entry_date is not None
+        and trade.exit_date is not None
+        and trade.exit_date < decision_date
+        for value in (trade.entry_date, trade.exit_date)
+    ]
+    benchmark_bars = (
+        MarketDataCacheRepository(repo.session_factory).load_daily_bars(
+            provider,
+            [benchmark_id],
+            min(eligible_dates),
+            max(eligible_dates),
+        )
+        if eligible_dates
+        else pd.DataFrame()
+    )
+    candidates = [
+        BaselineCandidate(
+            instrument_id=card.instrument_id,
+            baseline_rank_score=float(card.rank_score),
+            primary_strategy_id=card.primary_strategy_id,
+            factor_signals=sorted(
+                {
+                    *card.factor_flags,
+                    *(
+                        exposure.factor_id
+                        for exposure in card.factor_exposures
+                        if exposure.score >= 0.65
+                    ),
+                }
+            ),
+            market_regime=current_market_regime,
+            industry=(
+                card.market_context.industry if card.market_context is not None else None
+            ),
+            asset_type=card.asset_type,
+        )
+        for card in cards
+    ]
+    return build_paper_calibration_shadow_report(
+        candidates=candidates,
+        trades=trades,
+        cohort_id_by_snapshot=cohort_id_by_snapshot,
+        current_cohort_id=current_cohort_id,
+        source_context_by_trade=contexts,
+        benchmark_bars=benchmark_bars,
+        decision_date=decision_date,
+        current_market_regime=current_market_regime,
+    ).model_dump(mode="json")
+
+
+def _safe_paper_calibration_shadow_payload(
+    repo: QagentRepository,
+    *,
+    provider: str,
+    cards: list[OpportunityCard],
+    decision_date: date,
+    current_market_regime: str,
+    current_cohort_id: str | None,
+) -> dict[str, object]:
+    try:
+        return _paper_calibration_shadow_payload(
+            repo,
+            provider=provider,
+            cards=cards,
+            decision_date=decision_date,
+            current_market_regime=current_market_regime,
+            current_cohort_id=current_cohort_id,
+        )
+    except Exception:
+        return PaperCalibrationShadowReport(
+            model_version=BASELINE_CHALLENGER_VERSION,
+            cohort_id=current_cohort_id,
+            decision_date=decision_date,
+            current_market_regime=current_market_regime,
+            model_ready=False,
+            minimum_training_samples=MIN_BASELINE_TRAINING_SAMPLES,
+            current_cohort_trade_count=0,
+            eligible_closed_trade_count=0,
+            excluded_future_trade_count=0,
+            benchmark_matched_trade_count=0,
+            benchmark_missing_trade_count=0,
+            reason="shadow_report_unavailable",
+            decision=BaselineDecision(
+                decision_date=decision_date,
+                training_sample_count=0,
+                model_ready=False,
+            ),
+            data_health={
+                "paper_calibration_shadow_status": "unavailable",
+                "paper_calibration_shadow_mode": "shadow_only",
+                "paper_calibration_shadow_paper_write_effect": "none",
+                "paper_calibration_shadow_selection_effect": "none",
+                "paper_calibration_shadow_order_effect": "none",
+                "paper_calibration_shadow_weight_effect": "none",
+                "paper_calibration_shadow_training_samples": "0",
+                "paper_calibration_shadow_excluded_future": "0",
+                "paper_calibration_shadow_benchmark_missing": "0",
+            },
+        ).model_dump(mode="json")

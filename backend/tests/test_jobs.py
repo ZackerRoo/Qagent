@@ -13,6 +13,7 @@ from qagent.jobs.daily_scan import ScanItem
 from qagent.market.sector_strength import build_sector_strength
 from qagent.storage.repository import QagentRepository
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
+from qagent.storage.tables import PaperTradeEventRow, PaperTradeRow
 from qagent.strategy_data.models import FundamentalSnapshot
 
 
@@ -224,6 +225,33 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
         "build_market_data_provider",
         lambda provider: FixtureMarketDataProvider(),
     )
+    shadow_card_orders = []
+    build_shadow = full_market._paper_calibration_shadow_payload
+
+    def capture_shadow_card_order(*args, **kwargs):
+        cards = kwargs["cards"]
+        before = [
+            (card.card_id, card.instrument_id, card.rank_score)
+            for card in cards
+        ]
+        result = build_shadow(*args, **kwargs)
+        after = [
+            (card.card_id, card.instrument_id, card.rank_score)
+            for card in cards
+        ]
+        shadow_card_orders.append((before, after))
+        return result
+
+    monkeypatch.setattr(
+        full_market,
+        "_paper_calibration_shadow_payload",
+        capture_shadow_card_order,
+    )
+    with repo.session_factory() as session:
+        paper_counts_before = (
+            session.query(PaperTradeRow).count(),
+            session.query(PaperTradeEventRow).count(),
+        )
 
     full_market.run_full_market_batch_scan_job(job.job_id, top_cards_limit=5)
 
@@ -233,6 +261,26 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
     )
 
     assert cached is not None
+    assert shadow_card_orders
+    assert all(before == after for before, after in shadow_card_orders)
+    assert cached.payload["paper_calibration_shadow"]["mode"] == "shadow_only"
+    assert cached.payload["paper_calibration_shadow"]["model_ready"] is False
+    assert cached.payload["paper_calibration_shadow"]["decision"][
+        "training_sample_count"
+    ] == 0
+    assert "training_samples_below_minimum" in cached.payload[
+        "paper_calibration_shadow"
+    ]["reason"]
+    assert (
+        cached.payload["data_health"]["paper_calibration_shadow_status"]
+        == "collecting"
+    )
+    assert cached.payload["data_health"]["paper_calibration_shadow_mode"] == "shadow_only"
+    with repo.session_factory() as session:
+        assert (
+            session.query(PaperTradeRow).count(),
+            session.query(PaperTradeEventRow).count(),
+        ) == paper_counts_before
     assert cached.payload["factor_rankings"]
     assert len(cached.payload["factor_rankings"]) == len(cached.payload["cards"])
     assert cached.payload["data_health"]["factor_ranking_scope"] == "full_card_universe"
@@ -343,6 +391,73 @@ def test_full_market_batch_job_caches_strategy_health_and_explanations(tmp_path,
     )
     assert len(snapshots) == len(cached.payload["cards"])
     assert all(snapshot.latest_close is not None for snapshot in snapshots)
+
+
+def test_full_market_batch_shadow_report_failure_is_fail_open(tmp_path, monkeypatch):
+    monkeypatch.setenv("QAGENT_DATABASE_URL", f"sqlite:///{tmp_path / 'shadow-fail.db'}")
+    initialize_database()
+    repo = QagentRepository(create_session_factory())
+    job = repo.create_full_market_scan_job(
+        provider="fixture",
+        symbols=["US:TEST", "CN:000001"],
+        batch_size=1,
+        include_etfs=True,
+        sync_if_empty=False,
+    )
+    monkeypatch.setattr(
+        full_market,
+        "build_market_data_provider",
+        lambda provider: FixtureMarketDataProvider(),
+    )
+    shadow_input_order = []
+
+    def fail_shadow_report(*args, **kwargs):
+        shadow_input_order.extend(
+            (card.card_id, card.instrument_id, card.rank_score)
+            for card in kwargs["cards"]
+        )
+        raise RuntimeError("sensitive sqlite detail must not escape")
+
+    monkeypatch.setattr(
+        full_market,
+        "_paper_calibration_shadow_payload",
+        fail_shadow_report,
+    )
+    with repo.session_factory() as session:
+        paper_counts_before = (
+            session.query(PaperTradeRow).count(),
+            session.query(PaperTradeEventRow).count(),
+        )
+
+    full_market.run_full_market_batch_scan_job(job.job_id, top_cards_limit=5)
+
+    finished = repo.get_full_market_scan_job(job.job_id)
+    cached = repo.get_recent_scan_result_cache(
+        cache_key=full_market.full_market_batch_cache_key("fixture", True),
+        max_age=timedelta(minutes=60),
+    )
+    assert finished is not None
+    assert finished.status == "succeeded"
+    assert cached is not None
+    report = cached.payload["paper_calibration_shadow"]
+    assert report["mode"] == "shadow_only"
+    assert report["model_ready"] is False
+    assert report["reason"] == "shadow_report_unavailable"
+    assert "sensitive" not in json.dumps(report)
+    assert report["data_health"]["paper_calibration_shadow_status"] == "unavailable"
+    assert (
+        cached.payload["data_health"]["paper_calibration_shadow_status"]
+        == "unavailable"
+    )
+    assert [
+        (card["card_id"], card["instrument_id"], card["rank_score"])
+        for card in cached.payload["cards"]
+    ] == shadow_input_order
+    with repo.session_factory() as session:
+        assert (
+            session.query(PaperTradeRow).count(),
+            session.query(PaperTradeEventRow).count(),
+        ) == paper_counts_before
 
 
 def test_full_market_batch_uses_frozen_point_in_time_fundamentals(tmp_path, monkeypatch):

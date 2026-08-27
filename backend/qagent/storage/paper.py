@@ -356,6 +356,10 @@ class PaperTradingRepository:
                 signal_date=signal_date,
                 source_status="frozen" if snapshot is not None else "unknown",
                 strategy_configuration=_strategy_configuration_from_snapshot(session, snapshot),
+                fallback_market_regime=_market_regime_from_snapshot_run(
+                    session,
+                    snapshot,
+                ),
             )
             row = PaperTradeRow(
                 trade_id=f"paper-{uuid4().hex[:12]}",
@@ -1088,6 +1092,7 @@ def _source_context_from_snapshot(
     signal_date: date | None,
     source_status: str,
     strategy_configuration: tuple[dict[str, object], str] | None = None,
+    fallback_market_regime: str | None = None,
     fallback_created_at: datetime | None = None,
 ) -> PaperTradeSourceContext:
     card = _snapshot_card(snapshot)
@@ -1114,7 +1119,10 @@ def _source_context_from_snapshot(
         latest_close=snapshot.latest_close if snapshot is not None else None,
         industry=industry,
         themes=themes,
-        market_regime=_source_market_regime(card),
+        market_regime=_source_market_regime(
+            card,
+            fallback=fallback_market_regime,
+        ),
         factor_ids=_source_factor_ids(card),
         source_status=source_status,
         strategy_configuration=(strategy_configuration[0] if strategy_configuration else {}),
@@ -1139,9 +1147,37 @@ def _strategy_configuration_from_snapshot(
         health = json.loads(run.data_health or "{}")
     except (TypeError, json.JSONDecodeError):
         return None
+    if not isinstance(health, dict):
+        return None
     return parse_paper_strategy_configuration(
         health.get("paper_strategy_configuration_json"),
         health.get("paper_strategy_configuration_digest"),
+    )
+
+
+def _market_regime_from_snapshot_run(
+    session: Session,
+    snapshot: OpportunitySnapshotRow | None,
+) -> str | None:
+    if snapshot is None:
+        return None
+    run = session.get(ScanRunRow, snapshot.run_id)
+    if run is None:
+        return None
+    try:
+        health = json.loads(run.data_health or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(health, dict):
+        return None
+    raw_regime = health.get("market_intelligence_regime")
+    if not isinstance(raw_regime, str):
+        return None
+    regime = _normalized_dimension_value(raw_regime)
+    return (
+        regime
+        if regime in {"risk_on", "constructive", "mixed", "risk_off", "thin"}
+        else None
     )
 
 
@@ -1242,11 +1278,16 @@ def _decimal_equal(left: Decimal | None, right: Decimal | None) -> bool:
     return Decimal(left) == Decimal(right)
 
 
-def _source_market_regime(card: dict[str, object]) -> str:
+def _source_market_regime(
+    card: dict[str, object],
+    *,
+    fallback: str | None = None,
+) -> str:
     candidates = [
         card.get("market_regime"),
         card.get("market_environment"),
         card.get("market_state"),
+        fallback,
     ]
     for candidate in candidates:
         if isinstance(candidate, dict):
