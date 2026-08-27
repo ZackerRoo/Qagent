@@ -5271,20 +5271,17 @@ def _paper_strategy_capacity_filter(
     provider: str,
     max_per_strategy: int,
 ) -> tuple[list[OpportunitySnapshotRecord], dict[str, str]]:
+    """Record strategy concentration without using it to reject paper entries.
+
+    A strategy id is a research classification, not an exchange-level trading
+    constraint.  Keep duplicate instruments and source snapshots out of the
+    candidate stream, but let the normal account-capacity and execution checks
+    decide whether an otherwise eligible candidate can enter the paper ledger.
+    """
     if max_per_strategy <= 0:
         raise ValueError("max_per_strategy must be positive")
     trades = paper_repo.list_trades(limit=1000, provider=provider)
     active = [trade for trade in trades if trade.status in {"pending", "open"}]
-    pending = [trade for trade in active if trade.status == "pending"]
-    account = paper_repo.get_account_settings()
-    if len(active) >= account.max_positions and pending:
-        return snapshots, {
-            "paper_strategy_capacity_limit": str(max_per_strategy),
-            "paper_strategy_capacity_blocked": "0",
-            "paper_strategy_capacity_active": str(len(active)),
-            "paper_strategy_capacity_mode": "replacement_only",
-        }
-
     active_counts: dict[str, int] = {}
     active_instruments = {trade.instrument_id for trade in active}
     existing_sources = {trade.source_snapshot_id for trade in trades}
@@ -5293,7 +5290,7 @@ def _paper_strategy_capacity_filter(
         active_counts[strategy_id] = active_counts.get(strategy_id, 0) + 1
 
     allowed: list[OpportunitySnapshotRecord] = []
-    blocked = 0
+    would_exceed = 0
     already_tracked = 0
     selected_counts: dict[str, int] = {}
     for snapshot in snapshots:
@@ -5304,16 +5301,16 @@ def _paper_strategy_capacity_filter(
         occupied = active_counts.get(strategy_id, 0)
         selected = selected_counts.get(strategy_id, 0)
         if occupied + selected >= max_per_strategy:
-            blocked += 1
-            continue
+            would_exceed += 1
         allowed.append(snapshot)
         selected_counts[strategy_id] = selected + 1
     return allowed, {
         "paper_strategy_capacity_limit": str(max_per_strategy),
-        "paper_strategy_capacity_blocked": str(blocked),
+        "paper_strategy_capacity_blocked": "0",
+        "paper_strategy_capacity_would_exceed": str(would_exceed),
         "paper_strategy_capacity_active": str(sum(active_counts.values())),
         "paper_strategy_capacity_already_tracked": str(already_tracked),
-        "paper_strategy_capacity_mode": "new_entries",
+        "paper_strategy_capacity_mode": "advisory_only",
     }
 
 

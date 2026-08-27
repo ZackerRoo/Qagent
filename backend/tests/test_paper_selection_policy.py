@@ -128,8 +128,15 @@ def test_paper_strategy_capacity_counts_open_and_pending_positions():
         max_per_strategy=2,
     )
 
-    assert [item.primary_strategy_id for item in selected] == ["quality", "quality"]
-    assert health["paper_strategy_capacity_blocked"] == "2"
+    assert [item.primary_strategy_id for item in selected] == [
+        "trend",
+        "quality",
+        "quality",
+        "quality",
+    ]
+    assert health["paper_strategy_capacity_blocked"] == "0"
+    assert health["paper_strategy_capacity_would_exceed"] == "2"
+    assert health["paper_strategy_capacity_mode"] == "advisory_only"
 
 
 def test_paper_industry_capacity_is_advisory_for_new_paper_entries():
