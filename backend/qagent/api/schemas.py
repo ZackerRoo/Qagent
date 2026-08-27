@@ -1,4 +1,5 @@
 from datetime import date
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -63,3 +64,4 @@ class FactorResearchExperimentRequest(BaseModel):
     round_trip_cost_bps: float = Field(default=10.0, ge=0, le=100)
     max_instruments: int | None = Field(default=None, ge=50)
     seeds: list[int] = Field(default_factory=lambda: [7, 19, 42], min_length=1, max_length=10)
+    model_recipe: Literal["balanced_v1", "regularized_v1"] = "balanced_v1"

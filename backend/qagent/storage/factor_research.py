@@ -294,7 +294,8 @@ class FactorResearchRepository:
             bundles: list[FactorResearchModelBundle] = []
             seen_configs: set[str] = set()
             for experiment in experiments:
-                if experiment.config_digest in seen_configs:
+                hypothesis_key = _experiment_hypothesis_key(experiment)
+                if hypothesis_key in seen_configs:
                     continue
                 rows = (
                     session.query(FactorResearchModelArtifactRow)
@@ -306,7 +307,7 @@ class FactorResearchRepository:
                 )
                 if not rows:
                     continue
-                seen_configs.add(experiment.config_digest)
+                seen_configs.add(hypothesis_key)
                 models = [_model_artifact_from_row(row) for row in rows]
                 bundles.append(
                     FactorResearchModelBundle(
@@ -673,3 +674,11 @@ def _outcome_identity_payload(item: FactorShadowOutcome) -> dict[str, Any]:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _experiment_hypothesis_key(experiment: FactorResearchExperimentRow) -> str:
+    """Collapse retries of a legacy/default recipe into one forward-evidence lane."""
+
+    config = json.loads(experiment.config_json or "{}")
+    config.setdefault("model_recipe", "balanced_v1")
+    return sha256(_canonical_json(config).encode("utf-8")).hexdigest()

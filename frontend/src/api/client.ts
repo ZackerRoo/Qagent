@@ -990,6 +990,7 @@ export async function fetchFactorShadowRoster(
 
 export async function startFactorResearchExperiment(
   providerMode: DataProviderMode,
+  modelRecipe: "balanced_v1" | "regularized_v1" = "balanced_v1",
 ): Promise<FactorResearchExperiment> {
   return apiPost<FactorResearchExperiment>("/factor-research/experiments", {
     provider_mode: providerMode,
@@ -1002,6 +1003,7 @@ export async function startFactorResearchExperiment(
     top_fraction: 0.1,
     round_trip_cost_bps: 10,
     seeds: [7, 19, 42],
+    model_recipe: modelRecipe,
   });
 }
 

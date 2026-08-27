@@ -103,6 +103,7 @@ const defaultPaperSessionForm: PaperSessionStartPayload = {
 };
 
 type PortfolioView = "account" | "trades" | "research";
+type FactorResearchRecipe = "balanced_v1" | "regularized_v1";
 
 type PaperExposureCategory =
   | "all"
@@ -161,6 +162,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [isRunningValidation, setIsRunningValidation] = useState(false);
   const [isLoadingFactorDiagnostics, setIsLoadingFactorDiagnostics] = useState(false);
   const [isRunningFactorResearch, setIsRunningFactorResearch] = useState(false);
+  const [factorResearchRecipe, setFactorResearchRecipe] = useState<FactorResearchRecipe>("regularized_v1");
   const [isLoadingEtfExposure, setIsLoadingEtfExposure] = useState(false);
   const [deletingPaperTradeId, setDeletingPaperTradeId] = useState("");
   const [selectedPaperTradeId, setSelectedPaperTradeId] = useState("");
@@ -330,18 +332,18 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     }
   }
 
-  async function runFactorResearch() {
+  async function runFactorResearch(recipe: FactorResearchRecipe) {
     setIsRunningFactorResearch(true);
     try {
-      const experiment = await startFactorResearchExperiment(dataMode);
+      const experiment = await startFactorResearchExperiment(dataMode, recipe);
       setFactorResearchExperiments((current) => [
         experiment,
         ...current.filter((item) => item.experiment_id !== experiment.experiment_id),
       ]);
       setPaperMessage(
         language === "zh"
-          ? "全量中性化因子实验已进入后台队列；模拟盘模型和持仓保持不变。"
-          : "The full neutralized-factor experiment is queued; paper model and positions are unchanged.",
+          ? "冻结的 challenger 实验已进入后台队列；模拟盘模型和持仓保持不变。"
+          : "The frozen challenger experiment is queued; paper model and positions are unchanged.",
       );
     } catch {
       setPaperMessage(
@@ -887,6 +889,8 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
               experiment={factorResearchExperiments[0]}
               shadow={factorShadow}
               running={isRunningFactorResearch}
+              selectedRecipe={factorResearchRecipe}
+              onRecipeChange={setFactorResearchRecipe}
               onRun={runFactorResearch}
               language={language}
             />
@@ -1585,13 +1589,17 @@ function FactorModelResearchPanel({
   experiment,
   shadow,
   running,
+  selectedRecipe,
+  onRecipeChange,
   onRun,
   language,
 }: {
   experiment?: FactorResearchExperiment;
   shadow?: FactorShadowResponse;
   running: boolean;
-  onRun: () => Promise<void>;
+  selectedRecipe: FactorResearchRecipe;
+  onRecipeChange: (recipe: FactorResearchRecipe) => void;
+  onRun: (recipe: FactorResearchRecipe) => Promise<void>;
   language: Language;
 }) {
   const active = experiment?.status === "queued" || experiment?.status === "running";
@@ -1628,7 +1636,7 @@ function FactorModelResearchPanel({
           <button
             className="icon-action"
             type="button"
-            onClick={() => void onRun()}
+            onClick={() => void onRun(selectedRecipe)}
             disabled={running || active}
             title={language === "zh" ? "运行全量研究实验" : "Run full research experiment"}
           >
@@ -1640,6 +1648,34 @@ function FactorModelResearchPanel({
         </div>
       </div>
 
+      <div className="factor-model-recipe">
+        <label htmlFor="factor-model-recipe">
+          {language === "zh" ? "下一项冻结 challenger" : "Next frozen challenger"}
+        </label>
+        <select
+          id="factor-model-recipe"
+          value={selectedRecipe}
+          onChange={(event) => onRecipeChange(event.target.value as FactorResearchRecipe)}
+          disabled={running || active}
+        >
+          <option value="regularized_v1">
+            {language === "zh"
+              ? "正则化 LightGBM：更低复杂度、检验跨市场稳定性"
+              : "Regularized LightGBM: lower capacity, stability test"}
+          </option>
+          <option value="balanced_v1">
+            {language === "zh"
+              ? "均衡 LightGBM：既有基准配方重跑"
+              : "Balanced LightGBM: rerun existing reference recipe"}
+          </option>
+        </select>
+        <small>
+          {language === "zh"
+            ? "配方、成本、样本区间和数据修订会一并冻结；结果仅进入影子比较。"
+            : "Recipe, cost, sample window, and revision are frozen together; results only enter shadow comparison."}
+        </small>
+      </div>
+
       <div className="factor-model-meta">
         <span><small>{language === "zh" ? "数据修订" : "Revision"}</small><strong>{experiment?.dataset_revision ?? "-"}</strong></span>
         <span><small>{language === "zh" ? "样本区间" : "Window"}</small><strong>{experiment ? `${experiment.start_date} / ${experiment.end_date}` : "-"}</strong></span>
@@ -1647,6 +1683,13 @@ function FactorModelResearchPanel({
         <span><small>{language === "zh" ? "截面" : "Cross-sections"}</small><strong>{baseline?.cross_sections ?? "-"}</strong></span>
         <span><small>{language === "zh" ? "模型隔离" : "Isolation"}</small><strong>research only</strong></span>
       </div>
+
+      {experiment?.artifacts.recipe_hypothesis && (
+        <div className="factor-model-verdict">
+          <strong>{experiment.artifacts.recipe_label ?? experiment.artifacts.model_recipe}</strong>
+          <span>{experiment.artifacts.recipe_hypothesis}</span>
+        </div>
+      )}
 
       <div className="factor-model-verdict">
         <strong>

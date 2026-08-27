@@ -9596,6 +9596,33 @@ details.compact-data-health:not([open]) > .data-health-details {
   gap: 10px;
 }
 
+.factor-model-recipe {
+  display: grid;
+  grid-template-columns: minmax(10rem, 14rem) minmax(16rem, 1fr);
+  gap: 6px 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.factor-model-recipe label {
+  color: var(--terminal-text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.factor-model-recipe select {
+  min-width: 0;
+}
+
+.factor-model-recipe small {
+  grid-column: 2;
+  color: var(--terminal-muted);
+  font-size: 11px;
+}
+
 .factor-model-meta,
 .factor-importance-row {
   display: grid;

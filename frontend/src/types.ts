@@ -3637,6 +3637,10 @@ export type FactorResearchExperiment = {
     paper_model_unchanged?: boolean;
     shadow_model_persisted?: boolean;
     feature_contract_digest?: string;
+    model_recipe?: "balanced_v1" | "regularized_v1";
+    recipe_label?: string;
+    recipe_hypothesis?: string;
+    recipe_parameters?: Record<string, string | number>;
   };
   error: string | null;
   started_at: string | null;

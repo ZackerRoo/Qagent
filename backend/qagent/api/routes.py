@@ -75,6 +75,7 @@ from qagent.research.factor_experiments import (
     FactorResearchConfig,
     current_code_revision,
     execute_factor_research_experiment,
+    factor_research_recipe,
     resolved_config,
 )
 from qagent.research.factor_shadow_outcomes import (
@@ -3149,7 +3150,10 @@ def start_factor_research_experiment(request: FactorResearchExperimentRequest):
     except (RuntimeError, ValueError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     experiment = store.create(
-        experiment_name="A-share neutralized factor baseline vs LightGBM",
+        experiment_name=(
+            "A-share neutralized factor baseline vs "
+            f"{factor_research_recipe(config)['label']}"
+        ),
         provider_mode=config.provider_mode,
         model_family="baseline+lightgbm",
         benchmark_id=config.benchmark_id,

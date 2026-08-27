@@ -213,6 +213,45 @@ def test_lightgbm_challenger_uses_purged_time_split():
     assert "tree" in model_artifacts[0]["model_text"]
 
 
+def test_regularized_recipe_is_frozen_in_research_artifacts():
+    pytest.importorskip("lightgbm")
+    rng = np.random.default_rng(19)
+    rows = []
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    for date_index in range(30):
+        signal_date = (start + timedelta(days=date_index * 10)).date()
+        for instrument_index in range(60):
+            row = {
+                "signal_date": signal_date,
+                "instrument_id": f"CN:{instrument_index:06d}",
+                "industry": f"industry-{instrument_index % 6}",
+                "log_market_cap": rng.normal(22, 1),
+            }
+            for feature in FEATURE_COLUMNS:
+                row[feature] = rng.normal()
+            row["target_excess_return_pct"] = (
+                row["momentum_20"] - 0.5 * row["volatility_20"] ** 2 + rng.normal(0, 0.3)
+            )
+            rows.append(row)
+
+    _, artifacts, model_artifacts = compare_baseline_and_lightgbm(
+        pd.DataFrame(rows),
+        FactorResearchConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2025, 1, 1),
+            dataset_revision=7,
+            seeds=[7],
+            model_recipe="regularized_v1",
+        ),
+    )
+
+    assert artifacts["model_recipe"] == "regularized_v1"
+    assert artifacts["recipe_label"] == "Regularized LightGBM"
+    assert artifacts["recipe_parameters"]["num_leaves"] == 15
+    assert artifacts["paper_model_unchanged"] is True
+    assert model_artifacts[0]["model_digest"]
+
+
 def test_lightgbm_shadow_scores_are_persisted_without_paper_activation(tmp_path):
     lightgbm = pytest.importorskip("lightgbm")
     database_url = f"sqlite:///{tmp_path / 'factor-shadow.db'}"

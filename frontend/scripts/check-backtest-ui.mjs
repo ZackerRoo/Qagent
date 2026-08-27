@@ -16,6 +16,7 @@ const checks = [
   ["history supports current-recommendation and custom A-share backtest targets", files.history.includes("BacktestTargetMode") && files.history.includes("normalizeCustomBacktestSymbols") && files.history.includes("自定义 A 股")],
   ["history keeps custom backtests read-only", files.history.includes("只读取历史行情进行回测，不会创建模拟交易")],
   ["portfolio renders an isolated factor challenger queue", files.portfolio.includes("FactorShadowRosterPanel") && files.portfolio.includes("选股 Challenger 队列") && files.client.includes("/factor-research/shadow/roster")],
+  ["portfolio registers frozen challenger recipes", files.portfolio.includes("下一项冻结 challenger") && files.portfolio.includes("regularized_v1")],
   ["history renders an explicit verdict card", files.history.includes("BacktestVerdictCard")],
   ["history renders portfolio validation visuals", files.history.includes("PortfolioBacktestVisuals")],
   ["history renders parameter sensitivity sheet", files.history.includes("ParameterSensitivityPanel")],

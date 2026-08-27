@@ -8,7 +8,7 @@ from collections import defaultdict
 from datetime import date
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
 import numpy as np
 import pandas as pd
@@ -32,6 +32,43 @@ from qagent.strategy_data.models import FundamentalSnapshot
 DEFAULT_BENCHMARK_ID = "CN:000300.IDX"
 
 
+FactorResearchRecipe = Literal["balanced_v1", "regularized_v1"]
+
+
+RESEARCH_RECIPES: dict[FactorResearchRecipe, dict[str, Any]] = {
+    # The original broad-capacity learner. Older experiments without an explicit
+    # recipe are interpreted as this recipe for forward-comparison purposes.
+    "balanced_v1": {
+        "label": "Balanced LightGBM",
+        "hypothesis": "A moderately regularized tree ensemble can combine the neutralized factors.",
+        "learning_rate": 0.03,
+        "num_leaves": 31,
+        "min_data_in_leaf": 40,
+        "bagging_fraction": 0.85,
+        "feature_fraction": 0.85,
+        "lambda_l1": 0.1,
+        "lambda_l2": 0.2,
+        "num_boost_round": 500,
+        "early_stopping_rounds": 50,
+    },
+    # This simpler challenger is registered before its forward outcomes are
+    # observed. It tests stability, not a live paper-trading parameter change.
+    "regularized_v1": {
+        "label": "Regularized LightGBM",
+        "hypothesis": "A lower-capacity, more strongly regularized learner generalizes more reliably across market regimes.",
+        "learning_rate": 0.02,
+        "num_leaves": 15,
+        "min_data_in_leaf": 80,
+        "bagging_fraction": 0.9,
+        "feature_fraction": 0.75,
+        "lambda_l1": 0.2,
+        "lambda_l2": 0.5,
+        "num_boost_round": 750,
+        "early_stopping_rounds": 75,
+    },
+}
+
+
 class FactorResearchConfig(BaseModel):
     provider_mode: str = "free"
     start_date: date = date(2021, 11, 1)
@@ -45,12 +82,17 @@ class FactorResearchConfig(BaseModel):
     round_trip_cost_bps: float = Field(default=10.0, ge=0, le=100)
     max_instruments: int | None = Field(default=None, ge=50)
     seeds: list[int] = Field(default_factory=lambda: [7, 19, 42], min_length=1, max_length=10)
+    model_recipe: FactorResearchRecipe = "balanced_v1"
 
     @model_validator(mode="after")
     def validate_window(self) -> "FactorResearchConfig":
         if self.end_date <= self.start_date:
             raise ValueError("end_date must be after start_date")
         return self
+
+
+def factor_research_recipe(config: FactorResearchConfig) -> dict[str, Any]:
+    return RESEARCH_RECIPES[config.model_recipe]
 
 
 class FactorResearchRunOutput(BaseModel):
@@ -387,6 +429,7 @@ def compare_baseline_and_lightgbm(
     best_iterations: list[int] = []
     model_artifacts: list[dict[str, Any]] = []
     feature_contract_digest = factor_research_feature_contract_digest()
+    recipe = factor_research_recipe(config)
     for seed in config.seeds:
         train_data = lgb.Dataset(
             train[list(FEATURE_COLUMNS)],
@@ -405,14 +448,14 @@ def compare_baseline_and_lightgbm(
             {
                 "objective": "regression_l1",
                 "metric": "l1",
-                "learning_rate": 0.03,
-                "num_leaves": 31,
-                "min_data_in_leaf": 40,
-                "bagging_fraction": 0.85,
+                "learning_rate": recipe["learning_rate"],
+                "num_leaves": recipe["num_leaves"],
+                "min_data_in_leaf": recipe["min_data_in_leaf"],
+                "bagging_fraction": recipe["bagging_fraction"],
                 "bagging_freq": 1,
-                "feature_fraction": 0.85,
-                "lambda_l1": 0.1,
-                "lambda_l2": 0.2,
+                "feature_fraction": recipe["feature_fraction"],
+                "lambda_l1": recipe["lambda_l1"],
+                "lambda_l2": recipe["lambda_l2"],
                 "seed": seed,
                 "feature_fraction_seed": seed,
                 "bagging_seed": seed,
@@ -421,12 +464,12 @@ def compare_baseline_and_lightgbm(
                 "verbosity": -1,
             },
             train_data,
-            num_boost_round=500,
+            num_boost_round=recipe["num_boost_round"],
             valid_sets=[valid_data],
             valid_names=["validation"],
-            callbacks=[lgb.early_stopping(50, verbose=False)],
+            callbacks=[lgb.early_stopping(recipe["early_stopping_rounds"], verbose=False)],
         )
-        best_iteration = int(model.best_iteration or 500)
+        best_iteration = int(model.best_iteration or recipe["num_boost_round"])
         predictions.append(
             model.predict(test[list(FEATURE_COLUMNS)], num_iteration=best_iteration)
         )
@@ -493,6 +536,12 @@ def compare_baseline_and_lightgbm(
             "test_rows": len(test),
         },
         "seeds": config.seeds,
+        "model_recipe": config.model_recipe,
+        "recipe_label": recipe["label"],
+        "recipe_hypothesis": recipe["hypothesis"],
+        "recipe_parameters": {
+            key: value for key, value in recipe.items() if key not in {"label", "hypothesis"}
+        },
         "best_iterations": best_iterations,
         "feature_importance": feature_importance,
         "paper_model_unchanged": True,
