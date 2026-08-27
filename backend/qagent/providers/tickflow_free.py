@@ -1,6 +1,7 @@
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 import math
 from time import monotonic
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -13,6 +14,13 @@ DEFAULT_TICKFLOW_FREE_BASE_URL = "https://free-api.tickflow.org"
 DEFAULT_TICKFLOW_TIMEOUT_SECONDS = 6
 DEFAULT_FAILURE_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 300.0
 MAX_KLINE_COUNT = 10_000
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+LEGACY_TICKFLOW_SOURCE_PROVIDERS = {
+    "tickflow_free_index": "tickflow_free_index_shanghai",
+    "tickflow_free_paired": "tickflow_free_paired_shanghai",
+}
+TICKFLOW_INDEX_SOURCE_PROVIDER = LEGACY_TICKFLOW_SOURCE_PROVIDERS["tickflow_free_index"]
+TICKFLOW_PAIRED_SOURCE_PROVIDER = LEGACY_TICKFLOW_SOURCE_PROVIDERS["tickflow_free_paired"]
 
 
 class TickFlowFreeDailyProvider:
@@ -125,7 +133,7 @@ class TickFlowFreeDailyProvider:
         if is_index:
             adjusted = raw[["trade_date", "open", "high", "low", "close"]].copy()
             adjustment_type = "none"
-            provider_name = "tickflow_free_index"
+            provider_name = TICKFLOW_INDEX_SOURCE_PROVIDER
         else:
             try:
                 adjusted = self._request_klines(symbol, start, end, adjust="forward")
@@ -139,7 +147,7 @@ class TickFlowFreeDailyProvider:
                     )
                 adjusted = pd.DataFrame()
             adjustment_type = "forward"
-            provider_name = "tickflow_free_paired"
+            provider_name = TICKFLOW_PAIRED_SOURCE_PROVIDER
 
         adjusted = adjusted.rename(
             columns={
@@ -251,7 +259,7 @@ def _normalize_kline_payload(data: dict, start: date, end: date) -> pd.DataFrame
     frame = pd.DataFrame({**values, "turnover": amount})
     frame["trade_date"] = pd.to_datetime(
         frame.pop("timestamp"), unit="ms", utc=True, errors="coerce"
-    ).dt.date
+    ).dt.tz_convert(SHANGHAI_TZ).dt.date
     for column in ("open", "high", "low", "close", "volume", "turnover"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
         frame[column] = frame[column].where(
@@ -274,7 +282,7 @@ def _normalize_kline_payload(data: dict, start: date, end: date) -> pd.DataFrame
 
 
 def _date_to_epoch_ms(value: date, *, end_of_day: bool = False) -> int:
-    moment = datetime.combine(value, time.max if end_of_day else time.min, tzinfo=timezone.utc)
+    moment = datetime.combine(value, time.max if end_of_day else time.min, tzinfo=SHANGHAI_TZ)
     return int(moment.timestamp() * 1000)
 
 

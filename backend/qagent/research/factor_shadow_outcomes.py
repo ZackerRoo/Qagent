@@ -31,11 +31,13 @@ FACTOR_SHADOW_PROMOTION_MIN_MATURED_RUNS = 20
 FACTOR_SHADOW_PROMOTION_MIN_OUTCOME_COVERAGE = 0.95
 FACTOR_SHADOW_PROMOTION_MIN_SESSION_EDGE_RATE = 0.55
 FACTOR_SHADOW_PROMOTION_MIN_SELECTION_LIFT_RATE = 0.55
+FACTOR_SHADOW_RUN_SELECTION_RULE = "earliest_created_at_then_scan_job_id_per_signal_date"
 
 
 class FactorShadowOutcomeResolution(BaseModel):
     status: str
     as_of_date: date
+    # Compatibility names: both counts use one canonical run per signal date.
     runs: int = 0
     matured_run_horizons: int = 0
     outcomes_inserted: int = 0
@@ -65,6 +67,7 @@ class FactorShadowAttributionGroup(BaseModel):
 class FactorShadowHorizonEvaluation(BaseModel):
     horizon_sessions: int
     status: str
+    # Retained for API compatibility; semantically this is mature signal dates.
     matured_runs: int
     expected_instruments: int
     completed_instruments: int
@@ -107,6 +110,7 @@ class FactorShadowEvaluation(BaseModel):
     experiment_id: str | None = None
     model_digest: str | None = None
     as_of_date: date
+    # Retained for API compatibility; semantically this is unique signal dates.
     run_count: int = 0
     signal_dates: list[date] = Field(default_factory=list)
     next_maturity_date: date | None = None
@@ -185,7 +189,8 @@ def refresh_factor_shadow_benchmark_cache(
             },
         )
     bundle = bundles[0] if bundles else None
-    runs = store.shadow_runs(bundle.experiment.experiment_id) if bundle is not None else []
+    raw_runs = store.shadow_runs(bundle.experiment.experiment_id) if bundle is not None else []
+    runs = _canonical_shadow_runs(raw_runs)
     if bundle is None or not runs:
         return FactorShadowBenchmarkRefresh(
             status="not_started",
@@ -275,7 +280,8 @@ def resolve_factor_shadow_outcomes(
         bundle = bundles[0] if bundles else None
     else:
         bundle = store.model_bundle(experiment_id)
-    runs = store.shadow_runs(bundle.experiment.experiment_id) if bundle is not None else []
+    raw_runs = store.shadow_runs(bundle.experiment.experiment_id) if bundle is not None else []
+    runs = _canonical_shadow_runs(raw_runs)
     if bundle is None or not runs:
         return FactorShadowOutcomeResolution(
             status="not_started",
@@ -287,7 +293,11 @@ def resolve_factor_shadow_outcomes(
         )
 
     round_trip_cost_bps = float(bundle.experiment.config.get("round_trip_cost_bps", 20.0))
-    existing = store.shadow_outcomes(bundle.experiment.experiment_id)
+    raw_existing = store.shadow_outcomes(bundle.experiment.experiment_id)
+    canonical_scan_job_ids = {run.scan_job_id for run in runs}
+    existing = [
+        item for item in raw_existing if item.scan_job_id in canonical_scan_job_ids
+    ]
     existing_keys = {
         (item.scan_job_id, item.instrument_id, item.horizon_sessions) for item in existing
     }
@@ -420,8 +430,11 @@ def resolve_factor_shadow_outcomes(
             "factor_shadow_outcome_status": status,
             "factor_shadow_outcome_contract": FACTOR_SHADOW_OUTCOME_CONTRACT,
             "factor_shadow_outcome_runs": str(len(runs)),
+            "factor_shadow_outcome_raw_runs": str(len(raw_runs)),
+            "factor_shadow_outcome_run_selection": FACTOR_SHADOW_RUN_SELECTION_RULE,
             "factor_shadow_outcome_inserted": str(inserted),
             "factor_shadow_outcome_existing": str(len(existing)),
+            "factor_shadow_outcome_raw_existing": str(len(raw_existing)),
             "factor_shadow_outcome_unresolved_prices": str(unresolved_prices),
             "factor_shadow_outcome_paper_isolation": "true",
             "factor_shadow_outcome_order_effect": "none",
@@ -443,7 +456,8 @@ def build_factor_shadow_evaluation(
         if experiment_id is not None
         else store.latest_model_bundle(provider_mode)
     )
-    runs = store.shadow_runs(bundle.experiment.experiment_id) if bundle is not None else []
+    raw_runs = store.shadow_runs(bundle.experiment.experiment_id) if bundle is not None else []
+    runs = _canonical_shadow_runs(raw_runs)
     if bundle is None or not runs:
         return FactorShadowEvaluation(
             status="not_started",
@@ -457,7 +471,11 @@ def build_factor_shadow_evaluation(
     scores_by_run = {
         run.scan_job_id: store.shadow_scores(run.experiment_id, run.scan_job_id) for run in runs
     }
-    outcomes = store.shadow_outcomes(bundle.experiment.experiment_id)
+    raw_outcomes = store.shadow_outcomes(bundle.experiment.experiment_id)
+    canonical_scan_job_ids = {run.scan_job_id for run in runs}
+    outcomes = [
+        item for item in raw_outcomes if item.scan_job_id in canonical_scan_job_ids
+    ]
     outcomes_by_key = {
         (item.scan_job_id, item.instrument_id, item.horizon_sessions): item for item in outcomes
     }
@@ -498,7 +516,10 @@ def build_factor_shadow_evaluation(
         data_health={
             "factor_shadow_evaluation_status": status,
             "factor_shadow_evaluation_runs": str(len(runs)),
+            "factor_shadow_evaluation_raw_runs": str(len(raw_runs)),
+            "factor_shadow_evaluation_run_selection": FACTOR_SHADOW_RUN_SELECTION_RULE,
             "factor_shadow_evaluation_outcomes": str(len(outcomes)),
+            "factor_shadow_evaluation_raw_outcomes": str(len(raw_outcomes)),
             "factor_shadow_outcome_contract": FACTOR_SHADOW_OUTCOME_CONTRACT,
             "factor_shadow_evaluation_paper_isolation": "true",
         },
@@ -606,6 +627,26 @@ def factor_shadow_outcome_dates(
     entry_date = trading_day_offset(signal_date, FACTOR_SHADOW_ENTRY_WAIT_SESSIONS)
     outcome_date = trading_day_offset(entry_date, horizon_sessions - 1)
     return entry_date, outcome_date
+
+
+def _canonical_shadow_runs(
+    runs: Iterable[FactorShadowRunRef],
+) -> list[FactorShadowRunRef]:
+    """Select one preregistered run per independent signal date.
+
+    The first successfully persisted run is evidence for that date. Later
+    same-day scans cannot replace it, which prevents retries or repaired data
+    from increasing the sample size or retrospectively selecting a better run.
+    ``scan_job_id`` is the deterministic tie-breaker for equal timestamps.
+    """
+
+    selected: dict[date, FactorShadowRunRef] = {}
+    for run in sorted(
+        runs,
+        key=lambda item: (item.signal_date, item.created_at, item.scan_job_id),
+    ):
+        selected.setdefault(run.signal_date, run)
+    return [selected[signal_date] for signal_date in sorted(selected)]
 
 
 def _evaluate_horizon(

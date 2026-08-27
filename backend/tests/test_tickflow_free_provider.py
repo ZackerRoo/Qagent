@@ -6,7 +6,11 @@ import requests
 
 from qagent.providers.daily_fallback import DailyFallbackMarketDataProvider
 from qagent.providers.tickflow_free import (
+    TICKFLOW_INDEX_SOURCE_PROVIDER,
+    TICKFLOW_PAIRED_SOURCE_PROVIDER,
     TickFlowFreeDailyProvider,
+    _date_to_epoch_ms,
+    _normalize_kline_payload,
     _to_tickflow_symbol,
 )
 
@@ -74,7 +78,7 @@ def test_tickflow_free_provider_normalizes_raw_and_forward_adjusted_bars():
     )
 
     assert bars["instrument_id"].tolist() == ["CN:600000", "CN:600000"]
-    assert bars["provider"].eq("tickflow_free_paired").all()
+    assert bars["provider"].eq(TICKFLOW_PAIRED_SOURCE_PROVIDER).all()
     assert bars["trade_date"].tolist() == [date(2026, 1, 2), date(2026, 1, 5)]
     assert bars["close"].tolist() == [10.3, 10.4]
     assert bars["adjusted_close"].tolist() == [5.15, 5.2]
@@ -97,7 +101,7 @@ def test_tickflow_free_provider_treats_index_as_unadjusted():
 
     assert len(session.calls) == 1
     assert session.calls[0]["params"]["symbol"] == "000688.SH"
-    assert bars["provider"].eq("tickflow_free_index").all()
+    assert bars["provider"].eq(TICKFLOW_INDEX_SOURCE_PROVIDER).all()
     assert bars["adjusted_close"].tolist() == bars["close"].tolist()
     assert bars["adjustment_type"].eq("none").all()
 
@@ -117,6 +121,29 @@ def test_tickflow_free_provider_rejects_malformed_column_lengths():
 
     assert bars.empty
     assert "inconsistent lengths" in provider.last_errors[0]
+
+
+def test_tickflow_epoch_uses_shanghai_trade_date_and_request_boundaries():
+    trade_date = date(2026, 8, 17)
+
+    assert _date_to_epoch_ms(trade_date) == 1786896000000
+    assert _date_to_epoch_ms(trade_date, end_of_day=True) == 1786982399999
+
+    frame = _normalize_kline_payload(
+        {
+            "timestamp": [1786896000000],
+            "open": [9.07],
+            "high": [9.16],
+            "low": [8.83],
+            "close": [9.06],
+            "volume": [100],
+            "amount": [906],
+        },
+        trade_date,
+        trade_date,
+    )
+
+    assert frame["trade_date"].tolist() == [trade_date]
 
 
 def test_tickflow_free_provider_keeps_raw_rows_when_adjusted_request_fails():

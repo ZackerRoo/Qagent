@@ -2195,8 +2195,8 @@ function PaperResearchComparisonMatrix({
       {horizon && (
         <small className="paper-research-matrix-note">
           {language === "zh"
-            ? `影子结果采用 ${horizon.horizon_sessions} 个交易日持有期，覆盖率 ${(horizon.outcome_coverage * 100).toFixed(1)}%，成熟运行 ${horizon.matured_runs} 次。`
-            : `Shadow results use ${horizon.horizon_sessions} sessions, ${(horizon.outcome_coverage * 100).toFixed(1)}% coverage, and ${horizon.matured_runs} mature runs.`}
+            ? `影子结果采用 ${horizon.horizon_sessions} 个交易日持有期，覆盖率 ${(horizon.outcome_coverage * 100).toFixed(1)}%，独立成熟信号日 ${horizon.matured_runs} 个。`
+            : `Shadow results use ${horizon.horizon_sessions} sessions, ${(horizon.outcome_coverage * 100).toFixed(1)}% coverage, and ${horizon.matured_runs} independent mature signal dates.`}
         </small>
       )}
     </section>
@@ -2466,7 +2466,7 @@ function FactorShadowRosterPanel({
                 <tr key={candidate.experiment_id}>
                   <td>
                     <strong>{candidate.experiment_name}</strong>
-                    <small>{shortDigest(candidate.config_digest)} · {candidate.evaluation.run_count} {language === "zh" ? "次截面" : "runs"}</small>
+                    <small>{shortDigest(candidate.config_digest)} · {candidate.evaluation.run_count} {language === "zh" ? "个独立信号日" : "independent signal dates"}</small>
                   </td>
                   {[5, 10, 20].map((horizon) => {
                     const result = byHorizon.get(horizon);
@@ -2542,8 +2542,8 @@ function FactorShadowAttributionPanel({
             </strong>
             <small>
               {language === "zh"
-                ? `${horizon.matured_runs} 个成熟截面 · 覆盖 ${Math.round(horizon.outcome_coverage * 100)}%`
-                : `${horizon.matured_runs} mature sessions · ${Math.round(horizon.outcome_coverage * 100)}% coverage`}
+                ? `${horizon.matured_runs} 个独立成熟信号日 · 覆盖 ${Math.round(horizon.outcome_coverage * 100)}%`
+                : `${horizon.matured_runs} independent mature signal dates · ${Math.round(horizon.outcome_coverage * 100)}% coverage`}
             </small>
           </div>
           <div className="factor-shadow-promotion-metrics">
@@ -2617,9 +2617,9 @@ function localizeShadowPromotionReason(reason: string, language: Language) {
     "5d_outcomes_not_matured": "5日结果尚未成熟",
     "10d_outcomes_not_matured": "10日结果尚未成熟",
     "20d_outcomes_not_matured": "20日结果尚未成熟",
-    "5d_matured_runs_below_minimum": "5日成熟截面不足20次",
-    "10d_matured_runs_below_minimum": "10日成熟截面不足20次",
-    "20d_matured_runs_below_minimum": "20日成熟截面不足20次",
+    "5d_matured_runs_below_minimum": "5日独立成熟信号日不足20个",
+    "10d_matured_runs_below_minimum": "10日独立成熟信号日不足20个",
+    "20d_matured_runs_below_minimum": "20日独立成熟信号日不足20个",
     "5d_outcome_coverage_below_minimum": "5日结果覆盖未达95%",
     "10d_outcome_coverage_below_minimum": "10日结果覆盖未达95%",
     "20d_outcome_coverage_below_minimum": "20日结果覆盖未达95%",

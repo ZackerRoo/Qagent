@@ -412,7 +412,7 @@ def test_lightgbm_shadow_scores_are_persisted_without_paper_activation(tmp_path)
     assert roster.data_health["factor_shadow_roster_paper_isolation"] == "true"
 
 
-def test_factor_shadow_outcomes_resolve_only_after_maturity_and_are_immutable(tmp_path):
+def test_factor_shadow_outcomes_use_one_run_per_signal_date_and_are_immutable(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'factor-shadow-outcomes.db'}"
     initialize_database(database_url)
     session_factory = create_session_factory(database_url)
@@ -469,6 +469,23 @@ def test_factor_shadow_outcomes_resolve_only_after_maturity_and_are_immutable(tm
         model_digest=bundle.aggregate_model_digest,
         scores=scores,
     )
+    duplicate_scores = [
+        score.model_copy(
+            update={
+                "challenger_score": score.baseline_score,
+                "challenger_rank": score.baseline_rank,
+            }
+        )
+        for score in scores
+    ]
+    store.record_shadow_scores(
+        experiment_id=experiment.experiment_id,
+        scan_job_id="scan-outcome-2",
+        signal_date=signal_date,
+        dataset_revision=8,
+        model_digest=bundle.aggregate_model_digest,
+        scores=duplicate_scores,
+    )
     entry_date, outcome_date = factor_shadow_outcome_dates(signal_date, 5)
     bars = []
     for index, score in enumerate(scores):
@@ -524,6 +541,36 @@ def test_factor_shadow_outcomes_resolve_only_after_maturity_and_are_immutable(tm
         as_of_date=outcome_date,
         horizons=(5,),
     )
+    single_run_evaluation = build_factor_shadow_evaluation(
+        session_factory,
+        provider_mode="fixture",
+        as_of_date=outcome_date,
+        horizons=(5,),
+    )
+    canonical_outcomes = store.shadow_outcomes(
+        experiment.experiment_id,
+        scan_job_id="scan-outcome-1",
+    )
+    assert len(canonical_outcomes) == 10
+    assert store.shadow_outcomes(
+        experiment.experiment_id,
+        scan_job_id="scan-outcome-2",
+    ) == []
+    store.record_shadow_outcomes(
+        [
+            outcome.model_copy(
+                update={
+                    "scan_job_id": "scan-outcome-2",
+                    "signal_dataset_revision": 8,
+                    "source_digest": sha256(
+                        f"duplicate|{outcome.source_digest}".encode("utf-8")
+                    ).hexdigest(),
+                    "created_at": None,
+                }
+            )
+            for outcome in canonical_outcomes
+        ]
+    )
     evaluation = build_factor_shadow_evaluation(
         session_factory,
         provider_mode="fixture",
@@ -538,18 +585,33 @@ def test_factor_shadow_outcomes_resolve_only_after_maturity_and_are_immutable(tm
     )
 
     assert pending.status == "waiting_for_maturity"
+    assert pending.runs == 1
     assert pending.outcomes_inserted == 0
     assert pending.next_maturity_date == outcome_date
     assert refresh.status == "refreshed"
     assert benchmark_provider.calls == [(["CN:000300.IDX"], entry_date, outcome_date)]
     assert refresh.data_health["factor_shadow_benchmark_prefetch_refreshed"] == "1"
     assert resolved.status == "recorded"
+    assert resolved.runs == 1
     assert resolved.outcomes_inserted == 10
     assert resolved.unresolved_prices == 0
+    assert resolved.data_health["factor_shadow_outcome_raw_runs"] == "2"
+    assert (
+        resolved.data_health["factor_shadow_outcome_run_selection"]
+        == "earliest_created_at_then_scan_job_id_per_signal_date"
+    )
     assert retried.status == "up_to_date"
     assert retried.outcomes_inserted == 0
     assert retried.outcomes_existing == 10
+    assert retried.data_health["factor_shadow_outcome_raw_existing"] == "20"
     assert evaluation.status == "ready"
+    assert evaluation.run_count == 1
+    assert evaluation.signal_dates == [signal_date]
+    assert evaluation.data_health["factor_shadow_evaluation_raw_runs"] == "2"
+    assert evaluation.data_health["factor_shadow_evaluation_outcomes"] == "10"
+    assert evaluation.data_health["factor_shadow_evaluation_raw_outcomes"] == "20"
+    assert evaluation.horizons == single_run_evaluation.horizons
+    assert evaluation.promotion == single_run_evaluation.promotion
     assert evaluation.promotion is not None
     assert evaluation.promotion.status == "collecting"
     assert evaluation.promotion.action == "keep_shadow_only"
