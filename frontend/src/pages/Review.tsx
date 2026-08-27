@@ -50,22 +50,44 @@ export function Review({ symbols }: { symbols: string }) {
                   <th>{t("common.ticker")}</th>
                   <th>{t("review.type")}</th>
                   <th>{t("review.confidence")}</th>
-                  <th>{t("review.hypothesis")}</th>
-                  <th>{t("review.verification")}</th>
+                  <th>{language === "zh" ? "事实、推断与需求" : "Facts, inference, and demand"}</th>
+                  <th>{language === "zh" ? "财务传导与反证" : "Financial transmission and disconfirmation"}</th>
                 </tr>
               </thead>
               <tbody>
                 {data.hypotheses.map((item) => (
-                    <tr key={`${item.news_id}-${item.catalyst_type}`}>
+                  <tr key={`${item.news_id}-${item.catalyst_type}`}>
                     <td className="ticker" title={formatInstrumentDisplay(item.instrument_id)}>
                       {formatInstrumentDisplay(item.instrument_id)}
+                      <small>{item.source}{item.published_at ? ` · ${new Date(item.published_at).toLocaleDateString()}` : ""}</small>
                     </td>
                     <td>{localizeCatalyst(item.catalyst_type, language)}</td>
                     <td>{Math.round(item.confidence * 100)}</td>
                     <td className="reason-cell">
-                      {localizeReason(item.investment_hypothesis, language)}
+                      <strong>{language === "zh" ? "观察事实" : "Observed"}</strong>
+                      <p>{item.observed_facts[0] ?? item.title}</p>
+                      <strong>{language === "zh" ? "研究推断" : "Inference"}</strong>
+                      <p>{localizeReason(item.investment_hypothesis, language)}</p>
+                      <strong>{language === "zh" ? "需求翻译" : "Demand translation"}</strong>
+                      <p>{item.demand_translation}</p>
+                      <small>
+                        {language === "zh" ? "受益身份" : "Beneficiary status"}: {item.beneficiary_chain[0]?.benefit_order ?? "unverified"}
+                        {` · ${language === "zh" ? "已计价" : "Priced in"}: ${item.priced_in_assessment}`}
+                      </small>
                     </td>
-                    <td className="reason-cell">{localizeReason(item.verification_path, language)}</td>
+                    <td className="reason-cell">
+                      {item.financial_transmission.slice(0, 2).map((transmission) => (
+                        <p key={`${transmission.line_item}-${transmission.reporting_lag}`}>
+                          <strong>{transmission.line_item}</strong>: {transmission.mechanism}
+                          {` · ${transmission.reporting_lag}`}
+                        </p>
+                      ))}
+                      <strong>{language === "zh" ? "下一证据" : "Next evidence"}</strong>
+                      <p>{item.evidence_to_watch.slice(0, 2).join("；") || item.verification_path}</p>
+                      <strong>{language === "zh" ? "证伪/失效" : "Disconfirm / invalidate"}</strong>
+                      <p>{[...item.risks.slice(0, 1), ...item.invalidation_triggers.slice(0, 1)].join("；") || "-"}</p>
+                      <small>{language === "zh" ? "决策影响" : "Decision effect"}: {item.decision_effect}</small>
+                    </td>
                   </tr>
                 ))}
               </tbody>

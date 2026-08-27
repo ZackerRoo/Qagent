@@ -21,6 +21,11 @@ const checks = [
   ["portfolio renders Top10 cap3 evidence", files.portfolio.includes("Top10/cap3")],
   ["portfolio shows constraint-matched head lift", files.portfolio.includes("头部增益中位数")],
   ["portfolio localizes head promotion gates", files.portfolio.includes("execution_head_lift_not_positive")],
+  ["types expose paper calibration shadow", files.types.includes("PaperCalibrationShadowReport")],
+  ["portfolio renders calibration cohort training", files.portfolio.includes("PaperCalibrationShadowPanel")],
+  ["portfolio shows baseline to challenger rank change", files.portfolio.includes("baseline_position} → {candidate.challenger_position")],
+  ["portfolio renders factor predecessor continuity", files.portfolio.includes("predecessor_experiment")],
+  ["portfolio explains evidence reset without carryover", files.portfolio.includes("no evidence carryover")],
   ["research polling does not use a paper refresh interval", !files.portfolio.includes("setInterval")],
   ["styles include the research panel", files.styles.includes(".factor-model-research")],
   [

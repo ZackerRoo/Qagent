@@ -231,6 +231,7 @@ from qagent.research.paper_forward_report import (
     build_paper_forward_comparison,
     build_paper_research_baseline_definition,
 )
+from qagent.research.validation_center import build_validation_center
 from qagent.storage.paper import (
     PaperAccountSettings,
     PaperTradeAdmissionProof,
@@ -744,6 +745,17 @@ def start_walk_forward_job(
             lookback_days=lookback_days,
         )
     )
+
+
+@router.get("/validation-center")
+def get_validation_center(provider: str = "free") -> dict[str, object]:
+    mode = provider.strip().lower()
+    if mode != "free":
+        raise HTTPException(
+            status_code=400,
+            detail="validation center currently supports the free provider only",
+        )
+    return build_validation_center(_repo(), provider=mode)
 
 
 def _create_or_get_walk_forward_job(
@@ -8079,6 +8091,11 @@ def catalysts(symbols: str | None = None, limit: int = 5) -> dict[str, object]:
         "scanned": str(len(instrument_ids)),
         "news": str(len(news)),
         "hypotheses": str(len(hypotheses)),
+        "catalyst_research_contract": "serenity-alpha-hypothesis-v1",
+        "catalyst_source_traceability": "frozen_per_hypothesis",
+        "catalyst_beneficiary_scope": "named_instrument_unverified",
+        "catalyst_priced_in_assessment": "unknown_without_price_and_consensus_context",
+        "catalyst_decision_effect": "none",
     }
     data_health.update(resolved.data_health)
     if provider.last_errors:

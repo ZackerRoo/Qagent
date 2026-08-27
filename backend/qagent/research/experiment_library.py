@@ -185,12 +185,31 @@ def _factor_research_artifacts(
     experiments: object,
 ) -> list[ExperimentLibraryArtifact]:
     artifacts: list[ExperimentLibraryArtifact] = []
-    for experiment in list(experiments)[:10]:
+    ordered = sorted(
+        (
+            experiment
+            for experiment in list(experiments)
+            if isinstance(experiment, FactorResearchExperiment)
+        ),
+        key=lambda experiment: (
+            experiment.completed_at or experiment.started_at or experiment.created_at
+        ),
+        reverse=True,
+    )[:10]
+    lineage_positions: dict[str, list[FactorResearchExperiment]] = {}
+    for experiment in ordered:
+        lineage_positions.setdefault(_factor_lineage_key(experiment), []).append(experiment)
+    for experiment in ordered:
         if not isinstance(experiment, FactorResearchExperiment):
             continue
         metrics = experiment.metrics or {}
         baseline = _mapping(metrics.get("baseline"))
         challenger = _mapping(metrics.get("lightgbm_challenger"))
+        lineage = lineage_positions[_factor_lineage_key(experiment)]
+        lineage_index = lineage.index(experiment)
+        predecessor = lineage[lineage_index + 1] if lineage_index + 1 < len(lineage) else None
+        is_current = lineage_index == 0
+        reset_reason = _factor_reset_reason(experiment, predecessor) if is_current else "superseded_by_newer_experiment"
         artifacts.append(
             ExperimentLibraryArtifact(
                 artifact_id=experiment.experiment_id,
@@ -208,6 +227,10 @@ def _factor_research_artifacts(
                 evidence={
                     "model_family": experiment.model_family,
                     "benchmark": experiment.benchmark_id,
+                    "cohort_state": "current" if is_current else "predecessor",
+                    "predecessor_experiment": predecessor.experiment_id if predecessor else "none",
+                    "reset_reason": reset_reason,
+                    "evidence_policy": "experiment_scoped_no_carryover",
                     "baseline_rank_ic": _number_text(baseline.get("mean_rank_ic")),
                     "challenger_rank_ic": _number_text(challenger.get("mean_rank_ic")),
                     "activation": _boolean_text(metrics.get("activation_allowed")),
@@ -216,6 +239,29 @@ def _factor_research_artifacts(
             )
         )
     return artifacts
+
+
+def _factor_lineage_key(experiment: FactorResearchExperiment) -> str:
+    return "|".join(
+        (experiment.provider_mode, experiment.model_family, experiment.benchmark_id)
+    )
+
+
+def _factor_reset_reason(
+    current: FactorResearchExperiment,
+    predecessor: FactorResearchExperiment | None,
+) -> str:
+    if predecessor is None:
+        return "initial_experiment_cohort"
+    if current.config_digest == predecessor.config_digest:
+        return "experiment_restarted_same_config"
+    changed = sorted(
+        key
+        for key in set(current.config) | set(predecessor.config)
+        if current.config.get(key) != predecessor.config.get(key)
+    )
+    suffix = ",".join(changed) if changed else "config_digest"
+    return f"new_config_cohort:{suffix}"
 
 
 def _walk_forward_artifacts(runs: object) -> list[ExperimentLibraryArtifact]:

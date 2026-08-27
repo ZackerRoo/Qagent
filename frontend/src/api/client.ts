@@ -94,6 +94,7 @@ import type {
   WalkForwardJob,
   WalkForwardJobsResponse,
   WalkForwardRunsResponse,
+  ValidationCenterResponse,
 } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000/api";
@@ -1035,6 +1036,17 @@ export async function fetchLatestWalkForwardRun(
   provider: DataProviderMode = "free",
 ): Promise<WalkForwardRun> {
   return apiGet<WalkForwardRun>("/walk-forward/runs/latest", { provider });
+}
+
+export async function fetchValidationCenter(
+  provider: DataProviderMode = "free",
+  options?: RequestOptions,
+): Promise<ValidationCenterResponse> {
+  return apiGet<ValidationCenterResponse>(
+    "/validation-center",
+    { provider },
+    options,
+  );
 }
 
 export async function fetchRankingV3ForwardState(

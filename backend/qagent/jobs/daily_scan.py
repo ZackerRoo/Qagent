@@ -860,6 +860,16 @@ def _a_share_data_readiness(
     index_count = sum(
         bool(card.market_context and card.market_context.index_memberships) for card in cn_cards
     )
+    turnover_count = sum(
+        bool(
+            item.tradability
+            and item.tradability.avg_amount_20d is not None
+            and _positive_number(item.tradability.avg_amount_20d)
+        )
+        for item in cn_items
+    )
+    enhanced_fund_flow_status = data_health.get("a_share_enhanced_fund_flow_status")
+    enhanced_announcements_status = data_health.get("a_share_enhanced_announcements_status")
     statuses = {
         "a_share_adjusted_price": "ready"
         if _int_health(data_health, "adjusted_bars") > 0
@@ -872,15 +882,21 @@ def _a_share_data_readiness(
         "a_share_price_limit": "ready" if price_limit_ready else "missing",
         "a_share_industry": "ready" if industry_ready else "missing",
         "a_share_liquidity": "ready" if liquidity_ready else "partial" if cn_items else "missing",
-        "a_share_turnover": "partial" if liquidity_ready else "missing",
+        "a_share_turnover": _coverage_status(turnover_count, len(cn_items)),
         "a_share_index_constituents": "ready"
         if index_ready
         else "partial"
         if has_etf
         else "missing",
-        "a_share_fund_flow": "ready" if _int_health(data_health, "fund_flow") > 0 else "missing",
+        "a_share_fund_flow": "ready"
+        if _int_health(data_health, "fund_flow") > 0
+        else "unsupported"
+        if enhanced_fund_flow_status == "unsupported"
+        else "missing",
         "a_share_announcements": "ready"
         if _int_health(data_health, "strategy_announcements") > 0
+        else "unsupported"
+        if enhanced_announcements_status == "unsupported"
         else "partial"
         if _int_health(data_health, "strategy_fundamentals") > 0
         else "missing",
@@ -898,6 +914,7 @@ def _a_share_data_readiness(
         "a_share_cn_instrument_count": str(len(cn_items)),
         "a_share_cn_card_count": str(len(cn_cards)),
         "a_share_liquidity_count": str(liquidity_count),
+        "a_share_turnover_count": str(turnover_count),
         "a_share_suspension_count": str(suspension_count),
         "a_share_price_limit_count": str(price_limit_count),
         "a_share_industry_card_count": str(industry_count),
@@ -911,6 +928,19 @@ def _readiness_value(status: str) -> float:
     if status == "partial":
         return 0.55
     return 0.0
+
+
+def _coverage_status(covered: int, total: int) -> str:
+    if total <= 0 or covered <= 0:
+        return "missing"
+    return "ready" if covered / total >= 0.98 else "partial"
+
+
+def _positive_number(value: object) -> bool:
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _int_health(source: dict[str, str], key: str) -> int:

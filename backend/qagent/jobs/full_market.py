@@ -33,6 +33,13 @@ from qagent.market.benchmark_trend import (
 )
 from qagent.market.benchmarks import CN_BENCHMARKS
 from qagent.market.calendars import trading_sessions_in_range
+from qagent.market.astock_enhanced import (
+    AShareEnhancedProvider,
+    EmptyAShareEnhancedDataProvider,
+    apply_a_share_enhanced_to_cards,
+    build_a_share_enhanced_provider,
+    summarize_a_share_enhanced_snapshots,
+)
 from qagent.market.tradable import load_cn_tradable_instruments
 from qagent.monitoring.drift import (
     DriftSnapshotMetadata,
@@ -224,6 +231,47 @@ def build_full_market_batch_symbols(
     limit = max_symbols if max_symbols is not None else 20_000
     instruments = repo.list_tradable_instruments(asset_types=asset_types, limit=limit)
     return [item.instrument_id for item in instruments]
+
+
+def enrich_full_market_visible_cards(
+    cards: list[OpportunityCard],
+    *,
+    provider_mode: str,
+    market_provider_name: str,
+    as_of: date,
+    enhanced_provider: AShareEnhancedProvider | None = None,
+) -> dict[str, str]:
+    """Attach research-only enhancement after global ranking without changing card scores."""
+
+    provider = enhanced_provider or build_a_share_enhanced_provider(
+        provider_mode,
+        market_provider_name,
+    )
+    instrument_ids = [
+        card.instrument_id
+        for card in cards
+        if card.instrument_id.startswith("CN:") and card.asset_type.lower() == "stock"
+    ]
+    if not instrument_ids:
+        return summarize_a_share_enhanced_snapshots({}, provider, 0)
+    try:
+        snapshots = provider.get_snapshots(instrument_ids, as_of=as_of)
+    except Exception as exc:  # pragma: no cover - finalization fail-open guard
+        provider.last_errors.append(f"full_market_visible_enhancement: {exc}")
+        snapshots = {}
+    apply_a_share_enhanced_to_cards(cards, snapshots)
+    health = summarize_a_share_enhanced_snapshots(
+        snapshots,
+        provider,
+        len(instrument_ids),
+    )
+    health.update(
+        {
+            "a_share_enhanced_scope": "full_market_visible_cards_after_global_ranking",
+            "a_share_enhanced_fail_open": "true",
+        }
+    )
+    return health
 
 
 def run_full_market_scan(
@@ -455,6 +503,9 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
                     strategy_data_provider=StoredFundamentalStrategyDataProvider(
                         list(stored_fundamentals.values())
                     ),
+                    # Full-market enhancement is applied once after global ranking so
+                    # the returned Top N, rather than arbitrary batch-local cards, is enriched.
+                    a_share_enhanced_provider=EmptyAShareEnhancedDataProvider(),
                     recommendation_feedback_center=feedback_center,
                     paper_trading_report=paper_report,
                     walk_forward_validation=walk_forward_validation,
@@ -683,7 +734,6 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     aggregate_health.update(benchmark_trend_data_health(benchmark_trend))
     if benchmark_trend_error:
         aggregate_health["benchmark_trend_error"] = benchmark_trend_error
-    brief_health = apply_recommendation_briefs(all_cards)
     ranked_cards = sort_recommendation_cards(sorted(all_cards, key=lambda card: card.instrument_id))
     diversified_head = select_strategy_diversified(
         ranked_cards,
@@ -706,6 +756,15 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         }
     )
     visible_cards = ranked_cards[:top_cards_limit]
+    aggregate_health.update(
+        enrich_full_market_visible_cards(
+            visible_cards,
+            provider_mode=job.provider,
+            market_provider_name=provider.name,
+            as_of=scan_end,
+        )
+    )
+    brief_health = apply_recommendation_briefs(all_cards)
     visible_card_ids = {card.card_id for card in visible_cards}
     visible_governance = [audit for audit in all_governance if audit.card_id in visible_card_ids]
     visible_items = _visible_rejected_items(all_items, limit=500)
@@ -1710,6 +1769,7 @@ def _full_market_a_share_readiness_health(
     suspension = min(_int_health(aggregate_health, "a_share_suspension_count"), item_total)
     price_limit = min(_int_health(aggregate_health, "a_share_price_limit_count"), item_total)
     liquidity = min(_int_health(aggregate_health, "a_share_liquidity_count"), item_total)
+    turnover = min(_int_health(aggregate_health, "a_share_turnover_count"), item_total)
     industry = min(_int_health(aggregate_health, "a_share_industry_card_count"), card_total)
     index = min(
         _int_health(aggregate_health, "a_share_index_constituent_card_count"),
@@ -1721,14 +1781,18 @@ def _full_market_a_share_readiness_health(
         "a_share_price_limit": _coverage_readiness(price_limit, item_total),
         "a_share_industry": _coverage_readiness(industry, card_total),
         "a_share_liquidity": _coverage_readiness(liquidity, item_total),
-        "a_share_turnover": "partial" if liquidity else "missing",
+        "a_share_turnover": _coverage_readiness(turnover, item_total),
         "a_share_index_constituents": _coverage_readiness(index, card_total),
-        "a_share_fund_flow": (
-            "ready" if _int_health(aggregate_health, "fund_flow") > 0 else "missing"
-        ),
+        "a_share_fund_flow": "ready"
+        if _int_health(aggregate_health, "fund_flow") > 0
+        else "unsupported"
+        if aggregate_health.get("a_share_enhanced_fund_flow_status") == "unsupported"
+        else "missing",
         "a_share_announcements": (
             "ready"
             if _int_health(aggregate_health, "strategy_announcements") > 0
+            else "unsupported"
+            if aggregate_health.get("a_share_enhanced_announcements_status") == "unsupported"
             else "partial"
             if _int_health(aggregate_health, "strategy_fundamentals") > 0
             else "missing"
@@ -1750,6 +1814,7 @@ def _full_market_a_share_readiness_health(
         "a_share_suspension_coverage": f"{suspension}/{item_total}",
         "a_share_price_limit_coverage": f"{price_limit}/{item_total}",
         "a_share_liquidity_coverage": f"{liquidity}/{item_total}",
+        "a_share_turnover_coverage": f"{turnover}/{item_total}",
         "a_share_industry_card_coverage": f"{industry}/{card_total}",
         "a_share_index_constituent_card_coverage": f"{index}/{card_total}",
     }

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from qagent.historical_evidence import providers as historical_providers
+from qagent.config import Settings
 from qagent.db import create_session_factory, initialize_database
 from qagent.jobs import historical_data as historical_job
 from qagent.storage.repository import QagentRepository
@@ -297,3 +298,113 @@ def test_historical_job_uses_dedicated_point_in_time_fundamental_provider(
 
     assert result == "completed"
     assert captured["strategy_provider"] is point_in_time_provider
+
+
+def test_historical_job_adds_fuyao_current_snapshot_only_when_range_contains_today(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = f"sqlite:///{tmp_path / 'fuyao-current-overlay.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    repo = QagentRepository(create_session_factory(database_url))
+    today = date.today()
+    job = repo.create_historical_backfill_job(
+        "free",
+        ["CN:600519"],
+        today,
+        today,
+    )
+
+    class HistoricalProvider:
+        name = "historical"
+        last_errors = []
+
+        def get_fundamentals(self, instrument_ids, start, end):
+            return []
+
+    historical = HistoricalProvider()
+    current = SimpleNamespace(name="fuyao_current", last_errors=[])
+    captured = {}
+    monkeypatch.setattr(
+        historical_job,
+        "build_historical_fundamental_provider",
+        lambda _mode: historical,
+    )
+    monkeypatch.setattr(
+        historical_job,
+        "get_settings",
+        lambda: Settings(fuyao_api_key="fuyao-key"),
+    )
+
+    def fake_strategy_builder(_mode, _settings=None, **kwargs):
+        assert kwargs == {"include_fuyao_current_snapshot": True}
+        return current
+
+    monkeypatch.setattr(historical_job, "build_strategy_data_provider", fake_strategy_builder)
+    monkeypatch.setattr(historical_job, "build_market_data_provider", lambda _mode: object())
+    monkeypatch.setattr(
+        historical_job,
+        "build_historical_evidence_provider",
+        lambda _mode: None,
+    )
+    monkeypatch.setattr(
+        historical_job,
+        "run_historical_backfill",
+        lambda **kwargs: captured.update(kwargs) or "completed",
+    )
+
+    assert historical_job.run_historical_backfill_job(job.job_id) == "completed"
+    overlay = captured["strategy_provider"]
+    assert overlay.historical is historical
+    assert overlay.current is current
+    assert "known_at_retrieval_date" in overlay.current_snapshot_temporal_semantics
+
+
+def test_historical_job_uses_fuyao_current_provider_without_dedicated_history(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = f"sqlite:///{tmp_path / 'fuyao-current-direct.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    repo = QagentRepository(create_session_factory(database_url))
+    today = date.today()
+    job = repo.create_historical_backfill_job(
+        "development",
+        ["CN:600519"],
+        today,
+        today,
+    )
+    current = SimpleNamespace(name="fuyao_current", last_errors=[])
+    captured = {}
+    monkeypatch.setattr(
+        historical_job,
+        "build_historical_fundamental_provider",
+        lambda _mode: None,
+    )
+    monkeypatch.setattr(
+        historical_job,
+        "get_settings",
+        lambda: Settings(fuyao_api_key="fuyao-key"),
+    )
+
+    def fake_strategy_builder(_mode, _settings=None, **kwargs):
+        assert kwargs == {"include_fuyao_current_snapshot": True}
+        return current
+
+    monkeypatch.setattr(historical_job, "build_strategy_data_provider", fake_strategy_builder)
+    monkeypatch.setattr(historical_job, "build_market_data_provider", lambda _mode: object())
+    monkeypatch.setattr(
+        historical_job,
+        "build_historical_evidence_provider",
+        lambda _mode: None,
+    )
+    monkeypatch.setattr(
+        historical_job,
+        "run_historical_backfill",
+        lambda **kwargs: captured.update(kwargs) or "completed",
+    )
+
+    assert historical_job.run_historical_backfill_job(job.job_id) == "completed"
+    assert captured["strategy_provider"] is current

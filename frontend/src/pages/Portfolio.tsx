@@ -6,6 +6,7 @@ import {
   fetchAutomationScheduler,
   fetchFactorDiagnostics,
   fetchExperimentLibrary,
+  fetchLatestFullMarketBatchResult,
   fetchFactorResearchExperiments,
   fetchFactorResearchShadow,
   fetchFactorShadowEvaluation,
@@ -67,6 +68,7 @@ import type {
   PaperLedgerResponse,
   PortfolioLookThroughRiskResponse,
   PaperLedgerTransaction,
+  PaperCalibrationShadowReport,
   PaperReportingScope,
   PaperSessionResponse,
   PaperSessionStartPayload,
@@ -147,6 +149,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [factorDiagnostics, setFactorDiagnostics] = useState<FactorDiagnosticsResponse>();
   const [factorResearchExperiments, setFactorResearchExperiments] = useState<FactorResearchExperiment[]>([]);
   const [experimentLibrary, setExperimentLibrary] = useState<ExperimentLibraryReport>();
+  const [paperCalibrationShadow, setPaperCalibrationShadow] = useState<PaperCalibrationShadowReport>();
   const [factorShadow, setFactorShadow] = useState<FactorShadowResponse>();
   const [factorShadowEvaluation, setFactorShadowEvaluation] = useState<FactorShadowEvaluationResponse>();
   const [factorShadowRoster, setFactorShadowRoster] = useState<FactorShadowRosterResponse>();
@@ -264,6 +267,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchFactorResearchShadow(dataMode),
       fetchFactorShadowEvaluation(dataMode),
       fetchFactorShadowRoster(dataMode),
+      fetchLatestFullMarketBatchResult(dataMode, true, 1),
     ]);
     const [
       validationResult,
@@ -278,6 +282,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       factorShadowResult,
       factorShadowEvaluationResult,
       factorShadowRosterResult,
+      latestFullMarketResult,
     ] = researchResults;
     if (validationResult.status === "fulfilled") setValidation(validationResult.value);
     if (dailyReportResult.status === "fulfilled") setDailyReport(dailyReportResult.value);
@@ -306,6 +311,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     }
     if (factorShadowRosterResult.status === "fulfilled") {
       setFactorShadowRoster(factorShadowRosterResult.value);
+    }
+    if (latestFullMarketResult.status === "fulfilled") {
+      setPaperCalibrationShadow(latestFullMarketResult.value.paper_calibration_shadow ?? undefined);
     }
     const failedResearch = researchResults.filter((item) => item.status === "rejected");
     if (failedResearch.length) {
@@ -884,6 +892,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
 
         {portfolioView === "research" && (
           <div className="portfolio-view-stack">
+            <PaperCalibrationShadowPanel report={paperCalibrationShadow} language={language} />
             <ExperimentLibraryPanel report={experimentLibrary} language={language} />
             <FactorModelResearchPanel
               experiment={factorResearchExperiments[0]}
@@ -1501,6 +1510,78 @@ function paperLookThroughWarningText(
   return warning.label;
 }
 
+function PaperCalibrationShadowPanel({
+  report,
+  language,
+}: {
+  report?: PaperCalibrationShadowReport;
+  language: Language;
+}) {
+  const candidates = report?.decision.candidates ?? [];
+  const ranked = [...candidates]
+    .sort((left, right) => left.challenger_position - right.challenger_position)
+    .slice(0, 10);
+  return (
+    <section className="panel stack paper-calibration-shadow" aria-label={language === "zh" ? "模拟盘校准影子" : "Paper calibration shadow"}>
+      <div className="section-header">
+        <div>
+          <p className="eyebrow">{language === "zh" ? "模拟盘校准影子" : "Paper calibration shadow"}</p>
+          <h2>{language === "zh" ? "当前 cohort 的闭环训练进度" : "Closed-loop training for the current cohort"}</h2>
+          <p>{language === "zh" ? "只读比较 baseline 与 challenger，不改变选股、权重或订单。" : "Read-only baseline/challenger comparison; it does not change selection, weights, or orders."}</p>
+        </div>
+        <span className={`status status-${report?.model_ready ? "ready" : "pending"}`}>
+          {report ? (report.model_ready ? (language === "zh" ? "模型就绪" : "Model ready") : (language === "zh" ? "继续训练" : "Training")) : (language === "zh" ? "暂无数据" : "Unavailable")}
+        </span>
+      </div>
+      <div className="experiment-library-scopes">
+        <span><small>Cohort</small><strong title={report?.cohort_id ?? ""}>{report?.cohort_id ? shortDigest(report.cohort_id) : "-"}</strong></span>
+        <span><small>{language === "zh" ? "训练进度" : "Training"}</small><strong>{report ? `${report.benchmark_matched_trade_count}/${report.minimum_training_samples}` : "-/40"}</strong></span>
+        <span><small>model_ready</small><strong>{report ? String(report.model_ready) : "-"}</strong></span>
+      </div>
+      <div className="experiment-library-note">
+        {report ? localizeCalibrationReason(report.reason, language) : (language === "zh" ? "最新全量扫描尚未提供校准影子报告；其它研究与模拟盘数据仍可正常使用。" : "The latest full-market scan has no calibration shadow report; other research and paper data remain available.")}
+      </div>
+      {ranked.length > 0 && (
+        <div className="factor-challenger-queue-table-wrap">
+          <p className="experiment-library-note">
+            {language === "zh" ? `按 challenger 排名展示 ${ranked.length}/${candidates.length}` : `Showing ${ranked.length}/${candidates.length} by challenger rank`}
+          </p>
+          <table className="factor-challenger-queue-table">
+            <thead><tr>
+              <th>{language === "zh" ? "候选" : "Candidate"}</th>
+              <th>{language === "zh" ? "排名变化" : "Rank change"}</th>
+              <th>{language === "zh" ? "证据" : "Evidence"}</th>
+              <th>{language === "zh" ? "理由" : "Reason"}</th>
+            </tr></thead>
+            <tbody>{ranked.map((candidate) => {
+              const delta = candidate.baseline_position - candidate.challenger_position;
+              return <tr key={candidate.instrument_id}>
+                <td><strong>{formatInstrumentDisplay(candidate.instrument_id)}</strong></td>
+                <td><strong>{candidate.baseline_position} → {candidate.challenger_position}</strong><small>{delta === 0 ? "-" : `${delta > 0 ? "+" : ""}${delta}`}</small></td>
+                <td><strong>{candidate.evidence_sample_count}</strong><small>{candidate.expected_excess_return_pct == null ? "-" : `${candidate.expected_excess_return_pct.toFixed(2)}% excess`}</small></td>
+                <td className="reason-cell">{candidate.reason || "-"}</td>
+              </tr>;
+            })}</tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function localizeCalibrationReason(reason: string, language: Language): string {
+  if (language === "en") return reason;
+  if (reason === "ready") return "当前 cohort 的独立闭环样本已达到训练门槛。";
+  if (reason === "current_model_cohort_unavailable") return "当前模型 cohort 身份不可用，未混用历史 cohort 样本。";
+  if (reason === "shadow_report_unavailable") return "校准影子暂不可用，现有模拟盘不受影响。";
+  if (reason.startsWith("training_samples_below_minimum:")) {
+    const matched = reason.match(/matched=(\d+)/)?.[1] ?? "0";
+    const required = reason.match(/required=(\d+)/)?.[1] ?? "40";
+    return `当前 cohort 已匹配 ${matched} 个闭环样本，训练至少需要 ${required} 个。`;
+  }
+  return reason;
+}
+
 function ExperimentLibraryPanel({
   report,
   language,
@@ -1542,6 +1623,14 @@ function ExperimentLibraryPanel({
                 ))}
               </div>
               <p>{artifact.note}</p>
+              {artifact.artifact_type === "factor_research" && (
+                <div className="experiment-library-note">
+                  <strong>{artifact.evidence.cohort_state === "current" ? (language === "zh" ? "当前新 cohort" : "Current new cohort") : (language === "zh" ? "历史 predecessor" : "Historical predecessor")}</strong>
+                  {" · "}{language === "zh" ? "前序" : "predecessor"}: {artifact.evidence.predecessor_experiment ?? "none"}
+                  {" · "}{language === "zh" ? "证据重置" : "reset"}: {artifact.evidence.reset_reason ?? "unknown"}
+                  {" · "}{language === "zh" ? "不继承旧实验样本" : "no evidence carryover"}
+                </div>
+              )}
               {artifact.identity_digest && <code title={artifact.identity_digest}>{artifact.identity_digest.slice(0, 12)}...</code>}
             </article>
           ))}
@@ -2466,7 +2555,8 @@ function FactorShadowRosterPanel({
                 <tr key={candidate.experiment_id}>
                   <td>
                     <strong>{candidate.experiment_name}</strong>
-                    <small>{shortDigest(candidate.config_digest)} · {candidate.evaluation.run_count} {language === "zh" ? "个独立信号日" : "independent signal dates"}</small>
+                    <small>cfg {shortDigest(candidate.config_digest)} · model {shortDigest(candidate.model_digest)}</small>
+                    <small>{candidate.evaluation.run_count} {language === "zh" ? "个独立信号日" : "independent signal dates"}</small>
                   </td>
                   {[5, 10, 20].map((horizon) => {
                     const result = byHorizon.get(horizon);

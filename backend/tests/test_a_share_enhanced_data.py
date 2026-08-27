@@ -9,7 +9,14 @@ from qagent.domain.models import (
     AShareRiskEventProfile,
 )
 from qagent.jobs.daily_scan import run_daily_scan
-from qagent.market.astock_enhanced import AStockEnhancedDataProvider
+from qagent.jobs.full_market import enrich_full_market_visible_cards
+from qagent.market.astock_enhanced import (
+    AStockEnhancedDataProvider,
+    EmptyAShareEnhancedDataProvider,
+    build_a_share_enhanced_provider,
+    summarize_a_share_enhanced_snapshots,
+)
+from qagent.market.fuyao_enhanced import FuyaoAShareEnhancedDataProvider
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.db import create_session_factory, initialize_database
 from qagent.storage.astock_enhanced_cache import AShareEnhancedCacheRepository
@@ -276,3 +283,227 @@ def test_daily_scan_attaches_a_share_enhanced_data_to_recommendations():
     assert result.data_health["a_share_enhanced_provider"] == "fake_astock_enhanced"
     assert result.data_health["a_share_enhanced_snapshots"] == "1"
     assert result.data_health["a_share_enhanced_fund_flow_positive"] == "1"
+    assert result.data_health["a_share_enhanced_decision_weight_applied"] == "false"
+
+
+class FakeFuyaoEnhancedClient:
+    def __init__(self, *, fail_dragon_tiger: bool = False):
+        self.fail_dragon_tiger = fail_dragon_tiger
+        self.dragon_calls = 0
+        self.limit_calls = 0
+
+    def get_dragon_tiger(self, *, trade_date):
+        self.dragon_calls += 1
+        if self.fail_dragon_tiger:
+            raise RuntimeError("dragon source unavailable")
+        return {
+            "trade_date": trade_date.isoformat(),
+            "stock_items": [
+                {
+                    "thscode": "000001.SZ",
+                    "net_value": 36_000_000,
+                    "org_net_value": 8_000_000,
+                    "limit_reason": "日涨幅偏离值达7%",
+                }
+            ],
+        }
+
+    def get_limit_up_pool(self, *, trade_date, page, size):
+        self.limit_calls += 1
+        assert page == 1
+        assert size == 200
+        return {
+            "timestamp": int(trade_date.strftime("%Y%m%d")),
+            "pagination": {"total": 1, "pages": 1, "page": 1, "size": 200},
+            "item": [
+                {
+                    "thscode": "600000.SH",
+                    "continue_day_cnt": 2,
+                    "limit_up_reason": "银行",
+                }
+            ],
+        }
+
+
+def test_fuyao_enhanced_provider_populates_and_reuses_card_cache(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'fuyao-enhanced.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    cache = AShareEnhancedCacheRepository(create_session_factory(database_url))
+    client = FakeFuyaoEnhancedClient()
+    provider = FuyaoAShareEnhancedDataProvider(client, cache=cache)
+
+    first = provider.get_snapshots(
+        ["CN:000001", "CN:600000"],
+        as_of=date(2026, 7, 1),
+    )
+    second = provider.get_snapshots(
+        ["CN:000001", "CN:600000"],
+        as_of=date(2026, 7, 1),
+    )
+
+    assert set(first) == {"CN:000001", "CN:600000"}
+    assert first["CN:000001"].dragon_tiger.latest_net_buy_wan == 3600
+    assert first["CN:600000"].limit_sentiment.member_status == "limit_up"
+    assert first["CN:000001"].fund_flow.trend == "unsupported"
+    assert second["CN:000001"].summary == first["CN:000001"].summary
+    assert client.dragon_calls == 1
+    assert client.limit_calls == 1
+    assert provider.cache_hits == 2
+    assert provider.cache_misses == 2
+
+
+def test_fuyao_enhanced_provider_isolates_partial_source_failure():
+    provider = FuyaoAShareEnhancedDataProvider(
+        FakeFuyaoEnhancedClient(fail_dragon_tiger=True)
+    )
+
+    snapshots = provider.get_snapshots(["CN:600000"], as_of=date(2026, 7, 1))
+
+    snapshot = snapshots["CN:600000"]
+    assert snapshot.status == "partial"
+    assert snapshot.limit_sentiment.member_status == "limit_up"
+    assert snapshot.dragon_tiger.recent_records == 0
+    assert provider.capability_status["dragon_tiger"] == "error"
+    assert provider.capability_status["limit_sentiment"] == "ready"
+    assert "dragon source unavailable" in provider.last_errors[0]
+
+
+class PaginatedFuyaoEnhancedClient(FakeFuyaoEnhancedClient):
+    def __init__(self, *, fail_second_page: bool = False):
+        super().__init__()
+        self.fail_second_page = fail_second_page
+        self.limit_pages: list[int] = []
+
+    def get_dragon_tiger(self, *, trade_date):
+        del trade_date
+        return {"stock_items": []}
+
+    def get_limit_up_pool(self, *, trade_date, page, size):
+        del trade_date
+        assert size == 200
+        self.limit_pages.append(page)
+        if page == 2 and self.fail_second_page:
+            raise RuntimeError("page 2 unavailable")
+        rows = (
+            [{"thscode": f"{100000 + index:06d}.SZ"} for index in range(200)]
+            if page == 1
+            else [
+                {
+                    "thscode": "600000.SH",
+                    "continue_day_cnt": 3,
+                    "limit_up_reason": "第二页命中",
+                }
+            ]
+        )
+        return {
+            "pagination": {"total": 201, "pages": 2, "page": page, "size": 200},
+            "item": rows,
+        }
+
+
+def test_fuyao_enhanced_provider_fetches_second_limit_pool_page_before_negative_result():
+    client = PaginatedFuyaoEnhancedClient()
+    provider = FuyaoAShareEnhancedDataProvider(client)
+
+    snapshots = provider.get_snapshots(["CN:600000"], as_of=date(2026, 7, 1))
+    health = summarize_a_share_enhanced_snapshots(snapshots, provider, 1)
+
+    assert client.limit_pages == [1, 2]
+    assert snapshots["CN:600000"].limit_sentiment.member_status == "limit_up"
+    assert snapshots["CN:600000"].limit_sentiment.member_reason == "第二页命中"
+    assert health["a_share_enhanced_limit_sentiment_pages_succeeded"] == "2"
+    assert health["a_share_enhanced_limit_sentiment_rows"] == "201"
+    assert health["a_share_enhanced_limit_sentiment_coverage"] == "1.000000"
+    assert health["a_share_enhanced_limit_sentiment_complete"] == "true"
+
+
+def test_fuyao_enhanced_provider_does_not_emit_false_negative_after_page_failure():
+    client = PaginatedFuyaoEnhancedClient(fail_second_page=True)
+    provider = FuyaoAShareEnhancedDataProvider(client)
+
+    snapshots = provider.get_snapshots(["CN:600000"], as_of=date(2026, 7, 1))
+    health = summarize_a_share_enhanced_snapshots(snapshots, provider, 1)
+
+    insight = snapshots["CN:600000"].limit_sentiment
+    assert client.limit_pages == [1, 2]
+    assert insight.member_status == "unknown_due_to_partial_source"
+    assert "无法判断" in insight.summary
+    assert provider.capability_status["limit_sentiment"] == "partial_page_error"
+    assert health["a_share_enhanced_limit_sentiment_pages_requested"] == "2"
+    assert health["a_share_enhanced_limit_sentiment_pages_succeeded"] == "1"
+    assert health["a_share_enhanced_limit_sentiment_coverage"] == "0.995025"
+    assert health["a_share_enhanced_limit_sentiment_complete"] == "false"
+
+
+def test_enrich_full_market_visible_cards_is_post_rank_and_score_neutral():
+    scan = run_daily_scan(
+        instrument_ids=["CN:000001"],
+        provider=FixtureMarketDataProvider(),
+        end=date(2026, 3, 20),
+        a_share_enhanced_provider=EmptyAShareEnhancedDataProvider(),
+    )
+    card = scan.cards[0]
+    rank_score = card.rank_score
+    quality_score = card.quality_score
+
+    health = enrich_full_market_visible_cards(
+        [card],
+        provider_mode="free",
+        market_provider_name="free",
+        as_of=date(2026, 3, 20),
+        enhanced_provider=FakeEnhancedProvider(),
+    )
+
+    assert card.a_share_enhanced is not None
+    assert card.rank_score == rank_score
+    assert card.quality_score == quality_score
+    assert health["a_share_enhanced_scope"] == (
+        "full_market_visible_cards_after_global_ranking"
+    )
+    assert health["a_share_enhanced_coverage"] == "1.000000"
+    assert health["a_share_enhanced_fail_open"] == "true"
+
+
+def test_enrich_full_market_visible_cards_fails_open_without_touching_scores():
+    scan = run_daily_scan(
+        instrument_ids=["CN:000001"],
+        provider=FixtureMarketDataProvider(),
+        end=date(2026, 3, 20),
+        a_share_enhanced_provider=EmptyAShareEnhancedDataProvider(),
+    )
+    card = scan.cards[0]
+    original_scores = (card.rank_score, card.quality_score)
+
+    class FailingEnhancedProvider:
+        name = "failing_enhanced"
+        last_errors: list[str] = []
+
+        def get_snapshots(self, instrument_ids, as_of):
+            del instrument_ids, as_of
+            raise RuntimeError("enhancement unavailable")
+
+    health = enrich_full_market_visible_cards(
+        [card],
+        provider_mode="free",
+        market_provider_name="free",
+        as_of=date(2026, 3, 20),
+        enhanced_provider=FailingEnhancedProvider(),
+    )
+
+    assert card.a_share_enhanced is None
+    assert (card.rank_score, card.quality_score) == original_scores
+    assert health["a_share_enhanced_snapshots"] == "0"
+    assert health["a_share_enhanced_error_count"] == "1"
+    assert health["a_share_enhanced_fail_open"] == "true"
+
+
+def test_enhanced_provider_factory_routes_to_fuyao_when_configured(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'fuyao-enhanced-factory.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    monkeypatch.setenv("QAGENT_FUYAO_API_KEY", "secret-key")
+
+    provider = build_a_share_enhanced_provider("free", "free")
+
+    assert isinstance(provider, FuyaoAShareEnhancedDataProvider)
+    assert provider.name == "fuyao_official_enhanced"

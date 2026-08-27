@@ -8,8 +8,10 @@ from qagent.strategy_data import providers as strategy_providers
 from qagent.strategy_data.providers import (
     CninfoAnnouncementProvider,
     CompositeStrategyDataProvider,
+    CurrentSnapshotOverlayStrategyDataProvider,
     FmpStrategyDataProvider,
     FinnhubStrategyDataProvider,
+    FuyaoStrategyDataProvider,
     SecEdgarStrategyDataProvider,
     build_strategy_data_provider,
 )
@@ -474,3 +476,148 @@ def test_build_strategy_data_provider_uses_configured_real_sources():
     assert "sec_edgar" in provider.name
     assert "cninfo" in provider.name
     assert "tushare" in provider.name
+
+
+class FakeFuyaoFundamentalClient:
+    def __init__(self):
+        self.valuation_calls = []
+        self.indicator_calls = []
+
+    def get_valuations(self, thscodes):
+        self.valuation_calls.append(thscodes)
+        return {
+            "item": [
+                {"thscode": code, "pe_ttm": "12.5", "ps_ttm": "2.1"}
+                for code in thscodes
+            ]
+        }
+
+    def get_latest_financial_indicators(self, thscode, *, as_of):
+        self.indicator_calls.append((thscode, as_of))
+        return {
+            "report": "2026-2",
+            "abilities": [
+                {
+                    "ability": "growth",
+                    "indicators": [
+                        {
+                            "index_id": "operating_income_yoy_growth_ratio",
+                            "value": "18.2",
+                        }
+                    ],
+                },
+                {
+                    "ability": "profitability",
+                    "indicators": [
+                        {"index_id": "sale_gross_margin", "value": "42.6"},
+                        {"index_id": "index_weighted_avg_roe", "value": "15.3"},
+                    ],
+                },
+            ],
+        }
+
+
+def test_fuyao_current_fundamentals_use_retrieval_date_not_report_period():
+    client = FakeFuyaoFundamentalClient()
+    known_at = date(2026, 8, 28)
+    provider = FuyaoStrategyDataProvider(client, retrieval_date=lambda: known_at)
+
+    rows = provider.get_fundamentals(
+        ["CN:600519", "CN:510300", "US:AAPL"],
+        date(2026, 1, 1),
+        known_at,
+    )
+
+    assert len(rows) == 1
+    assert rows[0].instrument_id == "CN:600519"
+    assert rows[0].as_of_date == known_at
+    assert rows[0].revenue_growth_pct == Decimal("18.2")
+    assert rows[0].gross_margin_pct == Decimal("42.6")
+    assert rows[0].return_on_equity_pct == Decimal("15.3")
+    assert rows[0].pe_ratio == Decimal("12.5")
+    assert rows[0].price_to_sales == Decimal("2.1")
+    assert rows[0].provider == "fuyao_current_snapshot_known_at_retrieval_date"
+    assert client.valuation_calls == [["600519.SH"]]
+
+
+def test_fuyao_current_fundamentals_do_not_backfill_historical_interval():
+    client = FakeFuyaoFundamentalClient()
+    provider = FuyaoStrategyDataProvider(
+        client,
+        retrieval_date=lambda: date(2026, 8, 28),
+    )
+
+    rows = provider.get_fundamentals(
+        ["CN:600519"],
+        date(2025, 1, 1),
+        date(2026, 8, 27),
+    )
+
+    assert rows == []
+    assert client.valuation_calls == []
+    assert client.indicator_calls == []
+
+
+def test_fuyao_current_fundamentals_are_opt_in_for_explicit_repair():
+    settings = Settings(
+        fuyao_api_key="fuyao-key",
+        sec_user_agent="qagent-test contact@example.com",
+    )
+
+    default = build_strategy_data_provider("free", settings=settings)
+    repair = build_strategy_data_provider(
+        "free",
+        settings=settings,
+        include_fuyao_current_snapshot=True,
+    )
+
+    assert "fuyao_current_snapshot" not in default.name
+    assert "fuyao_current_snapshot_known_at_retrieval_date" in repair.name
+
+
+def test_current_snapshot_overlay_falls_back_without_cached_bars_method():
+    class HistoricalProvider(strategy_providers.BaseStrategyDataProvider):
+        name = "historical_without_cached_bars"
+
+        def get_fundamentals(self, instrument_ids, start, end):
+            del start, end
+            return [
+                strategy_providers.FundamentalSnapshot(
+                    instrument_id=instrument_ids[0],
+                    as_of_date=date(2026, 6, 30),
+                    revenue_growth_pct=Decimal("5"),
+                    provider=self.name,
+                )
+            ]
+
+    class CurrentProvider(strategy_providers.BaseStrategyDataProvider):
+        name = "current"
+
+        def get_fundamentals(self, instrument_ids, start, end):
+            del start
+            return [
+                strategy_providers.FundamentalSnapshot(
+                    instrument_id=instrument_ids[0],
+                    as_of_date=end,
+                    pe_ratio=Decimal("10"),
+                    provider=self.name,
+                )
+            ]
+
+    provider = CurrentSnapshotOverlayStrategyDataProvider(
+        HistoricalProvider(),
+        CurrentProvider(),
+    )
+
+    rows = provider.get_fundamentals_from_cached_bars(
+        ["CN:600519"],
+        date(2026, 1, 1),
+        date(2026, 8, 28),
+        bars=object(),
+    )
+
+    assert [row.provider for row in rows] == [
+        "historical_without_cached_bars",
+        "current",
+    ]
+    assert provider.current_snapshot_rows == 1

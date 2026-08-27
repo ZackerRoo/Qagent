@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 import httpx
 import pandas as pd
@@ -258,6 +258,152 @@ class StoredFundamentalStrategyDataProvider(BaseStrategyDataProvider):
                 and snapshot.as_of_date <= end
             )
         ]
+
+
+class FuyaoStrategyDataProvider(BaseStrategyDataProvider):
+    """Fetch a current A-share snapshot without pretending it was known historically."""
+
+    name = "fuyao_current_snapshot_known_at_retrieval_date"
+
+    def __init__(self, client, *, retrieval_date: Callable[[], date] = date.today):
+        super().__init__()
+        self.client = client
+        self.retrieval_date = retrieval_date
+        self.temporal_semantics = "known_at_retrieval_date;valuations_latest_only"
+
+    def get_fundamentals(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> list[FundamentalSnapshot]:
+        known_at = self.retrieval_date()
+        self.last_errors = []
+        # A current-only API must never populate a historical interval.
+        if not start <= known_at <= end:
+            return []
+        stocks = [
+            instrument_id
+            for instrument_id in dict.fromkeys(instrument_ids)
+            if _is_cn_stock(instrument_id)
+        ]
+        if not stocks:
+            return []
+
+        from qagent.providers.fuyao import to_fuyao_thscode
+
+        thscode_by_id = {
+            instrument_id: to_fuyao_thscode(instrument_id)
+            for instrument_id in stocks
+        }
+        valuations: dict[str, dict[str, object]] = {}
+        thscodes = list(thscode_by_id.values())
+        for offset in range(0, len(thscodes), 100):
+            batch = thscodes[offset : offset + 100]
+            try:
+                payload = self.client.get_valuations(batch)
+            except Exception as exc:
+                self.last_errors.append(
+                    f"valuations {batch[0]}..{batch[-1]}: {exc}"
+                )
+                continue
+            for row in payload.get("item") or []:
+                if isinstance(row, dict) and isinstance(row.get("thscode"), str):
+                    valuations[str(row["thscode"]).upper()] = row
+
+        snapshots: list[FundamentalSnapshot] = []
+        for instrument_id, thscode in thscode_by_id.items():
+            indicators: dict[str, object] = {}
+            try:
+                payload = self.client.get_latest_financial_indicators(
+                    thscode,
+                    as_of=known_at,
+                )
+                indicators = _fuyao_financial_indicators(payload)
+            except Exception as exc:
+                self.last_errors.append(f"{instrument_id}: financial indicators: {exc}")
+            valuation = valuations.get(thscode, {})
+            snapshot = FundamentalSnapshot(
+                instrument_id=instrument_id,
+                # This is intentionally the retrieval date, not the report period.
+                as_of_date=known_at,
+                revenue_growth_pct=_decimal_or_none(
+                    indicators.get("calculate_operating_income_yoy_growth_ratio")
+                    or indicators.get("operating_income_yoy_growth_ratio")
+                ),
+                earnings_growth_pct=_decimal_or_none(
+                    indicators.get("calculate_parent_holder_net_profit_yoy_growth_ratio")
+                    or indicators.get("net_profit_yoy_growth_ratio")
+                ),
+                gross_margin_pct=_decimal_or_none(indicators.get("sale_gross_margin")),
+                net_margin_pct=_decimal_or_none(indicators.get("sale_net_interest_ratio")),
+                return_on_equity_pct=_decimal_or_none(
+                    indicators.get("index_deduct_weighted_avg_roe")
+                    or indicators.get("index_weighted_avg_roe")
+                ),
+                pe_ratio=_decimal_or_none(valuation.get("pe_ttm")),
+                price_to_sales=_decimal_or_none(valuation.get("ps_ttm")),
+                provider=self.name,
+            )
+            if snapshot.has_growth_inputs or snapshot.has_valuation_inputs:
+                snapshots.append(snapshot)
+        return snapshots
+
+
+class CurrentSnapshotOverlayStrategyDataProvider(BaseStrategyDataProvider):
+    """Preserve historical generation and append retrieval-dated current snapshots."""
+
+    def __init__(self, historical: StrategyDataProvider, current: StrategyDataProvider):
+        super().__init__()
+        self.historical = historical
+        self.current = current
+        self.name = f"{historical.name}+{current.name}"
+        self.historical_source_name = self.name
+        self.current_snapshot_temporal_semantics = (
+            "known_at_retrieval_date;valuations_latest_only;no_historical_backfill"
+        )
+        self.current_snapshot_rows = 0
+
+    def get_fundamentals_from_cached_bars(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+        bars,
+    ) -> list[FundamentalSnapshot]:
+        historical_loader = getattr(
+            self.historical,
+            "get_fundamentals_from_cached_bars",
+            None,
+        )
+        historical = (
+            historical_loader(instrument_ids, start, end, bars)
+            if historical_loader is not None
+            else self.historical.get_fundamentals(instrument_ids, start, end)
+        )
+        current = self.current.get_fundamentals(instrument_ids, start, end)
+        self.current_snapshot_rows += len(current)
+        self.last_errors = [
+            *getattr(self.historical, "last_errors", []),
+            *getattr(self.current, "last_errors", []),
+        ]
+        return [*historical, *current]
+
+    def get_fundamentals(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> list[FundamentalSnapshot]:
+        rows = self.historical.get_fundamentals(instrument_ids, start, end)
+        current = self.current.get_fundamentals(instrument_ids, start, end)
+        self.current_snapshot_rows += len(current)
+        rows.extend(current)
+        self.last_errors = [
+            *getattr(self.historical, "last_errors", []),
+            *getattr(self.current, "last_errors", []),
+        ]
+        return rows
 
 
 class FmpStrategyDataProvider(BaseStrategyDataProvider):
@@ -756,6 +902,8 @@ class CompositeStrategyDataProvider(BaseStrategyDataProvider):
 def build_strategy_data_provider(
     mode: str,
     settings: Settings | None = None,
+    *,
+    include_fuyao_current_snapshot: bool = False,
 ) -> StrategyDataProvider:
     normalized_mode = mode.strip().lower()
     if normalized_mode == "fixture":
@@ -769,6 +917,18 @@ def build_strategy_data_provider(
         providers.append(FmpStrategyDataProvider(settings.fmp_api_key))
     if settings.finnhub_api_key:
         providers.append(FinnhubStrategyDataProvider(settings.finnhub_api_key))
+    if include_fuyao_current_snapshot and settings.fuyao_api_key:
+        from qagent.providers.fuyao import FuyaoClient
+
+        providers.append(
+            FuyaoStrategyDataProvider(
+                FuyaoClient(
+                    settings.fuyao_api_key,
+                    base_url=settings.fuyao_base_url,
+                    request_timeout_seconds=settings.fuyao_timeout_seconds,
+                )
+            )
+        )
     providers.append(CninfoAnnouncementProvider())
     if settings.tushare_token:
         providers.append(TushareStrategyDataProvider(settings.tushare_token))
@@ -859,6 +1019,26 @@ def _alpha_vantage_fundamental_snapshot(
     if not snapshot.has_growth_inputs and not snapshot.has_valuation_inputs:
         return None
     return snapshot
+
+
+def _fuyao_financial_indicators(payload: dict[str, object]) -> dict[str, object]:
+    values: dict[str, object] = {}
+    abilities = payload.get("abilities")
+    if not isinstance(abilities, list):
+        return values
+    for ability in abilities:
+        if not isinstance(ability, dict):
+            continue
+        indicators = ability.get("indicators")
+        if not isinstance(indicators, list):
+            continue
+        for indicator in indicators:
+            if not isinstance(indicator, dict):
+                continue
+            index_id = indicator.get("index_id")
+            if isinstance(index_id, str):
+                values[index_id] = indicator.get("value")
+    return values
 
 
 def _alpha_vantage_analyst_insight(
@@ -1103,6 +1283,16 @@ def _us_instruments(instrument_ids: list[str]) -> list[str]:
 
 def _cn_instruments(instrument_ids: list[str]) -> list[str]:
     return [instrument_id for instrument_id in instrument_ids if instrument_id.startswith("CN:")]
+
+
+def _is_cn_stock(instrument_id: str) -> bool:
+    normalized = instrument_id.strip().upper()
+    if not normalized.startswith("CN:") or normalized.endswith(".IDX"):
+        return False
+    symbol = normalized.split(":", 1)[1].split(".", 1)[0]
+    return len(symbol) == 6 and symbol.isdigit() and symbol.startswith(
+        ("0", "2", "3", "4", "6", "8", "9")
+    )
 
 
 def _raw_symbol(instrument_id: str) -> str:

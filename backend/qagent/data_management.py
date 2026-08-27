@@ -986,6 +986,14 @@ def run_historical_backfill(
                 backfill_fundamental_missing_symbols=",".join(
                     fundamental_missing[:200]
                 ),
+                backfill_current_snapshot_semantics=getattr(
+                    strategy_provider,
+                    "current_snapshot_temporal_semantics",
+                    "not_enabled",
+                ),
+                backfill_current_snapshot_rows=str(
+                    getattr(strategy_provider, "current_snapshot_rows", 0)
+                ),
             )
 
         evidence_data_health: dict[str, str] = {}

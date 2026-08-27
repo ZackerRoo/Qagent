@@ -165,3 +165,38 @@ def test_experiment_library_ignores_incomplete_scans_and_other_providers():
 
     assert report.artifacts == []
     assert report.data_health["experiment_library_scan_runs"] == "0"
+
+
+def test_factor_experiment_library_marks_new_cohort_and_preserves_predecessor():
+    predecessor = _factor_experiment().model_copy(
+        update={
+            "experiment_id": "factor-old",
+            "config_digest": "b" * 64,
+            "config": {"model_recipe": "balanced_v1", "top_fraction": 0.10},
+            "created_at": NOW.replace(day=25),
+            "completed_at": NOW.replace(day=25),
+        }
+    )
+    current = _factor_experiment().model_copy(
+        update={
+            "experiment_id": "factor-new",
+            "config_digest": "c" * 64,
+            "config": {"model_recipe": "regularized_v1", "top_fraction": 0.10},
+        }
+    )
+
+    report = build_experiment_library(
+        provider="free",
+        scan_runs=[],
+        factor_experiments=[predecessor, current],
+        walk_forward_runs=[],
+        paper_baseline=None,
+        now=NOW,
+    )
+
+    artifacts = {artifact.artifact_id: artifact for artifact in report.artifacts}
+    assert artifacts["factor-new"].evidence["cohort_state"] == "current"
+    assert artifacts["factor-new"].evidence["predecessor_experiment"] == "factor-old"
+    assert artifacts["factor-new"].evidence["reset_reason"] == "new_config_cohort:model_recipe"
+    assert artifacts["factor-new"].evidence["evidence_policy"] == "experiment_scoped_no_carryover"
+    assert artifacts["factor-old"].evidence["cohort_state"] == "predecessor"

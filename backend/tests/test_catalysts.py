@@ -74,6 +74,15 @@ def test_catalyst_hypotheses_map_news_to_verification_path():
     assert hypotheses[0].instrument_id == "US:AAPL"
     assert hypotheses[0].catalyst_type == "demand"
     assert "orders" in hypotheses[0].verification_path.lower()
+    assert hypotheses[0].source == "fixture"
+    assert hypotheses[0].observed_facts == [
+        "Source headline: Apple supplier wins new AI server order"
+    ]
+    assert hypotheses[0].beneficiary_chain[0].benefit_order == "unverified"
+    assert hypotheses[0].financial_transmission[0].line_item == "orders, backlog, and revenue"
+    assert hypotheses[0].priced_in_assessment == "unknown_without_price_and_consensus_context"
+    assert hypotheses[0].invalidation_triggers
+    assert hypotheses[0].decision_effect == "none"
 
 
 def test_catalyst_hypotheses_do_not_treat_ai_mention_as_demand_by_itself():
@@ -90,6 +99,30 @@ def test_catalyst_hypotheses_do_not_treat_ai_mention_as_demand_by_itself():
     hypotheses = build_catalyst_hypotheses([item])
 
     assert hypotheses[0].catalyst_type == "general"
+    assert hypotheses[0].financial_transmission[0].line_item == "unidentified"
+    assert hypotheses[0].research_status == "hypothesis_only"
+
+
+def test_catalyst_hypotheses_separate_policy_fact_from_beneficiary_inference():
+    item = NewsItem(
+        news_id="n3",
+        instrument_id="CN:000001",
+        title="新政策规划提出设备更新补贴",
+        publisher="Fixture",
+        published_at=datetime(2026, 6, 20, tzinfo=timezone.utc),
+        url="https://example.com/policy",
+        source="fixture",
+    )
+
+    hypothesis = build_catalyst_hypotheses([item])[0]
+
+    assert hypothesis.catalyst_type == "policy"
+    assert hypothesis.observed_facts == ["Source headline: 新政策规划提出设备更新补贴"]
+    assert hypothesis.beneficiary_chain[0].chain_role == "named_instrument"
+    assert hypothesis.beneficiary_chain[0].benefit_order == "unverified"
+    assert "primary policy document" in hypothesis.evidence_to_watch
+    assert hypothesis.risks
+    assert hypothesis.invalidation_triggers
 
 
 def test_catalysts_endpoint_returns_news_and_hypotheses(monkeypatch):
@@ -121,3 +154,5 @@ def test_catalysts_endpoint_returns_news_and_hypotheses(monkeypatch):
     assert body["news"][0]["instrument_id"] == "US:AAPL"
     assert body["hypotheses"][0]["catalyst_type"] == "demand"
     assert body["data_health"]["news"] == "1"
+    assert body["data_health"]["catalyst_research_contract"] == "serenity-alpha-hypothesis-v1"
+    assert body["data_health"]["catalyst_decision_effect"] == "none"

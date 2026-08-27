@@ -480,6 +480,19 @@ def build_a_share_enhanced_provider(
         or market_provider_name == "fixture"
     ):
         return EmptyAShareEnhancedDataProvider()
+    if settings.fuyao_api_key:
+        from qagent.market.fuyao_enhanced import FuyaoAShareEnhancedDataProvider
+        from qagent.providers.fuyao import FuyaoClient
+
+        return FuyaoAShareEnhancedDataProvider(
+            FuyaoClient(
+                settings.fuyao_api_key,
+                base_url=settings.fuyao_base_url,
+                request_timeout_seconds=settings.fuyao_timeout_seconds,
+            ),
+            cache=_build_default_cache(),
+            cache_ttl=timedelta(hours=settings.a_share_enhanced_cache_ttl_hours),
+        )
     return AStockEnhancedDataProvider(
         cache=_build_default_cache(),
         cache_ttl=timedelta(hours=settings.a_share_enhanced_cache_ttl_hours),
@@ -502,15 +515,16 @@ def apply_a_share_enhanced_to_cards(
         if snapshot is None:
             continue
         card.a_share_enhanced = snapshot
-        adjustment = _bounded((snapshot.score - 0.5) * 0.12, -0.06, 0.06)
-        card.rank_score = round(_clamp(card.rank_score + adjustment, 0, 1), 4)
-        card.quality_score = round(_clamp((card.quality_score or card.rank_score) + adjustment, 0, 1), 4)
         _add_unique(card.rank_reasons, f"A股增强数据：{snapshot.summary}")
         if snapshot.fund_flow.trend == "positive":
             _add_unique(card.rank_reasons, f"资金流确认：{snapshot.fund_flow.summary}")
         if (snapshot.dragon_tiger.latest_net_buy_wan or 0) > 0:
             _add_unique(card.rank_reasons, f"龙虎榜确认：{snapshot.dragon_tiger.summary}")
-        if snapshot.limit_sentiment.member_status != "none":
+        if snapshot.limit_sentiment.member_status in {
+            "limit_up",
+            "break_board",
+            "limit_down",
+        }:
             _add_unique(card.rank_reasons, f"涨停情绪：{snapshot.limit_sentiment.summary}")
         for warning in snapshot.warnings:
             _add_unique(card.calibration_notes, f"A股增强数据风险：{warning}")
@@ -526,7 +540,11 @@ def summarize_a_share_enhanced_snapshots(
     values = list(snapshots.values())
     positive_flow = sum(1 for item in values if item.fund_flow.trend == "positive")
     dragon_recent = sum(1 for item in values if item.dragon_tiger.recent_records > 0)
-    limit_members = sum(1 for item in values if item.limit_sentiment.member_status != "none")
+    limit_members = sum(
+        1
+        for item in values
+        if item.limit_sentiment.member_status in {"limit_up", "break_board", "limit_down"}
+    )
     risk_warnings = sum(1 for item in values if item.warnings)
     score = sum(item.score for item in values) / len(values) if values else 0
     health = {
@@ -538,6 +556,12 @@ def summarize_a_share_enhanced_snapshots(
         "a_share_enhanced_dragon_tiger_recent": str(dragon_recent),
         "a_share_enhanced_limit_members": str(limit_members),
         "a_share_enhanced_risk_warnings": str(risk_warnings),
+        "a_share_enhanced_coverage": (
+            f"{len(values) / requested_count:.6f}" if requested_count else "0.000000"
+        ),
+        "a_share_enhanced_decision_weight_applied": "false",
+        "a_share_enhanced_as_of_semantics": "explicit_trade_date_research_snapshot",
+        "a_share_enhanced_error_count": str(len(provider.last_errors)),
     }
     if provider.last_errors:
         health["a_share_enhanced_errors"] = " | ".join(provider.last_errors[:3])
@@ -547,6 +571,32 @@ def summarize_a_share_enhanced_snapshots(
         health["a_share_enhanced_cache_hits"] = str(cache_hits)
     if cache_misses is not None:
         health["a_share_enhanced_cache_misses"] = str(cache_misses)
+    capability_status = getattr(provider, "capability_status", None)
+    if isinstance(capability_status, dict):
+        health.update(
+            {
+                f"a_share_enhanced_{key}_status": str(value)
+                for key, value in capability_status.items()
+            }
+        )
+    source_request_ids = getattr(provider, "source_request_ids", None)
+    if isinstance(source_request_ids, dict) and source_request_ids:
+        health["a_share_enhanced_source_request_ids"] = ",".join(
+            f"{key}:{value}" for key, value in sorted(source_request_ids.items())
+        )
+    source_timestamps = getattr(provider, "source_timestamps", None)
+    if isinstance(source_timestamps, dict) and source_timestamps:
+        health["a_share_enhanced_source_timestamps"] = ",".join(
+            f"{key}:{value}" for key, value in sorted(source_timestamps.items())
+        )
+    coverage_health = getattr(provider, "coverage_health", None)
+    if isinstance(coverage_health, dict):
+        health.update(
+            {
+                f"a_share_enhanced_{key}": str(value)
+                for key, value in coverage_health.items()
+            }
+        )
     return health
 
 

@@ -324,6 +324,21 @@ def test_fuyao_client_market_page_is_paginated_and_bounded():
         client.get_stock_market_page(limit=1001)
 
 
+def test_fuyao_limit_up_pool_uses_documented_trade_date_contract():
+    session = FakeSession([_success_payload()])
+    client = FuyaoClient("secret-key", session=session, max_attempts=1)
+
+    client.get_limit_up_pool(trade_date=date(2026, 7, 1), page=1, size=200)
+
+    assert session.calls[0][1]["params"] == {
+        "date_ms": 1_782_835_200_000,
+        "page": 1,
+        "size": 200,
+    }
+    with pytest.raises(ValueError, match="between 1 and 200"):
+        client.get_limit_up_pool(size=201)
+
+
 def test_fuyao_client_bounds_explicit_snapshot_batches():
     client = FuyaoClient("secret-key", session=FakeSession([]), max_attempts=1)
 

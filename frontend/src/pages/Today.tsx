@@ -536,6 +536,7 @@ export function Today({
           validation={paperValidation}
           accountStatus={paperAccountStatus}
           shadowEvaluation={factorShadowEvaluation}
+          calibrationShadow={result?.paper_calibration_shadow}
           fullScanJob={fullScanJob}
           language={language}
         />
@@ -1307,6 +1308,7 @@ function AutoPaperStatusStrip({
   validation,
   accountStatus,
   shadowEvaluation,
+  calibrationShadow,
   fullScanJob,
   language,
 }: {
@@ -1314,6 +1316,7 @@ function AutoPaperStatusStrip({
   validation?: PaperValidationResponse;
   accountStatus?: PaperAccountStatusResponse;
   shadowEvaluation?: FactorShadowEvaluationResponse;
+  calibrationShadow?: FullMarketScanResponse["paper_calibration_shadow"];
   fullScanJob?: FullMarketBatchScanJob;
   language: "zh" | "en";
 }) {
@@ -1365,6 +1368,13 @@ function AutoPaperStatusStrip({
         <AutoPaperMetric
           label={language === "zh" ? "当前模型闭环" : "Model closed"}
           value={currentModel?.closed ?? "-"}
+        />
+        <AutoPaperMetric
+          label={language === "zh" ? "校准训练" : "Calibration training"}
+          value={calibrationShadow
+            ? `${calibrationShadow.benchmark_matched_trade_count}/${calibrationShadow.minimum_training_samples}`
+            : "-"}
+          tone={calibrationShadow?.model_ready ? "running" : "neutral"}
         />
         <AutoPaperMetric
           label={language === "zh" ? "全量扫描" : "Full scan"}

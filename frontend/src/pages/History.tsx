@@ -21,6 +21,7 @@ import {
   fetchStrategyDiagnostics,
   fetchStrategyGovernance,
   fetchStrategyPerformance,
+  fetchValidationCenter,
   startWalkForwardJob,
   startFullMarketHistoricalBackfill,
 } from "../api/client";
@@ -71,6 +72,7 @@ import type {
   WalkForwardRankingV4Evaluation,
   WalkForwardTemporalValidation,
   WalkForwardValidationCenter,
+  ValidationCenterResponse,
 } from "../types";
 
 function formatNumber(value: number | null | undefined, suffix = "") {
@@ -442,6 +444,7 @@ export function History({
   const [strategyGovernance, setStrategyGovernance] = useState<StrategyGovernanceResponse>();
   const [walkForward, setWalkForward] = useState<WalkForwardRun>();
   const [walkForwardJob, setWalkForwardJob] = useState<WalkForwardJob>();
+  const [validationCenter, setValidationCenter] = useState<ValidationCenterResponse>();
   const [rankingV3ForwardState, setRankingV3ForwardState] = useState<RankingV3ForwardStateResponse>();
   const [historicalBackfillJob, setHistoricalBackfillJob] = useState<HistoricalBackfillJob>();
   const [error, setError] = useState("");
@@ -489,6 +492,22 @@ export function History({
       });
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    if (dataMode !== "free") {
+      setValidationCenter(undefined);
+      return;
+    }
+    const controller = new AbortController();
+    void fetchValidationCenter(dataMode, { signal: controller.signal })
+      .then((result) => {
+        if (!controller.signal.aborted) setValidationCenter(result);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setValidationCenter(undefined);
+      });
+    return () => controller.abort();
+  }, [dataMode, walkForward?.run_id]);
 
   useEffect(() => {
     if (dataMode !== "free" || !isResearchArchiveOpen) {
@@ -917,6 +936,7 @@ export function History({
       {error && <div className="empty-state error history-load-warning">{error}</div>}
 
       <WalkForwardValidationCenter
+        validationCenter={validationCenter}
         run={walkForward}
         job={walkForwardJob}
         backfillJob={historicalBackfillJob}
@@ -2761,6 +2781,7 @@ function RankingV4ShadowCard({
 }
 
 function WalkForwardValidationCenter({
+  validationCenter,
   run,
   job,
   backfillJob,
@@ -2776,6 +2797,7 @@ function WalkForwardValidationCenter({
   onRun,
   onBackfill,
 }: {
+  validationCenter?: ValidationCenterResponse;
   run?: WalkForwardRun;
   job?: WalkForwardJob;
   backfillJob?: HistoricalBackfillJob;
@@ -2971,6 +2993,46 @@ function WalkForwardValidationCenter({
     };
     return labels[id] ?? id;
   };
+  const validationTrackLabels: Record<string, [string, string]> = {
+    current_shadow: ["当前选股影子", "Current selection shadow"],
+    paper_calibration: ["模拟交易校准", "Paper calibration"],
+    walk_forward: ["Walk-forward", "Walk-forward"],
+    legacy_v3: ["历史 V3", "Legacy V3"],
+    preregistered_v4: ["预注册 V4", "Preregistered V4"],
+  };
+  const validationStatusLabel = (status: string) => {
+    if (!zh) return status;
+    return ({
+      recorded: "已记录",
+      ready: "证据就绪",
+      collecting: "收集中",
+      unavailable: "尚不可用",
+      inactive: "未启用",
+      archived: "历史归档",
+      stale: "已过期",
+      succeeded: "已完成",
+    } as Record<string, string>)[status] ?? status;
+  };
+  const validationFreshnessLabel = (freshness: string) => {
+    if (!zh) return freshness;
+    return ({
+      fresh: "当前",
+      stale: "已过期",
+      missing: "无证据",
+      historical: "历史证据",
+      incomplete: "证据未闭环",
+    } as Record<string, string>)[freshness] ?? freshness;
+  };
+  const validationNextActionLabel = (trackKey: string, nextAction: string) => {
+    if (!zh) return nextAction.replace(/_/g, " ");
+    return ({
+      current_shadow: "继续只读结算影子结果",
+      paper_calibration: "继续收集当前 cohort 已关闭交易",
+      walk_forward: nextAction.includes("rerun") ? "手动重跑当前模型与数据" : "保留为当前历史证据",
+      legacy_v3: "仅保留审计，不恢复排名",
+      preregistered_v4: "仅按预注册口径继续收集",
+    } as Record<string, string>)[trackKey] ?? nextAction;
+  };
 
   return (
     <section className="panel walk-forward-center">
@@ -3003,6 +3065,42 @@ function WalkForwardValidationCenter({
           </button>
         </div>
       </div>
+      {validationCenter ? (
+        <div className="stack" data-testid="validation-center-status">
+          <div className="walk-forward-gate-note">
+            <strong>{zh ? "当前验证路径" : "Current validation path"}</strong>
+            <span>
+              {zh
+                ? "当前选股影子 → 当前模型模拟交易校准 → Walk-forward 历史样本外验证。V3/V4 仅保留审计，不参与当前排名或模拟盘。"
+                : "Current selection shadow → current-model paper calibration → historical out-of-sample walk-forward. V3/V4 remain audit-only and do not affect ranking or paper trading."}
+            </span>
+          </div>
+          <div className="metric-grid walk-forward-kpis">
+            {validationCenter.tracks.map((track) => (
+              <div key={track.key} data-validation-track={track.key}>
+                <span>{validationTrackLabels[track.key]?.[zh ? 0 : 1] ?? track.key}</span>
+                <strong>{validationStatusLabel(track.status)}</strong>
+                <small>
+                  {track.active_path ? (zh ? "当前路径" : "Current path") : (zh ? "旁路归档" : "Audit-only")}
+                  {` · ${validationFreshnessLabel(track.freshness)} · ${track.sample_count}`}
+                  {track.minimum_sample_count ? `/${track.minimum_sample_count}` : ""}
+                </small>
+                <small>{validationNextActionLabel(track.key, track.next_action)}</small>
+              </div>
+            ))}
+          </div>
+          {validationCenter.tracks.find((track) => track.key === "walk_forward")?.freshness === "stale" ? (
+            <div className="walk-forward-gate-note coverage-warning" role="status">
+              <strong>{zh ? "旧 Walk-forward 已过期" : "Saved walk-forward is stale"}</strong>
+              <span>
+                {zh
+                  ? `旧结果的数据或当前选股定义已变化（当前数据版本 ${validationCenter.current_dataset_revision}）。它不会自动重跑；请使用上方“运行历史验证”安全创建手动任务。`
+                  : `Its data or current selection definition changed (current dataset revision ${validationCenter.current_dataset_revision}). It will not rerun automatically; use “Run validation” above to create a manual job.`}
+              </span>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {error ? <div className="empty-state error">{error}</div> : null}
       {backfillError ? <div className="empty-state error">{backfillError}</div> : null}
       {backfillJob ? (

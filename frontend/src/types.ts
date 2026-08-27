@@ -1288,6 +1288,53 @@ export type OpportunitiesResponse = {
 
 export type FullMarketScanResponse = OpportunitiesResponse & {
   symbols: string[];
+  paper_calibration_shadow?: PaperCalibrationShadowReport | null;
+};
+
+export type PaperCalibrationCandidateScore = {
+  instrument_id: string;
+  baseline_position: number;
+  challenger_position: number;
+  baseline_score: number;
+  challenger_score: number;
+  training_sample_count: number;
+  strategy_sample_count: number;
+  evidence_sample_count: number;
+  expected_excess_return_pct: number | null;
+  expected_excess_lower_bound_pct: number | null;
+  win_probability: number | null;
+  win_probability_lower_bound: number | null;
+  downside_pct: number | null;
+  selection_eligible: boolean;
+  negative_segment: boolean;
+  reason: string;
+};
+
+export type PaperCalibrationShadowReport = {
+  schema_version: string;
+  scope: string;
+  mode: "shadow_only" | string;
+  model_version: string;
+  cohort_id: string | null;
+  decision_date: string;
+  current_market_regime: string;
+  model_ready: boolean;
+  minimum_training_samples: number;
+  current_cohort_trade_count: number;
+  eligible_closed_trade_count: number;
+  excluded_future_trade_count: number;
+  benchmark_matched_trade_count: number;
+  benchmark_missing_trade_count: number;
+  reason: string;
+  decision: {
+    model_version: string;
+    decision_date: string;
+    training_cutoff_date: string | null;
+    training_sample_count: number;
+    model_ready: boolean;
+    candidates: PaperCalibrationCandidateScore[];
+  };
+  data_health: Record<string, string>;
 };
 
 export type ScanTask = {
@@ -2630,6 +2677,31 @@ export type CatalystHypothesis = {
   investment_hypothesis: string;
   verification_path: string;
   confidence: number;
+  source: string;
+  published_at: string | null;
+  observed_facts: string[];
+  inferences: string[];
+  demand_translation: string;
+  beneficiary_chain: Array<{
+    name: string;
+    chain_role: string;
+    benefit_order: string;
+    demand_driver: string;
+    evidence_required: string;
+  }>;
+  financial_transmission: Array<{
+    line_item: string;
+    mechanism: string;
+    margin_effect: string;
+    reporting_lag: string;
+    confidence: number;
+  }>;
+  priced_in_assessment: string;
+  evidence_to_watch: string[];
+  risks: string[];
+  invalidation_triggers: string[];
+  research_status: string;
+  decision_effect: "none" | string;
 };
 
 export type CatalystsResponse = {
@@ -4547,6 +4619,56 @@ export type WalkForwardRankingV4Evaluation = {
 };
 
 export type RankingV3ForwardMetricValue = number | string | null;
+
+export type ValidationTrack = {
+  key:
+    | "current_shadow"
+    | "paper_calibration"
+    | "walk_forward"
+    | "legacy_v3"
+    | "preregistered_v4";
+  role: string;
+  active_path: boolean;
+  status: string;
+  freshness: "fresh" | "stale" | "missing" | "historical" | "incomplete" | string;
+  sample_count: number;
+  sample_label: string;
+  minimum_sample_count?: number;
+  as_of?: string | null;
+  run_id?: string;
+  dataset_revision?: number | null;
+  reason: string;
+  next_action: string;
+  counts?: Record<string, number>;
+};
+
+export type ValidationCenterResponse = {
+  schema_version: "validation-center-v1";
+  generated_at: string;
+  provider: string;
+  current_dataset_revision: number;
+  current_path: Array<"current_shadow" | "paper_calibration" | "walk_forward">;
+  tracks: ValidationTrack[];
+  manual_rerun: {
+    available: boolean;
+    automatic: false;
+    recommended: boolean;
+    method: "POST";
+    path: "/api/walk-forward/jobs";
+    start: string;
+    end: string;
+    step_sessions: number;
+    lookback_days: number;
+    reason: string;
+  };
+  side_effects: {
+    ranking: "none";
+    selection: "none";
+    allocation: "none";
+    orders: "none";
+    paper_trading: "none";
+  };
+};
 
 export type RankingV3ForwardMetrics = {
   session_count: number;

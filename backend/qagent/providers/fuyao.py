@@ -459,10 +459,24 @@ class FuyaoClient:
             params=_history_params(thscode, start, end, allow_ti=True),
         )
 
-    def get_limit_up_pool(self, *, trade_date: date | None = None) -> dict[str, Any]:
+    def get_limit_up_pool(
+        self,
+        *,
+        trade_date: date | None = None,
+        page: int = 1,
+        size: int = 200,
+    ) -> dict[str, Any]:
+        if page < 1:
+            raise ValueError("limit-up page must be at least 1")
+        if size < 1 or size > 200:
+            raise ValueError("limit-up size must be between 1 and 200")
         return self.request_data(
             "/api/a-share/special-data/limit-up-pool",
-            params={"date": trade_date.isoformat() if trade_date else None},
+            params={
+                "date_ms": _date_to_epoch_ms(trade_date) if trade_date else None,
+                "page": page,
+                "size": size,
+            },
         )
 
     def get_limit_up_ladder(self) -> dict[str, Any]:
