@@ -22,8 +22,9 @@ from qagent.research.factor_experiments import (
     factor_research_feature_contract_digest,
     neutralize_research_features,
 )
-from qagent.research.factor_shadow import score_factor_shadow_run
+from qagent.research.factor_shadow import score_factor_shadow_run, score_factor_shadow_runs
 from qagent.research.factor_shadow_outcomes import (
+    build_factor_shadow_roster,
     build_factor_shadow_evaluation,
     factor_shadow_outcome_dates,
     refresh_factor_shadow_benchmark_cache,
@@ -323,6 +324,53 @@ def test_lightgbm_shadow_scores_are_persisted_without_paper_activation(tmp_path)
             model_digest=result.run.model_digest,
             scores=result.run.top_scores,
         )
+
+    second = store.create(
+        experiment_name="alternate shadow fixture",
+        provider_mode="fixture",
+        model_family="baseline+lightgbm",
+        benchmark_id="CN:000300.IDX",
+        dataset_revision=0,
+        start_date=date(2024, 1, 1),
+        end_date=date(2025, 1, 1),
+        code_revision="d" * 40,
+        config={"paper_model_unchanged": True, "top_fraction": 0.2},
+    )
+    store.mark_running(second.experiment_id)
+    store.complete(
+        second.experiment_id,
+        metrics={"activation_allowed": False},
+        data_health={},
+        artifacts={"paper_model_unchanged": True},
+        model_artifacts=[
+            {
+                "seed": 17,
+                "feature_set_version": FACTOR_RESEARCH_VERSION,
+                "feature_contract_digest": factor_research_feature_contract_digest(),
+                "model_digest": sha256(model_text.encode("utf-8")).hexdigest(),
+                "model_text": model_text,
+            }
+        ],
+    )
+    multi = score_factor_shadow_runs(
+        session_factory,
+        provider_mode="fixture",
+        scan_job_id="scan-fixture-2",
+        signal_date=date(2026, 8, 11),
+        rankings=rankings,
+        stock_ids={item.instrument_id for item in rankings},
+    )
+    roster = build_factor_shadow_roster(
+        session_factory,
+        provider_mode="fixture",
+        as_of_date=date(2026, 8, 11),
+    )
+    assert len(store.model_bundles("fixture")) == 2
+    assert multi.status == "recorded"
+    assert len(multi.runs) == 2
+    assert multi.data_health["factor_shadow_candidate_count"] == "2"
+    assert len(roster.candidates) == 2
+    assert roster.data_health["factor_shadow_roster_paper_isolation"] == "true"
 
 
 def test_factor_shadow_outcomes_resolve_only_after_maturity_and_are_immutable(tmp_path):

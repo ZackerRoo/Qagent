@@ -16,6 +16,7 @@ from qagent.research.factor_experiments import (
     neutralize_research_features,
 )
 from qagent.storage.factor_research import (
+    FactorResearchModelBundle,
     FactorResearchRepository,
     FactorShadowRun,
     FactorShadowScore,
@@ -26,6 +27,7 @@ from qagent.storage.replay_evidence import ReplayEvidenceRepository
 class FactorShadowScoringResult(BaseModel):
     status: str
     run: FactorShadowRun | None = None
+    runs: list[FactorShadowRun] = Field(default_factory=list)
     data_health: dict[str, str] = Field(default_factory=dict)
 
 
@@ -48,6 +50,95 @@ def score_factor_shadow_run(
                 "factor_shadow_paper_isolation": "true",
             },
         )
+    return _score_factor_shadow_bundle(
+        session_factory,
+        store=store,
+        bundle=bundle,
+        provider_mode=provider_mode,
+        scan_job_id=scan_job_id,
+        signal_date=signal_date,
+        rankings=rankings,
+        stock_ids=stock_ids,
+    )
+
+
+def score_factor_shadow_runs(
+    session_factory: sessionmaker[Session],
+    *,
+    provider_mode: str,
+    scan_job_id: str,
+    signal_date: date,
+    rankings: Sequence[FactorRanking],
+    stock_ids: set[str],
+    max_challengers: int = 3,
+) -> FactorShadowScoringResult:
+    """Score each distinct frozen research configuration against one baseline.
+
+    This is research-only: it writes append-only shadow scores and does not
+    alter the opportunity ranking, paper orders, or position sizing.
+    """
+
+    store = FactorResearchRepository(session_factory)
+    bundles = store.model_bundles(provider_mode, limit=max_challengers)
+    if not bundles:
+        return FactorShadowScoringResult(
+            status="model_not_ready",
+            data_health={
+                "factor_shadow_status": "model_not_ready",
+                "factor_shadow_paper_isolation": "true",
+            },
+        )
+
+    results = [
+        _score_factor_shadow_bundle(
+            session_factory,
+            store=store,
+            bundle=bundle,
+            provider_mode=provider_mode,
+            scan_job_id=scan_job_id,
+            signal_date=signal_date,
+            rankings=rankings,
+            stock_ids=stock_ids,
+        )
+        for bundle in bundles
+    ]
+    recorded = [result.run for result in results if result.run is not None]
+    failed = [result for result in results if result.status != "recorded"]
+    status = "recorded" if recorded and not failed else "partial" if recorded else failed[0].status
+    health = {
+        "factor_shadow_status": status,
+        "factor_shadow_candidate_count": str(len(bundles)),
+        "factor_shadow_recorded_candidates": str(len(recorded)),
+        "factor_shadow_candidate_experiment_ids": ",".join(
+            bundle.experiment.experiment_id for bundle in bundles
+        ),
+        "factor_shadow_paper_isolation": "true",
+        "factor_shadow_order_effect": "none",
+    }
+    if failed:
+        health["factor_shadow_candidate_failures"] = ",".join(
+            f"{result.run.experiment_id if result.run else 'unknown'}:{result.status}"
+            for result in failed
+        )
+    return FactorShadowScoringResult(
+        status=status,
+        run=recorded[0] if recorded else None,
+        runs=recorded,
+        data_health=health,
+    )
+
+
+def _score_factor_shadow_bundle(
+    session_factory: sessionmaker[Session],
+    *,
+    store: FactorResearchRepository,
+    bundle: FactorResearchModelBundle,
+    provider_mode: str,
+    scan_job_id: str,
+    signal_date: date,
+    rankings: Sequence[FactorRanking],
+    stock_ids: set[str],
+) -> FactorShadowScoringResult:
     expected_digest = factor_research_feature_contract_digest()
     if any(
         model.feature_set_version != FACTOR_RESEARCH_VERSION
@@ -146,6 +237,7 @@ def score_factor_shadow_run(
     return FactorShadowScoringResult(
         status="recorded",
         run=run,
+        runs=[run],
         data_health={
             "factor_shadow_status": "recorded",
             "factor_shadow_experiment_id": bundle.experiment.experiment_id,

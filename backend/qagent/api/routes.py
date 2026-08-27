@@ -78,6 +78,7 @@ from qagent.research.factor_experiments import (
     resolved_config,
 )
 from qagent.research.factor_shadow_outcomes import (
+    build_factor_shadow_roster,
     build_factor_shadow_evaluation,
     refresh_factor_shadow_benchmark_cache,
     resolve_factor_shadow_outcomes,
@@ -3070,6 +3071,26 @@ def factor_research_shadow_evaluation(
     return {
         "evaluation": evaluation,
         "data_health": evaluation.data_health,
+    }
+
+
+@router.get("/factor-research/shadow/roster")
+def factor_research_shadow_roster(
+    provider: str = "free",
+    as_of_date: date | None = None,
+):
+    """List frozen factor challengers tracked beside the current paper baseline."""
+
+    mode = provider.strip().lower()
+    effective_as_of = as_of_date or _latest_completed_a_share_session() or date.today()
+    roster = build_factor_shadow_roster(
+        create_session_factory(),
+        provider_mode=mode,
+        as_of_date=effective_as_of,
+    )
+    return {
+        "roster": roster,
+        "data_health": roster.data_health,
     }
 
 

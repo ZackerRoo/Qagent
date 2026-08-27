@@ -7126,6 +7126,81 @@ details.compact-data-health:not([open]) > .data-health-details {
   line-height: 1.15;
 }
 
+.backtest-target-picker {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(9, 14, 20, 0.52);
+}
+
+.backtest-target-mode {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 6px;
+}
+
+.backtest-target-mode button {
+  min-height: 34px;
+  border: 0;
+  border-right: 1px solid var(--terminal-border-soft);
+  padding: 0 10px;
+  background: transparent;
+  color: var(--terminal-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.backtest-target-mode button:last-child {
+  border-right: 0;
+}
+
+.backtest-target-mode button.is-active {
+  background: rgba(244, 197, 66, 0.14);
+  color: var(--terminal-yellow);
+}
+
+.backtest-symbol-input {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px 10px;
+  align-items: center;
+  color: var(--terminal-muted-2);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.backtest-symbol-input input {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 6px;
+  padding: 0 10px;
+  background: rgba(4, 8, 13, 0.8);
+  color: var(--terminal-text);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.backtest-symbol-input input:focus {
+  outline: 2px solid rgba(77, 212, 255, 0.48);
+  outline-offset: 1px;
+}
+
+.backtest-symbol-input small {
+  grid-column: 2;
+  color: var(--terminal-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
 .backtest-guide-grid p,
 .backtest-interpretation p {
   margin: 7px 0 0;
@@ -9825,6 +9900,48 @@ details.compact-data-health:not([open]) > .data-health-details {
   gap: 12px;
   padding-top: 14px;
   border-top: 1px solid var(--terminal-border-soft);
+}
+
+.factor-challenger-queue {
+  display: grid;
+  gap: 14px;
+  padding: 16px 0;
+  border-top: 1px solid var(--terminal-border-soft);
+  border-bottom: 1px solid var(--terminal-border-soft);
+}
+
+.factor-challenger-queue-table-wrap {
+  overflow-x: auto;
+}
+
+.factor-challenger-queue-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.factor-challenger-queue-table th,
+.factor-challenger-queue-table td {
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--terminal-border-soft);
+  text-align: left;
+  vertical-align: top;
+}
+
+.factor-challenger-queue-table th {
+  color: var(--terminal-muted);
+  font-weight: 600;
+}
+
+.factor-challenger-queue-table td strong,
+.factor-challenger-queue-table td small {
+  display: block;
+}
+
+.factor-challenger-queue-table td small {
+  margin-top: 3px;
+  color: var(--terminal-muted-2);
 }
 
 .paper-attribution-heading h4,
@@ -16161,6 +16278,47 @@ td {
   font-weight: 700;
 }
 
+.walk-forward-research-archive {
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 8px;
+  background: rgba(9, 14, 20, 0.42);
+}
+
+.walk-forward-research-archive > summary {
+  display: flex;
+  min-height: 56px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  list-style: none;
+  padding: 10px 12px;
+}
+
+.walk-forward-research-archive > summary::-webkit-details-marker {
+  display: none;
+}
+
+.walk-forward-research-archive > summary > span:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.walk-forward-research-archive > summary strong {
+  color: var(--terminal-text);
+  font-size: 13px;
+}
+
+.walk-forward-research-archive > summary small {
+  color: var(--terminal-muted);
+  font-size: 12px;
+}
+
+.walk-forward-research-archive-content {
+  border-top: 1px solid var(--terminal-border-soft);
+  padding: 12px;
+}
+
 .ranking-v3-head > div:first-child {
   min-width: 0;
 }
@@ -16963,6 +17121,18 @@ td {
 }
 
 @media (max-width: 760px) {
+  .backtest-target-picker {
+    grid-template-columns: 1fr;
+  }
+
+  .backtest-symbol-input {
+    grid-template-columns: 1fr;
+  }
+
+  .backtest-symbol-input small {
+    grid-column: 1;
+  }
+
   .walk-forward-result-boundary {
     align-items: flex-start;
     flex-direction: column;
@@ -16983,6 +17153,7 @@ td {
   }
 
   .ranking-v3-shadow-banner,
+  .walk-forward-research-archive > summary,
   .ranking-v3-pbo-note,
   .ranking-v3-forward-live-head {
     align-items: flex-start;

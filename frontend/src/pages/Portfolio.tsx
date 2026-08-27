@@ -9,6 +9,7 @@ import {
   fetchFactorResearchExperiments,
   fetchFactorResearchShadow,
   fetchFactorShadowEvaluation,
+  fetchFactorShadowRoster,
   fetchEtfExposures,
   fetchInstrumentLabels,
   fetchPaperCandidatePool,
@@ -50,6 +51,7 @@ import type {
   FactorResearchExperiment,
   FactorShadowResponse,
   FactorShadowEvaluationResponse,
+  FactorShadowRosterResponse,
   EtfExposureResponse,
   PaperCandidatePoolResponse,
   CapacityStressReport,
@@ -146,6 +148,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [experimentLibrary, setExperimentLibrary] = useState<ExperimentLibraryReport>();
   const [factorShadow, setFactorShadow] = useState<FactorShadowResponse>();
   const [factorShadowEvaluation, setFactorShadowEvaluation] = useState<FactorShadowEvaluationResponse>();
+  const [factorShadowRoster, setFactorShadowRoster] = useState<FactorShadowRosterResponse>();
   const [validation, setValidation] = useState<PaperValidationResponse>();
   const [paperSession, setPaperSession] = useState<PaperSessionResponse>();
   const [automationScheduler, setAutomationScheduler] = useState<AutoProcessingState>();
@@ -258,6 +261,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchExperimentLibrary(dataMode),
       fetchFactorResearchShadow(dataMode),
       fetchFactorShadowEvaluation(dataMode),
+      fetchFactorShadowRoster(dataMode),
     ]);
     const [
       validationResult,
@@ -271,6 +275,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       experimentLibraryResult,
       factorShadowResult,
       factorShadowEvaluationResult,
+      factorShadowRosterResult,
     ] = researchResults;
     if (validationResult.status === "fulfilled") setValidation(validationResult.value);
     if (dailyReportResult.status === "fulfilled") setDailyReport(dailyReportResult.value);
@@ -296,6 +301,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     }
     if (factorShadowEvaluationResult.status === "fulfilled") {
       setFactorShadowEvaluation(factorShadowEvaluationResult.value);
+    }
+    if (factorShadowRosterResult.status === "fulfilled") {
+      setFactorShadowRoster(factorShadowRosterResult.value);
     }
     const failedResearch = researchResults.filter((item) => item.status === "rejected");
     if (failedResearch.length) {
@@ -887,6 +895,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
               currentModel={currentModelEvaluation}
               capacityResearch={capacityResearch}
               factorShadowEvaluation={factorShadowEvaluation?.evaluation}
+              factorShadowRoster={factorShadowRoster?.roster}
               factors={factorDiagnostics}
               loadingFactors={isLoadingFactorDiagnostics}
               language={language}
@@ -1733,6 +1742,7 @@ function PaperForwardResearchWorkbench({
   currentModel,
   capacityResearch,
   factorShadowEvaluation,
+  factorShadowRoster,
   factors,
   loadingFactors,
   language,
@@ -1741,6 +1751,7 @@ function PaperForwardResearchWorkbench({
   currentModel?: PaperCurrentModelEvaluationResponse;
   capacityResearch?: CapacityStressReport;
   factorShadowEvaluation?: FactorShadowEvaluationResponse["evaluation"];
+  factorShadowRoster?: FactorShadowRosterResponse["roster"];
   factors?: FactorDiagnosticsResponse;
   loadingFactors: boolean;
   language: Language;
@@ -1755,6 +1766,7 @@ function PaperForwardResearchWorkbench({
         />
         {capacityResearch && <CapacityStressPanel report={capacityResearch} language={language} />}
         {currentModel && <PaperCurrentModelAccuracyPanel report={currentModel} language={language} />}
+        {factorShadowRoster && <FactorShadowRosterPanel roster={factorShadowRoster} language={language} />}
         {factorShadowEvaluation && (
           <FactorShadowAttributionPanel evaluation={factorShadowEvaluation} language={language} />
         )}
@@ -1787,6 +1799,7 @@ function PaperForwardResearchWorkbench({
       />
       {capacityResearch && <CapacityStressPanel report={capacityResearch} language={language} />}
       {currentModel && <PaperCurrentModelAccuracyPanel report={currentModel} language={language} />}
+      {factorShadowRoster && <FactorShadowRosterPanel roster={factorShadowRoster} language={language} />}
       {factorShadowEvaluation && (
         <FactorShadowAttributionPanel evaluation={factorShadowEvaluation} language={language} />
       )}
@@ -2361,6 +2374,82 @@ function PaperCurrentModelAccuracyPanel({
         {report.warnings.map((warning) => <span key={warning}>{warning}</span>)}
       </div>
     </div>
+  );
+}
+
+function FactorShadowRosterPanel({
+  roster,
+  language,
+}: {
+  roster: FactorShadowRosterResponse["roster"];
+  language: Language;
+}) {
+  if (roster.candidates.length === 0) return null;
+  return (
+    <section className="factor-challenger-queue" aria-label={language === "zh" ? "因子挑战者队列" : "Factor challenger queue"}>
+      <div className="paper-research-subhead">
+        <div>
+          <p className="eyebrow">{language === "zh" ? "选股 Challenger 队列" : "Selection challenger queue"}</p>
+          <h3>{language === "zh" ? "与当前基线并列积累前向证据" : "Forward evidence beside the current baseline"}</h3>
+          <p>
+            {language === "zh"
+              ? "每个 challenger 都是冻结因子配置；只记录同日选股差异，不会创建模拟订单或改动当前权重。"
+              : "Each challenger is a frozen factor configuration. It records same-day selection differences without creating paper orders or changing current weights."}
+          </p>
+        </div>
+        <div className="paper-forward-status">
+          <span className="status status-pending">{language === "zh" ? "研究隔离" : "Research isolated"}</span>
+          <strong>{roster.candidates.length}</strong>
+          <small>{language === "zh" ? "个 challenger" : "challenger(s)"}</small>
+        </div>
+      </div>
+      <div className="factor-challenger-queue-table-wrap">
+        <table className="factor-challenger-queue-table">
+          <thead>
+            <tr>
+              <th>{language === "zh" ? "冻结实验" : "Frozen experiment"}</th>
+              <th>{language === "zh" ? "5日" : "5D"}</th>
+              <th>{language === "zh" ? "10日" : "10D"}</th>
+              <th>{language === "zh" ? "20日" : "20D"}</th>
+              <th>{language === "zh" ? "结论" : "Disposition"}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {roster.candidates.map((candidate) => {
+              const byHorizon = new Map(
+                candidate.evaluation.horizons.map((horizon) => [horizon.horizon_sessions, horizon]),
+              );
+              return (
+                <tr key={candidate.experiment_id}>
+                  <td>
+                    <strong>{candidate.experiment_name}</strong>
+                    <small>{shortDigest(candidate.config_digest)} · {candidate.evaluation.run_count} {language === "zh" ? "次截面" : "runs"}</small>
+                  </td>
+                  {[5, 10, 20].map((horizon) => {
+                    const result = byHorizon.get(horizon);
+                    return (
+                      <td key={horizon}>
+                        <strong>{result ? `${result.matured_runs} / ${Math.round(result.outcome_coverage * 100)}%` : "-"}</strong>
+                        <small>{result?.challenger_median_selection_lift_pct == null
+                          ? language === "zh" ? "积累中" : "Collecting"
+                          : `${result.challenger_median_selection_lift_pct > 0 ? "+" : ""}${result.challenger_median_selection_lift_pct.toFixed(2)}%`}</small>
+                      </td>
+                    );
+                  })}
+                  <td>
+                    <span className={`status status-${candidate.eligible_for_manual_review ? "ready" : "pending"}`}>
+                      {candidate.eligible_for_manual_review
+                        ? language === "zh" ? "人工复核" : "Review"
+                        : language === "zh" ? "继续影子" : "Keep shadowing"}
+                    </span>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 

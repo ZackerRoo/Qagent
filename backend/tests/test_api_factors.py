@@ -90,6 +90,7 @@ def test_factor_research_experiment_api_starts_empty_and_isolated(tmp_path, monk
     library = client.get("/api/research/experiment-library?provider=fixture")
     shadow = client.get("/api/factor-research/shadow/latest")
     evaluation = client.get("/api/factor-research/shadow/evaluation?provider=fixture")
+    roster = client.get("/api/factor-research/shadow/roster?provider=fixture")
     resolution = client.post(
         "/api/factor-research/shadow/outcomes/resolve?provider=fixture"
     )
@@ -106,6 +107,9 @@ def test_factor_research_experiment_api_starts_empty_and_isolated(tmp_path, monk
     assert shadow.json()["data_health"]["paper_order_effect"] == "none"
     assert evaluation.status_code == 200
     assert evaluation.json()["evaluation"]["status"] == "not_started"
+    assert roster.status_code == 200
+    assert roster.json()["roster"]["status"] == "not_started"
+    assert roster.json()["data_health"]["factor_shadow_roster_paper_isolation"] == "true"
     assert resolution.status_code == 200
     assert resolution.json()["resolution"]["status"] == "not_started"
     assert resolution.json()["evaluation"]["status"] == "not_started"

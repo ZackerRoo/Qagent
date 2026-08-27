@@ -106,10 +106,24 @@ const PREVIEW_ROW_LIMIT = 24;
 const EQUITY_ROW_LIMIT = 40;
 
 type BacktestRunContext = {
-  kind: "selected";
+  kind: "selected" | "custom";
   label: string;
   provider: DataProviderMode;
 };
+
+type BacktestTargetMode = "selected" | "custom";
+
+function normalizeCustomBacktestSymbols(raw: string): string | undefined {
+  const normalized = raw
+    .split(/[\s,，]+/)
+    .map((item) => item.trim().toUpperCase())
+    .filter(Boolean)
+    .map((item) => item.replace(/^CN:/, "").replace(/\.(SH|SZ|BJ)$/, ""));
+  if (!normalized.length || normalized.length > 10 || normalized.some((item) => !/^\d{6}$/.test(item))) {
+    return undefined;
+  }
+  return [...new Set(normalized)].map((item) => `CN:${item}`).join(",");
+}
 
 type GovernanceStateTone =
   | "admitted"
@@ -395,15 +409,25 @@ export function History({
   selectedCard?: OpportunityCard;
 }) {
   const { language, t } = useI18n();
-  const quickBacktestSymbols = "CN:000001";
-  const quickBacktestProvider: DataProviderMode = "fixture";
   const selectedBacktestSymbols = selectedCard?.instrument_id;
   const selectedBacktestLabel = selectedCard
     ? formatInstrumentDisplay(selectedCard.instrument_id, selectedCard.instrument_label)
     : "";
-  const activeBacktestLabel = selectedBacktestLabel || t("history.selectedMissing");
   const scanUniverseLabel = symbols === "CN:ALL" ? t("history.fullAUniverse") : symbols;
-  const factorBacktestSymbols = symbols || selectedBacktestSymbols;
+  const [backtestTargetMode, setBacktestTargetMode] = useState<BacktestTargetMode>("selected");
+  const [customBacktestSymbols, setCustomBacktestSymbols] = useState("");
+  const [isResearchArchiveOpen, setIsResearchArchiveOpen] = useState(false);
+  const normalizedCustomBacktestSymbols = normalizeCustomBacktestSymbols(customBacktestSymbols);
+  const activeBacktestSymbols = backtestTargetMode === "custom"
+    ? normalizedCustomBacktestSymbols
+    : selectedBacktestSymbols;
+  const activeBacktestLabel = backtestTargetMode === "custom"
+    ? (normalizedCustomBacktestSymbols
+      ? normalizedCustomBacktestSymbols.replace(/CN:/g, "").split(",").join(" / ")
+      : "请输入 A 股代码")
+    : (selectedBacktestLabel || t("history.selectedMissing"));
+  const hasBacktestTarget = Boolean(activeBacktestSymbols);
+  const factorBacktestSymbols = activeBacktestSymbols;
   const [backtest, setBacktest] = useState<BacktestResponse>();
   const [factorBacktest, setFactorBacktest] = useState<FactorBacktestResponse>();
   const [portfolioBacktest, setPortfolioBacktest] = useState<PortfolioBacktestResponse>();
@@ -467,7 +491,7 @@ export function History({
   }, []);
 
   useEffect(() => {
-    if (dataMode !== "free") {
+    if (dataMode !== "free" || !isResearchArchiveOpen) {
       setRankingV3ForwardState(undefined);
       setRankingV3ForwardError("");
       setIsRankingV3ForwardLoading(false);
@@ -522,7 +546,7 @@ export function History({
         window.clearTimeout(timeout);
       }
     };
-  }, [dataMode]);
+  }, [dataMode, isResearchArchiveOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -755,15 +779,21 @@ export function History({
   }
 
   async function runBacktest() {
-    const backtestProvider = selectedBacktestSymbols ? dataMode : quickBacktestProvider;
-    const backtestSymbols = selectedBacktestSymbols ?? quickBacktestSymbols;
+    if (!activeBacktestSymbols) {
+      setBacktestError(
+        backtestTargetMode === "custom"
+          ? "请输入 6 位 A 股代码，可用逗号分隔，最多 10 个。"
+          : "请先在今日或机会页选择一只推荐，或切换到自定义标的。",
+      );
+      return;
+    }
     try {
       setIsBacktesting(true);
       setBacktestError("");
       setParameterSensitivityError("");
-      const result = await fetchBacktest(backtestProvider, backtestSymbols);
+      const result = await fetchBacktest(dataMode, activeBacktestSymbols);
       setBacktest(result);
-      fetchParameterSensitivity(backtestProvider, backtestSymbols)
+      fetchParameterSensitivity(dataMode, activeBacktestSymbols)
         .then(setParameterSensitivity)
         .catch((caught) => {
           setParameterSensitivityError(
@@ -771,9 +801,9 @@ export function History({
           );
         });
       setBacktestRunContext({
-        kind: "selected",
-        label: selectedBacktestLabel || formatInstrumentDisplay(backtestSymbols),
-        provider: backtestProvider,
+        kind: backtestTargetMode,
+        label: activeBacktestLabel,
+        provider: dataMode,
       });
     } catch (caught) {
       setBacktestError(caught instanceof Error ? caught.message : "Failed to run backtest");
@@ -783,14 +813,18 @@ export function History({
   }
 
   async function runPortfolioBacktest() {
-    if (!selectedBacktestSymbols) {
-      setPortfolioBacktestError(t("history.noSelectedBacktestScope"));
+    if (!activeBacktestSymbols) {
+      setPortfolioBacktestError(
+        backtestTargetMode === "custom"
+          ? "请输入 6 位 A 股代码后再运行组合回测。"
+          : t("history.noSelectedBacktestScope"),
+      );
       return;
     }
     try {
       setIsPortfolioBacktesting(true);
       setPortfolioBacktestError("");
-      const result = await fetchPortfolioBacktest(dataMode, selectedBacktestSymbols);
+      const result = await fetchPortfolioBacktest(dataMode, activeBacktestSymbols);
       setPortfolioBacktest(result);
     } catch (caught) {
       setPortfolioBacktestError(
@@ -821,7 +855,7 @@ export function History({
   }
 
   useEffect(() => {
-    if (!selectedBacktestSymbols) {
+    if (backtestTargetMode !== "selected" || !selectedBacktestSymbols) {
       return;
     }
     const key = `${dataMode}:${selectedBacktestSymbols}`;
@@ -866,7 +900,7 @@ export function History({
       }
       setIsBacktesting(false);
     });
-  }, [dataMode, selectedBacktestSymbols]);
+  }, [backtestTargetMode, dataMode, selectedBacktestSymbols]);
 
   return (
     <div className="stack history-page">
@@ -895,6 +929,8 @@ export function History({
         forwardState={rankingV3ForwardState}
         forwardStateError={rankingV3ForwardError}
         isForwardStateLoading={isRankingV3ForwardLoading}
+        isResearchArchiveOpen={isResearchArchiveOpen}
+        onResearchArchiveToggle={setIsResearchArchiveOpen}
       />
 
       <BacktestCommandCenter
@@ -905,13 +941,18 @@ export function History({
         activeLabel={activeBacktestLabel}
         selectedLabel={selectedBacktestLabel}
         scanUniverseLabel={scanUniverseLabel}
+        targetMode={backtestTargetMode}
+        customSymbols={customBacktestSymbols}
         hasSelectedCard={Boolean(selectedBacktestSymbols)}
+        hasTarget={hasBacktestTarget}
         isBacktesting={isBacktesting}
         isFactorBacktesting={isFactorBacktesting}
         isPortfolioBacktesting={isPortfolioBacktesting}
         onRunSelected={runBacktest}
         onRunFactor={runFactorBacktest}
         onRunPortfolio={runPortfolioBacktest}
+        onTargetModeChange={setBacktestTargetMode}
+        onCustomSymbolsChange={setCustomBacktestSymbols}
       />
 
       {isHistoryLoading ? (
@@ -971,7 +1012,7 @@ export function History({
           <div>
             <h2>{t("history.backtest")}</h2>
             <p className="brief-headline">
-              {t("history.currentBacktestTarget")}: {activeBacktestLabel}
+              {backtestTargetMode === "custom" ? "自定义回测标的" : t("history.currentBacktestTarget")}: {activeBacktestLabel}
             </p>
           </div>
           <div className="brief-actions">
@@ -990,8 +1031,9 @@ export function History({
           </div>
         </div>
         <BacktestScopeNote
-          selectedLabel={selectedBacktestLabel}
-          hasSelectedCard={Boolean(selectedBacktestSymbols)}
+          targetMode={backtestTargetMode}
+          targetLabel={activeBacktestLabel}
+          hasTarget={hasBacktestTarget}
         />
         {backtestError && <div className="empty-state error">{backtestError}</div>}
         {backtest ? (
@@ -2725,6 +2767,8 @@ function WalkForwardValidationCenter({
   forwardState,
   forwardStateError,
   isForwardStateLoading,
+  isResearchArchiveOpen,
+  onResearchArchiveToggle,
   error,
   backfillError,
   isRunning,
@@ -2738,6 +2782,8 @@ function WalkForwardValidationCenter({
   forwardState?: RankingV3ForwardStateResponse;
   forwardStateError: string;
   isForwardStateLoading: boolean;
+  isResearchArchiveOpen: boolean;
+  onResearchArchiveToggle(open: boolean): void;
   error: string;
   backfillError: string;
   isRunning: boolean;
@@ -3059,12 +3105,6 @@ function WalkForwardValidationCenter({
           </div>
         </div>
       ) : null}
-      <RankingV3ForwardLiveCard
-        state={forwardState}
-        error={forwardStateError}
-        isLoading={isForwardStateLoading}
-        zh={zh}
-      />
       {!run ? (
         <div className="walk-forward-empty">
           <strong>{zh ? "还没有保存的 Walk-forward 结果" : "No saved walk-forward result"}</strong>
@@ -3137,19 +3177,46 @@ function WalkForwardValidationCenter({
                 : "This is a legacy validation result. Run it again to generate release criteria and strategy/factor gates."}
             </div>
           )}
-          {rankingV4 ? (
-            <RankingV4ShadowCard evaluation={rankingV4} zh={zh} />
-          ) : (
-            <div className="walk-forward-gate-note coverage-warning" role="status">
-              <strong>{zh ? "该历史结果未运行 V4" : "V4 was not run for this historical result"}</strong>
+          <details
+            className="walk-forward-research-archive"
+            onToggle={(event) => onResearchArchiveToggle(event.currentTarget.open)}
+          >
+            <summary>
               <span>
-                {zh
-                  ? "当前仅为旧版 Walk-forward 结果，不能视为 V4 影子验证。重新运行严格历史验证后才会生成 V4 门禁。"
-                  : "This is a legacy Walk-forward result, not V4 shadow evidence. Run strict historical validation to generate V4 gates."}
+                <strong>{zh ? "历史研发档案：V3 / V4 影子实验" : "Historical research archive: V3 / V4 shadow experiments"}</strong>
+                <small>{zh ? "不参与当前推荐、持仓或模拟盘" : "Does not affect current recommendations, positions, or paper trading"}</small>
               </span>
+              <span className="status status-shadow">{zh ? "仅供研究" : "Research only"}</span>
+            </summary>
+            <div className="stack walk-forward-research-archive-content">
+              <p className="compact-note">
+                {zh
+                  ? "V3 和 V4 是曾经并行测试过的历史排序实验，不是当前模拟盘模型。它们保留在这里用于审计失败原因，不能据此重新开启或改变当前交易。"
+                  : "V3 and V4 are archived historical ranking experiments, not the current paper model. They remain available for audit and cannot change current trading."}
+              </p>
+              {isResearchArchiveOpen ? (
+                <RankingV3ForwardLiveCard
+                  state={forwardState}
+                  error={forwardStateError}
+                  isLoading={isForwardStateLoading}
+                  zh={zh}
+                />
+              ) : null}
+              {rankingV4 ? (
+                <RankingV4ShadowCard evaluation={rankingV4} zh={zh} />
+              ) : (
+                <div className="walk-forward-gate-note coverage-warning" role="status">
+                  <strong>{zh ? "该历史结果未运行 V4" : "V4 was not run for this historical result"}</strong>
+                  <span>
+                    {zh
+                      ? "当前仅为旧版 Walk-forward 结果，不能视为 V4 影子验证。"
+                      : "This is a legacy Walk-forward result, not V4 shadow evidence."}
+                  </span>
+                </div>
+              )}
+              {rankingV3 ? <RankingV3ShadowCard evaluation={rankingV3} zh={zh} /> : null}
             </div>
-          )}
-          {rankingV3 ? <RankingV3ShadowCard evaluation={rankingV3} zh={zh} /> : null}
+          </details>
           {executionChallenger ? (
             <div className={`walk-forward-challenger challenger-${executionChallengerDisplayStatus}`}>
               <div className="walk-forward-challenger-head">
@@ -5086,13 +5153,18 @@ function BacktestCommandCenter({
   activeLabel,
   selectedLabel,
   scanUniverseLabel,
+  targetMode,
+  customSymbols,
   hasSelectedCard,
+  hasTarget,
   isBacktesting,
   isFactorBacktesting,
   isPortfolioBacktesting,
   onRunSelected,
   onRunFactor,
   onRunPortfolio,
+  onTargetModeChange,
+  onCustomSymbolsChange,
 }: {
   backtest?: BacktestResponse;
   portfolioBacktest?: PortfolioBacktestResponse;
@@ -5101,13 +5173,18 @@ function BacktestCommandCenter({
   activeLabel: string;
   selectedLabel: string;
   scanUniverseLabel: string;
+  targetMode: BacktestTargetMode;
+  customSymbols: string;
   hasSelectedCard: boolean;
+  hasTarget: boolean;
   isBacktesting: boolean;
   isFactorBacktesting: boolean;
   isPortfolioBacktesting: boolean;
   onRunSelected(): void;
   onRunFactor(): void;
   onRunPortfolio(): void;
+  onTargetModeChange(mode: BacktestTargetMode): void;
+  onCustomSymbolsChange(value: string): void;
 }) {
   const { language, t } = useI18n();
   const completedWindow =
@@ -5139,10 +5216,14 @@ function BacktestCommandCenter({
 
       <div className="backtest-verdict-grid">
         <div>
-          <span>{language === "zh" ? "当前推荐" : "Current recommendation"}</span>
-          <strong>{selectedLabel || activeLabel}</strong>
+          <span>{targetMode === "custom" ? (language === "zh" ? "自定义标的" : "Custom symbols") : (language === "zh" ? "当前推荐" : "Current recommendation")}</span>
+          <strong>{targetMode === "custom" ? activeLabel : (selectedLabel || activeLabel)}</strong>
           <p>
-            {hasSelectedCard
+            {targetMode === "custom"
+              ? language === "zh"
+                ? "只读取历史行情进行回测，不会创建模拟交易。"
+                : "Uses historical prices only and never creates paper trades."
+              : hasSelectedCard
               ? language === "zh"
                 ? "来自今日或机会页选中的推荐。"
                 : "Selected from Today or Opportunities."
@@ -5186,6 +5267,38 @@ function BacktestCommandCenter({
         </div>
       </div>
 
+      <div className="backtest-target-picker" aria-label={language === "zh" ? "回测标的选择" : "Backtest target selector"}>
+        <div className="backtest-target-mode" role="group" aria-label={language === "zh" ? "回测标的来源" : "Backtest target source"}>
+          <button
+            className={targetMode === "selected" ? "is-active" : ""}
+            type="button"
+            onClick={() => onTargetModeChange("selected")}
+          >
+            {language === "zh" ? "当前推荐" : "Current signal"}
+          </button>
+          <button
+            className={targetMode === "custom" ? "is-active" : ""}
+            type="button"
+            onClick={() => onTargetModeChange("custom")}
+          >
+            {language === "zh" ? "自定义 A 股" : "Custom A-share"}
+          </button>
+        </div>
+        {targetMode === "custom" ? (
+          <label className="backtest-symbol-input">
+            <span>{language === "zh" ? "代码" : "Symbols"}</span>
+            <input
+              value={customSymbols}
+              onChange={(event) => onCustomSymbolsChange(event.target.value)}
+              placeholder="例如 600519, 000001, 510300"
+              inputMode="numeric"
+              autoComplete="off"
+            />
+            <small>{language === "zh" ? "支持 6 位代码或 .SH/.SZ/.BJ 后缀，最多 10 个。" : "Use 6-digit codes or .SH/.SZ/.BJ suffixes, up to 10."}</small>
+          </label>
+        ) : null}
+      </div>
+
       <div className="backtest-action-grid">
         <button
           className="icon-action"
@@ -5195,15 +5308,17 @@ function BacktestCommandCenter({
         >
           {isBacktesting
             ? t("common.running")
-            : hasSelectedCard
-              ? t("history.runSelectedBacktest")
-              : t("history.runQuickSample")}
+            : targetMode === "custom"
+              ? (language === "zh" ? "运行自定义标的回测" : "Run custom backtest")
+              : hasSelectedCard
+                ? t("history.runSelectedBacktest")
+                : (language === "zh" ? "运行当前推荐回测" : "Run current signal")}
         </button>
         <button
           className="icon-action secondary"
           type="button"
           onClick={onRunPortfolio}
-          disabled={isPortfolioBacktesting || !hasSelectedCard}
+          disabled={isPortfolioBacktesting || !hasTarget}
         >
           {isPortfolioBacktesting ? t("common.running") : t("history.runPortfolio")}
         </button>
@@ -5211,7 +5326,7 @@ function BacktestCommandCenter({
           className="icon-action secondary"
           type="button"
           onClick={onRunFactor}
-          disabled={isFactorBacktesting || !hasSelectedCard}
+          disabled={isFactorBacktesting || !hasTarget}
         >
           {isFactorBacktesting ? t("common.running") : t("history.runFactor")}
         </button>
@@ -5369,20 +5484,24 @@ function BacktestGuidePanel({
 }
 
 function BacktestScopeNote({
-  selectedLabel,
-  hasSelectedCard,
+  targetMode,
+  targetLabel,
+  hasTarget,
 }: {
-  selectedLabel: string;
-  hasSelectedCard: boolean;
+  targetMode: BacktestTargetMode;
+  targetLabel: string;
+  hasTarget: boolean;
 }) {
   const { language, t } = useI18n();
   return (
     <div className="empty-state compact backtest-scope-note">
       <strong>{t("history.backtestScope")}</strong>
       <p>
-        {hasSelectedCard
-          ? `${t("history.selectedBacktestScope")}: ${selectedLabel}`
-          : t("history.noSelectedBacktestScope")}
+        {hasTarget
+          ? `${targetMode === "custom" ? "自定义回测范围" : t("history.selectedBacktestScope")}: ${targetLabel}`
+          : targetMode === "custom"
+            ? "请输入有效的 6 位 A 股代码。"
+            : t("history.noSelectedBacktestScope")}
       </p>
       <p>{t("history.realBacktestScope")}</p>
     </div>

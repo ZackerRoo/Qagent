@@ -26,6 +26,7 @@ import type {
   FactorResearchExperimentsResponse,
   ExperimentLibraryReport,
   FactorShadowEvaluationResponse,
+  FactorShadowRosterResponse,
   FactorShadowResponse,
   FullMarketBatchScanJob,
   FullMarketScanResponse,
@@ -975,6 +976,14 @@ export async function fetchFactorShadowEvaluation(
   provider: DataProviderMode,
 ): Promise<FactorShadowEvaluationResponse> {
   return apiGet<FactorShadowEvaluationResponse>("/factor-research/shadow/evaluation", {
+    provider,
+  });
+}
+
+export async function fetchFactorShadowRoster(
+  provider: DataProviderMode,
+): Promise<FactorShadowRosterResponse> {
+  return apiGet<FactorShadowRosterResponse>("/factor-research/shadow/roster", {
     provider,
   });
 }

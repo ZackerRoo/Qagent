@@ -72,7 +72,7 @@ from qagent.research.market_intelligence import (
     build_market_intelligence_center,
 )
 from qagent.research.operational_readiness import build_operational_readiness_center
-from qagent.research.factor_shadow import score_factor_shadow_run
+from qagent.research.factor_shadow import score_factor_shadow_runs
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
 from qagent.storage.repository import (
     paper_model_cohort_from_data_health,
@@ -611,7 +611,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
                 limit=20_000,
             )
         }
-        factor_shadow_result = score_factor_shadow_run(
+        factor_shadow_result = score_factor_shadow_runs(
             create_session_factory(),
             provider_mode=job.provider,
             scan_job_id=job.job_id,

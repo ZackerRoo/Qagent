@@ -5,6 +5,7 @@ const root = process.cwd();
 const files = {
   client: readFileSync(join(root, "src/api/client.ts"), "utf8"),
   history: readFileSync(join(root, "src/pages/History.tsx"), "utf8"),
+  portfolio: readFileSync(join(root, "src/pages/Portfolio.tsx"), "utf8"),
   localize: readFileSync(join(root, "src/lib/localize.ts"), "utf8"),
   styles: readFileSync(join(root, "src/styles.css"), "utf8"),
   types: readFileSync(join(root, "src/types.ts"), "utf8"),
@@ -12,6 +13,9 @@ const files = {
 
 const checks = [
   ["history renders a backtest command center", files.history.includes("BacktestCommandCenter")],
+  ["history supports current-recommendation and custom A-share backtest targets", files.history.includes("BacktestTargetMode") && files.history.includes("normalizeCustomBacktestSymbols") && files.history.includes("自定义 A 股")],
+  ["history keeps custom backtests read-only", files.history.includes("只读取历史行情进行回测，不会创建模拟交易")],
+  ["portfolio renders an isolated factor challenger queue", files.portfolio.includes("FactorShadowRosterPanel") && files.portfolio.includes("选股 Challenger 队列") && files.client.includes("/factor-research/shadow/roster")],
   ["history renders an explicit verdict card", files.history.includes("BacktestVerdictCard")],
   ["history renders portfolio validation visuals", files.history.includes("PortfolioBacktestVisuals")],
   ["history renders parameter sensitivity sheet", files.history.includes("ParameterSensitivityPanel")],
@@ -52,6 +56,7 @@ const checks = [
   ["history labels candidate means as non-portfolio statistics", files.history.includes("候选层统计（非组合收益）")],
   ["history explains missing forward portfolio evidence without an empty chart", files.history.includes("组合净值尚未生成") && files.history.includes("页面不会绘制空曲线")],
   ["history renders the preregistered Ranking V4 shadow result", files.history.includes("RankingV4ShadowCard") && files.history.includes("推荐排序 V4 · 预注册协议")],
+  ["history collapses V3 and V4 into a clearly isolated research archive", files.history.includes("walk-forward-research-archive") && files.history.includes("历史研发档案：V3 / V4 影子实验") && files.history.includes("不参与当前推荐、持仓或模拟盘")],
   ["history keeps Ranking V4 historical evidence out of official paper trading", files.history.includes("历史开发结果不能直接解锁推荐或模拟盘") && files.history.includes("正式推荐保持关闭")],
   ["history distinguishes Ranking V4 historical and confirmatory forward gates", files.history.includes("历史开发门禁") && files.history.includes("确认性前向窗口") && files.history.includes("必须使用冻结后新产生的数据")],
   ["history shows an explicit legacy result state when Ranking V4 is absent", files.history.includes("该历史结果未运行 V4") && files.history.includes("当前仅为旧版 Walk-forward 结果")],
@@ -71,6 +76,8 @@ const checks = [
   ["historical backfill requests full A-share scope", files.client.includes('scope: "full-a-share"')],
   ["historical backfill separates cache and retry outcomes", files.history.includes("backfill_price_retryable_failed") && files.history.includes("缓存复用")],
   ["styles include command center layout", files.styles.includes(".backtest-command-center")],
+  ["styles include the custom A-share target selector", files.styles.includes(".backtest-target-picker") && files.styles.includes(".backtest-symbol-input")],
+  ["styles include the collapsed historical research archive", files.styles.includes(".walk-forward-research-archive")],
   ["styles include temporal validation layout", files.styles.includes(".temporal-validation-panel")],
   ["styles include verdict grid", files.styles.includes(".backtest-verdict-grid")],
   ["styles include calibration center layout", files.styles.includes(".recommendation-calibration-center")],

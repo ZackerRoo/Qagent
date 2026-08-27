@@ -245,6 +245,42 @@ class FactorResearchRepository:
             return _from_row(row) if row is not None else None
 
     def latest_model_bundle(self, provider_mode: str) -> FactorResearchModelBundle | None:
+        bundles = self.model_bundles(provider_mode, limit=1)
+        return bundles[0] if bundles else None
+
+    def model_bundle(self, experiment_id: str) -> FactorResearchModelBundle | None:
+        with self.session_factory() as session:
+            experiment = session.get(FactorResearchExperimentRow, experiment_id)
+            if experiment is None or experiment.status != "succeeded":
+                return None
+            rows = (
+                session.query(FactorResearchModelArtifactRow)
+                .filter(FactorResearchModelArtifactRow.experiment_id == experiment.experiment_id)
+                .order_by(FactorResearchModelArtifactRow.seed.asc())
+                .all()
+            )
+            if rows:
+                models = [_model_artifact_from_row(row) for row in rows]
+                return FactorResearchModelBundle(
+                    experiment=_from_row(experiment),
+                    models=models,
+                    aggregate_model_digest=_aggregate_model_digest(models),
+                )
+        return None
+
+    def model_bundles(
+        self,
+        provider_mode: str,
+        *,
+        limit: int = 3,
+    ) -> list[FactorResearchModelBundle]:
+        """Return the newest frozen model for each distinct research configuration.
+
+        Multiple retries of the same hypothesis must not consume separate forward
+        evidence lanes. A changed immutable config digest, however, is a real
+        challenger and may collect its own results alongside the baseline.
+        """
+
         with self.session_factory() as session:
             experiments = (
                 session.query(FactorResearchExperimentRow)
@@ -255,7 +291,11 @@ class FactorResearchRepository:
                 .order_by(FactorResearchExperimentRow.completed_at.desc())
                 .all()
             )
+            bundles: list[FactorResearchModelBundle] = []
+            seen_configs: set[str] = set()
             for experiment in experiments:
+                if experiment.config_digest in seen_configs:
+                    continue
                 rows = (
                     session.query(FactorResearchModelArtifactRow)
                     .filter(
@@ -266,13 +306,18 @@ class FactorResearchRepository:
                 )
                 if not rows:
                     continue
+                seen_configs.add(experiment.config_digest)
                 models = [_model_artifact_from_row(row) for row in rows]
-                return FactorResearchModelBundle(
-                    experiment=_from_row(experiment),
-                    models=models,
-                    aggregate_model_digest=_aggregate_model_digest(models),
+                bundles.append(
+                    FactorResearchModelBundle(
+                        experiment=_from_row(experiment),
+                        models=models,
+                        aggregate_model_digest=_aggregate_model_digest(models),
+                    )
                 )
-        return None
+                if len(bundles) >= max(1, limit):
+                    break
+        return bundles
 
     def record_shadow_scores(
         self,
@@ -373,6 +418,9 @@ class FactorResearchRepository:
         bundle = self.latest_model_bundle(provider_mode)
         if bundle is None:
             return []
+        return self.shadow_runs(bundle.experiment.experiment_id)
+
+    def shadow_runs(self, experiment_id: str) -> list[FactorShadowRunRef]:
         with self.session_factory() as session:
             rows = (
                 session.query(
@@ -385,8 +433,7 @@ class FactorResearchRepository:
                     func.max(FactorShadowScoreRow.created_at),
                 )
                 .filter(
-                    FactorShadowScoreRow.experiment_id
-                    == bundle.experiment.experiment_id
+                    FactorShadowScoreRow.experiment_id == experiment_id
                 )
                 .group_by(
                     FactorShadowScoreRow.experiment_id,

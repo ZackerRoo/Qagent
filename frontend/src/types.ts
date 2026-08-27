@@ -3766,6 +3766,28 @@ export type FactorShadowEvaluationResponse = {
   data_health: Record<string, string>;
 };
 
+export type FactorShadowCandidate = {
+  experiment_id: string;
+  experiment_name: string;
+  config_digest: string;
+  model_digest: string;
+  status: "not_started" | "collecting" | "ready" | "manual_review_required" | string;
+  eligible_for_manual_review: boolean;
+  evaluation: FactorShadowEvaluation;
+};
+
+export type FactorShadowRoster = {
+  status: "not_started" | "ready" | string;
+  as_of_date: string;
+  candidates: FactorShadowCandidate[];
+  data_health: Record<string, string>;
+};
+
+export type FactorShadowRosterResponse = {
+  roster: FactorShadowRoster;
+  data_health: Record<string, string>;
+};
+
 export type DailyBriefOpportunity = {
   instrument_id: string;
   instrument_label: string | null;

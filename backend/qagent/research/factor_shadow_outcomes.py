@@ -115,6 +115,25 @@ class FactorShadowEvaluation(BaseModel):
     data_health: dict[str, str] = Field(default_factory=dict)
 
 
+class FactorShadowCandidate(BaseModel):
+    """One frozen challenger evaluated independently from the paper baseline."""
+
+    experiment_id: str
+    experiment_name: str
+    config_digest: str
+    model_digest: str
+    status: str
+    eligible_for_manual_review: bool = False
+    evaluation: FactorShadowEvaluation
+
+
+class FactorShadowRoster(BaseModel):
+    status: str
+    as_of_date: date
+    candidates: list[FactorShadowCandidate] = Field(default_factory=list)
+    data_health: dict[str, str] = Field(default_factory=dict)
+
+
 def refresh_factor_shadow_benchmark_cache(
     session_factory: sessionmaker[Session],
     *,
@@ -122,12 +141,51 @@ def refresh_factor_shadow_benchmark_cache(
     market_provider: object,
     as_of_date: date,
     horizons: tuple[int, ...] = FACTOR_SHADOW_HORIZONS,
+    experiment_id: str | None = None,
 ) -> FactorShadowBenchmarkRefresh:
     """Refresh only the benchmark bars needed by already-matured shadow runs."""
 
     store = FactorResearchRepository(session_factory)
-    bundle = store.latest_model_bundle(provider_mode)
-    runs = store.latest_model_shadow_runs(provider_mode)
+    if experiment_id is None:
+        bundles = store.model_bundles(provider_mode)
+    else:
+        selected_bundle = store.model_bundle(experiment_id)
+        bundles = [selected_bundle] if selected_bundle is not None else []
+    if experiment_id is None and len(bundles) > 1:
+        refreshed = [
+            refresh_factor_shadow_benchmark_cache(
+                session_factory,
+                provider_mode=provider_mode,
+                market_provider=market_provider,
+                as_of_date=as_of_date,
+                horizons=horizons,
+                experiment_id=bundle.experiment.experiment_id,
+            )
+            for bundle in bundles
+        ]
+        status = (
+            "refreshed"
+            if any(item.status == "refreshed" for item in refreshed)
+            else refreshed[0].status
+        )
+        starts = [item.start_date for item in refreshed if item.start_date is not None]
+        ends = [item.end_date for item in refreshed if item.end_date is not None]
+        return FactorShadowBenchmarkRefresh(
+            status=status,
+            benchmark_id=",".join(
+                sorted({item.benchmark_id for item in refreshed if item.benchmark_id})
+            )
+            or None,
+            start_date=min(starts, default=None),
+            end_date=max(ends, default=None),
+            data_health={
+                "factor_shadow_benchmark_refresh": status,
+                "factor_shadow_benchmark_candidates": str(len(refreshed)),
+                "factor_shadow_paper_isolation": "true",
+            },
+        )
+    bundle = bundles[0] if bundles else None
+    runs = store.shadow_runs(bundle.experiment.experiment_id) if bundle is not None else []
     if bundle is None or not runs:
         return FactorShadowBenchmarkRefresh(
             status="not_started",
@@ -197,10 +255,27 @@ def resolve_factor_shadow_outcomes(
     provider_mode: str,
     as_of_date: date,
     horizons: tuple[int, ...] = FACTOR_SHADOW_HORIZONS,
+    experiment_id: str | None = None,
 ) -> FactorShadowOutcomeResolution:
     store = FactorResearchRepository(session_factory)
-    bundle = store.latest_model_bundle(provider_mode)
-    runs = store.latest_model_shadow_runs(provider_mode)
+    if experiment_id is None:
+        bundles = store.model_bundles(provider_mode)
+        if len(bundles) > 1:
+            resolutions = [
+                resolve_factor_shadow_outcomes(
+                    session_factory,
+                    provider_mode=provider_mode,
+                    as_of_date=as_of_date,
+                    horizons=horizons,
+                    experiment_id=bundle.experiment.experiment_id,
+                )
+                for bundle in bundles
+            ]
+            return _merge_outcome_resolutions(resolutions, as_of_date=as_of_date)
+        bundle = bundles[0] if bundles else None
+    else:
+        bundle = store.model_bundle(experiment_id)
+    runs = store.shadow_runs(bundle.experiment.experiment_id) if bundle is not None else []
     if bundle is None or not runs:
         return FactorShadowOutcomeResolution(
             status="not_started",
@@ -360,10 +435,15 @@ def build_factor_shadow_evaluation(
     provider_mode: str,
     as_of_date: date,
     horizons: tuple[int, ...] = FACTOR_SHADOW_HORIZONS,
+    experiment_id: str | None = None,
 ) -> FactorShadowEvaluation:
     store = FactorResearchRepository(session_factory)
-    bundle = store.latest_model_bundle(provider_mode)
-    runs = store.latest_model_shadow_runs(provider_mode)
+    bundle = (
+        store.model_bundle(experiment_id)
+        if experiment_id is not None
+        else store.latest_model_bundle(provider_mode)
+    )
+    runs = store.shadow_runs(bundle.experiment.experiment_id) if bundle is not None else []
     if bundle is None or not runs:
         return FactorShadowEvaluation(
             status="not_started",
@@ -421,6 +501,98 @@ def build_factor_shadow_evaluation(
             "factor_shadow_evaluation_outcomes": str(len(outcomes)),
             "factor_shadow_outcome_contract": FACTOR_SHADOW_OUTCOME_CONTRACT,
             "factor_shadow_evaluation_paper_isolation": "true",
+        },
+    )
+
+
+def build_factor_shadow_roster(
+    session_factory: sessionmaker[Session],
+    *,
+    provider_mode: str,
+    as_of_date: date,
+    max_challengers: int = 3,
+) -> FactorShadowRoster:
+    """Summarize frozen challenger lanes without changing the paper strategy."""
+
+    store = FactorResearchRepository(session_factory)
+    bundles = store.model_bundles(provider_mode, limit=max_challengers)
+    candidates = []
+    for bundle in bundles:
+        evaluation = build_factor_shadow_evaluation(
+            session_factory,
+            provider_mode=provider_mode,
+            as_of_date=as_of_date,
+            experiment_id=bundle.experiment.experiment_id,
+        )
+        promotion = evaluation.promotion
+        candidates.append(
+            FactorShadowCandidate(
+                experiment_id=bundle.experiment.experiment_id,
+                experiment_name=bundle.experiment.experiment_name,
+                config_digest=bundle.experiment.config_digest,
+                model_digest=bundle.aggregate_model_digest,
+                status=(
+                    "manual_review_required"
+                    if promotion and promotion.eligible_for_manual_review
+                    else evaluation.status
+                ),
+                eligible_for_manual_review=bool(
+                    promotion and promotion.eligible_for_manual_review
+                ),
+                evaluation=evaluation,
+            )
+        )
+    return FactorShadowRoster(
+        status="ready" if candidates else "not_started",
+        as_of_date=as_of_date,
+        candidates=candidates,
+        data_health={
+            "factor_shadow_roster": "ready" if candidates else "not_started",
+            "factor_shadow_roster_candidates": str(len(candidates)),
+            "factor_shadow_roster_selection": "latest_per_frozen_configuration",
+            "factor_shadow_roster_paper_isolation": "true",
+            "factor_shadow_roster_order_effect": "none",
+        },
+    )
+
+
+def _merge_outcome_resolutions(
+    resolutions: list[FactorShadowOutcomeResolution],
+    *,
+    as_of_date: date,
+) -> FactorShadowOutcomeResolution:
+    if not resolutions:
+        return FactorShadowOutcomeResolution(
+            status="not_started",
+            as_of_date=as_of_date,
+            data_health={"factor_shadow_outcome_status": "not_started"},
+        )
+    statuses = {item.status for item in resolutions}
+    status = (
+        "recorded"
+        if "recorded" in statuses
+        else "incomplete"
+        if "incomplete" in statuses
+        else "waiting_for_maturity"
+        if "waiting_for_maturity" in statuses
+        else "up_to_date"
+    )
+    next_dates = [item.next_maturity_date for item in resolutions if item.next_maturity_date]
+    return FactorShadowOutcomeResolution(
+        status=status,
+        as_of_date=as_of_date,
+        runs=sum(item.runs for item in resolutions),
+        matured_run_horizons=sum(item.matured_run_horizons for item in resolutions),
+        outcomes_inserted=sum(item.outcomes_inserted for item in resolutions),
+        outcomes_existing=sum(item.outcomes_existing for item in resolutions),
+        unresolved_prices=sum(item.unresolved_prices for item in resolutions),
+        next_maturity_date=min(next_dates, default=None),
+        data_health={
+            "factor_shadow_outcome_status": status,
+            "factor_shadow_outcome_contract": FACTOR_SHADOW_OUTCOME_CONTRACT,
+            "factor_shadow_outcome_candidates": str(len(resolutions)),
+            "factor_shadow_outcome_paper_isolation": "true",
+            "factor_shadow_outcome_order_effect": "none",
         },
     )
 
