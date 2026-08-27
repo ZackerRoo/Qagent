@@ -1,8 +1,10 @@
+from datetime import date
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 import pandas as pd
 import pytest
+import requests
 
 from qagent.api import routes
 from qagent.app import create_app
@@ -256,6 +258,137 @@ def test_fuyao_market_provider_isolates_bad_symbol_in_snapshot_batch():
     assert len(session.calls) == 3
     assert len(provider.last_errors) == 1
     assert provider.last_errors[0].startswith("CN:000004: fuyao snapshot:")
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "method_name", "arguments"),
+    [
+        (1002, "Unknown thscode", "get_stock_snapshot_data", (["600519.SH"],)),
+        (3001, "Fund not found", "get_fund_profile", ("510300.SH",)),
+        (
+            3004,
+            "This fund does not support market data",
+            "get_fund_snapshot_data",
+            ("510300.SH",),
+        ),
+    ],
+)
+def test_fuyao_soft_negative_capability_cache_expires_and_recovers(
+    monkeypatch,
+    code,
+    message,
+    method_name,
+    arguments,
+):
+    clock = [100.0]
+    monkeypatch.setattr("qagent.providers.fuyao.time.monotonic", lambda: clock[0])
+    session = FakeSession(
+        [
+            {"code": code, "message": message, "request_id": f"error-{code}"},
+            _success_payload(),
+            _success_payload(),
+        ]
+    )
+    client = FuyaoClient(
+        "secret-key",
+        base_url=f"https://negative-{code}.example",
+        session=session,
+        max_attempts=1,
+        negative_capability_ttl_seconds=10,
+    )
+    request = getattr(client, method_name)
+
+    with pytest.raises(FuyaoProviderError) as initial:
+        request(*arguments)
+
+    recovery_client = FuyaoClient(
+        "secret-key",
+        base_url=client.base_url,
+        session=session,
+        max_attempts=1,
+        negative_capability_ttl_seconds=10,
+    )
+    request = getattr(recovery_client, method_name)
+    with pytest.raises(FuyaoProviderError, match="soft negative capability cache skipped"):
+        request(*arguments)
+
+    assert initial.value.code == code
+    assert len(session.calls) == 1
+
+    clock[0] = 111.0
+    request(*arguments)
+    request(*arguments)
+
+    assert len(session.calls) == 3
+    health = fuyao_telemetry_data_health(recovery_client)
+    assert health["fuyao_negative_capability_skips"] == "1"
+    assert health["fuyao_negative_capability_expired"] == "1"
+    assert health["fuyao_negative_capability_reprobes"] == "1"
+    assert health["fuyao_negative_capability_success_clears"] == "1"
+
+
+def test_fuyao_soft_negative_capability_cache_is_endpoint_scoped():
+    session = FakeSession(
+        [
+            {"code": 3004, "message": "Unsupported asset", "request_id": "snapshot"},
+            _success_payload(),
+        ]
+    )
+    client = FuyaoClient(
+        "secret-key",
+        base_url="https://endpoint-scope.example",
+        session=session,
+        max_attempts=1,
+    )
+
+    with pytest.raises(FuyaoProviderError):
+        client.get_fund_snapshot_data("510300.SH")
+    client.get_fund_history_data("510300.SH", date(2026, 8, 1), date(2026, 8, 2))
+    with pytest.raises(FuyaoProviderError, match="soft negative capability cache skipped"):
+        client.get_fund_snapshot_data("510300.SH")
+
+    assert [call[0].removeprefix(client.base_url) for call in session.calls] == [
+        "/api/fund/market/snapshot",
+        "/api/fund/market/historical",
+    ]
+
+
+def test_fuyao_soft_negative_capability_cache_ignores_transient_errors():
+    rate_session = FakeSession(
+        [
+            {"code": 4001, "message": "rate limited", "request_id": "rate"},
+            _success_payload(),
+        ]
+    )
+    rate_client = FuyaoClient(
+        "secret-key",
+        base_url="https://transient-rate.example",
+        session=rate_session,
+        max_attempts=1,
+    )
+    with pytest.raises(FuyaoProviderError):
+        rate_client.get_stock_snapshot_data(["600519.SH"])
+    rate_client.get_stock_snapshot_data(["600519.SH"])
+    assert len(rate_session.calls) == 2
+
+    class TimeoutThenSuccessSession(FakeSession):
+        def get(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            if len(self.calls) == 1:
+                raise requests.Timeout("timed out")
+            return FakeResponse(_success_payload())
+
+    timeout_session = TimeoutThenSuccessSession([])
+    timeout_client = FuyaoClient(
+        "secret-key",
+        base_url="https://transient-timeout.example",
+        session=timeout_session,
+        max_attempts=1,
+    )
+    with pytest.raises(FuyaoProviderError):
+        timeout_client.get_stock_snapshot_data(["600519.SH"])
+    timeout_client.get_stock_snapshot_data(["600519.SH"])
+    assert len(timeout_session.calls) == 2
 
 
 def test_fuyao_capability_manifest_is_explicit_about_boundaries():

@@ -34,6 +34,7 @@ FUYAO_SNAPSHOT_COLUMNS = [
     "ticker",
 ]
 RETRIABLE_BUSINESS_CODES = {4001, 5002, 5003}
+FUYAO_NEGATIVE_CAPABILITY_TTL_SECONDS = 60 * 60
 FINANCIAL_STATEMENT_PATHS = {
     "income": "/api/a-share/financials/income-statements",
     "balance": "/api/a-share/financials/balance-sheets",
@@ -123,6 +124,20 @@ class FuyaoProviderError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class _FuyaoNegativeCapability:
+    code: int
+    message: str
+    request_id: str | None
+    expires_at: float
+
+
+_FUYAO_NEGATIVE_CAPABILITY_CACHE: dict[tuple[str, str, str], _FuyaoNegativeCapability] = {}
+# Shared by clients in one process so independently constructed API/research clients can reuse it.
+# Spawned full-market workers retain their own isolated copy for that worker's lifetime.
+_FUYAO_NEGATIVE_CAPABILITY_LOCK = Lock()
+
+
+@dataclass(frozen=True)
 class FuyaoRequestMetadata:
     request_id: str | None
     timestamp_ms: int | None
@@ -145,6 +160,10 @@ class FuyaoTelemetrySnapshot:
     last_error_code: str | None
     last_completed_at: str | None
     error_categories: dict[str, int]
+    negative_capability_skips: int
+    negative_capability_expired: int
+    negative_capability_reprobes: int
+    negative_capability_success_clears: int
 
 
 class FuyaoClient:
@@ -160,6 +179,7 @@ class FuyaoClient:
         request_timeout_seconds: int = 8,
         max_attempts: int = 2,
         retry_backoff_seconds: float = 0.25,
+        negative_capability_ttl_seconds: float = FUYAO_NEGATIVE_CAPABILITY_TTL_SECONDS,
         session: requests.Session | None = None,
     ):
         normalized_key = api_key.strip()
@@ -170,6 +190,7 @@ class FuyaoClient:
         self.request_timeout_seconds = max(1, request_timeout_seconds)
         self.max_attempts = max(1, max_attempts)
         self.retry_backoff_seconds = max(0.0, retry_backoff_seconds)
+        self.negative_capability_ttl_seconds = max(0.0, negative_capability_ttl_seconds)
         self.session = session or requests.Session()
         self.last_errors: list[str] = []
         self.last_request: FuyaoRequestMetadata | None = None
@@ -191,6 +212,10 @@ class FuyaoClient:
             self._telemetry_last_error_code: str | None = None
             self._telemetry_last_completed_at: str | None = None
             self._telemetry_error_categories: Counter[str] = Counter()
+            self._telemetry_negative_capability_skips = 0
+            self._telemetry_negative_capability_expired = 0
+            self._telemetry_negative_capability_reprobes = 0
+            self._telemetry_negative_capability_success_clears = 0
 
     def telemetry_snapshot(self) -> FuyaoTelemetrySnapshot:
         with self._telemetry_lock:
@@ -212,6 +237,12 @@ class FuyaoClient:
                 last_error_code=self._telemetry_last_error_code,
                 last_completed_at=self._telemetry_last_completed_at,
                 error_categories=dict(self._telemetry_error_categories),
+                negative_capability_skips=self._telemetry_negative_capability_skips,
+                negative_capability_expired=self._telemetry_negative_capability_expired,
+                negative_capability_reprobes=self._telemetry_negative_capability_reprobes,
+                negative_capability_success_clears=(
+                    self._telemetry_negative_capability_success_clears
+                ),
             )
 
     def request_data(
@@ -589,6 +620,8 @@ class FuyaoClient:
     ) -> dict[str, Any]:
         endpoint = f"{self.base_url}{path}"
         request_params = {key: value for key, value in (params or {}).items() if value is not None}
+        capability_key = _negative_capability_key(self.base_url, path, request_params)
+        self._raise_if_negative_capability_cached(capability_key, path)
         last_error: FuyaoProviderError | None = None
         started_at = time.perf_counter()
         self._telemetry_begin(path)
@@ -604,7 +637,9 @@ class FuyaoClient:
                 response.raise_for_status()
                 payload = response.json()
             except (requests.RequestException, ValueError) as exc:
-                error_category = "timeout" if isinstance(exc, requests.Timeout) else "transport_error"
+                error_category = (
+                    "timeout" if isinstance(exc, requests.Timeout) else "transport_error"
+                )
                 last_error = FuyaoProviderError(
                     f"Fuyao request failed at the transport layer for {path}",
                     code="transport_error",
@@ -635,6 +670,11 @@ class FuyaoClient:
                 raise last_error
             code = payload.get("code")
             if code == 0:
+                if capability_key is not None:
+                    with _FUYAO_NEGATIVE_CAPABILITY_LOCK:
+                        cleared = _FUYAO_NEGATIVE_CAPABILITY_CACHE.pop(capability_key, None)
+                    if cleared is not None:
+                        self._telemetry_negative_capability(success_clear=True)
                 metadata = _request_metadata(payload, path)
                 self._telemetry_finish(
                     started_at,
@@ -651,6 +691,26 @@ class FuyaoClient:
                 code=code if isinstance(code, int) else "invalid_response",
                 request_id=request_id,
             )
+            if (
+                capability_key is not None
+                and self.negative_capability_ttl_seconds > 0
+                and _negative_capability_reason(code, message)
+            ):
+                with _FUYAO_NEGATIVE_CAPABILITY_LOCK:
+                    now = time.monotonic()
+                    expired_keys = [
+                        key
+                        for key, value in _FUYAO_NEGATIVE_CAPABILITY_CACHE.items()
+                        if value.expires_at <= now and key != capability_key
+                    ]
+                    for key in expired_keys:
+                        _FUYAO_NEGATIVE_CAPABILITY_CACHE.pop(key, None)
+                    _FUYAO_NEGATIVE_CAPABILITY_CACHE[capability_key] = _FuyaoNegativeCapability(
+                        code=code,
+                        message=message,
+                        request_id=request_id,
+                        expires_at=(now + self.negative_capability_ttl_seconds),
+                    )
             if code in RETRIABLE_BUSINESS_CODES and attempt < self.max_attempts:
                 self._telemetry_retry()
                 self._sleep_before_retry(attempt)
@@ -674,6 +734,27 @@ class FuyaoClient:
         )
         raise last_error
 
+    def _raise_if_negative_capability_cached(
+        self,
+        capability_key: tuple[str, str, str] | None,
+        path: str,
+    ) -> None:
+        if capability_key is None or self.negative_capability_ttl_seconds <= 0:
+            return
+        with _FUYAO_NEGATIVE_CAPABILITY_LOCK:
+            cached = _FUYAO_NEGATIVE_CAPABILITY_CACHE.get(capability_key)
+        if cached is None:
+            return
+        if cached.expires_at <= time.monotonic():
+            self._telemetry_negative_capability(expired=True, reprobe=True)
+            return
+        self._telemetry_negative_capability(skip=True)
+        raise FuyaoProviderError(
+            f"Fuyao soft negative capability cache skipped {path}: {cached.message}",
+            code=cached.code,
+            request_id=cached.request_id,
+        )
+
     def _sleep_before_retry(self, attempt: int) -> None:
         if self.retry_backoff_seconds:
             time.sleep(self.retry_backoff_seconds * attempt)
@@ -690,6 +771,20 @@ class FuyaoClient:
     def _telemetry_retry(self) -> None:
         with self._telemetry_lock:
             self._telemetry_retries += 1
+
+    def _telemetry_negative_capability(
+        self,
+        *,
+        skip: bool = False,
+        expired: bool = False,
+        reprobe: bool = False,
+        success_clear: bool = False,
+    ) -> None:
+        with self._telemetry_lock:
+            self._telemetry_negative_capability_skips += int(skip)
+            self._telemetry_negative_capability_expired += int(expired)
+            self._telemetry_negative_capability_reprobes += int(reprobe)
+            self._telemetry_negative_capability_success_clears += int(success_clear)
 
     def _telemetry_finish(
         self,
@@ -983,6 +1078,12 @@ def fuyao_telemetry_data_health(provider: object) -> dict[str, str]:
     successes = sum(item.successes for item in snapshots)
     errors = sum(item.errors for item in snapshots)
     retries = sum(item.retries for item in snapshots)
+    negative_capability_skips = sum(item.negative_capability_skips for item in snapshots)
+    negative_capability_expired = sum(item.negative_capability_expired for item in snapshots)
+    negative_capability_reprobes = sum(item.negative_capability_reprobes for item in snapshots)
+    negative_capability_success_clears = sum(
+        item.negative_capability_success_clears for item in snapshots
+    )
     latency_total = sum(item.latency_ms_total for item in snapshots)
     error_categories: Counter[str] = Counter()
     for item in snapshots:
@@ -1009,6 +1110,10 @@ def fuyao_telemetry_data_health(provider: object) -> dict[str, str]:
         "fuyao_errors": str(errors),
         "fuyao_error_category_mix": _count_mix(error_categories),
         "fuyao_retries": str(retries),
+        "fuyao_negative_capability_skips": str(negative_capability_skips),
+        "fuyao_negative_capability_expired": str(negative_capability_expired),
+        "fuyao_negative_capability_reprobes": str(negative_capability_reprobes),
+        "fuyao_negative_capability_success_clears": str(negative_capability_success_clears),
         "fuyao_latency_ms_total": f"{latency_total:.3f}",
         "fuyao_latency_ms_average": (f"{latency_total / requests:.3f}" if requests else "0.000"),
     }
@@ -1054,6 +1159,44 @@ def _fuyao_error_category(code: int | str | None, message: str | None) -> str:
     ):
         return "authentication"
     return f"business_{normalized_code}" if normalized_code else "business_error"
+
+
+def _negative_capability_reason(code: object, message: str) -> str | None:
+    """Return a cacheable reason only for Fuyao's explicit permanent symbol errors."""
+
+    normalized = " ".join(message.strip().lower().split())
+    if code == 1002 and "unknown" in normalized and "thscode" in normalized:
+        return "unknown thscode"
+    if code == 3001 and "fund" in normalized and "not found" in normalized:
+        return "fund not found"
+    unsupported_asset = "unsupported" in normalized and "asset" in normalized
+    unsupported_fund_market_data = "fund" in normalized and "not support market data" in normalized
+    if code == 3004 and (unsupported_asset or unsupported_fund_market_data):
+        return "unsupported asset"
+    return None
+
+
+def _negative_capability_key(
+    base_url: str,
+    path: str,
+    params: dict[str, object],
+) -> tuple[str, str, str] | None:
+    """Scope soft negatives to one endpoint and one unambiguous symbol."""
+
+    raw_symbol = params.get("thscode")
+    if isinstance(raw_symbol, str):
+        symbol = raw_symbol.strip().upper()
+    else:
+        raw_symbols = params.get("thscodes")
+        if not isinstance(raw_symbols, str):
+            return None
+        symbols = [item.strip().upper() for item in raw_symbols.split(",") if item.strip()]
+        if len(symbols) != 1:
+            return None
+        symbol = symbols[0]
+    if not symbol:
+        return None
+    return base_url.rstrip("/"), path, symbol
 
 
 def _count_mix(counts: Counter[str]) -> str:
