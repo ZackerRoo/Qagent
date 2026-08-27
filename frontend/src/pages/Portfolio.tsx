@@ -2507,6 +2507,7 @@ function FactorShadowAttributionPanel({
     ?? evaluation.horizons[0];
   if (!horizon) return null;
   const promotion = evaluation.promotion;
+  const head = horizon.execution_head;
   return (
     <div className="factor-shadow-attribution">
       <div className="paper-research-subhead">
@@ -2565,6 +2566,64 @@ function FactorShadowAttributionPanel({
           </p>
         </div>
       )}
+      {head && <div className="factor-shadow-promotion" aria-label={language === "zh" ? "执行容量头部影子证据" : "Execution-sized shadow head evidence"}>
+        <div>
+          <span className="status status-pending">shadow only</span>
+          <strong>
+            {language === "zh"
+              ? `Top${head.requested_size} / 单行业最多${head.industry_cap}只`
+              : `Top ${head.requested_size} / max ${head.industry_cap} per industry`}
+          </strong>
+          <small>
+            {head.policy_version} · {language === "zh"
+              ? `${head.paired_outcome_sessions} 个完整同约束可比期`
+              : `${head.paired_outcome_sessions} complete constraint-matched sessions`}
+          </small>
+        </div>
+        <div className="factor-shadow-promotion-metrics">
+          <span>
+            {language === "zh" ? "基准头部净超额" : "Baseline head net excess"}
+            <strong>{formatShadowEvidenceReturn(head.baseline_head_net_excess_return_pct, language)}</strong>
+          </span>
+          <span>
+            {language === "zh" ? "挑战者头部净超额" : "Challenger head net excess"}
+            <strong>{formatShadowEvidenceReturn(head.challenger_head_net_excess_return_pct, language)}</strong>
+          </span>
+          <span>
+            {language === "zh" ? "头部增益胜率" : "Head lift win rate"}
+            <strong>{formatShadowEvidencePercent(head.challenger_lift_win_rate, language)}</strong>
+          </span>
+          <span>
+            {language === "zh" ? "头部增益中位数" : "Median head lift"}
+            <strong>{formatShadowEvidenceReturn(head.challenger_median_lift_pct, language)}</strong>
+          </span>
+          <span>
+            {language === "zh" ? "约束后最大行业" : "Max industry after cap"}
+            <strong>
+              B {formatShadowEvidencePercent(head.baseline_max_industry_concentration, language)} · C {formatShadowEvidencePercent(head.challenger_max_industry_concentration, language)}
+            </strong>
+          </span>
+          <span>
+            {language === "zh" ? "是否填满" : "Head filled"}
+            <strong>
+              {head.matured_sessions === 0
+                ? language === "zh" ? "等待" : "Waiting"
+                : language === "zh"
+                  ? `B ${head.baseline_all_matured_sessions_filled ? "是" : "否"} · C ${head.challenger_all_matured_sessions_filled ? "是" : "否"}`
+                  : `B ${head.baseline_all_matured_sessions_filled ? "yes" : "no"} · C ${head.challenger_all_matured_sessions_filled ? "yes" : "no"}`}
+            </strong>
+          </span>
+        </div>
+        <p>
+          {head.paired_outcome_sessions === 0
+            ? language === "zh"
+              ? "尚无完整的 Top10/cap3 同约束结果，继续等待成熟数据。"
+              : "No complete Top10/cap3 constraint-matched outcome yet; waiting for mature evidence."
+            : language === "zh"
+              ? "该结果仅衡量执行容量下的影子选股差异，不会创建模拟订单或改动当前权重。"
+              : "This only measures shadow selection differences at execution size; it does not create paper orders or change current weights."}
+        </p>
+      </div>}
       <div className="factor-shadow-selection-lift">
         <div>
           <span>{language === "zh" ? "挑战者换入标的" : "Challenger additions"}</span>
@@ -2612,6 +2671,16 @@ function formatShadowReturn(value: number | null, language: Language) {
   return `${value > 0 ? "+" : ""}${value.toFixed(2)}${language === "zh" ? "%" : "%"}`;
 }
 
+function formatShadowEvidencePercent(value: number | null, language: Language) {
+  if (value == null) return language === "zh" ? "等待" : "Waiting";
+  return formatShadowPercent(value, language);
+}
+
+function formatShadowEvidenceReturn(value: number | null, language: Language) {
+  if (value == null) return language === "zh" ? "等待" : "Waiting";
+  return formatShadowReturn(value, language);
+}
+
 function localizeShadowPromotionReason(reason: string, language: Language) {
   const zh: Record<string, string> = {
     "5d_outcomes_not_matured": "5日结果尚未成熟",
@@ -2649,7 +2718,23 @@ function localizeShadowPromotionReason(reason: string, language: Language) {
     "20d_selection_lift_not_positive": "20日换入标的的每期选股增益中位数未转正",
     "all_preregistered_shadow_evidence_checks_passed": "已满足预注册影子证据，仍需人工复核后才可变更模型",
   };
-  if (language === "zh") return zh[reason] ?? reason;
+  if (language === "zh") {
+    const headReason = reason.match(/^(5|10|20)d_(execution_head_.+)$/);
+    const headReasonZh: Record<string, string> = {
+      "execution_head_outcomes_not_matured": "执行容量头部结果尚未成熟",
+      "execution_head_samples_below_minimum": "执行容量头部完整可比期不足20个",
+      "execution_head_not_filled": "基准或挑战者未能按行业上限填满10只",
+      "execution_head_industry_cap_violated": "执行容量头部超过单行业3只上限",
+      "execution_head_lift_missing": "执行容量头部缺少基准与挑战者的同约束对照",
+      "execution_head_lift_not_stable": "执行容量头部相对基准优势不稳定",
+      "execution_head_lift_not_positive": "执行容量头部相对基准的每期增益中位数未转正",
+    };
+    if (headReason) {
+      const localized = headReasonZh[headReason[2]];
+      if (localized) return `${headReason[1]}日${localized}`;
+    }
+    return zh[reason] ?? reason;
+  }
   return reason.replace(/_/g, " ");
 }
 

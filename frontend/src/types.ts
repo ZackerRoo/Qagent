@@ -3714,6 +3714,35 @@ export type FactorShadowAttributionGroup = {
   positive_net_excess_rate: number | null;
 };
 
+export type FactorShadowExecutionHeadEvaluation = {
+  policy_version: string;
+  requested_size: number;
+  industry_cap: number;
+  unknown_industry_bucket: string;
+  matured_sessions: number;
+  baseline_selection_slots: number;
+  challenger_selection_slots: number;
+  baseline_completed_outcomes: number;
+  challenger_completed_outcomes: number;
+  baseline_full_sessions: number;
+  challenger_full_sessions: number;
+  paired_outcome_sessions: number;
+  baseline_all_matured_sessions_filled: boolean;
+  challenger_all_matured_sessions_filled: boolean;
+  baseline_head_net_excess_return_pct: number | null;
+  challenger_head_net_excess_return_pct: number | null;
+  challenger_lift_win_rate: number | null;
+  challenger_median_lift_pct: number | null;
+  baseline_raw_max_industry_positions: number;
+  challenger_raw_max_industry_positions: number;
+  baseline_raw_max_industry_concentration: number | null;
+  challenger_raw_max_industry_concentration: number | null;
+  baseline_max_industry_positions: number;
+  challenger_max_industry_positions: number;
+  baseline_max_industry_concentration: number | null;
+  challenger_max_industry_concentration: number | null;
+};
+
 export type FactorShadowHorizonEvaluation = {
   horizon_sessions: number;
   status: "pending" | "partial" | "ready";
@@ -3742,6 +3771,7 @@ export type FactorShadowHorizonEvaluation = {
   challenger_median_selection_lift_pct: number | null;
   challenger_rank_buckets: FactorShadowAttributionGroup[];
   challenger_industries: FactorShadowAttributionGroup[];
+  execution_head?: FactorShadowExecutionHeadEvaluation;
 };
 
 export type FactorShadowPromotionAssessment = {

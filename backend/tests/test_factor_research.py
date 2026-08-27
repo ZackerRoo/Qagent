@@ -24,6 +24,12 @@ from qagent.research.factor_experiments import (
 )
 from qagent.research.factor_shadow import score_factor_shadow_run, score_factor_shadow_runs
 from qagent.research.factor_shadow_outcomes import (
+    FactorShadowExecutionHeadEvaluation,
+    FactorShadowHorizonEvaluation,
+    _assess_shadow_promotion,
+    _constrained_execution_head,
+    _evaluate_execution_head,
+    _raw_execution_head,
     build_factor_shadow_roster,
     build_factor_shadow_evaluation,
     factor_shadow_outcome_dates,
@@ -32,6 +38,8 @@ from qagent.research.factor_shadow_outcomes import (
 )
 from qagent.storage.factor_research import (
     FactorResearchRepository,
+    FactorShadowOutcome,
+    FactorShadowRunRef,
     FactorShadowScore,
 )
 from qagent.storage.market_cache import MarketDataCacheRepository
@@ -552,10 +560,13 @@ def test_factor_shadow_outcomes_use_one_run_per_signal_date_and_are_immutable(tm
         scan_job_id="scan-outcome-1",
     )
     assert len(canonical_outcomes) == 10
-    assert store.shadow_outcomes(
-        experiment.experiment_id,
-        scan_job_id="scan-outcome-2",
-    ) == []
+    assert (
+        store.shadow_outcomes(
+            experiment.experiment_id,
+            scan_job_id="scan-outcome-2",
+        )
+        == []
+    )
     store.record_shadow_outcomes(
         [
             outcome.model_copy(
@@ -642,6 +653,13 @@ def test_factor_shadow_outcomes_use_one_run_per_signal_date_and_are_immutable(tm
     ]
     assert sum(item.sample_count for item in horizon.challenger_rank_buckets) == 10
     assert horizon.challenger_industries
+    assert horizon.execution_head.requested_size == 10
+    assert horizon.execution_head.industry_cap == 3
+    assert horizon.execution_head.baseline_selection_slots == 6
+    assert horizon.execution_head.challenger_selection_slots == 6
+    assert horizon.execution_head.paired_outcome_sessions == 0
+    assert not horizon.execution_head.baseline_all_matured_sessions_filled
+    assert not horizon.execution_head.challenger_all_matured_sessions_filled
 
     stored = store.shadow_outcomes(experiment.experiment_id)
     with pytest.raises(ValueError, match="immutable row"):
@@ -658,6 +676,160 @@ def test_factor_shadow_outcomes_use_one_run_per_signal_date_and_are_immutable(tm
             {"experiment_id": experiment.experiment_id},
         )
         session.commit()
+
+
+def test_execution_sized_shadow_head_is_constraint_matched_and_deterministic():
+    scores = [
+        FactorShadowScore(
+            instrument_id=f"CN:{index:06d}",
+            baseline_score=float(index),
+            challenger_score=float(15 - index),
+            baseline_rank=(15 - index if index < 8 else index - 7),
+            challenger_rank=index + 1,
+            feature_coverage=1.0,
+            industry=("C39" if index < 8 else f"industry-{index}"),
+        )
+        for index in range(15)
+    ]
+    raw_challenger = _raw_execution_head(scores, rank_field="challenger_rank")
+    baseline = _constrained_execution_head(scores, rank_field="baseline_rank")
+    challenger = _constrained_execution_head(scores, rank_field="challenger_rank")
+    reversed_challenger = _constrained_execution_head(
+        list(reversed(scores)),
+        rank_field="challenger_rank",
+    )
+
+    assert sum(item.industry == "C39" for item in raw_challenger) == 8
+    assert len(baseline) == 10
+    assert len(challenger) == 10
+    assert sum(item.industry == "C39" for item in baseline) == 3
+    assert sum(item.industry == "C39" for item in challenger) == 3
+    assert [item.instrument_id for item in reversed_challenger] == [
+        item.instrument_id for item in challenger
+    ]
+
+    signal_date = date(2026, 7, 1)
+    run = FactorShadowRunRef(
+        experiment_id="experiment-head",
+        scan_job_id="scan-head",
+        signal_date=signal_date,
+        dataset_revision=7,
+        model_digest="a" * 64,
+        scored_instruments=len(scores),
+        created_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    outcomes = {
+        (run.scan_job_id, score.instrument_id, 5): FactorShadowOutcome(
+            experiment_id=run.experiment_id,
+            scan_job_id=run.scan_job_id,
+            instrument_id=score.instrument_id,
+            horizon_sessions=5,
+            signal_date=signal_date,
+            entry_date=date(2026, 7, 2),
+            outcome_date=date(2026, 7, 8),
+            benchmark_id="CN:000300.IDX",
+            instrument_return_pct=(3.0 if index < 3 else -3.0 if 5 <= index < 8 else 0.0),
+            benchmark_return_pct=0.0,
+            excess_return_pct=(3.0 if index < 3 else -3.0 if 5 <= index < 8 else 0.0),
+            net_excess_return_pct=(3.0 if index < 3 else -3.0 if 5 <= index < 8 else 0.0),
+            round_trip_cost_bps=0.0,
+            signal_dataset_revision=7,
+            model_digest=run.model_digest,
+            source_digest=sha256(f"head|{score.instrument_id}".encode()).hexdigest(),
+        )
+        for index, score in enumerate(scores)
+    }
+    evaluation = _evaluate_execution_head(
+        [run],
+        {run.scan_job_id: scores},
+        outcomes,
+        horizon_sessions=5,
+    )
+
+    assert evaluation.policy_version == "factor-shadow-execution-head-top10-cap3-v1"
+    assert evaluation.baseline_raw_max_industry_positions == 3
+    assert evaluation.challenger_raw_max_industry_positions == 8
+    assert evaluation.challenger_raw_max_industry_concentration == 0.8
+    assert evaluation.baseline_max_industry_positions == 3
+    assert evaluation.challenger_max_industry_positions == 3
+    assert evaluation.baseline_max_industry_concentration == 0.3
+    assert evaluation.challenger_max_industry_concentration == 0.3
+    assert evaluation.baseline_full_sessions == 1
+    assert evaluation.challenger_full_sessions == 1
+    assert evaluation.paired_outcome_sessions == 1
+    assert evaluation.baseline_head_net_excess_return_pct == pytest.approx(-0.9)
+    assert evaluation.challenger_head_net_excess_return_pct == pytest.approx(0.9)
+    assert evaluation.challenger_lift_win_rate == 1.0
+    assert evaluation.challenger_median_lift_pct == pytest.approx(1.8)
+
+
+def test_execution_sized_shadow_head_caps_unknown_and_reports_unfilled():
+    scores = [
+        FactorShadowScore(
+            instrument_id=f"CN:{index:06d}",
+            baseline_score=float(7 - index),
+            challenger_score=float(7 - index),
+            baseline_rank=1 if index < 2 else index,
+            challenger_rank=1 if index < 2 else index,
+            feature_coverage=1.0,
+            industry=None if index < 4 else f"industry-{index}",
+        )
+        for index in range(7)
+    ]
+    selected = _constrained_execution_head(scores, rank_field="challenger_rank")
+
+    assert [item.instrument_id for item in selected[:2]] == ["CN:000000", "CN:000001"]
+    assert len(selected) == 6
+    assert sum(item.industry is None for item in selected) == 3
+
+
+def test_execution_head_promotion_gate_fails_closed_on_sample_and_negative_lift():
+    head = FactorShadowExecutionHeadEvaluation(
+        matured_sessions=20,
+        baseline_selection_slots=200,
+        challenger_selection_slots=200,
+        baseline_completed_outcomes=199,
+        challenger_completed_outcomes=199,
+        baseline_full_sessions=20,
+        challenger_full_sessions=20,
+        paired_outcome_sessions=19,
+        baseline_all_matured_sessions_filled=True,
+        challenger_all_matured_sessions_filled=True,
+        baseline_head_net_excess_return_pct=0.2,
+        challenger_head_net_excess_return_pct=0.1,
+        challenger_lift_win_rate=0.4,
+        challenger_median_lift_pct=-0.1,
+        baseline_max_industry_positions=3,
+        challenger_max_industry_positions=3,
+        baseline_max_industry_concentration=0.3,
+        challenger_max_industry_concentration=0.3,
+    )
+    horizons = [
+        FactorShadowHorizonEvaluation(
+            horizon_sessions=horizon,
+            status="ready",
+            matured_runs=20,
+            expected_instruments=200,
+            completed_instruments=200,
+            outcome_coverage=1.0,
+            mean_baseline_rank_ic=0.1,
+            mean_challenger_rank_ic=0.2,
+            challenger_session_outperformance_rate=0.75,
+            challenger_median_session_net_excess_return_pct=0.2,
+            challenger_selection_lift_win_rate=0.75,
+            challenger_median_selection_lift_pct=0.2,
+            execution_head=head,
+        )
+        for horizon in (5, 10, 20)
+    ]
+
+    promotion = _assess_shadow_promotion(horizons)
+
+    assert promotion.action == "keep_shadow_only"
+    assert not promotion.eligible_for_manual_review
+    assert "5d_execution_head_samples_below_minimum" in promotion.reasons
+    assert "5d_execution_head_lift_not_stable" in promotion.reasons
+    assert "5d_execution_head_lift_not_positive" in promotion.reasons
 
 
 def _factor_shadow_price_rows(

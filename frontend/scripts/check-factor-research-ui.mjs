@@ -17,6 +17,10 @@ const checks = [
   ["portfolio renders the research panel", files.portfolio.includes("FactorModelResearchPanel")],
   ["portfolio compares baseline and challenger", files.portfolio.includes("lightgbm_challenger")],
   ["portfolio makes paper isolation explicit", files.portfolio.includes("不会自动替换模拟盘模型")],
+  ["types expose execution-sized shadow head", files.types.includes("FactorShadowExecutionHeadEvaluation")],
+  ["portfolio renders Top10 cap3 evidence", files.portfolio.includes("Top10/cap3")],
+  ["portfolio shows constraint-matched head lift", files.portfolio.includes("头部增益中位数")],
+  ["portfolio localizes head promotion gates", files.portfolio.includes("execution_head_lift_not_positive")],
   ["research polling does not use a paper refresh interval", !files.portfolio.includes("setInterval")],
   ["styles include the research panel", files.styles.includes(".factor-model-research")],
   [

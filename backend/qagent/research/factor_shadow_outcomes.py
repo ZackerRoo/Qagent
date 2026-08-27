@@ -32,6 +32,10 @@ FACTOR_SHADOW_PROMOTION_MIN_OUTCOME_COVERAGE = 0.95
 FACTOR_SHADOW_PROMOTION_MIN_SESSION_EDGE_RATE = 0.55
 FACTOR_SHADOW_PROMOTION_MIN_SELECTION_LIFT_RATE = 0.55
 FACTOR_SHADOW_RUN_SELECTION_RULE = "earliest_created_at_then_scan_job_id_per_signal_date"
+FACTOR_SHADOW_EXECUTION_HEAD_POLICY = "factor-shadow-execution-head-top10-cap3-v1"
+FACTOR_SHADOW_EXECUTION_HEAD_SIZE = 10
+FACTOR_SHADOW_EXECUTION_HEAD_INDUSTRY_CAP = 3
+FACTOR_SHADOW_UNKNOWN_INDUSTRY_BUCKET = "unknown"
 
 
 class FactorShadowOutcomeResolution(BaseModel):
@@ -64,6 +68,37 @@ class FactorShadowAttributionGroup(BaseModel):
     positive_net_excess_rate: float | None
 
 
+class FactorShadowExecutionHeadEvaluation(BaseModel):
+    """Execution-sized, constraint-matched evidence with no paper-order effect."""
+
+    policy_version: str = FACTOR_SHADOW_EXECUTION_HEAD_POLICY
+    requested_size: int = FACTOR_SHADOW_EXECUTION_HEAD_SIZE
+    industry_cap: int = FACTOR_SHADOW_EXECUTION_HEAD_INDUSTRY_CAP
+    unknown_industry_bucket: str = FACTOR_SHADOW_UNKNOWN_INDUSTRY_BUCKET
+    matured_sessions: int = 0
+    baseline_selection_slots: int = 0
+    challenger_selection_slots: int = 0
+    baseline_completed_outcomes: int = 0
+    challenger_completed_outcomes: int = 0
+    baseline_full_sessions: int = 0
+    challenger_full_sessions: int = 0
+    paired_outcome_sessions: int = 0
+    baseline_all_matured_sessions_filled: bool = False
+    challenger_all_matured_sessions_filled: bool = False
+    baseline_head_net_excess_return_pct: float | None = None
+    challenger_head_net_excess_return_pct: float | None = None
+    challenger_lift_win_rate: float | None = None
+    challenger_median_lift_pct: float | None = None
+    baseline_raw_max_industry_positions: int = 0
+    challenger_raw_max_industry_positions: int = 0
+    baseline_raw_max_industry_concentration: float | None = None
+    challenger_raw_max_industry_concentration: float | None = None
+    baseline_max_industry_positions: int = 0
+    challenger_max_industry_positions: int = 0
+    baseline_max_industry_concentration: float | None = None
+    challenger_max_industry_concentration: float | None = None
+
+
 class FactorShadowHorizonEvaluation(BaseModel):
     horizon_sessions: int
     status: str
@@ -93,6 +128,9 @@ class FactorShadowHorizonEvaluation(BaseModel):
     challenger_median_selection_lift_pct: float | None = None
     challenger_rank_buckets: list[FactorShadowAttributionGroup] = Field(default_factory=list)
     challenger_industries: list[FactorShadowAttributionGroup] = Field(default_factory=list)
+    execution_head: FactorShadowExecutionHeadEvaluation = Field(
+        default_factory=FactorShadowExecutionHeadEvaluation
+    )
 
 
 class FactorShadowPromotionAssessment(BaseModel):
@@ -295,9 +333,7 @@ def resolve_factor_shadow_outcomes(
     round_trip_cost_bps = float(bundle.experiment.config.get("round_trip_cost_bps", 20.0))
     raw_existing = store.shadow_outcomes(bundle.experiment.experiment_id)
     canonical_scan_job_ids = {run.scan_job_id for run in runs}
-    existing = [
-        item for item in raw_existing if item.scan_job_id in canonical_scan_job_ids
-    ]
+    existing = [item for item in raw_existing if item.scan_job_id in canonical_scan_job_ids]
     existing_keys = {
         (item.scan_job_id, item.instrument_id, item.horizon_sessions) for item in existing
     }
@@ -473,9 +509,7 @@ def build_factor_shadow_evaluation(
     }
     raw_outcomes = store.shadow_outcomes(bundle.experiment.experiment_id)
     canonical_scan_job_ids = {run.scan_job_id for run in runs}
-    outcomes = [
-        item for item in raw_outcomes if item.scan_job_id in canonical_scan_job_ids
-    ]
+    outcomes = [item for item in raw_outcomes if item.scan_job_id in canonical_scan_job_ids]
     outcomes_by_key = {
         (item.scan_job_id, item.instrument_id, item.horizon_sessions): item for item in outcomes
     }
@@ -557,9 +591,7 @@ def build_factor_shadow_roster(
                     if promotion and promotion.eligible_for_manual_review
                     else evaluation.status
                 ),
-                eligible_for_manual_review=bool(
-                    promotion and promotion.eligible_for_manual_review
-                ),
+                eligible_for_manual_review=bool(promotion and promotion.eligible_for_manual_review),
                 evaluation=evaluation,
             )
         )
@@ -647,6 +679,221 @@ def _canonical_shadow_runs(
     ):
         selected.setdefault(run.signal_date, run)
     return [selected[signal_date] for signal_date in sorted(selected)]
+
+
+def _evaluate_execution_head(
+    matured: list[FactorShadowRunRef],
+    scores_by_run: dict[str, list[FactorShadowScore]],
+    outcomes_by_key: dict[tuple[str, str, int], FactorShadowOutcome],
+    *,
+    horizon_sessions: int,
+) -> FactorShadowExecutionHeadEvaluation:
+    baseline_session_returns: list[float] = []
+    challenger_session_returns: list[float] = []
+    challenger_lifts: list[float] = []
+    challenger_lift_wins: list[bool] = []
+    baseline_selected = 0
+    challenger_selected = 0
+    baseline_completed = 0
+    challenger_completed = 0
+    baseline_full = 0
+    challenger_full = 0
+    baseline_raw_positions: list[int] = []
+    challenger_raw_positions: list[int] = []
+    baseline_raw_concentrations: list[float] = []
+    challenger_raw_concentrations: list[float] = []
+    baseline_positions: list[int] = []
+    challenger_positions: list[int] = []
+    baseline_concentrations: list[float] = []
+    challenger_concentrations: list[float] = []
+
+    for run in matured:
+        scores = scores_by_run.get(run.scan_job_id, [])
+        baseline_ordered = _ordered_execution_scores(scores, rank_field="baseline_rank")
+        challenger_ordered = _ordered_execution_scores(
+            scores,
+            rank_field="challenger_rank",
+        )
+        baseline_raw = baseline_ordered[:FACTOR_SHADOW_EXECUTION_HEAD_SIZE]
+        challenger_raw = challenger_ordered[:FACTOR_SHADOW_EXECUTION_HEAD_SIZE]
+        baseline_head = _constrained_execution_head_from_ordered(baseline_ordered)
+        challenger_head = _constrained_execution_head_from_ordered(challenger_ordered)
+        _append_industry_concentration(
+            baseline_raw,
+            positions=baseline_raw_positions,
+            concentrations=baseline_raw_concentrations,
+        )
+        _append_industry_concentration(
+            challenger_raw,
+            positions=challenger_raw_positions,
+            concentrations=challenger_raw_concentrations,
+        )
+        _append_industry_concentration(
+            baseline_head,
+            positions=baseline_positions,
+            concentrations=baseline_concentrations,
+        )
+        _append_industry_concentration(
+            challenger_head,
+            positions=challenger_positions,
+            concentrations=challenger_concentrations,
+        )
+        baseline_selected += len(baseline_head)
+        challenger_selected += len(challenger_head)
+        baseline_is_full = len(baseline_head) == FACTOR_SHADOW_EXECUTION_HEAD_SIZE
+        challenger_is_full = len(challenger_head) == FACTOR_SHADOW_EXECUTION_HEAD_SIZE
+        baseline_full += int(baseline_is_full)
+        challenger_full += int(challenger_is_full)
+        baseline_outcomes = [
+            outcome
+            for score in baseline_head
+            if (
+                outcome := outcomes_by_key.get(
+                    (run.scan_job_id, score.instrument_id, horizon_sessions)
+                )
+            )
+            is not None
+        ]
+        challenger_outcomes = [
+            outcome
+            for score in challenger_head
+            if (
+                outcome := outcomes_by_key.get(
+                    (run.scan_job_id, score.instrument_id, horizon_sessions)
+                )
+            )
+            is not None
+        ]
+        baseline_completed += len(baseline_outcomes)
+        challenger_completed += len(challenger_outcomes)
+        if not (
+            baseline_is_full
+            and challenger_is_full
+            and len(baseline_outcomes) == FACTOR_SHADOW_EXECUTION_HEAD_SIZE
+            and len(challenger_outcomes) == FACTOR_SHADOW_EXECUTION_HEAD_SIZE
+        ):
+            continue
+        baseline_return = float(np.mean([item.net_excess_return_pct for item in baseline_outcomes]))
+        challenger_return = float(
+            np.mean([item.net_excess_return_pct for item in challenger_outcomes])
+        )
+        lift = challenger_return - baseline_return
+        baseline_session_returns.append(baseline_return)
+        challenger_session_returns.append(challenger_return)
+        challenger_lifts.append(lift)
+        challenger_lift_wins.append(lift > 0)
+
+    paired_sessions = len(challenger_lifts)
+    matured_sessions = len(matured)
+    return FactorShadowExecutionHeadEvaluation(
+        matured_sessions=matured_sessions,
+        baseline_selection_slots=baseline_selected,
+        challenger_selection_slots=challenger_selected,
+        baseline_completed_outcomes=baseline_completed,
+        challenger_completed_outcomes=challenger_completed,
+        baseline_full_sessions=baseline_full,
+        challenger_full_sessions=challenger_full,
+        paired_outcome_sessions=paired_sessions,
+        baseline_all_matured_sessions_filled=bool(
+            matured_sessions and baseline_full == matured_sessions
+        ),
+        challenger_all_matured_sessions_filled=bool(
+            matured_sessions and challenger_full == matured_sessions
+        ),
+        baseline_head_net_excess_return_pct=_rounded_mean(baseline_session_returns),
+        challenger_head_net_excess_return_pct=_rounded_mean(challenger_session_returns),
+        challenger_lift_win_rate=(
+            round(sum(challenger_lift_wins) / paired_sessions, 6) if paired_sessions else None
+        ),
+        challenger_median_lift_pct=(
+            round(float(np.median(challenger_lifts)), 10) if challenger_lifts else None
+        ),
+        baseline_raw_max_industry_positions=max(baseline_raw_positions, default=0),
+        challenger_raw_max_industry_positions=max(challenger_raw_positions, default=0),
+        baseline_raw_max_industry_concentration=(
+            round(max(baseline_raw_concentrations), 6) if baseline_raw_concentrations else None
+        ),
+        challenger_raw_max_industry_concentration=(
+            round(max(challenger_raw_concentrations), 6) if challenger_raw_concentrations else None
+        ),
+        baseline_max_industry_positions=max(baseline_positions, default=0),
+        challenger_max_industry_positions=max(challenger_positions, default=0),
+        baseline_max_industry_concentration=(
+            round(max(baseline_concentrations), 6) if baseline_concentrations else None
+        ),
+        challenger_max_industry_concentration=(
+            round(max(challenger_concentrations), 6) if challenger_concentrations else None
+        ),
+    )
+
+
+def _raw_execution_head(
+    scores: Iterable[FactorShadowScore],
+    *,
+    rank_field: str,
+) -> list[FactorShadowScore]:
+    return _ordered_execution_scores(scores, rank_field=rank_field)[
+        :FACTOR_SHADOW_EXECUTION_HEAD_SIZE
+    ]
+
+
+def _constrained_execution_head(
+    scores: Iterable[FactorShadowScore],
+    *,
+    rank_field: str,
+) -> list[FactorShadowScore]:
+    return _constrained_execution_head_from_ordered(
+        _ordered_execution_scores(scores, rank_field=rank_field)
+    )
+
+
+def _ordered_execution_scores(
+    scores: Iterable[FactorShadowScore],
+    *,
+    rank_field: str,
+) -> list[FactorShadowScore]:
+    return sorted(
+        scores,
+        key=lambda item: (getattr(item, rank_field), item.instrument_id),
+    )
+
+
+def _constrained_execution_head_from_ordered(
+    scores: Iterable[FactorShadowScore],
+) -> list[FactorShadowScore]:
+    selected: list[FactorShadowScore] = []
+    industry_counts: dict[str, int] = {}
+    for score in scores:
+        industry = _shadow_industry_bucket(score)
+        if industry_counts.get(industry, 0) >= FACTOR_SHADOW_EXECUTION_HEAD_INDUSTRY_CAP:
+            continue
+        selected.append(score)
+        industry_counts[industry] = industry_counts.get(industry, 0) + 1
+        if len(selected) == FACTOR_SHADOW_EXECUTION_HEAD_SIZE:
+            break
+    return selected
+
+
+def _append_industry_concentration(
+    scores: list[FactorShadowScore],
+    *,
+    positions: list[int],
+    concentrations: list[float],
+) -> None:
+    if not scores:
+        return
+    counts: dict[str, int] = {}
+    for score in scores:
+        industry = _shadow_industry_bucket(score)
+        counts[industry] = counts.get(industry, 0) + 1
+    maximum = max(counts.values())
+    positions.append(maximum)
+    concentrations.append(maximum / len(scores))
+
+
+def _shadow_industry_bucket(score: FactorShadowScore) -> str:
+    industry = (score.industry or FACTOR_SHADOW_UNKNOWN_INDUSTRY_BUCKET).strip()
+    return industry or FACTOR_SHADOW_UNKNOWN_INDUSTRY_BUCKET
 
 
 def _evaluate_horizon(
@@ -763,9 +1010,7 @@ def _evaluate_horizon(
                 np.mean([item.net_excess_return_pct for item in challenger_top_outcomes])
             )
             challenger_session_net_excess.append(challenger_session_net)
-            challenger_session_outperformed.append(
-                challenger_session_net > baseline_session_net
-            )
+            challenger_session_outperformed.append(challenger_session_net > baseline_session_net)
         addition_outcomes = [
             outcome
             for score in challenger_top
@@ -808,6 +1053,12 @@ def _evaluate_horizon(
 
     coverage = completed / expected if expected else 0.0
     status = "pending" if not matured else "ready" if completed == expected else "partial"
+    execution_head = _evaluate_execution_head(
+        matured,
+        scores_by_run,
+        outcomes_by_key,
+        horizon_sessions=horizon_sessions,
+    )
     return FactorShadowHorizonEvaluation(
         horizon_sessions=horizon_sessions,
         status=status,
@@ -830,8 +1081,7 @@ def _evaluate_horizon(
         challenger_session_count=len(challenger_session_net_excess),
         challenger_session_outperformance_rate=(
             round(
-                sum(challenger_session_outperformed)
-                / len(challenger_session_outperformed),
+                sum(challenger_session_outperformed) / len(challenger_session_outperformed),
                 6,
             )
             if challenger_session_outperformed
@@ -849,17 +1099,12 @@ def _evaluate_horizon(
         ),
         challenger_addition_count=len(challenger_addition_net_excess),
         challenger_removal_count=len(challenger_removal_net_excess),
-        challenger_addition_net_excess_return_pct=_rounded_mean(
-            challenger_addition_net_excess
-        ),
-        challenger_removal_net_excess_return_pct=_rounded_mean(
-            challenger_removal_net_excess
-        ),
+        challenger_addition_net_excess_return_pct=_rounded_mean(challenger_addition_net_excess),
+        challenger_removal_net_excess_return_pct=_rounded_mean(challenger_removal_net_excess),
         challenger_selection_lift_session_count=len(challenger_selection_lifts),
         challenger_selection_lift_win_rate=(
             round(
-                sum(challenger_selection_lift_wins)
-                / len(challenger_selection_lift_wins),
+                sum(challenger_selection_lift_wins) / len(challenger_selection_lift_wins),
                 6,
             )
             if challenger_selection_lift_wins
@@ -886,6 +1131,7 @@ def _evaluate_horizon(
             labels={},
             limit=8,
         ),
+        execution_head=execution_head,
     )
 
 
@@ -906,6 +1152,7 @@ def _assess_shadow_promotion(
         prefix = f"{horizon}d"
         if evaluation is None or evaluation.status == "pending":
             reasons.append(f"{prefix}_outcomes_not_matured")
+            reasons.append(f"{prefix}_execution_head_outcomes_not_matured")
             continue
         if evaluation.matured_runs < FACTOR_SHADOW_PROMOTION_MIN_MATURED_RUNS:
             reasons.append(f"{prefix}_matured_runs_below_minimum")
@@ -941,6 +1188,27 @@ def _assess_shadow_promotion(
                 reasons.append(f"{prefix}_selection_lift_not_stable")
             if evaluation.challenger_median_selection_lift_pct <= 0:
                 reasons.append(f"{prefix}_selection_lift_not_positive")
+
+        head = evaluation.execution_head
+        if head.paired_outcome_sessions < FACTOR_SHADOW_PROMOTION_MIN_MATURED_RUNS:
+            reasons.append(f"{prefix}_execution_head_samples_below_minimum")
+        if not (
+            head.baseline_all_matured_sessions_filled
+            and head.challenger_all_matured_sessions_filled
+        ):
+            reasons.append(f"{prefix}_execution_head_not_filled")
+        if (
+            head.baseline_max_industry_positions > FACTOR_SHADOW_EXECUTION_HEAD_INDUSTRY_CAP
+            or head.challenger_max_industry_positions > FACTOR_SHADOW_EXECUTION_HEAD_INDUSTRY_CAP
+        ):
+            reasons.append(f"{prefix}_execution_head_industry_cap_violated")
+        if head.challenger_lift_win_rate is None or head.challenger_median_lift_pct is None:
+            reasons.append(f"{prefix}_execution_head_lift_missing")
+        else:
+            if head.challenger_lift_win_rate < FACTOR_SHADOW_PROMOTION_MIN_SELECTION_LIFT_RATE:
+                reasons.append(f"{prefix}_execution_head_lift_not_stable")
+            if head.challenger_median_lift_pct <= 0:
+                reasons.append(f"{prefix}_execution_head_lift_not_positive")
 
     if reasons:
         return FactorShadowPromotionAssessment(
@@ -1035,9 +1303,13 @@ def _spearman(scores: list[float], returns: list[float]) -> float | None:
     # Pandas delegates method="spearman" to SciPy. Ranking first preserves
     # Spearman's definition while keeping this research path runnable with the
     # project's declared NumPy/Pandas dependencies only.
-    value = pd.Series(scores, dtype="float64").rank(method="average").corr(
-        pd.Series(returns, dtype="float64").rank(method="average"),
-        method="pearson",
+    value = (
+        pd.Series(scores, dtype="float64")
+        .rank(method="average")
+        .corr(
+            pd.Series(returns, dtype="float64").rank(method="average"),
+            method="pearson",
+        )
     )
     return round(float(value), 10) if pd.notna(value) and np.isfinite(value) else None
 
