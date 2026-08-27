@@ -746,12 +746,25 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         "scanned": str(scanned_symbols),
         "cards": str(len(visible_cards)),
     }
+    asset_types_by_instrument = {
+        instrument.instrument_id: instrument.asset_type
+        for instrument in repo.list_tradable_instruments(limit=20_000)
+    }
     payload_data_health.update(
         _market_data_reliability_health(
             all_items,
             expected_trade_date=scan_end,
             error_count=error_count,
             provider_error_count=_int_health(aggregate_health, "provider_error_count"),
+            asset_types_by_instrument=asset_types_by_instrument,
+        )
+    )
+    payload_data_health.update(
+        _full_market_a_share_readiness_health(
+            all_items,
+            ranked_cards,
+            aggregate_health,
+            expected_trade_date=scan_end,
         )
     )
     paper_account = PaperTradingRepository(repo.session_factory).get_account_settings()
@@ -1557,6 +1570,7 @@ def _market_data_reliability_health(
     expected_trade_date: date,
     error_count: int,
     provider_error_count: int,
+    asset_types_by_instrument: dict[str, str] | None = None,
 ) -> dict[str, str]:
     dated = [item for item in items if item.latest_trade_date is not None]
     current = sum(item.latest_trade_date == expected_trade_date for item in dated)
@@ -1577,6 +1591,21 @@ def _market_data_reliability_health(
     )
     missing_reason_counts = Counter(
         _market_data_problem_reason(item) for item in items if item.latest_trade_date is None
+    )
+    asset_types = asset_types_by_instrument or {}
+    asset_type_counts = Counter(_asset_type(item, asset_types) for item in items)
+    current_asset_type_counts = Counter(
+        _asset_type(item, asset_types)
+        for item in items
+        if item.latest_trade_date == expected_trade_date
+    )
+    stale_asset_type_counts = Counter(
+        _asset_type(item, asset_types)
+        for item in items
+        if item.latest_trade_date is not None and item.latest_trade_date < expected_trade_date
+    )
+    missing_asset_type_counts = Counter(
+        _asset_type(item, asset_types) for item in items if item.latest_trade_date is None
     )
     stale_trade_dates = Counter(
         item.latest_trade_date
@@ -1612,6 +1641,14 @@ def _market_data_reliability_health(
         "market_data_stale_source_mix": _market_data_count_mix(stale_source_counts),
         "market_data_stale_age_mix": _market_data_count_mix(stale_age_counts),
         "market_data_missing_reason_mix": _market_data_count_mix(missing_reason_counts),
+        "market_data_asset_type_mix": _market_data_count_mix(asset_type_counts),
+        "market_data_current_asset_type_mix": _market_data_count_mix(
+            current_asset_type_counts
+        ),
+        "market_data_stale_asset_type_mix": _market_data_count_mix(stale_asset_type_counts),
+        "market_data_missing_asset_type_mix": _market_data_count_mix(
+            missing_asset_type_counts
+        ),
         "market_data_problem_status_mix": _market_data_count_mix(problem_status_counts),
         "market_data_problem_samples": problem_samples,
         "market_data_recovery_action": _market_data_recovery_action(
@@ -1622,6 +1659,92 @@ def _market_data_reliability_health(
             provider_error_count=provider_error_count,
         ),
     }
+
+
+def _full_market_a_share_readiness_health(
+    items: list[ScanItem],
+    cards: list[OpportunityCard],
+    aggregate_health: dict[str, str],
+    *,
+    expected_trade_date: date,
+) -> dict[str, str]:
+    cn_items = [item for item in items if item.instrument_id.startswith("CN:")]
+    cn_cards = [card for card in cards if card.instrument_id.startswith("CN:")]
+    item_total = len(cn_items)
+    card_total = len(cn_cards)
+    dated = sum(item.latest_trade_date is not None for item in cn_items)
+    current = sum(item.latest_trade_date == expected_trade_date for item in cn_items)
+    stale = sum(
+        item.latest_trade_date is not None and item.latest_trade_date < expected_trade_date
+        for item in cn_items
+    )
+    missing = item_total - dated
+    adjusted = min(_int_health(aggregate_health, "adjusted_bars"), dated)
+    suspension = min(_int_health(aggregate_health, "a_share_suspension_count"), item_total)
+    price_limit = min(_int_health(aggregate_health, "a_share_price_limit_count"), item_total)
+    liquidity = min(_int_health(aggregate_health, "a_share_liquidity_count"), item_total)
+    industry = min(_int_health(aggregate_health, "a_share_industry_card_count"), card_total)
+    index = min(
+        _int_health(aggregate_health, "a_share_index_constituent_card_count"),
+        card_total,
+    )
+    statuses = {
+        "a_share_adjusted_price": _coverage_readiness(adjusted, dated),
+        "a_share_suspension": _coverage_readiness(suspension, item_total),
+        "a_share_price_limit": _coverage_readiness(price_limit, item_total),
+        "a_share_industry": _coverage_readiness(industry, card_total),
+        "a_share_liquidity": _coverage_readiness(liquidity, item_total),
+        "a_share_turnover": "partial" if liquidity else "missing",
+        "a_share_index_constituents": _coverage_readiness(index, card_total),
+        "a_share_fund_flow": (
+            "ready" if _int_health(aggregate_health, "fund_flow") > 0 else "missing"
+        ),
+        "a_share_announcements": (
+            "ready"
+            if _int_health(aggregate_health, "strategy_announcements") > 0
+            else "partial"
+            if _int_health(aggregate_health, "strategy_fundamentals") > 0
+            else "missing"
+        ),
+    }
+    score = sum(_readiness_score(value) for value in statuses.values()) / len(statuses)
+    return {
+        **statuses,
+        "a_share_data_scope": "full_market_cn_universe",
+        "a_share_data_readiness_score": f"{score:.2f}",
+        "a_share_bars_coverage": f"{dated}/{item_total}",
+        "a_share_current_bars_coverage": f"{current}/{item_total}",
+        "a_share_stale_bars": str(stale),
+        "a_share_missing_bars": str(missing),
+        "a_share_current_bar_coverage_ratio": f"{current / item_total:.6f}"
+        if item_total
+        else "0.000000",
+        "a_share_adjusted_price_coverage": f"{adjusted}/{dated}",
+        "a_share_suspension_coverage": f"{suspension}/{item_total}",
+        "a_share_price_limit_coverage": f"{price_limit}/{item_total}",
+        "a_share_liquidity_coverage": f"{liquidity}/{item_total}",
+        "a_share_industry_card_coverage": f"{industry}/{card_total}",
+        "a_share_index_constituent_card_coverage": f"{index}/{card_total}",
+    }
+
+
+def _coverage_readiness(covered: int, total: int) -> str:
+    if total <= 0 or covered <= 0:
+        return "missing"
+    return "ready" if covered / total >= 0.98 else "partial"
+
+
+def _readiness_score(status: str) -> float:
+    if status == "ready":
+        return 1.0
+    if status == "partial":
+        return 0.55
+    return 0.0
+
+
+def _asset_type(item: ScanItem, asset_types_by_instrument: dict[str, str]) -> str:
+    value = asset_types_by_instrument.get(item.instrument_id, "unknown").strip().lower()
+    return value or "unknown"
 
 
 def _market_data_count_mix(counts: Counter[str]) -> str:

@@ -850,6 +850,16 @@ def _a_share_data_readiness(
         card.market_context and card.market_context.index_memberships for card in cn_cards
     )
     has_etf = any(card.asset_type.upper() == "ETF" for card in cn_cards)
+    liquidity_count = sum(
+        bool(item.tradability and (item.tradability.avg_amount_20d or item.tradability.avg_volume_20d))
+        for item in cn_items
+    )
+    suspension_count = sum(item.trading_status is not None for item in cn_items)
+    price_limit_count = sum(item.trading_status is not None for item in cn_items)
+    industry_count = sum(card.market_context is not None for card in cn_cards)
+    index_count = sum(
+        bool(card.market_context and card.market_context.index_memberships) for card in cn_cards
+    )
     statuses = {
         "a_share_adjusted_price": "ready"
         if _int_health(data_health, "adjusted_bars") > 0
@@ -868,7 +878,7 @@ def _a_share_data_readiness(
         else "partial"
         if has_etf
         else "missing",
-        "a_share_fund_flow": "ready" if data_health.get("fund_flow") else "missing",
+        "a_share_fund_flow": "ready" if _int_health(data_health, "fund_flow") > 0 else "missing",
         "a_share_announcements": "ready"
         if _int_health(data_health, "strategy_announcements") > 0
         else "partial"
@@ -885,6 +895,13 @@ def _a_share_data_readiness(
         **statuses,
         "a_share_data_readiness_score": f"{score:.2f}",
         "a_share_bars_coverage": f"{covered_bars}/{len(cn_items)}",
+        "a_share_cn_instrument_count": str(len(cn_items)),
+        "a_share_cn_card_count": str(len(cn_cards)),
+        "a_share_liquidity_count": str(liquidity_count),
+        "a_share_suspension_count": str(suspension_count),
+        "a_share_price_limit_count": str(price_limit_count),
+        "a_share_industry_card_count": str(industry_count),
+        "a_share_index_constituent_card_count": str(index_count),
     }
 
 

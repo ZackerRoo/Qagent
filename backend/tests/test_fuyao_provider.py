@@ -152,6 +152,22 @@ def test_fuyao_snapshot_provider_redacts_key_from_business_error():
     assert captured.value.request_id == "auth-1"
     assert "secret-key" not in str(captured.value)
     assert "[redacted]" in str(captured.value)
+    health = fuyao_telemetry_data_health(provider)
+    assert health["fuyao_error_category_mix"] == "authentication=1"
+
+
+def test_fuyao_telemetry_classifies_unsupported_assets():
+    session = FakeSession(
+        [{"code": 29028, "message": "unsupported ETF asset", "request_id": "asset-1"}]
+    )
+    provider = FuyaoSnapshotProvider("secret-key", session=session, max_attempts=1)
+
+    with pytest.raises(FuyaoProviderError):
+        provider.get_snapshot(["CN:510300"])
+
+    health = fuyao_telemetry_data_health(provider)
+    assert health["fuyao_errors"] == "1"
+    assert health["fuyao_error_category_mix"] == "unsupported_asset=1"
 
 
 def test_fuyao_snapshot_provider_fails_closed_on_missing_symbol():

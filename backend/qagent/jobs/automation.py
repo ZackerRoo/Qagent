@@ -159,7 +159,7 @@ def run_research_automation(
         scan_result=scan_result,
         backtest_result=backtest_result,
         catalyst_hypotheses=catalysts,
-        provider_statuses=build_provider_status(),
+        provider_statuses=build_provider_status(data_health=scan_result.data_health),
         limit=limit,
         data_health=data_health,
     )

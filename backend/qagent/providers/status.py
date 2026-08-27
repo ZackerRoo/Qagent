@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 from pydantic import BaseModel
 
 from qagent.config import Settings, get_settings
@@ -11,7 +13,11 @@ class ProviderStatus(BaseModel):
     notes: str
 
 
-def build_provider_status(settings: Settings | None = None) -> list[ProviderStatus]:
+def build_provider_status(
+    settings: Settings | None = None,
+    *,
+    data_health: Mapping[str, str] | None = None,
+) -> list[ProviderStatus]:
     settings = settings or get_settings()
     return [
         ProviderStatus(
@@ -73,9 +79,12 @@ def build_provider_status(settings: Settings | None = None) -> list[ProviderStat
         ProviderStatus(
             provider_id="cninfo",
             name="CNINFO",
-            status="ready",
+            status=_cninfo_status(data_health),
             capabilities=["a_share_announcements"],
-            notes="Free A-share announcements; live access can be rate-limited.",
+            notes=(
+                "Free A-share announcements; configured means the adapter is available but the "
+                "latest live response has not been verified."
+            ),
         ),
         ProviderStatus(
             provider_id="tushare",
@@ -84,10 +93,10 @@ def build_provider_status(settings: Settings | None = None) -> list[ProviderStat
             capabilities=["a_share_financials", "money_flow", "dragon_tiger"],
             notes="Configured by token, but deeper normalized adapters are still provider-dependent.",
         ),
-        _keyed_status(
+        ProviderStatus(
             provider_id="fuyao",
             name="扶摇同花顺金融数据 API",
-            configured=bool(settings.fuyao_api_key),
+            status=_fuyao_status(bool(settings.fuyao_api_key), data_health),
             capabilities=[
                 "cn_snapshot_read_only",
                 "cn_daily_ohlcv_fallback",
@@ -119,3 +128,28 @@ def _keyed_status(
         capabilities=capabilities,
         notes=notes,
     )
+
+
+def _cninfo_status(data_health: Mapping[str, str] | None) -> str:
+    if not data_health:
+        return "configured"
+    if _positive_int(data_health.get("strategy_announcements")):
+        return "ready"
+    errors = str(data_health.get("strategy_data_errors") or "").lower()
+    return "error" if "cninfo" in errors else "configured"
+
+
+def _fuyao_status(configured: bool, data_health: Mapping[str, str] | None) -> str:
+    if not configured:
+        return "missing_config"
+    telemetry = str((data_health or {}).get("fuyao_telemetry") or "").strip().lower()
+    if telemetry in {"ready", "partial", "error"}:
+        return telemetry
+    return "configured"
+
+
+def _positive_int(value: object) -> bool:
+    try:
+        return int(str(value or "0")) > 0
+    except ValueError:
+        return False

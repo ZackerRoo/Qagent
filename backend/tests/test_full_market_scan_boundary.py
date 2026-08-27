@@ -9,6 +9,7 @@ import pytest
 from qagent.db import Base, create_db_engine, create_session_factory
 from qagent.jobs.daily_scan import ScanItem
 from qagent.jobs.full_market import (
+    _full_market_a_share_readiness_health,
     _frozen_full_market_scan_end,
     _market_data_reliability_health,
 )
@@ -284,6 +285,7 @@ def test_market_data_reliability_health_reports_complete_latest_session():
         expected_trade_date=SIGNAL_DATE,
         error_count=0,
         provider_error_count=0,
+        asset_types_by_instrument={"CN:000001": "stock", "CN:000002": "etf"},
     )
 
     assert health["market_data_reliability_state"] == "ready"
@@ -293,6 +295,8 @@ def test_market_data_reliability_health_reports_complete_latest_session():
     assert health["market_data_current_source_mix"] == "akshare=1,baostock=1"
     assert health["market_data_stale_source_mix"] == ""
     assert health["market_data_recovery_action"] == "none"
+    assert health["market_data_asset_type_mix"] == "etf=1,stock=1"
+    assert health["market_data_current_asset_type_mix"] == "etf=1,stock=1"
 
 
 def test_market_data_reliability_health_fails_closed_for_stale_or_missing_data():
@@ -330,6 +334,46 @@ def test_market_data_reliability_health_fails_closed_for_stale_or_missing_data()
     assert health["market_data_problem_status_mix"] == "no_data=1,watch=1"
     assert health["market_data_problem_samples"] == "CN:000002,CN:000001"
     assert health["market_data_recovery_action"] == "quarantine_until_next_daily_scan"
+
+
+def test_full_market_a_share_readiness_uses_the_whole_universe():
+    health = _full_market_a_share_readiness_health(
+        [
+            ScanItem(
+                instrument_id="CN:000001",
+                status="watch",
+                reason="ready",
+                bars=400,
+                signals=1,
+                latest_trade_date=SIGNAL_DATE,
+            ),
+            ScanItem(
+                instrument_id="CN:510300",
+                status="watch",
+                reason="stale",
+                bars=400,
+                signals=0,
+                latest_trade_date=SIGNAL_DATE - timedelta(days=1),
+            ),
+            ScanItem(
+                instrument_id="CN:159001",
+                status="no_data",
+                reason="missing",
+                bars=0,
+                signals=0,
+            ),
+        ],
+        [],
+        {"adjusted_bars": "2"},
+        expected_trade_date=SIGNAL_DATE,
+    )
+
+    assert health["a_share_data_scope"] == "full_market_cn_universe"
+    assert health["a_share_bars_coverage"] == "2/3"
+    assert health["a_share_current_bars_coverage"] == "1/3"
+    assert health["a_share_stale_bars"] == "1"
+    assert health["a_share_missing_bars"] == "1"
+    assert health["a_share_adjusted_price_coverage"] == "2/2"
 
 
 def test_full_market_scan_resume_keeps_frozen_expected_trade_date():

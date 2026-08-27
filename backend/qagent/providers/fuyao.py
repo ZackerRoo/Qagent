@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 import math
@@ -143,6 +144,7 @@ class FuyaoTelemetrySnapshot:
     last_data_timestamp: str | None
     last_error_code: str | None
     last_completed_at: str | None
+    error_categories: dict[str, int]
 
 
 class FuyaoClient:
@@ -188,6 +190,7 @@ class FuyaoClient:
             self._telemetry_last_data_timestamp: str | None = None
             self._telemetry_last_error_code: str | None = None
             self._telemetry_last_completed_at: str | None = None
+            self._telemetry_error_categories: Counter[str] = Counter()
 
     def telemetry_snapshot(self) -> FuyaoTelemetrySnapshot:
         with self._telemetry_lock:
@@ -208,6 +211,7 @@ class FuyaoClient:
                 last_data_timestamp=self._telemetry_last_data_timestamp,
                 last_error_code=self._telemetry_last_error_code,
                 last_completed_at=self._telemetry_last_completed_at,
+                error_categories=dict(self._telemetry_error_categories),
             )
 
     def request_data(
@@ -600,6 +604,7 @@ class FuyaoClient:
                 response.raise_for_status()
                 payload = response.json()
             except (requests.RequestException, ValueError) as exc:
+                error_category = "timeout" if isinstance(exc, requests.Timeout) else "transport_error"
                 last_error = FuyaoProviderError(
                     f"Fuyao request failed at the transport layer for {path}",
                     code="transport_error",
@@ -612,6 +617,7 @@ class FuyaoClient:
                     started_at,
                     success=False,
                     error_code=last_error.code,
+                    error_category=error_category,
                 )
                 raise last_error from exc
 
@@ -624,6 +630,7 @@ class FuyaoClient:
                     started_at,
                     success=False,
                     error_code=last_error.code,
+                    error_category="incomplete_response",
                 )
                 raise last_error
             code = payload.get("code")
@@ -653,6 +660,7 @@ class FuyaoClient:
                 success=False,
                 request_id=request_id,
                 error_code=last_error.code,
+                error_category=_fuyao_error_category(last_error.code, message),
             )
             raise last_error
 
@@ -662,6 +670,7 @@ class FuyaoClient:
             success=False,
             request_id=last_error.request_id,
             error_code=last_error.code,
+            error_category=_fuyao_error_category(last_error.code, str(last_error)),
         )
         raise last_error
 
@@ -690,6 +699,7 @@ class FuyaoClient:
         request_id: str | None = None,
         data_timestamp: str | None = None,
         error_code: int | str | None = None,
+        error_category: str | None = None,
     ) -> None:
         elapsed_ms = max((time.perf_counter() - started_at) * 1_000, 0.0)
         with self._telemetry_lock:
@@ -698,6 +708,7 @@ class FuyaoClient:
                 self._telemetry_last_error_code = None
             else:
                 self._telemetry_errors += 1
+                self._telemetry_error_categories[error_category or "unknown"] += 1
                 self._telemetry_last_error_code = (
                     str(error_code) if error_code is not None else "unknown"
                 )
@@ -973,6 +984,9 @@ def fuyao_telemetry_data_health(provider: object) -> dict[str, str]:
     errors = sum(item.errors for item in snapshots)
     retries = sum(item.retries for item in snapshots)
     latency_total = sum(item.latency_ms_total for item in snapshots)
+    error_categories: Counter[str] = Counter()
+    for item in snapshots:
+        error_categories.update(item.error_categories)
     latest = max(
         snapshots,
         key=lambda item: item.last_completed_at or "",
@@ -993,6 +1007,7 @@ def fuyao_telemetry_data_health(provider: object) -> dict[str, str]:
         "fuyao_attempts": str(attempts),
         "fuyao_successes": str(successes),
         "fuyao_errors": str(errors),
+        "fuyao_error_category_mix": _count_mix(error_categories),
         "fuyao_retries": str(retries),
         "fuyao_latency_ms_total": f"{latency_total:.3f}",
         "fuyao_latency_ms_average": (f"{latency_total / requests:.3f}" if requests else "0.000"),
@@ -1013,6 +1028,39 @@ def fuyao_telemetry_data_health(provider: object) -> dict[str, str]:
         }
     )
     return health
+
+
+def _fuyao_error_category(code: int | str | None, message: str | None) -> str:
+    normalized = str(message or "").strip().lower()
+    normalized_code = str(code or "").strip().lower()
+    if normalized_code == "transport_error":
+        return "transport_error"
+    if normalized_code == "invalid_response":
+        return "incomplete_response"
+    if normalized_code in {"4001", "429"} or any(
+        value in normalized for value in ("rate limit", "too many requests", "限流", "频率")
+    ):
+        return "rate_limited"
+    if any(value in normalized for value in ("timeout", "timed out", "超时")):
+        return "timeout"
+    if any(value in normalized for value in ("not found", "不存在", "无此", "无数据")):
+        return "symbol_not_found"
+    if any(value in normalized for value in ("unsupported", "not support", "不支持")):
+        return "unsupported_asset"
+    if any(value in normalized for value in ("parameter", "argument", "参数")):
+        return "invalid_parameter"
+    if normalized_code in {"2001", "401", "403"} or any(
+        value in normalized for value in ("unauthorized", "forbidden", "api key", "鉴权")
+    ):
+        return "authentication"
+    return f"business_{normalized_code}" if normalized_code else "business_error"
+
+
+def _count_mix(counts: Counter[str]) -> str:
+    return ",".join(
+        f"{key}={count}"
+        for key, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    )
 
 
 def _fuyao_clients(provider: object) -> list[FuyaoClient]:
