@@ -26,6 +26,7 @@ class ExactPriceRequirement:
 class ExactPriceRepairResult:
     requested: int = 0
     cache_hits: int = 0
+    skipped_after_recheck: int = 0
     provider_requested: int = 0
     provider_batches: int = 0
     repaired: int = 0
@@ -45,6 +46,9 @@ class ExactPriceRepairResult:
         return {
             f"{prefix}_exact_price_requested": str(self.requested),
             f"{prefix}_exact_price_cache_hits": str(self.cache_hits),
+            f"{prefix}_exact_price_skipped_after_recheck": str(
+                self.skipped_after_recheck
+            ),
             f"{prefix}_exact_price_provider_requested": str(self.provider_requested),
             f"{prefix}_exact_price_provider_batches": str(self.provider_batches),
             f"{prefix}_exact_price_repaired": str(self.repaired),
@@ -99,20 +103,36 @@ def repair_exact_daily_prices(
             for offset in range(0, len(instruments), min(max(1, batch_size), 20)):
                 batch = instruments[offset : offset + min(max(1, batch_size), 20)]
                 batch_requirements = {item for item in dated if item.instrument_id in batch}
-                result.provider_requested += len(batch)
+                still_missing = set(
+                    _missing_requirements(cache, provider_mode, batch_requirements)
+                )
+                skipped = len(batch_requirements) - len(still_missing)
+                result.skipped_after_recheck += skipped
+                if not still_missing:
+                    continue
+                requested_batch = sorted({item.instrument_id for item in still_missing})
+                result.provider_requested += len(requested_batch)
                 result.provider_batches += 1
                 try:
-                    frame = getter(batch, trade_date, trade_date) if callable(getter) else None
+                    frame = (
+                        getter(requested_batch, trade_date, trade_date)
+                        if callable(getter)
+                        else None
+                    )
                     if isinstance(frame, pd.DataFrame) and not frame.empty:
                         cache.merge_missing_daily_bars(
                             provider_mode,
                             frame,
-                            allowed_keys={(instrument_id, trade_date) for instrument_id in batch},
+                            allowed_keys={
+                                (instrument_id, trade_date)
+                                for instrument_id in requested_batch
+                            },
                         )
                 except Exception as exc:
-                    provider_errors.update(batch_requirements)
+                    provider_errors.update(still_missing)
                     result.error_details.append(
-                        f"{trade_date.isoformat()}:{','.join(batch[:3])}:{str(exc)[:200]}"
+                        f"{trade_date.isoformat()}:{','.join(requested_batch[:3])}:"
+                        f"{str(exc)[:200]}"
                     )
     remaining = _missing_requirements(cache, provider_mode, missing)
     result.repaired = len(missing) - len(remaining)

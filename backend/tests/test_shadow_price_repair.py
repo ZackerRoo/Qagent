@@ -278,6 +278,162 @@ def test_exact_repair_deduplicates_shared_requirements_before_provider_call(tmp_
     assert provider.calls == [(["CN:000001"], target, target)]
 
 
+def test_exact_repair_rechecks_later_batch_after_concurrent_scan_fill(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'exact-later-batch-recheck.db'}"
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    cache = MarketDataCacheRepository(session_factory)
+    target = date(2026, 7, 2)
+    instrument_ids = [f"CN:{index:06d}" for index in range(25)]
+    first_batch = instrument_ids[:20]
+    later_batch = instrument_ids[20:]
+
+    class ConcurrentFillProvider(RecordingProvider):
+        def get_historical_daily_bars(self, instrument_ids, start, end):
+            frame = super().get_historical_daily_bars(instrument_ids, start, end)
+            if len(self.calls) == 1:
+                cache.save_daily_bars(
+                    "fixture",
+                    pd.DataFrame(_bar(instrument_id, target) for instrument_id in later_batch),
+                )
+            return frame
+
+    provider = ConcurrentFillProvider(
+        {(instrument_id, target): _bar(instrument_id, target) for instrument_id in first_batch}
+    )
+    result = repair_exact_daily_prices(
+        cache,
+        provider_mode="fixture",
+        market_provider=provider,
+        requirements=[
+            ExactPriceRequirement(instrument_id, target, "adjusted_open")
+            for instrument_id in instrument_ids
+        ],
+    )
+
+    assert provider.calls == [(first_batch, target, target)]
+    assert result.requested == 25
+    assert result.provider_requested == 20
+    assert result.provider_batches == 1
+    assert result.skipped_after_recheck == 5
+    assert result.cache_hits == 0
+    assert result.repaired == 25
+    assert result.unresolved == []
+    assert result.repaired + len(result.unresolved) == result.requested - result.cache_hits
+
+
+def test_exact_repair_rechecks_same_batch_and_requests_only_remaining_instruments(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'exact-same-batch-recheck.db'}"
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    target = date(2026, 7, 2)
+    concurrently_filled = "CN:000001"
+    provider_ids = ["CN:000002", "CN:000003"]
+
+    class FillOnRecheckCache(MarketDataCacheRepository):
+        def __init__(self):
+            super().__init__(session_factory)
+            self.loads = 0
+
+        def load_daily_bars(self, provider_mode, instrument_ids, start, end):
+            self.loads += 1
+            if self.loads == 2:
+                self.save_daily_bars(
+                    provider_mode,
+                    pd.DataFrame([_bar(concurrently_filled, target)]),
+                )
+            return super().load_daily_bars(provider_mode, instrument_ids, start, end)
+
+    cache = FillOnRecheckCache()
+    provider = RecordingProvider(
+        {(instrument_id, target): _bar(instrument_id, target) for instrument_id in provider_ids}
+    )
+    result = repair_exact_daily_prices(
+        cache,
+        provider_mode="fixture",
+        market_provider=provider,
+        requirements=[
+            ExactPriceRequirement(instrument_id, target, "adjusted_open")
+            for instrument_id in [concurrently_filled, *provider_ids]
+        ],
+    )
+
+    assert provider.calls == [(provider_ids, target, target)]
+    assert result.requested == 3
+    assert result.provider_requested == 2
+    assert result.provider_batches == 1
+    assert result.skipped_after_recheck == 1
+    assert result.cache_hits == 0
+    assert result.repaired == 3
+    assert result.unresolved == []
+    assert result.repaired + len(result.unresolved) == result.requested - result.cache_hits
+
+
+def test_exact_repair_partial_recheck_for_same_instrument_requests_once(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'exact-multifield-recheck.db'}"
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    target = date(2026, 7, 2)
+    instrument_id = "CN:000001"
+
+    class FillOneFieldOnRecheckCache(MarketDataCacheRepository):
+        def __init__(self):
+            super().__init__(session_factory)
+            self.loads = 0
+
+        def load_daily_bars(self, provider_mode, instrument_ids, start, end):
+            self.loads += 1
+            if self.loads == 2:
+                with session_factory() as session:
+                    session.add(
+                        MarketBarCacheRow(
+                            provider_mode=provider_mode,
+                            instrument_id=instrument_id,
+                            trade_date=target,
+                            source_provider="concurrent_scan",
+                            open=Decimal("10"),
+                            high=Decimal("11"),
+                            low=Decimal("9"),
+                            close=Decimal("10"),
+                            volume=Decimal("100"),
+                            turnover=Decimal("1000"),
+                            adjusted_open=None,
+                            adjusted_high=None,
+                            adjusted_low=None,
+                            adjusted_close=Decimal("10"),
+                            adjustment_factor=None,
+                            adjustment_type=None,
+                        )
+                    )
+                    session.commit()
+            return super().load_daily_bars(provider_mode, instrument_ids, start, end)
+
+    cache = FillOneFieldOnRecheckCache()
+    provider = RecordingProvider({(instrument_id, target): _bar(instrument_id, target)})
+    result = repair_exact_daily_prices(
+        cache,
+        provider_mode="fixture",
+        market_provider=provider,
+        requirements=[
+            ExactPriceRequirement(instrument_id, target, "adjusted_open"),
+            ExactPriceRequirement(instrument_id, target, "adjusted_close"),
+        ],
+    )
+
+    assert provider.calls == [([instrument_id], target, target)]
+    assert result.requested == 2
+    assert result.cache_hits == 0
+    assert result.skipped_after_recheck == 1
+    assert result.provider_requested == 1
+    assert result.provider_batches == 1
+    assert result.repaired == 2
+    assert result.unresolved == []
+    assert result.repaired + len(result.unresolved) == result.requested - result.cache_hits
+    bars = cache.load_daily_bars("fixture", [instrument_id], target, target)
+    assert float(bars.iloc[0]["adjusted_open"]) == 10.0
+    assert float(bars.iloc[0]["adjusted_close"]) == 10.0
+
+
 class RecordingProvider:
     def __init__(
         self,
