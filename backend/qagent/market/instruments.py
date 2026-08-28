@@ -1,3 +1,10 @@
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
+from dataclasses import dataclass
+from types import MappingProxyType
+
+
 CN_INSTRUMENT_NAMES = {
     "000001": "平安银行",
     "000021": "深科技",
@@ -87,8 +94,68 @@ CN_TOKEN_LABELS = {
 _CN_INSTRUMENT_NAMES_READY = False
 
 
+@dataclass(frozen=True)
+class _CNInstrumentDisplayContext:
+    names: Mapping[str, str]
+    ready: bool
+    no_hydration: bool
+
+
+_CN_INSTRUMENT_DISPLAY_CONTEXT: ContextVar[_CNInstrumentDisplayContext | None] = ContextVar(
+    "qagent_cn_instrument_display_context",
+    default=None,
+)
+
+
+def activate_cn_instrument_display_context(
+    names: Mapping[str, str],
+    *,
+    ready: bool = True,
+    no_hydration: bool = False,
+) -> Token:
+    normalized = {
+        str(symbol).strip().upper(): str(name).strip()
+        for symbol, name in names.items()
+        if str(symbol).strip() and str(name).strip()
+    }
+    return _CN_INSTRUMENT_DISPLAY_CONTEXT.set(
+        _CNInstrumentDisplayContext(
+            names=MappingProxyType(normalized),
+            ready=ready,
+            no_hydration=no_hydration,
+        )
+    )
+
+
+def reset_cn_instrument_display_context(token: Token) -> None:
+    _CN_INSTRUMENT_DISPLAY_CONTEXT.reset(token)
+
+
+@contextmanager
+def cn_instrument_display_context(
+    names: Mapping[str, str],
+    *,
+    ready: bool = True,
+    no_hydration: bool = False,
+) -> Iterator[None]:
+    token = activate_cn_instrument_display_context(
+        names,
+        ready=ready,
+        no_hydration=no_hydration,
+    )
+    try:
+        yield
+    finally:
+        reset_cn_instrument_display_context(token)
+
+
 def _ensure_cn_instrument_names_loaded() -> None:
     global _CN_INSTRUMENT_NAMES_READY
+    display_context = _CN_INSTRUMENT_DISPLAY_CONTEXT.get()
+    if display_context is not None and (
+        display_context.ready or display_context.no_hydration
+    ):
+        return
     if _CN_INSTRUMENT_NAMES_READY:
         return
     prior_ready = _CN_INSTRUMENT_NAMES_READY
@@ -129,7 +196,18 @@ def format_instrument_label(instrument_id: str | None) -> str:
         return CN_TOKEN_LABELS[symbol]
     if market == "CN":
         _ensure_cn_instrument_names_loaded()
-        name = CN_INSTRUMENT_NAMES.get(symbol)
+        display_context = _CN_INSTRUMENT_DISPLAY_CONTEXT.get()
+        name = (
+            display_context.names.get(symbol)
+            if display_context is not None
+            else CN_INSTRUMENT_NAMES.get(symbol)
+        )
+        if (
+            name is None
+            and display_context is not None
+            and not display_context.no_hydration
+        ):
+            name = CN_INSTRUMENT_NAMES.get(symbol)
         exchange_symbol = f"{symbol}.{_cn_exchange_suffix(symbol)}"
         return f"{name} {exchange_symbol}" if name else exchange_symbol
     if market == "US":

@@ -1,9 +1,11 @@
 import json
+import os
 from concurrent.futures import ProcessPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from multiprocessing import get_context
-from threading import Event
+from pathlib import Path
+from threading import Event, Thread
 from types import SimpleNamespace
 
 import pandas as pd
@@ -50,6 +52,7 @@ from qagent.historical_evidence.models import (
 )
 from qagent.historical_evidence.providers import REQUIRED_BENCHMARK_IDS
 from qagent.market.calendars import trading_sessions_in_range
+from qagent.market import instruments as market_instruments
 from qagent.storage import tables as _tables  # noqa: F401
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
 from qagent.storage.repository import QagentRepository
@@ -154,6 +157,52 @@ def test_snapshot_computation_defers_cyclic_gc_until_checkpoint_end(monkeypatch)
     assert observed_gc_states == [False]
     assert collected == [True]
     assert walk_forward.gc.isenabled()
+
+
+def test_replay_display_context_is_thread_local_nested_and_exception_safe():
+    market_instruments.CN_INSTRUMENT_NAMES["000001"] = "父进程当前名称"
+    market_instruments._CN_INSTRUMENT_NAMES_READY = True
+    other_thread_labels = []
+
+    with market_instruments.cn_instrument_display_context(
+        {},
+        ready=True,
+        no_hydration=True,
+    ):
+        assert market_instruments.format_instrument_label("CN:000001") == "000001.SZ"
+        thread = Thread(
+            target=lambda: other_thread_labels.append(
+                market_instruments.format_instrument_label("CN:000001")
+            )
+        )
+        thread.start()
+        thread.join(timeout=2)
+        assert other_thread_labels == ["父进程当前名称 000001.SZ"]
+
+        with market_instruments.cn_instrument_display_context(
+            {"000001": "冻结历史名称"},
+            ready=True,
+            no_hydration=True,
+        ):
+            assert (
+                market_instruments.format_instrument_label("CN:000001")
+                == "冻结历史名称 000001.SZ"
+            )
+        assert market_instruments.format_instrument_label("CN:000001") == "000001.SZ"
+
+        with pytest.raises(RuntimeError, match="replay failed"):
+            with market_instruments.cn_instrument_display_context(
+                {"000001": "异常内名称"},
+                ready=True,
+                no_hydration=True,
+            ):
+                raise RuntimeError("replay failed")
+        assert market_instruments.format_instrument_label("CN:000001") == "000001.SZ"
+
+    assert (
+        market_instruments.format_instrument_label("CN:000001")
+        == "父进程当前名称 000001.SZ"
+    )
 
 
 def test_dataset_lease_heartbeat_renews_during_long_snapshot():
@@ -329,7 +378,9 @@ def _replay_repository(tmp_path):
             fetched_at=fetched_at,
         ),
     )
-    sessions = trading_sessions_in_range(date(2024, 1, 2), date(2025, 1, 13))
+    # Keep the deterministic replay complete across the full 400-day scan
+    # lookback so the spawned-worker network guard tests only frozen data.
+    sessions = trading_sessions_in_range(date(2023, 12, 1), date(2025, 1, 13))
     repository.upsert_replay_bars(
         [
             HistoricalReplayBar(
@@ -920,32 +971,76 @@ def test_full_market_walk_forward_selection_is_reproducible(tmp_path):
     )
 
 
-def test_parallel_walk_forward_matches_serial_results(tmp_path):
+def test_parallel_walk_forward_matches_serial_results(tmp_path, monkeypatch):
+    network_guard_dir = Path(__file__).parent / "network_guard"
+    existing_pythonpath = os.environ.get("PYTHONPATH", "")
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, (str(network_guard_dir), existing_pythonpath))),
+    )
+    network_guard_audit = tmp_path / "network-guard-workers.txt"
+    monkeypatch.setenv("QAGENT_TEST_NETWORK_GUARD", "1")
+    monkeypatch.setenv(
+        "QAGENT_TEST_NETWORK_GUARD_AUDIT_FILE",
+        str(network_guard_audit),
+    )
     repository, decision_date = _replay_repository(tmp_path)
 
+    market_instruments.CN_INSTRUMENT_NAMES.clear()
+    market_instruments.CN_INSTRUMENT_NAMES["000001"] = "未来更名污染A"
+    market_instruments.CN_INSTRUMENT_NAMES["999999"] = "未来上市污染"
+    market_instruments._CN_INSTRUMENT_NAMES_READY = True
+    first_pollution = market_instruments.CN_INSTRUMENT_NAMES.copy()
+    baseline = run_full_market_walk_forward_selection(
+        repository,
+        owner_run_id="walk-forward-baseline-pollution-a",
+        start=decision_date,
+        end=date(2025, 1, 13),
+        rebalance_step_sessions=1,
+        snapshot_workers=1,
+    )
+    assert market_instruments.CN_INSTRUMENT_NAMES == first_pollution
+
+    market_instruments.CN_INSTRUMENT_NAMES["000001"] = "未来更名污染B"
+    second_pollution = market_instruments.CN_INSTRUMENT_NAMES.copy()
     serial = run_full_market_walk_forward_selection(
         repository,
         owner_run_id="walk-forward-serial",
         start=decision_date,
         end=date(2025, 1, 13),
         rebalance_step_sessions=1,
+        experiment_manifest=baseline.experiment_manifest,
         snapshot_workers=1,
     )
+    assert market_instruments.CN_INSTRUMENT_NAMES == second_pollution
     parallel = run_full_market_walk_forward_selection(
         repository,
         owner_run_id="walk-forward-parallel",
         start=decision_date,
         end=date(2025, 1, 13),
         rebalance_step_sessions=1,
+        experiment_manifest=baseline.experiment_manifest,
         snapshot_workers=2,
     )
+    assert market_instruments.CN_INSTRUMENT_NAMES == second_pollution
 
     assert len(serial.snapshots) == 2
+
+    def decision_payload(result):
+        return result.model_dump(exclude={"owner_run_id", "data_health"})
+
+    assert decision_payload(baseline) == decision_payload(serial)
+    assert decision_payload(serial) == decision_payload(parallel)
     assert parallel.snapshots == serial.snapshots
     assert parallel.reproducibility_digest == serial.reproducibility_digest
     assert parallel.top_5_portfolio == serial.top_5_portfolio
     assert parallel.top_10_portfolio == serial.top_10_portfolio
     assert parallel.data_health["walk_forward_snapshot_workers"] == "2"
+    assert baseline.data_health["walk_forward_scan_errors"] == "0"
+    assert serial.data_health["walk_forward_scan_errors"] == "0"
+    assert parallel.data_health["walk_forward_scan_errors"] == "0"
+    guarded_worker_pids = set(network_guard_audit.read_text().splitlines())
+    assert len(guarded_worker_pids) >= 2
 
 
 def test_parallel_walk_forward_bounds_submissions_when_progress_cancels(

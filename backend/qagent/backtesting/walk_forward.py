@@ -139,6 +139,7 @@ from qagent.factors.models import FactorRanking
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.market.astock_enhanced import EmptyAShareEnhancedDataProvider
 from qagent.market.calendars import trading_day_offset, trading_sessions_in_range
+from qagent.market import instruments as market_instruments
 from qagent.historical_evidence.providers import REQUIRED_BENCHMARK_IDS
 from qagent.market.benchmark_trend import (
     BenchmarkTrendState,
@@ -755,6 +756,22 @@ class _WalkForwardWorkerResult(BaseModel):
 _snapshot_worker_repository: ReplayEvidenceRepository | None = None
 _snapshot_worker_market_provider: ReplayMarketDataProvider | None = None
 _snapshot_worker_strategy_provider: ReplayStrategyDataProvider | None = None
+_snapshot_worker_display_context_token = None
+
+
+def _frozen_replay_display_names(lifecycle_inventory: Iterable[object]) -> dict[str, str]:
+    """Return display-only names contained in the frozen lifecycle revision.
+
+    The current lifecycle table does not persist names, so this normally returns
+    an empty mapping and labels deterministically fall back to instrument IDs.
+    """
+    names: dict[str, str] = {}
+    for profile in lifecycle_inventory:
+        instrument_id = str(getattr(profile, "instrument_id", "")).strip().upper()
+        name = str(getattr(profile, "name", "") or "").strip()
+        if instrument_id.startswith("CN:") and name:
+            names[instrument_id.removeprefix("CN:")] = name
+    return names
 
 
 def _repository_database_url(repository: ReplayEvidenceRepository) -> str:
@@ -769,12 +786,14 @@ def _initialize_snapshot_worker(
     provider_mode: str,
     owner_run_id: str,
     revision: int,
+    frozen_cn_instrument_names: dict[str, str],
 ) -> None:
     from qagent.db import create_session_factory
 
     global _snapshot_worker_repository
     global _snapshot_worker_market_provider
     global _snapshot_worker_strategy_provider
+    global _snapshot_worker_display_context_token
     _snapshot_worker_repository = ReplayEvidenceRepository(
         create_session_factory(database_url),
         provider_mode,
@@ -787,6 +806,20 @@ def _initialize_snapshot_worker(
     _snapshot_worker_strategy_provider = ReplayStrategyDataProvider(
         _snapshot_worker_repository,
         revision,
+    )
+    # Historical replay workers must not hydrate display names from the current
+    # tradable universe. Besides being non-hermetic, that would introduce a live,
+    # future-dated dependency into a frozen replay.
+    if _snapshot_worker_display_context_token is not None:
+        market_instruments.reset_cn_instrument_display_context(
+            _snapshot_worker_display_context_token
+        )
+    _snapshot_worker_display_context_token = (
+        market_instruments.activate_cn_instrument_display_context(
+            frozen_cn_instrument_names,
+            ready=True,
+            no_hydration=True,
+        )
     )
 
 
@@ -1257,6 +1290,7 @@ def run_full_market_walk_forward_selection(
             revision,
             decision_date=sessions[-1] if sessions else end,
         )
+        replay_display_names = _frozen_replay_display_names(lifecycle_inventory)
         missing_listing_dates = [
             item.instrument_id for item in lifecycle_inventory if item.listing_date is None
         ]
@@ -1386,29 +1420,36 @@ def run_full_market_walk_forward_selection(
         )
         isolate_snapshot_work = cancellation_check is not None
         if effective_snapshot_workers == 1 and not isolate_snapshot_work:
-            for snapshot_input in pending_inputs:
-                _raise_if_walk_forward_cancelled(cancellation_check)
-                lease_heartbeat.maintain_now()
-                worker_result = _compute_walk_forward_snapshot(
-                    snapshot_input,
-                    lookback_days=lookback_days,
-                    repository=owner_repository,
-                    market_provider=market_provider,
-                    strategy_provider=strategy_provider,
-                )
-                lease_heartbeat.raise_if_failed()
-                snapshot_by_date[worker_result.snapshot.decision_date] = worker_result.snapshot
-                scan_error_count += worker_result.scan_error_count
-                scan_error_samples.extend(worker_result.scan_error_samples)
-                _report_progress(
-                    progress_callback,
-                    phase="historical_replay",
-                    processed_snapshots=len(snapshot_by_date),
-                    total_snapshots=len(sessions),
-                    current_date=worker_result.snapshot.decision_date,
-                    snapshot=worker_result.snapshot,
-                    lease_heartbeat=lease_heartbeat,
-                )
+            with market_instruments.cn_instrument_display_context(
+                replay_display_names,
+                ready=True,
+                no_hydration=True,
+            ):
+                for snapshot_input in pending_inputs:
+                    _raise_if_walk_forward_cancelled(cancellation_check)
+                    lease_heartbeat.maintain_now()
+                    worker_result = _compute_walk_forward_snapshot(
+                        snapshot_input,
+                        lookback_days=lookback_days,
+                        repository=owner_repository,
+                        market_provider=market_provider,
+                        strategy_provider=strategy_provider,
+                    )
+                    lease_heartbeat.raise_if_failed()
+                    snapshot_by_date[worker_result.snapshot.decision_date] = (
+                        worker_result.snapshot
+                    )
+                    scan_error_count += worker_result.scan_error_count
+                    scan_error_samples.extend(worker_result.scan_error_samples)
+                    _report_progress(
+                        progress_callback,
+                        phase="historical_replay",
+                        processed_snapshots=len(snapshot_by_date),
+                        total_snapshots=len(sessions),
+                        current_date=worker_result.snapshot.decision_date,
+                        snapshot=worker_result.snapshot,
+                        lease_heartbeat=lease_heartbeat,
+                    )
         elif pending_inputs:
             database_url = _repository_database_url(owner_repository)
             stats_by_worker: dict[int, _WalkForwardWorkerStats] = {}
@@ -1421,6 +1462,7 @@ def run_full_market_walk_forward_selection(
                     repository.provider_mode,
                     owner_run_id,
                     revision,
+                    replay_display_names,
                 ),
             )
             in_flight = set()

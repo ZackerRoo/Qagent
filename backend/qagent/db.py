@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from collections.abc import Generator
 import json
+import os
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -127,6 +128,7 @@ def _shared_default_engine(url: str) -> Engine:
 
 
 def _build_db_engine(url: str, *, runtime_pool: bool = False) -> Engine:
+    _guard_pytest_database_url(url)
     parsed = make_url(url)
     is_file_sqlite = parsed.drivername.startswith("sqlite") and parsed.database not in (
         None,
@@ -158,6 +160,31 @@ def _build_db_engine(url: str, *, runtime_pool: bool = False) -> Engine:
     if is_file_sqlite:
         _configure_sqlite_pragmas(engine)
     return engine
+
+
+def _guard_pytest_database_url(url: str) -> None:
+    if os.environ.get("QAGENT_TEST_DATABASE_GUARD") != "1":
+        return
+    parsed = make_url(url)
+    workspace_database = (Path(__file__).resolve().parents[2] / "data" / "qagent.db").resolve()
+    if parsed.drivername.startswith("sqlite") and parsed.database not in {
+        None,
+        "",
+        ":memory:",
+    }:
+        candidate = Path(parsed.database).expanduser().resolve()
+        if candidate == workspace_database:
+            raise RuntimeError(
+                "pytest database isolation blocked workspace data/qagent.db"
+            )
+    try:
+        forbidden = json.loads(
+            os.environ.get("QAGENT_TEST_FORBIDDEN_DATABASE_URLS", "[]")
+        )
+    except json.JSONDecodeError:
+        forbidden = []
+    if str(url) in {str(item) for item in forbidden}:
+        raise RuntimeError("pytest database isolation blocked a production database_url")
 
 
 def _configure_sqlite_pragmas(engine: Engine) -> None:
