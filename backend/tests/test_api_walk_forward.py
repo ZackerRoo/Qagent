@@ -73,6 +73,12 @@ def test_walk_forward_run_queries_return_latest_and_complete_payload(tmp_path, m
     assert latest.json()["top_5_return_pct"] == 8.25
     assert detail.status_code == 200
     assert detail.json()["payload"]["cost_sensitivity"][0]["key"] == "stress"
+    attribution = detail.json()["derived_research"]["top_10_lag_attribution"]
+    assert attribution["status"] == "unsupported"
+    assert attribution["source"]["run_id"] == "api-walk-forward-1"
+    assert attribution["source"]["reproducibility_digest"] == "digest-1"
+    assert latest.json()["derived_research"]["top_10_lag_attribution"]["decision_weight"] is False
+    assert "top_10_lag_attribution" not in detail.json()["payload"]
     assert detail.json()["data_health"]["walk_forward_equal_weight_benchmark"] == "ready"
     assert missing.status_code == 404
 

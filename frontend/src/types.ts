@@ -4167,6 +4167,84 @@ export type WalkForwardPortfolioPayload = {
     equity: string;
     drawdown_pct: number;
   }>;
+  trades?: PortfolioBacktestTrade[];
+};
+
+export type WalkForwardTop10LagLayer = {
+  trade_count: number;
+  independent_signal_date_count: number;
+  win_rate: number | null;
+  average_return_pct: number | null;
+  gross_pnl: string | null;
+  gross_contribution_pct: number | null;
+  net_pnl: string | null;
+  contribution_pct: number | null;
+  total_costs: string | null;
+  cost_pct: number | null;
+  field_completeness: Record<string, { known: number; total: number }>;
+};
+
+export type WalkForwardTop10LagGroup = WalkForwardTop10LagLayer & {
+  dimension: "strategy" | "market_regime" | "industry" | "holding_period" | string;
+  key: string;
+};
+
+export type WalkForwardTop10LagAttribution = {
+  schema_version: "top10-lag-attribution-v1";
+  scope: "shadow_only";
+  official_release_allowed: false;
+  decision_weight: false;
+  source: {
+    kind: "validated_walk_forward_result_payload";
+    run_id: string | null;
+    reproducibility_digest: string | null;
+  };
+  status: "ready" | "partial" | "unsupported";
+  headline: string;
+  return_gap_pct: number | null;
+  observed_return_gap_pct: number | null;
+  common_layer: WalkForwardTop10LagLayer | null;
+  top5_independent_path: WalkForwardTop10LagLayer | null;
+  incremental_layer: WalkForwardTop10LagLayer | null;
+  incremental_layer_out_of_sample: (WalkForwardTop10LagLayer & {
+    share_of_full_incremental_net_loss: number | null;
+  }) | null;
+  unresolved_layer: WalkForwardTop10LagLayer | null;
+  dimensions: Array<{
+    dimension: string;
+    status: "ready" | "unsupported";
+    groups: WalkForwardTop10LagGroup[];
+  }>;
+  primary_drags: WalkForwardTop10LagGroup[];
+  reconciliation: {
+    formula: string;
+    incremental_layer_contribution_pct: number | null;
+    common_execution_configuration_delta_pct: number | null;
+    residual_pct: number | null;
+    tolerance_pct: number;
+    closed: boolean;
+    top5_portfolio_residual_pct: number | null;
+    top10_portfolio_residual_pct: number | null;
+    gross_return_gap_pct: number | null;
+    additional_cost_pct: number | null;
+    extra_cost_drag_pct: number | null;
+    gross_cost_formula: string;
+  };
+  data_health: {
+    classification: "ready" | "partial" | "unsupported";
+    classified_trade_count?: number;
+    unresolved_trade_count?: number;
+    snapshot_prefix_match?: boolean;
+    snapshot_prefix_mismatch_dates?: string[];
+    top5_duplicate_trade_keys?: string[];
+    top10_duplicate_trade_keys?: string[];
+    top5_only_trade_keys?: string[];
+    top10_common_only_trade_keys?: string[];
+    missing_fields: string[];
+    unknown_values_are_zero: false;
+    contribution_basis?: string;
+    cost_basis?: string;
+  };
 };
 
 export type WalkForwardSnapshotPayload = {
@@ -4828,6 +4906,9 @@ export type WalkForwardRun = {
   top_10_oos_gate: string;
   reproducibility_digest: string;
   payload: WalkForwardPayload;
+  derived_research?: {
+    top_10_lag_attribution?: WalkForwardTop10LagAttribution;
+  };
   data_health: Record<string, string>;
   created_at: string;
   updated_at: string;

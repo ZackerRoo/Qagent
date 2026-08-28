@@ -2823,6 +2823,7 @@ function WalkForwardValidationCenter({
   const executionChallenger = payload?.execution_challenger;
   const rankingV3 = payload?.ranking_v3;
   const rankingV4 = payload?.ranking_v4;
+  const top10LagAttribution = run?.derived_research?.top_10_lag_attribution;
   const dynamicKnownFailure = dynamicRerank?.criteria.some((item) => item.status === "fail") ?? false;
   const dynamicDisplayStatus = dynamicKnownFailure ? "rejected" : dynamicRerank?.status;
   const baselineChallengerKnownFailure = baselineChallenger?.criteria.some((item) => item.status === "fail") ?? false;
@@ -3266,6 +3267,74 @@ function WalkForwardValidationCenter({
                 ? `当前仅是 ${medianCovered} 标的试点：历史横截面证据覆盖 ${formatNumber(Number.isFinite(coveragePct) ? coveragePct : null, "%")}（门槛 90%）。收益和胜率只能说明这组试点表现，不能称为全市场选股有效。`
                 : `This is a ${medianCovered}-instrument pilot with ${formatNumber(Number.isFinite(coveragePct) ? coveragePct : null, "%")} historical market coverage (90% required). Returns do not validate full-market selection.`)}
           </div>
+          {top10LagAttribution ? (
+            <section className="walk-forward-challenger challenger-insufficient top10-lag-attribution" aria-label={zh ? "Top10 相对 Top5 落后归因" : "Top 10 lag attribution"}>
+              <div className="walk-forward-challenger-head">
+                <div>
+                  <p className="eyebrow">{zh ? "Top 6-10 增量层影子归因" : "Top 6-10 incremental-layer shadow attribution"}</p>
+                  <h3>{zh ? "Top 10 相对 Top 5 的差异来自哪里" : "What drives Top 10 versus Top 5"}</h3>
+                  <p>
+                    {top10LagAttribution.status === "unsupported"
+                      ? (zh ? "当前保存结果缺少逐笔交易或快照字段，归因未知；缺失值不会按 0 处理。" : "The saved result lacks trade or snapshot fields. Attribution is unknown, and missing values are not treated as zero.")
+                      : (zh
+                        ? `只读拆分 Top 10 组合内的 Top 5 共同持仓、第 6-10 名增量层，以及独立 Top 5 路径差；${top10LagAttribution.headline}`
+                        : `Read-only split of shared Top 5 holdings, incremental ranks 6-10, and the independent Top 5 path difference. ${top10LagAttribution.headline}`)}
+                  </p>
+                </div>
+                <span className="status status-shadow">{zh ? "仅供研究" : "Research only"}</span>
+              </div>
+              {top10LagAttribution.incremental_layer && top10LagAttribution.common_layer ? (
+                <>
+                  <div className="metric-grid walk-forward-kpis">
+                    <div><span>{zh ? "Top10 - Top5 收益差" : "Top10 - Top5 return gap"}</span><strong>{formatNumber(top10LagAttribution.return_gap_pct, "%")}</strong></div>
+                    <div><span>{zh ? "增量层贡献" : "Incremental contribution"}</span><strong>{formatNumber(top10LagAttribution.incremental_layer.contribution_pct, "%")}</strong></div>
+                    <div><span>{zh ? "共同层执行/配置差" : "Shared-layer path delta"}</span><strong>{formatNumber(top10LagAttribution.reconciliation.common_execution_configuration_delta_pct, "%")}</strong></div>
+                    <div><span>{zh ? "毛收益差" : "Gross-return gap"}</span><strong>{formatNumber(top10LagAttribution.reconciliation.gross_return_gap_pct, "%")}</strong></div>
+                    <div><span>{zh ? "额外成本拖累" : "Extra-cost drag"}</span><strong>{formatNumber(top10LagAttribution.reconciliation.extra_cost_drag_pct, "%")}</strong></div>
+                    <div><span>{zh ? "对账残差" : "Reconciliation residual"}</span><strong>{formatNumber(top10LagAttribution.reconciliation.residual_pct, "%")}</strong><small>{top10LagAttribution.reconciliation.closed ? (zh ? "已闭合" : "Closed") : (zh ? "未闭合" : "Open")}</small></div>
+                    <div><span>{zh ? "增量层胜率" : "Incremental win rate"}</span><strong>{top10LagAttribution.incremental_layer.win_rate == null ? (zh ? "未知" : "Unknown") : formatNumber(top10LagAttribution.incremental_layer.win_rate * 100, "%")}</strong></div>
+                    <div><span>{zh ? "增量层平均收益" : "Incremental avg return"}</span><strong>{formatNumber(top10LagAttribution.incremental_layer.average_return_pct, "%")}</strong></div>
+                    <div><span>{zh ? "增量层成本" : "Incremental costs"}</span><strong>{top10LagAttribution.incremental_layer.total_costs ?? (zh ? "未知" : "Unknown")}</strong><small>{formatNumber(top10LagAttribution.incremental_layer.cost_pct, "%")}</small></div>
+                    <div><span>{zh ? "增量层交易" : "Incremental trades"}</span><strong>{top10LagAttribution.incremental_layer.trade_count}</strong></div>
+                    <div><span>{zh ? "独立信号日" : "Independent signal dates"}</span><strong>{top10LagAttribution.incremental_layer.independent_signal_date_count}</strong></div>
+                    <div><span>{zh ? "样本外增量层" : "OOS incremental layer"}</span><strong>{top10LagAttribution.incremental_layer_out_of_sample?.net_pnl ?? (zh ? "未知" : "Unknown")}</strong><small>{top10LagAttribution.incremental_layer_out_of_sample ? `${top10LagAttribution.incremental_layer_out_of_sample.trade_count} ${zh ? "笔" : "trades"} / ${top10LagAttribution.incremental_layer_out_of_sample.independent_signal_date_count} ${zh ? "日" : "dates"}` : ""}</small></div>
+                    <div><span>{zh ? "样本外亏损占比" : "OOS share of full loss"}</span><strong>{top10LagAttribution.incremental_layer_out_of_sample?.share_of_full_incremental_net_loss == null ? (zh ? "未知" : "Unknown") : formatNumber(top10LagAttribution.incremental_layer_out_of_sample.share_of_full_incremental_net_loss * 100, "%")}</strong></div>
+                    <div><span>{zh ? "共同层贡献" : "Shared-layer contribution"}</span><strong>{formatNumber(top10LagAttribution.common_layer.contribution_pct, "%")}</strong></div>
+                    <div><span>{zh ? "共同层交易" : "Shared-layer trades"}</span><strong>{top10LagAttribution.common_layer.trade_count}</strong></div>
+                  </div>
+                  <div className="table-shell walk-forward-attribution-table">
+                    <table>
+                      <thead><tr><th>{zh ? "主要拖累维度" : "Main drag"}</th><th>{zh ? "分组" : "Group"}</th><th>{zh ? "交易" : "Trades"}</th><th>{zh ? "胜率" : "Win rate"}</th><th>{zh ? "平均收益" : "Avg return"}</th><th>{zh ? "贡献" : "Contribution"}</th><th>{zh ? "成本" : "Costs"}</th></tr></thead>
+                      <tbody>
+                        {top10LagAttribution.primary_drags.length > 0 ? top10LagAttribution.primary_drags.map((item) => (
+                          <tr key={`${item.dimension}:${item.key}`}>
+                            <td>{item.dimension}</td>
+                            <td>{item.key === "unknown" ? (zh ? "未知" : "Unknown") : item.key}</td>
+                            <td>{item.trade_count}</td>
+                            <td>{item.win_rate == null ? (zh ? "未知" : "Unknown") : formatNumber(item.win_rate * 100, "%")}</td>
+                            <td>{formatNumber(item.average_return_pct, "%")}</td>
+                            <td className={signedCellClass(item.contribution_pct)}>{formatNumber(item.contribution_pct, "%")}</td>
+                            <td>{item.total_costs ?? (zh ? "未知" : "Unknown")}</td>
+                          </tr>
+                        )) : <tr><td colSpan={7}>{zh ? "当前增量层没有可确认的负贡献分组。" : "No confirmed negative-contribution group in the incremental layer."}</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
+                  <p className="walk-forward-leakage-guard">
+                    {zh
+                      ? `口径：收益差 = 增量层贡献 + 共同层执行/配置路径差 + 残差；贡献按各自组合逐笔净损益 / 各自初始资金，胜率按净损益 > 0。维度彼此重叠，只是描述性归因，不能跨维度加总或视为因果；持有期是结果维度。${top10LagAttribution.incremental_layer.trade_count} 笔交易仅覆盖 ${top10LagAttribution.incremental_layer.independent_signal_date_count} 个信号日，不假设样本独立。${top10LagAttribution.data_health.unresolved_trade_count ?? 0} 笔无法分层，未知值保持未知。此结果不改变正式排名、权重、推荐、交易或唯一模拟盘。`
+                      : `Basis: return gap = incremental contribution + shared-layer execution/configuration path delta + residual; contribution uses each portfolio's trade net P&L / its own initial capital, and wins use net P&L > 0. Dimensions overlap and are descriptive, not additive or causal; holding period is an outcome dimension. ${top10LagAttribution.incremental_layer.trade_count} trades cover only ${top10LagAttribution.incremental_layer.independent_signal_date_count} signal dates, so independence is not assumed. ${top10LagAttribution.data_health.unresolved_trade_count ?? 0} trades are unresolved. Unknown stays unknown. This does not change ranking, weights, recommendations, trading, or the single paper ledger.`}
+                  </p>
+                </>
+              ) : (
+                <div className="walk-forward-gate-note coverage-warning">
+                  {zh
+                    ? `不支持字段：${top10LagAttribution.data_health.missing_fields.join("、") || "未知"}`
+                    : `Unsupported fields: ${top10LagAttribution.data_health.missing_fields.join(", ") || "unknown"}`}
+                </div>
+              )}
+            </section>
+          ) : null}
           {payload?.strategy_validation ? (
             <WalkForwardStrategyGate center={payload.strategy_validation} language={language} />
           ) : (

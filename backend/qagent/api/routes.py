@@ -89,6 +89,7 @@ from qagent.research.fuyao_theme_strength import capture_fuyao_theme_strength
 from qagent.research.fuyao_shadow_outcomes import (
     resolve_fuyao_shadow_outcomes,
 )
+from qagent.research.top10_lag_attribution import build_top10_lag_attribution
 from qagent.jobs.automation import run_research_automation
 from qagent.jobs.automation_scheduler import (
     AutoProcessingCycleResult,
@@ -717,7 +718,7 @@ def run_walk_forward(
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     record = _repo().save_walk_forward_run(result)
-    return record.model_dump(mode="json")
+    return _walk_forward_run_api_payload(record)
 
 
 @router.post("/walk-forward/jobs")
@@ -1149,7 +1150,7 @@ def list_walk_forward_runs(
         provider=provider.strip().lower(),
         limit=limit,
     )
-    return {"runs": [record.model_dump(mode="json") for record in records]}
+    return {"runs": [_walk_forward_run_api_payload(record) for record in records]}
 
 
 @router.get("/walk-forward/runs/latest")
@@ -1160,7 +1161,7 @@ def latest_walk_forward_run(provider: str = "free") -> dict[str, object]:
     )
     if not records:
         raise HTTPException(status_code=404, detail="walk-forward run not found")
-    return records[0].model_dump(mode="json")
+    return _walk_forward_run_api_payload(records[0])
 
 
 @router.get("/walk-forward/runs/{run_id}")
@@ -1168,7 +1169,23 @@ def get_walk_forward_run(run_id: str) -> dict[str, object]:
     record = _repo().get_walk_forward_run(run_id)
     if record is None:
         raise HTTPException(status_code=404, detail="walk-forward run not found")
-    return record.model_dump(mode="json")
+    return _walk_forward_run_api_payload(record)
+
+
+def _walk_forward_run_api_payload(record) -> dict[str, object]:
+    """Add unsigned, read-only research derived from the validated stored payload."""
+
+    result = record.model_dump(mode="json")
+    payload = result.get("payload")
+    if isinstance(payload, dict):
+        result["derived_research"] = {
+            "top_10_lag_attribution": build_top10_lag_attribution(
+                payload,
+                source_run_id=record.run_id,
+                source_reproducibility_digest=record.reproducibility_digest,
+            )
+        }
+    return result
 
 
 @router.get("/ranking-v3/forward/state")

@@ -16,6 +16,18 @@
 - Keep a concise implementation and verification summary in the parent task so
   deleting sub-agent sessions does not remove the project decision record.
 
+## Implementation delegation
+
+- For this project, especially for subsequent implementation work in this
+  conversation, the parent task owns requirement decomposition, read-only
+  investigation, risk boundaries, review, test acceptance, and integration.
+- Delegate actual code and documentation implementation to sub-agents with a
+  clear scope and deliverable.
+- The parent task may edit directly only for an urgent, very small integration
+  fix or when a sub-agent is explicitly blocked, and must state the reason.
+- Delegation must not bypass simulated-trading isolation, testing, review, or
+  session cleanup.
+
 ## Resource discipline
 
 - Avoid `fork_context` for simple tasks. Pass a small, self-contained prompt to
