@@ -17,6 +17,11 @@ from sqlalchemy import create_engine, inspect, text
 from qagent.db import create_session_factory, initialize_database
 from qagent import db as db_module
 from qagent.jobs.automation_retry import classify_automation_error
+from qagent.jobs.automation_scheduler import (
+    AutoProcessingCycleResult,
+    AutoProcessingSettings,
+    AutomationScheduler,
+)
 from qagent.providers.failure_state import (
     FailureCategory,
     FailureKey,
@@ -38,6 +43,11 @@ from qagent.storage.repository import (
     BriefRunRecord,
     DeliveryIdempotencyConflictError,
     QagentRepository,
+)
+from qagent.storage.tables import (
+    AutomationCircuitBreakerRow,
+    AutomationCycleRow,
+    AutomationCycleStageRow,
 )
 
 
@@ -902,6 +912,9 @@ def test_retry_budget_backoff_fingerprint_changes_and_alert_are_persisted(tmp_pa
         ).one()
         assert connection.execute(text("SELECT COUNT(*) FROM automation_incidents")).scalar_one() == 1
         assert connection.execute(
+            text("SELECT COUNT(*) FROM brief_runs WHERE brief_id LIKE 'automation-brief-%'")
+        ).scalar_one() == 1
+        assert connection.execute(
             text("SELECT COUNT(*) FROM delivery_outbox WHERE idempotency_key LIKE 'automation-retry-alert:%'")
         ).scalar_one() == 1
     assert cycle.attempt_count == 4
@@ -922,7 +935,283 @@ def test_retry_budget_backoff_fingerprint_changes_and_alert_are_persisted(tmp_pa
     assert replay.replay_status == "deferred_with_alert"
     with create_engine(database_url).connect() as connection:
         assert connection.execute(text("SELECT COUNT(*) FROM automation_incidents")).scalar_one() == 1
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM brief_runs WHERE brief_id LIKE 'automation-brief-%'")
+        ).scalar_one() == 1
         assert connection.execute(text("SELECT COUNT(*) FROM delivery_outbox")).scalar_one() == 1
+
+    with runtime._write_session() as session:
+        cycle_row = session.get(AutomationCycleRow, slot)
+        stage_row = session.get(AutomationCycleStageRow, (slot, "paper_update"))
+        breaker_row = session.get(AutomationCircuitBreakerRow, "paper_update:free")
+        assert cycle_row is not None
+        assert stage_row is not None
+        runtime._record_retry_incident(
+            session,
+            cycle_row,
+            stage_row,
+            breaker=breaker_row,
+            current=current,
+        )
+    with create_engine(database_url).begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE brief_runs SET headline='tampered facts' "
+                "WHERE brief_id LIKE 'automation-brief-%'"
+            )
+        )
+    with pytest.raises(AutomationCycleConflictError, match="different facts"):
+        with runtime._write_session() as session:
+            cycle_row = session.get(AutomationCycleRow, slot)
+            stage_row = session.get(AutomationCycleStageRow, (slot, "paper_update"))
+            breaker_row = session.get(AutomationCircuitBreakerRow, "paper_update:free")
+            assert cycle_row is not None
+            assert stage_row is not None
+            runtime._record_retry_incident(
+                session,
+                cycle_row,
+                stage_row,
+                breaker=breaker_row,
+                current=current,
+            )
+
+
+def test_running_cycle_with_stage_attempt_four_finalizes_without_attempt_five(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'raw-attempt-four.db'}"
+    runtime = _runtime(database_url)
+    due = datetime(2026, 8, 29, 2, 0, tzinfo=timezone.utc)
+    slot = scheduled_cycle_slot(due, "8" * 64)
+    started = runtime.begin_cycle(
+        cycle_slot=slot,
+        cycle_kind="scheduled",
+        settings_digest="8" * 64,
+        due_at=due,
+        idempotency_key=None,
+        owner_token="crashed-owner",
+        now=due,
+    )
+    assert started.grant is not None
+    runtime.begin_stage(
+        started.grant,
+        "paper_update",
+        retry_scope="paper_update:free",
+        now=due,
+    )
+    runtime.fail_stage(
+        started.grant,
+        "paper_update",
+        "provider timeout before terminal finalize",
+        retry_scope="paper_update:free",
+        error_fingerprint="8" * 64,
+        error_kind="timeout",
+        retryable=True,
+        now=due,
+    )
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE automation_cycles SET attempt_count=4,status='running' "
+                "WHERE cycle_slot=:slot"
+            ),
+            {"slot": slot},
+        )
+        connection.execute(
+            text(
+                "UPDATE automation_cycle_stages SET attempt_count=4,status='error' "
+                "WHERE cycle_slot=:slot AND stage_key='paper_update'"
+            ),
+            {"slot": slot},
+        )
+
+    recovered_at = due + timedelta(minutes=1)
+    restarted = AutomationRuntimeRepository(create_session_factory(database_url))
+    recovered = restarted.begin_cycle(
+        cycle_slot=slot,
+        cycle_kind="scheduled",
+        settings_digest="8" * 64,
+        due_at=due,
+        idempotency_key=None,
+        owner_token="recovery-owner",
+        now=recovered_at,
+        process_fence_held=True,
+    )
+    assert recovered.grant is not None
+    checkpoint = restarted.begin_stage(
+        recovered.grant,
+        "paper_update",
+        retry_scope="paper_update:free",
+        now=recovered_at,
+    )
+    assert checkpoint is not None
+    assert checkpoint["stage_terminal_error"] == (
+        "provider timeout before terminal finalize"
+    )
+    assert restarted.finalize_cycle(
+        recovered.grant,
+        result={},
+        errors=["paper_update: provider timeout before terminal finalize"],
+        issues=[],
+        required_stages={"paper_update"},
+        now=recovered_at,
+    ) == "deferred_with_alert"
+    assert restarted.cycle_retry_state(slot).attempt_count == 4
+    with engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM automation_incidents")
+        ).scalar_one() == 1
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM brief_runs WHERE brief_id LIKE 'automation-brief-%'")
+        ).scalar_one() == 1
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM delivery_outbox")
+        ).scalar_one() == 1
+
+
+def test_legacy_not_null_outbox_attempt_four_is_atomic_and_advances_scheduler(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'legacy-not-null-outbox.db'}"
+    initialize_database(database_url)
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE delivery_outbox"))
+        connection.execute(
+            text(
+                "CREATE TABLE delivery_outbox ("
+                "delivery_id VARCHAR(64) PRIMARY KEY, "
+                "brief_id VARCHAR(64) NOT NULL, channel VARCHAR(32) NOT NULL, "
+                "recipient VARCHAR(255), subject TEXT NOT NULL, markdown TEXT NOT NULL, "
+                "payload_json TEXT NOT NULL DEFAULT '{}', status VARCHAR(32) NOT NULL, "
+                "created_at DATETIME, updated_at DATETIME, sent_at DATETIME, "
+                "FOREIGN KEY(brief_id) REFERENCES brief_runs(brief_id))"
+            )
+        )
+    db_module._apply_additive_migrations(engine)
+    inspector = inspect(engine)
+    brief_id_column = next(
+        item
+        for item in inspector.get_columns("delivery_outbox")
+        if item["name"] == "brief_id"
+    )
+    assert brief_id_column["nullable"] is False
+    assert inspector.get_foreign_keys("delivery_outbox")[0]["referred_table"] == "brief_runs"
+
+    runtime = AutomationRuntimeRepository(create_session_factory(database_url))
+    due = datetime(2026, 8, 29, 4, 0, tzinfo=timezone.utc)
+    slot = scheduled_cycle_slot(due, "b" * 64)
+    current = due
+    for attempt in range(1, 4):
+        started = runtime.begin_cycle(
+            cycle_slot=slot,
+            cycle_kind="scheduled",
+            settings_digest="b" * 64,
+            due_at=due,
+            idempotency_key=None,
+            owner_token=f"legacy-owner-{attempt}",
+            now=current,
+        )
+        assert started.grant is not None
+        runtime.begin_stage(
+            started.grant,
+            "paper_update",
+            retry_scope="paper_update:free",
+            now=current,
+        )
+        runtime.fail_stage(
+            started.grant,
+            "paper_update",
+            "provider timeout",
+            retry_scope="paper_update:free",
+            error_fingerprint="b" * 64,
+            error_kind="timeout",
+            retryable=True,
+            now=current,
+        )
+        assert runtime.finalize_cycle(
+            started.grant,
+            result={"attempt": attempt},
+            errors=["paper_update: provider timeout"],
+            issues=[],
+            required_stages={"paper_update"},
+            now=current,
+        ) == "partial_retry_same_slot"
+        retry_at = runtime.cycle_retry_state(slot).next_retry_at
+        assert retry_at is not None
+        current = retry_at
+
+    settings = AutoProcessingSettings(provider="free", interval_seconds=1800)
+    scheduler = AutomationScheduler()
+    with scheduler._lock:
+        scheduler._enabled = True
+        scheduler._generation = 11
+        scheduler._settings = settings
+        scheduler._cycle_due_at = due
+        scheduler._next_run_at = current
+
+    def fourth_attempt(_settings):
+        started = runtime.begin_cycle(
+            cycle_slot=slot,
+            cycle_kind="scheduled",
+            settings_digest="b" * 64,
+            due_at=due,
+            idempotency_key=None,
+            owner_token="legacy-owner-4",
+            now=current,
+        )
+        assert started.grant is not None
+        runtime.begin_stage(
+            started.grant,
+            "paper_update",
+            retry_scope="paper_update:free",
+            now=current,
+        )
+        runtime.fail_stage(
+            started.grant,
+            "paper_update",
+            "provider timeout",
+            retry_scope="paper_update:free",
+            error_fingerprint="b" * 64,
+            error_kind="timeout",
+            retryable=True,
+            now=current,
+        )
+        status = runtime.finalize_cycle(
+            started.grant,
+            result={"attempt": 4},
+            errors=["paper_update: provider timeout"],
+            issues=[],
+            required_stages={"paper_update"},
+            now=current,
+        )
+        return AutoProcessingCycleResult(
+            provider="free",
+            started_at=current,
+            finished_at=current,
+            scan_status="failed",
+            errors=["paper_update: provider timeout"],
+            data_health={"automation_cycle_status": status},
+        )
+
+    assert scheduler._execute(settings, fourth_attempt, generation=11) is True
+    state = scheduler.state()
+    assert state.run_count == 1
+    assert state.cycle_due_at == current + timedelta(minutes=30)
+    assert state.next_run_at == current + timedelta(minutes=30)
+    with engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT status FROM automation_cycles WHERE cycle_slot=:slot"),
+            {"slot": slot},
+        ).scalar_one() == "deferred_with_alert"
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM automation_incidents")
+        ).scalar_one() == 1
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM brief_runs WHERE brief_id LIKE 'automation-brief-%'")
+        ).scalar_one() == 1
+        delivery = connection.execute(
+            text("SELECT COUNT(*),MIN(brief_id) FROM delivery_outbox")
+        ).one()
+    assert delivery[0] == 1
+    assert delivery[1].startswith("automation-brief-")
 
 
 def test_unkeyed_manual_failure_is_one_shot_and_keyed_manual_is_retryable(tmp_path):

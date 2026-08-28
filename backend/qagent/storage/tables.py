@@ -1614,8 +1614,8 @@ class DeliveryOutboxRow(Base):
     __tablename__ = "delivery_outbox"
 
     delivery_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    brief_id: Mapped[str | None] = mapped_column(
-        String(64), ForeignKey("brief_runs.brief_id"), index=True, nullable=True
+    brief_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("brief_runs.brief_id"), index=True, nullable=False
     )
     channel: Mapped[str] = mapped_column(String(32), index=True)
     recipient: Mapped[str | None] = mapped_column(String(255), nullable=True)

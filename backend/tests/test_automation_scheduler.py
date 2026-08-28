@@ -14,6 +14,7 @@ from qagent.jobs import automation_scheduler as scheduler_module
 from qagent.storage.automation_runtime import (
     AutomationCycleBusyError,
     AutomationCycleConflictError,
+    AutomationCycleTerminatedError,
 )
 
 
@@ -419,6 +420,67 @@ def test_scheduled_coordination_error_does_not_consume_or_hot_spin(monkeypatch):
     assert state.next_run_at == now + timedelta(
         seconds=scheduler_module.SCHEDULER_CLOCK_RECHECK_SECONDS
     )
+
+
+def test_unconfirmed_generic_failure_does_not_advance_or_report_terminal(monkeypatch):
+    now = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
+    due = now - timedelta(minutes=1)
+    monkeypatch.setattr(scheduler_module, "_utc_now", lambda: now)
+    scheduler = AutomationScheduler()
+    with scheduler._lock:
+        scheduler._enabled = True
+        scheduler._generation = 5
+        scheduler._cycle_due_at = due
+        scheduler._next_run_at = now
+
+    def failed_finalize(_settings):
+        raise RuntimeError("terminal persistence failed")
+
+    assert scheduler._execute(
+        AutoProcessingSettings(),
+        failed_finalize,
+        generation=5,
+    ) is True
+    state = scheduler.state()
+    assert state.run_count == 0
+    assert state.cycle_due_at == due
+    assert state.next_run_at == now + timedelta(minutes=5)
+    assert state.last_result is not None
+    assert (
+        state.last_result.data_health["automation_cycle_status"]
+        == "partial_retry_same_slot"
+    )
+    assert (
+        state.last_result.data_health["automation_retry_terminal_reason"]
+        == "finalization_unconfirmed"
+    )
+
+
+def test_confirmed_abort_exception_reports_terminal_and_advances(monkeypatch):
+    now = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(scheduler_module, "_utc_now", lambda: now)
+    scheduler = AutomationScheduler()
+    settings = AutoProcessingSettings(interval_seconds=60)
+    with scheduler._lock:
+        scheduler._enabled = True
+        scheduler._generation = 6
+        scheduler._settings = settings
+        scheduler._cycle_due_at = now
+        scheduler._next_run_at = now
+
+    def confirmed_abort(_settings):
+        raise AutomationCycleTerminatedError("persisted terminal failure")
+
+    assert scheduler._execute(
+        settings,
+        confirmed_abort,
+        generation=6,
+    ) is True
+    state = scheduler.state()
+    assert state.run_count == 1
+    assert state.last_result is not None
+    assert state.last_result.data_health["automation_cycle_status"] == "deferred_with_alert"
+    assert state.next_run_at == now + timedelta(minutes=1)
 
 
 def test_scheduled_partial_retries_same_immutable_cycle_due(monkeypatch):

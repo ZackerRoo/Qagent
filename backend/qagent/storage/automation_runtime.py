@@ -21,6 +21,7 @@ from qagent.storage.tables import (
     AutomationCycleRow,
     AutomationCycleStageRow,
     AutomationIncidentRow,
+    BriefRunRow,
     DeliveryOutboxRow,
     RuntimeLeaseRow,
 )
@@ -51,6 +52,12 @@ class AutomationLeaseLostError(RuntimeError):
 
 
 class AutomationCycleConflictError(ValueError):
+    pass
+
+
+class AutomationCycleTerminatedError(RuntimeError):
+    """The runner raised after its persisted cycle was safely terminated."""
+
     pass
 
 
@@ -391,6 +398,23 @@ class AutomationRuntimeRepository:
             row = session.get(AutomationCycleStageRow, (grant.cycle_slot, stage_key))
             if row is not None and row.status in TERMINAL_STAGE_STATUSES:
                 return _json_object(row.output_json)
+            cycle = session.get(AutomationCycleRow, grant.cycle_slot)
+            retry_budget = int(
+                cycle.retry_budget if cycle is not None else AUTOMATION_RETRY_BUDGET
+            )
+            if (
+                row is not None
+                and row.status == "error"
+                and int(row.attempt_count or 0) >= retry_budget
+            ):
+                return {
+                    "stage_terminal_error": row.error_text or "stage retry budget exhausted",
+                    "data_health": {
+                        f"automation_stage_{stage_key}_recovered_terminal_attempt": str(
+                            int(row.attempt_count or 0)
+                        )
+                    },
+                }
             breaker = (
                 session.get(AutomationCircuitBreakerRow, retry_scope)
                 if retry_scope
@@ -624,7 +648,20 @@ class AutomationRuntimeRepository:
             stage_status = {stage.stage_key: stage.status for stage in stages}
             error_stages = [stage for stage in stages if stage.status == "error"]
             if errors:
-                cycle.attempt_count = int(cycle.attempt_count or 0) + 1
+                observed_attempt = max(
+                    (int(stage.attempt_count or 0) for stage in error_stages),
+                    default=int(cycle.attempt_count or 0) + 1,
+                )
+                prior_attempt = int(cycle.attempt_count or 0)
+                retry_budget = int(
+                    cycle.retry_budget or AUTOMATION_RETRY_BUDGET
+                )
+                cycle.attempt_count = (
+                    max(prior_attempt, observed_attempt)
+                    if prior_attempt >= retry_budget
+                    and observed_attempt >= retry_budget
+                    else max(prior_attempt + 1, observed_attempt)
+                )
                 fingerprints = sorted(
                     {
                         str(stage.last_error_fingerprint)
@@ -822,58 +859,112 @@ class AutomationRuntimeRepository:
             }
         )
         incident_id = f"automation-incident-{identity[:32]}"
+        brief_id = f"automation-brief-{identity[:32]}"
         alert_key = f"automation-retry-alert:{identity}"
-        if session.get(AutomationIncidentRow, incident_id) is None:
+        payload = {
+            "incident_id": incident_id,
+            "cycle_slot": cycle.cycle_slot,
+            "stage": stage.stage_key,
+            "scope": scope,
+            "attempt_count": int(cycle.attempt_count or 0),
+            "error_fingerprint": fingerprint,
+            "open_count": open_count,
+            "next_probe_at": (
+                _as_utc(breaker.next_probe_at).isoformat()
+                if breaker is not None and breaker.next_probe_at is not None
+                else None
+            ),
+        }
+        subject = f"Qagent automation deferred: {stage.stage_key}"
+        markdown = (
+            f"Automation stage `{stage.stage_key}` reached its retry boundary. "
+            f"Fingerprint: `{fingerprint}`. Error: {stage.error_text or 'unknown'}"
+        )
+        provider = scope.rsplit(":", 1)[-1] if ":" in scope else "automation"
+        brief_health = {
+            "automation_incident_id": incident_id,
+            "automation_cycle_slot": cycle.cycle_slot,
+            "automation_stage": stage.stage_key,
+            "automation_retry_scope": scope,
+            "automation_error_fingerprint": fingerprint,
+            "automation_attempt_count": str(int(cycle.attempt_count or 0)),
+            "automation_open_count": str(open_count),
+        }
+        brief_payload = {
+            "brief_id": brief_id,
+            "provider": provider,
+            "symbols": [],
+            "headline": subject,
+            "top_opportunities": [],
+            "entry_watch": [],
+            "risk_alerts": [payload],
+            "catalyst_watch": [],
+            "strategy_validation": [],
+            "data_health": brief_health,
+        }
+        brief_facts = {
+            "provider": provider,
+            "symbols": "[]",
+            "headline": subject,
+            "opportunity_count": 0,
+            "entry_watch_count": 0,
+            "risk_alert_count": 1,
+            "catalyst_count": 0,
+            "validation_count": 0,
+            "data_health": _json_dumps(brief_health),
+            "brief_json": _json_dumps(brief_payload),
+        }
+        existing_brief = session.get(BriefRunRow, brief_id)
+        if existing_brief is None:
             session.add(
-                AutomationIncidentRow(
-                    incident_id=incident_id,
-                    cycle_slot=cycle.cycle_slot,
-                    stage_key=stage.stage_key,
-                    scope_key=scope,
-                    error_fingerprint=fingerprint,
-                    error_text=(stage.error_text or "unknown automation error")[:2000],
-                    attempt_count=int(cycle.attempt_count or 0),
-                    open_count=open_count,
-                    next_probe_at=breaker.next_probe_at if breaker is not None else None,
-                    alert_idempotency_key=alert_key,
+                BriefRunRow(
+                    brief_id=brief_id,
+                    **brief_facts,
                     created_at=current,
                 )
             )
+        else:
+            _require_row_facts(existing_brief, brief_facts, "automation synthetic brief")
+
+        incident_facts = {
+            "cycle_slot": cycle.cycle_slot,
+            "stage_key": stage.stage_key,
+            "scope_key": scope,
+            "error_fingerprint": fingerprint,
+            "error_text": (stage.error_text or "unknown automation error")[:2000],
+            "attempt_count": int(cycle.attempt_count or 0),
+            "open_count": open_count,
+            "next_probe_at": breaker.next_probe_at if breaker is not None else None,
+            "alert_idempotency_key": alert_key,
+        }
+        existing_incident = session.get(AutomationIncidentRow, incident_id)
+        if existing_incident is None:
+            session.add(
+                AutomationIncidentRow(
+                    incident_id=incident_id,
+                    **incident_facts,
+                    created_at=current,
+                )
+            )
+        else:
+            _require_row_facts(existing_incident, incident_facts, "automation incident")
         existing_delivery = session.scalar(
             select(DeliveryOutboxRow).where(DeliveryOutboxRow.idempotency_key == alert_key)
         )
+        digest_facts = {
+            "brief_id": brief_id,
+            "channel": "markdown",
+            "recipient": None,
+            "subject": subject,
+            "markdown": markdown,
+            "payload": payload,
+        }
+        payload_digest = canonical_digest(digest_facts)
         if existing_delivery is None:
-            payload = {
-                "incident_id": incident_id,
-                "cycle_slot": cycle.cycle_slot,
-                "stage": stage.stage_key,
-                "scope": scope,
-                "attempt_count": int(cycle.attempt_count or 0),
-                "error_fingerprint": fingerprint,
-                "next_probe_at": (
-                    _as_utc(breaker.next_probe_at).isoformat()
-                    if breaker is not None and breaker.next_probe_at is not None
-                    else None
-                ),
-            }
-            subject = f"Qagent automation deferred: {stage.stage_key}"
-            markdown = (
-                f"Automation stage `{stage.stage_key}` reached its retry boundary. "
-                f"Fingerprint: `{fingerprint}`. Error: {stage.error_text or 'unknown'}"
-            )
-            digest_facts = {
-                "brief_id": None,
-                "channel": "markdown",
-                "recipient": None,
-                "subject": subject,
-                "markdown": markdown,
-                "payload": payload,
-            }
-            payload_digest = canonical_digest(digest_facts)
             session.add(
                 DeliveryOutboxRow(
                     delivery_id=f"automation-alert-{identity[:32]}",
-                    brief_id=None,
+                    brief_id=brief_id,
                     channel="markdown",
                     recipient=None,
                     subject=subject,
@@ -885,6 +976,22 @@ class AutomationRuntimeRepository:
                     created_at=current,
                     updated_at=current,
                 )
+            )
+        else:
+            _require_row_facts(
+                existing_delivery,
+                {
+                    "brief_id": brief_id,
+                    "channel": "markdown",
+                    "recipient": None,
+                    "subject": subject,
+                    "markdown": markdown,
+                    "payload_json": _json_dumps(payload),
+                    "idempotency_key": alert_key,
+                    "payload_digest": payload_digest,
+                    "status": "queued",
+                },
+                "automation alert delivery",
             )
 
     def abort_cycle(
@@ -1059,6 +1166,19 @@ def _json_dumps(value: object) -> str:
 def _json_object(value: str) -> dict[str, Any]:
     decoded = json.loads(value or "{}")
     return decoded if isinstance(decoded, dict) else {}
+
+
+def _require_row_facts(row: object, expected: dict[str, object], label: str) -> None:
+    mismatches = {
+        key: {"stored": getattr(row, key), "expected": value}
+        for key, value in expected.items()
+        if getattr(row, key) != value
+    }
+    if mismatches:
+        raise AutomationCycleConflictError(
+            f"{label} idempotency identity is bound to different facts: "
+            f"{_json_dumps(mismatches)}"
+        )
 
 
 def _json_default(value: object) -> str:

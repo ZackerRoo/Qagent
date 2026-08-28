@@ -247,6 +247,7 @@ from qagent.storage.paper import (
 from qagent.storage.automation_runtime import (
     AutomationCycleBusyError,
     AutomationCycleConflictError,
+    AutomationCycleTerminatedError,
     AutomationLeaseLostError,
     AutomationRuntimeRepository,
     RuntimeLeaseGuard,
@@ -3904,11 +3905,17 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
         raise
     except Exception as exc:
         active = _active_automation_cycle.get()
+        terminated = False
         if active is not None and not active.guard.lost:
             try:
-                active.runtime_repo.abort_cycle(active.grant, error=str(exc))
+                terminated = active.runtime_repo.abort_cycle(
+                    active.grant,
+                    error=str(exc),
+                )
             except AutomationLeaseLostError:
                 pass
+        if terminated:
+            raise AutomationCycleTerminatedError(str(exc)) from exc
         raise
     finally:
         active = _active_automation_cycle.get()
@@ -4069,6 +4076,11 @@ def _run_auto_processing_cycle_inner(
         stage_issue = checkpoint.get("stage_issue")
         if stage_issue and str(stage_issue) not in issues:
             issues.append(str(stage_issue))
+        stage_terminal_error = checkpoint.get("stage_terminal_error")
+        if stage_terminal_error:
+            recovered_error = f"{stage_key}: {stage_terminal_error}"
+            if recovered_error not in errors:
+                errors.append(recovered_error)
         data_health[f"automation_stage_{stage_key}_replayed"] = "true"
         return True
 

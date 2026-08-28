@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from qagent.storage.automation_runtime import (
     AutomationCycleBusyError,
     AutomationCycleConflictError,
+    AutomationCycleTerminatedError,
     AutomationLeaseLostError,
     TERMINAL_CYCLE_STATUSES,
 )
@@ -425,7 +426,7 @@ class AutomationScheduler:
                     self._next_run_at = _utc_now() + timedelta(
                         seconds=SCHEDULER_CLOCK_RECHECK_SECONDS
                     )
-        except Exception as exc:  # pragma: no cover - route-level tests cover state output.
+        except AutomationCycleTerminatedError as exc:
             cycle_terminal = True
             finished_at = _utc_now()
             result = AutoProcessingCycleResult(
@@ -438,6 +439,23 @@ class AutomationScheduler:
                     "automation_scheduler_error": str(exc)[:500],
                     "automation_cycle_status": "deferred_with_alert",
                     "automation_retry_terminal_reason": "unhandled_permanent_error",
+                },
+            )
+            with self._lock:
+                self._last_error = str(exc)
+        except Exception as exc:  # pragma: no cover - route-level tests cover state output.
+            cycle_terminal = False
+            finished_at = _utc_now()
+            result = AutoProcessingCycleResult(
+                provider=settings.provider,
+                started_at=started_at,
+                finished_at=finished_at,
+                scan_status="failed",
+                errors=[str(exc)],
+                data_health={
+                    "automation_scheduler_error": str(exc)[:500],
+                    "automation_cycle_status": "partial_retry_same_slot",
+                    "automation_retry_terminal_reason": "finalization_unconfirmed",
                 },
             )
             with self._lock:
