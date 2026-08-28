@@ -38,7 +38,7 @@ def test_tickflow_provider_opens_circuit_after_rate_limit():
     assert bars.empty
     assert len(calls) == 1
     assert "CN:000001: tickflow_free: 429 too many requests" in provider.last_errors[0]
-    assert "CN:000002: tickflow_free skipped after rate limit" in provider.last_errors[1]
+    assert "CN:000002: tickflow_free/daily_none circuit open" in provider.last_errors[1]
     assert provider.source_circuit_retry_after_seconds() > 0
 
 
@@ -507,7 +507,7 @@ def test_free_cn_provider_circuit_breaker_skips_after_consecutive_source_failure
     assert bars.empty
     assert stock_calls == ["000001", "000002"]
     assert len(login_calls) == 2
-    assert "skipped after 2 consecutive source failures" in provider.last_errors[-1]
+    assert "free_cn/daily_bars circuit open" in provider.last_errors[-1]
 
 
 def test_free_cn_provider_circuit_breaker_half_opens_after_cooldown(monkeypatch):

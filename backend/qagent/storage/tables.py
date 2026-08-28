@@ -1503,6 +1503,14 @@ class AutomationCycleRow(Base):
     fencing_token: Mapped[int] = mapped_column(Integer, nullable=False)
     result_json: Mapped[str] = mapped_column(Text, default="{}")
     error_json: Mapped[str] = mapped_column(Text, default="[]")
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    retry_budget: Mapped[int] = mapped_column(Integer, default=4, nullable=False)
+    next_retry_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    retry_backoff_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_error_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    terminal_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     started_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     finalized_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
@@ -1527,11 +1535,54 @@ class AutomationCycleStageRow(Base):
     output_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     output_json: Mapped[str] = mapped_column(Text, default="{}")
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    retry_scope: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    retry_backoff_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_error_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_kind: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_retryable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    last_error_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     started_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), default=utc_now, onupdate=utc_now
     )
+
+
+class AutomationCircuitBreakerRow(Base):
+    __tablename__ = "automation_circuit_breakers"
+
+    scope_key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    open_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_probe_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    last_error_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    half_open_cycle_slot: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    probe_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utc_now, onupdate=utc_now
+    )
+
+
+class AutomationIncidentRow(Base):
+    __tablename__ = "automation_incidents"
+
+    incident_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    cycle_slot: Mapped[str] = mapped_column(String(160), index=True)
+    stage_key: Mapped[str] = mapped_column(String(64), index=True)
+    scope_key: Mapped[str] = mapped_column(String(160), index=True)
+    error_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    error_text: Mapped[str] = mapped_column(Text)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    open_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_probe_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    alert_idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
 
 
 class AutomationMigrationAuditRow(Base):

@@ -397,6 +397,30 @@ def test_manual_cycle_conflict_is_not_swallowed_by_generic_error_path():
     assert scheduler.state().last_result is None
 
 
+def test_scheduled_coordination_error_does_not_consume_or_hot_spin(monkeypatch):
+    now = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
+    due = now - timedelta(minutes=1)
+    monkeypatch.setattr(scheduler_module, "_utc_now", lambda: now)
+    scheduler = AutomationScheduler()
+    with scheduler._lock:
+        scheduler._enabled = True
+        scheduler._generation = 4
+        scheduler._cycle_due_at = due
+        scheduler._next_run_at = now
+
+    def busy(_settings):
+        raise AutomationCycleBusyError("winner owns lease")
+
+    assert scheduler._execute(AutoProcessingSettings(), busy, generation=4) is False
+    state = scheduler.state()
+    assert state.run_count == 0
+    assert state.last_result is None
+    assert state.cycle_due_at == due
+    assert state.next_run_at == now + timedelta(
+        seconds=scheduler_module.SCHEDULER_CLOCK_RECHECK_SECONDS
+    )
+
+
 def test_scheduled_partial_retries_same_immutable_cycle_due(monkeypatch):
     now = datetime(2026, 8, 28, 4, 0, tzinfo=timezone.utc)
     due = now - timedelta(minutes=2)
@@ -423,6 +447,70 @@ def test_scheduled_partial_retries_same_immutable_cycle_due(monkeypatch):
     assert state.run_count == 0
     assert state.cycle_due_at == due
     assert state.next_run_at == now + timedelta(seconds=300)
+
+
+def test_scheduled_partial_uses_persisted_retry_time(monkeypatch):
+    now = datetime(2026, 8, 29, 4, 0, tzinfo=timezone.utc)
+    retry_at = now + timedelta(minutes=17)
+    monkeypatch.setattr(scheduler_module, "_utc_now", lambda: now)
+    scheduler = AutomationScheduler()
+    with scheduler._lock:
+        scheduler._enabled = True
+        scheduler._generation = 8
+        scheduler._cycle_due_at = now - timedelta(minutes=1)
+        scheduler._next_run_at = now
+
+    def partial(settings):
+        return AutoProcessingCycleResult(
+            provider=settings.provider,
+            started_at=now,
+            finished_at=now,
+            scan_status="failed",
+            errors=["provider timeout"],
+            data_health={
+                "automation_cycle_status": "partial_retry_same_slot",
+                "automation_retry_next_at": retry_at.isoformat(),
+            },
+        )
+
+    assert scheduler._execute(AutoProcessingSettings(), partial, generation=8) is True
+    assert scheduler.state().next_run_at == retry_at
+
+
+def test_manual_run_never_moves_enabled_scheduled_clock(monkeypatch):
+    now = datetime(2026, 8, 29, 4, 0, tzinfo=timezone.utc)
+    scheduled_next = now + timedelta(minutes=23)
+    scheduled_due = now + timedelta(minutes=20)
+    monkeypatch.setattr(scheduler_module, "_utc_now", lambda: now)
+    scheduler = AutomationScheduler()
+    scheduled_settings = AutoProcessingSettings(provider="free", interval_seconds=1800)
+    manual_settings = AutoProcessingSettings(provider="fixture", interval_seconds=60)
+    with scheduler._lock:
+        scheduler._enabled = True
+        scheduler._generation = 9
+        scheduler._settings = scheduled_settings
+        scheduler._next_run_at = scheduled_next
+        scheduler._cycle_due_at = scheduled_due
+
+    def manual(settings):
+        assert settings == manual_settings
+        return AutoProcessingCycleResult(
+            provider=settings.provider,
+            started_at=now,
+            finished_at=now,
+            scan_status="failed",
+            errors=["provider timeout"],
+            data_health={
+                "automation_cycle_status": "partial_retry_same_slot",
+                "automation_retry_next_at": (now + timedelta(minutes=5)).isoformat(),
+            },
+        )
+
+    assert scheduler._execute(manual_settings, manual) is True
+    state = scheduler.state()
+    assert state.next_run_at == scheduled_next
+    assert state.cycle_due_at == scheduled_due
+    assert state.settings == scheduled_settings
 
 
 def test_scheduled_deferred_cycle_advances_slot_and_runs_paper_next_cycle(monkeypatch):

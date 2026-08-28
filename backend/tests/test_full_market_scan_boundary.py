@@ -397,6 +397,81 @@ def test_full_market_health_merges_fuyao_error_category_counts():
     assert health["fuyao_degraded_snapshot_field_mix"] == ("volume=5,high=4,turnover=1")
 
 
+def test_full_market_health_aggregates_fuyao_telemetry_across_batches():
+    health: dict[str, str] = {}
+    _merge_health(
+        health,
+        {
+            "fuyao_telemetry": "error",
+            "fuyao_clients": "1",
+            "fuyao_requests": "2",
+            "fuyao_errors": "2",
+            "fuyao_latency_ms_total": "30.000",
+            "fuyao_latency_ms_average": "15.000",
+        },
+    )
+    _merge_health(
+        health,
+        {
+            "fuyao_telemetry": "idle",
+            "fuyao_clients": "1",
+            "fuyao_requests": "0",
+            "fuyao_errors": "0",
+            "fuyao_latency_ms_total": "0.000",
+            "fuyao_latency_ms_average": "0.000",
+        },
+    )
+    _merge_health(
+        health,
+        {
+            "fuyao_telemetry": "partial",
+            "fuyao_clients": "1",
+            "fuyao_requests": "1",
+            "fuyao_successes": "1",
+            "fuyao_latency_ms_total": "12.000",
+            "fuyao_latency_ms_average": "12.000",
+        },
+    )
+
+    assert health["fuyao_telemetry"] == "error"
+    assert health["fuyao_clients"] == "1"
+    assert health["fuyao_requests"] == "3"
+    assert health["fuyao_latency_ms_total"] == "42.000"
+    assert health["fuyao_latency_ms_average"] == "14.000"
+
+
+def test_full_market_health_keeps_auth_non_retryable_across_provider_batches():
+    health: dict[str, str] = {}
+    _merge_health(
+        health,
+        {
+            "provider_error_kind": "transport",
+            "provider_error_code": "ConnectionError",
+            "provider_error_retryable": "true",
+        },
+    )
+    _merge_health(
+        health,
+        {
+            "provider_error_kind": "auth",
+            "provider_error_code": "configuration_auth",
+            "provider_error_retryable": "false",
+        },
+    )
+    _merge_health(
+        health,
+        {
+            "provider_error_kind": "none",
+            "provider_error_code": "",
+            "provider_error_retryable": "false",
+        },
+    )
+
+    assert health["provider_error_kind"] == "auth"
+    assert health["provider_error_code"] == "configuration_auth"
+    assert health["provider_error_retryable"] == "false"
+
+
 def test_full_market_scan_resume_keeps_frozen_expected_trade_date():
     created_at = datetime(2026, 7, 30, 1, 0, tzinfo=timezone.utc)
 

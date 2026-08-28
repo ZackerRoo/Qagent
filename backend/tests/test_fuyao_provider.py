@@ -19,6 +19,7 @@ from qagent.providers.fuyao import (
     reset_fuyao_telemetry,
     to_fuyao_thscode,
 )
+from qagent.providers.failure_state import ProviderFailureStateRegistry
 
 
 class FakeResponse:
@@ -502,6 +503,11 @@ def test_fuyao_soft_negative_capability_cache_ignores_transient_errors():
         base_url="https://transient-rate.example",
         session=rate_session,
         max_attempts=1,
+        failure_registry=ProviderFailureStateRegistry(
+            base_backoff_seconds=0,
+            max_backoff_seconds=0,
+            jitter_ratio=0,
+        ),
     )
     with pytest.raises(FuyaoProviderError):
         rate_client.get_stock_snapshot_data(["600519.SH"])

@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from time import monotonic
 
 import pandas as pd
 
@@ -16,11 +17,25 @@ class DailyFallbackMarketDataProvider:
         *,
         name: str | None = None,
         max_fallback_instruments: int | None = None,
+        max_fallback_batches: int | None = None,
+        fallback_time_budget_seconds: float | None = None,
     ):
         self.primary = primary
         self.fallback = fallback
         self.name = name or primary.name
-        self.max_fallback_instruments = max_fallback_instruments
+        self.max_fallback_instruments = (
+            max(1, max_fallback_instruments)
+            if max_fallback_instruments is not None
+            else None
+        )
+        self.max_fallback_batches = (
+            max(1, max_fallback_batches) if max_fallback_batches is not None else None
+        )
+        self.fallback_time_budget_seconds = (
+            max(0.0, fallback_time_budget_seconds)
+            if fallback_time_budget_seconds is not None
+            else None
+        )
         self.last_errors: list[str] = []
         self.last_fallback_instruments: list[str] = []
 
@@ -89,22 +104,36 @@ class DailyFallbackMarketDataProvider:
             self.last_errors = primary_errors
             return _normalized_result(primary_bars)
 
-        if (
-            self.max_fallback_instruments is not None
-            and len(missing) > self.max_fallback_instruments
-        ):
-            self.last_errors = primary_errors + [
-                "daily fallback skipped: "
-                f"{len(missing)} instruments exceeds the configured "
-                f"limit of {self.max_fallback_instruments}"
-            ]
-            return _normalized_result(primary_bars)
-
         fallback_getter = getattr(self.fallback, method_name, None)
         if fallback_getter is None:
             fallback_getter = self.fallback.get_daily_bars
-        fallback_bars = fallback_getter(missing, start, end)
-        fallback_errors = list(getattr(self.fallback, "last_errors", []))
+        batch_size = self.max_fallback_instruments or len(missing) or 1
+        batch_limit = self.max_fallback_batches or len(missing)
+        started_at = monotonic()
+        fallback_frames: list[pd.DataFrame] = []
+        fallback_errors: list[str] = []
+        attempted = 0
+        for offset in range(0, len(missing), batch_size):
+            if attempted >= batch_limit:
+                break
+            if (
+                self.fallback_time_budget_seconds is not None
+                and monotonic() - started_at >= self.fallback_time_budget_seconds
+            ):
+                break
+            batch = missing[offset : offset + batch_size]
+            frame = fallback_getter(batch, start, end)
+            fallback_frames.append(frame)
+            fallback_errors.extend(getattr(self.fallback, "last_errors", []))
+            attempted += 1
+        attempted_count = min(len(missing), attempted * batch_size)
+        if attempted_count < len(missing):
+            fallback_errors.append(
+                "daily fallback budget exhausted: "
+                f"attempted {attempted_count}/{len(missing)} instruments "
+                f"in {attempted} batches"
+            )
+        fallback_bars = _normalized_result(*fallback_frames)
         recovered = _instrument_ids(fallback_bars)
         self.last_fallback_instruments = [
             instrument_id for instrument_id in missing if instrument_id in recovered

@@ -252,6 +252,48 @@ def _apply_additive_migrations(engine: Engine) -> None:
         _add_missing_columns(
             connection,
             inspector,
+            "automation_cycles",
+            {
+                "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+                "retry_budget": "INTEGER NOT NULL DEFAULT 4",
+                "next_retry_at": "DATETIME",
+                "retry_backoff_seconds": "INTEGER",
+                "last_error_fingerprint": "VARCHAR(64)",
+                "last_error_text": "TEXT",
+                "last_error_at": "DATETIME",
+                "terminal_reason": "VARCHAR(64)",
+            },
+        )
+        _add_missing_columns(
+            connection,
+            inspector,
+            "automation_cycle_stages",
+            {
+                "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+                "retry_scope": "VARCHAR(160)",
+                "next_retry_at": "DATETIME",
+                "retry_backoff_seconds": "INTEGER",
+                "last_error_fingerprint": "VARCHAR(64)",
+                "last_error_kind": "VARCHAR(64)",
+                "last_error_retryable": "BOOLEAN",
+                "last_error_at": "DATETIME",
+            },
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_automation_cycle_stages_retry_scope "
+                "ON automation_cycle_stages(retry_scope)"
+            )
+        )
+        _add_missing_columns(
+            connection,
+            inspector,
+            "automation_circuit_breakers",
+            {"probe_expires_at": "DATETIME"},
+        )
+        _add_missing_columns(
+            connection,
+            inspector,
             "delivery_outbox",
             {
                 "idempotency_key": "VARCHAR(160)",

@@ -38,6 +38,7 @@ from qagent.providers.fuyao import (
     fuyao_telemetry_data_health,
     reset_fuyao_telemetry,
 )
+from qagent.providers.failure_state import provider_failure_state_data_health
 from qagent.recommendations.calibration import apply_strategy_calibration
 from qagent.recommendations.brief import apply_recommendation_briefs
 from qagent.recommendations.cn_execution import build_trading_constraints
@@ -463,6 +464,7 @@ def run_daily_scan(
     )
     data_health.update(operational_readiness_center.data_health)
     data_health.update(fuyao_telemetry_data_health(provider))
+    data_health.update(provider_failure_state_data_health(provider))
 
     return DailyScanResult(
         cards=cards,

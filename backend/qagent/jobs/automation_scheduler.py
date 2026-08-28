@@ -14,6 +14,7 @@ from qagent.storage.automation_runtime import (
     AutomationLeaseLostError,
     TERMINAL_CYCLE_STATUSES,
 )
+from qagent.jobs.automation_retry import retry_backoff
 
 
 class AutoProcessingSettings(BaseModel):
@@ -380,7 +381,12 @@ class AutomationScheduler:
             if generation is not None and generation != self._generation:
                 self._run_lock.release()
                 return False
-            if generation is None:
+            manual_scheduled_clock = (
+                self._next_run_at,
+                self._cycle_due_at,
+                self._settings,
+            )
+            if generation is None and not self._enabled:
                 self._settings = settings
             self._status = "running"
             due_at = self._cycle_due_at if generation is not None else None
@@ -413,8 +419,14 @@ class AutomationScheduler:
             with self._lock:
                 if generation is None or generation == self._generation:
                     self._status = "idle"
+                if generation is not None and generation == self._generation:
+                    # Coordination contention is not a cycle attempt, but the
+                    # loop still needs a bounded recheck to avoid a hot spin.
+                    self._next_run_at = _utc_now() + timedelta(
+                        seconds=SCHEDULER_CLOCK_RECHECK_SECONDS
+                    )
         except Exception as exc:  # pragma: no cover - route-level tests cover state output.
-            cycle_terminal = False
+            cycle_terminal = True
             finished_at = _utc_now()
             result = AutoProcessingCycleResult(
                 provider=settings.provider,
@@ -424,7 +436,8 @@ class AutomationScheduler:
                 errors=[str(exc)],
                 data_health={
                     "automation_scheduler_error": str(exc)[:500],
-                    "automation_cycle_status": "partial",
+                    "automation_cycle_status": "deferred_with_alert",
+                    "automation_retry_terminal_reason": "unhandled_permanent_error",
                 },
             )
             with self._lock:
@@ -457,7 +470,13 @@ class AutomationScheduler:
                         self._run_count += 1
                     self._last_completed_at = finished_at
                     self._last_result = result
-                    if is_current and cycle_terminal:
+                    if generation is None:
+                        # A manual run is observational with respect to the
+                        # background schedule, regardless of its outcome.
+                        self._next_run_at, self._cycle_due_at = manual_scheduled_clock[:2]
+                        if self._enabled:
+                            self._settings = manual_scheduled_clock[2]
+                    elif is_current and cycle_terminal:
                         self._next_run_at = (
                             finished_at + timedelta(seconds=self._settings.interval_seconds)
                             if self._enabled
@@ -467,8 +486,10 @@ class AutomationScheduler:
                     elif is_current:
                         # Preserve the immutable cycle_due_at and retry this
                         # partial slot instead of advancing the schedule.
-                        retry_seconds = min(self._settings.interval_seconds, 300)
-                        self._next_run_at = _utc_now() + timedelta(seconds=retry_seconds)
+                        retry_at = _retry_at_from_result(result)
+                        self._next_run_at = retry_at or (
+                            _utc_now() + retry_backoff(1)
+                        )
             if coordination_error is None:
                 if is_current:
                     self._notify_state_listener()
@@ -527,3 +548,14 @@ def _as_utc(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _retry_at_from_result(result: AutoProcessingCycleResult) -> datetime | None:
+    raw = result.data_health.get("automation_retry_next_at", "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return _as_utc(parsed)

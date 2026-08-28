@@ -1,6 +1,5 @@
 from datetime import date, datetime, time, timedelta
 import math
-from time import monotonic
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -8,6 +7,13 @@ import requests
 
 from qagent.providers.base import MINUTE_BAR_COLUMNS
 from qagent.providers.free_cn import BAR_COLUMNS
+from qagent.providers.failure_state import (
+    CircuitOpenError,
+    FailureKey,
+    ProviderFailureStateRegistry,
+    classify_exception,
+    retry_after_from_exception,
+)
 
 
 DEFAULT_TICKFLOW_FREE_BASE_URL = "https://free-api.tickflow.org"
@@ -37,6 +43,7 @@ class TickFlowFreeDailyProvider:
             DEFAULT_FAILURE_CIRCUIT_BREAKER_COOLDOWN_SECONDS
         ),
         session: requests.Session | None = None,
+        failure_registry: ProviderFailureStateRegistry | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.request_timeout_seconds = max(1, request_timeout_seconds)
@@ -45,6 +52,14 @@ class TickFlowFreeDailyProvider:
             failure_circuit_breaker_cooldown_seconds,
         )
         self.session = session or requests.Session()
+        self.failure_registry = failure_registry or ProviderFailureStateRegistry(
+            failure_threshold=3,
+            base_backoff_seconds=failure_circuit_breaker_cooldown_seconds,
+            max_backoff_seconds=max(
+                failure_circuit_breaker_cooldown_seconds,
+                failure_circuit_breaker_cooldown_seconds * 8,
+            ),
+        )
         self.last_errors: list[str] = []
         self.source_circuit_open_until = 0.0
 
@@ -57,20 +72,13 @@ class TickFlowFreeDailyProvider:
         self.last_errors = []
         frames: list[pd.DataFrame] = []
         for instrument_id in dict.fromkeys(instrument_ids):
-            if self._source_circuit_open():
-                self.last_errors.append(
-                    f"{instrument_id}: tickflow_free skipped after rate limit; "
-                    f"retry in {self.source_circuit_retry_after_seconds():.0f}s"
-                )
-                continue
             try:
                 frame = self._load_instrument(instrument_id, start, end)
+            except CircuitOpenError as exc:
+                self.last_errors.append(f"{instrument_id}: {exc}")
+                continue
             except Exception as exc:
                 self.last_errors.append(f"{instrument_id}: tickflow_free: {exc}")
-                if _is_rate_limit_error(exc):
-                    self.source_circuit_open_until = (
-                        monotonic() + self.failure_circuit_breaker_cooldown_seconds
-                    )
                 continue
             if not frame.empty:
                 frames.append(frame)
@@ -115,7 +123,10 @@ class TickFlowFreeDailyProvider:
 
     def source_circuit_retry_after_seconds(self, instrument_id: str | None = None) -> float:
         del instrument_id
-        return max(0.0, self.source_circuit_open_until - monotonic())
+        return max(
+            self.failure_registry.retry_after_seconds(self._failure_key("daily_none")),
+            self.failure_registry.retry_after_seconds(self._failure_key("daily_forward")),
+        )
 
     def _load_instrument(
         self,
@@ -141,10 +152,6 @@ class TickFlowFreeDailyProvider:
                 self.last_errors.append(
                     f"{instrument_id}: tickflow_free adjusted history: {exc}"
                 )
-                if _is_rate_limit_error(exc):
-                    self.source_circuit_open_until = (
-                        monotonic() + self.failure_circuit_breaker_cooldown_seconds
-                    )
                 adjusted = pd.DataFrame()
             adjustment_type = "forward"
             provider_name = TICKFLOW_PAIRED_SOURCE_PROVIDER
@@ -194,25 +201,41 @@ class TickFlowFreeDailyProvider:
         *,
         adjust: str,
     ) -> pd.DataFrame:
-        response = self.session.get(
-            f"{self.base_url}/v1/klines",
-            params={
-                "symbol": symbol,
-                "period": "1d",
-                "count": MAX_KLINE_COUNT,
-                "start_time": _date_to_epoch_ms(start),
-                "end_time": _date_to_epoch_ms(end, end_of_day=True),
-                "adjust": adjust,
-            },
-            timeout=(self.request_timeout_seconds, self.request_timeout_seconds),
-            headers={"User-Agent": "Qagent/0.1 tickflow-free-fallback"},
-        )
-        response.raise_for_status()
-        payload = response.json()
-        data = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(data, dict):
-            raise ValueError("response is missing the data object")
-        return _normalize_kline_payload(data, start, end)
+        key = self._failure_key(f"daily_{adjust}")
+        self.failure_registry.acquire(key)
+        try:
+            response = self.session.get(
+                f"{self.base_url}/v1/klines",
+                params={
+                    "symbol": symbol,
+                    "period": "1d",
+                    "count": MAX_KLINE_COUNT,
+                    "start_time": _date_to_epoch_ms(start),
+                    "end_time": _date_to_epoch_ms(end, end_of_day=True),
+                    "adjust": adjust,
+                },
+                timeout=(self.request_timeout_seconds, self.request_timeout_seconds),
+                headers={"User-Agent": "Qagent/0.1 tickflow-free-fallback"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            data = payload.get("data") if isinstance(payload, dict) else None
+            if not isinstance(data, dict):
+                raise ValueError("response is missing the data object")
+            normalized = _normalize_kline_payload(data, start, end)
+        except Exception as exc:
+            self.failure_registry.failure(
+                key,
+                classify_exception(exc),
+                retry_after_seconds=retry_after_from_exception(exc),
+                error_code=getattr(getattr(exc, "response", None), "status_code", None),
+            )
+            raise
+        self.failure_registry.success(key)
+        return normalized
+
+    def _failure_key(self, capability: str) -> FailureKey:
+        return FailureKey("tickflow_free", self.base_url, capability)
 
 
 def _to_tickflow_symbol(instrument_id: str) -> tuple[str, bool]:

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from http.client import RemoteDisconnected
 import math
+import random
 import time
 from threading import Lock
 from typing import Any, Literal
@@ -15,6 +16,14 @@ import requests
 
 from qagent.providers.base import MINUTE_BAR_COLUMNS
 from qagent.providers.free_cn import BAR_COLUMNS
+from qagent.providers.failure_state import (
+    CircuitOpenError,
+    FailureCategory,
+    FailureKey,
+    ProviderFailureStateRegistry,
+    classify_exception,
+    retry_after_from_exception,
+)
 
 
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
@@ -184,6 +193,8 @@ class FuyaoClient:
         retry_backoff_seconds: float = 0.25,
         negative_capability_ttl_seconds: float = FUYAO_NEGATIVE_CAPABILITY_TTL_SECONDS,
         session: requests.Session | None = None,
+        failure_registry: ProviderFailureStateRegistry | None = None,
+        retry_jitter_ratio: float = 0.2,
     ):
         normalized_key = api_key.strip()
         if not normalized_key:
@@ -195,6 +206,8 @@ class FuyaoClient:
         self.retry_backoff_seconds = max(0.0, retry_backoff_seconds)
         self.negative_capability_ttl_seconds = max(0.0, negative_capability_ttl_seconds)
         self.session = session or requests.Session()
+        self.failure_registry = failure_registry or ProviderFailureStateRegistry()
+        self.retry_jitter_ratio = min(1.0, max(0.0, retry_jitter_ratio))
         self.last_errors: list[str] = []
         self.last_request: FuyaoRequestMetadata | None = None
         self._telemetry_lock = Lock()
@@ -643,6 +656,11 @@ class FuyaoClient:
         request_params = {key: value for key, value in (params or {}).items() if value is not None}
         capability_key = _negative_capability_key(self.base_url, path, request_params)
         self._raise_if_negative_capability_cached(capability_key, path)
+        failure_key = FailureKey("fuyao", self.base_url, path)
+        try:
+            self.failure_registry.acquire(failure_key)
+        except CircuitOpenError as exc:
+            raise FuyaoProviderError(str(exc), code="circuit_open") from exc
         last_error: FuyaoProviderError | None = None
         started_at = time.perf_counter()
         self._telemetry_begin(path)
@@ -675,6 +693,17 @@ class FuyaoClient:
                     error_code=last_error.code,
                     error_category=error_category,
                 )
+                category = (
+                    FailureCategory.INVALID_REQUEST
+                    if isinstance(exc, ValueError)
+                    else classify_exception(exc)
+                )
+                self.failure_registry.failure(
+                    failure_key,
+                    category,
+                    retry_after_seconds=retry_after_from_exception(exc),
+                    error_code=getattr(getattr(exc, "response", None), "status_code", None),
+                )
                 raise last_error from exc
 
             if not isinstance(payload, dict):
@@ -687,6 +716,11 @@ class FuyaoClient:
                     success=False,
                     error_code=last_error.code,
                     error_category="incomplete_response",
+                )
+                self.failure_registry.failure(
+                    failure_key,
+                    FailureCategory.INVALID_REQUEST,
+                    error_code="invalid_response",
                 )
                 raise last_error
             code = payload.get("code")
@@ -703,6 +737,7 @@ class FuyaoClient:
                     request_id=metadata.request_id,
                     data_timestamp=metadata.timestamp,
                 )
+                self.failure_registry.success(failure_key)
                 return payload
 
             request_id = _request_id(payload)
@@ -743,6 +778,11 @@ class FuyaoClient:
                 error_code=last_error.code,
                 error_category=_fuyao_error_category(last_error.code, message),
             )
+            self.failure_registry.failure(
+                failure_key,
+                _fuyao_failure_category(last_error.code, message),
+                error_code=last_error.code,
+            )
             raise last_error
 
         assert last_error is not None
@@ -752,6 +792,11 @@ class FuyaoClient:
             request_id=last_error.request_id,
             error_code=last_error.code,
             error_category=_fuyao_error_category(last_error.code, str(last_error)),
+        )
+        self.failure_registry.failure(
+            failure_key,
+            _fuyao_failure_category(last_error.code, str(last_error)),
+            error_code=last_error.code,
         )
         raise last_error
 
@@ -778,7 +823,9 @@ class FuyaoClient:
 
     def _sleep_before_retry(self, attempt: int) -> None:
         if self.retry_backoff_seconds:
-            time.sleep(self.retry_backoff_seconds * attempt)
+            delay = self.retry_backoff_seconds * (2 ** max(0, attempt - 1))
+            delay += delay * self.retry_jitter_ratio * random.random()
+            time.sleep(delay)
 
     def _telemetry_begin(self, path: str) -> None:
         with self._telemetry_lock:
@@ -1205,6 +1252,23 @@ def _fuyao_error_category(code: int | str | None, message: str | None) -> str:
     ):
         return "authentication"
     return f"business_{normalized_code}" if normalized_code else "business_error"
+
+
+def _fuyao_failure_category(code: int | str | None, message: str | None) -> FailureCategory:
+    category = _fuyao_error_category(code, message)
+    if category == "authentication":
+        return FailureCategory.AUTH
+    if category == "rate_limited":
+        return FailureCategory.RATE_LIMIT
+    if category == "timeout":
+        return FailureCategory.TIMEOUT
+    if category == "unsupported_asset":
+        return FailureCategory.UNSUPPORTED
+    if category == "symbol_not_found":
+        return FailureCategory.NOT_LISTED
+    if str(code) in {"5002", "5003"}:
+        return FailureCategory.SERVER
+    return FailureCategory.INVALID_REQUEST
 
 
 def _negative_capability_reason(code: object, message: str) -> str | None:

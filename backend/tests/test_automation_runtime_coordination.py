@@ -12,10 +12,17 @@ from pathlib import Path
 from threading import Barrier
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 
 from qagent.db import create_session_factory, initialize_database
 from qagent import db as db_module
+from qagent.jobs.automation_retry import classify_automation_error
+from qagent.providers.failure_state import (
+    FailureCategory,
+    FailureKey,
+    ProviderFailureStateRegistry,
+    provider_failure_state_data_health,
+)
 from qagent.storage.automation_runtime import (
     AUTOMATION_LEASE_KEY,
     AutomationCycleBusyError,
@@ -26,7 +33,7 @@ from qagent.storage.automation_runtime import (
     manual_cycle_slot,
     scheduled_cycle_slot,
 )
-from qagent.storage.paper import PaperTradingRepository
+from qagent.storage.paper import PaperTradeEventMetadata, PaperTradingRepository
 from qagent.storage.repository import (
     BriefRunRecord,
     DeliveryIdempotencyConflictError,
@@ -37,6 +44,106 @@ from qagent.storage.repository import (
 def _runtime(database_url: str) -> AutomationRuntimeRepository:
     initialize_database(database_url)
     return AutomationRuntimeRepository(create_session_factory(database_url))
+
+
+@pytest.mark.parametrize(
+    ("health", "expected_kind", "expected_retryable"),
+    [
+        (
+            {
+                "provider_error_kind": "unsupported",
+                "provider_error_code": "NO_ENDPOINT",
+                "provider_error_retryable": "false",
+            },
+            "unsupported",
+            False,
+        ),
+        (
+            {
+                "free_provider_error_kind": "timeout",
+                "free_provider_error_retryable": "true",
+            },
+            "timeout",
+            True,
+        ),
+        (
+            {
+                "provider_error_kind": "auth",
+                "provider_error_retryable": "true",
+            },
+            "permanent_configuration/auth",
+            False,
+        ),
+        (
+            {
+                "provider_error_kind": "timeout",
+                "provider_error_retryable": "false",
+            },
+            "timeout",
+            False,
+        ),
+    ],
+)
+def test_automation_error_classification_prefers_structured_provider_health(
+    health,
+    expected_kind,
+    expected_retryable,
+):
+    classified = classify_automation_error(
+        "paper_update",
+        "free",
+        "contract violation",
+        health,
+    )
+
+    assert classified.error_kind == expected_kind
+    assert classified.retryable is expected_retryable
+    assert len(classified.fingerprint) == 64
+
+
+def test_automation_error_classification_falls_back_when_health_is_absent():
+    retryable = classify_automation_error(
+        "scan",
+        "free",
+        "provider timeout request_id=volatile",
+    )
+    permanent = classify_automation_error(
+        "paper_update",
+        "free",
+        "telemetry is missing or invalid",
+    )
+    auth = classify_automation_error(
+        "paper_update",
+        "free",
+        "HTTP 401 unauthorized",
+    )
+
+    assert retryable.retryable is True
+    assert retryable.error_kind == "provider_or_coverage"
+    assert permanent.retryable is False
+    assert permanent.error_kind == "permanent_contract"
+    assert auth.retryable is False
+    assert auth.error_kind == "permanent_configuration/auth"
+
+
+def test_provider_auth_health_is_permanent_across_provider_and_automation_layers():
+    registry = ProviderFailureStateRegistry(jitter_ratio=0)
+    key = FailureKey(provider="free", origin="example", capability="daily")
+    registry.failure(key, FailureCategory.AUTH, error_code=401)
+    provider = type("ProviderWithRegistry", (), {"failure_registry": registry})()
+
+    health = provider_failure_state_data_health(provider)
+    classified = classify_automation_error(
+        "paper_update",
+        "free",
+        "provider authentication failed",
+        health,
+    )
+
+    assert health["provider_error_kind"] == "auth"
+    assert health["provider_error_retryable"] == "false"
+    assert classified.retryable is False
+    assert classified.error_kind == "permanent_configuration/auth"
 
 
 def test_additive_migration_records_duplicate_audit_without_mutation(tmp_path):
@@ -53,6 +160,147 @@ def test_additive_migration_records_duplicate_audit_without_mutation(tmp_path):
     audit = json.loads(payload)
     assert audit["active_paper_duplicate_groups"] == 0
     assert audit["action"] == "audit_only_no_historical_deletion"
+
+
+def test_additive_migration_has_bounded_retry_schema(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'retry-schema.db'}"
+    initialize_database(database_url)
+    engine = create_engine(database_url)
+    inspector = inspect(engine)
+
+    cycle_columns = {item["name"] for item in inspector.get_columns("automation_cycles")}
+    stage_columns = {
+        item["name"] for item in inspector.get_columns("automation_cycle_stages")
+    }
+
+    assert {
+        "attempt_count",
+        "retry_budget",
+        "next_retry_at",
+        "last_error_fingerprint",
+        "terminal_reason",
+    } <= cycle_columns
+    assert {
+        "attempt_count",
+        "retry_scope",
+        "next_retry_at",
+        "last_error_retryable",
+    } <= stage_columns
+    assert {"automation_circuit_breakers", "automation_incidents"} <= set(
+        inspector.get_table_names()
+    )
+    breaker_columns = {
+        item["name"] for item in inspector.get_columns("automation_circuit_breakers")
+    }
+    assert "probe_expires_at" in breaker_columns
+
+
+def test_legacy_partial_cycle_migrates_and_first_new_failure_is_attempt_one(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'legacy-partial-retry.db'}"
+    initialize_database(database_url)
+    engine = create_engine(database_url)
+    now = datetime(2026, 8, 29, 1, 0, tzinfo=timezone.utc)
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE automation_cycle_stages"))
+        connection.execute(text("DROP TABLE automation_cycles"))
+        connection.execute(text("DROP TABLE automation_circuit_breakers"))
+        connection.execute(
+            text(
+                "CREATE TABLE automation_cycles ("
+                "cycle_slot VARCHAR(160) PRIMARY KEY, cycle_kind VARCHAR(16), "
+                "settings_digest VARCHAR(64), idempotency_key VARCHAR(160), "
+                "due_at DATETIME, status VARCHAR(32), owner_token VARCHAR(128), "
+                "fencing_token INTEGER, result_json TEXT, error_json TEXT, "
+                "started_at DATETIME, finalized_at DATETIME, created_at DATETIME, "
+                "updated_at DATETIME)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE automation_cycle_stages ("
+                "cycle_slot VARCHAR(160), stage_key VARCHAR(64), status VARCHAR(32), "
+                "owner_token VARCHAR(128), fencing_token INTEGER, output_digest VARCHAR(64), "
+                "output_json TEXT, error_text TEXT, started_at DATETIME, "
+                "completed_at DATETIME, updated_at DATETIME, "
+                "PRIMARY KEY(cycle_slot, stage_key))"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE automation_circuit_breakers ("
+                "scope_key VARCHAR(160) PRIMARY KEY, state VARCHAR(32), "
+                "failure_count INTEGER, open_count INTEGER, next_probe_at DATETIME, "
+                "last_error_fingerprint VARCHAR(64), last_error_text TEXT, "
+                "half_open_cycle_slot VARCHAR(160), revision INTEGER, "
+                "created_at DATETIME, updated_at DATETIME)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO automation_circuit_breakers VALUES "
+                "('scan:free','open',1,1,:now,NULL,'legacy',NULL,1,:now,:now)"
+            ),
+            {"now": now},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO automation_cycles VALUES "
+                "('manual:legacy','manual',:digest,:key,NULL,'partial_retry_same_slot',"
+                "'old-owner',1,'{}','[\"old failure\"]',:now,:now,:now,:now)"
+            ),
+            {"digest": "7" * 64, "key": "automation-manual:legacy", "now": now},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO automation_cycle_stages VALUES "
+                "('manual:legacy','scan','error','old-owner',1,NULL,'{}','old failure',"
+                ":now,:now,:now)"
+            ),
+            {"now": now},
+        )
+
+    db_module._apply_additive_migrations(engine)
+    with engine.connect() as connection:
+        legacy_breaker = connection.execute(
+            text(
+                "SELECT state,probe_expires_at FROM automation_circuit_breakers "
+                "WHERE scope_key='scan:free'"
+            )
+        ).one()
+    assert legacy_breaker.state == "open"
+    assert legacy_breaker.probe_expires_at is None
+    runtime = AutomationRuntimeRepository(create_session_factory(database_url))
+    started = runtime.begin_cycle(
+        cycle_slot="manual:legacy",
+        cycle_kind="manual",
+        settings_digest="7" * 64,
+        due_at=None,
+        idempotency_key="automation-manual:legacy",
+        owner_token="new-owner",
+        now=now + timedelta(minutes=5),
+        process_fence_held=True,
+    )
+    assert started.attempt_count == 0
+    assert started.grant is not None
+    assert runtime.begin_stage(started.grant, "scan", now=now + timedelta(minutes=5)) is None
+    runtime.fail_stage(
+        started.grant,
+        "scan",
+        "provider timeout",
+        error_fingerprint="7" * 64,
+        error_kind="timeout",
+        retryable=True,
+        now=now + timedelta(minutes=5),
+    )
+    assert runtime.finalize_cycle(
+        started.grant,
+        result={},
+        errors=["scan: provider timeout"],
+        issues=[],
+        required_stages={"scan"},
+        now=now + timedelta(minutes=5),
+    ) == "partial_retry_same_slot"
+    assert runtime.cycle_retry_state("manual:legacy").attempt_count == 1
 
 
 def test_legacy_outbox_migration_preserves_rows_and_adds_idempotency_columns(tmp_path):
@@ -378,6 +626,7 @@ def test_deferred_stage_is_terminal_and_replays_issue_status(tmp_path):
 def test_partial_cycle_reuses_successful_stage_and_recovers_failed_stage(tmp_path):
     runtime = _runtime(f"sqlite:///{tmp_path / 'stage-recovery.db'}")
     slot, idempotency_key = manual_cycle_slot("recover-1")
+    started_at = datetime(2026, 8, 29, 1, 0, tzinfo=timezone.utc)
     first = runtime.begin_cycle(
         cycle_slot=slot,
         cycle_kind="manual",
@@ -385,19 +634,43 @@ def test_partial_cycle_reuses_successful_stage_and_recovers_failed_stage(tmp_pat
         due_at=None,
         idempotency_key=idempotency_key,
         owner_token="first-owner",
+        now=started_at,
     )
     assert first.grant is not None
-    runtime.begin_stage(first.grant, "scan")
-    runtime.complete_stage(first.grant, "scan", {"artifact_id": "scan-1"})
-    runtime.begin_stage(first.grant, "paper_seed")
-    runtime.fail_stage(first.grant, "paper_seed", "injected failure")
+    runtime.begin_stage(first.grant, "scan", now=started_at)
+    runtime.complete_stage(
+        first.grant,
+        "scan",
+        {"artifact_id": "scan-1"},
+        now=started_at,
+    )
+    runtime.begin_stage(first.grant, "paper_seed", now=started_at)
+    runtime.fail_stage(
+        first.grant,
+        "paper_seed",
+        "injected failure",
+        now=started_at,
+    )
     assert runtime.finalize_cycle(
         first.grant,
         result={"status": "partial"},
         errors=["paper_seed: injected failure"],
         issues=[],
         required_stages={"scan", "paper_seed"},
+        now=started_at,
     ) == "partial_retry_same_slot"
+
+    not_due = runtime.begin_cycle(
+        cycle_slot=slot,
+        cycle_kind="manual",
+        settings_digest="b" * 64,
+        due_at=None,
+        idempotency_key=idempotency_key,
+        owner_token="early-owner",
+        now=started_at + timedelta(minutes=1),
+    )
+    assert not_due.grant is None
+    assert not_due.retry_not_due_at == started_at + timedelta(minutes=5)
 
     retry = runtime.begin_cycle(
         cycle_slot=slot,
@@ -406,18 +679,33 @@ def test_partial_cycle_reuses_successful_stage_and_recovers_failed_stage(tmp_pat
         due_at=None,
         idempotency_key=idempotency_key,
         owner_token="retry-owner",
+        now=started_at + timedelta(minutes=5),
     )
     assert retry.grant is not None
     assert retry.grant.fencing_token > first.grant.fencing_token
-    assert runtime.begin_stage(retry.grant, "scan") == {"artifact_id": "scan-1"}
-    assert runtime.begin_stage(retry.grant, "paper_seed") is None
-    runtime.complete_stage(retry.grant, "paper_seed", {"created": 1})
+    assert runtime.begin_stage(
+        retry.grant,
+        "scan",
+        now=started_at + timedelta(minutes=5),
+    ) == {"artifact_id": "scan-1"}
+    assert runtime.begin_stage(
+        retry.grant,
+        "paper_seed",
+        now=started_at + timedelta(minutes=5),
+    ) is None
+    runtime.complete_stage(
+        retry.grant,
+        "paper_seed",
+        {"created": 1},
+        now=started_at + timedelta(minutes=5),
+    )
     assert runtime.finalize_cycle(
         retry.grant,
         result={"status": "succeeded"},
         errors=[],
         issues=[],
         required_stages={"scan", "paper_seed"},
+        now=started_at + timedelta(minutes=5),
     ) == "succeeded"
 
     with pytest.raises(AutomationCycleConflictError, match="different facts"):
@@ -428,7 +716,662 @@ def test_partial_cycle_reuses_successful_stage_and_recovers_failed_stage(tmp_pat
             due_at=None,
             idempotency_key=idempotency_key,
             owner_token="conflicting-owner",
+            now=started_at + timedelta(minutes=5),
         )
+
+
+def test_partial_paper_stage_retry_does_not_duplicate_existing_event(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'partial-paper-event.db'}"
+    runtime = _runtime(database_url)
+    paper_repo = PaperTradingRepository(create_session_factory(database_url))
+    trade = paper_repo.create_trade(
+        source_snapshot_id="missing-legacy-snapshot",
+        provider="free",
+        instrument_id="CN:000001",
+        strategy_id="test",
+        signal_date=date(2026, 8, 28),
+        trigger_price=Decimal("10"),
+        initial_stop=Decimal("9"),
+        target_1=Decimal("12"),
+    )
+    now = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
+    slot, key = manual_cycle_slot("paper-event-retry")
+    first = runtime.begin_cycle(
+        cycle_slot=slot,
+        cycle_kind="manual",
+        settings_digest="9" * 64,
+        due_at=None,
+        idempotency_key=key,
+        owner_token="first-owner",
+        now=now,
+    )
+    assert first.grant is not None
+    runtime.begin_stage(first.grant, "paper_update", now=now)
+    paper_repo.update_trade(
+        trade.trade_id,
+        status="open",
+        entry_date=date(2026, 8, 29),
+        entry_price=Decimal("10"),
+        event_metadata=PaperTradeEventMetadata(
+            idempotency_key="automation-paper-open-stable",
+        ),
+    )
+    runtime.fail_stage(
+        first.grant,
+        "paper_update",
+        "provider timeout after first persisted update",
+        error_fingerprint="9" * 64,
+        error_kind="timeout",
+        retryable=True,
+        now=now,
+    )
+    assert runtime.finalize_cycle(
+        first.grant,
+        result={},
+        errors=["paper_update: provider timeout after first persisted update"],
+        issues=[],
+        required_stages={"paper_update"},
+        now=now,
+    ) == "partial_retry_same_slot"
+    assert len(paper_repo.list_trade_events(trade.trade_id)) == 2
+
+    retry_at = now + timedelta(minutes=5)
+    retry = runtime.begin_cycle(
+        cycle_slot=slot,
+        cycle_kind="manual",
+        settings_digest="9" * 64,
+        due_at=None,
+        idempotency_key=key,
+        owner_token="retry-owner",
+        now=retry_at,
+    )
+    assert retry.grant is not None
+    assert runtime.begin_stage(retry.grant, "paper_update", now=retry_at) is None
+    paper_repo.update_trade(
+        trade.trade_id,
+        status="open",
+        entry_date=date(2026, 8, 29),
+        entry_price=Decimal("10"),
+        event_metadata=PaperTradeEventMetadata(
+            idempotency_key="automation-paper-open-stable",
+        ),
+    )
+    assert len(paper_repo.list_trade_events(trade.trade_id)) == 2
+    runtime.complete_stage(
+        retry.grant,
+        "paper_update",
+        {"paper_total": 1},
+        now=retry_at,
+    )
+    assert runtime.finalize_cycle(
+        retry.grant,
+        result={},
+        errors=[],
+        issues=[],
+        required_stages={"paper_update"},
+        now=retry_at,
+    ) == "succeeded"
+
+
+def test_retry_budget_backoff_fingerprint_changes_and_alert_are_persisted(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'bounded-retry.db'}"
+    runtime = _runtime(database_url)
+    due = datetime(2026, 8, 29, 1, 0, tzinfo=timezone.utc)
+    slot = scheduled_cycle_slot(due, "d" * 64)
+    current = due
+    expected_delays = [300, 600, 1200]
+
+    for attempt in range(1, 5):
+        start = runtime.begin_cycle(
+            cycle_slot=slot,
+            cycle_kind="scheduled",
+            settings_digest="d" * 64,
+            due_at=due,
+            idempotency_key=None,
+            owner_token=f"owner-{attempt}",
+            now=current,
+        )
+        assert start.grant is not None
+        runtime.begin_stage(
+            start.grant,
+            "paper_update",
+            retry_scope="paper_update:free",
+            now=current,
+        )
+        runtime.fail_stage(
+            start.grant,
+            "paper_update",
+            f"provider timeout request_id={attempt}",
+            retry_scope="paper_update:free",
+            error_fingerprint=f"{attempt % 2}" * 64,
+            error_kind="provider_or_coverage",
+            retryable=True,
+            now=current,
+        )
+        status = runtime.finalize_cycle(
+            start.grant,
+            result={"attempt": attempt},
+            errors=[f"paper_update: provider timeout request_id={attempt}"],
+            issues=[],
+            required_stages={"paper_update"},
+            now=current,
+        )
+        retry = runtime.cycle_retry_state(slot)
+        assert retry.attempt_count == attempt
+        if attempt < 4:
+            assert status == "partial_retry_same_slot"
+            assert retry.retry_backoff_seconds == expected_delays[attempt - 1]
+            assert retry.next_retry_at == current + timedelta(
+                seconds=expected_delays[attempt - 1]
+            )
+            if attempt == 1:
+                runtime = AutomationRuntimeRepository(
+                    create_session_factory(database_url)
+                )
+            early = runtime.begin_cycle(
+                cycle_slot=slot,
+                cycle_kind="scheduled",
+                settings_digest="d" * 64,
+                due_at=due,
+                idempotency_key=None,
+                owner_token=f"early-{attempt}",
+                now=current + timedelta(seconds=1),
+            )
+            assert early.grant is None
+            assert early.retry_not_due_at == retry.next_retry_at
+            current = retry.next_retry_at
+            assert current is not None
+        else:
+            assert status == "deferred_with_alert"
+            assert retry.next_retry_at is None
+            assert retry.terminal_reason == "retry_budget_exhausted"
+
+    with create_engine(database_url).connect() as connection:
+        cycle = connection.execute(
+            text(
+                "SELECT attempt_count, status, last_error_fingerprint "
+                "FROM automation_cycles WHERE cycle_slot=:slot"
+            ),
+            {"slot": slot},
+        ).one()
+        breaker = connection.execute(
+            text(
+                "SELECT state,open_count,next_probe_at FROM automation_circuit_breakers "
+                "WHERE scope_key='paper_update:free'"
+            )
+        ).one()
+        assert connection.execute(text("SELECT COUNT(*) FROM automation_incidents")).scalar_one() == 1
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM delivery_outbox WHERE idempotency_key LIKE 'automation-retry-alert:%'")
+        ).scalar_one() == 1
+    assert cycle.attempt_count == 4
+    assert cycle.status == "deferred_with_alert"
+    assert cycle.last_error_fingerprint
+    assert breaker.state == "open"
+    assert breaker.open_count == 1
+
+    replay = runtime.begin_cycle(
+        cycle_slot=slot,
+        cycle_kind="scheduled",
+        settings_digest="d" * 64,
+        due_at=due,
+        idempotency_key=None,
+        owner_token="replay",
+        now=current,
+    )
+    assert replay.replay_status == "deferred_with_alert"
+    with create_engine(database_url).connect() as connection:
+        assert connection.execute(text("SELECT COUNT(*) FROM automation_incidents")).scalar_one() == 1
+        assert connection.execute(text("SELECT COUNT(*) FROM delivery_outbox")).scalar_one() == 1
+
+
+def test_unkeyed_manual_failure_is_one_shot_and_keyed_manual_is_retryable(tmp_path):
+    runtime = _runtime(f"sqlite:///{tmp_path / 'manual-retry-contract.db'}")
+    now = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
+
+    unkeyed_slot, unkeyed_id = manual_cycle_slot()
+    unkeyed = runtime.begin_cycle(
+        cycle_slot=unkeyed_slot,
+        cycle_kind="manual",
+        settings_digest="1" * 64,
+        due_at=None,
+        idempotency_key=unkeyed_id,
+        owner_token="unkeyed-owner",
+        now=now,
+    )
+    assert unkeyed.grant is not None
+    runtime.begin_stage(
+        unkeyed.grant,
+        "scan",
+        retry_scope="scan:free",
+        now=now,
+    )
+    runtime.fail_stage(
+        unkeyed.grant,
+        "scan",
+        "provider timeout",
+        retry_scope="scan:free",
+        error_fingerprint="1" * 64,
+        error_kind="timeout",
+        retryable=True,
+        now=now,
+    )
+    assert runtime.finalize_cycle(
+        unkeyed.grant,
+        result={},
+        errors=["scan: provider timeout"],
+        issues=[],
+        required_stages={"scan"},
+        now=now,
+    ) == "deferred_with_alert"
+    assert runtime.cycle_retry_state(unkeyed_slot).terminal_reason == "manual_one_shot"
+
+    keyed_slot, keyed_id = manual_cycle_slot("stable-key")
+    keyed = runtime.begin_cycle(
+        cycle_slot=keyed_slot,
+        cycle_kind="manual",
+        settings_digest="2" * 64,
+        due_at=None,
+        idempotency_key=keyed_id,
+        owner_token="keyed-owner",
+        now=now,
+    )
+    assert keyed.grant is not None
+    runtime.begin_stage(keyed.grant, "scan", now=now)
+    runtime.fail_stage(
+        keyed.grant,
+        "scan",
+        "provider timeout",
+        error_fingerprint="2" * 64,
+        error_kind="timeout",
+        retryable=True,
+        now=now,
+    )
+    assert runtime.finalize_cycle(
+        keyed.grant,
+        result={},
+        errors=["scan: provider timeout"],
+        issues=[],
+        required_stages={"scan"},
+        now=now,
+    ) == "partial_retry_same_slot"
+
+    early = runtime.begin_cycle(
+        cycle_slot=keyed_slot,
+        cycle_kind="manual",
+        settings_digest="2" * 64,
+        due_at=None,
+        idempotency_key=keyed_id,
+        owner_token="early-owner",
+        now=now + timedelta(minutes=1),
+    )
+    assert early.grant is None
+    assert early.retry_not_due_at == now + timedelta(minutes=5)
+
+
+def test_auth_failure_is_first_attempt_terminal_without_automation_breaker(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'auth-permanent.db'}"
+    runtime = _runtime(database_url)
+    now = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
+    due = now
+    slot = scheduled_cycle_slot(due, "a" * 64)
+    started = runtime.begin_cycle(
+        cycle_slot=slot,
+        cycle_kind="scheduled",
+        settings_digest="a" * 64,
+        due_at=due,
+        idempotency_key=None,
+        owner_token="auth-owner",
+        now=now,
+    )
+    assert started.grant is not None
+    runtime.begin_stage(
+        started.grant,
+        "paper_update",
+        retry_scope="paper_update:free",
+        now=now,
+    )
+    classified = classify_automation_error(
+        "paper_update",
+        "free",
+        "HTTP 401 unauthorized",
+        {
+            "provider_error_kind": "auth",
+            "provider_error_code": "401",
+            "provider_error_retryable": "false",
+        },
+    )
+    runtime.fail_stage(
+        started.grant,
+        "paper_update",
+        "HTTP 401 unauthorized",
+        retry_scope="paper_update:free",
+        error_fingerprint=classified.fingerprint,
+        error_kind=classified.error_kind,
+        retryable=classified.retryable,
+        now=now,
+    )
+    assert runtime.finalize_cycle(
+        started.grant,
+        result={},
+        errors=["paper_update: HTTP 401 unauthorized"],
+        issues=[],
+        required_stages={"paper_update"},
+        now=now,
+    ) == "deferred_with_alert"
+    retry = runtime.cycle_retry_state(slot)
+    assert retry.attempt_count == 1
+    assert retry.terminal_reason == "permanent_error"
+    with create_engine(database_url).connect() as connection:
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM automation_circuit_breakers")
+        ).scalar_one() == 0
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM automation_incidents")
+        ).scalar_one() == 1
+
+
+def test_open_breaker_skips_then_allows_one_half_open_probe_and_recovers(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'half-open.db'}"
+    runtime = _runtime(database_url)
+    engine = create_engine(database_url)
+    base = datetime(2026, 8, 29, 2, 0, tzinfo=timezone.utc)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO automation_circuit_breakers "
+                "(scope_key,state,failure_count,open_count,next_probe_at,revision,created_at,updated_at) "
+                "VALUES ('paper_update:free','open',1,1,:probe,1,:now,:now)"
+            ),
+            {"probe": base + timedelta(minutes=30), "now": base},
+        )
+
+    skipped_slot = scheduled_cycle_slot(base, "e" * 64)
+    skipped = runtime.begin_cycle(
+        cycle_slot=skipped_slot,
+        cycle_kind="scheduled",
+        settings_digest="e" * 64,
+        due_at=base,
+        idempotency_key=None,
+        owner_token="skip-owner",
+        now=base,
+    )
+    assert skipped.grant is not None
+    checkpoint = runtime.begin_stage(
+        skipped.grant,
+        "paper_update",
+        retry_scope="paper_update:free",
+        now=base,
+    )
+    assert checkpoint is not None
+    assert "circuit open" in checkpoint["stage_issue"]
+    assert runtime.finalize_cycle(
+        skipped.grant,
+        result={},
+        errors=[],
+        issues=[checkpoint["stage_issue"]],
+        required_stages={"paper_update"},
+        now=base,
+    ) == "deferred_with_alert"
+
+    first_probe_at = base + timedelta(minutes=30)
+    probe_slot = scheduled_cycle_slot(first_probe_at, "e" * 64)
+    probe = runtime.begin_cycle(
+        cycle_slot=probe_slot,
+        cycle_kind="scheduled",
+        settings_digest="e" * 64,
+        due_at=first_probe_at,
+        idempotency_key=None,
+        owner_token="probe-owner",
+        now=first_probe_at,
+    )
+    assert probe.grant is not None
+    assert runtime.begin_stage(
+        probe.grant,
+        "paper_update",
+        retry_scope="paper_update:free",
+        now=first_probe_at,
+    ) is None
+    with pytest.raises(AutomationCycleBusyError):
+        runtime.begin_cycle(
+            cycle_slot=scheduled_cycle_slot(first_probe_at, "f" * 64),
+            cycle_kind="scheduled",
+            settings_digest="f" * 64,
+            due_at=first_probe_at,
+            idempotency_key=None,
+            owner_token="second-probe-owner",
+            now=first_probe_at,
+        )
+    runtime.fail_stage(
+        probe.grant,
+        "paper_update",
+        "provider timeout",
+        retry_scope="paper_update:free",
+        error_fingerprint="f" * 64,
+        error_kind="provider_or_coverage",
+        retryable=True,
+        now=first_probe_at,
+    )
+    assert runtime.finalize_cycle(
+        probe.grant,
+        result={},
+        errors=["paper_update: provider timeout"],
+        issues=[],
+        required_stages={"paper_update"},
+        now=first_probe_at,
+    ) == "deferred_with_alert"
+    with engine.connect() as connection:
+        breaker = connection.execute(
+            text(
+                "SELECT state,open_count,next_probe_at FROM automation_circuit_breakers "
+                "WHERE scope_key='paper_update:free'"
+            )
+        ).one()
+    assert breaker.state == "open"
+    assert breaker.open_count == 2
+
+    second_probe_at = first_probe_at + timedelta(hours=1)
+    recovered_slot = scheduled_cycle_slot(second_probe_at, "e" * 64)
+    recovered = runtime.begin_cycle(
+        cycle_slot=recovered_slot,
+        cycle_kind="scheduled",
+        settings_digest="e" * 64,
+        due_at=second_probe_at,
+        idempotency_key=None,
+        owner_token="recovered-owner",
+        now=second_probe_at,
+    )
+    assert recovered.grant is not None
+    assert runtime.begin_stage(
+        recovered.grant,
+        "paper_update",
+        retry_scope="paper_update:free",
+        now=second_probe_at,
+    ) is None
+    runtime.complete_stage(
+        recovered.grant,
+        "paper_update",
+        {"paper_total": 1},
+        retry_scope="paper_update:free",
+        now=second_probe_at,
+    )
+    assert runtime.finalize_cycle(
+        recovered.grant,
+        result={},
+        errors=[],
+        issues=[],
+        required_stages={"paper_update"},
+        now=second_probe_at,
+    ) == "succeeded"
+    with engine.connect() as connection:
+        state = connection.execute(
+            text(
+                "SELECT state,open_count FROM automation_circuit_breakers "
+                "WHERE scope_key='paper_update:free'"
+            )
+        ).one()
+    assert state.state == "closed"
+    assert state.open_count == 0
+
+
+@pytest.mark.parametrize("terminal_status", ["deferred", "skipped"])
+def test_half_open_deferred_or_skipped_releases_probe_back_to_open(
+    tmp_path,
+    terminal_status,
+):
+    database_url = f"sqlite:///{tmp_path / f'probe-{terminal_status}.db'}"
+    runtime = _runtime(database_url)
+    engine = create_engine(database_url)
+    now = datetime(2026, 8, 29, 5, 0, tzinfo=timezone.utc)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO automation_circuit_breakers "
+                "(scope_key,state,failure_count,open_count,next_probe_at,revision,created_at,updated_at) "
+                "VALUES ('paper_update:free','open',1,1,:now,1,:now,:now)"
+            ),
+            {"now": now},
+        )
+    slot = scheduled_cycle_slot(now, "3" * 64)
+    started = runtime.begin_cycle(
+        cycle_slot=slot,
+        cycle_kind="scheduled",
+        settings_digest="3" * 64,
+        due_at=now,
+        idempotency_key=None,
+        owner_token="probe-owner",
+        now=now,
+    )
+    assert started.grant is not None
+    assert runtime.begin_stage(
+        started.grant,
+        "paper_update",
+        retry_scope="paper_update:free",
+        now=now,
+    ) is None
+
+    heartbeat_at = now + timedelta(hours=1)
+    runtime.heartbeat(started.grant, now=heartbeat_at)
+    with engine.connect() as connection:
+        extended = connection.execute(
+            text(
+                "SELECT probe_expires_at FROM automation_circuit_breakers "
+                "WHERE scope_key='paper_update:free'"
+            )
+        ).scalar_one()
+    assert datetime.fromisoformat(str(extended)).replace(tzinfo=timezone.utc) == (
+        heartbeat_at + timedelta(hours=3)
+    )
+
+    runtime.complete_stage(
+        started.grant,
+        "paper_update",
+        {"stage_issue": "natural deferral"},
+        status=terminal_status,
+        retry_scope="paper_update:free",
+        now=heartbeat_at,
+    )
+    with engine.connect() as connection:
+        breaker = connection.execute(
+            text(
+                "SELECT state,half_open_cycle_slot,probe_expires_at,next_probe_at "
+                "FROM automation_circuit_breakers WHERE scope_key='paper_update:free'"
+            )
+        ).one()
+    assert breaker.state == "open"
+    assert breaker.half_open_cycle_slot is None
+    assert breaker.probe_expires_at is None
+    assert datetime.fromisoformat(str(breaker.next_probe_at)).replace(
+        tzinfo=timezone.utc
+    ) == heartbeat_at + timedelta(minutes=30)
+
+
+def test_active_half_open_probe_cannot_be_stolen_but_expired_probe_is_reclaimed(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'probe-reclaim.db'}"
+    runtime = _runtime(database_url)
+    engine = create_engine(database_url)
+    now = datetime(2026, 8, 29, 6, 0, tzinfo=timezone.utc)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO automation_circuit_breakers "
+                "(scope_key,state,failure_count,open_count,next_probe_at,revision,created_at,updated_at) "
+                "VALUES ('paper_update:free','open',1,1,:now,1,:now,:now)"
+            ),
+            {"now": now},
+        )
+
+    first_slot = scheduled_cycle_slot(now, "4" * 64)
+    first = runtime.begin_cycle(
+        cycle_slot=first_slot,
+        cycle_kind="scheduled",
+        settings_digest="4" * 64,
+        due_at=now,
+        idempotency_key=None,
+        owner_token="first-probe",
+        now=now,
+    )
+    assert first.grant is not None
+    assert runtime.begin_stage(
+        first.grant,
+        "paper_update",
+        retry_scope="paper_update:free",
+        now=now,
+    ) is None
+
+    contender_at = now + timedelta(minutes=1)
+    contender_slot = scheduled_cycle_slot(contender_at, "5" * 64)
+    contender = runtime.begin_cycle(
+        cycle_slot=contender_slot,
+        cycle_kind="scheduled",
+        settings_digest="5" * 64,
+        due_at=contender_at,
+        idempotency_key=None,
+        owner_token="contender",
+        now=contender_at,
+        process_fence_held=True,
+    )
+    assert contender.grant is not None
+    checkpoint = runtime.begin_stage(
+        contender.grant,
+        "paper_update",
+        retry_scope="paper_update:free",
+        now=contender_at,
+    )
+    assert checkpoint is not None
+    assert checkpoint["data_health"]["automation_paper_update_circuit_state"] == "half_open"
+
+    reclaim_at = now + timedelta(hours=3, seconds=1)
+    reclaim_slot = scheduled_cycle_slot(reclaim_at, "6" * 64)
+    reclaim = runtime.begin_cycle(
+        cycle_slot=reclaim_slot,
+        cycle_kind="scheduled",
+        settings_digest="6" * 64,
+        due_at=reclaim_at,
+        idempotency_key=None,
+        owner_token="reclaimer",
+        now=reclaim_at,
+        process_fence_held=True,
+    )
+    assert reclaim.grant is not None
+    assert runtime.begin_stage(
+        reclaim.grant,
+        "paper_update",
+        retry_scope="paper_update:free",
+        now=reclaim_at,
+    ) is None
+    with engine.connect() as connection:
+        breaker = connection.execute(
+            text(
+                "SELECT state,half_open_cycle_slot,probe_expires_at "
+                "FROM automation_circuit_breakers WHERE scope_key='paper_update:free'"
+            )
+        ).one()
+    assert breaker.state == "half_open"
+    assert breaker.half_open_cycle_slot == reclaim_slot
+    assert datetime.fromisoformat(str(breaker.probe_expires_at)).replace(
+        tzinfo=timezone.utc
+    ) == reclaim_at + timedelta(hours=3)
 
 
 def test_outbox_same_facts_reuses_id_and_different_facts_conflict(tmp_path):

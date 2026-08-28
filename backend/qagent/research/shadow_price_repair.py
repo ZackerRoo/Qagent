@@ -34,6 +34,7 @@ class ExactPriceRepairResult:
     not_listed: int = 0
     missing: int = 0
     errors: int = 0
+    rejected_unsafe_provenance: int = 0
     unresolved: list[ExactPriceRequirement] = field(default_factory=list)
     reasons: dict[str, int] = field(default_factory=dict)
     error_details: list[str] = field(default_factory=list)
@@ -56,6 +57,9 @@ class ExactPriceRepairResult:
             f"{prefix}_exact_price_not_listed": str(self.not_listed),
             f"{prefix}_exact_price_missing": str(self.missing),
             f"{prefix}_exact_price_errors": str(self.errors),
+            f"{prefix}_exact_price_rejected_unsafe_provenance": str(
+                self.rejected_unsafe_provenance
+            ),
             f"{prefix}_exact_price_retryable": str(self.retryable),
             f"{prefix}_exact_price_unresolved": str(len(self.unresolved)),
             f"{prefix}_exact_price_reason_mix": _reason_mix(self.reasons),
@@ -88,6 +92,7 @@ def repair_exact_daily_prices(
 
     repairable = [item for item in missing if item not in structural]
     provider_errors: set[ExactPriceRequirement] = set()
+    unsafe_rejections: set[ExactPriceRequirement] = set()
     if market_provider is not None:
         raw_provider = getattr(market_provider, "provider", market_provider)
         getter = getattr(raw_provider, "get_historical_daily_bars", None)
@@ -121,6 +126,9 @@ def repair_exact_daily_prices(
                         else None
                     )
                     if isinstance(frame, pd.DataFrame) and not frame.empty:
+                        frame, rejected = _filter_unsafe_exact_rows(frame, still_missing)
+                        unsafe_rejections.update(rejected)
+                        result.rejected_unsafe_provenance += len(rejected)
                         cache.merge_missing_daily_bars(
                             provider_mode,
                             frame,
@@ -144,7 +152,9 @@ def repair_exact_daily_prices(
             # no-row response with explicit errors stays retryable as provider_error.
             raw_provider = getattr(market_provider, "provider", market_provider)
             reported_errors = getattr(raw_provider, "last_errors", []) if raw_provider else []
-            if market_provider is None:
+            if requirement in unsafe_rejections:
+                reason = "unsafe_adjustment_provenance"
+            elif market_provider is None:
                 reason = "provider_unavailable"
             else:
                 reason = (
@@ -182,12 +192,63 @@ def _missing_requirements(
             rows = bars.loc[
                 (bars["instrument_id"] == item.instrument_id)
                 & (bars["trade_date"] == item.trade_date),
-                item.field,
             ]
-            value = pd.to_numeric(rows.iloc[0], errors="coerce") if len(rows) == 1 else None
-            if value is None or pd.isna(value) or float(value) <= 0:
+            values = rows[item.field]
+            value = pd.to_numeric(values.iloc[0], errors="coerce") if len(values) == 1 else None
+            if (
+                value is None
+                or pd.isna(value)
+                or float(value) <= 0
+                or (len(rows) == 1 and _unsafe_exact_row(rows.iloc[0], item.field))
+            ):
                 missing.append(item)
     return missing
+
+
+def _filter_unsafe_exact_rows(
+    frame: pd.DataFrame,
+    requirements: set[ExactPriceRequirement],
+) -> tuple[pd.DataFrame, set[ExactPriceRequirement]]:
+    normalized = frame.copy()
+    rejected_keys: set[tuple[str, date]] = set()
+    rejected_requirements: set[ExactPriceRequirement] = set()
+    for requirement in requirements:
+        rows = normalized.loc[
+            (normalized["instrument_id"] == requirement.instrument_id)
+            & (normalized["trade_date"] == requirement.trade_date)
+        ]
+        if len(rows) == 1 and _unsafe_exact_row(rows.iloc[0], requirement.field):
+            rejected_keys.add((requirement.instrument_id, requirement.trade_date))
+            rejected_requirements.add(requirement)
+    if not rejected_keys:
+        return normalized, set()
+    rejected_mask = normalized.apply(
+        lambda row: (str(row.get("instrument_id")), row.get("trade_date")) in rejected_keys,
+        axis=1,
+    )
+    for column in (
+        "adjusted_open",
+        "adjusted_high",
+        "adjusted_low",
+        "adjusted_close",
+        "adjustment_factor",
+        "adjustment_type",
+    ):
+        if column in normalized.columns:
+            normalized.loc[rejected_mask, column] = None
+    return normalized, rejected_requirements
+
+
+def _unsafe_exact_row(row: pd.Series, field: str) -> bool:
+    if not field.startswith("adjusted_"):
+        return False
+    provider = str(row.get("provider") or "").lower()
+    adjustment_type = str(row.get("adjustment_type") or "").lower()
+    return (
+        provider == "fuyao_etf_unadjusted"
+        or provider == "fuyao_realtime"
+        or adjustment_type == "snapshot_qfq_anchor"
+    )
 
 
 def _structural_no_row_reason(

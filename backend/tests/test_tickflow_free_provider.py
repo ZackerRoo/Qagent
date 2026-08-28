@@ -258,8 +258,8 @@ def test_daily_fallback_only_requests_symbols_missing_from_primary():
     assert provider.last_errors == []
 
 
-def test_daily_fallback_skips_large_missing_batches_when_bounded():
-    requested = [f"CN:{index:06d}" for index in range(25)]
+def test_daily_fallback_chunks_large_missing_batches_when_bounded():
+    requested = [f"CN:{index:06d}" for index in range(45)]
     primary = StubDailyProvider("primary", {})
     fallback = StubDailyProvider("fallback", {item: 20.0 for item in requested})
     provider = DailyFallbackMarketDataProvider(
@@ -274,11 +274,70 @@ def test_daily_fallback_skips_large_missing_batches_when_bounded():
         date(2026, 1, 31),
     )
 
-    assert bars.empty
+    assert len(bars["instrument_id"].unique()) == 45
+    assert fallback.daily_calls == [requested[:20], requested[20:40], requested[40:]]
+    assert provider.last_fallback_instruments == requested
+    assert provider.last_errors == []
+
+
+def test_nested_daily_fallback_recovers_remaining_symbols_across_sources():
+    requested = [f"CN:{index:06d}" for index in range(45)]
+    primary = StubDailyProvider(
+        "baostock",
+        {},
+        errors=[f"{item}: baostock unavailable" for item in requested],
+    )
+    tickflow = StubDailyProvider(
+        "tickflow",
+        {item: 20.0 for item in requested[:20]},
+    )
+    fuyao = StubDailyProvider(
+        "fuyao",
+        {item: 30.0 for item in requested[20:]},
+    )
+    provider = DailyFallbackMarketDataProvider(
+        DailyFallbackMarketDataProvider(
+            primary,
+            tickflow,
+            max_fallback_instruments=20,
+        ),
+        fuyao,
+        max_fallback_instruments=20,
+    )
+
+    bars = provider.get_historical_daily_bars(
+        requested,
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+    assert len(bars["instrument_id"].unique()) == 45
+    assert tickflow.historical_calls == [requested[:20], requested[20:40], requested[40:]]
+    assert fuyao.historical_calls == [requested[20:40], requested[40:]]
+    assert provider.last_errors == []
+
+
+def test_daily_fallback_time_budget_fails_open_without_dropping_primary_rows():
+    requested = ["CN:000001", "CN:000002"]
+    primary = StubDailyProvider("primary", {"CN:000001": 10.0})
+    fallback = StubDailyProvider("fallback", {"CN:000002": 20.0})
+    provider = DailyFallbackMarketDataProvider(
+        primary,
+        fallback,
+        max_fallback_instruments=20,
+        fallback_time_budget_seconds=0,
+    )
+
+    bars = provider.get_daily_bars(
+        requested,
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+    )
+
+    assert bars["instrument_id"].tolist() == ["CN:000001"]
     assert fallback.daily_calls == []
-    assert provider.last_fallback_instruments == []
     assert provider.last_errors == [
-        "daily fallback skipped: 25 instruments exceeds the configured limit of 20"
+        "daily fallback budget exhausted: attempted 0/1 instruments in 0 batches"
     ]
 
 

@@ -101,6 +101,7 @@ from qagent.jobs.automation_scheduler import (
     AutomationScheduler,
     current_automation_cycle_invocation,
 )
+from qagent.jobs.automation_retry import classify_automation_error
 from qagent.providers.fuyao import (
     FuyaoClient,
     FuyaoProviderError,
@@ -3977,6 +3978,14 @@ def _run_auto_processing_cycle_inner(
             replay.data_health["automation_cycle_status"] = (
                 cycle_start.replay_status or "succeeded"
             )
+            replay.data_health["automation_retry_attempt_count"] = str(
+                cycle_start.attempt_count
+            )
+            if cycle_start.retry_not_due_at is not None:
+                replay.data_health["automation_retry_not_due"] = "true"
+                replay.data_health["automation_retry_next_at"] = (
+                    cycle_start.retry_not_due_at.isoformat()
+                )
             return replay
         grant = cycle_start.grant
         if grant is None:  # pragma: no cover - begin_cycle returns a grant or a replay.
@@ -4031,7 +4040,12 @@ def _run_auto_processing_cycle_inner(
         active = _active_automation_cycle.get()
         if active is not None:
             active.guard.assert_current()
-        checkpoint = runtime_repo.begin_stage(grant, stage_key)
+        retry_scope = f"{stage_key}:{mode}"
+        checkpoint = runtime_repo.begin_stage(
+            grant,
+            stage_key,
+            retry_scope=retry_scope,
+        )
         if checkpoint is None:
             stage_health_before[stage_key] = dict(data_health)
             return False
@@ -4071,12 +4085,33 @@ def _run_auto_processing_cycle_inner(
         active = _active_automation_cycle.get()
         if active is not None:
             active.guard.assert_current()
-        if len(errors) != error_count_before or not successful:
+        before_health = stage_health_before.get(stage_key, {})
+        stage_health = {
+            key: value
+            for key, value in data_health.items()
+            if before_health.get(key) != value
+        }
+
+        def fail(error: str) -> None:
+            classification = classify_automation_error(
+                stage_key,
+                mode,
+                error,
+                stage_health,
+            )
             runtime_repo.fail_stage(
                 grant,
                 stage_key,
-                failure_reason or (errors[-1] if errors else "stage incomplete"),
+                error,
+                retry_scope=f"{stage_key}:{mode}",
+                error_fingerprint=classification.fingerprint,
+                error_kind=classification.error_kind,
+                retryable=classification.retryable,
             )
+
+        if len(errors) != error_count_before or not successful:
+            error = failure_reason or (errors[-1] if errors else "stage incomplete")
+            fail(error)
             return
         checkpoint_payload = _automation_cycle_checkpoint_payload(
             data_health=data_health,
@@ -4089,12 +4124,6 @@ def _run_auto_processing_cycle_inner(
             paper_closed=paper_closed,
             alerts_triggered=alerts_triggered,
         )
-        before_health = stage_health_before.get(stage_key, {})
-        stage_health = {
-            key: value
-            for key, value in data_health.items()
-            if before_health.get(key) != value
-        }
         if successful and not skipped:
             outcome, outcome_reason = _automation_stage_outcome(
                 stage_key,
@@ -4103,7 +4132,7 @@ def _run_auto_processing_cycle_inner(
             if outcome == "error":
                 error = f"{stage_key}: {outcome_reason or 'stage failed validation'}"
                 errors.append(error)
-                runtime_repo.fail_stage(grant, stage_key, error)
+                fail(error)
                 return
             if outcome == "deferred":
                 issue = f"{stage_key}: {outcome_reason or 'stage is deferred'}"
@@ -4118,6 +4147,7 @@ def _run_auto_processing_cycle_inner(
                     stage_key,
                     checkpoint_payload,
                     status="deferred",
+                    retry_scope=f"{stage_key}:{mode}",
                 )
                 return
         checkpoint_payload["data_health"] = stage_health
@@ -4139,6 +4169,7 @@ def _run_auto_processing_cycle_inner(
             stage_key,
             checkpoint_payload,
             status="skipped" if skipped else "completed",
+            retry_scope=f"{stage_key}:{mode}",
         )
         if active is not None:
             active.guard.assert_current()
@@ -4743,6 +4774,28 @@ def _run_auto_processing_cycle_inner(
         )
     )
     result.data_health["automation_cycle_status"] = cycle_status
+    if runtime_repo is not None and grant is not None:
+        retry_state = runtime_repo.cycle_retry_state(cycle_slot)
+        result.data_health["automation_retry_attempt_count"] = str(
+            retry_state.attempt_count
+        )
+        result.data_health["automation_retry_budget"] = str(retry_state.retry_budget)
+        if retry_state.next_retry_at is not None:
+            result.data_health["automation_retry_next_at"] = (
+                retry_state.next_retry_at.isoformat()
+            )
+        if retry_state.retry_backoff_seconds is not None:
+            result.data_health["automation_retry_backoff_seconds"] = str(
+                retry_state.retry_backoff_seconds
+            )
+        if retry_state.last_error_fingerprint:
+            result.data_health["automation_retry_error_fingerprint"] = (
+                retry_state.last_error_fingerprint
+            )
+        if retry_state.terminal_reason:
+            result.data_health["automation_retry_terminal_reason"] = (
+                retry_state.terminal_reason
+            )
     return result
 
 

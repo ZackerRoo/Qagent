@@ -17,16 +17,29 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.storage.tables import (
+    AutomationCircuitBreakerRow,
     AutomationCycleRow,
     AutomationCycleStageRow,
+    AutomationIncidentRow,
+    DeliveryOutboxRow,
     RuntimeLeaseRow,
+)
+from qagent.jobs.automation_retry import (
+    AUTOMATION_RETRY_BUDGET,
+    breaker_cooldown,
+    retry_backoff,
 )
 
 
 AUTOMATION_LEASE_KEY = "automation:default"
 AUTOMATION_LEASE_TTL = timedelta(hours=3)
-TERMINAL_STAGE_STATUSES = {"completed", "skipped", "deferred"}
-TERMINAL_CYCLE_STATUSES = {"succeeded", "completed_with_deferred_or_issues"}
+AUTOMATION_PROBE_TTL = AUTOMATION_LEASE_TTL
+TERMINAL_STAGE_STATUSES = {"completed", "skipped", "deferred", "deferred_with_alert"}
+TERMINAL_CYCLE_STATUSES = {
+    "succeeded",
+    "completed_with_deferred_or_issues",
+    "deferred_with_alert",
+}
 
 
 class AutomationCycleBusyError(RuntimeError):
@@ -55,6 +68,18 @@ class CycleStart:
     grant: LeaseGrant | None
     replay_result: dict[str, Any] | None = None
     replay_status: str | None = None
+    retry_not_due_at: datetime | None = None
+    attempt_count: int = 0
+
+
+@dataclass(frozen=True)
+class CycleRetryState:
+    attempt_count: int = 0
+    retry_budget: int = AUTOMATION_RETRY_BUDGET
+    next_retry_at: datetime | None = None
+    retry_backoff_seconds: int | None = None
+    last_error_fingerprint: str | None = None
+    terminal_reason: str | None = None
 
 
 @dataclass
@@ -217,6 +242,17 @@ class AutomationRuntimeRepository:
             row.heartbeat_at = current
             row.expires_at = expires_at
             row.updated_at = current
+            breakers = session.scalars(
+                select(AutomationCircuitBreakerRow).where(
+                    AutomationCircuitBreakerRow.state == "half_open",
+                    AutomationCircuitBreakerRow.half_open_cycle_slot
+                    == grant.cycle_slot,
+                )
+            ).all()
+            for breaker in breakers:
+                breaker.probe_expires_at = current + AUTOMATION_PROBE_TTL
+                breaker.revision += 1
+                breaker.updated_at = current
         return LeaseGrant(**{**grant.__dict__, "expires_at": expires_at})
 
     def assert_current(
@@ -269,6 +305,18 @@ class AutomationRuntimeRepository:
                         grant=None,
                         replay_result=_json_object(existing.result_json),
                         replay_status=existing.status,
+                        attempt_count=existing.attempt_count,
+                    )
+                if (
+                    existing.next_retry_at is not None
+                    and _as_utc(existing.next_retry_at) > current
+                ):
+                    return CycleStart(
+                        grant=None,
+                        replay_result=_json_object(existing.result_json),
+                        replay_status=existing.status,
+                        retry_not_due_at=_as_utc(existing.next_retry_at),
+                        attempt_count=existing.attempt_count,
                     )
         grant = self.acquire(
             lease_key=AUTOMATION_LEASE_KEY,
@@ -289,6 +337,7 @@ class AutomationRuntimeRepository:
                         grant=grant,
                         replay_result=replay,
                         replay_status=row.status,
+                        attempt_count=row.attempt_count,
                     )
                 if row is None:
                     row = AutomationCycleRow(
@@ -300,6 +349,8 @@ class AutomationRuntimeRepository:
                         status="running",
                         owner_token=owner_token,
                         fencing_token=grant.fencing_token,
+                        attempt_count=0,
+                        retry_budget=AUTOMATION_RETRY_BUDGET,
                         started_at=current,
                         created_at=current,
                         updated_at=current,
@@ -315,15 +366,24 @@ class AutomationRuntimeRepository:
                     row.status = "running"
                     row.owner_token = owner_token
                     row.fencing_token = grant.fencing_token
+                    row.next_retry_at = None
+                    row.retry_backoff_seconds = None
                     row.updated_at = current
                 session.flush()
-            return CycleStart(grant=grant)
+            return CycleStart(grant=grant, attempt_count=row.attempt_count)
         except Exception:
             self.release(grant, now=current)
             raise
 
-    def begin_stage(self, grant: LeaseGrant, stage_key: str) -> dict[str, Any] | None:
-        current = datetime.now(timezone.utc)
+    def begin_stage(
+        self,
+        grant: LeaseGrant,
+        stage_key: str,
+        *,
+        retry_scope: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        current = _as_utc(now or datetime.now(timezone.utc))
         grant = self.heartbeat(grant, now=current)
         with self._write_session() as session:
             lease = session.get(RuntimeLeaseRow, grant.lease_key)
@@ -331,6 +391,82 @@ class AutomationRuntimeRepository:
             row = session.get(AutomationCycleStageRow, (grant.cycle_slot, stage_key))
             if row is not None and row.status in TERMINAL_STAGE_STATUSES:
                 return _json_object(row.output_json)
+            breaker = (
+                session.get(AutomationCircuitBreakerRow, retry_scope)
+                if retry_scope
+                else None
+            )
+            if breaker is not None and breaker.state in {"open", "half_open"}:
+                probe_due = (
+                    breaker.next_probe_at is None
+                    or _as_utc(breaker.next_probe_at) <= current
+                )
+                probe_expired = (
+                    breaker.state == "half_open"
+                    and (
+                        breaker.probe_expires_at is None
+                        or _as_utc(breaker.probe_expires_at) <= current
+                    )
+                )
+                owns_probe = (
+                    breaker.state == "half_open"
+                    and breaker.half_open_cycle_slot == grant.cycle_slot
+                    and not probe_expired
+                )
+                if (breaker.state == "open" and probe_due) or probe_expired:
+                    breaker.state = "half_open"
+                    breaker.half_open_cycle_slot = grant.cycle_slot
+                    breaker.probe_expires_at = current + AUTOMATION_PROBE_TTL
+                    breaker.next_probe_at = None
+                    breaker.revision += 1
+                    breaker.updated_at = current
+                    owns_probe = True
+                if not owns_probe:
+                    retry_at = (
+                        breaker.probe_expires_at
+                        if breaker.state == "half_open"
+                        else breaker.next_probe_at
+                    )
+                    checkpoint = {
+                        "stage_issue": (
+                            f"{stage_key}: circuit open until "
+                            f"{_as_utc(retry_at).isoformat() if retry_at else 'next probe'}"
+                        ),
+                        "data_health": {
+                            f"automation_{stage_key}_circuit_state": breaker.state,
+                            f"automation_{stage_key}_circuit_next_probe_at": (
+                                _as_utc(retry_at).isoformat()
+                                if retry_at
+                                else ""
+                            ),
+                        },
+                    }
+                    encoded = _json_dumps(checkpoint)
+                    if row is None:
+                        row = AutomationCycleStageRow(
+                            cycle_slot=grant.cycle_slot,
+                            stage_key=stage_key,
+                            status="deferred_with_alert",
+                            owner_token=grant.owner_token,
+                            fencing_token=grant.fencing_token,
+                            retry_scope=retry_scope,
+                            output_json=encoded,
+                            output_digest=hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+                            started_at=current,
+                            completed_at=current,
+                            updated_at=current,
+                        )
+                        session.add(row)
+                    else:
+                        row.status = "deferred_with_alert"
+                        row.owner_token = grant.owner_token
+                        row.fencing_token = grant.fencing_token
+                        row.retry_scope = retry_scope
+                        row.output_json = encoded
+                        row.output_digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+                        row.completed_at = current
+                        row.updated_at = current
+                    return checkpoint
             if row is None:
                 row = AutomationCycleStageRow(
                     cycle_slot=grant.cycle_slot,
@@ -338,6 +474,7 @@ class AutomationRuntimeRepository:
                     status="running",
                     owner_token=grant.owner_token,
                     fencing_token=grant.fencing_token,
+                    retry_scope=retry_scope,
                     started_at=current,
                     updated_at=current,
                 )
@@ -346,6 +483,7 @@ class AutomationRuntimeRepository:
                 row.status = "running"
                 row.owner_token = grant.owner_token
                 row.fencing_token = grant.fencing_token
+                row.retry_scope = retry_scope or row.retry_scope
                 row.error_text = None
                 row.started_at = current
                 row.completed_at = None
@@ -359,10 +497,12 @@ class AutomationRuntimeRepository:
         output: dict[str, Any],
         *,
         status: str = "completed",
+        retry_scope: str | None = None,
+        now: datetime | None = None,
     ) -> None:
         if status not in TERMINAL_STAGE_STATUSES:
-            raise ValueError("terminal stage status must be completed, skipped, or deferred")
-        current = datetime.now(timezone.utc)
+            raise ValueError("invalid terminal automation stage status")
+        current = _as_utc(now or datetime.now(timezone.utc))
         encoded = _json_dumps(output)
         with self._write_session() as session:
             lease = session.get(RuntimeLeaseRow, grant.lease_key)
@@ -374,11 +514,45 @@ class AutomationRuntimeRepository:
             row.output_json = encoded
             row.output_digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
             row.error_text = None
+            row.next_retry_at = None
+            row.retry_backoff_seconds = None
             row.completed_at = current
             row.updated_at = current
+            scope = retry_scope or row.retry_scope
+            breaker = session.get(AutomationCircuitBreakerRow, scope) if scope else None
+            if (
+                breaker is not None
+                and breaker.state == "half_open"
+                and breaker.half_open_cycle_slot == grant.cycle_slot
+            ):
+                if status == "completed":
+                    breaker.state = "closed"
+                    breaker.failure_count = 0
+                    breaker.open_count = 0
+                    breaker.next_probe_at = None
+                else:
+                    breaker.state = "open"
+                    breaker.next_probe_at = current + breaker_cooldown(
+                        max(int(breaker.open_count or 0), 1)
+                    )
+                breaker.half_open_cycle_slot = None
+                breaker.probe_expires_at = None
+                breaker.revision += 1
+                breaker.updated_at = current
 
-    def fail_stage(self, grant: LeaseGrant, stage_key: str, error: str) -> None:
-        current = datetime.now(timezone.utc)
+    def fail_stage(
+        self,
+        grant: LeaseGrant,
+        stage_key: str,
+        error: str,
+        *,
+        retry_scope: str | None = None,
+        error_fingerprint: str | None = None,
+        error_kind: str | None = None,
+        retryable: bool = True,
+        now: datetime | None = None,
+    ) -> None:
+        current = _as_utc(now or datetime.now(timezone.utc))
         with self._write_session() as session:
             lease = session.get(RuntimeLeaseRow, grant.lease_key)
             self._require_current_lease(lease, grant, current)
@@ -387,8 +561,41 @@ class AutomationRuntimeRepository:
                 raise AutomationLeaseLostError("automation stage owner was fenced")
             row.status = "error"
             row.error_text = error[:2000]
+            row.attempt_count = int(row.attempt_count or 0) + 1
+            row.retry_scope = retry_scope or row.retry_scope
+            row.last_error_fingerprint = error_fingerprint
+            row.last_error_kind = error_kind
+            row.last_error_retryable = retryable
+            row.last_error_at = current
             row.completed_at = current
             row.updated_at = current
+            scope = retry_scope or row.retry_scope
+            breaker = session.get(AutomationCircuitBreakerRow, scope) if scope else None
+            if (
+                breaker is not None
+                and breaker.state == "half_open"
+                and breaker.half_open_cycle_slot == grant.cycle_slot
+            ):
+                if retryable:
+                    breaker.state = "open"
+                    breaker.failure_count = int(breaker.failure_count or 0) + 1
+                    breaker.open_count = int(breaker.open_count or 0) + 1
+                    breaker.last_error_fingerprint = error_fingerprint
+                    breaker.last_error_text = error[:2000]
+                    breaker.next_probe_at = current + breaker_cooldown(
+                        breaker.open_count
+                    )
+                else:
+                    # A permanent contract/configuration failure belongs to
+                    # the incident, not the provider retry circuit.
+                    breaker.state = "closed"
+                    breaker.failure_count = 0
+                    breaker.open_count = 0
+                    breaker.next_probe_at = None
+                breaker.half_open_cycle_slot = None
+                breaker.probe_expires_at = None
+                breaker.revision += 1
+                breaker.updated_at = current
 
     def finalize_cycle(
         self,
@@ -415,20 +622,116 @@ class AutomationRuntimeRepository:
                 )
             ).all()
             stage_status = {stage.stage_key: stage.status for stage in stages}
-            terminal = not errors and all(
-                stage_status.get(stage) in TERMINAL_STAGE_STATUSES
-                for stage in required_stages
-            )
-            has_deferred = any(
-                stage_status.get(stage) == "deferred" for stage in required_stages
-            )
-            cycle.status = (
-                "partial_retry_same_slot"
-                if not terminal
-                else "completed_with_deferred_or_issues"
-                if has_deferred or issues
-                else "succeeded"
-            )
+            error_stages = [stage for stage in stages if stage.status == "error"]
+            if errors:
+                cycle.attempt_count = int(cycle.attempt_count or 0) + 1
+                fingerprints = sorted(
+                    {
+                        str(stage.last_error_fingerprint)
+                        for stage in error_stages
+                        if stage.last_error_fingerprint
+                    }
+                )
+                cycle.last_error_fingerprint = canonical_digest(fingerprints or errors)
+                cycle.last_error_text = str(errors[0])[:2000]
+                cycle.last_error_at = current
+                permanent = any(stage.last_error_retryable is not True for stage in error_stages)
+                half_open_failure = any(
+                    stage.retry_scope
+                    and (
+                        breaker := session.get(
+                            AutomationCircuitBreakerRow,
+                            stage.retry_scope,
+                        )
+                    )
+                    is not None
+                    and (
+                        (
+                            breaker.state == "half_open"
+                            and breaker.half_open_cycle_slot == grant.cycle_slot
+                        )
+                        or (
+                            breaker.state == "open"
+                            and stage.last_error_retryable is True
+                            and breaker.last_error_fingerprint
+                            == stage.last_error_fingerprint
+                        )
+                    )
+                    for stage in error_stages
+                )
+                unkeyed_manual = cycle.cycle_kind == "manual" and not cycle.idempotency_key
+                exhausted = (
+                    permanent
+                    or half_open_failure
+                    or unkeyed_manual
+                    or cycle.attempt_count >= int(cycle.retry_budget or AUTOMATION_RETRY_BUDGET)
+                )
+                if exhausted:
+                    cycle.status = "deferred_with_alert"
+                    cycle.next_retry_at = None
+                    cycle.retry_backoff_seconds = None
+                    cycle.terminal_reason = (
+                        "permanent_error"
+                        if permanent
+                        else "manual_one_shot"
+                        if unkeyed_manual
+                        else "half_open_probe_failed"
+                        if half_open_failure
+                        else "retry_budget_exhausted"
+                    )
+                    for stage in error_stages:
+                        stage.status = "deferred_with_alert"
+                        stage.next_retry_at = None
+                        stage.retry_backoff_seconds = None
+                        stage.updated_at = current
+                        breaker = self._open_breaker_for_stage(
+                            session,
+                            stage,
+                            cycle_slot=grant.cycle_slot,
+                            current=current,
+                        )
+                        self._record_retry_incident(
+                            session,
+                            cycle,
+                            stage,
+                            breaker=breaker,
+                            current=current,
+                        )
+                else:
+                    delay = retry_backoff(cycle.attempt_count)
+                    cycle.status = "partial_retry_same_slot"
+                    cycle.retry_backoff_seconds = int(delay.total_seconds())
+                    cycle.next_retry_at = current + delay
+                    cycle.terminal_reason = None
+                    for stage in error_stages:
+                        stage.retry_backoff_seconds = int(delay.total_seconds())
+                        stage.next_retry_at = cycle.next_retry_at
+                        stage.updated_at = current
+            else:
+                terminal = all(
+                    stage_status.get(stage) in TERMINAL_STAGE_STATUSES
+                    for stage in required_stages
+                )
+                has_alert_deferred = any(
+                    stage_status.get(stage) == "deferred_with_alert"
+                    for stage in required_stages
+                )
+                has_deferred = any(
+                    stage_status.get(stage) == "deferred" for stage in required_stages
+                )
+                cycle.status = (
+                    "partial_retry_same_slot"
+                    if not terminal
+                    else "deferred_with_alert"
+                    if has_alert_deferred
+                    else "completed_with_deferred_or_issues"
+                    if has_deferred or issues
+                    else "succeeded"
+                )
+                cycle.next_retry_at = None
+                cycle.retry_backoff_seconds = None
+                if cycle.status in TERMINAL_CYCLE_STATUSES:
+                    cycle.terminal_reason = None
             cycle.result_json = _json_dumps(result)
             cycle.error_json = _json_dumps(errors)
             cycle.finalized_at = current
@@ -437,6 +740,152 @@ class AutomationRuntimeRepository:
             lease.expires_at = current
             lease.updated_at = current
             return cycle.status
+
+    def cycle_retry_state(self, cycle_slot: str) -> CycleRetryState:
+        with self.session_factory() as session:
+            row = session.get(AutomationCycleRow, cycle_slot)
+            if row is None:
+                return CycleRetryState()
+            return CycleRetryState(
+                attempt_count=int(row.attempt_count or 0),
+                retry_budget=int(row.retry_budget or AUTOMATION_RETRY_BUDGET),
+                next_retry_at=(
+                    _as_utc(row.next_retry_at) if row.next_retry_at is not None else None
+                ),
+                retry_backoff_seconds=row.retry_backoff_seconds,
+                last_error_fingerprint=row.last_error_fingerprint,
+                terminal_reason=row.terminal_reason,
+            )
+
+    @staticmethod
+    def _open_breaker_for_stage(
+        session: Session,
+        stage: AutomationCycleStageRow,
+        *,
+        cycle_slot: str,
+        current: datetime,
+    ) -> AutomationCircuitBreakerRow | None:
+        if not stage.retry_scope or stage.last_error_retryable is not True:
+            return None
+        breaker = session.get(AutomationCircuitBreakerRow, stage.retry_scope)
+        if breaker is None:
+            breaker = AutomationCircuitBreakerRow(
+                scope_key=stage.retry_scope,
+                state="open",
+                failure_count=1,
+                open_count=1,
+                last_error_fingerprint=stage.last_error_fingerprint,
+                last_error_text=stage.error_text,
+                revision=1,
+                created_at=current,
+                updated_at=current,
+            )
+            session.add(breaker)
+        else:
+            if (
+                breaker.state == "open"
+                and breaker.half_open_cycle_slot is None
+                and breaker.last_error_fingerprint == stage.last_error_fingerprint
+            ):
+                return breaker
+            breaker.state = "open"
+            breaker.failure_count = int(breaker.failure_count or 0) + 1
+            breaker.open_count = int(breaker.open_count or 0) + 1
+            breaker.last_error_fingerprint = stage.last_error_fingerprint
+            breaker.last_error_text = stage.error_text
+            breaker.half_open_cycle_slot = None
+            breaker.probe_expires_at = None
+            breaker.revision += 1
+            breaker.updated_at = current
+        cooldown = breaker_cooldown(breaker.open_count)
+        breaker.next_probe_at = current + cooldown
+        return breaker
+
+    @staticmethod
+    def _record_retry_incident(
+        session: Session,
+        cycle: AutomationCycleRow,
+        stage: AutomationCycleStageRow,
+        *,
+        breaker: AutomationCircuitBreakerRow | None,
+        current: datetime,
+    ) -> None:
+        scope = stage.retry_scope or f"{stage.stage_key}:unknown"
+        fingerprint = stage.last_error_fingerprint or canonical_digest(stage.error_text or "")
+        open_count = int(breaker.open_count or 0) if breaker is not None else 0
+        identity = canonical_digest(
+            {
+                "cycle_slot": cycle.cycle_slot,
+                "scope": scope,
+                "fingerprint": fingerprint,
+                "open_count": open_count,
+            }
+        )
+        incident_id = f"automation-incident-{identity[:32]}"
+        alert_key = f"automation-retry-alert:{identity}"
+        if session.get(AutomationIncidentRow, incident_id) is None:
+            session.add(
+                AutomationIncidentRow(
+                    incident_id=incident_id,
+                    cycle_slot=cycle.cycle_slot,
+                    stage_key=stage.stage_key,
+                    scope_key=scope,
+                    error_fingerprint=fingerprint,
+                    error_text=(stage.error_text or "unknown automation error")[:2000],
+                    attempt_count=int(cycle.attempt_count or 0),
+                    open_count=open_count,
+                    next_probe_at=breaker.next_probe_at if breaker is not None else None,
+                    alert_idempotency_key=alert_key,
+                    created_at=current,
+                )
+            )
+        existing_delivery = session.scalar(
+            select(DeliveryOutboxRow).where(DeliveryOutboxRow.idempotency_key == alert_key)
+        )
+        if existing_delivery is None:
+            payload = {
+                "incident_id": incident_id,
+                "cycle_slot": cycle.cycle_slot,
+                "stage": stage.stage_key,
+                "scope": scope,
+                "attempt_count": int(cycle.attempt_count or 0),
+                "error_fingerprint": fingerprint,
+                "next_probe_at": (
+                    _as_utc(breaker.next_probe_at).isoformat()
+                    if breaker is not None and breaker.next_probe_at is not None
+                    else None
+                ),
+            }
+            subject = f"Qagent automation deferred: {stage.stage_key}"
+            markdown = (
+                f"Automation stage `{stage.stage_key}` reached its retry boundary. "
+                f"Fingerprint: `{fingerprint}`. Error: {stage.error_text or 'unknown'}"
+            )
+            digest_facts = {
+                "brief_id": None,
+                "channel": "markdown",
+                "recipient": None,
+                "subject": subject,
+                "markdown": markdown,
+                "payload": payload,
+            }
+            payload_digest = canonical_digest(digest_facts)
+            session.add(
+                DeliveryOutboxRow(
+                    delivery_id=f"automation-alert-{identity[:32]}",
+                    brief_id=None,
+                    channel="markdown",
+                    recipient=None,
+                    subject=subject,
+                    markdown=markdown,
+                    payload_json=_json_dumps(payload),
+                    idempotency_key=alert_key,
+                    payload_digest=payload_digest,
+                    status="queued",
+                    created_at=current,
+                    updated_at=current,
+                )
+            )
 
     def abort_cycle(
         self,
@@ -457,10 +906,49 @@ class AutomationRuntimeRepository:
                 or cycle.status in TERMINAL_CYCLE_STATUSES
             ):
                 return False
-            cycle.status = "partial_retry_same_slot"
+            cycle.status = "deferred_with_alert"
+            cycle.attempt_count = int(cycle.attempt_count or 0) + 1
+            cycle.next_retry_at = None
+            cycle.retry_backoff_seconds = None
+            cycle.last_error_fingerprint = canonical_digest(
+                {"stage": "cycle_runtime", "error": error[:2000]}
+            )
+            cycle.last_error_text = error[:2000]
+            cycle.last_error_at = current
+            cycle.terminal_reason = "unhandled_permanent_error"
             cycle.error_json = _json_dumps([error[:2000]])
             cycle.finalized_at = current
             cycle.updated_at = current
+            stage = session.get(
+                AutomationCycleStageRow,
+                (grant.cycle_slot, "cycle_runtime"),
+            )
+            if stage is None:
+                stage = AutomationCycleStageRow(
+                    cycle_slot=grant.cycle_slot,
+                    stage_key="cycle_runtime",
+                    status="deferred_with_alert",
+                    owner_token=grant.owner_token,
+                    fencing_token=grant.fencing_token,
+                    error_text=error[:2000],
+                    attempt_count=1,
+                    retry_scope="cycle_runtime:unknown",
+                    last_error_fingerprint=cycle.last_error_fingerprint,
+                    last_error_kind="permanent_unknown",
+                    last_error_retryable=False,
+                    last_error_at=current,
+                    started_at=current,
+                    completed_at=current,
+                    updated_at=current,
+                )
+                session.add(stage)
+            self._record_retry_incident(
+                session,
+                cycle,
+                stage,
+                breaker=None,
+                current=current,
+            )
             lease.heartbeat_at = current
             lease.expires_at = current
             lease.updated_at = current

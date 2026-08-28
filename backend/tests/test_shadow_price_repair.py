@@ -226,6 +226,40 @@ def test_exact_repair_preserves_existing_fields_and_filters_extra_rows(tmp_path)
     assert row["provider"] == "trusted"
 
 
+@pytest.mark.parametrize(
+    ("provider_name", "adjustment_type"),
+    [
+        ("fuyao_etf_unadjusted", "none"),
+        ("fuyao_realtime", "snapshot_qfq_anchor"),
+    ],
+)
+def test_exact_repair_rejects_unsafe_current_or_unadjusted_fuyao_prices(
+    tmp_path,
+    provider_name,
+    adjustment_type,
+):
+    database_url = f"sqlite:///{tmp_path / 'unsafe-provenance.db'}"
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    target = date(2026, 7, 2)
+    row = _bar("CN:510300", target)
+    row["provider"] = provider_name
+    row["adjustment_type"] = adjustment_type
+    provider = RecordingProvider({("CN:510300", target): row})
+
+    result = repair_exact_daily_prices(
+        MarketDataCacheRepository(session_factory),
+        provider_mode="fixture",
+        market_provider=provider,
+        requirements=[ExactPriceRequirement("CN:510300", target, "adjusted_close")],
+    )
+
+    assert result.repaired == 0
+    assert result.missing == 1
+    assert result.rejected_unsafe_provenance == 1
+    assert result.reasons == {"unsafe_adjustment_provenance": 1}
+
+
 def test_exact_repair_rejects_duplicate_requested_key(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'exact-duplicate.db'}"
     initialize_database(database_url)

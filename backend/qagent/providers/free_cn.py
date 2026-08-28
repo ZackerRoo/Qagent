@@ -11,6 +11,13 @@ import requests
 import yfinance as yf
 
 from qagent.providers.base import MINUTE_BAR_COLUMNS
+from qagent.providers.failure_state import (
+    CircuitOpenError,
+    FailureCategory,
+    FailureKey,
+    ProviderFailureStateRegistry,
+    classify_exception,
+)
 from qagent.providers.baostock_session import (
     BAOSTOCK_SESSION_LOCK,
     baostock_call_deadline,
@@ -50,6 +57,7 @@ class FreeCnMarketDataProvider:
         failure_circuit_breaker_cooldown_seconds: float = (
             DEFAULT_FAILURE_CIRCUIT_BREAKER_COOLDOWN_SECONDS
         ),
+        failure_registry: ProviderFailureStateRegistry | None = None,
     ):
         self.last_errors: list[str] = []
         self.request_timeout_seconds = request_timeout_seconds
@@ -60,20 +68,19 @@ class FreeCnMarketDataProvider:
         )
         self.consecutive_source_failures = 0
         self.source_circuit_open_until = 0.0
+        self.failure_registry = failure_registry or ProviderFailureStateRegistry(
+            failure_threshold=self.failure_circuit_breaker_threshold,
+            base_backoff_seconds=self.failure_circuit_breaker_cooldown_seconds,
+            max_backoff_seconds=max(300.0, self.failure_circuit_breaker_cooldown_seconds),
+        )
 
     def get_daily_bars(self, instrument_ids: list[str], start: date, end: date) -> pd.DataFrame:
         self.last_errors = []
         frames: list[pd.DataFrame] = []
         for instrument_id in instrument_ids:
             symbol = instrument_id.split(":", 1)[1]
-            if self._source_circuit_open():
-                self.last_errors.append(
-                    f"{instrument_id}: skipped after "
-                    f"{self.consecutive_source_failures} consecutive source failures; "
-                    f"retry in {self.source_circuit_retry_after_seconds():.2f}s"
-                )
-                continue
             source_errors: list[str] = []
+            akshare_key = self._failure_key("eastmoney", "daily_bars")
             try:
                 if _is_index_symbol(symbol):
                     normalized = self._load_akshare_index(
@@ -83,30 +90,48 @@ class FreeCnMarketDataProvider:
                         self.request_timeout_seconds,
                     )
                 else:
+                    self.failure_registry.acquire(akshare_key)
                     normalized = self._load_akshare(
                         symbol,
                         start,
                         end,
                         self.request_timeout_seconds,
                     )
+                    self.failure_registry.success(akshare_key)
             except Exception as exc:
+                if not _is_index_symbol(symbol) and not isinstance(exc, CircuitOpenError):
+                    if _is_beijing_exchange_symbol(symbol):
+                        self.failure_registry.ignored(akshare_key)
+                    else:
+                        self.failure_registry.failure(
+                            akshare_key,
+                            classify_exception(exc),
+                            error_code=_provider_error_code(exc),
+                        )
                 source_errors.append(f"akshare: {exc}")
                 if _is_index_symbol(symbol):
-                    self._record_source_failure()
                     self.last_errors.append(f"{instrument_id}: {'; '.join(source_errors)}")
                     continue
                 if _is_etf_symbol(symbol):
+                    yfinance_key = self._failure_key("yfinance", "etf_daily_bars")
                     try:
+                        self.failure_registry.acquire(yfinance_key)
                         normalized = self._load_yfinance_etf(
                             symbol,
                             start,
                             end,
                             self.request_timeout_seconds,
                         )
+                        self.failure_registry.success(yfinance_key)
                     except Exception as yfinance_exc:
+                        if not isinstance(yfinance_exc, CircuitOpenError):
+                            self.failure_registry.failure(
+                                yfinance_key,
+                                classify_exception(yfinance_exc),
+                                error_code=_provider_error_code(yfinance_exc),
+                            )
                         source_errors.append(f"yfinance: {yfinance_exc}")
                     else:
-                        self._record_source_success()
                         normalized["instrument_id"] = instrument_id
                         normalized["trade_date"] = pd.to_datetime(normalized["trade_date"]).dt.date
                         frames.append(normalized[BAR_COLUMNS])
@@ -117,19 +142,26 @@ class FreeCnMarketDataProvider:
                     )
                     self.last_errors.append(f"{instrument_id}: {'; '.join(source_errors)}")
                     continue
+                baostock_key = self._failure_key("baostock", "daily_bars")
                 try:
+                    self.failure_registry.acquire(baostock_key)
                     normalized = self._load_baostock(
                         symbol,
                         start,
                         end,
                         self.request_timeout_seconds,
                     )
+                    self.failure_registry.success(baostock_key)
                 except Exception as fallback_exc:
+                    if not isinstance(fallback_exc, CircuitOpenError):
+                        self.failure_registry.failure(
+                            baostock_key,
+                            classify_exception(fallback_exc),
+                            error_code=_provider_error_code(fallback_exc),
+                        )
                     source_errors.append(f"baostock: {fallback_exc}")
-                    self._record_source_failure()
                     self.last_errors.append(f"{instrument_id}: {'; '.join(source_errors)}")
                     continue
-            self._record_source_success()
             if normalized.empty:
                 continue
             normalized["instrument_id"] = instrument_id
@@ -157,6 +189,12 @@ class FreeCnMarketDataProvider:
         if not symbols:
             return pd.DataFrame(columns=BAR_COLUMNS)
         frames: list[pd.DataFrame] = []
+        baostock_key = self._failure_key("baostock", "historical_daily_bars")
+        try:
+            self.failure_registry.acquire(baostock_key)
+        except CircuitOpenError as exc:
+            self.last_errors.extend(f"{instrument_id}: {exc}" for instrument_id, _ in symbols)
+            return pd.DataFrame(columns=BAR_COLUMNS)
         with serialized_baostock_session():
             try:
                 with (
@@ -168,7 +206,11 @@ class FreeCnMarketDataProvider:
                 self.last_errors.extend(
                     f"{instrument_id}: baostock batch login: {exc}" for instrument_id, _ in symbols
                 )
-                self._record_source_failure()
+                self.failure_registry.failure(
+                    baostock_key,
+                    classify_exception(exc),
+                    error_code=_provider_error_code(exc),
+                )
                 return pd.DataFrame(columns=BAR_COLUMNS)
             try:
                 if login.error_code != "0":
@@ -177,7 +219,11 @@ class FreeCnMarketDataProvider:
                         f"{instrument_id}: baostock batch login: {message}"
                         for instrument_id, _ in symbols
                     )
-                    self._record_source_failure()
+                    self.failure_registry.failure(
+                        baostock_key,
+                        FailureCategory.TRANSPORT,
+                        error_code=login.error_code,
+                    )
                     return pd.DataFrame(columns=BAR_COLUMNS)
                 for index, (instrument_id, symbol) in enumerate(symbols):
                     try:
@@ -191,7 +237,11 @@ class FreeCnMarketDataProvider:
                         self.last_errors.append(
                             f"{instrument_id}: baostock historical batch: {exc}"
                         )
-                        self._record_source_failure()
+                        self.failure_registry.failure(
+                            baostock_key,
+                            classify_exception(exc),
+                            error_code=_provider_error_code(exc),
+                        )
                         if _baostock_session_is_unusable(exc):
                             self.last_errors.extend(
                                 f"{pending_id}: baostock historical batch deferred "
@@ -200,7 +250,6 @@ class FreeCnMarketDataProvider:
                             )
                             break
                         continue
-                    self._record_source_success()
                     if normalized.empty:
                         continue
                     normalized["instrument_id"] = instrument_id
@@ -215,7 +264,13 @@ class FreeCnMarketDataProvider:
                         bs.logout()
                 except Exception as exc:
                     self.last_errors.append(f"baostock batch logout: {exc}")
-                    self._record_source_failure()
+                    self.failure_registry.failure(
+                        baostock_key,
+                        classify_exception(exc),
+                        error_code=_provider_error_code(exc),
+                    )
+        if not self.last_errors:
+            self.failure_registry.success(baostock_key)
         if not frames:
             return pd.DataFrame(columns=BAR_COLUMNS)
         return pd.concat(frames, ignore_index=True)
@@ -238,25 +293,25 @@ class FreeCnMarketDataProvider:
         end_value = _local_naive_datetime(end)
         for instrument_id in instrument_ids:
             symbol = instrument_id.split(":", 1)[1]
-            if self._source_circuit_open():
-                self.last_errors.append(
-                    f"{instrument_id}: skipped minute data after "
-                    f"{self.consecutive_source_failures} consecutive source failures; "
-                    f"retry in {self.source_circuit_retry_after_seconds():.2f}s"
-                )
-                continue
+            sina_key = self._failure_key("sina", "minute_bars")
             try:
+                self.failure_registry.acquire(sina_key)
                 normalized = self._load_akshare_sina_minute(
                     symbol,
                     start_value,
                     end_value,
                     self.request_timeout_seconds,
                 )
+                self.failure_registry.success(sina_key)
             except Exception as exc:
-                self._record_source_failure()
+                if not isinstance(exc, CircuitOpenError):
+                    self.failure_registry.failure(
+                        sina_key,
+                        classify_exception(exc),
+                        error_code=_provider_error_code(exc),
+                    )
                 self.last_errors.append(f"{instrument_id}: akshare_sina_minute: {exc}")
                 continue
-            self._record_source_success()
             if normalized.empty:
                 continue
             normalized["instrument_id"] = instrument_id
@@ -275,9 +330,16 @@ class FreeCnMarketDataProvider:
 
     def source_circuit_retry_after_seconds(self, instrument_id: str | None = None) -> float:
         del instrument_id
-        if self.consecutive_source_failures < self.failure_circuit_breaker_threshold:
-            return 0.0
-        return max(0.0, self.source_circuit_open_until - monotonic())
+        return max(
+            (
+                snapshot.retry_after_seconds
+                for snapshot in self.failure_registry.snapshots().values()
+            ),
+            default=0.0,
+        )
+
+    def _failure_key(self, origin: str, capability: str) -> FailureKey:
+        return FailureKey("free_cn", origin, capability)
 
     def _record_source_failure(self) -> None:
         self.consecutive_source_failures += 1
@@ -322,15 +384,17 @@ class FreeCnMarketDataProvider:
             return pd.DataFrame(columns=BAR_COLUMNS)
         return _merge_raw_adjusted_frames(raw, adjusted, provider_name)
 
-    @staticmethod
     def _load_akshare_index(
+        self,
         symbol: str,
         start: date,
         end: date,
         request_timeout_seconds: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
     ) -> pd.DataFrame:
         primary_error: Exception | None = None
+        eastmoney_key = self._failure_key("eastmoney", "index_daily")
         try:
+            self.failure_registry.acquire(eastmoney_key)
             with _bounded_network_calls(request_timeout_seconds):
                 raw = ak.index_zh_a_hist(
                     symbol=symbol,
@@ -338,15 +402,31 @@ class FreeCnMarketDataProvider:
                     start_date=start.strftime("%Y%m%d"),
                     end_date=end.strftime("%Y%m%d"),
                 )
+            self.failure_registry.success(eastmoney_key)
         except Exception as exc:
+            if not isinstance(exc, CircuitOpenError):
+                self.failure_registry.failure(
+                    eastmoney_key,
+                    classify_exception(exc),
+                    error_code=_provider_error_code(exc),
+                )
             primary_error = exc
             raw = pd.DataFrame()
         provider_name = "akshare_index"
         if raw.empty:
+            sina_key = self._failure_key("sina", "index_daily")
             try:
+                self.failure_registry.acquire(sina_key)
                 with _bounded_network_calls(request_timeout_seconds):
                     raw = ak.stock_zh_index_daily(symbol=_to_sina_index_symbol(symbol))
+                self.failure_registry.success(sina_key)
             except Exception as fallback_exc:
+                if not isinstance(fallback_exc, CircuitOpenError):
+                    self.failure_registry.failure(
+                        sina_key,
+                        classify_exception(fallback_exc),
+                        error_code=_provider_error_code(fallback_exc),
+                    )
                 if primary_error is not None:
                     raise RuntimeError(
                         f"eastmoney index: {primary_error}; sina index: {fallback_exc}"
@@ -525,6 +605,11 @@ def _to_baostock_symbol(symbol: str) -> str:
         else "sz"
     )
     return f"{prefix}.{symbol}"
+
+
+def _provider_error_code(exc: BaseException) -> str | int:
+    status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    return status_code if status_code is not None else type(exc).__name__
 
 
 def _baostock_session_is_unusable(exc: Exception) -> bool:

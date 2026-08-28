@@ -1382,8 +1382,8 @@ def test_cycle_with_natural_waiting_is_terminal_with_visible_issue(tmp_path, mon
         ),
         (
             "failed",
-            "partial_retry_same_slot",
-            "error",
+            "deferred_with_alert",
+            "deferred_with_alert",
             None,
             "scan: scan status is failed",
         ),
@@ -1609,13 +1609,13 @@ def test_cycle_with_required_alert_failure_retries_same_slot(
 
     assert result.issues == []
     assert expected_error in result.errors[0]
-    assert result.data_health["automation_cycle_status"] == "partial_retry_same_slot"
+    assert result.data_health["automation_cycle_status"] == "deferred_with_alert"
     with repo.session_factory() as session:
         assert (
             session.execute(
                 text("SELECT status FROM automation_cycle_stages WHERE stage_key = 'alerts'")
             ).scalar_one()
-            == "error"
+            == "deferred_with_alert"
         )
 
 
@@ -1669,13 +1669,13 @@ def test_cycle_with_required_paper_telemetry_failure_retries_same_slot(
 
     assert result.issues == []
     assert expected_error in result.errors[0]
-    assert result.data_health["automation_cycle_status"] == "partial_retry_same_slot"
+    assert result.data_health["automation_cycle_status"] == "deferred_with_alert"
     with repo.session_factory() as session:
         assert (
             session.execute(
                 text("SELECT status FROM automation_cycle_stages WHERE stage_key = 'paper_update'")
             ).scalar_one()
-            == "error"
+            == "deferred_with_alert"
         )
 
 
@@ -1902,7 +1902,7 @@ def test_uncaught_cycle_exception_aborts_and_releases_runtime_lease(tmp_path, mo
     with factory() as session:
         cycle = session.execute(text("SELECT status, error_json FROM automation_cycles")).one()
         lease = session.execute(text("SELECT expires_at, heartbeat_at FROM runtime_leases")).one()
-    assert cycle.status == "partial_retry_same_slot"
+    assert cycle.status == "deferred_with_alert"
     assert "injected outer failure" in cycle.error_json
     assert lease.expires_at == lease.heartbeat_at
 

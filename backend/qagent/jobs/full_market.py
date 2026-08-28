@@ -1905,8 +1905,24 @@ def _market_data_recovery_action(
 
 
 def _merge_health(target: dict[str, str], source: dict[str, str]) -> None:
+    source_error_kind = str(source.get("provider_error_kind", "none"))
+    current_error_kind = str(target.get("provider_error_kind", "none"))
+    if _provider_error_severity(source_error_kind) >= _provider_error_severity(
+        current_error_kind
+    ):
+        target["provider_error_kind"] = source_error_kind
+        target["provider_error_code"] = str(source.get("provider_error_code", ""))
+        target["provider_error_retryable"] = str(
+            source.get("provider_error_retryable", "false")
+        )
     for key, value in source.items():
         current = target.get(key)
+        if key in {
+            "provider_error_kind",
+            "provider_error_code",
+            "provider_error_retryable",
+        }:
+            continue
         if key == "dynamic_calibration_passes":
             target[key] = "1"
         elif key in {
@@ -1914,12 +1930,75 @@ def _merge_health(target: dict[str, str], source: dict[str, str]) -> None:
             "fuyao_degraded_snapshot_field_mix",
         }:
             target[key] = _merge_health_count_mixes(current, str(value))
+        elif key == "fuyao_clients":
+            target[key] = str(max(_safe_health_int(current), _safe_health_int(value)))
+        elif key == "fuyao_telemetry":
+            target[key] = _merge_provider_state(current, str(value))
+        elif key == "fuyao_latency_ms_total":
+            target[key] = f"{_safe_health_float(current) + _safe_health_float(value):.3f}"
+        elif key == "fuyao_latency_ms_average":
+            # Recomputed from the merged request and latency totals below.
+            continue
+        elif key in {
+            "provider_circuit_capabilities",
+            "provider_circuit_failures",
+            "provider_circuit_successes",
+            "provider_circuit_opened",
+            "provider_circuit_half_open_probes",
+            "provider_circuit_recoveries",
+        }:
+            target[key] = str(max(_safe_health_int(current), _safe_health_int(value)))
+        elif key in {
+            "provider_circuit_open_capabilities",
+            "provider_circuit_half_open_capabilities",
+        }:
+            target[key] = str(value)
+        elif key == "provider_circuit_retry_after_seconds":
+            target[key] = f"{_safe_health_float(value):.3f}"
         elif current is not None and str(current).isdigit() and str(value).isdigit():
             target[key] = str(int(current) + int(str(value)))
         elif key == "errors" and current:
             target[key] = f"{current} | {value}"
         else:
             target[key] = str(value)
+    if "fuyao_latency_ms_total" in target:
+        requests = _safe_health_int(target.get("fuyao_requests"))
+        total = _safe_health_float(target.get("fuyao_latency_ms_total"))
+        target["fuyao_latency_ms_average"] = f"{total / requests:.3f}" if requests else "0.000"
+
+
+def _merge_provider_state(current: str | None, value: str) -> str:
+    severity = {"idle": 0, "ready": 1, "partial": 2, "error": 3}
+    return max((current or "idle", value), key=lambda item: severity.get(item, 0))
+
+
+def _provider_error_severity(value: str) -> int:
+    return {
+        "none": 0,
+        "not_listed": 1,
+        "unsupported": 2,
+        "invalid_request": 3,
+        "transport": 4,
+        "dns": 5,
+        "timeout": 6,
+        "rate_limit": 7,
+        "server": 8,
+        "auth": 9,
+    }.get(value, 0)
+
+
+def _safe_health_int(value: object) -> int:
+    try:
+        return int(str(value or "0"))
+    except ValueError:
+        return 0
+
+
+def _safe_health_float(value: object) -> float:
+    try:
+        return float(str(value or "0"))
+    except ValueError:
+        return 0.0
 
 
 def _merge_health_count_mixes(current: str | None, value: str) -> str:
