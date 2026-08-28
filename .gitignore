@@ -13,6 +13,7 @@ data/*.db-*
 data/*.sidecar.sqlite3
 data/*.log
 data/*.pid
+data/qagent.automation.lock
 data/outbox*/
 data/archives/
 logs/
