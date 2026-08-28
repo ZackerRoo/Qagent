@@ -2413,6 +2413,13 @@ def test_automation_scheduler_restores_enabled_state_after_app_restart(
         )
         assert started.status_code == 200
         assert started.json()["enabled"] is True
+        deadline = time.monotonic() + 2.0
+        before_restart = client.get("/api/automation/scheduler").json()
+        while before_restart["run_count"] < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+            before_restart = client.get("/api/automation/scheduler").json()
+        assert before_restart["run_count"] == 1
+        assert before_restart["next_run_at"] is not None
 
     monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
     with TestClient(create_app()) as restarted_client:
@@ -2427,6 +2434,8 @@ def test_automation_scheduler_restores_enabled_state_after_app_restart(
     assert body["settings"]["run_scan"] is False
     assert body["settings"]["seed_paper"] is False
     assert body["settings"]["update_paper"] is False
+    assert body["run_count"] == before_restart["run_count"]
+    assert body["next_run_at"] == before_restart["next_run_at"]
     assert body["next_run_at"] is not None
 
 

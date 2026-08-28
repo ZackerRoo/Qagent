@@ -3559,7 +3559,10 @@ def start_automation_scheduler(
         run_forward_evidence=run_forward_evidence,
     )
     _attach_automation_scheduler_state_listener()
-    state = _automation_scheduler.start(settings, _run_auto_processing_cycle)
+    try:
+        state = _automation_scheduler.start(settings, _run_auto_processing_cycle)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     # The loop may finish its immediate cycle before this request returns.
     # Persist a fresh snapshot so this request cannot overwrite that checkpoint.
     _persist_automation_scheduler_state(_automation_scheduler.state())
@@ -3586,7 +3589,7 @@ def restore_automation_scheduler_from_storage() -> None:
     _attach_automation_scheduler_state_listener()
     _automation_scheduler.restore_checkpoint(checkpoint)
     if saved.enabled:
-        _automation_scheduler.start(settings, _run_auto_processing_cycle)
+        _automation_scheduler.resume(settings, _run_auto_processing_cycle)
     else:
         _automation_scheduler.configure(settings)
 
@@ -3601,12 +3604,21 @@ def _persist_automation_scheduler_state(state) -> None:
             last_completed_at=state.last_completed_at,
             last_error=state.last_error,
             last_result=state.last_result,
+            next_run_at=state.next_run_at,
+            in_flight=state.status == "running",
+            scheduled_interval_seconds=state.settings.interval_seconds,
         ).model_dump(mode="json"),
     )
 
 
 def _attach_automation_scheduler_state_listener() -> None:
     _automation_scheduler.set_state_listener(_persist_automation_scheduler_state)
+
+
+def _shutdown_automation_scheduler_loop() -> None:
+    """Stop process-local work without changing the persisted enabled setting."""
+
+    _automation_scheduler.shutdown()
 
 
 def _auto_processing_settings(

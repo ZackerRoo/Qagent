@@ -54,13 +54,16 @@ class AutoProcessingState(BaseModel):
 
 
 class AutomationSchedulerCheckpoint(BaseModel):
-    """Completed-cycle state that remains meaningful across an API restart."""
+    """Runtime state that remains meaningful across an API restart."""
 
     run_count: int = Field(default=0, ge=0)
     last_started_at: datetime | None = None
     last_completed_at: datetime | None = None
     last_error: str | None = None
     last_result: AutoProcessingCycleResult | None = None
+    next_run_at: datetime | None = None
+    in_flight: bool = False
+    scheduled_interval_seconds: int | None = Field(default=None, ge=5, le=24 * 60 * 60)
 
 
 CycleRunner = Callable[[AutoProcessingSettings], AutoProcessingCycleResult]
@@ -75,6 +78,7 @@ class AutomationScheduler:
         self._stop_event = Event()
         self._wake_event = Event()
         self._thread: Thread | None = None
+        self._generation = 0
         self._settings = AutoProcessingSettings()
         self._enabled = False
         self._status = "idle"
@@ -84,6 +88,9 @@ class AutomationScheduler:
         self._next_run_at: datetime | None = None
         self._last_error: str | None = None
         self._last_result: AutoProcessingCycleResult | None = None
+        self._restored_next_run_at: datetime | None = None
+        self._restored_in_flight = False
+        self._restored_interval_seconds: int | None = None
         self._state_listener = state_listener
 
     def state(self) -> AutoProcessingState:
@@ -102,7 +109,7 @@ class AutomationScheduler:
             self._state_listener = listener
 
     def restore_checkpoint(self, checkpoint: AutomationSchedulerCheckpoint) -> None:
-        """Restore only completed-cycle facts; scheduling always restarts from now."""
+        """Restore persisted runtime facts before deciding how to resume."""
 
         with self._lock:
             self._run_count = checkpoint.run_count
@@ -110,6 +117,9 @@ class AutomationScheduler:
             self._last_completed_at = checkpoint.last_completed_at
             self._last_error = checkpoint.last_error
             self._last_result = checkpoint.last_result
+            self._restored_next_run_at = checkpoint.next_run_at
+            self._restored_in_flight = checkpoint.in_flight
+            self._restored_interval_seconds = checkpoint.scheduled_interval_seconds
 
     def refresh_if_due(self, runner: CycleRunner) -> AutoProcessingState:
         # Status reads may restore a missing loop, but the request thread must never
@@ -119,26 +129,114 @@ class AutomationScheduler:
             return self._state_unlocked()
 
     def start(self, settings: AutoProcessingSettings, runner: CycleRunner) -> AutoProcessingState:
+        return self._start(settings, runner, next_run_at=_utc_now())
+
+    def resume(
+        self,
+        settings: AutoProcessingSettings,
+        runner: CycleRunner,
+    ) -> AutoProcessingState:
+        """Resume a persisted schedule without adding a restart-only cycle."""
+
+        now = _utc_now()
         with self._lock:
+            last_completed_at = _latest_utc_datetime(
+                self._last_completed_at,
+                self._last_result.finished_at if self._last_result is not None else None,
+            )
+            restored_due = _as_utc(self._restored_next_run_at)
+            interval_changed = (
+                self._restored_interval_seconds is not None
+                and self._restored_interval_seconds != settings.interval_seconds
+            )
+            if self._restored_in_flight or (
+                restored_due is None
+                and self._last_started_at is not None
+                and last_completed_at is None
+            ):
+                # The prior process died inside a cycle. Retrying is explicitly
+                # at-least-once; do not mislabel its start time as a completion.
+                next_run_at = now
+                self._last_error = "interrupted_cycle_retry_after_restart"
+            elif restored_due is not None and not interval_changed:
+                next_run_at = restored_due
+            elif last_completed_at is not None:
+                next_run_at = last_completed_at + timedelta(seconds=settings.interval_seconds)
+            else:
+                # Legacy records without any trustworthy timing evidence cannot
+                # prove a cycle is overdue. Wait one interval to avoid a
+                # restart-only duplicate side effect.
+                next_run_at = now + timedelta(seconds=settings.interval_seconds)
+            self._restored_next_run_at = None
+            self._restored_in_flight = False
+            self._restored_interval_seconds = None
+        return self._start(settings, runner, next_run_at=max(next_run_at, now))
+
+    def _start(
+        self,
+        settings: AutoProcessingSettings,
+        runner: CycleRunner,
+        *,
+        next_run_at: datetime,
+    ) -> AutoProcessingState:
+        with self._lock:
+            if not self._enabled and self._run_lock.locked():
+                self._status = "stopping"
+                raise RuntimeError("automation scheduler is still stopping")
             self._settings = settings
             if self._enabled and self._thread and self._thread.is_alive():
-                self._next_run_at = self._next_run_at or _utc_now()
+                last_run_at = _latest_utc_datetime(
+                    self._last_started_at,
+                    self._last_completed_at,
+                    self._last_result.finished_at if self._last_result is not None else None,
+                )
+                if last_run_at is not None:
+                    self._next_run_at = max(
+                        last_run_at + timedelta(seconds=settings.interval_seconds),
+                        _utc_now(),
+                    )
+                else:
+                    self._next_run_at = self._next_run_at or next_run_at
+                self._wake_event.set()
                 return self._state_unlocked()
             self._enabled = True
             self._status = "idle"
-            self._next_run_at = _utc_now()
-            self._stop_event.clear()
-            self._wake_event.clear()
-            self._thread = Thread(target=self._loop, args=(runner,), daemon=True)
+            self._next_run_at = next_run_at
+            self._generation += 1
+            generation = self._generation
+            self._stop_event = Event()
+            stop_event = self._stop_event
+            self._wake_event = Event()
+            wake_event = self._wake_event
+            self._thread = Thread(
+                target=self._loop,
+                args=(runner, stop_event, wake_event, generation),
+                daemon=True,
+            )
             self._thread.start()
             return self._state_unlocked()
 
     def stop(self) -> AutoProcessingState:
         thread: Thread | None
         with self._lock:
+            self._generation += 1
             self._enabled = False
-            self._status = "idle"
+            self._status = "stopping" if self._run_lock.locked() else "idle"
             self._next_run_at = None
+            self._stop_event.set()
+            self._wake_event.set()
+            thread = self._thread
+        if thread and thread.is_alive():
+            thread.join(timeout=1.0)
+        with self._lock:
+            if not self._run_lock.locked():
+                self._status = "idle"
+            return self._state_unlocked()
+
+    def shutdown(self) -> AutoProcessingState:
+        """Stop this process's loop while preserving its persisted resume intent."""
+
+        with self._lock:
             self._stop_event.set()
             self._wake_event.set()
             thread = self._thread
@@ -156,9 +254,17 @@ class AutomationScheduler:
         with self._lock:
             return self._state_unlocked()
 
-    def _loop(self, runner: CycleRunner) -> None:
-        while not self._stop_event.is_set():
+    def _loop(
+        self,
+        runner: CycleRunner,
+        stop_event: Event,
+        wake_event: Event,
+        generation: int,
+    ) -> None:
+        while not stop_event.is_set():
             with self._lock:
+                if generation != self._generation:
+                    return
                 settings = self._settings
                 next_run_at = self._next_run_at
             if next_run_at is not None:
@@ -170,15 +276,17 @@ class AutomationScheduler:
                     # deadline has passed. Recheck UTC in short slices so the
                     # scheduler compensates promptly after wake without an API
                     # request having to nudge it.
-                    self._wake_event.wait(min(wait_seconds, SCHEDULER_CLOCK_RECHECK_SECONDS))
-                    self._wake_event.clear()
+                    wake_event.wait(min(wait_seconds, SCHEDULER_CLOCK_RECHECK_SECONDS))
+                    wake_event.clear()
                     continue
-            self._execute(settings, runner)
+            if not self._execute(settings, runner, generation=generation):
+                stop_event.wait(0.05)
         with self._lock:
-            self._enabled = False
-            if self._status == "running":
-                self._status = "idle"
-            self._next_run_at = None
+            if generation == self._generation:
+                self._enabled = False
+                if self._status == "running":
+                    self._status = "idle"
+                self._next_run_at = None
 
     def _ensure_loop_thread(self, runner: CycleRunner) -> None:
         with self._lock:
@@ -188,20 +296,40 @@ class AutomationScheduler:
                 if self._next_run_at is not None and self._next_run_at <= _utc_now():
                     self._wake_event.set()
                 return
-            self._stop_event.clear()
-            self._wake_event.clear()
-            self._thread = Thread(target=self._loop, args=(runner,), daemon=True)
+            self._generation += 1
+            generation = self._generation
+            self._stop_event = Event()
+            stop_event = self._stop_event
+            self._wake_event = Event()
+            wake_event = self._wake_event
+            self._thread = Thread(
+                target=self._loop,
+                args=(runner, stop_event, wake_event, generation),
+                daemon=True,
+            )
             self._thread.start()
 
-    def _execute(self, settings: AutoProcessingSettings, runner: CycleRunner) -> None:
+    def _execute(
+        self,
+        settings: AutoProcessingSettings,
+        runner: CycleRunner,
+        *,
+        generation: int | None = None,
+    ) -> bool:
         if not self._run_lock.acquire(blocking=False):
-            return
+            return False
         started_at = _utc_now()
         with self._lock:
-            self._settings = settings
+            if generation is not None and generation != self._generation:
+                self._run_lock.release()
+                return False
+            if generation is None:
+                self._settings = settings
             self._status = "running"
             self._last_started_at = started_at
-            self._last_error = None
+            if self._last_error != "interrupted_cycle_retry_after_restart":
+                self._last_error = None
+        self._notify_state_listener()
         try:
             result = runner(settings)
         except Exception as exc:  # pragma: no cover - route-level tests cover state output.
@@ -218,19 +346,31 @@ class AutomationScheduler:
                 self._last_error = str(exc)
         else:
             finished_at = result.finished_at
+            with self._lock:
+                self._last_error = None
         finally:
             with self._lock:
-                self._status = "idle" if self._enabled else "idle"
+                is_current = generation is None or generation == self._generation
+                if is_current:
+                    self._status = "idle"
+                elif not self._enabled and self._status == "stopping":
+                    # start() remains rejected while _run_lock is held, so a
+                    # stopped stale generation can safely finish the stopping
+                    # transition without overwriting a newer worker's state.
+                    self._status = "idle"
                 self._run_count += 1
                 self._last_completed_at = finished_at
                 self._last_result = result
-                self._next_run_at = (
-                    finished_at + timedelta(seconds=settings.interval_seconds)
-                    if self._enabled
-                    else None
-                )
-            self._notify_state_listener()
+                if is_current:
+                    self._next_run_at = (
+                        finished_at + timedelta(seconds=self._settings.interval_seconds)
+                        if self._enabled
+                        else None
+                    )
+            if is_current:
+                self._notify_state_listener()
             self._run_lock.release()
+        return True
 
     def _notify_state_listener(self) -> None:
         with self._lock:
@@ -260,3 +400,22 @@ class AutomationScheduler:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _latest_utc_datetime(*values: datetime | None) -> datetime | None:
+    normalized = [
+        value.replace(tzinfo=timezone.utc)
+        if value.tzinfo is None
+        else value.astimezone(timezone.utc)
+        for value in values
+        if value is not None
+    ]
+    return max(normalized, default=None)
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)

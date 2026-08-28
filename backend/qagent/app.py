@@ -7,6 +7,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from qagent.api.fuyao_routes import router as fuyao_router
 from qagent.api.routes import (
+    _shutdown_automation_scheduler_loop,
     _terminate_full_market_executor,
     restore_automation_scheduler_from_storage,
     restore_full_market_scan_job_from_storage,
@@ -25,6 +26,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # Stop only the in-memory loop. The persisted enabled flag intentionally
+        # remains unchanged so the next process can resume the same schedule.
+        _shutdown_automation_scheduler_loop()
         _terminate_full_market_executor()
 
 
