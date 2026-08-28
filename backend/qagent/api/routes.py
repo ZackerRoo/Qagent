@@ -3593,7 +3593,25 @@ def start_automation_scheduler(
     )
     _attach_automation_scheduler_state_listener()
     try:
-        state = _automation_scheduler.start(settings, _run_auto_processing_cycle)
+        recoverable = None
+        if _automation_scheduler.state().cycle_due_at is None:
+            repo = _repo()
+            if hasattr(repo, "session_factory"):
+                recoverable = AutomationRuntimeRepository(
+                    repo.session_factory
+                ).find_recoverable_scheduled_cycle(
+                    automation_settings_digest(settings)
+                )
+        if recoverable is None:
+            state = _automation_scheduler.start(settings, _run_auto_processing_cycle)
+        else:
+            now = datetime.now(timezone.utc)
+            state = _automation_scheduler.start_recoverable(
+                settings,
+                _run_auto_processing_cycle,
+                cycle_due_at=recoverable.due_at,
+                next_run_at=max(recoverable.next_retry_at or now, now),
+            )
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     # The loop may finish its immediate cycle before this request returns.

@@ -166,6 +166,21 @@ class AutomationScheduler:
     def start(self, settings: AutoProcessingSettings, runner: CycleRunner) -> AutoProcessingState:
         return self._start(settings, runner, next_run_at=_utc_now())
 
+    def start_recoverable(
+        self,
+        settings: AutoProcessingSettings,
+        runner: CycleRunner,
+        *,
+        cycle_due_at: datetime,
+        next_run_at: datetime,
+    ) -> AutoProcessingState:
+        return self._start(
+            settings,
+            runner,
+            next_run_at=max(_as_utc(next_run_at) or _utc_now(), _utc_now()),
+            cycle_due_at=_as_utc(cycle_due_at),
+        )
+
     def resume(
         self,
         settings: AutoProcessingSettings,

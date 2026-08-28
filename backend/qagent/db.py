@@ -101,6 +101,7 @@ _RANKING_V4_EVIDENCE_TRIGGER_VERSION = 4
 _RUNTIME_SQLITE_POOL_SIZE = 8
 _RUNTIME_SQLITE_MAX_OVERFLOW = 4
 _RUNTIME_SQLITE_POOL_TIMEOUT_SECONDS = 5
+_LEGACY_UNLINKED_BRIEF_ID = "brief-legacy-unlinked-delivery"
 
 
 def create_db_engine(database_url: str | None = None):
@@ -308,7 +309,11 @@ def _apply_additive_migrations(engine: Engine) -> None:
                 "WHERE idempotency_key IS NOT NULL"
             )
         )
-        _record_automation_runtime_migration_audit(connection)
+        repaired_unlinked_outbox = _repair_legacy_unlinked_delivery_briefs(connection)
+        _record_automation_runtime_migration_audit(
+            connection,
+            repaired_unlinked_outbox=repaired_unlinked_outbox,
+        )
         _add_missing_columns(
             connection,
             inspector,
@@ -424,7 +429,90 @@ def _apply_additive_migrations(engine: Engine) -> None:
         _create_immutable_row_triggers(connection, "fuyao_shadow_outcomes")
 
 
-def _record_automation_runtime_migration_audit(connection) -> None:
+def _repair_legacy_unlinked_delivery_briefs(connection) -> int:
+    orphan_count = int(
+        connection.execute(
+            text(
+                "SELECT COUNT(*) FROM delivery_outbox "
+                "WHERE brief_id = '' OR brief_id IS NULL"
+            )
+        ).scalar_one()
+    )
+    if orphan_count == 0:
+        return 0
+    health = json.dumps(
+        {
+            "migration": "legacy_unlinked_delivery_brief",
+            "scope": "operational_delivery_compatibility",
+            "decision_weight": "none",
+            "paper_ledger_mutation": "none",
+        },
+        sort_keys=True,
+    )
+    brief = json.dumps(
+        {
+            "brief_id": _LEGACY_UNLINKED_BRIEF_ID,
+            "provider": "legacy_unlinked",
+            "symbols": [],
+            "headline": "Legacy unlinked operational deliveries",
+            "top_opportunities": [],
+            "entry_watch": [],
+            "risk_alerts": [],
+            "catalyst_watch": [],
+            "strategy_validation": [],
+            "data_health": json.loads(health),
+        },
+        sort_keys=True,
+    )
+    connection.execute(
+        text(
+            "INSERT INTO brief_runs("
+            "brief_id,provider,symbols,headline,opportunity_count,entry_watch_count,"
+            "risk_alert_count,catalyst_count,validation_count,data_health,brief_json,created_at"
+            ") VALUES ("
+            ":brief_id,'legacy_unlinked','[]','Legacy unlinked operational deliveries',"
+            "0,0,0,0,0,:health,:brief,CURRENT_TIMESTAMP) "
+            "ON CONFLICT(brief_id) DO NOTHING"
+        ),
+        {"brief_id": _LEGACY_UNLINKED_BRIEF_ID, "health": health, "brief": brief},
+    )
+    stored = connection.execute(
+        text(
+            "SELECT provider,symbols,headline,opportunity_count,entry_watch_count,"
+            "risk_alert_count,catalyst_count,validation_count,data_health,brief_json "
+            "FROM brief_runs WHERE brief_id=:brief_id"
+        ),
+        {"brief_id": _LEGACY_UNLINKED_BRIEF_ID},
+    ).mappings().one()
+    expected = {
+        "provider": "legacy_unlinked",
+        "symbols": "[]",
+        "headline": "Legacy unlinked operational deliveries",
+        "opportunity_count": 0,
+        "entry_watch_count": 0,
+        "risk_alert_count": 0,
+        "catalyst_count": 0,
+        "validation_count": 0,
+        "data_health": health,
+        "brief_json": brief,
+    }
+    if dict(stored) != expected:
+        raise RuntimeError("legacy unlinked delivery sentinel brief has different facts")
+    result = connection.execute(
+        text(
+            "UPDATE delivery_outbox SET brief_id=:brief_id "
+            "WHERE brief_id = '' OR brief_id IS NULL"
+        ),
+        {"brief_id": _LEGACY_UNLINKED_BRIEF_ID},
+    )
+    return int(result.rowcount or 0)
+
+
+def _record_automation_runtime_migration_audit(
+    connection,
+    *,
+    repaired_unlinked_outbox: int = 0,
+) -> None:
     duplicate_rows = connection.execute(
         text(
             "SELECT provider, instrument_id, COUNT(*) AS duplicate_count "
@@ -435,11 +523,39 @@ def _record_automation_runtime_migration_audit(connection) -> None:
     legacy_outbox = connection.execute(
         text("SELECT COUNT(*) FROM delivery_outbox WHERE idempotency_key IS NULL")
     ).scalar_one()
+    previous = connection.execute(
+        text(
+            "SELECT payload_json FROM automation_migration_audits "
+            "WHERE audit_key='automation-runtime-v1'"
+        )
+    ).scalar_one_or_none()
+    try:
+        previous_payload = json.loads(previous or "{}")
+    except json.JSONDecodeError:
+        previous_payload = {}
+    repaired_total = int(
+        previous_payload.get("legacy_unlinked_outbox_repaired_total") or 0
+    ) + int(repaired_unlinked_outbox)
+    remaining_unlinked = int(
+        connection.execute(
+            text(
+                "SELECT COUNT(*) FROM delivery_outbox "
+                "WHERE brief_id = '' OR brief_id IS NULL"
+            )
+        ).scalar_one()
+    )
     payload = json.dumps(
         {
             "active_paper_duplicates": [dict(row) for row in duplicate_rows],
             "active_paper_duplicate_groups": len(duplicate_rows),
             "legacy_outbox_without_idempotency": int(legacy_outbox),
+            "legacy_unlinked_outbox_repaired_this_run": int(
+                repaired_unlinked_outbox
+            ),
+            "legacy_unlinked_outbox_repaired_total": repaired_total,
+            "legacy_unlinked_outbox_remaining": remaining_unlinked,
+            "legacy_unlinked_sentinel_brief_id": _LEGACY_UNLINKED_BRIEF_ID,
+            "legacy_unlinked_action": "repoint_only_preserve_delivery_rows",
             "action": "audit_only_no_historical_deletion",
         },
         sort_keys=True,

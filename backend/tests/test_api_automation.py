@@ -7,21 +7,28 @@ from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 
 import qagent.api.routes as routes
 import qagent.jobs.automation as research_automation
 import qagent.jobs.automation_scheduler as scheduler_module
 from qagent.app import create_app
+from qagent import db as db_module
 from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.automation_scheduler import (
     AutoProcessingCycleResult,
     AutoProcessingSettings,
     AutoProcessingState,
     AutomationScheduler,
+    current_automation_cycle_invocation,
 )
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.storage.paper import PaperTradingRepository
+from qagent.storage.automation_runtime import (
+    AutomationRuntimeRepository,
+    automation_settings_digest,
+    scheduled_cycle_slot,
+)
 from qagent.storage.repository import QagentRepository
 from qagent.storage.tables import (
     FullMarketScanJobRow,
@@ -2986,6 +2993,204 @@ def test_automation_scheduler_start_and_stop_are_visible(tmp_path, monkeypatch):
     assert stopped.status_code == 200
     assert stopped.json()["enabled"] is False
     assert stopped.json()["next_run_at"] is None
+
+
+def test_stopped_scheduler_start_recovers_raw_scheduled_slot_without_provider_call(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = f"sqlite:///{tmp_path / 'automation-stopped-slot-recovery.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO delivery_outbox("
+                "delivery_id,brief_id,channel,recipient,subject,markdown,payload_json,"
+                "idempotency_key,payload_digest,status,created_at,updated_at,sent_at) VALUES "
+                "('legacy-stopped-a','','markdown',NULL,'legacy-a','body-a','{}',NULL,NULL,"
+                "'sent','2026-08-01 01:00:00','2026-08-01 02:00:00','2026-08-01 03:00:00'),"
+                "('legacy-stopped-b','','webhook','b@example.com','legacy-b','body-b','{}',"
+                "NULL,NULL,'failed','2026-08-02 01:00:00','2026-08-02 02:00:00',NULL)"
+            )
+        )
+        legacy_before = connection.execute(
+            text(
+                "SELECT delivery_id,channel,recipient,subject,markdown,payload_json,status,"
+                "created_at,updated_at,sent_at FROM delivery_outbox "
+                "WHERE delivery_id LIKE 'legacy-stopped-%' ORDER BY delivery_id"
+            )
+        ).all()
+    db_module._apply_additive_migrations(engine)
+    settings = AutoProcessingSettings(
+        provider="fixture",
+        symbols="US:TEST",
+        interval_seconds=60,
+        run_scan=False,
+        seed_paper=False,
+        update_paper=False,
+        run_alerts=False,
+        queue_alerts=False,
+        run_forward_evidence=False,
+    )
+    digest = automation_settings_digest(settings)
+    due = datetime.now(timezone.utc) - timedelta(minutes=20)
+    slot = scheduled_cycle_slot(due, digest)
+    runtime = AutomationRuntimeRepository(create_session_factory(database_url))
+    raw = runtime.begin_cycle(
+        cycle_slot=slot,
+        cycle_kind="scheduled",
+        settings_digest=digest,
+        due_at=due,
+        idempotency_key=None,
+        owner_token="stopped-owner",
+        now=due,
+    )
+    assert raw.grant is not None
+    runtime.begin_stage(
+        raw.grant,
+        "paper_update",
+        retry_scope="paper_update:fixture",
+        now=due,
+    )
+    runtime.fail_stage(
+        raw.grant,
+        "paper_update",
+        "provider timeout before stop",
+        retry_scope="paper_update:fixture",
+        error_fingerprint="c" * 64,
+        error_kind="timeout",
+        retryable=True,
+        now=due,
+    )
+    with create_session_factory(database_url)() as session:
+        session.execute(
+            text(
+                "UPDATE automation_cycles SET attempt_count=3,status='running',"
+                "next_retry_at=NULL WHERE cycle_slot=:slot"
+            ),
+            {"slot": slot},
+        )
+        session.execute(
+            text(
+                "UPDATE automation_cycle_stages SET attempt_count=4,status='error' "
+                "WHERE cycle_slot=:slot AND stage_key='paper_update'"
+            ),
+            {"slot": slot},
+        )
+        session.commit()
+    runtime.release(raw.grant, now=due)
+
+    provider_calls = 0
+
+    def recover_runner(cycle_settings):
+        nonlocal provider_calls
+        assert cycle_settings == settings
+        invocation = current_automation_cycle_invocation()
+        assert invocation.trigger == "scheduled"
+        assert invocation.due_at == due
+        restarted = AutomationRuntimeRepository(create_session_factory(database_url))
+        started = restarted.begin_cycle(
+            cycle_slot=slot,
+            cycle_kind="scheduled",
+            settings_digest=digest,
+            due_at=due,
+            idempotency_key=None,
+            owner_token="recovery-owner",
+            now=datetime.now(timezone.utc),
+        )
+        assert started.grant is not None
+        checkpoint = restarted.begin_stage(
+            started.grant,
+            "paper_update",
+            retry_scope="paper_update:fixture",
+        )
+        assert checkpoint is not None
+        assert checkpoint["stage_terminal_error"] == "provider timeout before stop"
+        # The provider path would increment this counter; recovery must not use it.
+        assert provider_calls == 0
+        status = restarted.finalize_cycle(
+            started.grant,
+            result={},
+            errors=["paper_update: provider timeout before stop"],
+            issues=[],
+            required_stages={"paper_update"},
+        )
+        finished = datetime.now(timezone.utc)
+        return AutoProcessingCycleResult(
+            provider="fixture",
+            started_at=finished,
+            finished_at=finished,
+            scan_status="failed",
+            errors=["paper_update: provider timeout before stop"],
+            data_health={"automation_cycle_status": status},
+        )
+
+    monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
+    monkeypatch.setattr(routes, "_run_auto_processing_cycle", recover_runner)
+    with TestClient(create_app()) as client:
+        started = client.post(
+            "/api/automation/scheduler/start"
+            "?provider=fixture&symbols=US:TEST&interval_seconds=60&run_scan=false"
+            "&seed_paper=false&update_paper=false&run_alerts=false&queue_alerts=false"
+            "&run_forward_evidence=false"
+        )
+        assert started.status_code == 200
+        assert datetime.fromisoformat(
+            started.json()["cycle_due_at"].replace("Z", "+00:00")
+        ) == due
+        deadline = time.monotonic() + 2.0
+        state = client.get("/api/automation/scheduler").json()
+        while state["run_count"] < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+            state = client.get("/api/automation/scheduler").json()
+        assert state["run_count"] == 1
+        assert datetime.fromisoformat(
+            state["cycle_due_at"].replace("Z", "+00:00")
+        ) != due
+        client.post("/api/automation/scheduler/stop")
+
+    assert provider_calls == 0
+    with create_session_factory(database_url)() as session:
+        cycle = session.execute(
+            text(
+                "SELECT status,attempt_count FROM automation_cycles "
+                "WHERE cycle_slot=:slot"
+            ),
+            {"slot": slot},
+        ).one()
+        counts = session.execute(
+            text(
+                "SELECT "
+                "(SELECT COUNT(*) FROM automation_incidents),"
+                "(SELECT COUNT(*) FROM brief_runs WHERE brief_id LIKE 'automation-brief-%'),"
+                "(SELECT COUNT(*) FROM delivery_outbox "
+                " WHERE idempotency_key LIKE 'automation-retry-alert:%'),"
+                "(SELECT COUNT(*) FROM delivery_outbox)"
+            )
+        ).one()
+        legacy_after = session.execute(
+            text(
+                "SELECT delivery_id,channel,recipient,subject,markdown,payload_json,status,"
+                "created_at,updated_at,sent_at FROM delivery_outbox "
+                "WHERE delivery_id LIKE 'legacy-stopped-%' ORDER BY delivery_id"
+            )
+        ).all()
+        legacy_briefs = session.execute(
+            text(
+                "SELECT DISTINCT brief_id FROM delivery_outbox "
+                "WHERE delivery_id LIKE 'legacy-stopped-%'"
+            )
+        ).scalars().all()
+    assert cycle.status == "deferred_with_alert"
+    assert cycle.attempt_count == 4
+    assert tuple(counts) == (1, 1, 1, 3)
+    assert legacy_after == legacy_before
+    assert legacy_briefs == ["brief-legacy-unlinked-delivery"]
+    with engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
 
 
 def test_automation_scheduler_restores_enabled_state_after_app_restart(

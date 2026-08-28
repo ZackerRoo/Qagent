@@ -89,6 +89,15 @@ class CycleRetryState:
     terminal_reason: str | None = None
 
 
+@dataclass(frozen=True)
+class RecoverableScheduledCycle:
+    cycle_slot: str
+    due_at: datetime
+    next_retry_at: datetime | None
+    status: str
+    attempt_count: int
+
+
 @dataclass
 class ProcessFence:
     path: str
@@ -792,6 +801,47 @@ class AutomationRuntimeRepository:
                 retry_backoff_seconds=row.retry_backoff_seconds,
                 last_error_fingerprint=row.last_error_fingerprint,
                 terminal_reason=row.terminal_reason,
+            )
+
+    def find_recoverable_scheduled_cycle(
+        self,
+        settings_digest: str,
+        *,
+        lease_key: str = AUTOMATION_LEASE_KEY,
+        now: datetime | None = None,
+    ) -> RecoverableScheduledCycle | None:
+        current = _as_utc(now or datetime.now(timezone.utc))
+        with self.session_factory() as session:
+            lease = session.get(RuntimeLeaseRow, lease_key)
+            if lease is not None and _as_utc(lease.expires_at) > current:
+                return None
+            row = session.scalar(
+                select(AutomationCycleRow)
+                .where(
+                    AutomationCycleRow.cycle_kind == "scheduled",
+                    AutomationCycleRow.settings_digest == settings_digest,
+                    AutomationCycleRow.status.not_in(TERMINAL_CYCLE_STATUSES),
+                    AutomationCycleRow.due_at.is_not(None),
+                )
+                .order_by(
+                    AutomationCycleRow.due_at.desc(),
+                    AutomationCycleRow.created_at.desc(),
+                    AutomationCycleRow.cycle_slot.desc(),
+                )
+                .limit(1)
+            )
+            if row is None or row.due_at is None:
+                return None
+            return RecoverableScheduledCycle(
+                cycle_slot=row.cycle_slot,
+                due_at=_as_utc(row.due_at),
+                next_retry_at=(
+                    _as_utc(row.next_retry_at)
+                    if row.next_retry_at is not None
+                    else None
+                ),
+                status=row.status,
+                attempt_count=int(row.attempt_count or 0),
             )
 
     @staticmethod

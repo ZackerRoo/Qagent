@@ -361,6 +361,95 @@ def test_legacy_outbox_migration_preserves_rows_and_adds_idempotency_columns(tmp
     assert audit["legacy_outbox_without_idempotency"] == 1
 
 
+def test_legacy_unlinked_outbox_rows_are_repointed_to_stable_sentinel(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'legacy-unlinked-outbox.db'}"
+    initialize_database(database_url)
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE delivery_outbox"))
+        connection.execute(
+            text(
+                "CREATE TABLE delivery_outbox ("
+                "delivery_id VARCHAR(64) PRIMARY KEY, brief_id VARCHAR(64), "
+                "channel VARCHAR(32), recipient VARCHAR(255), subject TEXT, markdown TEXT, "
+                "payload_json TEXT, status VARCHAR(32), created_at DATETIME, "
+                "updated_at DATETIME, sent_at DATETIME, "
+                "FOREIGN KEY(brief_id) REFERENCES brief_runs(brief_id))"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO delivery_outbox VALUES "
+                "('legacy-empty','', 'markdown','a@example.com','empty','body-a',:payload_a,"
+                "'sent','2026-08-01 01:00:00','2026-08-01 02:00:00','2026-08-01 03:00:00'),"
+                "('legacy-null',NULL,'webhook',NULL,'null','body-b',:payload_b,"
+                "'failed','2026-08-02 01:00:00','2026-08-02 02:00:00',NULL)"
+            ),
+            {"payload_a": '{"a":1}', "payload_b": '{"b":2}'},
+        )
+        before = connection.execute(
+            text(
+                "SELECT delivery_id,channel,recipient,subject,markdown,payload_json,status,"
+                "created_at,updated_at,sent_at FROM delivery_outbox ORDER BY delivery_id"
+            )
+        ).all()
+
+    db_module._apply_additive_migrations(engine)
+    with engine.connect() as connection:
+        after = connection.execute(
+            text(
+                "SELECT delivery_id,channel,recipient,subject,markdown,payload_json,status,"
+                "created_at,updated_at,sent_at FROM delivery_outbox ORDER BY delivery_id"
+            )
+        ).all()
+        brief_ids = connection.execute(
+            text("SELECT DISTINCT brief_id FROM delivery_outbox")
+        ).scalars().all()
+        sentinel_count = connection.execute(
+            text(
+                "SELECT COUNT(*) FROM brief_runs "
+                "WHERE brief_id='brief-legacy-unlinked-delivery'"
+            )
+        ).scalar_one()
+        audit = json.loads(
+            connection.execute(
+                text(
+                    "SELECT payload_json FROM automation_migration_audits "
+                    "WHERE audit_key='automation-runtime-v1'"
+                )
+            ).scalar_one()
+        )
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        foreign_key_issues = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
+    assert after == before
+    assert brief_ids == ["brief-legacy-unlinked-delivery"]
+    assert sentinel_count == 1
+    assert audit["legacy_unlinked_outbox_repaired_this_run"] == 2
+    assert audit["legacy_unlinked_outbox_repaired_total"] == 2
+    assert audit["legacy_unlinked_outbox_remaining"] == 0
+    assert foreign_key_issues == []
+
+    db_module._apply_additive_migrations(engine)
+    with engine.connect() as connection:
+        repeated_audit = json.loads(
+            connection.execute(
+                text(
+                    "SELECT payload_json FROM automation_migration_audits "
+                    "WHERE audit_key='automation-runtime-v1'"
+                )
+            ).scalar_one()
+        )
+        assert connection.execute(text("SELECT COUNT(*) FROM delivery_outbox")).scalar_one() == 2
+        assert connection.execute(
+            text(
+                "SELECT COUNT(*) FROM brief_runs "
+                "WHERE brief_id='brief-legacy-unlinked-delivery'"
+            )
+        ).scalar_one() == 1
+    assert repeated_audit["legacy_unlinked_outbox_repaired_this_run"] == 0
+    assert repeated_audit["legacy_unlinked_outbox_repaired_total"] == 2
+
+
 def test_two_engines_have_one_lease_winner(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'lease-race.db'}"
     first = _runtime(database_url)
@@ -1066,6 +1155,62 @@ def test_running_cycle_with_stage_attempt_four_finalizes_without_attempt_five(tm
         assert connection.execute(
             text("SELECT COUNT(*) FROM delivery_outbox")
         ).scalar_one() == 1
+
+
+def test_find_recoverable_scheduled_cycle_filters_scope_and_active_lease(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'recoverable-cycle.db'}"
+    runtime = _runtime(database_url)
+    engine = create_engine(database_url)
+    now = datetime(2026, 8, 29, 3, 0, tzinfo=timezone.utc)
+    with engine.begin() as connection:
+        for slot, kind, digest, status, due_offset in (
+            ("scheduled:old", "scheduled", "d" * 64, "running", -60),
+            ("scheduled:new", "scheduled", "d" * 64, "partial_retry_same_slot", -30),
+            ("scheduled:other", "scheduled", "e" * 64, "running", -10),
+            ("manual:newest", "manual", "d" * 64, "running", -5),
+            ("scheduled:terminal", "scheduled", "d" * 64, "succeeded", -1),
+        ):
+            due_at = now + timedelta(minutes=due_offset)
+            connection.execute(
+                text(
+                    "INSERT INTO automation_cycles("
+                    "cycle_slot,cycle_kind,settings_digest,idempotency_key,due_at,status,"
+                    "owner_token,fencing_token,result_json,error_json,attempt_count,retry_budget,"
+                    "next_retry_at,started_at,created_at,updated_at) VALUES ("
+                    ":slot,:kind,:digest,NULL,:due,:status,'owner',1,'{}','[]',2,4,"
+                    ":retry,:due,:due,:due)"
+                ),
+                {
+                    "slot": slot,
+                    "kind": kind,
+                    "digest": digest,
+                    "status": status,
+                    "due": due_at,
+                    "retry": due_at + timedelta(minutes=20),
+                },
+            )
+
+    found = runtime.find_recoverable_scheduled_cycle("d" * 64, now=now)
+    assert found is not None
+    assert found.cycle_slot == "scheduled:new"
+    assert found.due_at == now - timedelta(minutes=30)
+    assert found.next_retry_at == now - timedelta(minutes=10)
+    assert found.status == "partial_retry_same_slot"
+    assert found.attempt_count == 2
+    assert runtime.find_recoverable_scheduled_cycle("missing", now=now) is None
+
+    lease = runtime.acquire(
+        lease_key=AUTOMATION_LEASE_KEY,
+        owner_token="foreign-owner",
+        cycle_slot="scheduled:foreign",
+        now=now,
+    )
+    assert lease is not None
+    assert runtime.find_recoverable_scheduled_cycle("d" * 64, now=now) is None
+    assert runtime.find_recoverable_scheduled_cycle(
+        "d" * 64,
+        now=now + timedelta(hours=4),
+    ) is not None
 
 
 def test_legacy_not_null_outbox_attempt_four_is_atomic_and_advances_scheduler(tmp_path):
