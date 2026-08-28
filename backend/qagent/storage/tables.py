@@ -1466,10 +1466,80 @@ class AutomationSchedulerStateRow(Base):
     state_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     settings_json: Mapped[str] = mapped_column(Text, default="{}")
+    revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
+
+
+class RuntimeLeaseRow(Base):
+    __tablename__ = "runtime_leases"
+
+    lease_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    owner_token: Mapped[str] = mapped_column(String(128), index=True)
+    cycle_slot: Mapped[str] = mapped_column(String(160), index=True)
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False)
+    heartbeat_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utc_now, onupdate=utc_now
+    )
+
+
+class AutomationCycleRow(Base):
+    __tablename__ = "automation_cycles"
+
+    cycle_slot: Mapped[str] = mapped_column(String(160), primary_key=True)
+    cycle_kind: Mapped[str] = mapped_column(String(16), index=True)
+    settings_digest: Mapped[str] = mapped_column(String(64), index=True)
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(160), unique=True, nullable=True
+    )
+    due_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    owner_token: Mapped[str] = mapped_column(String(128))
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False)
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    error_json: Mapped[str] = mapped_column(Text, default="[]")
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    finalized_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utc_now, onupdate=utc_now
+    )
+
+
+class AutomationCycleStageRow(Base):
+    __tablename__ = "automation_cycle_stages"
+    __table_args__ = (
+        UniqueConstraint("cycle_slot", "stage_key", name="uq_automation_cycle_stage"),
+    )
+
+    cycle_slot: Mapped[str] = mapped_column(
+        String(160), ForeignKey("automation_cycles.cycle_slot"), primary_key=True
+    )
+    stage_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    owner_token: Mapped[str] = mapped_column(String(128))
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False)
+    output_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    output_json: Mapped[str] = mapped_column(Text, default="{}")
+    error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utc_now, onupdate=utc_now
+    )
+
+
+class AutomationMigrationAuditRow(Base):
+    __tablename__ = "automation_migration_audits"
+
+    audit_key: Mapped[str] = mapped_column(String(96), primary_key=True)
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
 
 
 class BriefRunRow(Base):
@@ -1501,6 +1571,10 @@ class DeliveryOutboxRow(Base):
     subject: Mapped[str] = mapped_column(Text)
     markdown: Mapped[str] = mapped_column(Text)
     payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(160), unique=True, nullable=True
+    )
+    payload_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(

@@ -294,6 +294,33 @@ def test_paper_update_repairs_legacy_replacement_status(tmp_path):
     assert repaired.realized_return_pct is None
 
 
+def test_paper_update_reports_zero_coverage_for_active_trade_without_prices(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    paper_repo.create_trade(
+        source_snapshot_id="empty-price-active",
+        provider="free",
+        instrument_id="CN:588850",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 10),
+        trigger_price=Decimal("2.20"),
+        initial_stop=Decimal("2.10"),
+        target_1=Decimal("2.40"),
+        rank_score=Decimal("0.70"),
+    )
+
+    result = update_paper_trades(
+        paper_repo,
+        provider=EmptyMinuteAndDailyProvider(),
+        provider_mode="free",
+        as_of=datetime(2026, 7, 11, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    assert result.data_health["paper_price_requested"] == "1"
+    assert result.data_health["paper_price_resolved"] == "0"
+    assert result.data_health["paper_price_coverage"] == "0.000000"
+
+
 def test_a_share_paper_trade_does_not_backfill_entry_on_signal_date(tmp_path):
     repo = make_repo(tmp_path)
     paper_repo = PaperTradingRepository(repo.session_factory)

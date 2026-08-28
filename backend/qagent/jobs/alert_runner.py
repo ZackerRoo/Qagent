@@ -7,6 +7,7 @@ from qagent.market.instruments import format_instrument_label
 from qagent.monitoring.alerts import Alert, AlertRule
 from qagent.providers.base import MarketDataProvider
 from qagent.storage.repository import DeliveryOutboxRecord, QagentRepository
+from qagent.storage.automation_runtime import canonical_digest
 
 
 class AlertRunSummary(BaseModel):
@@ -30,6 +31,7 @@ def run_alert_rules(
     provider: MarketDataProvider,
     queue_delivery: bool = False,
     recipient: str | None = None,
+    idempotency_key: str | None = None,
 ) -> AlertRunResult:
     stored_rules = repo.list_alert_rules()
     rules = [
@@ -47,6 +49,12 @@ def run_alert_rules(
     alerts = evaluate_snapshot_alerts(latest_prices, rules)
     delivery = None
     if queue_delivery and alerts:
+        alert_facts = {
+            "provider": provider.name,
+            "rules": [rule.model_dump(mode="json") for rule in rules],
+            "alerts": [alert.model_dump(mode="json") for alert in alerts],
+            "latest_prices": {key: str(value) for key, value in latest_prices.items()},
+        }
         delivery = repo.enqueue_delivery(
             subject=f"Qagent Alerts: {len(alerts)} triggered",
             markdown=render_alert_run_markdown(provider.name, alerts, latest_prices),
@@ -58,6 +66,9 @@ def run_alert_rules(
                 "triggered": len(alerts),
                 "instruments": instrument_ids,
             },
+            idempotency_key=(
+                idempotency_key or f"automation-alert:{canonical_digest(alert_facts)}"
+            ),
         )
 
     data_health = {
@@ -65,6 +76,11 @@ def run_alert_rules(
         "rules": str(len(rules)),
         "instruments": str(len(instrument_ids)),
         "triggered": str(len(alerts)),
+        "alert_price_requested": str(len(instrument_ids)),
+        "alert_price_observed": str(len(latest_prices)),
+        "alert_price_coverage": (
+            f"{len(latest_prices) / len(instrument_ids):.6f}" if instrument_ids else "1.000000"
+        ),
     }
     provider_errors = getattr(provider, "last_errors", [])
     if provider_errors:

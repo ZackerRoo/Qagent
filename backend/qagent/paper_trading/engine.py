@@ -630,7 +630,7 @@ def seed_paper_trades_from_snapshots(
             skipped += 1
             skipped_unaffordable += 1
             continue
-        repo.create_trade(
+        created_trade = repo.create_trade_if_capacity(
             source_snapshot_id=snapshot.snapshot_id,
             provider=provider,
             instrument_id=snapshot.instrument_id,
@@ -642,6 +642,11 @@ def seed_paper_trades_from_snapshots(
             rank_score=snapshot.rank_score,
             notes=notes,
             allocation_multiplier=allocation_multiplier,
+            max_active_trades=(
+                max_active_trades
+                if max_active_trades is not None
+                else account_settings.max_positions
+            ),
             admission_proof=PaperTradeAdmissionProof(
                 admission_source=admission.admission_source,
                 production_identity_digest=admission.production_identity_digest,
@@ -650,6 +655,9 @@ def seed_paper_trades_from_snapshots(
                 release_proof_digest=admission.release_proof_digest,
             ),
         )
+        if created_trade is None:
+            skipped += 1
+            continue
         created += 1
         active_instruments.add(snapshot.instrument_id)
     return PaperSeedResult(
@@ -716,6 +724,7 @@ def update_paper_trades(
     daily_fallback_checked = 0
     daily_fallback_rows = 0
     unaffordable_missed = 0
+    resolved_trade_ids: set[str] = set()
     for trade in active:
         source_context = repo.get_trade_source_context(trade.source_snapshot_id)
         execution_context = _paper_execution_context(
@@ -739,6 +748,7 @@ def update_paper_trades(
                 execution_context,
             )
             unaffordable_missed += 1
+            resolved_trade_ids.add(trade.trade_id)
             continue
         minute_update, checked, rows, minute_deferred = _try_evaluate_trade_with_minutes(
             repo,
@@ -752,6 +762,8 @@ def update_paper_trades(
         )
         minute_checked += checked
         minute_rows += rows
+        if rows > 0:
+            resolved_trade_ids.add(trade.trade_id)
         fills_deferred += minute_deferred
         if minute_update is not None:
             _persist_paper_trade_update(
@@ -771,6 +783,7 @@ def update_paper_trades(
         daily_fallback_rows += len(bars)
         if bars.empty:
             continue
+        resolved_trade_ids.add(trade.trade_id)
         updated, deferred = _evaluate_trade(
             trade,
             bars,
@@ -789,6 +802,11 @@ def update_paper_trades(
         "paper_provider_filter": provider_mode or "all",
         "trades": str(len(refreshed)),
         "active_checked": str(len(active)),
+        "paper_price_requested": str(len(active)),
+        "paper_price_resolved": str(len(resolved_trade_ids)),
+        "paper_price_coverage": (
+            f"{len(resolved_trade_ids) / len(active):.6f}" if active else "1.000000"
+        ),
         **paper_execution_data_health(
             as_of=execution_time,
             fills_deferred=fills_deferred,

@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from threading import Event, Lock, Thread
 
 from pydantic import BaseModel, Field
+
+from qagent.storage.automation_runtime import (
+    AutomationCycleBusyError,
+    AutomationCycleConflictError,
+    AutomationLeaseLostError,
+    TERMINAL_CYCLE_STATUSES,
+)
 
 
 class AutoProcessingSettings(BaseModel):
@@ -38,6 +47,7 @@ class AutoProcessingCycleResult(BaseModel):
     paper_closed: int = 0
     alerts_triggered: int = 0
     errors: list[str] = Field(default_factory=list)
+    issues: list[str] = Field(default_factory=list)
     data_health: dict[str, str] = Field(default_factory=dict)
 
 
@@ -49,6 +59,7 @@ class AutoProcessingState(BaseModel):
     last_started_at: datetime | None = None
     last_completed_at: datetime | None = None
     next_run_at: datetime | None = None
+    cycle_due_at: datetime | None = None
     last_error: str | None = None
     last_result: AutoProcessingCycleResult | None = None
 
@@ -62,6 +73,7 @@ class AutomationSchedulerCheckpoint(BaseModel):
     last_error: str | None = None
     last_result: AutoProcessingCycleResult | None = None
     next_run_at: datetime | None = None
+    cycle_due_at: datetime | None = None
     in_flight: bool = False
     scheduled_interval_seconds: int | None = Field(default=None, ge=5, le=24 * 60 * 60)
 
@@ -69,6 +81,23 @@ class AutomationSchedulerCheckpoint(BaseModel):
 CycleRunner = Callable[[AutoProcessingSettings], AutoProcessingCycleResult]
 StateListener = Callable[[AutoProcessingState], None]
 SCHEDULER_CLOCK_RECHECK_SECONDS = 5.0
+
+
+@dataclass(frozen=True)
+class AutomationCycleInvocation:
+    trigger: str
+    due_at: datetime | None = None
+    idempotency_key: str | None = None
+
+
+_cycle_invocation: ContextVar[AutomationCycleInvocation | None] = ContextVar(
+    "automation_cycle_invocation",
+    default=None,
+)
+
+
+def current_automation_cycle_invocation() -> AutomationCycleInvocation:
+    return _cycle_invocation.get() or AutomationCycleInvocation(trigger="manual")
 
 
 class AutomationScheduler:
@@ -86,9 +115,11 @@ class AutomationScheduler:
         self._last_started_at: datetime | None = None
         self._last_completed_at: datetime | None = None
         self._next_run_at: datetime | None = None
+        self._cycle_due_at: datetime | None = None
         self._last_error: str | None = None
         self._last_result: AutoProcessingCycleResult | None = None
         self._restored_next_run_at: datetime | None = None
+        self._restored_cycle_due_at: datetime | None = None
         self._restored_in_flight = False
         self._restored_interval_seconds: int | None = None
         self._state_listener = state_listener
@@ -102,6 +133,7 @@ class AutomationScheduler:
             self._settings = settings
             if not self._enabled:
                 self._next_run_at = None
+                self._cycle_due_at = None
             return self._state_unlocked()
 
     def set_state_listener(self, listener: StateListener | None) -> None:
@@ -118,6 +150,7 @@ class AutomationScheduler:
             self._last_error = checkpoint.last_error
             self._last_result = checkpoint.last_result
             self._restored_next_run_at = checkpoint.next_run_at
+            self._restored_cycle_due_at = checkpoint.cycle_due_at
             self._restored_in_flight = checkpoint.in_flight
             self._restored_interval_seconds = checkpoint.scheduled_interval_seconds
 
@@ -145,6 +178,7 @@ class AutomationScheduler:
                 self._last_result.finished_at if self._last_result is not None else None,
             )
             restored_due = _as_utc(self._restored_next_run_at)
+            restored_cycle_due = _as_utc(self._restored_cycle_due_at)
             interval_changed = (
                 self._restored_interval_seconds is not None
                 and self._restored_interval_seconds != settings.interval_seconds
@@ -156,21 +190,36 @@ class AutomationScheduler:
             ):
                 # The prior process died inside a cycle. Retrying is explicitly
                 # at-least-once; do not mislabel its start time as a completion.
+                cycle_due_at = (
+                    restored_cycle_due
+                    or restored_due
+                    or _as_utc(self._last_started_at)
+                    or now
+                )
                 next_run_at = now
                 self._last_error = "interrupted_cycle_retry_after_restart"
             elif restored_due is not None and not interval_changed:
                 next_run_at = restored_due
+                cycle_due_at = restored_cycle_due or restored_due
             elif last_completed_at is not None:
                 next_run_at = last_completed_at + timedelta(seconds=settings.interval_seconds)
+                cycle_due_at = next_run_at
             else:
                 # Legacy records without any trustworthy timing evidence cannot
                 # prove a cycle is overdue. Wait one interval to avoid a
                 # restart-only duplicate side effect.
                 next_run_at = now + timedelta(seconds=settings.interval_seconds)
+                cycle_due_at = next_run_at
             self._restored_next_run_at = None
+            self._restored_cycle_due_at = None
             self._restored_in_flight = False
             self._restored_interval_seconds = None
-        return self._start(settings, runner, next_run_at=max(next_run_at, now))
+        return self._start(
+            settings,
+            runner,
+            next_run_at=max(next_run_at, now),
+            cycle_due_at=cycle_due_at,
+        )
 
     def _start(
         self,
@@ -178,6 +227,7 @@ class AutomationScheduler:
         runner: CycleRunner,
         *,
         next_run_at: datetime,
+        cycle_due_at: datetime | None = None,
     ) -> AutoProcessingState:
         with self._lock:
             if not self._enabled and self._run_lock.locked():
@@ -195,13 +245,16 @@ class AutomationScheduler:
                         last_run_at + timedelta(seconds=settings.interval_seconds),
                         _utc_now(),
                     )
+                    self._cycle_due_at = self._next_run_at
                 else:
                     self._next_run_at = self._next_run_at or next_run_at
+                    self._cycle_due_at = self._cycle_due_at or cycle_due_at or next_run_at
                 self._wake_event.set()
                 return self._state_unlocked()
             self._enabled = True
             self._status = "idle"
             self._next_run_at = next_run_at
+            self._cycle_due_at = cycle_due_at or next_run_at
             self._generation += 1
             generation = self._generation
             self._stop_event = Event()
@@ -223,6 +276,7 @@ class AutomationScheduler:
             self._enabled = False
             self._status = "stopping" if self._run_lock.locked() else "idle"
             self._next_run_at = None
+            self._cycle_due_at = None
             self._stop_event.set()
             self._wake_event.set()
             thread = self._thread
@@ -249,8 +303,10 @@ class AutomationScheduler:
         self,
         settings: AutoProcessingSettings,
         runner: CycleRunner,
+        *,
+        idempotency_key: str | None = None,
     ) -> AutoProcessingState:
-        self._execute(settings, runner)
+        self._execute(settings, runner, idempotency_key=idempotency_key)
         with self._lock:
             return self._state_unlocked()
 
@@ -315,6 +371,7 @@ class AutomationScheduler:
         runner: CycleRunner,
         *,
         generation: int | None = None,
+        idempotency_key: str | None = None,
     ) -> bool:
         if not self._run_lock.acquire(blocking=False):
             return False
@@ -326,13 +383,38 @@ class AutomationScheduler:
             if generation is None:
                 self._settings = settings
             self._status = "running"
+            due_at = self._cycle_due_at if generation is not None else None
             self._last_started_at = started_at
             if self._last_error != "interrupted_cycle_retry_after_restart":
                 self._last_error = None
-        self._notify_state_listener()
+        invocation_token = _cycle_invocation.set(
+            AutomationCycleInvocation(
+                trigger="scheduled" if generation is not None else "manual",
+                due_at=due_at,
+                idempotency_key=idempotency_key,
+            )
+        )
+        coordination_error: (
+            AutomationCycleBusyError
+            | AutomationLeaseLostError
+            | AutomationCycleConflictError
+            | None
+        ) = None
+        replayed = False
+        cycle_terminal = True
         try:
             result = runner(settings)
+        except (
+            AutomationCycleBusyError,
+            AutomationLeaseLostError,
+            AutomationCycleConflictError,
+        ) as exc:
+            coordination_error = exc
+            with self._lock:
+                if generation is None or generation == self._generation:
+                    self._status = "idle"
         except Exception as exc:  # pragma: no cover - route-level tests cover state output.
+            cycle_terminal = False
             finished_at = _utc_now()
             result = AutoProcessingCycleResult(
                 provider=settings.provider,
@@ -340,36 +422,61 @@ class AutomationScheduler:
                 finished_at=finished_at,
                 scan_status="failed",
                 errors=[str(exc)],
-                data_health={"automation_scheduler_error": str(exc)[:500]},
+                data_health={
+                    "automation_scheduler_error": str(exc)[:500],
+                    "automation_cycle_status": "partial",
+                },
             )
             with self._lock:
                 self._last_error = str(exc)
         else:
             finished_at = result.finished_at
+            replayed = result.data_health.get("automation_cycle_replayed") == "true"
+            cycle_terminal = (
+                result.data_health.get("automation_cycle_status", "succeeded")
+                in TERMINAL_CYCLE_STATUSES
+            )
             with self._lock:
-                self._last_error = None
+                reported = result.errors or result.issues
+                self._last_error = "; ".join(reported)[:1000] if reported else None
         finally:
+            _cycle_invocation.reset(invocation_token)
             with self._lock:
-                is_current = generation is None or generation == self._generation
+                if coordination_error is not None:
+                    self._run_lock.release()
+                else:
+                    is_current = generation is None or generation == self._generation
+                    if is_current:
+                        self._status = "idle"
+                    elif not self._enabled and self._status == "stopping":
+                        # start() remains rejected while _run_lock is held, so a
+                        # stopped stale generation can safely finish the stopping
+                        # transition without overwriting a newer worker's state.
+                        self._status = "idle"
+                    if not replayed and cycle_terminal:
+                        self._run_count += 1
+                    self._last_completed_at = finished_at
+                    self._last_result = result
+                    if is_current and cycle_terminal:
+                        self._next_run_at = (
+                            finished_at + timedelta(seconds=self._settings.interval_seconds)
+                            if self._enabled
+                            else None
+                        )
+                        self._cycle_due_at = self._next_run_at
+                    elif is_current:
+                        # Preserve the immutable cycle_due_at and retry this
+                        # partial slot instead of advancing the schedule.
+                        retry_seconds = min(self._settings.interval_seconds, 300)
+                        self._next_run_at = _utc_now() + timedelta(seconds=retry_seconds)
+            if coordination_error is None:
                 if is_current:
-                    self._status = "idle"
-                elif not self._enabled and self._status == "stopping":
-                    # start() remains rejected while _run_lock is held, so a
-                    # stopped stale generation can safely finish the stopping
-                    # transition without overwriting a newer worker's state.
-                    self._status = "idle"
-                self._run_count += 1
-                self._last_completed_at = finished_at
-                self._last_result = result
-                if is_current:
-                    self._next_run_at = (
-                        finished_at + timedelta(seconds=self._settings.interval_seconds)
-                        if self._enabled
-                        else None
-                    )
-            if is_current:
-                self._notify_state_listener()
-            self._run_lock.release()
+                    self._notify_state_listener()
+                self._run_lock.release()
+        if coordination_error is not None:
+            if generation is None:
+                raise coordination_error
+            return False
         return True
 
     def _notify_state_listener(self) -> None:
@@ -393,6 +500,7 @@ class AutomationScheduler:
             last_started_at=self._last_started_at,
             last_completed_at=self._last_completed_at,
             next_run_at=self._next_run_at,
+            cycle_due_at=self._cycle_due_at,
             last_error=self._last_error,
             last_result=self._last_result,
         )

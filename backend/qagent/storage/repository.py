@@ -629,6 +629,7 @@ class AutomationSchedulerStateRecord(BaseModel):
     settings: dict[str, object]
     runtime: dict[str, object] = Field(default_factory=dict)
     updated_at: datetime
+    revision: int = 0
 
 
 class OpportunitySnapshotRecord(BaseModel):
@@ -673,10 +674,16 @@ class DeliveryOutboxRecord(BaseModel):
     subject: str
     markdown: str
     payload: dict[str, object]
+    idempotency_key: str | None = None
+    payload_digest: str | None = None
     status: str
     created_at: datetime
     updated_at: datetime
     sent_at: datetime | None
+
+
+class DeliveryIdempotencyConflictError(ValueError):
+    pass
 
 
 class StoredTradableInstrument(BaseModel):
@@ -1340,14 +1347,38 @@ class QagentRepository:
         enabled: bool,
         settings: dict[str, object],
         runtime: dict[str, object] | None = None,
+        expected_revision: int | None = None,
+        control_plane: bool = False,
     ) -> AutomationSchedulerStateRecord:
         with self.session_factory() as session:
+            if session.bind is not None and session.bind.dialect.name == "sqlite":
+                session.connection().exec_driver_sql("BEGIN IMMEDIATE")
             now = datetime.now(timezone.utc)
+            row = session.get(AutomationSchedulerStateRow, "default")
+            runtime_payload = runtime or {}
+            if row is not None:
+                try:
+                    stored_payload = json.loads(row.settings_json or "{}")
+                except json.JSONDecodeError:
+                    stored_payload = {}
+                stored_runtime = stored_payload.get("runtime", {})
+                if (
+                    isinstance(stored_runtime, dict)
+                    and int(stored_runtime.get("run_count") or 0)
+                    > int(runtime_payload.get("run_count") or 0)
+                ):
+                    runtime_payload = stored_runtime
+                if expected_revision is not None and row.revision != expected_revision:
+                    if not control_plane:
+                        return self._automation_scheduler_state_from_row(row)
+                    # Explicit start/stop/settings changes own the control
+                    # plane, but never roll runtime evidence backwards.
+                    if isinstance(stored_runtime, dict):
+                        runtime_payload = stored_runtime
             state_json = json.dumps(
-                {"runtime": runtime or {}, "settings": settings},
+                {"runtime": runtime_payload, "settings": settings},
                 sort_keys=True,
             )
-            row = session.get(AutomationSchedulerStateRow, "default")
             if row is None:
                 row = AutomationSchedulerStateRow(
                     state_id="default",
@@ -1355,12 +1386,14 @@ class QagentRepository:
                     settings_json=state_json,
                     created_at=now,
                     updated_at=now,
+                    revision=1,
                 )
                 session.add(row)
             else:
                 row.enabled = enabled
                 row.settings_json = state_json
                 row.updated_at = now
+                row.revision += 1
             session.commit()
             session.refresh(row)
             return self._automation_scheduler_state_from_row(row)
@@ -3290,6 +3323,7 @@ class QagentRepository:
         channel: str = "markdown",
         recipient: str | None = None,
         markdown: str = "",
+        idempotency_key: str | None = None,
     ) -> DeliveryOutboxRecord:
         delivery_id = (
             f"delivery-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
@@ -3304,21 +3338,16 @@ class QagentRepository:
             "catalyst_count": brief_run.catalyst_count,
             "validation_count": brief_run.validation_count,
         }
-        with self.session_factory() as session:
-            row = DeliveryOutboxRow(
-                delivery_id=delivery_id,
-                brief_id=brief_run.brief_id,
-                channel=channel,
-                recipient=recipient,
-                subject=brief_run.headline,
-                markdown=markdown,
-                payload_json=json.dumps(payload, sort_keys=True),
-                status="queued",
-            )
-            session.add(row)
-            session.commit()
-            session.refresh(row)
-            return self._delivery_outbox_from_row(row)
+        return self.enqueue_delivery(
+            subject=brief_run.headline,
+            markdown=markdown,
+            channel=channel,
+            recipient=recipient,
+            payload=payload,
+            brief_id=brief_run.brief_id,
+            idempotency_key=idempotency_key,
+            delivery_id=delivery_id,
+        )
 
     def enqueue_delivery(
         self,
@@ -3328,11 +3357,44 @@ class QagentRepository:
         recipient: str | None = None,
         payload: dict[str, object] | None = None,
         brief_id: str | None = None,
+        idempotency_key: str | None = None,
+        delivery_id: str | None = None,
     ) -> DeliveryOutboxRecord:
-        delivery_id = (
+        delivery_id = delivery_id or (
             f"delivery-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
         )
+        normalized_key = (idempotency_key or "").strip() or None
+        payload_value = payload or {}
+        payload_json = json.dumps(payload_value, sort_keys=True)
+        digest_facts = {
+            "brief_id": brief_id,
+            "channel": channel,
+            "recipient": recipient,
+            "subject": subject,
+            "markdown": markdown,
+            "payload": payload_value,
+        }
+        payload_digest = hashlib.sha256(
+            json.dumps(
+                digest_facts,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
         with self.session_factory() as session:
+            if normalized_key is not None:
+                existing = (
+                    session.query(DeliveryOutboxRow)
+                    .filter(DeliveryOutboxRow.idempotency_key == normalized_key)
+                    .one_or_none()
+                )
+                if existing is not None:
+                    if existing.payload_digest != payload_digest:
+                        raise DeliveryIdempotencyConflictError(
+                            "delivery idempotency key is bound to different facts"
+                        )
+                    return self._delivery_outbox_from_row(existing)
             row = DeliveryOutboxRow(
                 delivery_id=delivery_id,
                 brief_id=brief_id or "",
@@ -3340,11 +3402,30 @@ class QagentRepository:
                 recipient=recipient,
                 subject=subject,
                 markdown=markdown,
-                payload_json=json.dumps(payload or {}, sort_keys=True),
+                payload_json=payload_json,
+                idempotency_key=normalized_key,
+                payload_digest=payload_digest,
                 status="queued",
             )
             session.add(row)
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                if normalized_key is None:
+                    raise
+                existing = (
+                    session.query(DeliveryOutboxRow)
+                    .filter(DeliveryOutboxRow.idempotency_key == normalized_key)
+                    .one_or_none()
+                )
+                if existing is None:
+                    raise
+                if existing.payload_digest != payload_digest:
+                    raise DeliveryIdempotencyConflictError(
+                        "delivery idempotency key is bound to different facts"
+                    )
+                return self._delivery_outbox_from_row(existing)
             session.refresh(row)
             return self._delivery_outbox_from_row(row)
 
@@ -3833,6 +3914,8 @@ class QagentRepository:
             subject=row.subject,
             markdown=row.markdown,
             payload=json.loads(row.payload_json or "{}"),
+            idempotency_key=row.idempotency_key,
+            payload_digest=row.payload_digest,
             status=row.status,
             created_at=row.created_at,
             updated_at=row.updated_at,
@@ -3859,6 +3942,7 @@ class QagentRepository:
             settings=settings if isinstance(settings, dict) else {},
             runtime=runtime if isinstance(runtime, dict) else {},
             updated_at=row.updated_at,
+            revision=row.revision,
         )
 
 

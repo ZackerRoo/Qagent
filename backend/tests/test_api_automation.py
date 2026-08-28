@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 import pytest
+from sqlalchemy import text
 
 import qagent.api.routes as routes
 import qagent.jobs.automation as research_automation
@@ -1151,6 +1152,345 @@ def test_automation_cycle_publishes_post_cycle_risk_gate(monkeypatch):
     assert shadow_resolution_calls[0][1]["provider_mode"] == "free"
 
 
+@pytest.mark.parametrize(
+    ("stage", "health", "expected"),
+    [
+        (
+            "fuyao_market_theme",
+            {
+                "fuyao_market_research_status": "unavailable",
+                "fuyao_theme_research_status": "existing",
+            },
+            "deferred",
+        ),
+        (
+            "fuyao_market_theme",
+            {
+                "fuyao_market_research_status": "recorded",
+                "fuyao_theme_research_status": "stored_fallback",
+            },
+            "deferred",
+        ),
+        (
+            "factor_shadow",
+            {"factor_shadow_outcome_status": "waiting_for_maturity"},
+            "deferred",
+        ),
+        ("factor_shadow", {"factor_shadow_outcome_status": "incomplete"}, "deferred"),
+        (
+            "fuyao_shadow",
+            {"fuyao_shadow_status": "collecting", "fuyao_shadow_unresolved_prices": "0"},
+            "deferred",
+        ),
+        (
+            "fuyao_shadow",
+            {"fuyao_shadow_status": "resolved", "fuyao_shadow_unresolved_prices": "2"},
+            "deferred",
+        ),
+        ("alerts", {"errors": "provider unavailable"}, "error"),
+        (
+            "forward_evidence",
+            {"ranking_v3_forward_state": "waiting_snapshot"},
+            "deferred",
+        ),
+        (
+            "paper_update",
+            {
+                "automation_paper_update_status": "completed",
+                "paper_price_requested": "2",
+                "paper_price_resolved": "0",
+            },
+            "error",
+        ),
+        (
+            "alerts",
+            {
+                "automation_alert_status": "evaluated",
+                "alert_price_requested": "2",
+                "alert_price_observed": "1",
+            },
+            "error",
+        ),
+        (
+            "paper_update",
+            {"automation_paper_update_status": "completed"},
+            "error",
+        ),
+        (
+            "alerts",
+            {
+                "automation_alert_status": "evaluated",
+                "alert_price_requested": "invalid",
+                "alert_price_observed": "0",
+            },
+            "error",
+        ),
+        (
+            "alerts",
+            {
+                "automation_alert_status": "evaluated",
+                "alert_price_requested": "1",
+                "alert_price_observed": "-1",
+            },
+            "error",
+        ),
+        (
+            "paper_update",
+            {
+                "automation_paper_update_status": "completed",
+                "paper_price_requested": "0",
+                "paper_price_resolved": "0",
+            },
+            "success",
+        ),
+        (
+            "alerts",
+            {
+                "automation_alert_status": "evaluated",
+                "alert_price_requested": "0",
+                "alert_price_observed": "0",
+            },
+            "success",
+        ),
+    ],
+)
+def test_automation_stage_outcome_distinguishes_waiting_from_errors(
+    stage, health, expected
+):
+    outcome, reason = routes._automation_stage_outcome(stage, health)
+    assert outcome == expected
+    assert bool(reason) is (expected != "success")
+
+
+def test_cycle_with_natural_waiting_is_terminal_with_visible_issue(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'cycle-deferred.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    repo = QagentRepository(create_session_factory(database_url))
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    monkeypatch.setattr(routes, "_repo", lambda: repo)
+    monkeypatch.setattr(routes, "_paper_repo", lambda: paper_repo)
+    monkeypatch.setattr(
+        routes,
+        "_paper_seed_risk_gate",
+        lambda *_: (True, {"paper_risk_gate_action": "allow"}),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_latest_completed_a_share_session",
+        lambda *args: date(2026, 8, 28),
+    )
+    monkeypatch.setattr(
+        routes,
+        "refresh_factor_shadow_benchmark_cache",
+        lambda *args, **kwargs: SimpleNamespace(data_health={}),
+    )
+    monkeypatch.setattr(
+        routes,
+        "resolve_factor_shadow_outcomes",
+        lambda *args, **kwargs: SimpleNamespace(
+            data_health={"factor_shadow_outcome_status": "waiting_for_maturity"},
+            next_maturity_date=date(2026, 9, 1),
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "resolve_fuyao_shadow_outcomes",
+        lambda *args, **kwargs: SimpleNamespace(
+            data_health={"fuyao_shadow_status": "resolved"},
+            unresolved_prices=0,
+            next_maturity_date=None,
+        ),
+    )
+
+    result = routes._run_auto_processing_cycle(
+        AutoProcessingSettings(
+            provider="free",
+            run_scan=False,
+            seed_paper=False,
+            update_paper=False,
+            run_alerts=False,
+            run_forward_evidence=False,
+        )
+    )
+
+    assert result.errors == []
+    assert result.issues == [
+        "factor_shadow: factor shadow status is waiting_for_maturity"
+    ]
+    assert (
+        result.data_health["automation_cycle_status"]
+        == "completed_with_deferred_or_issues"
+    )
+    with repo.session_factory() as session:
+        assert session.execute(
+            text(
+                "SELECT status FROM automation_cycle_stages "
+                "WHERE stage_key = 'factor_shadow'"
+            )
+        ).scalar_one() == "deferred"
+
+
+@pytest.mark.parametrize(
+    ("alert_health", "expected_error"),
+    [
+        (
+            {"alert_price_requested": "2", "alert_price_observed": "0"},
+            "price coverage=0/2",
+        ),
+        (
+            {
+                "alert_price_requested": "2",
+                "alert_price_observed": "2",
+                "errors": "snapshot provider unavailable",
+            },
+            "reported provider/stage errors: snapshot provider unavailable",
+        ),
+        ({}, "alert price coverage telemetry is missing or invalid"),
+    ],
+)
+def test_cycle_with_required_alert_failure_retries_same_slot(
+    tmp_path, monkeypatch, alert_health, expected_error
+):
+    database_url = f"sqlite:///{tmp_path / 'cycle-alert-coverage.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    repo = QagentRepository(create_session_factory(database_url))
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    monkeypatch.setattr(routes, "_repo", lambda: repo)
+    monkeypatch.setattr(routes, "_paper_repo", lambda: paper_repo)
+    monkeypatch.setattr(
+        routes,
+        "_paper_seed_risk_gate",
+        lambda *_: (True, {"paper_risk_gate_action": "allow"}),
+    )
+    monkeypatch.setattr(routes, "build_market_data_provider", lambda *_: object())
+    monkeypatch.setattr(
+        routes,
+        "run_alert_rules",
+        lambda **kwargs: SimpleNamespace(
+            summary=SimpleNamespace(triggered=0),
+            data_health=alert_health,
+            delivery=None,
+        ),
+    )
+
+    result = routes._run_auto_processing_cycle(
+        AutoProcessingSettings(
+            provider="fixture",
+            run_scan=False,
+            seed_paper=False,
+            update_paper=False,
+            run_alerts=True,
+            run_forward_evidence=False,
+        )
+    )
+
+    assert result.issues == []
+    assert expected_error in result.errors[0]
+    assert result.data_health["automation_cycle_status"] == "partial_retry_same_slot"
+    with repo.session_factory() as session:
+        assert session.execute(
+            text(
+                "SELECT status FROM automation_cycle_stages "
+                "WHERE stage_key = 'alerts'"
+            )
+        ).scalar_one() == "error"
+
+
+@pytest.mark.parametrize(
+    ("paper_health", "expected_error"),
+    [
+        (
+            {"paper_price_requested": "2", "paper_price_resolved": "1"},
+            "price coverage=1/2",
+        ),
+        ({}, "paper update price coverage telemetry is missing or invalid"),
+    ],
+)
+def test_cycle_with_required_paper_telemetry_failure_retries_same_slot(
+    tmp_path, monkeypatch, paper_health, expected_error
+):
+    database_url = f"sqlite:///{tmp_path / 'cycle-paper-coverage.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    repo = QagentRepository(create_session_factory(database_url))
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    monkeypatch.setattr(routes, "_repo", lambda: repo)
+    monkeypatch.setattr(routes, "_paper_repo", lambda: paper_repo)
+    monkeypatch.setattr(
+        routes,
+        "_paper_seed_risk_gate",
+        lambda *_: (True, {"paper_risk_gate_action": "allow"}),
+    )
+    monkeypatch.setattr(routes, "build_market_data_provider", lambda *_: object())
+    monkeypatch.setattr(routes, "reset_fuyao_telemetry", lambda *_: None)
+    monkeypatch.setattr(routes, "fuyao_telemetry_data_health", lambda *_: {})
+    monkeypatch.setattr(
+        routes,
+        "update_paper_trades",
+        lambda *args, **kwargs: SimpleNamespace(
+            summary=SimpleNamespace(total=2, closed=0),
+            data_health=paper_health,
+        ),
+    )
+
+    result = routes._run_auto_processing_cycle(
+        AutoProcessingSettings(
+            provider="fixture",
+            run_scan=False,
+            seed_paper=False,
+            update_paper=True,
+            run_alerts=False,
+            run_forward_evidence=False,
+        )
+    )
+
+    assert result.issues == []
+    assert expected_error in result.errors[0]
+    assert result.data_health["automation_cycle_status"] == "partial_retry_same_slot"
+    with repo.session_factory() as session:
+        assert session.execute(
+            text(
+                "SELECT status FROM automation_cycle_stages "
+                "WHERE stage_key = 'paper_update'"
+            )
+        ).scalar_one() == "error"
+
+
+def test_cycle_with_completed_stages_is_succeeded(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'cycle-success.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    repo = QagentRepository(create_session_factory(database_url))
+    monkeypatch.setattr(routes, "_repo", lambda: repo)
+    monkeypatch.setattr(
+        routes,
+        "_paper_repo",
+        lambda: PaperTradingRepository(repo.session_factory),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_paper_seed_risk_gate",
+        lambda *_: (True, {"paper_risk_gate_action": "allow"}),
+    )
+
+    result = routes._run_auto_processing_cycle(
+        AutoProcessingSettings(
+            provider="fixture",
+            run_scan=False,
+            seed_paper=False,
+            update_paper=False,
+            run_alerts=False,
+            run_forward_evidence=False,
+        )
+    )
+
+    assert result.errors == []
+    assert result.issues == []
+    assert result.data_health["automation_cycle_status"] == "succeeded"
+
+
 def test_automation_cycle_captures_fuyao_only_after_matching_daily_scan(monkeypatch):
     signal_date = date(2026, 8, 12)
     latest_scan = SimpleNamespace(
@@ -1313,6 +1653,41 @@ def test_automation_scheduler_run_once_updates_paper_status(tmp_path, monkeypatc
     assert body["last_result"]["paper_closed"] >= 0
     assert body["run_count"] == 1
     assert body["next_run_at"] is None
+
+
+def test_uncaught_cycle_exception_aborts_and_releases_runtime_lease(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'automation-abort.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    monkeypatch.setattr(
+        routes,
+        "_paper_seed_risk_gate",
+        lambda *_: (_ for _ in ()).throw(RuntimeError("injected outer failure")),
+    )
+
+    with pytest.raises(RuntimeError, match="injected outer failure"):
+        routes._run_auto_processing_cycle(
+            AutoProcessingSettings(
+                provider="fixture",
+                run_scan=False,
+                seed_paper=False,
+                update_paper=False,
+                run_alerts=False,
+                run_forward_evidence=False,
+            )
+        )
+
+    factory = create_session_factory(database_url)
+    with factory() as session:
+        cycle = session.execute(
+            text("SELECT status, error_json FROM automation_cycles")
+        ).one()
+        lease = session.execute(
+            text("SELECT expires_at, heartbeat_at FROM runtime_leases")
+        ).one()
+    assert cycle.status == "partial_retry_same_slot"
+    assert "injected outer failure" in cycle.error_json
+    assert lease.expires_at == lease.heartbeat_at
 
 
 def test_automation_cycle_publishes_paper_provider_telemetry(monkeypatch):

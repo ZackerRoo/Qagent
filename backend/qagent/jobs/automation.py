@@ -66,6 +66,7 @@ def run_research_automation(
     recipient: str | None = None,
     limit: int = 5,
     strategy_data_provider: StrategyDataProvider | None = None,
+    delivery_idempotency_key: str | None = None,
 ) -> AutomationRunResult:
     mode = provider_mode.strip().lower()
     scan_result = run_daily_scan(
@@ -171,6 +172,11 @@ def run_research_automation(
             channel="markdown",
             recipient=recipient,
             markdown=render_daily_brief_markdown(brief),
+            idempotency_key=(
+                f"automation-brief:{delivery_idempotency_key}"
+                if delivery_idempotency_key
+                else None
+            ),
         )
 
     alert_result = None
@@ -180,6 +186,11 @@ def run_research_automation(
             provider=provider,
             queue_delivery=queue_alerts,
             recipient=recipient,
+            idempotency_key=(
+                f"automation-alert:{delivery_idempotency_key}"
+                if delivery_idempotency_key
+                else None
+            ),
         )
 
     return AutomationRunResult(

@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 from collections.abc import Generator
+import json
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -245,6 +246,30 @@ def _apply_additive_migrations(engine: Engine) -> None:
         _add_missing_columns(
             connection,
             inspector,
+            "automation_scheduler_state",
+            {"revision": "INTEGER NOT NULL DEFAULT 0"},
+        )
+        _add_missing_columns(
+            connection,
+            inspector,
+            "delivery_outbox",
+            {
+                "idempotency_key": "VARCHAR(160)",
+                "payload_digest": "VARCHAR(64)",
+            },
+        )
+        connection.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "uq_delivery_outbox_idempotency_key "
+                "ON delivery_outbox(idempotency_key) "
+                "WHERE idempotency_key IS NOT NULL"
+            )
+        )
+        _record_automation_runtime_migration_audit(connection)
+        _add_missing_columns(
+            connection,
+            inspector,
             "ranking_v3_production_selections",
             {
                 "source_rank_score": "NUMERIC(8, 4)",
@@ -355,6 +380,36 @@ def _apply_additive_migrations(engine: Engine) -> None:
         _create_immutable_row_triggers(connection, "factor_shadow_outcomes")
         _create_immutable_row_triggers(connection, "fuyao_research_snapshots")
         _create_immutable_row_triggers(connection, "fuyao_shadow_outcomes")
+
+
+def _record_automation_runtime_migration_audit(connection) -> None:
+    duplicate_rows = connection.execute(
+        text(
+            "SELECT provider, instrument_id, COUNT(*) AS duplicate_count "
+            "FROM paper_trades WHERE status IN ('pending', 'open') "
+            "GROUP BY provider, instrument_id HAVING COUNT(*) > 1"
+        )
+    ).mappings().all()
+    legacy_outbox = connection.execute(
+        text("SELECT COUNT(*) FROM delivery_outbox WHERE idempotency_key IS NULL")
+    ).scalar_one()
+    payload = json.dumps(
+        {
+            "active_paper_duplicates": [dict(row) for row in duplicate_rows],
+            "active_paper_duplicate_groups": len(duplicate_rows),
+            "legacy_outbox_without_idempotency": int(legacy_outbox),
+            "action": "audit_only_no_historical_deletion",
+        },
+        sort_keys=True,
+    )
+    connection.execute(
+        text(
+            "INSERT INTO automation_migration_audits(audit_key, payload_json, created_at) "
+            "VALUES ('automation-runtime-v1', :payload, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(audit_key) DO UPDATE SET payload_json = excluded.payload_json"
+        ),
+        {"payload": payload},
+    )
 
 
 @contextmanager

@@ -399,6 +399,136 @@ class PaperTradingRepository:
             session.refresh(row)
             return self._trade_from_row(row)
 
+    def create_trade_if_capacity(
+        self,
+        source_snapshot_id: str,
+        provider: str,
+        instrument_id: str,
+        strategy_id: str | None,
+        signal_date: date,
+        trigger_price: Decimal,
+        initial_stop: Decimal | None,
+        target_1: Decimal | None,
+        *,
+        max_active_trades: int,
+        rank_score: Decimal | None = None,
+        allocation_multiplier: Decimal = Decimal("1.0"),
+        notes: str = "",
+        admission_proof: PaperTradeAdmissionProof | None = None,
+        event_metadata: PaperTradeEventMetadata | None = None,
+    ) -> PaperTradeRecord | None:
+        """Atomically recheck the single paper ledger before admitting a trade."""
+
+        if max_active_trades <= 0:
+            return None
+        proof = admission_proof or PaperTradeAdmissionProof(
+            admission_source="legacy_unknown"
+        )
+        engine = self.session_factory.kw.get("bind")
+        if engine is None:
+            raise TypeError("paper repository requires an engine-bound session factory")
+        with engine.connect() as connection:
+            if connection.dialect.name == "sqlite":
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+            else:
+                connection.begin()
+            session = Session(bind=connection, expire_on_commit=False)
+            try:
+                snapshot = session.get(OpportunitySnapshotRow, source_snapshot_id)
+                if proof.admission_source == "ranking_v3_production":
+                    _require_production_trade_matches_snapshot(
+                        session,
+                        snapshot,
+                        provider=provider,
+                        instrument_id=instrument_id,
+                        strategy_id=strategy_id,
+                        signal_date=signal_date,
+                        trigger_price=trigger_price,
+                        initial_stop=initial_stop,
+                        target_1=target_1,
+                        rank_score=rank_score,
+                        allocation_multiplier=allocation_multiplier,
+                    )
+                existing = (
+                    session.query(PaperTradeRow)
+                    .filter(PaperTradeRow.source_snapshot_id == source_snapshot_id)
+                    .one_or_none()
+                )
+                if existing is not None:
+                    connection.commit()
+                    return None
+                active_query = session.query(PaperTradeRow).filter(
+                    PaperTradeRow.status.in_(("pending", "open"))
+                )
+                if active_query.count() >= max_active_trades:
+                    connection.commit()
+                    return None
+                if (
+                    active_query.filter(
+                        PaperTradeRow.provider == provider,
+                        PaperTradeRow.instrument_id == instrument_id,
+                    ).first()
+                    is not None
+                ):
+                    connection.commit()
+                    return None
+                source_context = _source_context_from_snapshot(
+                    snapshot,
+                    source_snapshot_id=source_snapshot_id,
+                    signal_date=signal_date,
+                    source_status="frozen" if snapshot is not None else "unknown",
+                    strategy_configuration=_strategy_configuration_from_snapshot(
+                        session, snapshot
+                    ),
+                    fallback_market_regime=_market_regime_from_snapshot_run(
+                        session, snapshot
+                    ),
+                )
+                row = PaperTradeRow(
+                    trade_id=f"paper-{uuid4().hex[:12]}",
+                    source_snapshot_id=source_snapshot_id,
+                    provider=provider,
+                    instrument_id=instrument_id,
+                    strategy_id=strategy_id,
+                    status="pending",
+                    signal_date=signal_date,
+                    trigger_price=trigger_price,
+                    initial_stop=initial_stop,
+                    target_1=target_1,
+                    rank_score=rank_score,
+                    allocation_multiplier=allocation_multiplier,
+                    notes=notes,
+                    admission_source=proof.admission_source,
+                    production_identity_digest=proof.production_identity_digest,
+                    production_batch_fact_digest=proof.production_batch_fact_digest,
+                    production_selection_item_digest=(
+                        proof.production_selection_item_digest
+                    ),
+                    release_proof_digest=proof.release_proof_digest,
+                )
+                session.add(row)
+                self._append_trade_event(
+                    session,
+                    row,
+                    sequence=1,
+                    event_type="created",
+                    from_status=None,
+                    to_status="pending",
+                    default_trade_date=signal_date,
+                    default_price=trigger_price,
+                    default_note=notes,
+                    metadata=event_metadata,
+                    source_context=source_context,
+                )
+                session.flush()
+                connection.commit()
+                return self._trade_from_row(row)
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                session.close()
+
     def get_research_baseline(
         self,
         *,

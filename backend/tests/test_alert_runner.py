@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+import pandas as pd
+
 from qagent.jobs.alert_runner import run_alert_rules
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.storage.repository import AlertRuleCreate
@@ -35,3 +37,29 @@ def test_alert_runner_evaluates_latest_prices_and_queues_delivery(tmp_path):
     assert result.delivery is not None
     assert queued[0].delivery_id == result.delivery.delivery_id
     assert "entry_trigger" in queued[0].markdown
+
+
+def test_alert_runner_reports_empty_snapshot_coverage(tmp_path):
+    repo = make_repo(tmp_path)
+    repo.upsert_alert_rule(
+        AlertRuleCreate(
+            rule_id="empty-price-US-TEST",
+            instrument_id="US:TEST",
+            kind="entry_trigger",
+            operator=">=",
+            threshold=Decimal("82.00"),
+        )
+    )
+
+    class EmptySnapshotProvider:
+        name = "empty_snapshot"
+        last_errors: list[str] = []
+
+        def get_snapshot(self, instrument_ids):
+            return pd.DataFrame()
+
+    result = run_alert_rules(repo=repo, provider=EmptySnapshotProvider())
+
+    assert result.data_health["alert_price_requested"] == "1"
+    assert result.data_health["alert_price_observed"] == "0"
+    assert result.data_health["alert_price_coverage"] == "0.000000"

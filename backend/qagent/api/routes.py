@@ -1,5 +1,7 @@
 from copy import deepcopy
 from collections.abc import Mapping
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -97,6 +99,7 @@ from qagent.jobs.automation_scheduler import (
     AutoProcessingState,
     AutomationSchedulerCheckpoint,
     AutomationScheduler,
+    current_automation_cycle_invocation,
 )
 from qagent.providers.fuyao import (
     FuyaoClient,
@@ -240,6 +243,18 @@ from qagent.storage.paper import (
     PaperTradeSourceContext,
     PaperTradingRepository,
 )
+from qagent.storage.automation_runtime import (
+    AutomationCycleBusyError,
+    AutomationCycleConflictError,
+    AutomationLeaseLostError,
+    AutomationRuntimeRepository,
+    RuntimeLeaseGuard,
+    LeaseGrant,
+    ProcessFence,
+    automation_settings_digest,
+    manual_cycle_slot,
+    scheduled_cycle_slot,
+)
 from qagent.storage.ranking_v3_forward import RankingV3ForwardRepository
 from qagent.storage.ranking_v3_production import RankingV3ProductionRepository
 from qagent.storage.repository import (
@@ -305,6 +320,8 @@ _submitted_walk_forward_jobs: set[str] = set()
 _factor_research_jobs_lock = Lock()
 _submitted_factor_research_jobs: set[str] = set()
 _automation_scheduler = AutomationScheduler()
+_automation_scheduler_revision_lock = Lock()
+_automation_scheduler_state_revision = 0
 
 
 def _build_etf_exposure_service() -> EtfExposureService:
@@ -3437,6 +3454,7 @@ def run_automation(
     queue_alerts: bool = True,
     run_backtest: bool = True,
     recipient: str | None = None,
+    idempotency_key: str | None = None,
 ) -> dict[str, object]:
     mode = provider.strip().lower()
     if limit <= 0 or limit > 20:
@@ -3457,6 +3475,7 @@ def run_automation(
             recipient=recipient,
             limit=limit,
             strategy_data_provider=EmptyStrategyDataProvider() if resolved.is_dynamic else None,
+            delivery_idempotency_key=idempotency_key,
         )
         result.data_health.update(resolved.data_health)
         if resolved.is_dynamic:
@@ -3500,6 +3519,7 @@ def run_automation_scheduler_once(
     run_alerts: bool = True,
     queue_alerts: bool = True,
     run_forward_evidence: bool = True,
+    idempotency_key: str | None = None,
 ) -> dict[str, object]:
     settings = _auto_processing_settings(
         provider=provider,
@@ -3518,7 +3538,16 @@ def run_automation_scheduler_once(
         queue_alerts=queue_alerts,
         run_forward_evidence=run_forward_evidence,
     )
-    state = _automation_scheduler.run_once(settings, _run_auto_processing_cycle)
+    try:
+        state = _automation_scheduler.run_once(
+            settings,
+            _run_auto_processing_cycle,
+            idempotency_key=idempotency_key,
+        )
+    except (AutomationCycleBusyError, AutomationLeaseLostError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except AutomationCycleConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     _persist_automation_scheduler_state(state)
     return state.model_dump(mode="json")
 
@@ -3565,22 +3594,28 @@ def start_automation_scheduler(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     # The loop may finish its immediate cycle before this request returns.
     # Persist a fresh snapshot so this request cannot overwrite that checkpoint.
-    _persist_automation_scheduler_state(_automation_scheduler.state())
+    _persist_automation_scheduler_state(
+        _automation_scheduler.state(),
+        control_plane=True,
+    )
     return state.model_dump(mode="json")
 
 
 @router.post("/automation/scheduler/stop")
 def stop_automation_scheduler() -> dict[str, object]:
     state = _automation_scheduler.stop()
-    _persist_automation_scheduler_state(state)
+    _persist_automation_scheduler_state(state, control_plane=True)
     return state.model_dump(mode="json")
 
 
 def restore_automation_scheduler_from_storage() -> None:
+    global _automation_scheduler_state_revision
     repo = _repo()
     saved = repo.get_automation_scheduler_state()
     if saved is None:
         return
+    with _automation_scheduler_revision_lock:
+        _automation_scheduler_state_revision = saved.revision
     try:
         settings = AutoProcessingSettings.model_validate(saved.settings)
         checkpoint = AutomationSchedulerCheckpoint.model_validate(saved.runtime)
@@ -3594,21 +3629,27 @@ def restore_automation_scheduler_from_storage() -> None:
         _automation_scheduler.configure(settings)
 
 
-def _persist_automation_scheduler_state(state) -> None:
-    _repo().save_automation_scheduler_state(
-        enabled=state.enabled,
-        settings=state.settings.model_dump(mode="json"),
-        runtime=AutomationSchedulerCheckpoint(
-            run_count=state.run_count,
-            last_started_at=state.last_started_at,
-            last_completed_at=state.last_completed_at,
-            last_error=state.last_error,
-            last_result=state.last_result,
-            next_run_at=state.next_run_at,
-            in_flight=state.status == "running",
-            scheduled_interval_seconds=state.settings.interval_seconds,
-        ).model_dump(mode="json"),
-    )
+def _persist_automation_scheduler_state(state, *, control_plane: bool = False) -> None:
+    global _automation_scheduler_state_revision
+    with _automation_scheduler_revision_lock:
+        saved = _repo().save_automation_scheduler_state(
+            enabled=state.enabled,
+            settings=state.settings.model_dump(mode="json"),
+            runtime=AutomationSchedulerCheckpoint(
+                run_count=state.run_count,
+                last_started_at=state.last_started_at,
+                last_completed_at=state.last_completed_at,
+                last_error=state.last_error,
+                last_result=state.last_result,
+                next_run_at=state.next_run_at,
+                cycle_due_at=getattr(state, "cycle_due_at", None),
+                in_flight=state.status == "running",
+                scheduled_interval_seconds=state.settings.interval_seconds,
+            ).model_dump(mode="json"),
+            expected_revision=_automation_scheduler_state_revision,
+            control_plane=control_plane,
+        )
+        _automation_scheduler_state_revision = saved.revision
 
 
 def _attach_automation_scheduler_state_listener() -> None:
@@ -3661,7 +3702,213 @@ def _auto_processing_settings(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _automation_cycle_checkpoint_payload(
+    *,
+    data_health: dict[str, str],
+    errors: list[str],
+    scan_status: str,
+    scan_started: bool,
+    scan_job_id: str | None,
+    paper_created: int,
+    paper_total: int,
+    paper_closed: int,
+    alerts_triggered: int,
+) -> dict[str, object]:
+    return {
+        "data_health": dict(data_health),
+        # Completed checkpoints never carry prior-stage failures forward. A
+        # failed stage has its own durable error row and is rerun on recovery.
+        "errors": [],
+        "scan_status": scan_status,
+        "scan_started": scan_started,
+        "scan_job_id": scan_job_id,
+        "paper_created": paper_created,
+        "paper_total": paper_total,
+        "paper_closed": paper_closed,
+        "alerts_triggered": alerts_triggered,
+    }
+
+
+def _restore_automation_cycle_checkpoint(
+    checkpoint: dict[str, object],
+    *,
+    data_health: dict[str, str],
+) -> None:
+    restored_health = checkpoint.get("data_health")
+    if isinstance(restored_health, Mapping):
+        data_health.update({str(key): str(value) for key, value in restored_health.items()})
+
+
+def _automation_stage_outcome(
+    stage_key: str,
+    health: Mapping[str, str],
+) -> tuple[str, str | None]:
+    error_values = [
+        str(value).strip()
+        for key, value in health.items()
+        if (key == "errors" or key.endswith("_error") or key.endswith("_errors"))
+        and str(value).strip().lower() not in {"", "0", "false", "none", "null"}
+    ]
+    if error_values:
+        return "error", f"{stage_key} reported provider/stage errors: {error_values[0]}"
+    if stage_key == "scan":
+        status = health.get("automation_scan_status", "")
+        allowed = {
+            "completed",
+            "already_running",
+            "resumed_stale",
+            "cache_fresh",
+            "queued",
+            "queued_market_data_repair",
+        }
+        return (
+            "success" if status in allowed else "error",
+            f"scan status is {status or 'missing'}",
+        )
+    if stage_key == "fuyao_market_theme":
+        market = health.get("fuyao_market_research_status", "")
+        theme = health.get("fuyao_theme_research_status", "")
+        allowed = {"recorded", "existing"}
+        if market in allowed and theme in allowed:
+            return "success", None
+        deferred = {
+            "collecting",
+            "unavailable",
+            "missing_config",
+            "stored_fallback",
+            "waiting_full_scan",
+        }
+        outcome = "deferred" if market in deferred or theme in deferred else "error"
+        return outcome, (
+            f"fuyao market/theme status is {market or 'missing'}/{theme or 'missing'}"
+        )
+    if stage_key == "factor_shadow":
+        status = health.get("factor_shadow_outcome_status", "")
+        if status in {"recorded", "up_to_date"}:
+            return "success", None
+        outcome = "deferred" if status in {"waiting_for_maturity", "incomplete"} else "error"
+        return outcome, f"factor shadow status is {status or 'missing'}"
+    if stage_key == "fuyao_shadow":
+        status = health.get("fuyao_shadow_status", "")
+        unresolved = int(health.get("fuyao_shadow_unresolved_prices", "0") or 0)
+        if status == "resolved" and unresolved == 0:
+            return "success", None
+        outcome = (
+            "deferred"
+            if status in {"collecting", "unavailable", "missing_config"} or unresolved > 0
+            else "error"
+        )
+        return outcome, f"fuyao shadow status is {status or 'missing'}; unresolved={unresolved}"
+    if stage_key == "paper_seed":
+        status = health.get("automation_paper_seed_status", "")
+        if status in {"completed", "no_candidates"}:
+            return "success", None
+        outcome = "deferred" if status == "policy_blocked" else "error"
+        return outcome, f"paper seed status is {status or 'missing'}"
+    if stage_key == "paper_update":
+        status = health.get("automation_paper_update_status", "")
+        coverage = _automation_nonnegative_coverage(
+            health,
+            requested_key="paper_price_requested",
+            observed_key="paper_price_resolved",
+        )
+        if coverage is None:
+            return "error", "paper update price coverage telemetry is missing or invalid"
+        requested, resolved = coverage
+        if status == "completed" and (requested == 0 or resolved >= requested):
+            return "success", None
+        return "error", (
+            f"paper update status is {status or 'missing'}; price coverage={resolved}/{requested}"
+        )
+    if stage_key == "alerts":
+        status = health.get("automation_alert_status", "")
+        coverage = _automation_nonnegative_coverage(
+            health,
+            requested_key="alert_price_requested",
+            observed_key="alert_price_observed",
+        )
+        if coverage is None:
+            return "error", "alert price coverage telemetry is missing or invalid"
+        requested, observed = coverage
+        if status == "evaluated" and (requested == 0 or observed >= requested):
+            return "success", None
+        return "error", (
+            f"alert status is {status or 'missing'}; price coverage={observed}/{requested}"
+        )
+    if stage_key == "forward_evidence":
+        status = health.get("ranking_v3_forward_state", "")
+        allowed = {"approved_proof_available", "shadow_rejected", "shadow_unpublished"}
+        if status in allowed:
+            return "success", None
+        outcome = "deferred" if status in {"waiting_start", "waiting_snapshot"} else "error"
+        return outcome, f"forward evidence state is {status or 'missing'}"
+    return "success", None
+
+
+def _automation_nonnegative_coverage(
+    health: Mapping[str, str],
+    *,
+    requested_key: str,
+    observed_key: str,
+) -> tuple[int, int] | None:
+    if requested_key not in health or observed_key not in health:
+        return None
+    try:
+        requested = int(str(health[requested_key]).strip())
+        observed = int(str(health[observed_key]).strip())
+    except (TypeError, ValueError):
+        return None
+    if requested < 0 or observed < 0:
+        return None
+    return requested, observed
+
+
+@dataclass
+class _ActiveAutomationCycle:
+    runtime_repo: AutomationRuntimeRepository
+    grant: LeaseGrant
+    guard: RuntimeLeaseGuard
+    process_fence: ProcessFence
+
+
+_active_automation_cycle: ContextVar[_ActiveAutomationCycle | None] = ContextVar(
+    "active_automation_cycle",
+    default=None,
+)
+
+
 def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessingCycleResult:
+    active_token = _active_automation_cycle.set(None)
+    try:
+        return _run_auto_processing_cycle_inner(settings)
+    except AutomationLeaseLostError:
+        # A fenced owner cannot mutate cycle state. The takeover owner is the
+        # only process allowed to checkpoint or finalize from this point.
+        raise
+    except Exception as exc:
+        active = _active_automation_cycle.get()
+        if active is not None and not active.guard.lost:
+            try:
+                active.runtime_repo.abort_cycle(active.grant, error=str(exc))
+            except AutomationLeaseLostError:
+                pass
+        raise
+    finally:
+        active = _active_automation_cycle.get()
+        if active is not None:
+            active.guard.stop()
+            if not active.guard.lost:
+                try:
+                    active.runtime_repo.release(active.grant)
+                except Exception:
+                    pass
+            active.process_fence.release()
+        _active_automation_cycle.reset(active_token)
+
+
+def _run_auto_processing_cycle_inner(
+    settings: AutoProcessingSettings,
+) -> AutoProcessingCycleResult:
     started_at = datetime.now(timezone.utc)
     mode = settings.provider.strip().lower()
     expected_signal_date = (
@@ -3669,7 +3916,67 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
     )
     repo = _repo()
     paper_repo = _paper_repo()
+    runtime_repo = (
+        AutomationRuntimeRepository(repo.session_factory)
+        if hasattr(repo, "session_factory")
+        else None
+    )
+    invocation = current_automation_cycle_invocation()
+    settings_digest = automation_settings_digest(settings)
+    if invocation.trigger == "scheduled":
+        due_at = invocation.due_at or started_at
+        cycle_slot = scheduled_cycle_slot(due_at, settings_digest)
+        cycle_idempotency_key = None
+    else:
+        due_at = None
+        cycle_slot, cycle_idempotency_key = manual_cycle_slot(invocation.idempotency_key)
+    owner_token = f"automation-{uuid4().hex}"
+    grant = None
+    process_fence = None
+    if runtime_repo is not None:
+        process_fence = runtime_repo.acquire_process_fence()
+        if process_fence is None:
+            raise AutomationCycleBusyError("automation process fence is already held")
+        try:
+            cycle_start = runtime_repo.begin_cycle(
+                cycle_slot=cycle_slot,
+                cycle_kind=invocation.trigger,
+                settings_digest=settings_digest,
+                due_at=due_at,
+                idempotency_key=cycle_idempotency_key,
+                owner_token=owner_token,
+                now=started_at,
+                process_fence_held=True,
+            )
+        except Exception:
+            process_fence.release()
+            raise
+        if cycle_start.replay_result is not None:
+            if cycle_start.grant is not None:
+                runtime_repo.release(cycle_start.grant)
+            process_fence.release()
+            replay = AutoProcessingCycleResult.model_validate(cycle_start.replay_result)
+            replay.data_health["automation_cycle_replayed"] = "true"
+            replay.data_health["automation_cycle_slot"] = cycle_slot
+            replay.data_health["automation_cycle_status"] = (
+                cycle_start.replay_status or "succeeded"
+            )
+            return replay
+        grant = cycle_start.grant
+        if grant is None:  # pragma: no cover - begin_cycle returns a grant or a replay.
+            process_fence.release()
+            raise AutomationCycleBusyError("automation cycle did not acquire its runtime lease")
+        guard = RuntimeLeaseGuard(runtime_repo, grant).start()
+        _active_automation_cycle.set(
+            _ActiveAutomationCycle(
+                runtime_repo=runtime_repo,
+                grant=grant,
+                guard=guard,
+                process_fence=process_fence,
+            )
+        )
     errors: list[str] = []
+    issues: list[str] = []
     data_health: dict[str, str] = {
         "automation_scheduler": "enabled",
         "automation_provider": mode,
@@ -3678,6 +3985,15 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
         "automation_update_paper": str(settings.update_paper).lower(),
         "automation_run_alerts": str(settings.run_alerts).lower(),
         "automation_run_forward_evidence": str(settings.run_forward_evidence).lower(),
+        "automation_cycle_slot": cycle_slot,
+        "automation_cycle_kind": invocation.trigger,
+        "automation_cycle_fencing_token": str(grant.fencing_token if grant else 0),
+        "automation_stage_idempotency_contract": (
+            "scan=stable_job/cache;fuyao=trade_date_snapshot;"
+            "paper=source_snapshot+active_capacity;shadow=natural_outcome_key;"
+            "alerts=outbox_idempotency_key;forward=protocol_session_identity"
+        ),
+        "automation_process_fence_scope": "single_host_sqlite_flock",
     }
     if expected_signal_date is not None:
         data_health["automation_expected_signal_date"] = expected_signal_date.isoformat()
@@ -3685,9 +4001,135 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
     scan_started = False
     scan_job_id: str | None = None
     paper_created = 0
+    paper_total = 0
+    paper_closed = 0
     alerts_triggered = 0
+    stage_health_before: dict[str, dict[str, str]] = {}
 
-    if settings.run_scan:
+    def restore_stage(stage_key: str) -> bool:
+        nonlocal scan_status, scan_started, scan_job_id
+        nonlocal paper_created, paper_total, paper_closed, alerts_triggered
+        if runtime_repo is None or grant is None:
+            stage_health_before[stage_key] = dict(data_health)
+            return False
+        active = _active_automation_cycle.get()
+        if active is not None:
+            active.guard.assert_current()
+        checkpoint = runtime_repo.begin_stage(grant, stage_key)
+        if checkpoint is None:
+            stage_health_before[stage_key] = dict(data_health)
+            return False
+        _restore_automation_cycle_checkpoint(
+            checkpoint,
+            data_health=data_health,
+        )
+        if stage_key == "scan":
+            scan_status = str(checkpoint.get("scan_status") or "disabled")
+            scan_started = bool(checkpoint.get("scan_started"))
+            scan_job_id = (
+                str(checkpoint["scan_job_id"]) if checkpoint.get("scan_job_id") else None
+            )
+        elif stage_key == "paper_seed":
+            paper_created = int(checkpoint.get("paper_created") or 0)
+        elif stage_key == "paper_update":
+            paper_total = int(checkpoint.get("paper_total") or 0)
+            paper_closed = int(checkpoint.get("paper_closed") or 0)
+        elif stage_key == "alerts":
+            alerts_triggered = int(checkpoint.get("alerts_triggered") or 0)
+        stage_issue = checkpoint.get("stage_issue")
+        if stage_issue and str(stage_issue) not in issues:
+            issues.append(str(stage_issue))
+        data_health[f"automation_stage_{stage_key}_replayed"] = "true"
+        return True
+
+    def finish_stage(
+        stage_key: str,
+        error_count_before: int,
+        *,
+        successful: bool = True,
+        skipped: bool = False,
+        failure_reason: str | None = None,
+    ) -> None:
+        if runtime_repo is None or grant is None:
+            return
+        active = _active_automation_cycle.get()
+        if active is not None:
+            active.guard.assert_current()
+        if len(errors) != error_count_before or not successful:
+            runtime_repo.fail_stage(
+                grant,
+                stage_key,
+                failure_reason or (errors[-1] if errors else "stage incomplete"),
+            )
+            return
+        checkpoint_payload = _automation_cycle_checkpoint_payload(
+            data_health=data_health,
+            errors=errors,
+            scan_status=scan_status,
+            scan_started=scan_started,
+            scan_job_id=scan_job_id,
+            paper_created=paper_created,
+            paper_total=paper_total,
+            paper_closed=paper_closed,
+            alerts_triggered=alerts_triggered,
+        )
+        before_health = stage_health_before.get(stage_key, {})
+        stage_health = {
+            key: value
+            for key, value in data_health.items()
+            if before_health.get(key) != value
+        }
+        if successful and not skipped:
+            outcome, outcome_reason = _automation_stage_outcome(
+                stage_key,
+                stage_health,
+            )
+            if outcome == "error":
+                error = f"{stage_key}: {outcome_reason or 'stage failed validation'}"
+                errors.append(error)
+                runtime_repo.fail_stage(grant, stage_key, error)
+                return
+            if outcome == "deferred":
+                issue = f"{stage_key}: {outcome_reason or 'stage is deferred'}"
+                issues.append(issue)
+                checkpoint_payload["stage_issue"] = issue
+                checkpoint_payload["data_health"] = {
+                    **stage_health,
+                    f"automation_stage_{stage_key}_status": "deferred",
+                }
+                runtime_repo.complete_stage(
+                    grant,
+                    stage_key,
+                    checkpoint_payload,
+                    status="deferred",
+                )
+                return
+        checkpoint_payload["data_health"] = stage_health
+        checkpoint_payload["facts"] = {
+            "scan_job_id": scan_job_id,
+            "paper_created": paper_created,
+            "paper_total": paper_total,
+            "paper_closed": paper_closed,
+            "alerts_triggered": alerts_triggered,
+            "alert_delivery_id": data_health.get("automation_alert_delivery_id"),
+            "forward_state": data_health.get("ranking_v3_forward_state"),
+            "forward_processed_sessions": data_health.get(
+                "ranking_v3_forward_processed_sessions"
+            ),
+            "forward_through_date": data_health.get("ranking_v3_forward_through_date"),
+        }
+        runtime_repo.complete_stage(
+            grant,
+            stage_key,
+            checkpoint_payload,
+            status="skipped" if skipped else "completed",
+        )
+        if active is not None:
+            active.guard.assert_current()
+
+    scan_restored = restore_stage("scan")
+    scan_errors_before = len(errors)
+    if not scan_restored and settings.run_scan:
         try:
             if mode == "fixture":
                 resolved = _resolve_symbols(mode, settings.symbols)
@@ -3715,8 +4157,17 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
         except Exception as exc:
             scan_status = "failed"
             errors.append(f"scan: {exc}")
+    if not scan_restored:
+        data_health["automation_scan_status"] = scan_status
+        finish_stage(
+            "scan",
+            scan_errors_before,
+            skipped=not settings.run_scan,
+        )
 
-    if mode == "free" and expected_signal_date is not None:
+    fuyao_research_restored = restore_stage("fuyao_market_theme")
+    fuyao_research_errors_before = len(errors)
+    if not fuyao_research_restored and mode == "free" and expected_signal_date is not None:
         latest_scan = repo.get_latest_full_market_scan_job(provider=mode)
         latest_signal_date = (
             latest_scan.data_health.get("full_market_signal_date")
@@ -3777,16 +4228,35 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 data_health["fuyao_market_research_status"] = "missing_config"
         else:
             data_health["fuyao_market_research_status"] = "waiting_full_scan"
+    if not fuyao_research_restored:
+        fuyao_status = data_health.get("fuyao_market_research_status", "skipped")
+        fuyao_required = mode == "free" and expected_signal_date is not None
+        finish_stage(
+            "fuyao_market_theme",
+            fuyao_research_errors_before,
+            skipped=not fuyao_required,
+            failure_reason=f"fuyao research is {fuyao_status}",
+        )
 
-    allow_seed_paper, risk_gate_health = _paper_seed_risk_gate(repo, paper_repo, mode)
-    data_health.update(risk_gate_health)
+    paper_seed_restored = restore_stage("paper_seed")
+    paper_seed_errors_before = len(errors)
+    if paper_seed_restored:
+        risk_gate_health = {
+            key: value
+            for key, value in data_health.items()
+            if key.startswith("paper_risk_gate_") or key.startswith("paper_market_entry_gate")
+        }
+        allow_seed_paper = False
+    else:
+        allow_seed_paper, risk_gate_health = _paper_seed_risk_gate(repo, paper_repo, mode)
+        data_health.update(risk_gate_health)
     # A full book still needs to evaluate replacement candidates. The risk
     # gate may prevent direct admission, but it must not bypass the
     # low-quality pending-order replacement path.
-    if risk_gate_health.get("paper_risk_gate_action") == "capacity_full":
+    if not paper_seed_restored and risk_gate_health.get("paper_risk_gate_action") == "capacity_full":
         allow_seed_paper = True
 
-    if settings.seed_paper and mode != "fixture" and allow_seed_paper:
+    if not paper_seed_restored and settings.seed_paper and mode != "fixture" and allow_seed_paper:
         try:
             effective_seed_limit = _paper_seed_limit_from_risk_gate(
                 settings.seed_limit,
@@ -3957,6 +4427,9 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 )
                 data_health.update(post_seed_market_probe_health)
             paper_created += seed_result.created
+            data_health["automation_paper_seed_status"] = (
+                "completed" if snapshots else "no_candidates"
+            )
             data_health["automation_seed_snapshots"] = str(len(snapshots))
             data_health["automation_seed_skipped"] = str(seed_result.skipped)
             data_health["automation_seed_skipped_unaffordable"] = str(
@@ -3972,12 +4445,20 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 ].signal_date.isoformat()
         except Exception as exc:
             errors.append(f"paper_seed: {exc}")
-    elif settings.seed_paper and mode != "fixture":
+    elif not paper_seed_restored and settings.seed_paper and mode != "fixture":
         data_health["automation_seed_skipped_by_risk_gate"] = "true"
+        data_health["automation_paper_seed_status"] = "policy_blocked"
 
-    paper_total = 0
-    paper_closed = 0
-    if settings.update_paper:
+    if not paper_seed_restored:
+        finish_stage(
+            "paper_seed",
+            paper_seed_errors_before,
+            skipped=not settings.seed_paper or mode == "fixture",
+        )
+
+    paper_update_restored = restore_stage("paper_update")
+    paper_update_errors_before = len(errors)
+    if not paper_update_restored and settings.update_paper:
         try:
             paper_market_provider = build_market_data_provider(mode)
             reset_fuyao_telemetry(paper_market_provider)
@@ -3988,6 +4469,7 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             )
             paper_total = paper_update.summary.total
             paper_closed = paper_update.summary.closed
+            data_health["automation_paper_update_status"] = "completed"
             data_health.update(paper_update.data_health)
             data_health.update(fuyao_telemetry_data_health(paper_market_provider))
         except Exception as exc:
@@ -3998,15 +4480,23 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             )
             paper_total = summary.total
             paper_closed = summary.closed
-    else:
+    elif not paper_update_restored:
         summary = summarize_paper_trades(
             paper_repo.list_trades(limit=1000, provider=mode),
             reporting_scope="all",
         )
         paper_total = summary.total
         paper_closed = summary.closed
+    if not paper_update_restored:
+        finish_stage(
+            "paper_update",
+            paper_update_errors_before,
+            skipped=not settings.update_paper,
+        )
 
-    if mode == "free":
+    factor_shadow_restored = restore_stage("factor_shadow")
+    factor_shadow_errors_before = len(errors)
+    if not factor_shadow_restored and mode == "free":
         try:
             factor_shadow_as_of = (
                 expected_signal_date or _latest_completed_a_share_session() or date.today()
@@ -4033,6 +4523,16 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             data_health["factor_shadow_outcome_error"] = str(exc)
             errors.append(f"factor_shadow_outcomes: {exc}")
 
+    if not factor_shadow_restored:
+        finish_stage(
+            "factor_shadow",
+            factor_shadow_errors_before,
+            skipped=mode != "free",
+        )
+
+    fuyao_shadow_restored = restore_stage("fuyao_shadow")
+    fuyao_shadow_errors_before = len(errors)
+    if not fuyao_shadow_restored and mode == "free":
         try:
             fuyao_shadow_as_of = (
                 expected_signal_date or _latest_completed_a_share_session() or date.today()
@@ -4043,6 +4543,9 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 as_of_date=fuyao_shadow_as_of,
             )
             data_health.update(fuyao_shadow_resolution.data_health)
+            data_health["fuyao_shadow_unresolved_prices"] = str(
+                getattr(fuyao_shadow_resolution, "unresolved_prices", 0)
+            )
             if fuyao_shadow_resolution.next_maturity_date is not None:
                 data_health["fuyao_shadow_next_maturity_date"] = (
                     fuyao_shadow_resolution.next_maturity_date.isoformat()
@@ -4052,19 +4555,42 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             data_health["fuyao_shadow_error"] = str(exc)
             errors.append(f"fuyao_shadow_outcomes: {exc}")
 
-    if settings.run_alerts:
+    if not fuyao_shadow_restored:
+        finish_stage(
+            "fuyao_shadow",
+            fuyao_shadow_errors_before,
+            skipped=mode != "free",
+        )
+
+    alerts_restored = restore_stage("alerts")
+    alerts_errors_before = len(errors)
+    if not alerts_restored and settings.run_alerts:
         try:
             alert_result = run_alert_rules(
                 repo=repo,
                 provider=build_market_data_provider(mode),
                 queue_delivery=settings.queue_alerts,
+                idempotency_key=f"automation-alert:{cycle_slot}",
             )
             alerts_triggered = alert_result.summary.triggered
             data_health.update(alert_result.data_health)
+            data_health["automation_alert_status"] = "evaluated"
+            if alert_result.delivery is not None:
+                data_health["automation_alert_delivery_id"] = (
+                    alert_result.delivery.delivery_id
+                )
         except Exception as exc:
             errors.append(f"alerts: {exc}")
+    if not alerts_restored:
+        finish_stage(
+            "alerts",
+            alerts_errors_before,
+            skipped=not settings.run_alerts,
+        )
 
-    if mode == "free" and settings.run_forward_evidence:
+    forward_restored = restore_stage("forward_evidence")
+    forward_errors_before = len(errors)
+    if not forward_restored and mode == "free" and settings.run_forward_evidence:
         try:
             forward_context = _ranking_v3_forward_context(repo)
             forward_results = (
@@ -4080,6 +4606,7 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             forward_state = _ranking_v3_forward_state_payload(repo, forward_context)
             data_health["ranking_v3_forward_state"] = str(forward_state["state"])
             data_health["ranking_v3_forward_processed_sessions"] = str(len(forward_results))
+            data_health["ranking_v3_forward_through_date"] = _a_share_today().isoformat()
             if forward_state.get("validation_run_id"):
                 data_health["ranking_v3_forward_run_id"] = str(forward_state["validation_run_id"])
             evaluation = forward_state.get("evaluation")
@@ -4100,7 +4627,7 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             data_health["ranking_v3_forward_state"] = "error"
             data_health["ranking_v3_forward_error"] = str(exc)
             errors.append(f"ranking_v3_forward: {exc}")
-    elif mode == "free":
+    elif not forward_restored and mode == "free":
         data_health.update(
             {
                 "ranking_v3_forward_state": "disabled",
@@ -4109,6 +4636,12 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
                 "ranking_v3_forward_completed_trades": "0",
                 "ranking_v3_forward_release_proof": "false",
             }
+        )
+    if not forward_restored:
+        finish_stage(
+            "forward_evidence",
+            forward_errors_before,
+            skipped=mode != "free" or not settings.run_forward_evidence,
         )
 
     # Seeding and price updates can change active capacity. Keep the gate that
@@ -4141,9 +4674,10 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
             "automation_paper_closed": str(paper_closed),
             "automation_alerts_triggered": str(alerts_triggered),
             "automation_errors": str(len(errors)),
+            "automation_issues": str(len(issues)),
         }
     )
-    return AutoProcessingCycleResult(
+    result = AutoProcessingCycleResult(
         provider=mode,
         started_at=started_at,
         finished_at=finished_at,
@@ -4155,8 +4689,42 @@ def _run_auto_processing_cycle(settings: AutoProcessingSettings) -> AutoProcessi
         paper_closed=paper_closed,
         alerts_triggered=alerts_triggered,
         errors=errors,
+        issues=issues,
         data_health=data_health,
     )
+    active = _active_automation_cycle.get()
+    if active is not None:
+        active.guard.assert_current()
+        active.guard.stop()
+    cycle_status = (
+        runtime_repo.finalize_cycle(
+            grant,
+            result=result.model_dump(mode="json"),
+            errors=errors,
+            issues=issues,
+            required_stages={
+                "scan",
+                "fuyao_market_theme",
+                "paper_seed",
+                "paper_update",
+                "factor_shadow",
+                "fuyao_shadow",
+                "alerts",
+                "forward_evidence",
+            },
+            now=finished_at,
+        )
+        if runtime_repo is not None and grant is not None
+        else (
+            "partial_retry_same_slot"
+            if errors
+            else "completed_with_deferred_or_issues"
+            if issues
+            else "succeeded"
+        )
+    )
+    result.data_health["automation_cycle_status"] = cycle_status
+    return result
 
 
 def _paper_seed_risk_gate(

@@ -1,14 +1,20 @@
 import time
 from datetime import datetime, timedelta, timezone
 from threading import Event, get_ident
+import pytest
 
 from qagent.jobs.automation_scheduler import (
     AutomationScheduler,
     AutomationSchedulerCheckpoint,
     AutoProcessingCycleResult,
     AutoProcessingSettings,
+    current_automation_cycle_invocation,
 )
 from qagent.jobs import automation_scheduler as scheduler_module
+from qagent.storage.automation_runtime import (
+    AutomationCycleBusyError,
+    AutomationCycleConflictError,
+)
 
 
 def test_refresh_if_due_runs_overdue_cycle_off_caller_thread():
@@ -366,6 +372,152 @@ def test_stop_during_blocked_cycle_rejects_restart_until_runner_finishes():
     assert final_state.next_run_at is None
 
 
+def test_busy_loser_does_not_emit_listener_checkpoint():
+    events = []
+    scheduler = AutomationScheduler(state_listener=events.append)
+
+    def busy(_settings):
+        raise AutomationCycleBusyError("winner owns lease")
+
+    with pytest.raises(AutomationCycleBusyError):
+        scheduler.run_once(AutoProcessingSettings(), busy)
+    assert events == []
+    assert scheduler.state().run_count == 0
+
+
+def test_manual_cycle_conflict_is_not_swallowed_by_generic_error_path():
+    scheduler = AutomationScheduler()
+
+    def conflict(_settings):
+        raise AutomationCycleConflictError("different facts")
+
+    with pytest.raises(AutomationCycleConflictError, match="different facts"):
+        scheduler.run_once(AutoProcessingSettings(), conflict)
+    assert scheduler.state().run_count == 0
+    assert scheduler.state().last_result is None
+
+
+def test_scheduled_partial_retries_same_immutable_cycle_due(monkeypatch):
+    now = datetime(2026, 8, 28, 4, 0, tzinfo=timezone.utc)
+    due = now - timedelta(minutes=2)
+    monkeypatch.setattr(scheduler_module, "_utc_now", lambda: now)
+    scheduler = AutomationScheduler()
+    with scheduler._lock:
+        scheduler._enabled = True
+        scheduler._generation = 7
+        scheduler._cycle_due_at = due
+        scheduler._next_run_at = now
+
+    def partial(settings):
+        return AutoProcessingCycleResult(
+            provider=settings.provider,
+            started_at=now,
+            finished_at=now,
+            scan_status="waiting",
+            errors=["waiting_snapshot"],
+            data_health={"automation_cycle_status": "partial"},
+        )
+
+    assert scheduler._execute(AutoProcessingSettings(), partial, generation=7) is True
+    state = scheduler.state()
+    assert state.run_count == 0
+    assert state.cycle_due_at == due
+    assert state.next_run_at == now + timedelta(seconds=300)
+
+
+def test_scheduled_deferred_cycle_advances_slot_and_runs_paper_next_cycle(monkeypatch):
+    current_time = [datetime(2026, 8, 28, 4, 0, tzinfo=timezone.utc)]
+    first_due = current_time[0] - timedelta(minutes=2)
+    monkeypatch.setattr(scheduler_module, "_utc_now", lambda: current_time[0])
+    scheduler = AutomationScheduler()
+    settings = AutoProcessingSettings(interval_seconds=600)
+    with scheduler._lock:
+        scheduler._enabled = True
+        scheduler._generation = 9
+        scheduler._settings = settings
+        scheduler._cycle_due_at = first_due
+        scheduler._next_run_at = current_time[0]
+    observed_due: list[datetime | None] = []
+    paper_runs = 0
+
+    def runner(cycle_settings):
+        nonlocal paper_runs
+        paper_runs += 1
+        observed_due.append(current_automation_cycle_invocation().due_at)
+        issue_cycle = paper_runs == 1
+        return AutoProcessingCycleResult(
+            provider=cycle_settings.provider,
+            started_at=current_time[0],
+            finished_at=current_time[0],
+            scan_status="skipped",
+            paper_total=paper_runs,
+            issues=["factor_shadow: waiting_for_maturity"] if issue_cycle else [],
+            data_health={
+                "automation_cycle_status": (
+                    "completed_with_deferred_or_issues" if issue_cycle else "succeeded"
+                )
+            },
+        )
+
+    assert scheduler._execute(settings, runner, generation=9) is True
+    first_state = scheduler.state()
+    assert first_state.run_count == 1
+    assert first_state.cycle_due_at == current_time[0] + timedelta(seconds=600)
+    assert first_state.last_error == "factor_shadow: waiting_for_maturity"
+
+    current_time[0] = first_state.cycle_due_at
+    assert scheduler._execute(settings, runner, generation=9) is True
+    assert paper_runs == 2
+    assert observed_due == [first_due, first_state.cycle_due_at]
+    assert scheduler.state().run_count == 2
+
+
+def test_inflight_cycle_due_survives_two_restart_checkpoints(monkeypatch):
+    now = datetime(2026, 8, 28, 4, 0, tzinfo=timezone.utc)
+    original_due = now - timedelta(minutes=3)
+    monkeypatch.setattr(scheduler_module, "_utc_now", lambda: now)
+    first = AutomationScheduler()
+    first.restore_checkpoint(
+        AutomationSchedulerCheckpoint(
+            next_run_at=now - timedelta(minutes=1),
+            cycle_due_at=original_due,
+            in_flight=True,
+            scheduled_interval_seconds=600,
+        )
+    )
+    first.resume(
+        AutoProcessingSettings(interval_seconds=600),
+        lambda settings: _partial(settings, now),
+    )
+    deadline = time.monotonic() + 1
+    while first.state().last_result is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    first_state = first.state()
+    assert first_state.cycle_due_at == original_due
+    first.shutdown()
+
+    second = AutomationScheduler()
+    second.restore_checkpoint(
+        AutomationSchedulerCheckpoint(
+            run_count=first_state.run_count,
+            last_started_at=first_state.last_started_at,
+            last_completed_at=first_state.last_completed_at,
+            last_error=first_state.last_error,
+            last_result=first_state.last_result,
+            next_run_at=first_state.next_run_at,
+            cycle_due_at=first_state.cycle_due_at,
+            in_flight=True,
+            scheduled_interval_seconds=600,
+        )
+    )
+    second.resume(
+        AutoProcessingSettings(interval_seconds=600),
+        lambda settings: _partial(settings, now),
+    )
+    assert second.state().cycle_due_at == original_due
+    second.stop()
+
+
 def _complete_cycle(
     settings: AutoProcessingSettings,
     now: datetime,
@@ -377,4 +529,15 @@ def _complete_cycle(
         started_at=now,
         finished_at=now,
         scan_status="skipped",
+    )
+
+
+def _partial(settings: AutoProcessingSettings, now: datetime) -> AutoProcessingCycleResult:
+    return AutoProcessingCycleResult(
+        provider=settings.provider,
+        started_at=now,
+        finished_at=now,
+        scan_status="waiting",
+        errors=["waiting"],
+        data_health={"automation_cycle_status": "partial"},
     )
