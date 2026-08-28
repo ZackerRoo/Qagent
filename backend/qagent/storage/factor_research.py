@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 from sqlalchemy import func
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.storage.tables import (
@@ -486,51 +487,53 @@ class FactorResearchRepository:
         now = datetime.now(timezone.utc)
         with self.session_factory() as session:
             for item in outcomes:
-                identity = (
-                    item.experiment_id,
-                    item.scan_job_id,
-                    item.instrument_id,
-                    item.horizon_sessions,
+                values = {
+                    "experiment_id": item.experiment_id,
+                    "scan_job_id": item.scan_job_id,
+                    "instrument_id": item.instrument_id,
+                    "horizon_sessions": item.horizon_sessions,
+                    "signal_date": item.signal_date,
+                    "entry_date": item.entry_date,
+                    "outcome_date": item.outcome_date,
+                    "benchmark_id": item.benchmark_id,
+                    "instrument_return_pct": Decimal(str(item.instrument_return_pct)),
+                    "benchmark_return_pct": Decimal(str(item.benchmark_return_pct)),
+                    "excess_return_pct": Decimal(str(item.excess_return_pct)),
+                    "net_excess_return_pct": Decimal(str(item.net_excess_return_pct)),
+                    "round_trip_cost_bps": Decimal(str(item.round_trip_cost_bps)),
+                    "signal_dataset_revision": item.signal_dataset_revision,
+                    "model_digest": item.model_digest,
+                    "source_digest": item.source_digest,
+                    "created_at": item.created_at or now,
+                }
+                statement = sqlite_insert(FactorShadowOutcomeRow).values(**values)
+                statement = statement.on_conflict_do_nothing(
+                    index_elements=[
+                        FactorShadowOutcomeRow.experiment_id,
+                        FactorShadowOutcomeRow.scan_job_id,
+                        FactorShadowOutcomeRow.instrument_id,
+                        FactorShadowOutcomeRow.horizon_sessions,
+                    ]
                 )
-                existing = session.get(FactorShadowOutcomeRow, identity)
-                if existing is not None:
-                    if _outcome_identity_payload(_outcome_from_row(existing)) != (
-                        _outcome_identity_payload(item)
-                    ):
-                        raise ValueError(
-                            "factor shadow outcome retry does not match immutable row"
-                        )
+                result = session.execute(statement)
+                if int(result.rowcount or 0) > 0:
+                    inserted += 1
                     continue
-                session.add(
-                    FactorShadowOutcomeRow(
-                        experiment_id=item.experiment_id,
-                        scan_job_id=item.scan_job_id,
-                        instrument_id=item.instrument_id,
-                        horizon_sessions=item.horizon_sessions,
-                        signal_date=item.signal_date,
-                        entry_date=item.entry_date,
-                        outcome_date=item.outcome_date,
-                        benchmark_id=item.benchmark_id,
-                        instrument_return_pct=Decimal(
-                            str(item.instrument_return_pct)
-                        ),
-                        benchmark_return_pct=Decimal(
-                            str(item.benchmark_return_pct)
-                        ),
-                        excess_return_pct=Decimal(str(item.excess_return_pct)),
-                        net_excess_return_pct=Decimal(
-                            str(item.net_excess_return_pct)
-                        ),
-                        round_trip_cost_bps=Decimal(
-                            str(item.round_trip_cost_bps)
-                        ),
-                        signal_dataset_revision=item.signal_dataset_revision,
-                        model_digest=item.model_digest,
-                        source_digest=item.source_digest,
-                        created_at=item.created_at or now,
-                    )
+                existing = session.get(
+                    FactorShadowOutcomeRow,
+                    (
+                        item.experiment_id,
+                        item.scan_job_id,
+                        item.instrument_id,
+                        item.horizon_sessions,
+                    ),
                 )
-                inserted += 1
+                if existing is None:
+                    raise RuntimeError("factor shadow outcome conflict was not readable")
+                if _outcome_identity_payload(_outcome_from_row(existing)) != (
+                    _outcome_identity_payload(item)
+                ):
+                    raise ValueError("factor shadow outcome retry does not match immutable row")
             session.commit()
         return inserted
 

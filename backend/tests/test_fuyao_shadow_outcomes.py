@@ -84,10 +84,32 @@ def test_fuyao_shadow_outcomes_wait_for_maturity_and_remain_immutable(tmp_path):
             outcome_close=Decimal("101"),
         )
     )
+    missing_instrument = sentiment.signals[-1].instrument_id
+    missing_outcome_rows = [
+        row
+        for row in rows
+        if row["instrument_id"] == missing_instrument and row["trade_date"] == outcome_date
+    ]
+    cached_rows = [row for row in rows if row not in missing_outcome_rows]
     MarketDataCacheRepository(session_factory).save_daily_bars(
         "fixture",
-        pd.DataFrame(rows),
+        pd.DataFrame(cached_rows),
     )
+
+    class RepairProvider:
+        def __init__(self):
+            self.calls = []
+            self.last_errors = []
+
+        def get_historical_daily_bars(self, instrument_ids, start, end):
+            self.calls.append((instrument_ids, start, end))
+            return pd.DataFrame(
+                row
+                for row in missing_outcome_rows
+                if row["instrument_id"] in instrument_ids and row["trade_date"] == start
+            )
+
+    repair_provider = RepairProvider()
 
     pending = resolve_fuyao_shadow_outcomes(
         session_factory,
@@ -95,11 +117,18 @@ def test_fuyao_shadow_outcomes_wait_for_maturity_and_remain_immutable(tmp_path):
         as_of_date=entry_date,
         horizons=(5,),
     )
+    partial = resolve_fuyao_shadow_outcomes(
+        session_factory,
+        provider_mode="fixture",
+        as_of_date=outcome_date,
+        horizons=(5,),
+    )
     resolved = resolve_fuyao_shadow_outcomes(
         session_factory,
         provider_mode="fixture",
         as_of_date=outcome_date,
         horizons=(5,),
+        market_provider=repair_provider,
     )
     evaluation = build_fuyao_shadow_evaluation(
         session_factory,
@@ -116,9 +145,15 @@ def test_fuyao_shadow_outcomes_wait_for_maturity_and_remain_immutable(tmp_path):
     assert pending.status == "collecting"
     assert pending.outcomes_inserted == 0
     assert pending.next_maturity_date == outcome_date
+    assert partial.status == "partial"
+    assert partial.outcomes_inserted == 5
+    assert partial.unresolved_prices == 1
+    assert partial.unresolved_reasons == {"provider_unavailable": 1}
     assert resolved.status == "resolved"
-    assert resolved.outcomes_inserted == 6
+    assert resolved.outcomes_inserted == 1
+    assert resolved.outcomes_existing == 5
     assert resolved.unresolved_prices == 0
+    assert repair_provider.calls == [([missing_instrument], outcome_date, outcome_date)]
     assert retried.outcomes_inserted == 0
     assert retried.outcomes_existing == 6
     assert evaluation.status == "ready"

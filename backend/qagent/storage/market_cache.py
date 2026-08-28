@@ -4,7 +4,7 @@ import math
 
 import pandas as pd
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func
+from sqlalchemy import case, delete, func
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -115,6 +115,147 @@ class MarketDataCacheRepository:
                     },
                 )
                 session.execute(statement)
+            session.commit()
+        return len(records)
+
+    def merge_missing_daily_bars(
+        self,
+        provider_mode: str,
+        bars: pd.DataFrame,
+        *,
+        allowed_keys: set[tuple[str, date]],
+    ) -> int:
+        """Insert exact repair rows while preserving every valid cached field."""
+
+        if bars.empty or not allowed_keys:
+            return 0
+        required = {"instrument_id", "trade_date", "open", "high", "low", "close"}
+        missing_columns = required - set(bars.columns)
+        if missing_columns:
+            raise ValueError(
+                "exact repair rows are missing required fields: "
+                + ", ".join(sorted(missing_columns))
+            )
+        relevant = bars.copy()
+        relevant["trade_date"] = pd.to_datetime(relevant["trade_date"], errors="coerce").dt.date
+        relevant = relevant.loc[
+            relevant.apply(
+                lambda row: (str(row["instrument_id"]), row["trade_date"]) in allowed_keys,
+                axis=1,
+            )
+        ].copy()
+        if relevant.empty:
+            return 0
+        duplicate_keys = relevant.duplicated(["instrument_id", "trade_date"], keep=False)
+        if duplicate_keys.any():
+            raise ValueError("exact repair provider returned duplicate instrument/date rows")
+        normalized = _normalize_bars(relevant)
+        if len(normalized) != len(relevant):
+            raise ValueError("exact repair provider returned invalid OHLC fields")
+        for column in ["open", "high", "low", "close"]:
+            values = pd.to_numeric(normalized[column], errors="coerce")
+            if values.isna().any() or (values <= 0).any():
+                raise ValueError(f"exact repair provider returned invalid {column}")
+        volume = pd.to_numeric(normalized["volume"], errors="coerce")
+        if volume.isna().any() or (volume < 0).any():
+            raise ValueError("exact repair provider returned invalid volume")
+        adjustment_factors = pd.to_numeric(normalized["adjustment_factor"], errors="coerce")
+        invalid_factors = normalized["adjustment_factor"].notna() & (
+            adjustment_factors.isna() | (adjustment_factors <= 0)
+        )
+        if invalid_factors.any():
+            raise ValueError("exact repair provider returned invalid adjustment_factor")
+
+        with self.session_factory() as session:
+            existing_by_key = {
+                (row.instrument_id, row.trade_date): row
+                for row in session.query(MarketBarCacheRow)
+                .filter(
+                    MarketBarCacheRow.provider_mode == provider_mode,
+                    MarketBarCacheRow.instrument_id.in_(normalized["instrument_id"].tolist()),
+                    MarketBarCacheRow.trade_date.in_(normalized["trade_date"].tolist()),
+                )
+                .all()
+            }
+        for _, row in normalized.iterrows():
+            existing = existing_by_key.get((row["instrument_id"], row["trade_date"]))
+            if existing is None:
+                continue
+            merged_adjusted = {
+                column: _preserved_positive_value(
+                    getattr(existing, column),
+                    row.get(column),
+                )
+                for column in [
+                    "adjusted_open",
+                    "adjusted_high",
+                    "adjusted_low",
+                    "adjusted_close",
+                ]
+            }
+            if not _valid_partial_adjusted_ohlc(merged_adjusted):
+                raise ValueError("exact repair would create invalid adjusted OHLC fields")
+
+        cached_at = datetime.now(timezone.utc)
+        records = []
+        for _, row in normalized.iterrows():
+            records.append(
+                {
+                    "provider_mode": provider_mode,
+                    "instrument_id": row["instrument_id"],
+                    "trade_date": row["trade_date"],
+                    "source_provider": str(row.get("provider") or provider_mode),
+                    "open": Decimal(str(row["open"])),
+                    "high": Decimal(str(row["high"])),
+                    "low": Decimal(str(row["low"])),
+                    "close": Decimal(str(row["close"])),
+                    "volume": Decimal(str(row["volume"])),
+                    "turnover": _decimal_or_none(row.get("turnover")),
+                    "adjusted_open": _decimal_or_none(row.get("adjusted_open")),
+                    "adjusted_high": _decimal_or_none(row.get("adjusted_high")),
+                    "adjusted_low": _decimal_or_none(row.get("adjusted_low")),
+                    "adjusted_close": _decimal_or_none(row.get("adjusted_close")),
+                    "adjustment_factor": _decimal_or_none(row.get("adjustment_factor")),
+                    "adjustment_type": _text_or_none(row.get("adjustment_type")),
+                    "cached_at": cached_at,
+                    "updated_at": cached_at,
+                }
+            )
+        with self.session_factory() as session:
+            statement = sqlite_insert(MarketBarCacheRow).values(records)
+            excluded = statement.excluded
+            statement = statement.on_conflict_do_update(
+                index_elements=[
+                    MarketBarCacheRow.provider_mode,
+                    MarketBarCacheRow.instrument_id,
+                    MarketBarCacheRow.trade_date,
+                ],
+                set_={
+                    "turnover": func.coalesce(MarketBarCacheRow.turnover, excluded.turnover),
+                    "adjusted_open": _keep_valid_positive(
+                        MarketBarCacheRow.adjusted_open, excluded.adjusted_open
+                    ),
+                    "adjusted_high": _keep_valid_positive(
+                        MarketBarCacheRow.adjusted_high, excluded.adjusted_high
+                    ),
+                    "adjusted_low": _keep_valid_positive(
+                        MarketBarCacheRow.adjusted_low, excluded.adjusted_low
+                    ),
+                    "adjusted_close": _keep_valid_positive(
+                        MarketBarCacheRow.adjusted_close, excluded.adjusted_close
+                    ),
+                    "adjustment_factor": _keep_valid_positive(
+                        MarketBarCacheRow.adjustment_factor,
+                        excluded.adjustment_factor,
+                    ),
+                    "adjustment_type": func.coalesce(
+                        MarketBarCacheRow.adjustment_type,
+                        excluded.adjustment_type,
+                    ),
+                    "updated_at": excluded.updated_at,
+                },
+            )
+            session.execute(statement)
             session.commit()
         return len(records)
 
@@ -239,10 +380,7 @@ class MarketDataCacheRepository:
                 except ValueError:
                     # Snapshot lookups intentionally use an open-ended historical range.
                     expected_rows = total_rows
-                if (
-                    expected_rows > 0
-                    and total_rows / expected_rows < minimum_session_coverage
-                ):
+                if expected_rows > 0 and total_rows / expected_rows < minimum_session_coverage:
                     return False
             if not require_adjusted:
                 return True
@@ -381,16 +519,13 @@ class MarketDataCacheRepository:
         with self.session_factory() as session:
             for offset in range(0, len(unique_ids), SQLITE_SAFE_VARIABLE_LIMIT):
                 chunk = unique_ids[offset : offset + SQLITE_SAFE_VARIABLE_LIMIT]
-                query = (
-                    session.query(
-                        MarketBarCacheRow.instrument_id,
-                        func.max(MarketBarCacheRow.trade_date),
-                    )
-                    .filter(
-                        MarketBarCacheRow.provider_mode == provider_mode,
-                        MarketBarCacheRow.instrument_id.in_(chunk),
-                        *_valid_cached_ohlc_filters(),
-                    )
+                query = session.query(
+                    MarketBarCacheRow.instrument_id,
+                    func.max(MarketBarCacheRow.trade_date),
+                ).filter(
+                    MarketBarCacheRow.provider_mode == provider_mode,
+                    MarketBarCacheRow.instrument_id.in_(chunk),
+                    *_valid_cached_ohlc_filters(),
                 )
                 if not_after is not None:
                     query = query.filter(MarketBarCacheRow.trade_date <= not_after)
@@ -446,7 +581,9 @@ class MarketDataCacheRepository:
                 query = query.filter(MarketBarCacheRow.provider_mode == provider_mode)
             if instrument_id:
                 query = query.filter(MarketBarCacheRow.instrument_id == instrument_id)
-            rows = query.order_by(MarketBarCacheRow.provider_mode, MarketBarCacheRow.instrument_id).all()
+            rows = query.order_by(
+                MarketBarCacheRow.provider_mode, MarketBarCacheRow.instrument_id
+            ).all()
         grouped: dict[tuple[str, str], list[MarketBarCacheRow]] = {}
         for row in rows:
             grouped.setdefault((row.provider_mode, row.instrument_id), []).append(row)
@@ -481,10 +618,14 @@ class MarketDataCacheRepository:
             spans_query = delete(MarketDataCacheSpanRow)
             if provider_mode:
                 rows_query = rows_query.where(MarketBarCacheRow.provider_mode == provider_mode)
-                spans_query = spans_query.where(MarketDataCacheSpanRow.provider_mode == provider_mode)
+                spans_query = spans_query.where(
+                    MarketDataCacheSpanRow.provider_mode == provider_mode
+                )
             if instrument_id:
                 rows_query = rows_query.where(MarketBarCacheRow.instrument_id == instrument_id)
-                spans_query = spans_query.where(MarketDataCacheSpanRow.instrument_id == instrument_id)
+                spans_query = spans_query.where(
+                    MarketDataCacheSpanRow.instrument_id == instrument_id
+                )
             deleted_rows = session.execute(rows_query).rowcount or 0
             session.execute(spans_query)
             session.commit()
@@ -523,7 +664,44 @@ def _normalize_bars(bars: pd.DataFrame) -> pd.DataFrame:
     normalized = normalized.dropna(subset=["open", "high", "low", "close"])
     normalized = _clear_invalid_adjusted_ohlc(normalized)
     normalized = normalized[_valid_ohlc_mask(normalized)]
-    return normalized[BAR_COLUMNS].sort_values(["instrument_id", "trade_date"]).reset_index(drop=True)
+    return (
+        normalized[BAR_COLUMNS].sort_values(["instrument_id", "trade_date"]).reset_index(drop=True)
+    )
+
+
+def _keep_valid_positive(current, replacement):
+    return case(
+        (current.is_not(None) & (current > 0), current),
+        else_=replacement,
+    )
+
+
+def _preserved_positive_value(current: object, replacement: object) -> float | None:
+    for value in (current, replacement):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric) and numeric > 0:
+            return numeric
+    return None
+
+
+def _valid_partial_adjusted_ohlc(values: dict[str, float | None]) -> bool:
+    present = [value for value in values.values() if value is not None]
+    if not present:
+        return True
+    if values["adjusted_close"] is None:
+        return False
+    if len(present) < 4:
+        return True
+    return bool(
+        values["adjusted_high"] >= values["adjusted_open"]
+        and values["adjusted_high"] >= values["adjusted_close"]
+        and values["adjusted_high"] >= values["adjusted_low"]
+        and values["adjusted_low"] <= values["adjusted_open"]
+        and values["adjusted_low"] <= values["adjusted_close"]
+    )
 
 
 def _valid_ohlc_mask(frame: pd.DataFrame) -> pd.Series:

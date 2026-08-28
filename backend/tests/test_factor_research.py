@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from hashlib import sha256
 
@@ -26,10 +27,12 @@ from qagent.research.factor_shadow import score_factor_shadow_run, score_factor_
 from qagent.research.factor_shadow_outcomes import (
     FactorShadowExecutionHeadEvaluation,
     FactorShadowHorizonEvaluation,
+    FactorShadowOutcomeResolution,
     _assess_shadow_promotion,
     _constrained_execution_head,
     _evaluate_execution_head,
     _raw_execution_head,
+    _merge_outcome_resolutions,
     build_factor_shadow_roster,
     build_factor_shadow_evaluation,
     factor_shadow_outcome_dates,
@@ -44,6 +47,41 @@ from qagent.storage.factor_research import (
 )
 from qagent.storage.market_cache import MarketDataCacheRepository
 from qagent.storage.replay_evidence import ReplayFactorBarReadRow
+
+
+def test_factor_shadow_resolution_keeps_latest_maturity_separate_from_old_price_gaps():
+    as_of = date(2026, 8, 28)
+    merged = _merge_outcome_resolutions(
+        [
+            FactorShadowOutcomeResolution(
+                status="waiting_for_maturity",
+                as_of_date=as_of,
+                experiment_id="latest",
+                next_maturity_date=date(2026, 9, 1),
+            ),
+            FactorShadowOutcomeResolution(
+                status="partial",
+                as_of_date=as_of,
+                experiment_id="old",
+                unresolved_prices=2,
+            ),
+        ],
+        as_of_date=as_of,
+    )
+
+    assert merged.status == "partial"
+    assert merged.data_health["factor_shadow_outcome_latest_candidate_status"] == (
+        "waiting_for_maturity"
+    )
+    assert merged.data_health["factor_shadow_outcome_latest_candidate_waiting_maturity"] == "true"
+    assert merged.data_health["factor_shadow_outcome_older_candidate_price_gaps"] == "1"
+    assert merged.data_health["factor_shadow_outcome_candidate_statuses"] == (
+        "latest:waiting_for_maturity,old:partial"
+    )
+    repair_summary = merged.data_health["factor_shadow_outcome_candidate_repair_summary"]
+    assert '"experiment_id":"latest"' in repair_summary
+    assert '"experiment_id":"old"' in repair_summary
+    assert '"unresolved_prices":2' in repair_summary
 
 
 def test_factor_research_recorder_persists_terminal_result(tmp_path):
@@ -511,10 +549,17 @@ def test_factor_shadow_outcomes_use_one_run_per_signal_date_and_are_immutable(tm
         outcome_date,
         outcome_close=Decimal("101"),
     )
+    missing_instrument = scores[-1].instrument_id
+    missing_outcome_rows = [
+        row
+        for row in bars
+        if row["instrument_id"] == missing_instrument and row["trade_date"] == outcome_date
+    ]
+    cached_bars = [row for row in bars if row not in missing_outcome_rows]
     cache = MarketDataCacheRepository(session_factory)
     cache.save_daily_bars(
         "fixture",
-        pd.DataFrame(bars),
+        pd.DataFrame(cached_bars),
     )
 
     class BenchmarkPrefetchProvider:
@@ -529,6 +574,21 @@ def test_factor_shadow_outcomes_use_one_run_per_signal_date_and_are_immutable(tm
             return {"refreshed": 1, "stale_after_refresh": 0}
 
     benchmark_provider = BenchmarkPrefetchProvider()
+
+    class ExactRepairProvider:
+        def __init__(self):
+            self.calls = []
+            self.last_errors = []
+
+        def get_historical_daily_bars(self, instrument_ids, start, end):
+            self.calls.append((instrument_ids, start, end))
+            return pd.DataFrame(
+                row
+                for row in missing_outcome_rows
+                if row["instrument_id"] in instrument_ids and row["trade_date"] == start
+            )
+
+    exact_repair_provider = ExactRepairProvider()
 
     pending = resolve_factor_shadow_outcomes(
         session_factory,
@@ -548,6 +608,7 @@ def test_factor_shadow_outcomes_use_one_run_per_signal_date_and_are_immutable(tm
         provider_mode="fixture",
         as_of_date=outcome_date,
         horizons=(5,),
+        market_provider=exact_repair_provider,
     )
     single_run_evaluation = build_factor_shadow_evaluation(
         session_factory,
@@ -606,6 +667,7 @@ def test_factor_shadow_outcomes_use_one_run_per_signal_date_and_are_immutable(tm
     assert resolved.runs == 1
     assert resolved.outcomes_inserted == 10
     assert resolved.unresolved_prices == 0
+    assert exact_repair_provider.calls == [([missing_instrument], outcome_date, outcome_date)]
     assert resolved.data_health["factor_shadow_outcome_raw_runs"] == "2"
     assert (
         resolved.data_health["factor_shadow_outcome_run_selection"]
@@ -630,6 +692,15 @@ def test_factor_shadow_outcomes_use_one_run_per_signal_date_and_are_immutable(tm
     horizon = evaluation.horizons[0]
     assert horizon.status == "ready"
     assert horizon.outcome_coverage == 1.0
+    assert horizon.signal_date_scored_sessions == 1
+    assert horizon.signal_date_scored_coverage == 1.0
+    assert horizon.scored_cohort_instruments == 10
+    assert horizon.scored_cohort_outcome_coverage == 1.0
+    assert horizon.eligible_universe_instruments is None
+    assert horizon.universe_coverage == "unknown"
+    assert horizon.selection_filled_instruments == 10
+    assert horizon.outcome_filled_instruments == 10
+    assert horizon.paired_outcome_sessions == 0
     assert horizon.mean_baseline_rank_ic == pytest.approx(-1.0)
     assert horizon.mean_challenger_rank_ic == pytest.approx(1.0)
     assert horizon.challenger_top_net_excess_return_pct == pytest.approx(8.4)
@@ -662,6 +733,32 @@ def test_factor_shadow_outcomes_use_one_run_per_signal_date_and_are_immutable(tm
     assert not horizon.execution_head.challenger_all_matured_sessions_filled
 
     stored = store.shadow_outcomes(experiment.experiment_id)
+    concurrent_outcome = stored[0].model_copy(
+        update={
+            "instrument_id": "CN:999999",
+            "horizon_sessions": 99,
+            "source_digest": sha256(b"concurrent-factor-shadow-outcome").hexdigest(),
+            "created_at": None,
+        }
+    )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        concurrent_results = list(
+            executor.map(
+                lambda _: store.record_shadow_outcomes([concurrent_outcome]),
+                range(2),
+            )
+        )
+    assert sum(concurrent_results) == 1
+    assert (
+        len(
+            store.shadow_outcomes(
+                experiment.experiment_id,
+                scan_job_id=concurrent_outcome.scan_job_id,
+                horizon_sessions=99,
+            )
+        )
+        == 1
+    )
     with pytest.raises(ValueError, match="immutable row"):
         store.record_shadow_outcomes(
             [stored[0].model_copy(update={"instrument_return_pct": 999.0})]

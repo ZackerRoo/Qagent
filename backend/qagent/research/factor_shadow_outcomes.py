@@ -12,6 +12,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.market.calendars import trading_day_offset
+from qagent.research.shadow_price_repair import (
+    ExactPriceRequirement,
+    repair_exact_daily_prices,
+)
 from qagent.storage.factor_research import (
     FactorResearchRepository,
     FactorShadowOutcome,
@@ -41,6 +45,7 @@ FACTOR_SHADOW_UNKNOWN_INDUSTRY_BUCKET = "unknown"
 class FactorShadowOutcomeResolution(BaseModel):
     status: str
     as_of_date: date
+    experiment_id: str | None = None
     # Compatibility names: both counts use one canonical run per signal date.
     runs: int = 0
     matured_run_horizons: int = 0
@@ -107,6 +112,15 @@ class FactorShadowHorizonEvaluation(BaseModel):
     expected_instruments: int
     completed_instruments: int
     outcome_coverage: float
+    signal_date_scored_sessions: int = 0
+    signal_date_scored_coverage: float = 0.0
+    scored_cohort_instruments: int = 0
+    scored_cohort_outcome_coverage: float = 0.0
+    eligible_universe_instruments: int | None = None
+    universe_coverage: str = "unknown"
+    selection_filled_instruments: int = 0
+    outcome_filled_instruments: int = 0
+    paired_outcome_sessions: int = 0
     mean_baseline_rank_ic: float | None = None
     mean_challenger_rank_ic: float | None = None
     baseline_top_excess_return_pct: float | None = None
@@ -299,6 +313,7 @@ def resolve_factor_shadow_outcomes(
     as_of_date: date,
     horizons: tuple[int, ...] = FACTOR_SHADOW_HORIZONS,
     experiment_id: str | None = None,
+    market_provider: object | None = None,
 ) -> FactorShadowOutcomeResolution:
     store = FactorResearchRepository(session_factory)
     if experiment_id is None:
@@ -311,6 +326,7 @@ def resolve_factor_shadow_outcomes(
                     as_of_date=as_of_date,
                     horizons=horizons,
                     experiment_id=bundle.experiment.experiment_id,
+                    market_provider=market_provider,
                 )
                 for bundle in bundles
             ]
@@ -342,6 +358,8 @@ def resolve_factor_shadow_outcomes(
     matured_run_horizons = 0
     unresolved_prices = 0
     next_maturity_dates: list[date] = []
+    work: list[tuple[FactorShadowRunRef, int, date, date, list[FactorShadowScore]]] = []
+    requirements: set[ExactPriceRequirement] = set()
 
     for run in runs:
         scores = store.shadow_scores(run.experiment_id, run.scan_job_id)
@@ -362,93 +380,113 @@ def resolve_factor_shadow_outcomes(
             if not unresolved_scores:
                 continue
             instrument_ids = [item.instrument_id for item in unresolved_scores]
-            bars = _load_cached_bars(
-                cache,
-                provider_mode,
-                [*instrument_ids, bundle.experiment.benchmark_id],
-                entry_date,
-                outcome_date,
+            work.append((run, horizon, entry_date, outcome_date, unresolved_scores))
+            requirements.update(
+                ExactPriceRequirement(instrument_id, entry_date, "adjusted_open")
+                for instrument_id in [*instrument_ids, bundle.experiment.benchmark_id]
             )
-            benchmark_entry = _adjusted_price(
+            requirements.update(
+                ExactPriceRequirement(instrument_id, outcome_date, "adjusted_close")
+                for instrument_id in [*instrument_ids, bundle.experiment.benchmark_id]
+            )
+
+    repair = repair_exact_daily_prices(
+        cache,
+        provider_mode=provider_mode,
+        market_provider=market_provider,
+        requirements=requirements,
+    )
+    repair_health = repair.data_health("factor_shadow")
+    for run, horizon, entry_date, outcome_date, unresolved_scores in work:
+        instrument_ids = [item.instrument_id for item in unresolved_scores]
+        bars = _load_cached_bars(
+            cache,
+            provider_mode,
+            [*instrument_ids, bundle.experiment.benchmark_id],
+            entry_date,
+            outcome_date,
+        )
+        benchmark_entry = _adjusted_price(
+            bars,
+            bundle.experiment.benchmark_id,
+            entry_date,
+            "adjusted_open",
+        )
+        benchmark_exit = _adjusted_price(
+            bars,
+            bundle.experiment.benchmark_id,
+            outcome_date,
+            "adjusted_close",
+        )
+        if benchmark_entry is None or benchmark_exit is None:
+            unresolved_prices += len(unresolved_scores)
+            continue
+        benchmark_return = _return_pct(benchmark_entry, benchmark_exit)
+        outcomes: list[FactorShadowOutcome] = []
+        for score in unresolved_scores:
+            entry = _adjusted_price(
                 bars,
-                bundle.experiment.benchmark_id,
+                score.instrument_id,
                 entry_date,
                 "adjusted_open",
             )
-            benchmark_exit = _adjusted_price(
+            exit_ = _adjusted_price(
                 bars,
-                bundle.experiment.benchmark_id,
+                score.instrument_id,
                 outcome_date,
                 "adjusted_close",
             )
-            if benchmark_entry is None or benchmark_exit is None:
-                unresolved_prices += len(unresolved_scores)
+            if entry is None or exit_ is None:
+                unresolved_prices += 1
                 continue
-            benchmark_return = _return_pct(benchmark_entry, benchmark_exit)
-            outcomes: list[FactorShadowOutcome] = []
-            for score in unresolved_scores:
-                entry = _adjusted_price(
-                    bars,
-                    score.instrument_id,
-                    entry_date,
-                    "adjusted_open",
+            instrument_return = _return_pct(entry, exit_)
+            excess_return = instrument_return - benchmark_return
+            net_excess_return = excess_return - round_trip_cost_bps / 100.0
+            source_payload = {
+                "contract": FACTOR_SHADOW_OUTCOME_CONTRACT,
+                "experiment_id": run.experiment_id,
+                "scan_job_id": run.scan_job_id,
+                "instrument_id": score.instrument_id,
+                "horizon_sessions": horizon,
+                "signal_date": run.signal_date.isoformat(),
+                "entry_date": entry_date.isoformat(),
+                "outcome_date": outcome_date.isoformat(),
+                "entry_adjusted_open": entry,
+                "exit_adjusted_close": exit_,
+                "benchmark_id": bundle.experiment.benchmark_id,
+                "benchmark_entry_adjusted_open": benchmark_entry,
+                "benchmark_exit_adjusted_close": benchmark_exit,
+                "round_trip_cost_bps": round_trip_cost_bps,
+                "signal_dataset_revision": run.dataset_revision,
+                "model_digest": run.model_digest,
+            }
+            outcomes.append(
+                FactorShadowOutcome(
+                    experiment_id=run.experiment_id,
+                    scan_job_id=run.scan_job_id,
+                    instrument_id=score.instrument_id,
+                    horizon_sessions=horizon,
+                    signal_date=run.signal_date,
+                    entry_date=entry_date,
+                    outcome_date=outcome_date,
+                    benchmark_id=bundle.experiment.benchmark_id,
+                    instrument_return_pct=round(instrument_return, 10),
+                    benchmark_return_pct=round(benchmark_return, 10),
+                    excess_return_pct=round(excess_return, 10),
+                    net_excess_return_pct=round(net_excess_return, 10),
+                    round_trip_cost_bps=round_trip_cost_bps,
+                    signal_dataset_revision=run.dataset_revision,
+                    model_digest=run.model_digest,
+                    source_digest=_digest(source_payload),
                 )
-                exit_ = _adjusted_price(
-                    bars,
-                    score.instrument_id,
-                    outcome_date,
-                    "adjusted_close",
-                )
-                if entry is None or exit_ is None:
-                    unresolved_prices += 1
-                    continue
-                instrument_return = _return_pct(entry, exit_)
-                excess_return = instrument_return - benchmark_return
-                net_excess_return = excess_return - round_trip_cost_bps / 100.0
-                source_payload = {
-                    "contract": FACTOR_SHADOW_OUTCOME_CONTRACT,
-                    "experiment_id": run.experiment_id,
-                    "scan_job_id": run.scan_job_id,
-                    "instrument_id": score.instrument_id,
-                    "horizon_sessions": horizon,
-                    "signal_date": run.signal_date.isoformat(),
-                    "entry_date": entry_date.isoformat(),
-                    "outcome_date": outcome_date.isoformat(),
-                    "entry_adjusted_open": entry,
-                    "exit_adjusted_close": exit_,
-                    "benchmark_id": bundle.experiment.benchmark_id,
-                    "benchmark_entry_adjusted_open": benchmark_entry,
-                    "benchmark_exit_adjusted_close": benchmark_exit,
-                    "round_trip_cost_bps": round_trip_cost_bps,
-                    "signal_dataset_revision": run.dataset_revision,
-                    "model_digest": run.model_digest,
-                }
-                outcomes.append(
-                    FactorShadowOutcome(
-                        experiment_id=run.experiment_id,
-                        scan_job_id=run.scan_job_id,
-                        instrument_id=score.instrument_id,
-                        horizon_sessions=horizon,
-                        signal_date=run.signal_date,
-                        entry_date=entry_date,
-                        outcome_date=outcome_date,
-                        benchmark_id=bundle.experiment.benchmark_id,
-                        instrument_return_pct=round(instrument_return, 10),
-                        benchmark_return_pct=round(benchmark_return, 10),
-                        excess_return_pct=round(excess_return, 10),
-                        net_excess_return_pct=round(net_excess_return, 10),
-                        round_trip_cost_bps=round_trip_cost_bps,
-                        signal_dataset_revision=run.dataset_revision,
-                        model_digest=run.model_digest,
-                        source_digest=_digest(source_payload),
-                    )
-                )
-            inserted += store.record_shadow_outcomes(outcomes)
+            )
+        inserted += store.record_shadow_outcomes(outcomes)
 
-    if inserted:
+    retryable = repair.retryable
+    if unresolved_prices:
+        status = "partial" if retryable else "incomplete"
+    elif inserted:
         status = "recorded"
-    elif unresolved_prices:
-        status = "incomplete"
     elif next_maturity_dates:
         status = "waiting_for_maturity"
     else:
@@ -456,6 +494,7 @@ def resolve_factor_shadow_outcomes(
     return FactorShadowOutcomeResolution(
         status=status,
         as_of_date=as_of_date,
+        experiment_id=bundle.experiment.experiment_id,
         runs=len(runs),
         matured_run_horizons=matured_run_horizons,
         outcomes_inserted=inserted,
@@ -472,6 +511,7 @@ def resolve_factor_shadow_outcomes(
             "factor_shadow_outcome_existing": str(len(existing)),
             "factor_shadow_outcome_raw_existing": str(len(raw_existing)),
             "factor_shadow_outcome_unresolved_prices": str(unresolved_prices),
+            **repair_health,
             "factor_shadow_outcome_paper_isolation": "true",
             "factor_shadow_outcome_order_effect": "none",
         },
@@ -622,7 +662,9 @@ def _merge_outcome_resolutions(
         )
     statuses = {item.status for item in resolutions}
     status = (
-        "recorded"
+        "partial"
+        if "partial" in statuses
+        else "recorded"
         if "recorded" in statuses
         else "incomplete"
         if "incomplete" in statuses
@@ -644,6 +686,48 @@ def _merge_outcome_resolutions(
             "factor_shadow_outcome_status": status,
             "factor_shadow_outcome_contract": FACTOR_SHADOW_OUTCOME_CONTRACT,
             "factor_shadow_outcome_candidates": str(len(resolutions)),
+            "factor_shadow_outcome_candidate_recorded": str(
+                sum(item.status == "recorded" for item in resolutions)
+            ),
+            "factor_shadow_outcome_candidate_waiting_maturity": str(
+                sum(item.status == "waiting_for_maturity" for item in resolutions)
+            ),
+            "factor_shadow_outcome_candidate_price_gaps": str(
+                sum(item.status in {"partial", "incomplete"} for item in resolutions)
+            ),
+            "factor_shadow_outcome_candidate_statuses": ",".join(
+                f"{item.experiment_id or index}:{item.status}"
+                for index, item in enumerate(resolutions)
+            ),
+            "factor_shadow_outcome_candidate_repair_summary": json.dumps(
+                [
+                    {
+                        "experiment_id": item.experiment_id or str(index),
+                        "status": item.status,
+                        "unresolved_prices": item.unresolved_prices,
+                        "requested": item.data_health.get(
+                            "factor_shadow_exact_price_requested", "0"
+                        ),
+                        "repaired": item.data_health.get("factor_shadow_exact_price_repaired", "0"),
+                        "retryable": item.data_health.get(
+                            "factor_shadow_exact_price_retryable", "0"
+                        ),
+                        "reason_mix": item.data_health.get(
+                            "factor_shadow_exact_price_reason_mix", ""
+                        ),
+                    }
+                    for index, item in enumerate(resolutions[:3])
+                ],
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            "factor_shadow_outcome_latest_candidate_status": resolutions[0].status,
+            "factor_shadow_outcome_latest_candidate_waiting_maturity": str(
+                resolutions[0].status == "waiting_for_maturity"
+            ).lower(),
+            "factor_shadow_outcome_older_candidate_price_gaps": str(
+                sum(item.status in {"partial", "incomplete"} for item in resolutions[1:])
+            ),
             "factor_shadow_outcome_paper_isolation": "true",
             "factor_shadow_outcome_order_effect": "none",
         },
@@ -1066,6 +1150,24 @@ def _evaluate_horizon(
         expected_instruments=expected,
         completed_instruments=completed,
         outcome_coverage=round(coverage, 6),
+        signal_date_scored_sessions=sum(
+            bool(scores_by_run.get(run.scan_job_id)) for run in matured
+        ),
+        signal_date_scored_coverage=round(
+            sum(bool(scores_by_run.get(run.scan_job_id)) for run in matured) / len(matured),
+            6,
+        )
+        if matured
+        else 0.0,
+        scored_cohort_instruments=expected,
+        scored_cohort_outcome_coverage=round(coverage, 6),
+        eligible_universe_instruments=None,
+        universe_coverage="unknown",
+        selection_filled_instruments=sum(
+            len(scores_by_run.get(run.scan_job_id, [])) for run in matured
+        ),
+        outcome_filled_instruments=completed,
+        paired_outcome_sessions=execution_head.paired_outcome_sessions,
         mean_baseline_rank_ic=_rounded_mean(baseline_ics),
         mean_challenger_rank_ic=_rounded_mean(challenger_ics),
         baseline_top_excess_return_pct=_rounded_mean(baseline_top_excess),

@@ -12,6 +12,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.research.factor_shadow_outcomes import factor_shadow_outcome_dates
+from qagent.research.shadow_price_repair import (
+    ExactPriceRequirement,
+    repair_exact_daily_prices,
+)
 from qagent.storage.fuyao_research import FuyaoResearchRepository, FuyaoResearchSnapshot
 from qagent.storage.fuyao_shadow import FuyaoShadowOutcome, FuyaoShadowRepository
 from qagent.storage.market_cache import BAR_COLUMNS, MarketDataCacheRepository
@@ -31,6 +35,7 @@ class FuyaoShadowResolution(BaseModel):
     outcomes_inserted: int = 0
     outcomes_existing: int = 0
     unresolved_prices: int = 0
+    unresolved_reasons: dict[str, int] = Field(default_factory=dict)
     next_maturity_date: date | None = None
     data_health: dict[str, str] = Field(default_factory=dict)
 
@@ -69,6 +74,7 @@ def resolve_fuyao_shadow_outcomes(
     provider_mode: str,
     as_of_date: date,
     horizons: tuple[int, ...] = FUYAO_SHADOW_HORIZONS,
+    market_provider: object | None = None,
 ) -> FuyaoShadowResolution:
     snapshots = _daily_market_snapshots(session_factory)
     if not snapshots:
@@ -87,6 +93,9 @@ def resolve_fuyao_shadow_outcomes(
     unresolved = 0
     matured = 0
     next_dates: list[date] = []
+    work: list[tuple[FuyaoResearchSnapshot, date, int, date, date, list[dict[str, Any]]]] = []
+    requirements: set[ExactPriceRequirement] = set()
+    unresolved_reasons: dict[str, int] = {}
 
     for snapshot in snapshots:
         signal_date = _snapshot_signal_date(snapshot)
@@ -112,74 +121,111 @@ def resolve_fuyao_shadow_outcomes(
             if not unresolved_signals:
                 continue
             instrument_ids = [str(item["instrument_id"]) for item in unresolved_signals]
-            bars = _load_cached_bars(
-                cache,
-                provider_mode,
-                [*instrument_ids, FUYAO_SHADOW_BENCHMARK_ID],
-                entry_date,
-                outcome_date,
+            work.append(
+                (snapshot, signal_date, horizon, entry_date, outcome_date, unresolved_signals)
             )
-            benchmark_entry = _adjusted_price(
-                bars,
-                FUYAO_SHADOW_BENCHMARK_ID,
-                entry_date,
-                "adjusted_open",
+            requirements.update(
+                ExactPriceRequirement(instrument_id, entry_date, "adjusted_open")
+                for instrument_id in [*instrument_ids, FUYAO_SHADOW_BENCHMARK_ID]
             )
-            benchmark_exit = _adjusted_price(
-                bars,
-                FUYAO_SHADOW_BENCHMARK_ID,
-                outcome_date,
-                "adjusted_close",
+            requirements.update(
+                ExactPriceRequirement(instrument_id, outcome_date, "adjusted_close")
+                for instrument_id in [*instrument_ids, FUYAO_SHADOW_BENCHMARK_ID]
             )
-            if benchmark_entry is None or benchmark_exit is None:
-                unresolved += len(unresolved_signals)
+
+    repair = repair_exact_daily_prices(
+        cache,
+        provider_mode=provider_mode,
+        market_provider=market_provider,
+        requirements=requirements,
+    )
+    repair_health = repair.data_health("fuyao_shadow")
+    unresolved_reasons.update(repair.reasons)
+    for snapshot, signal_date, horizon, entry_date, outcome_date, unresolved_signals in work:
+        instrument_ids = [str(item["instrument_id"]) for item in unresolved_signals]
+        bars = _load_cached_bars(
+            cache,
+            provider_mode,
+            [*instrument_ids, FUYAO_SHADOW_BENCHMARK_ID],
+            entry_date,
+            outcome_date,
+        )
+        benchmark_entry = _adjusted_price(
+            bars,
+            FUYAO_SHADOW_BENCHMARK_ID,
+            entry_date,
+            "adjusted_open",
+        )
+        benchmark_exit = _adjusted_price(
+            bars,
+            FUYAO_SHADOW_BENCHMARK_ID,
+            outcome_date,
+            "adjusted_close",
+        )
+        if benchmark_entry is None or benchmark_exit is None:
+            unresolved += len(unresolved_signals)
+            continue
+        benchmark_return = _return_pct(benchmark_entry, benchmark_exit)
+        outcomes: list[FuyaoShadowOutcome] = []
+        for signal in unresolved_signals:
+            instrument_id = str(signal["instrument_id"])
+            entry = _adjusted_price(bars, instrument_id, entry_date, "adjusted_open")
+            exit_ = _adjusted_price(bars, instrument_id, outcome_date, "adjusted_close")
+            if entry is None or exit_ is None:
+                unresolved += 1
                 continue
-            benchmark_return = _return_pct(benchmark_entry, benchmark_exit)
-            outcomes: list[FuyaoShadowOutcome] = []
-            for signal in unresolved_signals:
-                instrument_id = str(signal["instrument_id"])
-                entry = _adjusted_price(bars, instrument_id, entry_date, "adjusted_open")
-                exit_ = _adjusted_price(bars, instrument_id, outcome_date, "adjusted_close")
-                if entry is None or exit_ is None:
-                    unresolved += 1
-                    continue
-                instrument_return = _return_pct(entry, exit_)
-                excess = instrument_return - benchmark_return
-                outcomes.append(
-                    FuyaoShadowOutcome(
-                        snapshot_id=snapshot.snapshot_id,
+            instrument_return = _return_pct(entry, exit_)
+            excess = instrument_return - benchmark_return
+            outcomes.append(
+                FuyaoShadowOutcome(
+                    snapshot_id=snapshot.snapshot_id,
+                    instrument_id=instrument_id,
+                    signal_date=signal_date,
+                    horizon_sessions=horizon,
+                    entry_date=entry_date,
+                    outcome_date=outcome_date,
+                    signal_score=float(signal["score"]),
+                    entry_adjusted_open=entry,
+                    exit_adjusted_close=exit_,
+                    benchmark_id=FUYAO_SHADOW_BENCHMARK_ID,
+                    benchmark_entry_adjusted_open=benchmark_entry,
+                    benchmark_exit_adjusted_close=benchmark_exit,
+                    instrument_return_pct=instrument_return,
+                    benchmark_return_pct=benchmark_return,
+                    excess_return_pct=excess,
+                    net_excess_return_pct=(excess - FUYAO_SHADOW_ROUND_TRIP_COST_BPS / 100.0),
+                    round_trip_cost_bps=FUYAO_SHADOW_ROUND_TRIP_COST_BPS,
+                    source_digest=_source_digest(
+                        snapshot,
                         instrument_id=instrument_id,
-                        signal_date=signal_date,
-                        horizon_sessions=horizon,
+                        horizon=horizon,
                         entry_date=entry_date,
                         outcome_date=outcome_date,
-                        signal_score=float(signal["score"]),
-                        entry_adjusted_open=entry,
-                        exit_adjusted_close=exit_,
-                        benchmark_id=FUYAO_SHADOW_BENCHMARK_ID,
-                        benchmark_entry_adjusted_open=benchmark_entry,
-                        benchmark_exit_adjusted_close=benchmark_exit,
-                        instrument_return_pct=instrument_return,
-                        benchmark_return_pct=benchmark_return,
-                        excess_return_pct=excess,
-                        net_excess_return_pct=(
-                            excess - FUYAO_SHADOW_ROUND_TRIP_COST_BPS / 100.0
-                        ),
-                        round_trip_cost_bps=FUYAO_SHADOW_ROUND_TRIP_COST_BPS,
-                        source_digest=_source_digest(
-                            snapshot,
-                            instrument_id=instrument_id,
-                            horizon=horizon,
-                            entry_date=entry_date,
-                            outcome_date=outcome_date,
-                        ),
-                    )
+                    ),
                 )
-            inserted += outcome_store.append_outcomes(outcomes)
+            )
+        inserted += outcome_store.append_outcomes(outcomes)
 
     refreshed = outcome_store.list_outcomes()
     next_maturity = min(next_dates, default=None)
-    status = "resolved" if matured else "collecting"
+    retryable = int(repair_health.get("fuyao_shadow_exact_price_retryable", "0") or 0)
+    status = (
+        "partial"
+        if unresolved and retryable
+        else "incomplete"
+        if unresolved
+        else "resolved"
+        if matured
+        else "collecting"
+    )
+    health = {
+        **_health(status, len(snapshots), len(refreshed)),
+        **repair_health,
+        "fuyao_shadow_unresolved_prices": str(unresolved),
+        "fuyao_shadow_unresolved_reason_mix": ",".join(
+            f"{key}={value}" for key, value in sorted(unresolved_reasons.items())
+        ),
+    }
     return FuyaoShadowResolution(
         status=status,
         as_of_date=as_of_date,
@@ -188,8 +234,9 @@ def resolve_fuyao_shadow_outcomes(
         outcomes_inserted=inserted,
         outcomes_existing=max(len(refreshed) - inserted, 0),
         unresolved_prices=unresolved,
+        unresolved_reasons=unresolved_reasons,
         next_maturity_date=next_maturity,
-        data_health=_health(status, len(snapshots), len(refreshed)),
+        data_health=health,
     )
 
 
@@ -202,8 +249,7 @@ def build_fuyao_shadow_evaluation(
     snapshots = _daily_market_snapshots(session_factory)
     outcomes = FuyaoShadowRepository(session_factory).list_outcomes()
     outcomes_by_key = {
-        (item.snapshot_id, item.instrument_id, item.horizon_sessions): item
-        for item in outcomes
+        (item.snapshot_id, item.instrument_id, item.horizon_sessions): item for item in outcomes
     }
     next_dates = [
         outcome_date
@@ -269,9 +315,7 @@ def _evaluate_horizon(
         pairs = [
             (
                 signal,
-                outcomes_by_key.get(
-                    (snapshot.snapshot_id, str(signal["instrument_id"]), horizon)
-                ),
+                outcomes_by_key.get((snapshot.snapshot_id, str(signal["instrument_id"]), horizon)),
             )
             for signal in signals
         ]
@@ -389,9 +433,13 @@ def _return_pct(entry: float, exit_: float) -> float:
 def _spearman(scores: list[float], returns: list[float]) -> float | None:
     if len(scores) != len(returns) or len(scores) < 2:
         return None
-    value = pd.Series(scores, dtype="float64").rank(method="average").corr(
-        pd.Series(returns, dtype="float64").rank(method="average"),
-        method="pearson",
+    value = (
+        pd.Series(scores, dtype="float64")
+        .rank(method="average")
+        .corr(
+            pd.Series(returns, dtype="float64").rank(method="average"),
+            method="pearson",
+        )
     )
     return round(float(value), 10) if pd.notna(value) and np.isfinite(value) else None
 

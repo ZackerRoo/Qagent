@@ -3159,10 +3159,12 @@ def resolve_factor_research_shadow_outcomes(
 ):
     mode = provider.strip().lower()
     effective_as_of = as_of_date or _latest_completed_a_share_session() or date.today()
+    market_provider = build_market_data_provider(mode)
     resolution = resolve_factor_shadow_outcomes(
         create_session_factory(),
         provider_mode=mode,
         as_of_date=effective_as_of,
+        market_provider=market_provider,
     )
     evaluation = build_factor_shadow_evaluation(
         create_session_factory(),
@@ -3747,6 +3749,7 @@ def _automation_stage_outcome(
         str(value).strip()
         for key, value in health.items()
         if (key == "errors" or key.endswith("_error") or key.endswith("_errors"))
+        and "_exact_price_" not in key
         and str(value).strip().lower() not in {"", "0", "false", "none", "null"}
     ]
     if error_values:
@@ -3786,7 +3789,9 @@ def _automation_stage_outcome(
         status = health.get("factor_shadow_outcome_status", "")
         if status in {"recorded", "up_to_date"}:
             return "success", None
-        outcome = "deferred" if status in {"waiting_for_maturity", "incomplete"} else "error"
+        outcome = (
+            "deferred" if status in {"waiting_for_maturity", "incomplete", "partial"} else "error"
+        )
         return outcome, f"factor shadow status is {status or 'missing'}"
     if stage_key == "fuyao_shadow":
         status = health.get("fuyao_shadow_status", "")
@@ -3795,7 +3800,7 @@ def _automation_stage_outcome(
             return "success", None
         outcome = (
             "deferred"
-            if status in {"collecting", "unavailable", "missing_config"} or unresolved > 0
+            if status in {"collecting", "incomplete", "partial", "unavailable", "missing_config"}
             else "error"
         )
         return outcome, f"fuyao shadow status is {status or 'missing'}; unresolved={unresolved}"
@@ -4501,10 +4506,11 @@ def _run_auto_processing_cycle_inner(
             factor_shadow_as_of = (
                 expected_signal_date or _latest_completed_a_share_session() or date.today()
             )
+            shadow_market_provider = build_market_data_provider(mode)
             benchmark_refresh = refresh_factor_shadow_benchmark_cache(
                 create_session_factory(),
                 provider_mode=mode,
-                market_provider=build_market_data_provider(mode),
+                market_provider=shadow_market_provider,
                 as_of_date=factor_shadow_as_of,
             )
             data_health.update(benchmark_refresh.data_health)
@@ -4512,6 +4518,7 @@ def _run_auto_processing_cycle_inner(
                 create_session_factory(),
                 provider_mode=mode,
                 as_of_date=factor_shadow_as_of,
+                market_provider=shadow_market_provider,
             )
             data_health.update(shadow_resolution.data_health)
             if shadow_resolution.next_maturity_date is not None:
@@ -4541,6 +4548,7 @@ def _run_auto_processing_cycle_inner(
                 create_session_factory(),
                 provider_mode=mode,
                 as_of_date=fuyao_shadow_as_of,
+                market_provider=build_market_data_provider(mode),
             )
             data_health.update(fuyao_shadow_resolution.data_health)
             data_health["fuyao_shadow_unresolved_prices"] = str(

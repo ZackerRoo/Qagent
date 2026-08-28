@@ -16,6 +16,7 @@ from qagent.providers.fuyao import (
     fuyao_capability_manifest,
     to_fuyao_thscode,
 )
+from qagent.providers.factory import build_market_data_provider
 from qagent.research.fuyao_market_sentiment import (
     capture_fuyao_market_research,
     latest_fuyao_market_research,
@@ -281,6 +282,7 @@ def resolve_market_shadow_outcomes(as_of_date: date | None = None) -> dict[str, 
         create_session_factory(),
         provider_mode="free",
         as_of_date=resolved_date,
+        market_provider=build_market_data_provider("free"),
     )
     evaluation = build_fuyao_shadow_evaluation(
         create_session_factory(),

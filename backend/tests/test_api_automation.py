@@ -1177,6 +1177,7 @@ def test_automation_cycle_publishes_post_cycle_risk_gate(monkeypatch):
             "deferred",
         ),
         ("factor_shadow", {"factor_shadow_outcome_status": "incomplete"}, "deferred"),
+        ("factor_shadow", {"factor_shadow_outcome_status": "partial"}, "deferred"),
         (
             "fuyao_shadow",
             {"fuyao_shadow_status": "collecting", "fuyao_shadow_unresolved_prices": "0"},
@@ -1185,6 +1186,16 @@ def test_automation_cycle_publishes_post_cycle_risk_gate(monkeypatch):
         (
             "fuyao_shadow",
             {"fuyao_shadow_status": "resolved", "fuyao_shadow_unresolved_prices": "2"},
+            "error",
+        ),
+        (
+            "fuyao_shadow",
+            {"fuyao_shadow_status": "partial", "fuyao_shadow_unresolved_prices": "2"},
+            "deferred",
+        ),
+        (
+            "fuyao_shadow",
+            {"fuyao_shadow_status": "incomplete", "fuyao_shadow_unresolved_prices": "2"},
             "deferred",
         ),
         ("alerts", {"errors": "provider unavailable"}, "error"),
@@ -1254,12 +1265,31 @@ def test_automation_cycle_publishes_post_cycle_risk_gate(monkeypatch):
         ),
     ],
 )
-def test_automation_stage_outcome_distinguishes_waiting_from_errors(
-    stage, health, expected
-):
+def test_automation_stage_outcome_distinguishes_waiting_from_errors(stage, health, expected):
     outcome, reason = routes._automation_stage_outcome(stage, health)
     assert outcome == expected
     assert bool(reason) is (expected != "success")
+
+
+def test_shadow_price_gap_defers_current_slot_and_next_cycle_can_progress():
+    first, first_reason = routes._automation_stage_outcome(
+        "factor_shadow",
+        {
+            "factor_shadow_outcome_status": "partial",
+            "factor_shadow_exact_price_reason_mix": "provider_no_row=1",
+            "factor_shadow_exact_price_provider_batches": "1",
+            "factor_shadow_exact_price_errors": "1",
+        },
+    )
+    next_cycle, next_reason = routes._automation_stage_outcome(
+        "factor_shadow",
+        {"factor_shadow_outcome_status": "up_to_date"},
+    )
+
+    assert first == "deferred"
+    assert first_reason == "factor shadow status is partial"
+    assert next_cycle == "success"
+    assert next_reason is None
 
 
 def test_cycle_with_natural_waiting_is_terminal_with_visible_issue(tmp_path, monkeypatch):
@@ -1315,20 +1345,15 @@ def test_cycle_with_natural_waiting_is_terminal_with_visible_issue(tmp_path, mon
     )
 
     assert result.errors == []
-    assert result.issues == [
-        "factor_shadow: factor shadow status is waiting_for_maturity"
-    ]
-    assert (
-        result.data_health["automation_cycle_status"]
-        == "completed_with_deferred_or_issues"
-    )
+    assert result.issues == ["factor_shadow: factor shadow status is waiting_for_maturity"]
+    assert result.data_health["automation_cycle_status"] == "completed_with_deferred_or_issues"
     with repo.session_factory() as session:
-        assert session.execute(
-            text(
-                "SELECT status FROM automation_cycle_stages "
-                "WHERE stage_key = 'factor_shadow'"
-            )
-        ).scalar_one() == "deferred"
+        assert (
+            session.execute(
+                text("SELECT status FROM automation_cycle_stages WHERE stage_key = 'factor_shadow'")
+            ).scalar_one()
+            == "deferred"
+        )
 
 
 @pytest.mark.parametrize(
@@ -1390,12 +1415,12 @@ def test_cycle_with_required_alert_failure_retries_same_slot(
     assert expected_error in result.errors[0]
     assert result.data_health["automation_cycle_status"] == "partial_retry_same_slot"
     with repo.session_factory() as session:
-        assert session.execute(
-            text(
-                "SELECT status FROM automation_cycle_stages "
-                "WHERE stage_key = 'alerts'"
-            )
-        ).scalar_one() == "error"
+        assert (
+            session.execute(
+                text("SELECT status FROM automation_cycle_stages WHERE stage_key = 'alerts'")
+            ).scalar_one()
+            == "error"
+        )
 
 
 @pytest.mark.parametrize(
@@ -1450,12 +1475,12 @@ def test_cycle_with_required_paper_telemetry_failure_retries_same_slot(
     assert expected_error in result.errors[0]
     assert result.data_health["automation_cycle_status"] == "partial_retry_same_slot"
     with repo.session_factory() as session:
-        assert session.execute(
-            text(
-                "SELECT status FROM automation_cycle_stages "
-                "WHERE stage_key = 'paper_update'"
-            )
-        ).scalar_one() == "error"
+        assert (
+            session.execute(
+                text("SELECT status FROM automation_cycle_stages WHERE stage_key = 'paper_update'")
+            ).scalar_one()
+            == "error"
+        )
 
 
 def test_cycle_with_completed_stages_is_succeeded(tmp_path, monkeypatch):
@@ -1679,12 +1704,8 @@ def test_uncaught_cycle_exception_aborts_and_releases_runtime_lease(tmp_path, mo
 
     factory = create_session_factory(database_url)
     with factory() as session:
-        cycle = session.execute(
-            text("SELECT status, error_json FROM automation_cycles")
-        ).one()
-        lease = session.execute(
-            text("SELECT expires_at, heartbeat_at FROM runtime_leases")
-        ).one()
+        cycle = session.execute(text("SELECT status, error_json FROM automation_cycles")).one()
+        lease = session.execute(text("SELECT expires_at, heartbeat_at FROM runtime_leases")).one()
     assert cycle.status == "partial_retry_same_slot"
     assert "injected outer failure" in cycle.error_json
     assert lease.expires_at == lease.heartbeat_at
