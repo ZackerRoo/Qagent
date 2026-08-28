@@ -673,6 +673,7 @@ def _merge_outcome_resolutions(
         else "up_to_date"
     )
     next_dates = [item.next_maturity_date for item in resolutions if item.next_maturity_date]
+    merged_repair_health = _merge_candidate_repair_health(resolutions)
     return FactorShadowOutcomeResolution(
         status=status,
         as_of_date=as_of_date,
@@ -686,6 +687,7 @@ def _merge_outcome_resolutions(
             "factor_shadow_outcome_status": status,
             "factor_shadow_outcome_contract": FACTOR_SHADOW_OUTCOME_CONTRACT,
             "factor_shadow_outcome_candidates": str(len(resolutions)),
+            **merged_repair_health,
             "factor_shadow_outcome_candidate_recorded": str(
                 sum(item.status == "recorded" for item in resolutions)
             ),
@@ -705,8 +707,28 @@ def _merge_outcome_resolutions(
                         "experiment_id": item.experiment_id or str(index),
                         "status": item.status,
                         "unresolved_prices": item.unresolved_prices,
+                        "exact_unresolved": sum(
+                            _nonnegative_health_int(
+                                item.data_health.get(
+                                    f"factor_shadow_exact_price_{suffix}", "0"
+                                )
+                            )
+                            for suffix in ("suspended", "not_listed", "missing", "errors")
+                        ),
                         "requested": item.data_health.get(
                             "factor_shadow_exact_price_requested", "0"
+                        ),
+                        "cache_hits": item.data_health.get(
+                            "factor_shadow_exact_price_cache_hits", "0"
+                        ),
+                        "skipped_after_recheck": item.data_health.get(
+                            "factor_shadow_exact_price_skipped_after_recheck", "0"
+                        ),
+                        "provider_requested": item.data_health.get(
+                            "factor_shadow_exact_price_provider_requested", "0"
+                        ),
+                        "provider_batches": item.data_health.get(
+                            "factor_shadow_exact_price_provider_batches", "0"
                         ),
                         "repaired": item.data_health.get("factor_shadow_exact_price_repaired", "0"),
                         "retryable": item.data_health.get(
@@ -732,6 +754,64 @@ def _merge_outcome_resolutions(
             "factor_shadow_outcome_order_effect": "none",
         },
     )
+
+
+def _merge_candidate_repair_health(
+    resolutions: list[FactorShadowOutcomeResolution],
+) -> dict[str, str]:
+    numeric_suffixes = (
+        "requested",
+        "cache_hits",
+        "skipped_after_recheck",
+        "provider_requested",
+        "provider_batches",
+        "repaired",
+        "suspended",
+        "not_listed",
+        "missing",
+        "errors",
+        "retryable",
+    )
+    merged = {
+        f"factor_shadow_exact_price_{suffix}": str(
+            sum(
+                _nonnegative_health_int(
+                    item.data_health.get(f"factor_shadow_exact_price_{suffix}", "0")
+                )
+                for item in resolutions
+            )
+        )
+        for suffix in numeric_suffixes
+    }
+    reasons: dict[str, int] = {}
+    for item in resolutions:
+        mix = item.data_health.get("factor_shadow_exact_price_reason_mix", "")
+        for token in mix.split(","):
+            reason, separator, raw_count = token.partition("=")
+            if not separator or not reason:
+                continue
+            reasons[reason] = reasons.get(reason, 0) + _nonnegative_health_int(raw_count)
+    merged["factor_shadow_exact_price_reason_mix"] = ",".join(
+        f"{reason}={count}" for reason, count in sorted(reasons.items())
+    )
+    merged["factor_shadow_exact_price_aggregation"] = "sum_per_candidate_resolution"
+    merged["factor_shadow_exact_price_unresolved"] = str(
+        sum(
+            _nonnegative_health_int(merged[f"factor_shadow_exact_price_{suffix}"])
+            for suffix in ("suspended", "not_listed", "missing", "errors")
+        )
+    )
+    merged["factor_shadow_outcome_unresolved_prices"] = str(
+        sum(item.unresolved_prices for item in resolutions)
+    )
+    return merged
+
+
+def _nonnegative_health_int(value: object) -> int:
+    try:
+        return max(int(str(value)), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def factor_shadow_outcome_dates(

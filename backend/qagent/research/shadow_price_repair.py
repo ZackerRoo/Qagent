@@ -57,6 +57,7 @@ class ExactPriceRepairResult:
             f"{prefix}_exact_price_missing": str(self.missing),
             f"{prefix}_exact_price_errors": str(self.errors),
             f"{prefix}_exact_price_retryable": str(self.retryable),
+            f"{prefix}_exact_price_unresolved": str(len(self.unresolved)),
             f"{prefix}_exact_price_reason_mix": _reason_mix(self.reasons),
             f"{prefix}_exact_price_error_details": " | ".join(self.error_details[:5]),
         }

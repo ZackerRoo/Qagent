@@ -11,6 +11,7 @@ from sqlalchemy import text
 
 import qagent.api.routes as routes
 import qagent.jobs.automation as research_automation
+import qagent.jobs.automation_scheduler as scheduler_module
 from qagent.app import create_app
 from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.automation_scheduler import (
@@ -1156,6 +1157,19 @@ def test_automation_cycle_publishes_post_cycle_risk_gate(monkeypatch):
     ("stage", "health", "expected"),
     [
         (
+            "scan",
+            {"automation_scan_status": "waiting_market_data_settlement"},
+            "deferred",
+        ),
+        ("scan", {"automation_scan_status": "waiting_market_data"}, "deferred"),
+        ("scan", {"automation_scan_status": "deferred_market_session"}, "deferred"),
+        ("scan", {"automation_scan_status": "failed"}, "error"),
+        (
+            "scan",
+            {"automation_scan_status": "candidate_data_partially_stale_filtered"},
+            "error",
+        ),
+        (
             "fuyao_market_theme",
             {
                 "fuyao_market_research_status": "unavailable",
@@ -1354,6 +1368,188 @@ def test_cycle_with_natural_waiting_is_terminal_with_visible_issue(tmp_path, mon
             ).scalar_one()
             == "deferred"
         )
+
+
+@pytest.mark.parametrize(
+    ("scan_status", "expected_cycle_status", "expected_stage_status", "issue", "error"),
+    [
+        (
+            "waiting_market_data_settlement",
+            "completed_with_deferred_or_issues",
+            "deferred",
+            "scan: scan status is waiting_market_data_settlement",
+            None,
+        ),
+        (
+            "failed",
+            "partial_retry_same_slot",
+            "error",
+            None,
+            "scan: scan status is failed",
+        ),
+    ],
+)
+def test_manual_scan_wait_defers_but_failure_retries_same_slot(
+    tmp_path,
+    monkeypatch,
+    scan_status,
+    expected_cycle_status,
+    expected_stage_status,
+    issue,
+    error,
+):
+    database_url = f"sqlite:///{tmp_path / f'manual-scan-{scan_status}.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    repo = QagentRepository(create_session_factory(database_url))
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    monkeypatch.setattr(routes, "_repo", lambda: repo)
+    monkeypatch.setattr(routes, "_paper_repo", lambda: paper_repo)
+    monkeypatch.setattr(
+        routes,
+        "_paper_seed_risk_gate",
+        lambda *_: (True, {"paper_risk_gate_action": "allow"}),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_latest_completed_a_share_session",
+        lambda *args: date(2026, 8, 28),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_maybe_start_automatic_full_scan",
+        lambda *args, **kwargs: (scan_status, False, None),
+    )
+    monkeypatch.setattr(
+        routes,
+        "refresh_factor_shadow_benchmark_cache",
+        lambda *args, **kwargs: SimpleNamespace(data_health={}),
+    )
+    monkeypatch.setattr(
+        routes,
+        "resolve_factor_shadow_outcomes",
+        lambda *args, **kwargs: SimpleNamespace(
+            data_health={"factor_shadow_outcome_status": "up_to_date"},
+            next_maturity_date=None,
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "resolve_fuyao_shadow_outcomes",
+        lambda *args, **kwargs: SimpleNamespace(
+            data_health={"fuyao_shadow_status": "resolved"},
+            unresolved_prices=0,
+            next_maturity_date=None,
+        ),
+    )
+
+    result = routes._run_auto_processing_cycle(
+        AutoProcessingSettings(
+            provider="free",
+            run_scan=True,
+            seed_paper=False,
+            update_paper=False,
+            run_alerts=False,
+            run_forward_evidence=False,
+        )
+    )
+
+    assert result.data_health["automation_cycle_kind"] == "manual"
+    assert result.data_health["automation_cycle_status"] == expected_cycle_status
+    if issue:
+        assert issue in result.issues
+    else:
+        assert all(not item.startswith("scan:") for item in result.issues)
+    assert result.errors == ([error] if error else [])
+    with repo.session_factory() as session:
+        assert (
+            session.execute(
+                text("SELECT status FROM automation_cycle_stages WHERE stage_key = 'scan'")
+            ).scalar_one()
+            == expected_stage_status
+        )
+
+
+def test_scheduled_scan_settlement_wait_advances_to_next_normal_slot(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'scheduled-scan-settlement.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    repo = QagentRepository(create_session_factory(database_url))
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    monkeypatch.setattr(routes, "_repo", lambda: repo)
+    monkeypatch.setattr(routes, "_paper_repo", lambda: paper_repo)
+    monkeypatch.setattr(
+        routes,
+        "_paper_seed_risk_gate",
+        lambda *_: (True, {"paper_risk_gate_action": "allow"}),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_latest_completed_a_share_session",
+        lambda *args: date(2026, 8, 28),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_maybe_start_automatic_full_scan",
+        lambda *args, **kwargs: ("waiting_market_data_settlement", False, None),
+    )
+    monkeypatch.setattr(
+        routes,
+        "refresh_factor_shadow_benchmark_cache",
+        lambda *args, **kwargs: SimpleNamespace(data_health={}),
+    )
+    monkeypatch.setattr(
+        routes,
+        "resolve_factor_shadow_outcomes",
+        lambda *args, **kwargs: SimpleNamespace(
+            data_health={"factor_shadow_outcome_status": "up_to_date"},
+            next_maturity_date=None,
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "resolve_fuyao_shadow_outcomes",
+        lambda *args, **kwargs: SimpleNamespace(
+            data_health={"fuyao_shadow_status": "resolved"},
+            unresolved_prices=0,
+            next_maturity_date=None,
+        ),
+    )
+    now = datetime(2026, 8, 28, 4, 0, tzinfo=timezone.utc)
+    due = now - timedelta(minutes=2)
+    monkeypatch.setattr(scheduler_module, "_utc_now", lambda: now)
+    scheduler = AutomationScheduler()
+    settings = AutoProcessingSettings(
+        provider="free",
+        interval_seconds=600,
+        run_scan=True,
+        seed_paper=False,
+        update_paper=False,
+        run_alerts=False,
+        run_forward_evidence=False,
+    )
+    with scheduler._lock:
+        scheduler._enabled = True
+        scheduler._generation = 11
+        scheduler._settings = settings
+        scheduler._cycle_due_at = due
+        scheduler._next_run_at = now
+
+    assert scheduler._execute(settings, routes._run_auto_processing_cycle, generation=11) is True
+    state = scheduler.state()
+
+    assert state.run_count == 1
+    assert state.last_completed_at is not None
+    assert state.cycle_due_at == state.last_completed_at + timedelta(seconds=600)
+    assert state.next_run_at == state.last_completed_at + timedelta(seconds=600)
+    assert state.last_result is not None
+    assert state.last_result.data_health["automation_cycle_kind"] == "scheduled"
+    assert (
+        state.last_result.data_health["automation_cycle_status"]
+        == "completed_with_deferred_or_issues"
+    )
+    assert state.last_error is not None
+    assert "scan: scan status is waiting_market_data_settlement" in state.last_error
 
 
 @pytest.mark.parametrize(

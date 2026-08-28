@@ -58,12 +58,32 @@ def test_factor_shadow_resolution_keeps_latest_maturity_separate_from_old_price_
                 as_of_date=as_of,
                 experiment_id="latest",
                 next_maturity_date=date(2026, 9, 1),
+                data_health={
+                    "factor_shadow_exact_price_requested": "3",
+                    "factor_shadow_exact_price_cache_hits": "2",
+                    "factor_shadow_exact_price_skipped_after_recheck": "1",
+                    "factor_shadow_exact_price_provider_requested": "0",
+                    "factor_shadow_exact_price_provider_batches": "0",
+                    "factor_shadow_exact_price_repaired": "1",
+                    "factor_shadow_exact_price_reason_mix": "",
+                },
             ),
             FactorShadowOutcomeResolution(
                 status="partial",
                 as_of_date=as_of,
                 experiment_id="old",
                 unresolved_prices=2,
+                data_health={
+                    "factor_shadow_exact_price_requested": "5",
+                    "factor_shadow_exact_price_cache_hits": "1",
+                    "factor_shadow_exact_price_skipped_after_recheck": "2",
+                    "factor_shadow_exact_price_provider_requested": "2",
+                    "factor_shadow_exact_price_provider_batches": "1",
+                    "factor_shadow_exact_price_repaired": "2",
+                    "factor_shadow_exact_price_missing": "2",
+                    "factor_shadow_exact_price_retryable": "2",
+                    "factor_shadow_exact_price_reason_mix": "provider_no_row=2",
+                },
             ),
         ],
         as_of_date=as_of,
@@ -82,6 +102,27 @@ def test_factor_shadow_resolution_keeps_latest_maturity_separate_from_old_price_
     assert '"experiment_id":"latest"' in repair_summary
     assert '"experiment_id":"old"' in repair_summary
     assert '"unresolved_prices":2' in repair_summary
+    assert merged.data_health["factor_shadow_exact_price_requested"] == "8"
+    assert merged.data_health["factor_shadow_exact_price_cache_hits"] == "3"
+    assert merged.data_health["factor_shadow_exact_price_skipped_after_recheck"] == "3"
+    assert merged.data_health["factor_shadow_exact_price_provider_requested"] == "2"
+    assert merged.data_health["factor_shadow_exact_price_provider_batches"] == "1"
+    assert merged.data_health["factor_shadow_exact_price_repaired"] == "3"
+    assert merged.data_health["factor_shadow_exact_price_unresolved"] == "2"
+    assert merged.data_health["factor_shadow_outcome_unresolved_prices"] == "2"
+    assert merged.data_health["factor_shadow_exact_price_reason_mix"] == "provider_no_row=2"
+    assert int(merged.data_health["factor_shadow_exact_price_requested"]) == sum(
+        int(merged.data_health[key])
+        for key in (
+            "factor_shadow_exact_price_cache_hits",
+            "factor_shadow_exact_price_repaired",
+            "factor_shadow_exact_price_unresolved",
+        )
+    )
+    assert (
+        merged.data_health["factor_shadow_exact_price_aggregation"]
+        == "sum_per_candidate_resolution"
+    )
 
 
 def test_factor_research_recorder_persists_terminal_result(tmp_path):
@@ -456,6 +497,113 @@ def test_lightgbm_shadow_scores_are_persisted_without_paper_activation(tmp_path)
     assert multi.data_health["factor_shadow_candidate_count"] == "2"
     assert len(roster.candidates) == 2
     assert roster.data_health["factor_shadow_roster_paper_isolation"] == "true"
+
+
+def test_factor_shadow_benchmark_exact_gap_keeps_requirement_and_outcome_units_separate(
+    tmp_path,
+):
+    database_url = f"sqlite:///{tmp_path / 'factor-shadow-benchmark-gap.db'}"
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    store = FactorResearchRepository(session_factory)
+    model_text = "fixture benchmark gap model"
+    model_digest = sha256(model_text.encode("utf-8")).hexdigest()
+    experiment = store.create(
+        experiment_name="benchmark gap fixture",
+        provider_mode="fixture",
+        model_family="baseline+lightgbm",
+        benchmark_id="CN:000300.IDX",
+        dataset_revision=7,
+        start_date=date(2024, 1, 1),
+        end_date=date(2025, 1, 1),
+        code_revision="b" * 40,
+        config={"top_fraction": 0.2, "round_trip_cost_bps": 10},
+    )
+    store.mark_running(experiment.experiment_id)
+    store.complete(
+        experiment.experiment_id,
+        metrics={"activation_allowed": False},
+        data_health={},
+        artifacts={"paper_model_unchanged": True},
+        model_artifacts=[
+            {
+                "seed": 7,
+                "feature_set_version": FACTOR_RESEARCH_VERSION,
+                "feature_contract_digest": factor_research_feature_contract_digest(),
+                "model_digest": model_digest,
+                "model_text": model_text,
+            }
+        ],
+    )
+    bundle = store.latest_model_bundle("fixture")
+    assert bundle is not None
+    signal_date = date(2026, 7, 1)
+    scores = [
+        FactorShadowScore(
+            instrument_id=f"CN:{index:06d}",
+            baseline_score=float(3 - index),
+            challenger_score=float(index),
+            baseline_rank=index + 1,
+            challenger_rank=3 - index,
+            feature_coverage=1.0,
+            industry="fixture",
+        )
+        for index in range(3)
+    ]
+    store.record_shadow_scores(
+        experiment_id=experiment.experiment_id,
+        scan_job_id="scan-benchmark-gap",
+        signal_date=signal_date,
+        dataset_revision=7,
+        model_digest=bundle.aggregate_model_digest,
+        scores=scores,
+    )
+    entry_date, outcome_date = factor_shadow_outcome_dates(signal_date, 5)
+    cached_rows = [
+        row
+        for score in scores
+        for row in _factor_shadow_price_rows(
+            score.instrument_id,
+            entry_date,
+            outcome_date,
+            outcome_close=Decimal("101"),
+        )
+    ]
+    benchmark_rows = _factor_shadow_price_rows(
+        "CN:000300.IDX",
+        entry_date,
+        outcome_date,
+        outcome_close=Decimal("101"),
+    )
+    cached_rows.extend(row for row in benchmark_rows if row["trade_date"] == entry_date)
+    MarketDataCacheRepository(session_factory).save_daily_bars(
+        "fixture",
+        pd.DataFrame(cached_rows),
+    )
+
+    resolution = resolve_factor_shadow_outcomes(
+        session_factory,
+        provider_mode="fixture",
+        as_of_date=outcome_date,
+        horizons=(5,),
+    )
+
+    health = resolution.data_health
+    assert resolution.status == "partial"
+    assert resolution.unresolved_prices == len(scores)
+    assert health["factor_shadow_outcome_unresolved_prices"] == str(len(scores))
+    assert health["factor_shadow_exact_price_requested"] == "8"
+    assert health["factor_shadow_exact_price_cache_hits"] == "7"
+    assert health["factor_shadow_exact_price_repaired"] == "0"
+    assert health["factor_shadow_exact_price_unresolved"] == "1"
+    assert int(health["factor_shadow_exact_price_requested"]) == sum(
+        int(health[key])
+        for key in (
+            "factor_shadow_exact_price_cache_hits",
+            "factor_shadow_exact_price_repaired",
+            "factor_shadow_exact_price_unresolved",
+        )
+    )
 
 
 def test_factor_shadow_outcomes_use_one_run_per_signal_date_and_are_immutable(tmp_path):

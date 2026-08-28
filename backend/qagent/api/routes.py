@@ -3741,6 +3741,15 @@ def _restore_automation_cycle_checkpoint(
         data_health.update({str(key): str(value) for key, value in restored_health.items()})
 
 
+AUTOMATION_SCAN_DEFERRED_STATUSES = frozenset(
+    {
+        "waiting_market_data_settlement",
+        "waiting_market_data",
+        "deferred_market_session",
+    }
+)
+
+
 def _automation_stage_outcome(
     stage_key: str,
     health: Mapping[str, str],
@@ -3764,6 +3773,8 @@ def _automation_stage_outcome(
             "queued",
             "queued_market_data_repair",
         }
+        if status in AUTOMATION_SCAN_DEFERRED_STATUSES:
+            return "deferred", f"scan status is {status}"
         return (
             "success" if status in allowed else "error",
             f"scan status is {status or 'missing'}",
