@@ -73,6 +73,7 @@ from qagent.data_management import build_historical_coverage_manifest
 from qagent.db import create_session_factory, initialize_database
 from qagent.domain.models import OpportunityCard, PortfolioPlan, SectorStrength
 from qagent.factors.backtest import run_factor_backtest, run_factor_diagnostics
+from qagent.research.factor_candidate_queue import build_factor_candidate_queue
 from qagent.research.factor_experiments import (
     FactorResearchConfig,
     current_code_revision,
@@ -3100,6 +3101,11 @@ def research_experiment_library(
         ),
     )
     return report.model_dump(mode="json")
+
+
+@router.get("/research/factor-candidate-queue")
+def research_factor_candidate_queue() -> dict[str, object]:
+    return build_factor_candidate_queue().model_dump(mode="json")
 
 
 @router.get("/factor-research/shadow/latest")

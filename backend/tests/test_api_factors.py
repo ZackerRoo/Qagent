@@ -114,3 +114,27 @@ def test_factor_research_experiment_api_starts_empty_and_isolated(tmp_path, monk
     assert resolution.json()["resolution"]["status"] == "not_started"
     assert resolution.json()["evaluation"]["status"] == "not_started"
     assert missing.status_code == 404
+
+
+def test_factor_candidate_queue_api_is_shadow_only_and_has_no_paper_effect():
+    client = TestClient(create_app())
+
+    response = client.get("/api/research/factor-candidate-queue")
+
+    assert response.status_code == 200
+    body = response.json()
+    states = [candidate["state"] for candidate in body["candidates"]]
+    assert states.count("contract_available_for_shadow_design") == 5
+    assert states.count("future_capability") == 1
+    assert body["scope"] == "research_shadow"
+    assert body["decision_weight"] is False
+    assert body["production_ranking_effect"] == "none"
+    assert body["paper_order_effect"] == "none"
+    assert body["data_health"]["factor_candidate_queue_data_coverage_status"] == "unverified"
+    assert body["data_health"]["factor_candidate_queue_experiment_start_allowed"] == "false"
+    assert body["data_health"]["factor_candidate_queue_gate_policy_completeness"] == "partial"
+    assert body["data_health"]["factor_candidate_queue_paper_isolation"] == "true"
+    assert all(candidate["decision_weight"] is False for candidate in body["candidates"])
+    assert all(candidate["paper_order_effect"] == "none" for candidate in body["candidates"])
+    assert all(candidate["data_coverage_status"] == "unverified" for candidate in body["candidates"])
+    assert all(candidate["experiment_start_allowed"] is False for candidate in body["candidates"])

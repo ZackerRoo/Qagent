@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Mapping
 
 
-_DIMENSIONS = ("strategy", "market_regime", "industry", "holding_period")
+_DIMENSIONS = (
+    "strategy",
+    "factor_signal",
+    "market_regime",
+    "industry",
+    "entry_timing",
+    "exit_reason",
+    "execution_constraint_evidence",
+    "holding_period",
+)
 _RECONCILIATION_TOLERANCE_PCT = 0.001
 
 
@@ -20,7 +30,7 @@ def build_top10_lag_attribution(
     """Reconcile the observed gap and describe, but do not promote, ranks 6-10."""
 
     base = {
-        "schema_version": "top10-lag-attribution-v1",
+        "schema_version": "top10-lag-attribution-v2",
         "scope": "shadow_only",
         "official_release_allowed": False,
         "decision_weight": False,
@@ -129,6 +139,10 @@ def build_top10_lag_attribution(
         "common_layer": common_summary,
         "top5_independent_path": top5_summary,
         "incremental_layer": incremental_summary,
+        "rank_buckets": {
+            "top_1_5": common_summary,
+            "rank_6_10": incremental_summary,
+        },
         "incremental_layer_out_of_sample": oos_incremental_summary,
         "unresolved_layer": unresolved_summary,
         "reconciliation": {
@@ -146,6 +160,10 @@ def build_top10_lag_attribution(
             "gross_cost_formula": "observed_gap = gross_return_gap + extra_cost_drag + residual",
         },
         "dimensions": dimensions,
+        "cost_and_execution": _cost_and_execution_attribution(
+            incremental,
+            incremental_summary,
+        ),
         "primary_drags": drags[:8],
         "data_health": {
             "classification": status,
@@ -179,6 +197,7 @@ def _unsupported(base, observed_gap, missing):
         "common_layer": None,
         "top5_independent_path": None,
         "incremental_layer": None,
+        "rank_buckets": {"top_1_5": None, "rank_6_10": None},
         "incremental_layer_out_of_sample": None,
         "unresolved_layer": None,
         "reconciliation": {
@@ -196,6 +215,17 @@ def _unsupported(base, observed_gap, missing):
             "gross_cost_formula": "observed_gap = gross_return_gap + extra_cost_drag + residual",
         },
         "dimensions": [],
+        "cost_and_execution": {
+            "transaction_cost": _unavailable_metric(
+                "Required portfolio trades and capital are unavailable."
+            ),
+            "entry_timing": _unavailable_metric(
+                "Required portfolio trades and snapshots are unavailable."
+            ),
+            "execution_constraints": _unavailable_metric(
+                "Required selection snapshots are unavailable."
+            ),
+        },
         "primary_drags": [],
         "data_health": {
             "classification": "unsupported",
@@ -212,16 +242,148 @@ def _dimension_attribution(rows, initial_capital):
     for dimension in _DIMENSIONS:
         groups = defaultdict(list)
         for row in rows:
-            groups[str(row[dimension])].append(row)
+            values = row[dimension]
+            if not isinstance(values, list):
+                values = [values]
+            for value in values:
+                groups[str(value)].append(row)
+        known_count = sum(_dimension_value_known(row[dimension]) for row in rows)
+        if dimension == "factor_signal":
+            known_count = sum(bool(row[dimension]) for row in rows)
         summaries = [
             {"dimension": dimension, "key": key, **_layer_summary(group, initial_capital)}
             for key, group in groups.items()
         ]
         summaries.sort(key=lambda item: (_sort_number(item["contribution_pct"]), item["key"]))
-        dimensions.append({"dimension": dimension, "status": "ready" if summaries else "unsupported", "groups": summaries})
-        drags.extend(item for item in summaries if item["contribution_pct"] is not None and item["contribution_pct"] < 0)
+        status = _coverage_status(known_count, len(rows))
+        dimensions.append(
+            {
+                "dimension": dimension,
+                "status": status,
+                "aggregation_semantics": (
+                    "multi_label_overlapping_groups_not_additive"
+                    if dimension == "factor_signal"
+                    else "single_label_partition_within_dimension"
+                ),
+                "known_trade_count": known_count,
+                "total_trade_count": len(rows),
+                "missing_trade_count": len(rows) - known_count,
+                "unavailable_reason": (
+                    None
+                    if status == "ready"
+                    else (
+                        f"No incremental trade has recorded {dimension} evidence."
+                        if status == "unavailable"
+                        else f"{len(rows) - known_count} incremental trades lack "
+                        f"{dimension} evidence."
+                    )
+                ),
+                "groups": summaries,
+            }
+        )
+        if dimension != "factor_signal":
+            drags.extend(
+                item
+                for item in summaries
+                if item["contribution_pct"] is not None and item["contribution_pct"] < 0
+            )
     drags.sort(key=lambda item: (_sort_number(item["contribution_pct"]), item["dimension"], item["key"]))
     return dimensions, drags
+
+
+def _cost_and_execution_attribution(rows, summary):
+    count = len(rows)
+    cost_known = summary["field_completeness"]["costs"]["known"]
+    timing_known = sum(row["entry_delay_calendar_days"] is not None for row in rows)
+    constraint_known = sum(
+        row["execution_constraint_evidence"] != "unknown" for row in rows
+    )
+    delay_values = [
+        row["entry_delay_calendar_days"]
+        for row in rows
+        if row["entry_delay_calendar_days"] is not None
+    ]
+    return {
+        "transaction_cost": {
+            "status": _coverage_status(cost_known, count),
+            "known_trade_count": cost_known,
+            "total_trade_count": count,
+            "missing_trade_count": count - cost_known,
+            "total_costs": summary["total_costs"],
+            "cost_pct": summary["cost_pct"],
+            "unavailable_reason": (
+                None
+                if cost_known == count and count
+                else (
+                    "No realized transaction-cost field is recorded for ranks 6-10."
+                    if not cost_known
+                    else f"{count - cost_known} ranks 6-10 trades lack realized cost data."
+                )
+            ),
+        },
+        "entry_timing": {
+            "status": _coverage_status(timing_known, count),
+            "known_trade_count": timing_known,
+            "total_trade_count": count,
+            "missing_trade_count": count - timing_known,
+            "basis": "calendar_days_between_signal_date_and_realized_entry_date",
+            "average_entry_delay_calendar_days": (
+                round(sum(delay_values) / len(delay_values), 4) if delay_values else None
+            ),
+            "unavailable_reason": (
+                None
+                if timing_known == count and count
+                else (
+                    "No realized entry_date is recorded for ranks 6-10."
+                    if not timing_known
+                    else f"{count - timing_known} ranks 6-10 trades lack entry_date."
+                )
+            ),
+        },
+        "execution_constraints": {
+            "status": _coverage_status(constraint_known, count),
+            "known_trade_count": constraint_known,
+            "total_trade_count": count,
+            "missing_trade_count": count - constraint_known,
+            "scope": "executed_rank_6_10_trades_only",
+            "unavailable_reason": (
+                None
+                if constraint_known == count and count
+                else (
+                    "Selection snapshots lack market or constraint-evidence fields."
+                    if not constraint_known
+                    else f"{count - constraint_known} ranks 6-10 trades lack constraint evidence."
+                )
+            ),
+            "blocked_or_unfilled_candidate_attribution": "unavailable",
+            "blocked_or_unfilled_candidate_reason": (
+                "Portfolio trade rows contain realized trades only; rejected, untriggered, "
+                "and unfilled candidates are not present in this payload."
+            ),
+        },
+    }
+
+
+def _unavailable_metric(reason):
+    return {
+        "status": "unavailable",
+        "known_trade_count": 0,
+        "total_trade_count": 0,
+        "missing_trade_count": 0,
+        "unavailable_reason": reason,
+    }
+
+
+def _coverage_status(known, total):
+    if total <= 0 or known <= 0:
+        return "unavailable"
+    return "ready" if known == total else "partial"
+
+
+def _dimension_value_known(value):
+    if isinstance(value, list):
+        return bool(value)
+    return value != "unknown"
 
 
 def _trade_row(trade, snapshots, layer):
@@ -230,6 +392,12 @@ def _trade_row(trade, snapshots, layer):
     snapshot = snapshots.get(signal_date)
     selection = _selection(snapshot, "top_10", instrument_id) or _selection(snapshot, "top_5", instrument_id)
     holding_days = _integer(trade.get("holding_days"))
+    entry_delay_days = _date_gap_days(signal_date, trade.get("entry_date"))
+    factor_signals = [
+        str(item)
+        for item in (selection or {}).get("factor_signals", [])
+        if str(item).strip()
+    ]
     return {
         "layer": layer,
         "instrument_id": instrument_id or "unknown",
@@ -239,8 +407,20 @@ def _trade_row(trade, snapshots, layer):
         "gross_pnl": _decimal(trade.get("gross_pnl")),
         "costs": _decimal(trade.get("costs")),
         "strategy": str(trade.get("strategy_id") or (selection or {}).get("primary_strategy_id") or "unknown"),
+        "factor_signal": factor_signals,
         "market_regime": str((snapshot or {}).get("benchmark_trend_state") or "unknown"),
         "industry": str((selection or {}).get("industry") or "unknown"),
+        "entry_timing": (
+            _entry_timing_bucket(entry_delay_days)
+            if entry_delay_days is not None
+            else "unknown"
+        ),
+        "entry_delay_calendar_days": entry_delay_days,
+        "exit_reason": str(trade.get("exit_reason") or "unknown"),
+        "execution_constraint_evidence": _execution_constraint_evidence(
+            snapshot,
+            selection,
+        ),
         "holding_period": _holding_period_bucket(holding_days) if holding_days is not None else "unknown",
     }
 
@@ -319,6 +499,38 @@ def _holding_period_bucket(days):
     if days <= 20:
         return "11-20d"
     return "20d+"
+
+
+def _entry_timing_bucket(days):
+    if days == 0:
+        return "same_calendar_day"
+    if days == 1:
+        return "next_calendar_day"
+    if days <= 3:
+        return "2-3_calendar_days"
+    return "4+_calendar_days"
+
+
+def _date_gap_days(signal_date, entry_date):
+    try:
+        signal = date.fromisoformat(str(signal_date))
+        entry = date.fromisoformat(str(entry_date))
+    except (TypeError, ValueError):
+        return None
+    gap = (entry - signal).days
+    return gap if gap >= 0 else None
+
+
+def _execution_constraint_evidence(snapshot, selection):
+    if snapshot is None or selection is None:
+        return "unknown"
+    if snapshot.get("market_entry_allowed") is False:
+        return "market_entry_blocked"
+    if selection.get("ranking_v4_combined_constraint_evidence_complete") is True:
+        return "constraint_evidence_complete"
+    if "ranking_v4_combined_constraint_evidence_complete" in selection:
+        return "constraint_evidence_incomplete"
+    return "unknown"
 
 
 def _mapping(value):

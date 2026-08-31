@@ -4185,12 +4185,29 @@ export type WalkForwardTop10LagLayer = {
 };
 
 export type WalkForwardTop10LagGroup = WalkForwardTop10LagLayer & {
-  dimension: "strategy" | "market_regime" | "industry" | "holding_period" | string;
+  dimension:
+    | "strategy"
+    | "factor_signal"
+    | "market_regime"
+    | "industry"
+    | "entry_timing"
+    | "exit_reason"
+    | "execution_constraint_evidence"
+    | "holding_period"
+    | string;
   key: string;
 };
 
+export type WalkForwardTop10LagAvailability = {
+  status: "ready" | "partial" | "unavailable";
+  known_trade_count: number;
+  total_trade_count: number;
+  missing_trade_count?: number;
+  unavailable_reason: string | null;
+};
+
 export type WalkForwardTop10LagAttribution = {
-  schema_version: "top10-lag-attribution-v1";
+  schema_version: "top10-lag-attribution-v1" | "top10-lag-attribution-v2";
   scope: "shadow_only";
   official_release_allowed: false;
   decision_weight: false;
@@ -4206,15 +4223,41 @@ export type WalkForwardTop10LagAttribution = {
   common_layer: WalkForwardTop10LagLayer | null;
   top5_independent_path: WalkForwardTop10LagLayer | null;
   incremental_layer: WalkForwardTop10LagLayer | null;
+  rank_buckets?: {
+    top_1_5: WalkForwardTop10LagLayer | null;
+    rank_6_10: WalkForwardTop10LagLayer | null;
+  };
   incremental_layer_out_of_sample: (WalkForwardTop10LagLayer & {
     share_of_full_incremental_net_loss: number | null;
   }) | null;
   unresolved_layer: WalkForwardTop10LagLayer | null;
   dimensions: Array<{
     dimension: string;
-    status: "ready" | "unsupported";
+    status: "ready" | "partial" | "unavailable" | "unsupported";
+    aggregation_semantics?:
+      | "single_label_partition_within_dimension"
+      | "multi_label_overlapping_groups_not_additive";
+    known_trade_count?: number;
+    total_trade_count?: number;
+    missing_trade_count?: number;
+    unavailable_reason?: string | null;
     groups: WalkForwardTop10LagGroup[];
   }>;
+  cost_and_execution?: {
+    transaction_cost: WalkForwardTop10LagAvailability & {
+      total_costs?: string | null;
+      cost_pct?: number | null;
+    };
+    entry_timing: WalkForwardTop10LagAvailability & {
+      basis?: "calendar_days_between_signal_date_and_realized_entry_date";
+      average_entry_delay_calendar_days?: number | null;
+    };
+    execution_constraints: WalkForwardTop10LagAvailability & {
+      scope?: "executed_rank_6_10_trades_only";
+      blocked_or_unfilled_candidate_attribution?: "unavailable";
+      blocked_or_unfilled_candidate_reason?: string;
+    };
+  };
   primary_drags: WalkForwardTop10LagGroup[];
   reconciliation: {
     formula: string;
@@ -4244,6 +4287,9 @@ export type WalkForwardTop10LagAttribution = {
     unknown_values_are_zero: false;
     contribution_basis?: string;
     cost_basis?: string;
+    dimension_semantics?: string;
+    holding_period_semantics?: string;
+    sample_independence?: string;
   };
 };
 
