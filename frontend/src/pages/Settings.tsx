@@ -805,6 +805,7 @@ function AutomaticProcessingPanel({
 }) {
   const enabled = state?.enabled ?? false;
   const result = state?.last_result;
+  const lastError = schedulerErrorForDisplay(state);
   return (
     <div className="auto-processing-panel">
       <div className="auto-processing-head">
@@ -872,12 +873,33 @@ function AutomaticProcessingPanel({
           {result.scan_job_id}
         </div>
       )}
-      {state?.last_error && <div className="empty-state error compact">{state.last_error}</div>}
+      {lastError && <div className="empty-state error compact">{lastError}</div>}
       {result?.errors.length ? (
         <div className="empty-state error compact">{result.errors.slice(0, 2).join("；")}</div>
       ) : null}
+      {result?.issues?.length ? (
+        <div className="empty-state compact">
+          {language === "zh" ? "本轮待观察：" : "Cycle watch: "}
+          {result.issues.slice(0, 2).join(language === "zh" ? "；" : "; ")}
+        </div>
+      ) : null}
     </div>
   );
+}
+
+function schedulerErrorForDisplay(state?: AutoProcessingState): string | null {
+  const lastError = state?.last_error ?? null;
+  const result = state?.last_result;
+  if (
+    lastError
+    && result
+    && result.errors.length === 0
+    && result.issues?.length
+    && lastError === result.issues.join("; ").slice(0, 1000)
+  ) {
+    return null;
+  }
+  return lastError;
 }
 
 function splitList(value: string): string[] {

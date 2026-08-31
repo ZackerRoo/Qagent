@@ -149,7 +149,14 @@ class AutomationScheduler:
             self._run_count = checkpoint.run_count
             self._last_started_at = checkpoint.last_started_at
             self._last_completed_at = checkpoint.last_completed_at
-            self._last_error = checkpoint.last_error
+            self._last_error = (
+                None
+                if _last_error_matches_deferred_issues(
+                    checkpoint.last_error,
+                    checkpoint.last_result,
+                )
+                else checkpoint.last_error
+            )
             self._last_result = checkpoint.last_result
             self._restored_next_run_at = checkpoint.next_run_at
             self._restored_cycle_due_at = checkpoint.cycle_due_at
@@ -483,8 +490,9 @@ class AutomationScheduler:
                 in TERMINAL_CYCLE_STATUSES
             )
             with self._lock:
-                reported = result.errors or result.issues
-                self._last_error = "; ".join(reported)[:1000] if reported else None
+                self._last_error = (
+                    "; ".join(result.errors)[:1000] if result.errors else None
+                )
         finally:
             _cycle_invocation.reset(invocation_token)
             with self._lock:
@@ -581,6 +589,17 @@ def _as_utc(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _last_error_matches_deferred_issues(
+    last_error: str | None,
+    last_result: AutoProcessingCycleResult | None,
+) -> bool:
+    """Recognize checkpoints written before deferred issues stopped being errors."""
+
+    if not last_error or last_result is None or last_result.errors or not last_result.issues:
+        return False
+    return last_error == "; ".join(last_result.issues)[:1000]
 
 
 def _retry_at_from_result(result: AutoProcessingCycleResult) -> datetime | None:

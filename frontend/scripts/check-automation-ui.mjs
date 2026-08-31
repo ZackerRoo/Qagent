@@ -30,6 +30,10 @@ assert(client.includes("startAutomationScheduler"), "Client must start automatio
 assert(client.includes("stopAutomationScheduler"), "Client must stop automation scheduler");
 assert(types.includes("AutoProcessingState"), "Types must define scheduler state");
 assert(types.includes("AutoProcessingCycleResult"), "Types must define scheduler cycle result");
+assert(types.includes("issues: string[]"), "Cycle result contract must expose deferred issues");
+assert(settings.includes("schedulerErrorForDisplay"), "Settings must suppress legacy deferred last_error values");
+assert(settings.includes("result?.issues?.length"), "Settings must render deferred issues separately");
+assert(settings.includes("本轮待观察"), "Settings must label deferred issues as a non-error watch state");
 assert(styles.includes(".auto-processing-panel"), "Styles must define automatic processing panel");
 assert(styles.includes(".auto-processing-metrics"), "Styles must define automatic processing metrics");
 

@@ -415,6 +415,98 @@ def test_automation_runtime_health_explains_pending_close_and_source_fallbacks(
     assert health["market_data_recovery_action"] == "quarantine_until_next_daily_scan"
 
 
+def test_automation_runtime_health_treats_legacy_deferred_last_error_as_watch(
+    monkeypatch,
+):
+    now = datetime(2026, 7, 31, 14, 40, tzinfo=ZoneInfo("Asia/Shanghai"))
+    expected = date(2026, 7, 30)
+    issue = "factor_shadow: factor shadow status is waiting_for_maturity"
+    state = AutoProcessingState(
+        enabled=True,
+        status="idle",
+        settings=AutoProcessingSettings(interval_seconds=1800),
+        next_run_at=now + timedelta(minutes=20),
+        last_error=issue,
+        last_result=AutoProcessingCycleResult(
+            provider="free",
+            started_at=now - timedelta(minutes=1),
+            finished_at=now,
+            scan_status="cache_fresh",
+            issues=[issue],
+            data_health={"fuyao_telemetry": "idle"},
+        ),
+    )
+    latest = SimpleNamespace(
+        job_id="latest-scan",
+        status="succeeded",
+        finished_at=now - timedelta(hours=1),
+        errors=0,
+        data_health={"full_market_signal_date": expected.isoformat()},
+    )
+    monkeypatch.setattr(
+        routes,
+        "_latest_completed_a_share_session",
+        lambda _now=None: expected,
+    )
+    monkeypatch.setattr(
+        routes,
+        "trading_sessions_in_range",
+        lambda *_: [date(2026, 7, 31)],
+    )
+
+    health = routes._automation_runtime_health(state, latest, now=now)
+
+    assert health["state"] == "watch"
+    assert health["summary_code"] == "cycle_deferred"
+    assert health["reason_codes"] == ["cycle_deferred"]
+    assert health["scheduler_cycle_errors"] == 0
+
+
+def test_automation_runtime_health_keeps_real_cycle_errors_at_risk(monkeypatch):
+    now = datetime(2026, 7, 31, 14, 40, tzinfo=ZoneInfo("Asia/Shanghai"))
+    expected = date(2026, 7, 30)
+    state = AutoProcessingState(
+        enabled=True,
+        status="idle",
+        settings=AutoProcessingSettings(interval_seconds=1800),
+        next_run_at=now + timedelta(minutes=20),
+        last_error="provider timeout",
+        last_result=AutoProcessingCycleResult(
+            provider="free",
+            started_at=now - timedelta(minutes=1),
+            finished_at=now,
+            scan_status="failed",
+            errors=["provider timeout"],
+            issues=["factor_shadow: waiting_for_maturity"],
+            data_health={"fuyao_telemetry": "idle"},
+        ),
+    )
+    latest = SimpleNamespace(
+        job_id="latest-scan",
+        status="succeeded",
+        finished_at=now - timedelta(hours=1),
+        errors=0,
+        data_health={"full_market_signal_date": expected.isoformat()},
+    )
+    monkeypatch.setattr(
+        routes,
+        "_latest_completed_a_share_session",
+        lambda _now=None: expected,
+    )
+    monkeypatch.setattr(
+        routes,
+        "trading_sessions_in_range",
+        lambda *_: [date(2026, 7, 31)],
+    )
+
+    health = routes._automation_runtime_health(state, latest, now=now)
+
+    assert health["state"] == "risk"
+    assert health["summary_code"] == "scheduler_error"
+    assert "scheduler_error" in health["reason_codes"]
+    assert health["scheduler_cycle_errors"] == 1
+
+
 def test_automation_runtime_health_retains_succeeded_evidence_during_new_scan(
     monkeypatch,
 ):
@@ -1685,8 +1777,9 @@ def test_scheduled_scan_settlement_wait_advances_to_next_normal_slot(tmp_path, m
         state.last_result.data_health["automation_cycle_status"]
         == "completed_with_deferred_or_issues"
     )
-    assert state.last_error is not None
-    assert "scan: scan status is waiting_market_data_settlement" in state.last_error
+    assert state.last_error is None
+    assert "scan: scan status is waiting_market_data_settlement" in state.last_result.issues
+    assert state.last_result.errors == []
 
 
 @pytest.mark.parametrize(

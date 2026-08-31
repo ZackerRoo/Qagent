@@ -75,6 +75,7 @@ assert(today.includes("fuyao-shadow-horizons"), "Today page must expose 5/10/20 
 assert(today.includes("groupFuyaoResearchMetrics"), "Fuyao candidate research must group market, valuation, and fundamentals");
 assert(today.includes("行情交叉核对"), "Fuyao candidate research must expose cross-source quote reconciliation");
 assert(today.includes("runtime_health"), "Runtime data health must consume the scheduler health snapshot");
+assert(today.includes("cycle_deferred"), "Today must explain deferred automation cycles as a watch state");
 assert(today.includes("scan_next_check_at"), "Runtime data health must show the next automatic scan check");
 assert(today.includes("latest_scan_provider_fallbacks"), "Runtime data health must separate provider fallbacks from batch failures");
 assert(today.includes("60_000"), "Runtime scheduler and scan status must refresh once per minute");

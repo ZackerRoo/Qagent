@@ -3238,6 +3238,7 @@ export type AutoProcessingCycleResult = {
   paper_closed: number;
   alerts_triggered: number;
   errors: string[];
+  issues: string[];
   data_health: Record<string, string>;
 };
 

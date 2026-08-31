@@ -613,13 +613,56 @@ def test_scheduled_deferred_cycle_advances_slot_and_runs_paper_next_cycle(monkey
     first_state = scheduler.state()
     assert first_state.run_count == 1
     assert first_state.cycle_due_at == current_time[0] + timedelta(seconds=600)
-    assert first_state.last_error == "factor_shadow: waiting_for_maturity"
+    assert first_state.last_error is None
+    assert first_state.last_result is not None
+    assert first_state.last_result.issues == ["factor_shadow: waiting_for_maturity"]
 
     current_time[0] = first_state.cycle_due_at
     assert scheduler._execute(settings, runner, generation=9) is True
     assert paper_runs == 2
     assert observed_due == [first_due, first_state.cycle_due_at]
     assert scheduler.state().run_count == 2
+
+
+def test_restore_checkpoint_clears_legacy_last_error_copied_from_deferred_issues():
+    now = datetime(2026, 8, 28, 4, 0, tzinfo=timezone.utc)
+    result = AutoProcessingCycleResult(
+        provider="free",
+        started_at=now,
+        finished_at=now,
+        scan_status="skipped",
+        issues=["factor_shadow: waiting_for_maturity"],
+    )
+    scheduler = AutomationScheduler()
+
+    scheduler.restore_checkpoint(
+        AutomationSchedulerCheckpoint(
+            last_error="factor_shadow: waiting_for_maturity",
+            last_result=result,
+        )
+    )
+
+    assert scheduler.state().last_error is None
+    assert scheduler.state().last_result == result
+
+
+def test_real_cycle_errors_remain_scheduler_last_error():
+    now = datetime(2026, 8, 28, 4, 0, tzinfo=timezone.utc)
+    scheduler = AutomationScheduler()
+
+    assert scheduler._execute(
+        AutoProcessingSettings(),
+        lambda settings: AutoProcessingCycleResult(
+            provider=settings.provider,
+            started_at=now,
+            finished_at=now,
+            scan_status="failed",
+            errors=["provider timeout"],
+            issues=["factor_shadow: waiting_for_maturity"],
+        ),
+    ) is True
+
+    assert scheduler.state().last_error == "provider timeout"
 
 
 def test_inflight_cycle_due_survives_two_restart_checkpoints(monkeypatch):

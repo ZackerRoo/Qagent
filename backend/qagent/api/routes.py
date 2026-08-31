@@ -103,6 +103,7 @@ from qagent.jobs.automation_scheduler import (
     AutoProcessingState,
     AutomationSchedulerCheckpoint,
     AutomationScheduler,
+    _last_error_matches_deferred_issues,
     current_automation_cycle_invocation,
 )
 from qagent.jobs.automation_retry import classify_automation_error
@@ -6739,6 +6740,12 @@ def _automation_runtime_health(
     tickflow_fallbacks = _int_value(evidence_health.get("tickflow_fallback_count"))
     fuyao_state = _string_value(cycle_health.get("fuyao_telemetry")) or "unavailable"
     cycle_errors = len(last_result.errors) if last_result is not None else 0
+    cycle_issues = len(last_result.issues) if last_result is not None else 0
+    effective_last_error = (
+        None
+        if _last_error_matches_deferred_issues(state.last_error, last_result)
+        else state.last_error
+    )
     latest_reliability = _string_value(evidence_health.get("market_data_reliability_state"))
     automation_scan_status = last_result.scan_status if last_result is not None else "not_started"
 
@@ -6746,8 +6753,10 @@ def _automation_runtime_health(
     watch_reasons = []
     if not state.enabled:
         risk_reasons.append("scheduler_disabled")
-    if state.last_error or cycle_errors:
+    if effective_last_error or cycle_errors:
         risk_reasons.append("scheduler_error")
+    if cycle_issues:
+        watch_reasons.append("cycle_deferred")
     if latest_status == "failed" or terminal_scan_errors:
         risk_reasons.append("scan_failed")
     if fuyao_state == "error":

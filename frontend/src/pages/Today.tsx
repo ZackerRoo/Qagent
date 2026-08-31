@@ -2019,6 +2019,7 @@ function runtimeHealthSummary(
     ? {
         scheduler_disabled: "自动处理已停用，不会继续更新候选或模拟持仓。",
         scheduler_error: "上轮自动处理出现错误，系统保留最近有效结果并等待下一轮。",
+        cycle_deferred: "上轮自动处理已完成，部分事项仍在等待条件成熟，系统会继续观察。",
         scan_failed: "最近全市场批次失败，本轮结果不会被当作完整扫描。",
         fuyao_error: "扶摇请求失败；候选研究会保留最近保存快照，不影响既有排序。",
         scheduler_overdue: "调度检查已超过计划时间，后台恢复线程正在补偿执行。",
@@ -2031,6 +2032,7 @@ function runtimeHealthSummary(
     : {
         scheduler_disabled: "Automatic processing is disabled; candidates and paper positions will not update.",
         scheduler_error: "The previous cycle failed; the latest valid result is retained for the next retry.",
+        cycle_deferred: "The previous cycle completed with deferred items that remain under watch.",
         scan_failed: "The latest full-market batch failed and is not treated as a complete scan.",
         fuyao_error: "Fuyao failed; saved research remains available without changing ranking.",
         scheduler_overdue: "The scheduler is overdue and its recovery loop is compensating.",
