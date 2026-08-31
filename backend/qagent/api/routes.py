@@ -76,11 +76,13 @@ from qagent.factors.backtest import run_factor_backtest, run_factor_diagnostics
 from qagent.research.factor_candidate_queue import build_factor_candidate_queue
 from qagent.research.factor_experiments import (
     FactorResearchConfig,
-    current_code_revision,
+    current_factor_source_identity,
     execute_factor_research_experiment,
     factor_research_recipe,
+    preflight_factor_candidate_experiment,
     resolved_config,
 )
+from qagent.research.factor_shadow import factor_shadow_scorer_identity
 from qagent.research.factor_shadow_outcomes import (
     build_factor_shadow_roster,
     build_factor_shadow_evaluation,
@@ -3075,6 +3077,9 @@ def factor_research_experiments(limit: int = 20):
         "experiments": _factor_research_repo().list(limit=min(max(limit, 1), 100)),
         "data_health": {
             "factor_research_recorder": "sqlite",
+            "factor_research_start_contract": (
+                "breaking_v2_candidate_id_plus_provider_mode_extra_forbid"
+            ),
             "paper_model_isolation": "unchanged",
         },
     }
@@ -3202,6 +3207,14 @@ def factor_research_experiment(experiment_id: str):
 
 @router.post("/factor-research/experiments", status_code=202)
 def start_factor_research_experiment(request: FactorResearchExperimentRequest):
+    try:
+        requested_config = FactorResearchConfig(
+            candidate_id=request.candidate_id,
+            provider_mode=request.provider_mode,
+            model_recipe="regularized_v1",
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     initialize_database()
     session_factory = create_session_factory()
     store = FactorResearchRepository(session_factory)
@@ -3214,14 +3227,35 @@ def start_factor_research_experiment(request: FactorResearchExperimentRequest):
     try:
         config = resolved_config(
             session_factory,
-            FactorResearchConfig.model_validate(request.model_dump()),
+            requested_config,
         )
-        revision = current_code_revision()
+        source_identity = current_factor_source_identity()
+        config = config.model_copy(
+            update={
+                "source_digest": source_identity["source_digest"],
+                "dirty_worktree_digest": source_identity["dirty_worktree_digest"],
+            }
+        )
+        scorer_identity = factor_shadow_scorer_identity(config.selected_feature_columns)
+        config = config.model_copy(
+            update={
+                "shadow_scorer_protocol_digest": scorer_identity.protocol_digest,
+                "shadow_scorer_source_digest": scorer_identity.source_digest,
+            }
+        )
+        coverage = preflight_factor_candidate_experiment(session_factory, config)
+        config = config.model_copy(
+            update={
+                "coverage_joint_non_null_rate": coverage.joint_non_null_rate,
+                "coverage_source_revision": config.dataset_revision,
+            }
+        )
+        revision = source_identity["code_revision"]
     except (RuntimeError, ValueError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     experiment = store.create(
         experiment_name=(
-            "A-share neutralized factor baseline vs "
+            f"{config.candidate_id} shadow vs full-contract baseline / "
             f"{factor_research_recipe(config)['label']}"
         ),
         provider_mode=config.provider_mode,

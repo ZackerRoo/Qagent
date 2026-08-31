@@ -4,7 +4,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from qagent.factors.research_contract import FACTOR_RESEARCH_VERSION, FEATURE_COLUMNS
+from qagent.factors.research_contract import (
+    EXPLICIT_SHADOW_CANDIDATE_IDS,
+    FACTOR_RESEARCH_VERSION,
+    FEATURE_COLUMNS,
+)
 from qagent.research.factor_shadow_outcomes import (
     FACTOR_SHADOW_HORIZONS,
     FACTOR_SHADOW_EXECUTION_HEAD_INDUSTRY_CAP,
@@ -253,3 +257,28 @@ def build_factor_candidate_queue(
             "factor_candidate_queue_order_effect": "none",
         },
     )
+
+
+def get_explicit_shadow_candidate(candidate_id: str) -> FactorCandidate:
+    """Resolve the small, server-owned candidate allowlist.
+
+    Feature lists are deliberately never accepted from an API caller. A queue
+    entry can describe future research without becoming executable here.
+    """
+
+    normalized = candidate_id.strip()
+    candidate = next(
+        (
+            item
+            for item in build_factor_candidate_queue().candidates
+            if item.candidate_id == normalized
+        ),
+        None,
+    )
+    if candidate is None:
+        raise ValueError(f"unknown factor shadow candidate {normalized!r}")
+    if normalized not in EXPLICIT_SHADOW_CANDIDATE_IDS:
+        raise ValueError(f"factor shadow candidate {normalized!r} is not approved for launch")
+    if candidate.state != "contract_available_for_shadow_design":
+        raise ValueError(f"factor shadow candidate {normalized!r} is not contract-available")
+    return candidate

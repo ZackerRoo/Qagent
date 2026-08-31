@@ -197,6 +197,29 @@ def test_repository_upserts_and_filters_point_in_time_fundamentals(tmp_path):
     assert [item.as_of_date for item in all_rows] == [date(2026, 3, 31), date(2026, 6, 30)]
 
 
+def test_repository_can_freeze_fundamental_reads_at_a_dataset_revision(tmp_path):
+    repo = make_repo(tmp_path)
+    replay = repo.replay_evidence("free")
+    snapshot = FundamentalSnapshot(
+        instrument_id="CN:000001",
+        as_of_date=date(2026, 3, 31),
+        pe_ratio=Decimal("8.0"),
+        provider="fixture",
+    )
+    replay.upsert_fundamentals([snapshot], revision=1)
+    replay.upsert_fundamentals(
+        [snapshot.model_copy(update={"pe_ratio": Decimal("9.0")})],
+        revision=2,
+    )
+
+    frozen = repo.list_fundamental_snapshots(
+        "free", ["CN:000001"], max_dataset_revision=1
+    )
+
+    assert len(frozen) == 1
+    assert frozen[0].pe_ratio == Decimal("8.000000")
+
+
 def test_create_db_engine_creates_sqlite_parent_directory(tmp_path):
     db_path = tmp_path / "nested" / "qagent.db"
     engine = create_db_engine(f"sqlite:///{db_path}")

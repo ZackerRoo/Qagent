@@ -105,7 +105,9 @@ const defaultPaperSessionForm: PaperSessionStartPayload = {
 };
 
 type PortfolioView = "account" | "trades" | "research";
-type FactorResearchRecipe = "balanced_v1" | "regularized_v1";
+type FactorShadowCandidateId =
+  | "trend-health-composite-v1"
+  | "turnover-volume-strength-v1";
 
 type PaperExposureCategory =
   | "all"
@@ -165,7 +167,8 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [isRunningValidation, setIsRunningValidation] = useState(false);
   const [isLoadingFactorDiagnostics, setIsLoadingFactorDiagnostics] = useState(false);
   const [isRunningFactorResearch, setIsRunningFactorResearch] = useState(false);
-  const [factorResearchRecipe, setFactorResearchRecipe] = useState<FactorResearchRecipe>("regularized_v1");
+  const [factorShadowCandidateId, setFactorShadowCandidateId] =
+    useState<FactorShadowCandidateId>("trend-health-composite-v1");
   const [isLoadingEtfExposure, setIsLoadingEtfExposure] = useState(false);
   const [deletingPaperTradeId, setDeletingPaperTradeId] = useState("");
   const [selectedPaperTradeId, setSelectedPaperTradeId] = useState("");
@@ -340,10 +343,10 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     }
   }
 
-  async function runFactorResearch(recipe: FactorResearchRecipe) {
+  async function runFactorResearch(candidateId: FactorShadowCandidateId) {
     setIsRunningFactorResearch(true);
     try {
-      const experiment = await startFactorResearchExperiment(dataMode, recipe);
+      const experiment = await startFactorResearchExperiment(dataMode, candidateId);
       setFactorResearchExperiments((current) => [
         experiment,
         ...current.filter((item) => item.experiment_id !== experiment.experiment_id),
@@ -898,8 +901,8 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
               experiment={factorResearchExperiments[0]}
               shadow={factorShadow}
               running={isRunningFactorResearch}
-              selectedRecipe={factorResearchRecipe}
-              onRecipeChange={setFactorResearchRecipe}
+              selectedCandidate={factorShadowCandidateId}
+              onCandidateChange={setFactorShadowCandidateId}
               onRun={runFactorResearch}
               language={language}
             />
@@ -1678,17 +1681,17 @@ function FactorModelResearchPanel({
   experiment,
   shadow,
   running,
-  selectedRecipe,
-  onRecipeChange,
+  selectedCandidate,
+  onCandidateChange,
   onRun,
   language,
 }: {
   experiment?: FactorResearchExperiment;
   shadow?: FactorShadowResponse;
   running: boolean;
-  selectedRecipe: FactorResearchRecipe;
-  onRecipeChange: (recipe: FactorResearchRecipe) => void;
-  onRun: (recipe: FactorResearchRecipe) => Promise<void>;
+  selectedCandidate: FactorShadowCandidateId;
+  onCandidateChange: (candidateId: FactorShadowCandidateId) => void;
+  onRun: (candidateId: FactorShadowCandidateId) => Promise<void>;
   language: Language;
 }) {
   const active = experiment?.status === "queued" || experiment?.status === "running";
@@ -1725,7 +1728,7 @@ function FactorModelResearchPanel({
           <button
             className="icon-action"
             type="button"
-            onClick={() => void onRun(selectedRecipe)}
+            onClick={() => void onRun(selectedCandidate)}
             disabled={running || active}
             title={language === "zh" ? "运行全量研究实验" : "Run full research experiment"}
           >
@@ -1743,19 +1746,19 @@ function FactorModelResearchPanel({
         </label>
         <select
           id="factor-model-recipe"
-          value={selectedRecipe}
-          onChange={(event) => onRecipeChange(event.target.value as FactorResearchRecipe)}
+          value={selectedCandidate}
+          onChange={(event) => onCandidateChange(event.target.value as FactorShadowCandidateId)}
           disabled={running || active}
         >
-          <option value="regularized_v1">
+          <option value="trend-health-composite-v1">
             {language === "zh"
-              ? "正则化 LightGBM：更低复杂度、检验跨市场稳定性"
-              : "Regularized LightGBM: lower capacity, stability test"}
+              ? "趋势健康：趋势持续性与下行风险"
+              : "Trend health: persistence and downside risk"}
           </option>
-          <option value="balanced_v1">
+          <option value="turnover-volume-strength-v1">
             {language === "zh"
-              ? "均衡 LightGBM：既有基准配方重跑"
-              : "Balanced LightGBM: rerun existing reference recipe"}
+              ? "量价参与强度：成交额与近期量能"
+              : "Turnover-volume strength: participation proxy"}
           </option>
         </select>
         <small>

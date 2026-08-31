@@ -12,6 +12,10 @@ from sqlalchemy import func
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
+from qagent.factors.research_contract import (
+    EXPLICIT_SHADOW_CANDIDATE_IDS,
+    FACTOR_CANDIDATE_SHADOW_PROTOCOL,
+)
 from qagent.storage.tables import (
     FactorResearchExperimentRow,
     FactorResearchModelArtifactRow,
@@ -275,11 +279,12 @@ class FactorResearchRepository:
         *,
         limit: int = 3,
     ) -> list[FactorResearchModelBundle]:
-        """Return the newest frozen model for each distinct research configuration.
+        """Return explicitly registered candidates plus one named legacy lane.
 
-        Multiple retries of the same hypothesis must not consume separate forward
-        evidence lanes. A changed immutable config digest, however, is a real
-        challenger and may collect its own results alongside the baseline.
+        A candidate keeps only its newest successful frozen lane, even when a
+        retry changed revision or source identity. Historical experiments
+        without candidate identity are grandfathered only as the single newest
+        legacy lane and are never interpreted as one of the named candidates.
         """
 
         with self.session_factory() as session:
@@ -292,11 +297,16 @@ class FactorResearchRepository:
                 .order_by(FactorResearchExperimentRow.completed_at.desc())
                 .all()
             )
-            bundles: list[FactorResearchModelBundle] = []
-            seen_configs: set[str] = set()
+            explicit_bundles: list[FactorResearchModelBundle] = []
+            legacy_bundle: FactorResearchModelBundle | None = None
+            seen_candidates: set[str] = set()
             for experiment in experiments:
-                hypothesis_key = _experiment_hypothesis_key(experiment)
-                if hypothesis_key in seen_configs:
+                config = json.loads(experiment.config_json or "{}")
+                lane_kind = _shadow_lane_kind(config)
+                if lane_kind is None or (lane_kind == "legacy" and legacy_bundle is not None):
+                    continue
+                candidate_id = str(config.get("candidate_id") or "")
+                if lane_kind == "explicit" and candidate_id in seen_candidates:
                     continue
                 rows = (
                     session.query(FactorResearchModelArtifactRow)
@@ -308,17 +318,21 @@ class FactorResearchRepository:
                 )
                 if not rows:
                     continue
-                seen_configs.add(hypothesis_key)
                 models = [_model_artifact_from_row(row) for row in rows]
-                bundles.append(
-                    FactorResearchModelBundle(
-                        experiment=_from_row(experiment),
-                        models=models,
-                        aggregate_model_digest=_aggregate_model_digest(models),
-                    )
+                bundle = FactorResearchModelBundle(
+                    experiment=_from_row(experiment),
+                    models=models,
+                    aggregate_model_digest=_aggregate_model_digest(models),
                 )
-                if len(bundles) >= max(1, limit):
-                    break
+                if lane_kind == "legacy":
+                    legacy_bundle = bundle
+                else:
+                    seen_candidates.add(candidate_id)
+                    explicit_bundles.append(bundle)
+        bounded_limit = max(1, limit)
+        bundles = explicit_bundles[:bounded_limit]
+        if legacy_bundle is not None and len(bundles) < bounded_limit:
+            bundles.append(legacy_bundle)
         return bundles
 
     def record_shadow_scores(
@@ -679,9 +693,18 @@ def _canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _experiment_hypothesis_key(experiment: FactorResearchExperimentRow) -> str:
-    """Collapse retries of a legacy/default recipe into one forward-evidence lane."""
-
-    config = json.loads(experiment.config_json or "{}")
-    config.setdefault("model_recipe", "balanced_v1")
-    return sha256(_canonical_json(config).encode("utf-8")).hexdigest()
+def _shadow_lane_kind(config: dict[str, Any]) -> str | None:
+    candidate_id = config.get("candidate_id")
+    if candidate_id is None:
+        registration = config.get("shadow_registration")
+        return "legacy" if registration in {None, "legacy_grandfather"} else None
+    if (
+        candidate_id in EXPLICIT_SHADOW_CANDIDATE_IDS
+        and config.get("candidate_protocol_version") == FACTOR_CANDIDATE_SHADOW_PROTOCOL
+        and config.get("shadow_registration") == "explicit_manual"
+        and config.get("scope") == "research_shadow"
+        and config.get("decision_weight") is False
+        and config.get("activation_allowed") is False
+    ):
+        return "explicit"
+    return None

@@ -2,6 +2,11 @@ from __future__ import annotations
 
 
 FACTOR_RESEARCH_VERSION = "factor-research-v2-online-shadow-contract"
+FACTOR_CANDIDATE_SHADOW_PROTOCOL = "factor-candidate-shadow-v1"
+EXPLICIT_SHADOW_CANDIDATE_IDS = (
+    "trend-health-composite-v1",
+    "turnover-volume-strength-v1",
+)
 
 FEATURE_COLUMNS = (
     "momentum_20",

@@ -24,7 +24,13 @@ from qagent.research.factor_experiments import (
     factor_research_feature_contract_digest,
     neutralize_research_features,
 )
-from qagent.research.factor_shadow import score_factor_shadow_run, score_factor_shadow_runs
+from qagent.research.factor_shadow import (
+    factor_shadow_evidence_model_digest,
+    factor_shadow_run_identity,
+    factor_shadow_scorer_identity,
+    score_factor_shadow_run,
+    score_factor_shadow_runs,
+)
 from qagent.research.factor_shadow_outcomes import (
     FactorShadowBenchmarkRefresh,
     FactorShadowExecutionHeadEvaluation,
@@ -403,6 +409,81 @@ def test_lightgbm_challenger_uses_purged_time_split():
     assert "tree" in model_artifacts[0]["model_text"]
 
 
+def test_candidate_config_freezes_server_owned_identity_and_feature_subset():
+    trend = FactorResearchConfig(candidate_id="trend-health-composite-v1")
+    turnover = FactorResearchConfig(candidate_id="turnover-volume-strength-v1")
+
+    assert trend.selected_feature_columns == (
+        "momentum_20",
+        "trend_slope_60",
+        "trend_r2_60",
+        "downside_risk_60",
+        "max_drawdown_60",
+    )
+    assert turnover.selected_feature_columns == (
+        "turnover_log_20",
+        "volume_ratio_5_20",
+    )
+    assert trend.candidate_protocol_version == "factor-candidate-shadow-v1"
+    assert trend.shadow_registration == "explicit_manual"
+    assert trend.scope == "research_shadow"
+    assert trend.decision_weight is False
+    assert trend.activation_allowed is False
+    assert factor_research_feature_contract_digest(
+        trend.selected_feature_columns
+    ) != factor_research_feature_contract_digest(turnover.selected_feature_columns)
+    with pytest.raises(ValueError, match="server-owned"):
+        FactorResearchConfig(
+            candidate_id="trend-health-composite-v1",
+            selected_feature_columns=("momentum_20",),
+        )
+
+
+def test_candidate_lightgbm_artifact_uses_only_frozen_subset():
+    pytest.importorskip("lightgbm")
+    rng = np.random.default_rng(71)
+    rows = []
+    for date_index in range(30):
+        signal_date = date(2024, 1, 1) + timedelta(days=date_index * 10)
+        for instrument_index in range(60):
+            row = {
+                "signal_date": signal_date,
+                "instrument_id": f"CN:{instrument_index:06d}",
+                "industry": f"industry-{instrument_index % 6}",
+                "log_market_cap": rng.normal(22, 1),
+            }
+            for feature in FEATURE_COLUMNS:
+                row[feature] = rng.normal()
+            row["target_excess_return_pct"] = (
+                row["turnover_log_20"] + row["volume_ratio_5_20"] + rng.normal(0, 0.2)
+            )
+            rows.append(row)
+    config = FactorResearchConfig(
+        candidate_id="turnover-volume-strength-v1",
+        dataset_revision=7,
+        seeds=[7],
+    )
+
+    metrics, artifacts, model_artifacts = compare_baseline_and_lightgbm(
+        pd.DataFrame(rows),
+        config,
+    )
+
+    assert metrics["activation_allowed"] is False
+    assert artifacts["selected_feature_columns"] == [
+        "turnover_log_20",
+        "volume_ratio_5_20",
+    ]
+    assert artifacts["decision_weight"] is False
+    assert artifacts["shadow_registration"] == "explicit_manual"
+    assert model_artifacts[0]["feature_contract_digest"] == (
+        factor_research_feature_contract_digest(config.selected_feature_columns)
+    )
+    assert {item["feature"] for item in artifacts["feature_importance"]} == set(
+        config.selected_feature_columns
+    )
+
+
 def test_regularized_recipe_is_frozen_in_research_artifacts():
     pytest.importorskip("lightgbm")
     rng = np.random.default_rng(19)
@@ -442,7 +523,7 @@ def test_regularized_recipe_is_frozen_in_research_artifacts():
     assert model_artifacts[0]["model_digest"]
 
 
-def test_lightgbm_shadow_scores_are_persisted_without_paper_activation(tmp_path):
+def test_lightgbm_shadow_scores_are_persisted_without_paper_activation(tmp_path, monkeypatch):
     lightgbm = pytest.importorskip("lightgbm")
     database_url = f"sqlite:///{tmp_path / 'factor-shadow.db'}"
     initialize_database(database_url)
@@ -542,6 +623,21 @@ def test_lightgbm_shadow_scores_are_persisted_without_paper_activation(tmp_path)
     assert result.run.scored_instruments == 25
     assert len(result.run.top_scores) == 20
     assert result.data_health["factor_shadow_paper_isolation"] == "true"
+    scorer_identity = factor_shadow_scorer_identity(FEATURE_COLUMNS)
+    bundle = store.model_bundle(experiment.experiment_id)
+    assert bundle is not None
+    expected_evidence_digest = factor_shadow_evidence_model_digest(
+        bundle.aggregate_model_digest,
+        scorer_identity.protocol_digest,
+    )
+    assert result.run.model_digest == expected_evidence_digest
+    assert result.data_health["factor_shadow_run_id"] == factor_shadow_run_identity(
+        experiment_id=experiment.experiment_id,
+        scan_job_id="scan-fixture-1",
+        signal_date=date(2026, 8, 10),
+        dataset_revision=0,
+        evidence_model_digest=expected_evidence_digest,
+    )
     assert retried.run == result.run
     assert store.latest_shadow_run("fixture") == result.run
     with pytest.raises(ValueError, match="retry identity"):
@@ -553,6 +649,26 @@ def test_lightgbm_shadow_scores_are_persisted_without_paper_activation(tmp_path)
             model_digest=result.run.model_digest,
             scores=result.run.top_scores,
         )
+
+    changed_identity = scorer_identity.model_copy(
+        update={"protocol_digest": "f" * 64, "source_digest": "e" * 64}
+    )
+    with monkeypatch.context() as scoped_patch:
+        scoped_patch.setattr(
+            "qagent.research.factor_shadow.factor_shadow_scorer_identity",
+            lambda _features: changed_identity,
+        )
+        changed = score_factor_shadow_run(
+            session_factory,
+            provider_mode="fixture",
+            scan_job_id="scan-fixture-changed-scorer",
+            signal_date=date(2026, 8, 11),
+            rankings=rankings,
+            stock_ids={item.instrument_id for item in rankings},
+        )
+    assert changed.status == "scorer_evidence_lane_mismatch"
+    assert changed.run is None
+    assert len(store.shadow_runs(experiment.experiment_id)) == 1
 
     second = store.create(
         experiment_name="alternate shadow fixture",
@@ -594,11 +710,14 @@ def test_lightgbm_shadow_scores_are_persisted_without_paper_activation(tmp_path)
         provider_mode="fixture",
         as_of_date=date(2026, 8, 11),
     )
-    assert len(store.model_bundles("fixture")) == 2
+    # Multiple pre-candidate experiments are kept as one explicitly named
+    # grandfather lane and are never mislabelled as named candidates.
+    assert len(store.model_bundles("fixture")) == 1
     assert multi.status == "recorded"
-    assert len(multi.runs) == 2
-    assert multi.data_health["factor_shadow_candidate_count"] == "2"
-    assert len(roster.candidates) == 2
+    assert len(multi.runs) == 1
+    assert multi.data_health["factor_shadow_candidate_count"] == "1"
+    assert len(roster.candidates) == 1
+    assert roster.candidates[0].experiment_id == second.experiment_id
     assert roster.data_health["factor_shadow_roster_paper_isolation"] == "true"
 
 
@@ -708,6 +827,219 @@ def test_factor_shadow_benchmark_exact_gap_keeps_requirement_and_outcome_units_s
         )
     )
 
+
+def test_shadow_roster_keeps_two_explicit_candidates_and_one_legacy_lane(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'factor-explicit-roster.db'}"
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    store = FactorResearchRepository(session_factory)
+
+    def complete(config: dict[str, object], name: str):
+        model_text = f"fixture model {name}"
+        selected = tuple(config.get("selected_feature_columns") or FEATURE_COLUMNS)
+        experiment = store.create(
+            experiment_name=name,
+            provider_mode="fixture",
+            model_family="baseline+lightgbm",
+            benchmark_id="CN:000300.IDX",
+            dataset_revision=7,
+            start_date=date(2024, 1, 1),
+            end_date=date(2025, 1, 1),
+            code_revision="e" * 40,
+            config=config,
+        )
+        store.mark_running(experiment.experiment_id)
+        return store.complete(
+            experiment.experiment_id,
+            metrics={"activation_allowed": False},
+            data_health={"factor_candidate_decision_weight": "false"},
+            artifacts={"paper_model_unchanged": True},
+            model_artifacts=[
+                {
+                    "seed": 7,
+                    "feature_set_version": FACTOR_RESEARCH_VERSION,
+                    "feature_contract_digest": factor_research_feature_contract_digest(selected),
+                    "model_digest": sha256(model_text.encode()).hexdigest(),
+                    "model_text": model_text,
+                }
+            ],
+        )
+
+    legacy = complete({"top_fraction": 0.1}, "legacy")
+    old_trend_config = FactorResearchConfig(
+        candidate_id="trend-health-composite-v1",
+        dataset_revision=7,
+        source_digest="a" * 64,
+    ).model_dump(mode="json")
+    old_trend = complete(old_trend_config, "trend retry 1")
+    new_trend = complete(
+        FactorResearchConfig(
+            candidate_id="trend-health-composite-v1",
+            dataset_revision=8,
+            source_digest="b" * 64,
+        ).model_dump(mode="json"),
+        "trend retry 2",
+    )
+    turnover = complete(
+        FactorResearchConfig(
+            candidate_id="turnover-volume-strength-v1",
+            dataset_revision=7,
+        ).model_dump(mode="json"),
+        "turnover",
+    )
+
+    bundles = store.model_bundles("fixture", limit=3)
+    roster = build_factor_shadow_roster(
+        session_factory,
+        provider_mode="fixture",
+        as_of_date=date(2026, 8, 31),
+        max_challengers=3,
+    )
+
+    ids = {bundle.experiment.experiment_id for bundle in bundles}
+    assert ids == {
+        new_trend.experiment_id,
+        turnover.experiment_id,
+        legacy.experiment_id,
+    }
+    assert old_trend.experiment_id not in ids
+    assert old_trend.config_digest != new_trend.config_digest
+    assert new_trend.config_digest != turnover.config_digest
+    limited_ids = {
+        bundle.experiment.experiment_id
+        for bundle in store.model_bundles("fixture", limit=2)
+    }
+    assert limited_ids == {new_trend.experiment_id, turnover.experiment_id}
+    assert legacy.experiment_id not in limited_ids
+    assert len(roster.candidates) == 3
+    assert {candidate.experiment_id for candidate in roster.candidates} == ids
+
+    horizon_outcomes = []
+    signal_date = date(2026, 8, 3)
+    for horizon in (5, 10, 20):
+        entry_date, outcome_date = factor_shadow_outcome_dates(signal_date, horizon)
+        horizon_outcomes.append(
+            FactorShadowOutcome(
+                experiment_id=new_trend.experiment_id,
+                scan_job_id="scan-three-horizons",
+                instrument_id="CN:000001",
+                horizon_sessions=horizon,
+                signal_date=signal_date,
+                entry_date=entry_date,
+                outcome_date=outcome_date,
+                benchmark_id="CN:000300.IDX",
+                instrument_return_pct=1.0,
+                benchmark_return_pct=0.5,
+                excess_return_pct=0.5,
+                net_excess_return_pct=0.4,
+                round_trip_cost_bps=10,
+                signal_dataset_revision=8,
+                model_digest=bundles[0].aggregate_model_digest,
+                source_digest=sha256(f"three-horizons|{horizon}".encode()).hexdigest(),
+            )
+        )
+    assert store.record_shadow_outcomes(horizon_outcomes) == 3
+    assert [
+        item.horizon_sessions
+        for item in store.shadow_outcomes(
+            new_trend.experiment_id,
+            scan_job_id="scan-three-horizons",
+        )
+    ] == [5, 10, 20]
+    assert store.record_shadow_outcomes(horizon_outcomes) == 0
+
+
+def test_factor_shadow_scorer_identity_changes_with_source_and_subset():
+    source_a = factor_shadow_scorer_identity(
+        ("momentum_20", "trend_slope_60"),
+        implementation_source_digest="a" * 64,
+    )
+    source_b = factor_shadow_scorer_identity(
+        ("momentum_20", "trend_slope_60"),
+        implementation_source_digest="b" * 64,
+    )
+    subset_b = factor_shadow_scorer_identity(
+        ("turnover_log_20", "volume_ratio_5_20"),
+        implementation_source_digest="a" * 64,
+    )
+
+    assert source_a.protocol_digest != source_b.protocol_digest
+    assert source_a.protocol_digest != subset_b.protocol_digest
+    evidence_a = factor_shadow_evidence_model_digest("c" * 64, source_a.protocol_digest)
+    evidence_b = factor_shadow_evidence_model_digest("c" * 64, source_b.protocol_digest)
+    assert evidence_a != evidence_b
+    run_a = factor_shadow_run_identity(
+        experiment_id="experiment",
+        scan_job_id="scan",
+        signal_date=date(2026, 8, 31),
+        dataset_revision=7,
+        evidence_model_digest=evidence_a,
+    )
+    run_b = factor_shadow_run_identity(
+        experiment_id="experiment",
+        scan_job_id="scan",
+        signal_date=date(2026, 8, 31),
+        dataset_revision=7,
+        evidence_model_digest=evidence_b,
+    )
+    assert run_a != run_b
+
+
+def test_explicit_shadow_candidate_fails_closed_on_scorer_contract_change(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'factor-scorer-contract.db'}"
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    store = FactorResearchRepository(session_factory)
+    config = FactorResearchConfig(
+        candidate_id="trend-health-composite-v1",
+        dataset_revision=7,
+        shadow_scorer_protocol_digest="a" * 64,
+        shadow_scorer_source_digest="b" * 64,
+    )
+    experiment = store.create(
+        experiment_name="stale scorer contract",
+        provider_mode="fixture",
+        model_family="baseline+lightgbm",
+        benchmark_id="CN:000300.IDX",
+        dataset_revision=7,
+        start_date=date(2024, 1, 1),
+        end_date=date(2025, 1, 1),
+        code_revision="c" * 40,
+        config=config.model_dump(mode="json"),
+    )
+    store.mark_running(experiment.experiment_id)
+    model_text = "not loaded because scorer identity fails first"
+    store.complete(
+        experiment.experiment_id,
+        metrics={"activation_allowed": False},
+        data_health={"factor_candidate_decision_weight": "false"},
+        artifacts={"paper_model_unchanged": True},
+        model_artifacts=[
+            {
+                "seed": 7,
+                "feature_set_version": FACTOR_RESEARCH_VERSION,
+                "feature_contract_digest": factor_research_feature_contract_digest(
+                    config.selected_feature_columns
+                ),
+                "model_digest": sha256(model_text.encode()).hexdigest(),
+                "model_text": model_text,
+            }
+        ],
+    )
+
+    result = score_factor_shadow_run(
+        session_factory,
+        provider_mode="fixture",
+        scan_job_id="scan-stale-scorer",
+        signal_date=date(2026, 8, 31),
+        rankings=[],
+        stock_ids=set(),
+    )
+
+    assert result.status == "scorer_contract_mismatch"
+    assert result.run is None
+    assert store.shadow_runs(experiment.experiment_id) == []
+    assert result.data_health["factor_shadow_paper_isolation"] == "true"
 
 def test_factor_shadow_outcomes_use_one_run_per_signal_date_and_are_immutable(tmp_path):
     database_url = f"sqlite:///{tmp_path / 'factor-shadow-outcomes.db'}"

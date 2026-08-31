@@ -1699,12 +1699,14 @@ class QagentRepository:
         start: date | None = None,
         end: date | None = None,
         limit: int = 50_000,
+        max_dataset_revision: int | None = None,
     ) -> list[FundamentalSnapshot]:
         normalized_mode = provider_mode.strip().lower()
         with self.session_factory() as session:
             row_alias, revision_rank = _latest_revision_alias(
                 FundamentalSnapshotRow,
                 ("provider_mode", "instrument_id", "as_of_date", "source_provider"),
+                max_dataset_revision=max_dataset_revision,
             )
             query = session.query(row_alias).filter(
                 row_alias.provider_mode == normalized_mode,
@@ -4404,8 +4406,13 @@ def _asset_browse_rank(asset_type: str) -> int:
     return {"stock": 0, "etf": 1}.get(asset_type, 2)
 
 
-def _latest_revision_alias(model, identity_columns: tuple[str, ...]):
-    ranked = select(
+def _latest_revision_alias(
+    model,
+    identity_columns: tuple[str, ...],
+    *,
+    max_dataset_revision: int | None = None,
+):
+    statement = select(
         model,
         func.row_number()
         .over(
@@ -4413,7 +4420,10 @@ def _latest_revision_alias(model, identity_columns: tuple[str, ...]):
             order_by=model.dataset_revision.desc(),
         )
         .label("revision_rank"),
-    ).subquery()
+    )
+    if max_dataset_revision is not None:
+        statement = statement.where(model.dataset_revision <= max_dataset_revision)
+    ranked = statement.subquery()
     return aliased(model, ranked), ranked.c.revision_rank
 
 

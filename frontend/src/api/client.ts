@@ -991,20 +991,11 @@ export async function fetchFactorShadowRoster(
 
 export async function startFactorResearchExperiment(
   providerMode: DataProviderMode,
-  modelRecipe: "balanced_v1" | "regularized_v1" = "balanced_v1",
+  candidateId: "trend-health-composite-v1" | "turnover-volume-strength-v1",
 ): Promise<FactorResearchExperiment> {
   return apiPost<FactorResearchExperiment>("/factor-research/experiments", {
+    candidate_id: candidateId,
     provider_mode: providerMode,
-    start_date: "2021-11-01",
-    end_date: "2025-12-31",
-    benchmark_id: "CN:000300.IDX",
-    rebalance_step_sessions: 10,
-    horizon_sessions: 20,
-    minimum_history_sessions: 120,
-    top_fraction: 0.1,
-    round_trip_cost_bps: 10,
-    seeds: [7, 19, 42],
-    model_recipe: modelRecipe,
   });
 }
 

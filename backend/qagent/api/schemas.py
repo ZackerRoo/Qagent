@@ -1,7 +1,4 @@
-from datetime import date
-from typing import Literal
-
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AgentQueryRequest(BaseModel):
@@ -52,16 +49,9 @@ class StrategyGovernanceResponse(BaseModel):
 
 
 class FactorResearchExperimentRequest(BaseModel):
-    provider_mode: str = "free"
-    start_date: date = date(2021, 11, 1)
-    end_date: date = date(2025, 12, 31)
-    dataset_revision: int | None = None
-    benchmark_id: str = "CN:000300.IDX"
-    rebalance_step_sessions: int = Field(default=10, ge=5, le=60)
-    horizon_sessions: int = Field(default=20, ge=5, le=60)
-    minimum_history_sessions: int = Field(default=120, ge=60, le=260)
-    top_fraction: float = Field(default=0.10, gt=0, le=0.30)
-    round_trip_cost_bps: float = Field(default=10.0, ge=0, le=100)
-    max_instruments: int | None = Field(default=None, ge=50)
-    seeds: list[int] = Field(default_factory=lambda: [7, 19, 42], min_length=1, max_length=10)
-    model_recipe: Literal["balanced_v1", "regularized_v1"] = "balanced_v1"
+    # Breaking v2 start contract: callers must name both the allowlisted
+    # candidate and the dataset provider; no free-form research knobs survive.
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: str
+    provider_mode: str

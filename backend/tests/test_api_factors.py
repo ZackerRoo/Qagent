@@ -138,3 +138,154 @@ def test_factor_candidate_queue_api_is_shadow_only_and_has_no_paper_effect():
     assert all(candidate["paper_order_effect"] == "none" for candidate in body["candidates"])
     assert all(candidate["data_coverage_status"] == "unverified" for candidate in body["candidates"])
     assert all(candidate["experiment_start_allowed"] is False for candidate in body["candidates"])
+
+
+def _factor_candidate_request(
+    candidate_id: str,
+    provider_mode: str = "free",
+) -> dict[str, object]:
+    return {"candidate_id": candidate_id, "provider_mode": provider_mode}
+
+
+def test_factor_candidate_api_rejects_unknown_and_future_without_recording(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'factor-candidate-reject.db'}",
+    )
+    client = TestClient(create_app())
+
+    unknown = client.post(
+        "/api/factor-research/experiments",
+        json=_factor_candidate_request("unknown-candidate"),
+    )
+    future = client.post(
+        "/api/factor-research/experiments",
+        json=_factor_candidate_request("point-in-time-catalyst-v1"),
+    )
+    experiments = client.get("/api/factor-research/experiments")
+
+    assert unknown.status_code == 400
+    assert future.status_code == 400
+    assert experiments.json()["experiments"] == []
+
+
+def test_factor_candidate_api_rejects_caller_supplied_experiment_parameters():
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/factor-research/experiments",
+        json={
+            "candidate_id": "trend-health-composite-v1",
+            "provider_mode": "free",
+            "selected_feature_columns": ["momentum_20"],
+            "dataset_revision": 7,
+            "model_recipe": "balanced_v1",
+        },
+    )
+
+    assert response.status_code == 422
+    assert {item["loc"][-1] for item in response.json()["detail"]} == {
+        "selected_feature_columns",
+        "dataset_revision",
+        "model_recipe",
+    }
+
+
+def test_factor_candidate_api_requires_provider_mode():
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/factor-research/experiments",
+        json={"candidate_id": "trend-health-composite-v1"},
+    )
+
+    assert response.status_code == 422
+    assert {item["loc"][-1] for item in response.json()["detail"]} == {"provider_mode"}
+
+
+def test_factor_candidate_api_propagates_explicit_provider_without_recording(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'factor-candidate-provider.db'}",
+    )
+    monkeypatch.setattr(
+        routes,
+        "current_factor_source_identity",
+        lambda: {
+            "code_revision": "f" * 40,
+            "source_digest": "a" * 64,
+            "dirty_worktree_digest": "b" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "resolved_config",
+        lambda _session_factory, config: config.model_copy(
+            update={"dataset_revision": 7}
+        ),
+    )
+
+    def reject_after_provider_check(_session_factory, config):
+        assert config.provider_mode == "fixture"
+        raise ValueError("provider propagation verified")
+
+    monkeypatch.setattr(routes, "preflight_factor_candidate_experiment", reject_after_provider_check)
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/factor-research/experiments",
+        json=_factor_candidate_request("trend-health-composite-v1", "fixture"),
+    )
+    experiments = client.get("/api/factor-research/experiments")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "provider propagation verified"
+    assert experiments.json()["experiments"] == []
+    assert (
+        experiments.json()["data_health"]["factor_research_start_contract"]
+        == "breaking_v2_candidate_id_plus_provider_mode_extra_forbid"
+    )
+
+
+def test_factor_candidate_api_rejects_low_coverage_without_recording(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'factor-candidate-low-coverage.db'}",
+    )
+    monkeypatch.setattr(
+        routes,
+        "current_factor_source_identity",
+        lambda: {
+            "code_revision": "f" * 40,
+            "source_digest": "a" * 64,
+            "dirty_worktree_digest": "b" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "resolved_config",
+        lambda _session_factory, config: config.model_copy(
+            update={"dataset_revision": 7}
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "preflight_factor_candidate_experiment",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("factor candidate joint feature coverage 0.940000 is below 0.95")
+        ),
+    )
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/factor-research/experiments",
+        json=_factor_candidate_request("trend-health-composite-v1"),
+    )
+    experiments = client.get("/api/factor-research/experiments")
+
+    assert response.status_code == 400
+    assert "below 0.95" in response.json()["detail"]
+    assert experiments.json()["experiments"] == []

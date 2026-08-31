@@ -719,7 +719,7 @@ def build_factor_shadow_evaluation(
     return FactorShadowEvaluation(
         status=status,
         experiment_id=bundle.experiment.experiment_id,
-        model_digest=bundle.aggregate_model_digest,
+        model_digest=runs[-1].model_digest,
         as_of_date=as_of_date,
         run_count=len(runs),
         signal_dates=sorted({run.signal_date for run in runs}),
@@ -733,6 +733,9 @@ def build_factor_shadow_evaluation(
             "factor_shadow_evaluation_run_selection": FACTOR_SHADOW_RUN_SELECTION_RULE,
             "factor_shadow_evaluation_outcomes": str(len(outcomes)),
             "factor_shadow_evaluation_raw_outcomes": str(len(raw_outcomes)),
+            "factor_shadow_evaluation_evidence_model_digests": ",".join(
+                sorted({run.model_digest for run in runs})
+            ),
             "factor_shadow_outcome_contract": FACTOR_SHADOW_OUTCOME_CONTRACT,
             "factor_shadow_evaluation_paper_isolation": "true",
         },
@@ -781,7 +784,10 @@ def build_factor_shadow_roster(
         data_health={
             "factor_shadow_roster": "ready" if candidates else "not_started",
             "factor_shadow_roster_candidates": str(len(candidates)),
-            "factor_shadow_roster_selection": "latest_per_frozen_configuration",
+            "factor_shadow_roster_selection": (
+                "latest_successful_per_candidate_then_limit_plus_single_legacy_lane"
+            ),
+            "factor_shadow_roster_legacy_policy": "single_latest_unlabelled_grandfather_lane",
             "factor_shadow_roster_paper_isolation": "true",
             "factor_shadow_roster_order_effect": "none",
         },

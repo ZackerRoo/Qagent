@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import json
 import math
-import subprocess
 from bisect import bisect_right
 from collections import defaultdict
 from datetime import date
 from hashlib import sha256
-from pathlib import Path
 from typing import Any, Literal, Sequence
 
 import numpy as np
@@ -17,10 +15,24 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.market.calendars import trading_day_offset, trading_sessions_in_range
+from qagent.backtesting.experiment import (
+    _dirty_worktree_digest,
+    _git_revision,
+    _research_source_digest,
+)
 from qagent.factors.research_contract import (
     BASELINE_SIGNS,
+    FACTOR_CANDIDATE_SHADOW_PROTOCOL,
     FACTOR_RESEARCH_VERSION,
     FEATURE_COLUMNS,
+)
+from qagent.research.factor_candidate_queue import (
+    get_explicit_shadow_candidate,
+)
+from qagent.research.factor_candidate_coverage import (
+    FactorCandidateCoverageEvidence,
+    FactorCoverageSource,
+    audit_factor_candidate_coverage,
 )
 from qagent.storage.factor_research import FactorResearchRepository
 from qagent.storage.replay_evidence import ReplayEvidenceRepository
@@ -30,6 +42,7 @@ from qagent.strategy_data.models import FundamentalSnapshot
 
 
 DEFAULT_BENCHMARK_ID = "CN:000300.IDX"
+FACTOR_CANDIDATE_MIN_JOINT_COVERAGE = 0.95
 
 
 FactorResearchRecipe = Literal["balanced_v1", "regularized_v1"]
@@ -83,11 +96,40 @@ class FactorResearchConfig(BaseModel):
     max_instruments: int | None = Field(default=None, ge=50)
     seeds: list[int] = Field(default_factory=lambda: [7, 19, 42], min_length=1, max_length=10)
     model_recipe: FactorResearchRecipe = "balanced_v1"
+    candidate_id: str | None = None
+    candidate_protocol_version: str = "legacy-factor-research-v1"
+    selected_feature_columns: tuple[str, ...] = ()
+    scope: Literal["research_shadow"] = "research_shadow"
+    decision_weight: Literal[False] = False
+    activation_allowed: Literal[False] = False
+    shadow_registration: Literal["explicit_manual", "legacy_grandfather"] = (
+        "legacy_grandfather"
+    )
+    source_digest: str | None = None
+    dirty_worktree_digest: str | None = None
+    coverage_joint_non_null_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    coverage_source_revision: int | None = Field(default=None, gt=0)
+    shadow_scorer_protocol_digest: str | None = None
+    shadow_scorer_source_digest: str | None = None
 
     @model_validator(mode="after")
     def validate_window(self) -> "FactorResearchConfig":
         if self.end_date <= self.start_date:
             raise ValueError("end_date must be after start_date")
+        if self.candidate_id is None:
+            if self.selected_feature_columns and self.selected_feature_columns != FEATURE_COLUMNS:
+                raise ValueError("legacy factor research must use the full feature contract")
+            self.selected_feature_columns = FEATURE_COLUMNS
+            self.candidate_protocol_version = "legacy-factor-research-v1"
+            self.shadow_registration = "legacy_grandfather"
+            return self
+        candidate = get_explicit_shadow_candidate(self.candidate_id)
+        if self.selected_feature_columns and self.selected_feature_columns != candidate.required_features:
+            raise ValueError("candidate feature columns are server-owned and immutable")
+        self.candidate_id = candidate.candidate_id
+        self.candidate_protocol_version = FACTOR_CANDIDATE_SHADOW_PROTOCOL
+        self.selected_feature_columns = candidate.required_features
+        self.shadow_registration = "explicit_manual"
         return self
 
 
@@ -103,18 +145,26 @@ class FactorResearchRunOutput(BaseModel):
 
 
 def current_code_revision() -> str:
-    root = Path(__file__).resolve().parents[3]
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    revision = result.stdout.strip().lower()
+    revision, _dirty = _git_revision()
+    revision = revision.lower()
     if len(revision) != 40:
         raise RuntimeError("factor research requires a full Git revision")
     return revision
+
+
+def current_factor_source_identity() -> dict[str, str]:
+    revision, dirty = _git_revision()
+    if len(revision) != 40:
+        raise RuntimeError("factor research requires a full Git revision")
+    return {
+        "code_revision": revision.lower(),
+        "source_digest": _research_source_digest(),
+        "dirty_worktree_digest": (
+            _dirty_worktree_digest()
+            if dirty
+            else sha256(b"factor-research-clean-worktree").hexdigest()
+        ),
+    }
 
 
 def resolved_config(
@@ -168,16 +218,75 @@ def run_factor_research(
         {
             "factor_research": "ready",
             "feature_set_version": FACTOR_RESEARCH_VERSION,
-            "feature_count": len(FEATURE_COLUMNS),
+            "feature_count": len(config.selected_feature_columns),
+            "factor_candidate_id": config.candidate_id or "legacy_grandfather",
+            "factor_candidate_protocol": config.candidate_protocol_version,
+            "factor_candidate_selected_features": ",".join(
+                config.selected_feature_columns
+            ),
+            "factor_candidate_scope": config.scope,
+            "factor_candidate_decision_weight": "false",
+            "factor_candidate_activation_allowed": "false",
+            "factor_candidate_shadow_registration": config.shadow_registration,
+            "factor_shadow_scorer_protocol_digest": (
+                config.shadow_scorer_protocol_digest or "legacy_unfrozen"
+            ),
+            "factor_shadow_scorer_source_digest": (
+                config.shadow_scorer_source_digest or "legacy_unfrozen"
+            ),
             "model_isolation": "research_only_no_paper_activation",
         }
     )
+    if config.coverage_joint_non_null_rate is not None:
+        data_health["factor_candidate_coverage_joint_non_null_rate"] = (
+            config.coverage_joint_non_null_rate
+        )
+    if config.coverage_source_revision is not None:
+        data_health["factor_candidate_coverage_source_revision"] = (
+            config.coverage_source_revision
+        )
     return FactorResearchRunOutput(
         metrics=metrics,
         data_health=data_health,
         artifacts=artifacts,
         model_artifacts=model_artifacts,
     )
+
+
+def preflight_factor_candidate_experiment(
+    session_factory: sessionmaker[Session],
+    config: FactorResearchConfig,
+) -> FactorCandidateCoverageEvidence:
+    """Fail closed before an experiment row is created."""
+
+    config = resolved_config(session_factory, config)
+    if config.candidate_id is None:
+        raise ValueError("factor candidate experiment requires candidate_id")
+    frame, _data_health = build_factor_research_dataset(session_factory, config)
+    manifest = audit_factor_candidate_coverage(
+        frame,
+        FactorCoverageSource(
+            provider_mode=config.provider_mode,
+            dataset_revision=int(config.dataset_revision or 0),
+            source_artifact_id=(
+                config.source_digest or f"candidate-preflight:{config.candidate_id}"
+            ),
+        ),
+    )
+    evidence = next(
+        item for item in manifest.candidates if item.candidate_id == config.candidate_id
+    )
+    if evidence.coverage_status != "verified":
+        raise ValueError(
+            f"factor candidate coverage is {evidence.coverage_status}; experiment blocked"
+        )
+    if evidence.joint_non_null_rate < FACTOR_CANDIDATE_MIN_JOINT_COVERAGE:
+        raise ValueError(
+            "factor candidate joint feature coverage "
+            f"{evidence.joint_non_null_rate:.6f} is below "
+            f"{FACTOR_CANDIDATE_MIN_JOINT_COVERAGE:.2f}"
+        )
+    return evidence
 
 
 def build_factor_research_dataset(
@@ -259,6 +368,7 @@ def build_factor_research_dataset(
             batch_ids,
             end=config.end_date,
             limit=50_000,
+            max_dataset_revision=config.dataset_revision,
         )
         fundamental_history = _fundamental_history(fundamentals)
         factor_rows = list(
@@ -424,23 +534,26 @@ def compare_baseline_and_lightgbm(
     except ImportError as error:
         raise RuntimeError("lightgbm dependency is unavailable") from error
 
+    feature_columns = config.selected_feature_columns
+    if not feature_columns:
+        raise ValueError("factor research requires a frozen feature subset")
     predictions: list[np.ndarray] = []
-    importance = np.zeros(len(FEATURE_COLUMNS), dtype="float64")
+    importance = np.zeros(len(feature_columns), dtype="float64")
     best_iterations: list[int] = []
     model_artifacts: list[dict[str, Any]] = []
-    feature_contract_digest = factor_research_feature_contract_digest()
+    feature_contract_digest = factor_research_feature_contract_digest(feature_columns)
     recipe = factor_research_recipe(config)
     for seed in config.seeds:
         train_data = lgb.Dataset(
-            train[list(FEATURE_COLUMNS)],
+            train[list(feature_columns)],
             label=train["target_excess_return_pct"],
-            feature_name=list(FEATURE_COLUMNS),
+            feature_name=list(feature_columns),
             free_raw_data=False,
         )
         valid_data = lgb.Dataset(
-            valid[list(FEATURE_COLUMNS)],
+            valid[list(feature_columns)],
             label=valid["target_excess_return_pct"],
-            feature_name=list(FEATURE_COLUMNS),
+            feature_name=list(feature_columns),
             reference=train_data,
             free_raw_data=False,
         )
@@ -471,7 +584,7 @@ def compare_baseline_and_lightgbm(
         )
         best_iteration = int(model.best_iteration or recipe["num_boost_round"])
         predictions.append(
-            model.predict(test[list(FEATURE_COLUMNS)], num_iteration=best_iteration)
+            model.predict(test[list(feature_columns)], num_iteration=best_iteration)
         )
         model_text = model.model_to_string(num_iteration=best_iteration)
         model_artifacts.append(
@@ -517,7 +630,7 @@ def compare_baseline_and_lightgbm(
                 "feature": feature,
                 "importance": round(float(value / len(config.seeds)), 4),
             }
-            for feature, value in zip(FEATURE_COLUMNS, importance)
+            for feature, value in zip(feature_columns, importance)
         ),
         key=lambda item: (-item["importance"], item["feature"]),
     )
@@ -537,6 +650,19 @@ def compare_baseline_and_lightgbm(
         },
         "seeds": config.seeds,
         "model_recipe": config.model_recipe,
+        "candidate_id": config.candidate_id or "legacy_grandfather",
+        "candidate_protocol_version": config.candidate_protocol_version,
+        "selected_feature_columns": list(feature_columns),
+        "scope": config.scope,
+        "decision_weight": False,
+        "activation_allowed": False,
+        "shadow_registration": config.shadow_registration,
+        "source_digest": config.source_digest,
+        "dirty_worktree_digest": config.dirty_worktree_digest,
+        "coverage_joint_non_null_rate": config.coverage_joint_non_null_rate,
+        "coverage_source_revision": config.coverage_source_revision,
+        "shadow_scorer_protocol_digest": config.shadow_scorer_protocol_digest,
+        "shadow_scorer_source_digest": config.shadow_scorer_source_digest,
         "recipe_label": recipe["label"],
         "recipe_hypothesis": recipe["hypothesis"],
         "recipe_parameters": {
@@ -551,10 +677,16 @@ def compare_baseline_and_lightgbm(
     return _json_safe(metrics), _json_safe(artifacts), model_artifacts
 
 
-def factor_research_feature_contract_digest() -> str:
+def factor_research_feature_contract_digest(
+    feature_columns: Sequence[str] = FEATURE_COLUMNS,
+) -> str:
+    selected = tuple(feature_columns)
+    unknown = tuple(feature for feature in selected if feature not in FEATURE_COLUMNS)
+    if not selected or unknown:
+        raise ValueError("factor research feature subset is empty or outside the contract")
     payload = {
         "feature_set_version": FACTOR_RESEARCH_VERSION,
-        "features": list(FEATURE_COLUMNS),
+        "features": list(selected),
         "neutralization": "cross_sectional_winsorize_then_size_and_industry_residual",
         "missing_values": "lightgbm_native_nan",
     }

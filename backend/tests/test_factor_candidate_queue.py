@@ -1,5 +1,10 @@
 from qagent.factors.research_contract import FEATURE_COLUMNS
-from qagent.research.factor_candidate_queue import build_factor_candidate_queue
+import pytest
+
+from qagent.research.factor_candidate_queue import (
+    build_factor_candidate_queue,
+    get_explicit_shadow_candidate,
+)
 
 
 def test_candidate_queue_enumerates_supported_families_without_execution_effects():
@@ -82,3 +87,21 @@ def test_future_capability_cannot_be_enabled_by_claiming_an_unknown_feature():
     assert catalyst.available_features == ()
     assert catalyst.missing_features == ("point_in_time_catalyst_event",)
     assert catalyst.decision_weight is False
+
+
+def test_explicit_shadow_lookup_allows_only_first_wave_candidates():
+    trend = get_explicit_shadow_candidate("trend-health-composite-v1")
+    turnover = get_explicit_shadow_candidate("turnover-volume-strength-v1")
+
+    assert trend.required_features == (
+        "momentum_20",
+        "trend_slope_60",
+        "trend_r2_60",
+        "downside_risk_60",
+        "max_drawdown_60",
+    )
+    assert turnover.required_features == ("turnover_log_20", "volume_ratio_5_20")
+    with pytest.raises(ValueError, match="not approved"):
+        get_explicit_shadow_candidate("point-in-time-catalyst-v1")
+    with pytest.raises(ValueError, match="unknown"):
+        get_explicit_shadow_candidate("unknown-candidate")
