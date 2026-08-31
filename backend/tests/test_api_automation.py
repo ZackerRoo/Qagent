@@ -1313,6 +1313,26 @@ def test_shadow_price_gap_defers_current_slot_and_next_cycle_can_progress():
     assert next_reason is None
 
 
+@pytest.mark.parametrize(
+    ("benchmark_status", "expected"),
+    [("deferred_budget", "deferred"), ("error", "error")],
+)
+def test_factor_shadow_benchmark_partial_state_prevents_false_stage_success(
+    benchmark_status,
+    expected,
+):
+    outcome, reason = routes._automation_stage_outcome(
+        "factor_shadow",
+        {
+            "factor_shadow_benchmark_refresh": benchmark_status,
+            "factor_shadow_outcome_status": "up_to_date",
+        },
+    )
+
+    assert outcome == expected
+    assert reason
+
+
 def test_cycle_with_natural_waiting_is_terminal_with_visible_issue(tmp_path, monkeypatch):
     database_url = f"sqlite:///{tmp_path / 'cycle-deferred.db'}"
     monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
@@ -1375,6 +1395,116 @@ def test_cycle_with_natural_waiting_is_terminal_with_visible_issue(tmp_path, mon
             ).scalar_one()
             == "deferred"
         )
+
+
+def test_factor_shadow_budget_defer_finishes_cycle_and_next_cycle_remains_eligible(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = f"sqlite:///{tmp_path / 'factor-shadow-budget-cycle.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    repo = QagentRepository(create_session_factory(database_url))
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    monkeypatch.setattr(routes, "_repo", lambda: repo)
+    monkeypatch.setattr(routes, "_paper_repo", lambda: paper_repo)
+    monkeypatch.setattr(
+        routes,
+        "_paper_seed_risk_gate",
+        lambda *_: (True, {"paper_risk_gate_action": "allow"}),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_latest_completed_a_share_session",
+        lambda *args: date(2026, 8, 29),
+    )
+    observed_budgets = []
+    monkeypatch.setattr(
+        routes,
+        "refresh_factor_shadow_benchmark_cache",
+        lambda *args, **kwargs: (
+            observed_budgets.append(kwargs["work_budget"])
+            or SimpleNamespace(data_health={})
+        ),
+    )
+    resolutions = iter(
+        [
+            SimpleNamespace(
+                data_health={
+                    "factor_shadow_outcome_status": "partial",
+                    "factor_shadow_exact_price_deferred_by_budget": "24",
+                    "factor_shadow_exact_price_budget_exhausted": "true",
+                    "factor_shadow_exact_price_budget_exhausted_reason": (
+                        "provider_batch_budget"
+                    ),
+                    "factor_shadow_outcome_paper_isolation": "true",
+                    "factor_shadow_outcome_order_effect": "none",
+                },
+                next_maturity_date=None,
+            ),
+            SimpleNamespace(
+                data_health={
+                    "factor_shadow_outcome_status": "up_to_date",
+                    "factor_shadow_outcome_paper_isolation": "true",
+                    "factor_shadow_outcome_order_effect": "none",
+                },
+                next_maturity_date=None,
+            ),
+        ]
+    )
+
+    def resolve(*args, **kwargs):
+        assert kwargs["work_budget"] is observed_budgets[-1]
+        return next(resolutions)
+
+    monkeypatch.setattr(routes, "resolve_factor_shadow_outcomes", resolve)
+    monkeypatch.setattr(
+        routes,
+        "resolve_fuyao_shadow_outcomes",
+        lambda *args, **kwargs: SimpleNamespace(
+            data_health={"fuyao_shadow_status": "resolved"},
+            unresolved_prices=0,
+            next_maturity_date=None,
+        ),
+    )
+    settings = AutoProcessingSettings(
+        provider="free",
+        run_scan=False,
+        seed_paper=False,
+        update_paper=False,
+        run_alerts=False,
+        run_forward_evidence=False,
+    )
+    before_trades = paper_repo.list_trades(limit=1000, provider="free")
+
+    deferred = routes._run_auto_processing_cycle(settings)
+    recovered = routes._run_auto_processing_cycle(settings)
+
+    assert deferred.data_health["automation_cycle_status"] == (
+        "completed_with_deferred_or_issues"
+    )
+    assert deferred.data_health["factor_shadow_exact_price_deferred_by_budget"] == "24"
+    assert deferred.data_health["factor_shadow_work_budget_deadline_contract"] == (
+        "cooperative_between_provider_calls_not_hard_cancellation"
+    )
+    assert deferred.data_health["factor_shadow_outcome_order_effect"] == "none"
+    assert deferred.paper_created == 0
+    assert deferred.paper_total == 0
+    assert deferred.paper_closed == 0
+    assert recovered.data_health["automation_cycle_status"] == "succeeded"
+    assert recovered.data_health["factor_shadow_outcome_status"] == "up_to_date"
+    assert len(observed_budgets) == 2
+    assert observed_budgets[0] is not observed_budgets[1]
+    assert all(item.max_provider_batches == 8 for item in observed_budgets)
+    assert paper_repo.list_trades(limit=1000, provider="free") == before_trades
+    with repo.session_factory() as session:
+        statuses = session.execute(
+            text(
+                "SELECT status FROM automation_cycle_stages "
+                "WHERE stage_key = 'factor_shadow' ORDER BY started_at"
+            )
+        ).scalars().all()
+    assert statuses == ["deferred", "completed"]
 
 
 @pytest.mark.parametrize(

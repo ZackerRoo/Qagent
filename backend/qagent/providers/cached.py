@@ -59,6 +59,27 @@ class CachedMarketDataProvider:
     def prefetch_stats(self) -> dict[str, int | str]:
         return dict(self.last_prefetch_stats)
 
+    def prefetch_refresh_candidates(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> list[str]:
+        """Return instruments that would require provider I/O for this range."""
+
+        return [
+            instrument_id
+            for instrument_id in dict.fromkeys(instrument_ids)
+            if not self.cache.has_usable_coverage(
+                self.provider_mode,
+                instrument_id,
+                start,
+                end,
+                minimum_session_coverage=(0.95 if instrument_id.startswith("CN:") else None),
+                maximum_trailing_session_gap=(0 if instrument_id.startswith("CN:") else None),
+            )
+        ]
+
     def get_daily_bars(
         self,
         instrument_ids: list[str],
@@ -164,18 +185,7 @@ class CachedMarketDataProvider:
         requested = list(dict.fromkeys(instrument_ids))
         self._pending_prefetch_errors = []
         self._pending_prefetch_fallback_instruments = []
-        missing = [
-            instrument_id
-            for instrument_id in requested
-            if not self.cache.has_usable_coverage(
-                self.provider_mode,
-                instrument_id,
-                start,
-                end,
-                minimum_session_coverage=(0.95 if instrument_id.startswith("CN:") else None),
-                maximum_trailing_session_gap=(0 if instrument_id.startswith("CN:") else None),
-            )
-        ]
+        missing = self.prefetch_refresh_candidates(requested, start, end)
         self.last_prefetch_stats = {
             "mode": "incremental_tail",
             "requested": len(requested),

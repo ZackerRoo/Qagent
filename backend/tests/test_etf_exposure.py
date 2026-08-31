@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -263,6 +263,57 @@ def test_paper_candidate_asset_type_keeps_unknown_sources_explicit():
     assert routes._paper_snapshot_asset_type(
         SimpleNamespace(card={}, instrument_id="CN:000001")
     ) == "unknown"
+
+
+def test_paper_industry_fallback_uses_only_evidence_known_at_source_time(monkeypatch):
+    signal_date = date(2026, 8, 20)
+    created_at = datetime(2026, 8, 20, 8, 30, tzinfo=timezone.utc)
+    calls = []
+
+    class FakeReplayEvidenceRepository:
+        def __init__(self, session_factory, provider_mode):
+            assert session_factory == "fixture-session"
+            assert provider_mode == "free"
+
+        def current_revision(self):
+            return 17
+
+        def industries_as_of(
+            self,
+            instrument_ids,
+            decision_date,
+            revision,
+            *,
+            known_at_or_before,
+        ):
+            calls.append(
+                (
+                    instrument_ids,
+                    decision_date,
+                    revision,
+                    known_at_or_before,
+                )
+            )
+            return {
+                "CN:600216": SimpleNamespace(industry="C27医药制造业"),
+            }
+
+    monkeypatch.setattr(
+        routes,
+        "ReplayEvidenceRepository",
+        FakeReplayEvidenceRepository,
+    )
+    context = SimpleNamespace(signal_date=signal_date, created_at=created_at)
+
+    industry = routes._paper_point_in_time_industry(
+        SimpleNamespace(session_factory="fixture-session"),
+        context=context,
+        instrument_id="CN:600216",
+        provider="free",
+    )
+
+    assert industry == "C27医药制造业"
+    assert calls == [(["CN:600216"], signal_date, 17, created_at)]
 
 
 def test_empty_paper_portfolio_lookthrough_endpoint(tmp_path: Path, monkeypatch):

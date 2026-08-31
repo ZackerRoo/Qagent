@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from hashlib import sha256
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -25,6 +26,7 @@ from qagent.research.factor_experiments import (
 )
 from qagent.research.factor_shadow import score_factor_shadow_run, score_factor_shadow_runs
 from qagent.research.factor_shadow_outcomes import (
+    FactorShadowBenchmarkRefresh,
     FactorShadowExecutionHeadEvaluation,
     FactorShadowHorizonEvaluation,
     FactorShadowOutcomeResolution,
@@ -33,12 +35,14 @@ from qagent.research.factor_shadow_outcomes import (
     _evaluate_execution_head,
     _raw_execution_head,
     _merge_outcome_resolutions,
+    _merge_benchmark_refreshes,
     build_factor_shadow_roster,
     build_factor_shadow_evaluation,
     factor_shadow_outcome_dates,
     refresh_factor_shadow_benchmark_cache,
     resolve_factor_shadow_outcomes,
 )
+from qagent.research.shadow_price_repair import ExactPriceRepairBudget
 from qagent.storage.factor_research import (
     FactorResearchRepository,
     FactorShadowOutcome,
@@ -123,6 +127,105 @@ def test_factor_shadow_resolution_keeps_latest_maturity_separate_from_old_price_
         merged.data_health["factor_shadow_exact_price_aggregation"]
         == "sum_per_candidate_resolution"
     )
+
+
+def test_factor_shadow_benchmark_cache_hit_does_not_consume_provider_budget(monkeypatch):
+    run = FactorShadowRunRef(
+        experiment_id="cache-hit",
+        scan_job_id="scan-cache-hit",
+        signal_date=date(2026, 7, 1),
+        dataset_revision=1,
+        model_digest="a" * 64,
+        scored_instruments=1,
+        created_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    bundle = SimpleNamespace(
+        experiment=SimpleNamespace(
+            experiment_id="cache-hit",
+            benchmark_id="CN:000300.IDX",
+        )
+    )
+
+    class Store:
+        def __init__(self, _session_factory):
+            pass
+
+        def model_bundles(self, _provider_mode):
+            return [bundle]
+
+        def shadow_runs(self, _experiment_id):
+            return [run]
+
+    class CacheHitProvider:
+        def __init__(self):
+            self.prefetch_calls = 0
+
+        def prefetch_refresh_candidates(self, instrument_ids, start, end):
+            assert instrument_ids == ["CN:000300.IDX"]
+            assert start <= end
+            return []
+
+        def prefetch_daily_bars(self, instrument_ids, start, end):
+            self.prefetch_calls += 1
+
+        def prefetch_stats(self):
+            return {"refresh_candidates": 0, "already_current": 1}
+
+    monkeypatch.setattr(
+        "qagent.research.factor_shadow_outcomes.FactorResearchRepository",
+        Store,
+    )
+    provider = CacheHitProvider()
+    budget = ExactPriceRepairBudget.bounded(
+        max_provider_batches=1,
+        wall_clock_seconds=60,
+    )
+
+    result = refresh_factor_shadow_benchmark_cache(
+        object(),
+        provider_mode="free",
+        market_provider=provider,
+        as_of_date=date(2026, 8, 31),
+        work_budget=budget,
+    )
+
+    assert result.status == "cache_current"
+    assert provider.prefetch_calls == 1
+    assert budget.provider_batches_used == 0
+    assert result.data_health["factor_shadow_benchmark_budget_claimed"] == "false"
+    assert result.data_health["factor_shadow_benchmark_provider_io_expected"] == "false"
+    assert result.data_health["factor_shadow_benchmark_refresh_mode"] == "cache_hit"
+
+
+def test_factor_shadow_benchmark_merge_preserves_deferred_and_error_status():
+    refreshed = FactorShadowBenchmarkRefresh(
+        status="refreshed",
+        benchmark_id="CN:000300.IDX",
+        data_health={"factor_shadow_benchmark_refresh": "refreshed"},
+    )
+    deferred = FactorShadowBenchmarkRefresh(
+        status="deferred_budget",
+        benchmark_id="CN:000905.IDX",
+        data_health={"factor_shadow_benchmark_refresh": "deferred_budget"},
+    )
+    failed = FactorShadowBenchmarkRefresh(
+        status="error",
+        benchmark_id="CN:000852.IDX",
+        data_health={
+            "factor_shadow_benchmark_refresh": "error",
+            "factor_shadow_benchmark_refresh_error": "timeout",
+        },
+    )
+
+    partial = _merge_benchmark_refreshes([refreshed, deferred])
+    error = _merge_benchmark_refreshes([refreshed, deferred, failed])
+
+    assert partial.status == "deferred_budget"
+    assert partial.data_health["factor_shadow_benchmark_refresh"] == "deferred_budget"
+    assert partial.data_health["factor_shadow_benchmark_deferred_candidates"] == "1"
+    assert error.status == "error"
+    assert error.data_health["factor_shadow_benchmark_error_candidates"] == "1"
+    assert error.data_health["factor_shadow_benchmark_refresh_error"] == "timeout"
 
 
 def test_factor_research_recorder_persists_terminal_result(tmp_path):

@@ -1,6 +1,7 @@
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.market.cn_context import (
     UNKNOWN_ETF_EXPOSURE,
+    UNKNOWN_STOCK_INDUSTRY,
     build_market_context,
     infer_etf_exposure_group,
 )
@@ -75,6 +76,13 @@ def test_unknown_etf_exposure_is_explicit_and_has_no_fake_benchmark():
 
     assert context.industry == UNKNOWN_ETF_EXPOSURE
     assert context.index_memberships == []
+
+
+def test_unknown_stock_industry_is_explicit_instead_of_generic_composite():
+    context = build_market_context("CN:002612", instrument_label="测试公司 002612.SZ")
+
+    assert context.industry == UNKNOWN_STOCK_INDUSTRY
+    assert context.industry != "综合"
 
 
 def test_daily_scan_cards_include_cn_constraints_context_and_chinese_summary():

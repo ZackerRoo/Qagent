@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.market.calendars import trading_day_offset
 from qagent.research.shadow_price_repair import (
+    ExactPriceRepairBudget,
     ExactPriceRequirement,
     repair_exact_daily_prices,
 )
@@ -40,6 +41,7 @@ FACTOR_SHADOW_EXECUTION_HEAD_POLICY = "factor-shadow-execution-head-top10-cap3-v
 FACTOR_SHADOW_EXECUTION_HEAD_SIZE = 10
 FACTOR_SHADOW_EXECUTION_HEAD_INDUSTRY_CAP = 3
 FACTOR_SHADOW_UNKNOWN_INDUSTRY_BUCKET = "unknown"
+FACTOR_SHADOW_BOUNDED_REPAIR_BATCH_SIZE = 5
 
 
 class FactorShadowOutcomeResolution(BaseModel):
@@ -198,6 +200,7 @@ def refresh_factor_shadow_benchmark_cache(
     as_of_date: date,
     horizons: tuple[int, ...] = FACTOR_SHADOW_HORIZONS,
     experiment_id: str | None = None,
+    work_budget: ExactPriceRepairBudget | None = None,
 ) -> FactorShadowBenchmarkRefresh:
     """Refresh only the benchmark bars needed by already-matured shadow runs."""
 
@@ -216,30 +219,11 @@ def refresh_factor_shadow_benchmark_cache(
                 as_of_date=as_of_date,
                 horizons=horizons,
                 experiment_id=bundle.experiment.experiment_id,
+                work_budget=work_budget,
             )
             for bundle in bundles
         ]
-        status = (
-            "refreshed"
-            if any(item.status == "refreshed" for item in refreshed)
-            else refreshed[0].status
-        )
-        starts = [item.start_date for item in refreshed if item.start_date is not None]
-        ends = [item.end_date for item in refreshed if item.end_date is not None]
-        return FactorShadowBenchmarkRefresh(
-            status=status,
-            benchmark_id=",".join(
-                sorted({item.benchmark_id for item in refreshed if item.benchmark_id})
-            )
-            or None,
-            start_date=min(starts, default=None),
-            end_date=max(ends, default=None),
-            data_health={
-                "factor_shadow_benchmark_refresh": status,
-                "factor_shadow_benchmark_candidates": str(len(refreshed)),
-                "factor_shadow_paper_isolation": "true",
-            },
-        )
+        return _merge_benchmark_refreshes(refreshed)
     bundle = bundles[0] if bundles else None
     raw_runs = store.shadow_runs(bundle.experiment.experiment_id) if bundle is not None else []
     runs = _canonical_shadow_runs(raw_runs)
@@ -274,6 +258,40 @@ def refresh_factor_shadow_benchmark_cache(
             data_health={"factor_shadow_benchmark_refresh": "unsupported_provider"},
         )
 
+    preflight = getattr(market_provider, "prefetch_refresh_candidates", None)
+    refresh_candidates: list[str] | None = None
+    if callable(preflight):
+        refresh_candidates = list(
+            preflight(
+                [bundle.experiment.benchmark_id],
+                start_date,
+                end_date,
+            )
+        )
+    provider_io_expected = refresh_candidates is None or bool(refresh_candidates)
+    budget_claimed = False
+    if (
+        provider_io_expected
+        and work_budget is not None
+        and not work_budget.claim_provider_batch()
+    ):
+        return FactorShadowBenchmarkRefresh(
+            status="deferred_budget",
+            benchmark_id=bundle.experiment.benchmark_id,
+            start_date=start_date,
+            end_date=end_date,
+            data_health={
+                "factor_shadow_benchmark_refresh": "deferred_budget",
+                "factor_shadow_work_budget_exhausted": "true",
+                "factor_shadow_work_budget_exhausted_reason": (
+                    work_budget.exhausted_reason or "unknown"
+                ),
+                "factor_shadow_benchmark_budget_claimed": "false",
+                "factor_shadow_benchmark_provider_io_expected": "true",
+            },
+        )
+    budget_claimed = provider_io_expected and work_budget is not None
+
     try:
         prefetch([bundle.experiment.benchmark_id], start=start_date, end=end_date)
     except Exception as exc:
@@ -290,19 +308,120 @@ def refresh_factor_shadow_benchmark_cache(
 
     stats_getter = getattr(market_provider, "prefetch_stats", None)
     stats = stats_getter() if callable(stats_getter) else {}
+    actual_refresh_candidates = (
+        _nonnegative_health_int(stats.get("refresh_candidates", 0))
+        if callable(stats_getter) and "refresh_candidates" in stats
+        else None
+    )
+    if (
+        budget_claimed
+        and refresh_candidates is None
+        and callable(stats_getter)
+        and actual_refresh_candidates == 0
+        and work_budget is not None
+    ):
+        work_budget.refund_provider_batch()
+        budget_claimed = False
+    refresh_status = (
+        "cache_current"
+        if not provider_io_expected or actual_refresh_candidates == 0
+        else "refreshed"
+    )
     return FactorShadowBenchmarkRefresh(
-        status="refreshed",
+        status=refresh_status,
         benchmark_id=bundle.experiment.benchmark_id,
         start_date=start_date,
         end_date=end_date,
         data_health={
-            "factor_shadow_benchmark_refresh": "refreshed",
+            "factor_shadow_benchmark_refresh": refresh_status,
+            "factor_shadow_benchmark_refresh_mode": (
+                "cache_hit" if refresh_status == "cache_current" else "provider_refresh"
+            ),
             "factor_shadow_benchmark_id": bundle.experiment.benchmark_id,
             "factor_shadow_benchmark_refresh_start": start_date.isoformat(),
             "factor_shadow_benchmark_refresh_end": end_date.isoformat(),
             "factor_shadow_benchmark_prefetch_refreshed": str(stats.get("refreshed", 0)),
             "factor_shadow_benchmark_prefetch_stale": str(stats.get("stale_after_refresh", 0)),
+            "factor_shadow_benchmark_budget_claimed": str(budget_claimed).lower(),
+            "factor_shadow_benchmark_provider_io_expected": str(
+                provider_io_expected
+            ).lower(),
+            "factor_shadow_benchmark_actual_refresh_candidates": str(
+                actual_refresh_candidates
+                if actual_refresh_candidates is not None
+                else "unknown"
+            ),
+            "factor_shadow_benchmark_budget_contract": (
+                "cooperative_deadline_between_calls_not_hard_cancellation"
+            ),
         },
+    )
+
+
+def _merge_benchmark_refreshes(
+    refreshed: list[FactorShadowBenchmarkRefresh],
+) -> FactorShadowBenchmarkRefresh:
+    priority = {
+        "error": 6,
+        "deferred_budget": 5,
+        "unsupported_provider": 4,
+        "refreshed": 3,
+        "cache_current": 2,
+        "waiting_for_maturity": 1,
+        "not_started": 0,
+    }
+    status = max(
+        (item.status for item in refreshed),
+        key=lambda value: priority.get(value, 3),
+        default="not_started",
+    )
+    starts = [item.start_date for item in refreshed if item.start_date is not None]
+    ends = [item.end_date for item in refreshed if item.end_date is not None]
+    counts = {
+        candidate_status: sum(item.status == candidate_status for item in refreshed)
+        for candidate_status in sorted({item.status for item in refreshed})
+    }
+    errors = [
+        item.data_health.get("factor_shadow_benchmark_refresh_error", "")
+        for item in refreshed
+        if item.status == "error"
+    ]
+    exhausted_reasons = {
+        item.data_health.get("factor_shadow_work_budget_exhausted_reason", "")
+        for item in refreshed
+        if item.status == "deferred_budget"
+    }
+    exhausted_reasons.discard("")
+    health = {
+        "factor_shadow_benchmark_refresh": status,
+        "factor_shadow_benchmark_candidates": str(len(refreshed)),
+        "factor_shadow_benchmark_candidate_statuses": ",".join(
+            f"{key}={value}" for key, value in sorted(counts.items())
+        ),
+        "factor_shadow_benchmark_deferred_candidates": str(
+            counts.get("deferred_budget", 0)
+        ),
+        "factor_shadow_benchmark_error_candidates": str(counts.get("error", 0)),
+        "factor_shadow_work_budget_exhausted": str(bool(exhausted_reasons)).lower(),
+        "factor_shadow_work_budget_exhausted_reason": ",".join(
+            sorted(exhausted_reasons)
+        ) or "none",
+        "factor_shadow_paper_isolation": "true",
+    }
+    if errors:
+        health["factor_shadow_benchmark_refresh_error"] = next(
+            (item for item in errors if item),
+            "benchmark candidate refresh failed",
+        )
+    return FactorShadowBenchmarkRefresh(
+        status=status,
+        benchmark_id=",".join(
+            sorted({item.benchmark_id for item in refreshed if item.benchmark_id})
+        )
+        or None,
+        start_date=min(starts, default=None),
+        end_date=max(ends, default=None),
+        data_health=health,
     )
 
 
@@ -314,6 +433,7 @@ def resolve_factor_shadow_outcomes(
     horizons: tuple[int, ...] = FACTOR_SHADOW_HORIZONS,
     experiment_id: str | None = None,
     market_provider: object | None = None,
+    work_budget: ExactPriceRepairBudget | None = None,
 ) -> FactorShadowOutcomeResolution:
     store = FactorResearchRepository(session_factory)
     if experiment_id is None:
@@ -327,6 +447,7 @@ def resolve_factor_shadow_outcomes(
                     horizons=horizons,
                     experiment_id=bundle.experiment.experiment_id,
                     market_provider=market_provider,
+                    work_budget=work_budget,
                 )
                 for bundle in bundles
             ]
@@ -395,6 +516,10 @@ def resolve_factor_shadow_outcomes(
         provider_mode=provider_mode,
         market_provider=market_provider,
         requirements=requirements,
+        batch_size=(
+            FACTOR_SHADOW_BOUNDED_REPAIR_BATCH_SIZE if work_budget is not None else 20
+        ),
+        work_budget=work_budget,
     )
     repair_health = repair.data_health("factor_shadow")
     for run, horizon, entry_date, outcome_date, unresolved_scores in work:
@@ -511,6 +636,20 @@ def resolve_factor_shadow_outcomes(
             "factor_shadow_outcome_existing": str(len(existing)),
             "factor_shadow_outcome_raw_existing": str(len(raw_existing)),
             "factor_shadow_outcome_unresolved_prices": str(unresolved_prices),
+            "factor_shadow_work_budget_provider_batches_used": str(
+                work_budget.provider_batches_used if work_budget is not None else 0
+            ),
+            "factor_shadow_work_budget_provider_batch_size": str(
+                FACTOR_SHADOW_BOUNDED_REPAIR_BATCH_SIZE if work_budget is not None else 20
+            ),
+            "factor_shadow_work_budget_exhausted": str(
+                bool(work_budget and work_budget.exhausted_reason)
+            ).lower(),
+            "factor_shadow_work_budget_exhausted_reason": (
+                work_budget.exhausted_reason
+                if work_budget is not None and work_budget.exhausted_reason
+                else "none"
+            ),
             **repair_health,
             "factor_shadow_outcome_paper_isolation": "true",
             "factor_shadow_outcome_order_effect": "none",
@@ -770,6 +909,7 @@ def _merge_candidate_repair_health(
         "not_listed",
         "missing",
         "errors",
+        "deferred_by_budget",
         "retryable",
     )
     merged = {
@@ -795,6 +935,17 @@ def _merge_candidate_repair_health(
         f"{reason}={count}" for reason, count in sorted(reasons.items())
     )
     merged["factor_shadow_exact_price_aggregation"] = "sum_per_candidate_resolution"
+    exhausted_reasons = {
+        item.data_health.get("factor_shadow_exact_price_budget_exhausted_reason", "none")
+        for item in resolutions
+    }
+    exhausted_reasons.discard("none")
+    merged["factor_shadow_exact_price_budget_exhausted"] = str(
+        bool(exhausted_reasons)
+    ).lower()
+    merged["factor_shadow_exact_price_budget_exhausted_reason"] = ",".join(
+        sorted(exhausted_reasons)
+    ) or "none"
     merged["factor_shadow_exact_price_unresolved"] = str(
         sum(
             _nonnegative_health_int(merged[f"factor_shadow_exact_price_{suffix}"])

@@ -869,6 +869,50 @@ def test_candidate_pool_reports_industry_capacity_block(tmp_path, monkeypatch):
     assert pool.json()["summary"]["industry_blocked_count"] == 1
 
 
+def test_lookthrough_read_keeps_paper_ledger_order_events_and_account_immutable(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'paper-lookthrough-read-only.db'}",
+    )
+    client = TestClient(create_app())
+    card = _persist_authoritative_opportunities(
+        provider="fixture",
+        cards=[("lookthrough-card", "CN:600216")],
+    )[0]
+    created = client.post(
+        "/api/paper-trades/from-opportunity",
+        json=_opportunity_request(card, provider="fixture"),
+    )
+    assert created.status_code == 200
+    trade_id = created.json()["trade"]["trade_id"]
+    paper_repo = routes._paper_repo()
+    before_trades = client.get(
+        "/api/paper-trades?provider=fixture&reporting_scope=legacy"
+    ).json()
+    before_events = client.get(f"/api/paper-trades/{trade_id}/events").json()
+    before_account = paper_repo.get_account_settings().model_dump(
+        mode="json",
+        exclude={"started_at"},
+    )
+
+    report = client.get(
+        "/api/paper-trades/look-through-risk?provider=fixture&reporting_scope=legacy"
+    )
+
+    assert report.status_code == 200
+    assert client.get(
+        "/api/paper-trades?provider=fixture&reporting_scope=legacy"
+    ).json() == before_trades
+    assert client.get(f"/api/paper-trades/{trade_id}/events").json() == before_events
+    assert paper_repo.get_account_settings().model_dump(
+        mode="json",
+        exclude={"started_at"},
+    ) == before_account
+
+
 def test_ranking_v4_shadow_claim_is_admitted_to_research_paper_lane(
     tmp_path,
     monkeypatch,

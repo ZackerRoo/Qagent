@@ -5,6 +5,7 @@ from qagent.recommendations.cn_execution import build_trading_constraints
 
 
 UNKNOWN_ETF_EXPOSURE = "未知ETF暴露"
+UNKNOWN_STOCK_INDUSTRY = "未知个股行业"
 
 
 @dataclass(frozen=True)
@@ -514,7 +515,9 @@ def _infer_industry(symbol: str, label: str | None, board: str) -> str:
         return "硬科技"
     if symbol.startswith(("300", "301")):
         return "成长制造"
-    return "综合"
+    # A board or numeric prefix is not an industry. Keep the missing taxonomy
+    # visible so a downstream concentration report cannot merge unrelated stocks.
+    return UNKNOWN_STOCK_INDUSTRY
 
 
 def _infer_themes(symbol: str, label: str | None, industry: str, board: str) -> list[str]:

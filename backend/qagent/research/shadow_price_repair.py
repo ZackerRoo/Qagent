@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date
+from time import monotonic
 from typing import Iterable
 
 import pandas as pd
@@ -13,6 +14,47 @@ from qagent.storage.tables import HistoricalInstrumentProfileRow, HistoricalTrad
 
 
 EXACT_PRICE_REPAIR_BATCH_SIZE = 20
+
+
+@dataclass
+class ExactPriceRepairBudget:
+    """Cooperative wall-clock and provider-call budget shared by one shadow stage."""
+
+    max_provider_batches: int
+    deadline_monotonic: float | None = None
+    provider_batches_used: int = 0
+    exhausted_reason: str | None = None
+
+    @classmethod
+    def bounded(
+        cls,
+        *,
+        max_provider_batches: int,
+        wall_clock_seconds: float | None,
+    ) -> "ExactPriceRepairBudget":
+        return cls(
+            max_provider_batches=max(0, max_provider_batches),
+            deadline_monotonic=(
+                monotonic() + max(0.0, wall_clock_seconds)
+                if wall_clock_seconds is not None
+                else None
+            ),
+        )
+
+    def claim_provider_batch(self) -> bool:
+        if self.deadline_monotonic is not None and monotonic() >= self.deadline_monotonic:
+            self.exhausted_reason = "wall_clock_deadline"
+            return False
+        if self.provider_batches_used >= self.max_provider_batches:
+            self.exhausted_reason = "provider_batch_budget"
+            return False
+        self.provider_batches_used += 1
+        return True
+
+    def refund_provider_batch(self) -> None:
+        """Refund a conservative claim when telemetry proves no provider I/O occurred."""
+
+        self.provider_batches_used = max(0, self.provider_batches_used - 1)
 
 
 @dataclass(frozen=True, order=True)
@@ -35,6 +77,8 @@ class ExactPriceRepairResult:
     missing: int = 0
     errors: int = 0
     rejected_unsafe_provenance: int = 0
+    deferred_by_budget: int = 0
+    budget_exhausted_reason: str | None = None
     unresolved: list[ExactPriceRequirement] = field(default_factory=list)
     reasons: dict[str, int] = field(default_factory=dict)
     error_details: list[str] = field(default_factory=list)
@@ -60,6 +104,13 @@ class ExactPriceRepairResult:
             f"{prefix}_exact_price_rejected_unsafe_provenance": str(
                 self.rejected_unsafe_provenance
             ),
+            f"{prefix}_exact_price_deferred_by_budget": str(self.deferred_by_budget),
+            f"{prefix}_exact_price_budget_exhausted": str(
+                self.budget_exhausted_reason is not None
+            ).lower(),
+            f"{prefix}_exact_price_budget_exhausted_reason": (
+                self.budget_exhausted_reason or "none"
+            ),
             f"{prefix}_exact_price_retryable": str(self.retryable),
             f"{prefix}_exact_price_unresolved": str(len(self.unresolved)),
             f"{prefix}_exact_price_reason_mix": _reason_mix(self.reasons),
@@ -74,6 +125,7 @@ def repair_exact_daily_prices(
     market_provider: object | None,
     requirements: Iterable[ExactPriceRequirement],
     batch_size: int = EXACT_PRICE_REPAIR_BATCH_SIZE,
+    work_budget: ExactPriceRepairBudget | None = None,
 ) -> ExactPriceRepairResult:
     """Fill exact shadow-price holes without trusting aggregate range coverage."""
 
@@ -93,6 +145,7 @@ def repair_exact_daily_prices(
     repairable = [item for item in missing if item not in structural]
     provider_errors: set[ExactPriceRequirement] = set()
     unsafe_rejections: set[ExactPriceRequirement] = set()
+    budget_deferred: set[ExactPriceRequirement] = set()
     if market_provider is not None:
         raw_provider = getattr(market_provider, "provider", market_provider)
         getter = getattr(raw_provider, "get_historical_daily_bars", None)
@@ -115,6 +168,9 @@ def repair_exact_daily_prices(
                 skipped = len(batch_requirements) - len(still_missing)
                 result.skipped_after_recheck += skipped
                 if not still_missing:
+                    continue
+                if work_budget is not None and not work_budget.claim_provider_batch():
+                    budget_deferred.update(still_missing)
                     continue
                 requested_batch = sorted({item.instrument_id for item in still_missing})
                 result.provider_requested += len(requested_batch)
@@ -145,6 +201,10 @@ def repair_exact_daily_prices(
                     )
     remaining = _missing_requirements(cache, provider_mode, missing)
     result.repaired = len(missing) - len(remaining)
+    result.deferred_by_budget = len(budget_deferred & set(remaining))
+    result.budget_exhausted_reason = (
+        work_budget.exhausted_reason if work_budget is not None else None
+    )
     for requirement in remaining:
         reason = structural.get(requirement)
         if reason is None:
@@ -152,7 +212,9 @@ def repair_exact_daily_prices(
             # no-row response with explicit errors stays retryable as provider_error.
             raw_provider = getattr(market_provider, "provider", market_provider)
             reported_errors = getattr(raw_provider, "last_errors", []) if raw_provider else []
-            if requirement in unsafe_rejections:
+            if requirement in budget_deferred:
+                reason = "work_budget_exhausted"
+            elif requirement in unsafe_rejections:
                 reason = "unsafe_adjustment_provenance"
             elif market_provider is None:
                 reason = "provider_unavailable"

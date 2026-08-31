@@ -86,6 +86,7 @@ from qagent.research.factor_shadow_outcomes import (
     refresh_factor_shadow_benchmark_cache,
     resolve_factor_shadow_outcomes,
 )
+from qagent.research.shadow_price_repair import ExactPriceRepairBudget
 from qagent.research.fuyao_market_sentiment import capture_fuyao_market_research
 from qagent.research.fuyao_theme_strength import capture_fuyao_theme_strength
 from qagent.research.fuyao_shadow_outcomes import (
@@ -295,7 +296,9 @@ _UNKNOWN_PAPER_INDUSTRIES = {
     "unknown",
     "unclassified",
     "其他",
+    "综合",
     "未知",
+    "未知个股行业",
     "未知etf暴露",
 }
 _task_manager = TaskManager()
@@ -3768,6 +3771,8 @@ AUTOMATION_SCAN_DEFERRED_STATUSES = frozenset(
         "deferred_market_session",
     }
 )
+AUTOMATION_FACTOR_SHADOW_MAX_PROVIDER_BATCHES = 8
+AUTOMATION_FACTOR_SHADOW_WALL_CLOCK_SECONDS = 90.0
 
 
 def _automation_stage_outcome(
@@ -3817,6 +3822,11 @@ def _automation_stage_outcome(
             f"fuyao market/theme status is {market or 'missing'}/{theme or 'missing'}"
         )
     if stage_key == "factor_shadow":
+        benchmark_status = health.get("factor_shadow_benchmark_refresh", "")
+        if benchmark_status == "error":
+            return "error", "factor shadow benchmark refresh failed"
+        if benchmark_status == "deferred_budget":
+            return "deferred", "factor shadow benchmark refresh exhausted work budget"
         status = health.get("factor_shadow_outcome_status", "")
         if status in {"recorded", "up_to_date"}:
             return "success", None
@@ -4579,11 +4589,25 @@ def _run_auto_processing_cycle_inner(
                 expected_signal_date or _latest_completed_a_share_session() or date.today()
             )
             shadow_market_provider = build_market_data_provider(mode)
+            shadow_work_budget = ExactPriceRepairBudget.bounded(
+                max_provider_batches=AUTOMATION_FACTOR_SHADOW_MAX_PROVIDER_BATCHES,
+                wall_clock_seconds=AUTOMATION_FACTOR_SHADOW_WALL_CLOCK_SECONDS,
+            )
+            data_health["factor_shadow_work_budget_max_provider_batches"] = str(
+                AUTOMATION_FACTOR_SHADOW_MAX_PROVIDER_BATCHES
+            )
+            data_health["factor_shadow_work_budget_wall_clock_seconds"] = str(
+                int(AUTOMATION_FACTOR_SHADOW_WALL_CLOCK_SECONDS)
+            )
+            data_health["factor_shadow_work_budget_deadline_contract"] = (
+                "cooperative_between_provider_calls_not_hard_cancellation"
+            )
             benchmark_refresh = refresh_factor_shadow_benchmark_cache(
                 create_session_factory(),
                 provider_mode=mode,
                 market_provider=shadow_market_provider,
                 as_of_date=factor_shadow_as_of,
+                work_budget=shadow_work_budget,
             )
             data_health.update(benchmark_refresh.data_health)
             shadow_resolution = resolve_factor_shadow_outcomes(
@@ -4591,6 +4615,7 @@ def _run_auto_processing_cycle_inner(
                 provider_mode=mode,
                 as_of_date=factor_shadow_as_of,
                 market_provider=shadow_market_provider,
+                work_budget=shadow_work_budget,
             )
             data_health.update(shadow_resolution.data_health)
             if shadow_resolution.next_maturity_date is not None:
@@ -6147,8 +6172,10 @@ def _paper_card_exposure_group(
     *,
     current_industry: object,
     instrument_id: str,
+    point_in_time_industry: object = None,
 ) -> str | None:
     normalized = _normalized_paper_industry(current_industry)
+    historical = _normalized_paper_industry(point_in_time_industry)
     market_context = card.get("market_context")
     market_context = market_context if isinstance(market_context, dict) else {}
     asset_type = str(card.get("asset_type") or "").strip().lower()
@@ -6162,8 +6189,38 @@ def _paper_card_exposure_group(
         or (normalized or "").lower() in {"指数etf", "etf", "未知etf暴露"}
     )
     if not is_etf:
-        return normalized
+        return normalized or historical
     return infer_etf_exposure_group(label, current_industry=normalized)
+
+
+def _paper_point_in_time_industry(
+    repo: QagentRepository,
+    *,
+    context,
+    instrument_id: str,
+    provider: str,
+) -> str | None:
+    if context is None:
+        return None
+    decision_date = getattr(context, "signal_date", None)
+    created_at = getattr(context, "created_at", None)
+    if decision_date is None and isinstance(created_at, datetime):
+        decision_date = created_at.date()
+    if not isinstance(decision_date, date) or not isinstance(created_at, datetime):
+        return None
+    replay = ReplayEvidenceRepository(repo.session_factory, provider)
+    revision = replay.current_revision()
+    if revision <= 0:
+        return None
+    evidence = replay.industries_as_of(
+        [instrument_id],
+        decision_date,
+        revision,
+        known_at_or_before=created_at,
+    ).get(instrument_id)
+    return _normalized_paper_industry(
+        getattr(evidence, "industry", None) if evidence is not None else None
+    )
 
 
 def _normalized_paper_industry(value: object) -> str | None:
@@ -8017,13 +8074,16 @@ def paper_trade_look_through_risk(
     )
     trade_by_id = {trade.trade_id: trade for trade in trades}
     position_ids = {position.instrument_id for position in ledger.positions}
+    production_repo = _repo()
     catalog = {
         item.instrument_id: item
-        for item in _repo().list_tradable_instruments(limit=20_000)
+        for item in production_repo.list_tradable_instruments(limit=20_000)
         if item.instrument_id in position_ids
     }
     holdings: list[PortfolioLookThroughHolding] = []
     etf_instruments: list[tuple[str, str]] = []
+    historical_industry_resolved = 0
+    stock_industry_unknown = 0
     for position in ledger.positions:
         trade = trade_by_id.get(position.trade_id)
         instrument = catalog.get(position.instrument_id)
@@ -8047,13 +8107,30 @@ def paper_trade_look_through_risk(
         )
         market_context = card.get("market_context")
         market_context = market_context if isinstance(market_context, dict) else {}
+        saved_industry = _normalized_paper_industry(
+            market_context.get("industry") or card.get("industry") or card.get("sector")
+        )
+        point_in_time_industry = (
+            _paper_point_in_time_industry(
+                production_repo,
+                context=context,
+                instrument_id=position.instrument_id,
+                provider=trade.provider,
+            )
+            if trade is not None and asset_type != "etf"
+            else None
+        )
         exposure_group = _paper_card_exposure_group(
             card,
-            current_industry=(
-                market_context.get("industry") or card.get("industry") or card.get("sector")
-            ),
+            current_industry=saved_industry,
             instrument_id=position.instrument_id,
+            point_in_time_industry=point_in_time_industry,
         )
+        if asset_type != "etf":
+            if exposure_group is None:
+                stock_industry_unknown += 1
+            elif saved_industry is None and exposure_group == point_in_time_industry:
+                historical_industry_resolved += 1
         holdings.append(
             PortfolioLookThroughHolding(
                 trade_id=position.trade_id,
@@ -8086,6 +8163,10 @@ def paper_trade_look_through_risk(
             "paper_reporting_scope": scope,
             "portfolio_lookthrough_catalog_matched": str(len(catalog)),
             "portfolio_lookthrough_position_count": str(len(holdings)),
+            "portfolio_lookthrough_historical_industry_resolved": str(
+                historical_industry_resolved
+            ),
+            "portfolio_lookthrough_stock_industry_unknown": str(stock_industry_unknown),
         }
     )
     return response.model_dump(mode="json")

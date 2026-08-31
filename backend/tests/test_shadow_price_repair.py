@@ -8,6 +8,7 @@ import pytest
 
 from qagent.db import create_session_factory, initialize_database
 from qagent.research.shadow_price_repair import (
+    ExactPriceRepairBudget,
     ExactPriceRequirement,
     repair_exact_daily_prices,
 )
@@ -81,6 +82,86 @@ def test_exact_date_repair_batches_at_twenty_and_repairs_entry_and_exit(tmp_path
     assert result.provider_batches == 6
     assert all(len(batch) <= 20 for batch, _, _ in provider.calls)
     assert len(cache.load_daily_bars("fixture", instrument_ids, entry, exit_)) == 82
+
+
+def test_exact_repair_budget_defers_unattempted_rows_but_keeps_not_listed_terminal(
+    tmp_path,
+):
+    database_url = f"sqlite:///{tmp_path / 'exact-budget.db'}"
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    cache = MarketDataCacheRepository(session_factory)
+    target = date(2026, 7, 2)
+    instrument_ids = [f"CN:{index:06d}" for index in range(45)]
+    not_listed = instrument_ids[0]
+    with session_factory() as session:
+        session.add(
+            HistoricalInstrumentProfileRow(
+                provider_mode="fixture",
+                instrument_id=not_listed,
+                snapshot_date=target,
+                listing_date=target + timedelta(days=1),
+                listing_status="pending",
+                source_provider="fixture",
+                dataset_revision=1,
+            )
+        )
+        session.commit()
+    rows = {
+        (instrument_id, target): _bar(instrument_id, target)
+        for instrument_id in instrument_ids[1:]
+    }
+    provider = RecordingProvider(rows)
+    budget = ExactPriceRepairBudget.bounded(
+        max_provider_batches=1,
+        wall_clock_seconds=60,
+    )
+
+    result = repair_exact_daily_prices(
+        cache,
+        provider_mode="fixture",
+        market_provider=provider,
+        requirements=[
+            ExactPriceRequirement(instrument_id, target, "adjusted_open")
+            for instrument_id in instrument_ids
+        ],
+        work_budget=budget,
+    )
+
+    assert provider.calls == [(instrument_ids[1:21], target, target)]
+    assert result.provider_batches == 1
+    assert result.repaired == 20
+    assert result.not_listed == 1
+    assert result.deferred_by_budget == 24
+    assert result.retryable == 24
+    assert result.budget_exhausted_reason == "provider_batch_budget"
+    assert result.reasons == {"not_listed": 1, "work_budget_exhausted": 24}
+
+
+def test_exact_repair_expired_wall_clock_budget_makes_no_provider_call(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'exact-deadline.db'}"
+    initialize_database(database_url)
+    session_factory = create_session_factory(database_url)
+    target = date(2026, 7, 2)
+    provider = RecordingProvider({("CN:000001", target): _bar("CN:000001", target)})
+
+    result = repair_exact_daily_prices(
+        MarketDataCacheRepository(session_factory),
+        provider_mode="fixture",
+        market_provider=provider,
+        requirements=[ExactPriceRequirement("CN:000001", target, "adjusted_open")],
+        work_budget=ExactPriceRepairBudget.bounded(
+            max_provider_batches=1,
+            wall_clock_seconds=0,
+        ),
+    )
+
+    assert provider.calls == []
+    assert result.deferred_by_budget == 1
+    assert result.budget_exhausted_reason == "wall_clock_deadline"
+    assert result.data_health("factor_shadow")[
+        "factor_shadow_exact_price_budget_exhausted"
+    ] == "true"
 
 
 def test_exact_date_no_row_classifies_suspension_not_listed_and_retryable_missing(tmp_path):

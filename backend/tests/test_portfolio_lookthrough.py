@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from qagent.api import routes
 from qagent.market.etf_exposure import (
     EtfConstituent,
     EtfExposureOverlap,
@@ -185,3 +186,76 @@ def test_portfolio_lookthrough_keeps_unavailable_etf_exposure_unknown():
     assert result.summary.unavailable_etf_weight_pct == 9.5
     assert result.industries[0].label == "ETF未披露行业"
     assert result.warnings[0].kind == "missing_etf_disclosure"
+
+
+def test_point_in_time_industries_do_not_merge_unrelated_stocks_as_composite():
+    industries = {
+        "CN:002612": "C18纺织服装、服饰业",
+        "CN:600216": "C27医药制造业",
+        "CN:600368": "G54道路运输业",
+        "CN:601628": "J68保险业",
+    }
+    holdings = [
+        PortfolioLookThroughHolding(
+            trade_id=f"trade-{instrument_id}",
+            instrument_id=instrument_id,
+            instrument_label=instrument_id,
+            asset_type="stock",
+            weight_pct=10.0,
+            exposure_group=routes._paper_card_exposure_group(
+                {"market_context": {"industry": "综合"}},
+                current_industry="综合",
+                instrument_id=instrument_id,
+                point_in_time_industry=industry,
+            ),
+        )
+        for instrument_id, industry in industries.items()
+    ]
+
+    result = build_portfolio_lookthrough_risk(holdings, [], [])
+
+    assert {item.label for item in result.industries} == set(industries.values())
+    assert "综合" not in {item.label for item in result.industries}
+    assert "industry_concentration" not in {warning.kind for warning in result.warnings}
+
+
+def test_genuine_same_industry_still_warns_and_unknown_stays_explicit():
+    same_industry = "C27医药制造业"
+    holdings = [
+        PortfolioLookThroughHolding(
+            trade_id="medicine-a",
+            instrument_id="CN:600216",
+            instrument_label="医药A",
+            asset_type="stock",
+            weight_pct=12.0,
+            exposure_group=same_industry,
+        ),
+        PortfolioLookThroughHolding(
+            trade_id="medicine-b",
+            instrument_id="CN:600267",
+            instrument_label="医药B",
+            asset_type="stock",
+            weight_pct=10.0,
+            exposure_group=same_industry,
+        ),
+        PortfolioLookThroughHolding(
+            trade_id="unknown",
+            instrument_id="CN:999999",
+            instrument_label="未知公司",
+            asset_type="stock",
+            weight_pct=5.0,
+            exposure_group=routes._paper_card_exposure_group(
+                {"market_context": {"industry": "综合"}},
+                current_industry="综合",
+                instrument_id="CN:999999",
+            ),
+        ),
+    ]
+
+    result = build_portfolio_lookthrough_risk(holdings, [], [])
+
+    warning = next(item for item in result.warnings if item.kind == "industry_concentration")
+    assert warning.label == same_industry
+    assert warning.weight_pct == 22.0
+    unknown = next(item for item in result.industries if item.label == "未知个股行业")
+    assert unknown.weight_pct == 5.0
