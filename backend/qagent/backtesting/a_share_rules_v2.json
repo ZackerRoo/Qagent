@@ -1,0 +1,46 @@
+{
+  "rule_set_version": "a-share-rules-v2",
+  "fee_schedule_version": "cn-cash-fees-2023-08-28-v1",
+  "valid_from": "2026-01-01",
+  "valid_to": null,
+  "as_of": "2026-09-01",
+  "review_after": "2026-12-31",
+  "scope": {
+    "included": ["continuous-auction price limits", "board lots and quantity steps", "T+0/T+1 settlement classification", "statutory stamp duty and transfer fee"],
+    "excluded": ["IPO/no-price-limit session execution", "price cage and order-price validity mechanics"]
+  },
+  "sources": [
+    {"authority": "SSE", "url": "https://www.sse.com.cn/lawandrules/sselawsrules2025/stocks/exchange/c/c_20260424_10816482.shtml"},
+    {"authority": "SZSE", "url": "https://www.szse.cn/lawrules/rule/trade/current/t20260424_620190.html"},
+    {"authority": "BSE", "url": "https://www.bse.cn/jygl_list/200028217.html"},
+    {"authority": "State Taxation Administration - securities transaction stamp tax law", "url": "https://fgk.chinatax.gov.cn/zcfgk/c100009/c5193058/content.html"},
+    {"authority": "State Taxation Administration - stamp duty reduction announcement", "url": "https://fgk.chinatax.gov.cn/zcfgk/c102416/c5211343/content.html"},
+    {"authority": "ChinaClear Shanghai fee schedule", "url": "https://www.chinaclear.cn/zdjs/fbzyls/202506/9d22b74d9f2e40edb67b44d1f6596f18/files/%E4%B8%8A%E6%B5%B7%E5%B8%82%E5%9C%BA%E8%AF%81%E5%88%B8%E7%99%BB%E8%AE%B0%E7%BB%93%E7%AE%97%E4%B8%9A%E5%8A%A1%E6%94%B6%E8%B4%B9%E5%8F%8A%E4%BB%A3%E6%94%B6%E7%A8%8E%E8%B4%B9%E4%B8%80%E8%A7%88%E8%A1%A8.pdf"},
+    {"authority": "ChinaClear Shenzhen fee schedule", "url": "https://www.chinaclear.cn/zdjs/fbzyls/202506/ab6384ba25514554a7eceaee3e521032/files/%E6%B7%B1%E5%9C%B3%E5%B8%82%E5%9C%BA%E8%AF%81%E5%88%B8%E7%99%BB%E8%AE%B0%E7%BB%93%E7%AE%97%E4%B8%9A%E5%8A%A1%E6%94%B6%E8%B4%B9%E5%8F%8A%E4%BB%A3%E6%94%B6%E7%A8%8E%E8%B4%B9%E4%B8%80%E8%A7%88%E8%A1%A8.pdf"},
+    {"authority": "ChinaClear Beijing fee schedule", "url": "https://www.chinaclear.cn/zdjs/fbzyls/202506/69144099e23c436ab678b9d778260402/files/%E5%8C%97%E4%BA%AC%E5%B8%82%E5%9C%BA%E8%AF%81%E5%88%B8%E7%99%BB%E8%AE%B0%E7%BB%93%E7%AE%97%E4%B8%9A%E5%8A%A1%E6%94%B6%E8%B4%B9%E5%8F%8A%E4%BB%A3%E6%94%B6%E7%A8%8E%E8%B4%B9%E4%B8%80%E8%A7%88%E8%A1%A8.pdf"}
+  ],
+  "trading_rules": [
+    {"limit_rule_key":"sse-main-2026","market":"SSE","board":"main","is_st":false,"security_type":"stock","effective_from":"2026-01-01","effective_to":null,"limit_pct":"10","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":5},
+    {"limit_rule_key":"sse-main-risk-pre-20260706","market":"SSE","board":"main","is_st":true,"security_type":"stock","effective_from":"2026-01-01","effective_to":"2026-07-05","limit_pct":"5","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":5},
+    {"limit_rule_key":"sse-main-risk-20260706","market":"SSE","board":"main","is_st":true,"security_type":"stock","effective_from":"2026-07-06","effective_to":null,"limit_pct":"10","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":5},
+    {"limit_rule_key":"szse-main-2026","market":"SZSE","board":"main","is_st":false,"security_type":"stock","effective_from":"2026-01-01","effective_to":null,"limit_pct":"10","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":5},
+    {"limit_rule_key":"szse-main-risk-pre-20260706","market":"SZSE","board":"main","is_st":true,"security_type":"stock","effective_from":"2026-01-01","effective_to":"2026-07-05","limit_pct":"5","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":5},
+    {"limit_rule_key":"szse-main-risk-20260706","market":"SZSE","board":"main","is_st":true,"security_type":"stock","effective_from":"2026-07-06","effective_to":null,"limit_pct":"10","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":5},
+    {"limit_rule_key":"sse-star-2026","market":"SSE","board":"star","is_st":false,"security_type":"stock","effective_from":"2026-01-01","effective_to":null,"limit_pct":"20","tick_size":"0.01","board_lot":200,"minimum_order_quantity":200,"quantity_step":1,"settlement_days":1,"ipo_no_limit_sessions":5},
+    {"limit_rule_key":"sse-star-risk-2026","market":"SSE","board":"star","is_st":true,"security_type":"stock","effective_from":"2026-01-01","effective_to":null,"limit_pct":"20","tick_size":"0.01","board_lot":200,"minimum_order_quantity":200,"quantity_step":1,"settlement_days":1,"ipo_no_limit_sessions":5},
+    {"limit_rule_key":"szse-chinext-2026","market":"SZSE","board":"chinext","is_st":false,"security_type":"stock","effective_from":"2026-01-01","effective_to":null,"limit_pct":"20","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":5},
+    {"limit_rule_key":"szse-chinext-risk-2026","market":"SZSE","board":"chinext","is_st":true,"security_type":"stock","effective_from":"2026-01-01","effective_to":null,"limit_pct":"20","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":5},
+    {"limit_rule_key":"bse-stock-2026","market":"BSE","board":"bse","is_st":false,"security_type":"stock","effective_from":"2026-01-01","effective_to":null,"limit_pct":"30","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":1,"settlement_days":1,"ipo_no_limit_sessions":1},
+    {"limit_rule_key":"bse-stock-risk-2026","market":"BSE","board":"bse","is_st":true,"security_type":"stock","effective_from":"2026-01-01","effective_to":null,"limit_pct":"30","tick_size":"0.01","board_lot":100,"minimum_order_quantity":100,"quantity_step":1,"settlement_days":1,"ipo_no_limit_sessions":1},
+    {"limit_rule_key":"cn-etf-10-t1-2026","market":"CN","board":"etf_10","is_st":false,"security_type":"etf","effective_from":"2026-01-01","effective_to":null,"limit_pct":"10","tick_size":"0.001","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":0},
+    {"limit_rule_key":"cn-etf-20-t1-2026","market":"CN","board":"etf_20","is_st":false,"security_type":"etf","effective_from":"2026-01-01","effective_to":null,"limit_pct":"20","tick_size":"0.001","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":1,"ipo_no_limit_sessions":0},
+    {"limit_rule_key":"cn-etf-10-t0-2026","market":"CN","board":"etf_10_t0","is_st":false,"security_type":"etf","effective_from":"2026-01-01","effective_to":null,"limit_pct":"10","tick_size":"0.001","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":0,"ipo_no_limit_sessions":0},
+    {"limit_rule_key":"cn-etf-20-t0-2026","market":"CN","board":"etf_20_t0","is_st":false,"security_type":"etf","effective_from":"2026-01-01","effective_to":null,"limit_pct":"20","tick_size":"0.001","board_lot":100,"minimum_order_quantity":100,"quantity_step":100,"settlement_days":0,"ipo_no_limit_sessions":0}
+  ],
+  "fee_templates": [
+    {"fee_rule_key":"cn-stock-secondary","effective_from":"2026-01-01","effective_to":null,"side":"buy","security_type":"stock","exchange":"ALL","stamp_duty_bps":"0","transfer_fee_bps":"0.1"},
+    {"fee_rule_key":"cn-stock-secondary","effective_from":"2026-01-01","effective_to":null,"side":"sell","security_type":"stock","exchange":"ALL","stamp_duty_bps":"5","transfer_fee_bps":"0.1"},
+    {"fee_rule_key":"cn-etf-secondary","effective_from":"2026-01-01","effective_to":null,"side":"buy","security_type":"etf","exchange":"ALL","stamp_duty_bps":"0","transfer_fee_bps":"0"},
+    {"fee_rule_key":"cn-etf-secondary","effective_from":"2026-01-01","effective_to":null,"side":"sell","security_type":"etf","exchange":"ALL","stamp_duty_bps":"0","transfer_fee_bps":"0"}
+  ]
+}

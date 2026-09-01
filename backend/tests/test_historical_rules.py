@@ -9,6 +9,7 @@ from qagent.backtesting.a_share_rules import (
     build_instrument_rule_metadata,
     build_instrument_rule_metadata_schedule,
     load_a_share_rule_schedule,
+    load_a_share_rule_schedule_version,
 )
 from qagent.backtesting.execution import VersionedAshareExecutionResolver
 from qagent.db import Base, create_db_engine
@@ -92,6 +93,72 @@ def test_checked_in_schedule_covers_board_and_registration_boundaries():
     assert bse.limit_pct == Decimal("30")
     assert bse.minimum_order_quantity == 100
     assert bse.quantity_step == 1
+
+
+def test_2026_schedule_changes_only_main_board_risk_limit_at_july_boundary():
+    schedule = load_a_share_rule_schedule_version("a-share-rules-v2")
+
+    for market in ("SSE", "SZSE"):
+        before = schedule.trading_rule(
+            trade_date=date(2026, 7, 5),
+            market=market,
+            board="main",
+            security_type="stock",
+            is_st=True,
+        )
+        after = schedule.trading_rule(
+            trade_date=date(2026, 7, 6),
+            market=market,
+            board="main",
+            security_type="stock",
+            is_st=True,
+        )
+        assert before.limit_pct == Decimal("5")
+        assert after.limit_pct == Decimal("10")
+
+    assert schedule.trading_rule(
+        trade_date=date(2026, 1, 1),
+        market="SSE",
+        board="star",
+        security_type="stock",
+        is_st=True,
+    ).limit_pct == Decimal("20")
+    assert schedule.trading_rule(
+        trade_date=date(2026, 7, 6),
+        market="BSE",
+        board="bse",
+        security_type="stock",
+    ).limit_pct == Decimal("30")
+    assert (
+        schedule.trading_rule(
+            trade_date=date(2026, 7, 6),
+            market="CN",
+            board="etf_20_t0",
+            security_type="etf",
+        ).settlement_days
+        == 0
+    )
+
+
+def test_legacy_loader_still_has_no_2026_coverage_and_v2_expires_for_runtime_use():
+    legacy = load_a_share_rule_schedule()
+    assert legacy.rule_set_version == "a-share-rules-v1"
+    with pytest.raises(LookupError, match="outside schedule validity"):
+        legacy.trading_rule(
+            trade_date=date(2026, 1, 1),
+            market="SSE",
+            board="main",
+            security_type="stock",
+        )
+
+    current = load_a_share_rule_schedule_version("a-share-rules-v2")
+    with pytest.raises(LookupError, match="mandatory review date"):
+        current.trading_rule(
+            trade_date=date(2027, 1, 1),
+            market="SSE",
+            board="main",
+            security_type="stock",
+        )
 
 
 def test_fee_schedule_requires_broker_terms_and_switches_stamp_duty():
@@ -235,11 +302,14 @@ def test_rule_repository_reports_metadata_coverage_gaps(tmp_path):
     )
     repo.upsert_instrument_rule_metadata(metadata)
 
-    assert repo.instrument_rule_metadata_gaps(
-        [profile],
-        date(2023, 1, 3),
-        date(2025, 12, 31),
-    ) == []
+    assert (
+        repo.instrument_rule_metadata_gaps(
+            [profile],
+            date(2023, 1, 3),
+            date(2025, 12, 31),
+        )
+        == []
+    )
     assert repo.instrument_rule_metadata_gaps(
         [profile],
         date(2021, 11, 1),
@@ -252,9 +322,7 @@ def test_execution_resolver_selects_st_rule_and_date_specific_stamp_duty(tmp_pat
     schedule = load_a_share_rule_schedule()
     repo.upsert_trading_rules(schedule.trading_rules)
     repo.upsert_fee_rules(
-        schedule.fee_rules(
-            BrokerFeeRequest(commission_bps="3", minimum_commission="5")
-        )
+        schedule.fee_rules(BrokerFeeRequest(commission_bps="3", minimum_commission="5"))
     )
     repo.upsert_instrument_rule_metadata(
         [
@@ -281,9 +349,7 @@ def test_execution_resolver_supports_pre_2023_validation_dates(tmp_path):
     profile = _profile("CN:600012")
     repo.upsert_trading_rules(schedule.trading_rules)
     repo.upsert_fee_rules(
-        schedule.fee_rules(
-            BrokerFeeRequest(commission_bps="3", minimum_commission="5")
-        )
+        schedule.fee_rules(BrokerFeeRequest(commission_bps="3", minimum_commission="5"))
     )
     repo.upsert_instrument_rule_metadata(
         build_instrument_rule_metadata_schedule(

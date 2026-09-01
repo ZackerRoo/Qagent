@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -17,6 +17,7 @@ from qagent.historical_evidence.models import (
 
 
 RULES_PATH = Path(__file__).with_name("a_share_rules_v1.json")
+RULES_V2_PATH = Path(__file__).with_name("a_share_rules_v2.json")
 SUPPORTED_T0_ETF_CATEGORIES = frozenset(
     {"bond", "gold", "money_market", "cross_border", "commodity_futures"}
 )
@@ -30,7 +31,7 @@ class BrokerFeeRequest(BaseModel):
 class FeeTemplate(BaseModel):
     fee_rule_key: str
     effective_from: date
-    effective_to: date
+    effective_to: date | None
     side: Literal["buy", "sell"]
     security_type: Literal["stock", "etf"]
     exchange: str
@@ -38,21 +39,52 @@ class FeeTemplate(BaseModel):
     transfer_fee_bps: Decimal
 
 
+class RuleSource(BaseModel):
+    authority: str
+    url: str
+
+
+class RuleScope(BaseModel):
+    included: tuple[str, ...] = ()
+    excluded: tuple[str, ...] = ()
+
+
 class AShareRuleSchedule(BaseModel):
     rule_set_version: str
     fee_schedule_version: str
     valid_from: date
-    valid_to: date
+    valid_to: date | None
+    as_of: date | None = None
+    review_after: date | None = None
+    sources: tuple[RuleSource, ...] = ()
+    scope: RuleScope | None = None
     trading_rules: list[HistoricalTradingRule]
     fee_templates: list[FeeTemplate]
 
     @model_validator(mode="after")
-    def validate_schedule(self):
-        if self.valid_from != date(2021, 11, 1) or self.valid_to != date(2025, 12, 31):
-            raise ValueError("a-share-rules-v1 must cover the declared validation window")
+    def validate_schedule(self) -> Self:
+        if self.valid_to is not None and self.valid_from > self.valid_to:
+            raise ValueError("valid_from must not be after valid_to")
+        if self.review_after is not None and self.as_of is None:
+            raise ValueError("review_after requires as_of")
+        if self.as_of is not None and self.review_after is not None:
+            if self.as_of > self.review_after:
+                raise ValueError("as_of must not be after review_after")
         if any(item.rule_set_version != self.rule_set_version for item in self.trading_rules):
             raise ValueError("trading rule version does not match schedule")
+        _validate_trading_rule_matrix(self)
+        _validate_fee_template_matrix(self)
         return self
+
+    def require_runtime_date(self, trade_date: date) -> None:
+        if trade_date < self.valid_from or (
+            self.valid_to is not None and trade_date > self.valid_to
+        ):
+            raise LookupError(f"trade date {trade_date} is outside schedule validity")
+        if self.review_after is not None and trade_date > self.review_after:
+            raise LookupError(
+                f"trade date {trade_date} is after mandatory review date {self.review_after}"
+            )
 
     def fee_rules(self, request: BrokerFeeRequest) -> list[HistoricalFeeRule]:
         return [
@@ -74,6 +106,7 @@ class AShareRuleSchedule(BaseModel):
         security_type: str,
         is_st: bool = False,
     ) -> HistoricalTradingRule:
+        self.require_runtime_date(trade_date)
         matches = [
             item
             for item in self.trading_rules
@@ -113,6 +146,120 @@ def load_a_share_rule_schedule(path: Path = RULES_PATH) -> AShareRuleSchedule:
         {"rule_set_version": version, **item} for item in payload["trading_rules"]
     ]
     return AShareRuleSchedule.model_validate(payload)
+
+
+def load_a_share_rule_schedule_version(version: str) -> AShareRuleSchedule:
+    """Load a checked-in schedule without changing the legacy no-argument contract."""
+
+    catalog = {
+        "a-share-rules-v1": RULES_PATH,
+        "a-share-rules-v2": RULES_V2_PATH,
+    }
+    try:
+        path = catalog[version]
+    except KeyError as exc:
+        raise LookupError(f"unknown A-share rule schedule: {version}") from exc
+    return load_a_share_rule_schedule(path)
+
+
+_CRITICAL_TRADING_MATRIX = frozenset(
+    {
+        ("SSE", "main", "stock", False),
+        ("SSE", "main", "stock", True),
+        ("SZSE", "main", "stock", False),
+        ("SZSE", "main", "stock", True),
+        ("SSE", "star", "stock", False),
+        ("SSE", "star", "stock", True),
+        ("SZSE", "chinext", "stock", False),
+        ("SZSE", "chinext", "stock", True),
+        ("BSE", "bse", "stock", False),
+        ("BSE", "bse", "stock", True),
+        ("CN", "etf_10", "etf", False),
+        ("CN", "etf_20", "etf", False),
+        ("CN", "etf_10_t0", "etf", False),
+        ("CN", "etf_20_t0", "etf", False),
+    }
+)
+_CRITICAL_FEE_MATRIX = frozenset(
+    {
+        ("stock", "buy", "ALL"),
+        ("stock", "sell", "ALL"),
+        ("etf", "buy", "ALL"),
+        ("etf", "sell", "ALL"),
+    }
+)
+
+
+def _validate_trading_rule_matrix(schedule: AShareRuleSchedule) -> None:
+    grouped: dict[tuple[str, str, str, bool], list[HistoricalTradingRule]] = {}
+    for item in schedule.trading_rules:
+        key = (item.market, item.board, item.security_type, item.is_st)
+        grouped.setdefault(key, []).append(item)
+    missing = _CRITICAL_TRADING_MATRIX - grouped.keys()
+    if missing:
+        raise ValueError(f"trading rule matrix has missing keys: {sorted(missing)!r}")
+    for key in grouped:
+        _validate_contiguous_intervals(
+            grouped[key],
+            schedule=schedule,
+            label=f"trading rule {key!r}",
+            coverage_start=max(
+                schedule.valid_from,
+                date(2021, 11, 15) if key[0] == "BSE" else schedule.valid_from,
+            ),
+        )
+
+
+def _validate_fee_template_matrix(schedule: AShareRuleSchedule) -> None:
+    grouped: dict[tuple[str, str, str], list[FeeTemplate]] = {}
+    for item in schedule.fee_templates:
+        key = (item.security_type, item.side, item.exchange)
+        grouped.setdefault(key, []).append(item)
+    missing = _CRITICAL_FEE_MATRIX - grouped.keys()
+    if missing:
+        raise ValueError(f"fee template matrix has missing keys: {sorted(missing)!r}")
+    for key, items in grouped.items():
+        _validate_contiguous_intervals(items, schedule=schedule, label=f"fee template {key!r}")
+    for index, left in enumerate(schedule.fee_templates):
+        for right in schedule.fee_templates[index + 1 :]:
+            if left.security_type != right.security_type or left.side != right.side:
+                continue
+            if left.exchange != right.exchange and "ALL" not in {
+                left.exchange,
+                right.exchange,
+            }:
+                continue
+            left_end = left.effective_to or date.max
+            right_end = right.effective_to or date.max
+            if left.effective_from <= right_end and right.effective_from <= left_end:
+                if left.exchange != right.exchange:
+                    raise ValueError("fee template exchange selectors overlap")
+
+
+def _validate_contiguous_intervals(
+    items: list[HistoricalTradingRule] | list[FeeTemplate],
+    *,
+    schedule: AShareRuleSchedule,
+    label: str,
+    coverage_start: date | None = None,
+) -> None:
+    ordered = sorted(items, key=lambda item: item.effective_from)
+    expected_start = coverage_start or schedule.valid_from
+    if ordered[0].effective_from != expected_start:
+        raise ValueError(f"{label} starts with a coverage gap")
+    for previous, current in zip(ordered, ordered[1:], strict=False):
+        if previous.effective_to is None:
+            raise ValueError(f"{label} has an open interval before another interval")
+        if current.effective_from <= previous.effective_to:
+            raise ValueError(f"{label} intervals overlap")
+        if current.effective_from != previous.effective_to + timedelta(days=1):
+            raise ValueError(f"{label} has a coverage gap")
+    final_to = ordered[-1].effective_to
+    if schedule.valid_to is None:
+        if final_to is not None:
+            raise ValueError(f"{label} must remain open for an open-ended schedule")
+    elif final_to != schedule.valid_to:
+        raise ValueError(f"{label} ends with a coverage gap")
 
 
 def build_instrument_rule_metadata(
@@ -181,7 +328,7 @@ def build_instrument_rule_metadata_schedule(
         schedule.valid_from,
         profile.listing_date or schedule.valid_from,
     )
-    effective_end = min(end, schedule.valid_to)
+    effective_end = min(end, schedule.valid_to or end)
     if profile.delisting_date is not None:
         effective_end = min(effective_end, profile.delisting_date)
     if effective_start > effective_end:
