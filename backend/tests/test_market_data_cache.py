@@ -560,6 +560,38 @@ class SettledTailHistoryRetryProvider(TailSnapshotRepairProvider):
         )
 
 
+class RawOnlySettledTailRetryProvider(TailSnapshotRepairProvider):
+    def __init__(self, expected: date):
+        super().__init__(expected + pd.Timedelta(days=1))
+        self.expected = expected
+
+    def get_historical_daily_bars(
+        self,
+        instrument_ids: list[str],
+        start: date,
+        end: date,
+    ) -> pd.DataFrame:
+        del start, end
+        self.history_calls.append(instrument_ids)
+        if len(self.history_calls) == 1:
+            return pd.DataFrame()
+        return pd.DataFrame(
+            [
+                {
+                    "instrument_id": instrument_id,
+                    "trade_date": self.expected,
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.8,
+                    "close": 10.2,
+                    "volume": 800_000,
+                    "provider": "raw_settled_history",
+                }
+                for instrument_id in instrument_ids
+            ]
+        )
+
+
 class PartialStaleBatchProvider(CountingProvider):
     def _partial(self, instrument_ids: list[str]) -> pd.DataFrame:
         return pd.DataFrame(
@@ -720,7 +752,7 @@ def test_cached_provider_repairs_internal_gaps_when_tail_is_current(tmp_path):
     assert inner.calls == 0
 
 
-def test_cached_provider_repairs_stale_tail_from_exact_session_snapshot(tmp_path):
+def test_cached_provider_keeps_raw_snapshot_but_does_not_fabricate_qfq(tmp_path):
     repo = make_cache_repo(tmp_path)
     expected = date(2026, 8, 12)
     instrument_id = "CN:300229"
@@ -774,14 +806,63 @@ def test_cached_provider_repairs_stale_tail_from_exact_session_snapshot(tmp_path
     )
     latest = bars.sort_values("trade_date").iloc[-1]
     assert inner.snapshot_calls == [[instrument_id]]
-    assert inner.history_calls == []
     assert latest["trade_date"] == expected
     assert latest["provider"] == "fuyao_realtime"
-    assert float(latest["adjusted_close"]) == float(latest["close"])
-    assert latest["adjustment_type"] == "snapshot_qfq_anchor"
+    assert pd.isna(latest["adjusted_close"])
+    assert latest["adjustment_type"] is None
+    assert inner.history_calls == [[instrument_id]]
     assert provider.prefetch_stats()["snapshot_requested"] == 1
     assert provider.prefetch_stats()["snapshot_repaired"] == 1
     assert provider.prefetch_stats()["snapshot_unrecovered"] == 0
+
+
+def test_cached_provider_repairs_one_missing_adjusted_tail_from_safe_history(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    expected = date(2026, 8, 12)
+    instrument_id = "CN:603439"
+    repo.save_daily_bars(
+        "free",
+        pd.DataFrame(
+            [
+                {
+                    "instrument_id": instrument_id,
+                    "trade_date": expected,
+                    "open": 40.0,
+                    "high": 43.0,
+                    "low": 39.5,
+                    "close": 42.0,
+                    "volume": 800_000,
+                    "provider": "akshare",
+                }
+            ]
+        ),
+    )
+    repo.record_coverage("free", instrument_id, expected, expected, row_count=1)
+    inner = SettledTailHistoryRetryProvider(expected)
+    # The bounded adjusted-tail repair is the second call for this fixture.
+    inner.history_calls.append([])
+    provider = CachedMarketDataProvider(
+        inner,
+        cache=repo,
+        provider_mode="free",
+        enable_recent_tail_snapshot_repair=True,
+    )
+
+    provider.prefetch_daily_bars(
+        [instrument_id],
+        expected,
+        expected,
+        repair_recent_tail=True,
+    )
+
+    repaired = repo.load_daily_bars("free", [instrument_id], expected, expected).iloc[0]
+    assert float(repaired["close"]) == 42.0
+    assert float(repaired["adjusted_close"]) == 10.2
+    assert repaired["adjustment_type"] == "qfq"
+    assert inner.history_calls[-1] == [instrument_id]
+    assert provider.prefetch_stats()["adjusted_tail_requested"] == 1
+    assert provider.prefetch_stats()["adjusted_tail_repaired"] == 1
+    assert provider.prefetch_stats()["adjusted_tail_unrecovered"] == 0
 
 
 def test_cached_provider_quarantines_snapshot_outside_expected_session(tmp_path):
@@ -841,6 +922,34 @@ def test_cached_provider_retries_unresolved_settled_tail_in_fresh_history_sessio
     assert provider.prefetch_stats()["settled_tail_retry_requested"] == 2
     assert provider.prefetch_stats()["settled_tail_retry_repaired"] == 2
     assert provider.prefetch_stats()["settled_tail_retry_unrecovered"] == 0
+
+
+def test_cached_provider_preserves_raw_only_settled_tail_retry(tmp_path):
+    repo = make_cache_repo(tmp_path)
+    expected = date(2026, 8, 12)
+    instrument_id = "CN:300229"
+    inner = RawOnlySettledTailRetryProvider(expected)
+    provider = CachedMarketDataProvider(
+        inner,
+        cache=repo,
+        provider_mode="free",
+        enable_recent_tail_snapshot_repair=True,
+    )
+
+    provider.prefetch_daily_bars(
+        [instrument_id],
+        date(2026, 8, 10),
+        expected,
+        repair_recent_tail=True,
+    )
+
+    bars = repo.load_daily_bars("free", [instrument_id], expected, expected)
+    assert len(bars) == 1
+    assert bars.iloc[0]["provider"] == "raw_settled_history"
+    assert float(bars.iloc[0]["close"]) == 10.2
+    assert pd.isna(bars.iloc[0]["adjusted_close"])
+    assert bars.iloc[0]["adjustment_type"] is None
+    assert provider.prefetch_stats()["settled_tail_retry_repaired"] == 1
 
 
 def test_cached_provider_does_not_treat_partial_stale_history_as_empty(tmp_path):

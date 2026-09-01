@@ -38,6 +38,8 @@ from qagent.storage.tables import (
     HistoricalInstrumentProfileRow,
     HistoricalTradabilityRow,
     OpportunitySnapshotRow,
+    PaperDualTrackJobRow,
+    PaperDualTrackSnapshotRow,
     PolicyDeploymentRow,
     PositionRow,
     ScanResultCacheRow,
@@ -546,6 +548,7 @@ class WalkForwardJobRecord(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
 
+
     def _portfolio_channel_selection_progress(self) -> int:
         phase_start = 92
         next_phase_start = 95
@@ -622,6 +625,33 @@ class WalkForwardJobRecord(BaseModel):
             0,
             min(99, int(self.processed_snapshots * 100 / self.total_snapshots)),
         )
+
+
+class PaperDualTrackJobRecord(BaseModel):
+    job_id: str
+    cache_identity: str
+    provider: str
+    reporting_scope: str
+    days: int
+    top_n: int
+    status: str
+    error: str | None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class PaperDualTrackSnapshotRecord(BaseModel):
+    cache_identity: str
+    provider: str
+    reporting_scope: str
+    days: int
+    top_n: int
+    source_job_id: str
+    payload: dict[str, object]
+    generated_at: datetime
+    updated_at: datetime
 
 
 class AutomationSchedulerStateRecord(BaseModel):
@@ -3012,6 +3042,189 @@ class QagentRepository:
             )
             return [self._walk_forward_job_from_row(row) for row in rows]
 
+    def create_or_get_paper_dual_track_job(
+        self,
+        *,
+        job_id: str,
+        cache_identity: str,
+        provider: str,
+        reporting_scope: str,
+        days: int,
+        top_n: int,
+    ) -> tuple[PaperDualTrackJobRecord, bool]:
+        """Atomically create one active refresh per complete cache identity."""
+
+        now = datetime.now(timezone.utc)
+        with self.session_factory() as session:
+            row = PaperDualTrackJobRow(
+                job_id=job_id,
+                cache_identity=cache_identity,
+                provider=provider,
+                reporting_scope=reporting_scope,
+                days=days,
+                top_n=top_n,
+                status="queued",
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                active = (
+                    session.query(PaperDualTrackJobRow)
+                    .filter(
+                        PaperDualTrackJobRow.cache_identity == cache_identity,
+                        PaperDualTrackJobRow.status.in_(("queued", "running")),
+                    )
+                    .order_by(PaperDualTrackJobRow.created_at.desc())
+                    .first()
+                )
+                if active is None:
+                    raise
+                return self._paper_dual_track_job_from_row(active), False
+            session.refresh(row)
+            return self._paper_dual_track_job_from_row(row), True
+
+    def get_paper_dual_track_job(
+        self,
+        job_id: str,
+    ) -> PaperDualTrackJobRecord | None:
+        with self.session_factory() as session:
+            row = session.get(PaperDualTrackJobRow, job_id)
+            return self._paper_dual_track_job_from_row(row) if row is not None else None
+
+    def get_latest_paper_dual_track_job(
+        self,
+        cache_identity: str,
+    ) -> PaperDualTrackJobRecord | None:
+        with self.session_factory() as session:
+            row = (
+                session.query(PaperDualTrackJobRow)
+                .filter(PaperDualTrackJobRow.cache_identity == cache_identity)
+                .order_by(
+                    PaperDualTrackJobRow.created_at.desc(),
+                    PaperDualTrackJobRow.job_id.desc(),
+                )
+                .first()
+            )
+            return self._paper_dual_track_job_from_row(row) if row is not None else None
+
+    def list_active_paper_dual_track_jobs(self) -> list[PaperDualTrackJobRecord]:
+        with self.session_factory() as session:
+            rows = (
+                session.query(PaperDualTrackJobRow)
+                .filter(PaperDualTrackJobRow.status.in_(("queued", "running")))
+                .order_by(PaperDualTrackJobRow.created_at.asc())
+                .all()
+            )
+            return [self._paper_dual_track_job_from_row(row) for row in rows]
+
+    def mark_paper_dual_track_job_running(
+        self,
+        job_id: str,
+    ) -> PaperDualTrackJobRecord | None:
+        now = datetime.now(timezone.utc)
+        with self.session_factory() as session:
+            row = session.get(PaperDualTrackJobRow, job_id)
+            if row is None or row.status != "queued":
+                return self._paper_dual_track_job_from_row(row) if row is not None else None
+            row.status = "running"
+            row.started_at = now
+            row.updated_at = now
+            session.commit()
+            session.refresh(row)
+            return self._paper_dual_track_job_from_row(row)
+
+    def requeue_paper_dual_track_job(
+        self,
+        job_id: str,
+    ) -> PaperDualTrackJobRecord | None:
+        now = datetime.now(timezone.utc)
+        with self.session_factory() as session:
+            row = session.get(PaperDualTrackJobRow, job_id)
+            if row is None or row.status not in {"queued", "running"}:
+                return self._paper_dual_track_job_from_row(row) if row is not None else None
+            row.status = "queued"
+            row.started_at = None
+            row.updated_at = now
+            session.commit()
+            session.refresh(row)
+            return self._paper_dual_track_job_from_row(row)
+
+    def complete_paper_dual_track_job(
+        self,
+        job_id: str,
+        *,
+        payload: dict[str, object],
+        generated_at: datetime,
+    ) -> PaperDualTrackJobRecord | None:
+        """Publish a snapshot only while this exact job still owns the active slot."""
+
+        now = datetime.now(timezone.utc)
+        with self.session_factory() as session:
+            row = session.get(PaperDualTrackJobRow, job_id)
+            if row is None or row.status not in {"queued", "running"}:
+                return self._paper_dual_track_job_from_row(row) if row is not None else None
+            snapshot = session.get(PaperDualTrackSnapshotRow, row.cache_identity)
+            values = {
+                "provider": row.provider,
+                "reporting_scope": row.reporting_scope,
+                "days": row.days,
+                "top_n": row.top_n,
+                "source_job_id": row.job_id,
+                "payload_json": json.dumps(payload, ensure_ascii=True, sort_keys=True),
+                "generated_at": generated_at,
+                "updated_at": now,
+            }
+            if snapshot is None:
+                snapshot = PaperDualTrackSnapshotRow(
+                    cache_identity=row.cache_identity,
+                    **values,
+                )
+                session.add(snapshot)
+            else:
+                for key, value in values.items():
+                    setattr(snapshot, key, value)
+            row.status = "succeeded"
+            row.error = None
+            row.finished_at = now
+            row.updated_at = now
+            session.commit()
+            session.refresh(row)
+            return self._paper_dual_track_job_from_row(row)
+
+    def fail_paper_dual_track_job(
+        self,
+        job_id: str,
+        *,
+        error: str,
+        status: str = "failed",
+    ) -> PaperDualTrackJobRecord | None:
+        if status not in {"failed", "timed_out"}:
+            raise ValueError("dual-track terminal status must be failed or timed_out")
+        now = datetime.now(timezone.utc)
+        with self.session_factory() as session:
+            row = session.get(PaperDualTrackJobRow, job_id)
+            if row is None or row.status not in {"queued", "running"}:
+                return self._paper_dual_track_job_from_row(row) if row is not None else None
+            row.status = status
+            row.error = error[:2000]
+            row.finished_at = now
+            row.updated_at = now
+            session.commit()
+            session.refresh(row)
+            return self._paper_dual_track_job_from_row(row)
+
+    def get_paper_dual_track_snapshot(
+        self,
+        cache_identity: str,
+    ) -> PaperDualTrackSnapshotRecord | None:
+        with self.session_factory() as session:
+            row = session.get(PaperDualTrackSnapshotRow, cache_identity)
+            return self._paper_dual_track_snapshot_from_row(row) if row is not None else None
+
     def get_walk_forward_run(self, run_id: str) -> WalkForwardRunRecord | None:
         with self.session_factory() as session:
             row = session.get(WalkForwardRunRow, run_id)
@@ -3866,6 +4079,44 @@ class QagentRepository:
             updated_at=row.updated_at,
             started_at=row.started_at,
             finished_at=row.finished_at,
+        )
+
+    @staticmethod
+    def _paper_dual_track_job_from_row(
+        row: PaperDualTrackJobRow,
+    ) -> PaperDualTrackJobRecord:
+        return PaperDualTrackJobRecord(
+            job_id=row.job_id,
+            cache_identity=row.cache_identity,
+            provider=row.provider,
+            reporting_scope=row.reporting_scope,
+            days=row.days,
+            top_n=row.top_n,
+            status=row.status,
+            error=row.error,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            started_at=row.started_at,
+            finished_at=row.finished_at,
+        )
+
+    @staticmethod
+    def _paper_dual_track_snapshot_from_row(
+        row: PaperDualTrackSnapshotRow,
+    ) -> PaperDualTrackSnapshotRecord:
+        payload = json.loads(row.payload_json)
+        if not isinstance(payload, dict):
+            raise ValueError("paper dual-track snapshot payload must be an object")
+        return PaperDualTrackSnapshotRecord(
+            cache_identity=row.cache_identity,
+            provider=row.provider,
+            reporting_scope=row.reporting_scope,
+            days=row.days,
+            top_n=row.top_n,
+            source_job_id=row.source_job_id,
+            payload=payload,
+            generated_at=row.generated_at,
+            updated_at=row.updated_at,
         )
 
     @staticmethod

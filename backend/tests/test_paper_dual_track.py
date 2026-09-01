@@ -581,8 +581,8 @@ def test_dual_track_route_defaults_to_current_cohort_and_reports_exclusions(monk
     )
     monkeypatch.setattr(routes, "_a_share_today", lambda: date(2026, 2, 6))
 
-    current_report = routes.paper_trade_dual_track()
-    history_report = routes.paper_trade_dual_track(reporting_scope="all_history")
+    current_report = routes._build_paper_dual_track_report()
+    history_report = routes._build_paper_dual_track_report(reporting_scope="all_history")
 
     assert current_report["reporting_scope"] == "current_model_cohort"
     assert requested_top_n == [50, 50]

@@ -347,6 +347,9 @@ def test_full_market_a_share_readiness_uses_the_whole_universe():
                 bars=400,
                 signals=1,
                 latest_trade_date=SIGNAL_DATE,
+                latest_adjusted_close="10.2",
+                latest_adjustment_type="qfq",
+                provider="baostock_paired",
             ),
             ScanItem(
                 instrument_id="CN:510300",
@@ -374,7 +377,81 @@ def test_full_market_a_share_readiness_uses_the_whole_universe():
     assert health["a_share_current_bars_coverage"] == "1/3"
     assert health["a_share_stale_bars"] == "1"
     assert health["a_share_missing_bars"] == "1"
-    assert health["a_share_adjusted_price_coverage"] == "2/2"
+    assert health["a_share_adjusted_price_coverage"] == "1/1"
+    assert health["a_share_adjusted_price_missing"] == "0"
+    assert health["a_share_adjusted_price_source_mix"] == "baostock_paired=1"
+
+
+def test_full_market_adjusted_health_does_not_confuse_raw_coverage_with_completeness():
+    health = _full_market_a_share_readiness_health(
+        [
+            ScanItem(
+                instrument_id="CN:000001",
+                status="watch",
+                reason="ready",
+                bars=400,
+                signals=0,
+                latest_trade_date=SIGNAL_DATE,
+                latest_close="10.1",
+                latest_adjusted_close="9.8",
+                latest_adjustment_type="qfq",
+                provider="baostock_paired",
+            ),
+            ScanItem(
+                instrument_id="CN:603439",
+                status="watch",
+                reason="ready",
+                bars=400,
+                signals=0,
+                latest_trade_date=SIGNAL_DATE,
+                latest_close="42.0",
+                latest_adjusted_close=None,
+                provider="akshare",
+            ),
+        ],
+        [],
+        {"adjusted_bars": "2"},
+        expected_trade_date=SIGNAL_DATE,
+    )
+
+    assert health["a_share_current_bars_coverage"] == "2/2"
+    assert health["a_share_adjusted_price_coverage"] == "1/2"
+    assert health["a_share_adjusted_price"] == "partial"
+    assert health["a_share_adjusted_price_missing"] == "1"
+    assert health["a_share_adjusted_price_missing_samples"] == "CN:603439"
+    assert health["a_share_adjusted_price_source_mix"] == "baostock_paired=1"
+    assert health["a_share_adjusted_price_missing_source_mix"] == "akshare=1"
+    assert health["a_share_adjustment_type_mix"] == "qfq=1"
+    assert health["a_share_adjusted_price_semantics"] == (
+        "latest_expected_session_adjusted_close_finite_positive"
+    )
+
+
+def test_full_market_adjusted_health_rejects_non_finite_and_non_positive_values():
+    items = [
+        ScanItem(
+            instrument_id=f"CN:00000{index}",
+            status="watch",
+            reason="ready",
+            bars=1,
+            signals=0,
+            latest_trade_date=SIGNAL_DATE,
+            latest_close="10",
+            latest_adjusted_close=value,
+            provider="fixture",
+        )
+        for index, value in enumerate(["10", "nan", "inf", "0"], start=1)
+    ]
+
+    health = _full_market_a_share_readiness_health(
+        items,
+        [],
+        {},
+        expected_trade_date=SIGNAL_DATE,
+    )
+
+    assert health["a_share_adjusted_price_coverage"] == "1/4"
+    assert health["a_share_adjusted_price_missing"] == "3"
 
 
 def test_full_market_health_merges_fuyao_error_category_counts():

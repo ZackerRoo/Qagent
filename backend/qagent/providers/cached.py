@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta
+import math
 
 import pandas as pd
 from pydantic import BaseModel
@@ -186,6 +187,11 @@ class CachedMarketDataProvider:
         self._pending_prefetch_errors = []
         self._pending_prefetch_fallback_instruments = []
         missing = self.prefetch_refresh_candidates(requested, start, end)
+        adjusted_tail_missing = self.cache.instruments_missing_valid_adjusted_close(
+            self.provider_mode,
+            [item for item in requested if item.startswith("CN:")],
+            end,
+        )
         self.last_prefetch_stats = {
             "mode": "incremental_tail",
             "requested": len(requested),
@@ -209,8 +215,11 @@ class CachedMarketDataProvider:
             "settled_tail_retry_repaired": 0,
             "settled_tail_retry_unrecovered": 0,
             "settled_tail_retry_errors": 0,
+            "adjusted_tail_requested": len(adjusted_tail_missing),
+            "adjusted_tail_repaired": 0,
+            "adjusted_tail_unrecovered": len(adjusted_tail_missing),
         }
-        if not missing:
+        if not missing and not adjusted_tail_missing:
             return
 
         getter = getattr(self.provider, "get_historical_daily_bars", None)
@@ -316,14 +325,23 @@ class CachedMarketDataProvider:
                 snapshot_targets,
                 not_after=end,
             )
-            retry_targets = [
+            raw_tail_missing = {
                 instrument_id
                 for instrument_id in snapshot_targets
                 if latest_after_history.get(instrument_id) != end
-            ]
+            }
+            invalid_adjusted_tail = set(
+                self.cache.instruments_missing_valid_adjusted_close(
+                    self.provider_mode,
+                    sorted(set(snapshot_targets) | set(adjusted_tail_missing)),
+                    end,
+                )
+            )
+            retry_targets = sorted(raw_tail_missing | invalid_adjusted_tail)
             retry_frame, retry_errors, retry_fallbacks = self._retry_settled_tail_from_history(
                 retry_targets,
                 end=end,
+                raw_tail_targets=raw_tail_missing,
             )
             errors.extend(retry_errors)
             fallback_instruments.extend(retry_fallbacks)
@@ -336,6 +354,18 @@ class CachedMarketDataProvider:
                     "settled_tail_retry_errors": len(retry_errors),
                 }
             )
+        adjusted_tail_remaining = self.cache.instruments_missing_valid_adjusted_close(
+            self.provider_mode,
+            adjusted_tail_missing,
+            end,
+        )
+        self.last_prefetch_stats.update(
+            {
+                "adjusted_tail_repaired": len(adjusted_tail_missing)
+                - len(adjusted_tail_remaining),
+                "adjusted_tail_unrecovered": len(adjusted_tail_remaining),
+            }
+        )
         self._pending_prefetch_errors = list(dict.fromkeys(errors))
         self._pending_prefetch_fallback_instruments = list(dict.fromkeys(fallback_instruments))
         cached_counts = self.cache.count_daily_bars_by_instrument(
@@ -411,7 +441,12 @@ class CachedMarketDataProvider:
         combined = (
             pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=BAR_COLUMNS)
         )
-        self.cache.save_daily_bars(self.provider_mode, combined)
+        if not combined.empty:
+            self.cache.merge_missing_daily_bars(
+                self.provider_mode,
+                combined,
+                allowed_keys={(instrument_id, end) for instrument_id in instrument_ids},
+            )
         return (
             combined,
             list(dict.fromkeys(errors)),
@@ -423,6 +458,7 @@ class CachedMarketDataProvider:
         instrument_ids: list[str],
         *,
         end: date,
+        raw_tail_targets: set[str] | None = None,
     ) -> tuple[pd.DataFrame, list[str], list[str]]:
         """Retry unresolved settled tails in fresh, bounded history sessions."""
 
@@ -432,7 +468,9 @@ class CachedMarketDataProvider:
         if not callable(getter):
             return pd.DataFrame(columns=BAR_COLUMNS), [], []
 
-        frames: list[pd.DataFrame] = []
+        raw_frames: list[pd.DataFrame] = []
+        adjusted_frames: list[pd.DataFrame] = []
+        raw_targets = raw_tail_targets or set()
         errors: list[str] = []
         fallback_instruments: list[str] = []
         for offset in range(0, len(instrument_ids), self.settled_tail_retry_batch_size):
@@ -441,13 +479,50 @@ class CachedMarketDataProvider:
             errors.extend(getattr(self.provider, "last_errors", []))
             fallback_instruments.extend(getattr(self.provider, "last_fallback_instruments", []))
             normalized = _normalized_snapshot_tail(frame, batch, expected=end)
-            if not normalized.empty:
-                frames.append(normalized)
+            if normalized.empty:
+                continue
+            raw_rows = normalized.loc[
+                normalized["instrument_id"].isin(raw_targets)
+            ].copy()
+            if not raw_rows.empty:
+                for column in (
+                    "adjusted_open",
+                    "adjusted_high",
+                    "adjusted_low",
+                    "adjusted_close",
+                    "adjustment_factor",
+                    "adjustment_type",
+                ):
+                    raw_rows[column] = None
+                raw_frames.append(raw_rows)
+            safe_adjusted = _safe_adjusted_repair_rows(normalized)
+            if not safe_adjusted.empty:
+                adjusted_frames.append(safe_adjusted)
 
-        combined = (
-            pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=BAR_COLUMNS)
+        raw_combined = (
+            pd.concat(raw_frames, ignore_index=True)
+            if raw_frames
+            else pd.DataFrame(columns=BAR_COLUMNS)
         )
-        self.cache.save_daily_bars(self.provider_mode, combined)
+        adjusted_combined = (
+            pd.concat(adjusted_frames, ignore_index=True)
+            if adjusted_frames
+            else pd.DataFrame(columns=BAR_COLUMNS)
+        )
+        if not raw_combined.empty:
+            self.cache.save_daily_bars(self.provider_mode, raw_combined)
+        if not adjusted_combined.empty:
+            self.cache.merge_missing_daily_bars(
+                self.provider_mode,
+                adjusted_combined,
+                allowed_keys={(instrument_id, end) for instrument_id in instrument_ids},
+            )
+        combined = pd.concat(
+            [frame for frame in (raw_combined, adjusted_combined) if not frame.empty],
+            ignore_index=True,
+        ) if not raw_combined.empty or not adjusted_combined.empty else pd.DataFrame(
+            columns=BAR_COLUMNS
+        )
         return (
             combined,
             list(dict.fromkeys(errors)),
@@ -498,6 +573,9 @@ def _empty_prefetch_stats() -> dict[str, int | str]:
         "settled_tail_retry_repaired": 0,
         "settled_tail_retry_unrecovered": 0,
         "settled_tail_retry_errors": 0,
+        "adjusted_tail_requested": 0,
+        "adjusted_tail_repaired": 0,
+        "adjusted_tail_unrecovered": 0,
     }
 
 
@@ -520,23 +598,6 @@ def _normalized_snapshot_tail(
     for column in BAR_COLUMNS:
         if column not in normalized.columns:
             normalized[column] = None
-    # A forward-adjusted series is anchored to the latest raw close. The
-    # explicit marker keeps this same-day snapshot repair auditable and allows
-    # a settled paired history row to replace it on the next refresh.
-    for field in ("open", "high", "low", "close"):
-        adjusted_field = f"adjusted_{field}"
-        normalized[adjusted_field] = normalized[adjusted_field].where(
-            normalized[adjusted_field].notna(),
-            normalized[field],
-        )
-    normalized["adjustment_factor"] = normalized["adjustment_factor"].where(
-        normalized["adjustment_factor"].notna(),
-        1.0,
-    )
-    normalized["adjustment_type"] = normalized["adjustment_type"].where(
-        normalized["adjustment_type"].notna(),
-        "snapshot_qfq_anchor",
-    )
     return (
         normalized[BAR_COLUMNS]
         .drop_duplicates(subset=["instrument_id", "trade_date"], keep="last")
@@ -550,3 +611,25 @@ def _instrument_ids_on_date(frame: pd.DataFrame, expected: date) -> set[str]:
         return set()
     trade_dates = pd.to_datetime(frame["trade_date"], errors="coerce").dt.date
     return set(frame.loc[trade_dates.eq(expected), "instrument_id"].astype(str))
+
+
+def _safe_adjusted_repair_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    """Keep only adjusted rows with explicit, non-realtime provenance."""
+
+    if frame.empty:
+        return frame
+    adjusted_close = pd.to_numeric(frame["adjusted_close"], errors="coerce")
+    adjustment_factor = pd.to_numeric(frame["adjustment_factor"], errors="coerce")
+    provider = frame["provider"].fillna("").astype(str).str.lower()
+    adjustment_type = frame["adjustment_type"].fillna("").astype(str).str.lower()
+    safe = (
+        adjusted_close.map(lambda value: pd.notna(value) and math.isfinite(float(value)))
+        & adjusted_close.gt(0)
+        & adjustment_factor.map(lambda value: pd.notna(value) and math.isfinite(float(value)))
+        & adjustment_factor.gt(0)
+        & adjustment_type.ne("")
+        & adjustment_type.ne("snapshot_qfq_anchor")
+        & provider.ne("fuyao_realtime")
+        & provider.ne("fuyao_etf_unadjusted")
+    )
+    return frame.loc[safe].copy()

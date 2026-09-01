@@ -2,6 +2,7 @@ from collections import Counter
 from copy import deepcopy
 from datetime import date, datetime, time, timedelta, timezone
 import json
+import math
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -1768,7 +1769,23 @@ def _full_market_a_share_readiness_health(
         for item in cn_items
     )
     missing = item_total - dated
-    adjusted = min(_int_health(aggregate_health, "adjusted_bars"), dated)
+    current_items = [item for item in cn_items if item.latest_trade_date == expected_trade_date]
+    adjusted_items = [item for item in current_items if _valid_latest_adjusted_close(item)]
+    adjusted = len(adjusted_items)
+    adjusted_total = len(current_items)
+    adjusted_missing_items = [
+        item for item in current_items if not _valid_latest_adjusted_close(item)
+    ]
+    adjusted_source_counts = Counter(
+        (item.provider or "unknown").strip() or "unknown" for item in adjusted_items
+    )
+    adjusted_missing_source_counts = Counter(
+        (item.provider or "unknown").strip() or "unknown" for item in adjusted_missing_items
+    )
+    adjusted_type_counts = Counter(
+        (item.latest_adjustment_type or "unknown").strip() or "unknown"
+        for item in adjusted_items
+    )
     suspension = min(_int_health(aggregate_health, "a_share_suspension_count"), item_total)
     price_limit = min(_int_health(aggregate_health, "a_share_price_limit_count"), item_total)
     liquidity = min(_int_health(aggregate_health, "a_share_liquidity_count"), item_total)
@@ -1779,7 +1796,7 @@ def _full_market_a_share_readiness_health(
         card_total,
     )
     statuses = {
-        "a_share_adjusted_price": _coverage_readiness(adjusted, dated),
+        "a_share_adjusted_price": _coverage_readiness(adjusted, adjusted_total),
         "a_share_suspension": _coverage_readiness(suspension, item_total),
         "a_share_price_limit": _coverage_readiness(price_limit, item_total),
         "a_share_industry": _coverage_readiness(industry, card_total),
@@ -1813,7 +1830,21 @@ def _full_market_a_share_readiness_health(
         "a_share_current_bar_coverage_ratio": f"{current / item_total:.6f}"
         if item_total
         else "0.000000",
-        "a_share_adjusted_price_coverage": f"{adjusted}/{dated}",
+        "a_share_adjusted_price_coverage": f"{adjusted}/{adjusted_total}",
+        "a_share_adjusted_price_missing": str(len(adjusted_missing_items)),
+        "a_share_adjusted_price_missing_samples": ",".join(
+            sorted(item.instrument_id for item in adjusted_missing_items)[:12]
+        ),
+        "a_share_adjusted_price_source_mix": _market_data_count_mix(
+            adjusted_source_counts
+        ),
+        "a_share_adjusted_price_missing_source_mix": _market_data_count_mix(
+            adjusted_missing_source_counts
+        ),
+        "a_share_adjustment_type_mix": _market_data_count_mix(adjusted_type_counts),
+        "a_share_adjusted_price_semantics": (
+            "latest_expected_session_adjusted_close_finite_positive"
+        ),
         "a_share_suspension_coverage": f"{suspension}/{item_total}",
         "a_share_price_limit_coverage": f"{price_limit}/{item_total}",
         "a_share_liquidity_coverage": f"{liquidity}/{item_total}",
@@ -1827,6 +1858,14 @@ def _coverage_readiness(covered: int, total: int) -> str:
     if total <= 0 or covered <= 0:
         return "missing"
     return "ready" if covered / total >= 0.98 else "partial"
+
+
+def _valid_latest_adjusted_close(item: ScanItem) -> bool:
+    try:
+        value = float(item.latest_adjusted_close)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(value) and value > 0
 
 
 def _readiness_score(status: str) -> float:

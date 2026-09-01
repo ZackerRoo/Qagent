@@ -13,6 +13,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -661,6 +662,55 @@ class WalkForwardJobRow(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PaperDualTrackJobRow(Base):
+    __tablename__ = "paper_dual_track_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'succeeded', 'failed', 'timed_out')",
+            name="ck_paper_dual_track_jobs_status",
+        ),
+        Index(
+            "uq_paper_dual_track_active_identity",
+            "cache_identity",
+            unique=True,
+            sqlite_where=text("status IN ('queued', 'running')"),
+        ),
+    )
+
+    job_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    cache_identity: Mapped[str] = mapped_column(String(160), index=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    reporting_scope: Mapped[str] = mapped_column(String(32), index=True)
+    days: Mapped[int] = mapped_column(Integer)
+    top_n: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="queued")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utc_now, onupdate=utc_now
+    )
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class PaperDualTrackSnapshotRow(Base):
+    __tablename__ = "paper_dual_track_snapshots"
+
+    cache_identity: Mapped[str] = mapped_column(String(160), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    reporting_scope: Mapped[str] = mapped_column(String(32), index=True)
+    days: Mapped[int] = mapped_column(Integer)
+    top_n: Mapped[int] = mapped_column(Integer)
+    source_job_id: Mapped[str] = mapped_column(
+        ForeignKey("paper_dual_track_jobs.job_id"), index=True
+    )
+    payload_json: Mapped[str] = mapped_column(Text)
+    generated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utc_now, onupdate=utc_now
+    )
 
 
 class RankingV3ForwardLedgerRow(Base):

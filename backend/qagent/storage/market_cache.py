@@ -569,6 +569,47 @@ class MarketDataCacheRepository:
                     result[str(instrument_id)] = int(row_count)
         return result
 
+    def instruments_missing_valid_adjusted_close(
+        self,
+        provider_mode: str,
+        instrument_ids: list[str],
+        trade_date: date,
+    ) -> list[str]:
+        """Return current raw rows whose adjusted close is absent or non-positive."""
+
+        missing: list[str] = []
+        unique_ids = sorted(set(instrument_ids))
+        with self.session_factory() as session:
+            for offset in range(0, len(unique_ids), SQLITE_SAFE_VARIABLE_LIMIT):
+                chunk = unique_ids[offset : offset + SQLITE_SAFE_VARIABLE_LIMIT]
+                valid_adjusted = case(
+                    (
+                        MarketBarCacheRow.adjusted_close.is_not(None)
+                        & (MarketBarCacheRow.adjusted_close > 0),
+                        1,
+                    ),
+                    else_=0,
+                )
+                rows = (
+                    session.query(
+                        MarketBarCacheRow.instrument_id,
+                        valid_adjusted,
+                    )
+                    .filter(
+                        MarketBarCacheRow.provider_mode == provider_mode,
+                        MarketBarCacheRow.instrument_id.in_(chunk),
+                        MarketBarCacheRow.trade_date == trade_date,
+                        *_valid_cached_ohlc_filters(),
+                    )
+                    .all()
+                )
+                missing.extend(
+                    str(instrument_id)
+                    for instrument_id, is_valid in rows
+                    if not bool(is_valid)
+                )
+        return sorted(missing)
+
     def list_summaries(
         self,
         provider_mode: str | None = None,

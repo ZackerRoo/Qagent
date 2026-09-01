@@ -329,6 +329,11 @@ _walk_forward_jobs_lock = Lock()
 _submitted_walk_forward_jobs: set[str] = set()
 _factor_research_jobs_lock = Lock()
 _submitted_factor_research_jobs: set[str] = set()
+_paper_dual_track_task_executor: ProcessPoolExecutor | None = None
+_paper_dual_track_jobs_lock = Lock()
+_submitted_paper_dual_track_jobs: set[str] = set()
+_PAPER_DUAL_TRACK_JOB_TIMEOUT = timedelta(minutes=10)
+_PAPER_DUAL_TRACK_FRESHNESS = timedelta(minutes=30)
 _automation_scheduler = AutomationScheduler()
 _automation_scheduler_revision_lock = Lock()
 _automation_scheduler_state_revision = 0
@@ -381,6 +386,18 @@ def _full_market_executor() -> ProcessPoolExecutor:
     return _full_market_task_executor
 
 
+def _paper_dual_track_executor() -> ProcessPoolExecutor:
+    """Isolate SQLite-heavy report analysis from API and scheduler threads."""
+
+    global _paper_dual_track_task_executor
+    if _paper_dual_track_task_executor is None:
+        _paper_dual_track_task_executor = ProcessPoolExecutor(
+            max_workers=1,
+            mp_context=get_context("spawn"),
+        )
+    return _paper_dual_track_task_executor
+
+
 def _release_factor_research_submission(experiment_id: str) -> None:
     with _factor_research_jobs_lock:
         _submitted_factor_research_jobs.discard(experiment_id)
@@ -427,6 +444,25 @@ def _terminate_walk_forward_executor() -> bool:
             process.terminate()
             terminated = True
     executor.shutdown(wait=False, cancel_futures=True)
+    return terminated
+
+
+def _terminate_paper_dual_track_executor() -> bool:
+    global _paper_dual_track_task_executor
+    with _paper_dual_track_jobs_lock:
+        executor = _paper_dual_track_task_executor
+        _paper_dual_track_task_executor = None
+        _submitted_paper_dual_track_jobs.clear()
+    if executor is None:
+        return False
+    terminated = False
+    for process in list(getattr(executor, "_processes", {}).values()):
+        if process.is_alive():
+            process.terminate()
+            terminated = True
+    shutdown = getattr(executor, "shutdown", None)
+    if callable(shutdown):
+        shutdown(wait=False, cancel_futures=True)
     return terminated
 
 
@@ -7954,8 +7990,7 @@ def paper_trade_daily_report(
     return report.model_dump(mode="json")
 
 
-@router.get("/paper-trades/dual-track")
-def paper_trade_dual_track(
+def _build_paper_dual_track_report(
     provider: str = "free",
     days: int = 180,
     top_n: int = 5,
@@ -8068,6 +8103,242 @@ def paper_trade_dual_track(
         }
     )
     return report.model_dump(mode="json")
+
+
+def _paper_dual_track_parameters(
+    provider: str,
+    days: int,
+    top_n: int,
+    reporting_scope: str,
+) -> tuple[str, str, str]:
+    if days <= 0 or days > 730:
+        raise HTTPException(status_code=400, detail="days must be between 1 and 730")
+    if top_n <= 0 or top_n > 20:
+        raise HTTPException(status_code=400, detail="top_n must be between 1 and 20")
+    scope = reporting_scope.strip().lower()
+    if scope not in {"current_model_cohort", "all_history"}:
+        raise HTTPException(
+            status_code=400,
+            detail="reporting_scope must be current_model_cohort or all_history",
+        )
+    mode = provider.strip().lower()
+    identity = f"paper-dual-track-v1:{mode}:{scope}:{days}:{top_n}"
+    return mode, scope, identity
+
+
+def _paper_dual_track_job_payload(job) -> dict[str, object]:
+    return {
+        "job_id": job.job_id,
+        "cache_identity": job.cache_identity,
+        "provider": job.provider,
+        "reporting_scope": job.reporting_scope,
+        "days": job.days,
+        "top_n": job.top_n,
+        "status": job.status,
+        "error": job.error,
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat(),
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+    }
+
+
+def _paper_dual_track_job_expired(job, *, now: datetime | None = None) -> bool:
+    if job.status not in {"queued", "running"}:
+        return False
+    current = now or datetime.now(timezone.utc)
+    baseline = job.started_at or job.created_at
+    if baseline.tzinfo is None:
+        baseline = baseline.replace(tzinfo=timezone.utc)
+    return current - baseline > _PAPER_DUAL_TRACK_JOB_TIMEOUT
+
+
+def _paper_dual_track_cache_payload(
+    repo: QagentRepository,
+    *,
+    cache_identity: str,
+) -> dict[str, object]:
+    now = datetime.now(timezone.utc)
+    job = repo.get_latest_paper_dual_track_job(cache_identity)
+    snapshot = repo.get_paper_dual_track_snapshot(cache_identity)
+    effective_status = job.status if job is not None else "missing"
+    error = job.error if job is not None else None
+    if job is not None and _paper_dual_track_job_expired(job, now=now):
+        effective_status = "timed_out"
+        error = "dual-track refresh exceeded the 10 minute timeout"
+    age_seconds: int | None = None
+    if snapshot is not None:
+        generated_at = snapshot.generated_at
+        if generated_at.tzinfo is None:
+            generated_at = generated_at.replace(tzinfo=timezone.utc)
+        age_seconds = max(0, int((now - generated_at).total_seconds()))
+    is_current_success = bool(
+        snapshot is not None
+        and job is not None
+        and effective_status == "succeeded"
+        and snapshot.source_job_id == job.job_id
+    )
+    freshness = (
+        "missing"
+        if snapshot is None
+        else "fresh"
+        if is_current_success
+        and age_seconds is not None
+        and age_seconds <= int(_PAPER_DUAL_TRACK_FRESHNESS.total_seconds())
+        else "stale"
+    )
+    job_payload = _paper_dual_track_job_payload(job) if job is not None else None
+    if job_payload is not None and effective_status != job.status:
+        job_payload = {**job_payload, "status": effective_status, "error": error}
+    return {
+        "cache_identity": cache_identity,
+        "status": effective_status,
+        "freshness": freshness,
+        "age_seconds": age_seconds,
+        "stale_after_seconds": int(_PAPER_DUAL_TRACK_FRESHNESS.total_seconds()),
+        "last_updated": snapshot.generated_at.isoformat() if snapshot is not None else None,
+        "job": job_payload,
+        "report": snapshot.payload if snapshot is not None else None,
+    }
+
+
+def _submit_paper_dual_track_job(job_id: str) -> bool:
+    with _paper_dual_track_jobs_lock:
+        if job_id in _submitted_paper_dual_track_jobs:
+            return False
+        _submitted_paper_dual_track_jobs.add(job_id)
+    try:
+        future = _paper_dual_track_executor().submit(
+            _run_submitted_paper_dual_track_job,
+            job_id,
+        )
+        if future is not None and hasattr(future, "add_done_callback"):
+            future.add_done_callback(
+                lambda _future: _release_paper_dual_track_submission(job_id)
+            )
+    except Exception:
+        with _paper_dual_track_jobs_lock:
+            _submitted_paper_dual_track_jobs.discard(job_id)
+        raise
+    return True
+
+
+def _release_paper_dual_track_submission(job_id: str) -> None:
+    with _paper_dual_track_jobs_lock:
+        _submitted_paper_dual_track_jobs.discard(job_id)
+
+
+def _run_submitted_paper_dual_track_job(job_id: str) -> None:
+    repo = _repo()
+    job = repo.mark_paper_dual_track_job_running(job_id)
+    if job is None or job.status != "running":
+        return
+    started = datetime.now(timezone.utc)
+    try:
+        payload = _build_paper_dual_track_report(
+            provider=job.provider,
+            days=job.days,
+            top_n=job.top_n,
+            reporting_scope=job.reporting_scope,
+        )
+        finished = datetime.now(timezone.utc)
+        if finished - started > _PAPER_DUAL_TRACK_JOB_TIMEOUT:
+            repo.fail_paper_dual_track_job(
+                job_id,
+                status="timed_out",
+                error="dual-track refresh exceeded the 10 minute timeout",
+            )
+            return
+        repo.complete_paper_dual_track_job(
+            job_id,
+            payload=payload,
+            generated_at=finished,
+        )
+    except Exception as exc:
+        repo.fail_paper_dual_track_job(
+            job_id,
+            error=f"dual-track refresh failed: {str(exc)[:1800]}",
+        )
+
+
+def restore_paper_dual_track_jobs_from_storage() -> list[str]:
+    repo = _repo()
+    restored: list[str] = []
+    now = datetime.now(timezone.utc)
+    for job in repo.list_active_paper_dual_track_jobs():
+        if _paper_dual_track_job_expired(job, now=now):
+            repo.fail_paper_dual_track_job(
+                job.job_id,
+                status="timed_out",
+                error="dual-track refresh exceeded the 10 minute timeout before restart",
+            )
+            continue
+        repo.requeue_paper_dual_track_job(job.job_id)
+        if _submit_paper_dual_track_job(job.job_id):
+            restored.append(job.job_id)
+    return restored
+
+
+@router.get("/paper-trades/dual-track")
+def paper_trade_dual_track(
+    provider: str = "free",
+    days: int = 180,
+    top_n: int = 5,
+    reporting_scope: str = "current_model_cohort",
+) -> dict[str, object]:
+    _, _, identity = _paper_dual_track_parameters(
+        provider,
+        days,
+        top_n,
+        reporting_scope,
+    )
+    return _paper_dual_track_cache_payload(_repo(), cache_identity=identity)
+
+
+@router.post("/paper-trades/dual-track/jobs")
+def start_paper_trade_dual_track_job(
+    provider: str = "free",
+    days: int = 180,
+    top_n: int = 5,
+    reporting_scope: str = "current_model_cohort",
+) -> dict[str, object]:
+    mode, scope, identity = _paper_dual_track_parameters(
+        provider,
+        days,
+        top_n,
+        reporting_scope,
+    )
+    repo = _repo()
+    active = repo.get_latest_paper_dual_track_job(identity)
+    if active is not None and _paper_dual_track_job_expired(active):
+        repo.fail_paper_dual_track_job(
+            active.job_id,
+            status="timed_out",
+            error="dual-track refresh exceeded the 10 minute timeout",
+        )
+    job, created = repo.create_or_get_paper_dual_track_job(
+        job_id=f"paper-dual-track-{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{uuid4().hex[:8]}",
+        cache_identity=identity,
+        provider=mode,
+        reporting_scope=scope,
+        days=days,
+        top_n=top_n,
+    )
+    if created:
+        _submit_paper_dual_track_job(job.job_id)
+    return _paper_dual_track_cache_payload(repo, cache_identity=identity)
+
+
+@router.get("/paper-trades/dual-track/jobs/{job_id}")
+def get_paper_trade_dual_track_job(job_id: str) -> dict[str, object]:
+    job = _repo().get_paper_dual_track_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="dual-track refresh job not found")
+    payload = _paper_dual_track_job_payload(job)
+    if _paper_dual_track_job_expired(job):
+        payload["status"] = "timed_out"
+        payload["error"] = "dual-track refresh exceeded the 10 minute timeout"
+    return payload
 
 
 @router.get("/paper-trades/candidate-pool")

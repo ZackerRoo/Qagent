@@ -1,5 +1,6 @@
 from collections.abc import Mapping
 from datetime import date
+import math
 
 from pydantic import BaseModel, Field
 
@@ -106,6 +107,8 @@ class ScanItem(BaseModel):
     strategies_watch: int = 0
     strategies_missing_data: int = 0
     latest_close: str | None = None
+    latest_adjusted_close: str | None = None
+    latest_adjustment_type: str | None = None
     latest_trade_date: date | None = None
     provider: str | None = None
     factor_score: float | None = None
@@ -155,6 +158,7 @@ def run_daily_scan(
     cards: list[OpportunityCard] = []
     items: list[ScanItem] = []
     bars_by_instrument = {}
+    raw_bars_by_instrument = {}
     trading_status_by_instrument = {}
     tradability_by_instrument = {}
     data_quality_by_instrument: dict[str, DataQualityAudit] = {}
@@ -187,6 +191,7 @@ def run_daily_scan(
                 end=end,
             )
             research_bars = _research_price_bars(bars)
+            raw_bars_by_instrument[instrument_id] = bars
             earnings_events = strategy_provider.get_earnings_events(
                 instrument_ids=[instrument_id],
                 start=start,
@@ -378,7 +383,7 @@ def run_daily_scan(
     strategy_provider_errors = getattr(strategy_provider, "last_errors", [])
     if strategy_provider_errors:
         data_health["strategy_data_errors"] = " | ".join(strategy_provider_errors[:3])
-    data_health.update(_adjusted_bar_health(bars_by_instrument))
+    data_health.update(_adjusted_bar_health(raw_bars_by_instrument))
     data_health.update(summarize_data_quality_audits(data_quality_by_instrument.values()))
     data_health.update(
         summarize_a_share_enhanced_snapshots(
@@ -618,6 +623,14 @@ def _scan_item(
 
     latest = bars.sort_values("trade_date").iloc[-1]
     latest_close = str(round(float(latest["close"]), 2))
+    latest_adjusted_close = _valid_positive_text(latest.get("adjusted_close"))
+    latest_adjustment_type = (
+        str(latest["adjustment_type"]).strip()
+        if latest_adjusted_close is not None
+        and "adjustment_type" in bars.columns
+        and _nonempty_text(latest["adjustment_type"]) is not None
+        else None
+    )
     latest_trade_date = latest["trade_date"]
     provider = str(latest["provider"]) if "provider" in bars.columns else None
     if card:
@@ -630,6 +643,8 @@ def _scan_item(
             signals=len(signals),
             **strategy_counts,
             latest_close=latest_close,
+            latest_adjusted_close=latest_adjusted_close,
+            latest_adjustment_type=latest_adjustment_type,
             latest_trade_date=latest_trade_date,
             provider=provider,
             trading_status=trading_status,
@@ -680,6 +695,8 @@ def _scan_item(
         blockers=blockers,
         **strategy_counts,
         latest_close=latest_close,
+        latest_adjusted_close=latest_adjusted_close,
+        latest_adjustment_type=latest_adjustment_type,
         latest_trade_date=latest_trade_date,
         provider=provider,
         trading_status=trading_status,
@@ -754,15 +771,27 @@ def _apply_data_quality_audit_to_card(
 
 
 def _bars_have_adjusted_price(bars) -> bool:
-    adjusted_columns = {
-        "adj_close",
-        "adjusted_close",
-        "adjust_factor",
-        "复权收盘",
-        "前复权收盘",
-        "后复权收盘",
-    }
-    return any(column in bars.columns for column in adjusted_columns)
+    if bars.empty or "adjusted_close" not in bars.columns:
+        return False
+    latest = bars.sort_values("trade_date").iloc[-1]
+    return _valid_positive_text(latest.get("adjusted_close")) is not None
+
+
+def _valid_positive_text(value: object) -> str | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric) or numeric <= 0:
+        return None
+    return str(value)
+
+
+def _nonempty_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text and text.lower() != "nan" else None
 
 
 def _research_price_bars(bars):

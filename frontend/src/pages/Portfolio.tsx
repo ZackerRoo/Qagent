@@ -19,6 +19,7 @@ import {
   fetchPaperCurrentModelEvaluation,
   fetchPaperDailyReport,
   fetchPaperDualTrack,
+  startPaperDualTrackRefresh,
   fetchPaperExecutionAudit,
   fetchPaperForwardComparison,
   fetchPaperLedger,
@@ -60,6 +61,7 @@ import type {
   PaperAccountStatusResponse,
   PaperCurrentModelEvaluationResponse,
   PaperDualTrackResponse,
+  PaperDualTrackCacheResponse,
   PaperExecutionAuditResponse,
   PaperForwardComparisonResponse,
   PaperLedgerItem,
@@ -143,7 +145,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [dailyReport, setDailyReport] = useState<PaperDailyReportResponse>();
   const [candidatePool, setCandidatePool] = useState<PaperCandidatePoolResponse>();
   const [etfExposure, setEtfExposure] = useState<EtfExposureResponse>();
-  const [dualTrack, setDualTrack] = useState<PaperDualTrackResponse>();
+  const [dualTrack, setDualTrack] = useState<PaperDualTrackCacheResponse>();
   const [executionAudit, setExecutionAudit] = useState<PaperExecutionAuditResponse>();
   const [forwardComparison, setForwardComparison] = useState<PaperForwardComparisonResponse>();
   const [currentModelEvaluation, setCurrentModelEvaluation] = useState<PaperCurrentModelEvaluationResponse>();
@@ -343,6 +345,20 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     }
   }
 
+  async function refreshDualTrack() {
+    try {
+      const result = await startPaperDualTrackRefresh(dataMode);
+      setDualTrack(result);
+      setPaperMessage(
+        language === "zh"
+          ? "双轨重分析已进入隔离后台任务；旧快照会保留到新结果成功。"
+          : "Dual-track reanalysis is running in isolation; the prior snapshot remains visible until success.",
+      );
+    } catch (caught) {
+      setPaperMessage(caught instanceof Error ? caught.message : "Failed to start dual-track refresh");
+    }
+  }
+
   async function runFactorResearch(candidateId: FactorShadowCandidateId) {
     setIsRunningFactorResearch(true);
     try {
@@ -444,6 +460,14 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   useEffect(() => {
     void load();
   }, [dataMode, paperScope]);
+
+  useEffect(() => {
+    if (!dualTrack || !["queued", "running"].includes(dualTrack.status)) return;
+    const timer = window.setTimeout(() => {
+      void fetchPaperDualTrack(dataMode).then(setDualTrack).catch(() => undefined);
+    }, 2000);
+    return () => window.clearTimeout(timer);
+  });
 
   useEffect(() => {
     setSelectedPaperTradeId("");
@@ -927,7 +951,11 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
             />
             <details className="paper-research-drawer">
               <summary>{language === "zh" ? "选股、过滤与择时归因" : "Selection, filtering, and timing attribution"}</summary>
-              <PaperDualTrackPanel report={dualTrack} language={language} />
+              <PaperDualTrackPanel
+                cache={dualTrack}
+                language={language}
+                onRefresh={refreshDualTrack}
+              />
             </details>
             <details className="paper-research-drawer">
               <summary>{language === "zh" ? "每日复盘与正式验证" : "Daily review and formal validation"}</summary>
@@ -2875,17 +2903,42 @@ function FactorShadowAttributionTable({
 }
 
 function PaperDualTrackPanel({
-  report,
+  cache,
   language,
+  onRefresh,
 }: {
-  report?: PaperDualTrackResponse;
+  cache?: PaperDualTrackCacheResponse;
   language: Language;
+  onRefresh: () => void;
 }) {
-  if (!report) {
+  if (!cache) {
     return (
       <section className="paper-dual-track">
         <div className="mini-curve-empty">
           {language === "zh" ? "正在加载选股与择时双轨验证。" : "Loading dual-track validation."}
+        </div>
+      </section>
+    );
+  }
+  const report = cache.report;
+  const isRunning = cache.status === "queued" || cache.status === "running";
+  if (!report) {
+    return (
+      <section className="paper-dual-track">
+        <div className="mini-curve-empty">
+          <p>
+            {isRunning
+              ? (language === "zh" ? "双轨重分析正在隔离后台运行。" : "Dual-track reanalysis is running in the isolated worker.")
+              : cache.status === "failed" || cache.status === "timed_out"
+                ? (language === "zh" ? `最近刷新失败：${cache.job?.error ?? "未知错误"}` : `The latest refresh failed: ${cache.job?.error ?? "unknown error"}`)
+                : (language === "zh" ? "尚无双轨分析快照。" : "No dual-track analysis snapshot is available yet.")}
+          </p>
+          <button type="button" className="ghost" disabled={isRunning} onClick={onRefresh}>
+            <RefreshCw size={15} className={isRunning ? "spin" : ""} />
+            {isRunning
+              ? (language === "zh" ? "后台计算中" : "Running")
+              : (language === "zh" ? "生成快照" : "Generate snapshot")}
+          </button>
         </div>
       </section>
     );
@@ -2902,6 +2955,24 @@ function PaperDualTrackPanel({
   const tone = dualTrackTone(summary.verdict);
   return (
     <section className={`paper-dual-track tone-${tone}`}>
+      <div className={`notice ${cache.freshness === "fresh" ? "notice-success" : "notice-warning"}`}>
+        <span>
+          {isRunning
+            ? (language === "zh" ? "新快照正在后台计算，当前继续显示上一版。" : "A new snapshot is running; the previous successful result remains visible.")
+            : cache.status === "failed" || cache.status === "timed_out"
+              ? (language === "zh" ? "最近刷新失败，当前显示上一版成功快照。" : "The latest refresh failed; showing the prior successful snapshot.")
+              : cache.freshness === "stale"
+                ? (language === "zh" ? "当前快照已过期，可手动后台刷新。" : "This snapshot is stale and can be refreshed in the background.")
+                : (language === "zh" ? "当前显示最新成功快照。" : "Showing the latest successful snapshot.")}
+          {cache.last_updated ? ` ${language === "zh" ? "更新于" : "Updated"} ${new Date(cache.last_updated).toLocaleString()}` : ""}
+        </span>
+        <button type="button" className="ghost" disabled={isRunning} onClick={onRefresh}>
+          <RefreshCw size={15} className={isRunning ? "spin" : ""} />
+          {isRunning
+            ? (language === "zh" ? "刷新中" : "Refreshing")
+            : (language === "zh" ? "后台刷新" : "Refresh")}
+        </button>
+      </div>
       <div className="paper-dual-track-hero">
         <div>
           <span className="eyebrow">{language === "zh" ? "三轨模拟验证" : "Three-track validation"}</span>

@@ -1,4 +1,5 @@
 from collections.abc import Iterable
+import math
 
 from qagent.domain.models import (
     DataQualityAudit,
@@ -234,12 +235,11 @@ def _numeric(value: object) -> float | None:
 
 
 def _has_adjusted_price(bars) -> bool:
-    adjusted_columns = {
-        "adj_close",
-        "adjusted_close",
-        "adjust_factor",
-        "复权收盘",
-        "前复权收盘",
-        "后复权收盘",
-    }
-    return any(column in bars.columns for column in adjusted_columns)
+    if bars.empty or "adjusted_close" not in bars.columns:
+        return False
+    latest = bars.sort_values("trade_date").iloc[-1]
+    try:
+        value = float(latest["adjusted_close"])
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(value) and value > 0

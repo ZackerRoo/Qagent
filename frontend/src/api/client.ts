@@ -48,7 +48,7 @@ import type {
   PaperCurrentModelEvaluationResponse,
   CapacityStressReport,
   PaperDailyReportResponse,
-  PaperDualTrackResponse,
+  PaperDualTrackCacheResponse,
   PaperDualTrackReportingScope,
   PaperExecutionAuditResponse,
   PaperLedgerResponse,
@@ -550,13 +550,28 @@ export async function fetchPaperDailyReport(
 export async function fetchPaperDualTrack(
   provider: DataProviderMode,
   reportingScope: PaperDualTrackReportingScope = "current_model_cohort",
-): Promise<PaperDualTrackResponse> {
-  return apiGet<PaperDualTrackResponse>("/paper-trades/dual-track", {
+): Promise<PaperDualTrackCacheResponse> {
+  return apiGet<PaperDualTrackCacheResponse>("/paper-trades/dual-track", {
     provider,
     reporting_scope: reportingScope,
     days: 180,
     top_n: 5,
   });
+}
+
+export async function startPaperDualTrackRefresh(
+  provider: DataProviderMode,
+  reportingScope: PaperDualTrackReportingScope = "current_model_cohort",
+): Promise<PaperDualTrackCacheResponse> {
+  return apiPost<PaperDualTrackCacheResponse>(
+    `/paper-trades/dual-track/jobs${queryString({
+      provider,
+      reporting_scope: reportingScope,
+      days: 180,
+      top_n: 5,
+    })}`,
+    {},
+  );
 }
 
 export async function fetchPaperCandidatePool(

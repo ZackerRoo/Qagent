@@ -2391,6 +2391,32 @@ export type PaperDualTrackResponse = {
   data_health: Record<string, string>;
 };
 
+export type PaperDualTrackJob = {
+  job_id: string;
+  cache_identity: string;
+  provider: string;
+  reporting_scope: PaperDualTrackReportingScope;
+  days: number;
+  top_n: number;
+  status: "queued" | "running" | "succeeded" | "failed" | "timed_out";
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+export type PaperDualTrackCacheResponse = {
+  cache_identity: string;
+  status: "missing" | PaperDualTrackJob["status"];
+  freshness: "missing" | "fresh" | "stale";
+  age_seconds: number | null;
+  stale_after_seconds: number;
+  last_updated: string | null;
+  job: PaperDualTrackJob | null;
+  report: PaperDualTrackResponse | null;
+};
+
 export type PaperCandidatePoolItem = {
   snapshot_id: string;
   instrument_id: string;
