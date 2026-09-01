@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd @APP_DIR@/frontend
+exec >>@LOG_DIR@/frontend.log 2>&1
+exec chpst -u @SERVICE_USER@:@SERVICE_USER@ \
+  env HOME=@SERVICE_HOME@ TZ=Asia/Shanghai NODE_ENV=production \
+  /usr/bin/npm run preview -- --host 127.0.0.1 --port 5173 --strictPort

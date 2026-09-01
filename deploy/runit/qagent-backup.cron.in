@@ -1,0 +1,2 @@
+CRON_TZ=Asia/Shanghai
+30 3 * * * @SERVICE_USER@ @APP_DIR@/scripts/backup_sqlite.sh @STATE_DIR@/qagent.db @BACKUP_DIR@ 14 >/dev/null

@@ -1,0 +1,11 @@
+@LOG_DIR@/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su @SERVICE_USER@ @SERVICE_USER@
+    create 0640 @SERVICE_USER@ @SERVICE_USER@
+}

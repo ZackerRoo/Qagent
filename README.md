@@ -66,8 +66,7 @@ Backend:
 
 ```bash
 cd backend
-python -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
+uv sync --frozen --extra dev
 ../scripts/dev_backend.sh
 ```
 
@@ -128,6 +127,12 @@ cd backend
 cd ../frontend
 npm run build
 ```
+
+## Linux cloud deployment
+
+The long-running Ubuntu deployment uses runit on the current cloud host, keeps the
+only production SQLite database outside Git checkouts, and exposes both services
+only through an SSH tunnel. See [docs/deployment/linux-cloud.md](docs/deployment/linux-cloud.md).
 
 ## Key API Examples
 

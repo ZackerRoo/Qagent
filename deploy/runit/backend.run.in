@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+set -a
+# shellcheck disable=SC1091
+source /etc/qagent/qagent.env
+set +a
+cd @APP_DIR@/backend
+exec >>@LOG_DIR@/backend.log 2>&1
+exec chpst -u @SERVICE_USER@:@SERVICE_USER@ \
+  env HOME=@SERVICE_HOME@ TZ=Asia/Shanghai PYTHONUNBUFFERED=1 \
+  @APP_DIR@/backend/.venv/bin/python -m uvicorn qagent.app:create_app \
+  --factory --host 127.0.0.1 --port 8000
