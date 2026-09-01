@@ -2895,6 +2895,10 @@ function PaperDualTrackPanel({
     ?? report.windows[0];
   const hasCalibration = summary.calibrated_admitted != null
     && report.windows.some((item) => item.calibrated != null);
+  const excludedOtherCohort = report.excluded_other_cohort ?? 0;
+  const excludedUnclassified = report.excluded_unclassified ?? 0;
+  const excludedAnomalousHorizons = report.excluded_anomalous_horizons ?? 0;
+  const excludedPreListingBars = report.excluded_pre_listing_bars ?? 0;
   const tone = dualTrackTone(summary.verdict);
   return (
     <section className={`paper-dual-track tone-${tone}`}>
@@ -2919,7 +2923,14 @@ function PaperDualTrackPanel({
         <div>
           <span>{language === "zh" ? "推荐样本" : "Recommendations"}</span>
           <strong>{summary.recommendations}</strong>
-          <small>{summary.recommendation_days} {language === "zh" ? "个推荐日" : "signal days"}</small>
+          <small>
+            {summary.recommendation_days} {language === "zh" ? "个推荐日" : "signal days"}
+            {report.reporting_scope === "current_model_cohort"
+              ? (language === "zh" ? " · 当前 cohort" : " · current cohort")
+              : report.reporting_scope === "all_history"
+                ? (language === "zh" ? " · 全历史" : " · all history")
+                : (language === "zh" ? " · 旧口径" : " · legacy scope")}
+          </small>
         </div>
         <div>
           <span>{language === "zh" ? "选股轨已入场" : "Selection entries"}</span>
@@ -2950,6 +2961,15 @@ function PaperDualTrackPanel({
           <span>{language === "zh" ? "成交率" : "Fill rate"}</span>
           <strong>{formatRate(summary.execution_fill_rate)}</strong>
           <small>{language === "zh" ? "不把等待单算买入" : "Pending is not a fill"}</small>
+        </div>
+        <div>
+          <span>{language === "zh" ? "候选池隔离" : "Candidate pool isolated"}</span>
+          <strong>{excludedOtherCohort + excludedUnclassified + excludedAnomalousHorizons}</strong>
+          <small>
+            {language === "zh"
+              ? `旧 cohort ${excludedOtherCohort} · 未归类 ${excludedUnclassified} · 异常窗口 ${excludedAnomalousHorizons} · 上市前 K 线 ${excludedPreListingBars}`
+              : `other cohorts ${excludedOtherCohort} · unclassified ${excludedUnclassified} · anomalous windows ${excludedAnomalousHorizons} · pre-listing bars ${excludedPreListingBars}`}
+          </small>
         </div>
       </div>
 
@@ -3140,6 +3160,8 @@ function dualTrackTone(verdict: string) {
 
 function dualTrackVerdictLabel(verdict: string, language: Language) {
   const labels: Record<string, { zh: string; en: string }> = {
+    data_quality_blocked: { zh: "行情质量阻断", en: "Data quality blocked" },
+    mixed_cohort: { zh: "历史批次混合", en: "Mixed cohorts" },
     selection_weak: { zh: "选股偏弱", en: "Selection weak" },
     selection_warning: { zh: "短期偏弱预警", en: "Early selection warning" },
     selection_only: { zh: "选股已验证，等待成交", en: "Selection ready, execution waiting" },
@@ -3156,6 +3178,8 @@ function dualTrackVerdictLabel(verdict: string, language: Language) {
 
 function dualTrackHeadline(verdict: string) {
   const labels: Record<string, string> = {
+    data_quality_blocked: "Market data quality blocks attribution",
+    mixed_cohort: "Historical cohorts are mixed",
     selection_weak: "Selection needs adjustment",
     selection_warning: "Early selection results are weak",
     selection_only: "Selection is measurable; execution is waiting",

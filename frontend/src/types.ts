@@ -2350,8 +2350,26 @@ export type PaperDualTrackSample = {
   attribution: string;
 };
 
+export type PaperDualTrackDataQualityIssue = {
+  snapshot_id: string;
+  instrument_id: string;
+  track: "selection" | "execution";
+  horizon_days: number;
+  reason: "unadjusted_discontinuity" | string;
+  discontinuity_date: string;
+  overnight_gap_pct: number;
+};
+
+export type PaperDualTrackReportingScope = "current_model_cohort" | "all_history";
+
 export type PaperDualTrackResponse = {
   as_of: string;
+  reporting_scope?: PaperDualTrackReportingScope;
+  cohort_id?: string | null;
+  excluded_other_cohort?: number;
+  excluded_unclassified?: number;
+  excluded_anomalous_horizons?: number;
+  excluded_pre_listing_bars?: number;
   summary: {
     recommendation_days: number;
     recommendations: number;
@@ -2369,6 +2387,7 @@ export type PaperDualTrackResponse = {
   };
   windows: PaperDualTrackWindow[];
   samples: PaperDualTrackSample[];
+  data_quality_issues?: PaperDualTrackDataQualityIssue[];
   data_health: Record<string, string>;
 };
 

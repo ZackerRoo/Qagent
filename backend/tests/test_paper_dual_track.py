@@ -1,9 +1,11 @@
 import json
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pandas as pd
 
+from qagent.api import routes
 from qagent.db import Base, create_db_engine, create_session_factory
 from qagent.paper_trading.dual_track import (
     build_dual_track_report,
@@ -81,6 +83,24 @@ def _bars(instrument_id: str, *, base: float, periods: int = 24) -> pd.DataFrame
             "volume": [1_000_000] * periods,
         }
     )
+
+
+def _bars_with_unadjusted_gap(
+    instrument_id: str,
+    *,
+    gap_index: int,
+    gap_pct: float,
+) -> pd.DataFrame:
+    bars = _bars(instrument_id, base=100)
+    previous_close = float(bars.iloc[gap_index - 1]["close"])
+    current_open = float(bars.iloc[gap_index]["open"])
+    scale = previous_close * (1 + gap_pct) / current_open
+    for field in ("open", "high", "low", "close"):
+        bars[field] = bars[field].astype(float)
+        bars.loc[gap_index:, field] = bars.loc[gap_index:, field] * scale
+        bars[f"adjusted_{field}"] = bars[field]
+    bars["adjustment_factor"] = 1.0
+    return bars
 
 
 def test_select_daily_top_recommendations_deduplicates_and_limits_each_day():
@@ -238,6 +258,309 @@ def test_dual_track_reads_data_quality_audit_instead_of_legacy_data_quality_key(
     assert "数据质量" in samples[blocked.snapshot_id].calibrated_reason
     assert samples[ready.snapshot_id].calibrated_eligible is True
     assert report.summary.calibrated_admitted == 1
+
+
+def test_dual_track_excludes_only_horizons_crossing_unadjusted_discontinuity():
+    snapshot = _snapshot("snapshot-split", "CN:000001", date(2026, 1, 2), "0.90")
+    bars = _bars(snapshot.instrument_id, base=100)
+    for field in ("open", "high", "low", "close"):
+        bars[field] = bars[field].astype(float)
+        bars[f"adjusted_{field}"] = bars[field]
+        bars.loc[6:, field] = bars.loc[6:, field] / 2
+        bars.loc[6:, f"adjusted_{field}"] = bars.loc[6:, field]
+    bars["adjustment_factor"] = 1.0
+
+    report = build_dual_track_report(
+        snapshots=[snapshot],
+        trades=[],
+        instrument_bars=bars,
+        benchmark_bars=pd.DataFrame(),
+        as_of=date(2026, 2, 6),
+    )
+
+    sample = report.samples[0]
+    assert sample.selection_return_5d is not None
+    assert sample.selection_return_10d is None
+    assert sample.selection_return_20d is None
+    assert report.excluded_anomalous_horizons == 2
+    assert {(issue.track, issue.horizon_days) for issue in report.data_quality_issues} == {
+        ("selection", 10),
+        ("selection", 20),
+    }
+    assert report.windows[1].verdict == "data_quality_blocked"
+    assert report.summary.verdict == "data_quality_blocked"
+
+
+def test_dual_track_allows_normal_bse_overnight_move_up_to_30_percent():
+    snapshot = _snapshot("snapshot-bse-normal", "CN:920580", date(2026, 1, 2), "0.90")
+
+    for gap_pct in (-0.299, -0.30):
+        report = build_dual_track_report(
+            snapshots=[snapshot],
+            trades=[],
+            instrument_bars=_bars_with_unadjusted_gap(
+                snapshot.instrument_id,
+                gap_index=6,
+                gap_pct=gap_pct,
+            ),
+            benchmark_bars=pd.DataFrame(),
+            as_of=date(2026, 2, 6),
+            listing_dates={snapshot.instrument_id: date(2025, 1, 2)},
+        )
+
+        assert report.samples[0].selection_return_10d is not None
+        assert report.excluded_anomalous_horizons == 0
+        assert report.data_quality_issues == []
+
+
+def test_dual_track_flags_bse_overnight_move_above_30_percent():
+    snapshot = _snapshot("snapshot-bse-suspicious", "CN:830799", date(2026, 1, 2), "0.90")
+
+    report = build_dual_track_report(
+        snapshots=[snapshot],
+        trades=[],
+        instrument_bars=_bars_with_unadjusted_gap(
+            snapshot.instrument_id,
+            gap_index=6,
+            gap_pct=-0.305,
+        ),
+        benchmark_bars=pd.DataFrame(),
+        as_of=date(2026, 2, 6),
+        listing_dates={snapshot.instrument_id: date(2025, 1, 2)},
+    )
+
+    assert report.samples[0].selection_return_10d is None
+    assert report.excluded_anomalous_horizons == 2
+    assert {issue.overnight_gap_pct for issue in report.data_quality_issues} == {-30.5}
+
+
+def test_dual_track_still_flags_large_etf_unadjusted_discontinuity():
+    snapshot = _snapshot("snapshot-etf-split", "CN:159582", date(2026, 1, 2), "0.90")
+
+    report = build_dual_track_report(
+        snapshots=[snapshot],
+        trades=[],
+        instrument_bars=_bars_with_unadjusted_gap(
+            snapshot.instrument_id,
+            gap_index=6,
+            gap_pct=-0.50,
+        ),
+        benchmark_bars=pd.DataFrame(),
+        as_of=date(2026, 2, 6),
+        listing_dates={snapshot.instrument_id: date(2025, 1, 2)},
+    )
+
+    assert report.samples[0].selection_return_10d is None
+    assert report.excluded_anomalous_horizons == 2
+    assert {issue.overnight_gap_pct for issue in report.data_quality_issues} == {-50.0}
+
+
+def test_dual_track_allows_large_moves_in_first_five_post_listing_trade_dates():
+    listing_date = date(2026, 1, 7)
+    instrument_ids = [
+        "CN:600519",
+        "CN:000001",
+        "CN:688981",
+        "CN:300750",
+        "CN:920580",
+    ]
+
+    for instrument_id in instrument_ids:
+        snapshot = _snapshot(
+            f"snapshot-new-{instrument_id}",
+            instrument_id,
+            date(2026, 1, 2),
+            "0.90",
+        )
+        report = build_dual_track_report(
+            snapshots=[snapshot],
+            trades=[],
+            instrument_bars=_bars_with_unadjusted_gap(
+                instrument_id,
+                gap_index=7,
+                gap_pct=-0.50,
+            ),
+            benchmark_bars=pd.DataFrame(),
+            as_of=date(2026, 2, 6),
+            listing_dates={instrument_id: listing_date},
+        )
+
+        assert report.excluded_pre_listing_bars == 3
+        assert report.samples[0].selection_entry_date == listing_date
+        assert report.samples[0].selection_return_5d is not None
+        assert report.excluded_anomalous_horizons == 0
+
+
+def test_dual_track_does_not_exempt_sixth_listing_session_when_early_bars_are_missing():
+    instrument_id = "CN:600519"
+    snapshot = _snapshot("snapshot-missing-ipo-bars", instrument_id, date(2026, 1, 2), "0.90")
+    bars = _bars_with_unadjusted_gap(
+        instrument_id,
+        gap_index=6,
+        gap_pct=-0.50,
+    ).iloc[5:]
+
+    report = build_dual_track_report(
+        snapshots=[snapshot],
+        trades=[],
+        instrument_bars=bars,
+        benchmark_bars=pd.DataFrame(),
+        as_of=date(2026, 2, 6),
+        listing_dates={instrument_id: date(2026, 1, 5)},
+    )
+
+    assert report.samples[0].selection_return_5d is None
+    assert report.excluded_anomalous_horizons == 2
+    assert {issue.discontinuity_date for issue in report.data_quality_issues} == {date(2026, 1, 12)}
+
+
+def test_dual_track_checks_realized_exit_window_before_using_ledger_return():
+    snapshot = _snapshot("snapshot-realized-split", "CN:000001", date(2026, 1, 2), "0.90")
+    bars = _bars(snapshot.instrument_id, base=100)
+    for field in ("open", "high", "low", "close"):
+        bars[field] = bars[field].astype(float)
+        bars[f"adjusted_{field}"] = bars[field]
+        bars.loc[6:, field] = bars.loc[6:, field] / 2
+        bars.loc[6:, f"adjusted_{field}"] = bars.loc[6:, field]
+    bars["adjustment_factor"] = 1.0
+    trade = _trade(snapshot.snapshot_id, snapshot.instrument_id).model_copy(
+        update={
+            "status": "closed",
+            "exit_date": bars.iloc[8]["trade_date"],
+            "exit_price": Decimal("55"),
+            "realized_return_pct": -46.6,
+        }
+    )
+
+    report = build_dual_track_report(
+        snapshots=[snapshot],
+        trades=[trade],
+        instrument_bars=bars,
+        benchmark_bars=pd.DataFrame(),
+        as_of=date(2026, 2, 6),
+    )
+
+    sample = report.samples[0]
+    assert sample.execution_return_10d is None
+    assert sample.execution_return_20d is None
+    assert {(issue.track, issue.horizon_days) for issue in report.data_quality_issues}.issuperset(
+        {("execution", 10), ("execution", 20)}
+    )
+
+
+def test_dual_track_filters_bars_before_listing_date_and_reports_count():
+    snapshot = _snapshot("snapshot-pre-listing", "CN:000001", date(2026, 1, 2), "0.90")
+
+    report = build_dual_track_report(
+        snapshots=[snapshot],
+        trades=[],
+        instrument_bars=_bars(snapshot.instrument_id, base=100),
+        benchmark_bars=pd.DataFrame(),
+        as_of=date(2026, 2, 6),
+        listing_dates={snapshot.instrument_id: date(2026, 1, 7)},
+    )
+
+    assert report.excluded_pre_listing_bars == 3
+    assert report.samples[0].selection_entry_date == date(2026, 1, 7)
+    assert report.data_health["dual_track_excluded_pre_listing_bars"] == "3"
+
+
+def test_all_history_mixed_cohort_blocks_selection_attribution():
+    snapshot = _snapshot("snapshot-history", "CN:000001", date(2026, 1, 2), "0.90")
+
+    report = build_dual_track_report(
+        snapshots=[snapshot],
+        trades=[],
+        instrument_bars=_bars(snapshot.instrument_id, base=100),
+        benchmark_bars=pd.DataFrame(),
+        as_of=date(2026, 2, 6),
+        reporting_scope="all_history",
+        mixed_cohort=True,
+    )
+
+    assert all(window.verdict == "mixed_cohort" for window in report.windows)
+    assert report.summary.verdict == "mixed_cohort"
+    assert "不能据此归因" in report.summary.explanation
+
+
+def test_dual_track_route_defaults_to_current_cohort_and_reports_exclusions(monkeypatch):
+    current_snapshots = [
+        _snapshot(
+            f"snapshot-current-{index}",
+            f"CN:{index:06d}",
+            date(2026, 1, 2),
+            f"0.{50 + index}",
+        )
+        for index in range(1, 6)
+    ]
+    old_snapshots = [
+        _snapshot(
+            f"snapshot-old-{index}",
+            f"CN:{index + 100:06d}",
+            date(2026, 1, 2),
+            f"0.{90 + index}",
+        )
+        for index in range(1, 7)
+    ]
+    unknown = _snapshot("snapshot-unknown", "CN:000003", date(2026, 1, 2), "0.88")
+    current_cohort = SimpleNamespace(cohort_id="cohort-current")
+    old_cohort = SimpleNamespace(cohort_id="cohort-old")
+    requested_top_n = []
+
+    class FakeRepo:
+        def list_top_daily_opportunity_snapshots(self, **kwargs):
+            requested_top_n.append(kwargs["top_n"])
+            return [*old_snapshots, unknown, *current_snapshots]
+
+        def get_current_paper_model_cohort(self, _provider):
+            return current_cohort
+
+        def get_paper_model_cohorts_for_snapshots(self, _snapshot_ids):
+            return {
+                **{snapshot.snapshot_id: current_cohort for snapshot in current_snapshots},
+                **{snapshot.snapshot_id: old_cohort for snapshot in old_snapshots},
+                unknown.snapshot_id: None,
+            }
+
+        def replay_evidence(self, _provider):
+            return SimpleNamespace(recoverable_lifecycle_profiles=lambda _as_of: [])
+
+    all_bars = pd.concat(
+        [
+            _bars(item.instrument_id, base=100 + index * 20)
+            for index, item in enumerate([*current_snapshots, *old_snapshots, unknown])
+        ],
+        ignore_index=True,
+    )
+    monkeypatch.setattr(routes, "_repo", lambda: FakeRepo())
+    monkeypatch.setattr(
+        routes,
+        "_paper_repo",
+        lambda: SimpleNamespace(
+            list_trades=lambda **_kwargs: [],
+            get_account_settings=lambda: SimpleNamespace(
+                transaction_cost_bps=Decimal("5"),
+                slippage_bps=Decimal("5"),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_market_cache_repo",
+        lambda: SimpleNamespace(load_daily_bars=lambda *_args: all_bars),
+    )
+    monkeypatch.setattr(routes, "_a_share_today", lambda: date(2026, 2, 6))
+
+    current_report = routes.paper_trade_dual_track()
+    history_report = routes.paper_trade_dual_track(reporting_scope="all_history")
+
+    assert current_report["reporting_scope"] == "current_model_cohort"
+    assert requested_top_n == [50, 50]
+    assert current_report["summary"]["recommendations"] == 5
+    assert current_report["excluded_other_cohort"] == 6
+    assert current_report["excluded_unclassified"] == 1
+    assert history_report["summary"]["recommendations"] == 5
+    assert history_report["summary"]["verdict"] == "mixed_cohort"
 
 
 def test_repository_selects_unique_daily_top_recommendations_per_provider(tmp_path):

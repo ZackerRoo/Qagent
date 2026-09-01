@@ -1,16 +1,19 @@
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
+from typing import Literal
 
 import pandas as pd
 from pydantic import BaseModel, Field
 
 from qagent.market.benchmarks import CN_BENCHMARKS, benchmark_frames_from_bars
+from qagent.market.calendars import trading_sessions_in_range
 from qagent.storage.paper import PaperTradeRecord
 from qagent.storage.repository import OpportunitySnapshotRecord
 
 
 DEFAULT_HORIZONS = (5, 10, 20)
+ReportingScope = Literal["current_model_cohort", "all_history"]
 
 
 class DualTrackMetric(BaseModel):
@@ -73,6 +76,16 @@ class DualTrackSample(BaseModel):
     attribution: str
 
 
+class DualTrackDataQualityIssue(BaseModel):
+    snapshot_id: str
+    instrument_id: str
+    track: Literal["selection", "execution"]
+    horizon_days: int
+    reason: str
+    discontinuity_date: date
+    overnight_gap_pct: float
+
+
 class DualTrackSummary(BaseModel):
     recommendation_days: int
     recommendations: int
@@ -91,9 +104,16 @@ class DualTrackSummary(BaseModel):
 
 class DualTrackReport(BaseModel):
     as_of: date
+    reporting_scope: ReportingScope = "current_model_cohort"
+    cohort_id: str | None = None
+    excluded_other_cohort: int = 0
+    excluded_unclassified: int = 0
+    excluded_anomalous_horizons: int = 0
+    excluded_pre_listing_bars: int = 0
     summary: DualTrackSummary
     windows: list[DualTrackWindow]
     samples: list[DualTrackSample]
+    data_quality_issues: list[DualTrackDataQualityIssue] = Field(default_factory=list)
     data_health: dict[str, str] = Field(default_factory=dict)
 
 
@@ -146,9 +166,19 @@ def build_dual_track_report(
     horizons: tuple[int, ...] = DEFAULT_HORIZONS,
     transaction_cost_bps: float = 5.0,
     slippage_bps: float = 5.0,
+    reporting_scope: ReportingScope = "current_model_cohort",
+    cohort_id: str | None = None,
+    excluded_other_cohort: int = 0,
+    excluded_unclassified: int = 0,
+    listing_dates: dict[str, date] | None = None,
+    mixed_cohort: bool = False,
 ) -> DualTrackReport:
     selected = select_daily_top_recommendations(snapshots, top_n=top_n, as_of=as_of)
-    frames = _frames_by_instrument(instrument_bars)
+    filtered_bars, pre_listing_bar_count = _filter_pre_listing_bars(
+        instrument_bars,
+        listing_dates or {},
+    )
+    frames = _frames_by_instrument(filtered_bars)
     benchmark_frames = benchmark_frames_from_bars(benchmark_bars)
     trades_by_source = {trade.source_snapshot_id: trade for trade in trades}
     round_trip_cost_pct = 2 * (transaction_cost_bps + slippage_bps) / 100
@@ -165,15 +195,24 @@ def build_dual_track_report(
     }
     for snapshot in selected:
         frame = frames.get(snapshot.instrument_id, pd.DataFrame())
-        selection_entry_date, selection_entry_price, selection_returns = _selection_track_returns(
+        (
+            selection_entry_date,
+            selection_entry_price,
+            selection_returns,
+            selection_issues,
+        ) = _selection_track_returns(
             frame,
+            instrument_id=snapshot.instrument_id,
+            listing_date=(listing_dates or {}).get(snapshot.instrument_id),
             signal_date=snapshot.signal_date,
             horizons=horizons,
             round_trip_cost_pct=round_trip_cost_pct,
         )
         trade = trades_by_source.get(snapshot.snapshot_id)
-        execution_returns = _execution_track_returns(
+        execution_returns, execution_issues = _execution_track_returns(
             frame,
+            instrument_id=snapshot.instrument_id,
+            listing_date=(listing_dates or {}).get(snapshot.instrument_id),
             trade=trade,
             horizons=horizons,
             round_trip_cost_pct=round_trip_cost_pct,
@@ -218,9 +257,11 @@ def build_dual_track_report(
                 "selection_entry_date": selection_entry_date,
                 "selection_entry_price": selection_entry_price,
                 "selection_returns": selection_returns,
+                "selection_issues": selection_issues,
                 "calibrated_eligible": calibrated_eligible,
                 "calibrated_reason": calibrated_reason,
                 "execution_returns": execution_returns,
+                "execution_issues": execution_issues,
             }
         )
 
@@ -285,11 +326,18 @@ def build_dual_track_report(
                     ),
                 )
             )
+        horizon_has_anomaly = any(
+            horizon in item["selection_issues"] or horizon in item["execution_issues"]
+            for item in raw_samples
+        )
         verdict, explanation = _window_verdict(
             selection_metric,
             calibrated_metric,
             execution_metric,
             benchmark_metrics,
+            reporting_scope=reporting_scope,
+            mixed_cohort=mixed_cohort,
+            data_quality_blocked=horizon_has_anomaly,
         )
         windows.append(
             DualTrackWindow(
@@ -328,9 +376,32 @@ def build_dual_track_report(
         for item in raw_samples
         if item["trade"] is not None and item["trade"].entry_date is not None
     )
+    quality_issues = [
+        DualTrackDataQualityIssue(
+            snapshot_id=item["snapshot"].snapshot_id,
+            instrument_id=item["snapshot"].instrument_id,
+            track=track,
+            horizon_days=horizon,
+            reason="unadjusted_discontinuity",
+            discontinuity_date=issue["discontinuity_date"],
+            overnight_gap_pct=issue["overnight_gap_pct"],
+        )
+        for item in raw_samples
+        for track, issues in (
+            ("selection", item["selection_issues"]),
+            ("execution", item["execution_issues"]),
+        )
+        for horizon, issue in issues.items()
+    ]
     summary_verdict, headline, summary_explanation = _summary_verdict(primary)
     report = DualTrackReport(
         as_of=as_of,
+        reporting_scope=reporting_scope,
+        cohort_id=cohort_id,
+        excluded_other_cohort=excluded_other_cohort,
+        excluded_unclassified=excluded_unclassified,
+        excluded_anomalous_horizons=len(quality_issues),
+        excluded_pre_listing_bars=pre_listing_bar_count,
         summary=DualTrackSummary(
             recommendation_days=len({snapshot.signal_date for snapshot in selected}),
             recommendations=len(selected),
@@ -353,6 +424,7 @@ def build_dual_track_report(
         ),
         windows=windows,
         samples=samples[:20],
+        data_quality_issues=quality_issues[:20],
         data_health={
             "dual_track_source": "recommendation_snapshots_and_paper_ledger",
             "dual_track_entry_rule": "next_trading_day_open",
@@ -361,7 +433,13 @@ def build_dual_track_report(
             "dual_track_top_n_per_day": str(top_n),
             "dual_track_horizons": ",".join(str(value) for value in horizons),
             "dual_track_selected": str(len(selected)),
-            "dual_track_bar_rows": str(len(instrument_bars)),
+            "dual_track_reporting_scope": reporting_scope,
+            "dual_track_cohort_id": cohort_id or "unavailable",
+            "dual_track_excluded_other_cohort": str(excluded_other_cohort),
+            "dual_track_excluded_unclassified": str(excluded_unclassified),
+            "dual_track_excluded_anomalous_horizons": str(len(quality_issues)),
+            "dual_track_excluded_pre_listing_bars": str(pre_listing_bar_count),
+            "dual_track_bar_rows": str(len(filtered_bars)),
             "dual_track_benchmark_rows": str(len(benchmark_bars)),
             "dual_track_round_trip_cost_pct": f"{round_trip_cost_pct:.4f}",
         },
@@ -372,22 +450,47 @@ def build_dual_track_report(
 def _selection_track_returns(
     frame: pd.DataFrame,
     *,
+    instrument_id: str,
+    listing_date: date | None,
     signal_date: date | None,
     horizons: tuple[int, ...],
     round_trip_cost_pct: float,
-) -> tuple[date | None, Decimal | None, dict[int, float | None]]:
+) -> tuple[
+    date | None,
+    Decimal | None,
+    dict[int, float | None],
+    dict[int, dict[str, object]],
+]:
     empty = {horizon: None for horizon in horizons}
     ordered = _ordered_bars(frame)
     if signal_date is None or ordered.empty:
-        return None, None, empty
+        return None, None, empty, {}
     future = ordered.loc[ordered["trade_date"] > signal_date].reset_index(drop=True)
     if future.empty:
-        return None, None, empty
+        return None, None, empty, {}
     entry_price = _bar_price(future.iloc[0], "open")
     if entry_price is None or entry_price <= 0:
-        return None, None, empty
+        return None, None, empty, {}
+    prior = ordered.loc[ordered["trade_date"] <= signal_date]
+    prior_row = prior.iloc[-1] if not prior.empty else None
+    issues = {
+        horizon: issue
+        for horizon in horizons
+        if (
+            issue := _unadjusted_discontinuity(
+                future,
+                horizon=horizon,
+                prior_row=prior_row,
+                instrument_id=instrument_id,
+                listing_date=listing_date,
+            )
+        )
+        is not None
+    }
     returns = {
-        horizon: _hold_return(
+        horizon: None
+        if horizon in issues
+        else _hold_return(
             future,
             entry_price=entry_price,
             horizon=horizon,
@@ -395,36 +498,53 @@ def _selection_track_returns(
         )
         for horizon in horizons
     }
-    return future.iloc[0]["trade_date"], Decimal(str(entry_price)), returns
+    return future.iloc[0]["trade_date"], Decimal(str(entry_price)), returns, issues
 
 
 def _execution_track_returns(
     frame: pd.DataFrame,
     *,
+    instrument_id: str,
+    listing_date: date | None,
     trade: PaperTradeRecord | None,
     horizons: tuple[int, ...],
     round_trip_cost_pct: float,
-) -> dict[int, float | None]:
+) -> tuple[dict[int, float | None], dict[int, dict[str, object]]]:
     values = {horizon: None for horizon in horizons}
     if trade is None or trade.entry_date is None or trade.entry_price is None:
-        return values
+        return values, {}
     ordered = _ordered_bars(frame)
     if ordered.empty:
-        return values
+        return values, {}
     execution = ordered.loc[ordered["trade_date"] >= trade.entry_date].reset_index(drop=True)
     if execution.empty:
-        return values
+        return values, {}
+    prior = ordered.loc[ordered["trade_date"] < trade.entry_date]
+    prior_row = prior.iloc[-1] if not prior.empty else None
+    issues: dict[int, dict[str, object]] = {}
     exit_index = None
     if trade.exit_date is not None:
         matches = execution.index[execution["trade_date"] >= trade.exit_date].tolist()
         exit_index = matches[0] if matches else None
     for horizon in horizons:
-        if (
+        uses_realized_exit = (
             exit_index is not None
             and exit_index < horizon
             and trade.exit_price is not None
             and trade.exit_price > 0
-        ):
+        )
+        quality_horizon = exit_index + 1 if uses_realized_exit else horizon
+        issue = _unadjusted_discontinuity(
+            execution,
+            horizon=quality_horizon,
+            prior_row=prior_row,
+            instrument_id=instrument_id,
+            listing_date=listing_date,
+        )
+        if issue is not None:
+            issues[horizon] = issue
+            continue
+        if uses_realized_exit:
             values[horizon] = _net_return(
                 float(trade.entry_price),
                 float(trade.exit_price),
@@ -437,7 +557,7 @@ def _execution_track_returns(
             horizon=horizon,
             round_trip_cost_pct=round_trip_cost_pct,
         )
-    return values
+    return values, issues
 
 
 def _benchmark_hold_return(
@@ -547,7 +667,18 @@ def _window_verdict(
     calibrated: DualTrackMetric,
     execution: DualTrackMetric,
     benchmarks: list[DualTrackBenchmarkMetric],
+    *,
+    reporting_scope: ReportingScope,
+    mixed_cohort: bool,
+    data_quality_blocked: bool,
 ) -> tuple[str, str]:
+    if reporting_scope == "all_history" and mixed_cohort:
+        return "mixed_cohort", "全历史包含不同模型 cohort，不能据此归因为当前模型选股偏弱。"
+    if data_quality_blocked:
+        return (
+            "data_quality_blocked",
+            "行情窗口存在未被复权消除的严重断点，已排除异常 horizon，暂不做选股归因。",
+        )
     if selection.evaluated_count < 5:
         return "waiting", "选股轨道尚未形成至少 5 个成熟样本。"
     calibration_effect = _difference(
@@ -583,6 +714,8 @@ def _summary_verdict(
     if primary is None:
         return "waiting", "等待双轨样本", "还没有可计算的推荐与行情数据。"
     labels = {
+        "data_quality_blocked": "行情质量阻断归因",
+        "mixed_cohort": "历史 cohort 混合",
         "selection_weak": "选股需要调整",
         "selection_warning": "选股短期偏弱预警",
         "selection_only": "选股已有结果，等待成交",
@@ -600,6 +733,16 @@ def _summary_verdict(
 def _primary_window(windows: list[DualTrackWindow]) -> DualTrackWindow | None:
     if not windows:
         return None
+    blocked_ten_day = next(
+        (
+            item
+            for item in windows
+            if item.window_days == 10 and item.verdict in {"data_quality_blocked", "mixed_cohort"}
+        ),
+        None,
+    )
+    if blocked_ten_day is not None:
+        return blocked_ten_day
     return next(
         (
             item
@@ -696,12 +839,81 @@ def _frames_by_instrument(frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
     }
 
 
+def _filter_pre_listing_bars(
+    frame: pd.DataFrame,
+    listing_dates: dict[str, date],
+) -> tuple[pd.DataFrame, int]:
+    if frame.empty or not listing_dates:
+        return frame.copy(), 0
+    if "instrument_id" not in frame.columns or "trade_date" not in frame.columns:
+        return frame.copy(), 0
+    filtered = frame.copy()
+    trade_dates = pd.to_datetime(filtered["trade_date"], errors="coerce").dt.date
+    listing_series = filtered["instrument_id"].astype(str).map(listing_dates)
+    invalid = listing_series.notna() & trade_dates.notna() & (trade_dates < listing_series)
+    return filtered.loc[~invalid].copy(), int(invalid.sum())
+
+
 def _ordered_bars(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty or "trade_date" not in frame.columns:
         return pd.DataFrame()
     ordered = frame.copy()
     ordered["trade_date"] = pd.to_datetime(ordered["trade_date"], errors="coerce").dt.date
     return ordered.dropna(subset=["trade_date"]).sort_values("trade_date").reset_index(drop=True)
+
+
+def _unadjusted_discontinuity(
+    frame: pd.DataFrame,
+    *,
+    horizon: int,
+    prior_row: pd.Series | None,
+    instrument_id: str,
+    listing_date: date | None,
+) -> dict[str, object] | None:
+    if horizon <= 0 or horizon > len(frame):
+        return None
+    window = frame.iloc[:horizon]
+    no_limit_dates = _initial_listing_trade_dates(listing_date)
+    gap_threshold = 0.30 if _is_bse_instrument(instrument_id) else 0.25
+    previous = prior_row
+    for _, current in window.iterrows():
+        if previous is not None and current["trade_date"] not in no_limit_dates:
+            raw_previous = _positive_number(previous.get("close"))
+            raw_current = _positive_number(current.get("open"))
+            adjusted_previous = _positive_number(previous.get("adjusted_close"))
+            adjusted_current = _positive_number(current.get("adjusted_open"))
+            previous_factor = _optional_number(previous.get("adjustment_factor"))
+            current_factor = _optional_number(current.get("adjustment_factor"))
+            if (
+                raw_previous is not None
+                and raw_current is not None
+                and adjusted_previous is not None
+                and adjusted_current is not None
+                and previous_factor is not None
+                and current_factor is not None
+                and abs(previous_factor - current_factor) <= 1e-12
+            ):
+                raw_gap = raw_current / raw_previous - 1
+                adjusted_gap = adjusted_current / adjusted_previous - 1
+                if abs(raw_gap) > gap_threshold + 1e-9 and abs(adjusted_gap - raw_gap) <= 0.01:
+                    return {
+                        "discontinuity_date": current["trade_date"],
+                        "overnight_gap_pct": round(raw_gap * 100, 4),
+                    }
+        previous = current
+    return None
+
+
+def _initial_listing_trade_dates(listing_date: date | None) -> set[date]:
+    if listing_date is None:
+        return set()
+    sessions = trading_sessions_in_range(listing_date, listing_date + timedelta(days=31))
+    return set(sessions[:5])
+
+
+def _is_bse_instrument(instrument_id: str) -> bool:
+    symbol = instrument_id.removeprefix("CN:").split(".", 1)[0]
+    return symbol.startswith(("4", "8", "920"))
 
 
 def _bar_price(row: pd.Series, field: str) -> float | None:
@@ -711,6 +923,13 @@ def _bar_price(row: pd.Series, field: str) -> float | None:
         return None
     result = float(value)
     return result if result > 0 else None
+
+
+def _positive_number(value: object) -> float | None:
+    number = _optional_number(value)
+    if number is None or number <= 0:
+        return None
+    return number
 
 
 def _snapshot_label(snapshot: OpportunitySnapshotRecord) -> str:

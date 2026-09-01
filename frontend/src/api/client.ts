@@ -49,6 +49,7 @@ import type {
   CapacityStressReport,
   PaperDailyReportResponse,
   PaperDualTrackResponse,
+  PaperDualTrackReportingScope,
   PaperExecutionAuditResponse,
   PaperLedgerResponse,
   PaperForwardComparisonResponse,
@@ -127,7 +128,7 @@ type ScanParams = {
   sync_if_empty?: boolean;
   seed_paper?: boolean;
   scope?: string;
-  reporting_scope?: PaperReportingScope;
+  reporting_scope?: PaperReportingScope | PaperDualTrackReportingScope;
   seed_limit?: number;
   update_paper?: boolean;
   run_forward_evidence?: boolean;
@@ -548,9 +549,11 @@ export async function fetchPaperDailyReport(
 
 export async function fetchPaperDualTrack(
   provider: DataProviderMode,
+  reportingScope: PaperDualTrackReportingScope = "current_model_cohort",
 ): Promise<PaperDualTrackResponse> {
   return apiGet<PaperDualTrackResponse>("/paper-trades/dual-track", {
     provider,
+    reporting_scope: reportingScope,
     days: 180,
     top_n: 5,
   });

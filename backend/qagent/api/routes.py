@@ -7959,19 +7959,55 @@ def paper_trade_dual_track(
     provider: str = "free",
     days: int = 180,
     top_n: int = 5,
+    reporting_scope: str = "current_model_cohort",
 ) -> dict[str, object]:
     if days <= 0 or days > 730:
         raise HTTPException(status_code=400, detail="days must be between 1 and 730")
     if top_n <= 0 or top_n > 20:
         raise HTTPException(status_code=400, detail="top_n must be between 1 and 20")
+    scope = reporting_scope.strip().lower()
+    if scope not in {"current_model_cohort", "all_history"}:
+        raise HTTPException(
+            status_code=400,
+            detail="reporting_scope must be current_model_cohort or all_history",
+        )
     mode = provider.strip().lower()
     as_of = _a_share_today()
     snapshot_start = as_of - timedelta(days=days)
-    snapshots = _repo().list_top_daily_opportunity_snapshots(
+    repo = _repo()
+    candidate_top_n = min(500, max(top_n, min(top_n * 10, max(1, 30_000 // days))))
+    all_snapshots = repo.list_top_daily_opportunity_snapshots(
         start=snapshot_start,
         end=as_of,
-        top_n=top_n,
+        top_n=candidate_top_n,
         provider=mode,
+    )
+    current_cohort = repo.get_current_paper_model_cohort(mode)
+    cohort_by_snapshot = repo.get_paper_model_cohorts_for_snapshots(
+        [snapshot.snapshot_id for snapshot in all_snapshots]
+    )
+    identified_cohort_ids = {
+        cohort.cohort_id for cohort in cohort_by_snapshot.values() if cohort is not None
+    }
+    unclassified_count = sum(
+        cohort_by_snapshot.get(snapshot.snapshot_id) is None for snapshot in all_snapshots
+    )
+    if scope == "current_model_cohort":
+        snapshots = [
+            snapshot
+            for snapshot in all_snapshots
+            if current_cohort is not None
+            and (cohort := cohort_by_snapshot.get(snapshot.snapshot_id)) is not None
+            and cohort.cohort_id == current_cohort.cohort_id
+        ]
+        excluded_unclassified = unclassified_count
+        excluded_other_cohort = len(all_snapshots) - len(snapshots) - excluded_unclassified
+    else:
+        snapshots = all_snapshots
+        excluded_unclassified = 0
+        excluded_other_cohort = 0
+    mixed_cohort = scope == "all_history" and (
+        len(identified_cohort_ids) > 1 or (bool(identified_cohort_ids) and unclassified_count > 0)
     )
     selected = select_daily_top_recommendations(snapshots, top_n=top_n, as_of=as_of)
     trades = _paper_repo().list_trades(limit=1000, provider=mode)
@@ -7981,6 +8017,11 @@ def paper_trade_dual_track(
         default=snapshot_start,
     ) - timedelta(days=7)
     selected_ids = sorted({snapshot.instrument_id for snapshot in selected})
+    listing_dates = {
+        profile.instrument_id: profile.listing_date
+        for profile in repo.replay_evidence(mode).recoverable_lifecycle_profiles(as_of)
+        if profile.instrument_id in selected_ids and profile.listing_date is not None
+    }
     cached_benchmark_ids = benchmark_ids() + benchmark_proxy_ids()
     cached = _market_cache_repo().load_daily_bars(
         mode,
@@ -8003,6 +8044,12 @@ def paper_trade_dual_track(
         top_n=top_n,
         transaction_cost_bps=float(account.transaction_cost_bps),
         slippage_bps=float(account.slippage_bps),
+        reporting_scope=scope,
+        cohort_id=current_cohort.cohort_id if current_cohort is not None else None,
+        excluded_other_cohort=excluded_other_cohort,
+        excluded_unclassified=excluded_unclassified,
+        listing_dates=listing_dates,
+        mixed_cohort=mixed_cohort,
     )
     adjusted_rows = 0
     if not instrument_bars.empty and "adjusted_close" in instrument_bars.columns:
@@ -8010,7 +8057,10 @@ def paper_trade_dual_track(
     report.data_health.update(
         {
             "dual_track_provider": mode,
-            "dual_track_snapshot_rows": str(len(snapshots)),
+            "dual_track_snapshot_rows": str(len(all_snapshots)),
+            "dual_track_scoped_snapshot_rows": str(len(snapshots)),
+            "dual_track_candidate_top_n_per_day": str(candidate_top_n),
+            "dual_track_exclusion_basis": "daily_candidate_pool_before_scope_rerank",
             "dual_track_snapshot_start": snapshot_start.isoformat(),
             "dual_track_cache_source": "sqlite_only",
             "dual_track_instruments": str(len(selected_ids)),
