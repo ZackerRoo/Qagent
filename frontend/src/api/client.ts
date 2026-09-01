@@ -51,6 +51,7 @@ import type {
   PaperDualTrackCacheResponse,
   PaperDualTrackReportingScope,
   PaperExecutionAuditResponse,
+  PaperExecutionReplayReadinessResponse,
   PaperLedgerResponse,
   PaperForwardComparisonResponse,
   PaperResearchBaseline,
@@ -462,6 +463,12 @@ export async function fetchPaperExecutionAudit(
   provider?: DataProviderMode,
 ): Promise<PaperExecutionAuditResponse> {
   return apiGet<PaperExecutionAuditResponse>("/paper-trades/execution-audit", { provider });
+}
+
+export async function fetchPaperExecutionReplayReadiness(): Promise<PaperExecutionReplayReadinessResponse> {
+  return apiGet<PaperExecutionReplayReadinessResponse>(
+    "/paper-trades/execution-replay-readiness",
+  );
 }
 
 type PaperLedgerRequest = {

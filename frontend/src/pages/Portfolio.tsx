@@ -21,6 +21,7 @@ import {
   fetchPaperDualTrack,
   startPaperDualTrackRefresh,
   fetchPaperExecutionAudit,
+  fetchPaperExecutionReplayReadiness,
   fetchPaperForwardComparison,
   fetchPaperLedger,
   fetchPaperLookThroughRisk,
@@ -63,6 +64,7 @@ import type {
   PaperDualTrackResponse,
   PaperDualTrackCacheResponse,
   PaperExecutionAuditResponse,
+  PaperExecutionReplayReadinessResponse,
   PaperForwardComparisonResponse,
   PaperLedgerItem,
   PaperDailyReportResponse,
@@ -147,6 +149,8 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [etfExposure, setEtfExposure] = useState<EtfExposureResponse>();
   const [dualTrack, setDualTrack] = useState<PaperDualTrackCacheResponse>();
   const [executionAudit, setExecutionAudit] = useState<PaperExecutionAuditResponse>();
+  const [replayReadiness, setReplayReadiness] =
+    useState<PaperExecutionReplayReadinessResponse | null>();
   const [forwardComparison, setForwardComparison] = useState<PaperForwardComparisonResponse>();
   const [currentModelEvaluation, setCurrentModelEvaluation] = useState<PaperCurrentModelEvaluationResponse>();
   const [capacityResearch, setCapacityResearch] = useState<CapacityStressReport>();
@@ -179,6 +183,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   const [, setInstrumentLabelNonce] = useState(0);
 
   async function load() {
+    const replayReadinessResultPromise = Promise.allSettled([
+      fetchPaperExecutionReplayReadiness(),
+    ]);
     const coreResults = await Promise.allSettled([
       fetchPaperTrades(dataMode, paperScope),
       fetchPaperTrades(dataMode, paperScope === "official" ? "legacy" : "official"),
@@ -189,6 +196,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchAutomationScheduler(),
       fetchPaperExecutionAudit(dataMode),
     ]);
+    const [replayReadinessResult] = await replayReadinessResultPromise;
     const [
       paperResult,
       otherPaperResult,
@@ -229,6 +237,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     if (executionAuditResult.status === "fulfilled") {
       setExecutionAudit(executionAuditResult.value);
     }
+    setReplayReadiness(
+      replayReadinessResult.status === "fulfilled" ? replayReadinessResult.value : null,
+    );
     const failedCore = coreResults.filter((item) => item.status === "rejected");
     if (failedCore.length) {
       setPaperMessage(
@@ -384,6 +395,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
   }
 
   async function refreshPaperRuntime() {
+    const replayReadinessResultPromise = Promise.allSettled([
+      fetchPaperExecutionReplayReadiness(),
+    ]);
     const results = await Promise.allSettled([
       fetchPaperTrades(dataMode, paperScope),
       fetchPaperTrades(dataMode, paperScope === "official" ? "legacy" : "official"),
@@ -400,6 +414,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
       fetchAutomationScheduler(),
       fetchPaperExecutionAudit(dataMode),
     ]);
+    const [replayReadinessResult] = await replayReadinessResultPromise;
     const [
       paperResult,
       otherPaperResult,
@@ -455,6 +470,9 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
     if (executionAuditResult.status === "fulfilled") {
       setExecutionAudit(executionAuditResult.value);
     }
+    setReplayReadiness(
+      replayReadinessResult.status === "fulfilled" ? replayReadinessResult.value : null,
+    );
   }
 
   useEffect(() => {
@@ -796,6 +814,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
         {portfolioView === "trades" && (
           <div className="portfolio-view-stack">
             <PaperExecutionAuditPanel audit={executionAudit} language={language} />
+            <PaperReplayReadinessPanel readiness={replayReadiness} language={language} />
             <PaperExecutionStatus dataHealth={paperExecutionHealth} language={language} />
             <div className="metric-grid">
               <Metric label={t("portfolio.open")} value={paper?.summary.open ?? 0} />
@@ -3359,6 +3378,89 @@ function PaperExecutionAuditPanel({
           </span>
         ))}
       </div>
+    </section>
+  );
+}
+
+function PaperReplayReadinessPanel({
+  readiness,
+  language,
+}: {
+  readiness?: PaperExecutionReplayReadinessResponse | null;
+  language: Language;
+}) {
+  const zh = language === "zh";
+  if (readiness === undefined) {
+    return (
+      <section className="paper-replay-readiness is-loading">
+        {zh ? "正在读取精确 replay 采样进度。" : "Loading exact replay sample progress."}
+      </section>
+    );
+  }
+  if (readiness === null) {
+    return (
+      <section className="paper-replay-readiness is-unavailable">
+        <strong>{zh ? "Replay 进度暂不可用" : "Replay progress unavailable"}</strong>
+        <span>
+          {zh
+            ? "只影响此只读卡片；模拟盘账户、持仓与交易数据仍正常加载。"
+            : "Only this read-only card is affected; paper account, positions, and trades continue loading."}
+        </span>
+      </section>
+    );
+  }
+  const statusLabel = {
+    collecting: zh ? "自然积累中" : "Collecting",
+    blocked: zh ? "只读阻断" : "Blocked",
+    ready_for_shadow: zh ? "可进入 shadow 观察" : "Ready for shadow",
+  }[readiness.gate];
+  const reason = zh
+    ? readiness.reason
+    : readiness.gate === "blocked"
+      ? `${readiness.unknown_count} unknown or unreplayable evidence item(s), including ${readiness.audit_build_failures} evidence-build/audit failure(s); the read-only gate remains blocked.`
+      : readiness.gate === "ready_for_shadow"
+        ? "Both exact-match targets are met for read-only shadow observation; the execution engine will not switch automatically."
+        : readiness.buy.observed === 0 && readiness.sell.observed === 0
+          ? "Waiting for new fills to accumulate exact replay evidence naturally; the single paper ledger is unaffected."
+          : `Collecting exact replay samples naturally: buy matched ${readiness.buy.matched}/${readiness.buy.target}, sell matched ${readiness.sell.matched}/${readiness.sell.target}; explained differences do not count toward the gate.`;
+  return (
+    <section className={`paper-replay-readiness replay-${readiness.gate}`}>
+      <div className="paper-replay-readiness-heading">
+        <div>
+          <span className="eyebrow">{zh ? "精确 Replay 证据" : "Exact replay evidence"}</span>
+          <h3>{statusLabel}</h3>
+          <p>{reason}</p>
+        </div>
+        <span className={`status status-${readiness.gate === "ready_for_shadow" ? "ready" : readiness.gate === "blocked" ? "error" : "pending"}`}>
+          {readiness.progress_pct.toFixed(1)}%
+        </span>
+      </div>
+      <div className="paper-replay-progress" aria-label={`${readiness.progress_pct}%`}>
+        <i style={{ width: `${Math.min(100, readiness.progress_pct)}%` }} />
+      </div>
+      <div className="paper-replay-readiness-metrics">
+        <span>
+          <small>{zh ? "买入 matched" : "Buy matched"}</small>
+          <strong>{readiness.buy.matched}/{readiness.buy.target}</strong>
+        </span>
+        <span>
+          <small>{zh ? "卖出 matched" : "Sell matched"}</small>
+          <strong>{readiness.sell.matched}/{readiness.sell.target}</strong>
+        </span>
+        <span>
+          <small>{zh ? "未知/失败" : "Unknown"}</small>
+          <strong>{readiness.unknown_count}</strong>
+        </span>
+        <span>
+          <small>{zh ? "状态" : "Gate"}</small>
+          <strong>{statusLabel}</strong>
+        </span>
+      </div>
+      <p className="paper-replay-readonly-note">
+        {zh
+          ? "只读观察，不切换引擎，不写入或影响唯一模拟盘。"
+          : "Read-only observation: no engine switch and no writes or impact to the single paper ledger."}
+      </p>
     </section>
   );
 }

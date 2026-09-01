@@ -18019,6 +18019,100 @@ td {
   background: var(--terminal-red);
 }
 
+.paper-replay-readiness {
+  display: grid;
+  gap: 9px;
+  border: 1px solid var(--terminal-border-soft);
+  border-radius: 6px;
+  padding: 11px 12px;
+}
+
+.paper-replay-readiness.is-loading,
+.paper-replay-readiness.is-unavailable {
+  color: var(--terminal-muted);
+  font-size: 11px;
+}
+
+.paper-replay-readiness.is-unavailable {
+  gap: 3px;
+  border-style: dashed;
+}
+
+.paper-replay-readiness-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.paper-replay-readiness-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.paper-replay-readiness-heading h3,
+.paper-replay-readiness-heading p,
+.paper-replay-readonly-note {
+  margin: 0;
+}
+
+.paper-replay-readiness-heading h3 {
+  color: var(--terminal-text);
+  font-size: 13px;
+}
+
+.paper-replay-readiness-heading p,
+.paper-replay-readonly-note {
+  color: var(--terminal-muted);
+  font-size: 10px;
+}
+
+.paper-replay-progress {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--terminal-border-soft);
+}
+
+.paper-replay-progress i {
+  display: block;
+  height: 100%;
+  background: var(--terminal-cyan);
+}
+
+.replay-blocked .paper-replay-progress i {
+  background: var(--terminal-red);
+}
+
+.replay-ready_for_shadow .paper-replay-progress i {
+  background: var(--terminal-green);
+}
+
+.paper-replay-readiness-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.paper-replay-readiness-metrics > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.paper-replay-readiness-metrics small {
+  color: var(--terminal-muted);
+  font-size: 10px;
+}
+
+.paper-replay-readiness-metrics strong {
+  overflow: hidden;
+  color: var(--terminal-cyan);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .manual-portfolio-note {
   margin: 0;
   border-left: 2px solid var(--terminal-cyan);
@@ -18316,6 +18410,10 @@ td {
     display: grid;
   }
 
+  .paper-replay-readiness-heading {
+    display: grid;
+  }
+
   .paper-execution-audit-metrics,
   .paper-execution-audit-checks {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -18323,6 +18421,10 @@ td {
 
   .paper-execution-audit-metrics > span:nth-child(2n) {
     border-right: 0;
+  }
+
+  .paper-replay-readiness-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .paper-account-capacity-grid {

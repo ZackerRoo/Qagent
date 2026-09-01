@@ -20,6 +20,7 @@ from qagent.execution.models import (
     OrderIntent,
     OrderSide,
     OrderType,
+    Position,
     TimeInForce,
 )
 from qagent.execution.rules import fee_breakdown, is_tick_aligned, money
@@ -33,6 +34,12 @@ class ReplayVerdict(StrEnum):
     MATCHED = "matched"
     EXPLAINED_DIFFERENCE = "explained_difference"
     UNREPLAYABLE = "unreplayable"
+
+
+class ReplayEvidenceVerdict(StrEnum):
+    MATCHED = "matched"
+    EXPLAINED_DIFFERENCE = "explained_difference"
+    UNKNOWN_OR_UNREPLAYABLE = "unknown_or_unreplayable"
 
 
 class MarketGranularity(StrEnum):
@@ -161,6 +168,19 @@ class PaperReplayBatchSummary(FrozenModel):
     batch_digest: str
 
 
+class PaperReplayEvidenceReport(FrozenModel):
+    """Independent kernel comparison for one immutable forward-evidence sample."""
+
+    evidence_digest: str
+    side: OrderSide
+    verdict: ReplayEvidenceVerdict
+    classifications: tuple[str, ...] = ()
+    differences: tuple[ReplayDifference, ...] = ()
+    expected_fill_digest: str
+    replay_fill_digest: str | None = None
+    report_digest: str
+
+
 class _DigestPayload(FrozenModel):
     value: object
 
@@ -170,6 +190,78 @@ def parse_execution_facts_payload(payload: str) -> PaperReplayFacts:
 
     value = json.loads(payload)
     return PaperReplayFacts.model_validate(value)
+
+
+def replay_paper_evidence(evidence: PaperReplayEvidence) -> PaperReplayEvidenceReport:
+    """Replay exactly one evidence item without storage, clocks, or paper-ledger state.
+
+    Buy samples get deliberately ample cash. Sell samples get a pre-existing
+    prior-session position and advance into the evidence session, so A-share T+1
+    settlement is performed by the kernel without depending on another sample.
+    """
+
+    expected = evidence.expected_fill
+    account_id = "offline-paper-evidence-replay"
+    if evidence.order.side == OrderSide.BUY:
+        account = Account(account_id=account_id, cash=Decimal("1000000000000"))
+        state = ExecutionState(account=account)
+    else:
+        position = Position(
+            account_id=account_id,
+            instrument_id=evidence.order.instrument_id,
+            quantity=evidence.order.quantity,
+            sellable_quantity=0,
+            average_cost=expected.base_price,
+            cost_basis=money(expected.base_price * evidence.order.quantity),
+            last_fill_at=evidence.market.occurred_at - timedelta(days=1),
+        )
+        account = Account(
+            account_id=account_id,
+            cash=Decimal("0"),
+            positions={evidence.order.instrument_id: position},
+        )
+        state = ExecutionState(
+            account=account,
+            session_date=evidence.market.trading_date - timedelta(days=1),
+        )
+    paper = PaperReplayLeg(
+        **expected.model_dump(exclude={"instrument_id"}),
+        source="paper_replay_evidence",
+    )
+    sample = PaperReplaySample(
+        sample_key=evidence.evidence_digest,
+        instrument_id=evidence.order.instrument_id,
+        trade_status="time_exit" if evidence.order.side == OrderSide.SELL else "open",
+        facts=None,
+    )
+    comparison, _ = _replay_leg(
+        state,
+        sample,
+        paper,
+        _market_evidence_from_explicit(evidence),
+        _explicit_order_contract(evidence),
+        rules=evidence.rules,
+        explicit_evidence=evidence,
+    )
+    verdict = {
+        ReplayVerdict.MATCHED: ReplayEvidenceVerdict.MATCHED,
+        ReplayVerdict.EXPLAINED_DIFFERENCE: ReplayEvidenceVerdict.EXPLAINED_DIFFERENCE,
+        ReplayVerdict.UNREPLAYABLE: ReplayEvidenceVerdict.UNKNOWN_OR_UNREPLAYABLE,
+    }[comparison.verdict]
+    classifications = tuple(sorted({item.code for item in comparison.differences}))
+    digest_payload = {
+        "evidence_digest": evidence.evidence_digest,
+        "side": evidence.order.side,
+        "verdict": verdict,
+        "classifications": classifications,
+        "differences": comparison.differences,
+        "expected_fill_digest": evidence.expected_fill_digest,
+        "replay_fill_digest": comparison.replay_digest,
+    }
+    return PaperReplayEvidenceReport(
+        **digest_payload,
+        report_digest=_digest(digest_payload),
+    )
 
 
 def replay_paper_sample(sample: PaperReplaySample) -> PerTradeReplayReport:

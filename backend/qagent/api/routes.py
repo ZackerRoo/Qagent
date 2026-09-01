@@ -197,6 +197,10 @@ from qagent.paper_trading.execution_audit import (
     PaperExecutionRuleAudit,
     build_paper_execution_rule_audit,
 )
+from qagent.paper_trading.replay_readiness import (
+    PaperExecutionReplayReadiness,
+    build_execution_replay_readiness,
+)
 from qagent.providers.factory import build_market_data_provider
 from qagent.providers.status import build_provider_status
 from qagent.recommendations.enrichment import enrich_opportunity_card
@@ -7306,6 +7310,14 @@ def paper_trade_execution_audit(provider: str | None = None) -> PaperExecutionRu
     )
 
 
+@router.get(
+    "/paper-trades/execution-replay-readiness",
+    response_model=PaperExecutionReplayReadiness,
+)
+def paper_trade_execution_replay_readiness() -> PaperExecutionReplayReadiness:
+    return build_execution_replay_readiness(_paper_repo().list_replay_evidence_audit())
+
+
 @router.post("/paper-trades/seed")
 def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, object]:
     if limit <= 0 or limit > 500:
@@ -8213,9 +8225,7 @@ def _submit_paper_dual_track_job(job_id: str) -> bool:
             job_id,
         )
         if future is not None and hasattr(future, "add_done_callback"):
-            future.add_done_callback(
-                lambda _future: _release_paper_dual_track_submission(job_id)
-            )
+            future.add_done_callback(lambda _future: _release_paper_dual_track_submission(job_id))
     except Exception:
         with _paper_dual_track_jobs_lock:
             _submitted_paper_dual_track_jobs.discard(job_id)

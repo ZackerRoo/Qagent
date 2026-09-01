@@ -5,13 +5,14 @@ from decimal import Decimal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.execution.models import AShareExecutionRules, OrderSide
 from qagent.execution.replay_evidence import (
     PAPER_REPLAY_EVIDENCE_NOTE_PREFIX,
     PaperReplayEvidence,
+    stable_replay_digest,
 )
 from qagent.execution.rules import is_tick_aligned
 from qagent.storage.tables import (
@@ -289,6 +290,26 @@ class PaperTradeEventRecord(BaseModel):
     created_at: datetime
     execution_facts: PaperExecutionFacts | None = None
     replay_evidence: tuple[PaperReplayEvidence, ...] = ()
+
+
+class PaperReplayEvidenceAuditRecord(BaseModel):
+    """Read-only replay input or a fail-closed audit item from an event note."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    audit_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    event_id: str
+    trade_id: str
+    occurred_at: datetime
+    evidence: PaperReplayEvidence | None = None
+    issue_code: str | None = None
+    issue_detail: str | None = None
+
+    @model_validator(mode="after")
+    def validate_audit_item(self):
+        if (self.evidence is None) == (self.issue_code is None):
+            raise ValueError("audit item must contain exactly one of evidence or issue")
+        return self
 
 
 class PaperTradingRepository:
@@ -717,6 +738,40 @@ class PaperTradingRepository:
                 .all()
             )
             return [self._event_from_row(row) for row in rows]
+
+    def list_replay_evidence_audit(self) -> list[PaperReplayEvidenceAuditRecord]:
+        """List forward replay evidence and failures without mutating the session.
+
+        The query is intentionally limited to ``paper_trade_events.note``. Invalid
+        payloads, same-phase conflicts, and explicit build-status lines are kept as
+        audit failures instead of being dropped from readiness denominators.
+        """
+
+        with self.session_factory() as session:
+            rows = (
+                session.query(PaperTradeEventRow)
+                .filter(
+                    or_(
+                        PaperTradeEventRow.note.contains(PAPER_REPLAY_EVIDENCE_NOTE_PREFIX),
+                        PaperTradeEventRow.note.contains(PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIX),
+                    )
+                )
+                .order_by(
+                    PaperTradeEventRow.occurred_at,
+                    PaperTradeEventRow.event_id,
+                )
+                .all()
+            )
+            result: list[PaperReplayEvidenceAuditRecord] = []
+            seen_evidence_digests: set[str] = set()
+            for row in rows:
+                result.extend(
+                    _replay_evidence_audit_records(
+                        row,
+                        seen_evidence_digests=seen_evidence_digests,
+                    )
+                )
+            return result
 
     def update_trade(
         self,
@@ -1229,6 +1284,126 @@ def parse_paper_replay_evidences(note: str | None) -> tuple[PaperReplayEvidence,
             return ()
         by_phase[item.phase] = item
     return tuple(by_phase[phase] for phase in ("entry", "exit") if phase in by_phase)
+
+
+def _replay_evidence_audit_records(
+    row: PaperTradeEventRow,
+    *,
+    seen_evidence_digests: set[str],
+) -> list[PaperReplayEvidenceAuditRecord]:
+    note = row.note or ""
+    evidence_payloads = [
+        line[len(PAPER_REPLAY_EVIDENCE_NOTE_PREFIX) :]
+        for line in note.splitlines()
+        if line.startswith(PAPER_REPLAY_EVIDENCE_NOTE_PREFIX)
+    ]
+    status_payloads = [
+        line[len(PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIX) :]
+        for line in note.splitlines()
+        if line.startswith(PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIX)
+    ]
+    records: list[PaperReplayEvidenceAuditRecord] = []
+
+    for index, payload in enumerate(status_payloads):
+        issue_code = "replay_evidence_status_invalid"
+        issue_detail = payload[:160]
+        try:
+            value = json.loads(payload)
+            status = str(value.get("status") or "unknown")
+            issue_code = f"replay_evidence_status:{status}"
+            issue_detail = str(value.get("reason") or status)[:160]
+        except (ValueError, TypeError, AttributeError):
+            pass
+        records.append(
+            _replay_evidence_issue_record(
+                row,
+                issue_code=issue_code,
+                issue_detail=issue_detail,
+                discriminator=f"status:{index}:{payload}",
+            )
+        )
+
+    parsed: list[PaperReplayEvidence] = []
+    invalid_payload = False
+    for payload in evidence_payloads:
+        try:
+            parsed.append(PaperReplayEvidence.model_validate_json(payload))
+        except (ValueError, TypeError):
+            invalid_payload = True
+    if invalid_payload:
+        records.append(
+            _replay_evidence_issue_record(
+                row,
+                issue_code="replay_evidence_corrupt",
+                issue_detail="one or more replay evidence payloads failed validation",
+                discriminator="corrupt_evidence",
+            )
+        )
+        return records
+
+    by_phase: dict[str, PaperReplayEvidence] = {}
+    conflicting_phases: set[str] = set()
+    for evidence in parsed:
+        existing = by_phase.get(evidence.phase)
+        if existing is not None and existing.evidence_digest != evidence.evidence_digest:
+            conflicting_phases.add(evidence.phase)
+        else:
+            by_phase[evidence.phase] = evidence
+    if conflicting_phases:
+        for phase in sorted(conflicting_phases):
+            records.append(
+                _replay_evidence_issue_record(
+                    row,
+                    issue_code="replay_evidence_conflict",
+                    issue_detail=f"conflicting {phase} evidence payloads",
+                    discriminator=f"conflict:{phase}",
+                )
+            )
+        return records
+
+    for phase in ("entry", "exit"):
+        evidence = by_phase.get(phase)
+        if evidence is None or evidence.evidence_digest in seen_evidence_digests:
+            continue
+        seen_evidence_digests.add(evidence.evidence_digest)
+        records.append(
+            PaperReplayEvidenceAuditRecord(
+                audit_digest=stable_replay_digest(
+                    {
+                        "event_id": row.event_id,
+                        "evidence_digest": evidence.evidence_digest,
+                    }
+                ),
+                event_id=row.event_id,
+                trade_id=row.trade_id,
+                occurred_at=row.occurred_at,
+                evidence=evidence,
+            )
+        )
+    return records
+
+
+def _replay_evidence_issue_record(
+    row: PaperTradeEventRow,
+    *,
+    issue_code: str,
+    issue_detail: str,
+    discriminator: str,
+) -> PaperReplayEvidenceAuditRecord:
+    return PaperReplayEvidenceAuditRecord(
+        audit_digest=stable_replay_digest(
+            {
+                "event_id": row.event_id,
+                "issue_code": issue_code,
+                "discriminator": discriminator,
+            }
+        ),
+        event_id=row.event_id,
+        trade_id=row.trade_id,
+        occurred_at=row.occurred_at,
+        issue_code=issue_code,
+        issue_detail=issue_detail,
+    )
 
 
 def encode_paper_replay_evidence_status(note: str, *, status: str, reason: str) -> str:

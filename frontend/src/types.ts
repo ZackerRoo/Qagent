@@ -1727,6 +1727,28 @@ export type PaperExecutionAuditResponse = {
   checks: PaperExecutionAuditCheck[];
 };
 
+export type PaperReplaySideProgress = {
+  target: number;
+  observed: number;
+  matched: number;
+  explained_difference: number;
+  unknown: number;
+};
+
+export type PaperExecutionReplayReadinessResponse = {
+  schema_version: string;
+  generated_at: string;
+  buy: PaperReplaySideProgress;
+  sell: PaperReplaySideProgress;
+  unknown_count: number;
+  audit_build_failures: number;
+  progress_pct: number;
+  gate: "collecting" | "blocked" | "ready_for_shadow";
+  automatic_promotion: false;
+  paper_ledger_mutated: false;
+  reason: string;
+};
+
 export type PaperTradesResponse = {
   summary: PaperTradingSummary;
   trades: PaperTrade[];

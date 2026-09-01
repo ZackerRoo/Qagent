@@ -7,6 +7,15 @@ const files = {
   portfolio: readFileSync(join(root, "src/pages/Portfolio.tsx"), "utf8"),
   styles: readFileSync(join(root, "src/styles.css"), "utf8"),
 };
+const initialCoreLoad = files.portfolio.match(
+  /const coreResults = await Promise\.allSettled\(\[[\s\S]*?\]\);/,
+)?.[0] ?? "";
+const manualCoreRefresh = files.portfolio.match(
+  /const results = await Promise\.allSettled\(\[[\s\S]*?\]\);/,
+)?.[0] ?? "";
+const isolatedReplayLoads = files.portfolio.match(
+  /const replayReadinessResultPromise = Promise\.allSettled/g,
+)?.length ?? 0;
 
 const checks = [
   ["client exposes fetchPaperLedger", files.client.includes("fetchPaperLedger")],
@@ -40,6 +49,9 @@ const checks = [
   ["portfolio exposes manual paper refresh", files.portfolio.includes("refreshPaperRuntime")],
   ["portfolio avoids background paper refresh timers", !files.portfolio.includes("setInterval")],
   ["portfolio isolates partial refresh failures", files.portfolio.includes("Promise.allSettled")],
+  ["portfolio isolates replay readiness in both load paths", isolatedReplayLoads === 2],
+  ["initial core failure count excludes replay readiness", !initialCoreLoad.includes("fetchPaperExecutionReplayReadiness")],
+  ["manual core refresh excludes replay readiness", !manualCoreRefresh.includes("fetchPaperExecutionReplayReadiness")],
   ["portfolio renders equity curve", files.portfolio.includes("paper-ledger-curve")],
   ["portfolio renders return bars", files.portfolio.includes("paper-return-bars")],
   ["portfolio renders transaction ledger", files.portfolio.includes("PaperTransactionsPanel")],

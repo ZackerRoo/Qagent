@@ -19,7 +19,9 @@ from qagent.execution.replay_evidence import (
 from qagent.execution.paper_replay import (
     PaperReplayFacts,
     PaperReplaySample,
+    ReplayEvidenceVerdict,
     ReplayVerdict,
+    replay_paper_evidence,
     replay_paper_sample,
 )
 from qagent.storage.paper import (
@@ -33,6 +35,7 @@ from qagent.storage.paper import (
     parse_paper_replay_evidence,
     parse_paper_replay_evidences,
 )
+from qagent.storage.tables import PaperTradeEventRow
 
 from test_state_repository import make_repo
 
@@ -63,6 +66,8 @@ def _evidence(
     *,
     phase: str = "entry",
     price: str = "10.00",
+    expected_price: str | None = None,
+    commission: str = "5.00",
     occurred_at: datetime = OCCURRED_AT,
 ) -> PaperReplayEvidence:
     side = OrderSide.BUY if phase == "entry" else OrderSide.SELL
@@ -92,15 +97,16 @@ def _evidence(
         updated_at=occurred_at,
         rules=rules,
     )
-    gross = Decimal(price) * 100
-    commission = Decimal("5.00")
+    fill_price = Decimal(expected_price or price)
+    gross = fill_price * 100
+    commission_value = Decimal(commission)
     stamp_duty = (
         (gross * Decimal("0.0005")).quantize(Decimal("0.01"))
         if side == OrderSide.SELL
         else Decimal("0")
     )
     transfer_fee = Decimal("0.01")
-    fees = commission + stamp_duty + transfer_fee
+    fees = commission_value + stamp_duty + transfer_fee
     return PaperReplayEvidence.create(
         phase=phase,
         market=market,
@@ -112,10 +118,10 @@ def _evidence(
             side=side,
             trade_date=market.trading_date,
             base_price=Decimal(price),
-            price=Decimal(price),
+            price=fill_price,
             quantity=100,
             gross_amount=gross,
-            commission=commission,
+            commission=commission_value,
             stamp_duty=stamp_duty,
             transfer_fee=transfer_fee,
             cash_flow=-(gross + fees) if side == OrderSide.BUY else gross - fees,
@@ -232,3 +238,95 @@ def test_explicit_minute_evidence_replays_with_independent_cross_date_rules():
     assert report.exit is not None and report.exit.verdict == ReplayVerdict.MATCHED
     assert report.verdict == ReplayVerdict.MATCHED
     assert "v1_single_rules_snapshot_cross_date" not in report.classifications
+
+
+def test_single_evidence_kernel_replay_matches_buy_and_sell_and_digest_is_stable():
+    buy = replay_paper_evidence(_evidence(phase="entry"))
+    sell = replay_paper_evidence(_evidence(phase="exit"))
+
+    assert buy.verdict == ReplayEvidenceVerdict.MATCHED
+    assert sell.verdict == ReplayEvidenceVerdict.MATCHED
+    assert sell.replay_fill_digest is not None
+    assert replay_paper_evidence(_evidence(phase="entry")).report_digest == buy.report_digest
+
+
+def test_single_evidence_fee_difference_is_explained_but_price_difference_is_unknown():
+    fee = replay_paper_evidence(_evidence(commission="6.00"))
+    price = replay_paper_evidence(_evidence(expected_price="10.01"))
+
+    assert fee.verdict == ReplayEvidenceVerdict.EXPLAINED_DIFFERENCE
+    assert "paper_fee_model_difference" in fee.classifications
+    assert price.verdict == ReplayEvidenceVerdict.UNKNOWN_OR_UNREPLAYABLE
+    assert "execution_difference_unexplained" in price.classifications
+
+
+def test_repository_replay_audit_deduplicates_and_keeps_all_fail_closed_items(tmp_path):
+    paper_repo = PaperTradingRepository(make_repo(tmp_path).session_factory)
+
+    def add_event(source: str, metadata: PaperTradeEventMetadata) -> str:
+        trade = paper_repo.create_trade(
+            source_snapshot_id=source,
+            provider="fixture",
+            instrument_id="CN:600000",
+            strategy_id="audit",
+            signal_date=date(2026, 8, 2),
+            trigger_price=Decimal("10.00"),
+            initial_stop=Decimal("9.00"),
+            target_1=Decimal("11.00"),
+        )
+        paper_repo.update_trade(
+            trade.trade_id,
+            status="open",
+            entry_date=date(2026, 8, 3),
+            entry_price=Decimal("10.00"),
+            event_metadata=metadata,
+        )
+        return trade.trade_id
+
+    evidence = _evidence()
+    add_event("valid", PaperTradeEventMetadata(replay_evidence=evidence))
+    add_event("duplicate", PaperTradeEventMetadata(replay_evidence=evidence))
+    add_event("status", PaperTradeEventMetadata(replay_evidence_error="build failed"))
+    corrupt_trade_id = add_event(
+        "corrupt",
+        PaperTradeEventMetadata(replay_evidence=evidence),
+    )
+    add_event(
+        "conflict",
+        PaperTradeEventMetadata(
+            replay_evidence=(evidence, _evidence(price="10.01")),
+        ),
+    )
+
+    with paper_repo.session_factory() as session:
+        corrupt_row = (
+            session.query(PaperTradeEventRow)
+            .filter(PaperTradeEventRow.trade_id == corrupt_trade_id)
+            .order_by(PaperTradeEventRow.sequence.desc())
+            .first()
+        )
+        assert corrupt_row is not None
+        corrupt_row.note = corrupt_row.note.replace(evidence.evidence_digest, "0" * 64)
+        session.commit()
+    with paper_repo.session_factory() as session:
+        before = [
+            (row.event_id, row.note)
+            for row in session.query(PaperTradeEventRow).order_by(PaperTradeEventRow.event_id).all()
+        ]
+
+    records = paper_repo.list_replay_evidence_audit()
+
+    with paper_repo.session_factory() as session:
+        after = [
+            (row.event_id, row.note)
+            for row in session.query(PaperTradeEventRow).order_by(PaperTradeEventRow.event_id).all()
+        ]
+    assert before == after
+    assert [record.evidence.evidence_digest for record in records if record.evidence] == [
+        evidence.evidence_digest
+    ]
+    assert {record.issue_code for record in records if record.issue_code} == {
+        "replay_evidence_status:build_failed_trade_continued",
+        "replay_evidence_corrupt",
+        "replay_evidence_conflict",
+    }
