@@ -64,13 +64,17 @@ def build_paper_execution_rule_audit(
         ):
             frozen_fact_violations += 1
         if _execution_leg_violates_contract(
-            facts.entry, facts.rules.lot_size, facts.rules.tick_size
+            facts.entry,
+            facts.rules.effective_minimum_order_quantity,
+            facts.rules.effective_quantity_step,
+            facts.rules.tick_size,
         ):
             lot_tick_cash_violations += 1
         if facts.exit is not None:
             if _execution_leg_violates_contract(
                 facts.exit,
-                facts.rules.lot_size,
+                facts.rules.effective_minimum_order_quantity,
+                facts.rules.effective_quantity_step,
                 facts.rules.tick_size,
             ):
                 lot_tick_cash_violations += 1
@@ -153,10 +157,15 @@ def build_paper_execution_rule_audit(
 
 def _execution_leg_violates_contract(
     leg: PaperExecutionLegFacts,
-    lot_size: int,
+    minimum_order_quantity: int,
+    quantity_step: int,
     tick_size: Decimal,
 ) -> bool:
-    if leg.quantity % lot_size != 0 or not is_tick_aligned(leg.price, tick_size):
+    if (
+        leg.quantity < minimum_order_quantity
+        or (leg.quantity - minimum_order_quantity) % quantity_step != 0
+        or not is_tick_aligned(leg.price, tick_size)
+    ):
         return True
     if leg.gross_amount != leg.price * leg.quantity:
         return True

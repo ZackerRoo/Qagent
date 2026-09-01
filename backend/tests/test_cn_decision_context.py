@@ -17,15 +17,21 @@ def test_trading_constraints_classify_a_share_boards_and_permissions():
     assert star.board == "科创板"
     assert star.price_limit_pct == 20
     assert star.permission_required is True
+    assert star.minimum_order_quantity == 200
+    assert star.quantity_step == 1
     assert {item.code for item in star.constraints}.issuperset(
         {"star_market_permission", "t_plus_one", "lot_size_100"}
     )
     assert bse.board == "北交所"
+    assert bse.minimum_order_quantity == 100
+    assert bse.quantity_step == 1
     assert bse.price_limit_pct == 30
     assert any(item.code == "bse_permission" for item in bse.constraints)
     assert main.board == "沪市主板"
     assert main.price_limit_pct == 10
     assert main.permission_required is False
+    assert main.minimum_order_quantity == 100
+    assert main.quantity_step == 100
 
 
 def test_market_context_adds_industry_theme_and_index_labels():

@@ -122,7 +122,9 @@ class PaperExecutionFacts(BaseModel):
             raise ValueError("entry execution fact must be a buy")
         legs = (self.entry,) if self.exit is None else (self.entry, self.exit)
         for leg in legs:
-            if leg.quantity % self.rules.lot_size != 0:
+            minimum = self.rules.effective_minimum_order_quantity
+            step = self.rules.effective_quantity_step
+            if leg.quantity < minimum or (leg.quantity - minimum) % step != 0:
                 raise ValueError("execution fact quantity must respect the frozen lot size")
             if not is_tick_aligned(leg.price, self.rules.tick_size):
                 raise ValueError("execution fact price must respect the frozen tick size")
@@ -302,9 +304,7 @@ class PaperTradingRepository:
         admission_proof: PaperTradeAdmissionProof | None = None,
         event_metadata: PaperTradeEventMetadata | None = None,
     ) -> PaperTradeRecord:
-        proof = admission_proof or PaperTradeAdmissionProof(
-            admission_source="legacy_unknown"
-        )
+        proof = admission_proof or PaperTradeAdmissionProof(admission_source="legacy_unknown")
         with self.session_factory() as session:
             snapshot = session.get(OpportunitySnapshotRow, source_snapshot_id)
             if proof.admission_source == "ranking_v3_production":
@@ -421,9 +421,7 @@ class PaperTradingRepository:
 
         if max_active_trades <= 0:
             return None
-        proof = admission_proof or PaperTradeAdmissionProof(
-            admission_source="legacy_unknown"
-        )
+        proof = admission_proof or PaperTradeAdmissionProof(admission_source="legacy_unknown")
         engine = self.session_factory.kw.get("bind")
         if engine is None:
             raise TypeError("paper repository requires an engine-bound session factory")
@@ -477,12 +475,8 @@ class PaperTradingRepository:
                     source_snapshot_id=source_snapshot_id,
                     signal_date=signal_date,
                     source_status="frozen" if snapshot is not None else "unknown",
-                    strategy_configuration=_strategy_configuration_from_snapshot(
-                        session, snapshot
-                    ),
-                    fallback_market_regime=_market_regime_from_snapshot_run(
-                        session, snapshot
-                    ),
+                    strategy_configuration=_strategy_configuration_from_snapshot(session, snapshot),
+                    fallback_market_regime=_market_regime_from_snapshot_run(session, snapshot),
                 )
                 row = PaperTradeRow(
                     trade_id=f"paper-{uuid4().hex[:12]}",
@@ -501,9 +495,7 @@ class PaperTradingRepository:
                     admission_source=proof.admission_source,
                     production_identity_digest=proof.production_identity_digest,
                     production_batch_fact_digest=proof.production_batch_fact_digest,
-                    production_selection_item_digest=(
-                        proof.production_selection_item_digest
-                    ),
+                    production_selection_item_digest=(proof.production_selection_item_digest),
                     release_proof_digest=proof.release_proof_digest,
                 )
                 session.add(row)
@@ -540,16 +532,11 @@ class PaperTradingRepository:
                 PaperResearchBaselineRow.provider == provider
             )
             if paper_session_id:
-                query = query.filter(
-                    PaperResearchBaselineRow.paper_session_id == paper_session_id
-                )
-            row = (
-                query.order_by(
-                    PaperResearchBaselineRow.created_at.desc(),
-                    PaperResearchBaselineRow.baseline_id.desc(),
-                )
-                .first()
-            )
+                query = query.filter(PaperResearchBaselineRow.paper_session_id == paper_session_id)
+            row = query.order_by(
+                PaperResearchBaselineRow.created_at.desc(),
+                PaperResearchBaselineRow.baseline_id.desc(),
+            ).first()
             return self._research_baseline_from_row(row) if row is not None else None
 
     def freeze_research_baseline(
@@ -1209,9 +1196,7 @@ def strip_paper_source_context(note: str | None) -> str:
     if not note:
         return ""
     return "\n".join(
-        line
-        for line in note.splitlines()
-        if not line.startswith(PAPER_SOURCE_CONTEXT_NOTE_PREFIX)
+        line for line in note.splitlines() if not line.startswith(PAPER_SOURCE_CONTEXT_NOTE_PREFIX)
     ).strip()
 
 
@@ -1228,22 +1213,16 @@ def _source_context_from_snapshot(
     card = _snapshot_card(snapshot)
     market_context = _object_mapping(card.get("market_context"))
     industry = _normalized_dimension_value(
-        market_context.get("industry")
-        or card.get("industry")
-        or card.get("sector")
+        market_context.get("industry") or card.get("industry") or card.get("sector")
     )
     themes = _normalized_text_list(
-        market_context.get("themes")
-        or card.get("themes")
-        or card.get("theme")
+        market_context.get("themes") or card.get("themes") or card.get("theme")
     )
     return PaperTradeSourceContext(
         source_snapshot_id=source_snapshot_id,
         source_run_id=snapshot.run_id if snapshot is not None else None,
         created_at=(
-            snapshot.created_at
-            if snapshot is not None
-            else fallback_created_at or utc_now()
+            snapshot.created_at if snapshot is not None else fallback_created_at or utc_now()
         ),
         signal_date=signal_date or (snapshot.signal_date if snapshot is not None else None),
         latest_close=snapshot.latest_close if snapshot is not None else None,
@@ -1256,10 +1235,10 @@ def _source_context_from_snapshot(
         factor_ids=_source_factor_ids(card),
         source_status=source_status,
         strategy_configuration=(strategy_configuration[0] if strategy_configuration else {}),
-        strategy_configuration_digest=(strategy_configuration[1] if strategy_configuration else None),
-        strategy_configuration_status=(
-            "frozen" if strategy_configuration else "legacy_unfrozen"
+        strategy_configuration_digest=(
+            strategy_configuration[1] if strategy_configuration else None
         ),
+        strategy_configuration_status=("frozen" if strategy_configuration else "legacy_unfrozen"),
         card=card,
     )
 
@@ -1304,11 +1283,7 @@ def _market_regime_from_snapshot_run(
     if not isinstance(raw_regime, str):
         return None
     regime = _normalized_dimension_value(raw_regime)
-    return (
-        regime
-        if regime in {"risk_on", "constructive", "mixed", "risk_off", "thin"}
-        else None
-    )
+    return regime if regime in {"risk_on", "constructive", "mixed", "risk_off", "thin"} else None
 
 
 def _snapshot_card(snapshot: OpportunitySnapshotRow | None) -> dict[str, object]:
@@ -1367,9 +1342,7 @@ def _require_production_trade_matches_snapshot(
             "Ranking V3 production trade plan does not match its immutable source snapshot"
         )
     if allocation_multiplier <= 0 or allocation_multiplier > 1:
-        raise ValueError(
-            "Ranking V3 production allocation multiplier must be between zero and one"
-        )
+        raise ValueError("Ranking V3 production allocation multiplier must be between zero and one")
 
 
 def _require_existing_production_plan_matches(
@@ -1421,11 +1394,7 @@ def _source_market_regime(
     ]
     for candidate in candidates:
         if isinstance(candidate, dict):
-            candidate = (
-                candidate.get("regime")
-                or candidate.get("state")
-                or candidate.get("CN")
-            )
+            candidate = candidate.get("regime") or candidate.get("state") or candidate.get("CN")
             if isinstance(candidate, dict):
                 candidate = candidate.get("regime") or candidate.get("state")
         normalized = _normalized_dimension_value(candidate)

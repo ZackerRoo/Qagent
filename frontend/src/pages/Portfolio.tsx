@@ -1290,7 +1290,7 @@ function PaperCurrentModelStrip({
     [zh ? "策略入口" : "Policy", version.recommendation_policy],
     [zh ? "校准方式" : "Calibration", version.calibration_merge_policy],
     [zh ? "持仓上限" : "Position limit", version.execution.max_positions],
-    [zh ? "单笔配比" : "Allocation", `${version.execution.allocation_per_trade_pct}%`],
+    [zh ? "目标仓位" : "Target weight", `${version.execution.allocation_per_trade_pct}%`],
     [zh ? "单边成本" : "One-way cost", `${version.execution.transaction_cost_bps} bps`],
     [zh ? "单边滑点" : "One-way slippage", `${version.execution.slippage_bps} bps`],
     [zh ? "止盈阈值" : "Take profit", `${version.execution.take_profit_pct}%`],
@@ -3551,7 +3551,7 @@ function PaperSessionStarter({
           />
         </label>
         <label>
-          <span>{language === "zh" ? "单票仓位 %" : "Position %"}</span>
+          <span>{language === "zh" ? "单票目标仓位 %" : "Target weight %"}</span>
           <input
             inputMode="decimal"
             value={form.allocation_per_trade_pct}
@@ -3619,7 +3619,7 @@ function PaperSessionStarter({
           <strong>{account ? formatMoney(account.initial_capital, language) : formatMoney(form.initial_capital, language)}</strong>
         </span>
         <span>
-          {language === "zh" ? "单票" : "Per trade"}{" "}
+          {language === "zh" ? "目标仓位" : "Target weight"}{" "}
           <strong>{account?.allocation_per_trade_pct ?? form.allocation_per_trade_pct}%</strong>
         </span>
         <span>
@@ -4159,7 +4159,7 @@ function PaperCandidatePoolPanel({
           <h3>{language === "zh" ? "候补机会池" : "Candidate pool"}</h3>
           <p>
             {language === "zh"
-              ? "模拟盘满额时不会直接放弃新机会，会先比较候补质量、买点距离和主题强度。"
+              ? `模拟盘以 ${summary.target_weight_pct}% 为目标仓位；高价股仅自适应到最低一手，单票硬上限 ${summary.max_weight_pct}%，并预留 ${summary.buffer_pct}% 费用/跳空缓冲。`
               : "When the paper book is full, Qagent compares quality, entry distance, and theme strength before replacing stale pending names."}
           </p>
         </div>
@@ -4269,8 +4269,9 @@ function PaperCandidatePoolPanel({
             </div>
             <div className="paper-candidate-metrics">
               <span>{language === "zh" ? "优先级" : "Priority"} <b>{Math.round(item.priority_score * 100)}</b></span>
-              <span>{language === "zh" ? "主题" : "Theme"} <b>{item.market_theme_boost > 0 ? "+8" : "0"}</b></span>
-              <span>{language === "zh" ? "买点差" : "Entry gap"} <b>{formatPctValue(item.entry_gap_pct)}</b></span>
+              <span>{language === "zh" ? "目标预算" : "Target"} <b>{item.target_budget ?? "-"}</b></span>
+              <span>{language === "zh" ? "一手所需" : "Min lot"} <b>{item.minimum_lot_budget ?? "-"}</b></span>
+              <span>{language === "zh" ? "有效权重" : "Weight"} <b>{item.effective_weight_pct ? `${item.effective_weight_pct}%` : "-"}</b></span>
             </div>
             <p title={item.reason}>
               {item.reason}
@@ -4966,7 +4967,8 @@ function paperCandidateStatusLabel(status: string, language: Language) {
     tracked_before: { zh: "已跟踪过", en: "Tracked" },
     paused_by_risk: { zh: "风控暂停", en: "Risk paused" },
     blocked_by_market: { zh: "市场暂停入场", en: "Market blocked" },
-    blocked_by_allocation: { zh: "资金不足一手", en: "Below one lot" },
+    blocked_by_cash: { zh: "可用现金不足", en: "Cash blocked" },
+    blocked_by_allocation: { zh: "一手超过20%上限", en: "Min lot above cap" },
     blocked_by_industry: { zh: "行业集中度阻断", en: "Industry blocked" },
     blocked_by_data: { zh: "数据阻断", en: "Data blocked" },
   };

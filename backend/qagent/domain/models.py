@@ -121,6 +121,8 @@ class TradingConstraintProfile(BaseModel):
     permission_required: bool = False
     t_plus_one: bool = True
     min_lot: int | None = 100
+    minimum_order_quantity: int | None = None
+    quantity_step: int | None = None
     constraints: list[TradingConstraint] = Field(default_factory=list)
 
 

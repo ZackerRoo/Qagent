@@ -178,10 +178,11 @@ from qagent.paper_trading.engine import (
     build_paper_risk_gate_status,
     build_paper_daily_report,
     build_paper_ledger,
+    build_paper_lot_aware_sizing_plan,
     build_paper_validation,
     paper_execution_data_health,
+    paper_lot_aware_sizing_state,
     paper_price_basis_gap_limit,
-    paper_snapshot_round_lot_is_affordable,
     paper_snapshot_price_basis_is_consistent,
     seed_paper_trades_from_snapshots,
     update_paper_trades,
@@ -3643,9 +3644,7 @@ def start_automation_scheduler(
             if hasattr(repo, "session_factory"):
                 recoverable = AutomationRuntimeRepository(
                     repo.session_factory
-                ).find_recoverable_scheduled_cycle(
-                    automation_settings_digest(settings)
-                )
+                ).find_recoverable_scheduled_cycle(automation_settings_digest(settings))
         if recoverable is None:
             state = _automation_scheduler.start(settings, _run_auto_processing_cycle)
         else:
@@ -3859,9 +3858,7 @@ def _automation_stage_outcome(
             "waiting_full_scan",
         }
         outcome = "deferred" if market in deferred or theme in deferred else "error"
-        return outcome, (
-            f"fuyao market/theme status is {market or 'missing'}/{theme or 'missing'}"
-        )
+        return outcome, (f"fuyao market/theme status is {market or 'missing'}/{theme or 'missing'}")
     if stage_key == "factor_shadow":
         benchmark_status = health.get("factor_shadow_benchmark_refresh", "")
         if benchmark_status == "error":
@@ -4051,12 +4048,8 @@ def _run_auto_processing_cycle_inner(
             replay = AutoProcessingCycleResult.model_validate(cycle_start.replay_result)
             replay.data_health["automation_cycle_replayed"] = "true"
             replay.data_health["automation_cycle_slot"] = cycle_slot
-            replay.data_health["automation_cycle_status"] = (
-                cycle_start.replay_status or "succeeded"
-            )
-            replay.data_health["automation_retry_attempt_count"] = str(
-                cycle_start.attempt_count
-            )
+            replay.data_health["automation_cycle_status"] = cycle_start.replay_status or "succeeded"
+            replay.data_health["automation_retry_attempt_count"] = str(cycle_start.attempt_count)
             if cycle_start.retry_not_due_at is not None:
                 replay.data_health["automation_retry_not_due"] = "true"
                 replay.data_health["automation_retry_next_at"] = (
@@ -4132,9 +4125,7 @@ def _run_auto_processing_cycle_inner(
         if stage_key == "scan":
             scan_status = str(checkpoint.get("scan_status") or "disabled")
             scan_started = bool(checkpoint.get("scan_started"))
-            scan_job_id = (
-                str(checkpoint["scan_job_id"]) if checkpoint.get("scan_job_id") else None
-            )
+            scan_job_id = str(checkpoint["scan_job_id"]) if checkpoint.get("scan_job_id") else None
         elif stage_key == "paper_seed":
             paper_created = int(checkpoint.get("paper_created") or 0)
         elif stage_key == "paper_update":
@@ -4168,9 +4159,7 @@ def _run_auto_processing_cycle_inner(
             active.guard.assert_current()
         before_health = stage_health_before.get(stage_key, {})
         stage_health = {
-            key: value
-            for key, value in data_health.items()
-            if before_health.get(key) != value
+            key: value for key, value in data_health.items() if before_health.get(key) != value
         }
 
         def fail(error: str) -> None:
@@ -4240,9 +4229,7 @@ def _run_auto_processing_cycle_inner(
             "alerts_triggered": alerts_triggered,
             "alert_delivery_id": data_health.get("automation_alert_delivery_id"),
             "forward_state": data_health.get("ranking_v3_forward_state"),
-            "forward_processed_sessions": data_health.get(
-                "ranking_v3_forward_processed_sessions"
-            ),
+            "forward_processed_sessions": data_health.get("ranking_v3_forward_processed_sessions"),
             "forward_through_date": data_health.get("ranking_v3_forward_through_date"),
         }
         runtime_repo.complete_stage(
@@ -4340,9 +4327,7 @@ def _run_auto_processing_cycle_inner(
                             data_health["fuyao_theme_research_snapshot_id"] = (
                                 theme_capture.snapshot.snapshot_id
                             )
-                        data_health["fuyao_theme_research_errors"] = str(
-                            len(theme_capture.errors)
-                        )
+                        data_health["fuyao_theme_research_errors"] = str(len(theme_capture.errors))
                         data_health["fuyao_theme_research_decision_weight"] = "none"
                     except Exception as exc:
                         data_health["fuyao_theme_research_status"] = "error"
@@ -4381,8 +4366,26 @@ def _run_auto_processing_cycle_inner(
     # A full book still needs to evaluate replacement candidates. The risk
     # gate may prevent direct admission, but it must not bypass the
     # low-quality pending-order replacement path.
-    if not paper_seed_restored and risk_gate_health.get("paper_risk_gate_action") == "capacity_full":
+    if (
+        not paper_seed_restored
+        and risk_gate_health.get("paper_risk_gate_action") == "capacity_full"
+    ):
         allow_seed_paper = True
+
+    account_getter = getattr(paper_repo, "get_account_settings", None)
+    sizing_target_weight = (
+        account_getter().allocation_per_trade_pct if callable(account_getter) else Decimal("10")
+    )
+    data_health.update(
+        {
+            "paper_sizing_policy": "paper-lot-aware-v2",
+            "paper_sizing_target_weight_pct": str(sizing_target_weight),
+            "paper_sizing_max_weight_pct": "20",
+            "paper_sizing_buffer_pct": "1",
+            "paper_sizing_blocked_by_cash": "0",
+            "paper_sizing_blocked_by_allocation": "0",
+        }
+    )
 
     if not paper_seed_restored and settings.seed_paper and mode != "fixture" and allow_seed_paper:
         try:
@@ -4415,23 +4418,8 @@ def _run_auto_processing_cycle_inner(
                 provider=mode,
             )
             data_health.update(production_health)
-            seed_allocation_multiplier = _paper_seed_allocation_multiplier(
-                risk_gate_health
-            )
+            seed_allocation_multiplier = _paper_seed_allocation_multiplier(risk_gate_health)
             account = paper_repo.get_account_settings()
-            before_affordability_filter = len(snapshots)
-            snapshots = [
-                snapshot
-                for snapshot in snapshots
-                if paper_snapshot_round_lot_is_affordable(
-                    snapshot,
-                    account,
-                    seed_allocation_multiplier,
-                )
-            ]
-            data_health["paper_unaffordable_candidate_blocked"] = str(
-                before_affordability_filter - len(snapshots)
-            )
             snapshots, strategy_capacity_health = _paper_strategy_capacity_filter(
                 paper_repo,
                 snapshots,
@@ -4562,6 +4550,14 @@ def _run_auto_processing_cycle_inner(
             data_health["automation_seed_skipped"] = str(seed_result.skipped)
             data_health["automation_seed_skipped_unaffordable"] = str(
                 seed_result.skipped_unaffordable
+            )
+            data_health["paper_sizing_policy"] = "paper-lot-aware-v2"
+            data_health["paper_sizing_target_weight_pct"] = str(account.allocation_per_trade_pct)
+            data_health["paper_sizing_max_weight_pct"] = "20"
+            data_health["paper_sizing_buffer_pct"] = "1"
+            data_health["paper_sizing_blocked_by_cash"] = str(seed_result.blocked_by_cash)
+            data_health["paper_sizing_blocked_by_allocation"] = str(
+                seed_result.blocked_by_allocation
             )
             data_health["automation_seed_effective_limit"] = str(effective_seed_limit)
             data_health["automation_seed_active_limit"] = str(effective_active_limit)
@@ -4722,9 +4718,7 @@ def _run_auto_processing_cycle_inner(
             data_health.update(alert_result.data_health)
             data_health["automation_alert_status"] = "evaluated"
             if alert_result.delivery is not None:
-                data_health["automation_alert_delivery_id"] = (
-                    alert_result.delivery.delivery_id
-                )
+                data_health["automation_alert_delivery_id"] = alert_result.delivery.delivery_id
         except Exception as exc:
             errors.append(f"alerts: {exc}")
     if not alerts_restored:
@@ -4872,14 +4866,10 @@ def _run_auto_processing_cycle_inner(
     result.data_health["automation_cycle_status"] = cycle_status
     if runtime_repo is not None and grant is not None:
         retry_state = runtime_repo.cycle_retry_state(cycle_slot)
-        result.data_health["automation_retry_attempt_count"] = str(
-            retry_state.attempt_count
-        )
+        result.data_health["automation_retry_attempt_count"] = str(retry_state.attempt_count)
         result.data_health["automation_retry_budget"] = str(retry_state.retry_budget)
         if retry_state.next_retry_at is not None:
-            result.data_health["automation_retry_next_at"] = (
-                retry_state.next_retry_at.isoformat()
-            )
+            result.data_health["automation_retry_next_at"] = retry_state.next_retry_at.isoformat()
         if retry_state.retry_backoff_seconds is not None:
             result.data_health["automation_retry_backoff_seconds"] = str(
                 retry_state.retry_backoff_seconds
@@ -4889,9 +4879,7 @@ def _run_auto_processing_cycle_inner(
                 retry_state.last_error_fingerprint
             )
         if retry_state.terminal_reason:
-            result.data_health["automation_retry_terminal_reason"] = (
-                retry_state.terminal_reason
-            )
+            result.data_health["automation_retry_terminal_reason"] = retry_state.terminal_reason
     return result
 
 
@@ -5101,6 +5089,7 @@ def _paper_candidate_pool_snapshot_items(
     risk_action = risk_gate_health.get("paper_risk_gate_action", "")
     market_entry_blocked = risk_gate_health.get("paper_market_entry_gate") == "blocked"
     allocation_multiplier = _paper_seed_allocation_multiplier(risk_gate_health)
+    total_equity, sizing_available_cash = paper_lot_aware_sizing_state(trades, account)
     expected_signal_date = None
     expected_signal_date_value = risk_gate_health.get("paper_candidate_expected_signal_date")
     if expected_signal_date_value:
@@ -5125,11 +5114,16 @@ def _paper_candidate_pool_snapshot_items(
             snapshot,
             latest_value=latest_value,
         )
-        round_lot_affordable = paper_snapshot_round_lot_is_affordable(
-            snapshot,
-            account,
-            allocation_multiplier,
-        )
+        sizing_plan = None
+        if snapshot.instrument_id.upper().startswith("CN:") and snapshot.trigger_price is not None:
+            sizing_plan = build_paper_lot_aware_sizing_plan(
+                snapshot,
+                account,
+                total_equity=total_equity,
+                available_cash=sizing_available_cash,
+                risk_multiplier=allocation_multiplier,
+            )
+        round_lot_affordable = sizing_plan is None or sizing_plan.allowed
         industry = _paper_snapshot_industry(snapshot)
         industry_active_count = active_industry_counts.get(industry, 0) if industry else 0
         industry_occupied = (
@@ -5170,9 +5164,12 @@ def _paper_candidate_pool_snapshot_items(
         elif is_untracked_candidate and not signal_date_fresh:
             status = "blocked_by_data"
             action = "数据待刷新：信号日期不是最新交易日"
+        elif sizing_plan is not None and sizing_plan.status == "blocked_by_cash":
+            status = "blocked_by_cash"
+            action = "可用现金不足"
         elif not round_lot_affordable:
             status = "blocked_by_allocation"
-            action = "仓位金额不足一手"
+            action = "最低一手超过20%上限"
         elif market_entry_blocked:
             status = "blocked_by_market"
             action = "市场风控暂停入场"
@@ -5214,6 +5211,16 @@ def _paper_candidate_pool_snapshot_items(
             and not industry_blocked
         ):
             reserved_industry_counts[industry] = reserved_industry_counts.get(industry, 0) + 1
+            if sizing_plan is not None and status in {
+                "ready_to_add",
+                "replace_candidate",
+                "waiting_for_slot",
+                "waiting",
+            }:
+                sizing_available_cash = max(
+                    Decimal("0"),
+                    sizing_available_cash - sizing_plan.planned_capital,
+                )
         items.append(
             {
                 "snapshot_id": snapshot.snapshot_id,
@@ -5236,6 +5243,29 @@ def _paper_candidate_pool_snapshot_items(
                 "entry_gap_pct": entry_gap_pct,
                 "price_basis_consistent": price_basis_consistent,
                 "round_lot_affordable": round_lot_affordable,
+                "sizing_policy": sizing_plan.policy if sizing_plan is not None else None,
+                "target_weight_pct": (
+                    str(sizing_plan.target_weight_pct) if sizing_plan is not None else None
+                ),
+                "target_budget": (
+                    str(sizing_plan.target_budget) if sizing_plan is not None else None
+                ),
+                "minimum_lot_budget": (
+                    str(sizing_plan.minimum_lot_budget) if sizing_plan is not None else None
+                ),
+                "planned_capital": (
+                    str(sizing_plan.planned_capital) if sizing_plan is not None else None
+                ),
+                "effective_weight_pct": (
+                    str(sizing_plan.effective_weight_pct) if sizing_plan is not None else None
+                ),
+                "available_cash": (
+                    str(sizing_plan.available_cash) if sizing_plan is not None else None
+                ),
+                "minimum_order_quantity": (
+                    sizing_plan.minimum_order_quantity if sizing_plan is not None else None
+                ),
+                "quantity_step": sizing_plan.quantity_step if sizing_plan is not None else None,
                 "trigger_price": str(snapshot.trigger_price)
                 if snapshot.trigger_price is not None
                 else None,
@@ -5255,9 +5285,8 @@ def _paper_candidate_pool_snapshot_items(
     replacement_candidates = sum(1 for item in items if item["status"] == "replace_candidate")
     market_blocked_count = sum(1 for item in items if item["status"] == "blocked_by_market")
     data_blocked_count = sum(1 for item in items if item["status"] == "blocked_by_data")
-    allocation_blocked_count = sum(
-        1 for item in items if item["status"] == "blocked_by_allocation"
-    )
+    allocation_blocked_count = sum(1 for item in items if item["status"] == "blocked_by_allocation")
+    cash_blocked_count = sum(1 for item in items if item["status"] == "blocked_by_cash")
     industry_blocked_count = sum(1 for item in items if item["industry_blocked"])
     industry_missing_count = sum(
         1 for item in items if item["industry"] is None and item["industry_blocked"]
@@ -5272,6 +5301,11 @@ def _paper_candidate_pool_snapshot_items(
         "market_blocked_count": market_blocked_count,
         "data_blocked_count": data_blocked_count,
         "allocation_blocked_count": allocation_blocked_count,
+        "cash_blocked_count": cash_blocked_count,
+        "sizing_policy": "paper-lot-aware-v2",
+        "target_weight_pct": str(account.allocation_per_trade_pct),
+        "max_weight_pct": "20",
+        "buffer_pct": "1",
         "industry_capacity_limit": PAPER_MAX_PER_INDUSTRY,
         "industry_blocked_count": industry_blocked_count,
         "industry_missing_count": industry_missing_count,
@@ -5991,9 +6025,7 @@ def _paper_market_entry_gate_from_cache(
             str(max_new_entries) if max_new_entries is not None else ""
         ),
         "paper_market_entry_gate_position_size_multiplier": (
-            "0.0000"
-            if hard_blocked
-            else "1.0000"
+            "0.0000" if hard_blocked else "1.0000"
         ),
     }
 
@@ -7284,11 +7316,7 @@ def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, o
         max_active_trades=account.max_positions,
         max_signal_age_days=None,
         signal_date_override=tracking_signal_date if mode != "fixture" else None,
-        notes=(
-            "账户表现触发风险收缩；合格候选按剩余仓位进入。"
-            if throttled
-            else ""
-        ),
+        notes=("账户表现触发风险收缩；合格候选按剩余仓位进入。" if throttled else ""),
         allocation_multiplier=Decimal(
             risk_gate_health.get("paper_risk_gate_position_size_multiplier", "1.0")
             if throttled
@@ -7676,9 +7704,7 @@ def paper_trade_current_model_evaluation(
         as_of_date=observation_date,
     )
     if unexpected_cached_dates:
-        report.warnings.append(
-            "行情缓存包含非交易所交易日日期，检查点已改用 XSHG 日历。"
-        )
+        report.warnings.append("行情缓存包含非交易所交易日日期，检查点已改用 XSHG 日历。")
     report.data_health.update(
         {
             "paper_current_model_provider": mode,
@@ -8052,6 +8078,12 @@ def paper_trade_candidate_pool(
         ),
         "paper_candidate_pool_endpoint": "true",
         "paper_candidate_pool_limit": str(limit),
+        "paper_sizing_policy": str(summary["sizing_policy"]),
+        "paper_sizing_target_weight_pct": str(summary["target_weight_pct"]),
+        "paper_sizing_max_weight_pct": str(summary["max_weight_pct"]),
+        "paper_sizing_buffer_pct": str(summary["buffer_pct"]),
+        "paper_sizing_blocked_by_cash": str(summary["cash_blocked_count"]),
+        "paper_sizing_blocked_by_allocation": str(summary["allocation_blocked_count"]),
     }
     return {
         "items": items,
@@ -8212,9 +8244,7 @@ def paper_trade_look_through_risk(
             "paper_reporting_scope": scope,
             "portfolio_lookthrough_catalog_matched": str(len(catalog)),
             "portfolio_lookthrough_position_count": str(len(holdings)),
-            "portfolio_lookthrough_historical_industry_resolved": str(
-                historical_industry_resolved
-            ),
+            "portfolio_lookthrough_historical_industry_resolved": str(historical_industry_resolved),
             "portfolio_lookthrough_stock_industry_unknown": str(stock_industry_unknown),
         }
     )

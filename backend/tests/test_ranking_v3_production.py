@@ -137,6 +137,23 @@ def _selection(
     )
 
 
+def test_official_selection_still_rejects_allocation_multiplier_above_one():
+    with pytest.raises(ValidationError):
+        RankingV3ProductionSelectionItem.create(
+            candidate_id="candidate-overweight",
+            instrument_id="CN:603259",
+            source_snapshot_id="snapshot-overweight",
+            strategy_id="ranking-v3",
+            rank=1,
+            score=Decimal("0.9"),
+            source_rank_score=Decimal("0.9"),
+            trigger_price=Decimal("154.78"),
+            initial_stop=Decimal("145"),
+            target_1=Decimal("170"),
+            allocation_multiplier=Decimal("1.0001"),
+        )
+
+
 def _batch(
     *,
     session_date: date = date(2026, 7, 29),
@@ -567,10 +584,7 @@ def test_legacy_v1_batch_is_readable_but_cannot_be_formally_admitted():
     )
     fact_digest = production_batch_fact_digest(identity, legacy_input)
     legacy_batch = RankingV3ProductionBatch(
-        **(
-            legacy_input.model_dump(mode="python")
-            | {"recorded_at": RECORDED_AT}
-        ),
+        **(legacy_input.model_dump(mode="python") | {"recorded_at": RECORDED_AT}),
         identity=identity,
         fact_digest=fact_digest,
         attestation=RankingV3Attestor(ATTESTATION_KEY).sign(

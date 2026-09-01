@@ -1,7 +1,7 @@
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 from typing import Literal, Mapping
 from zoneinfo import ZoneInfo
 
@@ -25,7 +25,6 @@ from qagent.execution.rules import (
     match_base_price,
     money as execution_money,
     participation_capacity,
-    round_lot,
 )
 from qagent.market.calendars import trading_sessions_elapsed
 from qagent.paper_trading.admission import evaluate_paper_snapshot_admission
@@ -65,6 +64,9 @@ _DEFERRED_FILL_UPDATE_KEY = "__paper_deferred_fills"
 _TERMINAL_REASON_UPDATE_KEY = "__paper_terminal_reason"
 _LEGACY_MARKET_REDUCED_NOTE = "防守行情研究仓位"
 _RESEARCH_SHADOW_ADMISSION_SOURCES = frozenset({"ranking_v4_shadow"})
+PAPER_LOT_AWARE_POLICY = "paper-lot-aware-v2"
+PAPER_LOT_AWARE_MAX_WEIGHT_PCT = Decimal("20")
+PAPER_LOT_AWARE_BUFFER_PCT = Decimal("1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +101,38 @@ class PaperSeedResult(BaseModel):
     created: int
     skipped: int
     skipped_unaffordable: int = 0
+    blocked_by_cash: int = 0
+    blocked_by_allocation: int = 0
+
+
+class PaperLotAwareSizingPlan(BaseModel):
+    policy: str = PAPER_LOT_AWARE_POLICY
+    target_weight_pct: Decimal
+    max_weight_pct: Decimal = PAPER_LOT_AWARE_MAX_WEIGHT_PCT
+    buffer_pct: Decimal = PAPER_LOT_AWARE_BUFFER_PCT
+    trigger_price: Decimal
+    minimum_order_quantity: int
+    quantity_step: int
+    target_budget: Decimal
+    minimum_lot_budget: Decimal
+    planned_capital: Decimal
+    effective_weight_pct: Decimal
+    available_cash: Decimal
+    allocation_multiplier: Decimal
+    status: Literal["allowed", "blocked_by_cash", "blocked_by_allocation"]
+
+    @property
+    def allowed(self) -> bool:
+        return self.status == "allowed"
+
+    def frozen_note(self) -> str:
+        return (
+            f"[sizing_policy={self.policy};target_weight_pct={self.target_weight_pct};"
+            f"max_weight_pct={self.max_weight_pct};buffer_pct={self.buffer_pct};"
+            f"planned_capital={self.planned_capital};"
+            f"minimum_order_quantity={self.minimum_order_quantity};"
+            f"quantity_step={self.quantity_step}]"
+        )
 
 
 class PaperTradingSummary(BaseModel):
@@ -559,6 +593,98 @@ class PaperDailyReport(BaseModel):
     data_health: dict[str, str]
 
 
+def paper_lot_aware_sizing_state(
+    trades: list[PaperTradeRecord],
+    account: PaperAccountSettings,
+) -> tuple[Decimal, Decimal]:
+    """Return mark-to-market equity and truly unreserved cash for new plans."""
+
+    ledger = build_paper_ledger(
+        trades,
+        initial_capital=account.initial_capital,
+        allocation_per_trade_pct=account.allocation_per_trade_pct,
+        max_positions=account.max_positions,
+        transaction_cost_bps=account.transaction_cost_bps,
+        slippage_bps=account.slippage_bps,
+        take_profit_pct=account.take_profit_pct,
+        reporting_scope="all",
+    )
+    base_allocation = execution_money(
+        account.initial_capital * account.allocation_per_trade_pct / Decimal("100")
+    )
+    pending_reservation = sum(
+        (
+            _trade_allocation(trade, base_allocation)
+            for trade in trades
+            if trade.status == "pending"
+        ),
+        Decimal("0"),
+    )
+    return (
+        ledger.summary.total_equity,
+        max(Decimal("0"), ledger.summary.cash_available - pending_reservation),
+    )
+
+
+def build_paper_lot_aware_sizing_plan(
+    snapshot: OpportunitySnapshotRecord,
+    account: PaperAccountSettings,
+    *,
+    total_equity: Decimal,
+    available_cash: Decimal,
+    risk_multiplier: Decimal = Decimal("1"),
+) -> PaperLotAwareSizingPlan:
+    if snapshot.trigger_price is None or snapshot.trigger_price <= 0:
+        raise ValueError("lot-aware sizing requires a positive trigger price")
+    if total_equity <= 0:
+        raise ValueError("lot-aware sizing requires positive account equity")
+    if risk_multiplier <= 0:
+        raise ValueError("lot-aware sizing requires a positive risk multiplier")
+
+    tick_size, minimum_order_quantity, quantity_step = _paper_snapshot_quantity_rule(snapshot)
+    trigger_price = _round_price_up(snapshot.trigger_price, tick_size)
+    target_weight_pct = account.allocation_per_trade_pct
+    target_budget = execution_money(
+        total_equity * target_weight_pct / Decimal("100") * risk_multiplier
+    )
+    minimum_lot_budget = execution_money(
+        trigger_price
+        * minimum_order_quantity
+        * (Decimal("1") + PAPER_LOT_AWARE_BUFFER_PCT / Decimal("100"))
+    )
+    requested = max(target_budget, minimum_lot_budget)
+    base_allocation = execution_money(account.initial_capital * target_weight_pct / Decimal("100"))
+    if base_allocation <= 0:
+        raise ValueError("lot-aware sizing requires a positive target allocation")
+    multiplier = (requested / base_allocation).quantize(Decimal("0.0001"), rounding=ROUND_CEILING)
+    planned_capital = execution_money(base_allocation * multiplier)
+    max_capital = total_equity * PAPER_LOT_AWARE_MAX_WEIGHT_PCT / Decimal("100")
+    if planned_capital > max_capital:
+        status: Literal["allowed", "blocked_by_cash", "blocked_by_allocation"] = (
+            "blocked_by_allocation"
+        )
+    elif planned_capital > available_cash:
+        status = "blocked_by_cash"
+    else:
+        status = "allowed"
+    effective_weight_pct = (planned_capital / total_equity * Decimal("100")).quantize(
+        Decimal("0.0001")
+    )
+    return PaperLotAwareSizingPlan(
+        target_weight_pct=target_weight_pct,
+        trigger_price=trigger_price,
+        minimum_order_quantity=minimum_order_quantity,
+        quantity_step=quantity_step,
+        target_budget=target_budget,
+        minimum_lot_budget=minimum_lot_budget,
+        planned_capital=planned_capital,
+        effective_weight_pct=effective_weight_pct,
+        available_cash=execution_money(available_cash),
+        allocation_multiplier=multiplier,
+        status=status,
+    )
+
+
 def seed_paper_trades_from_snapshots(
     repo: PaperTradingRepository,
     snapshots: list[OpportunitySnapshotRecord],
@@ -573,11 +699,13 @@ def seed_paper_trades_from_snapshots(
     admission_repo: object | None = None,
     admission_mode: str = "automatic",
 ) -> PaperSeedResult:
-    if allocation_multiplier <= 0 or allocation_multiplier > 1:
-        raise ValueError("allocation_multiplier must be between 0 and 1")
+    if allocation_multiplier <= 0:
+        raise ValueError("allocation_multiplier must be greater than zero")
     created = 0
     skipped = 0
     skipped_unaffordable = 0
+    blocked_by_cash = 0
+    blocked_by_allocation = 0
     existing_trades = repo.list_trades(limit=1000, provider=provider)
     existing = {trade.source_snapshot_id for trade in existing_trades}
     active_instruments = {
@@ -585,6 +713,10 @@ def seed_paper_trades_from_snapshots(
     }
     active_count = sum(1 for trade in existing_trades if trade.status in OPEN_STATUSES)
     account_settings = repo.get_account_settings()
+    total_equity, available_cash = paper_lot_aware_sizing_state(
+        existing_trades,
+        account_settings,
+    )
     current_date = _a_share_local_datetime(as_of).date()
     for snapshot in snapshots:
         if max_created is not None and created >= max_created:
@@ -622,13 +754,38 @@ def seed_paper_trades_from_snapshots(
         if not admission.eligible:
             skipped += 1
             continue
-        if not paper_snapshot_round_lot_is_affordable(
+        effective_multiplier = allocation_multiplier
+        effective_notes = notes
+        sizing_plan = None
+        if (
+            snapshot.instrument_id.upper().startswith("CN:")
+            and admission.admission_source != "ranking_v3_production"
+        ):
+            sizing_plan = build_paper_lot_aware_sizing_plan(
+                snapshot,
+                account_settings,
+                total_equity=total_equity,
+                available_cash=available_cash,
+                risk_multiplier=allocation_multiplier,
+            )
+            if not sizing_plan.allowed:
+                skipped += 1
+                skipped_unaffordable += 1
+                if sizing_plan.status == "blocked_by_cash":
+                    blocked_by_cash += 1
+                else:
+                    blocked_by_allocation += 1
+                continue
+            effective_multiplier = sizing_plan.allocation_multiplier
+            effective_notes = _append_note(notes, sizing_plan.frozen_note())
+        elif not paper_snapshot_round_lot_is_affordable(
             snapshot,
             account_settings,
             allocation_multiplier,
         ):
             skipped += 1
             skipped_unaffordable += 1
+            blocked_by_allocation += 1
             continue
         created_trade = repo.create_trade_if_capacity(
             source_snapshot_id=snapshot.snapshot_id,
@@ -640,8 +797,8 @@ def seed_paper_trades_from_snapshots(
             initial_stop=snapshot.initial_stop,
             target_1=snapshot.target_1,
             rank_score=snapshot.rank_score,
-            notes=notes,
-            allocation_multiplier=allocation_multiplier,
+            notes=effective_notes,
+            allocation_multiplier=effective_multiplier,
             max_active_trades=(
                 max_active_trades
                 if max_active_trades is not None
@@ -659,12 +816,19 @@ def seed_paper_trades_from_snapshots(
             skipped += 1
             continue
         created += 1
+        if sizing_plan is not None:
+            available_cash = max(
+                Decimal("0"),
+                available_cash - sizing_plan.planned_capital,
+            )
         active_instruments.add(snapshot.instrument_id)
     return PaperSeedResult(
         scanned=len(snapshots),
         created=created,
         skipped=skipped,
         skipped_unaffordable=skipped_unaffordable,
+        blocked_by_cash=blocked_by_cash,
+        blocked_by_allocation=blocked_by_allocation,
     )
 
 
@@ -904,6 +1068,7 @@ def _restore_pending_market_reduced_allocations(
         if (
             trade.status != "pending"
             or trade.allocation_multiplier >= Decimal("1")
+            or _is_lot_aware_trade(trade)
             or _LEGACY_MARKET_REDUCED_NOTE not in trade.notes
         ):
             continue
@@ -1343,15 +1508,18 @@ def _paper_reporting_scope(
     research_shadow = sum(
         trade.admission_source in _RESEARCH_SHADOW_ADMISSION_SOURCES for trade in trades
     )
-    legacy_unknown = sum(
-        trade.admission_source
-        not in {
-            "ranking_v3_production",
-            "legacy_manual",
-            *_RESEARCH_SHADOW_ADMISSION_SOURCES,
-        }
-        for trade in trades
-    ) + invalid_official_claims
+    legacy_unknown = (
+        sum(
+            trade.admission_source
+            not in {
+                "ranking_v3_production",
+                "legacy_manual",
+                *_RESEARCH_SHADOW_ADMISSION_SOURCES,
+            }
+            for trade in trades
+        )
+        + invalid_official_claims
+    )
     legacy = [trade for trade in trades if trade.trade_id not in authenticated_ids]
     reporting_trades = (
         official
@@ -1896,8 +2064,7 @@ def _paper_execution_evidence_summary(
         for trade in closed
     )
     audited_open = sum(
-        trade.status == "open"
-        and _paper_execution_evidence_status(trade) == "entry_audited"
+        trade.status == "open" and _paper_execution_evidence_status(trade) == "entry_audited"
         for trade in trades
     )
     if not closed:
@@ -1938,9 +2105,7 @@ def _paper_execution_evidence_health(
         "paper_execution_evidence_audited_closed": str(summary.audited_closed_trades),
         "paper_execution_evidence_partial_closed": str(summary.partial_closed_trades),
         "paper_execution_evidence_legacy_closed": str(summary.legacy_closed_trades),
-        "paper_execution_evidence_comparable_closed": str(
-            summary.comparable_closed_trades
-        ),
+        "paper_execution_evidence_comparable_closed": str(summary.comparable_closed_trades),
         "paper_execution_evidence_audited_open": str(summary.audited_open_entries),
     }
 
@@ -1999,9 +2164,7 @@ def _paper_trade_diagnostics(
             continue
         trade = trade_by_id.get(item.trade_id)
         evidence_status = (
-            _paper_execution_evidence_status(trade)
-            if trade is not None
-            else "legacy_unverified"
+            _paper_execution_evidence_status(trade) if trade is not None else "legacy_unverified"
         )
         strategy_attribution_eligible = (
             evidence_status == "complete"
@@ -2009,10 +2172,7 @@ def _paper_trade_diagnostics(
             and context.source_status == "frozen"
         )
         evidence_note = _paper_execution_evidence_note(evidence_status)
-        if (
-            item.status in EXECUTED_CLOSED_STATUSES
-            and not strategy_attribution_eligible
-        ):
+        if item.status in EXECUTED_CLOSED_STATUSES and not strategy_attribution_eligible:
             cause = "legacy_execution_evidence"
             label = "旧成交证据不完整"
             severity = "warning"
@@ -3471,6 +3631,64 @@ def _is_a_share_trade(trade: PaperTradeRecord) -> bool:
     return trade.instrument_id.upper().startswith("CN:")
 
 
+def _round_price_up(value: Decimal, tick_size: Decimal) -> Decimal:
+    ticks = (value / tick_size).to_integral_value(rounding=ROUND_CEILING)
+    return ticks * tick_size
+
+
+def _paper_quantity_rule_from_card(
+    instrument_id: str,
+    card: Mapping[str, object],
+) -> tuple[Decimal, int, int]:
+    constraints = _mapping(card.get("trading_constraints"))
+    overrides = _mapping(card.get("execution_rules") or card.get("execution"))
+    code = instrument_id.split(":", 1)[-1].split(".", 1)[0]
+    default_tick = Decimal("0.001") if code.startswith(("1", "5")) else Decimal("0.01")
+    tick_size = (
+        _positive_decimal_or_none(overrides.get("tick_size") or constraints.get("tick_size"))
+        or default_tick
+    )
+    explicit_minimum = _positive_int(
+        overrides.get("minimum_order_quantity")
+        or overrides.get("min_lot")
+        or constraints.get("minimum_order_quantity")
+        or constraints.get("min_lot")
+    )
+    explicit_step = _positive_int(
+        overrides.get("quantity_step")
+        or overrides.get("lot_size")
+        or constraints.get("quantity_step")
+    )
+    if explicit_minimum is not None or explicit_step is not None:
+        minimum = explicit_minimum or explicit_step or 100
+        step = explicit_step or minimum
+        return tick_size, minimum, step
+    if code.startswith(("688", "689")):
+        return tick_size, 200, 1
+    if code.startswith(("4", "8", "92")):
+        return tick_size, 100, 1
+    return tick_size, 100, 100
+
+
+def _paper_snapshot_quantity_rule(
+    snapshot: OpportunitySnapshotRecord,
+) -> tuple[Decimal, int, int]:
+    card = snapshot.card if isinstance(snapshot.card, dict) else {}
+    return _paper_quantity_rule_from_card(snapshot.instrument_id, card)
+
+
+def _round_order_quantity(raw_quantity: int, rules: AShareExecutionRules) -> int:
+    minimum = rules.effective_minimum_order_quantity
+    step = rules.effective_quantity_step
+    if raw_quantity < minimum:
+        return 0
+    return minimum + ((raw_quantity - minimum) // step) * step
+
+
+def _is_lot_aware_trade(trade: PaperTradeRecord) -> bool:
+    return f"sizing_policy={PAPER_LOT_AWARE_POLICY}" in trade.notes
+
+
 def _paper_execution_context(
     trade: PaperTradeRecord,
     account: PaperAccountSettings,
@@ -3495,6 +3713,14 @@ def _paper_execution_context(
         or default_tick
     )
     lot_size = _positive_int(overrides.get("lot_size") or constraints.get("min_lot")) or 100
+    minimum_order_quantity = None
+    quantity_step = None
+    if _is_lot_aware_trade(trade):
+        tick_size, minimum_order_quantity, quantity_step = _paper_quantity_rule_from_card(
+            trade.instrument_id,
+            card,
+        )
+        lot_size = quantity_step
 
     settlement_value = overrides.get("settlement_days")
     if settlement_value in {0, 1, "0", "1"}:
@@ -3521,6 +3747,8 @@ def _paper_execution_context(
         fee_schedule_version="paper-account-cost-v1",
         tick_size=tick_size,
         lot_size=lot_size,
+        minimum_order_quantity=minimum_order_quantity,
+        quantity_step=quantity_step,
         settlement_days=settlement_days,
         price_limit_rate=price_limit_rate,
         volume_participation_rate=Decimal("1"),
@@ -3549,9 +3777,9 @@ def _paper_entry_quantity(
 ) -> int:
     if trade.trigger_price <= 0:
         return 0
-    return round_lot(
+    return _round_order_quantity(
         int(context.allocation / trade.trigger_price),
-        context.rules.lot_size,
+        context.rules,
     )
 
 
@@ -3564,17 +3792,22 @@ def paper_snapshot_round_lot_is_affordable(
         return True
     if snapshot.trigger_price is None or snapshot.trigger_price <= 0:
         return False
-    card = snapshot.card if isinstance(snapshot.card, dict) else {}
-    constraints = _mapping(card.get("trading_constraints"))
-    overrides = _mapping(card.get("execution_rules") or card.get("execution"))
-    lot_size = _positive_int(overrides.get("lot_size") or constraints.get("min_lot")) or 100
+    _, minimum_order_quantity, quantity_step = _paper_snapshot_quantity_rule(snapshot)
     allocation = execution_money(
         account.initial_capital
         * account.allocation_per_trade_pct
         / Decimal("100")
         * allocation_multiplier
     )
-    return round_lot(int(allocation / snapshot.trigger_price), lot_size) > 0
+    raw_quantity = int(allocation / snapshot.trigger_price)
+    return (
+        raw_quantity >= minimum_order_quantity
+        and (
+            minimum_order_quantity
+            + ((raw_quantity - minimum_order_quantity) // quantity_step) * quantity_step
+        )
+        > 0
+    )
 
 
 def _unaffordable_round_lot_update(
@@ -3583,7 +3816,9 @@ def _unaffordable_round_lot_update(
     *,
     invalidated_on: date,
 ) -> dict[str, object]:
-    minimum_notional = execution_money(trade.trigger_price * context.rules.lot_size)
+    minimum_notional = execution_money(
+        trade.trigger_price * context.rules.effective_minimum_order_quantity
+    )
     return {
         "status": "missed_entry",
         "latest_date": trade.latest_date or invalidated_on,
@@ -3615,10 +3850,7 @@ def _paper_position_quantity(
         return trade.execution_facts.entry.quantity
     if entry_price is None or entry_price <= 0:
         return 0
-    return round_lot(
-        int(context.allocation / entry_price),
-        context.rules.lot_size,
-    )
+    return _round_order_quantity(int(context.allocation / entry_price), context.rules)
 
 
 def _paper_match_row(
@@ -3655,14 +3887,14 @@ def _paper_match_row(
             event_suffix=event_suffix,
             context=context,
             previous_close=previous_close,
-            default_volume=max(quantity, context.rules.lot_size),
+            default_volume=max(quantity, context.rules.effective_minimum_order_quantity),
         )
     except ValueError:
         return _PaperMatchResult(triggered=False, reason="invalid_market_bar")
     if market is None:
         return _PaperMatchResult(triggered=False, reason="invalid_market_bar")
 
-    order_quantity = max(quantity, context.rules.lot_size)
+    order_quantity = max(quantity, context.rules.effective_minimum_order_quantity)
     order = Order(
         order_id=f"paper-order:{trade.trade_id}:{event_suffix}",
         intent_id=f"paper-intent:{trade.trade_id}:{event_suffix}",
@@ -3695,15 +3927,12 @@ def _paper_match_row(
     capacity = participation_capacity(market.volume, context.rules)
     if not allow_partial and capacity < quantity:
         return _PaperMatchResult(triggered=True, reason="insufficient_round_lot_volume")
-    fill_quantity = round_lot(min(quantity, capacity), context.rules.lot_size)
+    fill_quantity = _round_order_quantity(min(quantity, capacity), context.rules)
     if fill_quantity <= 0:
         return _PaperMatchResult(triggered=True, reason="insufficient_round_lot_volume")
     price = execution_apply_slippage(order, market, base_price)
     if side == OrderSide.BUY and max_notional is not None:
-        affordable = round_lot(
-            int(max_notional / price),
-            context.rules.lot_size,
-        )
+        affordable = _round_order_quantity(int(max_notional / price), context.rules)
         fill_quantity = min(fill_quantity, affordable)
         if fill_quantity <= 0:
             return _PaperMatchResult(triggered=True, reason="quantity_below_round_lot")

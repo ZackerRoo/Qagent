@@ -10,6 +10,7 @@ def build_trading_constraints(
 
     symbol = instrument_id.split(":", 1)[1]
     board, price_limit_pct, permission_required = _board_rules(symbol)
+    minimum_order_quantity, quantity_step = _quantity_rules(board)
     constraints = [
         TradingConstraint(
             code="t_plus_one",
@@ -18,10 +19,15 @@ def build_trading_constraints(
             message="A股普通股票通常当日买入、下一交易日起可卖出，盘中计划需要预留隔夜风险。",
         ),
         TradingConstraint(
+            # Stable code retained for API compatibility; the structured
+            # minimum/step fields below are authoritative for sizing.
             code="lot_size_100",
             severity="info",
             title="最小交易单位",
-            message="普通A股买入通常按100股整数倍申报，仓位测算需要按手数取整。",
+            message=(
+                f"{board}买入最低申报 {minimum_order_quantity} 股，"
+                f"之后按 {quantity_step} 股递增；仓位测算按该规则取整。"
+            ),
         ),
     ]
     if price_limit_pct is not None:
@@ -50,9 +56,19 @@ def build_trading_constraints(
         price_limit_pct=price_limit_pct,
         permission_required=permission_required,
         t_plus_one=True,
-        min_lot=100,
+        min_lot=minimum_order_quantity,
+        minimum_order_quantity=minimum_order_quantity,
+        quantity_step=quantity_step,
         constraints=constraints,
     )
+
+
+def _quantity_rules(board: str) -> tuple[int, int]:
+    if board == "科创板":
+        return 200, 1
+    if board == "北交所":
+        return 100, 1
+    return 100, 100
 
 
 def _board_rules(symbol: str) -> tuple[str, int | None, bool]:

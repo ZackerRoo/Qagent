@@ -172,6 +172,8 @@ export type TradingConstraintProfile = {
   permission_required: boolean;
   t_plus_one: boolean;
   min_lot: number | null;
+  minimum_order_quantity?: number | null;
+  quantity_step?: number | null;
   constraints: TradingConstraint[];
 };
 
@@ -2390,6 +2392,15 @@ export type PaperCandidatePoolItem = {
   entry_gap_pct: number | null;
   price_basis_consistent: boolean;
   round_lot_affordable: boolean;
+  sizing_policy: string | null;
+  target_weight_pct: string | null;
+  target_budget: string | null;
+  minimum_lot_budget: string | null;
+  planned_capital: string | null;
+  effective_weight_pct: string | null;
+  available_cash: string | null;
+  minimum_order_quantity: number | null;
+  quantity_step: number | null;
   trigger_price: string | null;
   latest_close: string | null;
   status: string;
@@ -2408,6 +2419,11 @@ export type PaperCandidatePoolSummary = {
   replacement_candidates: number;
   market_blocked_count: number;
   allocation_blocked_count: number;
+  cash_blocked_count: number;
+  sizing_policy: string;
+  target_weight_pct: string;
+  max_weight_pct: string;
+  buffer_pct: string;
   industry_capacity_limit: number;
   industry_blocked_count: number;
   industry_missing_count: number;

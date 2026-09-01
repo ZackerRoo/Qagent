@@ -1032,9 +1032,9 @@ function TodayPaperAdmissionCard({
       </div>
       <p>{paperAdmissionExplanation(admission, summary, language)}</p>
       <div className="today-paper-admission-metrics">
-        <small>{language === "zh" ? "优先级" : "Priority"} <b>{admission ? Math.round(admission.priority_score * 100) : "-"}</b></small>
-        <small>{language === "zh" ? "买点差" : "Entry gap"} <b>{formatAdmissionGap(admission?.entry_gap_pct)}</b></small>
-        <small>{language === "zh" ? "候补" : "Waiting"} <b>{summary.waiting_count}</b></small>
+        <small>{language === "zh" ? "目标预算" : "Target"} <b>{admission?.target_budget ?? "-"}</b></small>
+        <small>{language === "zh" ? "一手所需" : "Min lot"} <b>{admission?.minimum_lot_budget ?? "-"}</b></small>
+        <small>{language === "zh" ? "有效权重" : "Weight"} <b>{admission?.effective_weight_pct ? `${admission.effective_weight_pct}%` : "-"}</b></small>
       </div>
       <div className="today-paper-admission-note">
         <span>{action}</span>
@@ -2538,7 +2538,8 @@ function paperAdmissionLabel(status: string, language: "zh" | "en") {
     tracked_before: { zh: "已跟踪/冷却", en: "Cooling" },
     paused_by_risk: { zh: "风控暂停", en: "Risk paused" },
     blocked_by_market: { zh: "市场暂停入场", en: "Market blocked" },
-    blocked_by_allocation: { zh: "资金不足一手", en: "Below one lot" },
+    blocked_by_cash: { zh: "可用现金不足", en: "Cash blocked" },
+    blocked_by_allocation: { zh: "一手超过20%上限", en: "Min lot above cap" },
     blocked_by_industry: { zh: "行业集中度阻断", en: "Industry blocked" },
     blocked_by_data: { zh: "数据阻断", en: "Data blocked" },
     not_in_pool: { zh: "未入候补", en: "Not queued" },
@@ -2574,8 +2575,13 @@ function paperAdmissionExplanation(
   }
   if (admission.status === "blocked_by_allocation") {
     return language === "zh"
-      ? "当前单笔模拟仓位不足以买入 A 股最小一手，本轮不会创建无法成交的等待单。"
-      : "The current paper allocation cannot buy one A-share lot, so no unfillable pending order is created.";
+      ? `最低一手缓冲金额 ${admission.minimum_lot_budget ?? "-"} 元超过当前权益 20% 硬上限，本轮明确阻断，不进入等待触发。`
+      : "The buffered minimum lot exceeds the 20% equity cap, so entry is blocked rather than shown as waiting.";
+  }
+  if (admission.status === "blocked_by_cash") {
+    return language === "zh"
+      ? `计划金额 ${admission.planned_capital ?? "-"} 元超过真实可用现金 ${admission.available_cash ?? "-"} 元；候选评分保留，但不进入等待触发。`
+      : "The plan exceeds truly available cash; research scoring remains visible but entry is blocked.";
   }
   if (admission.status === "blocked_by_industry") {
     const exposureGroup = admission.exposure_group ?? admission.industry;

@@ -9,6 +9,7 @@ import pytest
 from qagent.backtesting.ranking_v3_protocol import RANKING_V3_MODEL_VERSION
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.paper_trading.engine import (
+    build_paper_lot_aware_sizing_plan,
     build_paper_daily_report,
     build_paper_ledger as build_official_paper_ledger,
     build_paper_validation,
@@ -29,6 +30,167 @@ from qagent.storage.repository import OpportunitySnapshotRecord
 from qagent.storage.tables import OpportunitySnapshotRow, PaperTradeRow, ScanRunRow
 
 from test_state_repository import make_repo
+
+
+def _lot_aware_snapshot(
+    snapshot_id: str,
+    instrument_id: str,
+    trigger_price: str,
+    *,
+    card: dict[str, object] | None = None,
+) -> OpportunitySnapshotRecord:
+    price = Decimal(trigger_price)
+    return OpportunitySnapshotRecord(
+        snapshot_id=snapshot_id,
+        run_id=f"run-{snapshot_id}",
+        card_id=f"card-{snapshot_id}",
+        instrument_id=instrument_id,
+        market="CN",
+        status="setup_ready",
+        signal_date=date(2026, 8, 31),
+        latest_close=price,
+        primary_strategy_id="trend_momentum_stage2",
+        score=Decimal("0.90"),
+        strategy_score=Decimal("0.90"),
+        rank_score=Decimal("0.90"),
+        trigger_price=price,
+        initial_stop=price * Decimal("0.95"),
+        target_1=price * Decimal("1.10"),
+        card=card or {},
+    )
+
+
+def test_lot_aware_sizing_adapts_only_to_minimum_lot_and_enforces_cap(tmp_path):
+    account = PaperTradingRepository(make_repo(tmp_path).session_factory).get_account_settings()
+
+    wuxi = build_paper_lot_aware_sizing_plan(
+        _lot_aware_snapshot("wuxi", "CN:603259", "154.78"),
+        account,
+        total_equity=Decimal("100000"),
+        available_cash=Decimal("100000"),
+    )
+    gibit = build_paper_lot_aware_sizing_plan(
+        _lot_aware_snapshot("gibit", "CN:603444", "383.49"),
+        account,
+        total_equity=Decimal("100000"),
+        available_cash=Decimal("100000"),
+    )
+    normal = build_paper_lot_aware_sizing_plan(
+        _lot_aware_snapshot("normal", "CN:600000", "10.00"),
+        account,
+        total_equity=Decimal("100000"),
+        available_cash=Decimal("100000"),
+    )
+
+    assert wuxi.minimum_lot_budget == Decimal("15632.78")
+    assert wuxi.planned_capital == Decimal("15633.00")
+    assert wuxi.effective_weight_pct == Decimal("15.6330")
+    assert wuxi.status == "allowed"
+    assert gibit.minimum_lot_budget == Decimal("38732.49")
+    assert gibit.status == "blocked_by_allocation"
+    assert normal.target_budget == normal.planned_capital == Decimal("10000.00")
+    assert normal.effective_weight_pct == Decimal("10.0000")
+
+
+def test_lot_aware_sizing_distinguishes_cash_and_board_quantity_rules(tmp_path):
+    account = PaperTradingRepository(make_repo(tmp_path).session_factory).get_account_settings()
+    cash_blocked = build_paper_lot_aware_sizing_plan(
+        _lot_aware_snapshot("cash", "CN:603259", "154.78"),
+        account,
+        total_equity=Decimal("100000"),
+        available_cash=Decimal("15000"),
+    )
+    star = build_paper_lot_aware_sizing_plan(
+        _lot_aware_snapshot("star", "CN:688001", "50.00"),
+        account,
+        total_equity=Decimal("100000"),
+        available_cash=Decimal("100000"),
+    )
+    bse = build_paper_lot_aware_sizing_plan(
+        _lot_aware_snapshot("bse", "CN:920001", "10.00"),
+        account,
+        total_equity=Decimal("100000"),
+        available_cash=Decimal("100000"),
+    )
+
+    assert cash_blocked.status == "blocked_by_cash"
+    assert star.minimum_order_quantity == 200
+    assert star.quantity_step == 1
+    assert bse.minimum_order_quantity == 100
+    assert bse.quantity_step == 1
+
+
+def test_lot_aware_seed_reserves_pending_and_same_round_cash(tmp_path):
+    paper_repo = PaperTradingRepository(make_repo(tmp_path).session_factory)
+    legacy = paper_repo.create_trade(
+        source_snapshot_id="legacy-reservation",
+        provider="free",
+        instrument_id="CN:600000",
+        strategy_id="legacy",
+        signal_date=date(2026, 8, 30),
+        trigger_price=Decimal("10"),
+        initial_stop=Decimal("9"),
+        target_1=Decimal("12"),
+        allocation_multiplier=Decimal("7"),
+        notes="legacy pending plan",
+    )
+    snapshots = [
+        _lot_aware_snapshot("wuxi-a", "CN:603259", "154.78"),
+        _lot_aware_snapshot("wuxi-b", "CN:603260", "154.78"),
+    ]
+
+    result = seed_paper_trades_from_snapshots(
+        paper_repo,
+        snapshots,
+        provider="free",
+        max_created=2,
+    )
+    trades = paper_repo.list_trades(provider="free")
+
+    assert result.created == 1
+    assert result.blocked_by_cash == 1
+    assert result.blocked_by_allocation == 0
+    assert paper_repo.get_trade(legacy.trade_id).allocation_multiplier == Decimal("7.0000")
+    created = next(trade for trade in trades if trade.trade_id != legacy.trade_id)
+    assert created.allocation_multiplier == Decimal("1.5633")
+    assert "sizing_policy=paper-lot-aware-v2" in created.notes
+
+
+def test_lot_aware_seed_and_execution_share_frozen_plan(tmp_path):
+    paper_repo = PaperTradingRepository(make_repo(tmp_path).session_factory)
+    snapshot = _lot_aware_snapshot("wuxi-fill", "CN:603259", "154.78")
+    seeded = seed_paper_trades_from_snapshots(
+        paper_repo,
+        [snapshot],
+        provider="free",
+    )
+    assert seeded.created == 1
+
+    update_paper_trades(
+        paper_repo,
+        provider=DailyRowsProvider(
+            [
+                {
+                    "instrument_id": "CN:603259",
+                    "trade_date": date(2026, 9, 1),
+                    "open": Decimal("154.78"),
+                    "high": Decimal("156.00"),
+                    "low": Decimal("154.00"),
+                    "close": Decimal("155.50"),
+                    "volume": 100_000,
+                    "previous_close": Decimal("154.00"),
+                }
+            ]
+        ),
+        provider_mode="free",
+        as_of=datetime(2026, 9, 1, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    trade = paper_repo.list_trades(provider="free")[0]
+
+    assert trade.status == "open"
+    assert trade.execution_facts is not None
+    assert trade.execution_facts.allocation == Decimal("15633.00")
+    assert trade.execution_facts.entry.quantity == 100
 
 
 def build_paper_ledger(*args, **kwargs):
@@ -2249,9 +2411,7 @@ def test_paper_trade_freezes_scan_run_market_regime_without_changing_plan(tmp_pa
     with repo.session_factory() as session:
         run = session.get(ScanRunRow, "scan-minute")
         assert run is not None
-        run.data_health = json.dumps(
-            {"market_intelligence_regime": "constructive"}
-        )
+        run.data_health = json.dumps({"market_intelligence_regime": "constructive"})
         session.commit()
 
     trade = paper_repo.create_trade(

@@ -82,6 +82,11 @@ class AShareExecutionRules(FrozenModel):
     fee_schedule_version: str = "a-share-fees-v1"
     tick_size: Decimal = Field(default=Decimal("0.01"), gt=0)
     lot_size: int = Field(default=100, gt=0)
+    # ``lot_size`` is retained for backward compatibility with already frozen
+    # execution facts.  Newer rule snapshots can express exchanges where the
+    # minimum buy quantity and the subsequent quantity step differ (STAR/BSE).
+    minimum_order_quantity: int | None = Field(default=None, gt=0)
+    quantity_step: int | None = Field(default=None, gt=0)
     settlement_days: Literal[0, 1] = 1
     price_limit_rate: Decimal | None = Field(default=Decimal("0.10"), gt=0, le=1)
     volume_participation_rate: Decimal = Field(default=Decimal("0.10"), ge=0, le=1)
@@ -91,6 +96,14 @@ class AShareExecutionRules(FrozenModel):
     transfer_fee_bps: Decimal = Field(default=Decimal("0.1"), ge=0)
     slippage_bps: Decimal = Field(default=Decimal("5"), ge=0)
 
+    @property
+    def effective_minimum_order_quantity(self) -> int:
+        return self.minimum_order_quantity or self.lot_size
+
+    @property
+    def effective_quantity_step(self) -> int:
+        return self.quantity_step or self.lot_size
+
 
 class OrderIntent(FrozenModel):
     intent_id: str = Field(min_length=1)
@@ -98,9 +111,7 @@ class OrderIntent(FrozenModel):
     instrument_id: str = Field(min_length=1)
     side: OrderSide
     quantity: int = Field(gt=0)
-    submitted_at: datetime = Field(
-        validation_alias=AliasChoices("submitted_at", "created_at")
-    )
+    submitted_at: datetime = Field(validation_alias=AliasChoices("submitted_at", "created_at"))
     order_type: OrderType = OrderType.MARKET
     limit_price: Decimal | None = Field(default=None, gt=0)
     stop_price: Decimal | None = Field(default=None, gt=0)

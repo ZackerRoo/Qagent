@@ -760,9 +760,7 @@ def test_risk_off_candidates_allow_standard_size_research_entries(
         "/api/paper-trades/candidate-pool?provider=fixture&include_etfs=true&limit=10"
     )
     seeded = client.post("/api/paper-trades/seed?provider=fixture&limit=5")
-    report = client.get(
-        "/api/paper-trades/daily-report?provider=fixture&reporting_scope=legacy"
-    )
+    report = client.get("/api/paper-trades/daily-report?provider=fixture&reporting_scope=legacy")
     post_seed_pool = client.get(
         "/api/paper-trades/candidate-pool?provider=fixture&include_etfs=true&limit=10"
     )
@@ -783,16 +781,11 @@ def test_risk_off_candidates_allow_standard_size_research_entries(
     assert report.json()["risk_gate"]["max_new_entries"] == 3
     assert report.json()["risk_gate"]["position_size_multiplier"] == 1.0
     assert post_seed_pool.status_code == 200
-    assert {item["status"] for item in post_seed_pool.json()["items"]} == {
-        "active_in_paper"
-    }
-    assert (
-        post_seed_pool.json()["data_health"]["paper_market_probe_remaining_today"]
-        == "3"
-    )
-    trades = client.get(
-        "/api/paper-trades?provider=fixture&reporting_scope=legacy"
-    ).json()["trades"]
+    assert {item["status"] for item in post_seed_pool.json()["items"]} == {"active_in_paper"}
+    assert post_seed_pool.json()["data_health"]["paper_market_probe_remaining_today"] == "3"
+    trades = client.get("/api/paper-trades?provider=fixture&reporting_scope=legacy").json()[
+        "trades"
+    ]
     assert len(trades) == 2
     assert all(trade["allocation_multiplier"] == "1.0000" for trade in trades)
     assert all("防守行情研究仓位" not in trade["notes"] for trade in trades)
@@ -855,9 +848,7 @@ def test_candidate_pool_reports_industry_capacity_block(tmp_path, monkeypatch):
 
     assert pool.status_code == 200
     item = next(
-        candidate
-        for candidate in pool.json()["items"]
-        if candidate["instrument_id"] == "US:BANK-3"
+        candidate for candidate in pool.json()["items"] if candidate["instrument_id"] == "US:BANK-3"
     )
     assert item["status"] == "blocked_by_industry"
     assert item["industry"] == "银行"
@@ -889,9 +880,7 @@ def test_lookthrough_read_keeps_paper_ledger_order_events_and_account_immutable(
     assert created.status_code == 200
     trade_id = created.json()["trade"]["trade_id"]
     paper_repo = routes._paper_repo()
-    before_trades = client.get(
-        "/api/paper-trades?provider=fixture&reporting_scope=legacy"
-    ).json()
+    before_trades = client.get("/api/paper-trades?provider=fixture&reporting_scope=legacy").json()
     before_events = client.get(f"/api/paper-trades/{trade_id}/events").json()
     before_account = paper_repo.get_account_settings().model_dump(
         mode="json",
@@ -903,14 +892,18 @@ def test_lookthrough_read_keeps_paper_ledger_order_events_and_account_immutable(
     )
 
     assert report.status_code == 200
-    assert client.get(
-        "/api/paper-trades?provider=fixture&reporting_scope=legacy"
-    ).json() == before_trades
+    assert (
+        client.get("/api/paper-trades?provider=fixture&reporting_scope=legacy").json()
+        == before_trades
+    )
     assert client.get(f"/api/paper-trades/{trade_id}/events").json() == before_events
-    assert paper_repo.get_account_settings().model_dump(
-        mode="json",
-        exclude={"started_at"},
-    ) == before_account
+    assert (
+        paper_repo.get_account_settings().model_dump(
+            mode="json",
+            exclude={"started_at"},
+        )
+        == before_account
+    )
 
 
 def test_ranking_v4_shadow_claim_is_admitted_to_research_paper_lane(
@@ -1145,10 +1138,7 @@ def test_ranking_v3_requires_matching_authoritative_release_proof(tmp_path, monk
 
     class _ApprovedSelection:
         def validate_selection(self, requested_identity, requested_batch):
-            allowed = (
-                requested_identity == identity
-                and requested_batch == production_batch_input
-            )
+            allowed = requested_identity == identity and requested_batch == production_batch_input
             return RankingV3ProductionSelectionValidation(
                 authorized=allowed,
                 reason="authoritative test selection",
@@ -1232,10 +1222,7 @@ def test_ranking_v3_requires_matching_authoritative_release_proof(tmp_path, monk
     assert listed.status_code == 200
     assert listed.json()["summary"]["total"] == 1
     assert len(listed.json()["trades"]) == 1
-    assert (
-        listed.json()["data_health"]["paper_production_authentication"]
-        == "verified"
-    )
+    assert listed.json()["data_health"]["paper_production_authentication"] == "verified"
     retained_session = client.post(
         "/api/paper-trades/session/start",
         json={
@@ -1351,9 +1338,9 @@ def test_paper_candidate_pool_blocks_recently_invalidated_price_basis(tmp_path, 
     client.get("/api/opportunities?provider=fixture&symbols=US:TEST")
     seeded = client.post("/api/paper-trades/seed?provider=fixture&limit=1")
     assert seeded.status_code == 200
-    trade = client.get(
-        "/api/paper-trades?provider=fixture&reporting_scope=legacy"
-    ).json()["trades"][0]
+    trade = client.get("/api/paper-trades?provider=fixture&reporting_scope=legacy").json()[
+        "trades"
+    ][0]
     trigger = Decimal(trade["trigger_price"])
     routes._paper_repo().update_trade(
         trade["trade_id"],
@@ -1428,12 +1415,8 @@ def test_paper_trade_api_filters_by_provider(tmp_path, monkeypatch):
 
     listed = client.get("/api/paper-trades?provider=free&reporting_scope=legacy")
     ledger = client.get("/api/paper-trades/ledger?provider=free&reporting_scope=legacy")
-    validation = client.get(
-        "/api/paper-trades/validation?provider=free&reporting_scope=legacy"
-    )
-    report = client.get(
-        "/api/paper-trades/daily-report?provider=free&reporting_scope=legacy"
-    )
+    validation = client.get("/api/paper-trades/validation?provider=free&reporting_scope=legacy")
+    report = client.get("/api/paper-trades/daily-report?provider=free&reporting_scope=legacy")
 
     assert listed.status_code == 200
     assert listed.json()["summary"]["total"] == 1
@@ -1664,7 +1647,7 @@ def test_paper_update_restores_legacy_risk_off_pending_trade_to_standard_allocat
     assert events[-1].reason_code == "paper_trade.market_risk_sizing_removed"
 
 
-def test_paper_seed_skips_a_share_candidate_when_allocation_cannot_buy_one_lot(
+def test_paper_seed_adapts_research_candidate_to_minimum_lot(
     tmp_path,
     monkeypatch,
 ):
@@ -1675,16 +1658,20 @@ def test_paper_seed_skips_a_share_candidate_when_allocation_cannot_buy_one_lot(
     TestClient(create_app())
     _persist_authoritative_opportunities(
         provider="fixture",
-        cards=[("card_unaffordable_seed_0001", "CN:688578")],
+        cards=[("card_unaffordable_seed_0001", "CN:603259")],
     )
-    snapshot = routes._repo().list_opportunity_snapshots(
-        limit=1,
-        provider="fixture",
-    )[0].model_copy(
-        update={
-            "trigger_price": Decimal("117.97"),
-            "latest_close": Decimal("117.97"),
-        }
+    snapshot = (
+        routes._repo()
+        .list_opportunity_snapshots(
+            limit=1,
+            provider="fixture",
+        )[0]
+        .model_copy(
+            update={
+                "trigger_price": Decimal("117.97"),
+                "latest_close": Decimal("117.97"),
+            }
+        )
     )
     pool_items, pool_summary = routes._paper_candidate_pool_snapshot_items(
         paper_repo=routes._paper_repo(),
@@ -1706,13 +1693,16 @@ def test_paper_seed_skips_a_share_candidate_when_allocation_cannot_buy_one_lot(
         admission_repo=routes._repo(),
     )
 
-    assert result.created == 0
-    assert result.skipped == 1
-    assert result.skipped_unaffordable == 1
-    assert pool_items[0]["status"] == "blocked_by_allocation"
-    assert pool_items[0]["round_lot_affordable"] is False
-    assert pool_summary["allocation_blocked_count"] == 1
-    assert routes._paper_repo().list_trades(limit=10, provider="fixture") == []
+    assert result.created == 1
+    assert result.skipped == 0
+    assert result.skipped_unaffordable == 0
+    assert pool_items[0]["status"] not in {"blocked_by_allocation", "blocked_by_cash"}
+    assert pool_items[0]["round_lot_affordable"] is True
+    assert pool_items[0]["minimum_lot_budget"] == "11914.97"
+    assert pool_summary["allocation_blocked_count"] == 0
+    trade = routes._paper_repo().list_trades(limit=10, provider="fixture")[0]
+    assert trade.allocation_multiplier > Decimal("1")
+    assert "sizing_policy=paper-lot-aware-v2" in trade.notes
 
 
 def test_paper_forward_calendar_uses_exchange_sessions_and_flags_cache_dates():
@@ -1740,9 +1730,7 @@ def test_paper_trade_api_returns_ledger_metrics(tmp_path, monkeypatch):
     client.post("/api/paper-trades/seed?provider=fixture&limit=5")
     client.post("/api/paper-trades/update?provider=fixture")
 
-    response = client.get(
-        "/api/paper-trades/ledger?initial_capital=100000&reporting_scope=legacy"
-    )
+    response = client.get("/api/paper-trades/ledger?initial_capital=100000&reporting_scope=legacy")
 
     assert response.status_code == 200
     body = response.json()
@@ -1790,9 +1778,7 @@ def test_paper_trade_daily_report_uses_cached_benchmarks_only(tmp_path, monkeypa
 
     monkeypatch.setattr("qagent.api.routes.build_market_data_provider", fail_live_provider)
 
-    response = client.get(
-        "/api/paper-trades/daily-report?provider=free&reporting_scope=legacy"
-    )
+    response = client.get("/api/paper-trades/daily-report?provider=free&reporting_scope=legacy")
 
     assert response.status_code == 200
     body = response.json()
@@ -1856,9 +1842,7 @@ def test_paper_trade_daily_report_uses_cached_etf_proxy_benchmarks(tmp_path, mon
 
     monkeypatch.setattr("qagent.api.routes.build_market_data_provider", fail_live_provider)
 
-    response = client.get(
-        "/api/paper-trades/daily-report?provider=free&reporting_scope=legacy"
-    )
+    response = client.get("/api/paper-trades/daily-report?provider=free&reporting_scope=legacy")
 
     assert response.status_code == 200
     body = response.json()
@@ -1928,9 +1912,7 @@ def test_paper_trade_daily_report_falls_back_to_recent_cached_benchmarks(tmp_pat
 
     monkeypatch.setattr("qagent.api.routes.build_market_data_provider", fail_live_provider)
 
-    response = client.get(
-        "/api/paper-trades/daily-report?provider=free&reporting_scope=legacy"
-    )
+    response = client.get("/api/paper-trades/daily-report?provider=free&reporting_scope=legacy")
 
     assert response.status_code == 200
     body = response.json()

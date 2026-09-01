@@ -2326,6 +2326,7 @@ details.compact-data-health:not([open]) > .data-health-details {
 .today-paper-admission-mini.status-tracked_before,
 .today-paper-admission-mini.status-paused_by_risk,
 .today-paper-admission-mini.status-blocked_by_industry,
+.today-paper-admission-mini.status-blocked_by_cash,
 .today-paper-admission-mini.status-blocked_by_allocation,
 .today-paper-admission-mini.status-blocked_by_data {
   border-color: rgba(255, 92, 122, 0.24);
@@ -2424,6 +2425,7 @@ details.compact-data-health:not([open]) > .data-health-details {
 .today-paper-admission-card.status-tracked_before,
 .today-paper-admission-card.status-paused_by_risk,
 .today-paper-admission-card.status-blocked_by_industry,
+.today-paper-admission-card.status-blocked_by_cash,
 .today-paper-admission-card.status-blocked_by_allocation,
 .today-paper-admission-card.status-blocked_by_data {
   border-color: rgba(255, 92, 122, 0.26);
@@ -14510,6 +14512,7 @@ td {
 
 .paper-candidate-item.status-paused_by_risk,
 .paper-candidate-item.status-blocked_by_industry,
+.paper-candidate-item.status-blocked_by_cash,
 .paper-candidate-item.status-blocked_by_allocation,
 .paper-candidate-item.status-blocked_by_data {
   border-color: rgba(255, 92, 122, 0.32);
