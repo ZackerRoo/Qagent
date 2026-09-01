@@ -23,6 +23,7 @@ from qagent.execution.models import (
     TimeInForce,
 )
 from qagent.execution.rules import fee_breakdown, is_tick_aligned, money
+from qagent.execution.replay_evidence import PaperReplayEvidence
 
 
 PAPER_EXECUTION_FACTS_PREFIX = "[paper_execution_facts:v1]"
@@ -120,6 +121,8 @@ class PaperReplaySample(FrozenModel):
     facts: PaperReplayFacts | None
     entry_market: tuple[MarketEvidence, ...] = ()
     exit_market: tuple[MarketEvidence, ...] = ()
+    entry_replay_evidence: PaperReplayEvidence | None = None
+    exit_replay_evidence: PaperReplayEvidence | None = None
     load_issues: tuple[str, ...] = ()
 
 
@@ -177,24 +180,35 @@ def replay_paper_sample(sample: PaperReplaySample) -> PerTradeReplayReport:
     facts = sample.facts
     if _is_legacy_inferred(facts.entry):
         return _unreplayable_report(sample, "legacy_inferred_execution_unreplayable")
-    entry_market, entry_issue = _single_market(sample.entry_market, "entry")
-    if entry_issue is not None:
-        return _unreplayable_report(sample, entry_issue)
-    assert entry_market is not None
-    entry_granularity_issue = _market_granularity_issue(facts.entry, entry_market, "entry")
-    if entry_granularity_issue is not None:
-        return _unreplayable_report(sample, entry_granularity_issue)
-
-    entry_order = _order_contract(sample, facts.entry)
-    if entry_order is None:
-        return _unreplayable_report(sample, "entry_order_contract_missing")
+    entry_evidence = sample.entry_replay_evidence
+    if entry_evidence is not None:
+        entry_issue = _explicit_evidence_issue(
+            entry_evidence, facts.entry, sample.instrument_id, "entry"
+        )
+        if entry_issue is not None:
+            return _unreplayable_report(sample, entry_issue)
+        entry_market = _market_evidence_from_explicit(entry_evidence)
+        entry_order = _explicit_order_contract(entry_evidence)
+        entry_rules = entry_evidence.rules
+    else:
+        entry_market, entry_issue = _single_market(sample.entry_market, "entry")
+        if entry_issue is not None:
+            return _unreplayable_report(sample, entry_issue)
+        assert entry_market is not None
+        entry_granularity_issue = _market_granularity_issue(facts.entry, entry_market, "entry")
+        if entry_granularity_issue is not None:
+            return _unreplayable_report(sample, entry_granularity_issue)
+        entry_order = _order_contract(sample, facts.entry)
+        if entry_order is None:
+            return _unreplayable_report(sample, "entry_order_contract_missing")
+        entry_rules = facts.rules
 
     required = money(
         facts.entry.base_price * facts.entry.quantity
         + fee_breakdown(
             OrderSide.BUY,
             facts.entry.base_price * facts.entry.quantity,
-            facts.rules,
+            entry_rules,
         ).total
     )
     initial_cash = max(facts.allocation, required, -facts.entry.cash_flow)
@@ -205,6 +219,8 @@ def replay_paper_sample(sample: PaperReplaySample) -> PerTradeReplayReport:
         facts.entry,
         entry_market,
         entry_order,
+        rules=entry_rules,
+        explicit_evidence=entry_evidence,
     )
     classifications = [difference.code for difference in entry_comparison.differences]
     if facts.allocation < required:
@@ -234,15 +250,29 @@ def replay_paper_sample(sample: PaperReplaySample) -> PerTradeReplayReport:
             )
             classifications.append("legacy_inferred_execution_unreplayable")
         else:
-            exit_market, exit_issue = _single_market(sample.exit_market, "exit")
-            exit_order = _order_contract(sample, facts.exit)
+            exit_evidence = sample.exit_replay_evidence
+            if exit_evidence is not None:
+                exit_issue = _explicit_evidence_issue(
+                    exit_evidence, facts.exit, sample.instrument_id, "exit"
+                )
+                exit_market = _market_evidence_from_explicit(exit_evidence)
+                exit_order = _explicit_order_contract(exit_evidence)
+                exit_rules = exit_evidence.rules
+            else:
+                exit_market, exit_issue = _single_market(sample.exit_market, "exit")
+                exit_order = _order_contract(sample, facts.exit)
+                exit_rules = facts.rules
             if exit_issue is not None:
                 exit_comparison = _unreplayable_leg(facts.exit, exit_issue)
             elif exit_order is None:
                 exit_comparison = _unreplayable_leg(facts.exit, "exit_order_contract_missing")
             else:
                 assert exit_market is not None
-                exit_granularity_issue = _market_granularity_issue(facts.exit, exit_market, "exit")
+                exit_granularity_issue = (
+                    None
+                    if exit_evidence is not None
+                    else _market_granularity_issue(facts.exit, exit_market, "exit")
+                )
                 if exit_granularity_issue is not None:
                     exit_comparison = _unreplayable_leg(facts.exit, exit_granularity_issue)
                 else:
@@ -252,10 +282,14 @@ def replay_paper_sample(sample: PaperReplaySample) -> PerTradeReplayReport:
                         facts.exit,
                         exit_market,
                         exit_order,
+                        rules=exit_rules,
+                        explicit_evidence=exit_evidence,
                     )
         assert exit_comparison is not None
         classifications.extend(item.code for item in exit_comparison.differences)
-        if facts.exit.trade_date != facts.entry.trade_date:
+        if facts.exit.trade_date != facts.entry.trade_date and (
+            sample.entry_replay_evidence is None or sample.exit_replay_evidence is None
+        ):
             classifications.append("v1_single_rules_snapshot_cross_date")
 
     legacy_inferred = facts.entry.source == "legacy_inferred" or (
@@ -351,6 +385,62 @@ def _is_legacy_inferred(leg: PaperReplayLeg) -> bool:
     return leg.source == "legacy_inferred" or ":legacy-entry" in leg.market_event_id
 
 
+def _explicit_evidence_issue(
+    evidence: PaperReplayEvidence,
+    leg: PaperReplayLeg,
+    instrument_id: str,
+    phase: str,
+) -> str | None:
+    if evidence.phase != phase:
+        return f"{phase}_replay_evidence_phase_mismatch"
+    if evidence.market.instrument_id != instrument_id:
+        return f"{phase}_replay_evidence_instrument_mismatch"
+    expected = evidence.expected_fill
+    fields = (
+        "market_event_id",
+        "side",
+        "trade_date",
+        "base_price",
+        "price",
+        "quantity",
+        "gross_amount",
+        "commission",
+        "stamp_duty",
+        "transfer_fee",
+        "slippage",
+        "cash_flow",
+    )
+    if any(getattr(expected, field) != getattr(leg, field) for field in fields):
+        return f"{phase}_replay_evidence_fill_mismatch"
+    return None
+
+
+def _market_evidence_from_explicit(evidence: PaperReplayEvidence) -> MarketEvidence:
+    market = evidence.market
+    granularity = (
+        MarketGranularity.MINUTE if ":minute:" in market.event_id else MarketGranularity.DAILY
+    )
+    return MarketEvidence(
+        granularity=granularity,
+        provider_mode="paper_replay_evidence",
+        source_provider="unified_execution",
+        cached_at=market.occurred_at.isoformat(),
+        trade_date=market.trading_date,
+        open=market.open,
+        high=market.high,
+        low=market.low,
+        close=market.close,
+        volume=market.volume,
+    )
+
+
+def _explicit_order_contract(
+    evidence: PaperReplayEvidence,
+) -> tuple[OrderType, Decimal | None, Decimal | None]:
+    order = evidence.order
+    return order.order_type, order.limit_price, order.stop_price
+
+
 def _order_contract(
     sample: PaperReplaySample, leg: PaperReplayLeg
 ) -> tuple[OrderType, Decimal | None, Decimal | None] | None:
@@ -373,32 +463,58 @@ def _replay_leg(
     paper: PaperReplayLeg,
     evidence: MarketEvidence,
     order_contract: tuple[OrderType, Decimal | None, Decimal | None],
+    *,
+    rules: AShareExecutionRules,
+    explicit_evidence: PaperReplayEvidence | None = None,
 ) -> tuple[PerLegComparison, ExecutionState]:
     order_type, limit_price, stop_price = order_contract
-    occurred_at = datetime.combine(paper.trade_date, time(15, 0), tzinfo=timezone.utc)
+    occurred_at = (
+        explicit_evidence.market.occurred_at
+        if explicit_evidence is not None
+        else datetime.combine(paper.trade_date, time(15, 0), tzinfo=timezone.utc)
+    )
+    submitted_at = (
+        explicit_evidence.order.submitted_at
+        if explicit_evidence is not None
+        else occurred_at - timedelta(seconds=1)
+    )
     intent = OrderIntent(
         intent_id=f"offline:{sample.sample_key}:{paper.side.value}:{paper.trade_date}",
         account_id=state.account.account_id,
         instrument_id=sample.instrument_id,
         side=paper.side,
-        quantity=paper.quantity,
-        submitted_at=occurred_at - timedelta(seconds=1),
+        quantity=(
+            explicit_evidence.order.quantity if explicit_evidence is not None else paper.quantity
+        ),
+        submitted_at=submitted_at,
         order_type=order_type,
         limit_price=limit_price,
         stop_price=stop_price,
-        estimated_price=paper.base_price,
-        time_in_force=TimeInForce.DAY,
+        estimated_price=(
+            explicit_evidence.order.estimated_price
+            if explicit_evidence is not None
+            else paper.base_price
+        ),
+        time_in_force=(
+            explicit_evidence.order.time_in_force
+            if explicit_evidence is not None
+            else TimeInForce.DAY
+        ),
     )
-    market = MarketEvent(
-        event_id=f"offline-market:{sample.sample_key}:{paper.side.value}:{paper.trade_date}",
-        instrument_id=sample.instrument_id,
-        occurred_at=occurred_at,
-        trading_date=paper.trade_date,
-        open=evidence.open,
-        high=evidence.high,
-        low=evidence.low,
-        close=evidence.close,
-        volume=evidence.volume,
+    market = (
+        explicit_evidence.market
+        if explicit_evidence is not None
+        else MarketEvent(
+            event_id=f"offline-market:{sample.sample_key}:{paper.side.value}:{paper.trade_date}",
+            instrument_id=sample.instrument_id,
+            occurred_at=occurred_at,
+            trading_date=paper.trade_date,
+            open=evidence.open,
+            high=evidence.high,
+            low=evidence.low,
+            close=evidence.close,
+            volume=evidence.volume,
+        )
     )
     try:
         if (
@@ -415,8 +531,7 @@ def _replay_leg(
                 }
             )
             state = apply_market_event(state, session_market).state
-        assert sample.facts is not None
-        state = apply_order_intent(state, intent, sample.facts.rules).state
+        state = apply_order_intent(state, intent, rules).state
         before = len(state.fills)
         state = apply_market_event(state, market).state
     except (ValueError, AssertionError) as exc:

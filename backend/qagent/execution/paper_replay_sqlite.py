@@ -17,6 +17,10 @@ from qagent.execution.paper_replay import (
     replay_paper_sample,
     summarize_paper_replays,
 )
+from qagent.execution.replay_evidence import (
+    PAPER_REPLAY_EVIDENCE_NOTE_PREFIX,
+    PaperReplayEvidence,
+)
 
 
 REQUIRED_TABLES = frozenset({"paper_trades", "paper_trade_events", "market_bar_cache"})
@@ -92,22 +96,24 @@ def load_replay_samples(
     for trade_id in sorted(grouped):
         selected = _select_latest_facts(grouped[trade_id])
         row, facts, load_issues = selected
+        evidences, evidence_issues = _select_latest_replay_evidence(grouped[trade_id])
+        load_issues = load_issues + evidence_issues
+        entry_replay_evidence = evidences.get("entry")
+        exit_replay_evidence = evidences.get("exit")
         entry_market = (
-            _load_market_evidence(
-                connection,
-                str(row["instrument_id"]),
-                facts.entry.trade_date,
-                provider_modes,
+            (_explicit_market_evidence(entry_replay_evidence),)
+            if entry_replay_evidence is not None
+            else _load_market_evidence(
+                connection, str(row["instrument_id"]), facts.entry.trade_date, provider_modes
             )
             if facts is not None
             else ()
         )
         exit_market = (
-            _load_market_evidence(
-                connection,
-                str(row["instrument_id"]),
-                facts.exit.trade_date,
-                provider_modes,
+            (_explicit_market_evidence(exit_replay_evidence),)
+            if exit_replay_evidence is not None
+            else _load_market_evidence(
+                connection, str(row["instrument_id"]), facts.exit.trade_date, provider_modes
             )
             if facts is not None and facts.exit is not None
             else ()
@@ -123,6 +129,8 @@ def load_replay_samples(
                 facts=facts,
                 entry_market=entry_market,
                 exit_market=exit_market,
+                entry_replay_evidence=entry_replay_evidence,
+                exit_replay_evidence=exit_replay_evidence,
                 load_issues=load_issues,
             )
         )
@@ -161,6 +169,65 @@ def _facts_payloads(note: str) -> tuple[str, ...]:
         line[len(PAPER_EXECUTION_FACTS_PREFIX) :]
         for line in note.splitlines()
         if line.startswith(PAPER_EXECUTION_FACTS_PREFIX)
+    )
+
+
+def _select_latest_replay_evidence(
+    rows: list[sqlite3.Row],
+) -> tuple[dict[str, PaperReplayEvidence], tuple[str, ...]]:
+    selected: dict[str, PaperReplayEvidence] = {}
+    sequences = sorted({int(row["sequence"]) for row in rows}, reverse=True)
+    for sequence in sequences:
+        payloads = tuple(
+            payload
+            for row in rows
+            if int(row["sequence"]) == sequence
+            for payload in _replay_evidence_payloads(str(row["note"]))
+        )
+        if not payloads:
+            continue
+        parsed: list[PaperReplayEvidence] = []
+        try:
+            parsed = [PaperReplayEvidence.model_validate_json(payload) for payload in payloads]
+        except (ValueError, TypeError):
+            return {}, ("newest_replay_evidence_invalid_fail_closed",)
+        for phase in ("entry", "exit"):
+            if phase in selected:
+                continue
+            candidates = [item for item in parsed if item.phase == phase]
+            if not candidates:
+                continue
+            if len({item.evidence_digest for item in candidates}) != 1:
+                return {}, (f"{phase}_replay_evidence_conflict_fail_closed",)
+            selected[phase] = candidates[0]
+        if len(selected) == 2:
+            break
+    return selected, ()
+
+
+def _replay_evidence_payloads(note: str) -> tuple[str, ...]:
+    return tuple(
+        line[len(PAPER_REPLAY_EVIDENCE_NOTE_PREFIX) :]
+        for line in note.splitlines()
+        if line.startswith(PAPER_REPLAY_EVIDENCE_NOTE_PREFIX)
+    )
+
+
+def _explicit_market_evidence(evidence: PaperReplayEvidence) -> MarketEvidence:
+    market = evidence.market
+    return MarketEvidence(
+        granularity=(
+            MarketGranularity.MINUTE if ":minute:" in market.event_id else MarketGranularity.DAILY
+        ),
+        provider_mode="paper_replay_evidence",
+        source_provider="unified_execution",
+        cached_at=market.occurred_at.isoformat(),
+        trade_date=market.trading_date,
+        open=market.open,
+        high=market.high,
+        low=market.low,
+        close=market.close,
+        volume=market.volume,
     )
 
 

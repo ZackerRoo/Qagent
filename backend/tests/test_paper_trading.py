@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from qagent.backtesting.ranking_v3_protocol import RANKING_V3_MODEL_VERSION
+from qagent.execution.models import OrderSide
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.paper_trading.engine import (
     build_paper_lot_aware_sizing_plan,
@@ -571,6 +572,132 @@ def test_a_share_paper_trade_opens_from_post_signal_minute_cross(tmp_path):
     assert trade.entry_date == date(2026, 7, 2)
     assert trade.entry_price == Decimal("10.0000")
     assert "分钟线" in trade.notes
+    event = paper_repo.list_trade_events(trade.trade_id)[-1]
+    assert "[paper_replay_evidence:v1]" in event.note
+    assert len(event.replay_evidence) == 1
+    evidence = event.replay_evidence[0]
+    assert evidence.phase == "entry"
+    assert evidence.market.event_id == trade.execution_facts.entry.market_event_id
+    assert ":minute:" in evidence.market.event_id
+    assert evidence.expected_fill.price == trade.execution_facts.entry.price
+
+
+def test_replay_evidence_build_failure_is_audited_without_failing_trade(
+    tmp_path,
+    monkeypatch,
+):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    snapshot_id = _insert_cn_snapshot(
+        repo,
+        instrument_id="CN:688052",
+        created_at=datetime(2026, 7, 2, 3, 38, tzinfo=timezone.utc),
+        trigger_price=Decimal("10.00"),
+        no_chase_above=Decimal("10.50"),
+    )
+    paper_repo.create_trade(
+        source_snapshot_id=snapshot_id,
+        provider="free",
+        instrument_id="CN:688052",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 2),
+        trigger_price=Decimal("10.00"),
+        initial_stop=Decimal("9.50"),
+        target_1=Decimal("11.00"),
+        rank_score=Decimal("0.91"),
+    )
+    provider = MinuteCnProvider(
+        [
+            {
+                "instrument_id": "CN:688052",
+                "timestamp": datetime(2026, 7, 2, 13, 5),
+                "open": Decimal("9.90"),
+                "high": Decimal("10.20"),
+                "low": Decimal("9.85"),
+                "close": Decimal("10.10"),
+                "volume": 1000,
+            }
+        ]
+    )
+
+    def fail_audit(**_kwargs):
+        raise ValueError("fixture audit failure")
+
+    monkeypatch.setattr("qagent.paper_trading.engine._paper_replay_evidence", fail_audit)
+    update_paper_trades(
+        paper_repo,
+        provider=provider,
+        as_of=datetime(2026, 7, 2, 14, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    trade = paper_repo.list_trades()[0]
+    event = paper_repo.list_trade_events(trade.trade_id)[-1]
+    assert trade.status == "open"
+    assert trade.entry_price == Decimal("10.0000")
+    assert trade.execution_facts is not None
+    assert trade.execution_facts.entry.quantity == 1000
+    assert event.execution_facts == trade.execution_facts
+    assert event.replay_evidence == ()
+    assert "[paper_replay_evidence_status:v1]" in event.note
+    assert "build_failed_trade_continued" in event.note
+
+
+def test_legacy_inferred_entry_does_not_create_fabricated_replay_evidence(tmp_path):
+    repo = make_repo(tmp_path)
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    snapshot_id = _insert_cn_snapshot(
+        repo,
+        instrument_id="CN:600000",
+        created_at=datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc),
+        trigger_price=Decimal("10.00"),
+        no_chase_above=Decimal("10.50"),
+    )
+    trade = paper_repo.create_trade(
+        source_snapshot_id=snapshot_id,
+        provider="free",
+        instrument_id="CN:600000",
+        strategy_id="legacy",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("10.00"),
+        initial_stop=Decimal("9.50"),
+        target_1=Decimal("11.00"),
+        rank_score=Decimal("0.80"),
+    )
+    paper_repo.update_trade(
+        trade.trade_id,
+        status="open",
+        entry_date=date(2026, 7, 2),
+        entry_price=Decimal("10.00"),
+        latest_date=date(2026, 7, 2),
+        latest_price=Decimal("10.00"),
+    )
+    provider = MinuteCnProvider(
+        [
+            {
+                "instrument_id": "CN:600000",
+                "timestamp": datetime(2026, 7, 3, 10, 1),
+                "open": Decimal("9.60"),
+                "high": Decimal("9.70"),
+                "low": Decimal("9.40"),
+                "close": Decimal("9.45"),
+                "volume": 100_000,
+            }
+        ]
+    )
+
+    update_paper_trades(
+        paper_repo,
+        provider=provider,
+        as_of=datetime(2026, 7, 3, 14, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    closed = paper_repo.get_trade(trade.trade_id)
+    event = paper_repo.list_trade_events(trade.trade_id)[-1]
+    assert closed is not None and closed.status == "stopped"
+    assert closed.execution_facts is not None
+    assert closed.execution_facts.entry.source == "legacy_inferred"
+    assert [item.phase for item in event.replay_evidence] == ["exit"]
+    assert all(item.expected_fill.side == OrderSide.SELL for item in event.replay_evidence)
 
 
 def test_a_share_paper_trade_marks_missed_when_minute_price_gaps_above_chase_limit(

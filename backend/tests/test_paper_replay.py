@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from qagent.execution.models import AShareExecutionRules, OrderSide
+from qagent.execution.models import (
+    AShareExecutionRules,
+    MarketEvent,
+    Order,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    TimeInForce,
+)
 from qagent.execution.paper_replay import (
     PAPER_EXECUTION_FACTS_PREFIX,
     MarketEvidence,
@@ -25,6 +33,11 @@ from qagent.execution.paper_replay_sqlite import (
     load_replay_samples,
     open_read_only_sqlite,
     run_read_only_replay,
+)
+from qagent.execution.replay_evidence import (
+    PAPER_REPLAY_EVIDENCE_NOTE_PREFIX,
+    PaperReplayEvidence,
+    PaperReplayExpectedFill,
 )
 
 
@@ -96,6 +109,51 @@ def _sample(*, facts: PaperReplayFacts | None = None) -> PaperReplaySample:
         entry_market=(_market(DAY_1, "10.00"),),
         exit_market=(
             (_market(DAY_2, str(execution_facts.exit.base_price)),) if execution_facts.exit else ()
+        ),
+    )
+
+
+def _explicit_evidence(
+    leg: PaperReplayLeg,
+    rules: AShareExecutionRules,
+    *,
+    phase: str,
+) -> PaperReplayEvidence:
+    occurred_at = datetime.combine(leg.trade_date, datetime.min.time(), tzinfo=timezone.utc)
+    market = MarketEvent(
+        event_id=leg.market_event_id,
+        instrument_id="CN:600000",
+        occurred_at=occurred_at,
+        open=leg.base_price,
+        high=leg.base_price,
+        low=leg.base_price,
+        close=leg.base_price,
+        volume=100_000,
+    )
+    order_type = OrderType.MARKET
+    order = Order(
+        order_id=f"order-{phase}",
+        intent_id=f"intent-{phase}",
+        account_id="paper",
+        instrument_id=market.instrument_id,
+        side=leg.side,
+        quantity=leg.quantity,
+        submitted_at=occurred_at,
+        order_type=order_type,
+        estimated_price=leg.base_price,
+        time_in_force=TimeInForce.DAY,
+        status=OrderStatus.ACTIVE,
+        updated_at=occurred_at,
+        rules=rules,
+    )
+    return PaperReplayEvidence.create(
+        phase=phase,
+        market=market,
+        order=order,
+        rules=rules,
+        expected_fill=PaperReplayExpectedFill(
+            instrument_id=market.instrument_id,
+            **leg.model_dump(exclude={"source"}),
         ),
     )
 
@@ -180,6 +238,18 @@ def _insert_markets(connection: sqlite3.Connection) -> None:
                 "2026-08-05T00:00:00+00:00",
             ),
         )
+
+
+def _append_evidence(
+    connection: sqlite3.Connection,
+    event_id: str,
+    evidence: PaperReplayEvidence,
+) -> None:
+    payload = json.dumps(evidence.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    connection.execute(
+        "UPDATE paper_trade_events SET note = note || ? WHERE event_id = ?",
+        (f"\n{PAPER_REPLAY_EVIDENCE_NOTE_PREFIX}{payload}", event_id),
+    )
 
 
 def test_replays_buy_and_sell_and_marks_cross_date_v1_rule_limit():
@@ -362,6 +432,77 @@ def test_loader_selects_latest_facts_and_honors_limit(tmp_path: Path):
     assert samples[0].facts.exit is not None
     assert samples[0].entry_market[0].granularity == MarketGranularity.DAILY
     assert samples[0].exit_market[0].granularity == MarketGranularity.DAILY
+
+
+def test_loader_prefers_explicit_minute_evidence_without_daily_cache(tmp_path: Path):
+    path = tmp_path / "fixture.db"
+    writer = _create_db(path)
+    facts = _facts(closed=False)
+    facts = facts.model_copy(
+        update={
+            "entry": facts.entry.model_copy(
+                update={"market_event_id": "paper-market:fixture:minute:2026-08-03T10:01:00:entry"}
+            )
+        }
+    )
+    _insert_trade(writer, "trade-a", facts, event_id="explicit-entry")
+    _append_evidence(
+        writer,
+        "explicit-entry",
+        _explicit_evidence(facts.entry, facts.rules, phase="entry"),
+    )
+    writer.commit()
+    writer.close()
+
+    reader = open_read_only_sqlite(path)
+    try:
+        sample = load_replay_samples(reader, limit=1)[0]
+    finally:
+        reader.close()
+
+    assert sample.entry_replay_evidence is not None
+    assert sample.entry_market[0].granularity == MarketGranularity.MINUTE
+    report = replay_paper_sample(sample)
+    assert report.entry is not None and report.entry.replay_digest is not None
+    assert report.entry.verdict == ReplayVerdict.MATCHED
+
+
+def test_invalid_newest_replay_evidence_does_not_fallback_to_older_snapshot(
+    tmp_path: Path,
+):
+    path = tmp_path / "fixture.db"
+    writer = _create_db(path)
+    facts = _facts(closed=False)
+    facts = facts.model_copy(
+        update={
+            "entry": facts.entry.model_copy(
+                update={"market_event_id": "paper-market:fixture:minute:2026-08-03T10:01:00:entry"}
+            )
+        }
+    )
+    _insert_trade(writer, "trade-a", facts, sequence=1, event_id="older-valid")
+    _append_evidence(
+        writer,
+        "older-valid",
+        _explicit_evidence(facts.entry, facts.rules, phase="entry"),
+    )
+    _insert_trade(writer, "trade-a", facts, sequence=2, event_id="newest-invalid")
+    writer.execute(
+        "UPDATE paper_trade_events SET note = note || ? WHERE event_id = ?",
+        (f"\n{PAPER_REPLAY_EVIDENCE_NOTE_PREFIX}{{broken", "newest-invalid"),
+    )
+    writer.commit()
+    writer.close()
+
+    reader = open_read_only_sqlite(path)
+    try:
+        sample = load_replay_samples(reader, limit=1)[0]
+    finally:
+        reader.close()
+
+    assert sample.entry_replay_evidence is None
+    assert sample.load_issues == ("newest_replay_evidence_invalid_fail_closed",)
+    assert replay_paper_sample(sample).verdict == ReplayVerdict.UNREPLAYABLE
 
 
 def test_invalid_newest_facts_is_fail_closed_not_replayed_from_old_event(tmp_path: Path):

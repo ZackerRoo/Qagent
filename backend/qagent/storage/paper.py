@@ -9,6 +9,10 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.execution.models import AShareExecutionRules, OrderSide
+from qagent.execution.replay_evidence import (
+    PAPER_REPLAY_EVIDENCE_NOTE_PREFIX,
+    PaperReplayEvidence,
+)
 from qagent.execution.rules import is_tick_aligned
 from qagent.storage.tables import (
     OpportunitySnapshotRow,
@@ -23,6 +27,7 @@ from qagent.recommendations.strategy_configuration import parse_paper_strategy_c
 
 
 PAPER_EXECUTION_FACTS_NOTE_PREFIX = "[paper_execution_facts:v1]"
+PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIX = "[paper_replay_evidence_status:v1]"
 PAPER_SOURCE_CONTEXT_NOTE_PREFIX = "[paper_source_context:v1]"
 PAPER_TRADE_TERMINAL_STATUSES = frozenset(
     {
@@ -262,6 +267,8 @@ class PaperTradeEventMetadata(BaseModel):
     note: str = ""
     source: str = "paper_repository"
     execution_facts: PaperExecutionFacts | None = None
+    replay_evidence: PaperReplayEvidence | tuple[PaperReplayEvidence, ...] | None = None
+    replay_evidence_error: str | None = None
 
 
 class PaperTradeEventRecord(BaseModel):
@@ -281,6 +288,7 @@ class PaperTradeEventRecord(BaseModel):
     source: str
     created_at: datetime
     execution_facts: PaperExecutionFacts | None = None
+    replay_evidence: tuple[PaperReplayEvidence, ...] = ()
 
 
 class PaperTradingRepository:
@@ -936,6 +944,7 @@ class PaperTradingRepository:
             source=row.source,
             created_at=row.created_at,
             execution_facts=parse_paper_execution_facts(row.note),
+            replay_evidence=parse_paper_replay_evidences(row.note),
         )
 
     @staticmethod
@@ -969,6 +978,20 @@ class PaperTradingRepository:
             note = encode_paper_source_context(note, source_context)
         if details.execution_facts is not None:
             note = encode_paper_execution_facts(note, details.execution_facts)
+        if details.replay_evidence is not None:
+            evidences = (
+                details.replay_evidence
+                if isinstance(details.replay_evidence, tuple)
+                else (details.replay_evidence,)
+            )
+            for evidence in evidences:
+                note = encode_paper_replay_evidence(note, evidence)
+        if details.replay_evidence_error is not None:
+            note = encode_paper_replay_evidence_status(
+                note,
+                status="build_failed_trade_continued",
+                reason=details.replay_evidence_error,
+            )
         session.add(
             PaperTradeEventRow(
                 event_id=event_id,
@@ -1162,6 +1185,61 @@ def parse_paper_execution_facts(note: str | None) -> PaperExecutionFacts | None:
         except (ValueError, TypeError):
             return None
     return None
+
+
+def encode_paper_replay_evidence(
+    note: str,
+    evidence: PaperReplayEvidence,
+) -> str:
+    payload = json.dumps(
+        evidence.model_dump(mode="json"),
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    line = f"{PAPER_REPLAY_EVIDENCE_NOTE_PREFIX}{payload}"
+    return f"{note.rstrip()}\n{line}" if note.strip() else line
+
+
+def parse_paper_replay_evidence(note: str | None) -> PaperReplayEvidence | None:
+    evidences = parse_paper_replay_evidences(note)
+    return evidences[0] if len(evidences) == 1 else None
+
+
+def parse_paper_replay_evidences(note: str | None) -> tuple[PaperReplayEvidence, ...]:
+    if not note:
+        return ()
+    payloads = [
+        line[len(PAPER_REPLAY_EVIDENCE_NOTE_PREFIX) :]
+        for line in note.splitlines()
+        if line.startswith(PAPER_REPLAY_EVIDENCE_NOTE_PREFIX)
+    ]
+    if not payloads:
+        return ()
+    parsed: list[PaperReplayEvidence] = []
+    for payload in payloads:
+        try:
+            parsed.append(PaperReplayEvidence.model_validate_json(payload))
+        except (ValueError, TypeError):
+            return ()
+    by_phase: dict[str, PaperReplayEvidence] = {}
+    for item in parsed:
+        existing = by_phase.get(item.phase)
+        if existing is not None and existing.evidence_digest != item.evidence_digest:
+            return ()
+        by_phase[item.phase] = item
+    return tuple(by_phase[phase] for phase in ("entry", "exit") if phase in by_phase)
+
+
+def encode_paper_replay_evidence_status(note: str, *, status: str, reason: str) -> str:
+    payload = json.dumps(
+        {"reason": reason[:160], "status": status},
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    line = f"{PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIX}{payload}"
+    return f"{note.rstrip()}\n{line}" if note.strip() else line
 
 
 def encode_paper_source_context(

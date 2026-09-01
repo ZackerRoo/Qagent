@@ -1,5 +1,5 @@
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 from typing import Literal, Mapping
@@ -25,6 +25,10 @@ from qagent.execution.rules import (
     match_base_price,
     money as execution_money,
     participation_capacity,
+)
+from qagent.execution.replay_evidence import (
+    PaperReplayEvidence,
+    PaperReplayExpectedFill,
 )
 from qagent.market.calendars import trading_sessions_elapsed
 from qagent.paper_trading.admission import evaluate_paper_snapshot_admission
@@ -87,6 +91,8 @@ class _PaperMatchedFill:
     quantity: int
     rules: AShareExecutionRules
     source: str = "unified_execution"
+    replay_evidence: PaperReplayEvidence | None = None
+    replay_evidence_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3936,19 +3942,30 @@ def _paper_match_row(
         fill_quantity = min(fill_quantity, affordable)
         if fill_quantity <= 0:
             return _PaperMatchResult(triggered=True, reason="quantity_below_round_lot")
-    return _PaperMatchResult(
-        triggered=True,
-        fill=_PaperMatchedFill(
-            market_event_id=market.event_id,
-            side=side,
-            trade_date=trade_date,
-            occurred_at=occurred_at,
-            base_price=base_price,
-            price=price,
-            quantity=fill_quantity,
-            rules=context.rules,
-        ),
+    fill = _PaperMatchedFill(
+        market_event_id=market.event_id,
+        side=side,
+        trade_date=trade_date,
+        occurred_at=occurred_at,
+        base_price=base_price,
+        price=price,
+        quantity=fill_quantity,
+        rules=context.rules,
     )
+    try:
+        replay_evidence = _paper_replay_evidence(
+            trade=trade,
+            fill=fill,
+            market=market,
+            order=order,
+        )
+        fill = replace(fill, replay_evidence=replay_evidence)
+    except Exception as exc:  # replay audit must never change the trade decision
+        fill = replace(
+            fill,
+            replay_evidence_error=f"{type(exc).__name__}:evidence_build_failed",
+        )
+    return _PaperMatchResult(triggered=True, fill=fill)
 
 
 def _paper_market_event(
@@ -4176,6 +4193,16 @@ def _persist_paper_trade_update(
         latest_fill = exit_fill or entry_fill
         assert latest_fill is not None
         phase = "exit" if exit_fill is not None else "entry"
+        replay_evidences = tuple(
+            fill.replay_evidence
+            for fill in (entry_fill, exit_fill)
+            if fill is not None and fill.replay_evidence is not None
+        )
+        replay_errors = tuple(
+            fill.replay_evidence_error
+            for fill in (entry_fill, exit_fill)
+            if fill is not None and fill.replay_evidence_error is not None
+        )
         metadata = PaperTradeEventMetadata(
             idempotency_key=(
                 f"paper-execution:{trade.trade_id}:{phase}:{latest_fill.market_event_id}"
@@ -4187,6 +4214,8 @@ def _persist_paper_trade_update(
             note=str(changes.get("notes", trade.notes)),
             source="unified_execution",
             execution_facts=facts,
+            replay_evidence=replay_evidences or None,
+            replay_evidence_error=";".join(replay_errors) if replay_errors else None,
         )
     repo.update_trade(trade.trade_id, event_metadata=metadata, **changes)
 
@@ -4267,6 +4296,37 @@ def _paper_execution_leg(fill: _PaperMatchedFill) -> PaperExecutionLegFacts:
         slippage=slippage,
         cash_flow=execution_money(cash_flow),
         source=fill.source,
+    )
+
+
+def _paper_replay_evidence(
+    *,
+    trade: PaperTradeRecord,
+    fill: _PaperMatchedFill,
+    market: MarketEvent,
+    order: Order,
+) -> PaperReplayEvidence:
+    leg = _paper_execution_leg(fill)
+    return PaperReplayEvidence.create(
+        phase="entry" if fill.side == OrderSide.BUY else "exit",
+        market=market,
+        order=order,
+        rules=fill.rules,
+        expected_fill=PaperReplayExpectedFill(
+            market_event_id=leg.market_event_id,
+            instrument_id=trade.instrument_id,
+            side=leg.side,
+            trade_date=leg.trade_date,
+            base_price=leg.base_price,
+            price=leg.price,
+            quantity=leg.quantity,
+            gross_amount=leg.gross_amount,
+            commission=leg.commission,
+            stamp_duty=leg.stamp_duty,
+            transfer_fee=leg.transfer_fee,
+            slippage=leg.slippage,
+            cash_flow=leg.cash_flow,
+        ),
     )
 
 
