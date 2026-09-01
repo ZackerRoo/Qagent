@@ -74,6 +74,7 @@ install -d -m 0750 -o root -g "$SERVICE_USER" "$ENV_DIR"
 install -d -m 0700 -o root -g root "$ROLLBACK_DIR"
 install -d -m 0755 -o root -g root "$SV_DIR"
 
+ENV_FILE_MODE="0640"
 if [[ ! -f "$ENV_FILE" ]]; then
   umask 0027
   {
@@ -81,11 +82,15 @@ if [[ ! -f "$ENV_FILE" ]]; then
     echo "QAGENT_DATA_DIR=$STATE_DIR"
     echo "QAGENT_DATABASE_URL=sqlite:///$STATE_DIR/qagent.db"
   } >"$ENV_FILE"
-  chown root:"$SERVICE_USER" "$ENV_FILE"
-  chmod 0640 "$ENV_FILE"
 else
   echo "preserving existing environment file: $ENV_FILE"
+  CURRENT_ENV_MODE="$(stat -c '%a' "$ENV_FILE")"
+  printf -v ENV_FILE_MODE '%04o' "$((8#$CURRENT_ENV_MODE & 8#640))"
 fi
+python3.11 "$APP_DIR/scripts/merge_proxy_environment.py" \
+  --source /etc/environment --target "$ENV_FILE"
+chown root:"$SERVICE_USER" "$ENV_FILE"
+chmod "$ENV_FILE_MODE" "$ENV_FILE"
 
 runuser -u "$SERVICE_USER" -- "$UV_BIN" sync \
   --directory "$APP_DIR/backend" --frozen --no-dev --python python3.11

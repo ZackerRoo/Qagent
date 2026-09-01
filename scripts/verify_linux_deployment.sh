@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "root access is required to inspect runit supervise state; rerun with sudo: sudo $0" >&2
+  exit 1
+fi
+
 STATE_DIR="${QAGENT_STATE_DIR:-/var/lib/qagent}"
 EXPECTED_USER="${QAGENT_SERVICE_USER:-luozhenkun}"
 DB_PATH="$STATE_DIR/qagent.db"

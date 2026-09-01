@@ -34,7 +34,14 @@ and renders definitions into `/etc/sv`. It does **not** link them into
 `/etc/service` and leaves `/etc/cron.d/qagent-backup.disabled` disabled. Its
 backend check uses a disposable temporary database, confirms the scheduler remains
 disabled, and refuses an inherited `QAGENT_DATABASE_URL`; it cannot restore the
-production scheduler.
+production scheduler. It also copies only the six standard HTTP proxy variables
+(`http_proxy`, `https_proxy`, `HTTP_PROXY`, `HTTPS_PROXY`, `no_proxy`, and
+`NO_PROXY`) from `/etc/environment` without sourcing or executing that file. Proxy
+values are never printed. Existing secrets in `/etc/qagent/qagent.env` are
+preserved, and an explicit proxy value already in that file takes precedence over
+the corresponding host default. Both `no_proxy` and `NO_PROXY` retain their
+existing entries and include `localhost`, `127.0.0.1`, and `::1`. The installer
+corrects overly broad permissions without widening a stricter existing mode.
 
 Put provider secrets only in `/etc/qagent/qagent.env` (root-owned, mode `0640`,
 group `luozhenkun`). Never copy the local `.env` file as a whole. Preserve the
@@ -74,14 +81,23 @@ sha256sum /tmp/qagent-migration.db /var/lib/qagent/qagent.db
   --output /tmp/ledger-manifest.cloud.json
 diff -u /tmp/ledger-manifest.mac.json /tmp/ledger-manifest.cloud.json
 sudo ./scripts/enable_linux_runit.sh --confirm-local-writers-stopped
-./scripts/verify_linux_deployment.sh
+sudo ./scripts/verify_linux_deployment.sh
 ```
 
 The confirmation flag is an operator assertion that the Mac writers are stopped.
 The enable script refuses a missing or corrupt database. The scheduler's persisted
 enabled/disabled state is preserved by the snapshot; installing software never
 changes it. If the scheduler was stopped before the snapshot, start it later through
-the API/UI only after cloud verification.
+the API/UI only after cloud verification. Enabling waits for `runsvdir` to notice
+both new `/etc/service` links before asking `sv` to start them. Verification uses
+root access because runit's `supervise` state is intentionally not made readable to
+ordinary users; it fails fast for non-root callers, so invoke it consistently with
+`sudo`. If `sv up` fails, enabling
+restores both `down` files, makes a bounded attempt to confirm both services down,
+keeps backup cron disabled, and does not leave a single-writer approval marker.
+It removes the service links after a readiness failure while the `down` files are
+still present, or after a failed start only when both services are confirmed down;
+an incomplete shutdown deliberately retains both links under runit supervision.
 
 ## Access from the Mac
 
@@ -116,3 +132,10 @@ sudo ./scripts/enable_linux_runit.sh --confirm-local-writers-stopped
 
 These operations do not modify the database. `rollback_linux_runit.sh` separately
 restores an archived service-definition version while leaving services disabled.
+The disable script keeps each `/etc/service` link in place until runit reports the
+service down, its observed process tree has exited, and ports 8000 and 5173 are no
+longer listening. Immediately after recording both `down` intents, it disables the
+backup cron and removes the single-writer marker before waiting for shutdown. A
+timeout therefore leaves the links managed by runit with their `down` files
+present, cron disabled, and no marker, and reports the remaining processes or
+ports; resolve that failure before attempting rollback.
