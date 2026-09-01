@@ -4,6 +4,7 @@ from decimal import Decimal
 from typing import Literal
 
 import pandas as pd
+from exchange_calendars.errors import DateOutOfBounds
 from pydantic import BaseModel, Field
 
 from qagent.market.benchmarks import CN_BENCHMARKS, benchmark_frames_from_bars
@@ -907,7 +908,10 @@ def _unadjusted_discontinuity(
 def _initial_listing_trade_dates(listing_date: date | None) -> set[date]:
     if listing_date is None:
         return set()
-    sessions = trading_sessions_in_range(listing_date, listing_date + timedelta(days=31))
+    try:
+        sessions = trading_sessions_in_range(listing_date, listing_date + timedelta(days=31))
+    except DateOutOfBounds:
+        return set()
     return set(sessions[:5])
 
 

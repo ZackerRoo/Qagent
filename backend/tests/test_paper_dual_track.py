@@ -414,6 +414,28 @@ def test_dual_track_does_not_exempt_sixth_listing_session_when_early_bars_are_mi
     assert {issue.discontinuity_date for issue in report.data_quality_issues} == {date(2026, 1, 12)}
 
 
+def test_dual_track_old_listing_date_does_not_raise_or_expand_ipo_exemption():
+    instrument_id = "CN:600519"
+    snapshot = _snapshot("snapshot-old-listing", instrument_id, date(2026, 1, 2), "0.90")
+
+    report = build_dual_track_report(
+        snapshots=[snapshot],
+        trades=[],
+        instrument_bars=_bars_with_unadjusted_gap(
+            instrument_id,
+            gap_index=6,
+            gap_pct=-0.50,
+        ),
+        benchmark_bars=pd.DataFrame(),
+        as_of=date(2026, 2, 6),
+        listing_dates={instrument_id: date(2001, 6, 8)},
+    )
+
+    assert report.samples[0].selection_return_10d is None
+    assert report.excluded_anomalous_horizons == 2
+    assert {issue.discontinuity_date for issue in report.data_quality_issues} == {date(2026, 1, 12)}
+
+
 def test_dual_track_checks_realized_exit_window_before_using_ledger_return():
     snapshot = _snapshot("snapshot-realized-split", "CN:000001", date(2026, 1, 2), "0.90")
     bars = _bars(snapshot.instrument_id, base=100)
@@ -523,7 +545,15 @@ def test_dual_track_route_defaults_to_current_cohort_and_reports_exclusions(monk
             }
 
         def replay_evidence(self, _provider):
-            return SimpleNamespace(recoverable_lifecycle_profiles=lambda _as_of: [])
+            return SimpleNamespace(
+                recoverable_lifecycle_profiles=lambda _as_of: [
+                    SimpleNamespace(
+                        instrument_id=snapshot.instrument_id,
+                        listing_date=date(2001, 6, 8),
+                    )
+                    for snapshot in [*current_snapshots, *old_snapshots, unknown]
+                ]
+            )
 
     all_bars = pd.concat(
         [
