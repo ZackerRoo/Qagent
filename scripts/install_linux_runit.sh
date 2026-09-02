@@ -35,6 +35,22 @@ if [[ ! -x /usr/bin/chpst ]]; then
   echo "runit chpst is required at /usr/bin/chpst" >&2
   exit 1
 fi
+if [[ ! -r /etc/timezone ]]; then
+  echo "the backup cron requires a Debian/Ubuntu host with /etc/timezone set to UTC" >&2
+  exit 1
+fi
+CRON_HOST_TIMEZONE="$(tr -d '[:space:]' </etc/timezone)"
+case "$CRON_HOST_TIMEZONE" in
+  UTC|Etc/UTC|GMT|Etc/GMT) ;;
+  *)
+    echo "the backup cron is fixed at 19:30 UTC; host timezone must be UTC, found: $CRON_HOST_TIMEZONE" >&2
+    exit 1
+    ;;
+esac
+if [[ "$(env -u TZ date +%z)" != "+0000" ]]; then
+  echo "the backup cron requires a zero-offset UTC host" >&2
+  exit 1
+fi
 for name in qagent-backend qagent-frontend; do
   if [[ -e "$SERVICE_DIR/$name" || -L "$SERVICE_DIR/$name" ]]; then
     echo "$SERVICE_DIR/$name is enabled; disable Qagent before replacing service definitions" >&2

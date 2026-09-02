@@ -4,7 +4,9 @@ import os
 import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -13,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_runit_assets_enforce_loopback_user_restart_and_timezone():
     backend = (ROOT / "deploy/runit/backend.run.in").read_text()
     frontend = (ROOT / "deploy/runit/frontend.run.in").read_text()
+    backup_cron = (ROOT / "deploy/runit/qagent-backup.cron.in").read_text()
 
     assert "chpst -u @SERVICE_USER@:@SERVICE_USER@" in backend
     assert "HOME=@SERVICE_HOME@" in backend
@@ -23,11 +26,13 @@ def test_runit_assets_enforce_loopback_user_restart_and_timezone():
     assert "TZ=Asia/Shanghai" in frontend
     assert "--host 127.0.0.1 --port 5173 --strictPort" in frontend
     # runsv restarts an executable run script whenever it exits.
-    assert (
-        (ROOT / "deploy/runit/qagent-backup.cron.in")
-        .read_text()
-        .startswith("CRON_TZ=Asia/Shanghai")
-    )
+    assert "CRON_TZ=" not in backup_cron
+    assert "\n30 19 * * * @SERVICE_USER@ " in backup_cron
+    for month in (1, 7):
+        scheduled_utc = datetime(2026, month, 1, 19, 30, tzinfo=timezone.utc)
+        scheduled_shanghai = scheduled_utc.astimezone(ZoneInfo("Asia/Shanghai"))
+        assert (scheduled_shanghai.hour, scheduled_shanghai.minute) == (3, 30)
+        assert scheduled_shanghai.day == 2
 
 
 def test_installer_stages_services_without_enabling_them():
@@ -46,6 +51,9 @@ def test_installer_stages_services_without_enabling_them():
     assert "\nsource /etc/environment" not in installer
     assert "\n. /etc/environment" not in installer
     assert "8#$CURRENT_ENV_MODE & 8#640" in installer
+    assert 'CRON_HOST_TIMEZONE="$(tr -d' in installer
+    assert "UTC|Etc/UTC|GMT|Etc/GMT" in installer
+    assert '"$(env -u TZ date +%z)" != "+0000"' in installer
 
 
 def test_proxy_environment_merge_is_safe_idempotent_and_preserves_secrets(

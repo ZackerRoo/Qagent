@@ -117,8 +117,22 @@ Open `http://127.0.0.1:5173`; the API remains at
 
 Cron makes an online SQLite backup at 03:30 Asia/Shanghai, validates
 `PRAGMA quick_check`, atomically publishes it under `/var/backups/qagent`, and
-deletes backups older than 14 days. Logs are written to `/var/log/qagent` and
-rotated daily for 14 rotations without requiring `svlogd`.
+deletes backups older than 14 days. The current Debian/Ubuntu `cron` daemon
+matches crontab fields in the host timezone; setting `TZ` or `CRON_TZ` in a
+crontab changes only the command environment and does not change the match
+timezone. Because this cloud host is fixed at UTC, the installed cron expression
+is therefore `30 19 * * *` (19:30 UTC, which is 03:30 Asia/Shanghai on the next
+calendar day). The installer refuses a missing, non-UTC, or non-zero-offset host
+timezone instead of silently installing a shifted schedule. Verify the invariant
+before installation:
+
+```bash
+cat /etc/timezone  # UTC or Etc/UTC
+env -u TZ date '+%Z %z'  # UTC +0000
+```
+
+Logs are written to `/var/log/qagent` and rotated daily for 14 rotations without
+requiring `svlogd`.
 
 For a release rollback, disable writers, atomically swap the `current` and
 `previous` symlinks, reinstall definitions/build artifacts, then explicitly enable:
