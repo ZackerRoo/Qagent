@@ -8,12 +8,18 @@ from test_paper_replay_evidence import OCCURRED_AT, _evidence
 
 def _record(index: int, *, phase: str, **evidence_kwargs) -> PaperReplayEvidenceAuditRecord:
     occurred_at = OCCURRED_AT + timedelta(minutes=index)
-    evidence = _evidence(phase=phase, occurred_at=occurred_at, **evidence_kwargs)
+    evidence = _evidence(
+        phase=phase,
+        occurred_at=occurred_at,
+        evidence_version="v2",
+        **evidence_kwargs,
+    )
     return PaperReplayEvidenceAuditRecord(
         audit_digest=f"{index + 1:064x}",
         event_id=f"event-{index}",
         trade_id=f"trade-{index}",
         occurred_at=occurred_at,
+        evidence_version="v2",
         evidence=evidence,
     )
 
@@ -58,6 +64,7 @@ def test_replay_readiness_blocks_unknown_or_build_failure_and_explained_is_not_m
             event_id="event-build-failure",
             trade_id="trade-build-failure",
             occurred_at=OCCURRED_AT,
+            evidence_version="v2",
             issue_code="replay_evidence_status:build_failed_trade_continued",
             issue_detail="fixture",
         )
@@ -72,3 +79,26 @@ def test_replay_readiness_blocks_unknown_or_build_failure_and_explained_is_not_m
     assert readiness.unknown_count == 2
     assert readiness.audit_build_failures == 1
     assert readiness.automatic_promotion is False
+
+
+def test_legacy_v1_gap_is_visible_but_does_not_block_sufficient_v2_matches():
+    records = _matched_records(5, 3)
+    legacy = _evidence(phase="entry", evidence_version="v1", expected_price="10.01")
+    records.append(
+        PaperReplayEvidenceAuditRecord(
+            audit_digest="e" * 64,
+            event_id="legacy-event",
+            trade_id="legacy-trade",
+            occurred_at=OCCURRED_AT,
+            evidence_version="v1",
+            evidence=legacy,
+        )
+    )
+
+    readiness = build_execution_replay_readiness(records)
+
+    assert readiness.gate == "ready_for_shadow"
+    assert readiness.buy.matched == 5
+    assert readiness.legacy_v1.observed == 1
+    assert readiness.legacy_v1.unknown == 1
+    assert readiness.unknown_count == 0

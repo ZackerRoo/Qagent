@@ -66,7 +66,8 @@ def test_paper_execution_replay_readiness_api_is_read_only(tmp_path, monkeypatch
         )
     assert response.status_code == 200
     body = response.json()
-    assert body["schema_version"] == "paper-execution-replay-readiness-v1"
+    assert body["schema_version"] == "paper-execution-replay-readiness-v2"
+    assert body["legacy_v1"]["observed"] == 0
     assert body["gate"] == "collecting"
     assert body["buy"]["target"] == 5
     assert body["sell"]["target"] == 3

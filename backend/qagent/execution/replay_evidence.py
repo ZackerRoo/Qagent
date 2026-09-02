@@ -17,11 +17,21 @@ from qagent.execution.models import (
     OrderType,
     TimeInForce,
 )
-from qagent.execution.rules import is_tick_aligned
+from qagent.execution.rules import is_tick_aligned, participation_capacity
 
 
-PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION = "paper-replay-evidence-v1"
-PAPER_REPLAY_EVIDENCE_NOTE_PREFIX = "[paper_replay_evidence:v1]"
+PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V1 = "paper-replay-evidence-v1"
+PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V2 = "paper-replay-evidence-v2"
+PAPER_REPLAY_EVIDENCE_NOTE_PREFIX_V1 = "[paper_replay_evidence:v1]"
+PAPER_REPLAY_EVIDENCE_NOTE_PREFIX_V2 = "[paper_replay_evidence:v2]"
+# Compatibility aliases are deliberately pinned to V1. Existing imports, fixtures,
+# payload bytes, and digests must keep their historical meaning.
+PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION = PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V1
+PAPER_REPLAY_EVIDENCE_NOTE_PREFIX = PAPER_REPLAY_EVIDENCE_NOTE_PREFIX_V1
+PAPER_REPLAY_EVIDENCE_NOTE_PREFIXES = (
+    PAPER_REPLAY_EVIDENCE_NOTE_PREFIX_V2,
+    PAPER_REPLAY_EVIDENCE_NOTE_PREFIX_V1,
+)
 
 
 class PaperReplayOrderContract(FrozenModel):
@@ -80,6 +90,14 @@ class PaperReplayExpectedFill(FrozenModel):
         return self
 
 
+class PaperReplaySizingContract(FrozenModel):
+    """Matcher-side quantity boundary frozen before the canonical fill."""
+
+    requested_quantity: int = Field(gt=0)
+    executable_quantity: int = Field(gt=0)
+    max_notional: Decimal | None = Field(default=None, gt=0)
+
+
 class PaperReplayEvidence(FrozenModel):
     schema_version: str = PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION
     phase: Literal["entry", "exit"]
@@ -87,6 +105,7 @@ class PaperReplayEvidence(FrozenModel):
     order: PaperReplayOrderContract
     rules: AShareExecutionRules
     expected_fill: PaperReplayExpectedFill
+    sizing: PaperReplaySizingContract | None = None
     expected_fill_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     evidence_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
@@ -99,11 +118,13 @@ class PaperReplayEvidence(FrozenModel):
         order: Order,
         rules: AShareExecutionRules,
         expected_fill: PaperReplayExpectedFill,
+        schema_version: str = PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V1,
+        sizing: PaperReplaySizingContract | None = None,
     ) -> Self:
         order_contract = PaperReplayOrderContract.from_order(order)
         fill_digest = stable_replay_digest(expected_fill)
         payload = {
-            "schema_version": PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION,
+            "schema_version": schema_version,
             "phase": phase,
             "market": market,
             "order": order_contract,
@@ -111,6 +132,8 @@ class PaperReplayEvidence(FrozenModel):
             "expected_fill": expected_fill,
             "expected_fill_digest": fill_digest,
         }
+        if schema_version == PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V2:
+            payload["sizing"] = sizing
         return cls(
             **payload,
             evidence_digest=stable_replay_digest(payload),
@@ -118,8 +141,16 @@ class PaperReplayEvidence(FrozenModel):
 
     @model_validator(mode="after")
     def validate_binding(self) -> Self:
-        if self.schema_version != PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION:
+        if self.schema_version not in {
+            PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V1,
+            PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V2,
+        }:
             raise ValueError("unsupported replay evidence schema")
+        if self.schema_version == PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V1:
+            if self.sizing is not None:
+                raise ValueError("V1 replay evidence must not contain sizing context")
+        elif self.sizing is None:
+            raise ValueError("V2 replay evidence requires sizing context")
         expected_side = OrderSide.BUY if self.phase == "entry" else OrderSide.SELL
         if self.order.side != expected_side or self.expected_fill.side != expected_side:
             raise ValueError("phase, order side, and expected fill side must agree")
@@ -145,16 +176,51 @@ class PaperReplayEvidence(FrozenModel):
             raise ValueError("expected fill quantity must respect the frozen rules")
         if not is_tick_aligned(self.expected_fill.price, self.rules.tick_size):
             raise ValueError("expected fill price must respect the frozen rules")
+        if self.sizing is not None:
+            if self.sizing.requested_quantity != self.order.quantity:
+                raise ValueError("sizing requested quantity must match the order contract")
+            if self.sizing.executable_quantity != self.expected_fill.quantity:
+                raise ValueError("sizing executable quantity must match the expected fill")
+            if self.order.side == OrderSide.BUY and self.sizing.max_notional is None:
+                raise ValueError("V2 buy evidence requires max_notional")
+            if self.order.side == OrderSide.SELL and self.sizing.max_notional is not None:
+                raise ValueError("V2 sell evidence must not contain max_notional")
+            capacity = participation_capacity(self.market.volume, self.rules)
+            executable = _round_order_quantity(
+                min(self.sizing.requested_quantity, capacity), self.rules
+            )
+            if self.sizing.max_notional is not None:
+                affordable = _round_order_quantity(
+                    int(self.sizing.max_notional / self.expected_fill.price), self.rules
+                )
+                executable = min(executable, affordable)
+            if self.sizing.executable_quantity != executable:
+                raise ValueError("sizing context does not reproduce executable quantity")
         if self.expected_fill_digest != stable_replay_digest(self.expected_fill):
             raise ValueError("expected fill digest mismatch")
-        payload = self.model_dump(mode="json", exclude={"evidence_digest"})
+        excluded = {"evidence_digest"}
+        if self.schema_version == PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V1:
+            excluded.add("sizing")
+        payload = self.model_dump(mode="json", exclude=excluded)
         if self.evidence_digest != stable_replay_digest(payload):
             raise ValueError("replay evidence digest mismatch")
         return self
 
 
+def _round_order_quantity(raw_quantity: int, rules: AShareExecutionRules) -> int:
+    minimum = rules.effective_minimum_order_quantity
+    step = rules.effective_quantity_step
+    if raw_quantity < minimum:
+        return 0
+    return minimum + ((raw_quantity - minimum) // step) * step
+
+
 def stable_replay_digest(value: object) -> str:
-    if hasattr(value, "model_dump"):
+    if isinstance(value, PaperReplayEvidence) and (
+        value.schema_version == PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V1
+    ):
+        value = value.model_dump(mode="json", exclude={"sizing"})
+    elif hasattr(value, "model_dump"):
         value = value.model_dump(mode="json")
     else:
         value = _json_value(value)

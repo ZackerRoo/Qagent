@@ -3414,6 +3414,13 @@ function PaperReplayReadinessPanel({
     blocked: zh ? "只读阻断" : "Blocked",
     ready_for_shadow: zh ? "可进入 shadow 观察" : "Ready for shadow",
   }[readiness.gate];
+  const legacyV1 = readiness.legacy_v1 ?? {
+    observed: 0,
+    matched: 0,
+    explained_difference: 0,
+    unknown: 0,
+    audit_build_failures: 0,
+  };
   const reason = zh
     ? readiness.reason
     : readiness.gate === "blocked"
@@ -3427,7 +3434,7 @@ function PaperReplayReadinessPanel({
     <section className={`paper-replay-readiness replay-${readiness.gate}`}>
       <div className="paper-replay-readiness-heading">
         <div>
-          <span className="eyebrow">{zh ? "精确 Replay 证据" : "Exact replay evidence"}</span>
+          <span className="eyebrow">{zh ? "V2 精确 Replay 证据" : "V2 exact replay evidence"}</span>
           <h3>{statusLabel}</h3>
           <p>{reason}</p>
         </div>
@@ -3452,14 +3459,18 @@ function PaperReplayReadinessPanel({
           <strong>{readiness.unknown_count}</strong>
         </span>
         <span>
+          <small>{zh ? "Legacy V1 未知/总数" : "Legacy V1 unknown/total"}</small>
+          <strong>{legacyV1.unknown}/{legacyV1.observed}</strong>
+        </span>
+        <span>
           <small>{zh ? "状态" : "Gate"}</small>
           <strong>{statusLabel}</strong>
         </span>
       </div>
       <p className="paper-replay-readonly-note">
         {zh
-          ? "只读观察，不切换引擎，不写入或影响唯一模拟盘。"
-          : "Read-only observation: no engine switch and no writes or impact to the single paper ledger."}
+          ? `只读观察，不切换引擎，不写入或影响唯一模拟盘。历史 V1 共 ${legacyV1.observed} 条，其中 matched ${legacyV1.matched} 条；所有 V1（包括 matched）均不计入 V2 门槛，也不会永久阻断足量 V2 证据。`
+          : `Read-only observation: no engine switch and no writes or impact to the single paper ledger. Of ${legacyV1.observed} legacy V1 item(s), ${legacyV1.matched} matched; no V1 item, including a match, counts toward the V2 target or permanently blocks sufficient V2 evidence.`}
       </p>
     </section>
   );

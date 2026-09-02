@@ -36,8 +36,11 @@ from qagent.execution.paper_replay_sqlite import (
 )
 from qagent.execution.replay_evidence import (
     PAPER_REPLAY_EVIDENCE_NOTE_PREFIX,
+    PAPER_REPLAY_EVIDENCE_NOTE_PREFIX_V2,
+    PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V2,
     PaperReplayEvidence,
     PaperReplayExpectedFill,
+    PaperReplaySizingContract,
 )
 
 
@@ -118,6 +121,7 @@ def _explicit_evidence(
     rules: AShareExecutionRules,
     *,
     phase: str,
+    evidence_version: str = "v1",
 ) -> PaperReplayEvidence:
     occurred_at = datetime.combine(leg.trade_date, datetime.min.time(), tzinfo=timezone.utc)
     market = MarketEvent(
@@ -151,6 +155,20 @@ def _explicit_evidence(
         market=market,
         order=order,
         rules=rules,
+        schema_version=(
+            PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V2
+            if evidence_version == "v2"
+            else "paper-replay-evidence-v1"
+        ),
+        sizing=(
+            PaperReplaySizingContract(
+                requested_quantity=leg.quantity,
+                executable_quantity=leg.quantity,
+                max_notional=(leg.gross_amount * 2 if leg.side == OrderSide.BUY else None),
+            )
+            if evidence_version == "v2"
+            else None
+        ),
         expected_fill=PaperReplayExpectedFill(
             instrument_id=market.instrument_id,
             **leg.model_dump(exclude={"source"}),
@@ -246,9 +264,14 @@ def _append_evidence(
     evidence: PaperReplayEvidence,
 ) -> None:
     payload = json.dumps(evidence.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    prefix = (
+        PAPER_REPLAY_EVIDENCE_NOTE_PREFIX_V2
+        if evidence.schema_version == PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V2
+        else PAPER_REPLAY_EVIDENCE_NOTE_PREFIX
+    )
     connection.execute(
         "UPDATE paper_trade_events SET note = note || ? WHERE event_id = ?",
-        (f"\n{PAPER_REPLAY_EVIDENCE_NOTE_PREFIX}{payload}", event_id),
+        (f"\n{prefix}{payload}", event_id),
     )
 
 
@@ -434,7 +457,10 @@ def test_loader_selects_latest_facts_and_honors_limit(tmp_path: Path):
     assert samples[0].exit_market[0].granularity == MarketGranularity.DAILY
 
 
-def test_loader_prefers_explicit_minute_evidence_without_daily_cache(tmp_path: Path):
+@pytest.mark.parametrize("evidence_version", ["v1", "v2"])
+def test_loader_prefers_explicit_minute_evidence_without_daily_cache(
+    tmp_path: Path, evidence_version: str
+):
     path = tmp_path / "fixture.db"
     writer = _create_db(path)
     facts = _facts(closed=False)
@@ -449,7 +475,12 @@ def test_loader_prefers_explicit_minute_evidence_without_daily_cache(tmp_path: P
     _append_evidence(
         writer,
         "explicit-entry",
-        _explicit_evidence(facts.entry, facts.rules, phase="entry"),
+        _explicit_evidence(
+            facts.entry,
+            facts.rules,
+            phase="entry",
+            evidence_version=evidence_version,
+        ),
     )
     writer.commit()
     writer.close()
@@ -461,6 +492,7 @@ def test_loader_prefers_explicit_minute_evidence_without_daily_cache(tmp_path: P
         reader.close()
 
     assert sample.entry_replay_evidence is not None
+    assert sample.entry_replay_evidence.schema_version.endswith(evidence_version)
     assert sample.entry_market[0].granularity == MarketGranularity.MINUTE
     report = replay_paper_sample(sample)
     assert report.entry is not None and report.entry.replay_digest is not None

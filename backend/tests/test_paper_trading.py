@@ -8,6 +8,7 @@ import pytest
 
 from qagent.backtesting.ranking_v3_protocol import RANKING_V3_MODEL_VERSION
 from qagent.execution.models import OrderSide
+from qagent.execution.paper_replay import ReplayEvidenceVerdict, replay_paper_evidence
 from qagent.jobs.daily_scan import run_daily_scan
 from qagent.paper_trading.engine import (
     build_paper_lot_aware_sizing_plan,
@@ -573,13 +574,63 @@ def test_a_share_paper_trade_opens_from_post_signal_minute_cross(tmp_path):
     assert trade.entry_price == Decimal("10.0000")
     assert "分钟线" in trade.notes
     event = paper_repo.list_trade_events(trade.trade_id)[-1]
-    assert "[paper_replay_evidence:v1]" in event.note
+    assert "[paper_replay_evidence:v2]" in event.note
     assert len(event.replay_evidence) == 1
     evidence = event.replay_evidence[0]
+    assert evidence.schema_version == "paper-replay-evidence-v2"
+    assert evidence.sizing is not None
+    assert evidence.sizing.requested_quantity == evidence.order.quantity
+    assert evidence.sizing.executable_quantity == evidence.expected_fill.quantity
+    assert evidence.sizing.max_notional == trade.execution_facts.allocation
     assert evidence.phase == "entry"
     assert evidence.market.event_id == trade.execution_facts.entry.market_event_id
     assert ":minute:" in evidence.market.event_id
     assert evidence.expected_fill.price == trade.execution_facts.entry.price
+
+
+def test_entry_v2_evidence_replays_affordability_10800_to_10700(tmp_path):
+    paper_repo = PaperTradingRepository(make_repo(tmp_path).session_factory)
+    trade = paper_repo.create_trade(
+        source_snapshot_id="affordability-v2",
+        provider="free",
+        instrument_id="CN:600000",
+        strategy_id="trend_momentum_stage2",
+        signal_date=date(2026, 7, 1),
+        trigger_price=Decimal("0.92"),
+        initial_stop=Decimal("0.85"),
+        target_1=Decimal("1.10"),
+        rank_score=Decimal("0.90"),
+    )
+
+    update_paper_trades(
+        paper_repo,
+        provider=DailyRowsProvider(
+            [
+                {
+                    "instrument_id": "CN:600000",
+                    "trade_date": date(2026, 7, 2),
+                    "open": Decimal("0.93"),
+                    "high": Decimal("0.94"),
+                    "low": Decimal("0.92"),
+                    "close": Decimal("0.93"),
+                    "volume": 200_000,
+                    "previous_close": Decimal("0.92"),
+                }
+            ]
+        ),
+        provider_mode="free",
+        as_of=datetime(2026, 7, 2, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    updated = paper_repo.get_trade(trade.trade_id)
+    assert updated is not None and updated.execution_facts is not None
+    evidence = paper_repo.list_trade_events(trade.trade_id)[-1].replay_evidence[0]
+    assert evidence.order.quantity == 10_800
+    assert evidence.expected_fill.quantity == 10_700
+    assert evidence.sizing is not None
+    assert evidence.sizing.max_notional == Decimal("10000.00")
+    assert evidence.sizing.executable_quantity == 10_700
+    assert replay_paper_evidence(evidence).verdict == ReplayEvidenceVerdict.MATCHED
 
 
 def test_replay_evidence_build_failure_is_audited_without_failing_trade(
@@ -638,7 +689,7 @@ def test_replay_evidence_build_failure_is_audited_without_failing_trade(
     assert trade.execution_facts.entry.quantity == 1000
     assert event.execution_facts == trade.execution_facts
     assert event.replay_evidence == ()
-    assert "[paper_replay_evidence_status:v1]" in event.note
+    assert "[paper_replay_evidence_status:v2]" in event.note
     assert "build_failed_trade_continued" in event.note
 
 

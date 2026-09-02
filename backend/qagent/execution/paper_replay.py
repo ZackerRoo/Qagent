@@ -24,7 +24,10 @@ from qagent.execution.models import (
     TimeInForce,
 )
 from qagent.execution.rules import fee_breakdown, is_tick_aligned, money
-from qagent.execution.replay_evidence import PaperReplayEvidence
+from qagent.execution.replay_evidence import (
+    PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V2,
+    PaperReplayEvidence,
+)
 
 
 PAPER_EXECUTION_FACTS_PREFIX = "[paper_execution_facts:v1]"
@@ -576,7 +579,13 @@ def _replay_leg(
         instrument_id=sample.instrument_id,
         side=paper.side,
         quantity=(
-            explicit_evidence.order.quantity if explicit_evidence is not None else paper.quantity
+            explicit_evidence.sizing.executable_quantity
+            if explicit_evidence is not None
+            and explicit_evidence.schema_version == PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V2
+            and explicit_evidence.sizing is not None
+            else explicit_evidence.order.quantity
+            if explicit_evidence is not None
+            else paper.quantity
         ),
         submitted_at=submitted_at,
         order_type=order_type,

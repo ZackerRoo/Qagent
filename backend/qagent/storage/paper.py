@@ -2,6 +2,7 @@ import json
 import hashlib
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -10,7 +11,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.execution.models import AShareExecutionRules, OrderSide
 from qagent.execution.replay_evidence import (
-    PAPER_REPLAY_EVIDENCE_NOTE_PREFIX,
+    PAPER_REPLAY_EVIDENCE_NOTE_PREFIXES,
+    PAPER_REPLAY_EVIDENCE_NOTE_PREFIX_V1,
+    PAPER_REPLAY_EVIDENCE_NOTE_PREFIX_V2,
+    PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V2,
     PaperReplayEvidence,
     stable_replay_digest,
 )
@@ -28,7 +32,13 @@ from qagent.recommendations.strategy_configuration import parse_paper_strategy_c
 
 
 PAPER_EXECUTION_FACTS_NOTE_PREFIX = "[paper_execution_facts:v1]"
-PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIX = "[paper_replay_evidence_status:v1]"
+PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIX_V1 = "[paper_replay_evidence_status:v1]"
+PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIX_V2 = "[paper_replay_evidence_status:v2]"
+PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIX = PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIX_V1
+PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIXES = (
+    PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIX_V2,
+    PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIX_V1,
+)
 PAPER_SOURCE_CONTEXT_NOTE_PREFIX = "[paper_source_context:v1]"
 PAPER_TRADE_TERMINAL_STATUSES = frozenset(
     {
@@ -301,6 +311,7 @@ class PaperReplayEvidenceAuditRecord(BaseModel):
     event_id: str
     trade_id: str
     occurred_at: datetime
+    evidence_version: Literal["v1", "v2"] = "v1"
     evidence: PaperReplayEvidence | None = None
     issue_code: str | None = None
     issue_detail: str | None = None
@@ -309,6 +320,8 @@ class PaperReplayEvidenceAuditRecord(BaseModel):
     def validate_audit_item(self):
         if (self.evidence is None) == (self.issue_code is None):
             raise ValueError("audit item must contain exactly one of evidence or issue")
+        if self.evidence is not None and self.evidence_version != _evidence_version(self.evidence):
+            raise ValueError("audit evidence version must match its schema")
         return self
 
 
@@ -752,8 +765,13 @@ class PaperTradingRepository:
                 session.query(PaperTradeEventRow)
                 .filter(
                     or_(
-                        PaperTradeEventRow.note.contains(PAPER_REPLAY_EVIDENCE_NOTE_PREFIX),
-                        PaperTradeEventRow.note.contains(PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIX),
+                        *(
+                            PaperTradeEventRow.note.contains(prefix)
+                            for prefix in (
+                                *PAPER_REPLAY_EVIDENCE_NOTE_PREFIXES,
+                                *PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIXES,
+                            )
+                        ),
                     )
                 )
                 .order_by(
@@ -1247,12 +1265,22 @@ def encode_paper_replay_evidence(
     evidence: PaperReplayEvidence,
 ) -> str:
     payload = json.dumps(
-        evidence.model_dump(mode="json"),
+        evidence.model_dump(
+            mode="json",
+            exclude={"sizing"}
+            if evidence.schema_version != PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V2
+            else None,
+        ),
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),
     )
-    line = f"{PAPER_REPLAY_EVIDENCE_NOTE_PREFIX}{payload}"
+    prefix = (
+        PAPER_REPLAY_EVIDENCE_NOTE_PREFIX_V2
+        if evidence.schema_version == PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V2
+        else PAPER_REPLAY_EVIDENCE_NOTE_PREFIX_V1
+    )
+    line = f"{prefix}{payload}"
     return f"{note.rstrip()}\n{line}" if note.strip() else line
 
 
@@ -1264,17 +1292,16 @@ def parse_paper_replay_evidence(note: str | None) -> PaperReplayEvidence | None:
 def parse_paper_replay_evidences(note: str | None) -> tuple[PaperReplayEvidence, ...]:
     if not note:
         return ()
-    payloads = [
-        line[len(PAPER_REPLAY_EVIDENCE_NOTE_PREFIX) :]
-        for line in note.splitlines()
-        if line.startswith(PAPER_REPLAY_EVIDENCE_NOTE_PREFIX)
-    ]
+    payloads = _versioned_note_payloads(note, PAPER_REPLAY_EVIDENCE_NOTE_PREFIXES)
     if not payloads:
         return ()
     parsed: list[PaperReplayEvidence] = []
-    for payload in payloads:
+    for version, payload in payloads:
         try:
-            parsed.append(PaperReplayEvidence.model_validate_json(payload))
+            evidence = PaperReplayEvidence.model_validate_json(payload)
+            if _evidence_version(evidence) != version:
+                return ()
+            parsed.append(evidence)
         except (ValueError, TypeError):
             return ()
     by_phase: dict[str, PaperReplayEvidence] = {}
@@ -1286,25 +1313,35 @@ def parse_paper_replay_evidences(note: str | None) -> tuple[PaperReplayEvidence,
     return tuple(by_phase[phase] for phase in ("entry", "exit") if phase in by_phase)
 
 
+def _versioned_note_payloads(
+    note: str,
+    prefixes: tuple[str, str],
+) -> list[tuple[Literal["v1", "v2"], str]]:
+    payloads: list[tuple[Literal["v1", "v2"], str]] = []
+    for line in note.splitlines():
+        for prefix in prefixes:
+            if line.startswith(prefix):
+                version: Literal["v1", "v2"] = "v2" if ":v2]" in prefix else "v1"
+                payloads.append((version, line[len(prefix) :]))
+                break
+    return payloads
+
+
+def _evidence_version(evidence: PaperReplayEvidence) -> Literal["v1", "v2"]:
+    return "v2" if evidence.schema_version == PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V2 else "v1"
+
+
 def _replay_evidence_audit_records(
     row: PaperTradeEventRow,
     *,
     seen_evidence_digests: set[str],
 ) -> list[PaperReplayEvidenceAuditRecord]:
     note = row.note or ""
-    evidence_payloads = [
-        line[len(PAPER_REPLAY_EVIDENCE_NOTE_PREFIX) :]
-        for line in note.splitlines()
-        if line.startswith(PAPER_REPLAY_EVIDENCE_NOTE_PREFIX)
-    ]
-    status_payloads = [
-        line[len(PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIX) :]
-        for line in note.splitlines()
-        if line.startswith(PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIX)
-    ]
+    evidence_payloads = _versioned_note_payloads(note, PAPER_REPLAY_EVIDENCE_NOTE_PREFIXES)
+    status_payloads = _versioned_note_payloads(note, PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIXES)
     records: list[PaperReplayEvidenceAuditRecord] = []
 
-    for index, payload in enumerate(status_payloads):
+    for index, (version, payload) in enumerate(status_payloads):
         issue_code = "replay_evidence_status_invalid"
         issue_detail = payload[:160]
         try:
@@ -1320,25 +1357,33 @@ def _replay_evidence_audit_records(
                 issue_code=issue_code,
                 issue_detail=issue_detail,
                 discriminator=f"status:{index}:{payload}",
+                evidence_version=version,
             )
         )
 
     parsed: list[PaperReplayEvidence] = []
     invalid_payload = False
-    for payload in evidence_payloads:
+    corrupt_versions: set[Literal["v1", "v2"]] = set()
+    for version, payload in evidence_payloads:
         try:
-            parsed.append(PaperReplayEvidence.model_validate_json(payload))
+            evidence = PaperReplayEvidence.model_validate_json(payload)
+            if _evidence_version(evidence) != version:
+                raise ValueError("note prefix and schema version disagree")
+            parsed.append(evidence)
         except (ValueError, TypeError):
             invalid_payload = True
+            corrupt_versions.add(version)
     if invalid_payload:
-        records.append(
-            _replay_evidence_issue_record(
-                row,
-                issue_code="replay_evidence_corrupt",
-                issue_detail="one or more replay evidence payloads failed validation",
-                discriminator="corrupt_evidence",
+        for version in sorted(corrupt_versions):
+            records.append(
+                _replay_evidence_issue_record(
+                    row,
+                    issue_code="replay_evidence_corrupt",
+                    issue_detail="one or more replay evidence payloads failed validation",
+                    discriminator=f"corrupt_evidence:{version}",
+                    evidence_version=version,
+                )
             )
-        )
         return records
 
     by_phase: dict[str, PaperReplayEvidence] = {}
@@ -1357,6 +1402,10 @@ def _replay_evidence_audit_records(
                     issue_code="replay_evidence_conflict",
                     issue_detail=f"conflicting {phase} evidence payloads",
                     discriminator=f"conflict:{phase}",
+                    evidence_version=max(
+                        (_evidence_version(item) for item in parsed if item.phase == phase),
+                        default="v1",
+                    ),
                 )
             )
         return records
@@ -1377,6 +1426,7 @@ def _replay_evidence_audit_records(
                 event_id=row.event_id,
                 trade_id=row.trade_id,
                 occurred_at=row.occurred_at,
+                evidence_version=_evidence_version(evidence),
                 evidence=evidence,
             )
         )
@@ -1389,6 +1439,7 @@ def _replay_evidence_issue_record(
     issue_code: str,
     issue_detail: str,
     discriminator: str,
+    evidence_version: Literal["v1", "v2"],
 ) -> PaperReplayEvidenceAuditRecord:
     return PaperReplayEvidenceAuditRecord(
         audit_digest=stable_replay_digest(
@@ -1401,19 +1452,27 @@ def _replay_evidence_issue_record(
         event_id=row.event_id,
         trade_id=row.trade_id,
         occurred_at=row.occurred_at,
+        evidence_version=evidence_version,
         issue_code=issue_code,
         issue_detail=issue_detail,
     )
 
 
-def encode_paper_replay_evidence_status(note: str, *, status: str, reason: str) -> str:
+def encode_paper_replay_evidence_status(
+    note: str, *, status: str, reason: str, evidence_version: Literal["v1", "v2"] = "v2"
+) -> str:
     payload = json.dumps(
         {"reason": reason[:160], "status": status},
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),
     )
-    line = f"{PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIX}{payload}"
+    prefix = (
+        PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIX_V2
+        if evidence_version == "v2"
+        else PAPER_REPLAY_EVIDENCE_STATUS_NOTE_PREFIX_V1
+    )
+    line = f"{prefix}{payload}"
     return f"{note.rstrip()}\n{line}" if note.strip() else line
 
 

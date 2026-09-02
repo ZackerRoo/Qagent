@@ -1740,6 +1740,13 @@ export type PaperExecutionReplayReadinessResponse = {
   generated_at: string;
   buy: PaperReplaySideProgress;
   sell: PaperReplaySideProgress;
+  legacy_v1?: {
+    observed: number;
+    matched: number;
+    explained_difference: number;
+    unknown: number;
+    audit_build_failures: number;
+  };
   unknown_count: number;
   audit_build_failures: number;
   progress_pct: number;

@@ -27,8 +27,10 @@ from qagent.execution.rules import (
     participation_capacity,
 )
 from qagent.execution.replay_evidence import (
+    PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V2,
     PaperReplayEvidence,
     PaperReplayExpectedFill,
+    PaperReplaySizingContract,
 )
 from qagent.market.calendars import trading_sessions_elapsed
 from qagent.paper_trading.admission import evaluate_paper_snapshot_admission
@@ -90,6 +92,7 @@ class _PaperMatchedFill:
     price: Decimal
     quantity: int
     rules: AShareExecutionRules
+    max_notional: Decimal | None = None
     source: str = "unified_execution"
     replay_evidence: PaperReplayEvidence | None = None
     replay_evidence_error: str | None = None
@@ -3951,6 +3954,7 @@ def _paper_match_row(
         price=price,
         quantity=fill_quantity,
         rules=context.rules,
+        max_notional=max_notional,
     )
     try:
         replay_evidence = _paper_replay_evidence(
@@ -4312,6 +4316,12 @@ def _paper_replay_evidence(
         market=market,
         order=order,
         rules=fill.rules,
+        schema_version=PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V2,
+        sizing=PaperReplaySizingContract(
+            requested_quantity=order.quantity,
+            executable_quantity=fill.quantity,
+            max_notional=fill.max_notional,
+        ),
         expected_fill=PaperReplayExpectedFill(
             market_event_id=leg.market_event_id,
             instrument_id=trade.instrument_id,

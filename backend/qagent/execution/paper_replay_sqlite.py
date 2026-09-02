@@ -18,7 +18,8 @@ from qagent.execution.paper_replay import (
     summarize_paper_replays,
 )
 from qagent.execution.replay_evidence import (
-    PAPER_REPLAY_EVIDENCE_NOTE_PREFIX,
+    PAPER_REPLAY_EVIDENCE_NOTE_PREFIXES,
+    PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V2,
     PaperReplayEvidence,
 )
 
@@ -179,16 +180,25 @@ def _select_latest_replay_evidence(
     sequences = sorted({int(row["sequence"]) for row in rows}, reverse=True)
     for sequence in sequences:
         payloads = tuple(
-            payload
+            versioned_payload
             for row in rows
             if int(row["sequence"]) == sequence
-            for payload in _replay_evidence_payloads(str(row["note"]))
+            for versioned_payload in _replay_evidence_payloads(str(row["note"]))
         )
         if not payloads:
             continue
         parsed: list[PaperReplayEvidence] = []
         try:
-            parsed = [PaperReplayEvidence.model_validate_json(payload) for payload in payloads]
+            for version, payload in payloads:
+                evidence = PaperReplayEvidence.model_validate_json(payload)
+                parsed_version = (
+                    "v2"
+                    if evidence.schema_version == PAPER_REPLAY_EVIDENCE_SCHEMA_VERSION_V2
+                    else "v1"
+                )
+                if parsed_version != version:
+                    raise ValueError("note prefix and schema version disagree")
+                parsed.append(evidence)
         except (ValueError, TypeError):
             return {}, ("newest_replay_evidence_invalid_fail_closed",)
         for phase in ("entry", "exit"):
@@ -205,12 +215,14 @@ def _select_latest_replay_evidence(
     return selected, ()
 
 
-def _replay_evidence_payloads(note: str) -> tuple[str, ...]:
-    return tuple(
-        line[len(PAPER_REPLAY_EVIDENCE_NOTE_PREFIX) :]
-        for line in note.splitlines()
-        if line.startswith(PAPER_REPLAY_EVIDENCE_NOTE_PREFIX)
-    )
+def _replay_evidence_payloads(note: str) -> tuple[tuple[str, str], ...]:
+    payloads: list[tuple[str, str]] = []
+    for line in note.splitlines():
+        for prefix in PAPER_REPLAY_EVIDENCE_NOTE_PREFIXES:
+            if line.startswith(prefix):
+                payloads.append(("v2" if ":v2]" in prefix else "v1", line[len(prefix) :]))
+                break
+    return tuple(payloads)
 
 
 def _explicit_market_evidence(evidence: PaperReplayEvidence) -> MarketEvidence:

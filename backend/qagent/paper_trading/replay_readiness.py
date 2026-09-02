@@ -24,13 +24,24 @@ class PaperReplaySideProgress(BaseModel):
     unknown: int = 0
 
 
+class PaperReplayLegacyProgress(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    observed: int = 0
+    matched: int = 0
+    explained_difference: int = 0
+    unknown: int = 0
+    audit_build_failures: int = 0
+
+
 class PaperExecutionReplayReadiness(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: str = "paper-execution-replay-readiness-v1"
+    schema_version: str = "paper-execution-replay-readiness-v2"
     generated_at: datetime
     buy: PaperReplaySideProgress
     sell: PaperReplaySideProgress
+    legacy_v1: PaperReplayLegacyProgress
     unknown_count: int
     audit_build_failures: int
     progress_pct: float
@@ -51,8 +62,33 @@ def build_execution_replay_readiness(
     }
     audit_build_failures = 0
     unclassified_unknown = 0
+    legacy = {
+        "observed": 0,
+        "matched": 0,
+        "explained": 0,
+        "unknown": 0,
+        "build_failures": 0,
+    }
 
     for record in audit_records:
+        if record.evidence_version == "v1":
+            legacy["observed"] += 1
+            if record.evidence is None:
+                legacy["unknown"] += 1
+                legacy["build_failures"] += 1
+                continue
+            try:
+                legacy_report = replay_paper_evidence(record.evidence)
+            except (ValueError, AssertionError):
+                legacy["unknown"] += 1
+                continue
+            if legacy_report.verdict == ReplayEvidenceVerdict.MATCHED:
+                legacy["matched"] += 1
+            elif legacy_report.verdict == ReplayEvidenceVerdict.EXPLAINED_DIFFERENCE:
+                legacy["explained"] += 1
+            else:
+                legacy["unknown"] += 1
+            continue
         if record.evidence is None:
             audit_build_failures += 1
             unclassified_unknown += 1
@@ -87,25 +123,32 @@ def build_execution_replay_readiness(
         unknown=counters[OrderSide.SELL]["unknown"],
     )
     unknown_count = buy.unknown + sell.unknown + unclassified_unknown
+    legacy_v1 = PaperReplayLegacyProgress(
+        observed=legacy["observed"],
+        matched=legacy["matched"],
+        explained_difference=legacy["explained"],
+        unknown=legacy["unknown"],
+        audit_build_failures=legacy["build_failures"],
+    )
     matched_toward_target = min(buy.matched, buy.target) + min(sell.matched, sell.target)
     progress_pct = round(100 * matched_toward_target / (buy.target + sell.target), 1)
 
     if unknown_count or audit_build_failures:
         gate = "blocked"
         reason = (
-            f"发现 {unknown_count} 条未知或不可重放证据，其中 "
+            f"V2 发现 {unknown_count} 条未知或不可重放证据，其中 "
             f"{audit_build_failures} 条为证据构建/审计失败；保持只读阻断。"
         )
     elif buy.matched >= buy.target and sell.matched >= sell.target:
         gate = "ready_for_shadow"
-        reason = "买卖两侧精确重放样本已达到只读 shadow 观察门槛；不会自动切换执行引擎。"
+        reason = "V2 买卖两侧精确重放样本已达到只读 shadow 观察门槛；不会自动切换执行引擎。"
     elif buy.observed == 0 and sell.observed == 0:
         gate = "collecting"
-        reason = "等待新成交自然积累精确重放证据；当前不影响唯一模拟盘。"
+        reason = "等待新成交自然积累 V2 精确重放证据；当前不影响唯一模拟盘。"
     else:
         gate = "collecting"
         reason = (
-            f"正在自然积累精确重放样本：买入 matched {buy.matched}/{buy.target}，"
+            f"正在自然积累 V2 精确重放样本：买入 matched {buy.matched}/{buy.target}，"
             f"卖出 matched {sell.matched}/{sell.target}；解释性差异不计入门槛。"
         )
 
@@ -113,6 +156,7 @@ def build_execution_replay_readiness(
         generated_at=generated_at or datetime.now(timezone.utc),
         buy=buy,
         sell=sell,
+        legacy_v1=legacy_v1,
         unknown_count=unknown_count,
         audit_build_failures=audit_build_failures,
         progress_pct=progress_pct,
