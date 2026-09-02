@@ -153,3 +153,35 @@ backup cron and removes the single-writer marker before waiting for shutdown. A
 timeout therefore leaves the links managed by runit with their `down` files
 present, cron disabled, and no marker, and reports the remaining processes or
 ports; resolve that failure before attempting rollback.
+
+## Read-only unattended health check
+
+Run the bounded diagnostic on the cloud host without changing scheduler state,
+the production database, paper accounts/trades/events, strategy settings, or
+alert configuration:
+
+```bash
+sudo /opt/qagent/current/scripts/check_linux_unattended_health.py
+```
+
+It prints one compact JSON document. Exit `0` means every required check passed,
+exit `1` means at least one operational invariant failed, and exit `2` is invalid
+command input. The checks cover backend health, frontend reachability, the
+persisted scheduler checkpoint (enabled, idle or bounded in-flight, not overdue,
+and no `last_error`), replay-readiness visibility/unknown evidence, read-only
+`PRAGMA quick_check` for production and latest-backup databases, backup freshness,
+the enabled backup cron, running `cron`/`crond` and `runsvdir` daemons, SysV cron
+boot links for runlevels 2-5, and both runit service links/statuses. An optional
+duplicate runit `crond` definition is not used as evidence: this host's effective
+cron is the daemonizing SysV service. The default backup freshness limit is 36
+hours and the default maximum in-flight scheduler age is 6 hours; use the
+corresponding command flags only when an operator has a documented host-specific
+reason. A 60-second scheduler overdue grace avoids failing on the normal bounded
+clock-recheck race; older due checkpoints fail the check.
+
+The diagnostic intentionally does not call `GET /api/automation/scheduler`.
+That application route invokes scheduler due-work refresh and can advance a due
+cycle, so the diagnostic reads the persisted checkpoint through SQLite
+`mode=ro` with `PRAGMA query_only=ON` instead. Its only HTTP calls are GETs to
+the simple backend health endpoint, frontend root, and the explicitly read-only
+execution replay-readiness endpoint.
