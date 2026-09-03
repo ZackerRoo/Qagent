@@ -370,6 +370,11 @@ def test_full_market_a_share_readiness_uses_the_whole_universe():
         [],
         {"adjusted_bars": "2"},
         expected_trade_date=SIGNAL_DATE,
+        asset_types_by_instrument={
+            "CN:000001": "stock",
+            "CN:510300": "etf",
+            "CN:159001": "etf",
+        },
     )
 
     assert health["a_share_data_scope"] == "full_market_cn_universe"
@@ -412,6 +417,7 @@ def test_full_market_adjusted_health_does_not_confuse_raw_coverage_with_complete
         [],
         {"adjusted_bars": "2"},
         expected_trade_date=SIGNAL_DATE,
+        asset_types_by_instrument={"CN:000001": "stock", "CN:603439": "stock"},
     )
 
     assert health["a_share_current_bars_coverage"] == "2/2"
@@ -425,6 +431,10 @@ def test_full_market_adjusted_health_does_not_confuse_raw_coverage_with_complete
     assert health["a_share_adjusted_price_semantics"] == (
         "latest_expected_session_adjusted_close_finite_positive"
     )
+    assert health["a_share_adjusted_price_scope"] == "legacy_all_cn_universe"
+    assert health["a_share_stock_adjusted_price"] == "partial"
+    assert health["a_share_etf_raw_price"] == "not_applicable"
+    assert health["a_share_etf_total_return_adjusted_price"] == "not_applicable"
 
 
 def test_full_market_adjusted_health_rejects_non_finite_and_non_positive_values():
@@ -452,6 +462,145 @@ def test_full_market_adjusted_health_rejects_non_finite_and_non_positive_values(
 
     assert health["a_share_adjusted_price_coverage"] == "1/4"
     assert health["a_share_adjusted_price_missing"] == "3"
+
+
+def test_full_market_price_health_separates_stock_and_etf_semantics():
+    items = [
+        ScanItem(
+            instrument_id="CN:600519",
+            status="watch",
+            reason="ready",
+            bars=1,
+            signals=0,
+            latest_trade_date=SIGNAL_DATE,
+            latest_close="1500",
+            latest_adjusted_close="1498",
+            latest_adjustment_type="qfq",
+            provider="fuyao_stock_paired",
+        ),
+        ScanItem(
+            instrument_id="CN:510300",
+            status="watch",
+            reason="ready",
+            bars=1,
+            signals=0,
+            latest_trade_date=SIGNAL_DATE,
+            latest_close="4.1",
+            latest_adjusted_close="4.1",
+            latest_adjustment_type="none",
+            provider="fuyao_etf_unadjusted",
+        ),
+        ScanItem(
+            instrument_id="CN:530000",
+            status="watch",
+            reason="ready",
+            bars=1,
+            signals=0,
+            latest_trade_date=SIGNAL_DATE,
+            latest_close="1.05",
+            latest_adjusted_close="1.02",
+            latest_adjustment_type="forward",
+            provider="fuyao_realtime",
+        ),
+    ]
+
+    health = _full_market_a_share_readiness_health(
+        items,
+        [],
+        {},
+        expected_trade_date=SIGNAL_DATE,
+        asset_types_by_instrument={
+            "CN:600519": "stock",
+            "CN:510300": "etf",
+            "CN:530000": "etf",
+        },
+    )
+
+    # Legacy all-CN fields remain available and retain their prior finite-price contract.
+    assert health["a_share_adjusted_price_coverage"] == "3/3"
+    assert health["a_share_adjusted_price"] == "ready"
+    assert health["a_share_operational_price_coverage"] == "3/3"
+    assert health["a_share_operational_price"] == "ready"
+    assert health["a_share_stock_adjusted_price_coverage"] == "1/1"
+    assert health["a_share_stock_adjusted_price"] == "ready"
+    assert health["a_share_etf_raw_price_coverage"] == "2/2"
+    assert health["a_share_etf_raw_price"] == "ready"
+    assert health["a_share_etf_total_return_adjusted_price_coverage"] == "1/2"
+    assert health["a_share_etf_total_return_adjusted_price_missing"] == "1"
+    assert health["a_share_etf_total_return_adjusted_price"] == "partial"
+    assert health["a_share_etf_total_return_adjusted_price_source_mix"] == ("fuyao_realtime=1")
+    assert health["a_share_data_readiness_score"] == "0.11"
+
+
+def test_full_market_strict_etf_adjusted_health_rejects_unsafe_adjustment_semantics():
+    items = [
+        ScanItem(
+            instrument_id=instrument_id,
+            status="watch",
+            reason="ready",
+            bars=1,
+            signals=0,
+            latest_trade_date=SIGNAL_DATE,
+            latest_close="1",
+            latest_adjusted_close="1",
+            latest_adjustment_type=adjustment_type,
+            provider=provider,
+        )
+        for instrument_id, adjustment_type, provider in [
+            ("CN:510300", "none", "fixture"),
+            ("CN:510500", "forward", "fuyao_etf_unadjusted"),
+            ("CN:510880", "snapshot_qfq_anchor", "fixture"),
+            ("CN:530000", "qfq", "fixture"),
+        ]
+    ]
+
+    health = _full_market_a_share_readiness_health(
+        items,
+        [],
+        {},
+        expected_trade_date=SIGNAL_DATE,
+        asset_types_by_instrument={item.instrument_id: "etf" for item in items},
+    )
+
+    assert health["a_share_etf_raw_price_coverage"] == "4/4"
+    assert health["a_share_etf_total_return_adjusted_price_coverage"] == "1/4"
+    assert health["a_share_etf_total_return_adjusted_price_source_mix"] == "fixture=1"
+
+
+def test_etf_total_return_transparency_does_not_reweight_readiness_domains():
+    def health_for(adjustment_type: str, provider: str) -> dict[str, str]:
+        return _full_market_a_share_readiness_health(
+            [
+                ScanItem(
+                    instrument_id="CN:510300",
+                    status="watch",
+                    reason="ready",
+                    bars=1,
+                    signals=0,
+                    latest_trade_date=SIGNAL_DATE,
+                    latest_close="4.1",
+                    latest_adjusted_close="4.1",
+                    latest_adjustment_type=adjustment_type,
+                    provider=provider,
+                )
+            ],
+            [],
+            {},
+            expected_trade_date=SIGNAL_DATE,
+            asset_types_by_instrument={"CN:510300": "etf"},
+        )
+
+    unadjusted = health_for("none", "fuyao_etf_unadjusted")
+    total_return_adjusted = health_for("qfq", "fixture")
+
+    assert unadjusted["a_share_operational_price"] == "ready"
+    assert total_return_adjusted["a_share_operational_price"] == "ready"
+    assert unadjusted["a_share_etf_total_return_adjusted_price"] == "missing"
+    assert total_return_adjusted["a_share_etf_total_return_adjusted_price"] == "ready"
+    assert (
+        unadjusted["a_share_data_readiness_score"]
+        == (total_return_adjusted["a_share_data_readiness_score"])
+    )
 
 
 def test_full_market_health_merges_fuyao_error_category_counts():

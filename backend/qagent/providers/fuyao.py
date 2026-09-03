@@ -1840,7 +1840,7 @@ def _is_etf_instrument(instrument_id: str) -> bool:
         return False
     symbol = normalized.split(":", 1)[1].split(".", 1)[0]
     return len(symbol) == 6 and symbol.startswith(
-        ("15", "16", "18", "50", "51", "52", "55", "56", "58")
+        ("15", "16", "18", "50", "51", "52", "53", "55", "56", "58")
     )
 
 

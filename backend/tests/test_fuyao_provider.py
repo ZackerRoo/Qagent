@@ -376,6 +376,66 @@ def test_fuyao_market_provider_routes_stock_index_and_etf_snapshots():
     ]
 
 
+def test_fuyao_market_provider_routes_53_prefix_to_fund_snapshot():
+    session = FakeSession([_success_payload(_snapshot_item("530000.SH", 1.05))])
+    provider = FuyaoMarketDataProvider(
+        "secret-key",
+        session=session,
+        max_attempts=1,
+    )
+
+    frame = provider.get_snapshot(["CN:530000"])
+
+    assert frame["instrument_id"].tolist() == ["CN:530000"]
+    assert [call[0].removeprefix("https://fuyao.aicubes.cn") for call in session.calls] == [
+        "/api/fund/market/snapshot"
+    ]
+
+
+def test_fuyao_market_provider_routes_53_prefix_to_unadjusted_fund_history():
+    session = FakeSession(
+        [
+            {
+                "code": 0,
+                "message": "success",
+                "request_id": "fund-history-53",
+                "data": {
+                    "timestamp": 1_785_513_600_000,
+                    "item": [
+                        {
+                            "date_ms": 1_785_513_600_000,
+                            "open_price": 1.0,
+                            "high_price": 1.1,
+                            "low_price": 0.99,
+                            "close_price": 1.05,
+                            "volume": 1_000_000,
+                            "turnover": 1_050_000,
+                        }
+                    ],
+                },
+            }
+        ]
+    )
+    provider = FuyaoMarketDataProvider(
+        "secret-key",
+        session=session,
+        max_attempts=1,
+    )
+
+    frame = provider.get_daily_bars(
+        ["CN:530000"],
+        date(2026, 8, 1),
+        date(2026, 8, 1),
+    )
+
+    assert frame["instrument_id"].tolist() == ["CN:530000"]
+    assert frame["provider"].tolist() == ["fuyao_etf_unadjusted"]
+    assert frame["adjustment_type"].tolist() == ["none"]
+    assert [call[0].removeprefix("https://fuyao.aicubes.cn") for call in session.calls] == [
+        "/api/fund/market/historical"
+    ]
+
+
 def test_fuyao_market_provider_isolates_bad_symbol_in_snapshot_batch():
     session = FakeSession(
         [

@@ -88,7 +88,7 @@ from qagent.research.market_intelligence import (
     build_market_intelligence_center,
 )
 from qagent.research.operational_readiness import build_operational_readiness_center
-from qagent.research.factor_shadow import score_factor_shadow_runs
+from qagent.research.factor_shadow import score_factor_shadow_runs_with_legacy_retirement
 from qagent.research.paper_calibration_shadow import (
     PaperCalibrationShadowReport,
     build_paper_calibration_shadow_report,
@@ -676,7 +676,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
                 limit=20_000,
             )
         }
-        factor_shadow_result = score_factor_shadow_runs(
+        factor_shadow_result = score_factor_shadow_runs_with_legacy_retirement(
             create_session_factory(),
             provider_mode=job.provider,
             scan_job_id=job.job_id,
@@ -841,6 +841,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
             ranked_cards,
             aggregate_health,
             expected_trade_date=scan_end,
+            asset_types_by_instrument=asset_types_by_instrument,
         )
     )
     paper_account = PaperTradingRepository(repo.session_factory).get_account_settings()
@@ -1757,6 +1758,7 @@ def _full_market_a_share_readiness_health(
     aggregate_health: dict[str, str],
     *,
     expected_trade_date: date,
+    asset_types_by_instrument: dict[str, str] | None = None,
 ) -> dict[str, str]:
     cn_items = [item for item in items if item.instrument_id.startswith("CN:")]
     cn_cards = [card for card in cards if card.instrument_id.startswith("CN:")]
@@ -1783,8 +1785,36 @@ def _full_market_a_share_readiness_health(
         (item.provider or "unknown").strip() or "unknown" for item in adjusted_missing_items
     )
     adjusted_type_counts = Counter(
-        (item.latest_adjustment_type or "unknown").strip() or "unknown"
-        for item in adjusted_items
+        (item.latest_adjustment_type or "unknown").strip() or "unknown" for item in adjusted_items
+    )
+    asset_types = asset_types_by_instrument or {}
+    current_stock_items = [
+        item for item in current_items if _asset_type(item, asset_types) == "stock"
+    ]
+    current_etf_items = [item for item in current_items if _asset_type(item, asset_types) == "etf"]
+    stock_adjusted_items = [
+        item for item in current_stock_items if _valid_latest_adjusted_close(item)
+    ]
+    etf_raw_items = [item for item in current_etf_items if _valid_latest_close(item)]
+    etf_total_return_adjusted_items = [
+        item for item in current_etf_items if _valid_etf_total_return_adjusted_close(item)
+    ]
+    asset_price_statuses = {
+        "a_share_stock_adjusted_price": _coverage_readiness_if_applicable(
+            len(stock_adjusted_items), len(current_stock_items)
+        ),
+        "a_share_etf_raw_price": _coverage_readiness_if_applicable(
+            len(etf_raw_items), len(current_etf_items)
+        ),
+        "a_share_etf_total_return_adjusted_price": _coverage_readiness_if_applicable(
+            len(etf_total_return_adjusted_items), len(current_etf_items)
+        ),
+    }
+    operational_price_covered = len(stock_adjusted_items) + len(etf_raw_items)
+    operational_price_total = len(current_stock_items) + len(current_etf_items)
+    operational_price_status = _coverage_readiness_if_applicable(
+        operational_price_covered,
+        operational_price_total,
     )
     suspension = min(_int_health(aggregate_health, "a_share_suspension_count"), item_total)
     price_limit = min(_int_health(aggregate_health, "a_share_price_limit_count"), item_total)
@@ -1818,9 +1848,21 @@ def _full_market_a_share_readiness_health(
             else "missing"
         ),
     }
-    score = sum(_readiness_score(value) for value in statuses.values()) / len(statuses)
+    # Keep one price domain in the readiness average: adjusted prices are an
+    # operational requirement for stocks, while a valid raw price is sufficient
+    # for ETF scanning/execution. Strict ETF total-return-adjusted coverage is a
+    # separately reported research limitation and must not gain an extra weight.
+    scoring_statuses = dict(statuses)
+    scoring_statuses["a_share_adjusted_price"] = operational_price_status
+    scoring_values = [value for value in scoring_statuses.values() if value != "not_applicable"]
+    score = (
+        sum(_readiness_score(value) for value in scoring_values) / len(scoring_values)
+        if scoring_values
+        else 0.0
+    )
     return {
         **statuses,
+        **asset_price_statuses,
         "a_share_data_scope": "full_market_cn_universe",
         "a_share_data_readiness_score": f"{score:.2f}",
         "a_share_bars_coverage": f"{dated}/{item_total}",
@@ -1835,15 +1877,50 @@ def _full_market_a_share_readiness_health(
         "a_share_adjusted_price_missing_samples": ",".join(
             sorted(item.instrument_id for item in adjusted_missing_items)[:12]
         ),
-        "a_share_adjusted_price_source_mix": _market_data_count_mix(
-            adjusted_source_counts
-        ),
+        "a_share_adjusted_price_source_mix": _market_data_count_mix(adjusted_source_counts),
         "a_share_adjusted_price_missing_source_mix": _market_data_count_mix(
             adjusted_missing_source_counts
         ),
         "a_share_adjustment_type_mix": _market_data_count_mix(adjusted_type_counts),
         "a_share_adjusted_price_semantics": (
             "latest_expected_session_adjusted_close_finite_positive"
+        ),
+        "a_share_adjusted_price_scope": "legacy_all_cn_universe",
+        "a_share_operational_price": operational_price_status,
+        "a_share_operational_price_coverage": (
+            f"{operational_price_covered}/{operational_price_total}"
+        ),
+        "a_share_operational_price_semantics": (
+            "stock_adjusted_close_plus_etf_raw_close_on_latest_expected_session"
+        ),
+        "a_share_stock_adjusted_price_coverage": (
+            f"{len(stock_adjusted_items)}/{len(current_stock_items)}"
+        ),
+        "a_share_stock_adjusted_price_missing": str(
+            len(current_stock_items) - len(stock_adjusted_items)
+        ),
+        "a_share_stock_adjusted_price_semantics": (
+            "stock_latest_expected_session_adjusted_close_finite_positive"
+        ),
+        "a_share_etf_raw_price_coverage": f"{len(etf_raw_items)}/{len(current_etf_items)}",
+        "a_share_etf_raw_price_missing": str(len(current_etf_items) - len(etf_raw_items)),
+        "a_share_etf_raw_price_semantics": (
+            "etf_latest_expected_session_raw_close_finite_positive"
+        ),
+        "a_share_etf_total_return_adjusted_price_coverage": (
+            f"{len(etf_total_return_adjusted_items)}/{len(current_etf_items)}"
+        ),
+        "a_share_etf_total_return_adjusted_price_missing": str(
+            len(current_etf_items) - len(etf_total_return_adjusted_items)
+        ),
+        "a_share_etf_total_return_adjusted_price_source_mix": _market_data_count_mix(
+            Counter(
+                (item.provider or "unknown").strip() or "unknown"
+                for item in etf_total_return_adjusted_items
+            )
+        ),
+        "a_share_etf_total_return_adjusted_price_semantics": (
+            "etf_latest_expected_session_adjusted_close_finite_positive_with_explicit_non_none_adjustment"
         ),
         "a_share_suspension_coverage": f"{suspension}/{item_total}",
         "a_share_price_limit_coverage": f"{price_limit}/{item_total}",
@@ -1860,12 +1937,37 @@ def _coverage_readiness(covered: int, total: int) -> str:
     return "ready" if covered / total >= 0.98 else "partial"
 
 
+def _coverage_readiness_if_applicable(covered: int, total: int) -> str:
+    if total <= 0:
+        return "not_applicable"
+    return _coverage_readiness(covered, total)
+
+
 def _valid_latest_adjusted_close(item: ScanItem) -> bool:
+    return _valid_positive_price(item.latest_adjusted_close)
+
+
+def _valid_latest_close(item: ScanItem) -> bool:
+    return _valid_positive_price(item.latest_close)
+
+
+def _valid_positive_price(value: object) -> bool:
     try:
-        value = float(item.latest_adjusted_close)
+        number = float(value)
     except (TypeError, ValueError):
         return False
-    return math.isfinite(value) and value > 0
+    return math.isfinite(number) and number > 0
+
+
+def _valid_etf_total_return_adjusted_close(item: ScanItem) -> bool:
+    if not _valid_latest_adjusted_close(item):
+        return False
+    adjustment_type = (item.latest_adjustment_type or "").strip().lower()
+    provider = (item.provider or "").strip().lower()
+    return (
+        adjustment_type not in {"", "none", "snapshot_qfq_anchor"}
+        and provider != "fuyao_etf_unadjusted"
+    )
 
 
 def _readiness_score(status: str) -> float:
@@ -1946,14 +2048,10 @@ def _market_data_recovery_action(
 def _merge_health(target: dict[str, str], source: dict[str, str]) -> None:
     source_error_kind = str(source.get("provider_error_kind", "none"))
     current_error_kind = str(target.get("provider_error_kind", "none"))
-    if _provider_error_severity(source_error_kind) >= _provider_error_severity(
-        current_error_kind
-    ):
+    if _provider_error_severity(source_error_kind) >= _provider_error_severity(current_error_kind):
         target["provider_error_kind"] = source_error_kind
         target["provider_error_code"] = str(source.get("provider_error_code", ""))
-        target["provider_error_retryable"] = str(
-            source.get("provider_error_retryable", "false")
-        )
+        target["provider_error_retryable"] = str(source.get("provider_error_retryable", "false"))
     for key, value in source.items():
         current = target.get(key)
         if key in {
@@ -2302,8 +2400,7 @@ def _paper_calibration_shadow_payload(
     contexts = {
         trade.trade_id: context
         for trade in current_trades
-        if (context := paper_repo.get_trade_source_context(trade.source_snapshot_id))
-        is not None
+        if (context := paper_repo.get_trade_source_context(trade.source_snapshot_id)) is not None
     }
     benchmark_id = CN_BENCHMARKS[0].benchmark_id
     eligible_dates = [
@@ -2340,9 +2437,7 @@ def _paper_calibration_shadow_payload(
                 }
             ),
             market_regime=current_market_regime,
-            industry=(
-                card.market_context.industry if card.market_context is not None else None
-            ),
+            industry=(card.market_context.industry if card.market_context is not None else None),
             asset_type=card.asset_type,
         )
         for card in cards

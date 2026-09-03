@@ -54,20 +54,23 @@ def factor_shadow_scorer_identity(
     implementation_source_digest: str | None = None,
 ) -> FactorShadowScorerIdentity:
     selected = tuple(feature_columns)
-    source_digest = implementation_source_digest or sha256(
-        "\0".join(
-            inspect.getsource(function)
-            for function in (
-                neutralize_research_features,
-                _baseline_prediction,
-                factor_research_feature_contract_digest,
-                factor_shadow_evidence_model_digest,
-                factor_shadow_run_identity,
-                score_factor_shadow_runs,
-                _score_factor_shadow_bundle,
-            )
-        ).encode("utf-8")
-    ).hexdigest()
+    source_digest = (
+        implementation_source_digest
+        or sha256(
+            "\0".join(
+                inspect.getsource(function)
+                for function in (
+                    neutralize_research_features,
+                    _baseline_prediction,
+                    factor_research_feature_contract_digest,
+                    factor_shadow_evidence_model_digest,
+                    factor_shadow_run_identity,
+                    score_factor_shadow_runs,
+                    _score_factor_shadow_bundle,
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+    )
     payload = {
         "protocol_version": FACTOR_SHADOW_SCORER_PROTOCOL,
         "feature_set_version": FACTOR_RESEARCH_VERSION,
@@ -88,6 +91,7 @@ def factor_shadow_scorer_identity(
     )
 
 
+# fmt: off
 def factor_shadow_evidence_model_digest(
     aggregate_model_digest: str,
     scorer_protocol_digest: str,
@@ -115,6 +119,7 @@ def factor_shadow_run_identity(
     return "factor-shadow-run-" + sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+# fmt: on
 
 
 def score_factor_shadow_run(
@@ -148,6 +153,7 @@ def score_factor_shadow_run(
     )
 
 
+# fmt: off
 def score_factor_shadow_runs(
     session_factory: sessionmaker[Session],
     *,
@@ -225,6 +231,153 @@ def score_factor_shadow_runs(
     )
 
 
+# fmt: on
+
+
+def score_factor_shadow_runs_with_legacy_retirement(
+    session_factory: sessionmaker[Session],
+    *,
+    provider_mode: str,
+    scan_job_id: str,
+    signal_date: date,
+    rankings: Sequence[FactorRanking],
+    stock_ids: set[str],
+    max_challengers: int = 3,
+) -> FactorShadowScoringResult:
+    """Score active lanes while retaining legacy scorer-v1 evidence as history."""
+
+    store = FactorResearchRepository(session_factory)
+    bundles = store.model_bundles(provider_mode, limit=max_challengers)
+    if not bundles:
+        return FactorShadowScoringResult(
+            status="model_not_ready",
+            data_health={
+                "factor_shadow_status": "model_not_ready",
+                "factor_shadow_paper_isolation": "true",
+            },
+        )
+
+    active_entries: list[tuple[FactorResearchModelBundle, FactorShadowScoringResult]] = []
+    retired_results: list[FactorShadowScoringResult] = []
+    for bundle in bundles:
+        retired = _legacy_scorer_v1_retirement(store, bundle)
+        if retired is not None:
+            retired_results.append(retired)
+            continue
+        active_entries.append(
+            (
+                bundle,
+                _score_factor_shadow_bundle(
+                    session_factory,
+                    store=store,
+                    bundle=bundle,
+                    provider_mode=provider_mode,
+                    scan_job_id=scan_job_id,
+                    signal_date=signal_date,
+                    rankings=rankings,
+                    stock_ids=stock_ids,
+                ),
+            )
+        )
+    active_results = [result for _, result in active_entries]
+
+    recorded = [result.run for result in active_results if result.run is not None]
+    failed_entries = [
+        (bundle, result) for bundle, result in active_entries if result.status != "recorded"
+    ]
+    failed = [result for _, result in failed_entries]
+    status = (
+        "recorded"
+        if recorded and not failed
+        else "partial"
+        if recorded
+        else failed[0].status
+        if failed
+        else "legacy_scorer_v1_retired"
+    )
+    health = {
+        "factor_shadow_status": status,
+        "factor_shadow_candidate_count": str(len(active_results)),
+        "factor_shadow_active_lane_count": str(len(active_results)),
+        "factor_shadow_selected_lane_count": str(len(bundles)),
+        "factor_shadow_recorded_candidates": str(len(recorded)),
+        "factor_shadow_candidate_experiment_ids": ",".join(
+            bundle.experiment.experiment_id for bundle, _ in active_entries
+        ),
+        "factor_shadow_retired_candidates": str(len(retired_results)),
+        "factor_shadow_retired_lane_count": str(len(retired_results)),
+        "factor_shadow_retired_experiment_ids": ",".join(
+            result.data_health["factor_shadow_experiment_id"] for result in retired_results
+        ),
+        "factor_shadow_retirement_reasons": ",".join(
+            result.data_health["factor_shadow_retirement_reason"] for result in retired_results
+        ),
+        "factor_shadow_paper_isolation": "true",
+        "factor_shadow_order_effect": "none",
+        "factor_shadow_run_ids": ",".join(
+            result.data_health.get("factor_shadow_run_id", "") for result in active_results
+        ),
+        "factor_shadow_scorer_protocol_digests": ",".join(
+            result.data_health.get("factor_shadow_scorer_protocol_digest", "")
+            for result in active_results
+        ),
+        "factor_shadow_scorer_source_digests": ",".join(
+            result.data_health.get("factor_shadow_scorer_source_digest", "")
+            for result in active_results
+        ),
+    }
+    if failed:
+        health["factor_shadow_candidate_failures"] = ",".join(
+            f"{result.data_health.get('factor_shadow_experiment_id', bundle.experiment.experiment_id)}:{result.status}"
+            for bundle, result in failed_entries
+        )
+    return FactorShadowScoringResult(
+        status=status,
+        run=recorded[0] if recorded else None,
+        runs=recorded,
+        data_health=health,
+    )
+
+
+def _legacy_scorer_v1_retirement(
+    store: FactorResearchRepository,
+    bundle: FactorResearchModelBundle,
+) -> FactorShadowScoringResult | None:
+    config = FactorResearchConfig.model_validate(bundle.experiment.config)
+    if config.candidate_id is not None:
+        return None
+    scorer_identity = factor_shadow_scorer_identity(config.selected_feature_columns)
+    evidence_model_digest = factor_shadow_evidence_model_digest(
+        bundle.aggregate_model_digest,
+        scorer_identity.protocol_digest,
+    )
+    existing_evidence_digests = {
+        run.model_digest for run in store.shadow_runs(bundle.experiment.experiment_id)
+    }
+    if (
+        existing_evidence_digests != {bundle.aggregate_model_digest}
+        or evidence_model_digest == bundle.aggregate_model_digest
+    ):
+        return None
+    return FactorShadowScoringResult(
+        status="legacy_scorer_v1_retired",
+        data_health={
+            "factor_shadow_status": "legacy_scorer_v1_retired",
+            "factor_shadow_experiment_id": bundle.experiment.experiment_id,
+            "factor_shadow_retirement_reason": "legacy_scorer_v1_retired",
+            "factor_shadow_evidence_model_digest": evidence_model_digest,
+            "factor_shadow_existing_evidence_model_digests": ",".join(
+                sorted(existing_evidence_digests)
+            ),
+            "factor_shadow_scorer_protocol_digest": scorer_identity.protocol_digest,
+            "factor_shadow_scorer_source_digest": scorer_identity.source_digest,
+            "factor_shadow_paper_isolation": "true",
+            "factor_shadow_order_effect": "none",
+        },
+    )
+
+
+# fmt: off
 def _score_factor_shadow_bundle(
     session_factory: sessionmaker[Session],
     *,
@@ -410,6 +563,9 @@ def _score_factor_shadow_bundle(
             "factor_shadow_order_effect": "none",
         },
     )
+
+
+# fmt: on
 
 
 def _log_market_cap(ranking: FactorRanking) -> float | None:
