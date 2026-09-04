@@ -16,6 +16,7 @@ import {
   fetchLatestHistoricalBackfillJob,
   fetchHistoricalBackfillJob,
   retryHistoricalBackfillJob,
+  fetchWalkForwardRun,
   fetchWalkForwardJob,
   fetchScanRuns,
   fetchStrategyDiagnostics,
@@ -66,6 +67,7 @@ import type {
   StrategyGovernanceResponse,
   StrategyGovernanceState,
   StrategyPerformanceResponse,
+  WalkForwardRunSummary,
   WalkForwardRun,
   WalkForwardJob,
   WalkForwardRankingV3Evaluation,
@@ -411,6 +413,8 @@ export function History({
   selectedCard?: OpportunityCard;
 }) {
   const { language, t } = useI18n();
+  const quickBacktestSymbols = "CN:000001";
+  const quickBacktestProvider: DataProviderMode = "fixture";
   const selectedBacktestSymbols = selectedCard?.instrument_id;
   const selectedBacktestLabel = selectedCard
     ? formatInstrumentDisplay(selectedCard.instrument_id, selectedCard.instrument_label)
@@ -442,7 +446,8 @@ export function History({
   const [performance, setPerformance] = useState<StrategyPerformanceResponse>();
   const [diagnostics, setDiagnostics] = useState<StrategyDiagnosticsResponse>();
   const [strategyGovernance, setStrategyGovernance] = useState<StrategyGovernanceResponse>();
-  const [walkForward, setWalkForward] = useState<WalkForwardRun>();
+  const [walkForward, setWalkForward] = useState<WalkForwardRunSummary>();
+  const [walkForwardDetail, setWalkForwardDetail] = useState<WalkForwardRun>();
   const [walkForwardJob, setWalkForwardJob] = useState<WalkForwardJob>();
   const [validationCenter, setValidationCenter] = useState<ValidationCenterResponse>();
   const [rankingV3ForwardState, setRankingV3ForwardState] = useState<RankingV3ForwardStateResponse>();
@@ -458,6 +463,8 @@ export function History({
   const [isPortfolioBacktesting, setIsPortfolioBacktesting] = useState(false);
   const [isWalkForwardRunning, setIsWalkForwardRunning] = useState(false);
   const [walkForwardError, setWalkForwardError] = useState("");
+  const [isWalkForwardDetailLoading, setIsWalkForwardDetailLoading] = useState(false);
+  const [walkForwardDetailError, setWalkForwardDetailError] = useState("");
   const [rankingV3ForwardError, setRankingV3ForwardError] = useState("");
   const [isRankingV3ForwardLoading, setIsRankingV3ForwardLoading] = useState(true);
   const [isHistoricalBackfillRunning, setIsHistoricalBackfillRunning] = useState(false);
@@ -467,6 +474,7 @@ export function History({
   const [backtestRunContext, setBacktestRunContext] = useState<BacktestRunContext>();
   const autoBacktestKeyRef = useRef("");
   const rankingV3ForwardRequestRef = useRef(0);
+  const walkForwardDetailRequestRef = useRef(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -663,6 +671,13 @@ export function History({
   }, [dataMode]);
 
   useEffect(() => {
+    walkForwardDetailRequestRef.current += 1;
+    setWalkForwardDetail(undefined);
+    setIsWalkForwardDetailLoading(false);
+    setWalkForwardDetailError("");
+  }, [walkForward?.run_id]);
+
+  useEffect(() => {
     if (!walkForwardJob || !["queued", "running"].includes(walkForwardJob.status)) {
       return;
     }
@@ -771,6 +786,32 @@ export function History({
     }
   }
 
+  async function loadWalkForwardDetail() {
+    if (!walkForward || isWalkForwardDetailLoading) {
+      return;
+    }
+    const runId = walkForward.run_id;
+    const requestId = ++walkForwardDetailRequestRef.current;
+    setIsWalkForwardDetailLoading(true);
+    setWalkForwardDetailError("");
+    try {
+      const detail = await fetchWalkForwardRun(runId);
+      if (requestId === walkForwardDetailRequestRef.current && detail.run_id === runId) {
+        setWalkForwardDetail(detail);
+      }
+    } catch (caught) {
+      if (requestId === walkForwardDetailRequestRef.current) {
+        setWalkForwardDetailError(
+          caught instanceof Error ? caught.message : "Failed to load walk-forward detail",
+        );
+      }
+    } finally {
+      if (requestId === walkForwardDetailRequestRef.current) {
+        setIsWalkForwardDetailLoading(false);
+      }
+    }
+  }
+
   async function runFullMarketHistoricalBackfill() {
     if (dataMode !== "free") {
       setHistoricalBackfillError(
@@ -798,21 +839,29 @@ export function History({
   }
 
   async function runBacktest() {
-    if (!activeBacktestSymbols) {
-      setBacktestError(
-        backtestTargetMode === "custom"
-          ? "请输入 6 位 A 股代码，可用逗号分隔，最多 10 个。"
-          : "请先在今日或机会页选择一只推荐，或切换到自定义标的。",
-      );
-      return;
+    let backtestProvider: DataProviderMode;
+    let backtestSymbols: string;
+    let backtestLabel: string;
+    if (backtestTargetMode === "custom") {
+      if (!activeBacktestSymbols) {
+        setBacktestError("请输入 6 位 A 股代码，可用逗号分隔，最多 10 个。");
+        return;
+      }
+      backtestProvider = dataMode;
+      backtestSymbols = activeBacktestSymbols;
+      backtestLabel = activeBacktestLabel;
+    } else {
+      backtestProvider = selectedBacktestSymbols ? dataMode : quickBacktestProvider;
+      backtestSymbols = selectedBacktestSymbols ?? quickBacktestSymbols;
+      backtestLabel = selectedBacktestLabel || formatInstrumentDisplay(backtestSymbols);
     }
     try {
       setIsBacktesting(true);
       setBacktestError("");
       setParameterSensitivityError("");
-      const result = await fetchBacktest(dataMode, activeBacktestSymbols);
+      const result = await fetchBacktest(backtestProvider, backtestSymbols);
       setBacktest(result);
-      fetchParameterSensitivity(dataMode, activeBacktestSymbols)
+      fetchParameterSensitivity(backtestProvider, backtestSymbols)
         .then(setParameterSensitivity)
         .catch((caught) => {
           setParameterSensitivityError(
@@ -821,8 +870,8 @@ export function History({
         });
       setBacktestRunContext({
         kind: backtestTargetMode,
-        label: activeBacktestLabel,
-        provider: dataMode,
+        label: backtestLabel,
+        provider: backtestProvider,
       });
     } catch (caught) {
       setBacktestError(caught instanceof Error ? caught.message : "Failed to run backtest");
@@ -921,6 +970,10 @@ export function History({
     });
   }, [backtestTargetMode, dataMode, selectedBacktestSymbols]);
 
+  const displayedWalkForward = walkForwardDetail?.run_id === walkForward?.run_id
+    ? walkForwardDetail
+    : walkForward;
+
   return (
     <div className="stack history-page">
       <StrategyGovernancePanel
@@ -937,15 +990,18 @@ export function History({
 
       <WalkForwardValidationCenter
         validationCenter={validationCenter}
-        run={walkForward}
+        run={displayedWalkForward}
         job={walkForwardJob}
         backfillJob={historicalBackfillJob}
         error={walkForwardError}
         backfillError={historicalBackfillError}
         isRunning={isWalkForwardRunning}
         isBackfillRunning={isHistoricalBackfillRunning}
+        isDetailLoading={isWalkForwardDetailLoading}
+        detailError={walkForwardDetailError}
         onRun={runFullMarketWalkForward}
         onBackfill={runFullMarketHistoricalBackfill}
+        onLoadDetail={loadWalkForwardDetail}
         forwardState={rankingV3ForwardState}
         forwardStateError={rankingV3ForwardError}
         isForwardStateLoading={isRankingV3ForwardLoading}
@@ -2794,11 +2850,14 @@ function WalkForwardValidationCenter({
   backfillError,
   isRunning,
   isBackfillRunning,
+  isDetailLoading,
+  detailError,
   onRun,
   onBackfill,
+  onLoadDetail,
 }: {
   validationCenter?: ValidationCenterResponse;
-  run?: WalkForwardRun;
+  run?: WalkForwardRunSummary;
   job?: WalkForwardJob;
   backfillJob?: HistoricalBackfillJob;
   forwardState?: RankingV3ForwardStateResponse;
@@ -2810,8 +2869,11 @@ function WalkForwardValidationCenter({
   backfillError: string;
   isRunning: boolean;
   isBackfillRunning: boolean;
+  isDetailLoading: boolean;
+  detailError: string;
   onRun: () => void;
   onBackfill: () => void;
+  onLoadDetail: () => void;
 }) {
   const { language } = useI18n();
   const zh = language === "zh";
@@ -3258,6 +3320,44 @@ function WalkForwardValidationCenter({
             <div><span>{zh ? "Top 5 样本外" : "Top 5 OOS"}</span><strong>{run.top_5_oos_trades}/30</strong></div>
             <div><span>{zh ? "Top 10 样本外" : "Top 10 OOS"}</span><strong>{run.top_10_oos_trades}/30</strong></div>
           </div>
+          {!payload ? (
+            <div className="walk-forward-gate-note" data-testid="walk-forward-summary-boundary">
+              <strong>{zh ? "已加载轻量摘要" : "Lightweight summary loaded"}</strong>
+              <span>
+                {zh
+                  ? "页面保留核心指标；完整组合、逐期快照和研究明细仅通过单次运行详情接口按需获取。"
+                  : "Core metrics remain available; full portfolios, snapshots, and research evidence are available from the per-run detail endpoint on demand."}
+              </span>
+              <div className="brief-actions">
+                <button
+                  className="icon-action secondary"
+                  type="button"
+                  data-testid="walk-forward-load-detail"
+                  onClick={onLoadDetail}
+                  disabled={isDetailLoading}
+                >
+                  {isDetailLoading
+                    ? (zh ? "完整证据加载中…" : "Loading full evidence…")
+                    : (zh ? "加载完整证据 / 明细" : "Load full evidence / details")}
+                </button>
+              </div>
+              {detailError ? (
+                <span className="empty-state error" data-testid="walk-forward-detail-error">
+                  {zh ? `完整证据加载失败：${detailError}` : `Failed to load full evidence: ${detailError}`}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+          {payload ? (
+            <div className="walk-forward-gate-note" data-testid="walk-forward-detail-loaded">
+              <strong>{zh ? "完整证据已加载" : "Full evidence loaded"}</strong>
+              <span>
+                {zh
+                  ? "以下组合曲线、逐期验证与研究归因来自本次运行的完整详情。"
+                  : "The portfolio curves, validation windows, and research attribution below come from this run's full detail."}
+              </span>
+            </div>
+          ) : null}
           <div className={`walk-forward-gate-note ${marketCoverageReady ? "" : "coverage-warning"}`}>
             {marketCoverageReady
               ? (zh
@@ -3582,7 +3682,7 @@ function WalkForwardValidationCenter({
               </p>
             </div>
           ) : null}
-          <div className="walk-forward-chart-grid">
+          {payload ? <div className="walk-forward-chart-grid">
             <LineValidationChart
               title={zh ? "Top 5 权益曲线" : "Top 5 equity curve"}
               tone="equity"
@@ -3595,8 +3695,8 @@ function WalkForwardValidationCenter({
               points={(payload?.top_10_portfolio.equity_curve ?? []).map((point) => ({ label: point.date, value: numberFromDecimalText(point.equity) }))}
               valueFormatter={(value) => value.toFixed(0)}
             />
-          </div>
-          <div className="walk-forward-table-grid">
+          </div> : null}
+          {payload ? <div className="walk-forward-table-grid">
             <div className="table-shell">
               <table>
                 <thead><tr><th>{zh ? "组合" : "Portfolio"}</th><th>{zh ? "交易数" : "Trades"}</th><th>{zh ? "收益" : "Return"}</th><th>{zh ? "最大回撤" : "Max DD"}</th><th>{zh ? "样本外" : "OOS"}</th><th>{zh ? "门槛" : "Gate"}</th></tr></thead>
@@ -3615,8 +3715,18 @@ function WalkForwardValidationCenter({
                 <tbody>{benchmarks.map((item) => <tr key={item.benchmark_id}><td>{benchmarkLabel(item.benchmark_id)}</td><td>{formatNumber(item.benchmark_return_pct, "%")}</td><td>{formatNumber(item.top_5_excess_return_pct, "%")}</td><td>{formatNumber(item.top_10_excess_return_pct, "%")}</td>{executionChallenger ? <td>{formatNumber(item.execution_challenger_excess_return_pct ?? null, "%")}</td> : null}{baselineChallenger ? <td>{formatNumber(item.baseline_challenger_excess_return_pct ?? null, "%")}</td> : null}{dynamicRerank ? <td>{formatNumber(item.dynamic_top_5_excess_return_pct ?? null, "%")}</td> : null}<td>{dataStatusLabel(item.status)}</td></tr>)}</tbody>
               </table>
             </div>
-          </div>
-          <div className="walk-forward-table-grid">
+          </div> : (
+            <div className="table-shell">
+              <table>
+                <thead><tr><th>{zh ? "组合" : "Portfolio"}</th><th>{zh ? "交易数" : "Trades"}</th><th>{zh ? "收益" : "Return"}</th><th>{zh ? "样本外" : "OOS"}</th><th>{zh ? "门槛" : "Gate"}</th></tr></thead>
+                <tbody>
+                  <tr><td>Top 5</td><td>{run.top_5_trade_count}</td><td>{formatNumber(run.top_5_return_pct, "%")}</td><td>{run.top_5_oos_trades}</td><td>{gateLabel(top5Gate)}</td></tr>
+                  <tr><td>Top 10</td><td>{run.top_10_trade_count}</td><td>{formatNumber(run.top_10_return_pct, "%")}</td><td>{run.top_10_oos_trades}</td><td>{gateLabel(top10Gate)}</td></tr>
+                </tbody>
+              </table>
+            </div>
+          )}
+          {payload ? <div className="walk-forward-table-grid">
             <div className="table-shell">
               <table>
                 <thead><tr><th>{zh ? "成本场景" : "Cost scenario"}</th><th>{zh ? "滑点" : "Slippage"}</th><th>{zh ? "费率倍数" : "Fee x"}</th><th>Top 5</th><th>Top 10</th>{executionChallenger ? <th>{zh ? "自适应执行" : "Adaptive execution"}</th> : null}{baselineChallenger ? <th>{zh ? "基线优化" : "Optimized baseline"}</th> : null}{dynamicRerank ? <th>{zh ? "动态 Top 5" : "Dynamic Top 5"}</th> : null}</tr></thead>
@@ -3632,7 +3742,7 @@ function WalkForwardValidationCenter({
                 </div>
               ))}
             </div>
-          </div>
+          </div> : null}
         </div>
       )}
     </section>

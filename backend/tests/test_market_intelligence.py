@@ -108,6 +108,25 @@ def test_market_intelligence_calibrates_cards_before_sorting():
     assert weak.rank_score <= calibrated[0].rank_score
 
 
+def test_market_intelligence_uses_full_market_latest_session_coverage_for_cached_payload():
+    card = _card("CN:688981", "中芯国际 688981.SH", 0.88, 1, "validated")
+
+    center = build_market_intelligence_center(
+        cards=[card],
+        items=[],
+        bars_by_instrument={},
+        strategy_health=[],
+        data_health={
+            "provider": "free",
+            "scanned": "7148",
+            "market_data_latest_session_coverage": "0.999161",
+        },
+    )
+
+    assert center.data_quality.coverage_ratio == 0.9992
+    assert "覆盖 100%" in center.data_quality.summary
+
+
 def _card(
     instrument_id: str,
     label: str,

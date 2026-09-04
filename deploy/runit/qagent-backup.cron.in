@@ -1,3 +1,3 @@
 # Debian cron matches these fields in the host's fixed UTC timezone.
 # 19:30 UTC is 03:30 Asia/Shanghai on the following calendar day.
-30 19 * * * @SERVICE_USER@ @APP_DIR@/scripts/backup_sqlite.sh @STATE_DIR@/qagent.db @BACKUP_DIR@ 14 >/dev/null
+30 19 * * * @SERVICE_USER@ @APP_DIR@/scripts/backup_sqlite.sh @STATE_DIR@/qagent.db @BACKUP_DIR@ @BACKUP_KEEP_DAYS@ @BACKUP_MIN_FREE_BYTES@ >/dev/null

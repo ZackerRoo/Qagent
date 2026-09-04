@@ -28,6 +28,7 @@ def test_runit_assets_enforce_loopback_user_restart_and_timezone():
     # runsv restarts an executable run script whenever it exits.
     assert "CRON_TZ=" not in backup_cron
     assert "\n30 19 * * * @SERVICE_USER@ " in backup_cron
+    assert "@BACKUP_KEEP_DAYS@ @BACKUP_MIN_FREE_BYTES@" in backup_cron
     for month in (1, 7):
         scheduled_utc = datetime(2026, month, 1, 19, 30, tzinfo=timezone.utc)
         scheduled_shanghai = scheduled_utc.astimezone(ZoneInfo("Asia/Shanghai"))
@@ -54,6 +55,10 @@ def test_installer_stages_services_without_enabling_them():
     assert 'CRON_HOST_TIMEZONE="$(tr -d' in installer
     assert "UTC|Etc/UTC|GMT|Etc/GMT" in installer
     assert '"$(env -u TZ date +%z)" != "+0000"' in installer
+    assert 'BACKUP_KEEP_DAYS="${QAGENT_BACKUP_KEEP_DAYS:-5}"' in installer
+    assert 'BACKUP_MIN_FREE_BYTES="${QAGENT_BACKUP_MIN_FREE_BYTES:-10737418240}"' in installer
+    assert "@BACKUP_KEEP_DAYS@" in installer
+    assert "@BACKUP_MIN_FREE_BYTES@" in installer
 
 
 def test_proxy_environment_merge_is_safe_idempotent_and_preserves_secrets(
@@ -266,6 +271,65 @@ def test_backup_is_consistent_and_retention_argument_is_validated(tmp_path: Path
     with sqlite3.connect(f"file:{backups[0]}?mode=ro", uri=True) as db:
         assert db.execute("PRAGMA quick_check").fetchone() == ("ok",)
         assert db.execute("SELECT value FROM evidence").fetchone() == ("preserved",)
+
+
+def test_backup_refuses_insufficient_space_before_creating_temporary_database(
+    tmp_path: Path,
+):
+    source = tmp_path / "source.db"
+    destination = tmp_path / "backups"
+    with sqlite3.connect(source) as db:
+        db.execute("CREATE TABLE evidence (value TEXT NOT NULL)")
+        db.execute("INSERT INTO evidence VALUES ('preserved')")
+    source_before = source.read_bytes()
+
+    result = subprocess.run(
+        [
+            str(ROOT / "scripts/backup_sqlite.sh"),
+            str(source),
+            str(destination),
+            "5",
+            "999999999999999999",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "insufficient backup space" in result.stderr
+    assert list(destination.glob("qagent-*.db")) == []
+    assert list(destination.glob(".qagent-*.db.tmp")) == []
+    assert source.read_bytes() == source_before
+
+
+def test_backup_defaults_to_five_day_retention_with_configurable_reserve(
+    tmp_path: Path,
+):
+    backup = (ROOT / "scripts/backup_sqlite.sh").read_text()
+    source = tmp_path / "source.db"
+    destination = tmp_path / "backups"
+    destination.mkdir()
+    with sqlite3.connect(source) as db:
+        db.execute("CREATE TABLE evidence (value TEXT NOT NULL)")
+    expired = destination / "qagent-20000101T000000+0800.db"
+    expired.write_bytes(b"expired")
+    os.utime(expired, (0, 0))
+
+    subprocess.run(
+        [str(ROOT / "scripts/backup_sqlite.sh"), str(source), str(destination)],
+        check=True,
+        text=True,
+        capture_output=True,
+        env={**os.environ, "QAGENT_BACKUP_MIN_FREE_BYTES": "0"},
+    )
+
+    assert "QAGENT_BACKUP_KEEP_DAYS:-5" in backup
+    assert "QAGENT_BACKUP_MIN_FREE_BYTES:-10737418240" in backup
+    assert 'find "$BACKUP_DIR"' in backup
+    assert "estimated_backup = max(os.stat(source).st_size, page_count * page_size)" in backup
+    assert "available < required" in backup
+    assert not expired.exists()
+    assert len(list(destination.glob("qagent-*.db"))) == 1
 
 
 def test_snapshot_install_refuses_implicit_replacement(tmp_path: Path):

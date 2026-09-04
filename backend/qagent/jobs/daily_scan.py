@@ -876,7 +876,7 @@ def _a_share_data_readiness(
         card.trading_constraints and card.trading_constraints.price_limit_pct is not None
         for card in cn_cards
     )
-    industry_ready = any(card.market_context for card in cn_cards)
+    industry_ready = any(_has_known_industry(card) for card in cn_cards)
     index_ready = any(
         card.market_context and card.market_context.index_memberships for card in cn_cards
     )
@@ -887,7 +887,7 @@ def _a_share_data_readiness(
     )
     suspension_count = sum(item.trading_status is not None for item in cn_items)
     price_limit_count = sum(item.trading_status is not None for item in cn_items)
-    industry_count = sum(card.market_context is not None for card in cn_cards)
+    industry_count = sum(_has_known_industry(card) for card in cn_cards)
     index_count = sum(
         bool(card.market_context and card.market_context.index_memberships) for card in cn_cards
     )
@@ -959,6 +959,13 @@ def _readiness_value(status: str) -> float:
     if status == "partial":
         return 0.55
     return 0.0
+
+
+def _has_known_industry(card: OpportunityCard) -> bool:
+    if card.market_context is None:
+        return False
+    industry = card.market_context.industry.strip()
+    return bool(industry and industry not in {"unknown", "未知行业", "未知个股行业", "未知ETF暴露"})
 
 
 def _coverage_status(covered: int, total: int) -> str:

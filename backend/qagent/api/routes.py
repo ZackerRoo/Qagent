@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+import json
 import math
 from multiprocessing import get_context
 from threading import Lock
@@ -1210,25 +1211,42 @@ def retry_walk_forward_job(job_id: str) -> dict[str, object]:
 def list_walk_forward_runs(
     provider: str = "free",
     limit: int = 20,
+    include_payload: bool = False,
 ) -> dict[str, object]:
     if limit <= 0:
         raise HTTPException(status_code=400, detail="limit must be positive")
-    records = _repo().list_walk_forward_runs(
-        provider=provider.strip().lower(),
+    repo = _repo()
+    normalized_provider = provider.strip().lower()
+    if include_payload:
+        records = repo.list_walk_forward_runs(
+            provider=normalized_provider,
+            limit=limit,
+        )
+        return {"runs": [_walk_forward_run_api_payload(record) for record in records]}
+    summaries = repo.list_walk_forward_run_summaries(
+        provider=normalized_provider,
         limit=limit,
     )
-    return {"runs": [_walk_forward_run_api_payload(record) for record in records]}
+    return {"runs": [_walk_forward_run_summary_api_payload(record) for record in summaries]}
 
 
 @router.get("/walk-forward/runs/latest")
-def latest_walk_forward_run(provider: str = "free") -> dict[str, object]:
-    records = _repo().list_walk_forward_runs(
-        provider=provider.strip().lower(),
-        limit=1,
+def latest_walk_forward_run(
+    provider: str = "free",
+    include_payload: bool = False,
+) -> dict[str, object]:
+    repo = _repo()
+    normalized_provider = provider.strip().lower()
+    records = (
+        repo.list_walk_forward_runs(provider=normalized_provider, limit=1)
+        if include_payload
+        else repo.list_walk_forward_run_summaries(provider=normalized_provider, limit=1)
     )
     if not records:
         raise HTTPException(status_code=404, detail="walk-forward run not found")
-    return _walk_forward_run_api_payload(records[0])
+    if include_payload:
+        return _walk_forward_run_api_payload(records[0])
+    return _walk_forward_run_summary_api_payload(records[0])
 
 
 @router.get("/walk-forward/runs/{run_id}")
@@ -1243,6 +1261,8 @@ def _walk_forward_run_api_payload(record) -> dict[str, object]:
     """Add unsigned, read-only research derived from the validated stored payload."""
 
     result = record.model_dump(mode="json")
+    result["payload_included"] = True
+    result["detail_url"] = f"/api/walk-forward/runs/{record.run_id}"
     payload = result.get("payload")
     if isinstance(payload, dict):
         result["derived_research"] = {
@@ -1252,6 +1272,13 @@ def _walk_forward_run_api_payload(record) -> dict[str, object]:
                 source_reproducibility_digest=record.reproducibility_digest,
             )
         }
+    return result
+
+
+def _walk_forward_run_summary_api_payload(record) -> dict[str, object]:
+    result = record.model_dump(mode="json")
+    result["payload_included"] = False
+    result["detail_url"] = f"/api/walk-forward/runs/{record.run_id}"
     return result
 
 
@@ -2836,12 +2863,11 @@ def opportunities(provider: str = "fixture", symbols: str | None = None) -> dict
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)
-    _attach_live_paper_health_payload(payload)
+    _attach_live_runtime_health_payload(payload)
     payload.pop("operational_readiness_center", None)
     _attach_operational_readiness_payload(payload)
     _attach_alpha_quality_payload(payload)
     _attach_research_center_payload(payload)
-    _attach_live_paper_health_payload(payload)
     return payload
 
 
@@ -3400,6 +3426,7 @@ def overview(provider: str = "fixture", symbols: str | None = None) -> dict[str,
     _attach_manual_action_center_payload(payload, cards_key="top_cards")
     _attach_signal_monitor_payload(payload, cards_key="top_cards")
     _attach_decision_quality_payload(payload, cards_key="top_cards")
+    _attach_live_runtime_health_payload(payload)
     _attach_operational_readiness_payload(payload, cards_key="top_cards")
     _attach_alpha_quality_payload(payload, cards_key="top_cards")
     _attach_research_center_payload(payload, cards_key="top_cards")
@@ -9759,6 +9786,7 @@ def _enrich_scan_task_result(payload: dict[str, object]) -> dict[str, object]:
     _attach_manual_action_center_payload(result)
     _attach_signal_monitor_payload(result)
     _attach_decision_quality_payload(result)
+    _attach_live_runtime_health_payload(result)
     _attach_operational_readiness_payload(result)
     _attach_alpha_quality_payload(result)
     _attach_research_center_payload(result)
@@ -9832,12 +9860,11 @@ def _full_market_scan_payload(
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)
-    _attach_live_paper_health_payload(payload)
+    _attach_live_runtime_health_payload(payload)
     payload.pop("operational_readiness_center", None)
     _attach_operational_readiness_payload(payload)
     _attach_alpha_quality_payload(payload)
     _attach_research_center_payload(payload)
-    _attach_live_paper_health_payload(payload)
     _repo().save_scan_result_cache(
         cache_key=_full_market_scan_cache_key(mode, max_symbols, include_etfs, sync_if_empty),
         provider=mode,
@@ -9931,6 +9958,7 @@ def _recent_full_market_scan_payload(
         _attach_manual_action_center_payload(payload)
         _attach_signal_monitor_payload(payload)
         _attach_decision_quality_payload(payload)
+        _attach_live_runtime_health_payload(payload)
         _attach_operational_readiness_payload(payload)
         _attach_alpha_quality_payload(payload)
         _attach_research_center_payload(payload)
@@ -9997,6 +10025,7 @@ def _recent_full_market_scan_payload(
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)
+    _attach_live_runtime_health_payload(payload)
     _attach_operational_readiness_payload(payload)
     _attach_alpha_quality_payload(payload)
     _attach_research_center_payload(payload)
@@ -10057,6 +10086,7 @@ def _recent_scan_run_fallback_payload(
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)
+    _attach_live_runtime_health_payload(payload)
     _attach_operational_readiness_payload(payload)
     _attach_alpha_quality_payload(payload)
     _attach_research_center_payload(payload)
@@ -10107,12 +10137,11 @@ def _hydrate_full_market_batch_payload(
     _attach_manual_action_center_payload(payload)
     _attach_signal_monitor_payload(payload)
     _attach_decision_quality_payload(payload)
-    _attach_live_paper_health_payload(payload)
+    _attach_live_runtime_health_payload(payload)
     payload.pop("operational_readiness_center", None)
     _attach_operational_readiness_payload(payload)
     _attach_alpha_quality_payload(payload)
     _attach_research_center_payload(payload)
-    _attach_live_paper_health_payload(payload)
 
 
 def _hydrate_legacy_opportunity_cards(payload: dict[str, object]) -> int:
@@ -10601,8 +10630,6 @@ def _attach_operational_readiness_payload(
     payload: dict[str, object],
     cards_key: str = "cards",
 ) -> None:
-    if isinstance(payload.get("operational_readiness_center"), dict):
-        return
     raw_cards = payload.get(cards_key)
     if not isinstance(raw_cards, list):
         return
@@ -10661,8 +10688,15 @@ def _attach_live_paper_health_payload(payload: dict[str, object]) -> None:
             trades,
             reporting_scope="official",
         )
-        summary = summarize_paper_trades(
+        summary = summarize_paper_trades(trades, reporting_scope="all")
+        official_summary = summarize_paper_trades(
             trades,
+            reporting_scope="official",
+            authenticated_trade_ids=authenticated_ids,
+        )
+        research_summary = summarize_paper_trades(
+            trades,
+            reporting_scope="legacy",
             authenticated_trade_ids=authenticated_ids,
         )
     except Exception:
@@ -10677,7 +10711,55 @@ def _attach_live_paper_health_payload(payload: dict[str, object]) -> None:
             "paper_target_hit_count": str(summary.target_hit_count),
             "paper_stopped_count": str(summary.stopped_count),
             "paper_ledger": "true",
+            "paper_summary_scope": "all_account_records",
+            "paper_official_total": str(official_summary.total),
+            "paper_research_total": str(research_summary.total),
             "paper_provider_filter": provider or "all",
+        }
+    )
+
+
+def _attach_live_runtime_health_payload(payload: dict[str, object]) -> None:
+    """Attach one read-only runtime snapshot before rebuilding derived centers."""
+    _attach_live_paper_health_payload(payload)
+    _attach_live_strategy_governance_health_payload(payload)
+
+
+def _attach_live_strategy_governance_health_payload(payload: dict[str, object]) -> None:
+    data_health = payload.setdefault("data_health", {})
+    if not isinstance(data_health, dict):
+        data_health = {}
+        payload["data_health"] = data_health
+    try:
+        states = _repo().list_strategy_states()
+    except Exception:
+        return
+    by_strategy = {
+        item.strategy_id: {
+            "state": item.state.value,
+            "effective_weight": item.effective_weight,
+        }
+        for item in states
+    }
+    state_counts: dict[str, int] = {}
+    for item in states:
+        state_counts[item.state.value] = state_counts.get(item.state.value, 0) + 1
+    formal_enabled = sum(
+        item.state.value in {"admitted", "throttled"} and item.effective_weight > 0
+        for item in states
+    )
+    data_health.update(
+        {
+            "strategy_governance_live_total": str(len(states)),
+            "strategy_governance_live_shadow": str(state_counts.get("shadow", 0)),
+            "strategy_governance_live_formal_enabled": str(formal_enabled),
+            "strategy_governance_live_effective_weight": f"{sum(item.effective_weight for item in states):.6f}",
+            "strategy_governance_live_by_strategy": json.dumps(
+                by_strategy,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
         }
     )
 
@@ -10686,8 +10768,6 @@ def _attach_alpha_quality_payload(
     payload: dict[str, object],
     cards_key: str = "cards",
 ) -> None:
-    if isinstance(payload.get("alpha_quality_center"), dict):
-        return
     raw_cards = payload.get(cards_key)
     if not isinstance(raw_cards, list):
         return

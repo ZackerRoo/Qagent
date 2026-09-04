@@ -93,6 +93,7 @@ import type {
   WatchlistItem,
   WatchlistResponse,
   WalkForwardRun,
+  WalkForwardRunSummary,
   WalkForwardJob,
   WalkForwardJobsResponse,
   WalkForwardRunsResponse,
@@ -1050,8 +1051,12 @@ export async function fetchWalkForwardRuns(
 
 export async function fetchLatestWalkForwardRun(
   provider: DataProviderMode = "free",
-): Promise<WalkForwardRun> {
-  return apiGet<WalkForwardRun>("/walk-forward/runs/latest", { provider });
+): Promise<WalkForwardRunSummary> {
+  return apiGet<WalkForwardRunSummary>("/walk-forward/runs/latest", { provider });
+}
+
+export async function fetchWalkForwardRun(runId: string): Promise<WalkForwardRun> {
+  return apiGet<WalkForwardRun>(`/walk-forward/runs/${encodeURIComponent(runId)}`);
 }
 
 export async function fetchValidationCenter(

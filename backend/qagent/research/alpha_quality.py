@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import json
 
 from pydantic import BaseModel, Field
 
@@ -79,7 +80,7 @@ def build_alpha_quality_center(
     health_data = data_health or {}
     leader = cards[0] if cards else None
     gate = _buyability_gate(leader, health_data)
-    tuning = _strategy_tuning(cards, health)
+    tuning = _strategy_tuning(cards, health, health_data)
     themes = _theme_confirmation(rotation_radar)
     review = _leader_review(leader, gate, themes)
     alpha_score = _alpha_score(gate, review, tuning, themes)
@@ -220,6 +221,7 @@ def _leader_review(
 def _strategy_tuning(
     cards: list[OpportunityCard],
     health: list[StrategyHealth],
+    data_health: dict[str, str],
 ) -> list[StrategyTuningRule]:
     current_counts: dict[str, int] = {}
     for card in cards:
@@ -227,9 +229,23 @@ def _strategy_tuning(
         current_counts[strategy_id] = current_counts.get(strategy_id, 0) + 1
     if not health:
         health = [_fallback_health(strategy_id, count) for strategy_id, count in current_counts.items()]
+    governance = _strategy_governance_snapshot(data_health)
     rows = []
     for item in sorted(health, key=lambda row: (current_counts.get(row.strategy_id, 0), row.sample_count), reverse=True)[:8]:
         action, multiplier, evidence = _strategy_action(item)
+        governance_item = governance.get(item.strategy_id, {})
+        governance_state = str(governance_item.get("state") or "")
+        if governance_state in {"research", "shadow", "disabled"}:
+            effective_weight = _float_value(governance_item.get("effective_weight")) or 0.0
+            action = {
+                "research": "研究观察",
+                "shadow": "影子观察",
+                "disabled": "停用",
+            }[governance_state]
+            multiplier = effective_weight
+            evidence = (
+                f"治理状态 {governance_state}，正式权重 {effective_weight:.0%}；{evidence}"
+            )
         rows.append(
             StrategyTuningRule(
                 strategy_id=item.strategy_id,
@@ -245,6 +261,26 @@ def _strategy_tuning(
             )
         )
     return rows
+
+
+def _strategy_governance_snapshot(data_health: dict[str, str]) -> dict[str, dict[str, object]]:
+    raw = data_health.get("strategy_governance_live_by_strategy")
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in value.items() if isinstance(item, dict)}
+
+
+def _float_value(value: object) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _theme_confirmation(

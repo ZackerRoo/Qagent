@@ -1016,19 +1016,56 @@ def test_full_market_batch_latest_result_refreshes_paper_account_health(
     assert created.status_code == 200
     assert client.get("/api/paper-trades?reporting_scope=legacy").json()["summary"]["total"] == 1
 
+    paper_refresh_calls = 0
+    governance_refresh_calls = 0
+    original_paper_refresh = routes._attach_live_paper_health_payload
+    original_governance_refresh = routes._attach_live_strategy_governance_health_payload
+
+    def counted_paper_refresh(payload):
+        nonlocal paper_refresh_calls
+        paper_refresh_calls += 1
+        return original_paper_refresh(payload)
+
+    def counted_governance_refresh(payload):
+        nonlocal governance_refresh_calls
+        governance_refresh_calls += 1
+        return original_governance_refresh(payload)
+
+    monkeypatch.setattr(routes, "_attach_live_paper_health_payload", counted_paper_refresh)
+    monkeypatch.setattr(
+        routes,
+        "_attach_live_strategy_governance_health_payload",
+        counted_governance_refresh,
+    )
+
     response = client.get(
         "/api/full-market/batch-scan/latest-result?provider=fixture&include_etfs=true"
     )
 
     assert response.status_code == 200
+    assert paper_refresh_calls == 1
+    assert governance_refresh_calls == 1
     body = response.json()
-    assert body["data_health"]["paper_total"] == "0"
+    assert body["data_health"]["paper_total"] == "1"
+    assert body["data_health"]["paper_official_total"] == "0"
+    assert body["data_health"]["paper_research_total"] == "1"
+    assert body["data_health"]["paper_summary_scope"] == "all_account_records"
     paper_check = next(
         item
         for item in body["operational_readiness_center"]["checks"]
         if item["key"] == "paper_account"
     )
-    assert "模拟记录 0 条" in paper_check["evidence"]
+    assert "模拟记录 1 条" in paper_check["evidence"]
+    top_question = next(
+        item
+        for item in body["operational_readiness_center"]["user_questions"]
+        if item["key"] == "top_recommendation"
+    )
+    assert body["cards"][0]["instrument_label"] in top_question["answer"]
+    assert (
+        body["alpha_quality_center"]["current_leader"]["instrument_id"]
+        == body["cards"][0]["instrument_id"]
+    )
 
 
 def test_daily_brief_fast_mode_sets_snapshot_controls():

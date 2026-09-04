@@ -12,12 +12,23 @@ SERVICE_HOME="$(getent passwd "$SERVICE_USER" 2>/dev/null | cut -d: -f6 || true)
 APP_DIR="${QAGENT_APP_DIR:-$ROOT_DIR}"
 STATE_DIR="${QAGENT_STATE_DIR:-/var/lib/qagent}"
 BACKUP_DIR="${QAGENT_BACKUP_DIR:-/var/backups/qagent}"
+BACKUP_KEEP_DAYS="${QAGENT_BACKUP_KEEP_DAYS:-5}"
+BACKUP_MIN_FREE_BYTES="${QAGENT_BACKUP_MIN_FREE_BYTES:-10737418240}"
 LOG_DIR="${QAGENT_LOG_DIR:-/var/log/qagent}"
 ENV_DIR="/etc/qagent"
 ENV_FILE="$ENV_DIR/qagent.env"
 SV_DIR="/etc/sv"
 SERVICE_DIR="/etc/service"
 ROLLBACK_DIR="$ENV_DIR/deploy-rollback"
+
+if [[ ! "$BACKUP_KEEP_DAYS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "QAGENT_BACKUP_KEEP_DAYS must be a positive integer" >&2
+  exit 2
+fi
+if [[ ! "$BACKUP_MIN_FREE_BYTES" =~ ^[0-9]+$ ]]; then
+  echo "QAGENT_BACKUP_MIN_FREE_BYTES must be a non-negative integer" >&2
+  exit 2
+fi
 
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
   echo "service user does not exist: $SERVICE_USER" >&2
@@ -132,6 +143,8 @@ render() {
     -e "s|@APP_DIR@|$APP_DIR|g" \
     -e "s|@STATE_DIR@|$STATE_DIR|g" \
     -e "s|@BACKUP_DIR@|$BACKUP_DIR|g" \
+    -e "s|@BACKUP_KEEP_DAYS@|$BACKUP_KEEP_DAYS|g" \
+    -e "s|@BACKUP_MIN_FREE_BYTES@|$BACKUP_MIN_FREE_BYTES|g" \
     -e "s|@LOG_DIR@|$LOG_DIR|g" \
     "$1" >"$2"
 }

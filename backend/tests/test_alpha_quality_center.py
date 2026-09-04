@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+import json
 
 import pandas as pd
 
@@ -50,6 +51,25 @@ def test_alpha_quality_center_turns_recommendations_into_buyability_policy():
     assert center.data_health["alpha_quality_cards"] == "2"
     assert center.data_health["alpha_quality_strategies"] == str(len(center.strategy_tuning))
     assert center.data_health["alpha_quality_themes"] == str(len(center.theme_confirmation))
+
+
+def test_alpha_quality_uses_live_governance_weight_for_shadow_strategy():
+    card = _card("CN:688059", "华锐精密 688059.SH", 0.9, 1, "validated")
+    health = _health()
+    center = build_alpha_quality_center(
+        cards=[card],
+        strategy_health=[health],
+        data_health={
+            "strategy_governance_live_by_strategy": json.dumps(
+                {health.strategy_id: {"state": "shadow", "effective_weight": 0.0}}
+            )
+        },
+    )
+
+    tuning = center.strategy_tuning[0]
+    assert tuning.action == "影子观察"
+    assert tuning.weight_multiplier == 0
+    assert "正式权重 0%" in tuning.evidence
 
 
 def _card(

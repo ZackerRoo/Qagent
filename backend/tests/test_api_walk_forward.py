@@ -17,7 +17,10 @@ from qagent.storage.tables import (
 )
 
 
-def test_walk_forward_run_queries_return_latest_and_complete_payload(tmp_path, monkeypatch):
+def test_walk_forward_run_queries_default_to_summary_and_keep_explicit_detail(
+    tmp_path,
+    monkeypatch,
+):
     monkeypatch.setenv(
         "QAGENT_DATABASE_URL",
         f"sqlite:///{tmp_path / 'walk-forward-api.db'}",
@@ -64,23 +67,91 @@ def test_walk_forward_run_queries_return_latest_and_complete_payload(tmp_path, m
     client = TestClient(create_app())
     listed = client.get("/api/walk-forward/runs?provider=free&limit=5")
     latest = client.get("/api/walk-forward/runs/latest?provider=free")
+    compatible_latest = client.get(
+        "/api/walk-forward/runs/latest?provider=free&include_payload=true"
+    )
+    compatible_list = client.get(
+        "/api/walk-forward/runs?provider=free&limit=5&include_payload=true"
+    )
     detail = client.get("/api/walk-forward/runs/api-walk-forward-1")
     missing = client.get("/api/walk-forward/runs/missing")
 
     assert listed.status_code == 200
     assert listed.json()["runs"][0]["run_id"] == "api-walk-forward-1"
+    assert listed.json()["runs"][0]["payload_included"] is False
+    assert "payload" not in listed.json()["runs"][0]
     assert latest.status_code == 200
     assert latest.json()["top_5_return_pct"] == 8.25
+    assert latest.json()["payload_included"] is False
+    assert latest.json()["detail_url"] == "/api/walk-forward/runs/api-walk-forward-1"
+    assert "payload" not in latest.json()
+    assert "derived_research" not in latest.json()
+    assert len(latest.content) < 5_000
+    assert compatible_latest.status_code == 200
+    assert compatible_latest.json()["payload_included"] is True
+    assert compatible_latest.json()["payload"]["cost_sensitivity"][0]["key"] == "stress"
+    assert compatible_list.status_code == 200
+    assert compatible_list.json()["runs"][0]["payload_included"] is True
     assert detail.status_code == 200
+    assert detail.json()["payload_included"] is True
     assert detail.json()["payload"]["cost_sensitivity"][0]["key"] == "stress"
     attribution = detail.json()["derived_research"]["top_10_lag_attribution"]
     assert attribution["status"] == "unsupported"
     assert attribution["source"]["run_id"] == "api-walk-forward-1"
     assert attribution["source"]["reproducibility_digest"] == "digest-1"
-    assert latest.json()["derived_research"]["top_10_lag_attribution"]["decision_weight"] is False
+    assert (
+        compatible_latest.json()["derived_research"]["top_10_lag_attribution"][
+            "decision_weight"
+        ]
+        is False
+    )
     assert "top_10_lag_attribution" not in detail.json()["payload"]
     assert detail.json()["data_health"]["walk_forward_equal_weight_benchmark"] == "ready"
     assert missing.status_code == 404
+
+
+def test_walk_forward_summary_query_does_not_select_payload_json(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "QAGENT_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'walk-forward-summary-query.db'}",
+    )
+    now = datetime.now(timezone.utc)
+    repo = routes._repo()
+    with repo.session_factory() as session:
+        session.add(
+            WalkForwardRunRow(
+                run_id="summary-query-1",
+                provider="free",
+                status="succeeded",
+                start_date=date(2024, 1, 2),
+                end_date=date(2025, 1, 2),
+                dataset_revision=9,
+                rebalance_step_sessions=5,
+                lookback_days=400,
+                snapshot_count=52,
+                top_5_trade_count=24,
+                top_10_trade_count=48,
+                top_5_return_pct=Decimal("8.25"),
+                top_10_return_pct=Decimal("7.10"),
+                top_5_oos_trades=12,
+                top_10_oos_trades=18,
+                top_5_oos_gate="insufficient",
+                top_10_oos_gate="insufficient",
+                reproducibility_digest="digest-summary",
+                payload_json="not-json-and-must-not-be-loaded",
+                data_health=json.dumps({"walk_forward_cross_section_coverage_pct": "99.9"}),
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.commit()
+
+    response = TestClient(create_app()).get("/api/walk-forward/runs/latest?provider=free")
+
+    assert response.status_code == 200
+    assert response.json()["run_id"] == "summary-query-1"
+    assert response.json()["payload_included"] is False
+    assert "payload" not in response.json()
 
 
 def test_walk_forward_job_is_persisted_and_submitted_in_background(tmp_path, monkeypatch):

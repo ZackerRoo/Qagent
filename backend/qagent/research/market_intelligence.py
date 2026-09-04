@@ -209,6 +209,13 @@ def _build_data_quality(
     if not bars_by_instrument and cards:
         available = len(cards)
     coverage_ratio = round(min(1.0, available / expected), 4)
+    authoritative_coverage = _authoritative_market_coverage(data_health)
+    if authoritative_coverage is not None:
+        # Cached full-market payloads intentionally omit the thousands of bar
+        # frames.  In that read path ``available`` is only the visible card
+        # count, so cards/scanned is not market-data coverage.  The scan's
+        # latest-session metric is the canonical universe-level observation.
+        coverage_ratio = authoritative_coverage
     caveats = [caveat for card in cards for caveat in card.data_caveats]
     if any("fixture" in caveat for caveat in caveats):
         missing_inputs.append("真实行情替代 fixture 样例")
@@ -267,6 +274,23 @@ def _build_data_quality(
         warnings=warnings[:8],
         summary=summary,
     )
+
+
+def _authoritative_market_coverage(data_health: dict[str, str]) -> float | None:
+    for key in (
+        "market_data_latest_session_coverage",
+        "a_share_current_bar_coverage_ratio",
+    ):
+        raw = data_health.get(key)
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if 0.0 <= value <= 1.0:
+            return round(value, 4)
+    return None
 
 
 def _build_source_quality_checks(

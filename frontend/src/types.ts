@@ -5023,7 +5023,7 @@ export type WalkForwardExperimentManifest = {
   runtime_revisions?: string[];
 };
 
-export type WalkForwardRun = {
+export type WalkForwardRunSummary = {
   run_id: string;
   provider: DataProviderMode;
   status: string;
@@ -5042,17 +5042,24 @@ export type WalkForwardRun = {
   top_5_oos_gate: string;
   top_10_oos_gate: string;
   reproducibility_digest: string;
-  payload: WalkForwardPayload;
+  /** Present only on explicit full-detail responses. */
+  payload?: WalkForwardPayload;
   derived_research?: {
     top_10_lag_attribution?: WalkForwardTop10LagAttribution;
   };
+  payload_included: boolean;
+  detail_url: string;
   data_health: Record<string, string>;
   created_at: string;
   updated_at: string;
 };
 
+export type WalkForwardRun = WalkForwardRunSummary & {
+  payload: WalkForwardPayload;
+};
+
 export type WalkForwardRunsResponse = {
-  runs: WalkForwardRun[];
+  runs: WalkForwardRunSummary[];
 };
 
 export type HistoricalBackfillJob = {

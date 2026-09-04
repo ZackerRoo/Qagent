@@ -210,7 +210,7 @@ export function Layout({
             </span>
             <span className="workspace-status-item">
               <Database size={14} />
-              {language === "zh" ? "本地数据" : "Local data"}
+              {language === "zh" ? "运行数据" : "Runtime data"}
             </span>
             <span className={`workspace-status-item result-${resultStatus}`}>
               {formatResultStatus(resultStatus, opportunityCount, language)}

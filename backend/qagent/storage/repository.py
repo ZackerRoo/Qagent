@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import case, func, select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, aliased, sessionmaker
+from sqlalchemy.orm import Session, aliased, load_only, sessionmaker
 
 from qagent.domain.models import OpportunityCard
 from qagent.historical_evidence.models import (
@@ -518,6 +518,32 @@ class WalkForwardRunRecord(BaseModel):
     top_10_oos_gate: str
     reproducibility_digest: str
     payload: dict[str, object]
+    data_health: dict[str, str]
+    created_at: datetime
+    updated_at: datetime
+
+
+class WalkForwardRunSummaryRecord(BaseModel):
+    """Denormalized run fields readable without loading the large result payload."""
+
+    run_id: str
+    provider: str
+    status: str
+    start_date: date
+    end_date: date
+    dataset_revision: int
+    rebalance_step_sessions: int
+    lookback_days: int
+    snapshot_count: int
+    top_5_trade_count: int
+    top_10_trade_count: int
+    top_5_return_pct: float
+    top_10_return_pct: float
+    top_5_oos_trades: int
+    top_10_oos_trades: int
+    top_5_oos_gate: str
+    top_10_oos_gate: str
+    reproducibility_digest: str
     data_health: dict[str, str]
     created_at: datetime
     updated_at: datetime
@@ -3251,6 +3277,53 @@ class QagentRepository:
             )
             return [self._walk_forward_run_from_row(row) for row in rows]
 
+    def list_walk_forward_run_summaries(
+        self,
+        *,
+        provider: str | None = None,
+        limit: int = 20,
+    ) -> list[WalkForwardRunSummaryRecord]:
+        """List runs while leaving payload_json deferred at the SQL layer."""
+
+        bounded_limit = max(1, min(limit, 100))
+        with self.session_factory() as session:
+            query = session.query(WalkForwardRunRow).options(
+                load_only(
+                    WalkForwardRunRow.run_id,
+                    WalkForwardRunRow.provider,
+                    WalkForwardRunRow.status,
+                    WalkForwardRunRow.start_date,
+                    WalkForwardRunRow.end_date,
+                    WalkForwardRunRow.dataset_revision,
+                    WalkForwardRunRow.rebalance_step_sessions,
+                    WalkForwardRunRow.lookback_days,
+                    WalkForwardRunRow.snapshot_count,
+                    WalkForwardRunRow.top_5_trade_count,
+                    WalkForwardRunRow.top_10_trade_count,
+                    WalkForwardRunRow.top_5_return_pct,
+                    WalkForwardRunRow.top_10_return_pct,
+                    WalkForwardRunRow.top_5_oos_trades,
+                    WalkForwardRunRow.top_10_oos_trades,
+                    WalkForwardRunRow.top_5_oos_gate,
+                    WalkForwardRunRow.top_10_oos_gate,
+                    WalkForwardRunRow.reproducibility_digest,
+                    WalkForwardRunRow.data_health,
+                    WalkForwardRunRow.created_at,
+                    WalkForwardRunRow.updated_at,
+                )
+            )
+            if provider:
+                query = query.filter(WalkForwardRunRow.provider == provider)
+            rows = (
+                query.order_by(
+                    WalkForwardRunRow.created_at.desc(),
+                    WalkForwardRunRow.run_id.desc(),
+                )
+                .limit(bounded_limit)
+                .all()
+            )
+            return [self._walk_forward_run_summary_from_row(row) for row in rows]
+
     def list_opportunity_snapshots(
         self,
         instrument_id: str | None = None,
@@ -4043,6 +4116,47 @@ class QagentRepository:
             top_10_oos_gate=row.top_10_oos_gate,
             reproducibility_digest=row.reproducibility_digest,
             payload=payload,
+            data_health=data_health,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    @staticmethod
+    def _walk_forward_run_summary_from_row(
+        row: WalkForwardRunRow,
+    ) -> WalkForwardRunSummaryRecord:
+        stored_data_health = json.loads(row.data_health)
+        if not isinstance(stored_data_health, dict):
+            raise ValueError(f"walk-forward run {row.run_id} data health is malformed")
+        storage_schema = stored_data_health.get(WALK_FORWARD_RUN_STORAGE_SCHEMA_KEY)
+        if storage_schema not in {None, WALK_FORWARD_RUN_STORAGE_SCHEMA}:
+            raise ValueError(
+                f"walk-forward run {row.run_id} has unknown storage integrity schema"
+            )
+        data_health = {
+            key: value
+            for key, value in stored_data_health.items()
+            if key != WALK_FORWARD_RUN_STORAGE_SCHEMA_KEY
+        }
+        return WalkForwardRunSummaryRecord(
+            run_id=row.run_id,
+            provider=row.provider,
+            status=row.status,
+            start_date=row.start_date,
+            end_date=row.end_date,
+            dataset_revision=row.dataset_revision,
+            rebalance_step_sessions=row.rebalance_step_sessions,
+            lookback_days=row.lookback_days,
+            snapshot_count=row.snapshot_count,
+            top_5_trade_count=row.top_5_trade_count,
+            top_10_trade_count=row.top_10_trade_count,
+            top_5_return_pct=float(row.top_5_return_pct),
+            top_10_return_pct=float(row.top_10_return_pct),
+            top_5_oos_trades=row.top_5_oos_trades,
+            top_10_oos_trades=row.top_10_oos_trades,
+            top_5_oos_gate=row.top_5_oos_gate,
+            top_10_oos_gate=row.top_10_oos_gate,
+            reproducibility_digest=row.reproducibility_digest,
             data_health=data_health,
             created_at=row.created_at,
             updated_at=row.updated_at,

@@ -266,6 +266,94 @@ def _check_backup_cron(path: Path) -> dict[str, object]:
     return _result("backup_schedule", "pass", "backup cron is enabled", path=str(path))
 
 
+def _backup_capacity_checks(
+    database_path: Path,
+    backup_dir: Path,
+    *,
+    max_used_percent: float,
+    minimum_free_bytes: int,
+) -> list[dict[str, object]]:
+    try:
+        filesystem = os.statvfs(backup_dir)
+    except OSError as exc:
+        failure = _result(
+            "backup_disk_usage",
+            "fail",
+            f"backup filesystem cannot be inspected: {exc}",
+            path=str(backup_dir),
+        )
+        return [
+            failure,
+            _result(
+                "next_backup_capacity",
+                "fail",
+                "next backup capacity cannot be estimated",
+                path=str(backup_dir),
+            ),
+        ]
+
+    total_bytes = filesystem.f_blocks * filesystem.f_frsize
+    available_bytes = filesystem.f_bavail * filesystem.f_frsize
+    used_percent = (
+        ((total_bytes - available_bytes) * 100.0 / total_bytes)
+        if total_bytes
+        else 100.0
+    )
+    disk_status = "fail" if used_percent >= max_used_percent else "pass"
+    disk = _result(
+        "backup_disk_usage",
+        disk_status,
+        "backup filesystem usage is too high"
+        if disk_status == "fail"
+        else "backup filesystem usage is within limit",
+        path=str(backup_dir),
+        total_bytes=total_bytes,
+        available_bytes=available_bytes,
+        used_percent=round(used_percent, 2),
+        max_used_percent=max_used_percent,
+    )
+
+    if not database_path.is_file():
+        capacity = _result(
+            "next_backup_capacity",
+            "fail",
+            "next backup size cannot be estimated because the database is missing",
+            database_path=str(database_path),
+        )
+    else:
+        try:
+            with _open_read_only(database_path) as database:
+                page_count = int(database.execute("PRAGMA page_count").fetchone()[0])
+                page_size = int(database.execute("PRAGMA page_size").fetchone()[0])
+            estimated_backup_bytes = max(
+                database_path.stat().st_size, page_count * page_size
+            )
+        except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+            capacity = _result(
+                "next_backup_capacity",
+                "fail",
+                f"next backup size cannot be estimated: {exc}",
+                database_path=str(database_path),
+            )
+        else:
+            required_bytes = estimated_backup_bytes + minimum_free_bytes
+            at_risk = available_bytes < required_bytes
+            capacity = _result(
+                "next_backup_capacity",
+                "fail" if at_risk else "pass",
+                "insufficient space for the next atomic backup"
+                if at_risk
+                else "space is available for the next atomic backup",
+                database_path=str(database_path),
+                backup_dir=str(backup_dir),
+                available_bytes=available_bytes,
+                estimated_backup_bytes=estimated_backup_bytes,
+                minimum_free_after_backup_bytes=minimum_free_bytes,
+                required_bytes=required_bytes,
+            )
+    return [disk, capacity]
+
+
 def _check_process(
     name: str, process_names: tuple[str, ...], pgrep_command: str
 ) -> dict[str, object]:
@@ -375,6 +463,20 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return parsed
+
+
+def _percentage(value: str) -> float:
+    parsed = float(value)
+    if not 0 < parsed <= 100:
+        raise argparse.ArgumentTypeError("must be greater than 0 and at most 100")
+    return parsed
+
+
 def _arguments(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Read-only Qagent unattended Linux deployment health check."
@@ -382,6 +484,12 @@ def _arguments(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--database", default="/var/lib/qagent/qagent.db")
     parser.add_argument("--backup-dir", default="/var/backups/qagent")
     parser.add_argument("--backup-max-age-seconds", type=_positive_int, default=129600)
+    parser.add_argument(
+        "--backup-disk-max-used-percent", type=_percentage, default=85.0
+    )
+    parser.add_argument(
+        "--backup-min-free-bytes", type=_non_negative_int, default=10737418240
+    )
     parser.add_argument(
         "--scheduler-max-running-seconds", type=_positive_int, default=21600
     )
@@ -414,6 +522,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "usage_error", "detail": "invalid --now"}))
         return EXIT_USAGE
     database_path = Path(args.database)
+    backup_dir = Path(args.backup_dir)
     checks = [
         _check_backend(args.backend_health_url, args.http_timeout_seconds),
         _check_frontend(args.frontend_url, args.http_timeout_seconds),
@@ -426,9 +535,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
         _check_replay_readiness(args.replay_readiness_url, args.http_timeout_seconds),
         _check_backup(
-            Path(args.backup_dir),
+            backup_dir,
             now=now,
             max_age_seconds=args.backup_max_age_seconds,
+        ),
+        *_backup_capacity_checks(
+            database_path,
+            backup_dir,
+            max_used_percent=args.backup_disk_max_used_percent,
+            minimum_free_bytes=args.backup_min_free_bytes,
         ),
         _check_backup_cron(Path(args.backup_cron)),
         _check_process("runit_supervisor", ("runsvdir",), args.pgrep_command),

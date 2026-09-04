@@ -1,10 +1,12 @@
 from datetime import date, timedelta
+import json
 
 import pandas as pd
 
 from qagent.cards.factor_watch import build_factor_watch_card
 from qagent.domain.models import StrategyCalibration
 from qagent.factors.models import FactorRanking
+from qagent.jobs.daily_scan import _a_share_data_readiness
 from qagent.monitoring.signal_monitor import build_signal_monitor_center
 from qagent.recommendations.portfolio import build_portfolio_plan
 from qagent.recommendations.quality_gate import apply_recommendation_quality_gate
@@ -83,6 +85,69 @@ def test_operational_readiness_center_answers_new_user_decision_questions():
     assert "目标" in plan_question.answer
     assert center.data_health["operational_readiness_checks"] == "6"
     assert center.data_health["operational_readiness_questions"] == str(len(center.user_questions))
+
+
+def test_operational_readiness_separates_research_samples_from_live_strategy_authority():
+    card = _card("CN:688059", "华锐精密 688059.SH", 0.88, 1, "validated")
+    health = [_health()]
+    governance = {
+        health[0].strategy_id: {"state": "shadow", "effective_weight": 0.0},
+    }
+
+    center = build_operational_readiness_center(
+        cards=[card],
+        strategy_health=health,
+        data_health={
+            "strategy_governance_live_total": "14",
+            "strategy_governance_live_shadow": "14",
+            "strategy_governance_live_formal_enabled": "0",
+            "strategy_governance_live_by_strategy": json.dumps(governance),
+        },
+    )
+
+    check = center.check_by_key("strategy_self_learning")
+    assert check.status == "risk"
+    assert check.score <= 0.35
+    assert "正式启用策略 0/14" in check.evidence
+    assert "影子策略 14 个" in check.evidence
+    assert center.strategy_learning[0].action == "影子观察"
+    assert center.strategy_learning[0].weight_hint_pct == 0
+
+
+def test_operational_readiness_labels_latest_session_coverage_from_scan_health():
+    card = _card("CN:688059", "华锐精密 688059.SH", 0.88, 1, "validated")
+    market = build_market_intelligence_center(
+        cards=[card],
+        items=[],
+        bars_by_instrument={},
+        strategy_health=[],
+        data_health={"provider": "free", "scanned": "7148"},
+    )
+
+    center = build_operational_readiness_center(
+        cards=[card],
+        market_intelligence=market,
+        data_health={"market_data_latest_session_coverage": "0.999161"},
+    )
+
+    check = center.check_by_key("data_source_realism")
+    assert "最新交易日行情覆盖率 99.9%" in check.evidence
+
+
+def test_a_share_industry_coverage_does_not_count_unknown_taxonomy_as_covered():
+    card = _card("CN:603259", "药明康德 603259.SH", 0.88, 1, "validated")
+    assert card.market_context is not None
+    assert card.market_context.industry == "未知个股行业"
+
+    health = _a_share_data_readiness(
+        items=[],
+        cards=[card],
+        bars_by_instrument={},
+        data_health={"provider": "free"},
+    )
+
+    assert health["a_share_industry"] == "missing"
+    assert health["a_share_industry_card_count"] == "0"
 
 
 def _card(

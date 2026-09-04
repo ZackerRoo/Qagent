@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import json
 
 from pydantic import BaseModel, Field
 
@@ -81,11 +82,11 @@ def build_operational_readiness_center(
 ) -> OperationalReadinessCenter:
     health = strategy_health or []
     health_data = data_health or {}
-    learning = _strategy_learning(health, decision_quality_center)
+    learning = _strategy_learning(health, decision_quality_center, health_data)
     stability = _stability_audit(cards, previous_cards or [])
     checks = [
         _data_source_check(market_intelligence, health_data),
-        _strategy_learning_check(learning, health),
+        _strategy_learning_check(learning, health, health_data),
         _backtest_realism_check(health_data, health),
         _paper_account_check(health_data),
         _alert_system_check(decision_quality_center, signal_monitor, alert_rules_count),
@@ -129,12 +130,18 @@ def _data_source_check(
             next_action="先刷新全A池快照，并检查复权、停牌、涨跌停和行业字段。",
         )
     quality = market_intelligence.data_quality
+    coverage = _authoritative_coverage(data_health)
+    if coverage is None:
+        coverage = quality.coverage_ratio
     risk = sum(1 for item in quality.source_checks if item.severity == "risk")
     watch = sum(1 for item in quality.source_checks if item.severity == "watch")
-    status = _status_from_score(quality.score, risk=risk, watch=watch)
+    score = quality.score
+    if coverage is not None and quality.coverage_ratio is not None:
+        score = min(1.0, max(0.0, score + (coverage - quality.coverage_ratio) * 0.24))
+    status = _status_from_score(score, risk=risk, watch=watch)
     evidence = [
-        f"数据质量分 {quality.score:.0%}",
-        f"覆盖率 {_fmt_pct(quality.coverage_ratio)}",
+        f"数据质量分 {score:.0%}",
+        f"最新交易日行情覆盖率 {_fmt_pct(coverage * 100 if coverage is not None else None)}",
         f"风险项 {risk} 个，观察项 {watch} 个",
     ]
     if quality.missing_inputs:
@@ -143,7 +150,7 @@ def _data_source_check(
         key="data_source_realism",
         label="数据源真实度",
         status=status,
-        score=round(quality.score, 4),
+        score=round(score, 4),
         user_value="避免把样例数据、缺复权或缺停牌处理的数据当成真实机会。",
         evidence=evidence,
         next_action=(
@@ -157,13 +164,30 @@ def _data_source_check(
 def _strategy_learning_check(
     learning: list[StrategyLearningItem],
     health: list[StrategyHealth],
+    data_health: dict[str, str],
 ) -> OperationalReadinessCheck:
     sample_count = sum(item.sample_count for item in health)
     validated = sum(item.action in {"提高权重", "保持权重"} for item in learning)
     score = min(1.0, sample_count / 80)
     if validated:
         score = min(1.0, score + 0.15)
-    status = "ready" if score >= 0.72 else "watch" if score >= 0.38 else "risk"
+    # Strategy performance samples are research evidence, not authorization to
+    # use a strategy in formal decisions.  Live governance is attached by the
+    # API read path and takes precedence over the historical sample score.
+    governance_total = _int_health(data_health, "strategy_governance_live_total")
+    formal_enabled = _int_health(data_health, "strategy_governance_live_formal_enabled")
+    shadow_count = _int_health(data_health, "strategy_governance_live_shadow")
+    if governance_total > 0 and formal_enabled == 0:
+        score = min(score, 0.35)
+        status = "risk"
+    else:
+        status = "ready" if score >= 0.72 else "watch" if score >= 0.38 else "risk"
+    governance_evidence = []
+    if governance_total > 0:
+        governance_evidence = [
+            f"正式启用策略 {formal_enabled}/{governance_total}",
+            f"影子策略 {shadow_count} 个",
+        ]
     return OperationalReadinessCheck(
         key="strategy_self_learning",
         label="策略自学习",
@@ -171,6 +195,7 @@ def _strategy_learning_check(
         score=round(score, 4),
         user_value="让推荐不是固定列表，而是根据策略胜率、收益和回撤动态调权。",
         evidence=[
+            *governance_evidence,
             f"策略样本 {sample_count}",
             f"可保持/提高权重策略 {validated}",
             f"策略动作 {len(learning)} 个",
@@ -319,12 +344,14 @@ def _recommendation_stability_check(
 def _strategy_learning(
     health: list[StrategyHealth],
     decision_quality_center: DecisionQualityCenter | None,
+    data_health: dict[str, str],
 ) -> list[StrategyLearningItem]:
     action_by_id = {}
     if decision_quality_center is not None:
         action_by_id = {
             item.strategy_id: item for item in decision_quality_center.calibration.strategy_actions
         }
+    governance = _strategy_governance_snapshot(data_health)
     result: list[StrategyLearningItem] = []
     for item in sorted(
         health,
@@ -332,19 +359,64 @@ def _strategy_learning(
         reverse=True,
     )[:8]:
         action = action_by_id.get(item.strategy_id)
+        governance_item = governance.get(item.strategy_id, {})
+        governance_state = str(governance_item.get("state") or "")
+        effective_weight = _optional_float(governance_item.get("effective_weight"))
+        action_text = action.action if action else _fallback_strategy_action(item)
+        reason = action.reason if action else _fallback_strategy_reason(item)
+        weight_hint = action.weight_pct if action else None
+        if governance_state in {"research", "shadow", "disabled"}:
+            action_text = {
+                "research": "研究观察",
+                "shadow": "影子观察",
+                "disabled": "停用",
+            }[governance_state]
+            weight_hint = 0.0 if effective_weight is None else effective_weight * 100
+            reason = f"治理状态 {governance_state}，正式权重 {weight_hint:.0f}%；{reason}"
         result.append(
             StrategyLearningItem(
                 strategy_id=item.strategy_id,
                 name=item.name,
-                action=action.action if action else _fallback_strategy_action(item),
+                action=action_text,
                 sample_count=item.sample_count,
                 win_rate_10d=item.win_rate_10d,
                 avg_return_10d=item.avg_return_10d,
-                weight_hint_pct=action.weight_pct if action else None,
-                reason=action.reason if action else _fallback_strategy_reason(item),
+                weight_hint_pct=weight_hint,
+                reason=reason,
             )
         )
     return result
+
+
+def _strategy_governance_snapshot(data_health: dict[str, str]) -> dict[str, dict[str, object]]:
+    raw = data_health.get("strategy_governance_live_by_strategy")
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in value.items() if isinstance(item, dict)}
+
+
+def _optional_float(value: object) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _authoritative_coverage(data_health: dict[str, str]) -> float | None:
+    for key in (
+        "market_data_latest_session_coverage",
+        "a_share_current_bar_coverage_ratio",
+    ):
+        value = _optional_float(data_health.get(key))
+        if value is not None and 0.0 <= value <= 1.0:
+            return value
+    return None
 
 
 def _stability_audit(

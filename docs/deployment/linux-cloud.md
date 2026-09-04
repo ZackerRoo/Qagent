@@ -29,6 +29,12 @@ sudo ./scripts/switch_linux_release.sh "/opt/qagent/releases/$RELEASE_COMMIT"
 sudo QAGENT_APP_DIR=/opt/qagent/current ./scripts/install_linux_runit.sh
 ```
 
+The installed backup policy keeps five days by default and reserves 10 GiB after
+the estimated next backup. Override either value only for a documented disk plan,
+for example `QAGENT_BACKUP_KEEP_DAYS=7` or
+`QAGENT_BACKUP_MIN_FREE_BYTES=21474836480` on the installer command; the rendered
+cron entry records the effective values rather than depending on a cron environment.
+
 The installer creates the virtualenv, installs dependencies, builds the frontend,
 and renders definitions into `/etc/sv`. It does **not** link them into
 `/etc/service` and leaves `/etc/cron.d/qagent-backup.disabled` disabled. Its
@@ -117,7 +123,15 @@ Open `http://127.0.0.1:5173`; the API remains at
 
 Cron makes an online SQLite backup at 03:30 Asia/Shanghai, validates
 `PRAGMA quick_check`, atomically publishes it under `/var/backups/qagent`, and
-deletes backups older than 14 days. The current Debian/Ubuntu `cron` daemon
+deletes backups older than five days by default. Before creating its temporary
+database, the backup checks that the destination filesystem has room for the
+larger of the source file size and SQLite logical page size, plus 10 GiB that
+must remain free. A failed capacity preflight creates no temporary or final
+backup and does not run retention cleanup, preserving the last known-good set.
+The retention and reserve can be overridden with the installer variables above,
+or with the script's optional `KEEP_DAYS` and `MIN_FREE_BYTES` arguments.
+
+The current Debian/Ubuntu `cron` daemon
 matches crontab fields in the host timezone; setting `TZ` or `CRON_TZ` in a
 crontab changes only the command environment and does not change the match
 timezone. Because this cloud host is fixed at UTC, the installed cron expression
@@ -170,14 +184,17 @@ command input. The checks cover backend health, frontend reachability, the
 persisted scheduler checkpoint (enabled, idle or bounded in-flight, not overdue,
 and no `last_error`), replay-readiness visibility/unknown evidence, read-only
 `PRAGMA quick_check` for production and latest-backup databases, backup freshness,
-the enabled backup cron, running `cron`/`crond` and `runsvdir` daemons, SysV cron
+backup-filesystem usage, capacity for the estimated next atomic backup, the
+enabled backup cron, running `cron`/`crond` and `runsvdir` daemons, SysV cron
 boot links for runlevels 2-5, and both runit service links/statuses. An optional
 duplicate runit `crond` definition is not used as evidence: this host's effective
 cron is the daemonizing SysV service. The default backup freshness limit is 36
-hours and the default maximum in-flight scheduler age is 6 hours; use the
-corresponding command flags only when an operator has a documented host-specific
-reason. A 60-second scheduler overdue grace avoids failing on the normal bounded
-clock-recheck race; older due checkpoints fail the check.
+hours, the backup-filesystem failure threshold is 85% used, the required
+post-backup reserve is 10 GiB, and the default maximum in-flight scheduler age is
+6 hours. Use the corresponding command flags only when an operator has a
+documented host-specific reason. A 60-second scheduler overdue grace avoids
+failing on the normal bounded clock-recheck race; older due checkpoints fail the
+check.
 
 The diagnostic intentionally does not call `GET /api/automation/scheduler`.
 That application route invokes scheduler due-work refresh and can advance a due

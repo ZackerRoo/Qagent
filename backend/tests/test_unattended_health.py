@@ -115,6 +115,8 @@ def _run_check(
     *,
     enabled: bool = True,
     last_error: str | None = None,
+    backup_disk_max_used_percent: str = "100",
+    backup_min_free_bytes: str = "0",
 ) -> tuple[subprocess.CompletedProcess[str], bytes]:
     database = tmp_path / "qagent.db"
     _database(database, enabled=enabled, last_error=last_error)
@@ -156,6 +158,10 @@ def _run_check(
                 str(pgrep_command),
                 "--backup-cron",
                 str(cron),
+                "--backup-disk-max-used-percent",
+                backup_disk_max_used_percent,
+                "--backup-min-free-bytes",
+                backup_min_free_bytes,
                 "--sysv-rc-root",
                 str(tmp_path),
                 "--now",
@@ -185,10 +191,54 @@ def test_unattended_health_reports_healthy_without_mutating_database(tmp_path: P
     assert payload["failed_checks"] == 0
     assert {check["status"] for check in payload["checks"]} == {"pass"}
     assert {check["name"] for check in payload["checks"]} >= {
+        "backup_disk_usage",
+        "next_backup_capacity",
         "runit_supervisor",
         "cron_daemon",
         "cron_boot_enablement",
     }
+    assert (tmp_path / "qagent.db").read_bytes() == database_before
+
+
+def test_unattended_health_reports_next_backup_capacity_risk_without_writing(
+    tmp_path: Path,
+):
+    class HealthyHandler(_HealthHandler):
+        replay_blocked = False
+
+    result, database_before = _run_check(
+        tmp_path,
+        HealthyHandler,
+        backup_min_free_bytes="999999999999999999",
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    failed = {check["name"]: check for check in payload["checks"] if check["status"] == "fail"}
+    assert set(failed) == {"next_backup_capacity"}
+    capacity = failed["next_backup_capacity"]
+    assert capacity["required_bytes"] > capacity["available_bytes"]
+    assert capacity["estimated_backup_bytes"] == (tmp_path / "qagent.db").stat().st_size
+    assert (tmp_path / "qagent.db").read_bytes() == database_before
+
+
+def test_unattended_health_fails_when_backup_filesystem_usage_exceeds_limit(
+    tmp_path: Path,
+):
+    class HealthyHandler(_HealthHandler):
+        replay_blocked = False
+
+    result, database_before = _run_check(
+        tmp_path,
+        HealthyHandler,
+        backup_disk_max_used_percent="0.000001",
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    failed = {check["name"]: check for check in payload["checks"] if check["status"] == "fail"}
+    assert set(failed) == {"backup_disk_usage"}
+    assert failed["backup_disk_usage"]["used_percent"] > 0
     assert (tmp_path / "qagent.db").read_bytes() == database_before
 
 
