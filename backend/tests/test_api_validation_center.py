@@ -134,6 +134,15 @@ def test_validation_center_marks_old_tracks_and_stale_walk_forward_without_write
     )
     before = _protected_counts(repo)
 
+    def build_at_fixed_time(repo, *, provider):
+        return validation_center.build_validation_center(
+            repo,
+            provider=provider,
+            generated_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        )
+
+    monkeypatch.setattr(routes, "build_validation_center", build_at_fixed_time)
+
     response = TestClient(create_app()).get("/api/validation-center?provider=free")
 
     assert response.status_code == 200
