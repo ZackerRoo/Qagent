@@ -109,6 +109,24 @@ def _payload():
     }
 
 
+def test_common_execution_delta_extension_preserves_legacy_and_fails_closed():
+    payload = _payload()
+    legacy = build_top10_lag_attribution(payload)
+    assert legacy["status"] == "ready"
+    assert legacy["common_execution_delta"]["status"] == "unavailable"
+    for name in ("top_5_portfolio", "top_10_portfolio"):
+        payload[name]["trades"][0].update(
+            shares="100", entry_price="10", exit_price="20.10",
+            entry_date="2025-01-03", exit_date="2025-01-04",
+        )
+    result = build_top10_lag_attribution(payload)
+    assert result["common_execution_delta"]["status"] == "ready"
+    assert result["common_execution_delta"]["closed"]
+    assert result["reconciliation"] == legacy["reconciliation"]
+    payload["top_10_portfolio"]["trades"].append(None)
+    assert build_top10_lag_attribution(payload)["common_execution_delta"]["status"] == "unavailable"
+
+
 def test_top10_lag_attribution_separates_common_and_incremental_layers():
     result = build_top10_lag_attribution(_payload())
 

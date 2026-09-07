@@ -7,6 +7,8 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Mapping
 
+from qagent.research.common_execution_delta import build_common_execution_delta
+
 
 _DIMENSIONS = (
     "strategy",
@@ -34,6 +36,7 @@ def build_top10_lag_attribution(
         "scope": "shadow_only",
         "official_release_allowed": False,
         "decision_weight": False,
+        "common_execution_delta": None,
         "source": {
             "kind": "validated_walk_forward_result_payload",
             "run_id": source_run_id,
@@ -145,6 +148,19 @@ def build_top10_lag_attribution(
         },
         "incremental_layer_out_of_sample": oos_incremental_summary,
         "unresolved_layer": unresolved_summary,
+        "common_execution_delta": build_common_execution_delta(
+            top5_trades,
+            [trade for trade, row in zip(top10_trades, top10_rows) if row["layer"] == "common"],
+            top5_capital,
+            top10_capital,
+            identity_valid=(
+                strict_identity
+                and len(top5_trades) == len(top5_portfolio["trades"])
+                and len(top10_trades) == len(top10_portfolio["trades"])
+                and len(snapshots) == len(payload["snapshots"])
+                and len(snapshot_index) == len(snapshots)
+            ),
+        ),
         "reconciliation": {
             "formula": "observed_gap = incremental_layer_contribution + common_execution_configuration_delta + residual",
             "incremental_layer_contribution_pct": incremental_summary["contribution_pct"],
