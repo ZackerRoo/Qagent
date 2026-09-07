@@ -3906,6 +3906,54 @@ export type FactorShadowExecutionHeadEvaluation = {
   challenger_max_industry_concentration: number | null;
 };
 
+export type RankingHeadChallengerPolicy = {
+  schema_version: "ranking-head-challenger-evaluation-v1";
+  protocol_version: "ranking-head-challenger-top5-shadow-v1";
+  policy_version: "ranking-head-top5-v1";
+  policy_digest: string;
+  baseline_top_n: 10;
+  top_n: 5;
+  rank_field: "challenger_rank";
+  selection_rule: "ascending_rank_then_instrument_id_no_backfill";
+  outcome_basis: "existing_factor_shadow_next_open_adjusted_net_excess_return";
+  scope: "research_shadow";
+  decision_weight: false;
+  production_ranking_effect: "none";
+  paper_order_effect: "none";
+  paper_ledger_mutated: false;
+  automatic_promotion: false;
+};
+
+export type RankingHeadSameDayComparison = {
+  signal_date: string;
+  maturity_date: string;
+  status: "waiting_for_maturity" | "selection_incomplete" | "outcomes_incomplete" | "ready";
+  baseline_ids: string[];
+  challenger_ids: string[];
+  common_ids: string[];
+  baseline_only_ids: string[];
+  challenger_only_ids: string[];
+  excluded_rank_6_10_ids: string[];
+  baseline_completed_outcomes: number;
+  challenger_completed_outcomes: number;
+  baseline_net_excess_return_pct: number | null;
+  challenger_net_excess_return_pct: number | null;
+  challenger_lift_pct: number | null;
+};
+
+export type RankingHeadChallengerEvaluation = {
+  policy: RankingHeadChallengerPolicy;
+  status: "not_started" | "collecting" | "ready";
+  session_count: number;
+  matured_session_count: number;
+  paired_outcome_session_count: number;
+  baseline_net_excess_return_pct: number | null;
+  challenger_net_excess_return_pct: number | null;
+  challenger_lift_pct: number | null;
+  same_day_comparisons: RankingHeadSameDayComparison[];
+  data_health: Record<string, string>;
+};
+
 export type FactorShadowHorizonEvaluation = {
   horizon_sessions: number;
   status: "pending" | "partial" | "ready";
@@ -3935,6 +3983,7 @@ export type FactorShadowHorizonEvaluation = {
   challenger_rank_buckets: FactorShadowAttributionGroup[];
   challenger_industries: FactorShadowAttributionGroup[];
   execution_head?: FactorShadowExecutionHeadEvaluation;
+  ranking_head_challenger?: RankingHeadChallengerEvaluation;
 };
 
 export type FactorShadowPromotionAssessment = {

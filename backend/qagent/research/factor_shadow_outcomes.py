@@ -17,6 +17,10 @@ from qagent.research.shadow_price_repair import (
     ExactPriceRequirement,
     repair_exact_daily_prices,
 )
+from qagent.research.ranking_head_challenger import (
+    RankingHeadChallengerEvaluation,
+    evaluate_ranking_head_challenger,
+)
 from qagent.storage.factor_research import (
     FactorResearchRepository,
     FactorShadowOutcome,
@@ -146,6 +150,9 @@ class FactorShadowHorizonEvaluation(BaseModel):
     challenger_industries: list[FactorShadowAttributionGroup] = Field(default_factory=list)
     execution_head: FactorShadowExecutionHeadEvaluation = Field(
         default_factory=FactorShadowExecutionHeadEvaluation
+    )
+    ranking_head_challenger: RankingHeadChallengerEvaluation = Field(
+        default_factory=RankingHeadChallengerEvaluation
     )
 
 
@@ -1380,6 +1387,13 @@ def _evaluate_horizon(
         outcomes_by_key,
         horizon_sessions=horizon_sessions,
     )
+    ranking_head_challenger = evaluate_ranking_head_challenger(
+        runs,
+        scores_by_run,
+        outcomes_by_key,
+        as_of_date=as_of_date,
+        horizon_sessions=horizon_sessions,
+    )
     return FactorShadowHorizonEvaluation(
         horizon_sessions=horizon_sessions,
         status=status,
@@ -1471,6 +1485,7 @@ def _evaluate_horizon(
             limit=8,
         ),
         execution_head=execution_head,
+        ranking_head_challenger=ranking_head_challenger,
     )
 
 

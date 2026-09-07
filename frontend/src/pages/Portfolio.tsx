@@ -2648,6 +2648,7 @@ function FactorShadowAttributionPanel({
   if (!horizon) return null;
   const promotion = evaluation.promotion;
   const head = horizon.execution_head;
+  const rankingHead = horizon.ranking_head_challenger;
   return (
     <div className="factor-shadow-attribution">
       <div className="paper-research-subhead">
@@ -2706,6 +2707,46 @@ function FactorShadowAttributionPanel({
           </p>
         </div>
       )}
+      {rankingHead && <div className="factor-shadow-promotion" aria-label={language === "zh" ? "Factor Shadow 挑战者排名 Top5 对 Top10 影子对照" : "Factor Shadow challenger-rank Top 5 versus Top 10 comparison"}>
+        <div>
+          <span className={`status status-${rankingHead.status === "ready" ? "ready" : "pending"}`}>
+            {rankingHead.status === "ready"
+              ? language === "zh" ? "结果齐全" : "Complete"
+              : rankingHead.status === "collecting"
+                ? language === "zh" ? "结果积累中" : "Collecting"
+                : language === "zh" ? "尚未开始" : "Not started"}
+          </span>
+          <strong>
+            {language === "zh"
+              ? `Factor Shadow 挑战者排名 Top${rankingHead.policy.top_n} 对 Top${rankingHead.policy.baseline_top_n}`
+              : `Factor Shadow challenger rank: Top ${rankingHead.policy.top_n} vs Top ${rankingHead.policy.baseline_top_n}`}
+          </strong>
+          <small>
+            {rankingHead.policy.policy_version} · {language === "zh"
+              ? `${rankingHead.paired_outcome_session_count}/${rankingHead.session_count} 个同日完整可比期`
+              : `${rankingHead.paired_outcome_session_count}/${rankingHead.session_count} complete same-date comparisons`}
+          </small>
+        </div>
+        <div className="factor-shadow-promotion-metrics">
+          <span>
+            {language === "zh" ? `Top${rankingHead.policy.baseline_top_n} 基准净超额` : `Top ${rankingHead.policy.baseline_top_n} baseline net excess`}
+            <strong>{formatShadowEvidenceReturn(rankingHead.baseline_net_excess_return_pct, language)}</strong>
+          </span>
+          <span>
+            {language === "zh" ? `Top${rankingHead.policy.top_n} 头部净超额` : `Top ${rankingHead.policy.top_n} head net excess`}
+            <strong>{formatShadowEvidenceReturn(rankingHead.challenger_net_excess_return_pct, language)}</strong>
+          </span>
+          <span>
+            {language === "zh" ? "Top5 相对 Top10 增益" : "Top 5 lift vs Top 10"}
+            <strong>{formatShadowEvidenceReturn(rankingHead.challenger_lift_pct, language)}</strong>
+          </span>
+        </div>
+        <p>
+          {language === "zh"
+            ? "这是 Factor Shadow challenger_rank 的冻结只读 Top5/Top10 对照，第6-10名不会进入 Top5 头部；它不是 Ranking V3 正式模型，不改变排名、权重、订单或模拟盘账本。"
+            : "This is a frozen, read-only Top 5/Top 10 comparison on Factor Shadow challenger_rank. Ranks 6-10 never enter the Top 5 head. It is not the official Ranking V3 model and does not change ranking, weights, orders, or the paper ledger."}
+        </p>
+      </div>}
       {head && <div className="factor-shadow-promotion" aria-label={language === "zh" ? "执行容量头部影子证据" : "Execution-sized shadow head evidence"}>
         <div>
           <span className="status status-pending">shadow only</span>

@@ -1578,6 +1578,12 @@ def test_factor_shadow_outcomes_use_one_run_per_signal_date_and_are_immutable(tm
     assert horizon.execution_head.paired_outcome_sessions == 0
     assert not horizon.execution_head.baseline_all_matured_sessions_filled
     assert not horizon.execution_head.challenger_all_matured_sessions_filled
+    assert horizon.ranking_head_challenger.status == "ready"
+    assert horizon.ranking_head_challenger.policy.top_n == 5
+    assert (
+        horizon.ranking_head_challenger.data_health["production_ranking_effect"]
+        == "none"
+    )
 
     stored = store.shadow_outcomes(experiment.experiment_id)
     concurrent_outcome = stored[0].model_copy(
