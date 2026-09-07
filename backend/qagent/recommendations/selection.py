@@ -6,6 +6,20 @@ from typing import TypeVar
 
 
 T = TypeVar("T")
+EXCLUDED_STATUSES = frozenset({"risk_elevated", "invalidated", "closed", "postmortem_done"})
+
+
+def paper_eligible_card_ids(governance) -> set[str] | None:
+    if not governance:
+        return None
+    return {audit.card_id for audit in governance if audit.gate_decision.paper_candidate_eligible}
+
+
+def baseline_eligible_cards(cards, governance):
+    eligible_ids = paper_eligible_card_ids(governance)
+    return [card for card in cards
+            if card.status.value not in EXCLUDED_STATUSES
+            and (eligible_ids is None or card.card_id in eligible_ids)]
 
 
 def select_strategy_diversified(

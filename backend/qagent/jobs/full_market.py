@@ -964,6 +964,11 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         symbols=job.symbols,
         result=DailyScanResult.model_validate(payload),
         snapshot_items=snapshot_items,
+        forward_alignment_context={
+            "cards": ranked_cards, "governance": all_governance,
+            "items": all_items, "source_complete": True,
+            "benchmark_entry_allowed": benchmark_trend.entry_allowed,
+        },
     )
     repo.save_scan_result_cache(
         cache_key=cache_key,

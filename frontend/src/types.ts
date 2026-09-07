@@ -5166,3 +5166,16 @@ export type WalkForwardJob = {
 export type WalkForwardJobsResponse = {
   jobs: WalkForwardJob[];
 };
+export interface RecommendationForwardAlignment {
+  protocol: string;
+  prospective_start: string | null;
+  legacy_runs_excluded: number;
+  historical_comparison: { comparable: boolean; reason: string };
+  rejected_runs: { run_id: string; blockers: string[] }[];
+  cohorts: {
+    run_id: string;
+    decision_date: string;
+    selections: { instrument_id: string; rank: number }[];
+    metrics: Record<string, Record<string, { mature_count: number; expected_count: number; mean_return_pct: number | null }>>;
+  }[];
+}

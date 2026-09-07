@@ -145,7 +145,11 @@ from qagent.market.benchmark_trend import (
     BenchmarkTrendState,
     build_benchmark_trend_snapshot,
 )
-from qagent.recommendations.selection import select_strategy_diversified
+from qagent.recommendations.selection import (
+    EXCLUDED_STATUSES, baseline_eligible_cards,
+    paper_eligible_card_ids as _paper_eligible_card_ids,
+    select_strategy_diversified,
+)
 from qagent.storage.replay_evidence import (
     LEASE_DURATION,
     DatasetLeaseBusy,
@@ -155,7 +159,6 @@ from qagent.storage.replay_evidence import (
 )
 
 
-EXCLUDED_STATUSES = frozenset({"risk_elevated", "invalidated", "closed", "postmortem_done"})
 ELIGIBLE_UNIVERSE_BENCHMARK_ID = RANKING_V3_HISTORICAL_PORTFOLIO_BENCHMARK_ID
 MIN_FULL_MARKET_COVERAGE_RATIO = 0.90
 MIN_FUNDAMENTAL_COVERAGE_RATIO = 0.80
@@ -930,15 +933,8 @@ def _compute_walk_forward_snapshot_without_gc(
         end=decision_date,
     )
     errors = [item.reason for item in scan.items if item.status == "error"]
-    recommendation_cards = [
-        card for card in scan.cards if card.status.value not in EXCLUDED_STATUSES
-    ]
-    paper_eligible_ids = _paper_eligible_card_ids(scan.strategy_governance)
-    eligible_cards = (
-        [card for card in recommendation_cards if card.card_id in paper_eligible_ids]
-        if paper_eligible_ids is not None
-        else recommendation_cards
-    )
+    recommendation_cards = [card for card in scan.cards if card.status.value not in EXCLUDED_STATUSES]
+    eligible_cards = baseline_eligible_cards(scan.cards, scan.strategy_governance)
     ranking_by_instrument = {ranking.instrument_id: ranking for ranking in factor_rankings}
     selections = [
         _selection(
@@ -1054,12 +1050,6 @@ def _compute_walk_forward_snapshot_without_gc(
         scan_error_samples=errors[:3],
         stats=_snapshot_worker_stats(market_provider, strategy_provider),
     )
-
-
-def _paper_eligible_card_ids(governance) -> set[str] | None:
-    if not governance:
-        return None
-    return {audit.card_id for audit in governance if audit.gate_decision.paper_candidate_eligible}
 
 
 def _adjusted_prefilter_bars(bars):

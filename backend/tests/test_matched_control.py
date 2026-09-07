@@ -62,13 +62,13 @@ def test_explicit_cash_check_is_audited(monkeypatch):
     assert [row["reason"] for row in audit] == ["cash_insufficient"]
 
 
-def test_missing_candidate_is_unknown_and_default_result_unchanged():
+def test_missing_candidate_has_data_reason_and_default_result_unchanged():
     provider = SimpleNamespace(name="empty", get_daily_bars=lambda *args, **kwargs: pd.DataFrame())
     kwargs = dict(signals=[signal()], instrument_ids=["US:A"], provider=provider,
                   start=date(2025, 1, 2), end=date(2025, 1, 7))
     audit = []
     assert portfolio.run_signal_portfolio_backtest(**kwargs) == portfolio.run_signal_portfolio_backtest(**kwargs, audit_sink=audit)
-    assert [row["reason"] for row in audit] == ["unknown"]
+    assert [row["reason"] for row in audit] == ["insufficient_future_data"]
 
 
 def source():
@@ -101,6 +101,12 @@ def test_both_arms_share_config_and_source_is_unchanged(monkeypatch):
     assert {key: value for key, value in calls[0].items() if key not in {"signals", "audit_sink"}} == {
         key: value for key, value in calls[1].items() if key not in {"signals", "audit_sink"}}
     assert sum(report["arms"]["top_10"]["audit_reason_counts"].values()) == 10
+    limitations = " ".join(report["limitations"])
+    assert "Candidate resolution distinguishes" in limitations
+    assert "first_failure and raw sizing evidence" in limitations
+    assert "missing execution evidence remains unknown" in limitations
+    assert "Non-candidates are unknown:" not in limitations
+    assert "cash_insufficient records only the explicit outlay check" not in limitations
 
 
 def test_rejects_revision_mismatch_and_production_path(tmp_path):

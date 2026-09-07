@@ -2087,6 +2087,7 @@ class QagentRepository:
         symbols: list[str],
         result,
         snapshot_items: list[object] | None = None,
+        forward_alignment_context: dict | None = None,
     ) -> ScanRunRecord:
         persisted_at = datetime.now(timezone.utc)
         run_id = f"scan-{persisted_at.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
@@ -2122,6 +2123,21 @@ class QagentRepository:
             completed_at = completed_at or persisted_at
             if started_at > completed_at or completed_at > persisted_at:
                 raise ValueError("ScanRun timestamps must be ordered and not in the future")
+            from qagent.recommendations.forward_alignment import KEY, capture_recommendation_order
+
+            health = dict(result.data_health)
+            try:
+                context = forward_alignment_context or {}
+                alignment_items = {item.instrument_id: item for item in context["items"]} if "items" in context else item_by_instrument
+                health[KEY] = json.dumps(capture_recommendation_order(
+                    context.get("cards", result.cards), alignment_items, recorded_at=persisted_at,
+                    data_health=health, governance=context.get("governance", getattr(result, "strategy_governance", ())),
+                    source_complete=context.get("source_complete", False),
+                    benchmark_entry_allowed=context.get("benchmark_entry_allowed"),
+                ), sort_keys=True)
+            except Exception as exc:
+                # Research capture must never interrupt normal scan/account workflows.
+                health[KEY] = json.dumps({"blockers": ["capture_error"], "error_type": type(exc).__name__})
             run_row = ScanRunRow(
                 run_id=run_id,
                 provider=provider,
@@ -2129,7 +2145,7 @@ class QagentRepository:
                 symbols=json.dumps(symbols),
                 scanned=scanned,
                 cards=len(result.cards),
-                data_health=json.dumps(result.data_health, sort_keys=True),
+                data_health=json.dumps(health, sort_keys=True),
                 started_at=started_at,
                 completed_at=completed_at,
                 created_at=persisted_at,

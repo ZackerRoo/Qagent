@@ -869,6 +869,10 @@ export async function fetchScanRuns(provider?: DataProviderMode): Promise<ScanRu
   return apiGet<ScanRunsResponse>("/scan-runs", { provider, limit: 20 });
 }
 
+export async function fetchRecommendationForwardAlignment(provider: DataProviderMode): Promise<import("../types").RecommendationForwardAlignment> {
+  return apiGet<import("../types").RecommendationForwardAlignment>("/recommendations/forward-alignment", { provider });
+}
+
 export async function fetchOpportunityHistory(
   provider?: DataProviderMode,
 ): Promise<OpportunityHistoryResponse> {

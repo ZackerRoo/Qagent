@@ -326,6 +326,7 @@ def run_signal_portfolio_backtest(
         end=end,
     )
     bars = _normalize_bars(bars)
+    audit_start = len(audit_sink) if audit_sink is not None else 0
     candidates = _build_candidates(
         signals,
         bars,
@@ -334,18 +335,24 @@ def run_signal_portfolio_backtest(
         max_holding_days=max_holding_days,
         execution_rule_resolver=execution_rule_resolver,
         execution_profile=execution_profile,
+        audit_sink=audit_sink,
     )
     candidates = [candidate for candidate in candidates if candidate.exit_date <= end]
     if audit_sink is not None:
         candidate_ids = {id(candidate.signal) for candidate in candidates}
+        audited_ids = {
+            (row["snapshot_id"], row["instrument_id"], row["signal_date"])
+            for row in audit_sink[audit_start:]
+        }
         for signal in signals:
-            if id(signal) not in candidate_ids:
+            signal_key = (signal.snapshot_id, signal.instrument_id, signal.signal_date.isoformat())
+            if id(signal) not in candidate_ids and signal_key not in audited_ids:
                 audit_sink.append({
                     "snapshot_id": signal.snapshot_id,
                     "instrument_id": signal.instrument_id,
                     "signal_date": signal.signal_date.isoformat(),
                     "reason": "unknown",
-                    "detail": "no_in_range_candidate: data, plan, trigger or fill not distinguished",
+                    "detail": "candidate_outside_end_boundary",
                 })
     trades, equity_curve = _simulate_portfolio(
         candidates,
@@ -576,31 +583,65 @@ def _build_candidates(
     max_holding_days: int,
     execution_rule_resolver: VersionedAshareExecutionResolver | None = None,
     execution_profile: PortfolioExecutionProfile = DEFAULT_EXECUTION_PROFILE,
+    audit_sink: list[dict[str, object]] | None = None,
 ) -> list[_TradeCandidate]:
     candidates: list[_TradeCandidate] = []
-    if not signals or bars.empty:
+    if not signals or (bars.empty and audit_sink is None):
         return candidates
     bars_by_instrument = {
         str(instrument_id): frame.reset_index(drop=True)
         for instrument_id, frame in bars.groupby("instrument_id", sort=False)
-    }
+    } if not bars.empty else {}
     sorted_signals = sorted(
         signals,
         key=lambda signal: (signal.signal_date, Decimal(signal.rank_score)),
         reverse=False,
     )
     for signal in sorted_signals:
-        candidate = _candidate_from_signal(
+        instrument_bars = bars_by_instrument.get(signal.instrument_id, pd.DataFrame())
+        resolution = _candidate_resolution_from_signal(
             signal,
-            bars_by_instrument.get(signal.instrument_id, pd.DataFrame()),
+            instrument_bars,
             slippage_bps=slippage_bps,
             max_entry_wait_days=max_entry_wait_days,
             max_holding_days=max_holding_days,
             execution_rule_resolver=execution_rule_resolver,
             execution_profile=execution_profile,
         )
+        candidate = resolution.candidate
         if candidate is not None:
             candidates.append(candidate)
+        elif audit_sink is not None:
+            reason = resolution.status.value
+            detail = resolution.detail
+            if resolution.status == CandidateOutcomeStatus.NOT_TRIGGERED_OR_UNFILLABLE:
+                # The execution kernel defaults absent volume to zero; that is
+                # not evidence that a fully observed order failed to trigger.
+                observed = instrument_bars.loc[
+                    instrument_bars["trade_date"] > signal.signal_date
+                ].head(max_entry_wait_days)
+                if any(key not in observed or observed[key].isna().any()
+                       for key in ("open", "high", "low", "close", "volume")):
+                    reason, detail = "unknown", "missing_entry_execution_fields"
+                else:
+                    reason = {
+                        "entry_not_triggered": "not_triggered",
+                        "entry_triggered_but_unfillable": "unfillable",
+                        "entry_fill_outside_plan": "unfillable",
+                    }.get(detail, "unknown")
+                    if detail == "entry_not_triggered" and (
+                        execution_profile.close_confirmation
+                        or not any(_row_has_trades(row) for _, row in observed.iterrows())
+                    ):
+                        reason = "unknown"
+            audit_sink.append({
+                "snapshot_id": signal.snapshot_id,
+                "instrument_id": signal.instrument_id,
+                "signal_date": signal.signal_date.isoformat(),
+                "reason": reason,
+                "detail": detail,
+                "resolved_at": resolution.resolved_at.isoformat() if resolution.resolved_at else None,
+            })
     return candidates
 
 
@@ -1086,6 +1127,7 @@ def _simulate_portfolio(
             ):
                 record("already_held")
                 continue
+            sizing_audit: dict[str, object] = {}
             trade = _size_trade(
                 candidate,
                 equity=sizing_equity,
@@ -1094,9 +1136,10 @@ def _simulate_portfolio(
                 max_positions=max_positions,
                 transaction_cost_bps=transaction_cost_bps,
                 fee_multiplier=fee_multiplier,
+                **({"audit_details": sizing_audit} if audit_sink is not None else {}),
             )
             if trade is None:
-                record("size_zero", detail="sizing returned no trade; cash causality not distinguished")
+                record("size_zero", **sizing_audit)
                 continue
             entry_costs, exit_costs = _trade_cost_breakdown(
                 candidate,
@@ -1197,12 +1240,15 @@ def _size_trade(
     transaction_cost_bps: Decimal,
     fee_multiplier: Decimal = Decimal("1"),
     cash: Decimal | None = None,
+    audit_details: dict[str, object] | None = None,
 ) -> PortfolioBacktestTrade | None:
     per_share_risk = max(
         candidate.entry_price - candidate.stop_price,
         candidate.entry_price * Decimal("0.01"),
     )
     if per_share_risk <= 0:
+        if audit_details is not None:
+            audit_details.update(first_failure="unknown", detail="nonpositive_per_share_risk")
         return None
     risk_budget = equity * (risk_per_trade_pct / Decimal("100"))
     capital_budget = equity / Decimal(max_positions)
@@ -1216,6 +1262,28 @@ def _size_trade(
         candidate.signal.instrument_id,
         execution_rule=candidate.execution_rule,
     )
+    if audit_details is not None:
+        minimum = (Decimal(candidate.execution_rule.minimum_order_quantity)
+                   if candidate.execution_rule is not None
+                   else (Decimal("100") if _is_cn(candidate.signal.instrument_id) else Decimal("0.0001")))
+        raw_budget_quantity = min(shares_by_risk, shares_by_capital)
+        first_failure = None
+        if shares <= 0:
+            if _shares(raw_budget_quantity, candidate.signal.instrument_id,
+                       execution_rule=candidate.execution_rule) <= 0:
+                first_failure = "risk_budget" if shares_by_risk <= shares_by_capital else "minimum_order_quantity"
+            else:
+                first_failure = "executable_quantity_limit"
+        audit_details.update({
+            "risk_budget": str(risk_budget), "capital_budget": str(capital_budget),
+            "per_share_risk": str(per_share_risk), "shares_by_risk": str(shares_by_risk),
+            "shares_by_capital": str(shares_by_capital),
+            "max_executable_shares": str(candidate.max_executable_shares) if candidate.max_executable_shares is not None else None,
+            "desired_shares": str(desired_shares), "shares_before_cash": str(shares),
+            "minimum_order_quantity": str(minimum), "quantity_step": str(_share_step(candidate)),
+            "quantity_rule_source": "historical_execution_rule" if candidate.execution_rule is not None else "legacy_sizing_fallback",
+            "first_failure": first_failure,
+        })
     if cash is not None:
         shares = _fit_shares_to_cash(
             candidate,
@@ -1225,6 +1293,21 @@ def _size_trade(
             fee_multiplier,
         )
     if shares <= 0:
+        if audit_details is not None:
+            audit_details["shares_after_cash"] = str(shares)
+            if audit_details["first_failure"] is None:
+                try:
+                    step = _share_step(candidate)
+                    minimum = (minimum / step).to_integral_value(rounding=ROUND_CEILING) * step
+                    minimum_costs, _ = _trade_cost_breakdown(candidate, minimum, transaction_cost_bps, fee_multiplier)
+                    minimum_outlay = candidate.entry_price * minimum + minimum_costs
+                    audit_details["minimum_entry_outlay"] = str(minimum_outlay)
+                    audit_details["first_failure"] = "cash_insufficient" if cash is not None and cash < minimum_outlay else "unknown"
+                except Exception as exc:
+                    # Additional evidence must never turn a skipped trade into
+                    # a failed backtest; original sizing errors still propagate.
+                    audit_details["first_failure"] = "unknown"
+                    audit_details["detail"] = f"cash_audit_unavailable:{type(exc).__name__}"
         return None
 
     gross_pnl = _money((candidate.exit_price - candidate.entry_price) * shares)

@@ -27,6 +27,7 @@ import {
   startFullMarketHistoricalBackfill,
 } from "../api/client";
 import { DataHealth } from "../components/DataHealth";
+import { RecommendationForwardAlignment } from "../components/RecommendationForwardAlignment";
 import { OpportunityCandlestickChart, type SignalMarker } from "../components/OpportunityChart";
 import { useI18n } from "../i18n";
 import { formatInstrumentDisplay } from "../lib/instruments";
@@ -976,6 +977,7 @@ export function History({
 
   return (
     <div className="stack history-page">
+      <RecommendationForwardAlignment provider={dataMode} />
       <StrategyGovernancePanel
         governance={strategyGovernance}
         error={strategyGovernanceError}

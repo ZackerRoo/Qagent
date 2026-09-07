@@ -11245,6 +11245,22 @@ def opportunity_history(
     return {"snapshots": [_snapshot_payload_with_label(snapshot) for snapshot in snapshots]}
 
 
+@router.get("/recommendations/forward-alignment")
+def recommendation_forward_alignment(
+    provider: str = "free", start: date | None = None, end: date | None = None,
+    historical_run_id: str | None = None,
+) -> dict[str, object]:
+    from qagent.recommendations.forward_alignment import build_forward_alignment_report
+
+    end = end or date.today()
+    start = start or end - timedelta(days=90)
+    if start > end or end > date.today() or (end - start).days > 366:
+        raise HTTPException(status_code=422, detail="date range must be ordered and at most 366 days")
+    # No initialization, cache refresh, replay, scheduler or account access on this GET.
+    return build_forward_alignment_report(create_session_factory(), provider=provider, start=start, end=end,
+                                          historical_run_id=historical_run_id)
+
+
 @router.get("/outcomes")
 def outcomes(
     provider: str = "fixture",

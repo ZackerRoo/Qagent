@@ -6,6 +6,7 @@ const files = {
   client: readFileSync(join(root, "src/api/client.ts"), "utf8"),
   portfolio: readFileSync(join(root, "src/pages/Portfolio.tsx"), "utf8"),
   styles: readFileSync(join(root, "src/styles.css"), "utf8"),
+  forward: readFileSync(join(root, "src/components/RecommendationForwardAlignment.tsx"), "utf8"),
 };
 const initialCoreLoad = files.portfolio.match(
   /const coreResults = await Promise\.allSettled\(\[[\s\S]*?\]\);/,
@@ -18,6 +19,8 @@ const isolatedReplayLoads = files.portfolio.match(
 )?.length ?? 0;
 
 const checks = [
+  ["forward ranking observations stay in the research view below the account", /portfolioView === "research" && \([\s\S]*?<RecommendationForwardAlignment/.test(files.portfolio) && files.portfolio.indexOf("<RecommendationForwardAlignment") > files.portfolio.indexOf("<PaperLedgerDashboard")],
+  ["forward ranking observation has no run or trading controls", files.forward.includes("fetchRecommendationForwardAlignment(provider)") && !files.forward.includes("<button") && !files.forward.includes("startPaper") && files.client.includes('"/recommendations/forward-alignment"')],
   ["client exposes fetchPaperLedger", files.client.includes("fetchPaperLedger")],
   ["client exposes paper account status", files.client.includes("fetchPaperAccountStatus")],
   ["client exposes fetchPaperValidation", files.client.includes("fetchPaperValidation")],

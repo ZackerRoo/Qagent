@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { RecommendationForwardAlignment } from "../components/RecommendationForwardAlignment";
 import { AlertTriangle, BrainCircuit, ExternalLink, Layers3, Play, RefreshCw } from "lucide-react";
 
 import {
@@ -938,6 +939,7 @@ export function Portfolio({ dataMode }: { dataMode: DataProviderMode }) {
 
         {portfolioView === "research" && (
           <div className="portfolio-view-stack">
+            <RecommendationForwardAlignment provider={dataMode} />
             <PaperCalibrationShadowPanel report={paperCalibrationShadow} language={language} />
             <ExperimentLibraryPanel report={experimentLibrary} language={language} />
             <FactorModelResearchPanel
