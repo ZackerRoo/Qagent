@@ -1,0 +1,125 @@
+{
+  "schema": "matched-top5-top10-offline-v1",
+  "source_run_id": "walk-forward-20260906145921-a96770d9",
+  "source_file_sha256": "b34b9731b570c341fab1316e0819a45bd0f6025392972f8fc1b512588e1f51a9",
+  "source_snapshots_digest": "fac330167de3d5efdd902b5b1e42813a0b5a21118ec6ecdb712ead0189cded84",
+  "source_reproducibility_digest": "v2c6a822e893b866cbda6273d1dab6cf094f701349cbaabc200f8ae13f1c9e37",
+  "implementation_sha256": {
+    "matched_control.py": "5a6934cd8a2dd075e213d10b826e2c24db0bcb11a3f881af434d1d619345acb4",
+    "portfolio.py": "57654e1798e2c6adae5259e27e01760ef0ebd8fa08ff0281c05624a03e3c3715",
+    "replay_provider.py": "83b61c746c6bdc4dfa351ae1bd609574dc514733708b7c437351f57745e3ae28",
+    "execution.py": "4a25d7b171755b2d3df3fee0bfdda22f7dd4c02febab43abb9ca08995644787c",
+    "walk_forward.py": "d6a01a2af2fcadbc201baa7e60a26a07027aba53b4a3ec41cbb0b889d49d5a80"
+  },
+  "config": {
+    "start": "2021-11-01",
+    "end": "2025-12-31",
+    "initial_capital": "100000",
+    "risk_per_trade_pct": "1",
+    "max_positions": 10,
+    "transaction_cost_bps": "5",
+    "slippage_bps": "5",
+    "fee_multiplier": "1",
+    "max_entry_wait_days": 5,
+    "max_holding_days": 20,
+    "dataset_revision": 8947,
+    "execution_profile": "intraday-touch-fixed-plan-v1",
+    "provider": "free",
+    "execution_rules": "VersionedAshareExecutionResolver"
+  },
+  "symbol_count": 318,
+  "configs_identical": true,
+  "arms": {
+    "top_5": {
+      "config_digest": "2ce08cec8192c9336889a8ce328ef2400c8a4569c5642cd90c0ae11638ee4c95",
+      "signals_digest": "ee5efe93305abfd601a7d236d0204029ce0681912684a368373ef579e78da6b5",
+      "signal_count": 237,
+      "summary": {
+        "provider": "historical_replay",
+        "start": "2021-11-01",
+        "end": "2025-12-31",
+        "initial_capital": "100000",
+        "final_equity": "107607.72",
+        "total_return_pct": 7.6077,
+        "max_drawdown_pct": -5.0058,
+        "trade_count": 184,
+        "win_rate": 0.4457,
+        "profit_factor": 1.1937,
+        "avg_trade_return_pct": 0.4296,
+        "exposure_pct": 0.2975
+      },
+      "average_capital_utilization_pct": 8.89347350892128,
+      "closed_trade_costs": "2619.89",
+      "executed_entry_costs": "931.46",
+      "audit_reason_counts": {
+        "unknown": 37,
+        "executed": 184,
+        "already_held": 3,
+        "size_zero": 13
+      },
+      "provider_errors": [
+        "CN:512480 2025-10-24: adjusted OHLC is missing",
+        "CN:512680 2025-10-24: adjusted OHLC is missing",
+        "CN:512760 2025-10-24: adjusted OHLC is missing",
+        "CN:512880 2025-10-24: adjusted OHLC is missing",
+        "CN:515790 2025-10-24: adjusted OHLC is missing",
+        "CN:561350 2025-10-24: adjusted OHLC is missing"
+      ]
+    },
+    "top_10": {
+      "config_digest": "2ce08cec8192c9336889a8ce328ef2400c8a4569c5642cd90c0ae11638ee4c95",
+      "signals_digest": "ae15ff007557232f3d39afb4593f48b9b710055916dc7524babb50ca2b562226",
+      "signal_count": 439,
+      "summary": {
+        "provider": "historical_replay",
+        "start": "2021-11-01",
+        "end": "2025-12-31",
+        "initial_capital": "100000",
+        "final_equity": "97926.86",
+        "total_return_pct": -2.0731,
+        "max_drawdown_pct": -9.0643,
+        "trade_count": 349,
+        "win_rate": 0.4069,
+        "profit_factor": 0.972,
+        "avg_trade_return_pct": -0.0803,
+        "exposure_pct": 0.5803
+      },
+      "average_capital_utilization_pct": 17.360067955146203,
+      "closed_trade_costs": "5149.04",
+      "executed_entry_costs": "1769.60",
+      "audit_reason_counts": {
+        "unknown": 61,
+        "executed": 349,
+        "already_held": 6,
+        "size_zero": 17,
+        "position_limit": 6
+      },
+      "provider_errors": [
+        "CN:512480 2025-10-24: adjusted OHLC is missing",
+        "CN:512680 2025-10-24: adjusted OHLC is missing",
+        "CN:512760 2025-10-24: adjusted OHLC is missing",
+        "CN:512880 2025-10-24: adjusted OHLC is missing",
+        "CN:515790 2025-10-24: adjusted OHLC is missing",
+        "CN:561350 2025-10-24: adjusted OHLC is missing"
+      ]
+    }
+  },
+  "top10_minus_top5_return_percentage_points": -9.6808,
+  "limitations": [
+    "Only saved signal membership differs; both arms use ten slots and equity/10 sizing budget.",
+    "Identical sizing rules do not imply identical trade amounts: equity and cash paths diverge between arms.",
+    "This is a retrospective isolated replay, not prospective validation or a production allocation recommendation.",
+    "Non-candidates are unknown: missing data, invalid plan, absent trigger and unfillable orders are not distinguished.",
+    "size_zero does not establish cash causality; cash_insufficient records only the explicit outlay check.",
+    "Audit reasons record the first failing simulation check, not every potentially binding constraint.",
+    "executed means entry accepted; exit-liquidity-censored positions may remain open and not enter closed trade costs.",
+    "Utilization uses replay equity-curve observations including its initial point; closed_trade_costs exclude open-position exits.",
+    "Historical rule tables use the isolated database contents; revision equality alone is not a cryptographic dataset fingerprint."
+  ],
+  "execution_directory": "/var/tmp/qagent-matched-control-NkGIp4",
+  "full_result_local_path": "/tmp/qagent-matched-control-result.json",
+  "parent_review": {
+    "top10_trades_exactly_equal_saved_payload": true,
+    "verification_basis": "Parent task compared complete portfolio.trades list to saved payload"
+  }
+}

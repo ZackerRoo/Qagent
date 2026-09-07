@@ -308,6 +308,7 @@ def run_signal_portfolio_backtest(
     max_holding_days: int = 20,
     execution_rule_resolver: VersionedAshareExecutionResolver | None = None,
     execution_profile: PortfolioExecutionProfile = DEFAULT_EXECUTION_PROFILE,
+    audit_sink: list[dict[str, object]] | None = None,
 ) -> PortfolioBacktestResult:
     if start > end:
         raise ValueError("start must be on or before end")
@@ -335,6 +336,17 @@ def run_signal_portfolio_backtest(
         execution_profile=execution_profile,
     )
     candidates = [candidate for candidate in candidates if candidate.exit_date <= end]
+    if audit_sink is not None:
+        candidate_ids = {id(candidate.signal) for candidate in candidates}
+        for signal in signals:
+            if id(signal) not in candidate_ids:
+                audit_sink.append({
+                    "snapshot_id": signal.snapshot_id,
+                    "instrument_id": signal.instrument_id,
+                    "signal_date": signal.signal_date.isoformat(),
+                    "reason": "unknown",
+                    "detail": "no_in_range_candidate: data, plan, trigger or fill not distinguished",
+                })
     trades, equity_curve = _simulate_portfolio(
         candidates,
         start=start,
@@ -345,6 +357,7 @@ def run_signal_portfolio_backtest(
         max_positions=max_positions,
         transaction_cost_bps=transaction_cost_bps,
         fee_multiplier=fee_multiplier,
+        audit_sink=audit_sink,
     )
     summary = _build_summary(
         provider_name=provider.name,
@@ -995,6 +1008,7 @@ def _simulate_portfolio(
     fee_multiplier: Decimal,
     bars: pd.DataFrame | None = None,
     end: date | None = None,
+    audit_sink: list[dict[str, object]] | None = None,
 ) -> tuple[list[PortfolioBacktestTrade], list[PortfolioEquityPoint]]:
     cash = _money(initial_capital)
     peak = cash
@@ -1050,12 +1064,27 @@ def _simulate_portfolio(
 
         sizing_equity = _money(cash + _open_market_value(open_positions, latest_prices))
         for candidate in candidates_by_date.get(current_date, []):
+            def record(reason: str, **details: object) -> None:
+                if audit_sink is not None:
+                    audit_sink.append({
+                        "snapshot_id": candidate.signal.snapshot_id,
+                        "instrument_id": candidate.signal.instrument_id,
+                        "signal_date": candidate.signal.signal_date.isoformat(),
+                        "entry_date": current_date.isoformat(),
+                        "reason": reason,
+                        "cash_before": str(cash),
+                        "sizing_equity": str(sizing_equity),
+                        "open_positions_before": len(open_positions),
+                        **details,
+                    })
             if len(open_positions) >= max_positions:
+                record("position_limit")
                 continue
             if any(
                 position.trade.instrument_id == candidate.signal.instrument_id
                 for position in open_positions
             ):
+                record("already_held")
                 continue
             trade = _size_trade(
                 candidate,
@@ -1067,6 +1096,7 @@ def _simulate_portfolio(
                 fee_multiplier=fee_multiplier,
             )
             if trade is None:
+                record("size_zero", detail="sizing returned no trade; cash causality not distinguished")
                 continue
             entry_costs, exit_costs = _trade_cost_breakdown(
                 candidate,
@@ -1080,7 +1110,11 @@ def _simulate_portfolio(
             )
             entry_outlay = trade.entry_price * trade.shares + entry_costs
             if entry_outlay > cash:
+                record("cash_insufficient", entry_outlay=str(entry_outlay))
                 continue
+            record("executed", shares=str(trade.shares), entry_price=str(trade.entry_price),
+                   entry_outlay=str(entry_outlay), entry_costs=str(entry_costs),
+                   exit_liquidity_censored=exit_liquidity_censored)
             cash = _money(cash - entry_outlay)
             latest_prices[trade.instrument_id] = trade.entry_price
             position = _OpenPortfolioPosition(
