@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 import hashlib
 import json
+import math
 import re
 from time import monotonic
 from typing import Iterable
@@ -14,7 +15,8 @@ from sqlalchemy import desc, delete
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
 
-from qagent.storage.market_cache import MarketDataCacheRepository
+from qagent.storage.market_cache import MarketDataCacheRepository, TRUSTED_PAIRED_ADJUSTED_PROVIDERS
+from qagent.research.suspension_evidence import load_suspension_evidence
 from qagent.storage.tables import (
     ExactPriceRepairCursorRow, HistoricalInstrumentProfileRow, HistoricalTradabilityRow,
     utc_now,
@@ -147,8 +149,11 @@ def repair_exact_daily_prices(
         return result
 
     structural: dict[ExactPriceRequirement, str] = {}
+    suspension_evidence = {} if provider_mode == "fixture" else load_suspension_evidence()
     for requirement in missing:
-        reason = _structural_no_row_reason(cache, provider_mode, requirement)
+        reason = _structural_no_row_reason(
+            cache, provider_mode, requirement, suspension_evidence
+        )
         if reason is not None:
             structural[requirement] = reason
 
@@ -261,7 +266,7 @@ def repair_exact_daily_prices(
                 )
         result.unresolved.append(requirement)
         result.reasons[reason] = result.reasons.get(reason, 0) + 1
-        if reason == "suspended":
+        if reason in {"suspended", "confirmed_suspended"}:
             result.suspended += 1
         elif reason == "not_listed":
             result.not_listed += 1
@@ -371,10 +376,38 @@ def _unsafe_exact_row(row: pd.Series, field: str) -> bool:
         return False
     provider = str(row.get("provider") or "").lower()
     adjustment_type = str(row.get("adjustment_type") or "").lower()
+    if adjustment_type == "snapshot_qfq_anchor":
+        return True
+    if provider == "fuyao_realtime":
+        adjusted_source = row.get("adjusted_source_provider")
+        if adjusted_source not in TRUSTED_PAIRED_ADJUSTED_PROVIDERS:
+            return True
+        if adjustment_type not in {"qfq", "forward"}:
+            return True
+        values = {}
+        for column in ("close", "adjusted_open", "adjusted_high", "adjusted_low", "adjusted_close", "adjustment_factor"):
+            try:
+                value = float(row.get(column))
+            except (TypeError, ValueError):
+                return True
+            if not math.isfinite(value) or value <= 0:
+                return True
+            values[column] = value
+        if not (
+            values["adjusted_low"] <= min(values["adjusted_open"], values["adjusted_close"])
+            and values["adjusted_high"] >= max(values["adjusted_open"], values["adjusted_close"])
+        ):
+            return True
+        if not math.isclose(
+            values["adjusted_close"],
+            values["close"] * values["adjustment_factor"],
+            rel_tol=0,
+            abs_tol=0.000002 + values["close"] * 0.0000000001,
+        ):
+            return True
+        return False
     return (
         provider == "fuyao_etf_unadjusted"
-        or provider == "fuyao_realtime"
-        or adjustment_type == "snapshot_qfq_anchor"
     )
 
 
@@ -382,6 +415,7 @@ def _structural_no_row_reason(
     cache: MarketDataCacheRepository,
     provider_mode: str,
     requirement: ExactPriceRequirement,
+    suspension_evidence: dict | None = None,
 ) -> str | None:
     with cache.session_factory() as session:
         tradability = (
@@ -420,6 +454,11 @@ def _structural_no_row_reason(
             )
         ):
             return "not_listed"
+        # Contrary explicit metadata fails closed; no trading-state import.
+        if tradability is None and (requirement.instrument_id, requirement.trade_date) in (
+            suspension_evidence or {}
+        ):
+            return "confirmed_suspended"
     return None
 
 

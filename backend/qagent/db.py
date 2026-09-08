@@ -240,6 +240,7 @@ def _apply_additive_migrations(engine: Engine) -> None:
             inspector,
             "market_bar_cache",
             {
+                "adjusted_source_provider": "VARCHAR(64)",
                 "turnover": "NUMERIC(28, 4)",
                 "adjusted_open": "NUMERIC(18, 6)",
                 "adjusted_high": "NUMERIC(18, 6)",

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.market.calendars import trading_day_offset
 from qagent.research.shadow_price_repair import (
+    _unsafe_exact_row,
     ExactPriceRepairBudget,
     ExactPriceRequirement,
     repair_exact_daily_prices,
@@ -1651,13 +1652,12 @@ def _adjusted_price(
     if bars.empty or column not in bars.columns:
         return None
     rows = bars.loc[
-        (bars["instrument_id"] == instrument_id) & (bars["trade_date"] == trade_date),
-        column,
+        (bars["instrument_id"] == instrument_id) & (bars["trade_date"] == trade_date)
     ]
-    if len(rows) != 1:
+    if len(rows) != 1 or _unsafe_exact_row(rows.iloc[0], column):
         return None
-    value = pd.to_numeric(rows.iloc[0], errors="coerce")
-    return float(value) if pd.notna(value) and float(value) > 0 else None
+    value = pd.to_numeric(rows.iloc[0][column], errors="coerce")
+    return float(value) if pd.notna(value) and math.isfinite(float(value)) and float(value) > 0 else None
 
 
 def _return_pct(entry: float, exit_: float) -> float:

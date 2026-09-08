@@ -109,6 +109,7 @@ class MarketBarCacheRow(Base):
     instrument_id: Mapped[str] = mapped_column(String(32), primary_key=True)
     trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
     source_provider: Mapped[str] = mapped_column(String(64), default="")
+    adjusted_source_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
     open: Mapped[Decimal] = mapped_column(Numeric(18, 6))
     high: Mapped[Decimal] = mapped_column(Numeric(18, 6))
     low: Mapped[Decimal] = mapped_column(Numeric(18, 6))

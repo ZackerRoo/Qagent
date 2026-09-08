@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from qagent.research.factor_shadow_outcomes import factor_shadow_outcome_dates
 from qagent.research.shadow_price_repair import (
+    _unsafe_exact_row,
     ExactPriceRequirement,
     repair_exact_daily_prices,
 )
@@ -417,12 +418,11 @@ def _adjusted_price(
     if bars.empty or column not in bars.columns:
         return None
     rows = bars.loc[
-        (bars["instrument_id"] == instrument_id) & (bars["trade_date"] == trade_date),
-        column,
+        (bars["instrument_id"] == instrument_id) & (bars["trade_date"] == trade_date)
     ]
-    if len(rows) != 1:
+    if len(rows) != 1 or _unsafe_exact_row(rows.iloc[0], column):
         return None
-    value = _finite(rows.iloc[0])
+    value = _finite(rows.iloc[0][column])
     return value if value is not None and value > 0 else None
 
 

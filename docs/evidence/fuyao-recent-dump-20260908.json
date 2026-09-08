@@ -1,0 +1,39 @@
+{
+  "checked_on": "2026-09-08",
+  "mode": "offline_local_temporary_runtime",
+  "read_only": true,
+  "artifact": {
+    "source": "/api/dump/market-dumps/daily-k-10d/download-url",
+    "sha256": "cada203ea0b2090346d9f5f61d24ea630442f38f02d46fffc2d798d237eac099",
+    "bytes": 1078033,
+    "total_rows": 55471,
+    "unique_symbols": 5558,
+    "duplicate_thscode_date_ms_keys": 0,
+    "min_date": "2026-08-25",
+    "max_date": "2026-09-07"
+  },
+  "validated_schema": {
+    "required_columns": ["thscode", "date_ms", "adjusted", "interval", "currency", "open_price", "high_price", "low_price", "close_price"],
+    "adjusted": "none",
+    "interval": "1d",
+    "currency": "CNY",
+    "date_timezone": "Asia/Shanghai"
+  },
+  "targets": [
+    {"thscode": "002731.SZ", "trade_date": "2026-09-02", "count": 0},
+    {"thscode": "002731.SZ", "trade_date": "2026-09-07", "count": 0},
+    {"thscode": "600929.SH", "trade_date": "2026-09-04", "count": 0},
+    {"thscode": "688432.SH", "trade_date": "2026-09-07", "count": 0}
+  ],
+  "symbol_coverage": {
+    "002731.SZ": ["2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28", "2026-08-31"],
+    "600929.SH": ["2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28"],
+    "688432.SH": ["2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28"],
+    "000001.SZ": ["2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28", "2026-08-31", "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-07"]
+  },
+  "verification": {"unit_tests_passed": 11, "ruff": "passed", "diff_check": "passed"},
+  "conclusion": "None of the four target prices can be recovered from this artifact. Missing rows do not establish suspension without authoritative tradability evidence. Unadjusted dump prices alone do not establish adjusted-price coverage.",
+  "data_ingested": false,
+  "production_changed": false,
+  "parquet_committed": false
+}

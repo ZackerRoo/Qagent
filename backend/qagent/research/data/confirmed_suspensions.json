@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "usage": "research_only_retrospective",
+  "reviewed_on": "2026-09-08",
+  "entries": [
+    {
+      "instrument_id": "CN:002731",
+      "status": "confirmed_suspended",
+      "confirmed_dates": ["2026-09-02", "2026-09-03", "2026-09-04", "2026-09-07"],
+      "sources": [
+        {"url": "https://vip.stock.finance.sina.com.cn/corp/view/vCB_AllBulletinDetail.php?id=12577775&stockid=002731", "published_on": "2026-08-31", "title": "萃华珠宝：9月1日起停牌公告"},
+        {"url": "https://epaper.cs.com.cn/zgzqb/html/2026-09/07/nw.D110000zgzqb_20260907_2-A15.htm", "published_on": "2026-09-07", "title": "萃华珠宝：继续停牌公告"}
+      ]
+    },
+    {
+      "instrument_id": "CN:600929",
+      "status": "confirmed_suspended",
+      "confirmed_dates": ["2026-09-03", "2026-09-04", "2026-09-07"],
+      "sources": [{"url": "https://paper.cnstock.com/html/2026-09/05/content_2265364.htm", "published_on": "2026-09-05", "title": "雪天盐业：8月31日起停牌及继续停牌公告"}]
+    },
+    {
+      "instrument_id": "CN:688432",
+      "status": "confirmed_suspended",
+      "confirmed_dates": ["2026-09-03", "2026-09-04", "2026-09-07"],
+      "sources": [{"url": "https://paper.cnstock.com/html/2026-09/05/content_2265542.htm", "published_on": "2026-09-05", "title": "有研硅：9月7日继续停牌公告"}]
+    },
+    {
+      "instrument_id": "CN:002743",
+      "status": "confirmed_suspended",
+      "confirmed_dates": ["2026-09-07"],
+      "sources": [{"url": "https://money.finance.sina.com.cn/corp/view/vCB_AllBulletinDetail.php?id=12585262&stockid=002743", "published_on": "2026-09-05", "title": "富煌钢构：9月7日停牌一天、9月8日复牌公告"}]
+    },
+    {
+      "instrument_id": "CN:600825",
+      "status": "confirmed_suspended",
+      "confirmed_dates": ["2026-09-07"],
+      "sources": [{"url": "https://vip.stock.finance.sina.com.cn/corp/view/vCB_AllBulletinDetail.php?CompanyCode=10000774&gather=1&id=12588319", "published_on": "2026-09-08", "title": "新华传媒：9月7日停牌的回溯公告"}]
+    },
+    {
+      "instrument_id": "CN:000016",
+      "status": "confirmed_suspended",
+      "confirmed_dates": ["2026-09-04", "2026-09-07"],
+      "sources": [{"url": "https://money.finance.sina.com.cn/corp/view/vCB_AllBulletinDetail.php?id=12582291&stockid=000016", "published_on": "2026-09-04", "title": "深康佳A：9月4日起停牌直至终止上市公告"}]
+    },
+    {
+      "instrument_id": "CN:301266",
+      "status": "confirmed_suspended",
+      "confirmed_dates": ["2026-09-03", "2026-09-04"],
+      "sources": [{"url": "https://money.finance.sina.com.cn/corp/view/vCB_AllBulletinDetail.php?id=12586044&stockid=301266", "published_on": "2026-09-07", "title": "宇邦新材：复牌公告，回溯8月31日至9月4日停牌"}]
+    },
+    {
+      "instrument_id": "CN:002870",
+      "status": "confirmed_suspended",
+      "confirmed_dates": ["2026-09-03", "2026-09-04", "2026-09-07"],
+      "sources": [{"url": "https://vip.stock.finance.sina.com.cn/corp/view/vCB_AllBulletinDetail.php?id=12586534&stockid=002870", "published_on": "2026-09-08", "title": "香山股份：进展公告确认9月1日起继续停牌"}]
+    },
+    {
+      "instrument_id": "CN:301139",
+      "status": "confirmed_suspended",
+      "confirmed_dates": ["2026-09-03", "2026-09-04", "2026-09-07"],
+      "sources": [
+        {"url": "https://vip.stock.finance.sina.com.cn/corp/view/vCB_AllBulletinDetail.php?id=12576752&stockid=301139", "published_on": "2026-08-31", "title": "元道通信：8月31日起停牌及终止上市相关公告"}
+      ]
+    },
+    {
+      "instrument_id": "CN:002998",
+      "status": "confirmed_suspended",
+      "confirmed_dates": ["2026-09-04", "2026-09-07"],
+      "sources": [{"url": "https://money.finance.sina.com.cn/corp/view/vCB_AllBulletinDetail.php?id=12587844&stockid=002998", "published_on": "2026-09-08", "title": "优彩资源：继续停牌公告确认9月4日起两个交易日停牌"}]
+    }
+  ]
+}

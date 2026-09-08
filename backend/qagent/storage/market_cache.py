@@ -4,7 +4,7 @@ import math
 
 import pandas as pd
 from pydantic import BaseModel, Field
-from sqlalchemy import case, delete, func
+from sqlalchemy import and_, case, delete, func
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -29,6 +29,11 @@ BAR_COLUMNS = [
     "adjustment_factor",
     "adjustment_type",
 ]
+CACHE_BAR_COLUMNS = [*BAR_COLUMNS, "adjusted_source_provider"]
+TRUSTED_PAIRED_ADJUSTED_PROVIDERS = {
+    "fuyao_stock_paired": "qfq",
+    "tickflow_free_paired_shanghai": "forward",
+}
 
 # SQLite builds may keep the historical 999-variable limit. Leave headroom for
 # dialect-generated parameters so bulk upserts behave consistently everywhere.
@@ -64,6 +69,7 @@ class MarketDataCacheRepository:
                     "instrument_id": row["instrument_id"],
                     "trade_date": row["trade_date"],
                     "source_provider": str(row.get("provider") or provider_mode),
+                    "adjusted_source_provider": None,
                     "open": Decimal(str(row["open"])),
                     "high": Decimal(str(row["high"])),
                     "low": Decimal(str(row["low"])),
@@ -98,6 +104,7 @@ class MarketDataCacheRepository:
                     ],
                     set_={
                         "source_provider": excluded.source_provider,
+                        "adjusted_source_provider": None,
                         "open": excluded.open,
                         "high": excluded.high,
                         "low": excluded.low,
@@ -205,6 +212,7 @@ class MarketDataCacheRepository:
                     "instrument_id": row["instrument_id"],
                     "trade_date": row["trade_date"],
                     "source_provider": str(row.get("provider") or provider_mode),
+                    "adjusted_source_provider": _trusted_adjusted_source(row),
                     "open": Decimal(str(row["open"])),
                     "high": Decimal(str(row["high"])),
                     "low": Decimal(str(row["low"])),
@@ -231,6 +239,13 @@ class MarketDataCacheRepository:
                     MarketBarCacheRow.trade_date,
                 ],
                 set_={
+                    "adjusted_source_provider": case(
+                        (
+                            _matching_adjusted_provenance(excluded),
+                            excluded.adjusted_source_provider,
+                        ),
+                        else_=MarketBarCacheRow.adjusted_source_provider,
+                    ),
                     "turnover": func.coalesce(MarketBarCacheRow.turnover, excluded.turnover),
                     "adjusted_open": _keep_valid_positive(
                         MarketBarCacheRow.adjusted_open, excluded.adjusted_open
@@ -436,6 +451,7 @@ class MarketDataCacheRepository:
                     "volume": row.volume,
                     "turnover": row.turnover,
                     "provider": row.source_provider,
+                    "adjusted_source_provider": row.adjusted_source_provider,
                     "adjusted_open": row.adjusted_open,
                     "adjusted_high": row.adjusted_high,
                     "adjusted_low": row.adjusted_low,
@@ -445,7 +461,7 @@ class MarketDataCacheRepository:
                 }
                 for row in rows
             ],
-            columns=BAR_COLUMNS,
+            columns=CACHE_BAR_COLUMNS,
         )
         return _normalize_bars(frame)
 
@@ -493,6 +509,7 @@ class MarketDataCacheRepository:
                     "turnover": row.turnover,
                     "provider": row.source_provider,
                     "adjusted_open": row.adjusted_open,
+                    "adjusted_source_provider": row.adjusted_source_provider,
                     "adjusted_high": row.adjusted_high,
                     "adjusted_low": row.adjusted_low,
                     "adjusted_close": row.adjusted_close,
@@ -501,7 +518,7 @@ class MarketDataCacheRepository:
                 }
                 for row in rows
             ],
-            columns=BAR_COLUMNS,
+            columns=CACHE_BAR_COLUMNS,
         )
         return _normalize_bars(frame)
 
@@ -702,12 +719,56 @@ def _normalize_bars(bars: pd.DataFrame) -> pd.DataFrame:
         normalized["provider"] = ""
     if "adjustment_type" not in normalized.columns:
         normalized["adjustment_type"] = None
+    if "adjusted_source_provider" not in normalized.columns:
+        normalized["adjusted_source_provider"] = None
     normalized = normalized.dropna(subset=["open", "high", "low", "close"])
     normalized = _clear_invalid_adjusted_ohlc(normalized)
     normalized = normalized[_valid_ohlc_mask(normalized)]
     return (
-        normalized[BAR_COLUMNS].sort_values(["instrument_id", "trade_date"]).reset_index(drop=True)
+        normalized[CACHE_BAR_COLUMNS].sort_values(["instrument_id", "trade_date"]).reset_index(drop=True)
     )
+
+
+def _trusted_adjusted_source(row: pd.Series) -> str | None:
+    """Certify only a fresh, complete paired historical provider response."""
+    provider = _text_or_none(row.get("provider"))
+    if provider not in TRUSTED_PAIRED_ADJUSTED_PROVIDERS:
+        return None
+    if _text_or_none(row.get("adjustment_type")) != TRUSTED_PAIRED_ADJUSTED_PROVIDERS[provider]:
+        return None
+    for column in ("adjusted_open", "adjusted_high", "adjusted_low", "adjusted_close", "adjustment_factor"):
+        value = _preserved_positive_value(row.get(column), None)
+        if value is None:
+            return None
+    if not math.isclose(
+        float(row["adjustment_factor"]),
+        float(row["adjusted_close"]) / float(row["close"]),
+        rel_tol=1e-9,
+        abs_tol=1e-10,
+    ):
+        return None
+    return provider
+
+
+def _matching_adjusted_provenance(excluded):
+    # Evaluate against the row in the upsert itself, so another writer cannot
+    # change the retained prices between a Python precheck and certification.
+    conditions = [
+        excluded.adjusted_source_provider.is_not(None),
+        func.coalesce(MarketBarCacheRow.adjustment_type, excluded.adjustment_type).in_(
+            ("qfq", "forward")
+        ),
+    ]
+    for column in ("open", "high", "low", "close"):
+        conditions.append(
+            func.abs(getattr(MarketBarCacheRow, column) - getattr(excluded, column)) <= 0.000001
+        )
+    for column in ("adjusted_open", "adjusted_high", "adjusted_low", "adjusted_close", "adjustment_factor"):
+        replacement = getattr(excluded, column)
+        retained = _keep_valid_positive(getattr(MarketBarCacheRow, column), replacement)
+        tolerance = 0.0000000001 if column == "adjustment_factor" else 0.000001
+        conditions.append(func.abs(retained - replacement) <= tolerance)
+    return and_(*conditions)
 
 
 def _keep_valid_positive(current, replacement):
