@@ -4267,12 +4267,17 @@ function PaperRiskGatePanel({
     <section className={`paper-risk-gate-panel ${paused ? "is-paused" : throttled ? "is-throttled" : "is-allowed"}`}>
       <div className="paper-risk-gate-head">
         <div>
-          <span>{language === "zh" ? "自动开仓风控" : "Auto-entry risk gate"}</span>
+          <span>{language === "zh" ? "账户自动开仓风控" : "Account auto-entry risk gate"}</span>
           <strong>{title}</strong>
         </div>
         <em>{badge}</em>
       </div>
       <p>{reason}</p>
+      <p>
+        {language === "zh"
+          ? "执行约束：账户风控、总持仓名额、可用现金及单票金额检查。研究观察：行业集中度与市场状态（含 risk_off）本身不阻断新增或缩减仓位；允许新增不代表行业风险已通过。"
+          : "Enforced checks: account risk, total position slots, available cash, and per-name sizing. Research observations: industry concentration and market regime (including risk_off) do not themselves block entries or reduce size. Entry permission is not an industry risk clearance."}
+      </p>
       {riskGate && (
         <div className="paper-risk-gate-metrics">
           <span>
@@ -4358,8 +4363,8 @@ function PaperControlInsightGrid({
         <strong>{paperRecommendationState(report.risk_gate, language)}</strong>
         <p>
           {language === "zh"
-            ? "今日推荐会先经过模拟盘风控、市场归因和买点质量检查；合格机会可按剩余仓位批量进入验证。"
-            : "New recommendations pass through paper risk, market attribution, and trigger-quality checks before entering validation."}
+            ? "今日推荐按账户风控、数据和买点条件进入模拟验证；市场归因用于研究，新增仍受剩余仓位与现金约束。"
+            : "Recommendations enter paper validation subject to account risk, data, and entry conditions. Market attribution supports research; remaining position slots and cash still constrain entries."}
         </p>
         <div className="paper-control-stats">
           <small>{language === "zh" ? "单轮新增" : "Per run"} <b>{report.risk_gate.max_new_entries}</b></small>
@@ -4440,8 +4445,8 @@ function PaperCandidatePoolPanel({
           </strong>
           <small>
             {language === "zh"
-              ? `单组上限 ${summary.industry_capacity_limit} · 阻断 ${summary.industry_blocked_count}`
-              : `Limit ${summary.industry_capacity_limit} · ${summary.industry_blocked_count} blocked`}
+              ? `单组观察阈值 ${summary.industry_capacity_limit} · 待复核 ${summary.industry_warning_count ?? "—"}`
+              : `Observation threshold ${summary.industry_capacity_limit} · ${summary.industry_warning_count ?? "—"} to review`}
           </small>
         </div>
       </div>
@@ -4451,8 +4456,8 @@ function PaperCandidatePoolPanel({
             <strong>{language === "zh" ? "组合暴露" : "Portfolio exposure"}</strong>
             <small>
               {language === "zh"
-                ? `持仓与候补按同一风险组统计 · 买点校准 ${paperEntryCalibrationLabel(summary.entry_calibration_action, language)}`
-                : `Active and candidate names share one risk grouping · Entry ${paperEntryCalibrationLabel(summary.entry_calibration_action, language)}`}
+                ? `行业仅作观察，待复核数不是实际拦截数 · 买点校准 ${paperEntryCalibrationLabel(summary.entry_calibration_action, language)}`
+                : `Industry is advisory; review counts are not execution blocks · Entry ${paperEntryCalibrationLabel(summary.entry_calibration_action, language)}`}
             </small>
           </div>
           <div className="paper-exposure-filters" role="tablist" aria-label={language === "zh" ? "暴露分类" : "Exposure categories"}>
@@ -4480,8 +4485,8 @@ function PaperCandidatePoolPanel({
             <strong>{language === "zh" ? "未知持仓暴露" : "Unknown active exposure"}</strong>
             <span>
               {language === "zh"
-                ? `${summary.active_industry_unknown_count} 笔旧持仓缺少不可变来源分类，保留未知且不参与自动扩容。`
-                : `${summary.active_industry_unknown_count} legacy positions lack immutable source classification and remain unknown.`}
+                ? `${summary.active_industry_unknown_count} 笔持仓缺少来源分类，集中度无法完整评估；未知不代表低风险。`
+                : `${summary.active_industry_unknown_count} positions lack source classification, so concentration cannot be fully assessed; unknown does not mean low risk.`}
             </span>
           </div>
         )}
@@ -4494,7 +4499,7 @@ function PaperCandidatePoolPanel({
               </div>
               <span>{language === "zh" ? "占用" : "Occupied"}<b>{row.active}</b></span>
               <span>{language === "zh" ? "候选" : "Candidates"}<b>{row.candidates}</b></span>
-              <span>{language === "zh" ? "组内余量" : "Group slots"}<b>{row.remaining}</b></span>
+              <span>{language === "zh" ? "距观察阈值" : "To threshold"}<b>{row.category === "unknown" ? "—" : row.remaining}</b></span>
             </div>
           )) : (
             <div className="mini-curve-empty">
@@ -4517,6 +4522,11 @@ function PaperCandidatePoolPanel({
                   ? ` · ${item.exposure_group ?? item.industry}`
                   : ` · ${language === "zh" ? "暴露未知" : "Unknown exposure"}`}
               </small>
+              {item.industry_warning && (
+                <small>{item.industry_warning === "unknown"
+                  ? language === "zh" ? "行业未知，集中度待评估" : "Unknown industry; concentration unassessed"
+                  : language === "zh" ? "行业达到观察阈值，仅供研究复核" : "Industry observation threshold reached; research review only"}</small>
+              )}
             </div>
             <div className="paper-candidate-metrics">
               <span>{language === "zh" ? "优先级" : "Priority"} <b>{Math.round(item.priority_score * 100)}</b></span>

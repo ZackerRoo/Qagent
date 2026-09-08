@@ -2459,6 +2459,8 @@ export type PaperCandidatePoolItem = {
   industry_capacity_limit: number;
   industry_capacity_available: boolean;
   industry_blocked: boolean;
+  industry_control_mode?: "advisory_only";
+  industry_warning?: "unknown" | "threshold_exceeded" | null;
   signal_date: string | null;
   rank_score: number;
   priority_score: number;
@@ -2500,6 +2502,8 @@ export type PaperCandidatePoolSummary = {
   buffer_pct: string;
   industry_capacity_limit: number;
   industry_blocked_count: number;
+  industry_control_mode?: "advisory_only";
+  industry_warning_count?: number;
   industry_missing_count: number;
   active_industry_unknown_count: number;
   active_industry_counts: Record<string, number>;

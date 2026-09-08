@@ -1333,6 +1333,12 @@ def test_walk_forward_result_persists_and_round_trips_complete_payload(tmp_path)
     assert loaded.payload["reproducibility_digest"] == result.reproducibility_digest
     assert loaded.payload["cost_sensitivity"]
     assert loaded.data_health["walk_forward_top_5_oos_gate"] == "insufficient"
+    from qagent.recommendations.alignment_identity import IDENTITY_KEY, identity_is_valid
+    identity = json.loads(loaded.data_health[IDENTITY_KEY])
+    assert identity_is_valid(identity)
+    assert identity["source"] == "historical_point_in_time_baseline"
+    assert identity["effective_config"]["rebalance_step_sessions"] == 1
+    assert identity["missing_components"] == []
     assert listed[0].run_id == "persisted-walk-forward"
 
 

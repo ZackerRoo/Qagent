@@ -2,15 +2,23 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
+import hashlib
+import json
+import re
 from time import monotonic
 from typing import Iterable
 
 import pandas as pd
-from sqlalchemy import desc
+from sqlalchemy import desc, delete
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import SQLAlchemyError
 
 from qagent.storage.market_cache import MarketDataCacheRepository
-from qagent.storage.tables import HistoricalInstrumentProfileRow, HistoricalTradabilityRow
+from qagent.storage.tables import (
+    ExactPriceRepairCursorRow, HistoricalInstrumentProfileRow, HistoricalTradabilityRow,
+    utc_now,
+)
 
 
 EXACT_PRICE_REPAIR_BATCH_SIZE = 20
@@ -82,6 +90,7 @@ class ExactPriceRepairResult:
     unresolved: list[ExactPriceRequirement] = field(default_factory=list)
     reasons: dict[str, int] = field(default_factory=dict)
     error_details: list[str] = field(default_factory=list)
+    batch_trace: list[str] = field(default_factory=list)
 
     @property
     def retryable(self) -> int:
@@ -115,6 +124,7 @@ class ExactPriceRepairResult:
             f"{prefix}_exact_price_unresolved": str(len(self.unresolved)),
             f"{prefix}_exact_price_reason_mix": _reason_mix(self.reasons),
             f"{prefix}_exact_price_error_details": " | ".join(self.error_details[:5]),
+            f"{prefix}_exact_price_batch_trace": " | ".join(self.batch_trace[:20]),
         }
 
 
@@ -157,47 +167,76 @@ def repair_exact_daily_prices(
         grouped: dict[date, list[ExactPriceRequirement]] = defaultdict(list)
         for requirement in repairable if callable(getter) else []:
             grouped[requirement.trade_date].append(requirement)
+        batches = []
+        effective_batch_size = min(max(1, batch_size), 20)
         for trade_date, dated in sorted(grouped.items()):
             instruments = sorted({item.instrument_id for item in dated})
-            for offset in range(0, len(instruments), min(max(1, batch_size), 20)):
-                batch = instruments[offset : offset + min(max(1, batch_size), 20)]
-                batch_requirements = {item for item in dated if item.instrument_id in batch}
-                still_missing = set(
-                    _missing_requirements(cache, provider_mode, batch_requirements)
-                )
-                skipped = len(batch_requirements) - len(still_missing)
-                result.skipped_after_recheck += skipped
-                if not still_missing:
-                    continue
-                if work_budget is not None and not work_budget.claim_provider_batch():
-                    budget_deferred.update(still_missing)
-                    continue
-                requested_batch = sorted({item.instrument_id for item in still_missing})
-                result.provider_requested += len(requested_batch)
-                result.provider_batches += 1
+            for offset in range(0, len(instruments), effective_batch_size):
+                batch = instruments[offset : offset + effective_batch_size]
+                batches.append((trade_date, {item for item in dated if item.instrument_id in batch}))
+        # Include the actual protocol/batches: changes to dates, fields, mode or
+        # structural/cache gaps start a new independent round-robin scope.
+        scope = hashlib.sha256(json.dumps([
+            "exact-price-v1", provider_mode, effective_batch_size,
+            [[day.isoformat(), [[r.instrument_id, r.field] for r in sorted(items)]]
+             for day, items in batches],
+        ]).encode()).hexdigest()
+        attempted: set[ExactPriceRequirement] = set()
+        for offset in range(len(batches)):
+            if work_budget is not None and not work_budget.claim_provider_batch():
+                budget_deferred.update(set(repairable) - attempted)
+                break
+            index = offset
+            if work_budget is not None:
                 try:
-                    frame = (
-                        getter(requested_batch, trade_date, trade_date)
-                        if callable(getter)
-                        else None
+                    index = _claim_repair_cursor(cache, scope, len(batches))
+                except SQLAlchemyError:
+                    # Metadata must not turn a research repair into a failing
+                    # scheduler stage. Preserve the existing bounded fallback.
+                    if "research repair cursor unavailable" not in result.error_details:
+                        result.error_details.append("research repair cursor unavailable")
+            trade_date, batch_requirements = batches[index]
+            still_missing = set(_missing_requirements(cache, provider_mode, batch_requirements))
+            result.skipped_after_recheck += len(batch_requirements) - len(still_missing)
+            if not still_missing:
+                if work_budget is not None:
+                    work_budget.refund_provider_batch()
+                continue
+            attempted.update(still_missing)
+            requested_batch = sorted({item.instrument_id for item in still_missing})
+            result.provider_requested += len(requested_batch)
+            result.provider_batches += 1
+            if len(result.batch_trace) < 20:
+                result.batch_trace.append(
+                    f"{scope[:12]}:{index}/{len(batches)}:{trade_date.isoformat()}:"
+                    f"{','.join(requested_batch)}"
+                )
+            try:
+                frame = getter(requested_batch, trade_date, trade_date)
+                # Snapshot each call's telemetry before the next call clears it.
+                for error in getattr(raw_provider, "last_errors", []) or []:
+                    message = str(error)
+                    named = {r for r in still_missing if message.startswith(r.instrument_id + ":")}
+                    if not named and re.match(r"^[A-Z]+:[^:\s]+:", message):
+                        # Some wrappers accumulate old symbol errors. They are
+                        # not a batch-wide error for this request.
+                        continue
+                    provider_errors.update(named or still_missing)
+                    if len(result.error_details) < 5:
+                        result.error_details.append(f"{trade_date.isoformat()}:{_safe_error(message)}")
+                if isinstance(frame, pd.DataFrame) and not frame.empty:
+                    frame, rejected = _filter_unsafe_exact_rows(frame, still_missing)
+                    unsafe_rejections.update(rejected)
+                    result.rejected_unsafe_provenance += len(rejected)
+                    cache.merge_missing_daily_bars(
+                        provider_mode, frame,
+                        allowed_keys={(instrument_id, trade_date) for instrument_id in requested_batch},
                     )
-                    if isinstance(frame, pd.DataFrame) and not frame.empty:
-                        frame, rejected = _filter_unsafe_exact_rows(frame, still_missing)
-                        unsafe_rejections.update(rejected)
-                        result.rejected_unsafe_provenance += len(rejected)
-                        cache.merge_missing_daily_bars(
-                            provider_mode,
-                            frame,
-                            allowed_keys={
-                                (instrument_id, trade_date)
-                                for instrument_id in requested_batch
-                            },
-                        )
-                except Exception as exc:
-                    provider_errors.update(still_missing)
+            except Exception as exc:
+                provider_errors.update(still_missing)
+                if len(result.error_details) < 5:
                     result.error_details.append(
-                        f"{trade_date.isoformat()}:{','.join(requested_batch[:3])}:"
-                        f"{str(exc)[:200]}"
+                        f"{trade_date.isoformat()}:{','.join(requested_batch[:3])}:{_safe_error(str(exc))}"
                     )
     remaining = _missing_requirements(cache, provider_mode, missing)
     result.repaired = len(missing) - len(remaining)
@@ -208,10 +247,6 @@ def repair_exact_daily_prices(
     for requirement in remaining:
         reason = structural.get(requirement)
         if reason is None:
-            # Provider errors may be exposed as last_errors without raising. A
-            # no-row response with explicit errors stays retryable as provider_error.
-            raw_provider = getattr(market_provider, "provider", market_provider)
-            reported_errors = getattr(raw_provider, "last_errors", []) if raw_provider else []
             if requirement in budget_deferred:
                 reason = "work_budget_exhausted"
             elif requirement in unsafe_rejections:
@@ -221,7 +256,7 @@ def repair_exact_daily_prices(
             else:
                 reason = (
                     "provider_error"
-                    if requirement in provider_errors or bool(reported_errors)
+                    if requirement in provider_errors
                     else "provider_no_row"
                 )
         result.unresolved.append(requirement)
@@ -235,6 +270,36 @@ def repair_exact_daily_prices(
         else:
             result.missing += 1
     return result
+
+
+def _safe_error(message: str) -> str:
+    # Provider exceptions can include complete request URLs or auth headers.
+    message = re.sub(r"(https?://)[^/@\s]+:[^/@\s]+@", r"\1[redacted]@", message)
+    message = re.sub(r"(https?://[^\s?]+)\?[^\s]+", r"\1?[redacted]", message)
+    message = re.sub(r"(?i)(bearer\s+)\S+", r"\1[redacted]", message)
+    message = re.sub(
+        r"(?i)((?:api[_-]?key|access[_-]?token|token|password|secret|authorization)\s*[:=]\s*)[^\s,;]+",
+        r"\1[redacted]", message,
+    )
+    return message[:200]
+
+
+def _claim_repair_cursor(cache, scope: str, batch_count: int) -> int:
+    """Atomically reserve a batch before I/O; crashes advance, never reset priority."""
+    now = utc_now()
+    with cache.session_factory() as session:
+        session.execute(delete(ExactPriceRepairCursorRow).where(
+            ExactPriceRepairCursorRow.updated_at < now - timedelta(days=30)
+        ))
+        statement = sqlite_insert(ExactPriceRepairCursorRow).values(
+            scope_hash=scope, next_batch=1, updated_at=now,
+        ).on_conflict_do_update(
+            index_elements=[ExactPriceRepairCursorRow.scope_hash],
+            set_={"next_batch": ExactPriceRepairCursorRow.next_batch + 1, "updated_at": now},
+        ).returning(ExactPriceRepairCursorRow.next_batch)
+        reserved = session.execute(statement).scalar_one() - 1
+        session.commit()
+    return reserved % batch_count
 
 
 def _missing_requirements(

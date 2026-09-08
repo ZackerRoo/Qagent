@@ -1248,6 +1248,20 @@ def run_full_market_walk_forward_selection(
             "experiment manifest execution plan does not match the requested walk-forward run"
         )
     owner_repository = repository.for_owner(owner_run_id)
+    from qagent.recommendations.alignment_identity import build_alignment_identity
+    alignment_identity = build_alignment_identity(
+        source="historical_point_in_time_baseline",
+        effective_config={"provider_mode": repository.provider_mode,
+                          "lookback_days": lookback_days,
+                          "rebalance_step_sessions": rebalance_step_sessions,
+                          "prefilter_lookback_days": PREFILTER_LOOKBACK_DAYS,
+                          "candidate_limit": PREFILTER_CANDIDATE_LIMIT,
+                          "max_per_strategy": 2, "top_n": 10,
+                          "enhanced_provider": "EmptyAShareEnhancedDataProvider",
+                          "governance_context": None,
+                          "universe": "historical_lifecycle_per_rebalance_date"},
+        missing_components=["resumed_snapshots_identity_not_authenticated"] if resume_snapshots else [],
+    )
     lease = owner_repository.acquire_dataset_lease()
     if lease.revision != revision:
         owner_repository.release_dataset_lease()
@@ -2173,6 +2187,7 @@ def run_full_market_walk_forward_selection(
         experiment_manifest=experiment_manifest,
         reproducibility_digest=digest,
         data_health={
+            "recommendation_alignment_identity": json.dumps(alignment_identity, sort_keys=True),
             "walk_forward_revision": str(revision),
             "walk_forward_snapshots": str(len(snapshots)),
             "walk_forward_lookback_days": str(lookback_days),

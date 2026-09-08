@@ -385,6 +385,10 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
         repo,
         job.provider,
     )
+    from qagent.recommendations.alignment_identity import capture_live_identity
+    alignment_identity = capture_live_identity(job, top_cards_limit=top_cards_limit,
+                                              governance_context=governance_context,
+                                              feedback_center=feedback_center)
     all_cards: list[OpportunityCard] = []
     all_items: list[ScanItem] = []
     all_factor_rankings: list[FactorRanking] = []
@@ -785,6 +789,7 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
     scan_complete = batches_complete and symbols_complete and error_count == 0
     scan_completed_at = datetime.now(timezone.utc)
     payload_data_health = {
+        "recommendation_alignment_identity": json.dumps(alignment_identity, sort_keys=True),
         **aggregate_health,
         **market_intelligence.data_health,
         # Batch scans intentionally disable per-batch enhancement. The final

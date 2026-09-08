@@ -1815,6 +1815,16 @@ class PaperResearchBaselineRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class ExactPriceRepairCursorRow(Base):
+    """Research repair scheduling metadata; contains no market or ledger values."""
+
+    __tablename__ = "exact_price_repair_cursors"
+
+    scope_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    next_batch: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
 class FactorResearchExperimentRow(Base):
     __tablename__ = "factor_research_experiments"
 

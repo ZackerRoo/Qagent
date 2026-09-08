@@ -12,24 +12,20 @@ from zoneinfo import ZoneInfo
 
 from qagent.monitoring.outcomes import compute_forward_returns
 from qagent.recommendations.selection import (
-    EXCLUDED_STATUSES, baseline_eligible_cards, paper_eligible_card_ids, select_strategy_diversified,
+    baseline_eligible_cards, select_strategy_diversified,
 )
 from qagent.domain.enums import Market
 from qagent.market.calendars import trading_sessions_in_range
 from qagent.storage.market_cache import MarketDataCacheRepository
 from qagent.storage.tables import ScanRunRow, WalkForwardRunRow
+from qagent.recommendations.alignment_identity import (
+    IDENTITY_KEY, compare_identities, selection_digest,
+)
 
 
 KEY = "recommendation_forward_alignment_v1"
 PROTOCOL = "persisted_cards_order_strategy_cap2_top10_v1"
 SOURCE = "live_scan_cards_order"
-
-
-def selection_digest():
-    return hashlib.sha256((inspect.getsource(baseline_eligible_cards) +
-                           inspect.getsource(select_strategy_diversified) +
-                           inspect.getsource(paper_eligible_card_ids) +
-                           repr(sorted(EXCLUDED_STATUSES))).encode()).hexdigest()
 
 
 def capture_recommendation_order(cards, item_by_instrument, *, recorded_at, data_health,
@@ -75,6 +71,7 @@ def capture_recommendation_order(cards, item_by_instrument, *, recorded_at, data
         blockers.append("not_recorded_on_signal_date")
     return {
         "version": 1, "source": SOURCE, "protocol": PROTOCOL,
+        IDENTITY_KEY: data_health.get(IDENTITY_KEY),
         "recorded_at": recorded_at.isoformat(), "decision_date": local_day,
         "selection_implementation_digest": selection_digest(),
         "ranking_implementation_digest": ranking_digest,
@@ -98,18 +95,12 @@ def capture_recommendation_order(cards, item_by_instrument, *, recorded_at, data
 
 def compare_historical_identity(fact, reference):
     """A comparison requires a saved historical manifest, never caller assertions."""
-    differences = []
-    if not reference:
-        differences.append("historical_identity_manifest_missing")
-    else:
-        for key in ("feature_set_version", "recommendation_policy_entrypoint", "ranking_model_version"):
-            actual = fact.get("model_identity", {}).get(key)
-            expected = reference.get("model_identity", {}).get(key)
-            if not actual or not expected or actual != expected:
-                differences.append(f"model_identity:{key}")
-        for key in ("selection_implementation_digest", "ranking_implementation_digest"):
-            if not fact.get(key) or fact.get(key) != reference.get(key):
-                differences.append(key)
+    actual = fact.get(IDENTITY_KEY)
+    try:
+        actual = json.loads(actual) if isinstance(actual, str) else actual
+    except (TypeError, ValueError):
+        actual = None
+    differences = compare_identities(actual, reference)
     if fact.get("benchmark_gate_status") != "captured":
         differences.append("benchmark_gate_unknown")
     if fact.get("excluded_stale_cards"):
@@ -271,8 +262,12 @@ def build_forward_alignment_report(session_factory, *, provider: str, start: dat
             "selection_implementation_digest": selection_digest(),
             "statuses": "shared_baseline_eligible_cards", "strategy_limit": 2,
             "market_gate": "benchmark_trend.entry_allowed",
-            "required_identity_fields": ["feature_set_version", "recommendation_policy_entrypoint", "ranking_model_version"],
-            "comparison_requirements": "authenticated matching historical model identity, selection digest and benchmark gate; equal selection rules alone are insufficient",
+            "required_identity_fields": ["schema", "source", "selection_implementation_digest",
+                                         "model_identity.package_source_digest", "model_identity.strategy_registry_digest",
+                                         "model_identity.runtime_dependency_digest", "effective_config",
+                                         "decision_inputs", "missing_components", "manifest_digest"],
+            "comparison_requirements": "v2 content-valid execution-time manifests with no missing components; matching source, model, selection and effective config plus captured benchmark gate and no stale-filter difference; old runs stay unverifiable",
+            "decision_input_basis": "frozen per-decision observations are retained separately from stable adaptive policy/config; exact historical comparison reports input differences too",
         },
         "return_basis": "signal_close_to_cached_session_close_pct; descriptive_not_executable_portfolio_pnl",
         "prospective_start": min(canonical, default=None),

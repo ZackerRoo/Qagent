@@ -23,12 +23,34 @@
 缓存缺交易日不会把目标日顺延；组内所有实际入选项目成熟才显示均值，同时给成熟数/期望数。
 Top5、Top10、rank6_10 分开展示，不足 10 不扩展补选。
 这些是信号收盘到目标收盘的描述性百分比收益，不是可成交组合回报，也不能证明历史 9.68pp 差异。
-`frozen_selection_signals` 只转换已冻结计划供后续明确启动的离线同执行引擎验证；GET 不执行回放。
+`frozen_selection_signals` 只转换已冻结计划；GET 不执行回放。
 
 相同筛选函数不等于同一模型。API 明示 expected_historical_protocol，逐批次核对历史身份
-manifest、feature/policy/ranking version、selection/ranking digest、市场门禁和 stale 差异。
-当前历史记录未保存这种认证 manifest，线上排名也不能假装属于历史 baseline，故比较关闭。
+manifest 的内容摘要有效性、source、整个 Python 包源码、策略注册表、依赖版本、
+实际配置、市场门禁和 stale 差异。摘要是内容一致性检查，不是密码学签名。
+新的历史 run 在开始执行时产生 `recommendation_alignment_identity`，随 data_health 保存；
+恢复运行的旧 snapshot 没有自己的身份时仍明确不可认证。线上也记录实际 batch/ETF/展示上限、
+governance/feedback 摘要和同一套源码/依赖身份，但尚未完全冻结的实时增强与校准资产会明确标缺。
+线上 source 与历史 point-in-time baseline 不同，因此共享选择函数不能使二者自动可比。
 不得用当前代码版本补写旧历史身份；只有未来真实决策时捕获的对应身份才可能满足比较条件。
+
+显式离线执行入口（不连接生产数据库、不创建账户）：
+
+```sh
+cd backend
+.venv/bin/python -m qagent.backtesting.forward_replay /absolute/facts.json /absolute/isolated.sqlite /absolute/new-report.json
+```
+
+输入 JSON 是 `provider_mode`、`dataset_revision`、`start_date`、`end_date` 和
+`cohorts: [{"run_id": "原扫描 ID", "fact": 原始冻结事实对象}]`。
+使用从原记录导出的事实和人工准备的隔离数据库副本；不要重建历史排名。
+入口拒绝 data 目录、qagent.db、已有输出、超过 366 天/未来的日期窗口、重复日期、
+异日记录和混合模型配置。数据库以 SQLite mode=ro 和 query_only 打开。
+同一适应性策略的逐日 governance/feedback 是单独冻结的 decision_inputs，可随观察变化；
+报告保留各日摘要，稳定源码、策略和配置发生变化则需要另开报告。
+Top5/Top10 均使用 portfolio 同一执行器、版本化 A 股规则、10 个仓位及相同资金费用参数；
+报告保留逐信号 audit 和 provider_errors。实时模型等同性尚不可证明不妨碍对冻结计划做此实验，
+但该报告不会宣称历史模型已对齐。截止日未成熟或执行证据缺失的结果仍受执行器审计约束。
 
 验证覆盖：排名冻结与计划转换、完整小样本、市场门禁、同日 canonical、旧记录排除、空缓存、
 SELECT-only 报告；历史 selection 回归和前端 TypeScript/构建。测试均使用隔离 SQLite。

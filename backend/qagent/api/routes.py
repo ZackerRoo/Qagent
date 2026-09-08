@@ -5206,8 +5206,10 @@ def _paper_candidate_pool_snapshot_items(
         signal_date_fresh = (
             expected_signal_date is None or snapshot.signal_date == expected_signal_date
         )
-        industry_blocked = is_untracked_candidate and (
-            industry is None or industry_occupied >= PAPER_MAX_PER_INDUSTRY
+        industry_warning = (
+            "unknown" if industry is None
+            else "threshold_exceeded" if industry_occupied >= PAPER_MAX_PER_INDUSTRY
+            else None
         )
         industry_capacity_available = (
             industry is not None and industry_occupied < PAPER_MAX_PER_INDUSTRY
@@ -5240,12 +5242,6 @@ def _paper_candidate_pool_snapshot_items(
         elif market_entry_blocked:
             status = "blocked_by_market"
             action = "市场风控暂停入场"
-        elif industry is None:
-            status = "blocked_by_industry"
-            action = "行业数据缺失"
-        elif industry_blocked:
-            status = "blocked_by_industry"
-            action = "行业集中度已达上限"
         elif risk_action == "pause_new_entries":
             status = "paused_by_risk"
             action = "风控暂停新增"
@@ -5274,10 +5270,9 @@ def _paper_candidate_pool_snapshot_items(
             and signal_date_fresh
             and is_untracked_candidate
             and round_lot_affordable
-            and industry is not None
-            and not industry_blocked
         ):
-            reserved_industry_counts[industry] = reserved_industry_counts.get(industry, 0) + 1
+            if industry is not None:
+                reserved_industry_counts[industry] = reserved_industry_counts.get(industry, 0) + 1
             if sizing_plan is not None and status in {
                 "ready_to_add",
                 "replace_candidate",
@@ -5301,7 +5296,9 @@ def _paper_candidate_pool_snapshot_items(
                 "industry_capacity_used": industry_occupied,
                 "industry_capacity_limit": PAPER_MAX_PER_INDUSTRY,
                 "industry_capacity_available": industry_capacity_available,
-                "industry_blocked": industry_blocked,
+                "industry_blocked": False,
+                "industry_control_mode": "advisory_only",
+                "industry_warning": industry_warning,
                 "signal_date": snapshot.signal_date.isoformat() if snapshot.signal_date else None,
                 "signal_date_fresh": signal_date_fresh,
                 "rank_score": _float_value(snapshot.rank_score),
@@ -5355,9 +5352,7 @@ def _paper_candidate_pool_snapshot_items(
     allocation_blocked_count = sum(1 for item in items if item["status"] == "blocked_by_allocation")
     cash_blocked_count = sum(1 for item in items if item["status"] == "blocked_by_cash")
     industry_blocked_count = sum(1 for item in items if item["industry_blocked"])
-    industry_missing_count = sum(
-        1 for item in items if item["industry"] is None and item["industry_blocked"]
-    )
+    industry_missing_count = sum(1 for item in items if item["industry"] is None)
     summary = {
         "total_candidates": len(snapshots),
         "shown_candidates": len(items),
@@ -5375,6 +5370,8 @@ def _paper_candidate_pool_snapshot_items(
         "buffer_pct": "1",
         "industry_capacity_limit": PAPER_MAX_PER_INDUSTRY,
         "industry_blocked_count": industry_blocked_count,
+        "industry_control_mode": "advisory_only",
+        "industry_warning_count": sum(1 for item in items if item["industry_warning"]),
         "industry_missing_count": industry_missing_count,
         "active_industry_unknown_count": unknown_active_industries,
         "active_industry_counts": dict(sorted(active_industry_counts.items())),

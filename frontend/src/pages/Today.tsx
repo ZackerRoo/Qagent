@@ -1031,6 +1031,15 @@ function TodayPaperAdmissionCard({
         <em>{summary.active_count}/{summary.max_positions}</em>
       </div>
       <p>{paperAdmissionExplanation(admission, summary, language)}</p>
+      {admission?.industry_warning && (
+        <p>{admission.industry_warning === "unknown"
+          ? language === "zh"
+            ? "行业观察：分类未知，集中度无法完整评估；未知不代表低风险，此观察不改变上方准入状态。"
+            : "Industry observation: classification is unknown and concentration cannot be fully assessed. Unknown is not low risk; this observation does not change the admission status above."
+          : language === "zh"
+            ? "行业观察：已达到集中度观察阈值，仅供研究复核，不改变上方准入状态。"
+            : "Industry observation: concentration has reached the observation threshold; research review only, without changing the admission status above."}</p>
+      )}
       <div className="today-paper-admission-metrics">
         <small>{language === "zh" ? "目标预算" : "Target"} <b>{admission?.target_budget ?? "-"}</b></small>
         <small>{language === "zh" ? "一手所需" : "Min lot"} <b>{admission?.minimum_lot_budget ?? "-"}</b></small>

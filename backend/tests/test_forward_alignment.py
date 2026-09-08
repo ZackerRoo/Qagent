@@ -51,15 +51,26 @@ def test_malformed_facts_fail_closed(field, value):
 
 
 def test_historical_identity_requires_matching_frozen_fields_and_gate():
+    from copy import deepcopy
+    from qagent.recommendations.alignment_identity import build_alignment_identity, digest, IDENTITY_KEY
     fact = capture(benchmark_entry_allowed=True)
-    fact["model_identity"] = {"feature_set_version": "features-1",
-        "recommendation_policy_entrypoint": "policy-1", "ranking_model_version": "rank-1"}
-    reference = {key: fact[key] for key in ("model_identity", "selection_implementation_digest", "ranking_implementation_digest")}
+    reference = build_alignment_identity(source="same-executed-pipeline", effective_config={"limit": 10})
+    fact[IDENTITY_KEY] = deepcopy(reference)
     assert compare_historical_identity(fact, reference) == {"comparable": True, "differences": []}
-    changed = {**reference, "ranking_implementation_digest": "different"}
-    assert compare_historical_identity(fact, changed)["differences"] == ["ranking_implementation_digest"]
-    fact["model_identity"] = {**fact["model_identity"], "ranking_model_version": None}
-    assert "model_identity:ranking_model_version" in compare_historical_identity(fact, reference)["differences"]
+    for field in ("source", "selection_implementation_digest"):
+        changed = {**reference, field: "different"}
+        changed["manifest_digest"] = digest({k: v for k, v in changed.items() if k != "manifest_digest"})
+        assert compare_historical_identity(fact, changed)["differences"] == [field]
+    changed = deepcopy(reference)
+    changed["effective_config"]["limit"] = 5
+    changed["manifest_digest"] = digest({k: v for k, v in changed.items() if k != "manifest_digest"})
+    assert compare_historical_identity(fact, changed)["differences"] == ["effective_config:limit"]
+    changed = deepcopy(reference)
+    changed["model_identity"]["package_source_digest"] = "other-feature-implementation"
+    changed["manifest_digest"] = digest({k: v for k, v in changed.items() if k != "manifest_digest"})
+    assert compare_historical_identity(fact, changed)["differences"] == ["model_identity:package_source_digest"]
+    changed["manifest_digest"] = "tampered"
+    assert compare_historical_identity(fact, changed)["comparable"] is False
     assert compare_historical_identity(fact, None)["comparable"] is False
 
 

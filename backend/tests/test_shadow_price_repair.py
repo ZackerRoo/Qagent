@@ -549,6 +549,143 @@ def test_exact_repair_partial_recheck_for_same_instrument_requests_once(tmp_path
     assert float(bars.iloc[0]["adjusted_close"]) == 10.0
 
 
+@pytest.mark.parametrize("error_day", [date(2026, 7, 2), date(2026, 7, 3)])
+def test_soft_provider_errors_stay_with_their_call_and_instrument(tmp_path, error_day):
+    database_url = f"sqlite:///{tmp_path / 'soft-errors.db'}"
+    initialize_database(database_url)
+    cache = MarketDataCacheRepository(create_session_factory(database_url))
+
+    class SoftFailureProvider(RecordingProvider):
+        def get_historical_daily_bars(self, instrument_ids, start, end):
+            self.last_errors = ["CN:000001: baostock login timed out"] if start == error_day else []
+            return super().get_historical_daily_bars(instrument_ids, start, end)
+
+    provider = SoftFailureProvider({})
+    result = repair_exact_daily_prices(
+        cache, provider_mode="fixture", market_provider=provider,
+        requirements=[ExactPriceRequirement(instrument, day, "adjusted_open")
+                      for instrument in ("CN:000001", "CN:000002")
+                      for day in (date(2026, 7, 2), date(2026, 7, 3))],
+    )
+    assert result.reasons == {"provider_error": 1, "provider_no_row": 3}
+    assert result.error_details == [f"{error_day}:CN:000001: baostock login timed out"]
+
+
+def test_bounded_repair_eventually_attempts_every_gap_across_failing_cycles(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'fair-retry.db'}"
+    initialize_database(database_url)
+    cache = MarketDataCacheRepository(create_session_factory(database_url))
+    requirements = [ExactPriceRequirement(f"CN:{i:06d}", date(2026, 7, 2), "adjusted_open")
+                    for i in range(65)]
+    provider = RecordingProvider({})
+    for _ in range(2):
+        result = repair_exact_daily_prices(
+            cache, provider_mode="fixture", market_provider=provider,
+            requirements=requirements, batch_size=5,
+            work_budget=ExactPriceRepairBudget.bounded(max_provider_batches=8, wall_clock_seconds=60),
+        )
+        assert result.provider_batches == 8
+        assert result.deferred_by_budget == 25
+        assert result.repaired == 0
+    assert {instrument for batch, _, _ in provider.calls for instrument in batch} == {
+        requirement.instrument_id for requirement in requirements
+    }
+    assert provider.calls[8][0][0] == "CN:000040"
+    # A new field/date protocol must not reuse an unrelated offset.
+    changed = [ExactPriceRequirement(r.instrument_id, date(2026, 7, 3), r.field) for r in requirements]
+    repair_exact_daily_prices(
+        cache, provider_mode="fixture", market_provider=provider, requirements=changed, batch_size=5,
+        work_budget=ExactPriceRepairBudget.bounded(max_provider_batches=1, wall_clock_seconds=60),
+    )
+    assert provider.calls[-1][0][0] == "CN:000000"
+
+
+def test_cursor_claims_are_atomic_and_expire_old_scopes(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from qagent.research.shadow_price_repair import _claim_repair_cursor
+    from qagent.storage.tables import ExactPriceRepairCursorRow, utc_now
+
+    database_url = f"sqlite:///{tmp_path / 'cursor.db'}"
+    initialize_database(database_url)
+    factory = create_session_factory(database_url)
+    cache = MarketDataCacheRepository(factory)
+    with factory() as session:
+        session.add(ExactPriceRepairCursorRow(scope_hash="stale", next_batch=5,
+                                            updated_at=utc_now() - timedelta(days=31)))
+        session.commit()
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        claims = list(pool.map(lambda _: _claim_repair_cursor(cache, "shared", 20), range(8)))
+    assert sorted(claims) == list(range(8))
+    with factory() as session:
+        assert session.get(ExactPriceRepairCursorRow, "stale") is None
+
+
+def test_cursor_failure_keeps_provider_budget_bounded(tmp_path, monkeypatch):
+    from sqlalchemy.exc import SQLAlchemyError
+    from qagent.research import shadow_price_repair
+
+    database_url = f"sqlite:///{tmp_path / 'cursor-failure.db'}"
+    initialize_database(database_url)
+    cache = MarketDataCacheRepository(create_session_factory(database_url))
+    def fail(*args):
+        raise SQLAlchemyError("missing table")
+    monkeypatch.setattr(shadow_price_repair, "_claim_repair_cursor", fail)
+    provider = RecordingProvider({})
+    result = repair_exact_daily_prices(
+        cache, provider_mode="fixture", market_provider=provider,
+        requirements=[ExactPriceRequirement(f"CN:{i:06d}", date(2026, 7, 2), "adjusted_open")
+                      for i in range(3)], batch_size=1,
+        work_budget=ExactPriceRepairBudget.bounded(max_provider_batches=1, wall_clock_seconds=60),
+    )
+    assert result.provider_batches == 1
+    assert result.deferred_by_budget == 2
+    assert result.error_details == ["research repair cursor unavailable"]
+
+
+def test_failed_repair_writes_only_research_cursor_metadata(tmp_path):
+    from sqlalchemy import event
+
+    database_url = f"sqlite:///{tmp_path / 'write-boundary.db'}"
+    initialize_database(database_url)
+    factory = create_session_factory(database_url)
+    mutations = []
+    def observe(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+            mutations.append(statement)
+    event.listen(factory.kw["bind"], "before_cursor_execute", observe)
+    repair_exact_daily_prices(
+        MarketDataCacheRepository(factory), provider_mode="fixture", market_provider=RecordingProvider({}),
+        requirements=[ExactPriceRequirement("CN:000001", date(2026, 7, 2), "adjusted_open")],
+        work_budget=ExactPriceRepairBudget.bounded(max_provider_batches=8, wall_clock_seconds=60),
+    )
+    assert mutations
+    assert all("exact_price_repair_cursors" in statement for statement in mutations)
+
+
+def test_error_details_redact_provider_credentials():
+    from qagent.research.shadow_price_repair import _safe_error
+
+    message = _safe_error("https://user:passwd@example.test/bars?api_key=hidden Bearer credential token=secret")
+    for sensitive in ("passwd", "hidden", "credential", "=secret"):
+        assert sensitive not in message
+    assert "[redacted]" in message
+
+
+def test_accumulated_previous_symbol_error_does_not_contaminate_next_batch(tmp_path):
+    database_url = f"sqlite:///{tmp_path / 'accumulated-errors.db'}"
+    initialize_database(database_url)
+    provider = RecordingProvider({})
+    provider.last_errors = ["CN:000001: transport failed"]
+    result = repair_exact_daily_prices(
+        MarketDataCacheRepository(create_session_factory(database_url)),
+        provider_mode="fixture", market_provider=provider, batch_size=1,
+        requirements=[ExactPriceRequirement(i, date(2026, 7, 2), "adjusted_open")
+                      for i in ("CN:000001", "CN:000002")],
+    )
+    assert result.reasons == {"provider_error": 1, "provider_no_row": 1}
+    assert len(result.error_details) == 1
+
+
 class RecordingProvider:
     def __init__(
         self,

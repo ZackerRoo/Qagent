@@ -948,6 +948,19 @@ def _merge_candidate_repair_health(
         f"{reason}={count}" for reason, count in sorted(reasons.items())
     )
     merged["factor_shadow_exact_price_aggregation"] = "sum_per_candidate_resolution"
+    merged["factor_shadow_exact_price_error_details"] = " | ".join(
+        dict.fromkeys(
+            detail
+            for item in resolutions
+            for detail in item.data_health.get("factor_shadow_exact_price_error_details", "").split(" | ")
+            if detail
+        )
+    )[:2000]
+    merged["factor_shadow_exact_price_batch_trace"] = " | ".join(
+        item.data_health.get("factor_shadow_exact_price_batch_trace", "")
+        for item in resolutions
+        if item.data_health.get("factor_shadow_exact_price_batch_trace")
+    )[:4000]
     exhausted_reasons = {
         item.data_health.get("factor_shadow_exact_price_budget_exhausted_reason", "none")
         for item in resolutions

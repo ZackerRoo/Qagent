@@ -791,7 +791,7 @@ def test_risk_off_candidates_allow_standard_size_research_entries(
     assert all("防守行情研究仓位" not in trade["notes"] for trade in trades)
 
 
-def test_candidate_pool_reports_industry_capacity_block(tmp_path, monkeypatch):
+def test_candidate_pool_reports_industry_advisory_without_overriding_admission(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "QAGENT_DATABASE_URL",
         f"sqlite:///{tmp_path / 'paper-industry-capacity.db'}",
@@ -850,14 +850,47 @@ def test_candidate_pool_reports_industry_capacity_block(tmp_path, monkeypatch):
     item = next(
         candidate for candidate in pool.json()["items"] if candidate["instrument_id"] == "US:BANK-3"
     )
-    assert item["status"] == "blocked_by_industry"
+    assert item["status"] == "ready_to_add"
     assert item["industry"] == "银行"
     assert item["exposure_group"] == "银行"
     assert item["industry_active_count"] == 2
     assert item["industry_capacity_used"] == 2
     assert item["industry_capacity_limit"] == 2
-    assert item["industry_blocked"] is True
-    assert pool.json()["summary"]["industry_blocked_count"] == 1
+    assert item["industry_blocked"] is False
+    assert item["industry_warning"] == "threshold_exceeded"
+    assert item["industry_control_mode"] == "advisory_only"
+    assert pool.json()["summary"]["industry_blocked_count"] == 0
+    assert pool.json()["summary"]["industry_warning_count"] >= 1
+
+    paper_repo = routes._paper_repo()
+    account = paper_repo.get_account_settings()
+    candidate = next(s for s in snapshots if s.instrument_id == "US:BANK-3")
+    before_trades = [trade.model_dump(mode="json") for trade in paper_repo.list_trades(provider="fixture")]
+    for industry in ("银行", None):
+        for expected_status in ("ready_to_add", "paused_by_risk", "waiting_for_slot", "blocked_by_cash"):
+            with monkeypatch.context() as patch:
+                patch.setattr(routes, "_paper_snapshot_industry", lambda snapshot: industry)
+                patch.setattr(routes, "_paper_replacement_trade", lambda active: None)
+                patch.setattr(
+                    paper_repo, "get_account_settings",
+                    lambda: account.model_copy(update={"max_positions": 2 if expected_status == "waiting_for_slot" else 5}),
+                )
+                test_candidate = candidate
+                if expected_status == "blocked_by_cash":
+                    test_candidate = candidate.model_copy(update={"instrument_id": "CN:600000"})
+                    patch.setattr(routes, "paper_lot_aware_sizing_state", lambda trades, settings: (Decimal("100000"), Decimal("0")))
+                projected, summary = routes._paper_candidate_pool_snapshot_items(
+                    paper_repo=paper_repo, snapshots=[test_candidate], provider="fixture", limit=10,
+                    risk_gate_health={"paper_risk_gate_action": "pause_new_entries" if expected_status == "paused_by_risk" else "allow_new_entries"},
+                )
+                assert projected[0]["status"] == expected_status
+                assert projected[0]["industry_warning"] == ("unknown" if industry is None else "threshold_exceeded")
+                assert projected[0]["industry_blocked"] is False
+                assert summary["industry_blocked_count"] == 0
+                assert summary["industry_missing_count"] == (1 if industry is None else 0)
+    assert [trade.model_dump(mode="json") for trade in paper_repo.list_trades(provider="fixture")] == before_trades
+    # An unstarted account synthesizes started_at on every read.
+    assert paper_repo.get_account_settings().model_dump(exclude={"started_at"}) == account.model_dump(exclude={"started_at"})
 
 
 def test_lookthrough_read_keeps_paper_ledger_order_events_and_account_immutable(
