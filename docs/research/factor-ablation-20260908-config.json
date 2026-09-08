@@ -1,0 +1,19 @@
+{
+  "provider_mode": "free",
+  "dataset_revision": 8947,
+  "start_date": "2021-11-01",
+  "end_date": "2025-12-31",
+  "benchmark_id": "CN:000300.IDX",
+  "seeds": [7, 19, 42],
+  "model_recipe": "balanced_v1",
+  "rebalance_step_sessions": 10,
+  "horizon_sessions": 20,
+  "minimum_history_sessions": 120,
+  "round_trip_cost_bps": 10.0,
+  "top_fraction": 0.1,
+  "max_instruments": null,
+  "candidate_id": null,
+  "scope": "research_shadow",
+  "decision_weight": false,
+  "activation_allowed": false
+}

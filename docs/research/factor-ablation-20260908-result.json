@@ -1,0 +1,757 @@
+{
+  "status": "completed_offline_measurement",
+  "manifest": {
+    "protocol": "offline-factor-group-ablation-v1",
+    "feature_stage": "neutralized",
+    "provenance": "read-only /Users/luozhenkun/Documents/Qagent/data/qagent.db revision 8947",
+    "source_sha256": {
+      "research/factor_ablation.py": "6fe86ace8707cd7da17d1d6790844e805fced6b3fb436ab583980972118dc9e8",
+      "research/factor_experiments.py": "483607dc5cac6c845ed778cd01b0159b84c788f607b309c354efc475706687a4",
+      "factors/research_contract.py": "c698a66a486f2e46bbfa3d1ae4b6a8b772038f9cb59250c7ed4a1ca3c460ecb0"
+    },
+    "config": {
+      "provider_mode": "free",
+      "start_date": "2021-11-01",
+      "end_date": "2025-12-31",
+      "dataset_revision": 8947,
+      "benchmark_id": "CN:000300.IDX",
+      "rebalance_step_sessions": 10,
+      "horizon_sessions": 20,
+      "minimum_history_sessions": 120,
+      "top_fraction": 0.1,
+      "round_trip_cost_bps": 10.0,
+      "max_instruments": null,
+      "seeds": [
+        7,
+        19,
+        42
+      ],
+      "model_recipe": "balanced_v1",
+      "candidate_id": null,
+      "candidate_protocol_version": "legacy-factor-research-v1",
+      "selected_feature_columns": [
+        "momentum_20",
+        "momentum_60",
+        "momentum_120",
+        "return_5",
+        "trend_slope_60",
+        "trend_r2_60",
+        "volatility_20",
+        "downside_risk_60",
+        "max_drawdown_60",
+        "turnover_log_20",
+        "volume_ratio_5_20",
+        "distance_ma20",
+        "earnings_yield",
+        "return_on_equity",
+        "gross_margin",
+        "revenue_growth",
+        "earnings_growth"
+      ],
+      "scope": "research_shadow",
+      "decision_weight": false,
+      "activation_allowed": false,
+      "shadow_registration": "legacy_grandfather",
+      "source_digest": null,
+      "dirty_worktree_digest": null,
+      "coverage_joint_non_null_rate": null,
+      "coverage_source_revision": null,
+      "shadow_scorer_protocol_digest": null,
+      "shadow_scorer_source_digest": null
+    },
+    "variants": {
+      "full_features": [
+        "momentum_20",
+        "momentum_60",
+        "momentum_120",
+        "return_5",
+        "trend_slope_60",
+        "trend_r2_60",
+        "volatility_20",
+        "downside_risk_60",
+        "max_drawdown_60",
+        "turnover_log_20",
+        "volume_ratio_5_20",
+        "distance_ma20",
+        "earnings_yield",
+        "return_on_equity",
+        "gross_margin",
+        "revenue_growth",
+        "earnings_growth"
+      ],
+      "without_trend_reversal": [
+        "volatility_20",
+        "downside_risk_60",
+        "max_drawdown_60",
+        "turnover_log_20",
+        "volume_ratio_5_20",
+        "earnings_yield",
+        "return_on_equity",
+        "gross_margin",
+        "revenue_growth",
+        "earnings_growth"
+      ],
+      "without_risk": [
+        "momentum_20",
+        "momentum_60",
+        "momentum_120",
+        "return_5",
+        "trend_slope_60",
+        "trend_r2_60",
+        "turnover_log_20",
+        "volume_ratio_5_20",
+        "distance_ma20",
+        "earnings_yield",
+        "return_on_equity",
+        "gross_margin",
+        "revenue_growth",
+        "earnings_growth"
+      ],
+      "without_liquidity": [
+        "momentum_20",
+        "momentum_60",
+        "momentum_120",
+        "return_5",
+        "trend_slope_60",
+        "trend_r2_60",
+        "volatility_20",
+        "downside_risk_60",
+        "max_drawdown_60",
+        "distance_ma20",
+        "earnings_yield",
+        "return_on_equity",
+        "gross_margin",
+        "revenue_growth",
+        "earnings_growth"
+      ],
+      "without_fundamentals": [
+        "momentum_20",
+        "momentum_60",
+        "momentum_120",
+        "return_5",
+        "trend_slope_60",
+        "trend_r2_60",
+        "volatility_20",
+        "downside_risk_60",
+        "max_drawdown_60",
+        "turnover_log_20",
+        "volume_ratio_5_20",
+        "distance_ma20"
+      ]
+    },
+    "held_out_policy": "fixed_retrospective_previously_exposed_test_descriptive_only_no_tuning"
+  },
+  "manifest_sha256": "8e548904bb1c2dc8531bdb20cf37988966c45857d8f93ce7d0aa346089d85f92",
+  "cohort_sha256": "dbc965784d129ee8c32bba38afe2d202e801ab64aa996d795a53e1efb2e454cc",
+  "cohort_rows": 420381,
+  "feature_non_null_counts": {
+    "momentum_20": 420381,
+    "momentum_60": 420381,
+    "momentum_120": 420381,
+    "return_5": 420381,
+    "trend_slope_60": 420381,
+    "trend_r2_60": 420381,
+    "volatility_20": 420381,
+    "downside_risk_60": 420381,
+    "max_drawdown_60": 420381,
+    "turnover_log_20": 420381,
+    "volume_ratio_5_20": 420381,
+    "distance_ma20": 420381,
+    "earnings_yield": 301409,
+    "return_on_equity": 419694,
+    "gross_margin": 411445,
+    "revenue_growth": 416862,
+    "earnings_growth": 420380
+  },
+  "split": {
+    "train_start": "2022-04-28",
+    "train_end": "2024-05-09",
+    "valid_start": "2024-06-21",
+    "valid_end": "2025-02-06",
+    "test_start": "2025-03-20",
+    "test_end": "2025-11-28",
+    "purge_cross_sections": 2,
+    "train_rows": 233195,
+    "valid_rows": 78898,
+    "test_rows": 88632
+  },
+  "results": [
+    {
+      "variant": "full_features",
+      "selected_feature_columns": [
+        "momentum_20",
+        "momentum_60",
+        "momentum_120",
+        "return_5",
+        "trend_slope_60",
+        "trend_r2_60",
+        "volatility_20",
+        "downside_risk_60",
+        "max_drawdown_60",
+        "turnover_log_20",
+        "volume_ratio_5_20",
+        "distance_ma20",
+        "earnings_yield",
+        "return_on_equity",
+        "gross_margin",
+        "revenue_growth",
+        "earnings_growth"
+      ],
+      "lightgbm": {
+        "sample_rows": 88632,
+        "cross_sections": 18,
+        "mean_ic": 0.035215,
+        "mean_rank_ic": 0.110566,
+        "positive_rank_ic_rate": 0.833333,
+        "gross_top_bucket_excess_return_pct": 1.833882,
+        "average_turnover_rate": 0.471942,
+        "estimated_cost_drag_pct": 0.047194,
+        "net_top_bucket_excess_return_pct": 1.786687,
+        "top_bucket_max_drawdown_pct": 0.0
+      },
+      "full_linear_reference": {
+        "sample_rows": 88632,
+        "cross_sections": 18,
+        "mean_ic": -0.008595,
+        "mean_rank_ic": -0.028269,
+        "positive_rank_ic_rate": 0.333333,
+        "gross_top_bucket_excess_return_pct": 1.63178,
+        "average_turnover_rate": 0.406633,
+        "estimated_cost_drag_pct": 0.040663,
+        "net_top_bucket_excess_return_pct": 1.591117,
+        "top_bucket_max_drawdown_pct": -2.252096
+      },
+      "best_iterations": [
+        62,
+        61,
+        64
+      ],
+      "feature_importance": [
+        {
+          "feature": "turnover_log_20",
+          "importance": 26052.5138
+        },
+        {
+          "feature": "distance_ma20",
+          "importance": 12194.298
+        },
+        {
+          "feature": "downside_risk_60",
+          "importance": 8625.7555
+        },
+        {
+          "feature": "volatility_20",
+          "importance": 8132.7569
+        },
+        {
+          "feature": "return_5",
+          "importance": 6279.4906
+        },
+        {
+          "feature": "volume_ratio_5_20",
+          "importance": 3990.672
+        },
+        {
+          "feature": "earnings_yield",
+          "importance": 3847.306
+        },
+        {
+          "feature": "momentum_20",
+          "importance": 3503.2667
+        },
+        {
+          "feature": "return_on_equity",
+          "importance": 2562.552
+        },
+        {
+          "feature": "momentum_120",
+          "importance": 2134.2175
+        },
+        {
+          "feature": "momentum_60",
+          "importance": 2090.8063
+        },
+        {
+          "feature": "revenue_growth",
+          "importance": 1866.2711
+        },
+        {
+          "feature": "trend_r2_60",
+          "importance": 1760.2451
+        },
+        {
+          "feature": "trend_slope_60",
+          "importance": 1536.2713
+        },
+        {
+          "feature": "max_drawdown_60",
+          "importance": 1242.698
+        },
+        {
+          "feature": "earnings_growth",
+          "importance": 1155.3674
+        },
+        {
+          "feature": "gross_margin",
+          "importance": 798.3828
+        }
+      ],
+      "model_digests": [
+        "65c0de43ece99731307f1ad1b16b5ebc99c549fa0aa146d435e454066a9f06af",
+        "a13c1becbf90979aae2ae66a0b38d29c85c72421bd435c07352d99deeea4c456",
+        "ed2321593d36a71c2875e0a02d196c6e0bbfe9bad5ba29e7c3f8c5fc7b4ea9e4"
+      ]
+    },
+    {
+      "variant": "without_trend_reversal",
+      "selected_feature_columns": [
+        "volatility_20",
+        "downside_risk_60",
+        "max_drawdown_60",
+        "turnover_log_20",
+        "volume_ratio_5_20",
+        "earnings_yield",
+        "return_on_equity",
+        "gross_margin",
+        "revenue_growth",
+        "earnings_growth"
+      ],
+      "lightgbm": {
+        "sample_rows": 88632,
+        "cross_sections": 18,
+        "mean_ic": 0.041944,
+        "mean_rank_ic": 0.11083,
+        "positive_rank_ic_rate": 0.833333,
+        "gross_top_bucket_excess_return_pct": 1.876048,
+        "average_turnover_rate": 0.423371,
+        "estimated_cost_drag_pct": 0.042337,
+        "net_top_bucket_excess_return_pct": 1.833711,
+        "top_bucket_max_drawdown_pct": 0.0
+      },
+      "full_linear_reference": {
+        "sample_rows": 88632,
+        "cross_sections": 18,
+        "mean_ic": -0.008595,
+        "mean_rank_ic": -0.028269,
+        "positive_rank_ic_rate": 0.333333,
+        "gross_top_bucket_excess_return_pct": 1.63178,
+        "average_turnover_rate": 0.406633,
+        "estimated_cost_drag_pct": 0.040663,
+        "net_top_bucket_excess_return_pct": 1.591117,
+        "top_bucket_max_drawdown_pct": -2.252096
+      },
+      "best_iterations": [
+        43,
+        45,
+        37
+      ],
+      "feature_importance": [
+        {
+          "feature": "turnover_log_20",
+          "importance": 26667.6295
+        },
+        {
+          "feature": "volatility_20",
+          "importance": 10011.2775
+        },
+        {
+          "feature": "volume_ratio_5_20",
+          "importance": 8588.8091
+        },
+        {
+          "feature": "downside_risk_60",
+          "importance": 4375.8483
+        },
+        {
+          "feature": "earnings_yield",
+          "importance": 2752.6476
+        },
+        {
+          "feature": "return_on_equity",
+          "importance": 2173.8006
+        },
+        {
+          "feature": "revenue_growth",
+          "importance": 1825.0723
+        },
+        {
+          "feature": "max_drawdown_60",
+          "importance": 1760.2138
+        },
+        {
+          "feature": "earnings_growth",
+          "importance": 1127.5745
+        },
+        {
+          "feature": "gross_margin",
+          "importance": 861.3853
+        }
+      ],
+      "model_digests": [
+        "a5d1427b34df898a00b730454becdbfef7a81a545070c97b2eb194b0c2a3b362",
+        "d5e9321240a90238de00844f676142d49636f8003887d9485b8a64523eb013e7",
+        "7b36ca21914fb62e4218980443543d3cbc2b8161f22a42f6ac6190790a26dc5b"
+      ]
+    },
+    {
+      "variant": "without_risk",
+      "selected_feature_columns": [
+        "momentum_20",
+        "momentum_60",
+        "momentum_120",
+        "return_5",
+        "trend_slope_60",
+        "trend_r2_60",
+        "turnover_log_20",
+        "volume_ratio_5_20",
+        "distance_ma20",
+        "earnings_yield",
+        "return_on_equity",
+        "gross_margin",
+        "revenue_growth",
+        "earnings_growth"
+      ],
+      "lightgbm": {
+        "sample_rows": 88632,
+        "cross_sections": 18,
+        "mean_ic": 0.038544,
+        "mean_rank_ic": 0.116273,
+        "positive_rank_ic_rate": 0.888889,
+        "gross_top_bucket_excess_return_pct": 2.322904,
+        "average_turnover_rate": 0.516901,
+        "estimated_cost_drag_pct": 0.05169,
+        "net_top_bucket_excess_return_pct": 2.271214,
+        "top_bucket_max_drawdown_pct": 0.0
+      },
+      "full_linear_reference": {
+        "sample_rows": 88632,
+        "cross_sections": 18,
+        "mean_ic": -0.008595,
+        "mean_rank_ic": -0.028269,
+        "positive_rank_ic_rate": 0.333333,
+        "gross_top_bucket_excess_return_pct": 1.63178,
+        "average_turnover_rate": 0.406633,
+        "estimated_cost_drag_pct": 0.040663,
+        "net_top_bucket_excess_return_pct": 1.591117,
+        "top_bucket_max_drawdown_pct": -2.252096
+      },
+      "best_iterations": [
+        70,
+        61,
+        68
+      ],
+      "feature_importance": [
+        {
+          "feature": "turnover_log_20",
+          "importance": 30387.6974
+        },
+        {
+          "feature": "distance_ma20",
+          "importance": 12560.3413
+        },
+        {
+          "feature": "return_5",
+          "importance": 6471.4726
+        },
+        {
+          "feature": "earnings_yield",
+          "importance": 5639.2525
+        },
+        {
+          "feature": "volume_ratio_5_20",
+          "importance": 3980.6469
+        },
+        {
+          "feature": "return_on_equity",
+          "importance": 3911.3166
+        },
+        {
+          "feature": "momentum_120",
+          "importance": 3269.8888
+        },
+        {
+          "feature": "momentum_20",
+          "importance": 3202.8438
+        },
+        {
+          "feature": "momentum_60",
+          "importance": 3010.3475
+        },
+        {
+          "feature": "revenue_growth",
+          "importance": 2846.6118
+        },
+        {
+          "feature": "trend_slope_60",
+          "importance": 1927.0813
+        },
+        {
+          "feature": "trend_r2_60",
+          "importance": 1680.0299
+        },
+        {
+          "feature": "earnings_growth",
+          "importance": 1621.1158
+        },
+        {
+          "feature": "gross_margin",
+          "importance": 1493.0921
+        }
+      ],
+      "model_digests": [
+        "f7a81274f0713af4f53af426c52697b59626a69793dff9bde612e02cc7fd575e",
+        "453a314102ccff1039c10f71225e40261deb5d124eb8fdd7ea1e187da4c04d97",
+        "c41615b53a33cbfd3904546aad8cb988dd8e7b37647152677fcdde4ad24ca905"
+      ]
+    },
+    {
+      "variant": "without_liquidity",
+      "selected_feature_columns": [
+        "momentum_20",
+        "momentum_60",
+        "momentum_120",
+        "return_5",
+        "trend_slope_60",
+        "trend_r2_60",
+        "volatility_20",
+        "downside_risk_60",
+        "max_drawdown_60",
+        "distance_ma20",
+        "earnings_yield",
+        "return_on_equity",
+        "gross_margin",
+        "revenue_growth",
+        "earnings_growth"
+      ],
+      "lightgbm": {
+        "sample_rows": 88632,
+        "cross_sections": 18,
+        "mean_ic": 0.022904,
+        "mean_rank_ic": 0.09343,
+        "positive_rank_ic_rate": 0.833333,
+        "gross_top_bucket_excess_return_pct": 1.731917,
+        "average_turnover_rate": 0.462725,
+        "estimated_cost_drag_pct": 0.046272,
+        "net_top_bucket_excess_return_pct": 1.685644,
+        "top_bucket_max_drawdown_pct": 0.0
+      },
+      "full_linear_reference": {
+        "sample_rows": 88632,
+        "cross_sections": 18,
+        "mean_ic": -0.008595,
+        "mean_rank_ic": -0.028269,
+        "positive_rank_ic_rate": 0.333333,
+        "gross_top_bucket_excess_return_pct": 1.63178,
+        "average_turnover_rate": 0.406633,
+        "estimated_cost_drag_pct": 0.040663,
+        "net_top_bucket_excess_return_pct": 1.591117,
+        "top_bucket_max_drawdown_pct": -2.252096
+      },
+      "best_iterations": [
+        59,
+        67,
+        54
+      ],
+      "feature_importance": [
+        {
+          "feature": "volatility_20",
+          "importance": 20935.5454
+        },
+        {
+          "feature": "distance_ma20",
+          "importance": 13418.9513
+        },
+        {
+          "feature": "downside_risk_60",
+          "importance": 11831.3966
+        },
+        {
+          "feature": "return_5",
+          "importance": 6557.6167
+        },
+        {
+          "feature": "earnings_yield",
+          "importance": 4201.0294
+        },
+        {
+          "feature": "momentum_20",
+          "importance": 4050.3512
+        },
+        {
+          "feature": "momentum_60",
+          "importance": 2795.8736
+        },
+        {
+          "feature": "return_on_equity",
+          "importance": 2622.9238
+        },
+        {
+          "feature": "momentum_120",
+          "importance": 2382.7265
+        },
+        {
+          "feature": "trend_r2_60",
+          "importance": 2240.2147
+        },
+        {
+          "feature": "revenue_growth",
+          "importance": 2019.3261
+        },
+        {
+          "feature": "trend_slope_60",
+          "importance": 1936.2634
+        },
+        {
+          "feature": "max_drawdown_60",
+          "importance": 1656.7972
+        },
+        {
+          "feature": "gross_margin",
+          "importance": 1327.5806
+        },
+        {
+          "feature": "earnings_growth",
+          "importance": 595.0366
+        }
+      ],
+      "model_digests": [
+        "6789e9a852f447c46795ed8b7246c107355805eda8c2f310b3d6b5c45a7e5ed4",
+        "b96159efc75922e3ff2c75abf5bf85280fa9eb690de276de3b94abaec5cb4b31",
+        "87395365e9a13adba9cd1a2bf0ee269985b659ce9ad988875c0b8b95ef8adcae"
+      ]
+    },
+    {
+      "variant": "without_fundamentals",
+      "selected_feature_columns": [
+        "momentum_20",
+        "momentum_60",
+        "momentum_120",
+        "return_5",
+        "trend_slope_60",
+        "trend_r2_60",
+        "volatility_20",
+        "downside_risk_60",
+        "max_drawdown_60",
+        "turnover_log_20",
+        "volume_ratio_5_20",
+        "distance_ma20"
+      ],
+      "lightgbm": {
+        "sample_rows": 88632,
+        "cross_sections": 18,
+        "mean_ic": 0.034635,
+        "mean_rank_ic": 0.109586,
+        "positive_rank_ic_rate": 0.833333,
+        "gross_top_bucket_excess_return_pct": 1.838116,
+        "average_turnover_rate": 0.478369,
+        "estimated_cost_drag_pct": 0.047837,
+        "net_top_bucket_excess_return_pct": 1.790279,
+        "top_bucket_max_drawdown_pct": 0.0
+      },
+      "full_linear_reference": {
+        "sample_rows": 88632,
+        "cross_sections": 18,
+        "mean_ic": -0.008595,
+        "mean_rank_ic": -0.028269,
+        "positive_rank_ic_rate": 0.333333,
+        "gross_top_bucket_excess_return_pct": 1.63178,
+        "average_turnover_rate": 0.406633,
+        "estimated_cost_drag_pct": 0.040663,
+        "net_top_bucket_excess_return_pct": 1.591117,
+        "top_bucket_max_drawdown_pct": -2.252096
+      },
+      "best_iterations": [
+        72,
+        65,
+        65
+      ],
+      "feature_importance": [
+        {
+          "feature": "turnover_log_20",
+          "importance": 27272.2396
+        },
+        {
+          "feature": "distance_ma20",
+          "importance": 12578.3544
+        },
+        {
+          "feature": "downside_risk_60",
+          "importance": 9225.4138
+        },
+        {
+          "feature": "volatility_20",
+          "importance": 8502.4471
+        },
+        {
+          "feature": "return_5",
+          "importance": 7023.913
+        },
+        {
+          "feature": "volume_ratio_5_20",
+          "importance": 4929.286
+        },
+        {
+          "feature": "momentum_20",
+          "importance": 4060.8141
+        },
+        {
+          "feature": "trend_r2_60",
+          "importance": 2887.8113
+        },
+        {
+          "feature": "momentum_120",
+          "importance": 2847.9566
+        },
+        {
+          "feature": "momentum_60",
+          "importance": 2366.8342
+        },
+        {
+          "feature": "trend_slope_60",
+          "importance": 2151.8042
+        },
+        {
+          "feature": "max_drawdown_60",
+          "importance": 2054.7091
+        }
+      ],
+      "model_digests": [
+        "05c5fd0d9634b352c5186d653e328ce82308b716089c72649cd0c4be612ef4f4",
+        "7e0acc10652d58336b029b7cf0d83be083217ffa2ec06197fcb7d9284129f819",
+        "6dc16d06d00a5ad059554824a603450f87fcb2c024621ec2f4977cc7732cb90b"
+      ]
+    }
+  ],
+  "activation_allowed": false,
+  "decision_weight": false,
+  "model_persisted": false,
+  "candidate_registered": false,
+  "metric_semantics": {
+    "net_top_bucket_excess_return_pct": "Mean cross-sectional top-bucket horizon excess return in percentage points minus heuristic average-turnover cost; not cumulative or annualized portfolio return.",
+    "top_bucket_max_drawdown_pct": "Diagnostic compounding of horizon labels at each rebalance; labels overlap when horizon_sessions exceeds rebalance_step_sessions (20 versus 10 in preregistration). Not drawdown of a tradable portfolio.",
+    "variant_selection": "No automatic best variant or promotion; descriptive measurements only."
+  },
+  "dataset_preparation_caveat": "frozen_replay_revision_with_current_local_historical_rules_not_version_frozen",
+  "input_sha256": "6621a9bfa984f24a6e9e34b9c15c7ec56aa5f9d85b38d9f93c9eefbe6ec5eff8",
+  "data_health": {
+    "calendar": "exchange_calendars:XSHG",
+    "provider_mode": "free",
+    "dataset_revision": 8947,
+    "benchmark_id": "CN:000300.IDX",
+    "universe_scope": "frozen_full_stock_inventory",
+    "inventory_stock_count": 5350,
+    "adjusted_bar_rows": 5048951,
+    "research_sample_rows": 420381,
+    "research_cross_sections": 88,
+    "industry_snapshot_instruments": 5346,
+    "industry_excess_rows": 418150,
+    "benchmark_excess_fallback_rows": 2231,
+    "industry_label_coverage_ratio": 0.994693,
+    "missing_tradability_rejections": 34471,
+    "st_or_suspended_rejections": 15313,
+    "adjusted_price_policy": "adjusted_close_required",
+    "tradability_policy": "missing_or_nontrading_or_st_fail_closed",
+    "label_policy": "industry_excess_when_group_ge_5_else_hs300_excess",
+    "neutralization_policy": "cross_sectional_winsorize_then_size_and_industry_residual"
+  }
+}
