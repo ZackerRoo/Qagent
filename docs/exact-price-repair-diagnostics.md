@@ -1,5 +1,48 @@
 # Exact-price repair fairness and diagnostics
 
+## Throughput snapshot, September 8 at 13:59 UTC
+
+Six completed factor stages from 09:18 through 13:58 UTC each requested
+40 instrument/date keys in eight batches. Their reported repaired field counts
+were 240, 97, 37, 37, 37 and 37. The larger counts cannot be interpreted as
+provider-returned unique rows: repair compares cache state before and after
+work, fields differ from rows, and other work can populate the shared cache.
+The stage counter explicitly uses `sum_per_candidate_resolution`; its latest
+18,680 requested and 9,251 budget-deferred fields are not unique queue lengths.
+Do not divide them by 37 to promise a completion time.
+
+The last four stages each reported 37 repaired fields and three no-row fields.
+Their scope hashes changed and the first batch index reset to zero because
+the current missing set participates in the hash. The three persistent prefix
+keys were retried, but 37 new keys still advanced per cycle; this is not total
+queue starvation. Batch size is five on this bounded caller. Increasing it
+would also increase work inside each cooperative wall-clock budget claim;
+these observations do not justify changing batching or concurrency. Earlier
+telemetry also records two TickFlow HTTP 429 responses.
+
+Fuyao's six stages repeatedly requested the same 15 instrument/date keys,
+reported zero repaired fields and retained four confirmed suspension fields.
+No-row responses and structural suspension classification are kept separate.
+Newly matured outcomes can add requirements while repairs remove them, so a
+fixed-backlog completion scenario would not be a forecast of natural operation.
+
+The read-only diagnostic now adds `throughput` summaries grouped by stage.
+It preserves aggregation, budget and reason metadata, reports trace-derived
+unique instrument/date counts as lower bounds, and counts repeat attempts
+across observations. Trace truncation and absent telemetry cannot establish a
+unique pending queue size; this is explicitly `null`. Missing counters remain
+unknown instead of becoming zero. Its optional reported-fields/hour rate
+excludes the oldest observation and uses elapsed observation time, not provider
+execution time or unique recoveries. A running stage without counters makes
+that rate unknown. Use `--limit 12` for roughly six cycles when both shadow
+stages are present; the limit counts stage rows, not cycles.
+
+Five isolated regression tests cover aggregate-versus-unique interpretation,
+truncated traces, missing/structural/no-row/budget telemetry, bounded read-only
+SQLite access and refusal to create a missing database. The enhanced script
+was also run over SSH stdin against the live database with `mode=ro` and
+`query_only=ON`. No provider, scheduler endpoint or cloud write was invoked.
+
 On 2026-09-08, a read-only cloud snapshot showed the same saved results at
 00:47, 01:19 and 01:51 UTC: factor shadow requested 96 fields, found 31 cached,
 attempted 8 batches / 34 instruments, reported 34 provider errors and deferred

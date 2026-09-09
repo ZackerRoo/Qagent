@@ -88,3 +88,22 @@ reproduction; a caller-supplied revision alone does not certify data provenance.
 Per-feature non-null counts expose missing-factor ablations that cannot test the
 intended hypothesis. A zero-change result with all-missing omitted factors is not
 evidence that the economic factor group lacks predictive value.
+
+Optional `--stability` adds paired date/seed diagnostics without changing the five
+variants or training configuration. The offline collector reconstructs the returned
+in-memory model strings, predicts the exact test split, and requires reconstructed
+ensemble aggregate metrics to match the comparator exactly. It then discards model
+strings and emits per-seed aggregate metrics and per-date gross excess, Rank IC,
+bucket size, and turnover from the previous date (undefined for the first date).
+The shared production comparator is unchanged.
+
+Each omission is paired against full features using identical dates and seed IDs.
+The report includes date deltas, chronological halves, positive fractions and a
+leave-one-test-date-out mean range. These ranges are descriptive sensitivity
+checks, not confidence intervals or significance tests. Rank IC pairs with an
+undefined value are excluded explicitly through observed-pair counts; chronological
+halves are still defined by all test dates. Gross date comparisons do not claim
+net returns. Per-seed net metrics retain the original average-turnover heuristic.
+Shared data and overlapping labels prevent treating dates or seeds as independent
+market samples. No result from this already exposed test constitutes new forward
+validation or permits tuning, model selection, registration, or paper changes.

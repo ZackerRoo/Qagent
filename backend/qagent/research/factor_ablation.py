@@ -126,7 +126,7 @@ def prepare_features(frame: pd.DataFrame, *, feature_stage: str) -> pd.DataFrame
     return prepared
 
 
-def run_factor_ablation(payload: dict[str, Any]) -> dict[str, Any]:
+def run_factor_ablation(payload: dict[str, Any], *, collect_stability: bool = False) -> dict[str, Any]:
     frame, config = validate_input(payload)
     variants = {"full_features": FEATURE_COLUMNS}
     variants.update({
@@ -150,6 +150,11 @@ def run_factor_ablation(payload: dict[str, Any]) -> dict[str, Any]:
         "held_out_policy": "fixed_retrospective_previously_exposed_test_descriptive_only_no_tuning",
     }
     manifest_digest = sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+    if collect_stability:
+        diagnostic_path = Path(__file__).resolve().with_name("factor_ablation_stability.py")
+        manifest["stability_diagnostics"] = "paired-date-seed-descriptive-v1"
+        manifest["source_sha256"]["research/factor_ablation_stability.py"] = sha256(diagnostic_path.read_bytes()).hexdigest()
+        manifest_digest = sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
     cohort_digest = sha256(frame.to_json(orient="records", date_format="iso").encode()).hexdigest()
     prepared = prepare_features(frame, feature_stage=payload["feature_stage"])
     results = []
@@ -184,7 +189,12 @@ def run_factor_ablation(payload: dict[str, Any]) -> dict[str, Any]:
             "feature_importance": artifacts["feature_importance"],
             "model_digests": [model["model_digest"] for model in _models],
         })
-    return {
+        if collect_stability:
+            from qagent.research.factor_ablation_stability import collect_stability as collect
+            results[-1]["stability"] = collect(prepared, variant_config, artifacts, _models,
+                                                metrics["lightgbm_challenger"])
+        del _models
+    report = {
         "status": "completed_offline_measurement",
         "manifest": manifest,
         "manifest_sha256": manifest_digest,
@@ -211,3 +221,7 @@ def run_factor_ablation(payload: dict[str, Any]) -> dict[str, Any]:
         },
         "dataset_preparation_caveat": "frozen_replay_revision_with_current_local_historical_rules_not_version_frozen",
     }
+    if collect_stability:
+        from qagent.research.factor_ablation_stability import paired_stability
+        report["paired_stability"] = paired_stability(results)
+    return report

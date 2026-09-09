@@ -53,6 +53,7 @@ def main() -> None:
     source.add_argument("--database", type=Path)
     parser.add_argument("--config", type=Path, help="explicit config JSON required in database mode")
     parser.add_argument("--prepare-only", action="store_true", help="write the frozen dataset envelope without training")
+    parser.add_argument("--stability", action="store_true", help="collect descriptive paired date/seed diagnostics offline")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.output.exists():
@@ -74,7 +75,7 @@ def main() -> None:
         validate_input(payload)
         report = payload
     else:
-        report = run_factor_ablation(payload)
+        report = run_factor_ablation(payload, collect_stability=args.stability)
         report["input_sha256"] = sha256(raw).hexdigest()
         report["data_health"] = payload.get("data_health")
     encoded = json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
