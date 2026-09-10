@@ -680,6 +680,13 @@ def run_full_market_batch_scan_job(job_id: str, top_cards_limit: int = 200) -> N
                 limit=20_000,
             )
         }
+        # Opt-in research artifact only; helper failures never interrupt existing scoring.
+        from qagent.research.g2_forward_source import capture_if_enabled
+
+        capture_if_enabled(
+            provider=job.provider, scan_job_id=job.job_id, signal_date=feature_as_of,
+            rankings=global_shadow_rankings, stock_ids=stock_ids, items=all_items,
+        )
         factor_shadow_result = score_factor_shadow_runs_with_legacy_retirement(
             create_session_factory(),
             provider_mode=job.provider,

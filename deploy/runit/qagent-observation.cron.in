@@ -1,0 +1,6 @@
+# OPT-IN template: existing deployment installers do not install this file.
+# Debian /etc/cron.d format. Host UTC: 08:10 UTC = 16:10 Asia/Shanghai weekdays.
+# Render placeholders and create OBSERVATION_DIR owned by SERVICE_USER first.
+# 0 = observed (may still be collecting); 2 = blocked, report retained;
+# 1 = error; 75 = another run holds lock. All completed runs get unique JSON.
+10 8 * * 1-5 @SERVICE_USER@ @APP_DIR@/backend/.venv/bin/python -B @APP_DIR@/scripts/archive_paper_observation.py --db @STATE_DIR@/qagent.db --output-dir @OBSERVATION_DIR@

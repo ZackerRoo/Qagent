@@ -1,5 +1,21 @@
 # Qagent Agent Workflow
 
+## Start every repository task with the project goal
+
+- At the start of every conversation or resumed task in this repository, read
+  `docs/PROJECT_GOAL.md` completely before investigation or implementation. If the
+  file is missing or unreadable, explicitly tell the user; do not silently invent
+  or replace the agreed goals.
+- Refresh evidence relevant to the current task before updating goal status.
+  Historical snapshots, code presence, tests, push, and deployment are distinct
+  evidence; none alone proves the others or current operational success.
+- Check existing implementations and artifacts before proposing new work. Reuse
+  completed capabilities and preserve goal IDs, agreed acceptance criteria, and
+  historical snapshots when updating the goal document.
+- Keep work within the user's requested scope. A backlog item or comparison with
+  another tool does not authorize implementing every enhancement or expanding
+  trading authority automatically.
+
 ## Multi-agent lifecycle
 
 - Use sub-agents only for bounded parallel work with a clear owner and deliverable.

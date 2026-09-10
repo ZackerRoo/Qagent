@@ -1,0 +1,8 @@
+# OPT-IN only; existing deployment installers do not install this file.
+# Debian /etc/cron.d; host timezone must be UTC. 08:00-15:30 UTC = 16:00-23:30 Shanghai.
+# Set QAGENT_G2_CAPTURE_DIR=@G2_SOURCE_DIR@ in the EXISTING backend process environment
+# and restart/deploy that process to enable captures. Setting it in cron alone is insufficient.
+# Distribute and validate frozen models separately; make output owned by SERVICE_USER.
+# 0 ready/already collected/unscheduled/waiting; 2 diagnostic only; 1 error; 75 locked.
+# Per-run status and errors retained under G2_OUTPUT_DIR/runs; source files are never deleted.
+0,30 8-15 * * 1-5 @SERVICE_USER@ cd @APP_DIR@/backend && @APP_DIR@/backend/.venv/bin/python -B -m qagent.research.g2_forward_schedule --source-dir @G2_SOURCE_DIR@ --frozen-dir @G2_FROZEN_DIR@ --output-dir @G2_OUTPUT_DIR@
