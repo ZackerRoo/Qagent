@@ -136,12 +136,20 @@ def repair_exact_daily_prices(
     provider_mode: str,
     market_provider: object | None,
     requirements: Iterable[ExactPriceRequirement],
+    cursor_requirements: Iterable[ExactPriceRequirement] | None = None,
     batch_size: int = EXACT_PRICE_REPAIR_BATCH_SIZE,
     work_budget: ExactPriceRepairBudget | None = None,
 ) -> ExactPriceRepairResult:
-    """Fill exact shadow-price holes without trusting aggregate range coverage."""
+    """Fill exact shadow-price holes without trusting aggregate range coverage.
 
-    required = sorted(set(requirements))
+    ``cursor_requirements`` preserves slots for a consumer's completed outcomes;
+    it never expands requested prices. New mature dates or other cohort changes
+    still create a new scope. Stable slots can leave partially filled batches.
+    """
+
+    required_set = set(requirements)
+    required = sorted(required_set)
+    cursor_universe = sorted(required_set.union(cursor_requirements or ()))
     result = ExactPriceRepairResult(requested=len(required))
     missing = _missing_requirements(cache, provider_mode, required)
     result.cache_hits = len(required) - len(missing)
@@ -170,17 +178,23 @@ def repair_exact_daily_prices(
             provider_errors.update(repairable)
             result.error_details.append("provider does not implement exact daily bars")
         grouped: dict[date, list[ExactPriceRequirement]] = defaultdict(list)
-        for requirement in repairable if callable(getter) else []:
+        # Keep cursor membership stable while cache holes are filled. Hashing
+        # only current gaps resets the cursor after every successful repair and
+        # repeatedly puts old no-row batches ahead of unattempted later gaps.
+        for requirement in cursor_universe if callable(getter) else []:
             grouped[requirement.trade_date].append(requirement)
         batches = []
         effective_batch_size = min(max(1, batch_size), 20)
         for trade_date, dated in sorted(grouped.items()):
-            instruments = sorted({item.instrument_id for item in dated})
+            by_instrument: dict[str, set[ExactPriceRequirement]] = defaultdict(set)
+            for item in dated:
+                by_instrument[item.instrument_id].add(item)
+            instruments = sorted(by_instrument)
             for offset in range(0, len(instruments), effective_batch_size):
                 batch = instruments[offset : offset + effective_batch_size]
-                batches.append((trade_date, {item for item in dated if item.instrument_id in batch}))
-        # Include the actual protocol/batches: changes to dates, fields, mode or
-        # structural/cache gaps start a new independent round-robin scope.
+                batches.append((trade_date, set().union(*(by_instrument[item] for item in batch))))
+        # Changes to the requested protocol start an independent scope; cache
+        # hits and structural gaps retain their slots and are skipped below.
         scope = hashlib.sha256(json.dumps([
             "exact-price-v1", provider_mode, effective_batch_size,
             [[day.isoformat(), [[r.instrument_id, r.field] for r in sorted(items)]]
@@ -201,8 +215,14 @@ def repair_exact_daily_prices(
                     if "research repair cursor unavailable" not in result.error_details:
                         result.error_details.append("research repair cursor unavailable")
             trade_date, batch_requirements = batches[index]
-            still_missing = set(_missing_requirements(cache, provider_mode, batch_requirements))
-            result.skipped_after_recheck += len(batch_requirements) - len(still_missing)
+            active_requirements = batch_requirements.intersection(required_set)
+            if not active_requirements:
+                if work_budget is not None:
+                    work_budget.refund_provider_batch()
+                continue
+            current_missing = set(_missing_requirements(cache, provider_mode, active_requirements))
+            result.skipped_after_recheck += len(active_requirements) - len(current_missing)
+            still_missing = current_missing - structural.keys()
             if not still_missing:
                 if work_budget is not None:
                     work_budget.refund_provider_batch()

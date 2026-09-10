@@ -724,7 +724,18 @@ def test_lightgbm_shadow_scores_are_persisted_without_paper_activation(tmp_path,
 
 def test_factor_shadow_benchmark_exact_gap_keeps_requirement_and_outcome_units_separate(
     tmp_path,
+    monkeypatch,
 ):
+    from qagent.research import factor_shadow_outcomes
+
+    cursor_calls = []
+    real_repair = factor_shadow_outcomes.repair_exact_daily_prices
+
+    def capture_repair(*args, **kwargs):
+        cursor_calls.append((set(kwargs["requirements"]), set(kwargs["cursor_requirements"])))
+        return real_repair(*args, **kwargs)
+
+    monkeypatch.setattr(factor_shadow_outcomes, "repair_exact_daily_prices", capture_repair)
     database_url = f"sqlite:///{tmp_path / 'factor-shadow-benchmark-gap.db'}"
     initialize_database(database_url)
     session_factory = create_session_factory(database_url)
@@ -827,6 +838,21 @@ def test_factor_shadow_benchmark_exact_gap_keeps_requirement_and_outcome_units_s
             "factor_shadow_exact_price_unresolved",
         )
     )
+
+    # Once outcomes complete, the consumer stops requesting their prices but
+    # retains the full mature cohort as cursor slots for subsequent cycles.
+    MarketDataCacheRepository(session_factory).save_daily_bars(
+        "fixture", pd.DataFrame(benchmark_rows),
+    )
+    for _ in range(2):
+        resolve_factor_shadow_outcomes(
+            session_factory, provider_mode="fixture", as_of_date=outcome_date,
+            horizons=(5,),
+        )
+    assert len(cursor_calls) == 3
+    assert len(cursor_calls[0][0]) == 8
+    assert cursor_calls[-1][0] == set()
+    assert all(universe == cursor_calls[0][1] for _, universe in cursor_calls)
 
 
 def test_shadow_roster_keeps_two_explicit_candidates_and_one_legacy_lane(tmp_path):

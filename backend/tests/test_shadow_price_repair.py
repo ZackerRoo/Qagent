@@ -128,14 +128,15 @@ def test_exact_repair_budget_defers_unattempted_rows_but_keeps_not_listed_termin
         work_budget=budget,
     )
 
-    assert provider.calls == [(instrument_ids[1:21], target, target)]
+    # Structural slots remain in the stable cursor batch but never go to I/O.
+    assert provider.calls == [(instrument_ids[1:20], target, target)]
     assert result.provider_batches == 1
-    assert result.repaired == 20
+    assert result.repaired == 19
     assert result.not_listed == 1
-    assert result.deferred_by_budget == 24
-    assert result.retryable == 24
+    assert result.deferred_by_budget == 25
+    assert result.retryable == 25
     assert result.budget_exhausted_reason == "provider_batch_budget"
-    assert result.reasons == {"not_listed": 1, "work_budget_exhausted": 24}
+    assert result.reasons == {"not_listed": 1, "work_budget_exhausted": 25}
 
 
 def test_exact_repair_expired_wall_clock_budget_makes_no_provider_call(tmp_path):
@@ -618,6 +619,55 @@ def test_cursor_claims_are_atomic_and_expire_old_scopes(tmp_path):
     assert sorted(claims) == list(range(8))
     with factory() as session:
         assert session.get(ExactPriceRepairCursorRow, "stale") is None
+
+
+@pytest.mark.parametrize("retain_completed", [False, True])
+def test_cursor_survives_success_and_completed_requirements_and_retries_recovery(
+    tmp_path, retain_completed,
+):
+    database_url = f"sqlite:///{tmp_path / 'stable-cursor.db'}"
+    initialize_database(database_url)
+    cache = MarketDataCacheRepository(create_session_factory(database_url))
+    day = date(2026, 7, 2)
+    universe = [ExactPriceRequirement(f"CN:{i:06d}", day, "adjusted_open")
+                for i in range(5)]
+    provider = RecordingProvider({(r.instrument_id, day): _bar(r.instrument_id, day)
+                                  for r in universe[1:]})
+
+    def repair(requirements):
+        return repair_exact_daily_prices(
+            cache, provider_mode="fixture", market_provider=provider,
+            requirements=universe if retain_completed else requirements,
+            cursor_requirements=universe, batch_size=1,
+            work_budget=ExactPriceRepairBudget.bounded(
+                max_provider_batches=2, wall_clock_seconds=60,
+            ),
+        )
+
+    first = repair(universe)
+    assert first.repaired == 1
+    assert first.reasons == {"provider_no_row": 1, "work_budget_exhausted": 3}
+    # A consumer drops completed outcomes between cycles. A successful repair
+    # must not restart from the oldest unavailable symbol.
+    second = repair([universe[0], *universe[2:]])
+    assert second.repaired == 2
+    assert [call[0] for call in provider.calls] == [
+        ["CN:000000"], ["CN:000001"], ["CN:000002"], ["CN:000003"],
+    ]
+    third = repair([universe[0], universe[4]])
+    assert third.repaired == 1
+    assert third.reasons == {"provider_no_row": 1}
+    assert provider.calls[-2][0] == ["CN:000004"]
+    assert third.suspended == 0
+
+    # Recovered source data is still retried after skipping completed slots;
+    # those slots do not consume the provider budget or widen requested rows.
+    provider.rows[(universe[0].instrument_id, day)] = _bar(universe[0].instrument_id, day)
+    recovered = repair([universe[0]])
+    assert recovered.requested == (5 if retain_completed else 1)
+    assert recovered.cache_hits == (4 if retain_completed else 0)
+    assert recovered.repaired == recovered.provider_batches == 1
+    assert recovered.unresolved == []
 
 
 def test_cursor_failure_keeps_provider_budget_bounded(tmp_path, monkeypatch):

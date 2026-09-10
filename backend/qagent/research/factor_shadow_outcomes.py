@@ -489,6 +489,7 @@ def resolve_factor_shadow_outcomes(
     next_maturity_dates: list[date] = []
     work: list[tuple[FactorShadowRunRef, int, date, date, list[FactorShadowScore]]] = []
     requirements: set[ExactPriceRequirement] = set()
+    cursor_requirements: set[ExactPriceRequirement] = set()
 
     for run in runs:
         scores = store.shadow_scores(run.experiment_id, run.scan_job_id)
@@ -501,6 +502,17 @@ def resolve_factor_shadow_outcomes(
                 next_maturity_dates.append(outcome_date)
                 continue
             matured_run_horizons += 1
+            # Completed outcomes must retain their cursor slots: otherwise a
+            # successful cycle shrinks the scope and restarts at old no-row gaps.
+            for instrument_id in {item.instrument_id for item in scores} | {
+                bundle.experiment.benchmark_id
+            }:
+                cursor_requirements.add(
+                    ExactPriceRequirement(instrument_id, entry_date, "adjusted_open")
+                )
+                cursor_requirements.add(
+                    ExactPriceRequirement(instrument_id, outcome_date, "adjusted_close")
+                )
             unresolved_scores = [
                 item
                 for item in scores
@@ -524,6 +536,7 @@ def resolve_factor_shadow_outcomes(
         provider_mode=provider_mode,
         market_provider=market_provider,
         requirements=requirements,
+        cursor_requirements=cursor_requirements,
         batch_size=(
             FACTOR_SHADOW_BOUNDED_REPAIR_BATCH_SIZE if work_budget is not None else 20
         ),
