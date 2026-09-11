@@ -43,3 +43,15 @@
 - 12:03:39 UTC 新生产 G1 手动归档退出 0，产物为 `/var/lib/qagent-research/execution-observations/20260910T120339.582516Z-273021fa82f54c5aaf5defe0803d8409.json`，仍为 14 个样本，observation digest 仍为 `47ea95926e6de582aba57326cd49fea2d91fe07c1b349dfcf08d712686e7e61a`。重复样本不增加独立证据，G1 自然 cron 触发及持续覆盖仍待验。
 
 本阶段实现与 `94cf6f5` 已 push 并部署；本地全量测试为 2051 passed，测试 fixture 的单行容量参数修正不改变生产备份默认 10 GiB 保护。剩余工作为 G1 自然触发、G2 首份真实源捕获与采样日前向产物验证；唯一模拟账本、研究隔离和禁止自动接管边界保持不变。
+
+## 采样日午间核验（2026-09-11 12:55 北京时间）
+
+以下为主任务在 04:52 UTC（北京时间 12:52）取得的当次云端证据及随后源码核对，不代表全天持续健康。
+
+- health 为 `ok`，生产 current 仍为 `94cf6f5`。latest scan 仍是 9 月 10 日 11:55:57 UTC 完成的部署前扫描；04:15 UTC 调度已完成，返回 `cache_fresh`、`expected_signal_date=2026-09-10`，尚无部署后新扫描。后续只读查询 `automation_cycles` 显示 04:45:40 UTC 周期为 `running`，`factor_shadow` 阶段自 04:46:48 UTC 为 `running`；scheduler checkpoint 仍显示上轮完成态，不能据此认定当前空闲。
+- G2 源目录仍空。源码仅在分批全市场扫描完成各批次、进入最终排名阶段时调用 `capture_if_enabled`（`backend/qagent/jobs/full_market.py`），启用捕获不会追溯生成既有扫描的源文件。午间仍以最近已完成交易日 9 月 10 日判断缓存新鲜度，与此次尚未产生新源的状态一致；这不构成源捕获故障的证据，也尚未验证运行进程能成功写出源文件。
+- G1 自然 cron 计划为工作日 08:10 UTC（北京时间 16:10）；G2 为工作日 08:00–15:30 UTC（北京时间 16:00–23:30）每半小时一次。当次核验早于当天首轮研究 cron。G2 collector 只接受当日源且要求捕获时间不早于北京时间 15:30；collector 本身不启动扫描，首轮可能仍为 `waiting_for_source`。
+- 待验事项仍为 G1 自然归档、首份自然全量 source、9 月 11 日采样日真实 collector 产物及覆盖。需待收盘后自然扫描进入最终排名阶段，再核对源文件日期、捕获时间及 collector 状态；首份源与真实前向样本尚未验收。
+- 本轮主任务本地运行 `test_g2_risk_feature_forward.py` 和 `test_g2_forward_schedule.py`，18 tests passed（2.64 秒）。所检查云端日志尾部存在数据源连接超时，未见 G2 捕获报错；此结论仅限已读尾部，不能证明完整日志无错或源捕获已成功。
+
+本轮仅只读核验和追加记录，未启动扫描、重启或切换服务；未改变研究隔离、模拟账户或交易权限。本小节为本地文档更新，尚未提交或 push，不表示新增部署。
