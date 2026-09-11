@@ -25,3 +25,21 @@
 - 主任务独立复核安装前后 8 张账本表的行数和哈希、settings 哈希、生产 env 哈希及 current release 完全一致；backend PID 24469、frontend PID 24284 未变。未重启服务或 cron，未改生产环境或交易状态。
 
 当前已部署的是独立研究 cron；尚无 cron 自然触发证据，持续观察尚未完成。G2 源捕获环境仍未启用，须待自然扫描结束并通过空闲核验后，由主任务完成生产 release 切换及 `QAGENT_G2_CAPTURE_DIR` 启用，再核验真实源捕获、当日调度产物和前向覆盖。原有验收条件、唯一模拟账本及禁止自动接管边界保持不变。
+
+## 本地完整回归及容量相关测试修正（2026-09-10）
+
+主任务首次完整运行 `backend/tests` 得到 2050 passed、1 failed。失败项为 `test_backup_is_consistent_and_retention_argument_is_validated`：本地可用空间为 `7,110,762,496` 字节（约 7.1 GB / 6.6 GiB），小型测试数据库为 8192 字节，低于备份后默认保留 10 GiB 的要求。复现 stderr 为 `insufficient backup space: available_bytes=7110762496 estimated_backup_bytes=8192 minimum_free_after_backup_bytes=10737418240 required_bytes=10737426432`。修正前备份脚本与该测试相对已部署 `f1dd6d2` 均无差异，确认是本地容量触发既有保护，不是 G1/G2 回归。
+
+仅在该一致性测试调用中显式传入第四参数 `0`，使微型 fixture 备份不依赖宿主机保留 10 GiB 空间；生产备份脚本、默认 10 GiB 容量保护及独立容量拒绝测试均未改变。子任务与主任务分别运行部署资产测试文件，均为 16 passed；主任务随后完整重跑 `backend/tests`，结果为 **2051 passed、3 项既有 warnings，312.57 秒**。这些是本地测试证据，不代表云端 release 切换或源捕获启用已经完成。
+
+## 生产切换成功及剩余验收（2026-09-10 11:56–12:03 UTC）
+
+以下为主任务后续独立核验结果，更新上述暂存阶段的未部署状态；保留前文作为各时刻历史证据。
+
+- 自然扫描 `full-scan-20260910104100-63a4ef30` 于 11:55:57 UTC `succeeded`、36/36；11:56:12 UTC 核验 idle 后，guarded helper 退出 0，生产 current 已切换至 `94cf6f5057723460a88becd0c5e44f864a6cc53c`。切换证据保存在 `/var/tmp/qagent-rollout-g1g2-f11js7yb`。
+- 主任务比较 ledger-before/after，8 张账本表完全一致、16 项 settings 完全保留；scheduler 为 `enabled=true`、`in_flight=false`、`last_error=null`，前后端运行且 health 为 ok。
+- 生产 env 字节核验确认仅追加 `QAGENT_G2_CAPTURE_DIR=/var/lib/qagent-research/g2-forward-sources`，run 脚本确实 source 该 env。进程 environ 读取受权限限制，未直接核验进程内环境；源目录仍空，首次自然全量 source 捕获尚待验收，G2 真实前向样本仍为 0。
+- G2 已有 09:30、10:00、10:30、11:00 UTC 四份按期运行产物，均为 `skipped_unscheduled_day`、退出 0。这证明周期入口已运行，不代表产生真实前向样本。
+- 12:03:39 UTC 新生产 G1 手动归档退出 0，产物为 `/var/lib/qagent-research/execution-observations/20260910T120339.582516Z-273021fa82f54c5aaf5defe0803d8409.json`，仍为 14 个样本，observation digest 仍为 `47ea95926e6de582aba57326cd49fea2d91fe07c1b349dfcf08d712686e7e61a`。重复样本不增加独立证据，G1 自然 cron 触发及持续覆盖仍待验。
+
+本阶段实现与 `94cf6f5` 已 push 并部署；本地全量测试为 2051 passed，测试 fixture 的单行容量参数修正不改变生产备份默认 10 GiB 保护。剩余工作为 G1 自然触发、G2 首份真实源捕获与采样日前向产物验证；唯一模拟账本、研究隔离和禁止自动接管边界保持不变。

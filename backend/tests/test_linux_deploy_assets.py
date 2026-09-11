@@ -261,7 +261,7 @@ def test_backup_is_consistent_and_retention_argument_is_validated(tmp_path: Path
         db.execute("INSERT INTO evidence VALUES ('preserved')")
 
     subprocess.run(
-        [str(ROOT / "scripts/backup_sqlite.sh"), str(source), str(destination), "14"],
+        [str(ROOT / "scripts/backup_sqlite.sh"), str(source), str(destination), "14", "0"],
         check=True,
         text=True,
         capture_output=True,
