@@ -80,3 +80,9 @@ automation 已有进程内 `_run_lock`、整轮 single-host SQLite flock、持�
 主任务最终稳定代码全量回归 **2319 passed、3 项既有 warnings（238.62 秒）**，Ruff 与 diff 检查通过。首次边实施边测试的快照为 2291 passed、9 failed，包含测试替身缺少 writer 工厂绑定以及运行期间源文件摘要变化；修正后由上述稳定全量确认通过，保留首次结果作为历史，不绕过 manifest 校验。
 
 发布前主任务只读检查云端 24 项 walk-forward 记录，状态均为 none/rejected，未发现符合条件的 V3。API/storage 被既有宽范围研究指纹覆盖，本轮变化会使旧缓存指纹失效；G2 指定文件未变化，不据此修改冻结输入或放宽准入。当前已实现、已通过上述本地验收，提交与受控部署正在准备，尚未 push、尚未部署本轮 G7；自然运行、行情延迟基线与切换对账继续待验。
+
+### G7 受控部署验收（2026-09-13，周日）
+
+主任务确认提交 `fba984a1aec84eb0099d5710291cb1a87072513a` 已 push 并部署；受控 helper 退出 0，云端 `/var/tmp/qagent-rollout-relay-gsnz3wg1/result.json` 的 `ledger_equal=true`、`settings_equal=true`、`scheduler_enabled=true`，8 张账本表与 16 项 settings 保留，研究周期仍为 1800 秒。前后端 runit 均为 run，writer 锁文件属主为 `luozhenkun`、权限 `0600`。
+
+独立 tick 已启用，目标间隔 600 秒；主任务只读状态 API 返回 `configured=true`、`enabled=true`、`status=outside_session`、`attempts=0`、`completed=0`、`last_error=null`，符合此次周日观测。上述证据更新此前未部署的历史状态：已实现、已测试、已 push、已部署启用；不能据此宣称周一自然 cadence 或行情新鲜度已通过。交易时段实际触发、有效行情时间与延迟基线继续待验，G7 保持未完成。本段为部署证据补录，未修改代码或历史账本。
