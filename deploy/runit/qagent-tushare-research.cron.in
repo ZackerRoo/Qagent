@@ -1,0 +1,11 @@
+# OPT-IN only. Existing installers do not install this template.
+# Debian /etc/cron.d; UTC host: 08:30 UTC = 16:30 Shanghai, weekdays.
+# ENV_FILE must be shell-compatible and readable only by service user/root;
+# it supplies QAGENT_TUSHARE_RELAY_KEY. Never place keys on command lines or enable xtrace.
+# Create RESEARCH_OUTPUT_DIR owned by SERVICE_USER before installation.
+# Daily + current fundamentals + minute research only, no account/database writes.
+# Explicit fixed two-stock sample; change --symbols and --limit together (maximum 5).
+# Each symbol has a 180-second deadline. 0=all sections ok, 1=incomplete/error, 75=locked.
+# Immutable JSON retains partial failures and actual observation/asof/minute metadata.
+# The calendar date is not a trading-calendar guarantee; holidays can produce missing data.
+30 8 * * 1-5 @SERVICE_USER@ /bin/sh -c 'set -a; . "@ENV_FILE@"; set +a; exec "@PYTHON@" -B "@APP_DIR@/scripts/archive_tushare_research.py" --output-dir "@RESEARCH_OUTPUT_DIR@" --symbols CN:000001,CN:600519 --limit 2 --timeout 180'

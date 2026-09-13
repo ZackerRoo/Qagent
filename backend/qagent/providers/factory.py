@@ -11,6 +11,8 @@ from qagent.providers.free_us import FreeUsMarketDataProvider
 from qagent.providers.fuyao import FuyaoMarketDataProvider
 from qagent.providers.snapshot_preferred import SnapshotPreferredMarketDataProvider
 from qagent.providers.tickflow_free import TickFlowFreeDailyProvider
+from qagent.providers.tushare_relay import TushareRelayClient
+from qagent.providers.tushare_relay_market import TushareRelayMarketDataProvider
 from qagent.storage.market_cache import MarketDataCacheRepository
 
 
@@ -37,6 +39,7 @@ def build_market_data_provider(provider_mode: str) -> MarketDataProvider:
             max_fallback_batches=10,
             fallback_time_budget_seconds=120,
         )
+        fuyao = None
         if settings.fuyao_api_key:
             fuyao = FuyaoMarketDataProvider(
                 settings.fuyao_api_key,
@@ -44,15 +47,30 @@ def build_market_data_provider(provider_mode: str) -> MarketDataProvider:
                 request_timeout_seconds=settings.fuyao_timeout_seconds,
                 failure_registry=failure_registry,
             )
+            cn_provider = DailyFallbackMarketDataProvider(
+                cn_provider,
+                fuyao,
+                name="free_cn",
+                max_fallback_instruments=20,
+                max_fallback_batches=10,
+                fallback_time_budget_seconds=120,
+            )
+        if settings.tushare_relay_market_enabled and settings.tushare_relay_key:
+            cn_provider = DailyFallbackMarketDataProvider(
+                cn_provider,
+                TushareRelayMarketDataProvider(TushareRelayClient(
+                    api_key=settings.tushare_relay_key.get_secret_value(),
+                    timeout_seconds=min(5, settings.tushare_relay_timeout_seconds),
+                    retries=0,
+                )),
+                name="free_cn",
+                max_fallback_instruments=2,
+                max_fallback_batches=1,
+                fallback_time_budget_seconds=30,
+            )
+        if fuyao is not None:
             cn_provider = SnapshotPreferredMarketDataProvider(
-                DailyFallbackMarketDataProvider(
-                    cn_provider,
-                    fuyao,
-                    name="free_cn",
-                    max_fallback_instruments=20,
-                    max_fallback_batches=10,
-                    fallback_time_budget_seconds=120,
-                ),
+                cn_provider,
                 fuyao,
                 name="free_cn",
                 max_preferred_instruments=50,

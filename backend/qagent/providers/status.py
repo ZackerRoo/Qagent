@@ -111,6 +111,27 @@ def build_provider_status(
                 "不提供分钟 K 线，也不连接券商执行。"
             ),
         ),
+        ProviderStatus(
+            provider_id="tushare_relay_market",
+            name="Tushare ProMax relay daily fallback",
+            status=("disabled" if not settings.tushare_relay_market_enabled else
+                    "configured" if settings.tushare_relay_key else "missing_config"),
+            capabilities=["cn_daily_ohlcv_fallback"],
+            notes=("Explicit market opt-in; bounded fallback only for missing instruments. "
+                   "Preserves primary snapshots and minutes; configured does not mean healthy. "
+                   "Raw daily prices only; no adjusted-price or realtime guarantee."),
+        ),
+        ProviderStatus(
+            provider_id="tushare_relay_promax",
+            name="Tushare ProMax relay (research only)",
+            status=("disabled" if not settings.tushare_relay_research_enabled else
+                    "configured" if settings.tushare_relay_key else "missing_config"),
+            capabilities=["catalogue_readonly_tables", "current_research_fundamentals",
+                          "explicit_anchor_research_daily_prices"],
+            notes=("Configured is not healthy or verified. Explicit research opt-in required; "
+                   "no default pricing, trading or historical PIT authority. "
+                   "The separate HTTP-only basic service is blocked; no credential forwarding."),
+        ),
     ]
 
 

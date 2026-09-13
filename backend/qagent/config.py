@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     fmp_api_key: str | None = None
     finnhub_api_key: str | None = None
     tushare_token: str | None = None
+    tushare_relay_key: SecretStr | None = Field(default=None, repr=False)
+    tushare_relay_research_enabled: bool = False
+    tushare_relay_market_enabled: bool = False
+    tushare_relay_timeout_seconds: float = Field(default=30, gt=0, le=30)
     fuyao_api_key: str | None = None
     fuyao_base_url: str = "https://fuyao.aicubes.cn"
     fuyao_timeout_seconds: int = Field(default=8, ge=1, le=30)
