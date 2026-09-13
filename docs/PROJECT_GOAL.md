@@ -144,3 +144,9 @@
 主任务确认提交 `fba984a1aec84eb0099d5710291cb1a87072513a` 已 push 并部署；受控 helper 退出 0，云端 `/var/tmp/qagent-rollout-relay-gsnz3wg1/result.json` 的 `ledger_equal=true`、`settings_equal=true`、`scheduler_enabled=true`，8 张账本表与 16 项 settings 保留，研究周期仍为 1800 秒。前后端 runit 均为 run，writer 锁文件属主为 `luozhenkun`、权限 `0600`。
 
 独立 tick 已启用，目标间隔 600 秒；主任务只读状态 API 返回 `configured=true`、`enabled=true`、`status=outside_session`、`attempts=0`、`completed=0`、`last_error=null`，符合此次周日观测。上述证据更新此前未部署的历史状态：已实现、已测试、已 push、已部署启用；不能据此宣称周一自然 cadence 或行情新鲜度已通过。交易时段实际触发、有效行情时间与延迟基线继续待验，G7 保持未完成。本段为部署证据补录，未修改代码或历史账本。
+
+## G2 完整特征子集诊断与运行续验（2026-09-13）
+
+复用已有两模型及共识排序，新增独立原始特征完整性审计；从 09-11 真实 5,541 个配对股票核验出 3,518 个共同完整样本（63.4903%），三路均过滤既有完整集合排序，不重算子集 minimax。该集合仅为附加完整案例诊断，不新增资格门禁、不从冻结实验排除样本；完整案例选择偏差、缺失值不能归因为排名差异的边界见[审计报告](research/g2-complete-cohort-audit-20260913.md)。原冻结配对集合、模型、生产排名及模拟账户规则和历史保留，成熟收益仍未验，G2 不提升为完成。
+
+主任务复跑相关测试 **40 passed（1.33 秒）**、Ruff 通过；真实 CLI 退出 0，独立原始特征 ID 集合及三路原排序复核一致，来源与产物摘要归档于报告。完整结果已独占归档至云端 `g2-consensus-candidates/2026-09-11-complete-cohort-75d7b0bb18c9.json`、权限 `0400`，本地/云端 SHA 一致，绝对路径及摘要见报告。本轮未重跑全量，已实现、已完成上述本地验收，未 commit、未 push；研究结果已归档，脚本未部署到生产，纯离线工具无需生产部署。主任务同步只读续验当前服务健康，tick 仍 `outside_session`、`attempts=0`，Relay 研究归档无新增；周日状态不替代交易时段自然触发、分钟行情时效或新研究数据验收，G3/G7 原有待验项保留。
