@@ -92,6 +92,22 @@ ProMax 使用 `https://pcd.mobcvb.cn/tushare/pro/{api}`，能力目录在 `/tush
 
 主任务在此套件之外单独正式调用 `rt_k`（`ts_code=000001.SZ`、`__probe=0`、`limit=5`），取得 HTTP 503、`upstream_pool_exhausted`；再次调用 `a_share_mins` 的 5 分钟 09:30–10:00 窗口也返回相同机器错误。因此累计正式尝试过 18 种 API，但 17 项套件仍为独立批次，不能混算为该套件 18 项。错误码可供服务商排查上游池，尚不证明池耗尽的具体根因，也不代表分钟已经可用。
 
+## 实际启用与次日观察（2026-09-13 后续授权，已部署启用）
+
+用户已明确授权实际启用并次日观察。提交 `8d4f204e62e9092014fe9ea3d63daad1bf81de71` 包含原始日线后备、独立研究归档和受控发布 helper；push 状态尚未确认。生产新 release 正在暂存构建，尚未切换生产，运行后备是否启用待切换后核验。
+
+独立研究包 `/opt/qagent-research/tushare-relay-20260913` 已部署，归档脚本和安装器 SHA 已核验；已安装 `/etc/cron.d/qagent-relay-research`，周一至周五 08:30 UTC（北京时间 16:30）采集固定股票 `000001`、`600519` 的日线、当前基本面与 `rt_min` 研究数据，输出到 `/var/lib/qagent-research/tushare-relay`。密钥在独立 env 中，权限 `0640`、属主组 `root:luozhenkun`；不写入报告和归档正文。此研究任务不写模拟账本，不接线运行分钟或基本面消费者。
+
+单股 09-11 手动研究归档正在运行，退出状态和产物待主任务补录。已安装 cron 与复制脚本属于部署证据，不能替代自然触发、业务数据成功或生产后备生效。次日按自然归档的接口状态、行数和数据时间，并结合运行配置、健康与后备结果观察；本轮测试、生产切换和最终运行验收待补录，G3/G7 不升级完成。
+
+后续已确认本轮全量后端 **2246 passed、3 项 warnings（239.71 秒）**，测试收集早于最终 helper 和新增归档用例；最终专项 **49 passed（1.96 秒）**，由发布 helper 17、归档 14、市场适配 18 项组成，Ruff 与 `bash -n` 通过。云端 `uv --frozen` 依赖安装、`npm ci`/前端构建和隔离启动均通过。
+
+手动归档最终退出 1、`collector_timeout`（180 秒），实际产物为 `/var/lib/qagent-research/tushare-relay/20260913T104714.826464Z-5546f1e60b224b4bbe0593f5a75824c8.json`，未取得有效数据；归档留存成功与取数失败分开记录，cron 安装保持不变。生产空闲 preflight 已通过并核验 16 项 settings，受控发布正在执行，最终切换和运行启用证据待补录。
+
+最终受控切换退出 0，证据 `/var/tmp/qagent-rollout-relay-orqnnd2o/result.json` 确认 release `8d4f204e62e9092014fe9ea3d63daad1bf81de71`、`ledger_equal=true`、`settings_equal=true`、`scheduler_enabled=true`；8 张账本表稳定，16 项 settings 保留。API health 正常，API provider-status Relay market 为 `configured`，确认运行服务已读取市场开关和凭据；进程 environ 读取被权限拒绝，未取得直接进程环境证据。原始日线后备已部署并启用，未来缺股请求具备触发条件，尚未取得实际 Relay bar 成功样本，不据此宣称上游可用性改善。
+
+后端研究功能开关仍关闭，独立 cron 采集器通过显式研究开关运行，两者状态分开。下一工作日北京时间 16:30 按 cron 采集 `000001`/`600519` 两股研究样本，待核验自然触发、数据行和有效行情时间；不等于全市场、全接口启用或选股能力升级。实现、上述测试及部署启用均已完成，未 push；最新文档待主任务 review 后提交。上文部署过程快照保留，G3/G7 完成条件不因切换成功自动满足。
+
 ## 附录：两份手册逐 API 覆盖台账
 
 ### 后续运行接线授权：模拟盘与日常任务（2026-09-13，本地验收通过）

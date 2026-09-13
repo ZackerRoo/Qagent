@@ -48,3 +48,15 @@ python scripts/collect_tushare_research.py --symbol CN:000001 --date 2026-09-11 
 新运行适配器的主任务真实 smoke：`CN:000001` / `2026-09-11`，5 秒超时、零重试，返回 0 行、`transport_error`。脚本退出 0 仅说明安全处理取数失败，未通过数据可用性验收，不据此启用云端源。
 
 本轮主任务全量后端回归 **2215 passed、3 项既有 warnings（231.82 秒）**，测试收集早于新运行测试文件定稿；最终相关回归 **107 passed、1 项 warning（2.42 秒）**，包含 18 项运行专项，reviewer 独立复核同 18 项通过。Ruff/diff 检查通过，研究摘要保持 `309625c7be262e81bc22c35f40f563f7c497d78252ac6b4dfabd0e168642c848`。本地原始日线接线验收完成，可用性、部署及自然运行仍未完成，G3/G7 不升级。
+
+## 实际启用与次日观察（后续授权，已部署启用）
+
+用户已明确要求实际启用并次日观察。`8d4f204e62e9092014fe9ea3d63daad1bf81de71` 已提交原始日线后备、研究归档与受控发布 helper；push 尚未确认，生产 release 暂存构建中，尚未切换，原始日线运行后备生效待验。
+
+独立研究包 `/opt/qagent-research/tushare-relay-20260913` 已复制，归档/安装脚本 SHA 核验通过；cron `/etc/cron.d/qagent-relay-research` 已安装，工作日 08:30 UTC（北京时间 16:30）固定采集 `000001`、`600519` 的日线、当前基本面及 `rt_min`，归档目录 `/var/lib/qagent-research/tushare-relay`。密钥使用独立 env（`0640`、`root:luozhenkun`），归档不写账本，不将分钟转入模拟执行。单股 09-11 手动归档仍在运行，结果待补录。
+
+本轮已推进研究采集的部署接线，尚未获得自然 cron、生产切换或后备生效验收。次日以真实产物、来源错误、有效行情时间和运行配置判断可用性；此前成功/失败及测试快照均保留，不由 cron 安装推断数据缺口已补齐或 G7 时效已改善。
+
+后续主任务测试为全量 **2246 passed、3 项 warnings（239.71 秒）**，收集早于最终 helper/新增归档用例；最终专项 **49 passed（1.96 秒）**，包含发布 17、归档 14、市场适配 18 项，Ruff 与 `bash -n` 通过。云端 frozen 依赖安装、前端安装/构建和隔离启动通过。手动归档 180 秒后退出 1、`collector_timeout`，产物 `/var/lib/qagent-research/tushare-relay/20260913T104714.826464Z-5546f1e60b224b4bbe0593f5a75824c8.json` 无有效数据，保留失败证据；cron 仍已安装。生产空闲 preflight 已通过、核验 16 项 settings，发布执行中，尚不能宣称切换或后备生效。
+
+最终已完成受控切换，退出 0；`/var/tmp/qagent-rollout-relay-orqnnd2o/result.json` 确认 release `8d4f204e62e9092014fe9ea3d63daad1bf81de71`、账本与 settings 均相等、调度已启用，8 张账本表和 16 项 settings 保留。API health 正常，provider-status Relay market 为 `configured`，证明服务读取了开关和凭据；进程 environ 无权限读取，未直接核验。原始日线后备已实际启用，未来缺失股票可进入该路径；尚无实际 Relay bar 成功，数据缺口改善仍未验。后端研究开关保持关闭，独立 cron 采集器显式启用研究，下一工作日北京时间 16:30 采集固定两股；不是全市场或全接口启用，不提升选股结论。已实现、已测试、已部署启用，未 push；本段文档待主任务 review 后提交，G3/G7 保持未完成。

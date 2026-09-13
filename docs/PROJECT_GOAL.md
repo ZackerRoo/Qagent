@@ -106,3 +106,17 @@
 主任务以新运行适配器真实请求 `CN:000001` / `2026-09-11`，5 秒超时、零重试，结果 0 行、`transport_error`；脚本退出 0 表示安全处理失败，不是数据可用性通过。本次不据此启用云端数据源，云端保持原状，可用性仍待验。
 
 主任务全量后端回归 **2215 passed、3 项既有 warnings（231.82 秒）**；该次收集发生在新运行测试文件定稿前，不能将其描述为覆盖最终全部新增测试。最终相关回归 **107 passed、1 项 warning（2.42 秒）**，包含 18 项运行适配专项，reviewer 单独复核同 18 项通过；Ruff/diff 检查通过。研究摘要仍为 `309625c7be262e81bc22c35f40f563f7c497d78252ac6b4dfabd0e168642c848`。已实现、已完成上述本地测试，未 commit、未 push、未部署、未启用云端；真实可用性和自然运行不由本地测试替代。
+
+## G3 / G7 实际启用与次日观察（2026-09-13，已部署启用）
+
+最终运行复核：主任务确认 `current` 指向 `8d4f204`，前后端 runit 均为 run，cron 进程 PID 21 存在；这不替代下一次自然研究采集验收。
+
+用户后续明确授权实际启用并于次日观察，更新此前未启用的历史快照。提交 `8d4f204e62e9092014fe9ea3d63daad1bf81de71` 已包含原始日线后备、独立研究归档和受控发布 helper；push 状态尚未确认。生产新 release 暂存构建进行中，尚未切换生产，不能提前称运行后备已生效。
+
+独立研究包已复制至 `/opt/qagent-research/tushare-relay-20260913`，归档脚本及安装器 SHA 已核验；`/etc/cron.d/qagent-relay-research` 已安装，周一至周五 08:30 UTC（北京时间 16:30）采集固定股票 `000001`、`600519` 的日线、当前基本面及 `rt_min` 研究数据，归档至 `/var/lib/qagent-research/tushare-relay`。独立凭据 env 权限为 `0640`、属主组 `root:luozhenkun`，文档不含密钥。研究归档不写模拟账本；安装 cron 不等于自然触发或数据可用验收。
+
+单股、09-11 日期的手动研究归档正在运行，产物及退出状态待主任务补录；生产暂存构建、受控切换、测试和运行状态也分别待验。次日检查实际后备配置、健康及自然任务产物，按接口记录行数、错误和行情时间；G3/G7 仍未完成，分钟仅供研究，既有账户、规则和历史保留。
+
+后续验收：本轮后端全量 **2246 passed、3 项 warnings（239.71 秒）**，收集早于最终 helper 和新增归档用例；最终专项 **49 passed（1.96 秒）**，包括发布 helper 17、归档 14、市场适配 18 项。Ruff 与 `bash -n` 通过。云端 `uv --frozen` 依赖安装、`npm ci`/构建及隔离启动均通过。手动归档最终退出 1、`collector_timeout`（180 秒），已保留 `/var/lib/qagent-research/tushare-relay/20260913T104714.826464Z-5546f1e60b224b4bbe0593f5a75824c8.json`，无有效数据；cron 安装状态不变。生产空闲 preflight 已通过并核验 16 项 settings，受控发布执行中，尚未取得切换成功证据。
+
+最终切换验收：受控发布退出 0，`/var/tmp/qagent-rollout-relay-orqnnd2o/result.json` 确认 release 为 `8d4f204e62e9092014fe9ea3d63daad1bf81de71`、`ledger_equal=true`、`settings_equal=true`、`scheduler_enabled=true`，8 张账本表稳定、16 项 settings 保留。API health 正常，provider-status 的 Relay market 为 `configured`，确认运行服务已读取市场开关和凭据；进程 environ 因权限限制未读取，不据此声称已直接核验。原始日线后备已部署启用，未来缺股请求可触发，但尚无实际 Relay bar 成功证据。后端研究开关仍关闭；独立 cron 采集器显式启用研究功能，两者不混同。下一工作日北京时间 16:30 将按已安装 cron 采集两只股票，自然触发与数据有效性待验；不代表全市场、全接口启用或选股能力提升。已实现、已完成上述测试、已部署启用，尚未 push；本段文档待主任务 review 后提交，G3/G7 原有未完成验收继续保留。
