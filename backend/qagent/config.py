@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     a_share_enhanced_timeout_seconds: int = 12
     a_share_enhanced_cache_ttl_hours: int = 6
     walk_forward_snapshot_workers: int = Field(default=1, ge=1, le=4)
+    paper_update_scheduler_enabled: bool = False
+    paper_update_interval_seconds: int = Field(default=600, ge=600, le=600)
 
     model_config = SettingsConfigDict(
         env_prefix="QAGENT_",

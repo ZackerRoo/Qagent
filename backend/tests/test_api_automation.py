@@ -1188,7 +1188,9 @@ def test_paper_candidate_requires_latest_price_for_entry_validation():
 
 
 def test_automation_cycle_publishes_post_cycle_risk_gate(monkeypatch):
-    paper_repo = SimpleNamespace(list_trades=lambda **_: [])
+    paper_repo = SimpleNamespace(
+        list_trades=lambda **_: [], session_factory=create_session_factory("sqlite:///:memory:"),
+    )
     shadow_resolution_calls = []
     gates = iter(
         [
@@ -1949,7 +1951,9 @@ def test_automation_cycle_captures_fuyao_only_after_matching_daily_scan(monkeypa
         data_health={"full_market_signal_date": signal_date.isoformat()},
     )
     repo = SimpleNamespace(get_latest_full_market_scan_job=lambda **_: latest_scan)
-    paper_repo = SimpleNamespace(list_trades=lambda **_: [])
+    paper_repo = SimpleNamespace(
+        list_trades=lambda **_: [], session_factory=create_session_factory("sqlite:///:memory:"),
+    )
     captured: list[dict[str, object]] = []
 
     monkeypatch.setattr(routes, "_latest_completed_a_share_session", lambda *args: signal_date)
@@ -1970,6 +1974,7 @@ def test_automation_cycle_captures_fuyao_only_after_matching_daily_scan(monkeypa
             fuyao_api_key="configured-test-key",
             fuyao_base_url="https://example.test",
             fuyao_timeout_seconds=5,
+            paper_update_scheduler_enabled=False,
         ),
     )
     monkeypatch.setattr(routes, "FuyaoClient", lambda *args, **kwargs: object())
@@ -2138,7 +2143,9 @@ def test_uncaught_cycle_exception_aborts_and_releases_runtime_lease(tmp_path, mo
 
 
 def test_automation_cycle_publishes_paper_provider_telemetry(monkeypatch):
-    paper_repo = SimpleNamespace(list_trades=lambda **_: [])
+    paper_repo = SimpleNamespace(
+        list_trades=lambda **_: [], session_factory=create_session_factory("sqlite:///:memory:"),
+    )
     market_provider = object()
     telemetry_calls: list[tuple[str, object]] = []
 

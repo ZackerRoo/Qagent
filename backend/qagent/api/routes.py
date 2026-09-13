@@ -1,7 +1,7 @@
 from copy import deepcopy
 from collections.abc import Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -70,6 +70,8 @@ from qagent.briefing.export import render_daily_brief_markdown
 from qagent.catalysts.hypotheses import build_catalyst_hypotheses
 from qagent.catalysts.providers import FreeCatalystProvider
 from qagent.config import get_settings
+from qagent.storage.paper_writer import paper_account_writer, paper_writer_route, run_paper_update_slot
+from qagent.jobs.paper_update_scheduler import PaperUpdateScheduler, current_slot
 from qagent.data_management import build_historical_coverage_manifest
 from qagent.db import create_session_factory, initialize_database
 from qagent.domain.models import OpportunityCard, PortfolioPlan, SectorStrength
@@ -3665,6 +3667,7 @@ def run_automation_scheduler_once(
     except AutomationCycleConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     _persist_automation_scheduler_state(state)
+    _sync_paper_update_scheduler()
     return state.model_dump(mode="json")
 
 
@@ -3703,6 +3706,12 @@ def start_automation_scheduler(
         queue_alerts=queue_alerts,
         run_forward_evidence=run_forward_evidence,
     )
+    if (
+        get_settings().paper_update_scheduler_enabled
+        and settings.update_paper
+        and _paper_update_scheduler.state().status == "stopping"
+    ):
+        raise HTTPException(status_code=409, detail="paper update worker is still stopping")
     _attach_automation_scheduler_state_listener()
     try:
         recoverable = None
@@ -3730,14 +3739,29 @@ def start_automation_scheduler(
         _automation_scheduler.state(),
         control_plane=True,
     )
+    try:
+        _sync_paper_update_scheduler()
+    except RuntimeError as exc:
+        stopped = _automation_scheduler.stop()
+        _persist_automation_scheduler_state(stopped, control_plane=True)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return state.model_dump(mode="json")
 
 
 @router.post("/automation/scheduler/stop")
 def stop_automation_scheduler() -> dict[str, object]:
     state = _automation_scheduler.stop()
+    paper_stopped = _paper_update_scheduler.stop()
     _persist_automation_scheduler_state(state, control_plane=True)
-    return state.model_dump(mode="json")
+    return {**state.model_dump(mode="json"), "paper_tick_idle": paper_stopped}
+
+
+@router.get("/automation/paper-update/status")
+def paper_update_scheduler_status() -> dict[str, object]:
+    return {
+        "configured": get_settings().paper_update_scheduler_enabled,
+        "state": asdict(_paper_update_scheduler.state()),
+    }
 
 
 def restore_automation_scheduler_from_storage() -> None:
@@ -3759,6 +3783,7 @@ def restore_automation_scheduler_from_storage() -> None:
         _automation_scheduler.resume(settings, _run_auto_processing_cycle)
     else:
         _automation_scheduler.configure(settings)
+    _sync_paper_update_scheduler()
 
 
 def _persist_automation_scheduler_state(state, *, control_plane: bool = False) -> None:
@@ -3792,6 +3817,55 @@ def _shutdown_automation_scheduler_loop() -> None:
     """Stop process-local work without changing the persisted enabled setting."""
 
     _automation_scheduler.shutdown()
+    _paper_update_scheduler.stop()
+
+
+def _run_independent_paper_update(tick):
+    state = _automation_scheduler.state()
+    if not state.enabled or not state.settings.update_paper:
+        raise RuntimeError("paper update disabled by automation control plane")
+    repo = _paper_repo()
+
+    def update():
+        latest = _automation_scheduler.state()
+        if not latest.enabled or not latest.settings.update_paper:
+            raise RuntimeError("paper update disabled while waiting for account writer")
+        if current_slot(datetime.now(timezone.utc)) != tick.due_at:
+            raise RuntimeError("paper update slot expired while waiting for account writer")
+        mode = latest.settings.provider
+        result = update_paper_trades(
+            repo, provider=build_market_data_provider(mode), provider_mode=mode,
+        )
+        health = result.data_health
+        outcome, reason = _automation_stage_outcome(
+            "paper_update", {**health, "automation_paper_update_status": "completed"},
+        )
+        if outcome != "success":
+            raise RuntimeError(reason)
+        return result
+
+    return run_paper_update_slot(repo.session_factory, tick.slot_id, update)
+
+
+_paper_update_scheduler = PaperUpdateScheduler(_run_independent_paper_update)
+
+
+def _sync_paper_update_scheduler():
+    state = _automation_scheduler.state()
+    if get_settings().paper_update_scheduler_enabled and state.enabled and state.settings.update_paper:
+        _paper_update_scheduler.start()
+    else:
+        _paper_update_scheduler.stop()
+
+
+def _independent_paper_update_covers_now():
+    state = _automation_scheduler.state()
+    return (
+        get_settings().paper_update_scheduler_enabled
+        and state.enabled
+        and state.settings.update_paper
+        and current_slot(datetime.now(timezone.utc)) is not None
+    )
 
 
 def _auto_processing_settings(
@@ -4418,238 +4492,242 @@ def _run_auto_processing_cycle_inner(
             failure_reason=f"fuyao research is {fuyao_status}",
         )
 
-    paper_seed_restored = restore_stage("paper_seed")
-    paper_seed_errors_before = len(errors)
-    if paper_seed_restored:
-        risk_gate_health = {
-            key: value
-            for key, value in data_health.items()
-            if key.startswith("paper_risk_gate_") or key.startswith("paper_market_entry_gate")
-        }
-        allow_seed_paper = False
-    else:
-        allow_seed_paper, risk_gate_health = _paper_seed_risk_gate(repo, paper_repo, mode)
-        data_health.update(risk_gate_health)
-    # A full book still needs to evaluate replacement candidates. The risk
-    # gate may prevent direct admission, but it must not bypass the
-    # low-quality pending-order replacement path.
-    if (
-        not paper_seed_restored
-        and risk_gate_health.get("paper_risk_gate_action") == "capacity_full"
-    ):
-        allow_seed_paper = True
-
-    account_getter = getattr(paper_repo, "get_account_settings", None)
-    sizing_target_weight = (
-        account_getter().allocation_per_trade_pct if callable(account_getter) else Decimal("10")
-    )
-    data_health.update(
-        {
-            "paper_sizing_policy": "paper-lot-aware-v2",
-            "paper_sizing_target_weight_pct": str(sizing_target_weight),
-            "paper_sizing_max_weight_pct": "20",
-            "paper_sizing_buffer_pct": "1",
-            "paper_sizing_blocked_by_cash": "0",
-            "paper_sizing_blocked_by_allocation": "0",
-        }
-    )
-
-    if not paper_seed_restored and settings.seed_paper and mode != "fixture" and allow_seed_paper:
-        try:
-            effective_seed_limit = _paper_seed_limit_from_risk_gate(
-                settings.seed_limit,
-                risk_gate_health,
-            )
-            effective_active_limit = _paper_seed_active_limit_from_risk_gate(
-                paper_repo,
-                settings.seed_limit,
-                risk_gate_health,
-            )
-            candidate_pool_limit = _paper_candidate_pool_limit(effective_seed_limit)
-            snapshots, seed_health = _paper_seed_snapshots_from_recommendations(
-                repo,
-                mode=mode,
-                include_etfs=settings.include_etfs,
-                max_age=timedelta(minutes=max(settings.scan_max_age_minutes, 1)),
-                limit=candidate_pool_limit,
-                expected_signal_date=expected_signal_date,
-            )
-            risk_gate_health = _paper_merge_market_risk_gate(
-                risk_gate_health,
-                seed_health,
-            )
+    with paper_account_writer(paper_repo.session_factory):
+        paper_seed_restored = restore_stage("paper_seed")
+        paper_seed_errors_before = len(errors)
+        if paper_seed_restored:
+            risk_gate_health = {
+                key: value
+                for key, value in data_health.items()
+                if key.startswith("paper_risk_gate_") or key.startswith("paper_market_entry_gate")
+            }
+            allow_seed_paper = False
+        else:
+            allow_seed_paper, risk_gate_health = _paper_seed_risk_gate(repo, paper_repo, mode)
             data_health.update(risk_gate_health)
-            snapshots, production_health = _ranking_v3_production_seed_scope(
-                repo,
-                snapshots,
-                provider=mode,
-            )
-            data_health.update(production_health)
-            seed_allocation_multiplier = _paper_seed_allocation_multiplier(risk_gate_health)
-            account = paper_repo.get_account_settings()
-            snapshots, strategy_capacity_health = _paper_strategy_capacity_filter(
-                paper_repo,
-                snapshots,
-                provider=mode,
-                max_per_strategy=2,
-            )
-            data_health.update(strategy_capacity_health)
-            snapshots, industry_capacity_health = _paper_industry_capacity_filter(
-                paper_repo,
-                snapshots,
-                provider=mode,
-                max_per_industry=PAPER_MAX_PER_INDUSTRY,
-            )
-            data_health.update(industry_capacity_health)
-            snapshots, market_probe_health = _paper_market_probe_snapshots(
-                paper_repo,
-                snapshots,
-                provider=mode,
-                risk_gate_health=risk_gate_health,
-                signal_date=expected_signal_date or _a_share_today(),
-            )
-            data_health.update(market_probe_health)
-            effective_seed_limit = _paper_seed_limit_from_risk_gate(
-                settings.seed_limit,
-                risk_gate_health,
-            )
-            effective_active_limit = _paper_seed_active_limit_from_risk_gate(
-                paper_repo,
-                settings.seed_limit,
-                risk_gate_health,
-            )
-            pool_health = _paper_candidate_pool_health(
-                paper_repo=paper_repo,
-                snapshots=snapshots,
-                provider=mode,
-                risk_gate_health=risk_gate_health,
-            )
-            data_health.update(pool_health)
-            replacement_health = _maybe_replace_pending_paper_trade_for_candidate(
-                paper_repo=paper_repo,
-                snapshots=snapshots,
-                provider=mode,
-                risk_gate_health=risk_gate_health,
-            )
-            data_health.update(replacement_health)
-            replaced_instrument = replacement_health.get("paper_replacement_replacee")
-            if (
-                replacement_health.get("paper_replacement_action") == "replaced_pending"
-                and replaced_instrument
-            ):
-                snapshots = [
-                    snapshot
-                    for snapshot in snapshots
-                    if snapshot.instrument_id != replaced_instrument
-                ]
-                data_health["paper_replacement_excluded_replacee"] = replaced_instrument
-                replacement_candidate = replacement_health.get("paper_replacement_candidate")
-                if replacement_candidate:
-                    snapshots = _prioritize_paper_replacement_candidate(
-                        snapshots,
-                        replacement_candidate,
-                    )
-                    data_health["paper_replacement_seed_priority"] = str(replacement_candidate)
-            recently_released = _paper_recently_released_instruments(
-                paper_repo.list_trades(limit=1000, provider=mode)
-            )
-            if recently_released:
-                before_release_filter = len(snapshots)
-                snapshots = [
-                    snapshot
-                    for snapshot in snapshots
-                    if snapshot.instrument_id not in recently_released
-                ]
-                data_health["paper_recently_released_blocked"] = str(
-                    before_release_filter - len(snapshots)
+        # A full book still needs to evaluate replacement candidates. The risk
+        # gate may prevent direct admission, but it must not bypass the
+        # low-quality pending-order replacement path.
+        if (
+            not paper_seed_restored
+            and risk_gate_health.get("paper_risk_gate_action") == "capacity_full"
+        ):
+            allow_seed_paper = True
+
+        account_getter = getattr(paper_repo, "get_account_settings", None)
+        sizing_target_weight = (
+            account_getter().allocation_per_trade_pct if callable(account_getter) else Decimal("10")
+        )
+        data_health.update(
+            {
+                "paper_sizing_policy": "paper-lot-aware-v2",
+                "paper_sizing_target_weight_pct": str(sizing_target_weight),
+                "paper_sizing_max_weight_pct": "20",
+                "paper_sizing_buffer_pct": "1",
+                "paper_sizing_blocked_by_cash": "0",
+                "paper_sizing_blocked_by_allocation": "0",
+            }
+        )
+
+        if not paper_seed_restored and settings.seed_paper and mode != "fixture" and allow_seed_paper:
+            try:
+                effective_seed_limit = _paper_seed_limit_from_risk_gate(
+                    settings.seed_limit,
+                    risk_gate_health,
                 )
-            before_price_filter = len(snapshots)
-            snapshots = [
-                snapshot
-                for snapshot in snapshots
-                if _paper_candidate_price_basis_is_consistent(
-                    snapshot,
-                    latest_value=_paper_snapshot_latest_value(snapshot),
+                effective_active_limit = _paper_seed_active_limit_from_risk_gate(
+                    paper_repo,
+                    settings.seed_limit,
+                    risk_gate_health,
                 )
-            ]
-            data_health["paper_missing_or_inconsistent_price_blocked"] = str(
-                before_price_filter - len(snapshots)
-            )
-            tracking_signal_date = (
-                expected_signal_date or _a_share_today()
-                if seed_health.get("automation_seed_source") == "latest_recommendation_cache"
-                else None
-            )
-            seed_result = seed_paper_trades_from_snapshots(
-                paper_repo,
-                snapshots,
-                provider=mode,
-                max_created=effective_seed_limit,
-                max_active_trades=effective_active_limit,
-                max_signal_age_days=None,
-                signal_date_override=tracking_signal_date,
-                notes=(
-                    "账户表现触发风险收缩；合格候选按剩余仓位进入。"
-                    if risk_gate_health.get("paper_risk_gate_action") == "throttle_new_entries"
-                    else ""
-                ),
-                allocation_multiplier=Decimal(
-                    str(seed_allocation_multiplier)
-                    if risk_gate_health.get("paper_risk_gate_action") == "throttle_new_entries"
-                    else "1.0"
-                ),
-                admission_repo=repo,
-            )
-            if risk_gate_health.get("paper_market_entry_gate") == "observed":
-                _, post_seed_market_probe_health = _paper_market_probe_snapshots(
+                candidate_pool_limit = _paper_candidate_pool_limit(effective_seed_limit)
+                snapshots, seed_health = _paper_seed_snapshots_from_recommendations(
+                    repo,
+                    mode=mode,
+                    include_etfs=settings.include_etfs,
+                    max_age=timedelta(minutes=max(settings.scan_max_age_minutes, 1)),
+                    limit=candidate_pool_limit,
+                    expected_signal_date=expected_signal_date,
+                )
+                risk_gate_health = _paper_merge_market_risk_gate(
+                    risk_gate_health,
+                    seed_health,
+                )
+                data_health.update(risk_gate_health)
+                snapshots, production_health = _ranking_v3_production_seed_scope(
+                    repo,
+                    snapshots,
+                    provider=mode,
+                )
+                data_health.update(production_health)
+                seed_allocation_multiplier = _paper_seed_allocation_multiplier(risk_gate_health)
+                account = paper_repo.get_account_settings()
+                snapshots, strategy_capacity_health = _paper_strategy_capacity_filter(
+                    paper_repo,
+                    snapshots,
+                    provider=mode,
+                    max_per_strategy=2,
+                )
+                data_health.update(strategy_capacity_health)
+                snapshots, industry_capacity_health = _paper_industry_capacity_filter(
+                    paper_repo,
+                    snapshots,
+                    provider=mode,
+                    max_per_industry=PAPER_MAX_PER_INDUSTRY,
+                )
+                data_health.update(industry_capacity_health)
+                snapshots, market_probe_health = _paper_market_probe_snapshots(
                     paper_repo,
                     snapshots,
                     provider=mode,
                     risk_gate_health=risk_gate_health,
                     signal_date=expected_signal_date or _a_share_today(),
                 )
-                data_health.update(post_seed_market_probe_health)
-            paper_created += seed_result.created
-            data_health["automation_paper_seed_status"] = (
-                "completed" if snapshots else "no_candidates"
-            )
-            data_health["automation_seed_snapshots"] = str(len(snapshots))
-            data_health["automation_seed_skipped"] = str(seed_result.skipped)
-            data_health["automation_seed_skipped_unaffordable"] = str(
-                seed_result.skipped_unaffordable
-            )
-            data_health["paper_sizing_policy"] = "paper-lot-aware-v2"
-            data_health["paper_sizing_target_weight_pct"] = str(account.allocation_per_trade_pct)
-            data_health["paper_sizing_max_weight_pct"] = "20"
-            data_health["paper_sizing_buffer_pct"] = "1"
-            data_health["paper_sizing_blocked_by_cash"] = str(seed_result.blocked_by_cash)
-            data_health["paper_sizing_blocked_by_allocation"] = str(
-                seed_result.blocked_by_allocation
-            )
-            data_health["automation_seed_effective_limit"] = str(effective_seed_limit)
-            data_health["automation_seed_active_limit"] = str(effective_active_limit)
-            data_health["automation_seed_candidate_pool_limit"] = str(candidate_pool_limit)
-            data_health.update(seed_health)
-            if snapshots and snapshots[0].signal_date is not None:
-                data_health["automation_seed_latest_signal_date"] = snapshots[
-                    0
-                ].signal_date.isoformat()
-        except Exception as exc:
-            errors.append(f"paper_seed: {exc}")
-    elif not paper_seed_restored and settings.seed_paper and mode != "fixture":
-        data_health["automation_seed_skipped_by_risk_gate"] = "true"
-        data_health["automation_paper_seed_status"] = "policy_blocked"
+                data_health.update(market_probe_health)
+                effective_seed_limit = _paper_seed_limit_from_risk_gate(
+                    settings.seed_limit,
+                    risk_gate_health,
+                )
+                effective_active_limit = _paper_seed_active_limit_from_risk_gate(
+                    paper_repo,
+                    settings.seed_limit,
+                    risk_gate_health,
+                )
+                pool_health = _paper_candidate_pool_health(
+                    paper_repo=paper_repo,
+                    snapshots=snapshots,
+                    provider=mode,
+                    risk_gate_health=risk_gate_health,
+                )
+                data_health.update(pool_health)
+                replacement_health = _maybe_replace_pending_paper_trade_for_candidate(
+                    paper_repo=paper_repo,
+                    snapshots=snapshots,
+                    provider=mode,
+                    risk_gate_health=risk_gate_health,
+                )
+                data_health.update(replacement_health)
+                replaced_instrument = replacement_health.get("paper_replacement_replacee")
+                if (
+                    replacement_health.get("paper_replacement_action") == "replaced_pending"
+                    and replaced_instrument
+                ):
+                    snapshots = [
+                        snapshot
+                        for snapshot in snapshots
+                        if snapshot.instrument_id != replaced_instrument
+                    ]
+                    data_health["paper_replacement_excluded_replacee"] = replaced_instrument
+                    replacement_candidate = replacement_health.get("paper_replacement_candidate")
+                    if replacement_candidate:
+                        snapshots = _prioritize_paper_replacement_candidate(
+                            snapshots,
+                            replacement_candidate,
+                        )
+                        data_health["paper_replacement_seed_priority"] = str(replacement_candidate)
+                recently_released = _paper_recently_released_instruments(
+                    paper_repo.list_trades(limit=1000, provider=mode)
+                )
+                if recently_released:
+                    before_release_filter = len(snapshots)
+                    snapshots = [
+                        snapshot
+                        for snapshot in snapshots
+                        if snapshot.instrument_id not in recently_released
+                    ]
+                    data_health["paper_recently_released_blocked"] = str(
+                        before_release_filter - len(snapshots)
+                    )
+                before_price_filter = len(snapshots)
+                snapshots = [
+                    snapshot
+                    for snapshot in snapshots
+                    if _paper_candidate_price_basis_is_consistent(
+                        snapshot,
+                        latest_value=_paper_snapshot_latest_value(snapshot),
+                    )
+                ]
+                data_health["paper_missing_or_inconsistent_price_blocked"] = str(
+                    before_price_filter - len(snapshots)
+                )
+                tracking_signal_date = (
+                    expected_signal_date or _a_share_today()
+                    if seed_health.get("automation_seed_source") == "latest_recommendation_cache"
+                    else None
+                )
+                seed_result = seed_paper_trades_from_snapshots(
+                    paper_repo,
+                    snapshots,
+                    provider=mode,
+                    max_created=effective_seed_limit,
+                    max_active_trades=effective_active_limit,
+                    max_signal_age_days=None,
+                    signal_date_override=tracking_signal_date,
+                    notes=(
+                        "账户表现触发风险收缩；合格候选按剩余仓位进入。"
+                        if risk_gate_health.get("paper_risk_gate_action") == "throttle_new_entries"
+                        else ""
+                    ),
+                    allocation_multiplier=Decimal(
+                        str(seed_allocation_multiplier)
+                        if risk_gate_health.get("paper_risk_gate_action") == "throttle_new_entries"
+                        else "1.0"
+                    ),
+                    admission_repo=repo,
+                )
+                if risk_gate_health.get("paper_market_entry_gate") == "observed":
+                    _, post_seed_market_probe_health = _paper_market_probe_snapshots(
+                        paper_repo,
+                        snapshots,
+                        provider=mode,
+                        risk_gate_health=risk_gate_health,
+                        signal_date=expected_signal_date or _a_share_today(),
+                    )
+                    data_health.update(post_seed_market_probe_health)
+                paper_created += seed_result.created
+                data_health["automation_paper_seed_status"] = (
+                    "completed" if snapshots else "no_candidates"
+                )
+                data_health["automation_seed_snapshots"] = str(len(snapshots))
+                data_health["automation_seed_skipped"] = str(seed_result.skipped)
+                data_health["automation_seed_skipped_unaffordable"] = str(
+                    seed_result.skipped_unaffordable
+                )
+                data_health["paper_sizing_policy"] = "paper-lot-aware-v2"
+                data_health["paper_sizing_target_weight_pct"] = str(account.allocation_per_trade_pct)
+                data_health["paper_sizing_max_weight_pct"] = "20"
+                data_health["paper_sizing_buffer_pct"] = "1"
+                data_health["paper_sizing_blocked_by_cash"] = str(seed_result.blocked_by_cash)
+                data_health["paper_sizing_blocked_by_allocation"] = str(
+                    seed_result.blocked_by_allocation
+                )
+                data_health["automation_seed_effective_limit"] = str(effective_seed_limit)
+                data_health["automation_seed_active_limit"] = str(effective_active_limit)
+                data_health["automation_seed_candidate_pool_limit"] = str(candidate_pool_limit)
+                data_health.update(seed_health)
+                if snapshots and snapshots[0].signal_date is not None:
+                    data_health["automation_seed_latest_signal_date"] = snapshots[
+                        0
+                    ].signal_date.isoformat()
+            except Exception as exc:
+                errors.append(f"paper_seed: {exc}")
+        elif not paper_seed_restored and settings.seed_paper and mode != "fixture":
+            data_health["automation_seed_skipped_by_risk_gate"] = "true"
+            data_health["automation_paper_seed_status"] = "policy_blocked"
 
-    if not paper_seed_restored:
-        finish_stage(
-            "paper_seed",
-            paper_seed_errors_before,
-            skipped=not settings.seed_paper or mode == "fixture",
-        )
+        if not paper_seed_restored:
+            finish_stage(
+                "paper_seed",
+                paper_seed_errors_before,
+                skipped=not settings.seed_paper or mode == "fixture",
+            )
 
     paper_update_restored = restore_stage("paper_update")
     paper_update_errors_before = len(errors)
-    if not paper_update_restored and settings.update_paper:
+    independent_paper_active = _independent_paper_update_covers_now()
+    if independent_paper_active:
+        data_health["automation_paper_update_status"] = "independent_scheduler"
+    if not paper_update_restored and settings.update_paper and not independent_paper_active:
         try:
             paper_market_provider = build_market_data_provider(mode)
             reset_fuyao_telemetry(paper_market_provider)
@@ -4682,7 +4760,7 @@ def _run_auto_processing_cycle_inner(
         finish_stage(
             "paper_update",
             paper_update_errors_before,
-            skipped=not settings.update_paper,
+            skipped=not settings.update_paper or independent_paper_active,
         )
 
     factor_shadow_restored = restore_stage("factor_shadow")
@@ -7343,6 +7421,7 @@ def paper_trade_execution_replay_readiness() -> PaperExecutionReplayReadiness:
 
 
 @router.post("/paper-trades/seed")
+@paper_writer_route(lambda: _paper_repo())
 def seed_paper_trades(provider: str = "fixture", limit: int = 50) -> dict[str, object]:
     if limit <= 0 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
@@ -7438,6 +7517,7 @@ def paper_trade_session(provider: str | None = None) -> dict[str, object]:
 
 
 @router.post("/paper-trades/session/start")
+@paper_writer_route(lambda: _paper_repo())
 def start_paper_trade_session(request: PaperSessionStartRequest) -> dict[str, object]:
     repo = _paper_repo()
     initial_capital = _decimal_or_none(request.initial_capital) or Decimal("0")
@@ -8744,6 +8824,7 @@ def delete_paper_trade(trade_id: str) -> dict[str, object]:
 
 
 @router.post("/paper-trades/from-opportunity")
+@paper_writer_route(lambda: _paper_repo())
 def create_paper_trade_from_opportunity(
     request: PaperTradeFromOpportunityRequest,
 ) -> dict[str, object]:

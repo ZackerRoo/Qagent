@@ -1,4 +1,5 @@
 import copy
+import fcntl
 import hashlib
 import importlib.util
 import io
@@ -130,6 +131,7 @@ def rollout(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(deploy, "state", lambda: copy.deepcopy(state))
     monkeypatch.setattr(deploy, "idle", lambda: events.append("idle"))
+    monkeypatch.setattr(deploy, "paper_tick_quiescent", lambda: events.append("paper_idle"))
     monkeypatch.setattr(deploy, "ledger", lambda **kwargs: {"hash": "stable"})
     monkeypatch.setattr(deploy, "healthy", lambda: events.append("healthy"))
     monkeypatch.setattr(deploy, "RESUME_COMMITTED", False)
@@ -149,7 +151,7 @@ def rollout(tmp_path, monkeypatch):
             current.symlink_to(args[0])
 
     def restore(saved, actual_settings, ledger):
-        assert actual_settings == settings
+        assert actual_settings == initial["payload"]["settings"]
         assert ledger == {"hash": "stable"}
         events.append("resume")
         state.update(copy.deepcopy(saved))
@@ -221,6 +223,143 @@ def test_no_rollback_after_scheduler_resume_committed(rollout, monkeypatch):
         deploy.main()
     assert rollout.current.resolve() == rollout.release
     assert not (rollout.evidence / "rollback.json").exists()
+
+
+def test_paper_tick_environment_preserves_research_and_credentials():
+    original = (
+        b"QAGENT_TUSHARE_RELAY_KEY=private\nQAGENT_G2_CAPTURE_DIR=/research\n"
+        b"export QAGENT_PAPER_UPDATE_SCHEDULER_ENABLED=false\n"
+        b"QAGENT_PAPER_UPDATE_INTERVAL_SECONDS=1800\nOTHER=value"
+    )
+    updated = deploy.paper_tick_environment(original)
+    assert updated.startswith(
+        b"QAGENT_TUSHARE_RELAY_KEY=private\nQAGENT_G2_CAPTURE_DIR=/research\nOTHER=value\n"
+    )
+    assert updated.count(b"QAGENT_PAPER_UPDATE_SCHEDULER_ENABLED=true") == 1
+    assert updated.count(b"QAGENT_PAPER_UPDATE_INTERVAL_SECONDS=600") == 1
+    assert deploy.paper_tick_environment(updated) == updated
+
+
+def test_rollout_opt_in_preserves_1800_settings(rollout, monkeypatch):
+    rollout.state["payload"]["settings"].pop("0")
+    rollout.state["payload"]["settings"]["interval_seconds"] = 1800
+    rollout.initial["payload"]["settings"] = copy.deepcopy(rollout.state["payload"]["settings"])
+    monkeypatch.setattr(deploy.sys, "argv", deploy.sys.argv + ["--enable-paper-tick"])
+    deploy.main()
+    assert b"QAGENT_PAPER_UPDATE_SCHEDULER_ENABLED=true" in rollout.env.read_bytes()
+    assert rollout.state["payload"]["settings"]["interval_seconds"] == 1800
+
+
+def test_rollout_opt_in_rejects_changed_research_interval_before_pause(rollout, monkeypatch):
+    monkeypatch.setattr(deploy.sys, "argv", deploy.sys.argv + ["--enable-paper-tick"])
+    with pytest.raises(AssertionError, match="research interval"):
+        deploy.main()
+    assert "pause" not in rollout.events
+
+
+@pytest.mark.parametrize("status, enabled", [("running", True), ("stopping", False)])
+def test_busy_tick_after_master_stop_never_kills_or_rolls_back(rollout, monkeypatch, status, enabled):
+    def busy():
+        raise RuntimeError("paper tick still active")
+
+    monkeypatch.setattr(deploy, "paper_tick_quiescent", busy)
+    original_script = deploy.script
+
+    def guarded_script(path, name, *args):
+        if name == "disable_linux_runit.sh":
+            busy()
+        original_script(path, name, *args)
+
+    monkeypatch.setattr(deploy, "script", guarded_script)
+    with pytest.raises(RuntimeError, match="paper tick still active"):
+        deploy.main()
+    assert "disable_linux_runit.sh" not in rollout.events
+    assert "resume" not in rollout.events
+    assert rollout.state["enabled"] is False
+    assert rollout.env.read_bytes() == rollout.original
+
+
+def test_kernel_writer_lock_is_nonblocking_and_held_until_shutdown_finishes(tmp_path, monkeypatch):
+    db = tmp_path / "account.db"
+    db.touch()
+    monkeypatch.setattr(deploy, "DB", str(db))
+    path = str(db) + ".paper-writer.lock"
+    with deploy.idle_paper_writer():
+        with pytest.raises(RuntimeError, match="writer busy"):
+            with deploy.idle_paper_writer():
+                pytest.fail("busy writer must not be acquired")
+        with open(path, "rb") as other:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with deploy.idle_paper_writer():
+        pass
+
+
+def test_fresh_lock_uses_db_ownership_and_existing_inode_is_preserved(tmp_path, monkeypatch):
+    db = tmp_path / "account.db"
+    db.touch()
+    monkeypatch.setattr(deploy, "DB", str(db))
+    chown = Mock(wraps=deploy.os.fchown)
+    monkeypatch.setattr(deploy.os, "fchown", chown)
+    path = Path(str(db) + ".paper-writer.lock")
+    with deploy.idle_paper_writer():
+        inode = path.stat().st_ino
+        assert path.stat().st_uid == db.stat().st_uid
+        assert path.stat().st_gid == db.stat().st_gid
+    chown.assert_called_once()
+    with deploy.idle_paper_writer():
+        assert path.stat().st_ino == inode
+    chown.assert_called_once()
+
+
+@pytest.mark.parametrize("shutdown", ["backend", "services"])
+def test_busy_manual_writer_blocks_actual_shutdown_entry(tmp_path, monkeypatch, shutdown):
+    db = tmp_path / "account.db"
+    db.touch()
+    monkeypatch.setattr(deploy, "DB", str(db))
+    monkeypatch.setattr(deploy, "paper_tick_quiescent", Mock())
+    run = Mock()
+    monkeypatch.setattr(deploy, "run", run)
+    with deploy.idle_paper_writer():
+        with pytest.raises(RuntimeError, match="writer busy"):
+            if shutdown == "backend":
+                deploy.backend_down()
+            else:
+                deploy.script(tmp_path, "disable_linux_runit.sh")
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize("status, enabled, accepted", [
+    ("stopped", False, True), ("stopping", False, False), ("running", True, False),
+])
+def test_paper_status_requires_positive_stopped_confirmation(tmp_path, monkeypatch, status, enabled, accepted):
+    env = tmp_path / "env"
+    env.write_bytes(b"QAGENT_PAPER_UPDATE_SCHEDULER_ENABLED=true\n")
+    monkeypatch.setattr(deploy, "ENV", env)
+    payload = {"configured": True, "state": {"status": status, "enabled": enabled}}
+    monkeypatch.setattr(deploy.urllib.request, "urlopen", lambda *a, **kw: io.StringIO(json.dumps(payload)))
+    if accepted:
+        deploy.paper_tick_quiescent()
+    else:
+        with pytest.raises(AssertionError, match="still active"):
+            deploy.paper_tick_quiescent()
+
+
+@pytest.mark.parametrize("configured", [True, False])
+def test_old_status_404_only_allowed_when_not_configured(tmp_path, monkeypatch, configured):
+    env = tmp_path / "env"
+    env.write_bytes(b"QAGENT_PAPER_UPDATE_SCHEDULER_ENABLED=true\n" if configured else b"")
+    monkeypatch.setattr(deploy, "ENV", env)
+
+    def missing(*args, **kwargs):
+        raise deploy.urllib.error.HTTPError("url", 404, "not found", {}, None)
+
+    monkeypatch.setattr(deploy.urllib.request, "urlopen", missing)
+    if configured:
+        with pytest.raises(RuntimeError, match="quiescence unavailable"):
+            deploy.paper_tick_quiescent()
+    else:
+        deploy.paper_tick_quiescent()
 
 
 @pytest.mark.parametrize("changed_ledger", [False, True])

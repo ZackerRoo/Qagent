@@ -2,6 +2,8 @@
 """One-shot operator-reviewed rollout; run as root on the Qagent cloud host."""
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import shlex
 import sys
 import copy
@@ -16,6 +18,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+import urllib.error
 
 DB = "/var/lib/qagent/qagent.db"
 CURRENT = Path("/opt/qagent/current")
@@ -124,7 +127,61 @@ def run(*args):
 
 
 def script(release, name, *args):
-    run(str(release / "scripts" / name), *args)
+    if name == "disable_linux_runit.sh":
+        paper_tick_quiescent()
+        with idle_paper_writer():
+            run(str(release / "scripts" / name), *args)
+    else:
+        run(str(release / "scripts" / name), *args)
+
+
+def paper_tick_quiescent():
+    """A configured worker must positively acknowledge stop before service shutdown."""
+    required = bool(re.search(
+        rb"(?m)^\s*(?:export\s+)?QAGENT_PAPER_UPDATE_SCHEDULER_ENABLED\s*=\s*['\"]?(?:true|1)['\"]?\s*$",
+        ENV.read_bytes(), re.IGNORECASE,
+    ))
+    try:
+        with urllib.request.urlopen(
+            "http://127.0.0.1:8000/api/automation/paper-update/status", timeout=5,
+        ) as response:
+            payload = json.load(response)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404 and not required:
+            return  # Old release predates the opt-in worker.
+        raise RuntimeError("paper tick quiescence unavailable") from None
+    except Exception:
+        raise RuntimeError("paper tick quiescence unavailable") from None
+    assert isinstance(payload, dict), "invalid paper tick diagnostics"
+    tick = payload.get("state", {})
+    assert tick.get("enabled") is False and tick.get("status") == "stopped", (
+        "paper tick still active; leaving scheduler disabled"
+    )
+
+
+@contextmanager
+def idle_paper_writer():
+    """Hold the account's kernel lock through service stop; never kill a busy owner."""
+    database = Path(DB).resolve()
+    metadata = database.stat()
+    path = str(database) + ".paper-writer.lock"
+    created = False
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        created = True
+    except FileExistsError:
+        fd = os.open(path, os.O_RDWR)
+    try:
+        # The service must remain able to use a lock first created by this helper.
+        if created:
+            os.fchown(fd, metadata.st_uid, metadata.st_gid)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("paper account writer busy; service was not stopped") from None
+        yield
+    finally:
+        os.close(fd)
 
 
 def healthy():
@@ -142,7 +199,9 @@ def healthy():
 
 
 def backend_down():
-    run("sv", "-w", "45", "down", "/etc/service/qagent-backend")
+    paper_tick_quiescent()
+    with idle_paper_writer():
+        run("sv", "-w", "45", "down", "/etc/service/qagent-backend")
     output = subprocess.check_output(["ss", "-ltnH", "sport = :8000"], text=True)
     assert not output.strip(), "backend port still listening"
 
@@ -199,6 +258,19 @@ def relay_environment(original, key):
     )
 
 
+def paper_tick_environment(original):
+    """Enable only the approved paper cadence; leave research/account settings intact."""
+    names = rb"(?:QAGENT_PAPER_UPDATE_SCHEDULER_ENABLED|QAGENT_PAPER_UPDATE_INTERVAL_SECONDS)"
+    base = b"".join(
+        line for line in original.splitlines(keepends=True)
+        if not re.match(rb"^\s*(?:export\s+)?" + names + rb"\s*=", line)
+    )
+    return base + (b"" if not base or base.endswith(b"\n") else b"\n") + (
+        b"QAGENT_PAPER_UPDATE_SCHEDULER_ENABLED=true\n"
+        b"QAGENT_PAPER_UPDATE_INTERVAL_SECONDS=600\n"
+    )
+
+
 def atomic_environment(expected, replacement):
     """Replace atomically, retaining owner/mode and rejecting concurrent changes."""
     assert ENV.read_bytes() == expected, "environment changed concurrently"
@@ -230,6 +302,7 @@ def main():
     ap.add_argument("release")
     ap.add_argument("--execute", action="store_true")
     ap.add_argument("--expected-sha", required=True)
+    ap.add_argument("--enable-paper-tick", action="store_true")
     args = ap.parse_args()
     release = Path(args.release).resolve()
     old = CURRENT.resolve()
@@ -282,10 +355,14 @@ def main():
     if args.execute:
         assert not sys.stdin.isatty(), "provide credential via private stdin pipe"
         env_after = relay_environment(env_before, sys.stdin.read(4098).rstrip("\n"))
+        if args.enable_paper_tick:
+            env_after = paper_tick_environment(env_after)
     idle()
     saved = state()
     settings = saved["payload"]["settings"]
     assert len(settings) == 16
+    if args.enable_paper_tick:
+        assert settings.get("interval_seconds") == 1800, "research interval must remain 1800"
     print(
         json.dumps(
             {
@@ -294,6 +371,7 @@ def main():
                 "enabled": saved["enabled"],
                 "settings_count": len(settings),
                 "preflight": "passed",
+                "enable_paper_tick": args.enable_paper_tick,
             }
         ),
         flush=True,
@@ -329,6 +407,7 @@ def main():
             timeout=10,
         ) as r:
             assert r.status == 200
+        paper_tick_quiescent()
         idle()
         stopped = state()
         assert not stopped["enabled"]

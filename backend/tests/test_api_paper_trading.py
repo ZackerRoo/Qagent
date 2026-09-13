@@ -7,6 +7,7 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 from qagent.app import create_app
+from qagent.db import create_session_factory
 from qagent.api import routes
 from qagent.backtesting.experiment import build_walk_forward_experiment_manifest
 from qagent.backtesting.ranking_v3_evidence import (
@@ -629,6 +630,7 @@ def test_unreleased_ranking_v3_is_fail_closed_for_manual_and_seed(tmp_path, monk
 def test_seed_api_passes_authoritative_repository_to_low_level_admission(monkeypatch):
     authoritative_repo = object()
     paper_repo = SimpleNamespace(
+        session_factory=create_session_factory("sqlite:///:memory:"),
         list_trades=lambda **_kwargs: [],
         get_account_settings=lambda: SimpleNamespace(max_positions=10),
     )

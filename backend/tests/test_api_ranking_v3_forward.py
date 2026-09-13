@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 
 import qagent.api.routes as routes
 from qagent.app import create_app
+from qagent.db import create_session_factory
 from qagent.backtesting.ranking_v3_forward import (
     RankingV3ForwardConflictError,
     RankingV3ForwardStateError,
@@ -333,7 +334,9 @@ def test_free_automation_cycle_runs_forward_shadow_without_seeding_paper(
     monkeypatch,
 ):
     repo = SimpleNamespace()
-    paper_repo = SimpleNamespace(list_trades=lambda **_: [])
+    paper_repo = SimpleNamespace(
+        list_trades=lambda **_: [], session_factory=create_session_factory("sqlite:///:memory:"),
+    )
     context = (SimpleNamespace(run_id="run-v3"), {}, SimpleNamespace())
     result = SimpleNamespace(session_date=date(2026, 7, 27))
     monkeypatch.setattr(routes, "_repo", lambda: repo)
@@ -394,7 +397,9 @@ def test_free_automation_cycle_runs_forward_shadow_without_seeding_paper(
 
 def test_paper_only_automation_cycle_does_not_run_forward_evidence(monkeypatch):
     repo = SimpleNamespace()
-    paper_repo = SimpleNamespace(list_trades=lambda **_: [])
+    paper_repo = SimpleNamespace(
+        list_trades=lambda **_: [], session_factory=create_session_factory("sqlite:///:memory:"),
+    )
     monkeypatch.setattr(routes, "_repo", lambda: repo)
     monkeypatch.setattr(routes, "_paper_repo", lambda: paper_repo)
     monkeypatch.setattr(

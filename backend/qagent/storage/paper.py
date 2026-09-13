@@ -8,6 +8,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, sessionmaker
+from qagent.storage.paper_writer import paper_writer_operation
 
 from qagent.execution.models import AShareExecutionRules, OrderSide
 from qagent.execution.replay_evidence import (
@@ -329,6 +330,7 @@ class PaperTradingRepository:
     def __init__(self, session_factory: sessionmaker[Session]):
         self.session_factory = session_factory
 
+    @paper_writer_operation
     def create_trade(
         self,
         source_snapshot_id: str,
@@ -441,6 +443,7 @@ class PaperTradingRepository:
             session.refresh(row)
             return self._trade_from_row(row)
 
+    @paper_writer_operation
     def create_trade_if_capacity(
         self,
         source_snapshot_id: str,
@@ -581,6 +584,7 @@ class PaperTradingRepository:
             ).first()
             return self._research_baseline_from_row(row) if row is not None else None
 
+    @paper_writer_operation
     def freeze_research_baseline(
         self,
         *,
@@ -791,6 +795,7 @@ class PaperTradingRepository:
                 )
             return result
 
+    @paper_writer_operation
     def update_trade(
         self,
         trade_id: str,
@@ -867,6 +872,7 @@ class PaperTradingRepository:
                 self._latest_execution_facts(session, trade_id),
             )
 
+    @paper_writer_operation
     def delete_trade(self, trade_id: str) -> bool:
         with self.session_factory() as session:
             row = session.get(PaperTradeRow, trade_id)
@@ -889,6 +895,7 @@ class PaperTradingRepository:
             session.commit()
             return True
 
+    @paper_writer_operation
     def clear_trades(self) -> int:
         with self.session_factory() as session:
             rows = session.query(PaperTradeRow).all()
@@ -918,6 +925,7 @@ class PaperTradingRepository:
                 return self._default_account_settings()
             return self._account_from_row(row)
 
+    @paper_writer_operation
     def start_account_session(
         self,
         *,

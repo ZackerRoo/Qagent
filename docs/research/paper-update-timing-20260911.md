@@ -66,3 +66,17 @@ automation 已有进程内 `_run_lock`、整轮 single-host SQLite flock、持�
 ## 本轮交付与验证
 
 本轮仅新增此报告和 G7 跟踪项；没有新增生产逻辑或测试代码。现有 `test_paper_trading.py`、`test_automation_scheduler.py` 合计 **75 passed（8.32 秒）**，包括分钟空表降级及调度恢复场景。`test_automation_runtime_coordination.py` 定向验证 process fence、失租、同 slot 回放、paper 部分提交重试，**4 passed、28 deselected（4.45 秒）**。这些验证覆盖现有保护，并不证明尚未实施的独立 writer 方案。完整回归由主任务执行，本文不提前引用结果。本报告交付时未 commit、未 push、未部署、未启用调度拆分；主任务后续集成状态单独记录。
+
+## 2026-09-13 G7 独立更新实施（本地验证，尚未部署）
+
+用户已批准本轮有界实施及测试后受控部署。新增默认关闭的 `QAGENT_PAPER_UPDATE_SCHEDULER_ENABLED`：启用且 automation master/update_paper 开启时，沪深交易日上午 09:30–11:30、下午 13:00–15:00 每 600 秒独立到期，两个收盘点各保留一分钟启动窗口；该频率是调度目标，不是行情新鲜度或完成时延保证。过期 slot 不补跑，等待账户锁后再次检查当前 slot 和控制状态。交易窗口外保留旧 automation paper_update，窗口内由独立入口承担；扫描与研究阶段不持账户锁。新线程随 master start/restore 启动，stop/shutdown 停止；stop 返回 `paper_tick_idle`，它只说明 tick 线程是否已退出，不代表手动写入方已退出。只读 `/api/automation/paper-update/status` 可检查当前状态。
+
+`storage/paper_writer.py` 以规范化数据库路径共享线程 RLock 和独立 `.paper-writer.lock` flock。引擎 seed/update、账户存储 mutation、API admission/session reset、automation seed 的账户相关读取至提交受同一 writer 保护，保留唯一账本。此实现采用不超时的内核所有权替代可过期 lease：暂停的 owner 不会失租后被接管，进程死亡由内核释放；因此不存在旧 lease owner 与新 owner 同时获写权的窗口。fork 子进程清除继承的线程归属和文件描述符。锁文件运行期间不可删除，限同主机 SQLite；发布 helper 还需在停止服务前独占同一锁，不能用 tick_idle 推断所有 writer 空闲。
+
+`paper_update_slots` 仅保存成功 slot 的运行结果，属于调度元数据。相同 slot 成功后重放结果，异常或 provider/coverage 错误不记成功；部分账户提交仍遵循原引擎事件身份和逐笔事务，重试读取最新账户状态，不改交易规则、费用、日线降级语义或历史事实。研究 manifest 摘要会因 routes/engine 实施变化，不能绕过冻结校验。尚未新增逐股票完整延迟基线；行情等待仍在 writer 内，可能推迟 tick，长阻塞不代表可强杀 writer。
+
+子任务本地验证：原 paper_trading 与 automation_runtime_coordination 合计 84 passed；API automation 79 passed、1 项既有 warning；writer/slot 专项及主任务全量验收结果另行补录。已实现并进行上述本地测试，未 commit、未 push、未部署；周一自然触发、正常交易时段有效行情时间与延迟基线仍待验，G7 不提升为完成。
+
+主任务最终稳定代码全量回归 **2319 passed、3 项既有 warnings（238.62 秒）**，Ruff 与 diff 检查通过。首次边实施边测试的快照为 2291 passed、9 failed，包含测试替身缺少 writer 工厂绑定以及运行期间源文件摘要变化；修正后由上述稳定全量确认通过，保留首次结果作为历史，不绕过 manifest 校验。
+
+发布前主任务只读检查云端 24 项 walk-forward 记录，状态均为 none/rejected，未发现符合条件的 V3。API/storage 被既有宽范围研究指纹覆盖，本轮变化会使旧缓存指纹失效；G2 指定文件未变化，不据此修改冻结输入或放宽准入。当前已实现、已通过上述本地验收，提交与受控部署正在准备，尚未 push、尚未部署本轮 G7；自然运行、行情延迟基线与切换对账继续待验。

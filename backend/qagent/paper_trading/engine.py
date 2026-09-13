@@ -1,5 +1,6 @@
 from collections import defaultdict
 from dataclasses import dataclass, replace
+from qagent.storage.paper_writer import paper_writer_operation
 from datetime import date, datetime, time, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 from typing import Literal, Mapping
@@ -694,6 +695,7 @@ def build_paper_lot_aware_sizing_plan(
     )
 
 
+@paper_writer_operation
 def seed_paper_trades_from_snapshots(
     repo: PaperTradingRepository,
     snapshots: list[OpportunitySnapshotRecord],
@@ -868,6 +870,7 @@ def paper_price_basis_gap_limit(instrument_id: str) -> Decimal:
     return Decimal("0.12")
 
 
+@paper_writer_operation
 def update_paper_trades(
     repo: PaperTradingRepository,
     provider: MarketDataProvider,
