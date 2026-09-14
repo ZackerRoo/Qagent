@@ -133,6 +133,7 @@ def test_preview_validates_manifests_without_mutation(deployment):
 
 def test_atomic_install_idempotence_and_recoverable_rollback(deployment):
     result = upgrade.install(*deployment, execute=True)
+    json.dumps(result)
     assert result["status"] == "installed" and result["daily_cron_unchanged"] is True
     receipt = Path(result["receipt"])
     assert stat.S_IMODE(upgrade.FORWARD_CRON.stat().st_mode) == 0o644
@@ -141,10 +142,13 @@ def test_atomic_install_idempotence_and_recoverable_rollback(deployment):
     for path in (upgrade.SIGNAL_DIR, upgrade.EVALUATION_DIR, upgrade.RUN_DIR):
         assert stat.S_IMODE(path.stat().st_mode) == 0o700
     before = upgrade.FORWARD_CRON.read_bytes()
-    assert upgrade.install(*deployment, execute=True)["status"] == "already_installed"
+    repeated = upgrade.install(*deployment, execute=True)
+    assert repeated["status"] == "already_installed"
+    json.dumps(repeated)
     preview = upgrade.rollback(receipt, deployment[2])
     assert preview["status"] == "rollback_planned" and upgrade.FORWARD_CRON.read_bytes() == before
     rolled = upgrade.rollback(receipt, deployment[2], execute=True)
+    json.dumps(rolled)
     assert rolled["status"] == "rolled_back" and not upgrade.FORWARD_CRON.exists()
     assert Path(rolled["recovered_cron"]).read_bytes() == before
 
@@ -218,9 +222,11 @@ def test_execute_recovers_crash_prepared_receipt_and_can_rollback(deployment):
     receipt = prepared_crash_receipt(deployment)
     result = upgrade.install(*deployment, execute=True)
     assert result["status"] == "recovered_installed"
+    json.dumps(result)
     assert Path(result["receipt"]) == receipt
     assert json.loads(receipt.read_text())["status"] == "installed"
     rolled = upgrade.rollback(receipt, deployment[2], execute=True)
+    json.dumps(rolled)
     assert rolled["status"] == "rolled_back" and not upgrade.FORWARD_CRON.exists()
 
 
@@ -323,7 +329,7 @@ print(result['protocol'])
     assert completed.stdout.strip() == "financial-rule-forward-evaluation-v1"
 
 
-def test_absent_cron_ignores_historical_v2_receipt_for_v3_install(deployment):
+def test_absent_cron_ignores_historical_v2_receipt_for_v4_install(deployment):
     old = upgrade.BACKUPS / "before-install-v2-history.json"
     old.write_text(json.dumps({
         "schema": "financial-forward-install-receipt-v1", "status": "installed",
@@ -336,7 +342,23 @@ def test_absent_cron_ignores_historical_v2_receipt_for_v3_install(deployment):
     assert old.exists()
 
 
-def test_v2_installed_history_does_not_block_linked_v3_prepared_recovery(deployment):
+def test_main_outputs_json_for_install_idempotence_and_rollback(deployment, capsys):
+    arguments = ["--expected-daily-cron-sha256", deployment[0],
+                 "--expected-daily-manifest-sha256", deployment[1],
+                 "--expected-forward-manifest-sha256", deployment[2], "--execute"]
+    assert upgrade.main(arguments) == 0
+    installed = json.loads(capsys.readouterr().out)
+    assert installed["status"] == "installed"
+    assert upgrade.main(arguments) == 0
+    repeated = json.loads(capsys.readouterr().out)
+    assert repeated["status"] == "already_installed"
+    rollback = ["--expected-forward-manifest-sha256", deployment[2],
+                "--rollback-receipt", installed["receipt"], "--execute"]
+    assert upgrade.main(rollback) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "rolled_back"
+
+
+def test_v2_installed_history_does_not_block_linked_v4_prepared_recovery(deployment):
     current = prepared_crash_receipt(deployment, install_id="3" * 32)
     historical = json.loads(current.read_text())
     historical.update(status="installed", install_id="2" * 32,

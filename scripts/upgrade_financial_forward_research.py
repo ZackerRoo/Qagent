@@ -17,7 +17,7 @@ from uuid import uuid4
 import install_daily_financial_research as daily
 
 DAILY_BUNDLE = Path("/opt/qagent-research/daily-financial-20260914-v2")
-FORWARD_BUNDLE = Path("/opt/qagent-research/financial-forward-20260914-v3")
+FORWARD_BUNDLE = Path("/opt/qagent-research/financial-forward-20260914-v4")
 DAILY_CRON = Path("/etc/cron.d/qagent-daily-financial-research")
 FORWARD_CRON = Path("/etc/cron.d/qagent-financial-forward-research")
 BACKUPS = Path("/var/backups/qagent-financial-forward-research")
@@ -165,13 +165,13 @@ def _recover_existing(wanted: bytes, expected_daily_cron: str,
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             invalid.append(path)
     if len(installed) == 1:
-        return {"status": "already_installed", "receipt": installed[0][0]}
+        return {"status": "already_installed", "receipt": str(installed[0][0])}
     if installed or invalid or len(prepared) != 1:
         raise ValueError("ambiguous_or_missing_install_receipt")
     path, receipt = prepared[0]
     _fsync_directory(FORWARD_CRON.parent)
     _promote_receipt(path, receipt)
-    return {"status": "recovered_installed", "receipt": path}
+    return {"status": "recovered_installed", "receipt": str(path)}
 
 
 def _regular(path: Path):

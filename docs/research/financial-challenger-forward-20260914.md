@@ -78,11 +78,13 @@ runner 在独立锁下遍历所有既有 signal，每个 signal 仍通过只读 
 
 随后云端v2完成目录创建和cron安装，但安装后手动run失败：`research_financial_enrichment.analyze` 会从bundle root读取 `backend/qagent/providers/datahubco.py` 与 `tushare_relay.py` 计算实现摘要，v2 manifest/package未包含两文件。本地仓库运行曾从仓库根读取而未暴露缺口。主任务已安全rollback cron，安装收据为 `before-install-7biqeyhu`，撤回文件为 `rolled-back-9vxfg3ud.cron`；研究目录保留，任务未发生自然触发，未影响模拟盘。v3常量改为 `financial-forward-20260914-v3`，REQUIRED与manifest明确加入两个provider实现；隔离bundle测试仅复制manifest列出的完整文件，并在非仓库cwd实际完成seal/evaluate，防止再次隐式依赖仓库根。cron不存在时，BACKUPS中v2 installed/rollback历史收据不参与恢复扫描，不阻塞新v3安装。
 
+云端v3随后手动runner成功，但安装后的第二次execute幂等复核在CLI序列化阶段失败：`_recover_existing` 的公开result包含 `Path`，`json.dumps` 报 `PosixPath not serializable`。主任务使用收据 `before-install-lu0mzlde` 将v3 cron安全rollback为 `rolled-back-6yn8r4qa.cron`；未发生自然触发，daily cron、health与模拟账户仍正常。v4常量改为 `financial-forward-20260914-v4`，recovered/already receipt一律输出字符串；测试对installed、recovered、already与rollback结果递归执行JSON序列化，并通过实际 `main` 的安装、第二次幂等及回滚输出覆盖原失败路径。
+
 预览模板为工作日 `11:37 UTC`（北京时间19:37）一次，同时 seal 与 evaluate。选择19:37是为了给16:40采集的600秒上限留出充分间隔，并错开既有 G2 每半小时检查点以及10分钟整点节奏；它仍是独立只读研究任务，固定使用：
 
 ```sh
 PYTHONPATH=/opt/qagent/current/backend /opt/qagent/current/backend/.venv/bin/python -B \
-  /opt/qagent-research/financial-forward-20260914-v3/scripts/run_financial_forward_research.py \
+  /opt/qagent-research/financial-forward-20260914-v4/scripts/run_financial_forward_research.py \
   --daily-dir /var/lib/qagent-research/daily-financial \
   --baseline-dir /var/lib/qagent-research/g2-forward-results/signals \
   --signal-dir /var/lib/qagent-research/financial-forward-signals \
@@ -91,4 +93,4 @@ PYTHONPATH=/opt/qagent/current/backend /opt/qagent/current/backend/.venv/bin/pyt
   --db /var/lib/qagent/qagent.db --provider-mode free --budget-seconds 300
 ```
 
-最新专项与现有安装/升级回归共 **67 passed（2.54秒）**，正确虚拟环境全量 **2625 passed、3 warnings（230.77秒）**，Ruff及diff检查通过，最终审计无P1/P2。新增隔离manifest bundle实际seal/evaluate、cron缺失时v2历史收据不阻塞v3安装，以及v2 installed历史收据与v3同inode prepared并存时可恢复并回滚；当前v3多prepared/异inode仍拒绝。本阶段已实现并完成上述测试；v3未 commit、未 push、未打包、未安装cron、未部署或运行云端自动任务；v1仍仅暂存且未安装，v2 cron已回滚且未自然触发。首个自然 signal 的真实5/10/20日成熟验收仍按原日期等待，G2-FQ1/G2状态不提升。
+最新专项与现有安装/升级回归共 **68 passed（2.62秒）**，Ruff及diff检查通过；此前正确虚拟环境全量 **2625 passed、3 warnings（230.77秒）** 早于新增main序列化测试，本次未重跑全量。installed、recovered、already与rollback公开结果均已JSON序列化覆盖，实际main安装、第二次幂等输出和回滚通过。本阶段已实现并完成上述测试；v4未 commit、未 push、未打包、未安装cron、未部署或运行云端自动任务；v1未安装，v2/v3 cron均已回滚且未自然触发。首个自然 signal 的真实5/10/20日成熟验收仍按原日期等待，G2-FQ1/G2状态不提升。
