@@ -246,3 +246,9 @@ eligible8/8，Top5为600519.SH、300750.SZ、603766.SH、603259.SH、688002.SH�
 新增专项 **16 passed**，相关回归 **104 passed**；正确虚拟环境全量 **2595 passed、3 warnings**，Ruff和diff检查通过。本轮实现不写 `FactorResearchRepository`、模拟盘、唯一账本或正式Ranking，也没有新增数据库/API/调度或部署。自然有效信号、同日基线和5/10/20日真实成熟结果仍待后续时间窗口验收，因此G2-FQ1选股增益尚未证明，不提升正式交易权限。
 
 同日16:40自然财务任务已生成首份当日observed报告，20股中16只eligible；主任务完成证据重放并将首个合法信号独占归档至云端 `financial-forward-signals/2026-09-14.json`，文件SHA256 `1466a90ab84a5cbed989ef187ecc0c37a6aa9cb055253a162aa81ac8d7315732`、结果digest `46fe1dc5e4a2ea9adcfc23604b59b596d45faa5f3a8b0d8f9f30e2c79c28b79a`。当天无合格同日G2归档，基线明确 unavailable；5/10/20日结果最早于09-21、09-29、10-20收盘后验收。自动seal调度仍未安装，选股增益仍未证明；完整证据见上述前向验证报告。
+
+### G2-FQ1 前向自动归档实现阶段（2026-09-14）
+
+自动 seal 与到期 evaluate runner、独立 bundle 校验/预览/原子安装及可恢复回滚 helper 已实现；详细不变式和命令见[财务规则候选前向验证报告](research/financial-challenger-forward-20260914.md)。runner 复用既有协议、独立锁和固定300秒预算，只读 `qagent.db`；已有同日 signal 重放并核对首个合法 daily，缺同日G2继续 baseline unavailable。未成熟和到期 partial 写每次run证据并重试，只有 complete 才独占写最终5/10/20窗口，避免缺价首次评估永久锁死结果；归档记录 evaluator 与实际 backend/factor实现身份。
+
+终审安全修正后的专项及既有安装升级相关 **61 passed（2.00秒）**、正确虚拟环境全量 **2619 passed、3 warnings（255.59秒）**，Ruff及diff检查通过，最终审计无P1/P2。锁冲突先留不可变run证据；单次evaluate由Linux主线程SIGALRM硬截止，不启动悬挂SQLite线程；安装收据在发布前仅prepared且不可回滚，发布成功后才原子转installed。收据晋级失败只按本次pending的device/inode和字节撤销本次cron，他人替换文件不删除；rollback同样核对inode与字节。直接崩溃留下的唯一prepared可在下次execute持锁严格核验并晋级为recovered installed；无收据、同字节不同inode或多个prepared拒绝。已实现、已完成上述测试，未 commit、未 push、未打包、未安装、未部署。cron仅为默认预览模板，拟工作日11:37 UTC（北京时间19:37），错开16:40采集、G2半小时检查和10分钟整点节奏；显式安装后仍需自然触发、失败归档、已有手工signal幂等及首个真实成熟窗口验收。未修改模拟盘、正式Ranking、数据库schema/API、后端服务、冻结模型或交易权限；G2-FQ1/G2选股增益仍未证明。

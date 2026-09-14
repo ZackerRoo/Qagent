@@ -61,3 +61,30 @@ backend/.venv/bin/python scripts/evaluate_financial_challenger.py evaluate \
 主任务使用已测试的seal入口完成原始证据与候选重放，首个信号独占归档至 `/var/lib/qagent-research/financial-forward-signals/2026-09-14.json`，权限0400；文件SHA256为 `1466a90ab84a5cbed989ef187ecc0c37a6aa9cb055253a162aa81ac8d7315732`，结果digest为 `46fe1dc5e4a2ea9adcfc23604b59b596d45faa5f3a8b0d8f9f30e2c79c28b79a`。Top5为600519、603444、603259、002602、600398。当天没有满足同日完整集合要求的G2归档，因此 `baseline_unavailable`；可继续计算候选相对沪深300的净超额，但不能产生G2配对lift。
 
 该信号的次交易日入场日为09-15，5/10/20交易日到期日分别为09-21、09-29、10-20；到期前不计算收益。当前仅完成首次自然采集与信号封存，尚未安装自动seal调度，真实成熟收益仍待相应收盘后验收。
+
+## 自动封存与到期评估实现阶段（2026-09-14）
+
+本轮新增 `scripts/run_financial_forward_research.py`，复用上文 seal/evaluate 协议，不增加数据库表、API、后端服务或交易入口。每次运行在上海当日的 daily-financial 目录中按 `finished_at`、文件名稳定排序，逐个重放，只取首个协议、摘要、原始证据、时序和排名均合法且顶层为 observed 的当日产物。已有同日 signal 时重放信号，并在当日 daily 仍存在时核对它确实来自首个合法产物；一致则幂等成功，任何既有文件都不覆盖。可选 G2 目录仅选择同日 ready 且同完整资格集合的最早合法基线；缺失或无效继续封存 `baseline_unavailable`，后到基线不得改写当天信号。
+
+runner 在独立锁下遍历所有既有 signal，每个 signal 仍通过只读 SQLite URI、query-only 事务评估。5/10/20 日未成熟只进入当次不可覆盖 run 证据；已到期但缺价或质量拒绝的 partial 也完整保留逐股原因和价格证据于 run 归档，并在后续运行重试，**不占用最终窗口文件名**。只有完整 cohort 为 complete 时才独占发布 `financial-forward-evaluations/<signal_date>/<horizon>.json`；既有 complete 归档仅校验摘要、信号和窗口身份，不重新计算或覆盖。这样价格缓存后续补齐可从 partial 收敛到唯一 complete，同时已完成结果保持不可变。
+
+运行固定 300 秒预算（CLI 只接受 30–900 秒）、最多扫描 2,000 个 JSON、单文件 128 MiB（覆盖既有约56 MiB的G2 ready归档）；无网络取数、补价、训练或写库。Linux cron主线程用 `SIGALRM/setitimer` 包住每次evaluate，超时在同一进程中断查询并经evaluate的finally关闭连接，不创建可能继续访问SQLite的工作线程；记录 `run_budget_exhausted` 后停止遍历。锁冲突退出75前也以无需取得该锁的唯一文件名独占归档冲突证据。无当日采集是正常 waiting；非法当日产物、损坏 signal/evaluation、缺数据库和预算耗尽均写入独占 run 证据并返回非零。evaluation 与 run/final 归档新增 evaluator SHA、实际解析后的 backend 根路径以及 `factor_shadow_outcomes.py` SHA，避免 `/opt/qagent/current` 后续切换后无法区分评估算法版本。
+
+新增 `scripts/upgrade_financial_forward_research.py` 作为默认仅预览的独立升级器。它同时校验已部署 daily v2 cron/manifest、forward bundle manifest及每个文件摘要，拒绝额外文件、软链、可写文件或基线变化；显式 `--execute` 才以独占锁和硬链接原子安装新 cron，且不启动任务。发布前收据明确为 `prepared`，并记录唯一install id及本次pending文件的device/inode；只有cron发布及目录fsync成功后才原子改为 `installed`，回滚拒绝prepared或损坏收据。若收据晋级或fsync失败，持锁补偿仅在目标仍为本次pending的同device/inode且字节一致时撤销cron并fsync；若操作方已替换目标则绝不删除他人文件。显式 installed receipt 加 `--execute` 的回滚也核对device/inode与字节，并原子移至私密备份目录，保留可恢复 cron。默认未执行安装或回滚。
+
+若进程在cron发布/fsync之后、收据晋级之前直接退出，下一次显式execute不会直接返回already installed：它先在持锁状态扫描私有目录中的 `before-install-*.json`。唯一prepared收据必须严格匹配完整schema、0600普通文件、目标路径、daily cron/manifest、forward manifest、安装字节摘要及当前cron的0644/device/inode/bytes，才原子晋级并返回 `recovered_installed`；唯一已installed且同样完整匹配时才正常返回 `already_installed`。无有效收据、同字节不同inode、多个匹配prepared或多个installed均拒绝，避免把操作方重建的同内容文件误认成本次安装。
+
+预览模板为工作日 `11:37 UTC`（北京时间19:37）一次，同时 seal 与 evaluate。选择19:37是为了给16:40采集的600秒上限留出充分间隔，并错开既有 G2 每半小时检查点以及10分钟整点节奏；它仍是独立只读研究任务，固定使用：
+
+```sh
+PYTHONPATH=/opt/qagent/current/backend /opt/qagent/current/backend/.venv/bin/python -B \
+  /opt/qagent-research/financial-forward-20260914-v1/scripts/run_financial_forward_research.py \
+  --daily-dir /var/lib/qagent-research/daily-financial \
+  --baseline-dir /var/lib/qagent-research/g2-forward-results/signals \
+  --signal-dir /var/lib/qagent-research/financial-forward-signals \
+  --evaluation-dir /var/lib/qagent-research/financial-forward-evaluations \
+  --run-dir /var/lib/qagent-research/financial-forward-runs \
+  --db /var/lib/qagent/qagent.db --provider-mode free --budget-seconds 300
+```
+
+终审安全修正后的专项与现有安装/升级回归共 **61 passed（2.00秒）**，正确虚拟环境全量 **2619 passed、3 warnings（255.59秒）**，Ruff及diff检查通过，最终审计无P1/P2。覆盖已有手工 signal 幂等、首个合法 daily、锁冲突不可变证据、单次evaluate硬超时与留证、数据库字节不变、未成熟等待、首次 partial 不建 final、后续补齐生成 complete、complete 不覆盖、runtime identity、manifest 篡改、发布失败prepared收据不可回滚、receipt晋级失败安全撤销本次cron、他人替换文件不删除、崩溃遗留prepared恢复后可回滚、同字节不同inode及多个prepared拒绝、预览不写、原子安装/幂等和可恢复回滚。本阶段已实现并完成上述测试；未 commit、未 push、未打包、未安装 cron、未部署或运行云端自动任务。首个自然 signal 的真实5/10/20日成熟验收仍按原日期等待，G2-FQ1/G2状态不提升。

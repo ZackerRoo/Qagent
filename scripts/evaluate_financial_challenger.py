@@ -23,6 +23,7 @@ from qagent.research.factor_shadow_outcomes import (
     FACTOR_SHADOW_HORIZONS, _adjusted_price, _load_cached_bars, _return_pct,
     factor_shadow_outcome_dates,
 )
+import qagent.research.factor_shadow_outcomes as factor_shadow_runtime
 from qagent.storage.market_cache import MarketDataCacheRepository
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -35,6 +36,18 @@ POLICY = {
     "missing": "no_imputation_no_price_based_reselection_no_backfill",
     "decision_weight": False, "activation_allowed": False,
 }
+
+
+def evaluation_runtime_identity():
+    backend_root = Path(factor_shadow_runtime.__file__).resolve().parents[2]
+    return {
+        "backend_root_resolved": str(backend_root),
+        "evaluator_path_resolved": str(Path(__file__).resolve()),
+        "evaluator_sha256": sha256(Path(__file__).read_bytes()).hexdigest(),
+        "factor_shadow_outcomes_path_resolved": str(Path(factor_shadow_runtime.__file__).resolve()),
+        "factor_shadow_outcomes_sha256": sha256(
+            Path(factor_shadow_runtime.__file__).read_bytes()).hexdigest(),
+    }
 
 
 def timestamp(value):
@@ -222,6 +235,7 @@ def evaluate(signal, db, *, provider_mode="free", as_of=None):
     result = {"protocol": "financial-rule-forward-evaluation-v1", "signal_digest": signal["result_digest"],
               "policy_digest": signal["policy_digest"], "signal_date": str(day), "as_of": current.isoformat(),
               "provider_mode": provider_mode, "horizons": horizons,
+              "runtime_identity": evaluation_runtime_identity(),
               "decision_weight": False, "activation_allowed": False,
               "limitations": ["Research fixed-horizon labels, not executable fills or account returns.",
                               "G2 baseline is a research model, never the supplied observation order.",

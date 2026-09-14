@@ -149,6 +149,9 @@ def test_evaluate_exact_math_calendar_complete_pair_and_readonly(daily, tmp_path
     assert five["candidate_net_excess_pct"] == pytest.approx(9.9)
     assert five["baseline_net_excess_pct"] == pytest.approx(10.9)
     assert five["lift_pct"] == pytest.approx(-1)
+    assert result["runtime_identity"]["evaluator_sha256"]
+    assert result["runtime_identity"]["factor_shadow_outcomes_sha256"]
+    assert Path(result["runtime_identity"]["backend_root_resolved"]).name == "backend"
     assert ten["status"] == twenty["status"] == "waiting_for_maturity"
     assert db.read_bytes() == before
     with sqlite3.connect(db) as conn:
