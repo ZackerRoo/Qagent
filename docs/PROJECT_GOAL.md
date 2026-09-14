@@ -174,3 +174,13 @@
 主任务按基础文档在 Mac/云端分别成功取得同一条 20260825 日线，开盘 11.57、收盘 11.59，各 1 行、约 0.40/0.23 秒；仅为单样本调用证据。旧 09-11 分钟不能作为 09-14 实时交易价格。后备/发布 helper 相关 **71 passed、1 项既有 warning（2.92 秒）**、Ruff/diff 通过；主任务后端全量进行中，暂存发布及受控切换待验。已实现并完成上述相关测试，尚未 commit、未 push、未部署本轮改动；不宣称自然覆盖、财务配对或选股增益通过。G3/G7、G2-FQ1 未完成，既有目标、冻结模型、唯一账本及门槛保留。
 
 主任务后续本地以新增 DatahubcoMarketDataProvider、5 秒运行参数请求 CN:000001/2026-08-25，真实取得 raw 日线，收盘 11.59、成交量 99,488,115 股、来源 datahubco_daily_raw、errors=[]，补齐归一化适配单样本；不等于云端自然运行验收。云端服务 env 已有代理配置名称，无需追加网络配置，具体值不输出。全量和发布结果仍待主任务续补。
+
+### 双来源最终部署验收（2026-09-14）
+
+主任务补录全量 **2,412 passed、3 项 warnings（241.07 秒）**，收集早于最终 installer 测试；最终相关 **158 passed（1.77 秒）**，installer 路径修正后 **8 passed（0.04 秒）**。提交 `57fc24c00cda4ecd510989cc54a964841647d8b4` 已受控部署，云端 `/var/tmp/qagent-rollout-relay-4sxprzxh/result.json` 的 ledger_equal/settings_equal/scheduler_enabled 均 true，8 张账本表和 16 项 settings 不变。API health ok，datahubco 与 tushare_relay_market configured，基础 HTTP 已按明确授权启用；更新前文尚未部署的阶段快照。
+
+云端新 release 加生产 env 的真实 collector 查询 daily/000001.SZ/20260825 成功 1 行，开盘 11.57、收盘 11.59，observed_at 为 `2026-09-14T02:47:28.688988+00:00`，digest `53627c6b0b694553678e3902d25e692492dc887b861fee0a89dc9b2455af4090`。tick enabled/waiting、attempts 1/completed 1、last_error null，但恢复首 slot 迟到 422 秒，不能声称无中断或准点验收。
+
+研究 cron 更新至 20260914 新 bundle 与 qagent.env，原时间、两股、180 秒不变；旧 cron 私密备份及新 SHA 详见[接入报告](research/documented-data-integration-20260914.md)。首次 installer 因原备份目录安全约束拒绝且未改 cron，独立目录修复提交 `0d0f055` 临时复制执行成功，无需重新服务发布。已实现、已完成上述测试、已 commit、已受控部署启用，未 push；本段文档补录未提交。分钟实时性与自然采集仍未验，无选股有效性结论，G3/G7、G2-FQ1 原门槛与未完成状态保留。
+
+主任务同云端 collector 再验最新完整交易日 000001.SZ/20260911，成功 1 行，开盘 11.82、收盘 11.74；observed_at `2026-09-14T02:48:19.191712+00:00`，digest `b73c9b905f1a945c1f082965863629e57443ed36a5b1a57bebda8da33db6ea88`。补齐最新完整交易日日线单样本，不替代当日分钟或全市场自然覆盖验收。

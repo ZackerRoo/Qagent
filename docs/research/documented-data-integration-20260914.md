@@ -40,3 +40,19 @@ ProMax 客户端的代理修正尊重 `HTTPS_PROXY`/`NO_PROXY` 等环境设置�
 运行后备及发布 helper 子任务相关回归 **71 passed、1 项既有 warning（2.92 秒）**，覆盖基础服务显式配置、来源、单位、预算、熔断、既有行情保留、双密钥输入与回滚；Ruff/diff 通过。ProMax 代理修正先前 **125 passed（1.62 秒）** 保留为其阶段证据，不能将两组重叠测试相加。基础通用客户端/研究 CLI 的最终测试和主任务后端全量正在由主任务汇总，未提前记录通过。
 
 状态：两个来源的上述接入已实现，已完成上述本地相关验证；后端全量进行中，暂存及受控部署待验，尚未 commit、未 push、未部署本轮改动。实现发布后继续验自然任务覆盖、市场 5 秒可用性和财务配对，不宣称选股已改善。G3、G7 与 G2-FQ1 保持未完成，G1/G2 原门槛和历史快照保留。
+
+## 最终测试、受控部署与运行证据补录
+
+以下为主任务完成后的验收，更新上段待验状态并保留其历史。后端全量 **2,412 passed、3 项 warnings（241.07 秒）**，收集早于最终 installer 测试，不能称覆盖最终所有新增用例；最终相关 **158 passed（1.77 秒）**，installer 备份路径修正后再复跑 **8 passed（0.04 秒）**。这些重叠结果不相加。
+
+代码提交 `57fc24c00cda4ecd510989cc54a964841647d8b4` 已受控部署至 `/opt/qagent/releases/57fc24c00cda4ecd510989cc54a964841647d8b4`。云端 `/var/tmp/qagent-rollout-relay-4sxprzxh/result.json` 的 `ledger_equal`、`settings_equal`、`scheduler_enabled` 均为 true，8 张账本表与 16 项 settings 保持一致。API health 为 ok，`datahubco` 与 `tushare_relay_market` 状态为 configured；基础服务 HTTP 已按用户授权启用。configured 证明配置可用，不等于所有接口健康。
+
+主任务以云端新 release 及生产 env 运行真实研究 collector，请求 `daily`、`000001.SZ`、`20260825`，返回 1 行、开盘 11.57、收盘 11.59。`observed_at=2026-09-14T02:47:28.688988+00:00`，产物 digest 为 `53627c6b0b694553678e3902d25e692492dc887b861fee0a89dc9b2455af4090`。这补齐生产环境下新 collector 单样本，不替代自然后备调用或全市场覆盖。
+
+主任务同一云端 collector 追加上一完整交易日验证：`000001.SZ`、`trade_date=20260911` 成功 1 行，开盘 `11.82`、收盘 `11.74`，`observed_at=2026-09-14T02:48:19.191712+00:00`，digest `b73c9b905f1a945c1f082965863629e57443ed36a5b1a57bebda8da33db6ea88`。此结果将有效日线样本推进至最新完整交易日，仍不是当日分钟实时性或全市场自然覆盖证据。
+
+独立 tick 恢复后为 enabled、waiting，`attempts=1`、`completed=1`、`last_error=null`；恢复首个 slot 迟到 **422 秒**，因此不能称无中断、准点 cadence 或行情实时性已经验收。
+
+研究 cron 已更新至 20260914 新 bundle 并加载 `qagent.env`；原定时间、两只股票及 180 秒超时保持不变。旧 cron 备份为 `/var/backups/qagent-document-research/relay-research-before-20260914-pkos8tw2.cron`，新 cron SHA256 为 `d34a7a7e4cc98b8beca77217ec1b643cc29f0165f1a679abdb1df65375a514fe`。installer 首次因原备份目录安全约束拒绝，未改变 cron；改用独立目录的修复提交为 `0d0f055`，临时复制执行成功，此安装脚本修正无需重新发布运行服务。安装成功不等于自然采集已成功。
+
+最终状态：已实现、已完成上述测试、已 commit、已受控部署并授权启用基础 HTTP，**未 push**；本文补录本身尚未提交。分钟实时性、新 cron 自然采集与完整覆盖仍未验，不得从发布成功或单条历史日线推导选股有效。G3/G7、G2-FQ1 继续保持未完成。
