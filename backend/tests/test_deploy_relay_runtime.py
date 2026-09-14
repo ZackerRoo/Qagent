@@ -36,6 +36,28 @@ def test_bad_credential_rejected_without_exposing_value(key):
         deploy.relay_environment(b"", key)
 
 
+def test_dual_credentials_replace_only_approved_keys():
+    original = b"KEEP=yes\nQAGENT_DATAHUBCO_ENABLED=false\nexport QAGENT_DATAHUBCO_KEY=old\n"
+    basic = "basic ' $(not-executed)"
+    payload = json.dumps({"relay_key": "relay-test", "datahubco_key": basic})
+    result = deploy.credential_environment(original, io.StringIO(payload), enable_datahubco=True)
+    assert result.startswith(b"KEEP=yes\n")
+    assert result.count(b"QAGENT_DATAHUBCO_KEY=") == 1
+    assert b"QAGENT_DATAHUBCO_ALLOW_INSECURE_HTTP=true\n" in result
+    assert shlex.split(result.decode().splitlines()[-1])[0] == "QAGENT_DATAHUBCO_KEY=" + basic
+    assert deploy.credential_environment(b"", io.StringIO("relay-test\n")) == deploy.relay_environment(b"", "relay-test")
+
+
+@pytest.mark.parametrize("payload", ["bad-json", "[]", '{"relay_key":"secret"}',
+    json.dumps({"relay_key": "secret", "datahubco_key": "bad\nkey"}),
+    json.dumps({"relay_key": None, "datahubco_key": "secret"}),
+    json.dumps({"relay_key": "secret", "datahubco_key": "非ASCII"}),
+])
+def test_dual_credentials_fail_safely(payload):
+    with pytest.raises(ValueError, match="^invalid deployment credentials$"):
+        deploy.credential_environment(b"KEEP=yes", io.StringIO(payload), enable_datahubco=True)
+
+
 def test_atomic_environment_preserves_mode_and_rejects_concurrent_update(tmp_path, monkeypatch):
     env = tmp_path / "env"
     env.write_bytes(b"old")
@@ -200,6 +222,32 @@ def test_failure_before_resume_rolls_back_code_and_env(rollout, monkeypatch):
     assert rollout.env.read_bytes() == rollout.original
     assert rollout.state == rollout.initial
     assert (rollout.evidence / "rollback.json").exists()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_dual_service_rollout_and_rollback(rollout, monkeypatch, capsys, fail):
+    monkeypatch.setattr(deploy.sys, "argv", deploy.sys.argv + ["--enable-datahubco"])
+    monkeypatch.setattr(deploy.sys, "stdin", io.StringIO(json.dumps({
+        "relay_key": "private-relay", "datahubco_key": "private-basic"})))
+    calls = []
+    def health():
+        calls.append(1)
+        if fail and len(calls) == 1:
+            raise RuntimeError("health failure")
+    monkeypatch.setattr(deploy, "healthy", health)
+    if fail:
+        with pytest.raises(RuntimeError, match="health failure"):
+            deploy.main()
+        assert rollout.env.read_bytes() == rollout.original
+        assert rollout.current.resolve() == rollout.old
+    else:
+        deploy.main()
+        assert b"QAGENT_DATAHUBCO_ENABLED=true" in rollout.env.read_bytes()
+        assert b"QAGENT_DATAHUBCO_ALLOW_INSECURE_HTTP=true" in rollout.env.read_bytes()
+        assert b"QAGENT_TUSHARE_RELAY_MARKET_ENABLED=true" in rollout.env.read_bytes()
+    assert rollout.state == rollout.initial
+    assert (rollout.evidence / "qagent.env.before").read_bytes() == rollout.original
+    assert "private-" not in capsys.readouterr().out
 
 
 def test_idle_failure_never_pauses(rollout, monkeypatch):

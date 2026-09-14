@@ -155,3 +155,61 @@ def test_cli_no_inference_atomic_and_nonoverwrite(tmp_path):
     assert output.read_bytes() == encoded
     assert source.read_bytes() == before
     assert not list(tmp_path.glob(".g2-consensus-*"))
+
+
+def with_missing_features(changes):
+    signal = fixture(incomplete=())
+    features = json.loads(audit.CONFIG.read_text())["variants"]
+    for index, values in changes.items():
+        signal["source"]["rankings"][index]["research_features"].update(values)
+    missing = []
+    for row, source in zip(signal["predictions"], signal["source"]["rankings"]):
+        absent = {feature for feature in features["full_features"]
+                  if not audit.finite(source["research_features"].get(feature))}
+        missing.append(absent)
+        for name, columns in features.items():
+            row[name]["feature_coverage"] = (len(columns) - len(absent.intersection(columns))) / len(columns)
+    signal["coverage"]["feature_nonmissing"] = {
+        feature: sum(feature not in absent for absent in missing) for feature in features["full_features"]}
+    signal["coverage"]["variant_joint_complete"] = {
+        name: sum(not absent.intersection(columns) for absent in missing) for name, columns in features.items()}
+    return seal(signal)
+
+
+def test_financial_market_patterns_and_original_top10_are_separate():
+    signal = with_missing_features({
+        0: {"gross_margin": None, "return_on_equity": "invalid"},
+        1: {"gross_margin": None, "return_on_equity": None},
+        2: {"momentum_20": None},
+        3: {"earnings_yield": None, "momentum_20": None},
+    })
+    before = copy.deepcopy(signal)
+    result = audit.audit(signal)
+    report = result["raw_feature_missingness"]
+    assert report["group_coverage"]["financial"]["missing_rows"] == 3
+    assert report["group_coverage"]["market"]["missing_rows"] == 2
+    assert report["feature_coverage"]["gross_margin"]["complete_fraction"] == 0.6
+    assert report["feature_coverage"]["gross_margin"]["missing_instrument_ids"] == ["SYNTHETIC:0", "SYNTHETIC:1"]
+    patterns = {tuple(row["missing_features"]): row for row in report["missing_patterns"]}
+    assert patterns[("return_on_equity", "gross_margin")]["instrument_ids"] == ["SYNTHETIC:0", "SYNTHETIC:1"]
+    assert patterns[()]["instrument_ids"] == ["SYNTHETIC:4"]
+    assert sum(row["rows"] for row in patterns.values()) == 5
+    for name, selected in report["original_top10_financial_missing"].items():
+        assert {row["instrument_id"] for row in selected} == {"SYNTHETIC:0", "SYNTHETIC:1", "SYNTHETIC:3"}
+        assert [row["original_rank"] for row in selected] == sorted(row["original_rank"] for row in selected)
+    assert report["source_cause"] == "not_established"
+    assert result["complete_instrument_ids"] == ["SYNTHETIC:4"]
+    assert signal == before
+    signal["source"]["rankings"].reverse()
+    signal["predictions"].reverse()
+    assert audit.audit(seal(signal))["raw_feature_missingness"] == report
+
+
+def test_all_financial_complete_and_nonfinite_string_missingness():
+    complete = audit.audit(fixture(incomplete=()))["raw_feature_missingness"]
+    assert complete["group_coverage"]["financial"]["complete_fraction"] == 1.0
+    assert all(rows == [] for rows in complete["original_top10_financial_missing"].values())
+    report = audit.audit(with_missing_features({0: {"gross_margin": "nan"},
+                                               1: {"gross_margin": "inf"},
+                                               2: {"gross_margin": "0.0"}}))["raw_feature_missingness"]
+    assert report["feature_coverage"]["gross_margin"]["missing_rows"] == 2

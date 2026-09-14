@@ -4,6 +4,8 @@ from qagent.providers.base import MarketDataProvider
 from qagent.providers.cached import CachedMarketDataProvider
 from qagent.providers.composite import CompositeMarketDataProvider
 from qagent.providers.daily_fallback import DailyFallbackMarketDataProvider
+from qagent.providers.datahubco import DatahubcoClient
+from qagent.providers.datahubco_market import DatahubcoMarketDataProvider
 from qagent.providers.fixtures import FixtureMarketDataProvider
 from qagent.providers.free_cn import FreeCnMarketDataProvider
 from qagent.providers.failure_state import ProviderFailureStateRegistry
@@ -67,6 +69,17 @@ def build_market_data_provider(provider_mode: str) -> MarketDataProvider:
                 max_fallback_instruments=2,
                 max_fallback_batches=1,
                 fallback_time_budget_seconds=30,
+            )
+        if (settings.datahubco_enabled and settings.datahubco_key
+                and settings.datahubco_allow_insecure_http):
+            cn_provider = DailyFallbackMarketDataProvider(
+                cn_provider,
+                DatahubcoMarketDataProvider(DatahubcoClient(
+                    api_key=settings.datahubco_key.get_secret_value(),
+                    allow_insecure_http=True, timeout_seconds=5,
+                )),
+                name="free_cn", max_fallback_instruments=2,
+                max_fallback_batches=1, fallback_time_budget_seconds=30,
             )
         if fuyao is not None:
             cn_provider = SnapshotPreferredMarketDataProvider(

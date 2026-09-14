@@ -271,6 +271,38 @@ def paper_tick_environment(original):
     )
 
 
+def datahubco_environment(original, key):
+    """Apply only the explicitly approved basic-service settings."""
+    if (not isinstance(key, str) or not key or len(key) > 4096
+            or any(ord(ch) < 32 or ord(ch) > 126 for ch in key)):
+        raise ValueError("invalid Datahubco credential")
+    names = rb"(?:QAGENT_DATAHUBCO_KEY|QAGENT_DATAHUBCO_ENABLED|QAGENT_DATAHUBCO_ALLOW_INSECURE_HTTP)"
+    base = b"".join(line for line in original.splitlines(keepends=True)
+                    if not re.match(rb"^\s*(?:export\s+)?" + names + rb"\s*=", line))
+    return base + (b"" if not base or base.endswith(b"\n") else b"\n") + (
+        "QAGENT_DATAHUBCO_ENABLED=true\nQAGENT_DATAHUBCO_ALLOW_INSECURE_HTTP=true\n"
+        "QAGENT_DATAHUBCO_KEY=" + shlex.quote(key) + "\n"
+    ).encode()
+
+
+def credential_environment(original, stream, *, enable_datahubco=False):
+    if not enable_datahubco:
+        return relay_environment(original, stream.read(4098).rstrip("\n"))
+    try:
+        raw = stream.read(65537)
+        if len(raw) > 65536:
+            raise ValueError
+        payload = json.loads(raw)
+        if not isinstance(payload, dict) or set(payload) != {"relay_key", "datahubco_key"}:
+            raise ValueError
+        if not isinstance(payload["relay_key"], str):
+            raise ValueError
+        result = relay_environment(original, payload["relay_key"])
+        return datahubco_environment(result, payload["datahubco_key"])
+    except (ValueError, TypeError):
+        raise ValueError("invalid deployment credentials") from None
+
+
 def atomic_environment(expected, replacement):
     """Replace atomically, retaining owner/mode and rejecting concurrent changes."""
     assert ENV.read_bytes() == expected, "environment changed concurrently"
@@ -303,6 +335,8 @@ def main():
     ap.add_argument("--execute", action="store_true")
     ap.add_argument("--expected-sha", required=True)
     ap.add_argument("--enable-paper-tick", action="store_true")
+    ap.add_argument("--enable-datahubco", action="store_true",
+                    help="Accept basic-service HTTP; stdin must contain both service keys as JSON")
     args = ap.parse_args()
     release = Path(args.release).resolve()
     old = CURRENT.resolve()
@@ -354,7 +388,8 @@ def main():
     env_after = None
     if args.execute:
         assert not sys.stdin.isatty(), "provide credential via private stdin pipe"
-        env_after = relay_environment(env_before, sys.stdin.read(4098).rstrip("\n"))
+        env_after = credential_environment(env_before, sys.stdin,
+                                           enable_datahubco=args.enable_datahubco)
         if args.enable_paper_tick:
             env_after = paper_tick_environment(env_after)
     idle()
@@ -372,6 +407,7 @@ def main():
                 "settings_count": len(settings),
                 "preflight": "passed",
                 "enable_paper_tick": args.enable_paper_tick,
+                "enable_datahubco": args.enable_datahubco,
             }
         ),
         flush=True,

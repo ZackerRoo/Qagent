@@ -19,6 +19,57 @@ POLICY = {
     "diagnostic_only": True,
     "changes_frozen_eligibility": False,
 }
+FINANCIAL_FEATURES = (
+    "earnings_yield", "return_on_equity", "gross_margin", "revenue_growth", "earnings_growth",
+)
+
+
+def missingness_report(missing: dict, columns: list[str], original: dict) -> dict:
+    """Describe validated paired raw inputs, without attributing upstream causes."""
+    groups = {
+        "financial": [feature for feature in columns if feature in FINANCIAL_FEATURES],
+        "market": [feature for feature in columns if feature not in FINANCIAL_FEATURES],
+    }
+    total = len(missing)
+    absent = {key: set(value["full_features"]) for key, value in missing.items()}
+
+    def coverage(features: list[str]) -> dict:
+        incomplete = sorted(key for key, values in absent.items() if values.intersection(features))
+        return {
+            "features": features, "complete_rows": total - len(incomplete),
+            "complete_fraction": (total - len(incomplete)) / total,
+            "missing_rows": len(incomplete), "missing_instrument_ids": incomplete,
+        }
+
+    patterns = {}
+    for key in sorted(absent):
+        pattern = tuple(feature for feature in columns if feature in absent[key])
+        patterns.setdefault(pattern, []).append(key)
+    financial = set(groups["financial"])
+    return {
+        "protocol": "g2-raw-feature-missingness-v1",
+        "cohort": "original_validated_paired_rows", "rows": total,
+        "missing_definition": "raw_value_not_convertible_to_finite_float",
+        "feature_coverage": {feature: coverage([feature]) for feature in columns},
+        "group_coverage": {name: coverage(features) for name, features in groups.items()},
+        "missing_patterns": [{"missing_features": list(pattern), "rows": len(keys),
+                              "instrument_ids": keys}
+                             for pattern, keys in sorted(patterns.items())],
+        "original_top10_financial_missing": {
+            name: [{"instrument_id": row["instrument_id"],
+                    "original_rank": row["consensus_rank"] if name == "consensus" else row[name]["rank"],
+                    "missing_financial_features": [feature for feature in groups["financial"]
+                                                   if feature in absent[row["instrument_id"]]]}
+                   for row in ordered[:10] if absent[row["instrument_id"]].intersection(financial)]
+            for name, ordered in original.items()},
+        "source_cause": "not_established",
+        "limitations": [
+            "Financial groups include earnings yield, which combines earnings and market valuation inputs.",
+            "Groups describe feature semantics, not provider provenance or failure causes.",
+            "Missing raw values do not establish provider outage, absent reports, or point-in-time availability.",
+            "Top10 refers to each original full paired-cohort order, before complete-case filtering.",
+        ],
+    }
 
 
 def finite(value: object) -> bool:
@@ -149,6 +200,7 @@ def audit(signal: dict) -> dict:
         "signal_date": signal["signal_date"], "source_result_digest": signal["result_digest"],
         "source_digest": source["source_digest"], "config_digest": digest(config),
         "paired_rows": len(rows), "complete_rows": len(included),
+        "raw_feature_missingness": missingness_report(missing, features["full_features"], original),
         "complete_fraction_of_paired": len(included) / len(rows),
         "complete_instrument_ids": included, "complete_universe_digest": digest({"instrument_ids": included}),
         "excluded_from_diagnostic": [{"instrument_id": key, "missing_features": missing[key]}

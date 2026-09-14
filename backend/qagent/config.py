@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     tushare_relay_research_enabled: bool = False
     tushare_relay_market_enabled: bool = False
     tushare_relay_timeout_seconds: float = Field(default=30, gt=0, le=30)
+    datahubco_key: SecretStr | None = Field(default=None, repr=False)
+    datahubco_enabled: bool = False
+    datahubco_allow_insecure_http: bool = False
     fuyao_api_key: str | None = None
     fuyao_base_url: str = "https://fuyao.aicubes.cn"
     fuyao_timeout_seconds: int = Field(default=8, ge=1, le=30)

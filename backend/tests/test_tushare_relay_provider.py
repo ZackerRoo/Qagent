@@ -50,6 +50,56 @@ def test_dynamic_fields_and_business_mode():
     assert client.capabilities()["daily"]["enabled"] is True
 
 
+@pytest.mark.parametrize("bypass", [False, True])
+def test_environment_https_proxy_and_no_proxy_are_respected(monkeypatch, bypass):
+    """Exercise HTTPX environment routing with in-memory transports, never a socket."""
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                 "http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:8080")
+    if bypass:
+        monkeypatch.setenv("NO_PROXY", "pcd.mobcvb.cn")
+    routes = []
+
+    def transport(route):
+        def respond(request):
+            routes.append(route)
+            assert request.url.scheme == "https"
+            assert request.url.host == "pcd.mobcvb.cn"
+            assert request.headers["X-API-Key"] == "secret-relay-key"
+            assert "secret-relay-key" not in str(request.url)
+            return httpx.Response(200, json={"interfaces": []})
+        return httpx.MockTransport(respond)
+
+    class RoutedClient(httpx.Client):
+        def __init__(self, **kwargs):
+            assert kwargs["verify"] is True
+            assert kwargs["follow_redirects"] is False
+            assert kwargs["timeout"] == 5
+            super().__init__(**kwargs)
+
+        def _init_transport(self, **kwargs):
+            return transport("direct")
+
+        def _init_proxy_transport(self, proxy, **kwargs):
+            assert str(proxy.url) == "http://proxy.invalid:8080"
+            assert kwargs["verify"] is True
+            return transport("proxy")
+
+    monkeypatch.setattr(httpx, "Client", RoutedClient)
+    client = TushareRelayClient("secret-relay-key", timeout_seconds=5, retries=0,
+                               sleep=lambda _: None)
+    assert client.capabilities() == {}
+    assert routes == ["direct" if bypass else "proxy"]
+
+
+def test_explicit_mock_transport_remains_isolated_with_proxy_environment(monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:8080")
+    client, calls = make_client()
+    assert client.query("daily", ts_code="000001.SZ").rows == ()
+    assert len(calls) == 2
+
+
 @pytest.mark.parametrize("api", ["p_list", "p_get", "p_save", "p_delete", "../daily",
                                  "https://evil.com", "order", "order_create"])
 def test_forbidden_routes_never_send_auth(api):

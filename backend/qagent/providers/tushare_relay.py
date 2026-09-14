@@ -68,10 +68,11 @@ class TushareRelayClient:
         global _last_request_at
         if path != "/capabilities" and not re.fullmatch(r"/pro/[a-z][a-z0-9_]{0,79}", path):
             raise RelayError("forbidden_api")
-        # No configurable URL, ambient proxy, redirect, insecure TLS or SDK token.
+        # Respect deployment proxy/CA environment like the documented requests path.
+        # Keep a fixed HTTPS destination, certificate verification and no redirects.
         with httpx.Client(
             timeout=self.timeout_seconds, follow_redirects=False, verify=True,
-            trust_env=False, transport=self.transport,
+            trust_env=self.transport is None, transport=self.transport,
         ) as client:
             for attempt in range(self.retries + 1):
                 with _RATE_LOCK:

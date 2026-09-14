@@ -130,7 +130,18 @@ def build_provider_status(
                           "explicit_anchor_research_daily_prices"],
             notes=("Configured is not healthy or verified. Explicit research opt-in required; "
                    "no default pricing, trading or historical PIT authority. "
-                   "The separate HTTP-only basic service is blocked; no credential forwarding."),
+                   "The separate basic service uses its own credential and HTTP opt-in."),
+        ),
+        ProviderStatus(
+            provider_id="datahubco",
+            name="Datahubco basic daily fallback",
+            status=("disabled" if not settings.datahubco_enabled else
+                    "configured" if settings.datahubco_key and settings.datahubco_allow_insecure_http
+                    else "missing_config"),
+            capabilities=["cn_daily_ohlcv_fallback"],
+            notes=("Separate credential and explicit plaintext HTTP opt-in required. "
+                   "Configured is not healthy or verified. Bounded raw daily fallback after "
+                   "existing sources; no minute, adjustment or historical PIT guarantee."),
         ),
     ]
 
