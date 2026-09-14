@@ -20,6 +20,7 @@ SPEC.loader.exec_module(upgrade)
 def deployment(tmp_path, monkeypatch):
     monkeypatch.setattr(upgrade.os, "geteuid", lambda: 0)
     monkeypatch.setattr(upgrade.os, "fchown", lambda *args: None)
+    monkeypatch.setattr(upgrade, "_service_identity", lambda: (upgrade.os.getuid(), upgrade.os.getgid()))
 
     def regular(path):
         if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o022:
@@ -41,8 +42,13 @@ def deployment(tmp_path, monkeypatch):
                            ("FORWARD_CRON", "cron.d/forward"),
                            ("BACKUPS", "backups"), ("TIMEZONE", "timezone")):
         monkeypatch.setattr(upgrade, name, tmp_path / relative)
+    for name, relative in (("SIGNAL_DIR", "state/signals"),
+                           ("EVALUATION_DIR", "state/evaluations"),
+                           ("RUN_DIR", "state/runs")):
+        monkeypatch.setattr(upgrade, name, tmp_path / relative)
     upgrade.DAILY_CRON.parent.mkdir()
     upgrade.BACKUPS.mkdir(mode=0o700)
+    upgrade.SIGNAL_DIR.mkdir(parents=True, mode=0o700)
     upgrade.TIMEZONE.write_text("UTC")
 
     daily_required = daily.REQUIRED | {"scripts/upgrade_daily_financial_research.py"}
@@ -112,6 +118,9 @@ def test_preview_validates_manifests_without_mutation(deployment):
     result = upgrade.install(*deployment)
     assert result["status"] == "planned" and result["started_job"] is False
     assert not upgrade.FORWARD_CRON.exists()
+    assert result["research_directories"][str(upgrade.SIGNAL_DIR)] == "verified"
+    assert result["research_directories"][str(upgrade.EVALUATION_DIR)] == "planned"
+    assert not upgrade.EVALUATION_DIR.exists() and not upgrade.RUN_DIR.exists()
     assert list(upgrade.BACKUPS.iterdir()) == []
 
 
@@ -121,6 +130,9 @@ def test_atomic_install_idempotence_and_recoverable_rollback(deployment):
     receipt = Path(result["receipt"])
     assert stat.S_IMODE(upgrade.FORWARD_CRON.stat().st_mode) == 0o644
     assert stat.S_IMODE(receipt.stat().st_mode) == 0o600
+    assert result["research_directories"][str(upgrade.EVALUATION_DIR)] == "created"
+    for path in (upgrade.SIGNAL_DIR, upgrade.EVALUATION_DIR, upgrade.RUN_DIR):
+        assert stat.S_IMODE(path.stat().st_mode) == 0o700
     before = upgrade.FORWARD_CRON.read_bytes()
     assert upgrade.install(*deployment, execute=True)["status"] == "already_installed"
     preview = upgrade.rollback(receipt, deployment[2])
@@ -226,3 +238,18 @@ def test_recovery_rejects_multiple_matching_prepared_receipts(deployment):
         upgrade.install(*deployment, execute=True)
     assert json.loads(first.read_text())["status"] == "prepared"
     assert json.loads(second.read_text())["status"] == "prepared"
+
+
+@pytest.mark.parametrize("kind", ["mode", "owner", "symlink"])
+def test_research_directory_contract_rejected_before_cron_install(deployment, monkeypatch, kind):
+    if kind == "mode":
+        upgrade.SIGNAL_DIR.chmod(0o755)
+    elif kind == "owner":
+        monkeypatch.setattr(upgrade, "_service_identity", lambda: (
+            upgrade.os.getuid() + 1, upgrade.os.getgid()))
+    else:
+        upgrade.SIGNAL_DIR.rmdir()
+        upgrade.SIGNAL_DIR.symlink_to(upgrade.SIGNAL_DIR.parent, target_is_directory=True)
+    with pytest.raises(ValueError, match="unsafe_research_directory"):
+        upgrade.install(*deployment, execute=True)
+    assert not upgrade.FORWARD_CRON.exists()

@@ -8,6 +8,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path, PurePosixPath
+import pwd
 import re
 import stat
 import tempfile
@@ -16,11 +17,15 @@ from uuid import uuid4
 import install_daily_financial_research as daily
 
 DAILY_BUNDLE = Path("/opt/qagent-research/daily-financial-20260914-v2")
-FORWARD_BUNDLE = Path("/opt/qagent-research/financial-forward-20260914-v1")
+FORWARD_BUNDLE = Path("/opt/qagent-research/financial-forward-20260914-v2")
 DAILY_CRON = Path("/etc/cron.d/qagent-daily-financial-research")
 FORWARD_CRON = Path("/etc/cron.d/qagent-financial-forward-research")
 BACKUPS = Path("/var/backups/qagent-financial-forward-research")
 TIMEZONE = Path("/etc/timezone")
+SIGNAL_DIR = Path("/var/lib/qagent-research/financial-forward-signals")
+EVALUATION_DIR = Path("/var/lib/qagent-research/financial-forward-evaluations")
+RUN_DIR = Path("/var/lib/qagent-research/financial-forward-runs")
+SERVICE_USER = "luozhenkun"
 DAILY_CRON_SHA = "4a80db491109badc90190fe9bdd45bf39160118ebe17733a1e934a8cf9b88b9d"
 DAILY_MANIFEST_SHA = "4549c4af411f1f3cd212d154f5b340a9671cd3e54291a79f204bee91b4326a14"
 REQUIRED = {
@@ -157,6 +162,45 @@ def _directory(path: Path, *, private=False):
         raise ValueError("unsafe_directory_permissions")
 
 
+def _service_identity() -> tuple[int, int]:
+    account = pwd.getpwnam(SERVICE_USER)
+    return account.pw_uid, account.pw_gid
+
+
+def _validate_research_directory(path: Path, uid: int, gid: int) -> None:
+    if any(item.is_symlink() for item in (path, *path.parents)) or not path.is_dir():
+        raise ValueError("unsafe_research_directory")
+    meta = path.stat()
+    if (meta.st_uid, meta.st_gid) != (uid, gid) or stat.S_IMODE(meta.st_mode) != 0o700:
+        raise ValueError("unsafe_research_directory_owner_or_mode")
+
+
+def _prepare_research_directories(uid: int, gid: int, *, execute: bool) -> dict:
+    # Signals contains an already sealed production-independent artifact and is
+    # therefore validation-only. Evaluation/run directories may be created.
+    _validate_research_directory(SIGNAL_DIR, uid, gid)
+    result = {str(SIGNAL_DIR): "verified"}
+    for path in (EVALUATION_DIR, RUN_DIR):
+        if path.exists() or path.is_symlink():
+            _validate_research_directory(path, uid, gid)
+            result[str(path)] = "verified"
+            continue
+        result[str(path)] = "planned"
+        if not execute:
+            continue
+        os.mkdir(path, 0o700)
+        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fchmod(descriptor, 0o700)
+            os.fchown(descriptor, uid, gid)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        _validate_research_directory(path, uid, gid)
+        result[str(path)] = "created"
+    return result
+
+
 def validate_forward_bundle(expected_sha: str) -> None:
     if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
         raise ValueError("invalid_digest")
@@ -201,9 +245,9 @@ def cron_bytes() -> bytes:
         f"{FORWARD_BUNDLE}/scripts/run_financial_forward_research.py "
         "--daily-dir /var/lib/qagent-research/daily-financial "
         "--baseline-dir /var/lib/qagent-research/g2-forward-results/signals "
-        "--signal-dir /var/lib/qagent-research/financial-forward-signals "
-        "--evaluation-dir /var/lib/qagent-research/financial-forward-evaluations "
-        "--run-dir /var/lib/qagent-research/financial-forward-runs "
+        f"--signal-dir {SIGNAL_DIR} "
+        f"--evaluation-dir {EVALUATION_DIR} "
+        f"--run-dir {RUN_DIR} "
         "--db /var/lib/qagent/qagent.db --provider-mode free --budget-seconds 300\n"
     ).encode()
 
@@ -232,14 +276,22 @@ def inspect(expected_daily_cron: str, expected_daily_manifest: str,
 
 
 def install(expected_daily_cron: str, expected_daily_manifest: str,
-            expected_forward_manifest: str, *, execute=False) -> dict:
+            expected_forward_manifest: str, *, execute=False,
+            service_uid: int | None = None, service_gid: int | None = None) -> dict:
+    if (service_uid is None) != (service_gid is None):
+        raise ValueError("service_identity_pair_required")
+    if service_uid is None or service_gid is None:
+        service_uid, service_gid = _service_identity()
     wanted, exists = inspect(expected_daily_cron, expected_daily_manifest,
                              expected_forward_manifest)
+    research_directories = _prepare_research_directories(
+        service_uid, service_gid, execute=False)
     result = {"status": "already_installed" if exists else "planned",
               "cron_sha256": checksum(wanted),
               "forward_manifest_sha256": expected_forward_manifest,
               "cron": wanted.decode(), "started_job": False,
-              "daily_cron_unchanged": True}
+              "daily_cron_unchanged": True,
+              "research_directories": research_directories}
     if not execute:
         return result
     if os.geteuid() != 0:
@@ -251,6 +303,8 @@ def install(expected_daily_cron: str, expected_daily_manifest: str,
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         wanted, exists = inspect(expected_daily_cron, expected_daily_manifest,
                                  expected_forward_manifest)
+        result["research_directories"] = _prepare_research_directories(
+            service_uid, service_gid, execute=True)
         if exists:
             recovery = _recover_existing(wanted, expected_daily_cron,
                                          expected_daily_manifest,

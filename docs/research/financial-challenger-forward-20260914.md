@@ -74,11 +74,13 @@ runner 在独立锁下遍历所有既有 signal，每个 signal 仍通过只读 
 
 若进程在cron发布/fsync之后、收据晋级之前直接退出，下一次显式execute不会直接返回already installed：它先在持锁状态扫描私有目录中的 `before-install-*.json`。唯一prepared收据必须严格匹配完整schema、0600普通文件、目标路径、daily cron/manifest、forward manifest、安装字节摘要及当前cron的0644/device/inode/bytes，才原子晋级并返回 `recovered_installed`；唯一已installed且同样完整匹配时才正常返回 `already_installed`。无有效收据、同字节不同inode、多个匹配prepared或多个installed均拒绝，避免把操作方重建的同内容文件误认成本次安装。
 
+云端预安装手动run进一步确认父目录 `/var/lib/qagent-research` 为root:root 0755，既有signals为服务用户0700，但evaluations/runs尚不存在，服务用户不能直接创建。此前v1仅暂存、未安装cron，保留为失败候选证据且不覆盖；修订包常量改为 `financial-forward-20260914-v2`。v2 preview只严格验证signals为非软链、服务用户uid/gid、0700，并报告另外两目录的创建计划，不写磁盘；execute在持安装锁且发布cron前，以固定绝对路径创建evaluations/runs，使用目录fd设定服务用户uid/gid和0700、fsync并二次验证。任一目录缺失约束、owner/mode错误、软链或创建失败均不得安装cron；rollback不删除研究数据目录。runner无法在run目录本身不可创建时留证是预期边界，由该安装预检消除。
+
 预览模板为工作日 `11:37 UTC`（北京时间19:37）一次，同时 seal 与 evaluate。选择19:37是为了给16:40采集的600秒上限留出充分间隔，并错开既有 G2 每半小时检查点以及10分钟整点节奏；它仍是独立只读研究任务，固定使用：
 
 ```sh
 PYTHONPATH=/opt/qagent/current/backend /opt/qagent/current/backend/.venv/bin/python -B \
-  /opt/qagent-research/financial-forward-20260914-v1/scripts/run_financial_forward_research.py \
+  /opt/qagent-research/financial-forward-20260914-v2/scripts/run_financial_forward_research.py \
   --daily-dir /var/lib/qagent-research/daily-financial \
   --baseline-dir /var/lib/qagent-research/g2-forward-results/signals \
   --signal-dir /var/lib/qagent-research/financial-forward-signals \
@@ -87,4 +89,4 @@ PYTHONPATH=/opt/qagent/current/backend /opt/qagent/current/backend/.venv/bin/pyt
   --db /var/lib/qagent/qagent.db --provider-mode free --budget-seconds 300
 ```
 
-终审安全修正后的专项与现有安装/升级回归共 **61 passed（2.00秒）**，正确虚拟环境全量 **2619 passed、3 warnings（255.59秒）**，Ruff及diff检查通过，最终审计无P1/P2。覆盖已有手工 signal 幂等、首个合法 daily、锁冲突不可变证据、单次evaluate硬超时与留证、数据库字节不变、未成熟等待、首次 partial 不建 final、后续补齐生成 complete、complete 不覆盖、runtime identity、manifest 篡改、发布失败prepared收据不可回滚、receipt晋级失败安全撤销本次cron、他人替换文件不删除、崩溃遗留prepared恢复后可回滚、同字节不同inode及多个prepared拒绝、预览不写、原子安装/幂等和可恢复回滚。本阶段已实现并完成上述测试；未 commit、未 push、未打包、未安装 cron、未部署或运行云端自动任务。首个自然 signal 的真实5/10/20日成熟验收仍按原日期等待，G2-FQ1/G2状态不提升。
+最新专项与现有安装/升级回归共 **64 passed（3.57秒）**，正确虚拟环境全量 **2622 passed、3 warnings（333.92秒）**，Ruff及diff检查通过，终审无P1/P2。覆盖已有手工 signal 幂等、首个合法 daily、锁冲突不可变证据、单次evaluate硬超时与留证、数据库字节不变、未成熟等待、首次 partial 不建 final、后续补齐生成 complete、complete 不覆盖、runtime identity、manifest和目录契约篡改、preview不创建目录、execute安全创建、发布/receipt崩溃恢复、他人替换文件不删除、同字节不同inode及多个prepared拒绝、原子安装/幂等和可恢复回滚。本阶段已实现并完成上述测试；未 commit、未 push、v2未打包、未安装 cron、未部署或运行云端自动任务；v1仍仅暂存且未安装。首个自然 signal 的真实5/10/20日成熟验收仍按原日期等待，G2-FQ1/G2状态不提升。
