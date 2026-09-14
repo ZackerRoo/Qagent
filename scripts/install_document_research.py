@@ -21,7 +21,7 @@ NEW_BUNDLE = "/opt/qagent-research/tushare-relay-20260914"
 OLD_ENV = "/etc/qagent/relay-research.env"
 NEW_ENV = "/etc/qagent/qagent.env"
 CRON = Path("/etc/cron.d/qagent-relay-research")
-BACKUPS = Path("/var/backups/qagent")
+BACKUPS = Path("/var/backups/qagent-document-research")
 EXPECTED_JOB = (
     "30 8 * * 1-5 luozhenkun /bin/sh -c 'set -a; . \"" + OLD_ENV +
     "\"; set +a; exec \"/opt/qagent/current/backend/.venv/bin/python\" -B \"" +
