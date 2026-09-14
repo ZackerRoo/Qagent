@@ -236,3 +236,11 @@ eligible8/8，Top5为600519.SH、300750.SZ、603766.SH、603259.SH、688002.SH�
 独立包已部署到 `/opt/qagent-research/daily-financial-20260914-v2`，cron由c958…升级为4a80…，固定模板重算完整目标SHA为 `4a80db491109badc90190fe9bdd45bf39160118ebe17733a1e934a8cf9b88b9d`；旧cron备份0600、幂等复核already_installed。升级过程未启动任务、未重启后端，首次自然16:40运行仍待观察。`/api/health` ok，release仍5b72362；模拟盘同一session、active，128 total/9 active/remaining1；十分钟更新outside_session、3/3、last_error null，此状态快照不替代账本全量对账或分钟时效验收。
 
 本轮已实现、专项及正确环境全量测试通过、真实采集验收通过、独立包与cron已升级；commit/push状态未在本次验收中新增确认。不修改模拟盘、账本、交易规则或冻结输入。固定period20260630后续须显式滚动，预告和分页覆盖限制保留；G2-FQ1/G2自然运行、数据覆盖及同集合成熟收益验收继续待验，原目标与门槛不变。
+
+## G2-FQ1 独立前向验证链路（2026-09-14）
+
+新增 `scripts/evaluate_financial_challenger.py`，把既有六指标规则候选接到独立的 seal/evaluate 两阶段前向验证；详细协议、输入输出和限制见[财务规则候选前向验证报告](research/financial-challenger-forward-20260914.md)。它只接受交易日当日15:30后采集并在同日封存的 `daily-documented-research-v2`，复算原始证据和候选排名；旧09-11数据在09-14采集的人工报告明确拒绝追认为09-11前向信号。
+
+收益评估以次交易日调整开盘为入场、5/10/20交易日窗口末日调整收盘为退出，使用沪深300同窗收益和固定10bps往返成本；只读SQLite缓存，缺价、质量拒绝、未成熟分别保留，不补价、不换股、不把不完整Top5计算成组合均值。基线仅接受同日、同完整资格集合且摘要有效的G2 `full_features`研究归档；观察输入顺序不得作为收益基线，无合格归档时明确 `baseline_unavailable`。
+
+新增专项 **16 passed**，相关回归 **104 passed**；正确虚拟环境全量 **2595 passed、3 warnings**，Ruff和diff检查通过。本轮实现不写 `FactorResearchRepository`、模拟盘、唯一账本或正式Ranking，也没有新增数据库/API/调度或部署。自然有效信号、同日基线和5/10/20日真实成熟结果仍待后续时间窗口验收，因此G2-FQ1选股增益尚未证明，不提升正式交易权限。
