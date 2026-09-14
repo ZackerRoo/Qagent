@@ -17,7 +17,7 @@ from uuid import uuid4
 import install_daily_financial_research as daily
 
 DAILY_BUNDLE = Path("/opt/qagent-research/daily-financial-20260914-v2")
-FORWARD_BUNDLE = Path("/opt/qagent-research/financial-forward-20260914-v2")
+FORWARD_BUNDLE = Path("/opt/qagent-research/financial-forward-20260914-v3")
 DAILY_CRON = Path("/etc/cron.d/qagent-daily-financial-research")
 FORWARD_CRON = Path("/etc/cron.d/qagent-financial-forward-research")
 BACKUPS = Path("/var/backups/qagent-financial-forward-research")
@@ -38,6 +38,8 @@ REQUIRED = {
     "scripts/compare_g2_selections.py",
     "scripts/upgrade_financial_forward_research.py",
     "scripts/install_daily_financial_research.py",
+    "backend/qagent/providers/datahubco.py",
+    "backend/qagent/providers/tushare_relay.py",
 }
 
 
@@ -108,6 +110,28 @@ def _receipt_matches(receipt: dict, *, status_value: str, current_meta,
     )
 
 
+def _receipt_shape_valid(receipt: dict) -> bool:
+    required = {"schema", "status", "install_id", "pending_device", "pending_inode",
+                "cron_path", "previously_absent", "installed_sha256",
+                "forward_manifest_sha256", "daily_cron_sha256",
+                "daily_manifest_sha256"}
+    return (
+        isinstance(receipt, dict) and set(receipt) == required
+        and receipt.get("schema") == "financial-forward-install-receipt-v1"
+        and receipt.get("status") in {"prepared", "installed"}
+        and isinstance(receipt.get("install_id"), str)
+        and re.fullmatch(r"[0-9a-f]{32}", receipt["install_id"]) is not None
+        and type(receipt.get("pending_device")) is int
+        and type(receipt.get("pending_inode")) is int
+        and receipt.get("cron_path") == str(FORWARD_CRON)
+        and receipt.get("previously_absent") is True
+        and all(isinstance(receipt.get(key), str)
+                and re.fullmatch(r"[0-9a-f]{64}", receipt[key]) is not None
+                for key in ("installed_sha256", "forward_manifest_sha256",
+                            "daily_cron_sha256", "daily_manifest_sha256"))
+    )
+
+
 def _recover_existing(wanted: bytes, expected_daily_cron: str,
                       expected_daily_manifest: str,
                       expected_forward_manifest: str) -> dict:
@@ -116,16 +140,21 @@ def _recover_existing(wanted: bytes, expected_daily_cron: str,
     current_meta = _regular(FORWARD_CRON)
     if stat.S_IMODE(current_meta.st_mode) != 0o644 or FORWARD_CRON.read_bytes() != wanted:
         raise ValueError("existing_forward_cron_mismatch")
-    prepared, installed, invalid = [], [], []
+    prepared, installed, invalid, unrelated = [], [], [], []
     for path in sorted(BACKUPS.glob("before-install-*.json")):
         try:
             meta = _regular(path)
             if stat.S_IMODE(meta.st_mode) != 0o600:
                 raise ValueError("unsafe_receipt_permissions")
             receipt = json.loads(path.read_text())
-            status_value = receipt.get("status") if isinstance(receipt, dict) else None
-            if status_value not in {"prepared", "installed"}:
-                raise ValueError("invalid_receipt_status")
+            if not _receipt_shape_valid(receipt):
+                raise ValueError("invalid_receipt_shape")
+            if receipt["forward_manifest_sha256"] != expected_forward_manifest:
+                # A structurally valid receipt for a prior reviewed bundle is
+                # historical evidence, not a conflict with this v3 recovery.
+                unrelated.append(path)
+                continue
+            status_value = receipt["status"]
             if _receipt_matches(receipt, status_value=status_value, current_meta=current_meta,
                                 wanted=wanted, expected_daily_cron=expected_daily_cron,
                                 expected_daily_manifest=expected_daily_manifest,

@@ -1,14 +1,21 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
+import shutil
 import stat
+import subprocess
 import sys
 
 import pytest
+from sqlalchemy import create_engine
+
+from qagent.storage.tables import MarketBarCacheRow
 
 SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import install_daily_financial_research as daily  # noqa: E402
+import collect_daily_documented_research as batch  # noqa: E402
 
 SPEC = importlib.util.spec_from_file_location(
     "financial_forward_upgrade", SCRIPTS / "upgrade_financial_forward_research.py")
@@ -253,3 +260,94 @@ def test_research_directory_contract_rejected_before_cron_install(deployment, mo
     with pytest.raises(ValueError, match="unsafe_research_directory"):
         upgrade.install(*deployment, execute=True)
     assert not upgrade.FORWARD_CRON.exists()
+
+
+def test_isolated_manifest_bundle_replays_seal_and_evaluate(tmp_path, monkeypatch):
+    root = Path(__file__).resolve().parents[2]
+    bundle = tmp_path / "isolated-forward-v3"
+    files = {}
+    for name in upgrade.REQUIRED:
+        source = root / name
+        target = bundle / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        files[name] = upgrade.checksum(target.read_bytes())
+    manifest = json.dumps({"schema": "financial-forward-bundle-v1", "files": files}).encode()
+    (bundle / "manifest.json").write_bytes(manifest)
+    monkeypatch.setattr(upgrade, "FORWARD_BUNDLE", bundle)
+    monkeypatch.setattr(upgrade, "_regular", lambda path: path.stat())
+    monkeypatch.setattr(upgrade, "_directory", lambda path, private=False: None)
+    upgrade.validate_forward_bundle(upgrade.checksum(manifest))
+    assert {"backend/qagent/providers/datahubco.py",
+            "backend/qagent/providers/tushare_relay.py"} <= upgrade.REQUIRED
+
+    monkeypatch.setattr(batch, "now", lambda: "2026-09-11T16:40:00+08:00")
+    symbols = [f"60000{index}.SH" for index in range(1, 7)]
+
+    def query(base_url, **request):
+        symbol = request["params"]["ts_code"]
+        row = {"ts_code": symbol, "end_date": "20260630", "ann_date": "20260801",
+               "report_type": "1", "comp_type": "1", "n_cashflow_act": 30,
+               "n_income": 10, "total_revenue": 100, "trade_date": "20260911",
+               "pe": 10, "total_assets": 1000, "total_liab": 300, "roe": 10,
+               "netprofit_margin": 20, "type": "预增", "p_change_min": 1,
+               "p_change_max": 2}
+        return {"source": "datahubco", "status": "observed", "rows": [row],
+                "decision_weight": False, "activation_allowed": False}
+
+    daily_path = tmp_path / "daily.json"
+    daily_path.write_text(json.dumps(
+        batch.run_batch(symbols, "20260630", "20260911", query=query)))
+    db = tmp_path / "qagent.db"
+    engine = create_engine("sqlite:///" + str(db))
+    MarketBarCacheRow.__table__.create(engine)
+    engine.dispose()
+    code = """
+import json, pathlib, sys
+from datetime import datetime
+bundle, daily, db = map(pathlib.Path, sys.argv[1:])
+sys.path.insert(0, str(bundle / 'scripts'))
+import evaluate_financial_challenger as forward
+document = json.loads(daily.read_text())
+signal = forward.seal(document, now=datetime.fromisoformat('2026-09-11T19:30:00+08:00'))
+result = forward.evaluate(signal, db, as_of=datetime.fromisoformat('2026-09-11T19:31:00+08:00'))
+assert signal['status'] == 'sealed'
+assert all(item['status'] == 'waiting_for_maturity' for item in result['horizons'])
+print(result['protocol'])
+"""
+    environment = dict(os.environ, PYTHONPATH=str(root / "backend"))
+    completed = subprocess.run(
+        [sys.executable, "-c", code, str(bundle), str(daily_path), str(db)],
+        cwd=tmp_path, env=environment, capture_output=True, text=True, check=False)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "financial-rule-forward-evaluation-v1"
+
+
+def test_absent_cron_ignores_historical_v2_receipt_for_v3_install(deployment):
+    old = upgrade.BACKUPS / "before-install-v2-history.json"
+    old.write_text(json.dumps({
+        "schema": "financial-forward-install-receipt-v1", "status": "installed",
+        "cron_path": str(upgrade.FORWARD_CRON), "forward_manifest_sha256": "2" * 64,
+        "installed_sha256": "3" * 64}))
+    old.chmod(0o600)
+    result = upgrade.install(*deployment, execute=True)
+    assert result["status"] == "installed"
+    assert upgrade.FORWARD_CRON.read_bytes() == upgrade.cron_bytes()
+    assert old.exists()
+
+
+def test_v2_installed_history_does_not_block_linked_v3_prepared_recovery(deployment):
+    current = prepared_crash_receipt(deployment, install_id="3" * 32)
+    historical = json.loads(current.read_text())
+    historical.update(status="installed", install_id="2" * 32,
+                      forward_manifest_sha256="2" * 64,
+                      installed_sha256="4" * 64,
+                      pending_inode=historical["pending_inode"] + 10)
+    old = upgrade.BACKUPS / "before-install-v2-installed.json"
+    old.write_text(json.dumps(historical))
+    old.chmod(0o600)
+    result = upgrade.install(*deployment, execute=True)
+    assert result["status"] == "recovered_installed"
+    assert Path(result["receipt"]) == current
+    assert json.loads(old.read_text())["status"] == "installed"
+    assert upgrade.rollback(current, deployment[2], execute=True)["status"] == "rolled_back"
