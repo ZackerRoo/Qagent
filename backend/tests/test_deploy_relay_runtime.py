@@ -250,6 +250,29 @@ def test_dual_service_rollout_and_rollback(rollout, monkeypatch, capsys, fail):
     assert "private-" not in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("fail", [False, True])
+def test_documented_research_flag_and_rollback(rollout, monkeypatch, fail):
+    monkeypatch.setattr(deploy.sys, "argv", deploy.sys.argv + ["--enable-documented-research"])
+    calls = []
+    def health():
+        calls.append(1)
+        if fail and len(calls) == 1:
+            raise RuntimeError("health failure")
+    monkeypatch.setattr(deploy, "healthy", health)
+    if fail:
+        with pytest.raises(RuntimeError, match="health failure"):
+            deploy.main()
+        assert rollout.env.read_bytes() == rollout.original
+    else:
+        deploy.main()
+        assert b"QAGENT_TUSHARE_RELAY_RESEARCH_ENABLED=true\n" in rollout.env.read_bytes()
+    assert rollout.state == rollout.initial
+    original = b"KEEP=yes\nexport QAGENT_TUSHARE_RELAY_RESEARCH_ENABLED=false\n"
+    expected = b"KEEP=yes\nQAGENT_TUSHARE_RELAY_RESEARCH_ENABLED=true\n"
+    assert deploy.documented_research_environment(original) == expected
+    assert deploy.documented_research_environment(expected) == expected
+
+
 def test_idle_failure_never_pauses(rollout, monkeypatch):
     def busy():
         raise AssertionError("busy")

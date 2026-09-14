@@ -285,6 +285,15 @@ def datahubco_environment(original, key):
     ).encode()
 
 
+def documented_research_environment(original):
+    name = rb"QAGENT_TUSHARE_RELAY_RESEARCH_ENABLED"
+    base = b"".join(line for line in original.splitlines(keepends=True)
+                    if not re.match(rb"^\s*(?:export\s+)?" + name + rb"\s*=", line))
+    return base + (b"" if not base or base.endswith(b"\n") else b"\n") + (
+        b"QAGENT_TUSHARE_RELAY_RESEARCH_ENABLED=true\n"
+    )
+
+
 def credential_environment(original, stream, *, enable_datahubco=False):
     if not enable_datahubco:
         return relay_environment(original, stream.read(4098).rstrip("\n"))
@@ -337,6 +346,7 @@ def main():
     ap.add_argument("--enable-paper-tick", action="store_true")
     ap.add_argument("--enable-datahubco", action="store_true",
                     help="Accept basic-service HTTP; stdin must contain both service keys as JSON")
+    ap.add_argument("--enable-documented-research", action="store_true")
     args = ap.parse_args()
     release = Path(args.release).resolve()
     old = CURRENT.resolve()
@@ -392,6 +402,8 @@ def main():
                                            enable_datahubco=args.enable_datahubco)
         if args.enable_paper_tick:
             env_after = paper_tick_environment(env_after)
+        if args.enable_documented_research:
+            env_after = documented_research_environment(env_after)
     idle()
     saved = state()
     settings = saved["payload"]["settings"]
@@ -408,6 +420,7 @@ def main():
                 "preflight": "passed",
                 "enable_paper_tick": args.enable_paper_tick,
                 "enable_datahubco": args.enable_datahubco,
+                "enable_documented_research": args.enable_documented_research,
             }
         ),
         flush=True,

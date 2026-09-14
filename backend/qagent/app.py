@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from qagent.api.fuyao_routes import router as fuyao_router
+from qagent.api.documented_research_routes import router as documented_research_router
 from qagent.api.routes import (
     _shutdown_automation_scheduler_loop,
     _terminate_paper_dual_track_executor,
@@ -53,6 +54,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(router, prefix="/api")
     app.include_router(fuyao_router, prefix="/api")
+    app.include_router(documented_research_router, prefix="/api")
     return app
 
 
