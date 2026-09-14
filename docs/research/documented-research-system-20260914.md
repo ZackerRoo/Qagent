@@ -40,3 +40,24 @@ python scripts/collect_documented_research.py --source datahubco --api daily --p
 CLI与发布 helper 本轮子任务相关 **58 passed（0.33秒）**、Ruff通过，包含loopback约束、请求契约、禁止重定向、不可覆盖归档、错误脱敏及研究开关成功/失败回滚。系统API由并行子任务实施，主任务集成与真实部署验收另行补录，不能由客户端mock测试宣称服务已部署。当前本轮未commit、未push、未部署；前轮独立财务采集和日线部署证据继续有效，但不替代本入口验收。
 
 最终子任务复跑 **60 passed、1项既有warning（0.47秒）**、Ruff通过，新增CLI经真实FastAPI路由及研究service的契约验证（供应方替身，非公网请求）和目录incomplete退出码检查。CLI的limit/offset/fields位于请求顶层，目录总是全目录；error/incomplete保留证据但退出1，no_rows退出0仅表示查询完成，不代表数据覆盖成功。
+
+主任务集成验收补录：后端全量 **2,456 passed、3项warnings（242.91秒）**，收集早于部分最终新增测试，不称覆盖最终全部用例；最终相关 **105 passed、1项warning（2.27秒）**，Ruff/diff通过。代码提交 `5b72362b43b1401b742e1cea710f48e101eb64b1` 已完成云端暂存构建，preflight通过并核验16项settings。受控部署正在执行，尚未取得最终切换和对账结果，不能据构建或preflight宣称已部署成功；最终运行证据待主任务续补。
+
+## 最终部署与系统API真实验收
+
+主任务已确认新 release `5b72362b43b1401b742e1cea710f48e101eb64b1` 受控部署成功，`/var/tmp/qagent-rollout-relay-pu3u1eba/result.json` 的 ledger_equal、settings_equal、scheduler_enabled 均 true。研究来源开关已显式启用。本段更新此前部署待验状态，保留前段测试和暂存历史；已commit、未push，未改cron、交易权重或历史账本。
+
+系统 CLI 已经通过真实云端 API 成功取得目录：基础80项、79 callable；ProMax298项、255 callable，来自259 enabled中排除4个操作接口。255表示目录上可只读调用的路由，不是255项真实业务请求成功。目录产物 `/var/lib/qagent-research/financial-enrichment/system-catalogue-5b72362.json`。
+
+同系统入口的两个数据请求结果分别保留：
+
+| 请求 | 真实结果 | 产物与摘要 |
+| --- | --- | --- |
+| Datahubco moneyflow / 600519.SH / 20260911 | observed、1行，系统CLI成功 | `system-moneyflow-5b72362.json`；digest `400eb551f21b5734dcb8bb79a76f387c604dd23c3bd663b3db7a0a0576eb95e2` |
+| ProMax daily / 000001.SZ / 20260911 / limit3 | transport_error，系统CLI退出1 | `system-promax-daily-5b72362.json`；fetched_at `2026-09-14T03:21:27.878469+00:00`；digest `2c87f7bcc59c5d27793ad679d7ea4038274851a440e8f2dfbc48746c5fe592ad` |
+
+两份数据产物均位于 `/var/lib/qagent-research/financial-enrichment/`。ProMax目录成功和其数据请求失败是并列证据：接线路径已经真实执行，不等于该业务数据可用或服务稳定。基础资金流单样本也不证明全部财务、行业或特色路由有效。
+
+此次运行续验 tick 于北京时间 `11:20:00.410` 开始、`11:20:47.175` 完成，attempts2/completed2、错误null；这是该次周期运行证据，不撤销此前发布恢复首slot迟到422秒的历史，也不证明所有股票分钟行情新鲜。
+
+本轮系统只读目录/查询接线与CLI已实现、测试并受控部署；新增生产业务适配、全接口数据稳定性、分钟时效和选股收益仍未由此完成。G3/G2-FQ1原有未完成验收保留，本文补录待主任务review提交。

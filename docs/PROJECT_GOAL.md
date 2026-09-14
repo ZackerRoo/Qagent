@@ -204,3 +204,13 @@
 CLI与发布helper子任务相关 **58 passed（0.33秒）**、Ruff通过；显式 `--enable-documented-research` 复用环境原子备份回滚，只启用ProMax研究开关，不新建调度或改交易。系统后端由并行子任务实施，最终集成、真实调用和受控部署待主任务补录。本轮未commit、未push、未部署；G3/G2-FQ1原验收持续，通用查询不等于新增排名、历史PIT、分钟实时性或选股有效性。
 
 子任务最终相关 **60 passed、1项既有warning（0.47秒）**、Ruff通过，包含CLI经过真实FastAPI路由/service的替身供应方测试和incomplete证据/退出码验证。主任务最终集成与部署继续待验，不将此测试称为公网取数或全接口稳定。
+
+主任务后端全量 **2,456 passed、3项warnings（242.91秒）**，收集早于部分最终新测试；最终相关 **105 passed、1项warning（2.27秒）**，Ruff/diff通过。提交 `5b72362b43b1401b742e1cea710f48e101eb64b1` 已暂存云端构建成功，preflight通过并核验16项settings；受控部署执行中，最终切换、对账与真实API验收结果待补，不提前称部署成功。
+
+### 系统只读查询部署验收（2026-09-14）
+
+主任务确认release `5b72362b43b1401b742e1cea710f48e101eb64b1` 已受控部署，证据 `/var/tmp/qagent-rollout-relay-pu3u1eba/result.json` 的ledger_equal/settings_equal/scheduler_enabled均true，研究开关显式启用；已commit、未push，未改cron、交易权重或历史。系统CLI真实目录成功：基础80/79callable，ProMax298/255callable（259enabled排除4操作接口），不将255称为实测成功数。
+
+经真实系统API查询基础moneyflow/600519.SH/20260911返回1行observed，digest `400eb551f21b5734dcb8bb79a76f387c604dd23c3bd663b3db7a0a0576eb95e2`；ProMax daily/000001.SZ/20260911/limit3为transport_error、CLI退出1，fetched_at `2026-09-14T03:21:27.878469+00:00`，digest `2c87f7bcc59c5d27793ad679d7ea4038274851a440e8f2dfbc48746c5fe592ad`。目录、资金流和失败产物均已归档至 `/var/lib/qagent-research/financial-enrichment/`，文件名见[系统报告](research/documented-research-system-20260914.md)。目录可读和数据失败并列，不声明ProMax稳定或全部业务适配完成。
+
+tick本次北京时间11:20:00.410开始、11:20:47.175完成，attempts2/completed2、错误null，仅证明该次运行；保留此前首slot迟到422秒的历史，不替代分钟时效。系统接线已实现、测试并部署，G3/G2-FQ1原有数据覆盖、业务语义及选股有效性验收继续保留；本段文档待主任务review提交。
