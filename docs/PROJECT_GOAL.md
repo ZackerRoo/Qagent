@@ -214,3 +214,25 @@ CLI与发布helper子任务相关 **58 passed（0.33秒）**、Ruff通过；显�
 经真实系统API查询基础moneyflow/600519.SH/20260911返回1行observed，digest `400eb551f21b5734dcb8bb79a76f387c604dd23c3bd663b3db7a0a0576eb95e2`；ProMax daily/000001.SZ/20260911/limit3为transport_error、CLI退出1，fetched_at `2026-09-14T03:21:27.878469+00:00`，digest `2c87f7bcc59c5d27793ad679d7ea4038274851a440e8f2dfbc48746c5fe592ad`。目录、资金流和失败产物均已归档至 `/var/lib/qagent-research/financial-enrichment/`，文件名见[系统报告](research/documented-research-system-20260914.md)。目录可读和数据失败并列，不声明ProMax稳定或全部业务适配完成。
 
 tick本次北京时间11:20:00.410开始、11:20:47.175完成，attempts2/completed2、错误null，仅证明该次运行；保留此前首slot迟到422秒的历史，不替代分钟时效。系统接线已实现、测试并部署，G3/G2-FQ1原有数据覆盖、业务语义及选股有效性验收继续保留；本段文档待主任务review提交。
+
+## G2-FQ1 每日财务采集与独立排名验收（2026-09-14）
+
+用户授权的有界观察集合扩至8股，复用系统只读API采集五接口并生成独立候选；[实施和证据报告](research/daily-financial-candidate-20260914.md)保留固定集合、协议边界和完整产物路径。主任务相关 **103 passed、1项warning（3.28秒）**、Ruff/diff通过；首次102 passed、1 failed为测试替身缺失文件异常不一致，修正后复跑通过。本轮未跑全量、未commit、未push。
+
+独立包 `/opt/qagent-research/daily-financial-20260914` 已部署，root manifest SHA256 `a60212b96de7e83b7e34ea29ad27b3304368a53dcf2e9c0ba94e74d555947142`。首包因Mac `._`元数据被安装器拒绝、未安装，保留失败包后重打纯文件包通过。主任务真实运行 `period20260630/trade_date20260911`，上海时间11:39:46.068308至11:40:07.619686，八股40请求全部observed；归档 `/var/lib/qagent-research/daily-financial/20260914T034007-b1d9680836b14f78a0d91b08e52a7915.json`，digest `e4cb89ba8f183e69ef6ff786c4f8594b6c2a4322542ee737438c4958924b4cf2`，digest、原始重放及独立Fraction排序复核均通过。
+
+eligible8/8，Top5为600519.SH、300750.SZ、603766.SH、603259.SH、688002.SH，与显式观察顺序Top5重叠3/5；这是固定观察集合的行为对照，不是生产排名基线或收益。forecast旧公告及每页12行上限仍限制新鲜度和完整覆盖，固定20260630报告期须后续显式更新，不回填旧冻结信号。
+
+新 `/etc/cron.d/qagent-daily-financial-research` 已安装为周一至周五08:40 UTC（北京时间16:40），SHA256 `c9582b6d90d9a70e9be2cd02760312bff8104b37e458fae17820df6e53878bba`，收据 `/var/backups/qagent-daily-financial-research/before-install-fwi06squ.json`。旧16:30任务保留，首次自然触发待验。后端current仍5b72362、本轮无重启；tick快照3/3、无error、午休outside，不替代分钟时效验收。本轮已实现、已完成相关测试及真实单次验收、独立包已部署和新cron已安装，未commit、未push；未修改生产权重、冻结模型和唯一账本。三个实施子任务完成、清理hooks保持开启，session实际删除未核验。G2-FQ1/G2自然运行、覆盖及同集合成熟收益验收继续，原目标和门槛不变。
+
+主任务最终只读核验cron进程PID21、新cron属主root权限0644、归档属主luozhenkun权限0400；归档文件SHA256为 `c8124a0554bf91a1fb5ddf97d7450c75a030d7ce24015b8055e8671e29725077`，与上述结果digest分开保存。
+
+## G2-FQ1 七接口、20股版本验收与调度升级（2026-09-14）
+
+在前述八股历史结果基础上，用户授权观察集合扩至20股、七接口，完整集合及边界见[每日财务候选报告](research/daily-financial-candidate-20260914.md)。主任务最终专项 **112 passed**、Ruff/diff通过；使用 `backend/.venv` 最终全量 **2579 passed、3 warnings，无errors**。中间误用系统Python的2558 passed、7 skipped、3 warnings、7 errors由该环境缺lightgbm导致，已由正确环境全量通过更新，不再列为未解决缺口。Decimal等值修订P2已修复并增加7个参数化用例，真实冲突仍拒绝处理。
+
+最终独立包manifest SHA256 `4549c4af411f1f3cd212d154f5b340a9671cd3e54291a79f204bee91b4326a14`。真实20260911、period20260630采集为20股×7接口 **140/140 observed**，最终报告status observed，归档 `/var/lib/qagent-research/daily-financial/20260914T041222-bf75194a3fb14a0692b6b7fedbb65ea9.json`；result digest `dad7f8b5a2c38e2d25ad5d4a40c489d28536d5cc088c7cff5a3d8e73109e8c28`，文件SHA256 `10536793a1e4892ad5fdb0fc5778c69f5ad0c3d69f4d6cf70eba2d61884fe08f`。16只eligible、4只金融股明确排除，数据成功与排名适用范围分开；首次报告把有意排除计为incomplete的问题已修正，保留排除事实。Top5为600519.SH、603444.SH、603259.SH、002602.SZ、600398.SH，不代表生产排名基线或排名效果已证明。
+
+独立包已部署到 `/opt/qagent-research/daily-financial-20260914-v2`，cron由c958…升级为4a80…，固定模板重算完整目标SHA为 `4a80db491109badc90190fe9bdd45bf39160118ebe17733a1e934a8cf9b88b9d`；旧cron备份0600、幂等复核already_installed。升级过程未启动任务、未重启后端，首次自然16:40运行仍待观察。`/api/health` ok，release仍5b72362；模拟盘同一session、active，128 total/9 active/remaining1；十分钟更新outside_session、3/3、last_error null，此状态快照不替代账本全量对账或分钟时效验收。
+
+本轮已实现、专项及正确环境全量测试通过、真实采集验收通过、独立包与cron已升级；commit/push状态未在本次验收中新增确认。不修改模拟盘、账本、交易规则或冻结输入。固定period20260630后续须显式滚动，预告和分页覆盖限制保留；G2-FQ1/G2自然运行、数据覆盖及同集合成熟收益验收继续待验，原目标与门槛不变。

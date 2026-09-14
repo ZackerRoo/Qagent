@@ -126,7 +126,7 @@ def test_fetch_independent_failure_and_request_budget():
             return type("Table", (), {"rows": []})()
 
     payload = research.fetch(Client(), "promax", ["600519.SH", "603259.SH"], "20260630", "20260911",
-                             observed=datetime.fromisoformat("2026-09-14T12:00:00+08:00"))
+                             observed=datetime.fromisoformat("2026-09-14T12:00:00+08:00"), analysis_version=1)
     assert len(calls) == 8 and all(p["limit"] == 12 for _, p in calls)
     assert calls[0][1]["period"] == "20260630" and calls[2][1]["trade_date"] == "20260911"
     assert calls[3][1] == {"ts_code": "600519.SH", "limit": 12}
@@ -151,3 +151,104 @@ def test_cli_fixture_nonoverwrite_and_live_http_optin(tmp_path):
     live = subprocess.run([sys.executable, str(SCRIPTS / "research_financial_enrichment.py"),
                            "--source", "datahubco", "--live"], capture_output=True, text=True)
     assert live.returncode == 2 and json.loads(live.stdout)["status"] == "error"
+
+
+def v2_fixture():
+    payload = fixture()
+    payload["analysis_version"] = 2
+    base = {"ts_code": "600519.SH", "end_date": "20260630", "ann_date": "20260815"}
+    sections(payload)["balancesheet"] = {"status": "observed", "rows": [{
+        **base, "report_type": "1", "comp_type": "1", "total_assets": 1000, "total_liab": 300}]}
+    sections(payload)["fina_indicator"] = {"status": "observed", "rows": [{
+        **base, "roe": 10, "netprofit_margin": 20, "q_roe": 999, "roe_yearly": 999}]}
+    return payload
+
+
+def test_v2_only_consumes_selected_nonquarter_fields_and_balances():
+    payload = v2_fixture()
+    report = research.analyze(payload)
+    assert report["protocol"] == "financial-enrichment-current-v2"
+    assert report["research_only"] is True and not report["activation_allowed"]
+    got = result(payload)["sections"]
+    assert got["fina_indicator"]["derived"]["values"] == {"roe": "10", "netprofit_margin": "20"}
+    assert got["fina_indicator"]["derived"]["scope_confirmed_by_matching_statements"] is True
+    assert got["balancesheet"]["derived"]["values"]["liabilities_to_assets"] == "0.3"
+    assert got["balancesheet"]["request"]["report_type"] == "1"
+    assert got["fina_indicator"]["request"] == {"ts_code": "600519.SH", "period": "20260630", "limit": 12}
+
+
+@pytest.mark.parametrize("api,field,formatted", [
+    ("daily_basic", "pe", "20.00"),
+    ("fina_indicator", "roe", "10.0"),
+    ("balancesheet", "total_assets", "1000.00"),
+    ("forecast", "p_change_min", "10.0"),
+])
+def test_equivalent_numeric_revision_precision_preserves_values(api, field, formatted):
+    payload = v2_fixture()
+    original = result(payload)["sections"][api]["derived"]
+    rows = sections(payload)[api]["rows"]
+    rows.append({**rows[0], field: formatted})
+    got = result(payload)["sections"][api]
+    assert got["status"] == "observed"
+    if api in ("fina_indicator", "balancesheet"):
+        assert got["derived"]["equivalent_consumed_revisions"] == 2
+        original["equivalent_consumed_revisions"] = 2
+    assert got["derived"] == original
+    rows[1][field] = formatted + "1"
+    assert result(payload)["sections"][api]["status"] in ("invalid_data", "no_usable_rows")
+
+
+@pytest.mark.parametrize("api,field,value", [
+    ("balancesheet", "ts_code", "000001.SZ"), ("fina_indicator", "end_date", "20260331"),
+    ("balancesheet", "ann_date", "20260915"), ("fina_indicator", "f_ann_date", "20260915"),
+    ("balancesheet", "report_type", "6"), ("fina_indicator", "report_type", "2"),
+    ("balancesheet", "comp_type", "2"), ("fina_indicator", "comp_type", "4"),
+])
+def test_v2_rejects_identity_future_and_incompatible_scope(api, field, value):
+    payload = v2_fixture()
+    sections(payload)[api]["rows"][0][field] = value
+    got = result(payload)["sections"]
+    assert got[api]["status"] in ("invalid_data", "no_usable_rows")
+    assert got["fina_indicator"]["status"] != "observed"
+
+
+@pytest.mark.parametrize("api,field", [("balancesheet", "total_liab"), ("fina_indicator", "roe")])
+def test_v2_consumed_revision_conflict_excludes_but_unused_revision_does_not(api, field):
+    payload = v2_fixture()
+    rows = sections(payload)[api]["rows"]
+    rows.append({**rows[0], "unused": 123})
+    assert result(payload)["sections"][api]["status"] == "observed"
+    rows[1][field] = 999
+    assert result(payload)["sections"][api]["status"] == "no_usable_rows"
+
+
+@pytest.mark.parametrize("field,value", [("total_assets", 0), ("total_liab", -1),
+                                        ("total_liab", None), ("total_assets", "NaN")])
+def test_v2_invalid_balance_never_becomes_zero_ratio(field, value):
+    payload = v2_fixture()
+    sections(payload)["balancesheet"]["rows"][0][field] = value
+    got = result(payload)["sections"]["balancesheet"]["derived"]
+    assert got["values"]["liabilities_to_assets"] is None
+    assert "liabilities_to_assets" in got["exclusions"]
+
+
+def test_v2_zero_liabilities_and_negative_profitability_are_valid():
+    payload = v2_fixture()
+    sections(payload)["balancesheet"]["rows"][0]["total_liab"] = 0
+    sections(payload)["fina_indicator"]["rows"][0]["roe"] = -2
+    got = result(payload)["sections"]
+    assert got["balancesheet"]["derived"]["values"]["liabilities_to_assets"] == "0"
+    assert got["fina_indicator"]["derived"]["values"]["roe"] == "-2"
+
+
+def test_v2_live_fetch_is_six_api_bounded_default():
+    calls = []
+
+    class Client:
+        def query(self, api, **kwargs):
+            calls.append((api, kwargs))
+            return type("Table", (), {"rows": []})()
+
+    payload = research.fetch(Client(), "promax", ["600519.SH", "603259.SH"], "20260630", "20260911")
+    assert len(calls) == 12 and payload["analysis_version"] == 2
+    assert all(kwargs["limit"] == 12 for _, kwargs in calls)

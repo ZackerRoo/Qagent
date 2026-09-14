@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""One current research snapshot: two stocks, four APIs, twelve rows each.
+"""Current research snapshots: two stocks, six APIs in V2, twelve rows each.
 
 Fixture schema: source (datahubco|promax), period (YYYYMMDD), trade_date
 (YYYYMMDD), retrieved_at (timezone ISO), instruments: {symbol: {api:
 {status: observed|no_rows|error, rows: [...], error: safe_code_if_error}}}.
+analysis_version=2 enables balancesheet/fina_indicator; absent means legacy V1
+with four APIs. New live collection uses V2; old fixtures retain V1 validation.
 Raw table evidence is retained; no historical PIT, trading weight or ranking.
 """
 import argparse
@@ -21,13 +23,16 @@ from research_cashflow_quality import LIMIT, SAFE_ERRORS, day, digest, normalize
 from rank_g2_consensus import publish
 
 APIS = ("cashflow", "income", "daily_basic", "forecast")
+APIS_V2 = APIS + ("balancesheet", "fina_indicator")
 SYMBOL = re.compile(r"(?:[03]\d{5}\.SZ|6\d{5}\.SH|(?:[48]\d{5}|92\d{4})\.BJ)\Z")
 
 
 def request_params(api, symbol, period, trade_date):
     params = {"ts_code": symbol, "limit": LIMIT}
-    if api in ("cashflow", "income"):
+    if api in ("cashflow", "income", "balancesheet"):
         params.update(period=period, report_type="1")
+    elif api == "fina_indicator":
+        params["period"] = period
     elif api == "daily_basic":
         params["trade_date"] = trade_date
     return params
@@ -59,15 +64,19 @@ def safe_error(exc):
     return kind if isinstance(kind, str) and kind in SAFE_ERRORS else "section_failed"
 
 
-def fetch(client, source, symbols, period, trade_date, *, observed=None):
+def fetch(client, source, symbols, period, trade_date, *, observed=None, analysis_version=2):
     observed = observed or datetime.now(ZoneInfo("Asia/Shanghai"))
     if len(symbols) != len(set(symbols)):
         raise ValueError("duplicate_symbol")
     payload = {"source": source, "period": period, "trade_date": trade_date,
                "retrieved_at": observed.isoformat(), "instruments": {s: {} for s in symbols}}
+    if type(analysis_version) is not int or analysis_version not in (1, 2):
+        raise ValueError("unsupported_analysis_version")
+    if analysis_version == 2:
+        payload["analysis_version"] = 2
     validate_header(payload)
     for symbol, sections in payload["instruments"].items():
-        for api in APIS:
+        for api in APIS_V2 if analysis_version == 2 else APIS:
             try:
                 table = client.query(api, **request_params(api, symbol, period, trade_date))
                 rows = list(table.rows)
@@ -91,10 +100,11 @@ def valuation(rows, trade_date):
     fields = ("pe", "pe_ttm", "pb", "turnover_rate", "volume_ratio")
     if any(row.get("trade_date") != trade_date for row in rows):
         raise ValueError("date_mismatch")
-    variants = {tuple(numeric(row.get(k)) for k in fields) for row in rows}
+    # Decimal equality ignores harmless source precision (20 == 20.00).
+    variants = {tuple(number(row.get(k)) for k in fields) for row in rows}
     if len(variants) != 1:
         raise ValueError("ambiguous_revision")
-    values = dict(zip(fields, next(iter(variants))))
+    values = {field: numeric(rows[0].get(field)) for field in fields}
     exclusions = {}
     for field in fields:
         if values[field] is None:
@@ -128,7 +138,7 @@ def forecasts(rows, today):
         grouped.setdefault(period.isoformat(), []).append((row.get("type"), values, ann.isoformat()))
     accepted = []
     for period, versions in sorted(grouped.items()):
-        if len({(kind, values) for kind, values, _ in versions}) != 1:
+        if len({(kind, tuple(number(value) for value in values)) for kind, values, _ in versions}) != 1:
             excluded.append({"period": period, "reason": "ambiguous_revision"})
             continue
         kind, values, _ = versions[0]
@@ -147,9 +157,60 @@ def forecasts(rows, today):
     return {"rows": accepted, "excluded": excluded}
 
 
+def extended_financial(rows, api, period, today):
+    """Consume only non-quarter profitability and same-period consolidated balances.
+
+    fina_indicator does not define comp_type/report_type in its standard schema.
+    Optional returned tags must agree; matching income/balance provide the scope gate.
+    """
+    fields = ("total_assets", "total_liab") if api == "balancesheet" else ("roe", "netprofit_margin")
+    versions, dates, excluded = [], set(), []
+    for row in rows:
+        if row.get("end_date") != period:
+            raise ValueError("period_mismatch")
+        announcements = [day(row.get("ann_date"))]
+        if row.get("f_ann_date") not in (None, ""):
+            announcements.append(day(row["f_ann_date"]))
+        if min(announcements) < day(period) or max(announcements) > today:
+            excluded.append("unavailable_at_retrieval")
+            continue
+        if api == "balancesheet":
+            compatible = all(str(row.get(key)) == "1" for key in ("report_type", "comp_type"))
+        else:
+            compatible = all(row.get(key) in (None, "") or str(row[key]) == "1"
+                             for key in ("report_type", "comp_type"))
+        if not compatible:
+            excluded.append("unsupported_report_or_company_type")
+            continue
+        versions.append(tuple(numeric(row.get(key)) for key in fields))
+        dates.update(d.isoformat() for d in announcements)
+    if not versions:
+        return {"values": {}, "exclusions": {"section": "no_compatible_rows"}, "excluded_rows": excluded}
+    if len({tuple(number(value) for value in values) for values in versions}) != 1:
+        return {"values": {}, "exclusions": {"section": "ambiguous_consumed_revision"}, "excluded_rows": excluded}
+    values, reasons = dict(zip(fields, versions[0])), {}
+    for key, value in values.items():
+        if value is None:
+            reasons[key] = "missing_or_nonfinite"
+    if api == "balancesheet":
+        assets, liabilities = number(values["total_assets"]), number(values["total_liab"])
+        valid = assets is not None and assets > 0 and liabilities is not None and liabilities >= 0
+        values["liabilities_to_assets"] = str(liabilities / assets) if valid else None
+        if not valid:
+            reasons["liabilities_to_assets"] = "missing_nonfinite_or_invalid_balance"
+    return {"report_period": period, "values": values, "exclusions": reasons,
+            "announcement_dates": sorted(dates), "excluded_rows": excluded,
+            "equivalent_consumed_revisions": len(versions),
+            "scope": "consolidated_company_type_1" if api == "balancesheet" else "requires_matching_consolidated_statements",
+            "period_basis": "period_end_stock" if api == "balancesheet" else "source_nonquarter_nonannualized_metrics"}
+
+
 def analyze(payload):
     today = validate_header(payload)
-    report = {"protocol": "financial-enrichment-current-v1", "source": payload["source"],
+    version = payload.get("analysis_version", 1)
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError("unsupported_analysis_version")
+    report = {"protocol": f"financial-enrichment-current-v{version}", "source": payload["source"],
               "retrieved_at": payload["retrieved_at"], "period": payload["period"],
               "trade_date": payload["trade_date"], "decision_weight": False, "activation_allowed": False,
               "temporal_semantics": "current_observation_not_historical_pit",
@@ -167,7 +228,7 @@ def analyze(payload):
               "raw_evidence": payload, "input_digest": digest(payload), "instruments": {}}
     for symbol, evidence in sorted(payload["instruments"].items()):
         sections, financial = {}, {}
-        for api in APIS:
+        for api in APIS_V2 if version == 2 else APIS:
             section = {"request": request_params(api, symbol, payload["period"], payload["trade_date"])}
             sections[api] = section
             try:
@@ -202,6 +263,9 @@ def analyze(payload):
                         }
                 elif api == "daily_basic":
                     section.update(status="observed", derived=valuation(rows, payload["trade_date"]))
+                elif api in ("balancesheet", "fina_indicator"):
+                    derived = extended_financial(rows, api, payload["period"], today)
+                    section.update(status="observed" if derived["values"] else "no_usable_rows", derived=derived)
                 else:
                     derived = forecasts(rows, today)
                     section.update(status="observed" if derived["rows"] else "no_usable_rows", derived=derived)
@@ -216,6 +280,22 @@ def analyze(payload):
             ratios[name] = {"value": str(numerator / denom) if okay else None,
                             "reason": None if okay else "missing_or_nonpositive_denominator_or_missing_cashflow"}
         report["instruments"][symbol] = {"sections": sections, "financial_ratios": ratios}
+        if version == 2:
+            indicator = sections["fina_indicator"]
+            if indicator["status"] == "observed":
+                confirmed = financial.get("income") is not None and sections["balancesheet"]["status"] == "observed"
+                indicator["derived"]["scope_confirmed_by_matching_statements"] = confirmed
+                if not confirmed:
+                    indicator["status"] = "no_usable_rows"
+                    indicator["derived"]["exclusions"]["scope"] = "matching_consolidated_statements_required"
+    if version == 2:
+        report["research_only"] = True
+        report["metric_definitions"].update({
+            "roe": "fina_indicator.roe source percent, not q_roe/roe_yearly; same report period",
+            "netprofit_margin": "fina_indicator.netprofit_margin source sales net profit percent, not quarterly",
+            "liabilities_to_assets": "balancesheet.total_liab / positive total_assets; nonnegative liabilities, dimensionless",
+        })
+        report["limitations"].append("Indicator schema lacks scope tags; same-period type-1 income/balance corroborate scope, not cross-source authenticity.")
     report["status"] = "observed" if all(s["status"] == "observed" for i in report["instruments"].values()
                                           for s in i["sections"].values()) else "incomplete"
     root = Path(__file__).resolve().parents[1]
