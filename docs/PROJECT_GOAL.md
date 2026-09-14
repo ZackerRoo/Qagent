@@ -252,3 +252,11 @@ eligible8/8，Top5为600519.SH、300750.SZ、603766.SH、603259.SH、688002.SH�
 自动 seal 与到期 evaluate runner、独立 bundle 校验/预览/原子安装及可恢复回滚 helper 已实现；详细不变式和命令见[财务规则候选前向验证报告](research/financial-challenger-forward-20260914.md)。runner 复用既有协议、独立锁和固定300秒预算，只读 `qagent.db`；已有同日 signal 重放并核对首个合法 daily，缺同日G2继续 baseline unavailable。未成熟和到期 partial 写每次run证据并重试，只有 complete 才独占写最终5/10/20窗口，避免缺价首次评估永久锁死结果；归档记录 evaluator 与实际 backend/factor实现身份。
 
 最新专项及既有安装升级相关 **68 passed（2.62秒）**、Ruff及diff检查通过；此前正确虚拟环境全量 **2625 passed、3 warnings（230.77秒）** 早于新增main序列化测试，本次未重跑全量。v3云端手动runner成功，但安装后第二次execute因公开result含Path而在JSON输出失败；cron已用 `before-install-lu0mzlde` 安全rollback为 `rolled-back-6yn8r4qa.cron`，未自然触发，daily cron、health和模拟账户正常。v4将recovered/already receipt统一转字符串，并对installed/recovered/already/rollback递归JSON序列化，实际main安装、幂等和回滚测试通过。已实现、已完成上述测试；v4未 commit、未 push、未打包、未安装、未部署。v1未安装，v2/v3 cron均已回滚且未自然触发。cron仍拟工作日11:37 UTC（北京时间19:37）；显式安装后仍需自然触发、已有手工signal幂等及首个真实成熟窗口验收。未修改模拟盘、正式Ranking、数据库schema/API、后端服务、冻结模型或交易权限；G2-FQ1/G2选股增益仍未证明。
+
+### G2-FQ1 前向自动归档 v4 部署验收（2026-09-14）
+
+最终实现已commit/push至 `bb365349aa7b25befc745cbfdce4d7d8d9a67195`；v4 bundle `/opt/qagent-research/financial-forward-20260914-v4` manifest SHA为 `01bd17e086321a7b1cd990858383992fa62270608a66bb6ef7aa2c6029f03a28`。cron `/etc/cron.d/qagent-financial-forward-research` 为root:root 0644、SHA `a570099924da2e4540a58aa7fe3952c689fc609ce821a13df21de569fe29d81f`，工作日11:37 UTC；root:root 0600收据为 `/var/backups/qagent-financial-forward-research/before-install-bt_wnxro.json`。首次installed、第二次already_installed均exit 0。v1未安装以及v2/v3失败与rollback历史保留。
+
+安装后手动runner exit 0、complete、already_sealed；既有signal SHA前后均为 `1466a90ab84a5cbed989ef187ecc0c37a6aa9cb055253a162aa81ac8d7315732`，5/10/20均waiting。最新run `/var/lib/qagent-research/financial-forward-runs/20260914T220445.472354+0800-7117a87bf70a47c688653ca98723ba84.json` 为0400，digest `206eec9ded3f79c9d5a68a7d7343c3346e2f3827635426991681799f9135b5be`，runtime为v4 evaluator。最终相关 **68 passed（3.92秒）**、全量 **2625 passed、3 warnings（230.77秒）**，Ruff/diff通过，审计无P1/P2。
+
+daily cron仍为 `4a80db491109badc90190fe9bdd45bf39160118ebe17733a1e934a8cf9b88b9d`，backend current仍5b72362、health ok。模拟账户保持同一 `paper-session-69470ca6b12c` active，total128 / active9 / remaining1；未修改账本、正式Ranking或交易规则。本阶段已实现、测试、commit/push、打包、安装和部署；首次自然cron仍待下一工作日北京时间19:37，真实5/10/20成熟仍待09-21、09-29、10-20，G2-FQ1/G2选股增益尚未证明。

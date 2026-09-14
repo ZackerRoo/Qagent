@@ -94,3 +94,13 @@ PYTHONPATH=/opt/qagent/current/backend /opt/qagent/current/backend/.venv/bin/pyt
 ```
 
 最新专项与现有安装/升级回归共 **68 passed（2.62秒）**，Ruff及diff检查通过；此前正确虚拟环境全量 **2625 passed、3 warnings（230.77秒）** 早于新增main序列化测试，本次未重跑全量。installed、recovered、already与rollback公开结果均已JSON序列化覆盖，实际main安装、第二次幂等输出和回滚通过。本阶段已实现并完成上述测试；v4未 commit、未 push、未打包、未安装cron、未部署或运行云端自动任务；v1未安装，v2/v3 cron均已回滚且未自然触发。首个自然 signal 的真实5/10/20日成熟验收仍按原日期等待，G2-FQ1/G2状态不提升。
+
+## v4 最终部署验收（2026-09-14）
+
+主任务已将实现 commit/push 至 `bb365349aa7b25befc745cbfdce4d7d8d9a67195`。v4独立bundle位于 `/opt/qagent-research/financial-forward-20260914-v4`，manifest SHA256为 `01bd17e086321a7b1cd990858383992fa62270608a66bb6ef7aa2c6029f03a28`。独立cron `/etc/cron.d/qagent-financial-forward-research` 为root:root 0644，SHA256 `a570099924da2e4540a58aa7fe3952c689fc609ce821a13df21de569fe29d81f`，固定工作日11:37 UTC（北京时间19:37）；安装收据 `/var/backups/qagent-financial-forward-research/before-install-bt_wnxro.json` 为root:root 0600。首次安装返回installed、第二次执行返回already_installed，均exit 0，补齐了v3曾失败的CLI幂等路径。v1未安装、v2/v3失败及安全rollback历史继续保留。
+
+部署后手动runner exit 0、status complete，seal为already_sealed；既有信号SHA256在运行前后均为 `1466a90ab84a5cbed989ef187ecc0c37a6aa9cb055253a162aa81ac8d7315732`，未覆盖首个自然信号。5/10/20窗口均为waiting_for_maturity。最新不可变run为 `/var/lib/qagent-research/financial-forward-runs/20260914T220445.472354+0800-7117a87bf70a47c688653ca98723ba84.json`，权限0400，result digest `206eec9ded3f79c9d5a68a7d7343c3346e2f3827635426991681799f9135b5be`，runtime identity确认使用v4 evaluator。
+
+最终相关 **68 passed（3.92秒）**，正确虚拟环境全量 **2625 passed、3 warnings（230.77秒）**，Ruff与diff检查通过，审计无P1/P2。daily cron SHA仍为 `4a80db491109badc90190fe9bdd45bf39160118ebe17733a1e934a8cf9b88b9d`，backend current仍为 `5b72362`，health ok。模拟账户仍为同一 `paper-session-69470ca6b12c`、active，total 128 / active 9 / remaining 1；未修改账本或交易规则。
+
+本阶段现为已实现、已测试、已commit/push、已打包、已安装并部署。首次自然cron仍待下一工作日北京时间19:37验收；真实5/10/20成熟结果仍分别等待09-21、09-29、10-20收盘后，不能据当前waiting状态宣称选股增益。
