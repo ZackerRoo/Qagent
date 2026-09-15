@@ -265,16 +265,20 @@ daily cron仍为 `4a80db491109badc90190fe9bdd45bf39160118ebe17733a1e934a8cf9b88b
 
 ## G2-FQ2 候选池驱动的 Financial Challenger 观察集合（2026-09-15）
 
-稳定子目标：现有 Financial Challenger 是本能力的唯一研究消费者。每日财务采集器新增默认关闭的候选池输入模式，只读复用既有 `/api/paper-trades/candidate-pool`，从当日有序的最多100条来源记录中保留前20只合格A股、对明确基金类型留证排除，以此替代固定观察集合，再复用原七接口采集和 `rank_financial_candidate`；不新增排名、组合、数据库、账户或长期并行链路。显式 `--symbol`/`--symbols-file` 默认行为保留。设计和本地实现见[候选池研究适配](research/financial-candidate-pool-adapter-20260915.md)；本轮未提交、未 push、未部署、未改调度和模拟盘。
+稳定子目标：现有 Financial Challenger 是本能力的唯一研究消费者。每日财务采集器新增默认关闭的候选池输入模式，只读复用既有 `/api/paper-trades/candidate-pool`，从当日有序的最多100条来源记录中保留前20只合格A股、对明确基金类型留证排除，以此替代固定观察集合，再复用原七接口采集和 `rank_financial_candidate`；不新增排名、组合、数据库、账户或长期并行链路。显式 `--symbol`/`--symbols-file` 默认行为保留。设计和实现见[候选池研究适配](research/financial-candidate-pool-adapter-20260915.md)；当前提交、push和部署事实见本节末尾验收记录。
 
 验收条件：先以同一候选池集合、同一信号日、同一财报期和成本口径封存固定集合路径与候选池路径的可复现对照；候选池模式须保存原响应摘要/digest、数据健康、选择顺序及限制。至少等待首个真实5交易日结果成熟，再比较覆盖、Top5变化及同集合5日净收益，不能用排名差异或接口成功代替收益增益。只有数据健康和日期证据连续合格、同集合基线存在且5日结果支持继续观察时，才由用户决定是否替代固定集合调度；不长期并行运行两套同类输入。
 
 失败与停用条件：总体响应、日期或数据健康不合格，股票类型但非合法沪深北A股、后缀错误或股票重复，基金类型但不是合法CN基金代码，或排除基金后少于5只股票时均失败退出，且不请求七个财务接口；明确 `etf/fund/index_fund` 且基金代码合法的记录只做有摘要的排除，不伪装成股票。自然运行连续失败、无法形成同集合基线、首个5日结果否定候选或长期无 Financial Challenger 消费时，停止候选池模式调度并移出运行链路，只保留必要研究和审计证据，不删除历史账本。任何上线、替换或恢复调度均需单独授权和验收；保持固定边界中的非冗余规则。
 
-上线前兼容与升级门禁：forward seal保留旧 `explicit_observation_order` 及原digest校验，同时严格接受可复现的 `paper_candidate_pool_order`，不降低同日15:30后、raw evidence和eligible>=5门禁。上线采用consumer-first原子顺序：先升级financial-forward v4->v5，再升级daily v2->v3，因此不存在动态daily被旧forward拒绝的窗口；两步只改批准的bundle/候选池参数，固定校验当前manifest及cron，具备锁、私有备份、幂等和rollback且不启动任务。若daily第二步失败，统一helper自动把forward回滚至v4；首次升级使用私有备份，重试时已处于v5则用严格验证的固定旧cron恢复。本地覆盖collector、runner/evaluator及升级/回滚的专项 **143 passed（3.35秒）**，Ruff与diff检查通过；未打包、安装、部署或改cron，未修改模拟盘、数据库、后端服务或策略。
+上线前兼容与升级门禁：forward seal保留旧 `explicit_observation_order` 及原digest校验，同时严格接受可复现的 `paper_candidate_pool_order`，不降低同日15:30后、raw evidence和eligible>=5门禁。上线采用consumer-first原子顺序：先升级financial-forward v4->v5，再升级daily v2->v3，因此不存在动态daily被旧forward拒绝的窗口；两步只改批准的bundle/候选池参数，固定校验当前manifest及cron，具备锁、私有备份、幂等和rollback且不启动任务。若daily第二步失败，统一helper自动把forward回滚至v4；首次升级使用私有备份，重试时已处于v5则用严格验证的固定旧cron恢复。本地覆盖collector、runner/evaluator及升级/回滚的专项 **143 passed（3.35秒）**，Ruff与diff检查通过；未修改模拟盘、数据库、后端服务或策略。
 
 本机集合验收：2026-09-15 经 loopback 真实 GET，期望信号日为 2026-09-14，来源 shown/total 均为90；验证出56只合法股票、34只明确 fund/ETF，按源顺序选前20只，首3只为 `002746.SZ`、`600025.SH`、`688581.SH`，共留证排除70只（34 `explicit_fund_asset_type`、36 `selected_limit`）。`include_etfs=false` 仍混入ETF，已由适配层留证排除。本次只验证候选集合，未调用后续七接口；主任务相关 **99 passed（1.89秒）**，Ruff与diff检查通过。未 commit、未 push、未 deploy，未改调度和模拟盘；同集合基线及5日结果仍待验。
 
 隔离端到端补跑：临时产物 `/tmp/qagent-fin-pool.UlhQIW/20260915T105253-612f840dffc645e7a196e929cc7dc7db.json` 使用 `trade_date=20260914`、`observation_day=2026-09-15`，20股×7接口共140项 classification 全部 observed，报告 status observed，result digest `cb59...` 校验有效。19只 eligible；`600028.SH` 因 `fina_indicator` 存在 ambiguous consumed revision 被明确排除。候选 Top5 为 `603565.SH`、`600398.SH`、`688581.SH`、`601919.SH`、`601857.SH`，与原候选顺序 Top5 重合2/5。该结果是次日补跑，不得追认为09-14前向信号，未进入正式归档，也不形成收益结论；未部署、未改 cron 或模拟盘。前述99项测试证据保留。
 
 最终测试验收：专项 **143 passed（3.35秒）** 保留；主任务使用正确backend虚拟环境完成全量 **2660 passed、3项既有warnings（256.45秒）**。此前一次从backend工作目录误写 `backend/.venv` 路径，命令立即exit 127且未执行测试，已由上述正确命令的完整通过结果取代。
+
+部署验收：源提交 `d599a91` 已 push 至 `features/automation-backtest`。consumer-first 两步升级均成功且 `started_job=false`；随后两次preview均为 `already_installed`，health为ok。daily v3位于 `/opt/qagent-research/daily-financial-20260914-v3`，manifest SHA为 `1a6855501e14e4d54b2eca0f59afc618971135b932e74d612de835399307efbe`，cron SHA为 `701215372bdb050190ab1df52910e74040ec6545b3691978575d7de823b19aa7`，工作日北京时间16:40运行；forward v5位于 `/opt/qagent-research/financial-forward-20260914-v5`，manifest SHA为 `386ea1dbc0c427a4693e0109161145c89b73df83a9820e6ffefa35d7333711ae`，cron SHA为 `04040c5f48a42865c5f43289c5012fdfadd0dcd6f0f50500505397e783ad2016`，工作日北京时间19:37运行。
+
+唯一模拟盘仍为 `paper-session-69470ca6b12c`、active；current_model为total 58、pending 1、open 9、closed 39、active 10，规则仍为max_positions 10、allocation 10%、cost 5bps、slippage 5bps、take_profit 50%，未创建第二账本。隔离端到端的140/140 observed、19 eligible及动态适配已验证，但今日自然daily/forward尚未发生，绩效与晋级仍未验证，不能据此宣称选股收益提升。

@@ -18,7 +18,7 @@
 
 先用同一候选池集合、同一信号日、同一财报期与成本口径保留固定输入路径和候选池输入路径的基线对照；至少取得首个真实5交易日成熟结果后，再比较覆盖、Top5变化和同集合5日净收益。数据健康连续合格、同集合基线存在及5日证据支持继续观察，才可另行批准替换固定集合调度。
 
-候选池模式当前未部署、未接调度，不影响模拟盘。自然运行连续失败、无法形成同集合基线、首个5日结果否定候选或 Financial Challenger 长期不消费时，应停用该模式并移出运行链路，只保留必要证据；不得长期同时运行固定集合与候选池集合。
+候选池模式已按下述consumer-first步骤接入原有daily/forward调度，未新建并行研究链路或第二模拟账户。自然运行连续失败、无法形成同集合基线、首个5日结果否定候选或 Financial Challenger 长期不消费时，应停用该模式并移出运行链路，只保留必要证据；不得长期同时运行固定集合与候选池集合。
 
 ## 上线前兼容与升级设计
 
@@ -26,7 +26,13 @@ Financial forward seal 继续接受旧 `explicit_observation_order`，其 digest
 
 上线采用consumer-first顺序：先将 `financial-forward v4 -> v5`，确认兼容旧 `explicit_observation_order` 的consumer就位，再将 `daily v2 -> v3`；由此不存在动态daily被旧forward拒绝的窗口。daily v3只把bundle路径及固定20个 `--symbol` 改为 `--candidate-pool`；forward v5只替换bundle路径，使19:37 runner加载新evaluator。两步分别固定校验当前manifest/cron摘要、加独占锁、留0600备份并以临时文件原子替换，支持预览、幂等和显式rollback，且不启动任务。`upgrade_financial_candidate_pool_chain.py` 编排两步；若daily第二步失败，则forward回滚v4：首次升级使用0600备份，重试时已处于v5则用经固定摘要及bundle校验的旧cron模板恢复。
 
-本轮仅完成本地实现与验证，专项 **143 passed（3.35秒）**；主任务使用正确backend虚拟环境完成全量 **2660 passed、3项既有warnings（256.45秒）**。此前一次从backend工作目录误写 `backend/.venv` 路径，命令立即exit 127且未执行测试，已由正确命令的完整通过结果取代。未打包、安装、部署或修改cron，未启动任务，也未修改模拟盘、数据库、后端服务或交易策略。Ruff与diff检查通过。
+实现验收专项 **143 passed（3.35秒）**；主任务使用正确backend虚拟环境完成全量 **2660 passed、3项既有warnings（256.45秒）**。此前一次从backend工作目录误写 `backend/.venv` 路径，命令立即exit 127且未执行测试，已由正确命令的完整通过结果取代。未修改模拟盘、数据库、后端服务或交易策略。Ruff与diff检查通过。
+
+## 部署验收与待自然验证
+
+源提交 `d599a91` 已 push 至 `features/automation-backtest`。consumer-first 两步升级均成功且 `started_job=false`，升级后daily与forward的preview均为 `already_installed`，health为ok：daily v3 bundle `/opt/qagent-research/daily-financial-20260914-v3` 的manifest SHA为 `1a6855501e14e4d54b2eca0f59afc618971135b932e74d612de835399307efbe`，cron SHA为 `701215372bdb050190ab1df52910e74040ec6545b3691978575d7de823b19aa7`，工作日北京时间16:40运行；forward v5 bundle `/opt/qagent-research/financial-forward-20260914-v5` 的manifest SHA为 `386ea1dbc0c427a4693e0109161145c89b73df83a9820e6ffefa35d7333711ae`，cron SHA为 `04040c5f48a42865c5f43289c5012fdfadd0dcd6f0f50500505397e783ad2016`，工作日北京时间19:37运行。
+
+云端唯一模拟盘仍为 `paper-session-69470ca6b12c`、active；current_model为total 58、pending 1、open 9、closed 39、active 10，规则保持max_positions 10、allocation 10%、cost 5bps、slippage 5bps、take_profit 50%，未创建第二账本。隔离端到端的140/140 observed、19 eligible和候选池动态适配已经验证；但今日自然daily和forward尚未发生，绩效及晋级未验证，不能宣称选股收益提升。
 
 ## 2026-09-15 本机集合验收
 
