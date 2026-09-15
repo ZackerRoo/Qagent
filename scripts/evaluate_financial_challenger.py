@@ -5,6 +5,7 @@ from datetime import date, datetime, time, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
+import re
 import sqlite3
 import sys
 from zoneinfo import ZoneInfo
@@ -36,6 +37,135 @@ POLICY = {
     "missing": "no_imputation_no_price_based_reselection_no_backfill",
     "decision_weight": False, "activation_allowed": False,
 }
+HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def _instrument_matches_symbol(instrument_id, symbol, asset_type):
+    if not isinstance(instrument_id, str) or not isinstance(symbol, str):
+        return False
+    ticker, separator, exchange = symbol.partition(".")
+    if not separator or len(ticker) != 6 or not ticker.isdigit():
+        return False
+    if asset_type == "stock":
+        expected = ("SZ" if ticker.startswith(("000", "001", "002", "003", "300", "301"))
+                    else "SH" if ticker.startswith(("600", "601", "603", "605", "688", "689"))
+                    else "BJ" if ticker.startswith(("430", "82", "83", "87", "88", "920"))
+                    else None)
+    else:
+        expected = ("SZ" if ticker.startswith(("15", "16"))
+                    else "SH" if ticker.startswith(("50", "51", "52", "56", "58"))
+                    else None)
+    if exchange != expected:
+        return False
+    return instrument_id in {f"CN:{ticker}", f"CN:{ticker}.{exchange}"}
+
+
+def validate_source_universe(universe, symbols, day):
+    if not isinstance(universe, dict):
+        raise ValueError("invalid_universe")
+    if universe.get("kind") == "explicit_observation_order":
+        # Preserve the original explicit-universe digest contract unchanged.
+        if universe.get("digest") != digest({"symbols": symbols}):
+            raise ValueError("universe_digest_mismatch")
+        return
+    if universe.get("kind") != "paper_candidate_pool_order":
+        raise ValueError("unsupported_universe_kind")
+    fixed = {
+        "source": "paper_candidate_pool",
+        "endpoint": "/api/paper-trades/candidate-pool",
+        "provider": "free",
+        "include_etfs": False,
+        "requested_pool_limit": 100,
+        "selected_limit": 20,
+        "production_baseline_verified": False,
+        "expected_signal_date": str(day),
+    }
+    if any(universe.get(key) != value for key, value in fixed.items()):
+        raise ValueError("candidate_pool_universe_identity_mismatch")
+    selected_count = universe.get("selected_count")
+    eligible = universe.get("eligible_stock_count")
+    shown = universe.get("source_shown_count")
+    total = universe.get("source_total_count")
+    if (type(selected_count) is not int or selected_count != len(symbols)
+            or not 5 <= selected_count <= 20 or universe.get("symbols") != symbols
+            or type(eligible) is not int or eligible < selected_count
+            or selected_count != min(20, eligible)
+            or type(shown) is not int or not selected_count <= shown <= 100
+            or type(total) is not int or total < shown):
+        raise ValueError("candidate_pool_universe_count_mismatch")
+    response_digest = universe.get("response_digest")
+    if not isinstance(response_digest, str) or HEX64.fullmatch(response_digest) is None:
+        raise ValueError("candidate_pool_response_digest_invalid")
+    if universe.get("digest") != digest({"symbols": symbols, "response_digest": response_digest}):
+        raise ValueError("universe_digest_mismatch")
+
+    selection = universe.get("selection_order")
+    if not isinstance(selection, list) or len(selection) != selected_count:
+        raise ValueError("candidate_pool_selection_invalid")
+    selected_positions = []
+    for position, (item, symbol) in enumerate(zip(selection, symbols), 1):
+        if (not isinstance(item, dict)
+                or item.get("position") != position
+                or item.get("asset_type") != "stock"
+                or item.get("symbol") != symbol
+                or not _instrument_matches_symbol(item.get("instrument_id"), symbol, "stock")
+                or type(item.get("source_position")) is not int):
+            raise ValueError("candidate_pool_selection_invalid")
+        selected_positions.append(item["source_position"])
+    if selected_positions != sorted(selected_positions) or len(set(selected_positions)) != len(selection):
+        raise ValueError("candidate_pool_selection_order_invalid")
+
+    excluded = universe.get("excluded_items")
+    reasons = universe.get("excluded_reasons")
+    excluded_count = universe.get("excluded_count")
+    if (not isinstance(excluded, list) or type(excluded_count) is not int
+            or excluded_count != len(excluded)
+            or universe.get("excluded_digest") != digest(excluded)
+            or not isinstance(reasons, dict)
+            or set(reasons) - {"explicit_fund_asset_type", "selected_limit"}
+            or any(type(value) is not int or value <= 0 for value in reasons.values())
+            or sum(reasons.values()) != excluded_count):
+        raise ValueError("candidate_pool_exclusions_invalid")
+    excluded_positions, observed_reasons = [], {}
+    for item in excluded:
+        if not isinstance(item, dict) or type(item.get("source_position")) is not int:
+            raise ValueError("candidate_pool_exclusions_invalid")
+        reason = item.get("reason")
+        asset_type = item.get("asset_type")
+        symbol = item.get("symbol")
+        if (reason == "explicit_fund_asset_type"
+                and asset_type not in {"etf", "fund", "index_fund"}):
+            raise ValueError("candidate_pool_exclusions_invalid")
+        if reason == "selected_limit" and asset_type != "stock":
+            raise ValueError("candidate_pool_exclusions_invalid")
+        if reason not in {"explicit_fund_asset_type", "selected_limit"} or not _instrument_matches_symbol(
+                item.get("instrument_id"), symbol, asset_type):
+            raise ValueError("candidate_pool_exclusions_invalid")
+        excluded_positions.append(item["source_position"])
+        observed_reasons[reason] = observed_reasons.get(reason, 0) + 1
+    if (excluded_positions != sorted(excluded_positions)
+            or observed_reasons != reasons
+            or sorted(selected_positions + excluded_positions) != list(range(1, shown + 1))
+            or eligible != selected_count + reasons.get("selected_limit", 0)
+            or shown != eligible + reasons.get("explicit_fund_asset_type", 0)
+            or any(item["source_position"] <= selected_positions[-1]
+                   for item in excluded if item["reason"] == "selected_limit")):
+        raise ValueError("candidate_pool_exclusion_count_mismatch")
+
+    summary, health = universe.get("response_summary"), universe.get("response_data_health")
+    if (not isinstance(summary, dict) or summary.get("shown_candidates") != shown
+            or summary.get("total_candidates") != total or not isinstance(health, dict)):
+        raise ValueError("candidate_pool_response_summary_invalid")
+    expected_health = {
+        "paper_candidate_pool_endpoint": "true",
+        "paper_candidate_pool_limit": "100",
+        "paper_candidate_pool_total": str(total),
+        "paper_candidate_freshness_gate": "fresh",
+        "paper_candidate_expected_signal_date": str(day),
+        "paper_candidate_signal_date_mismatch": "0",
+    }
+    if any(health.get(key) != value for key, value in expected_health.items()):
+        raise ValueError("candidate_pool_response_health_invalid")
 
 
 def evaluation_runtime_identity():
@@ -73,9 +203,8 @@ def seal(document, baseline=None, *, now=None):
     symbols = document.get("symbols")
     if not isinstance(symbols, list) or not 5 <= len(symbols) <= 20:
         raise ValueError("bounded_observation_universe_required")
-    if document.get("universe", {}).get("digest") != digest({"symbols": symbols}):
-        raise ValueError("universe_digest_mismatch")
     day = datetime.strptime(document["trade_date"], "%Y%m%d").date()
+    validate_source_universe(document.get("universe"), symbols, day)
     if not trading_sessions_in_range(day, day):
         raise ValueError("not_exchange_session")
     sealed = after_close(now.isoformat(), day)

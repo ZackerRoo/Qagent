@@ -261,3 +261,164 @@ def test_today_close_does_not_invent_previous_trading_day(tmp_path, monkeypatch,
         assert not calls
     else:
         assert calls[0][2] == "20260913"
+
+
+def candidate_pool_payload(instrument_ids=None, asset_types=None):
+    instrument_ids = instrument_ids or [f"CN:60000{value}" for value in range(5)]
+    asset_types = asset_types or ["stock"] * len(instrument_ids)
+    items = [
+        {
+            "instrument_id": instrument_id,
+            "asset_type": asset_type,
+            "signal_date": "2026-09-11",
+            "signal_date_fresh": True,
+        }
+        for instrument_id, asset_type in zip(instrument_ids, asset_types)
+    ]
+    return {
+        "items": items,
+        "summary": {"total_candidates": len(items), "shown_candidates": len(items)},
+        "data_health": {
+            "paper_candidate_pool_endpoint": "true",
+            "paper_candidate_pool_limit": "100",
+            "paper_candidate_pool_total": str(len(items)),
+            "paper_candidate_freshness_gate": "fresh",
+            "paper_candidate_expected_signal_date": "2026-09-11",
+            "paper_candidate_signal_date_mismatch": "0",
+        },
+    }
+
+
+def test_candidate_pool_success_preserves_order_and_reuses_batch():
+    payload = candidate_pool_payload(
+        ["CN:159146", "CN:000001", "CN:300750", "CN:600519", "CN:688002", "CN:920001"],
+        ["etf", "stock", "stock", "stock", "stock", "stock"],
+    )
+    symbols, universe = batch.candidate_pool_universe(payload, "20260911")
+    assert symbols == ["000001.SZ", "300750.SZ", "600519.SH", "688002.SH", "920001.BJ"]
+    assert universe["selection_order"][2] == {
+        "position": 3, "source_position": 4, "instrument_id": "CN:600519",
+        "asset_type": "stock", "symbol": "600519.SH",
+    }
+    assert universe["excluded_items"] == [{
+        "source_position": 1, "instrument_id": "CN:159146", "asset_type": "etf",
+        "symbol": "159146.SZ", "reason": "explicit_fund_asset_type",
+    }]
+    assert universe["excluded_reasons"] == {"explicit_fund_asset_type": 1}
+    assert universe["excluded_count"] == 1
+    assert universe["excluded_digest"] == batch.digest(universe["excluded_items"])
+    assert universe["source_shown_count"] == 6 and universe["source_total_count"] == 6
+    assert universe["response_summary"] == payload["summary"]
+    assert universe["response_digest"] == batch.digest(payload)
+    report = batch.run_batch(symbols, "20260630", "20260911", query=query, universe=universe)
+    assert report["status"] == "observed"
+    assert report["universe"] == universe
+    assert report["financial_candidate"]["status"] == "ranked"
+    many = candidate_pool_payload([f"CN:6000{value:02}" for value in range(21)])
+    selected, capped = batch.candidate_pool_universe(many, "20260911")
+    assert len(selected) == 20 and selected[-1] == "600019.SH"
+    assert capped["requested_pool_limit"] == 100 and capped["selected_limit"] == 20
+    assert capped["eligible_stock_count"] == 21
+    assert capped["excluded_reasons"] == {"selected_limit": 1}
+
+
+def test_candidate_pool_request_is_loopback_only():
+    class Reply:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def read(self, _limit):
+            return json.dumps(candidate_pool_payload()).encode()
+
+    class Opener:
+        def open(self, request, timeout):
+            assert request.full_url == (
+                "http://127.0.0.1:8000/api/paper-trades/candidate-pool"
+                "?provider=free&include_etfs=false&limit=100"
+            )
+            assert timeout == 70
+            return Reply()
+
+    assert batch.collect_candidate_pool("http://localhost:8000", opener=Opener())["items"]
+    with pytest.raises(ValueError):
+        batch.collect_candidate_pool("https://example.com", opener=Opener())
+
+
+@pytest.mark.parametrize("instrument_id,asset_type", [
+    ("US:AAPL", "stock"), ("CN:510300", "stock"),
+    ("CN:600519.SZ", "stock"), ("CN:123456", "etf"),
+])
+def test_candidate_pool_rejects_non_a_share_or_invalid_mapping(instrument_id, asset_type):
+    payload = candidate_pool_payload()
+    payload["items"][0]["instrument_id"] = instrument_id
+    payload["items"][0]["asset_type"] = asset_type
+    with pytest.raises(ValueError):
+        batch.candidate_pool_universe(payload, "20260911")
+
+
+def test_candidate_pool_rejects_duplicate_before_batch_requests():
+    payload = candidate_pool_payload(["CN:600000", "CN:600000", "CN:600001", "CN:600002", "CN:600003"])
+    with pytest.raises(ValueError, match="duplicate_candidate_pool_instrument"):
+        batch.candidate_pool_universe(payload, "20260911")
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        ("health", "paper_candidate_freshness_gate", "filtered"),
+        ("health", "paper_candidate_expected_signal_date", "2026-09-10"),
+        ("health", "paper_candidate_signal_date_mismatch", "1"),
+        ("item", "signal_date", "2026-09-10"),
+        ("item", "signal_date_fresh", False),
+    ],
+)
+def test_candidate_pool_rejects_stale_or_inconsistent_dates(change):
+    payload = candidate_pool_payload()
+    scope, key, value = change
+    target = payload["data_health"] if scope == "health" else payload["items"][0]
+    target[key] = value
+    with pytest.raises(ValueError):
+        batch.candidate_pool_universe(payload, "20260911")
+
+
+def test_candidate_pool_rejects_fewer_than_five():
+    payload = candidate_pool_payload(
+        ["CN:159146", "CN:600000", "CN:600001", "CN:600002", "CN:600003"],
+        ["etf", "stock", "stock", "stock", "stock"],
+    )
+    with pytest.raises(ValueError, match="invalid_candidate_pool_stock_count"):
+        batch.candidate_pool_universe(payload, "20260911")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [None, [], {}, {"items": "bad"}, {"items": [], "summary": [], "data_health": {}}],
+)
+def test_candidate_pool_rejects_invalid_response(payload):
+    with pytest.raises(ValueError):
+        batch.candidate_pool_universe(payload, "20260911")
+
+
+@pytest.mark.parametrize("explicit", [["--symbol", "600519.SH"], ["--symbols-file", "stocks.json"]])
+def test_candidate_pool_cli_is_mutually_exclusive(tmp_path, monkeypatch, explicit):
+    monkeypatch.setattr(sys, "argv", ["batch", "--candidate-pool", *explicit,
+        "--period", "20260630", "--trade-date", "20260911", "--output-dir", str(tmp_path)])
+    with pytest.raises(SystemExit) as exc:
+        batch.main()
+    assert exc.value.code == 2
+
+
+def test_invalid_candidate_pool_stops_before_seven_api_batch(tmp_path, monkeypatch):
+    monkeypatch.setattr(batch, "collect_candidate_pool", lambda *_args, **_kwargs: candidate_pool_payload(
+        ["CN:159146", "CN:600000", "CN:600001", "CN:600002", "CN:600003"],
+        ["etf", "stock", "stock", "stock", "stock"],
+    ))
+    monkeypatch.setattr(batch, "run_batch", lambda *_args, **_kwargs: pytest.fail("seven APIs requested"))
+    monkeypatch.setattr(sys, "argv", ["batch", "--candidate-pool", "--period", "20260630",
+                                     "--trade-date", "20260911", "--output-dir", str(tmp_path)])
+    assert batch.main() == 2

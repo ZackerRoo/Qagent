@@ -11,16 +11,22 @@ import os
 import stat
 from pathlib import Path
 import time
+import urllib.parse
+import urllib.request
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from collect_documented_research import collect, local_origin
+from collect_documented_research import NoRedirect, collect, local_origin
 from rank_g2_consensus import publish
 from research_financial_enrichment import APIS, analyze, digest, request_params, validate_header
 from rank_financial_candidate import rank_candidate
 
 BATCH_APIS = (*APIS, "moneyflow", "fina_indicator", "balancesheet")
 FINANCIAL_APIS = (*APIS, "fina_indicator", "balancesheet")
+CANDIDATE_POOL_PATH = "/api/paper-trades/candidate-pool"
+CANDIDATE_POOL_REQUEST_LIMIT = 100
+CANDIDATE_POOL_SELECTED_LIMIT = 20
+FUND_ASSET_TYPES = frozenset({"etf", "fund", "index_fund"})
 
 
 def batch_params(api, symbol, period, trade_date):
@@ -38,6 +44,149 @@ def now():
     return datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
 
 
+def collect_candidate_pool(base_url, *, opener=None):
+    """Read the existing paper candidate pool without provider credentials or redirects."""
+    origin = local_origin(base_url)
+    query = urllib.parse.urlencode({"provider": "free", "include_etfs": "false",
+                                    "limit": CANDIDATE_POOL_REQUEST_LIMIT})
+    request = urllib.request.Request(f"{origin}{CANDIDATE_POOL_PATH}?{query}", method="GET")
+    opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    with opener.open(request, timeout=70) as response:
+        if response.status != 200:
+            raise ValueError("candidate_pool_request_failed")
+        raw = response.read(4 * 1024 * 1024 + 1)
+    if len(raw) > 4 * 1024 * 1024:
+        raise ValueError("candidate_pool_response_limit")
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("invalid_candidate_pool")
+    return payload
+
+
+def candidate_pool_universe(payload, expected_trade_date):
+    """Fail closed and convert one current A-share pool response to ordered Tushare IDs."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        raise ValueError("invalid_candidate_pool")
+    items = payload["items"]
+    summary, health = payload.get("summary"), payload.get("data_health")
+    if not isinstance(summary, dict) or not isinstance(health, dict):
+        raise ValueError("invalid_candidate_pool_evidence")
+    try:
+        expected = datetime.strptime(expected_trade_date, "%Y%m%d").date().isoformat()
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid_expected_trade_date") from exc
+    required_health = {
+        "paper_candidate_pool_endpoint": "true",
+        "paper_candidate_pool_limit": str(CANDIDATE_POOL_REQUEST_LIMIT),
+        "paper_candidate_freshness_gate": "fresh",
+        "paper_candidate_expected_signal_date": expected,
+        "paper_candidate_signal_date_mismatch": "0",
+    }
+    if any(health.get(key) != value for key, value in required_health.items()):
+        raise ValueError("invalid_candidate_pool_health")
+    if (type(summary.get("shown_candidates")) is not int
+            or summary["shown_candidates"] != len(items)
+            or type(summary.get("total_candidates")) is not int
+            or summary["total_candidates"] < len(items)
+            or health.get("paper_candidate_pool_total") != str(summary["total_candidates"])):
+        raise ValueError("invalid_candidate_pool_summary")
+    if not 1 <= len(items) <= CANDIDATE_POOL_REQUEST_LIMIT:
+        raise ValueError("invalid_candidate_pool_size")
+
+    stock_items, stock_symbols, excluded_items = [], set(), []
+    for position, item in enumerate(items, 1):
+        if not isinstance(item, dict):
+            raise ValueError("invalid_candidate_pool_item")
+        instrument_id = item.get("instrument_id")
+        if not isinstance(instrument_id, str) or not instrument_id.startswith("CN:"):
+            raise ValueError("invalid_candidate_pool_instrument")
+        if item.get("signal_date") != expected or item.get("signal_date_fresh") is not True:
+            raise ValueError("invalid_candidate_pool_item_evidence")
+        asset_type = item.get("asset_type")
+        if asset_type not in {"stock", *FUND_ASSET_TYPES}:
+            raise ValueError("invalid_candidate_pool_asset_type")
+        market_id = instrument_id.removeprefix("CN:")
+        parts = market_id.split(".")
+        ticker = parts[0]
+        exchange = None
+        if asset_type == "stock" and len(ticker) == 6 and ticker.isdigit():
+            if ticker.startswith(("000", "001", "002", "003", "300", "301")):
+                exchange = "SZ"
+            elif ticker.startswith(("600", "601", "603", "605", "688", "689")):
+                exchange = "SH"
+            elif ticker.startswith(("430", "82", "83", "87", "88", "920")):
+                exchange = "BJ"
+        elif asset_type in FUND_ASSET_TYPES and len(ticker) == 6 and ticker.isdigit():
+            if ticker.startswith(("15", "16")):
+                exchange = "SZ"
+            elif ticker.startswith(("50", "51", "52", "56", "58")):
+                exchange = "SH"
+        if exchange is None or len(parts) > 2 or (len(parts) == 2 and parts[1] != exchange):
+            raise ValueError("invalid_candidate_pool_instrument")
+        symbol = f"{ticker}.{exchange}"
+        if asset_type in FUND_ASSET_TYPES:
+            excluded_items.append({"source_position": position, "instrument_id": instrument_id,
+                                   "asset_type": asset_type, "symbol": symbol,
+                                   "reason": "explicit_fund_asset_type"})
+            continue
+        if symbol in stock_symbols:
+            raise ValueError("duplicate_candidate_pool_instrument")
+        stock_symbols.add(symbol)
+        stock_items.append({"source_position": position, "instrument_id": instrument_id,
+                            "asset_type": asset_type, "symbol": symbol})
+
+    if len(stock_items) < 5:
+        raise ValueError("invalid_candidate_pool_stock_count")
+    selected = stock_items[:CANDIDATE_POOL_SELECTED_LIMIT]
+    for item in stock_items[CANDIDATE_POOL_SELECTED_LIMIT:]:
+        excluded_items.append({**item, "reason": "selected_limit"})
+    excluded_items.sort(key=lambda item: item["source_position"])
+    symbols = [item["symbol"] for item in selected]
+    selection = [
+        {"position": position, **item}
+        for position, item in enumerate(selected, 1)
+    ]
+    excluded_reasons = {
+        reason: sum(item["reason"] == reason for item in excluded_items)
+        for reason in sorted({item["reason"] for item in excluded_items})
+    }
+
+    source_digest = digest(payload)
+    universe = {
+        "kind": "paper_candidate_pool_order",
+        "source": "paper_candidate_pool",
+        "endpoint": CANDIDATE_POOL_PATH,
+        "provider": "free",
+        "include_etfs": False,
+        "requested_pool_limit": CANDIDATE_POOL_REQUEST_LIMIT,
+        "selected_limit": CANDIDATE_POOL_SELECTED_LIMIT,
+        "selected_count": len(symbols),
+        "eligible_stock_count": len(stock_items),
+        "source_shown_count": summary["shown_candidates"],
+        "source_total_count": summary["total_candidates"],
+        "expected_signal_date": expected,
+        "symbols": symbols,
+        "selection_order": selection,
+        "excluded_items": excluded_items,
+        "excluded_reasons": excluded_reasons,
+        "excluded_count": len(excluded_items),
+        "excluded_digest": digest(excluded_items),
+        "response_summary": summary,
+        "response_data_health": health,
+        "response_digest": source_digest,
+        "digest": digest({"symbols": symbols, "response_digest": source_digest}),
+        "production_baseline_verified": False,
+        "limitations": [
+            "Uses only the existing read-only paper candidate pool and preserves its returned order.",
+            "Reads at most 100 source items and selects the first 20 validated A-share stocks.",
+            "Explicit fund types are evidence-backed exclusions; other identity errors fail closed.",
+            "This replaces the fixed research observation set only.",
+            "Candidate-pool admission and financial ranking are distinct; no trading authority is added.",
+        ],
+    }
+    return symbols, universe
+
+
 @contextmanager
 def batch_lock(directory):
     directory.mkdir(parents=True, exist_ok=True)
@@ -52,7 +201,8 @@ def batch_lock(directory):
 
 
 def run_batch(symbols, period, trade_date, *, source="datahubco",
-              base_url="http://127.0.0.1:8000", budget_seconds=600, query=collect):
+              base_url="http://127.0.0.1:8000", budget_seconds=600, query=collect,
+              universe=None):
     local_origin(base_url)
     if (not 1 <= len(symbols) <= 20 or len(set(symbols)) != len(symbols)
             or isinstance(budget_seconds, bool) or not math.isfinite(budget_seconds)
@@ -109,9 +259,11 @@ def run_batch(symbols, period, trade_date, *, source="datahubco",
                      "decision_weight": False, "activation_allowed": False}
     report = {"protocol": "daily-documented-research-v2", "source": source,
               "period": period, "trade_date": trade_date, "symbols": symbols,
-              "universe": {"kind": "explicit_observation_order", "symbols": list(symbols),
-                           "digest": digest({"symbols": list(symbols)}),
-                           "production_baseline_verified": False},
+              "universe": universe or {
+                  "kind": "explicit_observation_order", "symbols": list(symbols),
+                  "digest": digest({"symbols": list(symbols)}),
+                  "production_baseline_verified": False,
+              },
               "started_at": started_at, "finished_at": finished_at,
               "budget_seconds": budget_seconds, "system_evidence": evidence,
               "enrichment_reports": reports, "decision_weight": False, "activation_allowed": False,
@@ -126,7 +278,7 @@ def run_batch(symbols, period, trade_date, *, source="datahubco",
               "status_semantics": "observed means all source sections observed and candidate ranked; analysis exclusions remain explicit",
               "status": "observed" if candidate["status"] == "ranked" and all(
                   e["classification"] == "observed" for apis in evidence.values() for e in apis.values()) else "incomplete",
-              "limitations": ["At most 20 explicitly supplied stocks and seven APIs; no full-market coverage claim.",
+              "limitations": ["At most 20 A-share stocks and seven APIs; no full-market coverage claim.",
                               "Current observation only; no historical PIT or production ranking effect.",
                               "Derived observations use collection completion, never pretend availability before fetch.",
                               "Budget is a request-start budget reserving 70 seconds per system call; no retries."]}
@@ -142,6 +294,8 @@ def main():
     universe = parser.add_mutually_exclusive_group(required=True)
     universe.add_argument("--symbol", action="append")
     universe.add_argument("--symbols-file", type=Path, help="Explicit ordered JSON list, at most 20 stock symbols")
+    universe.add_argument("--candidate-pool", action="store_true",
+                          help="Use 5-20 current A-share stocks from the existing local paper candidate pool")
     parser.add_argument("--period", required=True)
     dates = parser.add_mutually_exclusive_group(required=True)
     dates.add_argument("--trade-date")
@@ -153,18 +307,24 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     try:
-        symbols = json.loads(args.symbols_file.read_text()) if args.symbols_file else args.symbol
-        if not isinstance(symbols, list) or any(not isinstance(s, str) for s in symbols):
-            raise ValueError("invalid_symbols")
         trade_date = args.trade_date
         if args.today_close:
             local = datetime.now(ZoneInfo("Asia/Shanghai"))
             if local.hour < 15:
                 raise ValueError("session_not_closed")
             trade_date = local.strftime("%Y%m%d")
+        universe_evidence = None
+        if args.candidate_pool:
+            payload = collect_candidate_pool(args.base_url)
+            symbols, universe_evidence = candidate_pool_universe(payload, trade_date)
+        else:
+            symbols = json.loads(args.symbols_file.read_text()) if args.symbols_file else args.symbol
+        if not isinstance(symbols, list) or any(not isinstance(s, str) for s in symbols):
+            raise ValueError("invalid_symbols")
         with batch_lock(args.output_dir):
             report = run_batch(symbols, args.period, trade_date, source=args.source,
-                               base_url=args.base_url, budget_seconds=args.budget_seconds)
+                               base_url=args.base_url, budget_seconds=args.budget_seconds,
+                               universe=universe_evidence)
             filename = datetime.now().strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex + ".json"
             output = args.output_dir / filename
             publish(output, json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n")

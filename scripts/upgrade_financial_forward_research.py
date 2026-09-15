@@ -230,19 +230,21 @@ def _prepare_research_directories(uid: int, gid: int, *, execute: bool) -> dict:
     return result
 
 
-def validate_forward_bundle(expected_sha: str) -> None:
+def validate_forward_bundle(expected_sha: str, *, bundle=None, required=None) -> None:
+    bundle = FORWARD_BUNDLE if bundle is None else bundle
+    required = REQUIRED if required is None else required
     if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
         raise ValueError("invalid_digest")
-    _directory(FORWARD_BUNDLE)
-    raw = (FORWARD_BUNDLE / "manifest.json").read_bytes()
-    _regular(FORWARD_BUNDLE / "manifest.json")
+    _directory(bundle)
+    raw = (bundle / "manifest.json").read_bytes()
+    _regular(bundle / "manifest.json")
     if checksum(raw) != expected_sha:
         raise ValueError("manifest_changed")
     manifest = json.loads(raw)
     if (not isinstance(manifest, dict) or set(manifest) != {"schema", "files"}
             or manifest["schema"] != "financial-forward-bundle-v1"
             or not isinstance(manifest["files"], dict)
-            or not REQUIRED <= set(manifest["files"]) or len(manifest["files"]) > 50):
+            or not required <= set(manifest["files"]) or len(manifest["files"]) > 50):
         raise ValueError("invalid_manifest")
     for name, expected in manifest["files"].items():
         pure = PurePosixPath(name)
@@ -250,17 +252,17 @@ def validate_forward_bundle(expected_sha: str) -> None:
                 or str(pure) != name or name == "manifest.json"
                 or not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected)):
             raise ValueError("invalid_manifest_path")
-        path = FORWARD_BUNDLE / name
+        path = bundle / name
         _regular(path)
         if checksum(path.read_bytes()) != expected:
             raise ValueError("bundle_changed")
     actual = set()
-    for path in FORWARD_BUNDLE.rglob("*"):
+    for path in bundle.rglob("*"):
         if path.is_dir():
             _directory(path)
         else:
             _regular(path)
-            actual.add(path.relative_to(FORWARD_BUNDLE).as_posix())
+            actual.add(path.relative_to(bundle).as_posix())
     if actual != set(manifest["files"]) | {"manifest.json"}:
         raise ValueError("unmanifested_bundle_files")
 

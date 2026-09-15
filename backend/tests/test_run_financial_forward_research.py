@@ -93,6 +93,34 @@ def test_first_legal_daily_is_sealed_and_existing_signal_is_idempotent(paths, mo
     assert len(list(runs.glob("*.json"))) == 2
 
 
+def test_same_day_dynamic_candidate_pool_daily_is_sealed(paths, monkeypatch):
+    daily_dir, signal_dir, evaluations, runs, db = paths
+    document = _daily(monkeypatch)
+    items = [{"instrument_id": "CN:159146", "asset_type": "etf",
+              "signal_date": "2026-09-11", "signal_date_fresh": True}]
+    items.extend({"instrument_id": "CN:" + symbol[:6], "asset_type": "stock",
+                  "signal_date": "2026-09-11", "signal_date_fresh": True}
+                 for symbol in SYMBOLS)
+    payload = {
+        "items": items, "summary": {"shown_candidates": 7, "total_candidates": 7},
+        "data_health": {"paper_candidate_pool_endpoint": "true",
+                        "paper_candidate_pool_limit": "100",
+                        "paper_candidate_pool_total": "7",
+                        "paper_candidate_freshness_gate": "fresh",
+                        "paper_candidate_expected_signal_date": "2026-09-11",
+                        "paper_candidate_signal_date_mismatch": "0"},
+    }
+    _, document["universe"] = batch.candidate_pool_universe(payload, "20260911")
+    document.pop("result_digest")
+    document["result_digest"] = batch.digest(document)
+    (daily_dir / "dynamic.json").write_text(json.dumps(document))
+    code, report = runner.run(daily_dir, signal_dir, evaluations, runs, db, now=RUN)
+    assert code == 0 and report["seal"]["status"] == "sealed"
+    signal = json.loads((signal_dir / "2026-09-11.json").read_text())
+    assert signal["source"]["universe"]["kind"] == "paper_candidate_pool_order"
+    runner.forward.validate_archive(signal)
+
+
 def test_existing_signal_must_match_first_legal_daily(paths, monkeypatch):
     daily_dir, signal_dir, evaluations, runs, db = paths
     document = _daily(monkeypatch)
