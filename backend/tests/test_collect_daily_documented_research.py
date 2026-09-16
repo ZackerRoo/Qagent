@@ -21,7 +21,8 @@ def response(api, symbol):
         row.update(end_date="20260630", ann_date="20260815", report_type="1", comp_type="1",
                    n_cashflow_act=30, n_income=10, total_revenue=100)
     elif api == "daily_basic":
-        row.update(trade_date="20260911", pe=10, pe_ttm=10, pb=1, turnover_rate=1, volume_ratio=1)
+        row.update(trade_date="20260911", pe=10, pe_ttm=10, pb=1, turnover_rate=1,
+                   volume_ratio=1, total_mv=100000)
     elif api == "forecast":
         row.update(end_date="20261231", ann_date="20260901", type="预增",
                    p_change_min=1, p_change_max=2, net_profit_min=3, net_profit_max=4)
@@ -54,6 +55,9 @@ def test_seven_api_batch_replay_and_digest():
     assert claimed == batch.digest(report)
     for enrichment in report["enrichment_reports"]:
         assert enrichment["raw_evidence"]["analysis_version"] == 2
+        assert "matched_control_evidence_version" not in enrichment["raw_evidence"]
+        assert "total_mv" not in next(iter(enrichment["instruments"].values()))[
+            "sections"]["daily_basic"]["derived"]["values"]
         assert batch.analyze(enrichment["raw_evidence"]) == enrichment
         assert enrichment["retrieved_at"] == report["finished_at"]
         assert next(iter(enrichment["instruments"].values()))["financial_ratios"]["cashflow_to_netprofit"]["value"] == "3"
@@ -270,6 +274,8 @@ def candidate_pool_payload(instrument_ids=None, asset_types=None):
         {
             "instrument_id": instrument_id,
             "asset_type": asset_type,
+            "industry": "test" if asset_type == "stock" else None,
+            "exposure_group": "test" if asset_type == "stock" else None,
             "signal_date": "2026-09-11",
             "signal_date_fresh": True,
         }
@@ -298,7 +304,8 @@ def test_candidate_pool_success_preserves_order_and_reuses_batch():
     assert symbols == ["000001.SZ", "300750.SZ", "600519.SH", "688002.SH", "920001.BJ"]
     assert universe["selection_order"][2] == {
         "position": 3, "source_position": 4, "instrument_id": "CN:600519",
-        "asset_type": "stock", "symbol": "600519.SH",
+        "asset_type": "stock", "symbol": "600519.SH", "industry": "test",
+        "exposure_group": "test",
     }
     assert universe["excluded_items"] == [{
         "source_position": 1, "instrument_id": "CN:159146", "asset_type": "etf",
@@ -314,12 +321,48 @@ def test_candidate_pool_success_preserves_order_and_reuses_batch():
     assert report["status"] == "observed"
     assert report["universe"] == universe
     assert report["financial_candidate"]["status"] == "ranked"
+    assert all(r["raw_evidence"]["matched_control_evidence_version"] == 1
+               for r in report["enrichment_reports"])
+    assert all(r["instruments"][symbol]["sections"]["daily_basic"]["derived"]["values"]["total_mv"]
+               == "100000" for symbol, r in zip(symbols, report["enrichment_reports"]))
     many = candidate_pool_payload([f"CN:6000{value:02}" for value in range(21)])
     selected, capped = batch.candidate_pool_universe(many, "20260911")
     assert len(selected) == 20 and selected[-1] == "600019.SH"
     assert capped["requested_pool_limit"] == 100 and capped["selected_limit"] == 20
     assert capped["eligible_stock_count"] == 21
     assert capped["excluded_reasons"] == {"selected_limit": 1}
+
+
+def test_candidate_pool_stock_exposure_is_preserved_and_strict():
+    payload = candidate_pool_payload()
+    payload["items"][0].update(industry="C27医药制造业", exposure_group="C27医药制造业")
+    _, universe = batch.candidate_pool_universe(payload, "20260911")
+    assert universe["selection_order"][0]["industry"] == "C27医药制造业"
+    assert universe["selection_order"][0]["exposure_group"] == "C27医药制造业"
+    for change in ({"industry": "C27医药制造业", "exposure_group": "其他"},
+                   {"industry": " C27医药制造业", "exposure_group": " C27医药制造业"},
+                   {"industry": "C27医药制造业"}):
+        invalid = candidate_pool_payload()
+        invalid["items"][0].pop("exposure_group")
+        invalid["items"][0].update(change)
+        with pytest.raises(ValueError, match="invalid_candidate_pool_exposure"):
+            batch.candidate_pool_universe(invalid, "20260911")
+
+
+def test_candidate_pool_missing_stock_exposure_is_explicit_not_invented():
+    payload = candidate_pool_payload()
+    payload["items"][0].update(industry=None, exposure_group=None)
+    _, universe = batch.candidate_pool_universe(payload, "20260911")
+    assert universe["selection_order"][0]["industry"] is None
+    assert universe["selection_order"][0]["exposure_group"] is None
+
+
+def test_candidate_pool_stock_exposure_keys_are_required_for_new_collection():
+    payload = candidate_pool_payload()
+    payload["items"][0].pop("industry")
+    payload["items"][0].pop("exposure_group")
+    with pytest.raises(ValueError, match="invalid_candidate_pool_exposure"):
+        batch.candidate_pool_universe(payload, "20260911")
 
 
 def test_candidate_pool_request_is_loopback_only():

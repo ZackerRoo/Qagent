@@ -107,6 +107,19 @@ def candidate_pool_universe(payload, expected_trade_date):
         asset_type = item.get("asset_type")
         if asset_type not in {"stock", *FUND_ASSET_TYPES}:
             raise ValueError("invalid_candidate_pool_asset_type")
+        industry = item.get("industry")
+        exposure_group = item.get("exposure_group")
+        has_industry = "industry" in item
+        has_exposure_group = "exposure_group" in item
+        if (asset_type == "stock" and not (has_industry and has_exposure_group)):
+            raise ValueError("invalid_candidate_pool_exposure")
+        if (asset_type == "stock" and has_industry
+                and not ((industry is None and exposure_group is None)
+                         or (isinstance(industry, str) and industry == industry.strip() and industry
+                             and isinstance(exposure_group, str)
+                             and exposure_group == exposure_group.strip()
+                             and exposure_group == industry))):
+            raise ValueError("invalid_candidate_pool_exposure")
         market_id = instrument_id.removeprefix("CN:")
         parts = market_id.split(".")
         ticker = parts[0]
@@ -134,8 +147,11 @@ def candidate_pool_universe(payload, expected_trade_date):
         if symbol in stock_symbols:
             raise ValueError("duplicate_candidate_pool_instrument")
         stock_symbols.add(symbol)
-        stock_items.append({"source_position": position, "instrument_id": instrument_id,
-                            "asset_type": asset_type, "symbol": symbol})
+        stock_item = {"source_position": position, "instrument_id": instrument_id,
+                      "asset_type": asset_type, "symbol": symbol}
+        if has_industry:
+            stock_item.update(industry=industry, exposure_group=exposure_group)
+        stock_items.append(stock_item)
 
     if len(stock_items) < 5:
         raise ValueError("invalid_candidate_pool_stock_count")
@@ -334,7 +350,13 @@ def run_batch(symbols, period, trade_date, *, source="datahubco",
                 if response["status"] == "error":
                     sections[symbol][api]["error"] = response.get("error", "section_failed")
     finished_at = now()
-    reports = [analyze({"analysis_version": 2, "source": source, "period": period, "trade_date": trade_date,
+    matched_control_evidence = (
+        {"matched_control_evidence_version": 1}
+        if isinstance(universe, dict) and universe.get("kind") == "paper_candidate_pool_order"
+        else {}
+    )
+    reports = [analyze({"analysis_version": 2, **matched_control_evidence,
+                        "source": source, "period": period, "trade_date": trade_date,
                         "retrieved_at": finished_at, "instruments": {symbol: sections[symbol]}})
                for symbol in symbols]
     try:

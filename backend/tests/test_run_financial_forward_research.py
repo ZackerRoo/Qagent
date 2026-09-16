@@ -99,6 +99,7 @@ def test_same_day_dynamic_candidate_pool_daily_is_sealed(paths, monkeypatch):
     items = [{"instrument_id": "CN:159146", "asset_type": "etf",
               "signal_date": "2026-09-11", "signal_date_fresh": True}]
     items.extend({"instrument_id": "CN:" + symbol[:6], "asset_type": "stock",
+                  "industry": "test", "exposure_group": "test",
                   "signal_date": "2026-09-11", "signal_date_fresh": True}
                  for symbol in SYMBOLS)
     payload = {

@@ -22,7 +22,8 @@ def fixture():
     raw = {"cashflow": [{**row, "n_cashflow_act": 150}],
            "income": [{**row, "n_income": 100, "total_revenue": 300}],
            "daily_basic": [{"ts_code": "600519.SH", "trade_date": "20260911", "pe": 20,
-                            "pe_ttm": 25, "pb": 3, "turnover_rate": 0.5, "volume_ratio": 1.25}],
+                            "pe_ttm": 25, "pb": 3, "turnover_rate": 0.5, "volume_ratio": 1.25,
+                            "total_mv": "159405405.3056"}],
            "forecast": [{"ts_code": "600519.SH", "end_date": "20241231", "ann_date": "20241230",
                          "type": "预增", "p_change_min": 10, "p_change_max": 20,
                          "net_profit_min": 100, "net_profit_max": 120}]}
@@ -62,6 +63,29 @@ def test_nonpositive_or_missing_does_not_become_zero(value):
     got = result(payload)
     assert got["financial_ratios"]["cashflow_to_netprofit"]["value"] is None
     assert got["sections"]["daily_basic"]["derived"]["values"]["earnings_yield"] is None
+
+
+@pytest.mark.parametrize("value", [None, 0, -1, "NaN", "Infinity"])
+def test_total_mv_requires_positive_source_value_without_affecting_valuation(value):
+    payload = fixture()
+    payload["matched_control_evidence_version"] = 1
+    sections(payload)["daily_basic"]["rows"][0]["total_mv"] = value
+    derived = result(payload)["sections"]["daily_basic"]["derived"]
+    assert derived["values"]["total_mv"] is None
+    assert derived["exclusions"]["total_mv"] == "missing_or_nonpositive"
+    assert derived["values"]["earnings_yield"] == "0.05"
+
+
+def test_total_mv_revision_conflict_is_control_only_unavailable():
+    payload = fixture()
+    payload["matched_control_evidence_version"] = 1
+    rows = sections(payload)["daily_basic"]["rows"]
+    rows.append({**rows[0], "total_mv": "159405406.3056"})
+    derived = result(payload)["sections"]["daily_basic"]
+    assert derived["status"] == "observed"
+    assert derived["derived"]["values"]["earnings_yield"] == "0.05"
+    assert derived["derived"]["values"]["total_mv"] is None
+    assert derived["derived"]["exclusions"]["total_mv"] == "ambiguous_revision"
 
 
 @pytest.mark.parametrize("api,field,value", [
@@ -156,6 +180,7 @@ def test_cli_fixture_nonoverwrite_and_live_http_optin(tmp_path):
 def v2_fixture():
     payload = fixture()
     payload["analysis_version"] = 2
+    payload["matched_control_evidence_version"] = 1
     base = {"ts_code": "600519.SH", "end_date": "20260630", "ann_date": "20260815"}
     sections(payload)["balancesheet"] = {"status": "observed", "rows": [{
         **base, "report_type": "1", "comp_type": "1", "total_assets": 1000, "total_liab": 300}]}
@@ -170,6 +195,7 @@ def test_v2_only_consumes_selected_nonquarter_fields_and_balances():
     assert report["protocol"] == "financial-enrichment-current-v2"
     assert report["research_only"] is True and not report["activation_allowed"]
     got = result(payload)["sections"]
+    assert got["daily_basic"]["derived"]["values"]["total_mv"] == "159405405.3056"
     assert got["fina_indicator"]["derived"]["values"] == {"roe": "10", "netprofit_margin": "20"}
     assert got["fina_indicator"]["derived"]["scope_confirmed_by_matching_statements"] is True
     assert got["balancesheet"]["derived"]["values"]["liabilities_to_assets"] == "0.3"

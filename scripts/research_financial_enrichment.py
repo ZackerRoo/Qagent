@@ -96,7 +96,7 @@ def numeric(value):
     return None if parsed is None else str(parsed)
 
 
-def valuation(rows, trade_date):
+def valuation(rows, trade_date, *, include_total_mv=False):
     fields = ("pe", "pe_ttm", "pb", "turnover_rate", "volume_ratio")
     if any(row.get("trade_date") != trade_date for row in rows):
         raise ValueError("date_mismatch")
@@ -113,6 +113,17 @@ def valuation(rows, trade_date):
         if values[field] is not None and Decimal(values[field]) < 0:
             values[field] = None
             exclusions[field] = "negative_value"
+    if include_total_mv:
+        market_caps = [number(row.get("total_mv")) for row in rows]
+        positive = [value for value in market_caps if value is not None and value > 0]
+        if len(positive) != len(rows):
+            values["total_mv"] = None
+            exclusions["total_mv"] = "missing_or_nonpositive"
+        elif len(set(positive)) != 1:
+            values["total_mv"] = None
+            exclusions["total_mv"] = "ambiguous_revision"
+        else:
+            values["total_mv"] = str(positive[0])
     for pe_field, result_field in (("pe", "earnings_yield"), ("pe_ttm", "earnings_yield_ttm")):
         pe = number(values[pe_field])
         values[result_field] = str(Decimal(1) / pe) if pe is not None and pe > 0 else None
@@ -210,6 +221,9 @@ def analyze(payload):
     version = payload.get("analysis_version", 1)
     if type(version) is not int or version not in (1, 2):
         raise ValueError("unsupported_analysis_version")
+    matched_control_evidence = payload.get("matched_control_evidence_version")
+    if matched_control_evidence not in (None, 1):
+        raise ValueError("unsupported_matched_control_evidence_version")
     report = {"protocol": f"financial-enrichment-current-v{version}", "source": payload["source"],
               "retrieved_at": payload["retrieved_at"], "period": payload["period"],
               "trade_date": payload["trade_date"], "decision_weight": False, "activation_allowed": False,
@@ -262,7 +276,8 @@ def analyze(payload):
                             "values": {k: None if v is None else str(v) for k, v in financial[api]["values"].items()},
                         }
                 elif api == "daily_basic":
-                    section.update(status="observed", derived=valuation(rows, payload["trade_date"]))
+                    section.update(status="observed", derived=valuation(
+                        rows, payload["trade_date"], include_total_mv=matched_control_evidence == 1))
                 elif api in ("balancesheet", "fina_indicator"):
                     derived = extended_financial(rows, api, payload["period"], today)
                     section.update(status="observed" if derived["values"] else "no_usable_rows", derived=derived)
@@ -296,6 +311,11 @@ def analyze(payload):
             "liabilities_to_assets": "balancesheet.total_liab / positive total_assets; nonnegative liabilities, dimensionless",
         })
         report["limitations"].append("Indicator schema lacks scope tags; same-period type-1 income/balance corroborate scope, not cross-source authenticity.")
+    if matched_control_evidence == 1:
+        report["metric_definitions"]["total_mv"] = (
+            "positive daily_basic.total_mv source value; provider source unit retained without conversion; "
+            "current observation, not historical PIT"
+        )
     report["status"] = "observed" if all(s["status"] == "observed" for i in report["instruments"].values()
                                           for s in i["sections"].values()) else "incomplete"
     root = Path(__file__).resolve().parents[1]
