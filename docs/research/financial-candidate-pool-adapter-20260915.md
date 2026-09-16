@@ -13,9 +13,13 @@
 
 升级 helper 从已部署 daily v3 / forward v5 严格校验的 cron 和 manifest 起步。升级先替换 forward consumer，再替换 daily producer；若中断，`daily-old + forward-new` 是唯一可接受混合态，重试仅续写 daily。回滚按相反的安全依赖顺序，先恢复 daily producer，再恢复 forward consumer；第二步失败仍停留在同一兼容混合态，可重试完成。`daily-new + forward-old` 不兼容，helper fail-closed，不猜测操作意图。私有 receipt 校验回滚身份，安装和回滚都不启动任务。它不扩大 Datahubco/Tushare 消费边界：仍使用现有财务查询和原始日线后备，不接分钟或复权价。
 
-当前仅为本地实现与测试阶段。父任务专项回归 **96 passed**；正确虚拟环境全量为 **2668 passed、1 failed、3 warnings（957.73秒）**。唯一失败是 `tests/test_paper_writer.py::test_process_death_releases_writer` 的 `spawn ready.wait(8)` 超时，随后对该用例隔离复测 **1 passed（3.15秒）**。这组证据不能表述为“全量一次全绿”；必须保留全量运行中单一超时和隔离复测通过两项事实。
+部署前本地实现与测试记录：父任务专项回归 **96 passed**；正确虚拟环境全量为 **2668 passed、1 failed、3 warnings（957.73秒）**。唯一失败是 `tests/test_paper_writer.py::test_process_death_releases_writer` 的 `spawn ready.wait(8)` 超时，随后对该用例隔离复测 **1 passed（3.15秒）**。这组证据不能表述为“全量一次全绿”；必须保留全量运行中单一超时和隔离复测通过两项事实。
 
-云端首次从 daily-v4 独立bundle执行helper preview时安全失败，错误为 `ModuleNotFoundError: upgrade_financial_forward_research`；原因是daily和forward新bundle的manifest各自只包含半边依赖，而原测试通过仓库 `sys.path` 隐式补齐。失败发生在preview导入阶段，cron未修改、任务未启动，不构成安装或部署成功。修复后两个新bundle使用同一严格最小完整依赖闭包，并从仅复制manifest列出文件的隔离bundle、非仓库cwd、`-I -S` Python进程分别验证daily/forward preview；manifest仍拒绝任何额外文件。本轮helper相关专项 **39 passed（2.49秒）**，Ruff和diff检查通过。本次修复未 commit、未 push、未安装、未部署。测试不替代下一个交易日的自然扫描完成、daily 成功和 forward 封存验收。
+云端首次从 daily-v4 独立bundle执行helper preview时安全失败，错误为 `ModuleNotFoundError: upgrade_financial_forward_research`；原因是daily和forward新bundle的manifest各自只包含半边依赖，而原测试通过仓库 `sys.path` 隐式补齐。失败发生在preview导入阶段，cron未修改、任务未启动，不构成安装或部署成功。修复后两个新bundle使用同一严格最小完整依赖闭包，并从仅复制manifest列出文件的隔离bundle、非仓库cwd、`-I -S` Python进程分别验证daily/forward preview；manifest仍拒绝任何额外文件。本轮helper相关专项 **39 passed（2.49秒）**，Ruff和diff检查通过。截至该次本地修复时尚未 commit、push、安装或部署；测试不替代下一个交易日的自然扫描完成、daily 成功和 forward 封存验收。
+
+最终部署验收：源提交 `a223b2d` 已 push；重建后 daily-v4 manifest SHA为 `800d60b8fe3b83bcf33acd139a521744c9b739e6ac4751812deae123be4c0b6f`，forward-v6 manifest SHA为 `f670920638b094522847fb868db8ed86da5d942ad4a4a63208338f37ee3c2ef1`。首次root preview在bundle中生成`__pycache__`，被manifest的额外文件检查安全拒绝，当时cron未修改。清理后由普通用户使用 `python -B` preview，结果为`planned`且旧cron未改。execute结果为`upgraded/new`、`started_job=false`，receipt `/var/backups/qagent-financial-dependency-retry/before-install-dacfwrpf.json` 为root:root 0600，目录0700；post-preview为`already_installed/new`。
+
+新daily cron SHA为 `ff8dfcc89647d9af4404d6f234de5583d87dc811a7c6eb962bd16fc3b77bf16d`，工作日北京时间16:40至19:10共六次；新forward cron SHA为 `c7425b014f6dfa37681e5f5e57e481b58d7c13a6d7f6e4f46f7689b75b1c5ecc`，工作日北京时间19:37、20:07、20:37共三次。health为ok；唯一模拟盘仍为 `paper-session-69470ca6b12c`、active，9 active / remaining 1；十分钟调度快照为`waiting`、attempts 57 / completed 53、`last_error=null`。未手动启动daily或forward，自然运行仍待验证；选股绩效未晋级，部署成功不等于策略有效。
 ## 目标与复用关系
 
 `collect_daily_documented_research.py` 新增可选 `--candidate-pool` 输入。它只读调用现有本机 `/api/paper-trades/candidate-pool?provider=free&include_etfs=false&limit=100`，验证全部返回项并按来源顺序保留前20只合格A股，再原样复用既有七接口采集、财务分析和 `rank_financial_candidate`。唯一消费者是现有 Financial Challenger；目标是经对照验收后替代固定20股观察集合，不建立第二套排名、组合或长期并行任务。
