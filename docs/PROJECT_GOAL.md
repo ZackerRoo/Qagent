@@ -306,3 +306,13 @@ v2 matched control 替代当前未配平的 G2 `full_features` Top5，作为 5/1
 若数据语义或单位不可确认、连续五个自然v2信号均为 `control_unavailable` 或 `control_not_discriminative`、首个可判别且完整的5日matched结果否定继续观察，或唯一消费者不再使用该能力，则停止新v2调度并移出运行链路，只保留历史证据，不回退为长期v1/v2双轨。collector/enrichment/evaluator v2、v1历史兼容及per-pair digest已实现；独立 `daily-v5` / `forward-v7` 不可变bundle升级器也已实现，固定从当前v4/v6按consumer-first顺序升级，默认preview、显式execute，支持幂等、中断续做和可恢复回滚，不启动任务，两个目标bundle使用相同完整依赖闭包并拒绝额外文件、软链及可写文件。父级本轮相关8组回归共 **186 passed**，升级器联合回归 **65 passed**，完整backend回归 **2692 passed、3 warnings**，Ruff与`git diff --check`通过。
 
 源提交 `87d8590` 已push。`daily-v5` manifest SHA为 `551edc0ce38c5e7892ab3158ef4bb337db9f41b6bbb265853aff91fd2e68bf2f`，`forward-v7` manifest SHA为 `ec9dfd26617eda1b037d433b5eb5f0e5f51e0526786f9b4c044ab72c64a8186e`。execute前preview为`planned`且旧cron未变；execute结果为`upgraded/new`、`started_job=false`，receipt为 `/var/backups/qagent-financial-matched-control/before-install-4eu899i5.json`；安装后preview为`already_installed/new`。新daily cron SHA为 `45ee481081dd3e3ba06f6df02bbd55f07944d1b896ff54e08f8ffcff10ff62f8`，新forward cron SHA为 `1305eb71acc82ecb3730433044f218815c40ec23aff004a602db3f622cc9dec3`，均为root:root 0644；health为ok。未手动启动daily或forward任务，唯一模拟盘、账户、账本、数据库/schema、API、正式Ranking、历史交易、交易权重和实盘权限均不改变。自然v2信号与真实5/10/20交易日成熟证据仍待自然运行验收，不能由部署成功替代。
+
+## G8 / P0：扫描 freshness gate 与 provider breaker 语义隔离（2026-09-16）
+
+稳定子目标：自动全市场扫描把 `candidate_data_partially_stale_filtered`、`candidate_data_stale_filtered` 和兼容旧状态 `candidate_data_stale_after_retry` 统一视为 fail-closed 的 freshness deferred/watch。它们保留 cycle issue 和可观测健康状态，但不消耗错误重试预算、不创建或递增 `scan:free` circuit breaker；真实 provider/transport/coverage 错误仍沿用既有重试与 breaker 语义。后续正常周期必须仍能启动新扫描，不能因为候选陈旧门禁被六小时 breaker 阻塞。
+
+一次性恢复工具 `scripts/recover_scan_freshness_breaker.py` 默认只预览，显式 `--execute` 才允许修改；目标固定为 `scan:free`，仅接受 state=open、`last_error_text` 精确属于上述三种历史误分类、`next_probe_at` 尚未到期且无 half-open probe owner 的行。执行只关闭并清零该 breaker 的运行计数和 probe 字段，保留最后错误证据，使用 revision compare-and-swap，并输出私有 before/after receipt；重复执行只返回 `already_recovered`，其他 scope、错误、状态或已到 probe 时间均拒绝。该工具不启动 scan、automation scheduler 或模拟盘。
+
+验收条件：回归须同时证明 stage 为 deferred、issue 保留、`scan:free` breaker 不创建/不递增、下一 post-close cycle 可以进入 queued scan；恢复工具须覆盖 preview 无写、严格 allowlist、未到期检查、仅目标行变化、私有审计 receipt 和幂等。上线前由主任务复核真实 breaker 行与当前时间，先 preview 再显式 execute；代码部署和历史 breaker 恢复分别记录，恢复成功不能替代下一自然扫描、daily-v5/forward-v7 产物或选股收益验收。
+
+当前状态：最小语义修复、回归及一次性恢复工具已实现；`test_api_automation.py`、`test_automation_runtime_coordination.py` 与恢复工具专项合计 **122 passed、1 项既有 warning（15.97 秒）**，Ruff 与 `git diff --check` 通过。尚未 commit、未 push、未部署，尚未执行云端 breaker 恢复；唯一模拟账户、账本、正式 Ranking、交易规则、daily/forward cron 和研究协议均未改变。

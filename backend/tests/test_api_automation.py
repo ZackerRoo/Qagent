@@ -1268,7 +1268,17 @@ def test_automation_cycle_publishes_post_cycle_risk_gate(monkeypatch):
         (
             "scan",
             {"automation_scan_status": "candidate_data_partially_stale_filtered"},
-            "error",
+            "deferred",
+        ),
+        (
+            "scan",
+            {"automation_scan_status": "candidate_data_stale_filtered"},
+            "deferred",
+        ),
+        (
+            "scan",
+            {"automation_scan_status": "candidate_data_stale_after_retry"},
+            "deferred",
         ),
         (
             "fuyao_market_theme",
@@ -1782,6 +1792,101 @@ def test_scheduled_scan_settlement_wait_advances_to_next_normal_slot(tmp_path, m
     assert state.last_error is None
     assert "scan: scan status is waiting_market_data_settlement" in state.last_result.issues
     assert state.last_result.errors == []
+
+
+def test_candidate_freshness_defer_does_not_open_breaker_and_next_cycle_can_scan(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = f"sqlite:///{tmp_path / 'candidate-freshness-deferred.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
+    initialize_database(database_url)
+    repo = QagentRepository(create_session_factory(database_url))
+    paper_repo = PaperTradingRepository(repo.session_factory)
+    monkeypatch.setattr(routes, "_repo", lambda: repo)
+    monkeypatch.setattr(routes, "_paper_repo", lambda: paper_repo)
+    monkeypatch.setattr(
+        routes,
+        "_paper_seed_risk_gate",
+        lambda *_: (True, {"paper_risk_gate_action": "allow"}),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_latest_completed_a_share_session",
+        lambda *args: date(2026, 9, 16),
+    )
+    scan_outcomes = iter(
+        [
+            ("candidate_data_partially_stale_filtered", False, "old-scan"),
+            ("queued", True, "new-scan"),
+        ]
+    )
+    monkeypatch.setattr(
+        routes,
+        "_maybe_start_automatic_full_scan",
+        lambda *args, **kwargs: next(scan_outcomes),
+    )
+    monkeypatch.setattr(
+        routes,
+        "refresh_factor_shadow_benchmark_cache",
+        lambda *args, **kwargs: SimpleNamespace(data_health={}),
+    )
+    monkeypatch.setattr(
+        routes,
+        "resolve_factor_shadow_outcomes",
+        lambda *args, **kwargs: SimpleNamespace(
+            data_health={"factor_shadow_outcome_status": "up_to_date"},
+            next_maturity_date=None,
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "resolve_fuyao_shadow_outcomes",
+        lambda *args, **kwargs: SimpleNamespace(
+            data_health={"fuyao_shadow_status": "resolved"},
+            unresolved_prices=0,
+            next_maturity_date=None,
+        ),
+    )
+    settings = AutoProcessingSettings(
+        provider="free",
+        run_scan=True,
+        seed_paper=False,
+        update_paper=False,
+        run_alerts=False,
+        run_forward_evidence=False,
+    )
+
+    deferred = routes._run_auto_processing_cycle(settings)
+    post_close = routes._run_auto_processing_cycle(settings)
+
+    assert deferred.errors == []
+    assert (
+        "scan: scan status is candidate_data_partially_stale_filtered"
+        in deferred.issues
+    )
+    assert deferred.data_health["automation_cycle_status"] == (
+        "completed_with_deferred_or_issues"
+    )
+    assert post_close.scan_status == "queued"
+    assert post_close.scan_started is True
+    assert post_close.scan_job_id == "new-scan"
+    assert post_close.errors == []
+    with repo.session_factory() as session:
+        scan_stages = session.execute(
+            text(
+                "SELECT status FROM automation_cycle_stages "
+                "WHERE stage_key='scan' ORDER BY started_at"
+            )
+        ).scalars().all()
+        breaker_count = session.execute(
+            text(
+                "SELECT COUNT(*) FROM automation_circuit_breakers "
+                "WHERE scope_key='scan:free'"
+            )
+        ).scalar_one()
+    assert scan_stages == ["deferred", "completed"]
+    assert breaker_count == 0
 
 
 @pytest.mark.parametrize(

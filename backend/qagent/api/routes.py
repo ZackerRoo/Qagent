@@ -3950,6 +3950,12 @@ AUTOMATION_SCAN_DEFERRED_STATUSES = frozenset(
         "waiting_market_data_settlement",
         "waiting_market_data",
         "deferred_market_session",
+        # These are fail-closed freshness gates, not provider failures.  The
+        # scan intentionally keeps the issue visible without consuming retry
+        # budget or opening the provider circuit breaker.
+        "candidate_data_partially_stale_filtered",
+        "candidate_data_stale_filtered",
+        "candidate_data_stale_after_retry",
     }
 )
 AUTOMATION_FACTOR_SHADOW_MAX_PROVIDER_BATCHES = 8

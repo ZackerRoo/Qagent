@@ -136,6 +136,25 @@ def test_automation_error_classification_falls_back_when_health_is_absent():
     assert auth.error_kind == "permanent_configuration/auth"
 
 
+@pytest.mark.parametrize(
+    "status",
+    [
+        "candidate_data_partially_stale_filtered",
+        "candidate_data_stale_filtered",
+        "candidate_data_stale_after_retry",
+    ],
+)
+def test_candidate_freshness_gate_is_not_a_retryable_provider_error(status):
+    classified = classify_automation_error(
+        "scan",
+        "free",
+        f"scan: scan status is {status}",
+    )
+
+    assert classified.retryable is False
+    assert classified.error_kind == "permanent_unknown"
+
+
 def test_provider_auth_health_is_permanent_across_provider_and_automation_layers():
     registry = ProviderFailureStateRegistry(jitter_ratio=0)
     key = FailureKey(provider="free", origin="example", capability="daily")

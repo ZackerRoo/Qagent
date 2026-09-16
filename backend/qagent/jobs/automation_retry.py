@@ -77,8 +77,6 @@ def classify_automation_error(
         "http 429",
         "http 5",
         "price coverage=",
-        "candidate_data_partially_stale_filtered",
-        "candidate_data_stale_filtered",
     )
     if raw_retryable in {"false", "0", "no"} and (kind not in {"", "none"} or code):
         retryable = False
