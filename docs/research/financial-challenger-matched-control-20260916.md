@@ -39,8 +39,8 @@
 
 - 已实现：collector 已保存并校验候选池 `industry` / `exposure_group`，enrichment 已从 `daily_basic` 提取正 `total_mv` 并保留 raw evidence，evaluator 已实现 `financial-rule-forward-v2` 的确定性匹配、三态判定、per-pair digest 及 5/10/20 评估；旧 v1 信号继续兼容重放和到期补算。新增独立 `daily-v5` / `forward-v7` 不可变 bundle 升级器，固定从当前 `daily-v4` / `forward-v6` 升级，默认 preview、显式 execute，按 consumer-first 顺序切换，支持幂等、中断续做和可恢复回滚，且不会启动任务；两个目标 bundle 使用相同完整依赖闭包，并拒绝额外文件、软链和可写文件。
 - 已测试：父级本轮相关 8 组回归共 **186 passed**，升级器联合回归 **65 passed**，完整 backend 回归 **2692 passed、3 warnings**；Ruff 通过，`git diff --check` 通过。
-- 已 commit：否。
-- 已 push：否。
-- 已部署：否。
+- 已 commit：是，源提交 `87d8590`。
+- 已 push：是，源提交 `87d8590` 已 push。
+- 已部署：是。`daily-v5` manifest SHA 为 `551edc0ce38c5e7892ab3158ef4bb337db9f41b6bbb265853aff91fd2e68bf2f`，`forward-v7` manifest SHA 为 `ec9dfd26617eda1b037d433b5eb5f0e5f51e0526786f9b4c044ab72c64a8186e`。执行前 preview 为 `planned` 且旧 cron 未变；execute 为 `upgraded/new`、`started_job=false`，receipt 为 `/var/backups/qagent-financial-matched-control/before-install-4eu899i5.json`；安装后 preview 为 `already_installed/new`。新 daily cron SHA 为 `45ee481081dd3e3ba06f6df02bbd55f07944d1b896ff54e08f8ffcff10ff62f8`，新 forward cron SHA 为 `1305eb71acc82ecb3730433044f218815c40ec23aff004a602db3f622cc9dec3`，两者均为 `root:root 0644`；health 为 ok。
 
-升级器仅已实现和测试，尚未打包安装或执行，因此本轮未新增或修改线上 cron、账户、数据库/schema、API、正式 Ranking 或模拟盘权重，也未创建第二模拟账户或账本。自然 v2 信号及其真实 5/10/20 交易日成熟证据仍待后续运行验收，不能由本地测试替代。
+升级过程未手动启动 daily 或 forward 任务，只把既有唯一研究链路切换到不可变新 bundle；账户、数据库/schema、API、正式 Ranking 和模拟盘权重均未修改，也未创建第二模拟账户或账本。唯一模拟盘保持不变。自然 v2 信号及其真实 5/10/20 交易日成熟证据仍待后续自然运行验收，不能由部署成功或本地测试替代。
