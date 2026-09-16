@@ -292,10 +292,17 @@ def run(daily_dir: Path, signal_dir: Path, evaluation_dir: Path, run_dir: Path,
             if budget_exhausted:
                 break
         report["finished_at"] = datetime.now(SHANGHAI).isoformat()
-        report["status"] = "complete" if not report["errors"] else "incomplete"
+        if report["errors"]:
+            report["status"] = "incomplete"
+        elif report["seal"].get("status") == "waiting_for_daily":
+            report["status"] = "waiting_for_daily"
+        else:
+            report["status"] = "complete"
         report["result_digest"] = forward.digest(report)
         filename = current.strftime("%Y%m%dT%H%M%S.%f%z") + "-" + uuid4().hex + ".json"
         _publish(run_dir / filename, report)
+        if report["status"] == "waiting_for_daily" and not report["evaluations"]:
+            return 75, report
         return (0 if not report["errors"] else 1), report
     finally:
         os.close(lock_fd)

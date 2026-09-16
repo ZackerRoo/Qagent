@@ -422,3 +422,40 @@ def test_invalid_candidate_pool_stops_before_seven_api_batch(tmp_path, monkeypat
     monkeypatch.setattr(sys, "argv", ["batch", "--candidate-pool", "--period", "20260630",
                                      "--trade-date", "20260911", "--output-dir", str(tmp_path)])
     assert batch.main() == 2
+
+
+def test_candidate_pool_waiting_is_audited_and_retried_without_api_batch(tmp_path, monkeypatch):
+    payload = candidate_pool_payload()
+    payload["data_health"]["paper_candidate_freshness_gate"] = "filtered"
+    payload["data_health"]["paper_candidate_expected_signal_date"] = "2026-09-10"
+    monkeypatch.setattr(batch, "collect_candidate_pool", lambda *_args, **_kwargs: payload)
+    monkeypatch.setattr(batch, "run_batch", lambda *_args, **_kwargs: pytest.fail("seven APIs requested"))
+    monkeypatch.setattr(sys, "argv", ["batch", "--candidate-pool", "--period", "20260630",
+                                     "--trade-date", "20260911", "--output-dir", str(tmp_path)])
+    assert batch.main() == 75
+    artifact = json.loads(next(tmp_path.glob("*.json")).read_text())
+    assert artifact["status"] == "waiting_for_candidate_pool"
+    assert artifact["reason"] == "candidate_pool_not_fresh"
+    assert artifact["candidate_pool_response_digest"] == batch.digest(payload)
+    assert "no_rows" in artifact["semantics"] and "suspension" in artifact["semantics"]
+
+
+def test_candidate_pool_success_is_idempotent_by_trade_day(tmp_path, monkeypatch):
+    payload = candidate_pool_payload()
+    report = batch.run_batch([f"60000{value}.SH" for value in range(5)],
+                             "20260630", "20260911", query=query)
+    _, report["universe"] = batch.candidate_pool_universe(payload, "20260911")
+    report.pop("result_digest")
+    report["result_digest"] = batch.digest(report)
+    calls = []
+    monkeypatch.setattr(batch, "collect_candidate_pool", lambda *_args, **_kwargs: calls.append(1) or payload)
+    monkeypatch.setattr(batch, "run_batch", lambda *_args, **_kwargs: report)
+    monkeypatch.setattr(sys, "argv", ["batch", "--candidate-pool", "--period", "20260630",
+                                     "--trade-date", "20260911", "--output-dir", str(tmp_path)])
+    assert batch.main() == 0 and calls == [1]
+    success = [path for path in tmp_path.glob("*.json")
+               if json.loads(path.read_text()).get("protocol") == "daily-documented-research-v2"]
+    assert len(success) == 1
+    assert batch.main() == 0 and calls == [1]
+    assert len([path for path in tmp_path.glob("*.json")
+                if json.loads(path.read_text()).get("protocol") == "daily-documented-research-v2"]) == 1

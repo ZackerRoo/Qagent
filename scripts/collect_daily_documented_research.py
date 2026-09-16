@@ -27,6 +27,8 @@ CANDIDATE_POOL_PATH = "/api/paper-trades/candidate-pool"
 CANDIDATE_POOL_REQUEST_LIMIT = 100
 CANDIDATE_POOL_SELECTED_LIMIT = 20
 FUND_ASSET_TYPES = frozenset({"etf", "fund", "index_fund"})
+MAX_ARCHIVE_FILES = 2000
+MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
 
 
 def batch_params(api, symbol, period, trade_date):
@@ -187,6 +189,89 @@ def candidate_pool_universe(payload, expected_trade_date):
     return symbols, universe
 
 
+def candidate_pool_ready(payload, expected_trade_date):
+    """Return a safe readiness reason without treating provider no-rows as suspension."""
+    try:
+        expected = datetime.strptime(expected_trade_date, "%Y%m%d").date().isoformat()
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid_expected_trade_date") from exc
+    if not isinstance(payload, dict):
+        return False, "invalid_candidate_pool"
+    health = payload.get("data_health")
+    if not isinstance(health, dict):
+        return False, "missing_candidate_pool_health"
+    if health.get("paper_candidate_freshness_gate") != "fresh":
+        return False, "candidate_pool_not_fresh"
+    if health.get("paper_candidate_expected_signal_date") != expected:
+        return False, "candidate_pool_expected_date_mismatch"
+    if health.get("paper_candidate_signal_date_mismatch") != "0":
+        return False, "candidate_pool_signal_date_mismatch"
+    return True, None
+
+
+def _load_archive(path):
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_ARCHIVE_BYTES:
+        raise ValueError("unsafe_or_oversized_archive")
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict):
+        raise ValueError("archive_object_required")
+    return value
+
+
+def completed_candidate_pool_daily(directory, trade_date):
+    """Find the immutable successful candidate-pool result for one trading day."""
+    if not directory.exists():
+        return None
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError("unsafe_output_directory")
+    paths = sorted(directory.glob("*.json"))
+    if len(paths) > MAX_ARCHIVE_FILES:
+        raise ValueError("archive_file_budget_exceeded")
+    matches = []
+    for path in paths:
+        try:
+            value = _load_archive(path)
+            claimed = value.pop("result_digest", None)
+            universe = value.get("universe", {})
+            if (value.get("protocol") == "daily-documented-research-v2"
+                    and value.get("status") == "observed"
+                    and value.get("trade_date") == trade_date
+                    and universe.get("kind") == "paper_candidate_pool_order"
+                    and claimed == digest(value)):
+                matches.append(path)
+        except (ValueError, OSError, json.JSONDecodeError):
+            continue
+    if len(matches) > 1:
+        raise ValueError("multiple_successful_candidate_pool_daily")
+    return matches[0] if matches else None
+
+
+def publish_schedule_evidence(directory, trade_date, status, *, payload=None, reason=None):
+    """Publish one small immutable scheduling record; it contains no provider rows."""
+    observed_at = now()
+    summary = payload.get("summary") if isinstance(payload, dict) else None
+    health = payload.get("data_health") if isinstance(payload, dict) else None
+    evidence = {
+        "protocol": "daily-financial-schedule-attempt-v1",
+        "observed_at": observed_at,
+        "trade_date": trade_date,
+        "status": status,
+        "reason": reason,
+        "candidate_pool_summary": summary if isinstance(summary, dict) else None,
+        "candidate_pool_data_health": health if isinstance(health, dict) else None,
+        "candidate_pool_response_digest": digest(payload) if isinstance(payload, dict) else None,
+        "decision_weight": False,
+        "activation_allowed": False,
+        "semantics": "no_rows is preserved as missing data and never interpreted as suspension",
+    }
+    evidence["result_digest"] = digest(evidence)
+    filename = datetime.now().strftime("%Y%m%dT%H%M%S.%f") + "-schedule-" + uuid4().hex + ".json"
+    output = directory / filename
+    publish(output, json.dumps(evidence, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
+    output.chmod(0o400)
+    return output
+
+
 @contextmanager
 def batch_lock(directory):
     directory.mkdir(parents=True, exist_ok=True)
@@ -313,27 +398,67 @@ def main():
             if local.hour < 15:
                 raise ValueError("session_not_closed")
             trade_date = local.strftime("%Y%m%d")
-        universe_evidence = None
         if args.candidate_pool:
-            payload = collect_candidate_pool(args.base_url)
-            symbols, universe_evidence = candidate_pool_universe(payload, trade_date)
+            with batch_lock(args.output_dir):
+                completed = completed_candidate_pool_daily(args.output_dir, trade_date)
+                if completed is not None:
+                    print(json.dumps({"status": "already_completed", "trade_date": trade_date,
+                                      "output": str(completed)}))
+                    return 0
+                try:
+                    payload = collect_candidate_pool(args.base_url)
+                except Exception:
+                    output = publish_schedule_evidence(
+                        args.output_dir, trade_date, "retryable_error",
+                        reason="candidate_pool_request_failed")
+                    print(json.dumps({"status": "retryable_error", "trade_date": trade_date,
+                                      "reason": "candidate_pool_request_failed", "output": str(output)}))
+                    return 75
+                ready, reason = candidate_pool_ready(payload, trade_date)
+                if not ready:
+                    output = publish_schedule_evidence(
+                        args.output_dir, trade_date, "waiting_for_candidate_pool",
+                        payload=payload, reason=reason)
+                    print(json.dumps({"status": "waiting_for_candidate_pool", "trade_date": trade_date,
+                                      "reason": reason, "output": str(output)}))
+                    return 75
+                try:
+                    symbols, universe_evidence = candidate_pool_universe(payload, trade_date)
+                except Exception:
+                    output = publish_schedule_evidence(
+                        args.output_dir, trade_date, "failed", payload=payload,
+                        reason="invalid_fresh_candidate_pool")
+                    print(json.dumps({"status": "failed", "trade_date": trade_date,
+                                      "reason": "invalid_fresh_candidate_pool", "output": str(output)}))
+                    return 2
+                report = run_batch(symbols, args.period, trade_date, source=args.source,
+                                   base_url=args.base_url, budget_seconds=args.budget_seconds,
+                                   universe=universe_evidence)
+                filename = datetime.now().strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex + ".json"
+                output = args.output_dir / filename
+                publish(output, json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
+                output.chmod(0o400)
         else:
             symbols = json.loads(args.symbols_file.read_text()) if args.symbols_file else args.symbol
-        if not isinstance(symbols, list) or any(not isinstance(s, str) for s in symbols):
-            raise ValueError("invalid_symbols")
-        with batch_lock(args.output_dir):
-            report = run_batch(symbols, args.period, trade_date, source=args.source,
-                               base_url=args.base_url, budget_seconds=args.budget_seconds,
-                               universe=universe_evidence)
-            filename = datetime.now().strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex + ".json"
-            output = args.output_dir / filename
-            publish(output, json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
-            output.chmod(0o400)
+            if not isinstance(symbols, list) or any(not isinstance(s, str) for s in symbols):
+                raise ValueError("invalid_symbols")
+            with batch_lock(args.output_dir):
+                report = run_batch(symbols, args.period, trade_date, source=args.source,
+                                   base_url=args.base_url, budget_seconds=args.budget_seconds)
+                filename = datetime.now().strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex + ".json"
+                output = args.output_dir / filename
+                publish(output, json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
+                output.chmod(0o400)
         print(json.dumps({"status": report["status"], "output": str(output),
                           "result_digest": report["result_digest"]}))
         return 0 if report["status"] == "observed" else 1
     except BlockingIOError:
-        print(json.dumps({"status": "skipped", "reason": "batch_locked"}))
+        result = {"status": "skipped", "reason": "batch_locked"}
+        if args.candidate_pool and isinstance(locals().get("trade_date"), str):
+            output = publish_schedule_evidence(
+                args.output_dir, trade_date, "skipped", reason="batch_locked")
+            result["output"] = str(output)
+        print(json.dumps(result))
         return 0
     except Exception:
         print(json.dumps({"status": "error", "error": "daily_documented_research_failed"}))

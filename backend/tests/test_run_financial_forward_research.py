@@ -204,6 +204,16 @@ def test_invalid_daily_leaves_failure_run(paths):
     assert archived["status"] == "incomplete" and archived["errors"]
 
 
+def test_missing_same_day_daily_is_retryable_and_audited(paths):
+    daily_dir, signal_dir, evaluations, runs, db = paths
+    code, report = runner.run(daily_dir, signal_dir, evaluations, runs, db, now=RUN)
+    assert code == 75
+    assert report["status"] == "waiting_for_daily"
+    assert report["seal"]["status"] == "waiting_for_daily"
+    archived = json.loads(next(runs.glob("*.json")).read_text())
+    assert archived["status"] == "waiting_for_daily"
+
+
 def test_independent_lock_returns_temporary_failure(paths):
     daily, signals, evaluations, runs, db = paths
     runs.mkdir()

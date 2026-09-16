@@ -282,3 +282,9 @@ daily cron仍为 `4a80db491109badc90190fe9bdd45bf39160118ebe17733a1e934a8cf9b88b
 部署验收：源提交 `d599a91` 已 push 至 `features/automation-backtest`。consumer-first 两步升级均成功且 `started_job=false`；随后两次preview均为 `already_installed`，health为ok。daily v3位于 `/opt/qagent-research/daily-financial-20260914-v3`，manifest SHA为 `1a6855501e14e4d54b2eca0f59afc618971135b932e74d612de835399307efbe`，cron SHA为 `701215372bdb050190ab1df52910e74040ec6545b3691978575d7de823b19aa7`，工作日北京时间16:40运行；forward v5位于 `/opt/qagent-research/financial-forward-20260914-v5`，manifest SHA为 `386ea1dbc0c427a4693e0109161145c89b73df83a9820e6ffefa35d7333711ae`，cron SHA为 `04040c5f48a42865c5f43289c5012fdfadd0dcd6f0f50500505397e783ad2016`，工作日北京时间19:37运行。
 
 唯一模拟盘仍为 `paper-session-69470ca6b12c`、active；current_model为total 58、pending 1、open 9、closed 39、active 10，规则仍为max_positions 10、allocation 10%、cost 5bps、slippage 5bps、take_profit 50%，未创建第二账本。隔离端到端的140/140 observed、19 eligible及动态适配已验证，但今日自然daily/forward尚未发生，绩效与晋级仍未验证，不能据此宣称选股收益提升。
+
+### G2-FQ2 扫描依赖有界重试（2026-09-16，本地实现）
+
+09-15 自然 daily 在北京时间16:40早于18:51完成的全市场扫描，因候选池仍是旧日期而 fail-closed；19:37 forward因无当日daily产物无法封存。最小修复保留现有唯一daily/forward链路：daily在16:40至19:10六次有界尝试，候选池未新鲜时不请求七个财务接口并写轻量审计产物；当日首份摘要有效的observed产物成功后，后续尝试按交易日幂等退出。forward在19:37至20:37三次有界尝试，缺daily留下`waiting_for_daily`，已封存信号严格校验后`already_sealed`，不重复写信号。显式symbols模式不变，不新增账户、数据库或排名器，不由`no_rows`推断停牌，不扩大Tushare/Datahubco到分钟或复权价。
+
+修复已实现交易日daily去重、等待/失败证据、forward等待状态及双cron受控升级/回滚helper。helper的显式状态机只接受`old/old`、兼容的`daily-old/forward-new`和`new/new`：升级按forward后daily执行，回滚按daily后forward执行，中断后均可从兼容混合态续做；`daily-new/forward-old`fail-closed。父任务最终专项回归 **96 passed**。正确虚拟环境全量结果为 **2668 passed、1 failed、3 warnings（957.73秒）**，唯一失败是 `tests/test_paper_writer.py::test_process_death_releases_writer` 的 `spawn ready.wait(8)` 超时；该用例随后隔离复测 **1 passed（3.15秒）**。因此本轮不能记为“全量一次全绿”，仅能并列保留全量单一超时与隔离复测通过的事实；Ruff和diff检查通过。已实现、已完成上述本地测试；未commit、未push、未打包、未安装、未部署。下一验收点是受控升级后观察首个自然交易日：扫描完成后daily成功且仅一份、forward仅一份当日signal，失败时能由调度产物区分等待、数据错误与锁冲突。

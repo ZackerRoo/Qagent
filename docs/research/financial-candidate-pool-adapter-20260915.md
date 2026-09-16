@@ -1,5 +1,19 @@
 # Financial Challenger 候选池研究适配
 
+## 2026-09-16 候选池新鲜度依赖与有界重试
+
+09-15 的自然运行暴露了调度依赖：daily v3 在北京时间 16:40 运行时，全市场扫描尚未完成，候选池仍是前一交易日；采集器正确 fail-closed，但单次 cron 没有后续机会。全市场扫描在 18:51 完成，因此 19:37 forward 也没有当日 daily 产物可封存。
+
+本轮修复不新建账户、数据库、排名器或第二条研究链路，仍只调用原 daily collector 和原 forward runner：
+
+- daily 候选池模式在工作日北京时间 `16:40、17:10、17:40、18:10、18:40、19:10` 有界尝试。候选池未新鲜时不请求七个财务接口，只写一份轻量、不可覆盖的调度证据并以临时失败码 `75` 退出。
+- 同一交易日已有摘要验证通过的 `observed` 候选池 daily 产物后，后续尝试直接 `already_completed` 退出，不再请求候选池或七个接口。显式 `--symbol` / `--symbols-file` 路径保持原行为，不使用该去重语义。
+- forward 在北京时间 `19:37、20:07、20:37` 有界尝试。缺当日 daily 时归档 `waiting_for_daily`；当日 daily 成功后复用原 seal/evaluate。信号路径按交易日唯一，已封存时校验原摘要并返回 `already_sealed`，不重复封存。
+- 尝试窗口到期即停止；daily 最后一次为 19:10，forward 最后一次为 20:37。运行失败、等待和锁冲突均保留审计产物，不由 `no_rows` 推断停牌。
+
+升级 helper 从已部署 daily v3 / forward v5 严格校验的 cron 和 manifest 起步。升级先替换 forward consumer，再替换 daily producer；若中断，`daily-old + forward-new` 是唯一可接受混合态，重试仅续写 daily。回滚按相反的安全依赖顺序，先恢复 daily producer，再恢复 forward consumer；第二步失败仍停留在同一兼容混合态，可重试完成。`daily-new + forward-old` 不兼容，helper fail-closed，不猜测操作意图。私有 receipt 校验回滚身份，安装和回滚都不启动任务。它不扩大 Datahubco/Tushare 消费边界：仍使用现有财务查询和原始日线后备，不接分钟或复权价。
+
+当前仅为本地实现与测试阶段。父任务专项回归 **96 passed**；正确虚拟环境全量为 **2668 passed、1 failed、3 warnings（957.73秒）**。唯一失败是 `tests/test_paper_writer.py::test_process_death_releases_writer` 的 `spawn ready.wait(8)` 超时，随后对该用例隔离复测 **1 passed（3.15秒）**。这组证据不能表述为“全量一次全绿”；必须保留全量运行中单一超时和隔离复测通过两项事实。未 commit、未 push、未打包、未安装、未部署。测试不替代下一个交易日的自然扫描完成、daily 成功和 forward 封存验收。
 ## 目标与复用关系
 
 `collect_daily_documented_research.py` 新增可选 `--candidate-pool` 输入。它只读调用现有本机 `/api/paper-trades/candidate-pool?provider=free&include_etfs=false&limit=100`，验证全部返回项并按来源顺序保留前20只合格A股，再原样复用既有七接口采集、财务分析和 `rank_financial_candidate`。唯一消费者是现有 Financial Challenger；目标是经对照验收后替代固定20股观察集合，不建立第二套排名、组合或长期并行任务。
