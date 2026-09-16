@@ -26,8 +26,12 @@ FORWARD_OLD_CRON_SHA = "04040c5f48a42865c5f43289c5012fdfadd0dcd6f0f50500505397e7
 DAILY_OLD_MANIFEST_SHA = "1a6855501e14e4d54b2eca0f59afc618971135b932e74d612de835399307efbe"
 FORWARD_OLD_MANIFEST_SHA = "386ea1dbc0c427a4693e0109161145c89b73df83a9820e6ffefa35d7333711ae"
 HELPER = "scripts/upgrade_financial_dependency_retry.py"
-DAILY_REQUIRED = daily_v3.NEW_REQUIRED | {HELPER}
-FORWARD_REQUIRED = forward_v5.NEW_REQUIRED | {HELPER}
+# The helper is intentionally runnable from either independently installed new
+# bundle. Keep both manifests on the same complete import/validation closure so
+# neither bundle can borrow modules from a checkout through cwd or PYTHONPATH.
+HELPER_REQUIRED = daily_v3.NEW_REQUIRED | forward_v5.NEW_REQUIRED | {HELPER}
+DAILY_REQUIRED = HELPER_REQUIRED
+FORWARD_REQUIRED = HELPER_REQUIRED
 STATE_OLD = "old"
 STATE_UPGRADE_PARTIAL = "daily_old_forward_new"
 STATE_NEW = "new"

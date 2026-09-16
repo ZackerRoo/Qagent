@@ -1,12 +1,15 @@
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import stat
+import subprocess
 import sys
 
 import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
+ROOT = SCRIPTS.parent
 sys.path.insert(0, str(SCRIPTS))
 spec = importlib.util.spec_from_file_location(
     "upgrade_financial_dependency_retry", SCRIPTS / "upgrade_financial_dependency_retry.py")
@@ -25,6 +28,19 @@ def make_bundle(bundle, required, schema, checksum):
     raw = json.dumps({"schema": schema, "files": files}).encode()
     (bundle / "manifest.json").write_bytes(raw)
     return checksum(raw)
+
+
+def copy_bundle(bundle, required, schema):
+    files = {}
+    for name in required:
+        source = ROOT / name
+        target = bundle / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        files[name] = upgrade.base.checksum(target.read_bytes())
+    raw = json.dumps({"schema": schema, "files": files}).encode()
+    (bundle / "manifest.json").write_bytes(raw)
+    return upgrade.base.checksum(raw)
 
 
 @pytest.fixture
@@ -190,4 +206,99 @@ def test_daily_new_forward_old_is_rejected(deployment):
     upgrade.DAILY_CRON.write_bytes(upgrade.daily_cron())
     upgrade.FORWARD_CRON.write_bytes(old_forward)
     with pytest.raises(ValueError, match="unsafe_daily_new_forward_old_state"):
+        upgrade.install(*args)
+
+
+@pytest.mark.parametrize("entry_bundle_name", ["daily-v4", "forward-v6"])
+def test_helper_preview_runs_from_each_isolated_manifest_bundle(
+        tmp_path, entry_bundle_name):
+    daily_old_bundle = tmp_path / "daily-v3"
+    daily_new_bundle = tmp_path / "daily-v4"
+    forward_old_bundle = tmp_path / "forward-v5"
+    forward_new_bundle = tmp_path / "forward-v6"
+    daily_old_manifest = copy_bundle(
+        daily_old_bundle, upgrade.daily_v3.NEW_REQUIRED, "daily-financial-bundle-v1")
+    daily_new_manifest = copy_bundle(
+        daily_new_bundle, upgrade.DAILY_REQUIRED, "daily-financial-bundle-v1")
+    forward_old_manifest = copy_bundle(
+        forward_old_bundle, upgrade.forward_v5.NEW_REQUIRED, "financial-forward-bundle-v1")
+    forward_new_manifest = copy_bundle(
+        forward_new_bundle, upgrade.FORWARD_REQUIRED, "financial-forward-bundle-v1")
+    cron_dir = tmp_path / "cron.d"
+    cron_dir.mkdir()
+    daily_cron = cron_dir / "daily"
+    forward_cron = cron_dir / "forward"
+    timezone = tmp_path / "timezone"
+    timezone.write_text("UTC\n")
+    backups = tmp_path / "backups"
+    old_daily = (f"# old\nSHELL=/bin/sh\nPATH=/usr/bin:/bin\n40 8 * * 1-5 user python "
+                 f"{daily_old_bundle}/scripts/collect_daily_documented_research.py "
+                 "--candidate-pool --period 20260630 --today-close --output-dir /daily\n").encode()
+    old_forward = (f"# old\nSHELL=/bin/sh\nPATH=/usr/bin:/bin\n37 11 * * 1-5 user python "
+                   f"{forward_old_bundle}/scripts/run_financial_forward_research.py "
+                   "--daily-dir /daily --signal-dir /signals\n").encode()
+    daily_cron.write_bytes(old_daily)
+    forward_cron.write_bytes(old_forward)
+    entry = tmp_path / entry_bundle_name
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    code = f"""
+import json
+from pathlib import Path
+import stat
+import sys
+sys.path.insert(0, {str(entry / 'scripts')!r})
+import upgrade_financial_dependency_retry as helper
+forbidden = {{{str(ROOT)!r}, {str(SCRIPTS)!r}, {str(ROOT / 'backend')!r}}}
+assert not forbidden.intersection(sys.path)
+def regular(path):
+    path = Path(path)
+    if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o022:
+        raise ValueError('unsafe_file')
+    return path.stat()
+def directory(path, *, private=False):
+    path = Path(path)
+    if path.is_symlink() or not path.is_dir():
+        raise ValueError('unsafe_directory')
+    if path.stat().st_mode & (0o077 if private else 0o022):
+        raise ValueError('unsafe_directory_permissions')
+helper.base.regular = regular
+helper.base.directory = directory
+helper.forward_base._regular = regular
+helper.forward_base._directory = directory
+helper.DAILY_OLD_BUNDLE = Path({str(daily_old_bundle)!r})
+helper.DAILY_NEW_BUNDLE = Path({str(daily_new_bundle)!r})
+helper.FORWARD_OLD_BUNDLE = Path({str(forward_old_bundle)!r})
+helper.FORWARD_NEW_BUNDLE = Path({str(forward_new_bundle)!r})
+helper.DAILY_CRON = Path({str(daily_cron)!r})
+helper.FORWARD_CRON = Path({str(forward_cron)!r})
+helper.BACKUPS = Path({str(backups)!r})
+helper.TIMEZONE = Path({str(timezone)!r})
+old_daily = {old_daily!r}
+old_forward = {old_forward!r}
+helper.daily_v3.upgraded_cron = lambda: old_daily
+helper.forward_v5.upgraded_cron = lambda: old_forward
+helper.DAILY_OLD_CRON_SHA = helper.base.checksum(old_daily)
+helper.FORWARD_OLD_CRON_SHA = helper.base.checksum(old_forward)
+helper.DAILY_OLD_MANIFEST_SHA = {daily_old_manifest!r}
+helper.FORWARD_OLD_MANIFEST_SHA = {forward_old_manifest!r}
+sys.argv = ['helper',
+    '--expected-daily-new-manifest-sha256', {daily_new_manifest!r},
+    '--expected-forward-new-manifest-sha256', {forward_new_manifest!r}]
+raise SystemExit(helper.main())
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-B", "-c", code], cwd=outside,
+        capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert json.loads(result.stdout)["status"] == "planned"
+    assert daily_cron.read_bytes() == old_daily
+    assert forward_cron.read_bytes() == old_forward
+    assert not list(entry.rglob("__pycache__"))
+
+
+def test_new_bundle_manifest_still_rejects_extra_files(deployment):
+    args, _, _ = deployment
+    (upgrade.DAILY_NEW_BUNDLE / "extra.py").write_text("# not manifested\n")
+    with pytest.raises(ValueError, match="unmanifested_bundle_files"):
         upgrade.install(*args)
