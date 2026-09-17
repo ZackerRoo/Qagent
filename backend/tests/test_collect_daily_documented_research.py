@@ -476,7 +476,7 @@ def test_candidate_pool_waiting_is_audited_and_retried_without_api_batch(tmp_pat
     monkeypatch.setattr(sys, "argv", ["batch", "--candidate-pool", "--period", "20260630",
                                      "--trade-date", "20260911", "--output-dir", str(tmp_path)])
     assert batch.main() == 75
-    artifact = json.loads(next(tmp_path.glob("*.json")).read_text())
+    artifact = json.loads(next(tmp_path.rglob("*-schedule-*.json")).read_text())
     assert artifact["status"] == "waiting_for_candidate_pool"
     assert artifact["reason"] == "candidate_pool_not_fresh"
     assert artifact["candidate_pool_response_digest"] == batch.digest(payload)
@@ -502,3 +502,102 @@ def test_candidate_pool_success_is_idempotent_by_trade_day(tmp_path, monkeypatch
     assert batch.main() == 0 and calls == [1]
     assert len([path for path in tmp_path.glob("*.json")
                 if json.loads(path.read_text()).get("protocol") == "daily-documented-research-v2"]) == 1
+
+
+@pytest.fixture
+def bounded_cli(tmp_path, monkeypatch):
+    class Clock(datetime):
+        current = datetime.fromisoformat("2026-09-11T21:40:00+08:00")
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current.astimezone(tz) if tz else cls.current.replace(tzinfo=None)
+
+    monkeypatch.setattr(batch, "datetime", Clock)
+    monkeypatch.setattr(sys, "argv", ["batch", "--candidate-pool", "--period", "20260630",
+                                     "--today-close", "--bounded-same-day",
+                                     "--output-dir", str(tmp_path)])
+    monkeypatch.setattr(batch, "collect_candidate_pool", lambda *_: candidate_pool_payload())
+    return Clock
+
+
+@pytest.mark.parametrize("hour,minute", [(20, 40), (21, 40), (22, 40)])
+def test_late_fresh_pool_success_and_duplicate(tmp_path, monkeypatch, bounded_cli, hour, minute):
+    bounded_cli.current = bounded_cli.current.replace(hour=hour, minute=minute)
+    report = batch.run_batch([f"60000{value}.SH" for value in range(5)],
+                             "20260630", "20260911", query=query)
+    _, report["universe"] = batch.candidate_pool_universe(candidate_pool_payload(), "20260911")
+    report.pop("result_digest")
+    report["result_digest"] = batch.digest(report)
+    calls = []
+    monkeypatch.setattr(batch, "run_batch", lambda *a, **k: calls.append(1) or report)
+    assert batch.main() == 0
+    assert batch.main() == 0
+    assert calls == [1]
+    assert len(list(tmp_path.glob("*.json"))) == 1
+    assert len(list(tmp_path.rglob("*-schedule-*.json"))) == 1
+
+
+def test_waiting_does_not_spend_budget_crashed_batches_do(tmp_path, monkeypatch, bounded_cli):
+    payload = candidate_pool_payload()
+    payload["data_health"]["paper_candidate_freshness_gate"] = "filtered"
+    monkeypatch.setattr(batch, "collect_candidate_pool", lambda *_: payload)
+    calls = []
+
+    def crash(*args, **kwargs):
+        calls.append(1)
+        raise RuntimeError("provider process failed after durable reservation")
+
+    monkeypatch.setattr(batch, "run_batch", crash)
+    for _ in range(4):
+        assert batch.main() == 75
+    monkeypatch.setattr(batch, "collect_candidate_pool", lambda *_: candidate_pool_payload())
+    assert batch.main() == 2
+    assert batch.main() == 2
+    assert batch.main() == 75
+    assert calls == [1, 1]
+
+
+@pytest.mark.parametrize("clock", ["2026-09-11T23:00:00+08:00", "2026-09-12T00:01:00+08:00",
+                                   "2026-09-11T16:39:00+08:00"])
+def test_bounded_window_refuses_without_requests(tmp_path, monkeypatch, bounded_cli, clock):
+    bounded_cli.current = datetime.fromisoformat(clock)
+    monkeypatch.setattr(batch, "collect_candidate_pool", lambda *_: pytest.fail("unexpected request"))
+    assert batch.main() == 2
+
+
+def test_pool_request_crossing_midnight_refuses_financial(tmp_path, monkeypatch, bounded_cli):
+    def request(*_):
+        bounded_cli.current = datetime.fromisoformat("2026-09-12T00:00:01+08:00")
+        return candidate_pool_payload()
+    monkeypatch.setattr(batch, "collect_candidate_pool", request)
+    monkeypatch.setattr(batch, "run_batch", lambda *a, **k: pytest.fail("unexpected financial APIs"))
+    assert batch.main() == 2
+
+
+def test_bounded_lock_contention_is_not_daily_success(tmp_path, bounded_cli):
+    with batch.batch_lock(tmp_path):
+        assert batch.main() == 75
+
+
+@pytest.mark.parametrize("day", ["../elsewhere", "2026911", "20260230", "２０２６０９１１"])
+def test_schedule_date_cannot_escape_partition(tmp_path, day):
+    with pytest.raises(ValueError):
+        batch.publish_schedule_evidence(tmp_path, day, "waiting_for_candidate_pool")
+    assert not list(tmp_path.iterdir())
+
+
+def test_attempt_budget_rejects_symlink_or_tampered_receipt(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "schedule-attempts").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="unsafe_schedule_directory"):
+        batch.reserve_financial_attempt(tmp_path, "20260911", 2)
+    (tmp_path / "schedule-attempts").unlink()
+    path = batch.publish_schedule_evidence(tmp_path, "20260911", "financial_batch_started")
+    path.chmod(0o600)
+    raw = json.loads(path.read_text())
+    raw["status"] = "waiting_for_candidate_pool"
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ValueError, match="invalid_schedule_digest"):
+        batch.reserve_financial_attempt(tmp_path, "20260911", 2)

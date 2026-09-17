@@ -262,8 +262,21 @@ def completed_candidate_pool_daily(directory, trade_date):
     return matches[0] if matches else None
 
 
+def schedule_directory(directory, trade_date):
+    if (not isinstance(trade_date, str) or len(trade_date) != 8 or not trade_date.isascii()
+            or not trade_date.isdigit()
+            or datetime.strptime(trade_date, "%Y%m%d").strftime("%Y%m%d") != trade_date):
+        raise ValueError("invalid_schedule_trade_date")
+    target = directory / "schedule-attempts" / trade_date
+    if any(path.is_symlink() for path in (target, *target.parents)):
+        raise ValueError("unsafe_schedule_directory")
+    return target
+
+
 def publish_schedule_evidence(directory, trade_date, status, *, payload=None, reason=None):
     """Publish one small immutable scheduling record; it contains no provider rows."""
+    directory = schedule_directory(directory, trade_date)
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     observed_at = now()
     summary = payload.get("summary") if isinstance(payload, dict) else None
     health = payload.get("data_health") if isinstance(payload, dict) else None
@@ -285,7 +298,37 @@ def publish_schedule_evidence(directory, trade_date, status, *, payload=None, re
     output = directory / filename
     publish(output, json.dumps(evidence, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
     output.chmod(0o400)
+    # Persist the directory entry as well as publish()'s file contents. A crash
+    # after reservation must not restore the provider-call budget.
+    for parent in (directory, directory.parent, directory.parent.parent):
+        descriptor = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
     return output
+
+
+def reserve_financial_attempt(directory, trade_date, limit):
+    """Called under batch_lock; a crashed start still consumes its budget."""
+    starts = 0
+    target = schedule_directory(directory, trade_date)
+    paths = list(directory.glob("*-schedule-*.json")) + list(target.glob("*-schedule-*.json"))
+    if len(paths) > MAX_ARCHIVE_FILES:
+        raise ValueError("schedule_file_budget_exceeded")
+    for path in paths:
+        value = _load_archive(path)
+        if value.get("trade_date") != trade_date:
+            continue
+        expected = value.get("result_digest")
+        if digest({k: v for k, v in value.items() if k != "result_digest"}) != expected:
+            raise ValueError("invalid_schedule_digest")
+        starts += value.get("status") == "financial_batch_started"
+    if starts >= limit:
+        publish_schedule_evidence(directory, trade_date, "financial_budget_exhausted")
+        return False
+    publish_schedule_evidence(directory, trade_date, "financial_batch_started")
+    return True
 
 
 @contextmanager
@@ -412,6 +455,8 @@ def main():
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--budget-seconds", type=float, default=600)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--bounded-same-day", action="store_true",
+                        help="Candidate-pool only: 16:40-22:40 Shanghai, at most two API batches/day")
     args = parser.parse_args()
     try:
         trade_date = args.trade_date
@@ -420,6 +465,13 @@ def main():
             if local.hour < 15:
                 raise ValueError("session_not_closed")
             trade_date = local.strftime("%Y%m%d")
+        if args.bounded_same_day:
+            local = datetime.now(ZoneInfo("Asia/Shanghai"))
+            minute = local.hour * 60 + local.minute
+            if (not args.candidate_pool or not args.today_close or local.weekday() >= 5
+                    or trade_date != local.strftime("%Y%m%d") or not 1000 <= minute <= 1360
+                    or not 0 < args.budget_seconds <= 600):
+                raise ValueError("outside_same_day_dependency_window")
         if args.candidate_pool:
             with batch_lock(args.output_dir):
                 completed = completed_candidate_pool_daily(args.output_dir, trade_date)
@@ -453,6 +505,14 @@ def main():
                     print(json.dumps({"status": "failed", "trade_date": trade_date,
                                       "reason": "invalid_fresh_candidate_pool", "output": str(output)}))
                     return 2
+                if args.bounded_same_day:
+                    current = datetime.now(ZoneInfo("Asia/Shanghai"))
+                    if (current.strftime("%Y%m%d") != trade_date
+                            or current.hour * 60 + current.minute > 1360):
+                        raise ValueError("outside_same_day_dependency_window")
+                    if not reserve_financial_attempt(args.output_dir, trade_date, 2):
+                        print(json.dumps({"status": "financial_budget_exhausted", "trade_date": trade_date}))
+                        return 75
                 report = run_batch(symbols, args.period, trade_date, source=args.source,
                                    base_url=args.base_url, budget_seconds=args.budget_seconds,
                                    universe=universe_evidence)
@@ -481,7 +541,7 @@ def main():
                 args.output_dir, trade_date, "skipped", reason="batch_locked")
             result["output"] = str(output)
         print(json.dumps(result))
-        return 0
+        return 75 if args.bounded_same_day else 0
     except Exception:
         print(json.dumps({"status": "error", "error": "daily_documented_research_failed"}))
         return 2
