@@ -22,3 +22,18 @@ python3 -B /opt/qagent-research/daily-financial-20260917-v6/scripts/upgrade_fina
 预览为`planned`且确认旧cron不变后，同一命令加`--execute`安装；不启动任务，不重启后端。再次preview应为`already_installed`。回滚使用同一命令加`--rollback-receipt RECEIPT --execute`，只接受工具产生的私有receipt；先回daily再回forward，中断可恢复。receipt schema沿用原engine，备份目录独立为`/var/backups/qagent-financial-late-scan`。
 
 安装后验收须分别记录cron摘要、自然候选fresh、首次daily observed、同日forward v2封存及五对control语义。测试、打包和安装均不替代自然信号或成熟5/10/20交易日结果；不晋级、不开新账户、不改交易权重。
+
+## 09-17部署验收
+
+主任务北京时间10:34:48确认：源提交`d86e8fc`已push，两个新bundle分别从云端非仓库cwd完成隔离preview（均planned），旧cron保持不变；execute为`upgraded/new`、`started_job=false`，随后preview为already_installed。
+
+| 产物 | SHA256 |
+| --- | --- |
+| daily-v6 manifest | `1e942320d572f2a61c5e0f155c3c2dcb2a4e0e1589b7c77f7af854f275cb8d55` |
+| forward-v8 manifest | `92717c3ff89a50efe27a627a40d2549a6ab585989330c9111b045dfc45e6838b` |
+| daily cron | `340f8484b34d92a0680bc7ff56519e9cbd2c03239df1632a60b96660169fdda0` |
+| forward cron | `ac3898d5f73f28dcb10e429dc017368508507d606a05917a29d164fccd703574` |
+
+两份cron均root:root 0644；receipt为`/var/backups/qagent-financial-late-scan/before-install-gd578v2b.json`、root:root 0600。health ok，cron PID21、backend PID52233、frontend PID52046和current2392d4b保持不变，未重启后端。09-14既有signal SHA仍为`1466a90ab84a5cbed989ef187ecc0c37a6aa9cb055253a162aa81ac8d7315732`，历史信号未改。
+
+真实上午bounded CLI由时段门禁在数据请求前拒绝、exit2，符合预期，不计为采集失败或新数据成功。相关15组回归302 passed、1项既有warning（6.38秒），Ruff/diff通过；未跑完整backend。已实现、已测试、已push、已部署，未启动研究任务或写账户/规则/数据库。晚间首份自然daily、同日v2封存及完整control、真实5/10/20日成熟仍待验，不能由调度安装代替。子任务review无P1/P2；会话清理实际删除尚未核验。
