@@ -119,7 +119,21 @@ def test_same_day_dynamic_candidate_pool_daily_is_sealed(paths, monkeypatch):
     assert code == 0 and report["seal"]["status"] == "sealed"
     signal = json.loads((signal_dir / "2026-09-11.json").read_text())
     assert signal["source"]["universe"]["kind"] == "paper_candidate_pool_order"
+    assert signal["protocol"] == "financial-rule-forward-v2"
+    assert report["seal"]["signal_protocol"] == signal["protocol"]
+    assert report["seal"]["control_status"] == "control_unavailable"
+    assert "g2_rank_incomplete" in report["seal"]["control_reasons"]
+    assert report["seal"]["baseline_reasons"] == ["baseline_not_supplied"]
     runner.forward.validate_archive(signal)
+    before = (signal_dir / "2026-09-11.json").read_bytes()
+    def unexpected_baseline_lookup(*args, **kwargs):
+        pytest.fail("a later baseline must not replace an already sealed signal")
+    monkeypatch.setattr(runner, "_baseline", unexpected_baseline_lookup)
+    code, replay = runner.run(daily_dir, signal_dir, evaluations, runs, db, now=RUN)
+    assert code == 0 and replay["seal"]["status"] == "already_sealed"
+    assert replay["seal"]["control_status"] == "control_unavailable"
+    assert replay["seal"]["baseline_reasons"] == ["baseline_not_supplied"]
+    assert (signal_dir / "2026-09-11.json").read_bytes() == before
 
 
 def test_existing_signal_must_match_first_legal_daily(paths, monkeypatch):

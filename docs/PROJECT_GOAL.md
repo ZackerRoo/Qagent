@@ -326,3 +326,41 @@ v2 matched control 替代当前未配平的 G2 `full_features` Top5，作为 5/1
 受控升级器`upgrade_financial_late_scan.py`复用既有双cron状态机、锁、备份、consumer-first和rollback实现，以隔离配置实例固定当前v5/v7摘要，旧模板保持原样；目标为`daily-financial-20260917-v6`和`financial-forward-20260917-v8`。提供确定性打包函数，两bundle都包含完整严格依赖闭包；命令和验收见[晚扫描运行说明](research/financial-late-scan-20260917.md)。当前已实现，collector、forward runner、新旧升级器四组专项 **95 passed（3.59秒）**，含两个完整打包依赖闭包的隔离subprocess预览/中断恢复/回滚；主任务15组相关回归 **302 passed、1项既有warning（6.38秒）**，本轮未跑完整backend回归。Ruff和diff检查通过；未commit、未push、未安装或部署，不更改唯一模拟账户、交易规则、模型、历史账本或正式Ranking。
 
 部署补录（北京时间09-17 10:34:48）：源提交`d86e8fc`已push；两个新bundle在云端隔离preview均为planned、旧cron不变，execute为`upgraded/new`且`started_job=false`，随后preview为already_installed。daily-v6 manifest SHA为`1e942320d572f2a61c5e0f155c3c2dcb2a4e0e1589b7c77f7af854f275cb8d55`，forward-v8为`92717c3ff89a50efe27a627a40d2549a6ab585989330c9111b045dfc45e6838b`；私有receipt、cron SHA与完整验收见运行说明。health ok，cron PID21、backend PID52233、frontend PID52046和current2392d4b均未改变，无后端重启。上午真实CLI被时段门禁拒绝（exit2、数据请求前退出），不是新数据采集或运行失败证据。09-14历史signal SHA保持不变；已实现、相关测试通过、已push、已部署，不改账户、规则或数据库，今晚自然daily、v2封存及真实成熟收益仍待验。子任务review无P1/P2，会话清理hook保持启用，实际删除尚未核验。
+
+### G2-FQ3 同日 G2 基线缺口（2026-09-18，本地修复）
+
+主任务刷新09-17自然证据：daily为140/140 observed、15/20 eligible，extended候选池输入存在；signal仍为`financial-rule-forward-v1`、`baseline_not_supplied`。G2归档只有09-11信号，其冻结每10交易日采样与财务工作日运行频率不一致。本轮修正新extended输入因缺G2隐式回落v1的问题：新信号固定v2，缺同日完整G2排名时明确`control_unavailable/g2_rank_incomplete`，不制造control或paired lift；历史extended v1仍按旧协议重放，不改旧日产物、匹配tie-break或门槛。runner显式记录baseline/control状态原因，详见[同日基线缺口](research/financial-baseline-gap-20260918.md)。
+
+first-seal仍不可变，首次unavailable封存后不因后来G2补到而重写。实际每日基线生成尚未解决：每日冻结模型排名sidecar（须在首次seal前完成）与仅G2采样日生成财务信号的选择已向用户提出、尚待确定，本轮不擅改冻结采样、不代用生产rank、不回填09-17。evaluator/runner专项47 passed（2.59秒），Ruff/diff通过，未跑全量；已实现、已完成上述本地测试，未提交、未push、未部署。G2-FQ3自然v2完整五对及真实5/10/20成熟收益仍待验，不改变唯一模拟账户、历史账本、规则或正式Ranking。
+
+后续只读验收：主任务复跑47 passed（2.35秒）；真实09-17旧v1归档通过新validate_archive且文件哈希不变。内存按新seal行为重算同时出现`g2_rank_incomplete`和`industry_incomplete`，原20只selection有14只industry/exposure同为空，补G2本身不足以形成control。归档source为latest_signal_day；代码显示候选池从snapshot.card提取并规范化行业，collector原样保存，并非财务适配器丢字段。上游常规card行业采用固定映射与名称/前缀推断，候选池路径未查询PIT行业库；未读云端逐只card原值，不把缺口等同供应商无数据。本轮未新增行业请求或补值，未变更生产逻辑；同日基线选择仍待用户答复，完整五对和成熟收益仍未验收。
+
+### G3 研究补价前置预算有界修复（2026-09-18，本地验收）
+
+针对主任务09-18自然周期的factor shadow补价provider请求为0、wall_clock_deadline快照，已确认首次provider预算claim/cursor推进前存在逐requirement过滤整张缓存表及逐缺口独立metadata查询。最小修复复用原Factor/Fuyao shadow消费者：缓存按日期建立键索引，结构metadata每500股批查并以SQL window只返回最新记录；保持90秒协作预算、provider批次预算、cursor公平续做、价格质量与停牌判定，不新增数据源或调度。详见[研究补价预算报告](research/research-price-budget-20260918.md)。
+
+同机合成微基准：5,500条缓存检查2.162917→0.109124秒，1,000条结构检查2.280063→0.026500秒；1,001股双字段结构SELECT由最多4,004条降为6条。五文件专项48 passed（5.30秒），扩展三文件132 passed、1项既有warning（15.42秒），Ruff/diff通过；这些不是云端profile或补价成功证据。G2冻结/scorer与walk-forward固定源码摘要输入不变，但recommendation alignment的全package `package_source_digest`会变化，继续保留原身份不一致检查，不绕过旧校验。
+
+本轮已实现、完成上述本地测试，未提交、未push、未部署；云端自然provider进度、cursor推进和缺口覆盖仍待验，G3不标完成。不修改唯一模拟账户、账本、交易规则、冻结模型、正式Ranking或研究晋级门槛。
+
+### 2026-09-18 两项修复集成验收
+
+主任务完成最终backend全量 **2744 passed、3项既有warnings（235.03秒）**，Ruff及`git diff --check`通过；独立review对上述财务封存协议与补价前置查询两项修复未发现P1/P2。真实09-17财务旧v1归档兼容校验通过且文件哈希不变。已实现、已完成上述测试，仍未提交、未push、未部署，不将本地验收外推为云端自然效果。每日同日G2基线方案尚未确定，真实selection的14/20行业缺失仍未解决；G2-FQ3完整五对、成熟收益及G3自然补价覆盖继续待验。
+
+### G2-FQ3 每日冻结基线与同源行业补齐（2026-09-18，本地实施）
+
+用户现已批准每日冻结模型 baseline 与可信供应方行业证据，更新上段“方案尚未确定”的历史状态。复用原 Financial 唯一 daily/forward 链路，新 prospective 输入使用 `financial-daily-frozen-industry-v1`、新信号使用 `financial-rule-forward-v3`；旧 v1/v2 仅用于历史重放与到期评估，不回填旧信号、不长期双轨。原 G2 每10交易日采样、冻结输入及归档保持原样；独立每日 sidecar 复用完整 source、冻结 full_features 三种子均值排名，仅供 Financial 配平 tie-break。首次 seal 前等待同日合格 baseline，缺少时 `waiting_for_baseline` 不占用 first-seal；行业证据不可用时 daily 为 incomplete、仅按原同日两批预算重试，用尽后停止且不 seal；行业齐全但同行业候选不足则保留 control_unavailable，不得伪造五对或 paired lift。
+
+全部原选中最多20股使用同一供应方 `stock_basic.industry`，单独保存 raw response、时间、taxonomy 与摘要，不改候选池 universe、不混入启发式行业；明确 current observation、非历史PIT。原七接口加行业接口，每批最多160请求，仍受600秒与同日两批预算限制；forward 保持300秒。主任务云端 `/stock-basic` 上午单股000975.SZ成功返回“黄金”，只证明当时路由可读，未形成收盘后信号；现有系统API仍因旧allowlist返回unknown_api。本地补充81项目录及stock-basic路由，须后端发布才能生效。详见[每日依赖实施记录](research/financial-daily-dependencies-20260918.md)。
+
+当前行业/供应方/API专项 **101 passed、1项既有warning**，每日baseline初始专项 **28 passed**；集成与全量结果待主任务补录，不能沿用上段2744结果作为本轮新增代码验证。已实现相关模块、完成上述专项，未提交、未push、未部署新后端或daily/forward bundle。G2-FQ3自然完整可判别五对和真实5/10/20收益仍未验收，原停用条件、唯一模拟账户、历史账本、交易规则及正式Ranking保持不变。
+
+随后主任务早间只读诊断原09-17选中20股，stock-basic 20次均HTTP200/code0/单行行业，耗时10.75秒，无fetch失败；原card14只空行业不能等同供应方无数据。此为09-18上午current observation，不回填09-17、不作为收盘后信号。行业20/20可用仍不等于五对control可用，原Top5存在集合内单只行业；保持原20股、分类与门槛，不扩池或合并标签。自然配对覆盖与成熟收益继续待验，完整分类见上述实施记录。
+
+后续相关集成119 passed（2.80秒）、1项既有warning，全量仍待完成。provider目录不在既有walk-forward源码文件集内，两个provider文件变更本身不改变该摘要；recommendation alignment全包package_source_digest会改变，保留身份失配拒绝规则，不复用为新代码验收。新受控研究升级器已实现，后端路由发布及daily-v7/forward-v9安装仍待主任务执行和验证。
+
+02:51 UTC 云端隔离内存加载新客户端、DocumentedResearch与行业模块，单股真实返回observed/available、“黄金”；无云端文件或环境修改、无部署，原服务API仍待发布。该上午样本仅验证新代码单股链路，不算自然收盘后信号。
+
+本轮首轮全量2805 passed/1 failed，唯一失败为新增stock_basic后CLI目录数量旧断言80；已改为81，该文件18 passed，最终全量重跑中。合成输入实际冻结collect→seal→validate_archive 8 passed，无baseline mock；双研究包本地打包解压后从/tmp执行两消费者--help通过，摘要见实施记录，均不替代自然运行或部署。自然runner以incomplete拒绝行业缺失日产物；单独evaluator seal对该类证据保留control_unavailable、拒绝有效配平及paired lift，不概称所有手工调用均抛错。未提交、未push、未部署，G2-FQ3自然配对与成熟收益仍待验。
+
+最终本地验收补录：主任务backend全量 **2807 passed、3项既有warnings（243.69秒，exit0）**，覆盖本轮当前最终代码；涉及脚本及端到端测试Ruff复检、`git diff --check`通过。首轮2805/1失败与各专项数字保留为历史过程，最终全量已通过。已实现、已测试，仍未commit、未push、未部署新后端或研究包；G2-FQ3自然同日baseline/行业/完整可判别配对及真实5/10/20成熟收益仍待验，不改变唯一模拟账户、交易规则或晋级权限。

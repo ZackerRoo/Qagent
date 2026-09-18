@@ -122,4 +122,4 @@ def test_cli_real_fastapi_route_and_service_contract(monkeypatch):
         assert report["research_only"] and not report["decision_weight"]
         assert calls == [("daily", {"ts_code": "000001.SZ", "limit": 2, "offset": 4, "fields": "close"})]
         catalogue = cli.collect("http://127.0.0.1:8000", catalogue=True, opener=Adapter())
-        assert catalogue["sources"]["datahubco"]["count"] == 80
+        assert catalogue["sources"]["datahubco"]["count"] == 81

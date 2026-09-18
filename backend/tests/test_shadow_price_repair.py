@@ -10,6 +10,8 @@ from qagent.db import create_session_factory, initialize_database
 from qagent.research.shadow_price_repair import (
     ExactPriceRepairBudget,
     ExactPriceRequirement,
+    _missing_requirements,
+    _structural_no_row_reasons,
     repair_exact_daily_prices,
 )
 from qagent.storage.market_cache import MarketDataCacheRepository
@@ -18,6 +20,112 @@ from qagent.storage.tables import (
     HistoricalTradabilityRow,
     MarketBarCacheRow,
 )
+
+
+def test_indexed_cache_recheck_preserves_duplicate_date_field_and_quality_rules():
+    day = date(2026, 7, 2)
+    rows = [
+        _bar("CN:000001", day),
+        _bar("CN:000002", day), _bar("CN:000002", day),
+        {**_bar("CN:000003", day), "adjusted_open": 0},
+        {**_bar("CN:000004", day), "adjustment_type": "snapshot_qfq_anchor"},
+        _bar("CN:000005", day + timedelta(days=1)),
+        {**_bar("CN:000006", day), "adjusted_open": "invalid"},
+        {**_bar("CN:000008", day), "adjusted_open": float("nan")},
+        {**_bar("CN:000009", day), "adjusted_open": -1},
+    ]
+
+    class Cache:
+        def load_daily_bars(self, *args):
+            return pd.DataFrame(rows)
+
+    requirements = [
+        ExactPriceRequirement(f"CN:{i:06d}", day, field)
+        for i in range(1, 10) for field in ("adjusted_open", "adjusted_close")
+    ]
+    missing = _missing_requirements(Cache(), "fixture", requirements)
+    assert missing == [r for r in requirements if (
+        r.instrument_id in {"CN:000002", "CN:000004", "CN:000005", "CN:000007"}
+        or (r.instrument_id in {"CN:000003", "CN:000006", "CN:000008", "CN:000009"}
+            and r.field == "adjusted_open")
+    )]
+
+
+def test_batched_structural_metadata_preserves_latest_precedence_and_date_boundaries(tmp_path):
+    url = f"sqlite:///{tmp_path / 'structural-batch.db'}"
+    initialize_database(url)
+    factory = create_session_factory(url)
+    day = date(2026, 7, 2)
+    with factory() as session:
+        for instrument, revision, source, status in [
+            ("CN:000001", 1, "a", "suspended"),
+            ("CN:000001", 2, "a", "trading"),
+            ("CN:000002", 2, "a", "suspended"),
+            ("CN:000002", 2, "b", "trading"),
+        ]:
+            session.add(HistoricalTradabilityRow(
+                provider_mode="fixture", instrument_id=instrument, trade_date=day,
+                dataset_revision=revision, source_provider=source, trading_status=status,
+            ))
+        for instrument, snapshot, revision, listing, delisting in [
+            ("CN:000003", day, 1, day + timedelta(days=1), None),
+            ("CN:000004", day, 1, day, day),
+            ("CN:000005", day, 1, day + timedelta(days=1), None),
+            ("CN:000005", day, 2, day, None),
+            ("CN:000006", day + timedelta(days=1), 1, day + timedelta(days=2), None),
+        ]:
+            session.add(HistoricalInstrumentProfileRow(
+                provider_mode="fixture", instrument_id=instrument, snapshot_date=snapshot,
+                dataset_revision=revision, source_provider="fixture",
+                listing_date=listing, delisting_date=delisting,
+            ))
+        # Other provider modes must never classify a missing fixture row.
+        session.add(HistoricalTradabilityRow(
+            provider_mode="free", instrument_id="CN:000008", trade_date=day,
+            dataset_revision=99, source_provider="fixture", trading_status="suspended",
+        ))
+        session.commit()
+    requirements = [
+        ExactPriceRequirement(f"CN:{i:06d}", day, field)
+        for i in range(1, 9) for field in ("adjusted_open", "adjusted_close")
+    ]
+    future = ExactPriceRequirement("CN:000006", day + timedelta(days=1), "adjusted_open")
+    reasons = _structural_no_row_reasons(
+        MarketDataCacheRepository(factory), "fixture", [*requirements, future],
+        {(f"CN:{i:06d}", day): {} for i in (1, 2, 3, 7)},
+    )
+    expected = {"CN:000002": "suspended", "CN:000003": "not_listed",
+                "CN:000004": "not_listed", "CN:000007": "confirmed_suspended"}
+    assert reasons == {
+        **{r: expected[r.instrument_id] for r in requirements if r.instrument_id in expected},
+        future: "not_listed",
+    }
+
+
+def test_structural_preflight_queries_scale_by_batch_not_missing_field(tmp_path):
+    from sqlalchemy import event
+
+    url = f"sqlite:///{tmp_path / 'structural-query-count.db'}"
+    initialize_database(url)
+    factory = create_session_factory(url)
+    statements = []
+    engine = factory.kw["bind"]
+
+    def record(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        reasons = _structural_no_row_reasons(
+            MarketDataCacheRepository(factory), "fixture",
+            [ExactPriceRequirement(f"CN:{i:06d}", date(2026, 7, 2), field)
+             for i in range(1001) for field in ("adjusted_open", "adjusted_close")],
+            {},
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    assert reasons == {}
+    assert len(statements) == 6  # Two metadata reads per 500-symbol batch, not 4,004.
 
 
 def test_exact_date_repair_fills_internal_gap_hidden_by_99_37_percent_coverage(tmp_path):

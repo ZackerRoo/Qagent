@@ -47,8 +47,8 @@ def test_catalogue_separates_configuration_capability_and_mutations(monkeypatch)
     service = research.DocumentedResearch(enabled())
     monkeypatch.setattr(service, "_client", lambda source: Client())
     report = service.catalogue()
-    assert report["sources"]["datahubco"]["count"] == 80
-    assert report["sources"]["datahubco"]["callable_count"] == 79
+    assert report["sources"]["datahubco"]["count"] == 81
+    assert report["sources"]["datahubco"]["callable_count"] == 80
     entries = {entry["api"]: entry for entry in report["sources"]["promax"]["entries"]}
     assert entries["daily"]["callable"] is True
     assert not entries["p_save"]["read_only"] and not entries["disabled"]["callable"]

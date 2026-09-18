@@ -51,6 +51,10 @@ POLICY_MATCHED_CONTROL = {
     "paired_lift": "candidate_top5_vs_matched_control_top5_only_when_both_price_complete_5_of_5",
 }
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+PROSPECTIVE_CONTRACT = "financial-daily-frozen-industry-v1"
+POLICY_DAILY = {**POLICY_MATCHED_CONTROL, "protocol": "financial-rule-forward-v3",
+                "baseline": "isolated_daily_frozen_full_features_ranks",
+                "industry": "single_provider_stock_basic_current_observation"}
 
 
 def _instrument_matches_symbol(instrument_id, symbol, asset_type):
@@ -204,6 +208,22 @@ def _extended_candidate_pool_universe(universe):
 
 def _matched_control_plan(document, rankings, baseline_rows):
     selection = document["universe"]["selection_order"]
+    if document.get("prospective_contract") == PROSPECTIVE_CONTRACT:
+        from financial_industry_evidence import validate_industry_evidence
+        section = validate_industry_evidence(document["industry_evidence"], document["symbols"],
+                                            document["trade_date"], source=document["source"])
+        day = datetime.strptime(document["trade_date"], "%Y%m%d").date()
+        for entry in section["raw_evidence"].values():
+            received = after_close(entry["received_at"], day)
+            if not timestamp(document["started_at"]) <= received <= timestamp(document["finished_at"]):
+                raise ValueError("industry_capture_time_order")
+            if entry["response"].get("fetched_at"):
+                fetched = after_close(entry["response"]["fetched_at"], day)
+                if not timestamp(document["started_at"]) <= fetched <= received:
+                    raise ValueError("industry_capture_time_order")
+        selection = section["rows"] if section["status"] == "available" else [
+            {"symbol": symbol, "industry": None, "exposure_group": None}
+            for symbol in document["symbols"]]
     metadata = {}
     reasons = set()
     for item in selection:
@@ -324,9 +344,17 @@ def after_close(value, day):
 
 
 def seal(document, baseline=None, *, now=None):
+    """Seal new evidence; extended candidate pools always use matched-control v2."""
+    return _seal(document, baseline, now=now)
+
+
+def _seal(document, baseline=None, *, now=None, legacy_v1_fallback=False):
     """No prices or database are consulted when fixing the eligible set."""
     now = now or datetime.now(timezone.utc)
     verify_digest(document)
+    prospective = document.get("prospective_contract")
+    if prospective is not None and prospective != PROSPECTIVE_CONTRACT:
+        raise ValueError("unknown_prospective_contract")
     if document.get("protocol") != "daily-documented-research-v2":
         raise ValueError("requires_daily_v2")
     symbols = document.get("symbols")
@@ -375,7 +403,11 @@ def seal(document, baseline=None, *, now=None):
     baseline_order, baseline_rows, reasons = None, None, ["baseline_not_supplied"]
     if baseline is not None:
         try:
-            rows = validate_g2(baseline)
+            if prospective:
+                from financial_daily_baseline import validate_archive as validate_daily_baseline
+                rows = validate_daily_baseline(baseline, signal_date=day, eligible_ids=ids)
+            else:
+                rows = validate_g2(baseline)
             if baseline["signal_date"] != str(day):
                 raise ValueError("baseline_date_mismatch")
             bs = after_close(baseline["collection_started_at_utc"], day)
@@ -401,20 +433,33 @@ def seal(document, baseline=None, *, now=None):
         "status": "sealed", "decision_weight": False, "activation_allowed": False,
         "implementation_sha256": sha256(Path(__file__).read_bytes()).hexdigest(),
     }
-    if _extended_candidate_pool_universe(document.get("universe")) and baseline_rows is not None:
+    # Missing tie-break evidence makes a new matched-control signal unavailable;
+    # it must not silently select the retired v1 performance protocol.
+    if (_extended_candidate_pool_universe(document.get("universe"))
+            and not (legacy_v1_fallback and baseline_rows is None)):
         result.update(
             protocol=POLICY_MATCHED_CONTROL["protocol"],
             policy=POLICY_MATCHED_CONTROL,
             policy_digest=digest(POLICY_MATCHED_CONTROL),
-            **_matched_control_plan(document, rankings, baseline_rows),
+            **_matched_control_plan(document, rankings, baseline_rows or []),
         )
+    if prospective:
+        if not _extended_candidate_pool_universe(document.get("universe")):
+            raise ValueError("prospective_candidate_pool_required")
+        result.update(protocol=POLICY_DAILY["protocol"], policy=POLICY_DAILY,
+                      policy_digest=digest(POLICY_DAILY), prospective_contract=prospective,
+                      baseline_kind="isolated_daily_frozen_full_features_research")
     result["result_digest"] = digest(result)
     return result
 
 
 def validate_archive(signal):
     verify_digest(signal)
-    replay = seal(signal["source"], signal["baseline_source"], now=timestamp(signal["sealed_at"]))
+    # Prior releases sealed extended inputs without a baseline as v1. Replay
+    # that exact historical behavior without exposing it to new seal callers.
+    replay = _seal(signal["source"], signal["baseline_source"],
+                   now=timestamp(signal["sealed_at"]),
+                   legacy_v1_fallback=signal.get("protocol") == POLICY["protocol"])
     # A new implementation can audit an old archive, but cannot alter its identity/content.
     for key in replay:
         if key not in {"result_digest", "implementation_sha256"} and replay[key] != signal.get(key):
@@ -435,7 +480,7 @@ def evaluate(signal, db, *, provider_mode="free", as_of=None):
     reader.exec_driver_sql("BEGIN")
     ids = [r["instrument_id"] for r in signal["rankings"]]
     day = date.fromisoformat(signal["signal_date"])
-    is_v2 = signal["protocol"] == POLICY_MATCHED_CONTROL["protocol"]
+    is_v2 = signal["protocol"] in {POLICY_MATCHED_CONTROL["protocol"], POLICY_DAILY["protocol"]}
     policy = POLICY_MATCHED_CONTROL if is_v2 else POLICY
     candidate = ids[:policy["top_k"]]
     baseline = (signal["baseline_order"] or [])[:policy["top_k"]]

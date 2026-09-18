@@ -73,7 +73,7 @@ class DocumentedResearch:
 
     def catalogue(self):
         sources = {}
-        basic = {"catalogue_origin": "documented_20260827", "entries": [
+        basic = {"catalogue_origin": "documented_20260827_plus_stock_basic_example", "entries": [
             {"api": name, "enabled": name in READ_APIS, "read_only": name in READ_APIS,
              "callable": False, "classification": "read_only" if name in READ_APIS else "http_unsupported"}
             for name in sorted(DOCUMENTED_APIS)]}

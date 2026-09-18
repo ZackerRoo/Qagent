@@ -41,8 +41,8 @@ def test_catalogue_exactly_matches_document():
         libor hibor wz_index gz_index tmt_twincome tmt_twincomedetail bo_monthly bo_weekly bo_daily
         bo_cinema film_record teleplay_record report_rc cyq_perf cyq_chips stk_rewards stk_factor_pro
         stk_nineturn""".split())
-    assert DOCUMENTED_APIS == expected
-    assert len(DOCUMENTED_APIS) == 80 and len(READ_APIS) == 79
+    assert DOCUMENTED_APIS == expected | {"stock_basic"}
+    assert len(DOCUMENTED_APIS) == 81 and len(READ_APIS) == 80
 
 
 def test_header_identity_dynamic_table_and_zero_empty():
@@ -63,12 +63,22 @@ def test_http_gate_prevents_any_request():
     assert calls == []
 
 
-@pytest.mark.parametrize("api", ["pro_bar", "stock_basic", "../daily", "p_save", "delete", "https://evil"])
+@pytest.mark.parametrize("api", ["pro_bar", "stock-basic", "../daily", "p_save", "delete", "https://evil"])
 def test_noncallable_routes_fail_before_request(api):
     client, calls = make_client()
     with pytest.raises(DatahubcoError):
         client.query(api)
     assert calls == []
+
+
+def test_stock_basic_uses_documented_hyphen_endpoint_and_bounded_query():
+    client, calls = make_client({"code": 0, "data": {
+        "fields": ["ts_code", "industry"], "items": [["000001.SZ", "银行"]]}})
+    table = client.query("stock_basic", ts_code="000001.SZ", fields="ts_code,industry", limit=2, offset=0)
+    assert table.rows == ({"ts_code": "000001.SZ", "industry": "银行"},)
+    assert calls[0].url.path.endswith("/stock-basic")
+    assert dict(calls[0].url.params) == {
+        "ts_code": "000001.SZ", "fields": "ts_code,industry", "limit": "2", "offset": "0"}
 
 
 @pytest.mark.parametrize("params", [

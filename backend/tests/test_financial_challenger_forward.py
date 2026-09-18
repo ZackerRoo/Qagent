@@ -171,6 +171,54 @@ def test_dynamic_candidate_pool_seals_and_archive_replays(dynamic_daily):
     forward.validate_archive(signal)
 
 
+@pytest.mark.parametrize("baseline_case", ["absent", "wrong_day", "missing_cohort", "invalid"])
+def test_extended_signal_missing_valid_g2_remains_v2(monkeypatch, tmp_path, baseline_case):
+    symbols, document, g2 = matched_inputs(monkeypatch)
+    if baseline_case == "absent":
+        g2 = None
+    elif baseline_case == "wrong_day":
+        g2["signal_date"] = "2026-09-10"
+        signed(g2)
+    elif baseline_case == "missing_cohort":
+        g2["predictions"].pop()
+        g2["coverage"]["scored_rows"] -= 1
+        signed(g2)
+    else:
+        g2 = {"order": symbols}
+    signal = forward.seal(document, g2, now=NOW)
+    assert signal["protocol"] == "financial-rule-forward-v2"
+    assert signal["baseline_status"] == "baseline_unavailable"
+    assert signal["control_status"] == "control_unavailable"
+    assert signal["control_reasons"] == ["g2_rank_incomplete"]
+    assert signal["matched_control_pairs"] == []
+    assert signal["control_order"] == []
+    forward.validate_archive(signal)
+    result = forward.evaluate(signal, database(tmp_path, symbols=symbols),
+                              as_of=datetime.fromisoformat("2026-09-18T16:00:00+08:00"))
+    assert result["protocol"] == "financial-rule-forward-evaluation-v2"
+    assert result["horizons"][0]["paired_complete"] is False
+    assert result["horizons"][0]["lift_pct"] is None
+
+
+def test_pre_fix_extended_v1_without_baseline_replays_unchanged(monkeypatch, tmp_path):
+    symbols, document, _ = matched_inputs(monkeypatch)
+    # Reproduce the prior artifact schema independently of the new replay switch.
+    old = forward.seal(document, now=NOW)
+    for key in ("control_status", "control_discriminative", "control_reasons",
+                "matched_control_pairs", "matched_control_pairs_digest", "control_order"):
+        old.pop(key)
+    old.update(protocol=forward.POLICY["protocol"], policy=forward.POLICY,
+               policy_digest=forward.digest(forward.POLICY), implementation_sha256="0" * 64)
+    signed(old)
+    before = deepcopy(old)
+    forward.validate_archive(old)
+    result = forward.evaluate(old, database(tmp_path, symbols=symbols),
+                              as_of=datetime.fromisoformat("2026-09-18T16:00:00+08:00"))
+    assert old == before
+    assert result["protocol"] == "financial-rule-forward-evaluation-v1"
+    assert result["horizons"][0]["lift_pct"] is None
+
+
 def test_old_candidate_pool_v1_archive_replay_and_evaluation_compatibility(dynamic_daily, tmp_path):
     old = deepcopy(dynamic_daily)
     for item in old["universe"]["selection_order"]:

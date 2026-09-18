@@ -1,6 +1,7 @@
 """Opt-in, bounded research access to the documented Datahubco HTTP gateway.
 
-The 80-entry source catalogue includes pro_bar, which is not HTTP callable.
+The original 80-entry catalogue includes non-HTTP pro_bar; stock_basic is
+supplemented from the user-provided stock-basic endpoint example.
 HTTP key transport is disabled unless the caller explicitly accepts it;
 availability and semantics require verification by each consumer.
 """
@@ -26,7 +27,7 @@ cb_daily fx_obasic fx_daily index_basic index_weekly index_monthly index_weight
 index_dailybasic index_classify index_member_all hk_basic shibor shibor_quote shibor_lpr
 libor hibor wz_index gz_index tmt_twincome tmt_twincomedetail bo_monthly bo_weekly bo_daily
 bo_cinema film_record teleplay_record report_rc cyq_perf cyq_chips stk_rewards
-stk_factor_pro stk_nineturn
+stk_factor_pro stk_nineturn stock_basic
 """.split())
 READ_APIS = DOCUMENTED_APIS - {"pro_bar"}
 _NAME = re.compile(r"[a-zA-Z][a-zA-Z0-9_]{0,79}\Z")
@@ -124,7 +125,8 @@ class DatahubcoClient:
         with httpx.Client(timeout=self.timeout_seconds, follow_redirects=False, verify=True,
                           trust_env=self.transport is None, transport=self.transport) as client:
             try:
-                response = client.get(BASE_URL + "/" + api, params=clean,
+                route = "stock-basic" if api == "stock_basic" else api
+                response = client.get(BASE_URL + "/" + route, params=clean,
                                       headers={"X-API-Key": self.api_key})
             except httpx.TransportError:
                 raise DatahubcoError("transport_error") from None

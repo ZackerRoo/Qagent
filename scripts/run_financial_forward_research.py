@@ -25,7 +25,7 @@ MAX_INPUT_FILES = 2000
 MAX_INPUT_BYTES = 128 * 1024 * 1024
 
 
-class RunBudgetExceeded(TimeoutError):
+class RunBudgetExceeded(RuntimeError):
     pass
 
 
@@ -39,6 +39,9 @@ def _alarm_timeout(seconds: float):
 
     previous_handler = process_signal.getsignal(process_signal.SIGALRM)
     previous_timer = process_signal.getitimer(process_signal.ITIMER_REAL)
+    started = time.monotonic()
+    if previous_timer[0] > 0:
+        seconds = min(seconds, previous_timer[0])
     process_signal.signal(process_signal.SIGALRM, expired)
     process_signal.setitimer(process_signal.ITIMER_REAL, seconds)
     try:
@@ -47,7 +50,9 @@ def _alarm_timeout(seconds: float):
         process_signal.setitimer(process_signal.ITIMER_REAL, 0)
         process_signal.signal(process_signal.SIGALRM, previous_handler)
         if previous_timer[0] > 0:
-            process_signal.setitimer(process_signal.ITIMER_REAL, *previous_timer)
+            process_signal.setitimer(process_signal.ITIMER_REAL,
+                                     max(0.000001, previous_timer[0] - (time.monotonic() - started)),
+                                     previous_timer[1])
 
 
 def _evaluate_with_timeout(signal_value: dict, db: Path, provider_mode: str,
@@ -173,7 +178,26 @@ def _archive_horizon(signal: dict, result: dict, horizon: dict, output: Path) ->
 
 def run(daily_dir: Path, signal_dir: Path, evaluation_dir: Path, run_dir: Path,
         db: Path, *, baseline_dir: Path | None = None, provider_mode: str = "free",
-        budget_seconds: float = 300, now: datetime | None = None) -> tuple[int, dict]:
+        budget_seconds: float = 300, now: datetime | None = None,
+        daily_baseline_source_dir: Path | None = None,
+        daily_baseline_frozen_dir: Path | None = None,
+        daily_baseline_rank_dir: Path | None = None) -> tuple[int, dict]:
+    if (isinstance(budget_seconds, bool) or not math.isfinite(budget_seconds)
+            or not 30 <= budget_seconds <= 900):
+        raise ValueError("invalid_budget")
+    paths = (daily_baseline_source_dir, daily_baseline_frozen_dir, daily_baseline_rank_dir)
+    if any(paths) and (not all(paths) or budget_seconds > 300):
+        raise ValueError("daily_baseline_paths_and_bounded_budget_required")
+    with _alarm_timeout(budget_seconds):
+        return _run(daily_dir, signal_dir, evaluation_dir, run_dir, db,
+                    baseline_dir=baseline_dir, provider_mode=provider_mode,
+                    budget_seconds=budget_seconds, now=now,
+                    daily_baseline_paths=paths if all(paths) else None)
+
+
+def _run(daily_dir: Path, signal_dir: Path, evaluation_dir: Path, run_dir: Path,
+         db: Path, *, baseline_dir=None, provider_mode="free", budget_seconds=300,
+         now=None, daily_baseline_paths=None):
     if (isinstance(budget_seconds, bool) or not math.isfinite(budget_seconds)
             or not 30 <= budget_seconds <= 900):
         raise ValueError("invalid_budget")
@@ -227,15 +251,41 @@ def run(daily_dir: Path, signal_dir: Path, evaluation_dir: Path, run_dir: Path,
                 if candidates and signal.get("source_result_digest") != candidates[0][2].get("result_digest"):
                     raise ValueError("existing_signal_not_first_legal_daily_artifact")
                 report["seal"].update(status="already_sealed", signal=str(target),
-                                      signal_digest=signal["result_digest"])
+                                      signal_digest=signal["result_digest"],
+                                      signal_protocol=signal["protocol"],
+                                      baseline_status=signal["baseline_status"],
+                                      baseline_reasons=signal["baseline_reasons"],
+                                      control_status=signal.get("control_status"),
+                                      control_reasons=signal.get("control_reasons", []))
             elif candidates:
                 _, daily_path, document = candidates[0]
-                baseline, baseline_path = _baseline(baseline_dir, document, current)
-                signal = forward.seal(document, baseline, now=current)
-                _publish(target, signal)
-                report["seal"].update(status="sealed", daily=str(daily_path),
+                prospective = document.get("prospective_contract") == forward.PROSPECTIVE_CONTRACT
+                if prospective:
+                    from financial_daily_baseline import collect as collect_daily_baseline
+                    eligible = [r["instrument_id"] for r in forward.seal(document, now=current)["rankings"]]
+                    baseline = (collect_daily_baseline(*daily_baseline_paths,
+                                signal_date=current.date(), eligible_ids=eligible, now=current)
+                                if daily_baseline_paths else None)
+                    baseline_path = str(daily_baseline_paths[2] / f"{current.date()}.json") if baseline else None
+                else:
+                    baseline, baseline_path = _baseline(baseline_dir, document, current)
+                seal_time = datetime.now(SHANGHAI) if prospective and baseline else current
+                signal = forward.seal(document, baseline, now=seal_time)
+                if prospective and baseline:
+                    current = seal_time
+                if prospective and signal["baseline_status"] != "available":
+                    report["seal"].update(status="waiting_for_baseline", daily=str(daily_path),
+                                          baseline_reasons=signal["baseline_reasons"])
+                else:
+                    _publish(target, signal)
+                    report["seal"].update(status="sealed", daily=str(daily_path),
                                       baseline=baseline_path, signal=str(target),
-                                      signal_digest=signal["result_digest"])
+                                      signal_digest=signal["result_digest"],
+                                      signal_protocol=signal["protocol"],
+                                      baseline_status=signal["baseline_status"],
+                                      baseline_reasons=signal["baseline_reasons"],
+                                      control_status=signal.get("control_status"),
+                                      control_reasons=signal.get("control_reasons", []))
             else:
                 report["seal"]["status"] = "blocked_no_legal_daily" if rejected else "waiting_for_daily"
                 if rejected:
@@ -294,14 +344,14 @@ def run(daily_dir: Path, signal_dir: Path, evaluation_dir: Path, run_dir: Path,
         report["finished_at"] = datetime.now(SHANGHAI).isoformat()
         if report["errors"]:
             report["status"] = "incomplete"
-        elif report["seal"].get("status") == "waiting_for_daily":
-            report["status"] = "waiting_for_daily"
+        elif report["seal"].get("status") in {"waiting_for_daily", "waiting_for_baseline"}:
+            report["status"] = report["seal"]["status"]
         else:
             report["status"] = "complete"
         report["result_digest"] = forward.digest(report)
         filename = current.strftime("%Y%m%dT%H%M%S.%f%z") + "-" + uuid4().hex + ".json"
         _publish(run_dir / filename, report)
-        if report["status"] == "waiting_for_daily" and not report["evaluations"]:
+        if report["status"] in {"waiting_for_daily", "waiting_for_baseline"} and not report["evaluations"]:
             return 75, report
         return (0 if not report["errors"] else 1), report
     finally:
@@ -312,6 +362,9 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--daily-dir", required=True, type=Path)
     parser.add_argument("--baseline-dir", type=Path)
+    parser.add_argument("--daily-baseline-source-dir", type=Path)
+    parser.add_argument("--daily-baseline-frozen-dir", type=Path)
+    parser.add_argument("--daily-baseline-rank-dir", type=Path)
     parser.add_argument("--signal-dir", required=True, type=Path)
     parser.add_argument("--evaluation-dir", required=True, type=Path)
     parser.add_argument("--run-dir", required=True, type=Path)
@@ -322,7 +375,10 @@ def main(argv=None) -> int:
     try:
         code, report = run(args.daily_dir, args.signal_dir, args.evaluation_dir,
                            args.run_dir, args.db, baseline_dir=args.baseline_dir,
-                           provider_mode=args.provider_mode, budget_seconds=args.budget_seconds)
+                           provider_mode=args.provider_mode, budget_seconds=args.budget_seconds,
+                           daily_baseline_source_dir=args.daily_baseline_source_dir,
+                           daily_baseline_frozen_dir=args.daily_baseline_frozen_dir,
+                           daily_baseline_rank_dir=args.daily_baseline_rank_dir)
     except Exception:
         print(json.dumps({"status": "error", "error": "financial_forward_automation_failed"}))
         return 2

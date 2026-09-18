@@ -346,7 +346,7 @@ def batch_lock(directory):
 
 def run_batch(symbols, period, trade_date, *, source="datahubco",
               base_url="http://127.0.0.1:8000", budget_seconds=600, query=collect,
-              universe=None):
+              universe=None, daily_frozen_industry=False):
     local_origin(base_url)
     if (not 1 <= len(symbols) <= 20 or len(set(symbols)) != len(symbols)
             or isinstance(budget_seconds, bool) or not math.isfinite(budget_seconds)
@@ -357,6 +357,21 @@ def run_batch(symbols, period, trade_date, *, source="datahubco",
         validate_header({"source": source, "period": period, "trade_date": trade_date,
                          "retrieved_at": started_at, "instruments": {symbol: {}}})
     evidence, sections = {}, {}
+    industry_raw = {}
+    if daily_frozen_industry:
+        if not isinstance(universe, dict) or universe.get("kind") != "paper_candidate_pool_order" or budget_seconds > 600:
+            raise ValueError("prospective_candidate_pool_budget_required")
+        from financial_industry_evidence import industry_request
+        for symbol in symbols:
+            request = industry_request(symbol, source=source)
+            if budget_seconds - (time.monotonic() - started) < 70:
+                response = {"status": "error", "error": "batch_budget_exhausted", "rows": []}
+            else:
+                try:
+                    response = query(base_url, **request)
+                except Exception:
+                    response = {"status": "error", "error": "system_request_failed", "rows": []}
+            industry_raw[symbol] = {"request": request, "response": response, "received_at": now()}
     for symbol in symbols:
         evidence[symbol], sections[symbol] = {}, {}
         for api in BATCH_APIS:
@@ -432,9 +447,21 @@ def run_batch(symbols, period, trade_date, *, source="datahubco",
                               "Current observation only; no historical PIT or production ranking effect.",
                               "Derived observations use collection completion, never pretend availability before fetch.",
                               "Budget is a request-start budget reserving 70 seconds per system call; no retries."]}
+    if daily_frozen_industry:
+        from financial_industry_evidence import build_industry_evidence
+        report["prospective_contract"] = "financial-daily-frozen-industry-v1"
+        report["industry_evidence"] = build_industry_evidence(symbols, industry_raw, trade_date, source=source)
+        if report["industry_evidence"]["status"] != "available":
+            report["status"] = "incomplete"
+        report["status_semantics"] = (
+            "observed requires all financial sections and same-provider industry evidence; "
+            "industry failures remain explicit and consume the existing bounded batch attempt")
     report["implementation_sha256"] = {name: sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
         for name in ("collect_daily_documented_research.py", "collect_documented_research.py",
                      "rank_financial_candidate.py", "research_financial_enrichment.py", "research_cashflow_quality.py")}
+    if daily_frozen_industry:
+        report["implementation_sha256"]["financial_industry_evidence.py"] = sha256(
+            Path(__file__).with_name("financial_industry_evidence.py").read_bytes()).hexdigest()
     report["result_digest"] = digest(report)
     return report
 
@@ -457,8 +484,11 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--bounded-same-day", action="store_true",
                         help="Candidate-pool only: 16:40-22:40 Shanghai, at most two API batches/day")
+    parser.add_argument("--daily-frozen-industry", action="store_true")
     args = parser.parse_args()
     try:
+        if args.daily_frozen_industry and not args.bounded_same_day:
+            raise ValueError("prospective_requires_bounded_same_day")
         trade_date = args.trade_date
         if args.today_close:
             local = datetime.now(ZoneInfo("Asia/Shanghai"))
@@ -515,7 +545,8 @@ def main():
                         return 75
                 report = run_batch(symbols, args.period, trade_date, source=args.source,
                                    base_url=args.base_url, budget_seconds=args.budget_seconds,
-                                   universe=universe_evidence)
+                                   universe=universe_evidence,
+                                   daily_frozen_industry=args.daily_frozen_industry)
                 filename = datetime.now().strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex + ".json"
                 output = args.output_dir / filename
                 publish(output, json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n")

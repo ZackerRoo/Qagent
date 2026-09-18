@@ -11,9 +11,10 @@ from time import monotonic
 from typing import Iterable
 
 import pandas as pd
-from sqlalchemy import desc, delete
+from sqlalchemy import desc, delete, func
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import aliased
 
 from qagent.storage.market_cache import MarketDataCacheRepository, TRUSTED_PAIRED_ADJUSTED_PROVIDERS
 from qagent.research.suspension_evidence import load_suspension_evidence
@@ -156,14 +157,10 @@ def repair_exact_daily_prices(
     if not missing:
         return result
 
-    structural: dict[ExactPriceRequirement, str] = {}
     suspension_evidence = {} if provider_mode == "fixture" else load_suspension_evidence()
-    for requirement in missing:
-        reason = _structural_no_row_reason(
-            cache, provider_mode, requirement, suspension_evidence
-        )
-        if reason is not None:
-            structural[requirement] = reason
+    structural = _structural_no_row_reasons(
+        cache, provider_mode, missing, suspension_evidence
+    )
 
     repairable = [item for item in missing if item not in structural]
     provider_errors: set[ExactPriceRequirement] = set()
@@ -340,18 +337,27 @@ def _missing_requirements(
     for trade_date, dated in grouped.items():
         instrument_ids = sorted({item.instrument_id for item in dated})
         bars = cache.load_daily_bars(provider_mode, instrument_ids, trade_date, trade_date)
+        # Index once per date. Re-filtering a full market frame for every
+        # requirement makes cache-only preflight quadratic in the universe size.
+        rows_by_key = {}
+        duplicate_keys = set()
+        for _, row in bars.iterrows():
+            key = (row["instrument_id"], row["trade_date"])
+            if key in rows_by_key:
+                duplicate_keys.add(key)
+            rows_by_key[key] = row
         for item in dated:
-            rows = bars.loc[
-                (bars["instrument_id"] == item.instrument_id)
-                & (bars["trade_date"] == item.trade_date),
-            ]
-            values = rows[item.field]
-            value = pd.to_numeric(values.iloc[0], errors="coerce") if len(values) == 1 else None
+            key = (item.instrument_id, item.trade_date)
+            row = rows_by_key.get(key)
+            value = (
+                pd.to_numeric(row[item.field], errors="coerce")
+                if row is not None and key not in duplicate_keys else None
+            )
             if (
                 value is None
                 or pd.isna(value)
                 or float(value) <= 0
-                or (len(rows) == 1 and _unsafe_exact_row(rows.iloc[0], item.field))
+                or (row is not None and _unsafe_exact_row(row, item.field))
             ):
                 missing.append(item)
     return missing
@@ -431,55 +437,91 @@ def _unsafe_exact_row(row: pd.Series, field: str) -> bool:
     )
 
 
-def _structural_no_row_reason(
+def _structural_no_row_reasons(
     cache: MarketDataCacheRepository,
     provider_mode: str,
-    requirement: ExactPriceRequirement,
+    requirements: Iterable[ExactPriceRequirement],
     suspension_evidence: dict | None = None,
-) -> str | None:
+) -> dict[ExactPriceRequirement, str]:
+    """Read the same latest metadata in bounded batches, once per date/symbol.
+
+    Thousands of independent sessions/queries here can exhaust the cooperative
+    budget before the first provider batch and before its cursor advances.
+    """
+    grouped: dict[date, list[ExactPriceRequirement]] = defaultdict(list)
+    for requirement in requirements:
+        grouped[requirement.trade_date].append(requirement)
+    reasons: dict[ExactPriceRequirement, str] = {}
     with cache.session_factory() as session:
-        tradability = (
-            session.query(HistoricalTradabilityRow)
-            .filter(
-                HistoricalTradabilityRow.provider_mode == provider_mode,
-                HistoricalTradabilityRow.instrument_id == requirement.instrument_id,
-                HistoricalTradabilityRow.trade_date == requirement.trade_date,
-            )
-            .order_by(
-                desc(HistoricalTradabilityRow.dataset_revision),
-                HistoricalTradabilityRow.source_provider,
-            )
-            .first()
-        )
-        if tradability is not None and tradability.trading_status == "suspended":
-            return "suspended"
-        profile = (
-            session.query(HistoricalInstrumentProfileRow)
-            .filter(
-                HistoricalInstrumentProfileRow.provider_mode == provider_mode,
-                HistoricalInstrumentProfileRow.instrument_id == requirement.instrument_id,
-                HistoricalInstrumentProfileRow.snapshot_date <= requirement.trade_date,
-            )
-            .order_by(
-                desc(HistoricalInstrumentProfileRow.snapshot_date),
-                desc(HistoricalInstrumentProfileRow.dataset_revision),
-            )
-            .first()
-        )
-        if profile is not None and (
-            (profile.listing_date is not None and profile.listing_date > requirement.trade_date)
-            or (
-                profile.delisting_date is not None
-                and profile.delisting_date <= requirement.trade_date
-            )
-        ):
-            return "not_listed"
-        # Contrary explicit metadata fails closed; no trading-state import.
-        if tradability is None and (requirement.instrument_id, requirement.trade_date) in (
-            suspension_evidence or {}
-        ):
-            return "confirmed_suspended"
-    return None
+        for trade_date, dated in grouped.items():
+            instruments = sorted({item.instrument_id for item in dated})
+            tradability_by_id = {}
+            profiles_by_id = {}
+            for offset in range(0, len(instruments), 500):
+                batch = instruments[offset:offset + 500]
+                tradability_ranked = (
+                    session.query(
+                        HistoricalTradabilityRow,
+                        func.row_number().over(
+                            partition_by=HistoricalTradabilityRow.instrument_id,
+                            order_by=(
+                                desc(HistoricalTradabilityRow.dataset_revision),
+                                HistoricalTradabilityRow.source_provider,
+                            ),
+                        ).label("repair_position"),
+                    )
+                    .filter(
+                        HistoricalTradabilityRow.provider_mode == provider_mode,
+                        HistoricalTradabilityRow.instrument_id.in_(batch),
+                        HistoricalTradabilityRow.trade_date == trade_date,
+                    )
+                    .subquery()
+                )
+                for row in session.query(aliased(HistoricalTradabilityRow, tradability_ranked)).filter(
+                    tradability_ranked.c.repair_position == 1
+                ):
+                    tradability_by_id[row.instrument_id] = row
+                profile_ranked = (
+                    session.query(
+                        HistoricalInstrumentProfileRow,
+                        func.row_number().over(
+                            partition_by=HistoricalInstrumentProfileRow.instrument_id,
+                            order_by=(
+                                desc(HistoricalInstrumentProfileRow.snapshot_date),
+                                desc(HistoricalInstrumentProfileRow.dataset_revision),
+                            ),
+                        ).label("repair_position"),
+                    )
+                    .filter(
+                        HistoricalInstrumentProfileRow.provider_mode == provider_mode,
+                        HistoricalInstrumentProfileRow.instrument_id.in_(batch),
+                        HistoricalInstrumentProfileRow.snapshot_date <= trade_date,
+                    )
+                    .subquery()
+                )
+                for row in session.query(aliased(HistoricalInstrumentProfileRow, profile_ranked)).filter(
+                    profile_ranked.c.repair_position == 1
+                ):
+                    profiles_by_id[row.instrument_id] = row
+            for requirement in dated:
+                tradability = tradability_by_id.get(requirement.instrument_id)
+                profile = profiles_by_id.get(requirement.instrument_id)
+                reason = None
+                if tradability is not None and tradability.trading_status == "suspended":
+                    reason = "suspended"
+                elif profile is not None and (
+                    (profile.listing_date is not None and profile.listing_date > trade_date)
+                    or (profile.delisting_date is not None and profile.delisting_date <= trade_date)
+                ):
+                    reason = "not_listed"
+                # Contrary explicit metadata fails closed; no trading-state import.
+                elif tradability is None and (requirement.instrument_id, trade_date) in (
+                    suspension_evidence or {}
+                ):
+                    reason = "confirmed_suspended"
+                if reason is not None:
+                    reasons[requirement] = reason
+    return reasons
 
 
 def _reason_mix(reasons: dict[str, int]) -> str:
