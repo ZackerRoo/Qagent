@@ -29,3 +29,11 @@ G7逐股行情时效、G2-FQ3收盘后同日baseline/行业/Financial自然链�
 07:08及07:09:47 UTC，guarded helper preview均安全退出1，未执行 execute。07:10:27 UTC只读复核仍为1个active cycle、1个active stage，`factor_shadow` 从07:05:13.805949开始持续 running；最近三次同阶段约15–22分钟。这是当前切换门禁未通过的直接证据，不据此认定任务故障，也未强制停止研究周期。
 
 本轮已创建云端暂存release、依赖和构建文件；未修改运行中的服务配置、cron、账本、current或交易规则，三份研究cron摘要复核保持原值。新release已暂存，但current仍为旧版本，本轮没有切换后的ledger/settings对账或新服务运行验收。最终状态为**已实现、已测试、已提交并push、已暂存、未部署**。部署待活动周期自然结束后重新检查空闲门禁并执行受控切换；本轮未设置自动续办，不承诺自动后续。自然逐股分钟时效与G2-FQ3收盘后研究链路仍待验。
+
+## 后续受控切换与恢复验收（约07:33 UTC）
+
+主任务后续完成生产切换，current 已为 `e999e4f5433ad424b441cc73f3950a4f87445389`。首次 helper 在切换后、写出 `result.json` 前中断，随后操作方沿同一 `restore()` 路径恢复；本次没有 `result.json`，不能记为 helper 一次完整成功退出。主任务恢复后独立复核，相对于 `/var/tmp/qagent-rollout-relay-rbygwvqc/ledger-before.json` 的 `ledger_equal=true`，且 `settings_equal=true`、`scheduler_enabled=true`；backend/frontend runit 均为 run，`/api/health` 正常，前端 HTTP 200。独立 paper-update 为 configured/enabled true、outside_session，未手动触发 tick。
+
+此前07:10的未部署结论保留为历史快照，本次状态更新为**已实现、已测试、已提交并push、已部署并完成恢复后对账与健康核验**。本次没有交易时段自然分钟观测，不能由窗口外健康推断逐股延迟已验收。
+
+07:23:37 UTC 的研究依赖只读快照：daily-ranks 目录为空且服务用户可写，signals 仍为09-14/09-17两份，daily根目录12份JSON最新09-17，完整 source 最新09-17；冻结目录保留两变体各三种子及manifest，本次未重新计算模型摘要。cron PID21，daily-v7仍为北京时间16:40–22:40共13次，成功后联动forward-v9；独立forward为19:37/20:07/20:37/23:07。daily/forward cron SHA256分别为 `04e0023e784aad93a006011a16f6e7061f2bd1adc6bf8c1e78594542c4827e5f`、`f03ae7a5e252d95191967d85d79b956aed6d00d0bcc973e09e8f48ce8ad7b6ef`。该快照早于16:40，尚无09-18产物不能判为链路失败；同日source、baseline、行业、可判别配平及成熟收益仍待自然窗口验收。本次未触发财务任务或供应方请求，不提高G2/G7完成状态或交易权限。
