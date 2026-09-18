@@ -364,3 +364,11 @@ first-seal仍不可变，首次unavailable封存后不因后来G2补到而重写
 本轮首轮全量2805 passed/1 failed，唯一失败为新增stock_basic后CLI目录数量旧断言80；已改为81，该文件18 passed，最终全量重跑中。合成输入实际冻结collect→seal→validate_archive 8 passed，无baseline mock；双研究包本地打包解压后从/tmp执行两消费者--help通过，摘要见实施记录，均不替代自然运行或部署。自然runner以incomplete拒绝行业缺失日产物；单独evaluator seal对该类证据保留control_unavailable、拒绝有效配平及paired lift，不概称所有手工调用均抛错。未提交、未push、未部署，G2-FQ3自然配对与成熟收益仍待验。
 
 最终本地验收补录：主任务backend全量 **2807 passed、3项既有warnings（243.69秒，exit0）**，覆盖本轮当前最终代码；涉及脚本及端到端测试Ruff复检、`git diff --check`通过。首轮2805/1失败与各专项数字保留为历史过程，最终全量已通过。已实现、已测试，仍未commit、未push、未部署新后端或研究包；G2-FQ3自然同日baseline/行业/完整可判别配对及真实5/10/20成熟收益仍待验，不改变唯一模拟账户、交易规则或晋级权限。
+
+### 2026-09-18 受控发布补录
+
+源提交`edbd9fa11dd12f56d009d1b3128401a6b5e8248f`已push并受控部署；冻结依赖、隔离启动和前端构建通过，证据`/var/tmp/qagent-rollout-relay-07arl0e6/result.json`确认新release、八表ledger_equal、16项settings_equal及scheduler_enabled均true，服务属主/loopback端口/backup cron与health验收通过。维护down时间03:23:54.885 UTC，最终健康03:28:17 UTC前恢复；恢复tick为enabled/waiting、1/1、last_error=null，03:20 slot实际03:28:10.841971开始、迟到490.841971秒、skipped_slots0，不称准点或无中断，不由此推断漏单，没有手动补交易。
+
+新系统`stock_basic`真实单股成功observed/行业“黄金”后，daily-v7与forward-v9受控升级为upgraded/new，复核already_installed/new、started_job=false；receipt为`/var/backups/qagent-financial-daily-dependencies/before-install-xztb_bw9.json`。新13/4时槽及行业/baseline参数、完整manifest和cron摘要见[每日依赖部署记录](research/financial-daily-dependencies-20260918.md)。G2 cron和09-14历史signal摘要保持原值，rank目录服务用户可写。已实现、已测试、已push、已部署；没有手动启动完整财务批次，G2-FQ3自然baseline/行业/可判别五对及5/10/20收益、G3自然补价provider/cursor/覆盖仍待验，不提升目标完成状态、正式Ranking或交易权限。
+
+恢复后自然03:30 UTC tick于03:30:00.047722启动、03:30:34.539601完成，enabled/waiting、attempts2/completed2、skipped_slots0、last_error=null。这是单次自然触发与完成证据，不泛化为所有股票行情实时性或长期准点；上述部署暂停影响更新及时性，账本未改写。

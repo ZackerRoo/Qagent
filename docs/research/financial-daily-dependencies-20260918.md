@@ -62,3 +62,19 @@
 主任务最终 backend 全量 **2807 passed、3 项既有 warnings（243.69 秒，exit 0）**，覆盖本轮当前最终代码；涉及脚本与端到端测试的 Ruff 复检及 `git diff --check` 通过。上文首轮2805 passed/1 failed及专项结果保留为过程快照，最终结论以本次完整通过为准。
 
 当前已实现、已完成上述本地验收，仍未 commit、未 push、未部署新后端或研究包。自然同日 baseline、行业与完整可判别配对，以及真实5/10/20交易日成熟收益仍待验，不以测试通过提升G2-FQ3状态或交易权限。
+
+## 受控部署验收（2026-09-18 03:29 UTC）
+
+源提交 `edbd9fa11dd12f56d009d1b3128401a6b5e8248f` 已 push；云端同名 release 的冻结依赖、隔离临时数据库启动、前端安装及构建通过。原 `deploy_relay_runtime.py` 即时 preflight 通过后执行成功，证据目录 `/var/tmp/qagent-rollout-relay-07arl0e6` 的 `result.json` 确认新 release、`ledger_equal=true`、`settings_equal=true`、`scheduler_enabled=true`；八表摘要及16项settings保留。等价验收确认两个runit进程属主luozhenkun、8000/5173仅loopback监听、backup cron启用、health正常；完整数据库quick_check已在受控流程内通过，未在最终验收额外重复，不调用生产scheduler GET。
+
+本次是维护暂停：down文件时间为03:23:54.885 UTC，首次服务启动约03:27:14 UTC，恢复scheduler后后端再次启动，最终健康于03:28:17 UTC前确认。10.67GB数据库一致性检查占用主要暂停时间。独立tick恢复为enabled/waiting、1次attempt/1次completed、last_error=null、skipped_slots=0；报告slot03:20:00于03:28:10.841971开始，lateness490.841971秒。部署暂停影响更新及时性，账本未改写；该状态不能证明准点、无中断或发生漏单，没有手动补交易。主任务03:30:14 UTC复核自然03:30 slot于03:30:00.047722启动、lateness0.047722秒，当时running、attempts2/completed1、无error，仅证明自然触发，完成状态待后续复核。
+
+新系统API实际查询 `datahubco/stock_basic`、`000975.SZ` 成功observed，1行、industry“黄金”，fetched_at为03:28:36.067021 UTC，digest为 `27e5c4f99a194ec00d2e7619d01c0015b3c6eb85e9a9dff5a82fe4736eb7070e`，完整报告保存在上述目录 `stock-basic-system.json`。这仅验证上午单股真实系统链路，不代表收盘后信号或行业全覆盖。
+
+研究bundle分别安装到 `/opt/qagent-research/daily-financial-20260918-v7` 和 `/opt/qagent-research/financial-forward-20260918-v9`；manifest SHA256分别为 `3edf4fa5b867bfe2cd452f2f4a8504bec47fe458bfa697abf14154a971daf793`、`b09e7e639493eb8cda5e9a2da321956dded47bbbb7a202c4342c93de149dd097`。首次preview因root Python生成的额外`__pycache__`被严格门禁拒绝，cron未变；该缓存已移至`/var/tmp/qagent-0918-installer-pycache`留证，后续使用`python3 -B`。preview随后planned/old；系统API通过后execute为upgraded/new，复核already_installed/new，均`started_job=false`。私有收据 `/var/backups/qagent-financial-daily-dependencies/before-install-xztb_bw9.json` 为0600。
+
+新daily/forward cron均root:root 0644，SHA256分别为 `04e0023e784aad93a006011a16f6e7061f2bd1adc6bf8c1e78594542c4827e5f`、`f03ae7a5e252d95191967d85d79b956aed6d00d0bcc973e09e8f48ce8ad7b6ef`。原13个daily时槽均包含`--daily-frozen-industry`和每日baseline参数，原4个forward时槽均包含同样baseline目录参数；rank目录`/var/lib/qagent-research/financial-daily-ranks`为luozhenkun:luozhenkun 0750。G2 cron SHA仍 `32eb4b92042ee48d0ba6e1ede4bf9f0c71e0b5eb495bbfb941f660ff8bc0cfe9`，09-14历史signal SHA仍 `1466a90ab84a5cbed989ef187ecc0c37a6aa9cb055253a162aa81ac8d7315732`。
+
+已实现、已测试、已push、已部署后端及研究链路；没有手动启动完整daily/forward批次。自然同日baseline、行业、完整可判别五对及真实5/10/20成熟收益仍待验，G2-FQ3不标完成；G3自然补价provider/cursor/覆盖效果仍待验。唯一模拟账户、历史账本、交易规则和研究晋级权限保留。
+
+主任务后续确认自然03:30 slot于03:30:34.539601 UTC完成，状态enabled/waiting、attempts2/completed2、skipped_slots0、last_error=null。与03:30:00.047722启动时间配对，构成恢复后单次自然10分钟触发及完成证据，不代表所有股票行情实时性或长期准点验收。
