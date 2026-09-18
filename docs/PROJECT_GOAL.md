@@ -382,3 +382,11 @@ first-seal仍不可变，首次unavailable封存后不因后来G2补到而重写
 [资金流核验与本轮证据](research/moneyflow-readiness-20260918.md)确认09-17归档moneyflow为20/20同日单行、现有Financial合格15/20、wrapper及20个response摘要一致。现有六指标未消费资金流；根目录只有09-11/09-14/09-17三个资金日期，不能称连续资金流。供应方单位/统计契约尚待确认，仅固定一个大/特大单金额差比的第七等权指标提案，未实施新权重、采集或调度。对同15股的一次性内存敏感性计算与主任务独立Fraction复核一致：Top5集合仍5/5、只内部顺序变化；不是合法历史forward或收益增益。唯一预期消费者仍为原Financial lane，保留同集合、同成本、原配平与停止条件，不增账户或长期并行策略。
 
 主任务联合109 passed、1项warning（7.69秒），最终backend全量**2818 passed、3项既有warnings（238.22秒、exit0）**，Ruff及diff检查通过。本轮新增代码已实现、已测试，**未commit、未push、未部署**；此前`edbd9fa`已部署记录保留为历史事实。下一步为受控发布这两项小变更后验收自然逐股行情时效与收盘后baseline/行业/Financial链路，未提高G2/G7完成状态或交易权限。两个代码子任务结果已消费并关闭，会话终态task_complete已核验但仍被PID41183打开，未删除会话；文档子任务由主任务结束后按同样安全条件复核，cleanup hook保持启用，不把任务关闭计为存储已清理。
+
+### 2026-09-18 G7 观测发布准备
+
+源提交`e999e4f5433ad424b441cc73f3950a4f87445389`已提交并push，更新上段未提交的历史状态；主任务本轮相关109 passed、1项既有warning（9.39秒），独立review四文件89 passed、1项既有warning（9.25秒），无P1/P2阻塞。API/storage变更会改变walk-forward research digest，recommendation alignment全包摘要也会改变，保留身份失配拒绝规则；G2冻结五文件及factor-shadow scorer未变。资金流指标仍未实施。
+
+主任务07:05 UTC确认旧current仍edbd9fa，tick为outside_session、07:00 slot于07:00:37.417870完成、last_error=null；automation仍有1个active cycle/stage，仅准备新release，尚未确认本轮部署。完整范围、验证与后续发布证据见[分钟观测发布记录](research/minute-freshness-rollout-20260918.md)。G7逐股自然行情时效及G2-FQ3收盘后链路、成熟收益继续待验，不提高目标完成状态或交易权限。
+
+本轮最终暂存验收：`/opt/qagent/releases/e999e4f5433ad424b441cc73f3950a4f87445389`已clone并核验exact SHA，Python3.11的uv frozen、临时DB隔离startup、npm ci/build均通过，仅有既有chunk超过500kB warning。07:08及07:09:47 UTC guarded helper preview安全exit1、未execute；07:10:27 UTC仍为1cycle/1stage，factor_shadow自07:05:13.805949 running，最近三次该阶段约15–22分钟，未强停。本轮已创建云端暂存release、依赖和构建文件，未修改运行中的服务配置、cron、账本、current或交易规则，三份研究cron摘要保持原值；已push、已暂存、**未部署**，没有本轮切换后的ledger/settings验收。部署待自然空闲后重新检查门禁，本轮未设置自动续办；不将隔离构建通过等同自然分钟时效或研究验收。
