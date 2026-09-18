@@ -583,12 +583,7 @@ def health() -> dict[str, str]:
 
 @router.get("/provider-status")
 def provider_status() -> dict[str, list[object]]:
-    recent_runs = _repo().list_scan_runs(limit=20)
-    latest_full_market = next(
-        (run for run in recent_runs if run.mode == "full_market_batch"),
-        None,
-    )
-    data_health = latest_full_market.data_health if latest_full_market is not None else None
+    data_health = _repo().get_recent_full_market_data_health(limit=20)
     return {
         "providers": [
             status.model_dump(mode="json")

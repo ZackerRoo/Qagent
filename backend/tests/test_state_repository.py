@@ -4,7 +4,7 @@ from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.pool import NullPool, QueuePool
 
 from qagent.db import Base, create_db_engine, create_session_factory, initialize_database
@@ -298,6 +298,55 @@ def test_repository_saves_scan_run_and_opportunity_snapshots(tmp_path):
     assert repo.get_opportunity_snapshot(snapshots[0].snapshot_id) == snapshots[0]
     assert repo.get_opportunity_snapshot("missing-snapshot") is None
     assert snapshots[0].card["instrument_id"] == "US:TEST"
+
+
+def test_recent_full_market_health_preserves_window_and_tie_order(tmp_path):
+    repo = make_repo(tmp_path)
+    assert repo.get_recent_full_market_data_health() is None
+    created = datetime(2026, 9, 18, tzinfo=timezone.utc)
+    with repo.session_factory() as session:
+        for index in range(22):
+            session.add(ScanRunRow(
+                run_id=f"run-{index:02d}", provider="free",
+                mode="full_market_batch" if index in {0, 2, 3} else "symbols",
+                symbols="[]", data_health=json.dumps({"marker": str(index)}),
+                created_at=created,
+            ))
+        session.commit()
+    # Equal timestamps retain the existing descending run_id tie-break.
+    expected = next(run.data_health for run in repo.list_scan_runs()
+                    if run.mode == "full_market_batch")
+    assert repo.get_recent_full_market_data_health() == expected == {"marker": "3"}
+    assert repo.get_recent_full_market_data_health(limit=18) is None
+    assert repo.get_recent_full_market_data_health(limit=0) is None
+
+
+def test_recent_full_market_health_does_not_deserialize_unused_runs(tmp_path):
+    repo = make_repo(tmp_path)
+    with repo.session_factory() as session:
+        session.add_all([
+            ScanRunRow(run_id="older", provider="free", mode="full_market_batch",
+                       symbols="invalid unused symbols", data_health="invalid unused health",
+                       created_at=datetime(2026, 9, 17, tzinfo=timezone.utc)),
+            ScanRunRow(run_id="latest", provider="free", mode="full_market_batch",
+                       symbols="invalid unused symbols", data_health='{"fuyao_telemetry":"partial"}',
+                       created_at=datetime(2026, 9, 18, tzinfo=timezone.utc)),
+        ])
+        session.commit()
+    statements = []
+    engine = repo.session_factory.kw["bind"]
+
+    def record_statement(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record_statement)
+    try:
+        health = repo.get_recent_full_market_data_health()
+    finally:
+        event.remove(engine, "before_cursor_execute", record_statement)
+    assert len(statements) == 1
+    assert "scan_runs.symbols" not in statements[0]
+    assert health == {"fuyao_telemetry": "partial"}
 
 
 def test_top_daily_opportunities_support_protocol_pool_and_isolate_provider(tmp_path):

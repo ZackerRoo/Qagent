@@ -569,6 +569,11 @@ def test_a_share_paper_trade_opens_from_post_signal_minute_cross(tmp_path):
 
     assert result.data_health["paper_minute_checked"] == "1"
     assert result.data_health["paper_minute_rows"] == "2"
+    freshness = json.loads(result.data_health["paper_minute_freshness"])[trade.trade_id]
+    assert freshness["instrument_id"] == "CN:688052"
+    assert freshness["latest_effective_asof_at"] == "2026-07-02T13:05:00+08:00"
+    assert freshness["as_of_lag_seconds"] == "3300.0"
+    assert all(isinstance(value, str) for value in result.data_health.values())
     assert trade.status == "open"
     assert trade.entry_date == date(2026, 7, 2)
     assert trade.entry_price == Decimal("10.0000")

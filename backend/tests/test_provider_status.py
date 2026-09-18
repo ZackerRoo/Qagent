@@ -93,19 +93,10 @@ def test_provider_status_api_uses_latest_full_market_health(monkeypatch):
             "Repo",
             (),
             {
-                "list_scan_runs": lambda self, limit: [
-                    type(
-                        "Run",
-                        (),
-                        {
-                            "mode": "full_market_batch",
-                            "data_health": {
-                                "strategy_announcements": "8",
-                                "fuyao_telemetry": "partial",
-                            },
-                        },
-                    )()
-                ]
+                "get_recent_full_market_data_health": lambda self, limit: {
+                    "strategy_announcements": "8",
+                    "fuyao_telemetry": "partial",
+                }
             },
         )(),
     )

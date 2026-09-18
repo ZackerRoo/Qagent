@@ -372,3 +372,13 @@ first-seal仍不可变，首次unavailable封存后不因后来G2补到而重写
 新系统`stock_basic`真实单股成功observed/行业“黄金”后，daily-v7与forward-v9受控升级为upgraded/new，复核already_installed/new、started_job=false；receipt为`/var/backups/qagent-financial-daily-dependencies/before-install-xztb_bw9.json`。新13/4时槽及行业/baseline参数、完整manifest和cron摘要见[每日依赖部署记录](research/financial-daily-dependencies-20260918.md)。G2 cron和09-14历史signal摘要保持原值，rank目录服务用户可写。已实现、已测试、已push、已部署；没有手动启动完整财务批次，G2-FQ3自然baseline/行业/可判别五对及5/10/20收益、G3自然补价provider/cursor/覆盖仍待验，不提升目标完成状态、正式Ranking或交易权限。
 
 恢复后自然03:30 UTC tick于03:30:00.047722启动、03:30:34.539601完成，enabled/waiting、attempts2/completed2、skipped_slots0、last_error=null。这是单次自然触发与完成证据，不泛化为所有股票行情实时性或长期准点；上述部署暂停影响更新及时性，账本未改写。
+
+### 2026-09-18 G7 行情时效观测与 G2-FQ 资金流有界核验
+
+主任务06:41–06:45 UTC只读核验current仍为`edbd9fa`、health ok；最新06:20/06:30/06:40三个slot各9 checked/9 resolved，分钟行数10534/10602/10676、日线降级均0，9个active持仓latest_date为09-18。06:40 slot实际06:41:12.262763启动、迟到72.262763秒，06:41:49.620261完成，attempts14/completed13、error null；这些是当次运行证据，不能证明逐只分钟无延迟。北京时间14:45尚未到16:40研究时段，当时daily-ranks为0、signals2/latest09-17、daily根目录12文件/latest09-17，不能据此判定当日收盘后链路失败。
+
+本轮最小实现为逐只分钟数据时间/延迟观测及provider-status最近20条health读取范围收敛，不改模拟交易语义或账户规则。实施子任务云端单次只读比较、主任务复核：health读取32,715,801→1,397,149字节，SQL 0.271318→0.031141秒、解析0.665141→0.023810秒，health_equal；真实API200/0.419146秒，未复现此前15秒超时，不能确证唯一根因或长期性能。
+
+[资金流核验与本轮证据](research/moneyflow-readiness-20260918.md)确认09-17归档moneyflow为20/20同日单行、现有Financial合格15/20、wrapper及20个response摘要一致。现有六指标未消费资金流；根目录只有09-11/09-14/09-17三个资金日期，不能称连续资金流。供应方单位/统计契约尚待确认，仅固定一个大/特大单金额差比的第七等权指标提案，未实施新权重、采集或调度。对同15股的一次性内存敏感性计算与主任务独立Fraction复核一致：Top5集合仍5/5、只内部顺序变化；不是合法历史forward或收益增益。唯一预期消费者仍为原Financial lane，保留同集合、同成本、原配平与停止条件，不增账户或长期并行策略。
+
+主任务联合109 passed、1项warning（7.69秒），最终backend全量**2818 passed、3项既有warnings（238.22秒、exit0）**，Ruff及diff检查通过。本轮新增代码已实现、已测试，**未commit、未push、未部署**；此前`edbd9fa`已部署记录保留为历史事实。下一步为受控发布这两项小变更后验收自然逐股行情时效与收盘后baseline/行业/Financial链路，未提高G2/G7完成状态或交易权限。两个代码子任务结果已消费并关闭，会话终态task_complete已核验但仍被PID41183打开，未删除会话；文档子任务由主任务结束后按同样安全条件复核，cleanup hook保持启用，不把任务关闭计为存储已清理。

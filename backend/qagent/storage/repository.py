@@ -2170,6 +2170,24 @@ class QagentRepository:
             )
             return [self._scan_run_from_row(row) for row in rows]
 
+    def get_recent_full_market_data_health(self, limit: int = 20) -> dict[str, str] | None:
+        """Read only the health used by provider status, within the recent-run window."""
+        with self.session_factory() as session:
+            recent = (
+                session.query(ScanRunRow.run_id, ScanRunRow.mode, ScanRunRow.created_at)
+                .order_by(ScanRunRow.created_at.desc(), ScanRunRow.run_id.desc())
+                .limit(limit)
+                .subquery()
+            )
+            row = (
+                session.query(ScanRunRow.data_health)
+                .join(recent, ScanRunRow.run_id == recent.c.run_id)
+                .filter(recent.c.mode == "full_market_batch")
+                .order_by(recent.c.created_at.desc(), recent.c.run_id.desc())
+                .first()
+            )
+            return json.loads(row[0] or "{}") if row is not None else None
+
     def get_current_paper_model_cohort(
         self,
         provider: str,

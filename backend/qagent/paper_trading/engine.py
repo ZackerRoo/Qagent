@@ -1,5 +1,6 @@
 from collections import defaultdict
 from dataclasses import dataclass, replace
+import json
 from qagent.storage.paper_writer import paper_writer_operation
 from datetime import date, datetime, time, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
@@ -901,7 +902,13 @@ def update_paper_trades(
     daily_fallback_rows = 0
     unaffordable_missed = 0
     resolved_trade_ids: set[str] = set()
+    minute_freshness: dict[str, dict[str, str]] = {}
     for trade in active:
+        minute_observation = {
+            "instrument_id": trade.instrument_id,
+            "reason": "not_checked",
+        }
+        minute_freshness[trade.trade_id] = minute_observation
         source_context = repo.get_trade_source_context(trade.source_snapshot_id)
         execution_context = _paper_execution_context(
             trade,
@@ -924,6 +931,7 @@ def update_paper_trades(
                 execution_context,
             )
             unaffordable_missed += 1
+            minute_observation["reason"] = "unaffordable_pending"
             resolved_trade_ids.add(trade.trade_id)
             continue
         minute_update, checked, rows, minute_deferred = _try_evaluate_trade_with_minutes(
@@ -935,6 +943,7 @@ def update_paper_trades(
             as_of=execution_time,
             source_context=source_context,
             execution_context=execution_context,
+            minute_observation=minute_observation,
         )
         minute_checked += checked
         minute_rows += rows
@@ -990,6 +999,7 @@ def update_paper_trades(
         ),
         "paper_minute_checked": str(minute_checked),
         "paper_minute_rows": str(minute_rows),
+        "paper_minute_freshness": json.dumps(minute_freshness, separators=(",", ":")),
         "paper_daily_fallback_checked": str(daily_fallback_checked),
         "paper_daily_fallback_rows": str(daily_fallback_rows),
         "paper_unaffordable_pending_missed": str(unaffordable_missed),
@@ -4729,23 +4739,30 @@ def _try_evaluate_trade_with_minutes(
     as_of: datetime,
     source_context: PaperTradeSourceContext | None = None,
     execution_context: _PaperExecutionContext | None = None,
+    minute_observation: dict[str, str] | None = None,
 ) -> tuple[dict[str, object] | None, int, int, int]:
+    observation = minute_observation if minute_observation is not None else {}
     getter = getattr(provider, "get_minute_bars", None)
     if getter is None or not _is_a_share_trade(trade):
+        observation["reason"] = "no_minute_getter" if getter is None else "not_a_share"
         return None, 0, 0, 0
     if source_context is None:
         source_context = repo.get_trade_source_context(trade.source_snapshot_id)
     signal_datetime = _trade_signal_datetime(trade, source_context)
     if signal_datetime is None:
+        observation["reason"] = "missing_signal_time"
         return None, 0, 0, 0
     start = signal_datetime
     end = _a_share_local_datetime(as_of).replace(tzinfo=None)
     try:
         minute_bars = getter([trade.instrument_id], start, end)
     except Exception:
+        observation["reason"] = "minute_request_error"
         return None, 1, 0, 0
     if minute_bars.empty:
+        observation["reason"] = "empty_response"
         return None, 1, 0, 0
+    observation.update(_minute_response_freshness(minute_bars, signal_datetime, as_of))
     update = _evaluate_trade_with_minutes(
         trade,
         minute_bars,
@@ -4758,6 +4775,48 @@ def _try_evaluate_trade_with_minutes(
     )
     deferred = int(update.pop(_DEFERRED_FILL_UPDATE_KEY, 0))
     return update, 1, len(minute_bars), deferred
+
+
+def _minute_response_freshness(
+    minute_bars: pd.DataFrame, signal_datetime: datetime, as_of: datetime,
+) -> dict[str, str]:
+    """Observe the response, not execution consumption (which may return early).
+
+    The as-of subset is diagnostic only; it does not filter executor inputs.
+    Naive provider timestamps follow the existing Shanghai wall-clock contract.
+    """
+    try:
+        if "timestamp" not in minute_bars:
+            return {"reason": "missing_timestamp_column"}
+        # Match the executor's ordering/parsing without mutating its frame.
+        parsed = pd.to_datetime(
+            minute_bars.sort_values("timestamp")["timestamp"], errors="coerce",
+        )
+        valid = [
+            _a_share_local_datetime(value.to_pydatetime())
+            for value in parsed if not pd.isna(value)
+        ]
+        cutoff = _a_share_local_datetime(as_of)
+        signal = _a_share_local_datetime(signal_datetime)
+        effective = [value for value in valid if signal < value <= cutoff]
+        result = {
+            "as_of": cutoff.isoformat(),
+            "invalid_timestamp_rows": str(int(parsed.isna().sum())),
+            "future_timestamp_rows": str(sum(value > cutoff for value in valid)),
+            "reason": "available" if effective else "no_post_signal_asof_timestamp",
+        }
+        if valid:
+            result["latest_received_at"] = max(valid).isoformat()
+        else:
+            result["reason"] = "no_valid_timestamp"
+        if effective:
+            latest = max(effective)
+            result["latest_effective_asof_at"] = latest.isoformat()
+            result["as_of_lag_seconds"] = str((cutoff - latest).total_seconds())
+        return result
+    except Exception:
+        # Observability must never turn a successful update into an error.
+        return {"reason": "timestamp_diagnostic_error"}
 
 
 def _evaluate_trade_with_minutes(
