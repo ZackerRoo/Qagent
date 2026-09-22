@@ -78,3 +78,13 @@
 已实现、已测试、已push、已部署后端及研究链路；没有手动启动完整daily/forward批次。自然同日baseline、行业、完整可判别五对及真实5/10/20成熟收益仍待验，G2-FQ3不标完成；G3自然补价provider/cursor/覆盖效果仍待验。唯一模拟账户、历史账本、交易规则和研究晋级权限保留。
 
 主任务后续确认自然03:30 slot于03:30:34.539601 UTC完成，状态enabled/waiting、attempts2/completed2、skipped_slots0、last_error=null。与03:30:00.047722启动时间配对，构成恢复后单次自然10分钟触发及完成证据，不代表所有股票行情实时性或长期准点验收。
+
+## 每日 Financial cron 长命令修复（2026-09-22）
+
+本次只修复 Financial daily → forward 研究链路的调度包装方式，不改变模拟交易链路。排查发现旧版 daily cron 的单条命令约 1166 个字符；云端 `daily-financial` 生产产物因该命令没有按计划更新，forward 因而持续得到 `waiting_for_daily`。这不是模拟盘成交、持仓、现金或正式 Ranking 的故障。
+
+首次包装器修复的云端预检被安全拒绝，原因不是放宽门禁失败：安装器仍假设历史基线为 daily-v6 / forward-v8，而生产实际已是 daily-v7 / forward-v9。该拒绝发生在 cron 改写前。后续修复将实际生产基线严格钉死：daily cron SHA256 为 `04e0023e784aad93a006011a16f6e7061f2bd1adc6bf8c1e78594542c4827e5f`、forward cron SHA256 为 `f03ae7a5e252d95191967d85d79b956aed6d00d0bcc973e09e8f48ce8ad7b6ef`，并同时校验对应 v7/v9 bundle manifest；不匹配仍拒绝升级。
+
+实现提交 `f66f1d1`（短 daily wrapper）与 `ff27283`（实际 v7/v9 基线对齐）均已 push。聚焦测试共 **9 passed**，Ruff 与 `git diff --check` 通过。受控部署使用新的 daily-v9 / forward-v11 研究 bundle：首次 preview 为 `planned`，显式 execute 为 `upgraded`，第二次复核为 `already_installed`。13 条 daily cron wrapper 命令最长 161 字符，forward 命令最长 803 字符；健康检查正常。升级备份收据为 `/var/backups/qagent-financial-daily-dependencies/before-install-2o_px4bs.json`，全过程 `started_job=false`。
+
+部署没有手动启动 daily 或 forward 任务，没有改写账本、模拟盘、正式 Ranking、交易规则或冻结输入。下一项验收只能等待自然调度写出首份新的同日 daily 产物，并由 forward 正常消费；随后才按既有协议观察完整可判别信号与 5/10/20 交易日成熟结果，不能以本次安装成功宣称选股效果已经提升。
