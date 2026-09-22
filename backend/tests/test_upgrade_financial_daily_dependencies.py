@@ -16,18 +16,19 @@ sys.path.pop(0)
 
 
 def test_schedule_arguments_and_historical_helpers_unchanged():
-    previous = upgrade.baseline.configured_engine()
-    before = previous.daily_cron(), previous.forward_cron()
     engine = upgrade.configured_engine()
     checksum = engine.previous.base.checksum
     assert checksum(engine.old_daily_cron()) == engine.DAILY_OLD_CRON_SHA
     assert checksum(engine.old_forward_cron()) == engine.FORWARD_OLD_CRON_SHA
-    assert str(engine.DAILY_OLD_BUNDLE).endswith("20260917-v6")
-    assert str(engine.FORWARD_OLD_BUNDLE).endswith("20260917-v8")
-    assert str(engine.DAILY_NEW_BUNDLE).endswith("20260922-v8")
-    assert str(engine.FORWARD_NEW_BUNDLE).endswith("20260922-v10")
-    assert engine.DAILY_OLD_MANIFEST_SHA == "1e942320d572f2a61c5e0f155c3c2dcb2a4e0e1589b7c77f7af854f275cb8d55"
-    assert engine.FORWARD_OLD_MANIFEST_SHA == "92717c3ff89a50efe27a627a40d2549a6ab585989330c9111b045dfc45e6838b"
+    before = engine.old_daily_cron(), engine.old_forward_cron()
+    assert str(engine.DAILY_OLD_BUNDLE).endswith("20260918-v7")
+    assert str(engine.FORWARD_OLD_BUNDLE).endswith("20260918-v9")
+    assert str(engine.DAILY_NEW_BUNDLE).endswith("20260922-v9")
+    assert str(engine.FORWARD_NEW_BUNDLE).endswith("20260922-v11")
+    assert engine.DAILY_OLD_CRON_SHA == "04e0023e784aad93a006011a16f6e7061f2bd1adc6bf8c1e78594542c4827e5f"
+    assert engine.FORWARD_OLD_CRON_SHA == "f03ae7a5e252d95191967d85d79b956aed6d00d0bcc973e09e8f48ce8ad7b6ef"
+    assert engine.DAILY_OLD_MANIFEST_SHA == "3edf4fa5b867bfe2cd452f2f4a8504bec47fe458bfa697abf14154a971daf793"
+    assert engine.FORWARD_OLD_MANIFEST_SHA == "b09e7e639493eb8cda5e9a2da321956dded47bbbb7a202c4342c93de149dd097"
     for raw, old_raw, count in ((engine.forward_cron(), before[1], 4),):
         lines = [s for s in raw.decode().splitlines() if "run_financial_forward_research.py" in s]
         old_lines = [s for s in old_raw.decode().splitlines() if "run_financial_forward_research.py" in s]
@@ -46,11 +47,11 @@ def test_schedule_arguments_and_historical_helpers_unchanged():
         assert line.split(None, 6)[:6] == old_line.split(None, 6)[:6]
         assert len(line) < 1000
         assert "&&" not in line
-        assert "/daily-financial-20260922-v8/scripts/run_daily_financial_same_day.py" in line
+        assert "/daily-financial-20260922-v9/scripts/run_daily_financial_same_day.py" in line
         assert subprocess.run(["/bin/sh", "-n", "-c", line.split(None, 6)[6]]).returncode == 0
     assert all(len(line) < 1000 for line in engine.daily_cron().decode().splitlines())
     assert engine.forward_cron().decode().count("--daily-frozen-industry") == 0
-    assert (previous.daily_cron(), previous.forward_cron()) == before
+    assert upgrade._v7_v9_crons() == before
     assert upgrade.baseline.DAILY_REQUIRED < upgrade.DAILY_REQUIRED
     with pytest.raises(ValueError, match="unexpected_upgrade_baseline"):
         engine._validate_manifests("0" * 64, "0" * 64, "0" * 64, "0" * 64)

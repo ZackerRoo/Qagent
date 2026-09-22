@@ -23,8 +23,8 @@ from uuid import uuid4
 
 PROTOCOL = "financial-daily-same-day-wrapper-v1"
 MAX_OUTPUT_BYTES = 64 * 1024
-DAILY_BUNDLE = Path("/opt/qagent-research/daily-financial-20260922-v8")
-FORWARD_BUNDLE = Path("/opt/qagent-research/financial-forward-20260922-v10")
+DAILY_BUNDLE = Path("/opt/qagent-research/daily-financial-20260922-v9")
+FORWARD_BUNDLE = Path("/opt/qagent-research/financial-forward-20260922-v11")
 ATTEMPT_DIR = Path("/var/lib/qagent-research/daily-financial/wrapper-attempts")
 BACKEND = Path("/opt/qagent/current/backend")
 

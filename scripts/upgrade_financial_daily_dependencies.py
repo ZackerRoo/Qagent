@@ -21,19 +21,54 @@ BASELINE_ARGUMENTS = (
     " --daily-baseline-frozen-dir /var/lib/qagent-research/g2-frozen-v1"
     " --daily-baseline-rank-dir /var/lib/qagent-research/financial-daily-ranks"
 )
+DAILY_V7_BUNDLE = Path("/opt/qagent-research/daily-financial-20260918-v7")
+FORWARD_V9_BUNDLE = Path("/opt/qagent-research/financial-forward-20260918-v9")
+
+
+def _v7_v9_crons():
+    """Rebuild the only accepted production v7/v9 cron templates.
+
+    The inherited late-scan engine produces v6/v8 templates.  v7/v9 added the
+    frozen-industry flag and daily-baseline arguments, so treating that older
+    engine output as the installed state would both reject production and risk
+    generating the wrong rollback target.
+    """
+    previous = baseline.configured_engine()
+    daily = previous.daily_cron()
+    forward = previous.forward_cron()
+    if (previous.previous.base.checksum(daily) != "340f8484b34d92a0680bc7ff56519e9cbd2c03239df1632a60b96660169fdda0"
+            or previous.previous.base.checksum(forward) != "ac3898d5f73f28dcb10e429dc017368508507d606a05917a29d164fccd703574"):
+        raise ValueError("v7_v9_baseline_template_changed")
+    daily = previous._rewrite_bundle(daily, previous.DAILY_NEW_BUNDLE, DAILY_V7_BUNDLE, 13)
+    daily = previous._rewrite_bundle(daily, previous.FORWARD_NEW_BUNDLE, FORWARD_V9_BUNDLE, 13)
+    marker = b" --bounded-same-day && "
+    if daily.count(marker) != 13:
+        raise ValueError("unexpected_v7_daily_command_shape")
+    daily = daily.replace(marker, b" --bounded-same-day --daily-frozen-industry && ")
+
+    def add_arguments(raw, expected):
+        lines = raw.decode().splitlines()
+        matches = [i for i, line in enumerate(lines) if "run_financial_forward_research.py" in line]
+        if len(matches) != expected or "--daily-baseline-" in raw.decode():
+            raise ValueError("unexpected_v7_forward_command_shape")
+        for index in matches:
+            lines[index] += BASELINE_ARGUMENTS
+        return ("\n".join(lines) + "\n").encode()
+
+    return add_arguments(daily, 13), add_arguments(
+        previous._rewrite_bundle(forward, previous.FORWARD_NEW_BUNDLE, FORWARD_V9_BUNDLE, 4), 4)
 
 
 def configured_engine():
     engine = baseline.configured_engine()
-    old = baseline.configured_engine()
-    engine.DAILY_OLD_BUNDLE = old.DAILY_NEW_BUNDLE
-    engine.FORWARD_OLD_BUNDLE = old.FORWARD_NEW_BUNDLE
-    engine.DAILY_NEW_BUNDLE = Path("/opt/qagent-research/daily-financial-20260922-v8")
-    engine.FORWARD_NEW_BUNDLE = Path("/opt/qagent-research/financial-forward-20260922-v10")
-    engine.DAILY_OLD_CRON_SHA = "340f8484b34d92a0680bc7ff56519e9cbd2c03239df1632a60b96660169fdda0"
-    engine.FORWARD_OLD_CRON_SHA = "ac3898d5f73f28dcb10e429dc017368508507d606a05917a29d164fccd703574"
-    engine.DAILY_OLD_MANIFEST_SHA = "1e942320d572f2a61c5e0f155c3c2dcb2a4e0e1589b7c77f7af854f275cb8d55"
-    engine.FORWARD_OLD_MANIFEST_SHA = "92717c3ff89a50efe27a627a40d2549a6ab585989330c9111b045dfc45e6838b"
+    engine.DAILY_OLD_BUNDLE = DAILY_V7_BUNDLE
+    engine.FORWARD_OLD_BUNDLE = FORWARD_V9_BUNDLE
+    engine.DAILY_NEW_BUNDLE = Path("/opt/qagent-research/daily-financial-20260922-v9")
+    engine.FORWARD_NEW_BUNDLE = Path("/opt/qagent-research/financial-forward-20260922-v11")
+    engine.DAILY_OLD_CRON_SHA = "04e0023e784aad93a006011a16f6e7061f2bd1adc6bf8c1e78594542c4827e5f"
+    engine.FORWARD_OLD_CRON_SHA = "f03ae7a5e252d95191967d85d79b956aed6d00d0bcc973e09e8f48ce8ad7b6ef"
+    engine.DAILY_OLD_MANIFEST_SHA = "3edf4fa5b867bfe2cd452f2f4a8504bec47fe458bfa697abf14154a971daf793"
+    engine.FORWARD_OLD_MANIFEST_SHA = "b09e7e639493eb8cda5e9a2da321956dded47bbbb7a202c4342c93de149dd097"
     engine.BACKUPS = Path("/var/backups/qagent-financial-daily-dependencies")
     engine.DAILY_REQUIRED = engine.FORWARD_REQUIRED = DAILY_REQUIRED
 
@@ -58,8 +93,8 @@ def configured_engine():
             raise ValueError("daily_dependencies_baseline_changed")
         return raw
 
-    engine.old_daily_cron = lambda: pinned_template(old.daily_cron, engine.DAILY_OLD_CRON_SHA)
-    engine.old_forward_cron = lambda: pinned_template(old.forward_cron, engine.FORWARD_OLD_CRON_SHA)
+    engine.old_daily_cron = lambda: pinned_template(lambda: _v7_v9_crons()[0], engine.DAILY_OLD_CRON_SHA)
+    engine.old_forward_cron = lambda: pinned_template(lambda: _v7_v9_crons()[1], engine.FORWARD_OLD_CRON_SHA)
 
     def add_forward_arguments(raw, expected):
         lines = raw.decode().splitlines()
@@ -88,7 +123,10 @@ def configured_engine():
     def forward_cron():
         raw = engine._rewrite_bundle(engine.old_forward_cron(), engine.FORWARD_OLD_BUNDLE,
                                      engine.FORWARD_NEW_BUNDLE, 4)
-        return add_forward_arguments(raw, 4)
+        # v9 already carries the reviewed daily-baseline arguments.  Adding
+        # them again would both change its semantics and reject the real v9
+        # production baseline during a safe preview.
+        return raw
 
     engine.daily_cron, engine.forward_cron = daily_cron, forward_cron
     return engine
