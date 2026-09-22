@@ -24,11 +24,11 @@ def test_schedule_arguments_and_historical_helpers_unchanged():
     assert checksum(engine.old_forward_cron()) == engine.FORWARD_OLD_CRON_SHA
     assert str(engine.DAILY_OLD_BUNDLE).endswith("20260917-v6")
     assert str(engine.FORWARD_OLD_BUNDLE).endswith("20260917-v8")
-    assert str(engine.DAILY_NEW_BUNDLE).endswith("20260918-v7")
-    assert str(engine.FORWARD_NEW_BUNDLE).endswith("20260918-v9")
+    assert str(engine.DAILY_NEW_BUNDLE).endswith("20260922-v8")
+    assert str(engine.FORWARD_NEW_BUNDLE).endswith("20260922-v10")
     assert engine.DAILY_OLD_MANIFEST_SHA == "1e942320d572f2a61c5e0f155c3c2dcb2a4e0e1589b7c77f7af854f275cb8d55"
     assert engine.FORWARD_OLD_MANIFEST_SHA == "92717c3ff89a50efe27a627a40d2549a6ab585989330c9111b045dfc45e6838b"
-    for raw, old_raw, count in ((engine.daily_cron(), before[0], 13), (engine.forward_cron(), before[1], 4)):
+    for raw, old_raw, count in ((engine.forward_cron(), before[1], 4),):
         lines = [s for s in raw.decode().splitlines() if "run_financial_forward_research.py" in s]
         old_lines = [s for s in old_raw.decode().splitlines() if "run_financial_forward_research.py" in s]
         assert len(lines) == count
@@ -37,7 +37,18 @@ def test_schedule_arguments_and_historical_helpers_unchanged():
             assert line.count(upgrade.BASELINE_ARGUMENTS) == 1
             assert "--budget-seconds 300" in line
             assert subprocess.run(["/bin/sh", "-n", "-c", line.split(None, 6)[6]]).returncode == 0
-    assert engine.daily_cron().decode().count("--daily-frozen-industry &&") == 13
+    daily_lines = [s for s in engine.daily_cron().decode().splitlines()
+                   if "run_daily_financial_same_day.py" in s]
+    old_daily_lines = [s for s in before[0].decode().splitlines()
+                       if "collect_daily_documented_research.py" in s]
+    assert len(daily_lines) == len(old_daily_lines) == 13
+    for line, old_line in zip(daily_lines, old_daily_lines):
+        assert line.split(None, 6)[:6] == old_line.split(None, 6)[:6]
+        assert len(line) < 1000
+        assert "&&" not in line
+        assert "/daily-financial-20260922-v8/scripts/run_daily_financial_same_day.py" in line
+        assert subprocess.run(["/bin/sh", "-n", "-c", line.split(None, 6)[6]]).returncode == 0
+    assert all(len(line) < 1000 for line in engine.daily_cron().decode().splitlines())
     assert engine.forward_cron().decode().count("--daily-frozen-industry") == 0
     assert (previous.daily_cron(), previous.forward_cron()) == before
     assert upgrade.baseline.DAILY_REQUIRED < upgrade.DAILY_REQUIRED

@@ -14,6 +14,7 @@ import upgrade_financial_late_scan as baseline
 HELPER = "scripts/upgrade_financial_daily_dependencies.py"
 DAILY_REQUIRED = FORWARD_REQUIRED = baseline.DAILY_REQUIRED | {
     HELPER, "scripts/financial_daily_baseline.py", "scripts/financial_industry_evidence.py",
+    "scripts/run_daily_financial_same_day.py",
 }
 BASELINE_ARGUMENTS = (
     " --daily-baseline-source-dir /var/lib/qagent-research/g2-forward-sources"
@@ -27,8 +28,8 @@ def configured_engine():
     old = baseline.configured_engine()
     engine.DAILY_OLD_BUNDLE = old.DAILY_NEW_BUNDLE
     engine.FORWARD_OLD_BUNDLE = old.FORWARD_NEW_BUNDLE
-    engine.DAILY_NEW_BUNDLE = Path("/opt/qagent-research/daily-financial-20260918-v7")
-    engine.FORWARD_NEW_BUNDLE = Path("/opt/qagent-research/financial-forward-20260918-v9")
+    engine.DAILY_NEW_BUNDLE = Path("/opt/qagent-research/daily-financial-20260922-v8")
+    engine.FORWARD_NEW_BUNDLE = Path("/opt/qagent-research/financial-forward-20260922-v10")
     engine.DAILY_OLD_CRON_SHA = "340f8484b34d92a0680bc7ff56519e9cbd2c03239df1632a60b96660169fdda0"
     engine.FORWARD_OLD_CRON_SHA = "ac3898d5f73f28dcb10e429dc017368508507d606a05917a29d164fccd703574"
     engine.DAILY_OLD_MANIFEST_SHA = "1e942320d572f2a61c5e0f155c3c2dcb2a4e0e1589b7c77f7af854f275cb8d55"
@@ -70,14 +71,19 @@ def configured_engine():
         return ("\n".join(lines) + "\n").encode()
 
     def daily_cron():
-        raw = engine._rewrite_bundle(engine.old_daily_cron(), engine.DAILY_OLD_BUNDLE,
-                                     engine.DAILY_NEW_BUNDLE, 13)
-        raw = engine._rewrite_bundle(raw, engine.FORWARD_OLD_BUNDLE, engine.FORWARD_NEW_BUNDLE, 13)
-        marker = b" --bounded-same-day && "
-        if raw.count(marker) != 13:
+        raw = engine.old_daily_cron()
+        lines = raw.decode().splitlines()
+        matches = [i for i, line in enumerate(lines) if "collect_daily_documented_research.py" in line]
+        if len(matches) != 13:
             raise ValueError("unexpected_daily_command_shape")
-        raw = raw.replace(marker, b" --bounded-same-day --daily-frozen-industry && ")
-        return add_forward_arguments(raw, 13)
+        wrapper = ("/opt/qagent/current/backend/.venv/bin/python -B "
+                   f"{engine.DAILY_NEW_BUNDLE}/scripts/run_daily_financial_same_day.py")
+        for i in matches:
+            prefix = lines[i].split(None, 6)[:6]
+            if len(prefix) != 6 or prefix[5] != "luozhenkun":
+                raise ValueError("unexpected_daily_command_shape")
+            lines[i] = " ".join([*prefix, wrapper])
+        return ("\n".join(lines) + "\n").encode()
 
     def forward_cron():
         raw = engine._rewrite_bundle(engine.old_forward_cron(), engine.FORWARD_OLD_BUNDLE,
