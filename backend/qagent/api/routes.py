@@ -3957,6 +3957,126 @@ AUTOMATION_FACTOR_SHADOW_MAX_PROVIDER_BATCHES = 8
 AUTOMATION_FACTOR_SHADOW_WALL_CLOCK_SECONDS = 90.0
 
 
+def _factor_shadow_stage_worker(
+    result_connection,
+    *,
+    provider_mode: str,
+    as_of_date: date,
+    max_provider_batches: int,
+    wall_clock_seconds: float,
+) -> None:
+    """Run provider-backed shadow repair outside the scheduler process.
+
+    This deliberately creates its provider and SQLAlchemy sessions in the
+    spawned process.  The parent owns the automation checkpoint; a killed worker can
+    therefore never report a completed stage.
+    """
+
+    try:
+        market_provider = build_market_data_provider(provider_mode)
+        work_budget = ExactPriceRepairBudget.bounded(
+            max_provider_batches=max_provider_batches,
+            wall_clock_seconds=wall_clock_seconds,
+        )
+        benchmark_refresh = refresh_factor_shadow_benchmark_cache(
+            create_session_factory(),
+            provider_mode=provider_mode,
+            market_provider=market_provider,
+            as_of_date=as_of_date,
+            work_budget=work_budget,
+        )
+        shadow_resolution = resolve_factor_shadow_outcomes(
+            create_session_factory(),
+            provider_mode=provider_mode,
+            as_of_date=as_of_date,
+            market_provider=market_provider,
+            work_budget=work_budget,
+        )
+        result_connection.send(
+            {
+                "data_health": {
+                    **benchmark_refresh.data_health,
+                    **shadow_resolution.data_health,
+                },
+                "next_maturity_date": (
+                    shadow_resolution.next_maturity_date.isoformat()
+                    if shadow_resolution.next_maturity_date is not None
+                    else None
+                ),
+            }
+        )
+    except Exception as exc:
+        # Do not transfer an exception object: provider exceptions can carry
+        # unpicklable state and must not make the parent wait indefinitely.
+        result_connection.send({"error": str(exc)[:500]})
+    finally:
+        result_connection.close()
+
+
+def _run_factor_shadow_stage_with_hard_timeout(
+    *,
+    provider_mode: str,
+    as_of_date: date,
+    max_provider_batches: int = AUTOMATION_FACTOR_SHADOW_MAX_PROVIDER_BATCHES,
+    wall_clock_seconds: float = AUTOMATION_FACTOR_SHADOW_WALL_CLOCK_SECONDS,
+    worker_target=None,
+) -> dict[str, object]:
+    """Return a complete worker result, or a durable deferred timeout state.
+
+    ``ExactPriceRepairBudget`` remains useful for bounded normal work, but it
+    cannot interrupt a blocked network syscall.  A one-shot spawned worker is
+    used so a multi-threaded API process never forks inherited locks or SQLite
+    state; its parent can terminate the syscall without stopping paper updates
+    or later stages.
+    """
+
+    context = get_context("spawn")
+    receive_connection, send_connection = context.Pipe(duplex=False)
+    process = context.Process(
+        target=worker_target or _factor_shadow_stage_worker,
+        kwargs={
+            "result_connection": send_connection,
+            "provider_mode": provider_mode,
+            "as_of_date": as_of_date,
+            "max_provider_batches": max_provider_batches,
+            "wall_clock_seconds": wall_clock_seconds,
+        },
+        daemon=True,
+    )
+    process.start()
+    send_connection.close()
+    process.join(max(0.0, wall_clock_seconds))
+    if process.is_alive():
+        process.terminate()
+        # A process blocked in an uninterruptible provider syscall must not
+        # turn this cleanup into another unbounded wait.
+        process.join(timeout=1)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=1)
+        receive_connection.close()
+        return {
+            "timed_out": True,
+            "data_health": {
+                "factor_shadow_outcome_status": "partial",
+                "factor_shadow_hard_timeout": "true",
+                "factor_shadow_hard_timeout_seconds": str(int(wall_clock_seconds)),
+                "factor_shadow_hard_timeout_action": "worker_terminated",
+                "factor_shadow_paper_isolation": "true",
+                "factor_shadow_outcome_paper_isolation": "true",
+                "factor_shadow_outcome_order_effect": "none",
+            },
+        }
+    try:
+        if receive_connection.poll():
+            payload = receive_connection.recv()
+        else:
+            payload = {"error": f"worker exited without result (exitcode={process.exitcode})"}
+    finally:
+        receive_connection.close()
+    return payload
+
+
 def _automation_stage_outcome(
     stage_key: str,
     health: Mapping[str, str],
@@ -4771,11 +4891,6 @@ def _run_auto_processing_cycle_inner(
             factor_shadow_as_of = (
                 expected_signal_date or _latest_completed_a_share_session() or date.today()
             )
-            shadow_market_provider = build_market_data_provider(mode)
-            shadow_work_budget = ExactPriceRepairBudget.bounded(
-                max_provider_batches=AUTOMATION_FACTOR_SHADOW_MAX_PROVIDER_BATCHES,
-                wall_clock_seconds=AUTOMATION_FACTOR_SHADOW_WALL_CLOCK_SECONDS,
-            )
             data_health["factor_shadow_work_budget_max_provider_batches"] = str(
                 AUTOMATION_FACTOR_SHADOW_MAX_PROVIDER_BATCHES
             )
@@ -4783,27 +4898,22 @@ def _run_auto_processing_cycle_inner(
                 int(AUTOMATION_FACTOR_SHADOW_WALL_CLOCK_SECONDS)
             )
             data_health["factor_shadow_work_budget_deadline_contract"] = (
-                "cooperative_between_provider_calls_not_hard_cancellation"
+                "hard_process_termination_at_stage_boundary"
             )
-            benchmark_refresh = refresh_factor_shadow_benchmark_cache(
-                create_session_factory(),
-                provider_mode=mode,
-                market_provider=shadow_market_provider,
-                as_of_date=factor_shadow_as_of,
-                work_budget=shadow_work_budget,
-            )
-            data_health.update(benchmark_refresh.data_health)
-            shadow_resolution = resolve_factor_shadow_outcomes(
-                create_session_factory(),
+            shadow_stage = _run_factor_shadow_stage_with_hard_timeout(
                 provider_mode=mode,
                 as_of_date=factor_shadow_as_of,
-                market_provider=shadow_market_provider,
-                work_budget=shadow_work_budget,
             )
-            data_health.update(shadow_resolution.data_health)
-            if shadow_resolution.next_maturity_date is not None:
+            if shadow_stage.get("timed_out"):
+                data_health.update(shadow_stage["data_health"])
+            elif "error" in shadow_stage:
+                raise RuntimeError(f"factor shadow worker failed: {shadow_stage['error']}")
+            else:
+                data_health.update(shadow_stage["data_health"])
+            next_maturity_date = shadow_stage.get("next_maturity_date")
+            if next_maturity_date is not None:
                 data_health["factor_shadow_outcome_next_maturity_date"] = (
-                    shadow_resolution.next_maturity_date.isoformat()
+                    str(next_maturity_date)
                 )
         except Exception as exc:
             data_health["factor_shadow_outcome_status"] = "error"

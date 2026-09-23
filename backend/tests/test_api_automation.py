@@ -38,6 +38,20 @@ from qagent.storage.tables import (
 )
 
 
+def _stuck_factor_shadow_worker(result_connection, **kwargs):
+    time.sleep(1)
+
+
+def _stub_factor_shadow_stage(monkeypatch, status="up_to_date"):
+    """Keep API scheduler tests independent of the spawned research worker."""
+
+    monkeypatch.setattr(
+        routes,
+        "_run_factor_shadow_stage_with_hard_timeout",
+        lambda **_: {"data_health": {"factor_shadow_outcome_status": status}},
+    )
+
+
 def test_automation_reuses_same_market_day_cache_after_ttl(monkeypatch):
     now = datetime.now(timezone.utc)
     stale_same_day = now - timedelta(hours=6)
@@ -1228,6 +1242,14 @@ def test_automation_cycle_publishes_post_cycle_risk_gate(monkeypatch):
     )
     monkeypatch.setattr(
         routes,
+        "_run_factor_shadow_stage_with_hard_timeout",
+        lambda **kwargs: (
+            shadow_resolution_calls.append(((), kwargs))
+            or {"data_health": {"factor_shadow_outcome_status": "not_started"}}
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
         "resolve_fuyao_shadow_outcomes",
         lambda *args, **kwargs: SimpleNamespace(
             data_health={"fuyao_shadow_status": "not_started"},
@@ -1470,6 +1492,14 @@ def test_cycle_with_natural_waiting_is_terminal_with_visible_issue(tmp_path, mon
     )
     monkeypatch.setattr(
         routes,
+        "_run_factor_shadow_stage_with_hard_timeout",
+        lambda **_: {
+            "data_health": {"factor_shadow_outcome_status": "waiting_for_maturity"},
+            "next_maturity_date": "2026-09-01",
+        },
+    )
+    monkeypatch.setattr(
+        routes,
         "resolve_fuyao_shadow_outcomes",
         lambda *args, **kwargs: SimpleNamespace(
             data_health={"fuyao_shadow_status": "resolved"},
@@ -1522,19 +1552,10 @@ def test_factor_shadow_budget_defer_finishes_cycle_and_next_cycle_remains_eligib
         "_latest_completed_a_share_session",
         lambda *args: date(2026, 8, 29),
     )
-    observed_budgets = []
-    monkeypatch.setattr(
-        routes,
-        "refresh_factor_shadow_benchmark_cache",
-        lambda *args, **kwargs: (
-            observed_budgets.append(kwargs["work_budget"])
-            or SimpleNamespace(data_health={})
-        ),
-    )
-    resolutions = iter(
+    stage_results = iter(
         [
-            SimpleNamespace(
-                data_health={
+            {
+                "data_health": {
                     "factor_shadow_outcome_status": "partial",
                     "factor_shadow_exact_price_deferred_by_budget": "24",
                     "factor_shadow_exact_price_budget_exhausted": "true",
@@ -1544,24 +1565,23 @@ def test_factor_shadow_budget_defer_finishes_cycle_and_next_cycle_remains_eligib
                     "factor_shadow_outcome_paper_isolation": "true",
                     "factor_shadow_outcome_order_effect": "none",
                 },
-                next_maturity_date=None,
-            ),
-            SimpleNamespace(
-                data_health={
+                "next_maturity_date": None,
+            },
+            {
+                "data_health": {
                     "factor_shadow_outcome_status": "up_to_date",
                     "factor_shadow_outcome_paper_isolation": "true",
                     "factor_shadow_outcome_order_effect": "none",
                 },
-                next_maturity_date=None,
-            ),
+                "next_maturity_date": None,
+            },
         ]
     )
-
-    def resolve(*args, **kwargs):
-        assert kwargs["work_budget"] is observed_budgets[-1]
-        return next(resolutions)
-
-    monkeypatch.setattr(routes, "resolve_factor_shadow_outcomes", resolve)
+    monkeypatch.setattr(
+        routes,
+        "_run_factor_shadow_stage_with_hard_timeout",
+        lambda **_: next(stage_results),
+    )
     monkeypatch.setattr(
         routes,
         "resolve_fuyao_shadow_outcomes",
@@ -1589,7 +1609,7 @@ def test_factor_shadow_budget_defer_finishes_cycle_and_next_cycle_remains_eligib
     )
     assert deferred.data_health["factor_shadow_exact_price_deferred_by_budget"] == "24"
     assert deferred.data_health["factor_shadow_work_budget_deadline_contract"] == (
-        "cooperative_between_provider_calls_not_hard_cancellation"
+        "hard_process_termination_at_stage_boundary"
     )
     assert deferred.data_health["factor_shadow_outcome_order_effect"] == "none"
     assert deferred.paper_created == 0
@@ -1597,9 +1617,6 @@ def test_factor_shadow_budget_defer_finishes_cycle_and_next_cycle_remains_eligib
     assert deferred.paper_closed == 0
     assert recovered.data_health["automation_cycle_status"] == "succeeded"
     assert recovered.data_health["factor_shadow_outcome_status"] == "up_to_date"
-    assert len(observed_budgets) == 2
-    assert observed_budgets[0] is not observed_budgets[1]
-    assert all(item.max_provider_batches == 8 for item in observed_budgets)
     assert paper_repo.list_trades(limit=1000, provider="free") == before_trades
     with repo.session_factory() as session:
         statuses = session.execute(
@@ -1609,6 +1626,26 @@ def test_factor_shadow_budget_defer_finishes_cycle_and_next_cycle_remains_eligib
             )
         ).scalars().all()
     assert statuses == ["deferred", "completed"]
+
+
+def test_factor_shadow_hard_timeout_terminates_stuck_worker_without_success(monkeypatch):
+    started = time.monotonic()
+    result = routes._run_factor_shadow_stage_with_hard_timeout(
+        provider_mode="free",
+        as_of_date=date(2026, 8, 29),
+        max_provider_batches=1,
+        wall_clock_seconds=0.05,
+        worker_target=_stuck_factor_shadow_worker,
+    )
+
+    assert time.monotonic() - started < 0.5
+    assert result["timed_out"] is True
+    health = result["data_health"]
+    assert health["factor_shadow_outcome_status"] == "partial"
+    assert health["factor_shadow_hard_timeout"] == "true"
+    assert health["factor_shadow_hard_timeout_action"] == "worker_terminated"
+    assert health["factor_shadow_outcome_paper_isolation"] == "true"
+    assert routes._automation_stage_outcome("factor_shadow", health)[0] == "deferred"
 
 
 @pytest.mark.parametrize(
@@ -1673,6 +1710,11 @@ def test_manual_scan_wait_defers_but_failure_retries_same_slot(
             data_health={"factor_shadow_outcome_status": "up_to_date"},
             next_maturity_date=None,
         ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_run_factor_shadow_stage_with_hard_timeout",
+        lambda **_: {"data_health": {"factor_shadow_outcome_status": "up_to_date"}},
     )
     monkeypatch.setattr(
         routes,
@@ -1746,6 +1788,11 @@ def test_scheduled_scan_settlement_wait_advances_to_next_normal_slot(tmp_path, m
             data_health={"factor_shadow_outcome_status": "up_to_date"},
             next_maturity_date=None,
         ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_run_factor_shadow_stage_with_hard_timeout",
+        lambda **_: {"data_health": {"factor_shadow_outcome_status": "up_to_date"}},
     )
     monkeypatch.setattr(
         routes,
@@ -1838,6 +1885,11 @@ def test_candidate_freshness_defer_does_not_open_breaker_and_next_cycle_can_scan
             data_health={"factor_shadow_outcome_status": "up_to_date"},
             next_maturity_date=None,
         ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_run_factor_shadow_stage_with_hard_timeout",
+        lambda **_: {"data_health": {"factor_shadow_outcome_status": "up_to_date"}},
     )
     monkeypatch.setattr(
         routes,
@@ -2102,6 +2154,11 @@ def test_automation_cycle_captures_fuyao_only_after_matching_daily_scan(monkeypa
     )
     monkeypatch.setattr(
         routes,
+        "_run_factor_shadow_stage_with_hard_timeout",
+        lambda **_: {"data_health": {"factor_shadow_outcome_status": "up_to_date"}},
+    )
+    monkeypatch.setattr(
+        routes,
         "resolve_fuyao_shadow_outcomes",
         lambda *args, **kwargs: SimpleNamespace(data_health={}, next_maturity_date=None),
     )
@@ -2316,6 +2373,7 @@ def test_automation_scheduler_seeds_latest_signal_day_not_latest_inserted_rows(
     database_url = f"sqlite:///{tmp_path / 'automation-latest-signal.db'}"
     monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
     monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
+    _stub_factor_shadow_stage(monkeypatch)
     initialize_database(database_url)
     session_factory = create_session_factory(database_url)
     now = datetime.now(timezone.utc)
@@ -2432,6 +2490,7 @@ def test_automation_scheduler_seeds_from_cached_recommendation_order(tmp_path, m
     database_url = f"sqlite:///{tmp_path / 'automation-cache-recommendations.db'}"
     monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
     monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
+    _stub_factor_shadow_stage(monkeypatch)
     initialize_database(database_url)
     session_factory = create_session_factory(database_url)
     repo = QagentRepository(session_factory)
@@ -2676,6 +2735,7 @@ def test_automation_scheduler_backfills_closed_paper_slot_from_deeper_cache_cand
     database_url = f"sqlite:///{tmp_path / 'automation-cache-backfill.db'}"
     monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
     monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
+    _stub_factor_shadow_stage(monkeypatch)
     initialize_database(database_url)
     session_factory = create_session_factory(database_url)
     repo = QagentRepository(session_factory)
@@ -2798,6 +2858,7 @@ def test_automation_scheduler_keeps_reduced_size_capacity_when_drawdown_is_high(
     database_url = f"sqlite:///{tmp_path / 'automation-risk-pause.db'}"
     monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
     monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
+    _stub_factor_shadow_stage(monkeypatch)
     initialize_database(database_url)
     session_factory = create_session_factory(database_url)
     now = datetime.now(timezone.utc)
@@ -2910,6 +2971,7 @@ def test_automation_scheduler_risk_off_uses_capacity_instead_of_daily_quota(
     database_url = f"sqlite:///{tmp_path / 'automation-market-probe.db'}"
     monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
     monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
+    _stub_factor_shadow_stage(monkeypatch)
     initialize_database(database_url)
     session_factory = create_session_factory(database_url)
     repo = QagentRepository(session_factory)
@@ -3069,6 +3131,7 @@ def test_automation_scheduler_replaces_stale_pending_with_strong_candidate(
     database_url = f"sqlite:///{tmp_path / 'automation-replacement.db'}"
     monkeypatch.setenv("QAGENT_DATABASE_URL", database_url)
     monkeypatch.setattr(routes, "_automation_scheduler", AutomationScheduler())
+    _stub_factor_shadow_stage(monkeypatch)
     initialize_database(database_url)
     session_factory = create_session_factory(database_url)
     now = datetime.now(timezone.utc)
