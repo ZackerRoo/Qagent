@@ -104,3 +104,11 @@ PYTHONPATH=/opt/qagent/current/backend /opt/qagent/current/backend/.venv/bin/pyt
 最终相关 **68 passed（3.92秒）**，正确虚拟环境全量 **2625 passed、3 warnings（230.77秒）**，Ruff与diff检查通过，审计无P1/P2。daily cron SHA仍为 `4a80db491109badc90190fe9bdd45bf39160118ebe17733a1e934a8cf9b88b9d`，backend current仍为 `5b72362`，health ok。模拟账户仍为同一 `paper-session-69470ca6b12c`、active，total 128 / active 9 / remaining 1；未修改账本或交易规则。
 
 本阶段现为已实现、已测试、已commit/push、已打包、已安装并部署。首次自然cron仍待下一工作日北京时间19:37验收；真实5/10/20成熟结果仍分别等待09-21、09-29、10-20收盘后，不能据当前waiting状态宣称选股增益。
+
+## 首个自然 v1 五交易日结果（2026-09-21）
+
+已验证的不可变完成归档为 `/var/lib/qagent-research/financial-forward-evaluations/2026-09-14/5.json`，`evaluated_at` 为 `2026-09-21T23:07:02.314232+08:00`。该窗口共有 5 个 session，候选 Top5 的 16/16 计算全部完成；固定候选为 `[CN:600519,CN:603444,CN:603259,CN:002602,CN:600398]`，相对沪深300并扣除往返 10 bps 的候选净超额为 `-3.2971742378645645%`。
+
+此信号封存时没有同日可用的 G2 基线，归档明确为 `baseline_status=baseline_unavailable`，`baseline`、`lift` 均为 `null`，且 `paired=false`。因此，该结果仅是一个候选相对沪深300、扣10bps成本的单样本观察：它既不支持财务规则存在选股增益，也不能用于新 v3 的同集合配平或任何权重变化。
+
+本记录不改模拟盘、正式 ranking 或交易规则；后续仍仅以自然形成、同口径且具有可用同日基线的成熟 5/10/20 日标签，验收候选与基线的配对增益。
