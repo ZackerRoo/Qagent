@@ -69,7 +69,7 @@
 
 ## G7-R / P1：因子影子阶段运行可靠性（2026-09-23）
 
-`factor_shadow` 的 90 秒 ExactPriceRepairBudget 原先只在 provider 调用之间协作检查，不能限制卡住的 BaoStock 网络调用。本轮将该研究阶段隔离到一次性 spawned worker：超时由父自动化终止 worker，并以 `partial`、`hard_timeout` 和 `worker_terminated` 记录为 deferred issue；未收到完整结果不得写为成功，后续周期仍可重试。该隔离只覆盖研究补价/结果解析，不改变唯一 paper ledger、交易执行、Ranking 权重或策略选择。已实现、已聚焦测试；未 push、未部署，云端实际恢复仍待后续运行证据。
+`factor_shadow` 的 90 秒 ExactPriceRepairBudget 原先只在 provider 调用之间协作检查，不能限制卡住的 BaoStock 网络调用。本轮将该研究阶段隔离到一次性 spawned worker：超时由父自动化终止 worker，并以 `partial`、`hard_timeout` 和 `worker_terminated` 记录为 deferred issue；未收到完整结果不得写为成功，后续周期仍可重试。该隔离只覆盖研究补价/结果解析，不改变唯一 paper ledger、交易执行、Ranking 权重或策略选择。发布提交 `f6ab404d4c5bd398ba67b965b1e41729fafca4bf` 已部署，云端当前 release 为该 SHA；2026-09-23 部署证据 `result.json` 显示 `ledger_equal=true`、`settings_equal=true`、`scheduler_enabled=true`。部署后 `/api/health` 正常，且无 running cycles/stages。该部署仅确认运行可靠性修复已上线，不替代后续自然运行证据，也不改变目标结论或交易规则。
 
 ## 20260911 集成验收
 
