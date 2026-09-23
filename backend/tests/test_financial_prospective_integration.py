@@ -38,11 +38,15 @@ def test_new_contract_uses_vendor_industry_and_only_isolated_ranks(monkeypatch):
         return value["predictions"]
     monkeypatch.setattr(daily, "validate_archive", validate)
     signal = forward.seal(document, baseline, now=NOW)
-    assert signal["protocol"] == "financial-rule-forward-v3"
+    assert signal["protocol"] == "financial-rule-forward-v4"
     assert signal["control_status"] == "available"
     assert all(pair["industry"] == "vendor" for pair in signal["matched_control_pairs"])
     assert calls[0]["eligible_ids"] == {row["instrument_id"] for row in signal["rankings"]}
     forward.validate_archive(signal)
+    legacy = forward._seal(
+        document, baseline, now=NOW, archive_protocol="financial-rule-forward-v3")
+    assert legacy["protocol"] == "financial-rule-forward-v3"
+    forward.validate_archive(legacy)
 
 
 def test_new_contract_cannot_fallback_to_candidate_pool_industry(monkeypatch):
@@ -56,6 +60,23 @@ def test_new_contract_cannot_fallback_to_candidate_pool_industry(monkeypatch):
     signal = forward.seal(signed(document), baseline, now=NOW)
     assert signal["control_status"] == "control_unavailable"
     assert "industry_incomplete" in signal["control_reasons"]
+
+
+def test_v4_vendor_industry_singleton_still_has_zero_pairs(monkeypatch):
+    document, baseline = prospective(monkeypatch)
+    import financial_daily_baseline as daily
+    import financial_industry_evidence as industry
+    raw = deepcopy(document["industry_evidence"]["raw_evidence"])
+    first = document["symbols"][0]
+    raw[first]["response"]["rows"] = [{"ts_code": first, "industry": "singleton"}]
+    signed(raw[first]["response"])
+    document["industry_evidence"] = industry.build_industry_evidence(document["symbols"], raw, "20260911")
+    monkeypatch.setattr(daily, "validate_archive", lambda value, **kwargs: value["predictions"])
+    signal = forward.seal(signed(document), baseline, now=NOW)
+    assert signal["protocol"] == "financial-rule-forward-v4"
+    assert signal["control_status"] == "control_unavailable"
+    assert signal["control_reasons"] == ["same_industry_control_unavailable"]
+    assert signal["matched_control_pairs"] == []
 
 
 def test_new_contract_rejects_industry_before_daily_capture(monkeypatch):
@@ -164,7 +185,7 @@ def test_baseline_timeout_not_swallowed_as_input_error(paths, monkeypatch):  # n
     assert not list(paths[1].glob("*.json"))
 
 
-def test_synthetic_real_frozen_collection_to_v3_seal_and_replay(tmp_path, monkeypatch):
+def test_synthetic_real_frozen_collection_to_v4_seal_and_replay(tmp_path, monkeypatch):
     """Actual frozen inference integration; synthetic inputs are not operating evidence."""
     document, _ = prospective(monkeypatch)
     import financial_daily_baseline as daily
@@ -196,7 +217,7 @@ def test_synthetic_real_frozen_collection_to_v3_seal_and_replay(tmp_path, monkey
     assert baseline["source"]["scan_job_id"] == "synthetic-not-operational-evidence"
     assert len(daily.validate_archive(baseline, signal_date=NOW.date(), eligible_ids=ids)) == 10
     signal = forward.seal(document, baseline, now=NOW)
-    assert signal["protocol"] == "financial-rule-forward-v3"
+    assert signal["protocol"] == "financial-rule-forward-v4"
     assert signal["baseline_status"] == "available"
     assert signal["control_status"] == "available"
     assert len(signal["matched_control_pairs"]) == 5

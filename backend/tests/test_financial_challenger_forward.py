@@ -421,6 +421,35 @@ def test_v2_equal_market_cap_distance_uses_g2_rank_before_instrument_id(monkeypa
     assert first["control_g2_rank"] == 6
 
 
+def test_v4_global_matching_beats_prior_greedy_local_assignment(monkeypatch):
+    """The v4 solver finds the lower total-distance complete allocation."""
+    industries = ["A"] * 7 + ["B", "C", "D"]
+    values = [4, 5, 100, 200, 300, 1, 6, 1000, 2000, 3000]
+    _, document, g2 = matched_inputs(monkeypatch, industries=industries, total_mvs=values)
+
+    # v3 preserves the old sequential local choices for archive replay.
+    rankings = forward.seal(document, g2, now=NOW)["rankings"]
+    legacy = forward._matched_control_plan(document, rankings, g2["predictions"])
+    current = forward._matched_control_plan(
+        document, rankings, g2["predictions"], global_assignment=True)
+    assert legacy["control_order"][:2] == ["CN:600007", "CN:600006"]
+    assert current["control_order"][:2] == ["CN:600006", "CN:600007"]
+    assert current["control_status"] == "available"
+    assert sum(pair["absolute_log_total_mv_distance"] for pair in current["matched_control_pairs"]) < sum(
+        pair["absolute_log_total_mv_distance"] for pair in legacy["matched_control_pairs"]
+    )
+
+
+def test_v4_singleton_industry_still_has_no_control(monkeypatch):
+    industries = ["A", "A", "A", "A", "B", "C", "C", "C", "C", "C"]
+    _, document, g2 = matched_inputs(monkeypatch, industries=industries)
+    rankings = forward.seal(document, g2, now=NOW)["rankings"]
+    plan = forward._matched_control_plan(document, rankings, g2["predictions"], global_assignment=True)
+    assert plan["control_status"] == "control_unavailable"
+    assert plan["control_reasons"] == ["same_industry_control_unavailable"]
+    assert plan["matched_control_pairs"] == []
+
+
 def test_v2_industry_shortage_is_control_unavailable(monkeypatch):
     industries = ["A", "A", "A", "A", "B", "C", "C", "C", "C", "C"]
     _, document, g2 = matched_inputs(monkeypatch, industries=industries)

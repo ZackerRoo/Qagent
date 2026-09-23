@@ -118,7 +118,13 @@ def run_paper_update_slot(session_factory, slot_id, callback):
             ), {"slot": slot_id}).scalar_one_or_none()
         if previous is not None:
             return {"slot_id": slot_id, "replayed": True, "result": json.loads(previous), **timing}
-        result = callback()
+        try:
+            result = callback()
+        except Exception as exc:
+            # The scheduler only exposes its own controlled error taxonomy, but
+            # needs this timing to distinguish a slot that expired in writer wait.
+            exc.writer_wait_seconds = timing["writer_wait_seconds"]
+            raise
         if hasattr(result, "model_dump"):
             result = result.model_dump(mode="json")
         payload = json.dumps(result, ensure_ascii=False, allow_nan=False)

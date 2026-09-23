@@ -19,6 +19,34 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 INTERVAL_SECONDS = 600
 
 
+class PaperUpdateSlotExpiredWhileWaitingForWriter(RuntimeError):
+    """A tick became ineligible after acquiring the single account writer."""
+
+    def __init__(self) -> None:
+        super().__init__("paper update slot expired while waiting for account writer")
+
+
+_FAILURE_REASONS = {
+    "slot_expired_while_waiting_for_writer": (
+        "Paper update slot expired while waiting for the account writer."
+    ),
+    "control_plane_disabled": "Paper update was disabled by the automation control plane.",
+    "runner_failed": "Paper update failed; the scheduler will retry the current slot.",
+    "scheduler_failed": "Paper update scheduler failed before starting an update.",
+}
+
+
+def _failure_details(exc: Exception) -> tuple[str, str]:
+    """Return diagnostics safe to expose from the local status endpoint."""
+    if isinstance(exc, PaperUpdateSlotExpiredWhileWaitingForWriter):
+        code = "slot_expired_while_waiting_for_writer"
+    elif isinstance(exc, RuntimeError) and str(exc).startswith("paper update disabled"):
+        code = "control_plane_disabled"
+    else:
+        code = "runner_failed"
+    return code, _FAILURE_REASONS[code]
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -68,6 +96,9 @@ class PaperUpdateState:
     finished_at: datetime | None = None
     lateness_seconds: float | None = None
     last_error: str | None = None
+    error_code: str | None = None
+    error_reason: str | None = None
+    writer_wait_seconds: float | None = None
     attempts: int = 0
     completed: int = 0
     skipped_slots: int = 0
@@ -150,7 +181,11 @@ class PaperUpdateScheduler:
             return self._run_due()
         except Exception as exc:
             with self._lock:
-                self._state = replace(self._state, status="error", last_error=type(exc).__name__)
+                self._state = replace(
+                    self._state, status="error", last_error=type(exc).__name__,
+                    error_code="scheduler_failed", error_reason=_FAILURE_REASONS["scheduler_failed"],
+                    writer_wait_seconds=getattr(exc, "writer_wait_seconds", None),
+                )
             return False
         finally:
             self._run_lock.release()
@@ -184,6 +219,7 @@ class PaperUpdateScheduler:
                 self._state, status="running", slot_id=tick.slot_id, due_at=due,
                 started_at=now, finished_at=None, lateness_seconds=(now - due).total_seconds(),
                 last_error=None, attempts=self._state.attempts + 1,
+                error_code=None, error_reason=None, writer_wait_seconds=None,
                 skipped_slots=self._state.skipped_slots + skipped,
                 skip_reason="expired_slots_not_replayed" if skipped else None,
             )
@@ -192,10 +228,13 @@ class PaperUpdateScheduler:
         except Exception as exc:
             finished = _aware(self._clock())
             self._retry_at = finished + timedelta(seconds=self._retry_seconds)
+            error_code, error_reason = _failure_details(exc)
             with self._lock:
                 self._state = replace(
                     self._state, status="error", finished_at=finished,
                     last_error=type(exc).__name__,
+                    error_code=error_code, error_reason=error_reason,
+                    writer_wait_seconds=getattr(exc, "writer_wait_seconds", None),
                 )
             return False
         self._finished_slot = due

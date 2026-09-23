@@ -6,7 +6,11 @@ import pytest
 from pydantic import ValidationError
 
 from qagent.config import Settings
-from qagent.jobs.paper_update_scheduler import PaperUpdateScheduler, current_slot
+from qagent.jobs.paper_update_scheduler import (
+    PaperUpdateScheduler,
+    PaperUpdateSlotExpiredWhileWaitingForWriter,
+    current_slot,
+)
 
 SH = ZoneInfo("Asia/Shanghai")
 
@@ -166,7 +170,25 @@ def test_upstream_secrets_are_not_exposed_in_scheduler_diagnostics():
     scheduler = PaperUpdateScheduler(runner, clock=lambda: at(10), is_session=weekdays)
     assert not scheduler.run_due()
     assert scheduler.state().last_error == "RuntimeError"
+    assert scheduler.state().error_code == "runner_failed"
+    assert scheduler.state().error_reason == "Paper update failed; the scheduler will retry the current slot."
     assert "private-token" not in repr(scheduler.state())
+
+
+def test_slot_expired_while_waiting_for_writer_has_safe_failure_details():
+    now = [at(10)]
+
+    def expired(tick):
+        error = PaperUpdateSlotExpiredWhileWaitingForWriter()
+        error.writer_wait_seconds = 0.25
+        raise error
+
+    scheduler = PaperUpdateScheduler(expired, clock=lambda: now[0], is_session=weekdays)
+    assert not scheduler.run_due()
+    state = scheduler.state()
+    assert state.error_code == "slot_expired_while_waiting_for_writer"
+    assert state.error_reason == "Paper update slot expired while waiting for the account writer."
+    assert state.writer_wait_seconds == 0.25
 
 
 def test_opt_in_and_fixed_interval(monkeypatch):

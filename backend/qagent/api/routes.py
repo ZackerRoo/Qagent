@@ -71,7 +71,11 @@ from qagent.catalysts.hypotheses import build_catalyst_hypotheses
 from qagent.catalysts.providers import FreeCatalystProvider
 from qagent.config import get_settings
 from qagent.storage.paper_writer import paper_account_writer, paper_writer_route, run_paper_update_slot
-from qagent.jobs.paper_update_scheduler import PaperUpdateScheduler, current_slot
+from qagent.jobs.paper_update_scheduler import (
+    PaperUpdateScheduler,
+    PaperUpdateSlotExpiredWhileWaitingForWriter,
+    current_slot,
+)
 from qagent.data_management import build_historical_coverage_manifest
 from qagent.db import create_session_factory, initialize_database
 from qagent.domain.models import OpportunityCard, PortfolioPlan, SectorStrength
@@ -3826,7 +3830,7 @@ def _run_independent_paper_update(tick):
         if not latest.enabled or not latest.settings.update_paper:
             raise RuntimeError("paper update disabled while waiting for account writer")
         if current_slot(datetime.now(timezone.utc)) != tick.due_at:
-            raise RuntimeError("paper update slot expired while waiting for account writer")
+            raise PaperUpdateSlotExpiredWhileWaitingForWriter()
         mode = latest.settings.provider
         result = update_paper_trades(
             repo, provider=build_market_data_provider(mode), provider_mode=mode,

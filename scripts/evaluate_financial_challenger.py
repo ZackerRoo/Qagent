@@ -55,6 +55,15 @@ PROSPECTIVE_CONTRACT = "financial-daily-frozen-industry-v1"
 POLICY_DAILY = {**POLICY_MATCHED_CONTROL, "protocol": "financial-rule-forward-v3",
                 "baseline": "isolated_daily_frozen_full_features_ranks",
                 "industry": "single_provider_stock_basic_current_observation"}
+POLICY_DAILY_V4 = {
+    **POLICY_DAILY,
+    "protocol": "financial-rule-forward-v4",
+    "control": (
+        "one same-industry control per candidate; globally minimize candidate-controls, then "
+        "total absolute log total_mv distance, G2 full_features rank, instrument_id; "
+        "controls are unique across pairs"
+    ),
+}
 
 
 def _instrument_matches_symbol(instrument_id, symbol, asset_type):
@@ -206,7 +215,53 @@ def _extended_candidate_pool_universe(universe):
     )
 
 
-def _matched_control_plan(document, rankings, baseline_rows):
+def _global_control_assignment(candidate, ids, metadata, g2_ranks):
+    """Return the deterministic minimum-cost complete assignment, or ``None``.
+
+    The candidate set is capped at five and the eligible set at twenty, so an
+    exhaustive assignment is both simpler to audit and bounded (at most 20P5).
+    Tuple ordering makes every tie deterministic without changing membership.
+    """
+    candidate_set = set(candidate)
+    choices = []
+    for candidate_id in candidate:
+        candidate_mv = float(metadata[candidate_id]["total_mv"])
+        alternatives = [key for key in ids if key != candidate_id
+                        and metadata[key]["industry"] == metadata[candidate_id]["industry"]]
+        if not alternatives:
+            return None
+        choices.append(sorted(
+            ((key, key in candidate_set,
+              abs(math.log(float(metadata[key]["total_mv"])) - math.log(candidate_mv)),
+              g2_ranks[key]) for key in alternatives),
+            key=lambda value: (value[1], value[2], value[3], value[0]),
+        ))
+
+    best = None
+
+    def visit(position, used, selected, candidate_controls, distance, rank_sum):
+        nonlocal best
+        if position == len(candidate):
+            # Preserve the existing preference order globally.  The ordered
+            # control IDs resolve otherwise identical aggregate costs.
+            value = (candidate_controls, distance, rank_sum,
+                     tuple(item[0] for item in selected), tuple(selected))
+            if best is None or value[:4] < best[:4]:
+                best = value
+            return
+        for choice in choices[position]:
+            control_id, is_candidate, log_distance, control_rank = choice
+            if control_id in used:
+                continue
+            visit(position + 1, used | {control_id}, selected + [choice],
+                  candidate_controls + int(is_candidate), distance + log_distance,
+                  rank_sum + control_rank)
+
+    visit(0, frozenset(), [], 0, 0.0, 0)
+    return None if best is None else best[4]
+
+
+def _matched_control_plan(document, rankings, baseline_rows, *, global_assignment=False):
     selection = document["universe"]["selection_order"]
     if document.get("prospective_contract") == PROSPECTIVE_CONTRACT:
         from financial_industry_evidence import validate_industry_evidence
@@ -261,44 +316,57 @@ def _matched_control_plan(document, rankings, baseline_rows):
     pairs = []
     if not reasons:
         candidate_set = set(candidate)
-        used_controls = set()
-        for candidate_id in candidate:
-            candidate_meta = metadata[candidate_id]
-            alternatives = [key for key in ids if key != candidate_id and key not in used_controls
-                            and metadata[key]["industry"] == candidate_meta["industry"]]
-            if not alternatives:
+        if global_assignment:
+            assignments = _global_control_assignment(candidate, ids, metadata, g2_ranks)
+            if assignments is None:
                 reasons.add("same_industry_control_unavailable")
-                break
-            candidate_mv = float(candidate_meta["total_mv"])
-            control_id = min(
-                alternatives,
-                key=lambda key: (
-                    key in candidate_set,
-                    abs(math.log(float(metadata[key]["total_mv"])) - math.log(candidate_mv)),
-                    g2_ranks[key],
-                    key,
-                ),
-            )
-            used_controls.add(control_id)
-            control_meta = metadata[control_id]
-            pair = {
-                "position": len(pairs) + 1,
-                "candidate_instrument_id": candidate_id,
-                "control_instrument_id": control_id,
-                "industry": candidate_meta["industry"],
-                "candidate_total_mv": candidate_meta["total_mv"],
-                "control_total_mv": control_meta["total_mv"],
-                "absolute_log_total_mv_distance": abs(
-                    math.log(float(control_meta["total_mv"])) - math.log(candidate_mv)
-                ),
-                "control_is_candidate": control_id in candidate_set,
-                "evidence_complete": True,
-                "discriminative": control_id not in candidate_set,
-                "candidate_g2_rank": g2_ranks[candidate_id],
-                "control_g2_rank": g2_ranks[control_id],
-            }
-            pair["pair_digest"] = digest(pair)
-            pairs.append(pair)
+        else:
+            used_controls = set()
+            assignments = []
+            for candidate_id in candidate:
+                candidate_meta = metadata[candidate_id]
+                alternatives = [key for key in ids if key != candidate_id and key not in used_controls
+                                and metadata[key]["industry"] == candidate_meta["industry"]]
+                if not alternatives:
+                    reasons.add("same_industry_control_unavailable")
+                    break
+                candidate_mv = float(candidate_meta["total_mv"])
+                control_id = min(
+                    alternatives,
+                    key=lambda key: (
+                        key in candidate_set,
+                        abs(math.log(float(metadata[key]["total_mv"])) - math.log(candidate_mv)),
+                        g2_ranks[key],
+                        key,
+                    ),
+                )
+                used_controls.add(control_id)
+                assignments.append((control_id, control_id in candidate_set,
+                                    abs(math.log(float(metadata[control_id]["total_mv"]))
+                                        - math.log(candidate_mv)), g2_ranks[control_id]))
+        if not reasons:
+            for candidate_id, (control_id, _, _, _) in zip(candidate, assignments):
+                candidate_meta = metadata[candidate_id]
+                control_meta = metadata[control_id]
+                candidate_mv = float(candidate_meta["total_mv"])
+                pair = {
+                    "position": len(pairs) + 1,
+                    "candidate_instrument_id": candidate_id,
+                    "control_instrument_id": control_id,
+                    "industry": candidate_meta["industry"],
+                    "candidate_total_mv": candidate_meta["total_mv"],
+                    "control_total_mv": control_meta["total_mv"],
+                    "absolute_log_total_mv_distance": abs(
+                        math.log(float(control_meta["total_mv"])) - math.log(candidate_mv)
+                    ),
+                    "control_is_candidate": control_id in candidate_set,
+                    "evidence_complete": True,
+                    "discriminative": control_id not in candidate_set,
+                    "candidate_g2_rank": g2_ranks[candidate_id],
+                    "control_g2_rank": g2_ranks[control_id],
+                }
+                pair["pair_digest"] = digest(pair)
+                pairs.append(pair)
     if reasons:
         status, discriminative = "control_unavailable", False
         pairs = []
@@ -344,11 +412,11 @@ def after_close(value, day):
 
 
 def seal(document, baseline=None, *, now=None):
-    """Seal new evidence; extended candidate pools always use matched-control v2."""
+    """Seal new evidence; prospective inputs use global matched-control v4."""
     return _seal(document, baseline, now=now)
 
 
-def _seal(document, baseline=None, *, now=None, legacy_v1_fallback=False):
+def _seal(document, baseline=None, *, now=None, legacy_v1_fallback=False, archive_protocol=None):
     """No prices or database are consulted when fixing the eligible set."""
     now = now or datetime.now(timezone.utc)
     verify_digest(document)
@@ -441,13 +509,17 @@ def _seal(document, baseline=None, *, now=None, legacy_v1_fallback=False):
             protocol=POLICY_MATCHED_CONTROL["protocol"],
             policy=POLICY_MATCHED_CONTROL,
             policy_digest=digest(POLICY_MATCHED_CONTROL),
-            **_matched_control_plan(document, rankings, baseline_rows or []),
+            **_matched_control_plan(
+                document, rankings, baseline_rows or [],
+                global_assignment=prospective and archive_protocol != POLICY_DAILY["protocol"],
+            ),
         )
     if prospective:
         if not _extended_candidate_pool_universe(document.get("universe")):
             raise ValueError("prospective_candidate_pool_required")
-        result.update(protocol=POLICY_DAILY["protocol"], policy=POLICY_DAILY,
-                      policy_digest=digest(POLICY_DAILY), prospective_contract=prospective,
+        policy = POLICY_DAILY if archive_protocol == POLICY_DAILY["protocol"] else POLICY_DAILY_V4
+        result.update(protocol=policy["protocol"], policy=policy,
+                      policy_digest=digest(policy), prospective_contract=prospective,
                       baseline_kind="isolated_daily_frozen_full_features_research")
     result["result_digest"] = digest(result)
     return result
@@ -459,7 +531,8 @@ def validate_archive(signal):
     # that exact historical behavior without exposing it to new seal callers.
     replay = _seal(signal["source"], signal["baseline_source"],
                    now=timestamp(signal["sealed_at"]),
-                   legacy_v1_fallback=signal.get("protocol") == POLICY["protocol"])
+                   legacy_v1_fallback=signal.get("protocol") == POLICY["protocol"],
+                   archive_protocol=signal.get("protocol"))
     # A new implementation can audit an old archive, but cannot alter its identity/content.
     for key in replay:
         if key not in {"result_digest", "implementation_sha256"} and replay[key] != signal.get(key):

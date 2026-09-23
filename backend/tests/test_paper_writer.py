@@ -5,10 +5,11 @@ from types import SimpleNamespace
 from datetime import datetime, timezone
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from qagent.storage.paper import PaperTradingRepository
+from qagent.jobs.paper_update_scheduler import PaperUpdateScheduler
 from qagent.storage.paper_writer import paper_account_writer, run_paper_update_slot
 from qagent.paper_trading.engine import seed_paper_trades_from_snapshots, update_paper_trades
 from test_state_repository import make_repo
@@ -136,6 +137,63 @@ def test_tick_checks_expiry_and_control_after_writer_wait(tmp_path, monkeypatch)
     state.enabled = False
     with pytest.raises(RuntimeError, match="disabled"):
         routes._run_independent_paper_update(tick)
+
+
+def test_close_slot_writer_wait_expiry_does_not_persist_slot_and_later_retry_works(tmp_path, monkeypatch):
+    from qagent.api import routes
+
+    repo = PaperTradingRepository(make_repo(tmp_path).session_factory)
+    due = datetime(2026, 9, 14, 1, 30, tzinfo=timezone.utc)
+    now = [due]
+    state = SimpleNamespace(enabled=True, settings=SimpleNamespace(update_paper=True, provider="free"))
+    monkeypatch.setattr(routes, "_paper_repo", lambda: repo)
+    monkeypatch.setattr(routes, "_automation_scheduler", SimpleNamespace(state=lambda: state))
+    current = [None]
+    monkeypatch.setattr(routes, "current_slot", lambda now: current[0])
+    monkeypatch.setattr(routes, "build_market_data_provider", lambda mode: mode)
+    calls = []
+
+    def update(*args, **kwargs):
+        calls.append(kwargs["provider_mode"])
+        from qagent.paper_trading.engine import PaperUpdateResult, summarize_paper_trades
+        return PaperUpdateResult(summary=summarize_paper_trades([]), trades=[], data_health={
+            "paper_price_requested": "0", "paper_price_resolved": "0",
+        })
+
+    monkeypatch.setattr(routes, "update_paper_trades", update)
+    scheduler = PaperUpdateScheduler(
+        routes._run_independent_paper_update, clock=lambda: now[0],
+        is_session=lambda day: True, retry_seconds=0.01,
+    )
+    with ThreadPoolExecutor(1) as executor:
+        with paper_account_writer(repo.session_factory):
+            future = executor.submit(scheduler.run_due)
+            # The worker cannot enter its callback until the account writer releases.
+            assert not future.done()
+        assert not future.result(2)
+    failed = scheduler.state()
+    assert failed.error_code == "slot_expired_while_waiting_for_writer"
+    assert failed.error_reason == "Paper update slot expired while waiting for the account writer."
+    assert failed.writer_wait_seconds is not None
+    assert failed.writer_wait_seconds >= 0
+    monkeypatch.setattr(routes, "_paper_update_scheduler", scheduler)
+    monkeypatch.setattr(
+        routes, "get_settings", lambda: SimpleNamespace(paper_update_scheduler_enabled=True),
+    )
+    status = routes.paper_update_scheduler_status()
+    assert status["configured"] is True
+    assert status["state"]["error_code"] == failed.error_code
+    assert status["state"]["writer_wait_seconds"] == failed.writer_wait_seconds
+    engine = repo.session_factory.kw["bind"]
+    with engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT count(*) FROM paper_update_slots")
+        ).scalar_one() == 0
+
+    now[0] = due.replace(second=1)
+    current[0] = due
+    assert scheduler.run_due()
+    assert calls == ["free"]
 
 
 def test_tick_refreshes_provider_and_replays_completed_slot(tmp_path, monkeypatch):
