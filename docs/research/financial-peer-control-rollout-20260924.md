@@ -27,3 +27,11 @@
 4. 核对新 cron SHA、13/4 时槽、v11 命令指向版本化 wrapper、v13 指向同版 evaluator；健康、单一模拟账户、账本和 settings 不变。记录旧信号 SHA 前后相等。只把安装成功记为启用研究调度，等待下一次自然 daily/forward 分别验证同日 raw evidence、v5 seal、control 可判别性及5/10/20日真实成熟收益；退出0、接口成功或部署不能代替收益验收。
 
 升级器默认预览，不自动启动任务。目标旧摘要、目录或 cron 状态不符时应安全拒绝；中断后的兼容混合态可重试。`--rollback-receipt` 使用安装时的私有收据，先恢复 daily、再恢复 forward。**仅在首份 v5 信号封存前允许回滚旧 forward-v12**；v12 不识别 v5，封存后若需停止新增采集，应停用 v11 daily 调度但保留 v13 到期消费者，另行制定兼容处理，不改写已封存信号或历史账本。
+
+## 受控安装验收补录（2026-09-24）
+
+上述“未提交、未 push、未部署”保留为发布前快照。源提交 `4885639` 已推送至 `origin/features/automation-backtest`；最终 backend 全量仍为 `2878 passed`、3 项既有 warnings。云端 v11/v13 tar SHA256 分别为 `c869c6b8b1af50a9fecd9c41c8140ef5ea6676d2a4ab7c69c62f6b654ce55afa` / `cd7c9c0eb6896237af18982dfd408aa2beb862fb3d32d4a967dab28d73cc9eea`，manifest SHA256 分别为 `dbb81c3c88397d353e9cb72278b56fd28bf83e7103996264e308c25b89a6a9ae` / `83b73c530bb7e430b2d7940cc1ca2e1d90ac1e25cccf6117438b40ee09e37a83`。
+
+安装前 preview 为 `planned/old`；显式 execute 为 `upgraded/new`、`started_job=false`，私有收据 `/var/backups/qagent-financial-peer-control/before-install-gisc2gj1.json` 权限 root:root `0600`；安装后 preview 为 `already_installed/new`。新 daily/forward cron SHA256 分别为 `cb22a5396452b17fd860ba2d11177afd3d0fc4e056a26b0b368c797782bb3e17` / `706b15213bd395046faa0de434d9b168fff1dc5bdb957fe5965ed55af0fb5fb5`，13/4时槽、root:root `0644`。API health 正常，backend current 仍为 `83cdcb5`；独立 paper update enabled、outside_session、attempts 4 / completed 4、last_error null。四份既有归档 SHA 前后不变，v13 `validate_archive` 四份均通过。
+
+当前已实现、已测试、已 push、**独立研究包和 cron 已部署启用**。安装没有启动 daily/forward，尚无自然 v5 信号、可判别五对或真实5/10/20日成熟收益证据；backend 没有在此次研究包升级中切换。唯一模拟账户、账本、正式 Ranking、交易规则和实盘权限未改变，不提升 G2 完成状态。
