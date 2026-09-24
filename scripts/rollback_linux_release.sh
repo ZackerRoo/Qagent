@@ -5,8 +5,9 @@ if [[ "$(id -u)" -ne 0 ]]; then
   echo "run with sudo" >&2
   exit 1
 fi
-CURRENT_LINK="${QAGENT_CURRENT_LINK:-/opt/qagent/current}"
-PREVIOUS_LINK="${QAGENT_PREVIOUS_LINK:-/opt/qagent/previous}"
+QAGENT_HOME="${QAGENT_HOME:-/home/${QAGENT_SERVICE_USER:-luozhenkun}/qagent}"
+CURRENT_LINK="${QAGENT_CURRENT_LINK:-$QAGENT_HOME/current}"
+PREVIOUS_LINK="${QAGENT_PREVIOUS_LINK:-$QAGENT_HOME/previous}"
 for service in qagent-backend qagent-frontend; do
   if [[ -e "/etc/service/$service" || -L "/etc/service/$service" ]]; then
     echo "disable Qagent before rolling back a release" >&2

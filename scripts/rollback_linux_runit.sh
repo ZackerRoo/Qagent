@@ -5,7 +5,9 @@ if [[ "$(id -u)" -ne 0 ]]; then
   echo "run with sudo" >&2
   exit 1
 fi
-ROLLBACK_DIR="/etc/qagent/deploy-rollback"
+QAGENT_HOME="${QAGENT_HOME:-/home/${QAGENT_SERVICE_USER:-luozhenkun}/qagent}"
+BACKUP_DIR="${QAGENT_BACKUP_DIR:-$QAGENT_HOME/backups}"
+ROLLBACK_DIR="${QAGENT_RUNIT_ROLLBACK_DIR:-$BACKUP_DIR/deploy-rollback}"
 ARCHIVE="${1:-$(find "$ROLLBACK_DIR" -mindepth 1 -maxdepth 1 -type d | sort | tail -1)}"
 if [[ -z "$ARCHIVE" || ! -d "$ARCHIVE" ]]; then
   echo "no rollback archive found" >&2

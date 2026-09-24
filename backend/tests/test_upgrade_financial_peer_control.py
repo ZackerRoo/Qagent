@@ -21,12 +21,22 @@ def test_peer_control_upgrade_preserves_schedule_and_rewrites_only_bundle_entryp
     assert engine.FORWARD_NEW_BUNDLE == wrapper.FORWARD_BUNDLE
     daily = engine.daily_cron().replace(str(engine.DAILY_NEW_BUNDLE).encode(),
                                        str(engine.DAILY_OLD_BUNDLE).encode())
-    assert daily.replace(b"run_daily_financial_v5.py", b"run_daily_financial_v4.py") == old.daily_cron()
+    expected_daily = (old.daily_cron()
+        .replace(b"/opt/qagent/current", str(upgrade.QAGENT_HOME / "current").encode())
+        .replace(b"/var/lib/qagent-research", str(upgrade.QAGENT_HOME / "research-data").encode())
+        .replace(b"/var/lib/qagent", str(upgrade.QAGENT_HOME / "state").encode()))
+    assert daily.replace(b"run_daily_financial_v5.py", b"run_daily_financial_v4.py") == expected_daily
     forward = engine.forward_cron().replace(str(engine.FORWARD_NEW_BUNDLE).encode(),
                                            str(engine.FORWARD_OLD_BUNDLE).encode())
-    assert forward == old.forward_cron()
+    expected_forward = (old.forward_cron()
+        .replace(b"/opt/qagent/current", str(upgrade.QAGENT_HOME / "current").encode())
+        .replace(b"/var/lib/qagent-research", str(upgrade.QAGENT_HOME / "research-data").encode())
+        .replace(b"/var/lib/qagent", str(upgrade.QAGENT_HOME / "state").encode()))
+    assert forward == expected_forward
     assert engine.daily_cron().count(b"run_daily_financial_v5.py") == 13
     assert engine.forward_cron().count(str(engine.FORWARD_NEW_BUNDLE).encode()) == 4
+    assert b"/opt/qagent/current" not in forward
+    assert b"/var/lib/qagent" not in forward
     assert "scripts/financial_peer_evidence.py" in upgrade.REQUIRED
 
 

@@ -2,12 +2,13 @@
 set -euo pipefail
 
 if [[ "$(id -u)" -ne 0 || $# -ne 1 ]]; then
-  echo "usage: sudo $0 /opt/qagent/releases/COMMIT" >&2
+  echo "usage: sudo $0 /home/luozhenkun/qagent/releases/COMMIT" >&2
   exit 2
 fi
 RELEASE_DIR="$(realpath "$1")"
-CURRENT_LINK="${QAGENT_CURRENT_LINK:-/opt/qagent/current}"
-PREVIOUS_LINK="${QAGENT_PREVIOUS_LINK:-/opt/qagent/previous}"
+QAGENT_HOME="${QAGENT_HOME:-/home/${QAGENT_SERVICE_USER:-luozhenkun}/qagent}"
+CURRENT_LINK="${QAGENT_CURRENT_LINK:-$QAGENT_HOME/current}"
+PREVIOUS_LINK="${QAGENT_PREVIOUS_LINK:-$QAGENT_HOME/previous}"
 
 if [[ ! -f "$RELEASE_DIR/backend/pyproject.toml" || ! -f "$RELEASE_DIR/frontend/package-lock.json" ]]; then
   echo "not a prepared Qagent release: $RELEASE_DIR" >&2

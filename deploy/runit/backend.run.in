@@ -3,7 +3,7 @@ set -euo pipefail
 
 set -a
 # shellcheck disable=SC1091
-source /etc/qagent/qagent.env
+source @ENV_FILE@
 set +a
 cd @APP_DIR@/backend
 exec >>@LOG_DIR@/backend.log 2>&1

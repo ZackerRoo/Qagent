@@ -17,7 +17,8 @@ if [[ ! "$RUNSV_READY_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
-STATE_DIR="${QAGENT_STATE_DIR:-/var/lib/qagent}"
+QAGENT_HOME="${QAGENT_HOME:-/home/${QAGENT_SERVICE_USER:-luozhenkun}/qagent}"
+STATE_DIR="${QAGENT_STATE_DIR:-$QAGENT_HOME/state}"
 SERVICE_USER="${QAGENT_SERVICE_USER:-luozhenkun}"
 DB_PATH="$STATE_DIR/qagent.db"
 if [[ ! -f "$DB_PATH" ]]; then
@@ -128,6 +129,10 @@ if ! sv up /etc/service/qagent-backend /etc/service/qagent-frontend; then
 fi
 if [[ -f /etc/cron.d/qagent-backup.disabled ]]; then
   mv /etc/cron.d/qagent-backup.disabled /etc/cron.d/qagent-backup
+fi
+if [[ -f /etc/cron.d/qagent-financial-peer-control.disabled ]]; then
+  mv /etc/cron.d/qagent-financial-peer-control.disabled \
+    /etc/cron.d/qagent-financial-peer-control
 fi
 touch "$STATE_DIR/.single-writer-approved"
 chown "$SERVICE_USER:$SERVICE_USER" "$STATE_DIR/.single-writer-approved"

@@ -6,6 +6,8 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
+QAGENT_HOME="${QAGENT_HOME:-/home/${QAGENT_SERVICE_USER:-luozhenkun}/qagent}"
+STATE_DIR="${QAGENT_STATE_DIR:-$QAGENT_HOME/state}"
 DISABLE_TIMEOUT="${QAGENT_DISABLE_TIMEOUT:-20}"
 if [[ ! "$DISABLE_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
   echo "QAGENT_DISABLE_TIMEOUT must be a positive integer" >&2
@@ -29,7 +31,11 @@ done
 if [[ -f /etc/cron.d/qagent-backup ]]; then
   mv /etc/cron.d/qagent-backup /etc/cron.d/qagent-backup.disabled
 fi
-rm -f /var/lib/qagent/.single-writer-approved
+if [[ -f /etc/cron.d/qagent-financial-peer-control ]]; then
+  mv /etc/cron.d/qagent-financial-peer-control \
+    /etc/cron.d/qagent-financial-peer-control.disabled
+fi
+rm -f "$STATE_DIR/.single-writer-approved"
 
 for name in qagent-frontend qagent-backend; do
   if [[ -e "/etc/service/$name" || -L "/etc/service/$name" ]]; then

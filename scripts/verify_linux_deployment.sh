@@ -6,7 +6,8 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
-STATE_DIR="${QAGENT_STATE_DIR:-/var/lib/qagent}"
+QAGENT_HOME="${QAGENT_HOME:-/home/${QAGENT_SERVICE_USER:-luozhenkun}/qagent}"
+STATE_DIR="${QAGENT_STATE_DIR:-$QAGENT_HOME/state}"
 EXPECTED_USER="${QAGENT_SERVICE_USER:-luozhenkun}"
 DB_PATH="$STATE_DIR/qagent.db"
 

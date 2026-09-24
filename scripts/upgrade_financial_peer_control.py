@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Guardedly enable peer-control v5 in the existing financial research chain."""
 import importlib.util
+import os
 from pathlib import Path
 
 import upgrade_financial_global_control as baseline
 from run_daily_financial_v5 import DAILY_BUNDLE, FORWARD_BUNDLE
+
+QAGENT_HOME = Path(os.environ.get("QAGENT_HOME", "/home/luozhenkun/qagent"))
 
 
 REQUIRED = baseline.DAILY_REQUIRED | {
@@ -25,7 +28,7 @@ def configured_engine():
     engine.FORWARD_OLD_CRON_SHA = "aad4e58bdbf27f4d914c713ab1908432d358523b479533bdfe458f1a62e036e2"
     engine.DAILY_OLD_MANIFEST_SHA = "08b2d4ede0d46d26586e21001c904ed95b20762ff9d3cfe0bf5abf38a1def1f8"
     engine.FORWARD_OLD_MANIFEST_SHA = "e21a920aa9bfe47213568b346a1aeb26f1cdf31a820bd66481c06b77f84d35aa"
-    engine.BACKUPS = Path("/var/backups/qagent-financial-peer-control")
+    engine.BACKUPS = QAGENT_HOME / "backups/financial-peer-control"
     engine.DAILY_REQUIRED = engine.FORWARD_REQUIRED = REQUIRED
 
     def pinned_template(factory, expected):
@@ -43,11 +46,20 @@ def configured_engine():
         old = b"/scripts/run_daily_financial_v4.py"
         if raw.count(old) != 13:
             raise ValueError("unexpected_daily_wrapper_shape")
-        return raw.replace(old, b"/scripts/run_daily_financial_v5.py")
+        return (raw.replace(old, b"/scripts/run_daily_financial_v5.py")
+                   .replace(b"/opt/qagent/current", str(QAGENT_HOME / "current").encode())
+                   .replace(b"/var/lib/qagent-research", str(QAGENT_HOME / "research-data").encode())
+                   .replace(b"/var/lib/qagent", str(QAGENT_HOME / "state").encode()))
 
     engine.daily_cron = daily_cron
-    engine.forward_cron = lambda: engine._rewrite_bundle(
-        engine.old_forward_cron(), engine.FORWARD_OLD_BUNDLE, engine.FORWARD_NEW_BUNDLE, 4)
+    def forward_cron():
+        raw = engine._rewrite_bundle(
+            engine.old_forward_cron(), engine.FORWARD_OLD_BUNDLE, engine.FORWARD_NEW_BUNDLE, 4)
+        return (raw.replace(b"/opt/qagent/current", str(QAGENT_HOME / "current").encode())
+                   .replace(b"/var/lib/qagent-research", str(QAGENT_HOME / "research-data").encode())
+                   .replace(b"/var/lib/qagent", str(QAGENT_HOME / "state").encode()))
+
+    engine.forward_cron = forward_cron
 
     def validate_manifests(daily_old, daily_new, forward_old, forward_new):
         if (daily_old != engine.DAILY_OLD_MANIFEST_SHA

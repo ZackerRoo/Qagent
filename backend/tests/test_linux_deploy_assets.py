@@ -45,13 +45,23 @@ def test_installer_stages_services_without_enabling_them():
     assert "env -u QAGENT_DATABASE_URL" in installer
     assert 'touch "$STAGING/qagent-$name/down"' in installer
     assert '"$UV_BIN" sync' in installer
-    assert "--frozen --no-dev --python python3.11" in installer
+    assert '--frozen --no-dev --python "$PYTHON_BIN"' in installer
     assert "pip install" not in installer
     assert "merge_proxy_environment.py" in installer
-    assert 'python3.11 "$APP_DIR/scripts/merge_proxy_environment.py"' in installer
+    assert '"$PYTHON_BIN" "$APP_DIR/scripts/merge_proxy_environment.py"' in installer
+    runtime = (ROOT / "scripts/resolve_linux_runtime.sh").read_text()
+    bootstrap = (ROOT / "scripts/bootstrap_linux_persistent_home.sh").read_text()
+    frontend = (ROOT / "deploy/runit/frontend.run.in").read_text()
+    assert 'runtime/node-v24/bin/node' in runtime
+    assert 'runtime/uv/bin/uv' in runtime
+    assert 'runtime/python3.11/bin/python3.11' in runtime
+    assert 'QAGENT_NPM_BIN' in runtime
+    assert 'resolve_qagent_runtime' in installer and 'resolve_qagent_runtime' in bootstrap
+    assert '@NPM_BIN@' in frontend and '@NODE_BIN_DIR@' in frontend
+    assert '@NPM_BIN@' in installer and '@NPM_BIN@' in bootstrap
     assert "\nsource /etc/environment" not in installer
     assert "\n. /etc/environment" not in installer
-    assert "8#$CURRENT_ENV_MODE & 8#640" in installer
+    assert "(8#$CURRENT_ENV_MODE & 8#600) | 8#040" in installer
     assert 'CRON_HOST_TIMEZONE="$(tr -d' in installer
     assert "UTC|Etc/UTC|GMT|Etc/GMT" in installer
     assert '"$(env -u TZ date +%z)" != "+0000"' in installer
@@ -59,6 +69,33 @@ def test_installer_stages_services_without_enabling_them():
     assert 'BACKUP_MIN_FREE_BYTES="${QAGENT_BACKUP_MIN_FREE_BYTES:-10737418240}"' in installer
     assert "@BACKUP_KEEP_DAYS@" in installer
     assert "@BACKUP_MIN_FREE_BYTES@" in installer
+    assert 'ROLLBACK_DIR="${QAGENT_RUNIT_ROLLBACK_DIR:-$BACKUP_DIR/deploy-rollback}"' in installer
+    assert 'mv "$STAGING/qagent-backup" /etc/cron.d/qagent-backup.disabled' in installer
+
+
+def test_health_and_runit_rollback_defaults_use_persistent_backup_root():
+    health = (ROOT / "scripts/check_linux_unattended_health.py").read_text()
+    rollback = (ROOT / "scripts/rollback_linux_runit.sh").read_text()
+    guide = (ROOT / "docs/deployment/linux-cloud.md").read_text()
+    assert '"QAGENT_BACKUP_DIR", str(Path(os.environ.get("QAGENT_HOME"' in health
+    assert 'QAGENT_RUNIT_ROLLBACK_DIR:-$BACKUP_DIR/deploy-rollback' in rollback
+    assert 'backups/deploy-rollback/' in guide
+    assert 'config/qagent.env' in guide and 'mode `0640`' in guide
+    assert 'mode `0600`' in guide and 'QAGENT_RANKING_V4_EVIDENCE_ATTESTATION_KEY_FILE' in guide
+
+
+def test_persistent_home_bootstrap_fails_closed_and_restores_only_marked_state():
+    bootstrap = (ROOT / "scripts/bootstrap_linux_persistent_home.sh").read_text()
+    assert 'findmnt -n -o TARGET --target /home' in bootstrap
+    assert '[[ -f "$STATE_DIR/qagent.db" && ! -L "$STATE_DIR/qagent.db" ]]' in bootstrap
+    assert 'mode=ro' in bootstrap and 'PRAGMA quick_check' in bootstrap
+    assert 'QAGENT_DATABASE_URL' in bootstrap and 'QAGENT_DATA_DIR' in bootstrap
+    assert 'if [[ -f "$STATE_DIR/.single-writer-approved" ]]' in bootstrap
+    assert 'if (( DESIRED_ENABLED == 1 )); then' in bootstrap
+    assert 'touch "$STATE_DIR/.single-writer-approved"' not in bootstrap
+    assert '/etc/service/$name' in bootstrap
+    assert 'qagent-backup.disabled' in bootstrap
+    assert 'qagent-financial-peer-control.disabled' in bootstrap
 
 
 def test_proxy_environment_merge_is_safe_idempotent_and_preserves_secrets(
@@ -223,7 +260,7 @@ def test_disable_keeps_links_until_processes_and_ports_are_quiescent():
         down_intent_loop_position,
     )
     clear_marker_position = disabler.index(
-        "rm -f /var/lib/qagent/.single-writer-approved", disable_cron_position
+        'rm -f "$STATE_DIR/.single-writer-approved"', disable_cron_position
     )
     down_position = disabler.index('sv -w "$DISABLE_TIMEOUT" down')
     port_position = disabler.index('ss -H -ltn "sport = :$port"')
@@ -244,7 +281,7 @@ def test_disable_keeps_links_until_processes_and_ports_are_quiescent():
         "if [[ -f /etc/cron.d/qagent-backup ]]"
     ) in disabler
     assert disabler.count("mv /etc/cron.d/qagent-backup ") == 1
-    assert disabler.count("rm -f /var/lib/qagent/.single-writer-approved") == 1
+    assert disabler.count('rm -f "$STATE_DIR/.single-writer-approved"') == 1
     assert "QAGENT_DISABLE_TIMEOUT" in disabler
     assert "kill -0" in disabler
     assert "collect_process_tree" in disabler

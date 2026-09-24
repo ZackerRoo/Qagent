@@ -481,8 +481,10 @@ def _arguments(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Read-only Qagent unattended Linux deployment health check."
     )
-    parser.add_argument("--database", default="/var/lib/qagent/qagent.db")
-    parser.add_argument("--backup-dir", default="/var/backups/qagent")
+    parser.add_argument("--database", default=str(
+        Path(os.environ.get("QAGENT_HOME", "/home/luozhenkun/qagent")) / "state/qagent.db"))
+    parser.add_argument("--backup-dir", default=os.environ.get(
+        "QAGENT_BACKUP_DIR", str(Path(os.environ.get("QAGENT_HOME", "/home/luozhenkun/qagent")) / "backups")))
     parser.add_argument("--backup-max-age-seconds", type=_positive_int, default=129600)
     parser.add_argument(
         "--backup-disk-max-used-percent", type=_percentage, default=85.0

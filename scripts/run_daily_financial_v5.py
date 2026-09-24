@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Pinned peer-control research entrypoint; the collector remains opt-in."""
+import os
 from pathlib import Path
 
 from run_daily_financial_same_day import main
 
 
-DAILY_BUNDLE = Path("/opt/qagent-research/daily-financial-20260924-v11")
-FORWARD_BUNDLE = Path("/opt/qagent-research/financial-forward-20260924-v13")
+QAGENT_HOME = Path(os.environ.get("QAGENT_HOME", "/home/luozhenkun/qagent"))
+DAILY_BUNDLE = QAGENT_HOME / "research/daily-financial-20260924-v11"
+FORWARD_BUNDLE = QAGENT_HOME / "research/financial-forward-20260924-v13"
 
 
 if __name__ == "__main__":

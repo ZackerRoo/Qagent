@@ -432,3 +432,13 @@ first-seal仍不可变，首次unavailable封存后不因后来G2补到而重写
 现有daily-v10/forward-v12及13/4时槽经云端只读核验；新增指向daily-v11/forward-v13的版本化包装器与受控升级器，v11仅对唯一Financial研究链路显式启用`--peer-controls`，保留原600秒及同日两批预算。旧cron/manifest摘要已固定，旧包和历史信号不覆盖；[发布步骤与回滚边界](research/financial-peer-control-rollout-20260924.md)。主任务最终backend全量**2878 passed、3项既有warnings（400.16秒、exit0）**；最终新包装器/升级器专项7 passed（4.02秒），含两个manifest-only隔离包测试3 passed；Ruff及diff检查通过。当前已实现、已本地测试，**未提交、未push、未部署、未云端启用v5**；本地测试不替代自然v5封存、完整可判别五对及成熟收益。唯一模拟账户、账本、正式Ranking和交易权限未改变，G2状态不提升。
 
 后续受控安装补录：源提交`4885639`已push至`origin/features/automation-backtest`，云端daily-v11/forward-v13 tar及manifest摘要与[发布记录](research/financial-peer-control-rollout-20260924.md)一致。升级前preview为`planned/old`，execute为`upgraded/new`、`started_job=false`，安装后preview为`already_installed/new`；私有备份收据为`/var/backups/qagent-financial-peer-control/before-install-gisc2gj1.json`、root:root 0600。新cron摘要分别为`cb22a5396452b17fd860ba2d11177afd3d0fc4e056a26b0b368c797782bb3e17`和`706b15213bd395046faa0de434d9b168fff1dc5bdb957fe5965ed55af0fb5fb5`，保持13/4时槽、root:root 0644；health正常、backend current仍83cdcb5，paper update enabled/outside_session、attempts4/completed4、last_error null。既有四份归档SHA未变，v13对四份`validate_archive`均通过。更新上段发布前状态为**已实现、已测试、已push、独立研究包及cron已部署启用**；尚无自然v5封存、完整可判别五对及真实5/10/20收益证明，不改变唯一模拟账户、账本、正式Ranking或交易规则，G2状态不提升。
+
+### G9 / P0：持久化主目录与镜像重启恢复（2026-09-24）
+
+本地准备中：将 Linux 部署的 canonical root 收敛到 `/home/luozhenkun/qagent`（可由`QAGENT_HOME`覆盖），包括 release/current、state DB、backups、logs、config、peer-control bundles/data，并提供重建 ephemeral `/etc` runit/cron 定义的 bootstrap。health 默认备份目录和 runit 定义回滚归档也指向持久 backups；provider config 与 Ranking V3/V4 原签名密钥必须保存在持久 config。bootstrap 必须在 `/home` 已挂载后运行；只有持久 state 中由显式 enable 创建的 `.single-writer-approved` marker 存在时才恢复已启用服务链接和 cron；marker 缺失时保持 down/disabled。bootstrap 验证配置指向持久 DB、DB 存在且 quick_check 通过；不隐式创建/替换生产 DB 或 marker，也不触发 API scheduler start。当前已完成聚焦本地测试，**未push、未部署**；当前 cloud image 缺少 Python 3.11 与 uv，不能据此尝试部署或安装运行时。
+
+当前 bootstrap 不重建 G1 observation 或 G2 collector cron；这些任务要等 bundle/data 路径迁入持久根目录、G2 frozen models 外部恢复并校验摘要、且各自有显式持久 opt-in/rehydration 规则后再单独接入。仓库未包含 G2 frozen model 文件，不得据此恢复 collector。
+
+完成条件：先由镜像/平台提供可验证的启动命令，在`/home`持久盘挂载后、runsvdir/cron消费定义前调用 bootstrap；执行一次受控 fresh paper run 后验证重启前后 DB manifest/账本完全一致、备份可读且 fresh run 只写原唯一 paper account，cron/scheduler 状态按持久 marker 恢复。自然重启恢复和账户验证未完成前不提升本项目运行可靠性状态，不迁移或截断 stale DB，不因 rehydrate 调用 paper scheduler start。
+
+本地新增显式 fresh ledger 初始化入口：仅在持久 `state/qagent.db` 不存在时独占创建，要求操作者显式填写初始资金及全部账户规则并校验，启动唯一 `default` 会话，拒绝已有 DB；不创建启用 marker、不启动服务或调度。2026-09-15 历史活跃账户快照见上文（10 持仓、10% 单笔分配、成本/滑点各 5bps、止盈 50%），但该快照不能证明最新初始资金或当前规则；新账本无法恢复旧会话、持仓、现金和事件。此项仅覆盖全新账本准备，不构成云端 fresh run 或重启恢复验收。专项测试与提交、push、部署状态由主任务集成时补录。

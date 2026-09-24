@@ -23,10 +23,12 @@ from uuid import uuid4
 
 PROTOCOL = "financial-daily-same-day-wrapper-v1"
 MAX_OUTPUT_BYTES = 64 * 1024
-DAILY_BUNDLE = Path("/opt/qagent-research/daily-financial-20260922-v9")
-FORWARD_BUNDLE = Path("/opt/qagent-research/financial-forward-20260922-v11")
-ATTEMPT_DIR = Path("/var/lib/qagent-research/daily-financial/wrapper-attempts")
-BACKEND = Path("/opt/qagent/current/backend")
+QAGENT_HOME = Path(os.environ.get("QAGENT_HOME", "/home/luozhenkun/qagent"))
+RESEARCH_DATA = QAGENT_HOME / "research-data"
+DAILY_BUNDLE = QAGENT_HOME / "research/daily-financial-20260922-v9"
+FORWARD_BUNDLE = QAGENT_HOME / "research/financial-forward-20260922-v11"
+ATTEMPT_DIR = RESEARCH_DATA / "daily-financial/wrapper-attempts"
+BACKEND = QAGENT_HOME / "current/backend"
 
 
 def _digest(path: Path) -> str:
@@ -112,7 +114,7 @@ def run(*, daily_bundle: Path = DAILY_BUNDLE, forward_bundle: Path = FORWARD_BUN
         daily_arguments = (
             "--base-url", "http://127.0.0.1:8000", "--source", "datahubco", "--candidate-pool",
             "--period", "20260630", "--today-close", "--budget-seconds", "600", "--output-dir",
-            "/var/lib/qagent-research/daily-financial", "--bounded-same-day", "--daily-frozen-industry")
+            str(RESEARCH_DATA / "daily-financial"), "--bounded-same-day", "--daily-frozen-industry")
         if peer_controls:
             daily_arguments += ("--peer-controls",)
         daily = subprocess.run(_command(daily_bundle / "scripts/collect_daily_documented_research.py",
@@ -128,15 +130,15 @@ def run(*, daily_bundle: Path = DAILY_BUNDLE, forward_bundle: Path = FORWARD_BUN
         env = os.environ.copy()
         env["PYTHONPATH"] = str(backend) + (":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         forward = subprocess.run(_command(forward_bundle / "scripts/run_financial_forward_research.py", (
-            "--daily-dir", "/var/lib/qagent-research/daily-financial", "--baseline-dir",
-            "/var/lib/qagent-research/g2-forward-results/signals", "--signal-dir",
-            "/var/lib/qagent-research/financial-forward-signals", "--evaluation-dir",
-            "/var/lib/qagent-research/financial-forward-evaluations", "--run-dir",
-            "/var/lib/qagent-research/financial-forward-runs", "--db", "/var/lib/qagent/qagent.db",
+            "--daily-dir", str(RESEARCH_DATA / "daily-financial"), "--baseline-dir",
+            str(RESEARCH_DATA / "g2-forward-results/signals"), "--signal-dir",
+            str(RESEARCH_DATA / "financial-forward-signals"), "--evaluation-dir",
+            str(RESEARCH_DATA / "financial-forward-evaluations"), "--run-dir",
+            str(RESEARCH_DATA / "financial-forward-runs"), "--db", str(QAGENT_HOME / "state/qagent.db"),
             "--provider-mode", "free", "--budget-seconds", "300", "--daily-baseline-source-dir",
-            "/var/lib/qagent-research/g2-forward-sources", "--daily-baseline-frozen-dir",
-            "/var/lib/qagent-research/g2-frozen-v1", "--daily-baseline-rank-dir",
-            "/var/lib/qagent-research/financial-daily-ranks")), capture_output=True, text=True,
+            str(RESEARCH_DATA / "g2-forward-sources"), "--daily-baseline-frozen-dir",
+            str(RESEARCH_DATA / "g2-frozen-v1"), "--daily-baseline-rank-dir",
+            str(RESEARCH_DATA / "financial-daily-ranks"))), capture_output=True, text=True,
             check=False, env=env)
         report["forward"] = {"returncode": forward.returncode, "result": _result(forward.stdout),
                              "stdout": _output(forward.stdout), "stderr": _output(forward.stderr)}

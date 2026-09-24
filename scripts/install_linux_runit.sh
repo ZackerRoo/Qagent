@@ -9,17 +9,20 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE_USER="${QAGENT_SERVICE_USER:-luozhenkun}"
 SERVICE_HOME="$(getent passwd "$SERVICE_USER" 2>/dev/null | cut -d: -f6 || true)"
-APP_DIR="${QAGENT_APP_DIR:-$ROOT_DIR}"
-STATE_DIR="${QAGENT_STATE_DIR:-/var/lib/qagent}"
-BACKUP_DIR="${QAGENT_BACKUP_DIR:-/var/backups/qagent}"
+QAGENT_HOME="${QAGENT_HOME:-${SERVICE_HOME:-/home/$SERVICE_USER}/qagent}"
+case "$QAGENT_HOME" in /home/*) ;; *) echo "QAGENT_HOME must be under /home" >&2; exit 1 ;; esac
+APP_DIR="${QAGENT_APP_DIR:-$QAGENT_HOME/current}"
+STATE_DIR="${QAGENT_STATE_DIR:-$QAGENT_HOME/state}"
+BACKUP_DIR="${QAGENT_BACKUP_DIR:-$QAGENT_HOME/backups}"
 BACKUP_KEEP_DAYS="${QAGENT_BACKUP_KEEP_DAYS:-5}"
 BACKUP_MIN_FREE_BYTES="${QAGENT_BACKUP_MIN_FREE_BYTES:-10737418240}"
-LOG_DIR="${QAGENT_LOG_DIR:-/var/log/qagent}"
+LOG_DIR="${QAGENT_LOG_DIR:-$QAGENT_HOME/logs}"
 ENV_DIR="/etc/qagent"
-ENV_FILE="$ENV_DIR/qagent.env"
+CONFIG_DIR="${QAGENT_CONFIG_DIR:-$QAGENT_HOME/config}"
+ENV_FILE="$CONFIG_DIR/qagent.env"
 SV_DIR="/etc/sv"
 SERVICE_DIR="/etc/service"
-ROLLBACK_DIR="$ENV_DIR/deploy-rollback"
+ROLLBACK_DIR="${QAGENT_RUNIT_ROLLBACK_DIR:-$BACKUP_DIR/deploy-rollback}"
 
 if [[ ! "$BACKUP_KEEP_DAYS" =~ ^[1-9][0-9]*$ ]]; then
   echo "QAGENT_BACKUP_KEEP_DAYS must be a positive integer" >&2
@@ -36,6 +39,10 @@ if ! id "$SERVICE_USER" >/dev/null 2>&1; then
 fi
 if [[ -z "$SERVICE_HOME" || ! -d "$SERVICE_HOME" ]]; then
   echo "service home does not exist: $SERVICE_HOME" >&2
+  exit 1
+fi
+if [[ ! -d /home || "$(findmnt -n -o TARGET --target /home 2>/dev/null || true)" != "/home" ]]; then
+  echo "/home must be a mounted persistent filesystem before installing Qagent" >&2
   exit 1
 fi
 if [[ ! -d "$SERVICE_DIR" || ! -x /usr/bin/runsvdir ]]; then
@@ -72,55 +79,48 @@ if [[ ! -f "$APP_DIR/backend/pyproject.toml" || ! -f "$APP_DIR/frontend/package-
   echo "QAGENT_APP_DIR is not a Qagent checkout: $APP_DIR" >&2
   exit 1
 fi
-if ! command -v python3.11 >/dev/null 2>&1; then
-  echo "Python 3.11+ is required. Install python3.11 and python3.11-venv first." >&2
-  exit 1
-fi
-UV_BIN="${QAGENT_UV_BIN:-$(runuser -u "$SERVICE_USER" -- env HOME="$SERVICE_HOME" \
-  bash -lc 'command -v uv' 2>/dev/null || true)}"
-if [[ -z "$UV_BIN" || ! -x "$UV_BIN" ]]; then
-  echo "uv is required so backend/uv.lock can be installed with --frozen" >&2
-  exit 1
-fi
-if [[ "$(python3.11 -c 'import sys; print(sys.version_info >= (3, 11))')" != "True" ]]; then
-  echo "python3.11 does not satisfy Python >=3.11" >&2
-  exit 1
-fi
-if [[ ! -x /usr/bin/npm ]]; then
-  echo "npm is required at /usr/bin/npm; install a supported Node.js LTS release first" >&2
-  exit 1
-fi
-if ! /usr/bin/node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>20 || (a===20 && b>=19) ? 0 : 1)'; then
-  echo "Node.js >=20.19 is required by the frontend toolchain" >&2
-  exit 1
-fi
+source "$ROOT_DIR/scripts/resolve_linux_runtime.sh"
+resolve_qagent_runtime
+for binary in "$PYTHON_BIN" "$UV_BIN" "$NODE_BIN" "$NPM_BIN"; do
+  runuser -u "$SERVICE_USER" -- test -x "$binary" || {
+    echo "service user cannot execute runtime: $binary" >&2; exit 1;
+  }
+done
 
 install -d -m 0750 -o "$SERVICE_USER" -g "$SERVICE_USER" \
-  "$STATE_DIR" "$BACKUP_DIR" "$LOG_DIR"
+  "$QAGENT_HOME/releases" "$STATE_DIR" "$BACKUP_DIR" "$LOG_DIR"
+install -d -m 0750 -o root -g "$SERVICE_USER" "$CONFIG_DIR"
 install -d -m 0750 -o root -g "$SERVICE_USER" "$ENV_DIR"
 install -d -m 0700 -o root -g root "$ROLLBACK_DIR"
 install -d -m 0755 -o root -g root "$SV_DIR"
 
 ENV_FILE_MODE="0640"
 if [[ ! -f "$ENV_FILE" ]]; then
+  if [[ -f "$ENV_DIR/qagent.env" && ! -L "$ENV_DIR/qagent.env" ]]; then
+    install -m 0640 -o root -g "$SERVICE_USER" "$ENV_DIR/qagent.env" "$ENV_FILE"
+  fi
+fi
+if [[ ! -f "$ENV_FILE" ]]; then
   umask 0027
   {
     echo "QAGENT_ENVIRONMENT=production"
+    echo "QAGENT_HOME=$QAGENT_HOME"
     echo "QAGENT_DATA_DIR=$STATE_DIR"
     echo "QAGENT_DATABASE_URL=sqlite:///$STATE_DIR/qagent.db"
   } >"$ENV_FILE"
 else
   echo "preserving existing environment file: $ENV_FILE"
   CURRENT_ENV_MODE="$(stat -c '%a' "$ENV_FILE")"
-  printf -v ENV_FILE_MODE '%04o' "$((8#$CURRENT_ENV_MODE & 8#640))"
+  printf -v ENV_FILE_MODE '%04o' "$(((8#$CURRENT_ENV_MODE & 8#600) | 8#040))"
 fi
-python3.11 "$APP_DIR/scripts/merge_proxy_environment.py" \
+"$PYTHON_BIN" "$APP_DIR/scripts/merge_proxy_environment.py" \
   --source /etc/environment --target "$ENV_FILE"
 chown root:"$SERVICE_USER" "$ENV_FILE"
 chmod "$ENV_FILE_MODE" "$ENV_FILE"
+ln -sfn "$ENV_FILE" "$ENV_DIR/qagent.env"
 
 runuser -u "$SERVICE_USER" -- "$UV_BIN" sync \
-  --directory "$APP_DIR/backend" --frozen --no-dev --python python3.11
+  --directory "$APP_DIR/backend" --frozen --no-dev --python "$PYTHON_BIN"
 if ! "$APP_DIR/backend/.venv/bin/python" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))'; then
   echo "existing backend virtualenv uses Python <3.11; recreate $APP_DIR/backend/.venv" >&2
   exit 1
@@ -133,19 +133,22 @@ done
 runuser -u "$SERVICE_USER" -- env -u QAGENT_DATABASE_URL \
   PYTHONPATH="$APP_DIR/backend" "$APP_DIR/backend/.venv/bin/python" \
   "$APP_DIR/scripts/verify_isolated_linux_install.py"
-runuser -u "$SERVICE_USER" -- /usr/bin/npm --prefix "$APP_DIR/frontend" ci
-runuser -u "$SERVICE_USER" -- /usr/bin/npm --prefix "$APP_DIR/frontend" run build
+runuser -u "$SERVICE_USER" -- env PATH="$(dirname "$NODE_BIN"):$PATH" "$NPM_BIN" --prefix "$APP_DIR/frontend" ci
+runuser -u "$SERVICE_USER" -- env PATH="$(dirname "$NODE_BIN"):$PATH" "$NPM_BIN" --prefix "$APP_DIR/frontend" run build
 
 render() {
   sed \
     -e "s|@SERVICE_USER@|$SERVICE_USER|g" \
     -e "s|@SERVICE_HOME@|$SERVICE_HOME|g" \
+    -e "s|@QAGENT_HOME@|$QAGENT_HOME|g" \
     -e "s|@APP_DIR@|$APP_DIR|g" \
     -e "s|@STATE_DIR@|$STATE_DIR|g" \
     -e "s|@BACKUP_DIR@|$BACKUP_DIR|g" \
     -e "s|@BACKUP_KEEP_DAYS@|$BACKUP_KEEP_DAYS|g" \
     -e "s|@BACKUP_MIN_FREE_BYTES@|$BACKUP_MIN_FREE_BYTES|g" \
     -e "s|@LOG_DIR@|$LOG_DIR|g" \
+    -e "s|@NODE_BIN_DIR@|$(dirname "$NODE_BIN")|g" \
+    -e "s|@NPM_BIN@|$NPM_BIN|g" \
     "$1" >"$2"
 }
 
