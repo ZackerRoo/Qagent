@@ -405,4 +405,10 @@ first-seal仍不可变，首次unavailable封存后不因后来G2补到而重写
 
 ### G2-FQ3 v4 受控研究包准备（2026-09-24）
 
+最终发布证据补充：主任务读取`/var/tmp/qagent-rollout-relay-8lnet469/result.json`确认`ledger_equal=true`、`settings_equal=true`、`scheduler_enabled=true`；API health正常，独立paper tick enabled=true、间隔600秒，主调度settings间隔1800秒。以下阶段快照按发生顺序保留。
+
 主任务刷新09-22及09-23两份自然v3信号，均baseline available、control unavailable、0 pairs；未达连续五份停用阈值。已提交的全局同行业分配v4此次补齐evaluator协议识别，避免错误沿用旧G2 baseline收益比较；旧v1–v3重放保留，行业单例仍明确不可配对。新增从实际daily-v9/forward-v11到daily-v10/forward-v12的不可变bundle升级适配，保留原调度、预算、池和门槛，升级不重置连续失败观察及停用条件。当前已实现、相关测试通过，尚未提交、push或部署本轮补齐；[准备与验收记录](research/financial-global-control-rollout-20260924.md)。自然v4完整可判别五对和真实5/10/20结果仍待验，不更改唯一模拟账户、账本、正式Ranking或交易权限。
+
+同日部署补录：源提交`83cdcb528a226538750b41adb6a2fd7cecac8af8`已提交并push，主任务子集复核26 passed。云端daily-v10/forward-v12研究包升级成功，重复preview为`already_installed`、`started_job=false`；receipt为`/var/backups/qagent-financial-global-control/before-install-9iswa1j8.json`，四份旧signal的SHA全部保持不变。研究包已部署，但backend `83cdcb5`仍在暂存准备、尚未部署；上述准备阶段快照保留。自然v4封存、配对及成熟收益仍待验，连续失败观察不重置。
+
+后续后端部署验收：`83cdcb528a226538750b41adb6a2fd7cecac8af8`受控发布成功、进程exit0，证据目录`/var/tmp/qagent-rollout-relay-8lnet469`；helper完成ledger/settings一致性断言，后端隔离Linux startup通过，主任务相关118 passed、1项既有warning。前端暂存首次因缺node_modules报vite not found，经确认frontend源码diff为空后复用此前成功72构建的依赖，恢复后前端HTTP200、前后端runit均运行；过程存在维护与恢复，不称零停机。四份历史云端归档在生产PYTHONPATH下校验通过。更新上段后端尚未部署为已部署；自然v4信号、配对和选股收益仍待验。

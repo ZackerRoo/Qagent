@@ -23,3 +23,19 @@ python3 -B /opt/qagent-research/daily-financial-20260924-v10/scripts/upgrade_fin
 预览必须为 planned/old、started_job=false；以相同参数追加 `--execute` 进行授权升级，保存输出 receipt；再次预览须为 already_installed/new。需要恢复时以相同参数追加 `--rollback-receipt RECEIPT_PATH` 预览，再追加 `--execute`。helper只更改两个研究cron，不启动任务、不重启后端。恢复旧包仍保留已生成 v4 信号，因此回滚后的历史评估能力必须另行核验，不把cron回滚等同所有产物兼容。
 
 安装后核验两cron、bundle摘要、权限和健康，旧信号SHA保持原值；后续等待自然新v4 seal与matched-control评估证据，真实5/10/20收益仍需成熟和合格价格。
+
+## 2026-09-24 研究包部署补录
+
+主任务确认源提交`83cdcb528a226538750b41adb6a2fd7cecac8af8`已提交并push，子集复核26 passed。云端daily-v10/forward-v12研究包升级成功，重复preview为`already_installed`，`started_job=false`；私有receipt为`/var/backups/qagent-financial-global-control/before-install-9iswa1j8.json`。四份旧signal的SHA全部保持不变，没有手动启动研究任务。
+
+本段更新前述未提交、未push、研究包未部署的历史状态；backend `83cdcb5`仍在暂存准备，尚未部署，不将研究包升级等同后端发布。自然v4 seal、完整可判别配对及5/10/20成熟收益仍待验，连续失败观察和原停用条件继续跨协议版本保留。
+
+## 后端发布与恢复验收补录
+
+主任务最终读取`result.json`确认`ledger_equal=true`、`settings_equal=true`、`scheduler_enabled=true`；API health正常。实时配置核验独立paper tick enabled为true、间隔600秒，主调度settings间隔1800秒。
+
+主任务确认后端`83cdcb528a226538750b41adb6a2fd7cecac8af8`受控部署成功、进程exit0，证据目录`/var/tmp/qagent-rollout-relay-8lnet469`，helper成功完成ledger/settings一致性断言；隔离Linux startup通过，主任务相关回归118 passed、1项既有warning。此前后端仍暂存的记录保留为历史阶段。
+
+前端暂存首次因缺少node_modules报vite not found；确认frontend源码diff为空后，复用此前成功72构建的未变前端依赖完成恢复。最终前端HTTP200、前后端runit均运行。此次存在短暂维护及恢复过程，不宣称零停机。
+
+四份云端历史归档均在真实生产`PYTHONPATH=/opt/qagent/current/backend`环境下验证通过。此前手工诊断未设置该环境时，部分bundle目录形成namespace并导致`qagent.providers.baostock_session`导入失败；生产forward cron和daily wrapper本已设置完整backend路径，因此该诊断错误不代表自然runner失败。本次已实现、已测试、已push、研究包与后端已部署；尚无自然v4封存、可判别配对或选股收益改善验收结论。
