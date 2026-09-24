@@ -412,3 +412,21 @@ first-seal仍不可变，首次unavailable封存后不因后来G2补到而重写
 同日部署补录：源提交`83cdcb528a226538750b41adb6a2fd7cecac8af8`已提交并push，主任务子集复核26 passed。云端daily-v10/forward-v12研究包升级成功，重复preview为`already_installed`、`started_job=false`；receipt为`/var/backups/qagent-financial-global-control/before-install-9iswa1j8.json`，四份旧signal的SHA全部保持不变。研究包已部署，但backend `83cdcb5`仍在暂存准备、尚未部署；上述准备阶段快照保留。自然v4封存、配对及成熟收益仍待验，连续失败观察不重置。
 
 后续后端部署验收：`83cdcb528a226538750b41adb6a2fd7cecac8af8`受控发布成功、进程exit0，证据目录`/var/tmp/qagent-rollout-relay-8lnet469`；helper完成ledger/settings一致性断言，后端隔离Linux startup通过，主任务相关118 passed、1项既有warning。前端暂存首次因缺node_modules报vite not found，经确认frontend源码diff为空后复用此前成功72构建的依赖，恢复后前端HTTP200、前后端runit均运行；过程存在维护与恢复，不称零停机。四份历史云端归档在生产PYTHONPATH下校验通过。更新上段后端尚未部署为已部署；自然v4信号、配对和选股收益仍待验。
+
+### G2-FQ3 同行业对照可行性诊断（2026-09-24）
+
+本轮[真实归档诊断](research/financial-control-feasibility-20260924.md)确认09-22/23的Top5各有四只在原20股中为行业单例，eligible分别13/20、16/20且baseline均available；原v3重放通过，同证据内存v4仍control_unavailable/0 pairs，文件SHA不变。等待价格成熟或优化分配不能补出这两日不存在的同行；未来自然集合可能变化，但未保证可配对。最小待选方案为保留原20股排名与Top5，另行有界采样同日同源同行研究control，并事前固定市值规则和预算；这会改变研究对照集合，尚待用户批准，未实施，不改变选股池、模拟盘或正式Ranking。既有连续五份失败停止条件及跨版本累计保持，本轮不自动暂停、不回填旧信号，不提升G2完成状态。此补充仅文档与只读诊断，未提交、未push、未部署。
+
+同轮G2可执行缺口：主任务审计现有冻结collector仅归档predictions，未找到其20交易日结果消费者，已授权独立离线evaluator实施，目前进行中、未验收。保持冻结信号日复权收盘至第20个后续交易日复权收盘、Top10%、行业至少5股用行业中位数否则沪深300；成本沿用换手率×10bps，单横截面净结果留空，不混用Financial次日开盘口径，不新增调度或改变模型/账户。Financial唯一已成熟09-14五日窗口净超额为-3.2971742378645645%、baseline unavailable且lift为空，单个负窗口不构成配平假设检验；文件SHA和来源见上述报告。
+
+后续实施补录：`scripts/evaluate_g2_forward.py`及专项测试已实现，子任务最终12 passed、无warnings；主任务最终联合64 passed（5.00秒）、零warnings，Ruff及diff检查通过。云端隔离临时smoke读取真实5541股归档返回waiting_for_maturity、到期2026-10-19、指标为空，原signal SHA不变且不存在的DB路径未被创建；证据及脚本SHA见上述报告。不将未成熟分支通过视为选股收益验收。已实现并完成上述验证，未提交、未push、未生产部署；仅写云端临时脚本/输出，未变更cron、模型、规则或账本。额外同行研究control仍为待批准方案。
+
+### G2-FQ3 有界同行研究 control v5（2026-09-24，本地实施）
+
+后续锚点边界补充：原Top5不在批量首屏时，沿用原逐股同日已验证行业/市值作为匹配锚点，不因首屏缺席单独拒绝；若批量包含锚点则须精确一致。额外control仍仅取捕获交集，不伪造control或改变排名。主任务调整后独立复跑同七组测试，最终140 passed（17.81秒），所有修改Python文件的Ruff及diff检查通过；下段137 passed保留为调整前基线。未部署、未启用及收益未验边界保持。
+
+本轮已批准并实现默认关闭的peer-control v5，更新此前“待批准、未实施”的阶段状态；[范围与限制](research/financial-control-feasibility-20260924.md)。保留原20股、排名、Top5和原report字节，另取最多10只研究control；不扩选股池、不改paper或cron。供应方offset语义不可靠且industry过滤被忽略，故仅取stock_basic及同日daily_basic各第一页、各最多5000行，在捕获交集内做本地精确行业过滤和市值距离选择；完整性未知，最近仅限捕获交集，抽样偏差明确保留。每批新增最多2次批量加70次财务请求，即72次，原160次上限增至232次，仍共享600秒deadline和同日两批预算。`--peer-controls`须同时配`--daily-frozen-industry --bounded-same-day`。主任务当前七组联合测试137 passed（16.67秒）、diff检查通过；只读集成review无阻塞项，确认v1–v4行为保持及v5原候选/额外control分开计数。已实现并完成上述验证，未push、未部署、未启用，无本轮自然配对或真实收益提升证据；保留旧信号、既有停止条件及跨版本累计。连续五份失败停止条件是运行决策标准，并非已实现自动计数/停调机制，G2状态不提升。
+
+### G2-FQ3 peer-control v5 发布准备（2026-09-24）
+
+现有daily-v10/forward-v12及13/4时槽经云端只读核验；新增指向daily-v11/forward-v13的版本化包装器与受控升级器，v11仅对唯一Financial研究链路显式启用`--peer-controls`，保留原600秒及同日两批预算。旧cron/manifest摘要已固定，旧包和历史信号不覆盖；[发布步骤与回滚边界](research/financial-peer-control-rollout-20260924.md)。主任务最终backend全量**2878 passed、3项既有warnings（400.16秒、exit0）**；最终新包装器/升级器专项7 passed（4.02秒），含两个manifest-only隔离包测试3 passed；Ruff及diff检查通过。当前已实现、已本地测试，**未提交、未push、未部署、未云端启用v5**；本地测试不替代自然v5封存、完整可判别五对及成熟收益。唯一模拟账户、账本、正式Ranking和交易权限未改变，G2状态不提升。

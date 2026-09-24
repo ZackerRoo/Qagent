@@ -86,3 +86,26 @@ def test_manifest_mismatch_prevents_daily_execution_and_is_recorded(tmp_path, mo
     assert report["status"] == "wrapper_error"
     assert report["error"] == "ValueError"
     assert Path(report["attempt"]).is_file()
+
+
+def test_peer_control_requires_explicit_wrapper_opt_in(tmp_path, monkeypatch):
+    daily = _bundle(tmp_path / "daily", "daily-financial-bundle-v1", "collect_daily_documented_research.py")
+    forward = _bundle(tmp_path / "forward", "financial-forward-bundle-v1", "run_financial_forward_research.py")
+    commands = []
+
+    class Result:
+        returncode = 75
+        stdout = json.dumps({"status": "waiting_for_candidate_pool"})
+        stderr = ""
+
+    monkeypatch.setattr(wrapper.subprocess, "run", lambda command, **kwargs: commands.append(command) or Result())
+    for enabled in (False, True):
+        code, _ = wrapper.run(daily_bundle=daily, forward_bundle=forward,
+                              attempt_dir=tmp_path / "attempts", peer_controls=enabled)
+        assert code == 75
+    assert "--peer-controls" not in commands[0]
+    assert commands[1].count("--peer-controls") == 1
+    for command in commands:
+        assert command[command.index("--budget-seconds") + 1] == "600"
+        assert "--bounded-same-day" in command
+        assert "--daily-frozen-industry" in command

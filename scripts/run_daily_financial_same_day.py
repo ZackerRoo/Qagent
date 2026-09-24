@@ -102,16 +102,21 @@ def _command(script: Path, arguments: tuple[str, ...]) -> list[str]:
 
 
 def run(*, daily_bundle: Path = DAILY_BUNDLE, forward_bundle: Path = FORWARD_BUNDLE,
-        attempt_dir: Path = ATTEMPT_DIR, backend: Path = BACKEND) -> tuple[int, dict]:
+        attempt_dir: Path = ATTEMPT_DIR, backend: Path = BACKEND,
+        peer_controls: bool = False) -> tuple[int, dict]:
     report = {"protocol": PROTOCOL, "started_at": datetime.now(timezone.utc).isoformat(),
               "daily": None, "forward": None}
     try:
         report["daily_manifest_sha256"] = _validate_bundle(daily_bundle, "daily-financial-bundle-v1")
         report["forward_manifest_sha256"] = _validate_bundle(forward_bundle, "financial-forward-bundle-v1")
-        daily = subprocess.run(_command(daily_bundle / "scripts/collect_daily_documented_research.py", (
+        daily_arguments = (
             "--base-url", "http://127.0.0.1:8000", "--source", "datahubco", "--candidate-pool",
             "--period", "20260630", "--today-close", "--budget-seconds", "600", "--output-dir",
-            "/var/lib/qagent-research/daily-financial", "--bounded-same-day", "--daily-frozen-industry")),
+            "/var/lib/qagent-research/daily-financial", "--bounded-same-day", "--daily-frozen-industry")
+        if peer_controls:
+            daily_arguments += ("--peer-controls",)
+        daily = subprocess.run(_command(daily_bundle / "scripts/collect_daily_documented_research.py",
+                                         daily_arguments),
             capture_output=True, text=True, check=False)
         daily_result = _result(daily.stdout)
         report["daily"] = {"returncode": daily.returncode, "result": daily_result,

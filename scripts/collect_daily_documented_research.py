@@ -346,8 +346,11 @@ def batch_lock(directory):
 
 def run_batch(symbols, period, trade_date, *, source="datahubco",
               base_url="http://127.0.0.1:8000", budget_seconds=600, query=collect,
-              universe=None, daily_frozen_industry=False):
+              universe=None, daily_frozen_industry=False, peer_controls=False,
+              bounded_same_day=False):
     local_origin(base_url)
+    if peer_controls and not (daily_frozen_industry and bounded_same_day):
+        raise ValueError("peer_controls_require_daily_frozen_industry_and_bounded_same_day")
     if (not 1 <= len(symbols) <= 20 or len(set(symbols)) != len(symbols)
             or isinstance(budget_seconds, bool) or not math.isfinite(budget_seconds)
             or not 70 <= budget_seconds <= 1800):
@@ -462,6 +465,18 @@ def run_batch(symbols, period, trade_date, *, source="datahubco",
     if daily_frozen_industry:
         report["implementation_sha256"]["financial_industry_evidence.py"] = sha256(
             Path(__file__).with_name("financial_industry_evidence.py").read_bytes()).hexdigest()
+    if peer_controls:
+        from financial_peer_evidence import collect_peer_evidence
+        report["prospective_contract"] = "financial-daily-peer-control-v1"
+        report["peer_control_evidence"] = collect_peer_evidence(
+            report, base_url=base_url, query=query, deadline_monotonic=started + budget_seconds)
+        report["finished_at"] = now()
+        report["implementation_sha256"]["financial_peer_evidence.py"] = sha256(
+            Path(__file__).with_name("financial_peer_evidence.py").read_bytes()).hexdigest()
+        report["limitations"].append(
+            "Opt-in peer controls add at most 10 research-only stocks, two bulk requests and "
+            "70 financial requests, within the same deadline and daily batch budget; "
+            "original candidate universe and ranking remain unchanged.")
     report["result_digest"] = digest(report)
     return report
 
@@ -485,8 +500,11 @@ def main():
     parser.add_argument("--bounded-same-day", action="store_true",
                         help="Candidate-pool only: 16:40-22:40 Shanghai, at most two API batches/day")
     parser.add_argument("--daily-frozen-industry", action="store_true")
+    parser.add_argument("--peer-controls", action="store_true")
     args = parser.parse_args()
     try:
+        if args.peer_controls and not (args.daily_frozen_industry and args.bounded_same_day):
+            raise ValueError("peer_controls_require_daily_frozen_industry_and_bounded_same_day")
         if args.daily_frozen_industry and not args.bounded_same_day:
             raise ValueError("prospective_requires_bounded_same_day")
         trade_date = args.trade_date
@@ -546,7 +564,9 @@ def main():
                 report = run_batch(symbols, args.period, trade_date, source=args.source,
                                    base_url=args.base_url, budget_seconds=args.budget_seconds,
                                    universe=universe_evidence,
-                                   daily_frozen_industry=args.daily_frozen_industry)
+                                   daily_frozen_industry=args.daily_frozen_industry,
+                                   peer_controls=args.peer_controls,
+                                   bounded_same_day=args.bounded_same_day)
                 filename = datetime.now().strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex + ".json"
                 output = args.output_dir / filename
                 publish(output, json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n")

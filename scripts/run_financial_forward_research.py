@@ -259,7 +259,7 @@ def _run(daily_dir: Path, signal_dir: Path, evaluation_dir: Path, run_dir: Path,
                                       control_reasons=signal.get("control_reasons", []))
             elif candidates:
                 _, daily_path, document = candidates[0]
-                prospective = document.get("prospective_contract") == forward.PROSPECTIVE_CONTRACT
+                prospective = document.get("prospective_contract") in forward.PROSPECTIVE_CONTRACTS
                 if prospective:
                     from financial_daily_baseline import collect as collect_daily_baseline
                     eligible = [r["instrument_id"] for r in forward.seal(document, now=current)["rankings"]]

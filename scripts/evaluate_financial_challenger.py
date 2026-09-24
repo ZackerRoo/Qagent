@@ -52,6 +52,8 @@ POLICY_MATCHED_CONTROL = {
 }
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 PROSPECTIVE_CONTRACT = "financial-daily-frozen-industry-v1"
+PEER_PROSPECTIVE_CONTRACT = "financial-daily-peer-control-v1"
+PROSPECTIVE_CONTRACTS = {PROSPECTIVE_CONTRACT, PEER_PROSPECTIVE_CONTRACT}
 POLICY_DAILY = {**POLICY_MATCHED_CONTROL, "protocol": "financial-rule-forward-v3",
                 "baseline": "isolated_daily_frozen_full_features_ranks",
                 "industry": "single_provider_stock_basic_current_observation"}
@@ -63,6 +65,16 @@ POLICY_DAILY_V4 = {
         "total absolute log total_mv distance, G2 full_features rank, instrument_id; "
         "controls are unique across pairs"
     ),
+}
+POLICY_DAILY_V5 = {
+    **POLICY_DAILY_V4,
+    "protocol": "financial-rule-forward-v5",
+    "control": (
+        "original eligible stocks plus qualified bounded same-day peer controls; globally minimize "
+        "candidate-controls, then total absolute log total_mv distance, then ordered control IDs; "
+        "same-industry nonself controls are unique across pairs; no external G2 ranks"
+    ),
+    "candidate_universe": "original_daily_symbols_and_financial_top5_unchanged",
 }
 
 
@@ -215,11 +227,11 @@ def _extended_candidate_pool_universe(universe):
     )
 
 
-def _global_control_assignment(candidate, ids, metadata, g2_ranks):
+def _global_control_assignment(candidate, ids, metadata, g2_ranks, *, peer_controls=False):
     """Return the deterministic minimum-cost complete assignment, or ``None``.
 
-    The candidate set is capped at five and the eligible set at twenty, so an
-    exhaustive assignment is both simpler to audit and bounded (at most 20P5).
+    The candidate set is capped at five; v5 adds at most ten research controls
+    to the original twenty. Nonnegative cost pruning bounds the v5 search.
     Tuple ordering makes every tie deterministic without changing membership.
     """
     candidate_set = set(candidate)
@@ -233,7 +245,7 @@ def _global_control_assignment(candidate, ids, metadata, g2_ranks):
         choices.append(sorted(
             ((key, key in candidate_set,
               abs(math.log(float(metadata[key]["total_mv"])) - math.log(candidate_mv)),
-              g2_ranks[key]) for key in alternatives),
+              0 if peer_controls else g2_ranks[key]) for key in alternatives),
             key=lambda value: (value[1], value[2], value[3], value[0]),
         ))
 
@@ -241,6 +253,10 @@ def _global_control_assignment(candidate, ids, metadata, g2_ranks):
 
     def visit(position, used, selected, candidate_controls, distance, rank_sum):
         nonlocal best
+        if peer_controls and best is not None and (
+                candidate_controls > best[0]
+                or (candidate_controls == best[0] and distance > best[1])):
+            return
         if position == len(candidate):
             # Preserve the existing preference order globally.  The ordered
             # control IDs resolve otherwise identical aggregate costs.
@@ -261,9 +277,10 @@ def _global_control_assignment(candidate, ids, metadata, g2_ranks):
     return None if best is None else best[4]
 
 
-def _matched_control_plan(document, rankings, baseline_rows, *, global_assignment=False):
+def _matched_control_plan(document, rankings, baseline_rows, *, global_assignment=False,
+                          peer_controls=False):
     selection = document["universe"]["selection_order"]
-    if document.get("prospective_contract") == PROSPECTIVE_CONTRACT:
+    if document.get("prospective_contract") in PROSPECTIVE_CONTRACTS:
         from financial_industry_evidence import validate_industry_evidence
         section = validate_industry_evidence(document["industry_evidence"], document["symbols"],
                                             document["trade_date"], source=document["source"])
@@ -307,17 +324,29 @@ def _matched_control_plan(document, rankings, baseline_rows, *, global_assignmen
                 reasons.add("total_mv_incomplete")
 
     ids = [row["instrument_id"] for row in rankings]
+    original_ids = set(ids)
     if any(key not in metadata for key in ids):
         reasons.add("universe_metadata_incomplete")
     g2_ranks = {row["instrument_id"]: row["full_features"]["rank"] for row in baseline_rows}
     if any(key not in g2_ranks for key in ids):
         reasons.add("g2_rank_incomplete")
     candidate = ids[:POLICY_MATCHED_CONTROL["top_k"]]
+    if peer_controls:
+        from financial_peer_evidence import validate_peer_evidence
+        peer_section = validate_peer_evidence(document)
+        if peer_section["status"] != "available":
+            reasons.add("peer_control_evidence_unavailable")
+        else:
+            for row in peer_section["rows"]:
+                key = row["instrument_id"]
+                metadata[key] = {name: row[name] for name in ("industry", "exposure_group", "total_mv")}
+                ids.append(key)
     pairs = []
     if not reasons:
         candidate_set = set(candidate)
         if global_assignment:
-            assignments = _global_control_assignment(candidate, ids, metadata, g2_ranks)
+            assignments = _global_control_assignment(candidate, ids, metadata, g2_ranks,
+                                                      peer_controls=peer_controls)
             if assignments is None:
                 reasons.add("same_industry_control_unavailable")
         else:
@@ -363,7 +392,7 @@ def _matched_control_plan(document, rankings, baseline_rows, *, global_assignmen
                     "evidence_complete": True,
                     "discriminative": control_id not in candidate_set,
                     "candidate_g2_rank": g2_ranks[candidate_id],
-                    "control_g2_rank": g2_ranks[control_id],
+                    "control_g2_rank": g2_ranks.get(control_id) if control_id in original_ids else None,
                 }
                 pair["pair_digest"] = digest(pair)
                 pairs.append(pair)
@@ -412,7 +441,7 @@ def after_close(value, day):
 
 
 def seal(document, baseline=None, *, now=None):
-    """Seal new evidence; prospective inputs use global matched-control v4."""
+    """Seal prospective evidence as v4, or explicit peer-control evidence as v5."""
     return _seal(document, baseline, now=now)
 
 
@@ -421,7 +450,7 @@ def _seal(document, baseline=None, *, now=None, legacy_v1_fallback=False, archiv
     now = now or datetime.now(timezone.utc)
     verify_digest(document)
     prospective = document.get("prospective_contract")
-    if prospective is not None and prospective != PROSPECTIVE_CONTRACT:
+    if prospective is not None and prospective not in PROSPECTIVE_CONTRACTS:
         raise ValueError("unknown_prospective_contract")
     if document.get("protocol") != "daily-documented-research-v2":
         raise ValueError("requires_daily_v2")
@@ -438,13 +467,15 @@ def _seal(document, baseline=None, *, now=None, legacy_v1_fallback=False, archiv
     if not started <= finished <= sealed:
         raise ValueError("capture_time_order")
     for report in document["enrichment_reports"]:
-        if timestamp(report["retrieved_at"]) != finished:
+        report_time = timestamp(report["retrieved_at"])
+        if (not started <= report_time <= finished if prospective == PEER_PROSPECTIVE_CONTRACT
+                else report_time != finished):
             raise ValueError("enrichment_capture_mismatch")
         for symbol, raw in report["raw_evidence"]["instruments"].items():
             for api, item in raw.items():
                 evidence = document["system_evidence"][symbol][api]
                 received = after_close(evidence["received_at"], day)
-                if not started <= received <= finished:
+                if not started <= received <= report_time:
                     raise ValueError("section_capture_time_order")
                 response = evidence["response"]
                 if response.get("fetched_at"):
@@ -512,12 +543,17 @@ def _seal(document, baseline=None, *, now=None, legacy_v1_fallback=False, archiv
             **_matched_control_plan(
                 document, rankings, baseline_rows or [],
                 global_assignment=prospective and archive_protocol != POLICY_DAILY["protocol"],
+                peer_controls=prospective == PEER_PROSPECTIVE_CONTRACT,
             ),
         )
     if prospective:
         if not _extended_candidate_pool_universe(document.get("universe")):
             raise ValueError("prospective_candidate_pool_required")
         policy = POLICY_DAILY if archive_protocol == POLICY_DAILY["protocol"] else POLICY_DAILY_V4
+        if prospective == PEER_PROSPECTIVE_CONTRACT:
+            if archive_protocol not in (None, POLICY_DAILY_V5["protocol"]):
+                raise ValueError("peer_protocol_mismatch")
+            policy = POLICY_DAILY_V5
         result.update(protocol=policy["protocol"], policy=policy,
                       policy_digest=digest(policy), prospective_contract=prospective,
                       baseline_kind="isolated_daily_frozen_full_features_research")
@@ -554,22 +590,31 @@ def evaluate(signal, db, *, provider_mode="free", as_of=None):
     ids = [r["instrument_id"] for r in signal["rankings"]]
     day = date.fromisoformat(signal["signal_date"])
     is_v2 = signal["protocol"] in {
-        POLICY_MATCHED_CONTROL["protocol"], POLICY_DAILY["protocol"], POLICY_DAILY_V4["protocol"]}
+        POLICY_MATCHED_CONTROL["protocol"], POLICY_DAILY["protocol"], POLICY_DAILY_V4["protocol"],
+        POLICY_DAILY_V5["protocol"]}
     policy = POLICY_MATCHED_CONTROL if is_v2 else POLICY
     candidate = ids[:policy["top_k"]]
     baseline = (signal["baseline_order"] or [])[:policy["top_k"]]
     controls = signal.get("control_order", []) if is_v2 else []
+    is_v5 = signal["protocol"] == POLICY_DAILY_V5["protocol"]
+    original_ids = list(ids)
+    external_ids = [key for key in controls if key not in original_ids] if is_v5 else []
+    if is_v5:
+        ids = list(dict.fromkeys([*ids, *controls]))
     horizons = []
     try:
         cache = MarketDataCacheRepository(sessionmaker(bind=reader))
         for horizon in FACTOR_SHADOW_HORIZONS:
             entry, end = factor_shadow_outcome_dates(day, horizon)
             item = {"horizon_sessions": horizon, "entry_date": str(entry), "outcome_date": str(end),
-                    "expected": len(ids), "completed": 0, "labels": [],
+                    "expected": len(original_ids), "completed": 0, "labels": [],
                     "candidate_selected": candidate, "baseline_selected": baseline,
                     "baseline_status": signal["baseline_status"], "paired_complete": False,
                     "candidate_net_excess_pct": None, "baseline_net_excess_pct": None,
                     "lift_pct": None}
+            if is_v5:
+                item.update(external_control_expected=len(external_ids), external_control_completed=0,
+                            label_expected=len(ids), label_completed=0)
             if is_v2:
                 pair_results = []
                 for pair in signal["matched_control_pairs"]:
@@ -632,6 +677,10 @@ def evaluate(signal, db, *, provider_mode="free", as_of=None):
             known = {r["instrument_id"]: r["net_excess_return_pct"] for r in item["labels"]
                      if r["status"] == "computed"}
             item.update(completed=len(known), status="complete" if len(known) == len(ids) else "partial")
+            if is_v5:
+                item.update(completed=sum(key in known for key in original_ids),
+                            external_control_completed=sum(key in known for key in external_ids),
+                            label_completed=len(known))
             item["candidate_completed"] = sum(k in known for k in candidate)
             item["baseline_completed"] = sum(k in known for k in baseline)
             if all(k in known for k in candidate):
@@ -694,6 +743,9 @@ def evaluate(signal, db, *, provider_mode="free", as_of=None):
             "Digests prove integrity, not timestamp authenticity or historical PIT.",
             "No promotion; overlapping daily windows are not independent samples.",
         ]
+        if is_v5:
+            result["limitations"][2] = (
+                "G2 ranks verify the original eligible baseline only; v5 matching uses no rank tie-break.")
     result["result_digest"] = digest(result)
     return result
 
