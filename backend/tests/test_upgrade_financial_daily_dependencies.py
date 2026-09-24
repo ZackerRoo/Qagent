@@ -58,7 +58,13 @@ def test_schedule_arguments_and_historical_helpers_unchanged():
 
 
 @pytest.mark.parametrize("entry_index", [0, 1])
-def test_isolated_bundles_preview_consumer_first_resume_and_rollback(tmp_path, entry_index):
+@pytest.mark.parametrize("module_name", ["upgrade_financial_daily_dependencies", "upgrade_financial_global_control"])
+def test_isolated_bundles_preview_consumer_first_resume_and_rollback(tmp_path, entry_index, module_name):
+    sys.path.insert(0, str(SCRIPTS))
+    try:
+        upgrade = __import__(module_name)
+    finally:
+        sys.path.pop(0)
     packages = upgrade.package_bundles(tmp_path / "packages")
     repeated = upgrade.package_bundles(tmp_path / "repeat")
     assert [p["tar_sha256"] for p in packages] == [p["tar_sha256"] for p in repeated]
@@ -74,7 +80,7 @@ def test_isolated_bundles_preview_consumer_first_resume_and_rollback(tmp_path, e
 import sys, json
 from pathlib import Path
 sys.path.insert(0, {str(bundles[entry_index] / "scripts")!r})
-import upgrade_financial_daily_dependencies as u
+import {module_name} as u
 e = u.configured_engine()
 root = Path({str(tmp_path)!r})
 def regular(path):

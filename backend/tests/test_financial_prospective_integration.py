@@ -8,6 +8,30 @@ from test_financial_challenger_forward import matched_inputs, signed, NOW, SCRIP
 from test_run_financial_forward_research import paths, runner, RUN  # noqa: F401
 
 
+@pytest.mark.parametrize("protocol", ["financial-rule-forward-v3", "financial-rule-forward-v4"])
+def test_prospective_evaluation_preserves_matched_control_semantics(monkeypatch, tmp_path, protocol):
+    from test_financial_challenger_forward import database
+    document, baseline = prospective(monkeypatch)
+    import financial_daily_baseline as daily
+    monkeypatch.setattr(daily, "validate_archive", lambda value, **kwargs: value["predictions"])
+    signal = forward._seal(document, baseline, now=NOW, archive_protocol=protocol)
+    db = database(tmp_path, symbols=document["symbols"])
+    before = db.read_bytes()
+    result = forward.evaluate(signal, db, as_of=datetime.fromisoformat("2026-09-18T16:00:00+08:00"))
+    assert result["protocol"] == "financial-rule-forward-evaluation-v2"
+    five, ten, twenty = result["horizons"]
+    assert five["paired_complete"] is True
+    assert five["control_completed"] == 5
+    assert five["baseline_net_excess_pct"] is None
+    assert five["lift_pct"] == pytest.approx(
+        five["candidate_net_excess_pct"] - five["control_net_excess_pct"])
+    assert len(five["matched_control_pair_results"]) == 5
+    for waiting in (ten, twenty):
+        assert waiting["control_selected"] == signal["control_order"]
+        assert waiting["status"] == "waiting_for_maturity"
+    assert db.read_bytes() == before
+
+
 def prospective(monkeypatch):
     monkeypatch.syspath_prepend(str(SCRIPTS))
     import financial_industry_evidence as industry
@@ -62,7 +86,7 @@ def test_new_contract_cannot_fallback_to_candidate_pool_industry(monkeypatch):
     assert "industry_incomplete" in signal["control_reasons"]
 
 
-def test_v4_vendor_industry_singleton_still_has_zero_pairs(monkeypatch):
+def test_v4_vendor_industry_singleton_still_has_zero_pairs(monkeypatch, tmp_path):
     document, baseline = prospective(monkeypatch)
     import financial_daily_baseline as daily
     import financial_industry_evidence as industry
@@ -77,6 +101,14 @@ def test_v4_vendor_industry_singleton_still_has_zero_pairs(monkeypatch):
     assert signal["control_status"] == "control_unavailable"
     assert signal["control_reasons"] == ["same_industry_control_unavailable"]
     assert signal["matched_control_pairs"] == []
+    from test_financial_challenger_forward import database
+    outcome = forward.evaluate(
+        signal, database(tmp_path, symbols=document["symbols"]),
+        as_of=datetime.fromisoformat("2026-09-18T16:00:00+08:00"))["horizons"][0]
+    assert outcome["control_status"] == "control_unavailable"
+    assert outcome["paired_complete"] is False
+    assert outcome["lift_pct"] is None
+    assert outcome["baseline_net_excess_pct"] is None
 
 
 def test_new_contract_rejects_industry_before_daily_capture(monkeypatch):

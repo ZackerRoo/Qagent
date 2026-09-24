@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from multiprocessing import get_context
 from threading import Event
 from types import SimpleNamespace
@@ -84,6 +85,47 @@ def test_failure_releases_writer_and_slot_retries_then_replays(tmp_path):
     assert not run_paper_update_slot(repo.session_factory, "slot", callback)["replayed"]
     assert run_paper_update_slot(repo.session_factory, "slot", callback)["replayed"]
     assert len(attempts) == 2
+
+
+@dataclass(frozen=True)
+class FrozenFailureDetails(Exception):
+    reason: str
+    writer_wait_seconds: float | None = None
+
+
+class FrozenProviderFailure(FrozenFailureDetails):
+    # Let contextlib restore traceback while keeping diagnostic fields frozen.
+    pass
+
+
+class RejectingProviderFailure(Exception):
+    def __setattr__(self, name, value):
+        if name == "writer_wait_seconds":
+            raise RuntimeError("diagnostic assignment rejected")
+        super().__setattr__(name, value)
+
+
+@pytest.mark.parametrize("error", [
+    FrozenProviderFailure("provider failure"),
+    RejectingProviderFailure("provider failure"),
+    ValueError("provider failure"),
+])
+def test_callback_exception_preserved_when_timing_annotation_rejected(tmp_path, error):
+    repo = make_repo(tmp_path)
+
+    def callback():
+        raise error
+
+    with pytest.raises(type(error)) as raised:
+        run_paper_update_slot(repo.session_factory, "failed-slot", callback)
+    assert raised.value is error
+    if isinstance(error, ValueError):
+        assert error.writer_wait_seconds >= 0
+    with repo.session_factory.kw["bind"].connect() as connection:
+        assert connection.execute(text("SELECT count(*) FROM paper_update_slots")).scalar_one() == 0
+    assert not run_paper_update_slot(
+        repo.session_factory, "failed-slot", lambda: {"updated": 1},
+    )["replayed"]
 
 
 @pytest.mark.parametrize("operation", ["update", "seed", "settings"])

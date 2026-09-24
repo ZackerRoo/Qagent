@@ -553,7 +553,8 @@ def evaluate(signal, db, *, provider_mode="free", as_of=None):
     reader.exec_driver_sql("BEGIN")
     ids = [r["instrument_id"] for r in signal["rankings"]]
     day = date.fromisoformat(signal["signal_date"])
-    is_v2 = signal["protocol"] in {POLICY_MATCHED_CONTROL["protocol"], POLICY_DAILY["protocol"]}
+    is_v2 = signal["protocol"] in {
+        POLICY_MATCHED_CONTROL["protocol"], POLICY_DAILY["protocol"], POLICY_DAILY_V4["protocol"]}
     policy = POLICY_MATCHED_CONTROL if is_v2 else POLICY
     candidate = ids[:policy["top_k"]]
     baseline = (signal["baseline_order"] or [])[:policy["top_k"]]

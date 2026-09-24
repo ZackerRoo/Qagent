@@ -402,3 +402,7 @@ first-seal仍不可变，首次unavailable封存后不因后来G2补到而重写
 2026-09-22 北京时间20:10–20:13，自然 daily 产物为 `observed`；20:13:58，`financial-rule-forward-v3` 信号已 sealed，且同日 baseline 为 `available`；其后23:07的 forward 运行 `complete`、无 errors。该日 Financial eligible 为13/20，但 v3 matched control 为 `control_unavailable` / `same_industry_control_unavailable`、0 pairs，故尚无配对 lift 或成熟的5/10/20交易日结果。
 
 这是按预注册的同候选池、同行业规则 fail-closed 的结果；不得因单日不可配对而改候选池、补值或新增因子至正式 Ranking。继续积累5个自然 v3 信号；触发既有停用条件，或取得首个可判别的5日结果后，再判断是否继续。此轮仅只读研究记录，未修改唯一模拟盘、正式 Ranking 或交易权重。
+
+### G2-FQ3 v4 受控研究包准备（2026-09-24）
+
+主任务刷新09-22及09-23两份自然v3信号，均baseline available、control unavailable、0 pairs；未达连续五份停用阈值。已提交的全局同行业分配v4此次补齐evaluator协议识别，避免错误沿用旧G2 baseline收益比较；旧v1–v3重放保留，行业单例仍明确不可配对。新增从实际daily-v9/forward-v11到daily-v10/forward-v12的不可变bundle升级适配，保留原调度、预算、池和门槛，升级不重置连续失败观察及停用条件。当前已实现、相关测试通过，尚未提交、push或部署本轮补齐；[准备与验收记录](research/financial-global-control-rollout-20260924.md)。自然v4完整可判别五对和真实5/10/20结果仍待验，不更改唯一模拟账户、账本、正式Ranking或交易权限。

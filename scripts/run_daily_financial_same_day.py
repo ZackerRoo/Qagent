@@ -149,8 +149,8 @@ def run(*, daily_bundle: Path = DAILY_BUNDLE, forward_bundle: Path = FORWARD_BUN
             report["attempt_error"] = type(error).__name__
 
 
-def main() -> int:
-    code, report = run()
+def main(**options) -> int:
+    code, report = run(**options)
     print(json.dumps({"status": report["status"], "attempt": report.get("attempt"),
                       "attempt_error": report.get("attempt_error"), "daily": report["daily"],
                       "forward": report["forward"]}, ensure_ascii=False, sort_keys=True))

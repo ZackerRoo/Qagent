@@ -123,7 +123,11 @@ def run_paper_update_slot(session_factory, slot_id, callback):
         except Exception as exc:
             # The scheduler only exposes its own controlled error taxonomy, but
             # needs this timing to distinguish a slot that expired in writer wait.
-            exc.writer_wait_seconds = timing["writer_wait_seconds"]
+            try:
+                exc.writer_wait_seconds = timing["writer_wait_seconds"]
+            except Exception:
+                # Optional diagnostics must never replace the callback failure.
+                pass
             raise
         if hasattr(result, "model_dump"):
             result = result.model_dump(mode="json")
