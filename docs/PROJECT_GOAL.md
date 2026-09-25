@@ -452,3 +452,9 @@ G9 **仍未完成**：镜像重启时在持久 `/home` 挂载后重建 ephemeral
 2026-09-25 后续运行补录：空目录递归修复提交 `998b908` 已提交并 push，云端 release 已从上述 `d638abb` 切换到 `998b908`。切换前的旧自动化周期已自然终结为 `deferred_with_alert`，原因是超过最大递归层数；这是旧周期的失败终态，不计为成功扫描或交易验收。切换前发布 preflight 通过。切换后在临时空库中用模拟源验证股票与 ETF 加载函数各调用一次、无递归；后端、前端 runit 均为 run，Mac 隧道访问前端 HTTP 200、后端 health 正常。这些分别证明修复已发布、空库回归行为与服务可达，不证明全市场扫描已经完成。
 
 切换后的目录只有一份，含 5,574 个标的；新全市场扫描任务已启动，但截至 09:33:39 UTC 进度仍为 `0/5574`、状态 running。唯一模拟账户此时交易事件数为 0；尚无本轮自然扫描完成或自然成交证据。自然 10 分钟 paper tick、镜像重启后从持久 `/home` 恢复的启动 hook、重启前后 DB manifest/账本/备份/marker 对账仍未验证，G9 维持未完成。G1/G2 的研究 bundles、G2 frozen models 与相应自然观察/collector 仍缺失，不因此提升 G1/G2 状态或扩大交易权限。
+
+2026-09-25 持久启动信任边界补录：提交 `5c958d7519c3ad571c65a5027648ff5145388598` 已 push 至 `features/automation-backtest`，实现独立的 root-owned 持久启动包、root 独立审批，以及 backend 降权后读取 env；主任务本地相关测试 **61 passed**，`bash -n` 和 diff 检查通过。云端由 root 安装的 `/home/qagent-boot` 为 root:root `0755`，其中 `bootstrap.sh` 为 `0755`、模板为 `0644`。这证明启动材料已安装，尚未证明镜像启动 hook 已配置或重启恢复可用；当前运行中的 backend/frontend 仍为原 PID `150367` / `150368`，未因本轮启动包安装而重启，云端 current release 仍为旧 `998b908`，不包含此提交。
+
+独立 root 审批曾创建 `/home/qagent-boot-approved`（root:root `0600`），并与 `/home/luozhenkun/qagent` 匹配。随后发现当前旧 release 的 disable 脚本不会撤销该审批；为避免过渡期误恢复，已将审批文件原子移至 `/home/qagent-boot-approved.pending-5c958d7`（root:root `0600`）。因此**当前有效 root 审批缺失，恢复应 fail-closed**；可信启动包保留，须在受控切换到新 release 后重新运行独立 approve，不能把曾经批准写成当前获批。平台在持久 `/home` 挂载后、服务消费 ephemeral `/etc` 定义前调用 bootstrap 的 hook 仍未配置或验证，也未做镜像重启及重启前后对账。
+
+10:03 UTC 第二次自然调度返回 `already_running`，仍指向同一扫描任务 `full-scan-20260925093257-11955b9b`，未创建第二个扫描；当时进度 `2400/5574`、errors `0`、状态仍为 running。唯一 paper 会话仍为 `paper-session-50fa0927861b`，交易事件 `0`。这更新了上段 09:33:39 UTC 的进度快照，但不证明扫描完成、自然交易时段 10 分钟 tick 或成交。G9 **仍未完成**：待新 release 受控切换及重新审批、平台 hook 配置与验证、受控镜像重启和 DB manifest/唯一账本/备份/marker 恢复对账，并观察自然交易时段 tick；不提升 G1/G2 或模拟交易权限。
