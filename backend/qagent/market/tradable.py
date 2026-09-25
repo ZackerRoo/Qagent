@@ -7,7 +7,7 @@ import akshare as ak
 import pandas as pd
 from pydantic import BaseModel, Field
 
-from qagent.market.instruments import format_instrument_label, register_cn_instrument_names
+from qagent.market.instruments import register_cn_instrument_names
 
 
 class TradableInstrument(BaseModel):
@@ -207,13 +207,14 @@ def _is_inactive_name(name: str, *, asset_type: str) -> bool:
 
 def _instrument(symbol: str, name: str, asset_type: str, source: str) -> TradableInstrument:
     instrument_id = f"CN:{symbol}"
+    exchange = _exchange(symbol)
     return TradableInstrument(
         instrument_id=instrument_id,
         symbol=symbol,
         name=name,
-        label=format_instrument_label(instrument_id),
+        label=f"{name} {symbol}.{exchange}",
         asset_type=asset_type,
-        exchange=_exchange(symbol),
+        exchange=exchange,
         source=source,
     )
 

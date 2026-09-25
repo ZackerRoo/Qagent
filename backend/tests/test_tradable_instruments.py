@@ -4,11 +4,41 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 from qagent.app import create_app
+from qagent.market import instruments, tradable
 from qagent.market.tradable import load_cn_tradable_instruments, search_cn_tradable_instruments
 from qagent.market.instruments import format_instrument_label
 from qagent.db import create_session_factory, initialize_database
 from qagent.jobs.full_market import build_full_market_symbols, sync_cn_tradable_catalog
 from qagent.storage.repository import QagentRepository
+
+
+def test_empty_catalog_name_hydration_does_not_recurse(monkeypatch, tmp_path):
+    monkeypatch.setenv("QAGENT_TRADABLE_CACHE_DIR", str(tmp_path / "tradable-cache"))
+    monkeypatch.setattr(tradable, "_MEMORY_CACHE", {})
+    monkeypatch.setattr(instruments, "_CN_INSTRUMENT_NAMES_READY", False)
+
+    calls = {"stocks": 0, "etfs": 0}
+
+    def fake_stocks():
+        calls["stocks"] += 1
+        return pd.DataFrame({"code": ["603000"], "name": ["新目录股票"]})
+
+    def fake_etfs():
+        calls["etfs"] += 1
+        return pd.DataFrame({"代码": ["560650"], "名称": ["新目录ETF"]})
+
+    monkeypatch.setattr(
+        tradable,
+        "ak",
+        SimpleNamespace(stock_info_a_code_name=fake_stocks, fund_etf_spot_em=fake_etfs),
+    )
+    initialize_database()
+    repo = QagentRepository(create_session_factory())
+    assert repo.list_tradable_instruments(limit=10) == []
+
+    assert format_instrument_label("CN:603000") == "新目录股票 603000.SH"
+    assert format_instrument_label("CN:560650") == "新目录ETF 560650.SH"
+    assert calls == {"stocks": 1, "etfs": 1}
 
 
 def test_load_cn_tradable_instruments_combines_a_shares_and_etfs(monkeypatch):
