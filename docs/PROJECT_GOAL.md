@@ -442,3 +442,9 @@ first-seal仍不可变，首次unavailable封存后不因后来G2补到而重写
 完成条件：先由镜像/平台提供可验证的启动命令，在`/home`持久盘挂载后、runsvdir/cron消费定义前调用 bootstrap；执行一次受控 fresh paper run 后验证重启前后 DB manifest/账本完全一致、备份可读且 fresh run 只写原唯一 paper account，cron/scheduler 状态按持久 marker 恢复。自然重启恢复和账户验证未完成前不提升本项目运行可靠性状态，不迁移或截断 stale DB，不因 rehydrate 调用 paper scheduler start。
 
 本地新增显式 fresh ledger 初始化入口：仅在持久 `state/qagent.db` 不存在时独占创建，要求操作者显式填写初始资金及全部账户规则并校验，启动唯一 `default` 会话，拒绝已有 DB；不创建启用 marker、不启动服务或调度。2026-09-15 历史活跃账户快照见上文（10 持仓、10% 单笔分配、成本/滑点各 5bps、止盈 50%），但该快照不能证明最新初始资金或当前规则；新账本无法恢复旧会话、持仓、现金和事件。此项仅覆盖全新账本准备，不构成云端 fresh run 或重启恢复验收。专项测试与提交、push、部署状态由主任务集成时补录。
+
+2026-09-25 进展（更新上述历史快照）：持久化部署实现 `8204c60`、前端 package 修复 `d638abb`、安装器工作目录修复 `4bcbf82` 均已提交并 push；当前云端 release 为 `d638abb`。`/home` 为持久 XFS，运行环境已具备 Python 3.11.16、uv 0.12.18、Node 24.21；后端与前端服务健康，前端 HTTP 200。实现和聚焦本地测试已有证据，上述 push、云端 release 与服务检查分别成立；`4bcbf82` 已 push 不等于当前 release 已包含该修复。
+
+云端已显式启动全新、唯一 `default` 模拟账本会话 `paper-session-50fa0927861b`：初始资金 100000、单笔分配上限 10%、最多 10 个持仓、成本及滑点各 5 bps、止盈 50%。未使用 09-01 旧备份，旧会话、持仓、现金及事件不视为已恢复。主调度已启动、间隔 30 分钟；独立 paper update 间隔 10 分钟，当前为 `outside_session`；首轮自动化周期正在扫描，尚无成交。ProMax 与 Datahubco 经云端独立 Squid 代理分别取得认证请求 HTTP 200、业务 code 0、各 1 行；首份备份已验证可读。这些是单次服务、数据源和备份检查，尚不证明自然周期完成、交易时段更新时效或长期可用性。
+
+G9 **仍未完成**：镜像重启时在持久 `/home` 挂载后重建 ephemeral `/etc` 定义的启动 hook 尚未安装，受控重启及重启前后 DB manifest、唯一账本、备份和 marker 恢复状态对账尚未验证。G1/G2 所需研究 bundles 与 G2 frozen models 仍缺失，未恢复其观察和 collector 任务；不以主调度运行替代 G1/G2 自然研究验收。当前证据边界为：新账本初始化和服务启动已验证；首轮周期/自然交易尚未完成，重启恢复尚未证明。
