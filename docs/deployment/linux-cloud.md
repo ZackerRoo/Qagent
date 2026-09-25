@@ -20,9 +20,9 @@ the repository.
 
 ## Prepare a release without starting Qagent
 
-The current cloud image does not include Python 3.11 or `uv`; both are runtime
-prerequisites that must be supplied by the image/build environment. Do not install
-them as part of the rehydration step. Install Python 3.11+ (including `venv`), `uv`, a supported Node.js LTS release
+Python 3.11+ and `uv` are runtime prerequisites supplied by the image/build
+environment; the 2026-09-25 cloud check found Python 3.11.16 and uv 0.12.18.
+Do not install them as part of the rehydration step. The image also needs `venv`, a supported Node.js LTS release
 with npm, `runit`, `cron`, `curl`, and `iproute2`. Ubuntu 20.04's default Python
 3.8 is not supported by the backend. Create an immutable checkout named for the
 exact release commit (use the full commit SHA selected for this deployment):
@@ -48,29 +48,61 @@ the repository.
 
 ### Image/container restart recovery
 
-Only `/home/luozhenkun/qagent` is the persistent boundary. Paths under `/etc` are
+Only `/home` is the persistent boundary. Paths under `/etc` are
 ephemeral: the runit definitions, backup cron, peer-control cron, logrotate config,
 and `/etc/qagent/qagent.env` link must be reconstructed after an image/container
-replacement. The platform startup command must invoke this repository script after
-the persistent `/home` mount is ready and before `runsvdir` or `cron` can consume
-definitions:
+replacement. Install the reviewed release's static boot assets once into a
+root-owned `/home/qagent-boot` directory. `/home` must be root-owned and not
+writable by the service user; a bundle anywhere below `/home/luozhenkun` is unsafe
+because that parent can be renamed by the service user:
+
+```bash
+sudo ./scripts/install_linux_boot_bundle.sh
+```
+
+Review the exact release SHA and the copied files before installing; this root
+installer is an explicit deployment action. It does not grant restart approval or
+change running services. Bundle installation does not configure a platform hook;
+the platform owner must confirm the actual `/sbin/launcher sc --init` semantics
+and verify that the hook runs after `/home` is mounted but before runsvdir and cron
+consume `/etc` definitions. After the existing single-writer enable step, explicitly
+authorize restart recovery from the same reviewed release:
 
 ```bash
 sudo QAGENT_HOME=/home/luozhenkun/qagent \
-  /home/luozhenkun/qagent/current/scripts/bootstrap_linux_persistent_home.sh
+  ./scripts/approve_linux_boot_restore.sh --confirm-restore-after-restart
 ```
 
-The script requires the existing `state/qagent.db`, verifies its read-only
+The approval creates `/home/qagent-boot-approved` as root:root `0600`, containing
+the approved QAGENT_HOME. It requires the existing state marker and enabled runit
+links. The disable procedure revokes both markers. Installing a new bundle never
+creates approval. In particular, an already running deployment remains unchanged
+until the operator explicitly installs the bundle and authorizes recovery.
+
+The image/platform startup command must invoke `/home/qagent-boot/bootstrap.sh`
+after the persistent `/home` mount is ready and before `runsvdir` or `cron` can
+consume definitions. Configure the launcher `--init` hook in the platform image
+or startup settings; this repository cannot set that external hook itself. The
+current PID 1 is `/sbin/launcher sc`, whose default init directory is
+`/etc/my_init.d`; `/etc` is ephemeral, so a hook stored only there does not survive
+an image replacement. The platform must provide and verify the hook and ordering.
+Never point that root hook at `current/scripts/bootstrap_linux_persistent_home.sh`.
+
+```bash
+QAGENT_HOME=/home/luozhenkun/qagent /home/qagent-boot/bootstrap.sh
+```
+
+The installed script requires the existing `state/qagent.db`, verifies its read-only
 `quick_check`, checks that the persistent config points to that DB and is readable
-by `luozhenkun`, then restores definitions. With no
-`state/.single-writer-approved` marker it leaves services down and all Qagent cron
-files disabled. That marker is created only by the explicit enable procedure; when
-it already exists, bootstrap restores the previously enabled service links and cron
-files so runsvdir/cron can resume after restart. Bootstrap never creates the DB or
-marker. Startup integration is an external image/platform prerequisite: a script
-stored under `/home` cannot invoke itself after restart. The platform must arrange
-and verify this invocation/order. The persisted application scheduler state is
-unchanged; no manual API start is performed.
+by `luozhenkun`, then restores definitions from the root-owned templates. Both
+`state/.single-writer-approved` and the root approval must exist and match the
+approved home to restore links and cron. If either is absent, services and cron
+remain disabled; malformed root approval, symlinks, unsafe bundle ownership or
+mode, missing DB, and failed DB/config checks abort. The state marker alone is not
+trusted because its parent is writable by the service user. Bootstrap creates
+neither DB nor approval and does not call the API scheduler. Backend environment
+loading occurs inside the shell launched by `chpst` as `luozhenkun`; no root process
+sources `qagent.env` or executes a runtime from the service-owned release.
 
 This bootstrap currently restores the backend/frontend runit definitions, backup
 cron, and the pinned peer-control v5 daily/forward cron only. It does not recreate

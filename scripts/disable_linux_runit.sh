@@ -14,6 +14,10 @@ if [[ ! "$DISABLE_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
+# Revoke restart authorization before any service or cron mutation. An
+# interrupted shutdown must never turn into an automatic restart on next boot.
+rm -f /home/qagent-boot-approved
+
 declare -a ENABLED_SERVICES=()
 declare -a SERVICE_PIDS=()
 collect_process_tree() {

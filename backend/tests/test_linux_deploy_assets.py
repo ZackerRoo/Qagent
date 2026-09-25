@@ -60,7 +60,9 @@ def test_installer_stages_services_without_enabling_them():
     assert 'runtime/uv/bin/uv' in runtime
     assert 'runtime/python3.11/bin/python3.11' in runtime
     assert 'QAGENT_NPM_BIN' in runtime
-    assert 'resolve_qagent_runtime' in installer and 'resolve_qagent_runtime' in bootstrap
+    assert 'resolve_qagent_runtime' in installer
+    assert 'source "$APP_DIR/scripts/resolve_linux_runtime.sh"' not in bootstrap
+    assert 'source "$BOOT_DIR/resolve_linux_runtime.sh"' not in bootstrap
     assert '@NPM_BIN@' in frontend and '@NODE_BIN_DIR@' in frontend
     assert '@NPM_BIN@' in installer and '@NPM_BIN@' in bootstrap
     assert "\nsource /etc/environment" not in installer
@@ -94,12 +96,46 @@ def test_persistent_home_bootstrap_fails_closed_and_restores_only_marked_state()
     assert '[[ -f "$STATE_DIR/qagent.db" && ! -L "$STATE_DIR/qagent.db" ]]' in bootstrap
     assert 'mode=ro' in bootstrap and 'PRAGMA quick_check' in bootstrap
     assert 'QAGENT_DATABASE_URL' in bootstrap and 'QAGENT_DATA_DIR' in bootstrap
-    assert 'if [[ -f "$STATE_DIR/.single-writer-approved" ]]' in bootstrap
+    assert 'if [[ -f "$STATE_DIR/.single-writer-approved" && -f "$APPROVAL" ]]' in bootstrap
     assert 'if (( DESIRED_ENABLED == 1 )); then' in bootstrap
     assert 'touch "$STATE_DIR/.single-writer-approved"' not in bootstrap
     assert '/etc/service/$name' in bootstrap
     assert 'qagent-backup.disabled' in bootstrap
     assert 'qagent-financial-peer-control.disabled' in bootstrap
+
+
+def test_boot_bundle_is_root_owned_and_requires_independent_approval():
+    installer = (ROOT / "scripts/install_linux_boot_bundle.sh").read_text()
+    approver = (ROOT / "scripts/approve_linux_boot_restore.sh").read_text()
+    bootstrap = (ROOT / "scripts/bootstrap_linux_persistent_home.sh").read_text()
+    backend = (ROOT / "deploy/runit/backend.run.in").read_text()
+    disabler = (ROOT / "scripts/disable_linux_runit.sh").read_text()
+
+    assert "TARGET=/home/qagent-boot" in installer
+    assert 'install -m 0755 -o root -g root' in installer
+    assert 'install -m 0644 -o root -g root' in installer
+    assert "/home/qagent-boot-approved" not in installer
+    assert 'BOOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"' in bootstrap
+    assert 'render "$BOOT_DIR/$name.run.in"' in bootstrap
+    assert 'render "$APP_DIR/deploy/runit/$name.run.in"' not in bootstrap
+    assert '"$(stat -c %u "$asset")" == 0' in bootstrap
+    assert 'APPROVAL=/home/qagent-boot-approved' in bootstrap
+    assert '"$(cat "$APPROVAL")" == "$QAGENT_HOME"' in bootstrap
+    assert '"${1:-}" == --confirm-restore-after-restart' in approver
+    assert 'chmod 0600 "$STAGE"' in approver
+    assert 'rm -f /home/qagent-boot-approved' in disabler
+    assert disabler.index('rm -f /home/qagent-boot-approved') < disabler.index('touch "/etc/sv/$name/down"')
+    assert disabler.index('rm -f /home/qagent-boot-approved') < disabler.index('mv /etc/cron.d/qagent-backup')
+    assert 'findmnt -n -o TARGET --target /home' in approver
+    assert '"$(stat -c %u /home)" == 0' in approver
+    assert '$((8#$(stat -c %a /home) & 8#022)) -eq 0' in approver
+    assert '"$(stat -c %u "$asset")" == 0' in approver
+    assert '$((8#$(stat -c %a "$asset") & 8#022)) -eq 0' in approver
+    assert 'chpst_line' in approver and 'source_line' in approver
+    assert '"$(stat -c %a "$ENV_FILE")" == 640' in approver
+    assert 'runuser -u "$SERVICE_USER" -- test -r "$ENV_FILE"' in approver
+    assert backend.index('exec chpst -u @SERVICE_USER@:@SERVICE_USER@') < backend.index('source @ENV_FILE@')
+    assert "/bin/bash -c '" in backend
 
 
 def test_proxy_environment_merge_is_safe_idempotent_and_preserves_secrets(
