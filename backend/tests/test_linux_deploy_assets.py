@@ -49,6 +49,10 @@ def test_installer_stages_services_without_enabling_them():
     assert "pip install" not in installer
     assert "merge_proxy_environment.py" in installer
     assert '"$PYTHON_BIN" "$APP_DIR/scripts/merge_proxy_environment.py"' in installer
+    frontend_install = installer.split('  cd "$APP_DIR/frontend"\n', 1)[1].split("\n)", 1)[0]
+    assert '"$NPM_BIN" ci\n' in frontend_install
+    assert '"$NPM_BIN" run build' in frontend_install
+    assert '"$NPM_BIN" --prefix' not in installer
     runtime = (ROOT / "scripts/resolve_linux_runtime.sh").read_text()
     bootstrap = (ROOT / "scripts/bootstrap_linux_persistent_home.sh").read_text()
     frontend = (ROOT / "deploy/runit/frontend.run.in").read_text()

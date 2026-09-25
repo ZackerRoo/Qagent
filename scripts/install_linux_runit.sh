@@ -133,8 +133,11 @@ done
 runuser -u "$SERVICE_USER" -- env -u QAGENT_DATABASE_URL \
   PYTHONPATH="$APP_DIR/backend" "$APP_DIR/backend/.venv/bin/python" \
   "$APP_DIR/scripts/verify_isolated_linux_install.py"
-runuser -u "$SERVICE_USER" -- env PATH="$(dirname "$NODE_BIN"):$PATH" "$NPM_BIN" --prefix "$APP_DIR/frontend" ci
-runuser -u "$SERVICE_USER" -- env PATH="$(dirname "$NODE_BIN"):$PATH" "$NPM_BIN" --prefix "$APP_DIR/frontend" run build
+(
+  cd "$APP_DIR/frontend"
+  runuser -u "$SERVICE_USER" -- env PATH="$(dirname "$NODE_BIN"):$PATH" "$NPM_BIN" ci
+  runuser -u "$SERVICE_USER" -- env PATH="$(dirname "$NODE_BIN"):$PATH" "$NPM_BIN" run build
+)
 
 render() {
   sed \
