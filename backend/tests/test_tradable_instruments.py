@@ -337,7 +337,7 @@ def test_datahubco_catalog_uses_exchange_partitions_and_promax_etfs(monkeypatch)
             return RelayTable(api, tuple(rows[0]), rows, kwargs["limit"])
 
     monkeypatch.setattr(tradable, "_build_datahubco_client", Client)
-    monkeypatch.setattr(tradable, "_load_promax_etfs", lambda stocks: {"588000": "科创50ETF"})
+    monkeypatch.setattr(tradable, "_load_promax_etfs", lambda stocks: ({"588000": "科创50ETF"}, {}))
     catalog = tradable.load_cn_tradable_instruments(prefer_datahubco=True)
     assert [item.source for item in catalog.items] == [
         "datahubco_stock_basic", "datahubco_stock_basic",
@@ -398,7 +398,7 @@ def test_promax_etf_catalog_rejects_non_etf_code_and_name(monkeypatch):
             return RelayTable(api, tuple(row), (row,), kwargs["limit"])
 
     monkeypatch.setattr(tradable, "TushareRelayClient", Client)
-    with pytest.raises(ValueError, match="invalid_etf_name"):
+    with pytest.raises(ValueError, match="excess_etf_exclusions:1/1"):
         tradable._load_promax_etfs({})
 
 
@@ -426,7 +426,94 @@ def test_promax_etf_short_page_is_incomplete(monkeypatch):
         tradable._load_promax_etfs({})
 
 
-def test_opted_in_catalog_retains_previous_if_etf_sources_fail(monkeypatch, tmp_path):
+def _promax_rows():
+    core = ["588000.SH", "510300.SH", "510500.SH", "512100.SH", "159949.SZ"]
+    valid = core + [f"{520000 + n:06d}.SH" for n in range(1645)]
+    rows = [
+        {"ts_code": code, "extname": "ETF", "csname": "", "list_status": "L",
+         "list_date": "20200101"}
+        for code in valid
+    ]
+    rows.extend(
+        {"ts_code": f"{530000 + n:06d}.SH", "extname": "ETF", "csname": "",
+         "list_status": "L", "list_date": None}
+        for n in range(7)
+    )
+    rows.append({"ts_code": "158008.OF", "extname": "ETF", "csname": "",
+                 "list_status": "L", "list_date": "20200101"})
+    return rows
+
+
+def _mock_promax(monkeypatch, rows):
+    from qagent.providers.tushare_relay import RelayTable
+
+    monkeypatch.setattr(tradable, "get_settings", lambda: SimpleNamespace(
+        tushare_relay_research_enabled=True,
+        tushare_relay_key=SimpleNamespace(get_secret_value=lambda: "test-key"),
+    ))
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def query(self, api, **kwargs):
+            assert api == "etf_basic"
+            assert kwargs == {"list_status": "L", "limit": 5000,
+                              "fields": "ts_code,extname,csname,list_status,list_date"}
+            return RelayTable(api, tuple(rows[0]), tuple(rows), kwargs["limit"])
+
+    monkeypatch.setattr(tradable, "TushareRelayClient", Client)
+
+
+def test_promax_etf_excludes_observed_null_dates_and_of_duplicate(monkeypatch):
+    rows = _promax_rows()
+    _mock_promax(monkeypatch, rows)
+    etfs, health = tradable._load_promax_etfs({})
+
+    assert len(rows) == 1658
+    assert len(etfs) == 1650
+    assert "158008" not in etfs
+    assert health["tradable_etf_raw_rows"] == "1658"
+    assert health["tradable_etf_excluded"] == "8"
+    assert health["tradable_etf_exclusion_rate"] == "0.004825"
+    assert health["tradable_etf_added_vs_core"] == "1645"
+    assert health["tradable_etf_exclusion_counts"] == "invalid_code:1,invalid_listing_date:7"
+    assert "invalid_code:158008.OF" in health["tradable_etf_exclusion_samples"]
+    assert "invalid_listing_date:530000.SH" in health["tradable_etf_exclusion_samples"]
+
+
+def test_promax_etf_rejects_exclusions_over_one_percent(monkeypatch):
+    rows = _promax_rows()
+    for n in range(9):
+        rows[n]["list_date"] = None
+    _mock_promax(monkeypatch, rows)
+    with pytest.raises(ValueError, match="excess_etf_exclusions:17/1658"):
+        tradable._load_promax_etfs({})
+
+
+def test_promax_etf_rejects_missing_core_and_duplicate_after_exclusion(monkeypatch):
+    rows = _promax_rows()
+    rows[0]["ts_code"] = "530007.SH"
+    _mock_promax(monkeypatch, rows)
+    with pytest.raises(ValueError, match="missing_core_etfs:588000"):
+        tradable._load_promax_etfs({})
+
+    rows[0]["ts_code"] = "520000.SH"
+    with pytest.raises(ValueError, match="duplicate_etf_code"):
+        tradable._load_promax_etfs({})
+
+
+def test_promax_etf_rejects_page_at_limit(monkeypatch):
+    rows = _promax_rows()
+    rows.extend(dict(rows[0]) for _ in range(5000 - len(rows)))
+    _mock_promax(monkeypatch, rows)
+    with pytest.raises(ValueError, match="incomplete_etf_page"):
+        tradable._load_promax_etfs({})
+
+
+def test_opted_in_catalog_retains_previous_on_promax_503_with_akshare_fallback(
+    monkeypatch, tmp_path,
+):
     from qagent.providers.tushare_relay import RelayTable
 
     db_url = f"sqlite:///{tmp_path / 'tradable-opt-in-retain.db'}"
@@ -453,12 +540,15 @@ def test_opted_in_catalog_retains_previous_if_etf_sources_fail(monkeypatch, tmp_
     monkeypatch.setattr(tradable, "_build_datahubco_client", Client)
     monkeypatch.setattr(tradable, "_load_promax_etfs", lambda stocks: (_ for _ in ()).throw(
         RuntimeError("upstream_503")))
-    monkeypatch.setattr(tradable.ak, "fund_etf_spot_em", lambda: (_ for _ in ()).throw(
-        RuntimeError("akshare_unavailable")))
+    monkeypatch.setattr(tradable.ak, "fund_etf_spot_em", lambda: pd.DataFrame(
+        {"代码": ["588000", "510300"], "名称": ["科创50ETF", "沪深300ETF"]}))
     monkeypatch.setattr(tradable.ak, "stock_info_a_code_name", lambda: pd.DataFrame())
 
     result = sync_cn_tradable_catalog(repo=repo)
     assert result.data_health["tradable_sync_status"] == "retained_previous"
+    assert result.data_health["tradable_etf_source_status"] == "fallback"
+    assert result.data_health["tradable_etf_source_error"] == "upstream_503"
+    assert "etf_source_not_live" in result.data_health["tradable_sync_rejection_reasons"]
     assert result.summary.total_count == 2
     assert {item.instrument_id for item in repo.list_tradable_instruments(limit=10)} == {
         "CN:000001", "CN:588000",

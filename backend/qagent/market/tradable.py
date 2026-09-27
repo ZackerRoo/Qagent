@@ -207,9 +207,10 @@ def _load_datahubco_catalog(*, include_full_etfs: bool) -> TradableInstrumentCat
     etf_source = "core"
     etf_status = "core"
     etf_error = ""
+    etf_health: dict[str, str] = {}
     if include_full_etfs:
         try:
-            etfs = _load_promax_etfs(stocks)
+            etfs, etf_health = _load_promax_etfs(stocks)
             etf_source = "tushare_relay_promax_etf_basic"
             etf_status = "live"
         except (RuntimeError, ValueError) as exc:
@@ -218,7 +219,7 @@ def _load_datahubco_catalog(*, include_full_etfs: bool) -> TradableInstrumentCat
             etfs, _ = _exclude_inactive_names(etfs, asset_type="etf")
             if etfs:
                 etf_source = "akshare_fund_etf_spot_em"
-                etf_status = "live"
+                etf_status = "fallback"
             else:
                 raise ValueError(f"etf_sources_unavailable:{etf_error}") from None
     else:
@@ -242,10 +243,11 @@ def _load_datahubco_catalog(*, include_full_etfs: bool) -> TradableInstrumentCat
         "tradable_etf_coverage": "full" if include_full_etfs else "core",
         "tradable_etf_source_error": etf_error,
         "tradable_cache": "off",
+        **etf_health,
     })
 
 
-def _load_promax_etfs(stocks: dict[str, str]) -> dict[str, str]:
+def _load_promax_etfs(stocks: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
     settings = get_settings()
     if not settings.tushare_relay_research_enabled or not settings.tushare_relay_key:
         raise ValueError("promax_not_enabled")
@@ -256,22 +258,54 @@ def _load_promax_etfs(stocks: dict[str, str]) -> dict[str, str]:
     if not table.rows or len(table.rows) >= _DATAHUBCO_PAGE_LIMIT:
         raise ValueError("incomplete_etf_page")
     etfs: dict[str, str] = {}
+    excluded: dict[str, list[str]] = {}
     for row in table.rows:
         code = row.get("ts_code")
+        name = row.get("extname")
+        if not isinstance(name, str) or not name.strip():
+            name = row.get("csname")
         match = _CODE.fullmatch(code) if isinstance(code, str) else None
         if match is None or match.group(2) not in {"SH", "SZ"}:
-            raise ValueError("invalid_etf_code")
-        symbol = _validated_code(row, match.group(2), asset_type="etf")
-        if row.get("list_status") != "L" or not _valid_listing_date(row.get("list_date")):
-            raise ValueError("invalid_etf_listing_status")
-        name = _validated_name({"name": row.get("extname") or row.get("csname")},
-                               asset_type="etf")
+            reason = "invalid_code"
+        elif _exchange(match.group(1)) != match.group(2):
+            reason = "invalid_exchange"
+        elif row.get("list_status") != "L":
+            reason = "not_listed"
+        elif not _valid_listing_date(row.get("list_date")):
+            reason = "invalid_listing_date"
+        elif not isinstance(name, str) or not name.strip():
+            reason = "invalid_name"
+        else:
+            reason = ""
+        if reason:
+            sample = code if isinstance(code, str) and re.fullmatch(r"\d{6}\.[A-Z]{2}", code) else "unknown"
+            excluded.setdefault(reason, []).append(sample)
+            continue
+        symbol = match.group(1)
         if symbol in etfs or symbol in stocks:
             raise ValueError("duplicate_etf_code")
-        etfs[symbol] = name
+        etfs[symbol] = name.strip()
+    excluded_count = sum(len(samples) for samples in excluded.values())
+    if excluded_count * 100 > len(table.rows):
+        raise ValueError(f"excess_etf_exclusions:{excluded_count}/{len(table.rows)}")
     if len(etfs) < _DATAHUBCO_MIN_ETFS:
         raise ValueError(f"incomplete_etf_coverage:{len(etfs)}")
-    return etfs
+    missing_core = FALLBACK_ETF_NAMES.keys() - etfs.keys()
+    if missing_core:
+        raise ValueError("missing_core_etfs:" + ",".join(sorted(missing_core)))
+    return etfs, {
+        "tradable_etf_raw_rows": str(len(table.rows)),
+        "tradable_etf_excluded": str(excluded_count),
+        "tradable_etf_exclusion_rate": f"{excluded_count / len(table.rows):.6f}",
+        "tradable_etf_added_vs_core": str(len(etfs) - len(FALLBACK_ETF_NAMES)),
+        "tradable_etf_exclusion_counts": ",".join(
+            f"{reason}:{len(samples)}" for reason, samples in sorted(excluded.items())
+        ),
+        "tradable_etf_exclusion_samples": ",".join(
+            f"{reason}:{'|'.join(samples[:3])}" for reason, samples in sorted(excluded.items())
+        ),
+        "tradable_etf_source_observed_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
+    }
 
 
 def search_cn_tradable_instruments(
