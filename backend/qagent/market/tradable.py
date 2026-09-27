@@ -1,13 +1,19 @@
 import json
 import os
+import re
 import time
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import akshare as ak
 import pandas as pd
 from pydantic import BaseModel, Field
 
 from qagent.market.instruments import register_cn_instrument_names
+from qagent.config import get_settings
+from qagent.providers.datahubco import DatahubcoClient
+from qagent.providers.tushare_relay import TushareRelayClient
 
 
 class TradableInstrument(BaseModel):
@@ -44,13 +50,31 @@ FALLBACK_ETF_NAMES = {
 _CACHE_VERSION = 2
 _CACHE_TTL_SECONDS = 12 * 60 * 60
 _MEMORY_CACHE: dict[tuple[bool], tuple[float, TradableInstrumentCatalog]] = {}
+_DATAHUBCO_PAGE_LIMIT = 5000
+_DATAHUBCO_MIN_STOCKS = 5500
+_DATAHUBCO_MIN_ETFS = 1000
+_CODE = re.compile(r"(\d{6})\.(SH|SZ|BJ)\Z")
 
 
 def load_cn_tradable_instruments(
     *,
     include_full_etfs: bool = True,
     use_cache: bool = False,
+    prefer_datahubco: bool = False,
 ) -> TradableInstrumentCatalog:
+    if prefer_datahubco:
+        try:
+            return _load_datahubco_catalog(include_full_etfs=include_full_etfs)
+        except (RuntimeError, ValueError) as exc:
+            fallback = load_cn_tradable_instruments(
+                include_full_etfs=include_full_etfs, use_cache=use_cache,
+            )
+            return fallback.model_copy(deep=True, update={"data_health": {
+                **fallback.data_health,
+                "tradable_preferred_source": "datahubco",
+                "tradable_datahubco_status": "rejected",
+                "tradable_datahubco_error": str(exc)[:200],
+            }})
     cache_key = (include_full_etfs,)
     if use_cache:
         cached = _read_memory_cache(cache_key)
@@ -113,6 +137,141 @@ def load_cn_tradable_instruments(
         _MEMORY_CACHE[cache_key] = (time.time(), catalog)
         _write_disk_cache(include_full_etfs, catalog)
     return catalog
+
+
+def _datahubco_enabled() -> bool:
+    settings = get_settings()
+    return bool(settings.tradable_datahubco_enabled and settings.datahubco_enabled
+                and settings.datahubco_key
+                and settings.datahubco_allow_insecure_http)
+
+
+def _build_datahubco_client() -> DatahubcoClient:
+    settings = get_settings()
+    if not _datahubco_enabled():
+        raise ValueError("datahubco_not_enabled")
+    return DatahubcoClient(settings.datahubco_key.get_secret_value(),
+                           allow_insecure_http=True, timeout_seconds=30)
+
+
+def _validated_code(row: dict[str, object], exchange: str, *, asset_type: str) -> str:
+    raw = row.get("ts_code")
+    match = _CODE.fullmatch(raw) if isinstance(raw, str) else None
+    if match is None or match.group(2) != exchange:
+        raise ValueError(f"invalid_{asset_type}_code")
+    symbol = match.group(1)
+    if _exchange(symbol) != exchange:
+        raise ValueError(f"invalid_{asset_type}_exchange")
+    return symbol
+
+
+def _validated_name(row: dict[str, object], *, asset_type: str) -> str:
+    name = row.get("name")
+    if not isinstance(name, str) or not name.strip() or name != name.strip():
+        raise ValueError(f"invalid_{asset_type}_name")
+    return name
+
+
+def _valid_listing_date(value: object) -> bool:
+    if not isinstance(value, str) or not re.fullmatch(r"\d{8}", value):
+        return False
+    try:
+        return datetime.strptime(value, "%Y%m%d").date() <= datetime.now(
+            ZoneInfo("Asia/Shanghai")
+        ).date()
+    except ValueError:
+        return False
+
+
+def _load_datahubco_catalog(*, include_full_etfs: bool) -> TradableInstrumentCatalog:
+    client = _build_datahubco_client()
+    stocks: dict[str, str] = {}
+    for query_exchange, suffix in (("SSE", "SH"), ("SZSE", "SZ"), ("BSE", "BJ")):
+        table = client.query("stock_basic", exchange=query_exchange, list_status="L",
+                             limit=_DATAHUBCO_PAGE_LIMIT)
+        if not table.rows or len(table.rows) >= _DATAHUBCO_PAGE_LIMIT:
+            raise ValueError(f"incomplete_stock_page:{query_exchange}")
+        for row in table.rows:
+            # The documented stock_basic payload omits list_status even when filtered.
+            if not _valid_listing_date(row.get("list_date")):
+                raise ValueError("invalid_stock_listing_date")
+            symbol = _validated_code(row, suffix, asset_type="stock")
+            name = _validated_name(row, asset_type="stock")
+            if symbol in stocks:
+                raise ValueError("duplicate_stock_code")
+            stocks[symbol] = name
+    if len(stocks) < _DATAHUBCO_MIN_STOCKS:
+        raise ValueError(f"incomplete_stock_coverage:{len(stocks)}")
+
+    etfs: dict[str, str] = {}
+    etf_source = "core"
+    etf_status = "core"
+    etf_error = ""
+    if include_full_etfs:
+        try:
+            etfs = _load_promax_etfs(stocks)
+            etf_source = "tushare_relay_promax_etf_basic"
+            etf_status = "live"
+        except (RuntimeError, ValueError) as exc:
+            etf_error = str(exc)[:200]
+            etfs = _load_etf_names([])
+            etfs, _ = _exclude_inactive_names(etfs, asset_type="etf")
+            if etfs:
+                etf_source = "akshare_fund_etf_spot_em"
+                etf_status = "live"
+            else:
+                raise ValueError(f"etf_sources_unavailable:{etf_error}") from None
+    else:
+        etfs = FALLBACK_ETF_NAMES.copy()
+        etf_source = "core_fallback"
+
+    names = {**stocks, **etfs}
+    register_cn_instrument_names(names)
+    items = [_instrument(symbol, name, "stock", "datahubco_stock_basic")
+             for symbol, name in stocks.items()]
+    items.extend(_instrument(symbol, name, "etf", etf_source)
+                 for symbol, name in etfs.items() if symbol not in stocks)
+    return TradableInstrumentCatalog(items=items, data_health={
+        "tradable_market": "CN", "tradable_a_shares": str(len(stocks)),
+        "tradable_etfs": str(len(etfs)), "tradable_total": str(len(items)),
+        "tradable_source": "datahubco", "tradable_preferred_source": "datahubco",
+        "tradable_datahubco_status": "accepted",
+        "tradable_stock_source_status": "live",
+        "tradable_etf_source_status": etf_status,
+        "tradable_etf_source": etf_source,
+        "tradable_etf_coverage": "full" if include_full_etfs else "core",
+        "tradable_etf_source_error": etf_error,
+        "tradable_cache": "off",
+    })
+
+
+def _load_promax_etfs(stocks: dict[str, str]) -> dict[str, str]:
+    settings = get_settings()
+    if not settings.tushare_relay_research_enabled or not settings.tushare_relay_key:
+        raise ValueError("promax_not_enabled")
+    client = TushareRelayClient(settings.tushare_relay_key.get_secret_value(),
+                                timeout_seconds=30, retries=0)
+    table = client.query("etf_basic", list_status="L", limit=_DATAHUBCO_PAGE_LIMIT,
+                         fields="ts_code,extname,csname,list_status,list_date")
+    if not table.rows or len(table.rows) >= _DATAHUBCO_PAGE_LIMIT:
+        raise ValueError("incomplete_etf_page")
+    etfs: dict[str, str] = {}
+    for row in table.rows:
+        code = row.get("ts_code")
+        match = _CODE.fullmatch(code) if isinstance(code, str) else None
+        if match is None or match.group(2) not in {"SH", "SZ"}:
+            raise ValueError("invalid_etf_code")
+        symbol = _validated_code(row, match.group(2), asset_type="etf")
+        if row.get("list_status") != "L" or not _valid_listing_date(row.get("list_date")):
+            raise ValueError("invalid_etf_listing_status")
+        name = _validated_name({"name": row.get("extname") or row.get("csname")},
+                               asset_type="etf")
+        if symbol in etfs or symbol in stocks:
+            raise ValueError("duplicate_etf_code")
+        etfs[symbol] = name
+    if len(etfs) < _DATAHUBCO_MIN_ETFS:
+        raise ValueError(f"incomplete_etf_coverage:{len(etfs)}")
+    return etfs
 
 
 def search_cn_tradable_instruments(

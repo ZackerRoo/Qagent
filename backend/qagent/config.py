@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     datahubco_key: SecretStr | None = Field(default=None, repr=False)
     datahubco_enabled: bool = False
     datahubco_allow_insecure_http: bool = False
+    tradable_datahubco_enabled: bool = False
     fuyao_api_key: str | None = None
     fuyao_base_url: str = "https://fuyao.aicubes.cn"
     fuyao_timeout_seconds: int = Field(default=8, ge=1, le=30)

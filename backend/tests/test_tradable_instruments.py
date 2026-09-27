@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from qagent.app import create_app
@@ -8,7 +9,11 @@ from qagent.market import instruments, tradable
 from qagent.market.tradable import load_cn_tradable_instruments, search_cn_tradable_instruments
 from qagent.market.instruments import format_instrument_label
 from qagent.db import create_session_factory, initialize_database
-from qagent.jobs.full_market import build_full_market_symbols, sync_cn_tradable_catalog
+from qagent.jobs.full_market import (
+    _tradable_catalog_sync_rejection_reasons,
+    build_full_market_symbols,
+    sync_cn_tradable_catalog,
+)
 from qagent.storage.repository import QagentRepository
 
 
@@ -312,3 +317,167 @@ def test_tradable_catalog_api_syncs_searches_and_scans(monkeypatch, tmp_path):
     assert scan_response.status_code == 200
     assert scan_response.json()["data_health"]["full_market_catalog"] == "sqlite"
     assert scan_response.json()["data_health"]["full_market_requested"] == "3"
+
+
+def test_datahubco_catalog_uses_exchange_partitions_and_promax_etfs(monkeypatch):
+    from qagent.providers.tushare_relay import RelayTable
+
+    monkeypatch.setattr(tradable, "_DATAHUBCO_MIN_STOCKS", 3)
+    monkeypatch.setattr(tradable, "_datahubco_enabled", lambda: True)
+    calls = []
+
+    class Client:
+        def query(self, api, **kwargs):
+            calls.append((api, kwargs))
+            rows = {
+                "SSE": ({"ts_code": "600519.SH", "name": "贵州茅台", "list_date": "20010827"},),
+                "SZSE": ({"ts_code": "000001.SZ", "name": "平安银行", "list_date": "19910403"},),
+                "BSE": ({"ts_code": "920305.BJ", "name": "北交股票", "list_date": "20220101"},),
+            }[kwargs["exchange"]]
+            return RelayTable(api, tuple(rows[0]), rows, kwargs["limit"])
+
+    monkeypatch.setattr(tradable, "_build_datahubco_client", Client)
+    monkeypatch.setattr(tradable, "_load_promax_etfs", lambda stocks: {"588000": "科创50ETF"})
+    catalog = tradable.load_cn_tradable_instruments(prefer_datahubco=True)
+    assert [item.source for item in catalog.items] == [
+        "datahubco_stock_basic", "datahubco_stock_basic",
+        "datahubco_stock_basic", "tushare_relay_promax_etf_basic",
+    ]
+    assert [params["exchange"] for _, params in calls] == ["SSE", "SZSE", "BSE"]
+    assert all("offset" not in params and params["limit"] == 5000 for _, params in calls)
+    assert catalog.data_health["tradable_source"] == "datahubco"
+
+
+@pytest.mark.parametrize("bad_row,expected_error", [
+    ({"ts_code": "600519.SZ", "name": "贵州茅台", "list_date": "20010827"},
+     "invalid_stock_code"),
+    ({"ts_code": "600519.SH", "name": "", "list_date": "20010827"},
+     "invalid_stock_name"),
+    ({"ts_code": "600519.SH", "name": "贵州茅台", "list_date": "20990101"},
+     "invalid_stock_listing_date"),
+])
+def test_datahubco_catalog_rejects_bad_stock_fields_and_falls_back(
+    monkeypatch, bad_row, expected_error,
+):
+    from qagent.providers.tushare_relay import RelayTable
+
+    monkeypatch.setattr(tradable, "_DATAHUBCO_MIN_STOCKS", 1)
+    monkeypatch.setattr(tradable, "_datahubco_enabled", lambda: True)
+
+    class Client:
+        def query(self, api, **kwargs):
+            return RelayTable(api, tuple(bad_row), (bad_row,), kwargs["limit"])
+
+    monkeypatch.setattr(tradable, "_build_datahubco_client", Client)
+    monkeypatch.setattr(tradable.ak, "stock_info_a_code_name", lambda: pd.DataFrame(
+        {"code": ["000001"], "name": ["平安银行"]}))
+    catalog = tradable.load_cn_tradable_instruments(
+        include_full_etfs=False, prefer_datahubco=True,
+    )
+    assert catalog.data_health["tradable_source"] == "akshare"
+    assert catalog.data_health["tradable_datahubco_status"] == "rejected"
+    assert expected_error in catalog.data_health["tradable_datahubco_error"]
+
+
+def test_promax_etf_catalog_rejects_non_etf_code_and_name(monkeypatch):
+    from qagent.providers.tushare_relay import RelayTable
+
+    monkeypatch.setattr(tradable, "get_settings", lambda: SimpleNamespace(
+        tushare_relay_research_enabled=True,
+        tushare_relay_key=SimpleNamespace(get_secret_value=lambda: "test-key"),
+    ))
+    monkeypatch.setattr(tradable, "_DATAHUBCO_MIN_ETFS", 1)
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def query(self, api, **kwargs):
+            row = {"ts_code": "588000.SH", "extname": "", "csname": "",
+                   "list_status": "L", "list_date": "20200101"}
+            return RelayTable(api, tuple(row), (row,), kwargs["limit"])
+
+    monkeypatch.setattr(tradable, "TushareRelayClient", Client)
+    with pytest.raises(ValueError, match="invalid_etf_name"):
+        tradable._load_promax_etfs({})
+
+
+def test_promax_etf_short_page_is_incomplete(monkeypatch):
+    from qagent.providers.tushare_relay import RelayTable
+
+    monkeypatch.setattr(tradable, "_DATAHUBCO_MIN_ETFS", 1000)
+    monkeypatch.setattr(tradable, "get_settings", lambda: SimpleNamespace(
+        tushare_relay_research_enabled=True,
+        tushare_relay_key=SimpleNamespace(get_secret_value=lambda: "test-key"),
+    ))
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def query(self, api, **kwargs):
+            assert kwargs["list_status"] == "L"
+            row = {"ts_code": "588000.SH", "extname": "科创50ETF",
+                   "list_status": "L", "list_date": "20200101"}
+            return RelayTable(api, tuple(row), (row,), kwargs["limit"])
+
+    monkeypatch.setattr(tradable, "TushareRelayClient", Client)
+    with pytest.raises(ValueError, match="incomplete_etf_coverage:1"):
+        tradable._load_promax_etfs({})
+
+
+def test_opted_in_catalog_retains_previous_if_etf_sources_fail(monkeypatch, tmp_path):
+    from qagent.providers.tushare_relay import RelayTable
+
+    db_url = f"sqlite:///{tmp_path / 'tradable-opt-in-retain.db'}"
+    monkeypatch.setenv("QAGENT_DATABASE_URL", db_url)
+    monkeypatch.setattr(tradable, "_DATAHUBCO_MIN_STOCKS", 3)
+    monkeypatch.setattr(tradable, "_datahubco_enabled", lambda: True)
+    monkeypatch.setattr("qagent.jobs.full_market.get_settings", lambda: SimpleNamespace(
+        tradable_datahubco_enabled=True))
+    initialize_database(db_url)
+    repo = QagentRepository(create_session_factory(db_url))
+    first = tradable.TradableInstrumentCatalog(items=[
+        tradable._instrument("000001", "平安银行", "stock", "akshare"),
+        tradable._instrument("588000", "科创50ETF", "etf", "akshare"),
+    ])
+    repo.replace_tradable_instruments(first.items, first.data_health)
+
+    class Client:
+        def query(self, api, **kwargs):
+            symbols = {"SSE": "600519.SH", "SZSE": "000001.SZ", "BSE": "920305.BJ"}
+            row = {"ts_code": symbols[kwargs["exchange"]], "name": "新股票",
+                   "list_date": "20200101"}
+            return RelayTable(api, tuple(row), (row,), kwargs["limit"])
+
+    monkeypatch.setattr(tradable, "_build_datahubco_client", Client)
+    monkeypatch.setattr(tradable, "_load_promax_etfs", lambda stocks: (_ for _ in ()).throw(
+        RuntimeError("upstream_503")))
+    monkeypatch.setattr(tradable.ak, "fund_etf_spot_em", lambda: (_ for _ in ()).throw(
+        RuntimeError("akshare_unavailable")))
+    monkeypatch.setattr(tradable.ak, "stock_info_a_code_name", lambda: pd.DataFrame())
+
+    result = sync_cn_tradable_catalog(repo=repo)
+    assert result.data_health["tradable_sync_status"] == "retained_previous"
+    assert result.summary.total_count == 2
+    assert {item.instrument_id for item in repo.list_tradable_instruments(limit=10)} == {
+        "CN:000001", "CN:588000",
+    }
+
+
+def test_datahubco_catalog_rejects_one_of_five_etfs_missing():
+    previous = SimpleNamespace(total_count=6, stock_count=1, etf_count=5)
+    catalog = tradable.TradableInstrumentCatalog(
+        items=[tradable._instrument("000001", "平安银行", "stock", "datahubco")]
+        + [tradable._instrument(symbol, "ETF", "etf", "promax") for symbol in (
+            "588000", "510300", "510500", "512100",
+        )],
+        data_health={
+            "tradable_source": "datahubco",
+            "tradable_stock_source_status": "live",
+            "tradable_etf_source_status": "live",
+        },
+    )
+    assert "etf_coverage_drop:5->4" in _tradable_catalog_sync_rejection_reasons(
+        previous, catalog, include_full_etfs=True,
+    )

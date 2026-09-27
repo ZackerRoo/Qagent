@@ -15,6 +15,7 @@ from qagent.backtesting.baseline_challenger import (
     BaselineDecision,
 )
 from qagent.db import create_session_factory, initialize_database
+from qagent.config import get_settings
 from qagent.domain.models import OpportunityCard, SectorStrength
 from qagent.factors.engine import build_factor_feature_snapshot, rerank_factor_rankings
 from qagent.factors.models import FactorRanking
@@ -125,6 +126,7 @@ def sync_cn_tradable_catalog(
     catalog = load_cn_tradable_instruments(
         include_full_etfs=include_full_etfs,
         use_cache=use_cache,
+        prefer_datahubco=get_settings().tradable_datahubco_enabled,
     )
     rejection_reasons = _tradable_catalog_sync_rejection_reasons(
         previous,
@@ -174,6 +176,11 @@ def _tradable_catalog_sync_rejection_reasons(
         reasons.append("stock_source_not_live")
     if include_full_etfs and catalog.data_health.get("tradable_etf_source_status") != "live":
         reasons.append("etf_source_not_live")
+    if catalog.data_health.get("tradable_source") == "datahubco":
+        if stock_count < math.ceil(previous.stock_count * 0.99):
+            reasons.append(f"stock_coverage_drop:{previous.stock_count}->{stock_count}")
+        if include_full_etfs and etf_count < math.ceil(previous.etf_count * 0.95):
+            reasons.append(f"etf_coverage_drop:{previous.etf_count}->{etf_count}")
     if previous.stock_count >= 1_000 and stock_count < max(1_000, int(previous.stock_count * 0.8)):
         reasons.append(f"stock_coverage_drop:{previous.stock_count}->{stock_count}")
     if (
