@@ -79,6 +79,46 @@ def test_installer_stages_services_without_enabling_them():
     assert 'mv "$STAGING/qagent-backup" /etc/cron.d/qagent-backup.disabled' in installer
 
 
+def test_installer_renders_both_service_templates_without_placeholders(tmp_path: Path):
+    installer = (ROOT / "scripts/install_linux_runit.sh").read_text()
+    render_body = installer.split("render() {\n", 1)[1].split("\n}\n\nSTAGING=", 1)[0]
+    render_function = "render() {\n" + render_body + "\n}\n"
+    home = tmp_path / "qagent"
+    env_file = home / "config/qagent.env"
+    values = {
+        "SERVICE_USER": "qagent",
+        "SERVICE_HOME": str(tmp_path),
+        "QAGENT_HOME": str(home),
+        "ENV_FILE": str(env_file),
+        "APP_DIR": str(home / "current"),
+        "STATE_DIR": str(home / "state"),
+        "BACKUP_DIR": str(home / "backups"),
+        "BACKUP_KEEP_DAYS": "5",
+        "BACKUP_MIN_FREE_BYTES": "10737418240",
+        "LOG_DIR": str(home / "logs"),
+        "NODE_BIN": "/opt/node/bin/node",
+        "NPM_BIN": "/opt/node/bin/npm",
+    }
+    for name in ("backend", "frontend"):
+        rendered = tmp_path / f"{name}.run"
+        subprocess.run(
+            [
+                "bash",
+                "-c",
+                render_function + 'render "$1" "$2"',
+                "render-test",
+                str(ROOT / f"deploy/runit/{name}.run.in"),
+                str(rendered),
+            ],
+            env={**os.environ, **values},
+            check=True,
+        )
+        result = rendered.read_text()
+        assert "@" not in result
+        if name == "backend":
+            assert f"source {env_file}" in result
+
+
 def test_health_and_runit_rollback_defaults_use_persistent_backup_root():
     health = (ROOT / "scripts/check_linux_unattended_health.py").read_text()
     rollback = (ROOT / "scripts/rollback_linux_runit.sh").read_text()

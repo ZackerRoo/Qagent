@@ -144,6 +144,7 @@ render() {
     -e "s|@SERVICE_USER@|$SERVICE_USER|g" \
     -e "s|@SERVICE_HOME@|$SERVICE_HOME|g" \
     -e "s|@QAGENT_HOME@|$QAGENT_HOME|g" \
+    -e "s|@ENV_FILE@|$ENV_FILE|g" \
     -e "s|@APP_DIR@|$APP_DIR|g" \
     -e "s|@STATE_DIR@|$STATE_DIR|g" \
     -e "s|@BACKUP_DIR@|$BACKUP_DIR|g" \
