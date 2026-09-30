@@ -25,9 +25,18 @@ PYTHONPATH=backend:scripts backend/.venv/bin/python scripts/compare_current_fina
 
 ## 2026-09-30 云端只读 smoke
 
-主任务从云端 `market_bar_cache` **只读**取得 2026-09-29 行情，作为 2026-09-30 当前观察的两组共同输入；隔离脚本和一次性输入/输出均放在云端 `/tmp`，没有安装调度或变更服务。以下结果只属于对应批次，不代表全市场覆盖或前向收益。
+主任务从云端 `market_bar_cache` **只读**取得 2026-09-29 行情，作为 2026-09-30 当前观察的两组共同输入；隔离脚本和运行时输入/输出最初放在云端 `/tmp`，没有安装调度或变更服务。下面补录的私有持久归档更新了“产物仅在 `/tmp`”的初始状态。以下结果只属于对应批次，不代表全市场覆盖或前向收益。
 
 - 三股批次：ProMax 付费查询 6/6 完成，三股均合格，报告 `status=compared`。基线与增强的排名顺序完全相同；结果摘要为 `977f6abc8da785bdf97d4a2bad03ba6aaabf6444286ed1416263d8e4c7f07771`。这确认隔离接线能运行，未观察到该批次的排序改善。
 - 候选池十股批次：共发起 20 次查询，六股合格、四股排除；其中一次 `fina_indicator` 返回 ProMax HTTP 503 `upstream_pool_exhausted`，整批按协议 `status=blocked`，不生成可比较排名。结果摘要为 `b7818138bb25aa24d8fe8c08631d1e9d4ceeff02411e9ccb3bb4d019e449e316`。不能把六股合格误写为本批对照成功。
 
 两次均未写模拟账本或数据库，也未修改正式 Ranking、交易规则及研究 cron。真实 smoke 不提供成熟收益或选股增益证据；本轮只补录文档，未改代码，未 commit、push 或部署。
+
+主任务随后将两批 CSV 输入和 JSON 报告按原字节复制到云端私有持久目录 `/home/luozhenkun/qagent/research-data/current-financial-comparison-20260930`，目录权限 `0700`、文件权限 `0600`，并核对复制前后 SHA256 一致。以下是**文件 SHA256**，不同于上文报告内的 `result_digest`：
+
+| 批次 | CSV 输入 | JSON 报告 |
+| --- | --- | --- |
+| 三股 | `de31a1b87147adc96fe0a4d35d7c8af6b52a498b73846ee0f801c208fede62e3` | `99ca33b01f005b679b5f23523eaa13ef1b56160944db3cd15b3e8812f66475fb` |
+| 十股 | `5cc2020586472131cb4be73c9819c512215727b234eb5ead79deb45d0c4b09b3` | `01f2e1bd47394bf57b9eb2d55479fd6ecaae186c108862548b60d92201c35f1f` |
+
+此归档只保存研究证据文件，不是对模拟盘数据库的写入，也不改变上述 `compared` / `blocked` 结论。
