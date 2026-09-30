@@ -101,7 +101,8 @@ def audit(signal: dict) -> dict:
         raise ValueError("source digest mismatch")
     if signal.get("source_digest") != source["source_digest"]:
         raise ValueError("signal source digest mismatch")
-    if (source.get("protocol") != "g2-forward-source-v1"
+    source_protocol = source.get("protocol")
+    if (source_protocol not in {"g2-forward-source-v1", "g2-forward-source-v2"}
             or source.get("stage") != "ranking_finalized_before_job_completion"
             or source.get("provider") != "free"
             or source.get("decision_weight") is not False
@@ -150,9 +151,32 @@ def audit(signal: dict) -> dict:
     industries = source.get("industries")
     if not isinstance(industries, dict) or not set(industries).issubset(key_set):
         raise ValueError("invalid source industries")
+    if source_protocol == "g2-forward-source-v2":
+        revision = source.get("revision")
+        evidence = source.get("industry_evidence")
+        expected_status = "revision_available" if revision is not None else "revision_unavailable"
+        if (not isinstance(evidence, dict) or evidence.get("source") != "historical_industry_snapshots"
+                or evidence.get("status") != expected_status or (revision is None and industries)
+                or (revision is not None and (not isinstance(revision, dict)
+                                              or type(revision.get("revision")) is not int
+                                              or revision["revision"] <= 0))
+                or any(not isinstance(record, dict) for record in industries.values())):
+            raise ValueError("industry evidence provenance mismatch")
+        nonmissing = {key for key, record in industries.items()
+                      if isinstance(record.get("industry"), str) and record["industry"].strip()}
+        missing_industries = sorted(key_set - nonmissing)
+        if (evidence.get("nonmissing_count") != len(nonmissing)
+                or evidence.get("missing_count") != len(missing_industries)
+                or evidence.get("missing_instrument_ids") != missing_industries):
+            raise ValueError("industry evidence coverage mismatch")
     for row in rows:
         industry_record = industries.get(row["instrument_id"], {})
-        if not isinstance(industry_record, dict) or row.get("industry") != industry_record.get("industry"):
+        expected_industry = industry_record.get("industry") if isinstance(industry_record, dict) else None
+        if source_protocol == "g2-forward-source-v2" and (
+            not isinstance(expected_industry, str) or not expected_industry.strip()
+        ):
+            expected_industry = None
+        if not isinstance(industry_record, dict) or row.get("industry") != expected_industry:
             raise ValueError("prediction industry differs from source")
     coverage = signal["coverage"]
     expected = {
@@ -166,6 +190,12 @@ def audit(signal: dict) -> dict:
     for key, value in expected.items():
         if coverage.get(key) != value:
             raise ValueError(f"coverage {key} differs from raw source")
+    if source_protocol == "g2-forward-source-v2":
+        if (coverage.get("industry_evidence_status") != evidence["status"]
+                or coverage.get("industry_missing_instrument_ids") != sorted(
+                    row["instrument_id"] for row in rows if row["industry"] is None
+                )):
+            raise ValueError("prediction industry coverage differs from source")
     for key, value in (("stale_or_missing_trade_dates", stale), ("excluded_all_features_missing", empty)):
         if sorted(identities(coverage.get(key), key)) != sorted(value):
             raise ValueError(f"coverage {key} differs from source identities")

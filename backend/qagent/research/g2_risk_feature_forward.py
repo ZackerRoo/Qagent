@@ -16,7 +16,7 @@ from qagent.factors.research_contract import FEATURE_COLUMNS
 from qagent.market.calendars import trading_sessions_in_range
 from qagent.research.factor_ablation import prepare_features
 from qagent.research.factor_shadow import _finite_or_none, _log_market_cap, factor_shadow_scorer_identity
-from qagent.research.g2_forward_source import SOURCE_PROTOCOL, atomic_archive, digest
+from qagent.research.g2_forward_source import CAPTURE_PROTOCOL, SOURCE_PROTOCOL, atomic_archive, digest
 from qagent.research.g2_risk_feature_freeze import VARIANTS, validate_frozen_config
 
 MANIFEST_DIGEST = "b6bbb9a44dbb61fb4ec8879034ef6232e2cd32f07356a1407ffad71c69c9e77b"
@@ -61,7 +61,8 @@ def load_frozen(directory: Path) -> tuple[dict, dict]:
 
 
 def source_rows(source: dict) -> tuple[list[dict], dict]:
-    if source.get("protocol") != SOURCE_PROTOCOL or source.get("stage") != "ranking_finalized_before_job_completion":
+    protocol = source.get("protocol")
+    if protocol not in {SOURCE_PROTOCOL, CAPTURE_PROTOCOL} or source.get("stage") != "ranking_finalized_before_job_completion":
         raise ValueError("unsupported source contract")
     if source.get("provider") != "free":
         raise ValueError("source provider differs from frozen protocol")
@@ -77,15 +78,30 @@ def source_rows(source: dict) -> tuple[list[dict], dict]:
         for value in hashes.values()
     ):
         raise ValueError("source implementation hashes missing or malformed")
-    if not isinstance(source.get("revision", {}).get("revision"), int) or source["revision"]["revision"] <= 0:
-        raise ValueError("source dataset revision missing")
+    revision = source.get("revision")
+    if protocol == SOURCE_PROTOCOL or revision is not None:
+        if not isinstance(revision, dict) or type(revision.get("revision")) is not int or revision["revision"] <= 0:
+            raise ValueError("source dataset revision missing")
     cutoff = timestamp(source["capture_started_at_utc"])
+    if protocol == CAPTURE_PROTOCOL:
+        evidence = source.get("industry_evidence")
+        expected_status = "revision_available" if revision is not None else "revision_unavailable"
+        if not isinstance(evidence, dict) or evidence.get("source") != "historical_industry_snapshots" or evidence.get("status") != expected_status:
+            raise ValueError("industry evidence provenance mismatch")
+        if revision is None and source["industries"]:
+            raise ValueError("industry rows without historical revision")
+        if revision is not None:
+            updated = datetime.fromisoformat(revision["updated_at"])
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=timezone.utc)
+            if updated > cutoff:
+                raise ValueError("historical revision is newer than capture cutoff")
     for industry in source["industries"].values():
         fetched = datetime.fromisoformat(industry["fetched_at"])
         if fetched.tzinfo is None:
             fetched = fetched.replace(tzinfo=timezone.utc)
         if (fetched > cutoff or industry["snapshot_date"] > source["signal_date"]
-                or industry["dataset_revision"] > source["revision"]["revision"]):
+                or industry["dataset_revision"] > revision["revision"]):
             raise ValueError("industry source is not point in time")
     rankings = [FactorRanking.model_validate(item) for item in source["rankings"]]
     identities = [item.instrument_id for item in rankings]
@@ -93,6 +109,19 @@ def source_rows(source: dict) -> tuple[list[dict], dict]:
         raise ValueError("source cohort mismatch")
     if not set(identities).issubset(source["stock_ids"]):
         raise ValueError("source includes non-stock identities")
+    if protocol == CAPTURE_PROTOCOL:
+        if not set(source["industries"]).issubset(identities) or any(
+            record.get("instrument_id") != key or record.get("provider_mode") != source["provider"]
+            for key, record in source["industries"].items()
+        ):
+            raise ValueError("industry evidence identity mismatch")
+        nonmissing = {key for key, record in source["industries"].items()
+                      if isinstance(record.get("industry"), str) and record["industry"].strip()}
+        missing = sorted(set(identities) - nonmissing)
+        if (evidence.get("nonmissing_count") != len(nonmissing)
+                or evidence.get("missing_count") != len(missing)
+                or evidence.get("missing_instrument_ids") != missing):
+            raise ValueError("industry evidence coverage mismatch")
     rows, excluded, stale = [], [], []
     item_dates = {}
     for item in source["items"]:
@@ -107,6 +136,8 @@ def source_rows(source: dict) -> tuple[list[dict], dict]:
             excluded.append(key)
             continue
         industry = source["industries"].get(key, {}).get("industry")
+        if protocol == CAPTURE_PROTOCOL and (not isinstance(industry, str) or not industry.strip()):
+            industry = None
         rows.append({"instrument_id": key, "signal_date": source["signal_date"],
                      "industry": industry, "log_market_cap": _log_market_cap(ranking), **features})
     # Stable identity ordering also fixes tie handling across retries.
@@ -117,6 +148,9 @@ def source_rows(source: dict) -> tuple[list[dict], dict]:
         "stale_or_missing_trade_dates": stale,
         "feature_nonmissing": {feature: sum(row[feature] is not None for row in rows) for feature in FEATURE_COLUMNS},
         "industry_nonmissing": sum(row["industry"] is not None for row in rows),
+        "industry_missing_instrument_ids": [row["instrument_id"] for row in rows if row["industry"] is None],
+        "industry_evidence_status": (source["industry_evidence"]["status"] if protocol == CAPTURE_PROTOCOL
+                                     else "legacy_revision_required"),
         "size_nonmissing": sum(row["log_market_cap"] is not None for row in rows),
         "variant_joint_complete": {name: sum(all(row[f] is not None for f in features) for row in rows)
                                    for name, features in VARIANTS.items()},

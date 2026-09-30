@@ -12,6 +12,7 @@ import sqlite3
 import tempfile
 
 SOURCE_PROTOCOL = "g2-forward-source-v1"
+CAPTURE_PROTOCOL = "g2-forward-source-v2"
 
 
 def digest(value: dict) -> str:
@@ -53,9 +54,13 @@ def read_industries(db: Path, provider: str, signal_date: str, cutoff: datetime)
             "SELECT revision, updated_at FROM historical_data_revisions WHERE provider_mode=?",
             (provider,),
         ).fetchone()
-        if revision is None:
-            raise ValueError("missing historical dataset revision")
-        records = connection.execute(
+        if revision is not None:
+            updated = datetime.fromisoformat(revision["updated_at"])
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=timezone.utc)
+            if updated > cutoff:
+                raise ValueError("historical revision is newer than capture cutoff")
+        records = [] if revision is None else connection.execute(
             """SELECT * FROM historical_industry_snapshots
             WHERE provider_mode=? AND snapshot_date<=? AND dataset_revision<=?
             ORDER BY instrument_id,snapshot_date DESC,dataset_revision DESC,source_provider""",
@@ -69,7 +74,8 @@ def read_industries(db: Path, provider: str, signal_date: str, cutoff: datetime)
                 fetched = fetched.replace(tzinfo=timezone.utc)
             if fetched <= cutoff:
                 industries.setdefault(record["instrument_id"], dict(record))
-        return {"db_path": str(db.resolve()), "revision": dict(revision), "industries": industries}
+        return {"db_path": str(db.resolve()), "revision": dict(revision) if revision else None,
+                "industries": industries}
 
 
 def capture_source(*, output: Path, db: Path, provider: str, scan_job_id: str,
@@ -81,9 +87,18 @@ def capture_source(*, output: Path, db: Path, provider: str, scan_job_id: str,
     if len(selected_ids) != len(selected):
         raise ValueError("duplicate ranking identity")
     source["industries"] = {key: value for key, value in source["industries"].items() if key in selected_ids}
+    nonmissing = {key for key, record in source["industries"].items()
+                  if isinstance(record.get("industry"), str) and record["industry"].strip()}
+    source["industry_evidence"] = {
+        "source": "historical_industry_snapshots",
+        "status": "revision_available" if source["revision"] is not None else "revision_unavailable",
+        "nonmissing_count": len(nonmissing),
+        "missing_count": len(selected_ids - nonmissing),
+        "missing_instrument_ids": sorted(selected_ids - nonmissing),
+    }
     root = Path(__file__).resolve().parents[1]
     source.update({
-        "protocol": SOURCE_PROTOCOL, "stage": "ranking_finalized_before_job_completion",
+        "protocol": CAPTURE_PROTOCOL, "stage": "ranking_finalized_before_job_completion",
         "provider": provider, "scan_job_id": scan_job_id, "signal_date": signal_date.isoformat(),
         "capture_started_at_utc": started.isoformat(),
         "captured_at_utc": datetime.now(timezone.utc).isoformat(),

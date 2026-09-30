@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -166,6 +166,99 @@ def test_readonly_snapshot_filters_future_industries_and_preserves_db(tmp_path):
     with pytest.raises(sqlite3.OperationalError):
         capture.read_industries(tmp_path / "absent.db", "free", "2026-09-11", Clock.now())
     assert not (tmp_path / "absent.db").exists()
+
+
+def test_fresh_db_captures_v2_without_inventing_industry_revision(tmp_path, monkeypatch):
+    path = tmp_path / "fresh.db"
+    with sqlite3.connect(path) as connection:
+        connection.executescript("""
+        CREATE TABLE historical_data_revisions(provider_mode TEXT,revision INTEGER,updated_at TEXT);
+        CREATE TABLE historical_industry_snapshots(provider_mode TEXT,instrument_id TEXT,
+          snapshot_date TEXT,dataset_revision INTEGER,source_provider TEXT,industry TEXT,fetched_at TEXT);
+        """)
+    before = sha256(path.read_bytes()).hexdigest()
+    monkeypatch.setattr(capture, "datetime", Clock)
+    rankings = [ranking(index) for index in range(7)]
+
+    class Item:
+        def __init__(self, instrument_id):
+            self.instrument_id = instrument_id
+
+        def model_dump(self, mode):
+            return {"instrument_id": self.instrument_id, "latest_trade_date": "2026-09-11"}
+
+    source_path = capture.capture_source(
+        output=tmp_path / "sources", db=path, provider="free", scan_job_id="fresh-db-scan",
+        signal_date=date(2026, 9, 11), rankings=rankings,
+        stock_ids={item.instrument_id for item in rankings},
+        items=[Item(item.instrument_id) for item in rankings],
+    )
+    source = json.loads(source_path.read_text())
+    assert source["protocol"] == capture.CAPTURE_PROTOCOL
+    assert source["revision"] is None and source["industries"] == {}
+    assert source["industry_evidence"] == {
+        "source": "historical_industry_snapshots", "status": "revision_unavailable",
+        "nonmissing_count": 0, "missing_count": 7,
+        "missing_instrument_ids": sorted(item.instrument_id for item in rankings),
+    }
+    rows, coverage = forward.source_rows(source)
+    assert len(rows) == 7 and all(row["industry"] is None for row in rows)
+    assert coverage["industry_nonmissing"] == 0
+    assert coverage["industry_evidence_status"] == "revision_unavailable"
+    assert coverage["industry_missing_instrument_ids"] == sorted(item.instrument_id for item in rankings)
+    assert sha256(path.read_bytes()).hexdigest() == before
+
+
+def test_v2_missing_revision_cannot_carry_industry_or_false_coverage(tmp_path):
+    path = make_source(tmp_path)
+    source = json.loads(path.read_text())
+    source["protocol"] = capture.CAPTURE_PROTOCOL
+    source["revision"] = None
+    source["industry_evidence"] = {
+        "source": "historical_industry_snapshots", "status": "revision_unavailable",
+        "nonmissing_count": 0, "missing_count": 7,
+        "missing_instrument_ids": source["research_universe"],
+    }
+    assert len(forward.source_rows(json.loads(write_source(tmp_path, source).read_text()))[0]) == 7
+    source["industries"] = {"CN:000000": {"industry": "invented"}}
+    with pytest.raises(ValueError, match="without historical revision"):
+        forward.source_rows(json.loads(write_source(tmp_path, source).read_text()))
+    source["industries"] = {}
+    source["industry_evidence"]["missing_count"] = 0
+    with pytest.raises(ValueError, match="coverage mismatch"):
+        forward.source_rows(json.loads(write_source(tmp_path, source).read_text()))
+
+
+def test_v2_missing_industry_evidence_produces_research_only_signal(tmp_path, monkeypatch, frozen_models):
+    monkeypatch.setattr(forward, "datetime", Clock)
+    source = json.loads(make_source(tmp_path).read_text())
+    source["protocol"] = capture.CAPTURE_PROTOCOL
+    source["revision"] = None
+    source["industry_evidence"] = {
+        "source": "historical_industry_snapshots", "status": "revision_unavailable",
+        "nonmissing_count": 0, "missing_count": 7,
+        "missing_instrument_ids": source["research_universe"],
+    }
+    result = forward.collect(write_source(tmp_path, source), FROZEN, tmp_path / "output")
+    assert result["status"] == "ready"
+    assert result["decision_weight"] is False and result["activation_allowed"] is False
+    assert result["coverage"]["industry_evidence_status"] == "revision_unavailable"
+    assert result["coverage"]["industry_nonmissing"] == 0
+    assert all(row["industry"] is None for row in result["predictions"])
+
+
+def test_v2_revision_must_precede_capture_cutoff(tmp_path):
+    source = json.loads(make_source(tmp_path).read_text())
+    source["protocol"] = capture.CAPTURE_PROTOCOL
+    source["industry_evidence"] = {
+        "source": "historical_industry_snapshots", "status": "revision_available",
+        "nonmissing_count": 0, "missing_count": 7,
+        "missing_instrument_ids": source["research_universe"],
+    }
+    assert len(forward.source_rows(json.loads(write_source(tmp_path, source).read_text()))[0]) == 7
+    source["revision"]["updated_at"] = "2026-09-11 09:00:00"
+    with pytest.raises(ValueError, match="newer than capture cutoff"):
+        forward.source_rows(json.loads(write_source(tmp_path, source).read_text()))
 
 
 def test_disabled_capture_and_failure_are_nonblocking(tmp_path, monkeypatch):

@@ -498,3 +498,19 @@ G9 **仍未完成**：镜像重启时在持久 `/home` 挂载后重建 ephemeral
 ### G2 研究恢复准备（2026-09-30）
 
 云端持久目录中的六份 G2 冻结模型已按固定摘要核验，并由当前 `f6725c4` release 的 Python 实际加载；但 capture env、独立 collector cron 和新 source 仍缺失，G2 自然采样及成熟收益未验。[恢复预检记录](research/g2-rehydration-preview-20260930.md)记载了模型与 Financial 包的独立状态。Financial daily-v11、forward-v13 两个包已暂存并校验 manifest（分别为 `6cc90710087e73f6420f08b6d373551292ee74242da5f02a5d0696429b5a1681`、`3e3964e85039a10a62274943831254187db8368d6fc72a82fe78c19e42ab7282`），runtime import 通过；Financial 审批 marker 与 cron 均未安装，bootstrap/enabler 未执行。root 启动门禁 a18 已安装、候选 a18 不可变 release 已暂存，生产仍为 `f6725c4`。本地 HEAD `59ae3b8` 已 push；日期锚定测试修正后的 backend 全量为 **2914 passed**，不等于云端新 release 部署。G2 未完成，尚无新自然信号或选股增益证据；唯一模拟账户及正式 Ranking 不因研究准备改变。
+
+#### G2 收盘后 capture 与调度恢复（2026-09-30，阶段验收）
+
+主任务在 **07:32 UTC** 核验独立 paper update 为 **78/78**、无 skipped slot 后，停止主 scheduler 并确认 idle。现有备份 `qagent-20260930T154037+0800.db` 经备份脚本 `quick_check`；配置调整前后的 ledger manifest 字节相等。生产 current 保持 `f6725c4`，仅在 `config/qagent.env` 增加 `QAGENT_G2_CAPTURE_DIR=/home/luozhenkun/qagent/research-data/g2-forward-sources`；backend 重启后 PID 为 **926109**，进程环境已直接核验包含该值，API health 正常。主 scheduler 随后以原 **1800 秒**间隔恢复。此段更新上文“capture env 尚缺失”的准备期快照，不将服务健康当作 source 捕获成功。
+
+主任务从现有模板安装 root-owned 独立 G2 cron `/etc/cron.d/qagent-g2-forward`，持久副本为 `config/qagent-g2-forward.cron`，两者固定指向 `f6725c4` release 路径；持久副本 SHA256 为 `7cf3d019c86998a508c9d3bc8e702ccb95639396fa8e8168b7427615327dccd0`。暂存 a18 脚本的静态 preview 所有检查为 true，返回 `ready_for_opt_in_review`；该结果只证明静态路径与配置就绪。**09:00、09:30 UTC 两次自然 cron** 均退出 0、结果为 `skipped_unscheduled_day`，说明调度触发，但非采样日跳过不计为真实 G2 前向样本。上述恢复更新了“G2 cron 缺失”的准备期快照，尚无采样日 collector 成功证据。
+
+约 **09:33 UTC** 只读快照中，最新自然全量扫描 `full-scan-20260930083633-e14d97e2` 仍为 `running`、**4200/7219**、errors **0**；G2 source 文件仍为 **0**。扫描进度不能记为完成或证明捕获，需等待其终态、首份完整自然 source、采样日 collector/signal 与后续成熟收益验证。Financial 审批 marker 与 cron 仍缺失，两包仅暂存；G9 平台启动 hook、受控镜像重启及重启前后恢复对账仍未完成。**G2、G9 均未完成**；唯一模拟账户、账本规则、正式 Ranking 和实盘禁令不变。本轮仅补录运行证据与文档，未修改代码、未提交或 push 文档，也未切换生产 release。
+
+#### G2 首轮自然扫描终态与鲜库捕获缺口（2026-09-30，10:34 UTC 后续诊断）
+
+更新上文 09:33 UTC 的运行中快照：`full-scan-20260930083633-e14d97e2` 于 **10:07:17 UTC** 自然 `succeeded`，进度 **7219/7219**、批次 **37/37**、errors **0**，但 G2 source 目录仍为 **0**。backend 日志出现 `G2 research source capture failed`。只读复现确认：全新 DB 的 `historical_data_revisions` 及各 `historical_*` 表均为 **0 行**；旧捕获路径要求存在 historical revision，因而抛出 `ValueError`。扫描成功与 G2 完整 source 捕获是两项不同验收，本次前者成立、后者失败。
+
+本地工作树已有仅面向隔离研究的 `g2-forward-source-v2` 鲜库兼容修复：缺少历史 revision 时明确记录 `revision=null`、行业覆盖 **0**，并保留 benchmark fallback；旧 v1 归档仍可读取。v2 的 benchmark/行业标签口径与有完整历史行业证据的结果不能直接混比。聚焦测试 **54 passed**，Ruff 与 diff 检查通过；代码**未提交、未 push、未部署**，生产仍运行 `f6725c4` 的旧捕获逻辑，尚无 v2 自然 source、真实 G2 信号或收益增益证据。后续须先 review 并受控发布兼容修复，再核验自然扫描捕获、采样日 collector 和成熟窗口；不回填本次失败扫描为成功 source。
+
+Financial 独立 root 审批 marker 已于 **09:37 UTC** 创建（root:root `0600`），更新此前“审批缺失”的历史快照；**active Financial cron 仍不存在**，两个 bundle 暂存和 marker 存在均不能记为 Financial 任务运行。G9 平台 hook、受控镜像重启及重启前后恢复对账仍待验。G2、G9 保持未完成，唯一模拟账户、账本规则、正式 Ranking 与实盘禁令不变。本次仅文档补录，未提交、push 或部署本次文档改动。

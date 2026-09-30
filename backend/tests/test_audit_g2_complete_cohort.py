@@ -90,6 +90,24 @@ def test_zero_complete_rows_is_explicit_not_error_or_original_fallback():
                    for lane in selection["lanes"].values())
 
 
+def test_v2_missing_industry_evidence_is_accepted_and_checked():
+    signal = fixture(incomplete=())
+    source = signal["source"]
+    source["protocol"] = "g2-forward-source-v2"
+    source["revision"] = None
+    source["industry_evidence"] = {
+        "source": "historical_industry_snapshots", "status": "revision_unavailable",
+        "nonmissing_count": 0, "missing_count": 5,
+        "missing_instrument_ids": source["research_universe"],
+    }
+    signal["coverage"].update(industry_evidence_status="revision_unavailable",
+                              industry_missing_instrument_ids=source["research_universe"])
+    assert audit.audit(seal(signal))["complete_rows"] == 5
+    source["industry_evidence"]["missing_count"] = 0
+    with pytest.raises(ValueError, match="industry evidence coverage"):
+        audit.audit(seal(signal))
+
+
 @pytest.mark.parametrize("damage", [
     lambda s: s["predictions"][0]["full_features"].pop("feature_coverage"),
     lambda s: s["predictions"][0]["full_features"].update(feature_coverage=True),
