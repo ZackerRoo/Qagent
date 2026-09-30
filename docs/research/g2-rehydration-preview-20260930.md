@@ -49,3 +49,32 @@ Financial 独立 root 审批 marker 在 **09:37 UTC** 已创建为 root:root `06
 root-owned 独立 G2 cron 的持久 pin 已改指 `c8659cf`，SHA256 为 `a71ebed51f51a745432de0c40337d03d142070d65cdc67b2d30803f703cfb817`。root 启动审批重新建立为 root:root `0600`；此前的 Financial 专用 marker 可逆移到 `pending-g2-source-20260930`，active Financial cron 保持关闭，直到真实 G2 source 可验。此操作不表示 Financial daily/forward 已自然运行。
 
 **12:11 UTC** 最近扫描仍为 **10:38 UTC** 的成功扫描（**7219/7219**），G2 source 文件仍为 **0**。这是旧 release 下的扫描记录；新 release 尚无完成的自然扫描及 v2 source。下一验收依次为新 release 自然全量扫描及完整 v2 source、采样日 collector/signal、随后真实成熟结果；不能回填旧失败扫描或用服务健康推断选股改善。G2 保持未完成，Financial 仍关闭；G9 平台启动 hook、受控镜像重启及重启前后恢复对账仍未验证。唯一模拟账户、账本规则、正式 Ranking 和实盘权限不变。本段文档改动未 commit、push 或部署。
+
+## G2 财务 PIT 有界研究方案（2026-10-01，设计，未实施）
+
+09-30 云端鲜库只读检查：`fundamental_snapshots=0`、`historical_data_revisions=0`；自然 G2 v2 source 有股票 **5572**、可评分 **5557**，财务五项特征及市值覆盖均为 **0**。另一次只读探测中，ProMax `daily_basic(trade_date=20260930)` 分两页返回 **5000+561=5561** 行，尚未核对与 G2 股票身份的交集；`fina_indicator(period=20260630)` 的全期及单 `ts_code` 请求均为 HTTP **503 / upstream_pool_exhausted**。Datahubco HTTP `fina_indicator(ts_code,period=20260630)` 对 `000001`、`600519`、`300750`、`688002`、`603259` 五只异质股票各返回非空，公告日、报告期均不晚于 09-30，每只仅有 3–4 个既有消费字段可用。文档要求 `ts_code`，没有全市场财务批量能力证据；五次单股请求合计约 **9.3 秒**，简单外推全市场需数小时，且不能推断限流、成功率、数据稳定性或来源独立性。上述请求在事后取得，不能回填 09-30 信号或证明当时已知。
+
+| 放置位置 | 收益与代价 | 本轮取舍 |
+| --- | --- | --- |
+| 生产 `fundamental_snapshots` | 可被现有因子读取；但写入生产 DB 会改变后续扫描输入，还需处理 revision、混源及账本部署对账。 | 不采用。 |
+| 隔离 G2 sidecar，按 source digest 绑定只读归档 | 复用 Datahubco/ProMax 查询适配、Financial daily-v11 的 20 股归档和 G2 source/同集合研究对照；缺点是须显式校验覆盖，现有冻结 collector 不会自动消费。 | 推荐先做一次有界 prospective 研究验证；不另建长期并行 Financial 候选链路。 |
+
+最小流程：在**未来**采样日、G2 source 捕获前，从当时唯一可交易股票目录或本次扫描请求清单预登记股票身份、日期和集合摘要；先复用同日、同供应方、同参数且能通过下述时点门禁的已有 Financial 原始归档，仅对缺口通过既有只读适配器查询。G2 source 捕获后才以其实际股票集合为覆盖分母，并按 `source_digest` 逐只核对预登记身份和 sidecar；只保留截止 T 前完成的观察，不用捕获后的请求补齐该信号。试点限原 Financial 观察集合最多 **20 股、40 次请求、600 秒**，每只完成后原子 checkpoint；503、超时、空行、截断页、身份或修订冲突分别记原因，503 不在本次窗口重试。续传只在同一预登记日期、集合摘要和参数下、预算及截止 T 内进行，预算耗尽即封存 `partial`。扩大分批范围、请求预算与可用速率须先实测并另行确定；不承诺同日全覆盖，不加 cron 或部署。20 股试点只形成诊断，不能算全市场 G2 特征覆盖或有效的全 cohort 对照。
+
+时点门禁以自然 G2 `capture_started_at_utc` 为信号截止 **T**，所有纳入值的响应完成时间 `fetched_at<=T`。`daily_basic.trade_date<=signal_date`；财报 `end_date<=` 实际公告日 `<=T`，`ann_date` / `f_ann_date` 等存在的公告字段均须不晚于 T；缺公告日、晚到修订、未来报告期、冲突消费字段均拒绝，不用事后最新值替代当时值。截止后才完成的查询只可供后续真实信号重新取证。隔离归档保留供应方、接口/参数、原始行与页码、抓取/公告/报告时间、排除原因、实现与 G2 source 摘要及确定性结果 digest；不保存凭据。唯一消费者应是未来**版本化的 G2 研究输入**：按同日 `source_digest` 显式读取 sidecar，与原 `source_rows` 的共同股票集合形成隔离对照，保留既有 first-ready 信号、冻结模型字节与生产 Ranking。若预先固定的同日对照集合不完整或 PIT 门禁不足，只留诊断，不生成有效对照；现有 collector 不会自动读取 sidecar。
+
+验收先核对试点每个 ID 的请求、复用、有效、缺失及失败总数闭合，PIT 违规纳入数为 **0**，原始归档和 digest 可重放；再以未来采样日捕获后的实际 G2 集合为分母（09-30 的 **5572/5557** 仅是历史参照），报告预登记集合差异、逐字段及联合财务＋市值覆盖、分页遗漏、行业/市值偏差和同集合排名差异。只有全部目标身份均有明确有效或排除证据，才可称覆盖审计完整；只有全部目标身份具有合格值，才可称全市场特征覆盖。部分覆盖仅标记 `partial`，不得宣称选股增益或有效的全 cohort 对照；后续仍遵守既有自然信号及成熟收益门槛。若试点没有超过现有 Financial 归档的独有有效覆盖，或 G2 同集合消费者不再需要该证据，停止 sidecar 并删除新增运行接线，仅保留必要原始审计归档；不得形成第二条常驻财务采集链路。此节仅为设计，未改代码、生产 DB、账户、调度、正式 Ranking，未测试、commit、push 或部署。
+
+### 本地试点实现状态（2026-10-01）
+
+一次性 `scripts/collect_g2_financial_pit_pilot.py` 已在本地实现，聚焦测试 **13 passed**，Ruff 与 diff 检查通过。它复用现有 Financial 请求参数和 loopback 只读查询，按股保留原始响应、请求预算及 checkpoint；绑定时调用既有 G2 `source_rows` 完整校验，核对预登记 source 目录、自然归档文件名、捕获时间顺序和 PIT 截止。诊断覆盖显式对应 G2 五项：`pe_ttm>0 → earnings_yield`、`roe → return_on_equity`、`grossprofit_margin → gross_margin`、`tr_yoy → revenue_growth`、`netprofit_yoy → earnings_growth`；市值仅按正 `total_mv × 10000` 元判定可用性。逐字段计数、3/5 等部分覆盖及五项加市值联合覆盖均留证；`netprofit_margin` 保留为适配器原始字段，但不算 G2 五项之一。没有生产 DB、paper、正式 Ranking 或 cron 写入。
+
+操作顺序为 `register → collect → bind-source`。先在未来采样日、G2 捕获开始前准备 JSON，例如 `{"kind":"scan_request_list","signal_date":"YYYYMMDD","symbols":["000001.SZ"]}`；`kind` 也可为 `tradable_stock_directory`，最多 20 个合法股票 ID。以下路径均应换为隔离研究目录和当日自然 G2 source 目录：
+
+```sh
+backend/.venv/bin/python scripts/collect_g2_financial_pit_pilot.py register --directory /path/to/isolated-pilot --universe-file /path/to/universe.json --signal-date YYYYMMDD --period YYYYMMDD --source-dir /path/to/g2-forward-sources
+backend/.venv/bin/python scripts/collect_g2_financial_pit_pilot.py collect --directory /path/to/isolated-pilot --financial-archive /path/to/matching-financial-archive.json
+backend/.venv/bin/python scripts/collect_g2_financial_pit_pilot.py bind-source --directory /path/to/isolated-pilot --source-file /path/to/g2-forward-sources/YYYY-MM-DD-SCAN_HASH.json
+```
+
+`--financial-archive` 可省略；只复用同日、同来源与参数的有效原始证据。采集最多 40 次请求、600 秒，503 不在本轮重试；截断页、晚于捕获开始的响应、同日只有日期而无公告具体时刻的财报和冲突修订均排除。`bound-source.json` 仅是诊断，不是 G2 冻结模型输入或收益对照。**本轮代码未提交、未推送、未部署；未真实调用供应方，也未取得自然采样日或成熟收益验收。** 不得据本地测试或试点诊断宣称选股增益，G2 原门槛与状态不变。
