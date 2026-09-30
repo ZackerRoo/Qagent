@@ -40,3 +40,19 @@ PYTHONPATH=backend:scripts backend/.venv/bin/python scripts/compare_current_fina
 | 十股 | `5cc2020586472131cb4be73c9819c512215727b234eb5ead79deb45d0c4b09b3` | `01f2e1bd47394bf57b9eb2d55479fd6ecaae186c108862548b60d92201c35f1f` |
 
 此归档只保存研究证据文件，不是对模拟盘数据库的写入，也不改变上述 `compared` / `blocked` 结论。
+
+## 2026-10-01 Datahubco 当前观察适配（本地实现）
+
+同一个隔离对比入口新增显式 `--source datahubco` 模式，继续复用同一个 `build_factor_rankings`、相同合格股票集合与相同行情行；ProMax 仍是原默认模式。Datahubco 模式要求 `--report-period YYYYMMDD` 和 `--valuation-trade-date YYYYMMDD`，每股固定查询一次带 `trade_date` 的 `daily_basic` 和一次带 `period` 的 `fina_indicator`，最多 20 股、40 次请求。不查询无报告期的全历史财报；云端只读探针显示无报告期请求的 `limit=100` 会触顶，不能视为完整数据。估值日必须等于 CSV 中所有股票共同的最新行情日，当前观察日仍必须是运行当日的北京时间日期。
+
+```bash
+PYTHONPATH=backend:scripts backend/.venv/bin/python scripts/compare_current_financial_factors.py \
+  --enable-current-financial-research --source datahubco \
+  --report-period 20260630 --valuation-trade-date 20260930 \
+  --bars-csv /absolute/path/20260930-bars.csv \
+  --output /absolute/path/current-datahubco-comparison.json
+```
+
+使用现有 `Settings` 的 Datahubco 开关、密钥及 HTTP 授权，不在脚本中写入凭据。每次请求的参数、原始行、来源、行摘要及错误均留在原报告 `source_queries`；报告另记报告期、估值日、输入文件及实现摘要。身份、精确交易日和报告期、`ann_date` 及存在时的 `f_ann_date` 均须在报告期至**估值交易日**之间，不能借次日观察时才公告的财务值搭配前一交易日行情；快照公告日取两者较晚者。数值格式、消费字段修订冲突与分页触顶也做拒绝校验。任一来源请求无行、错误或覆盖不全时整批 `blocked`，不生成两组排名；单股只有合法缺失值时按原 complete-case 规则共同排除。日期门禁只验证返回行上的日期，当前取得仍无历史 PIT、前向收益或成本后提升证据，不回填 G2 冻结信号，也不接正式 Ranking、模拟账户、数据库或 cron。
+
+本地代码及聚焦测试已实现，尚未对修订后的 Datahubco 模式运行云端真实对比；未 commit、未 push、未部署。上文 09-30 ProMax 两批归档结论与文件摘要均是历史证据，不由本次实现改写。

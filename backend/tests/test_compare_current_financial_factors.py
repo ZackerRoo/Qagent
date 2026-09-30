@@ -9,7 +9,10 @@ import pandas as pd
 import pytest
 
 from qagent.providers.tushare_relay import RelayError, RelayTable
-from qagent.providers.tushare_relay_research import TushareRelayStrategyDataProvider
+from qagent.providers.tushare_relay_research import (
+    DatahubcoStrategyDataProvider,
+    TushareRelayStrategyDataProvider,
+)
 
 
 SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
@@ -83,6 +86,8 @@ def test_same_cohort_existing_engine_and_auditable_dates():
     assert any(row["valuation_score"] != 0.5 for row in report["enriched"])
     assert all(row["valuation_score"] == 0.5 for row in report["baseline"])
     assert report["cost_assumption"]["round_trip_bps"] == "10"
+    assert report["source"] == "tushare_relay_promax"
+    assert "report_period" not in report and "valuation_trade_date" not in report
     assert len(report["source_queries"]) == 6
     assert all(item["rows_digest"] for item in report["source_queries"])
     assert all(item["financial_period"] and item["financial_announcement_date"]
@@ -142,3 +147,128 @@ def test_cli_is_default_off_before_file_or_provider_access(monkeypatch, tmp_path
         comparison.main()
     assert result.value.code == 2
     assert not output.exists()
+
+
+class FakeDatahubcoClient:
+    def __init__(self, *, edit=None, full_page=False, wrong_source=False):
+        self.edit = edit
+        self.full_page = full_page
+        self.wrong_source = wrong_source
+        self.calls = []
+
+    def query(self, api: str, **params):
+        self.calls.append((api, params))
+        symbol = params["ts_code"]
+        if api == "daily_basic":
+            rows = [{"ts_code": symbol, "trade_date": params["trade_date"],
+                     "pe_ttm": 12, "total_mv": 1000000, "ps_ttm": 2}]
+        else:
+            rows = [{"ts_code": symbol, "ann_date": (TODAY - timedelta(days=5)).strftime("%Y%m%d"),
+                     "end_date": params["period"], "roe": 10, "tr_yoy": 14,
+                     "netprofit_yoy": 21, "grossprofit_margin": 30,
+                     "netprofit_margin": 12}]
+        if self.edit:
+            self.edit(api, rows, symbol)
+        limit = len(rows) if self.full_page else params["limit"]
+        return RelayTable(api, tuple(rows[0]) if rows else (), tuple(rows), limit,
+                          source="unknown" if self.wrong_source else "datahubco")
+
+
+def run_datahubco(client=None):
+    client = client or FakeDatahubcoClient()
+    period = TODAY - timedelta(days=90)
+    provider = DatahubcoStrategyDataProvider(
+        client, report_period=period, valuation_trade_date=TODAY - timedelta(days=1)
+    )
+    report = comparison.compare_current_financial_factors(
+        bars(), provider, observation_day=TODAY, top_k=2,
+    )
+    return report, client
+
+
+def test_datahubco_same_cohort_explicit_dates_and_provenance():
+    report, client = run_datahubco()
+    assert report["status"] == "compared"
+    assert report["source"] == "datahubco"
+    assert report["report_period"] == (TODAY - timedelta(days=90)).isoformat()
+    assert report["valuation_trade_date"] == (TODAY - timedelta(days=1)).isoformat()
+    assert report["cohort"]["eligible"] == sorted(SYMBOLS)
+    assert {row["instrument_id"] for row in report["baseline"]} == set(SYMBOLS)
+    assert {row["instrument_id"] for row in report["enriched"]} == set(SYMBOLS)
+    assert len(client.calls) == 6
+    assert all("period" in params for api, params in client.calls if api == "fina_indicator")
+    assert all(item["source"] == "datahubco" and item["rows_digest"]
+               for item in report["source_queries"])
+
+
+@pytest.mark.parametrize("edit", [
+    lambda api, rows, symbol: rows[0].update(ts_code="999999.SZ") if api == "daily_basic" else None,
+    lambda api, rows, symbol: rows[0].update(trade_date="20200101") if api == "daily_basic" else None,
+    lambda api, rows, symbol: rows[0].update(end_date="20200101") if api == "fina_indicator" else None,
+    lambda api, rows, symbol: rows[0].update(ann_date="20990101") if api == "fina_indicator" else None,
+    lambda api, rows, symbol: rows[0].update(ann_date=TODAY.strftime("%Y%m%d"))
+    if api == "fina_indicator" else None,
+    lambda api, rows, symbol: rows[0].update(f_ann_date=TODAY.strftime("%Y%m%d"))
+    if api == "fina_indicator" else None,
+    lambda api, rows, symbol: rows[0].update(f_ann_date="20200101")
+    if api == "fina_indicator" else None,
+    lambda api, rows, symbol: rows[0].update(f_ann_date="not-a-date")
+    if api == "fina_indicator" else None,
+    lambda api, rows, symbol: rows[0].update(roe="NaN") if api == "fina_indicator" else None,
+    lambda api, rows, symbol: rows[0].update(total_mv="1e999") if api == "daily_basic" else None,
+    lambda api, rows, symbol: rows.append({**rows[0], "roe": 11}) if api == "fina_indicator" else None,
+])
+def test_datahubco_malicious_rows_block_comparison(edit):
+    report, _ = run_datahubco(FakeDatahubcoClient(edit=edit))
+    assert report["status"] == "blocked"
+    assert report["baseline"] is None and report["enriched"] is None
+    assert report["provider_errors"]
+
+
+def test_datahubco_empty_or_page_full_fails_closed():
+    def empty_financial(api, rows, symbol):
+        if api == "fina_indicator" and symbol == "300750.SZ":
+            rows.clear()
+
+    for client in (FakeDatahubcoClient(edit=empty_financial),
+                   FakeDatahubcoClient(full_page=True),
+                   FakeDatahubcoClient(wrong_source=True)):
+        report, _ = run_datahubco(client)
+        assert report["status"] == "blocked"
+        assert report["baseline"] is None
+        assert report["provider_errors"]
+
+
+def test_datahubco_snapshot_uses_later_actual_announcement_within_valuation_cutoff():
+    actual = TODAY - timedelta(days=2)
+
+    def later_actual(api, rows, symbol):
+        if api == "fina_indicator":
+            rows[0]["f_ann_date"] = actual.strftime("%Y%m%d")
+
+    report, _ = run_datahubco(FakeDatahubcoClient(edit=later_actual))
+    assert report["status"] == "compared"
+    assert all(item["financial_announcement_date"] == actual.isoformat()
+               for item in report["fundamentals"].values())
+
+
+def test_datahubco_valuation_day_must_match_bars_before_query():
+    client = FakeDatahubcoClient()
+    provider = DatahubcoStrategyDataProvider(
+        client, report_period=TODAY - timedelta(days=90), valuation_trade_date=TODAY
+    )
+    with pytest.raises(ValueError, match="valuation_bar_date_mismatch"):
+        comparison.compare_current_financial_factors(bars(), provider, observation_day=TODAY)
+    assert not client.calls
+
+
+def test_datahubco_cli_requires_explicit_period_and_valuation_day(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "argv", ["compare_current_financial_factors.py",
+                                     "--enable-current-financial-research",
+                                     "--source", "datahubco",
+                                     "--bars-csv", str(tmp_path / "missing.csv"),
+                                     "--output", str(tmp_path / "report.json")])
+    with pytest.raises(SystemExit) as result:
+        comparison.main()
+    assert result.value.code == 2
+    assert not (tmp_path / "report.json").exists()

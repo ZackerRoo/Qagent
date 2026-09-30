@@ -17,10 +17,13 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from qagent.factors.engine import build_factor_rankings
+from qagent.providers.datahubco import DatahubcoError
 from qagent.providers.tushare_relay import RelayError
 from qagent.providers.tushare_relay_research import (
+    DatahubcoStrategyDataProvider,
     TushareRelayStrategyDataProvider,
     _symbol,
+    build_datahubco_research_provider,
     build_tushare_relay_research_provider,
 )
 from rank_g2_consensus import publish
@@ -28,7 +31,9 @@ from rank_g2_consensus import publish
 
 PROTOCOL = "current-financial-factor-comparison-v1"
 SOURCE = "tushare_relay_promax"
-SAFE_WARNING = "tushare_relay:unused_field_revision_difference"
+DATAHUBCO_SOURCE = "datahubco"
+SAFE_WARNINGS = {"tushare_relay:unused_field_revision_difference",
+                 "datahubco:unused_field_revision_difference"}
 BAR_COLUMNS = ("instrument_id", "trade_date", "open", "high", "low", "close", "volume", "provider")
 
 
@@ -96,17 +101,20 @@ def _validated_bars(bars: pd.DataFrame, observation_day: date) -> tuple[pd.DataF
 
 
 class _RecordingClient:
-    def __init__(self, client: object):
+    def __init__(self, client: object, source: str):
         self.client = client
+        self.source = source
         self.queries: list[dict] = []
 
     def query(self, api: str, **params):
         if api not in {"daily_basic", "fina_indicator"}:
             raise RelayError("forbidden_api")
         evidence = {"api": api, "params": params}
+        if self.source == DATAHUBCO_SOURCE:
+            evidence["requested_source"] = self.source
         try:
             table = self.client.query(api, **params)
-            if table.api != api or table.source != SOURCE:
+            if table.api != api or table.source != self.source:
                 raise RelayError("source_provenance_mismatch")
             rows = [dict(row) for row in table.rows]
             evidence.update(source=table.source, row_limit=table.row_limit,
@@ -115,18 +123,18 @@ class _RecordingClient:
             if len(rows) >= table.row_limit:
                 raise RelayError("page_coverage_unknown")
             return table
-        except RelayError as exc:
+        except (RelayError, DatahubcoError) as exc:
             evidence.update(status="error", error=exc.kind)
             raise
         finally:
             self.queries.append(evidence)
 
 
-def _snapshot_status(snapshot, observation_day: date) -> list[str]:
+def _snapshot_status(snapshot, observation_day: date, provider_name: str) -> list[str]:
     reasons = []
     if snapshot is None:
         return ["missing_snapshot"]
-    if snapshot.provider != TushareRelayStrategyDataProvider.name or snapshot.as_of_date != observation_day:
+    if snapshot.provider != provider_name or snapshot.as_of_date != observation_day:
         reasons.append("invalid_snapshot_provenance")
     valuation_date = getattr(snapshot, "valuation_date", None)
     announcement_date = getattr(snapshot, "financial_announcement_date", None)
@@ -149,7 +157,7 @@ def _snapshot_status(snapshot, observation_day: date) -> list[str]:
 
 def compare_current_financial_factors(
     bars: pd.DataFrame,
-    provider: TushareRelayStrategyDataProvider,
+    provider: TushareRelayStrategyDataProvider | DatahubcoStrategyDataProvider,
     *,
     observation_day: date,
     round_trip_cost_bps: Decimal = Decimal("10"),
@@ -163,7 +171,11 @@ def compare_current_financial_factors(
     if type(top_k) is not int or top_k < 1 or top_k > 20:
         raise ValueError("invalid_top_k")
     normalized, latest_bar_date, symbols, bars_digest = _validated_bars(bars, observation_day)
-    recorder = _RecordingClient(provider.client)
+    if (isinstance(provider, DatahubcoStrategyDataProvider)
+            and provider.valuation_trade_date != latest_bar_date):
+        raise ValueError("valuation_bar_date_mismatch")
+    source = DATAHUBCO_SOURCE if isinstance(provider, DatahubcoStrategyDataProvider) else SOURCE
+    recorder = _RecordingClient(provider.client, source)
     provider.client = recorder
     try:
         snapshots = provider.get_fundamentals(
@@ -175,11 +187,12 @@ def compare_current_financial_factors(
     by_id = {snapshot.instrument_id: snapshot for snapshot in snapshots}
     if len(by_id) != len(snapshots) or set(by_id) - set(symbols):
         raise ValueError("snapshot_identity_mismatch")
-    excluded = [{"instrument_id": symbol, "reasons": _snapshot_status(by_id.get(symbol), observation_day)}
+    excluded = [{"instrument_id": symbol, "reasons": _snapshot_status(
+        by_id.get(symbol), observation_day, provider.name)}
                 for symbol in symbols]
     excluded = [item for item in excluded if item["reasons"]]
     eligible = sorted(set(symbols) - {item["instrument_id"] for item in excluded})
-    errors = [error for error in provider.last_errors if error != SAFE_WARNING]
+    errors = [error for error in provider.last_errors if error not in SAFE_WARNINGS]
     errors.extend(query["error"] for query in recorder.queries if query["status"] == "error")
     query_pairs = {(query["api"], query["params"].get("ts_code"))
                    for query in recorder.queries if query["status"] == "observed"}
@@ -188,6 +201,15 @@ def compare_current_financial_factors(
     if (len(recorder.queries) != 2 * len(symbols) or len(query_pairs) != 2 * len(symbols)
             or query_pairs != expected_pairs):
         errors.append("source_query_coverage_incomplete")
+    if source == DATAHUBCO_SOURCE:
+        expected_dates = {
+            "daily_basic": {"trade_date": provider.valuation_trade_date.strftime("%Y%m%d")},
+            "fina_indicator": {"period": provider.report_period.strftime("%Y%m%d")},
+        }
+        for query in recorder.queries:
+            if any(query["params"].get(key) != value
+                   for key, value in expected_dates[query["api"]].items()):
+                errors.append("source_query_date_mismatch")
     report = {
         "protocol": PROTOCOL,
         "observation_day": observation_day.isoformat(),
@@ -196,9 +218,9 @@ def compare_current_financial_factors(
         "bar_rows": len(normalized),
         "bar_providers": sorted(normalized["provider"].unique().tolist()),
         "bars_digest": bars_digest,
-        "source": SOURCE,
+        "source": source,
         "source_queries": recorder.queries,
-        "provider_warnings": [error for error in provider.last_errors if error == SAFE_WARNING],
+        "provider_warnings": [error for error in provider.last_errors if error in SAFE_WARNINGS],
         "provider_errors": sorted(set(errors)),
         "cost_assumption": {"round_trip_bps": str(round_trip_cost_bps),
                             "same_for_baseline_and_enriched": True},
@@ -220,6 +242,9 @@ def compare_current_financial_factors(
         ],
         "implementation_sha256": sha256(Path(__file__).read_bytes()).hexdigest(),
     }
+    if source == DATAHUBCO_SOURCE:
+        report["report_period"] = provider.report_period.isoformat()
+        report["valuation_trade_date"] = provider.valuation_trade_date.isoformat()
     if not errors and len(eligible) >= 2:
         common_bars = normalized[normalized["instrument_id"].isin(eligible)]
         baseline = build_factor_rankings(common_bars)
@@ -248,6 +273,9 @@ def compare_current_financial_factors(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--enable-current-financial-research", action="store_true")
+    parser.add_argument("--source", choices=("promax", "datahubco"), default="promax")
+    parser.add_argument("--report-period", help="Datahubco report period, YYYYMMDD")
+    parser.add_argument("--valuation-trade-date", help="Datahubco valuation date, YYYYMMDD")
     parser.add_argument("--bars-csv", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--round-trip-cost-bps", type=Decimal, default=Decimal("10"))
@@ -255,11 +283,29 @@ def main() -> int:
     args = parser.parse_args()
     if not args.enable_current_financial_research:
         parser.error("explicit --enable-current-financial-research is required")
+    if args.source == "datahubco" and (not args.report_period or not args.valuation_trade_date):
+        parser.error("Datahubco requires --report-period and --valuation-trade-date")
+    if args.source == "promax" and (args.report_period or args.valuation_trade_date):
+        parser.error("Datahubco dates require --source datahubco")
     try:
         raw_bars = args.bars_csv.read_bytes()
         bars = pd.read_csv(args.bars_csv, dtype={"instrument_id": str, "trade_date": str,
                                                 "provider": str})
-        provider = build_tushare_relay_research_provider()
+        if args.source == "datahubco":
+            def parse_explicit_day(value):
+                if not re.fullmatch(r"\d{8}", value):
+                    raise ValueError("invalid_explicit_date")
+                try:
+                    return datetime.strptime(value, "%Y%m%d").date()
+                except ValueError:
+                    raise ValueError("invalid_explicit_date") from None
+
+            provider = build_datahubco_research_provider(
+                report_period=parse_explicit_day(args.report_period),
+                valuation_trade_date=parse_explicit_day(args.valuation_trade_date),
+            )
+        else:
+            provider = build_tushare_relay_research_provider()
         report = compare_current_financial_factors(
             bars, provider,
             observation_day=datetime.now(ZoneInfo("Asia/Shanghai")).date(),
@@ -271,7 +317,7 @@ def main() -> int:
                                            if key != "result_digest"})
         publish(args.output, json.dumps(report, indent=2, allow_nan=False, default=str) + "\n")
         return 0 if report["status"] == "compared" else 1
-    except (OSError, ValueError, RelayError) as exc:
+    except (OSError, ValueError, RelayError, DatahubcoError) as exc:
         parser.exit(2, f"{type(exc).__name__}: {exc}\n")
 
 
