@@ -142,6 +142,137 @@ def test_persistent_home_bootstrap_fails_closed_and_restores_only_marked_state()
     assert '/etc/service/$name' in bootstrap
     assert 'qagent-backup.disabled' in bootstrap
     assert 'qagent-financial-peer-control.disabled' in bootstrap
+    assert 'if (( DESIRED_ENABLED == 1 && PEER_READY == 1 )) && financial_research_approved; then' in bootstrap
+    assert 'set_cron_state qagent-financial-peer-control "$FINANCIAL_ENABLED"' in bootstrap
+    assert bootstrap.index('if [[ -f /etc/cron.d/qagent-financial-peer-control ]]; then') < bootstrap.index('PRAGMA quick_check')
+
+
+def test_financial_research_approval_is_independent_and_fail_closed(tmp_path: Path):
+    test_home = tmp_path / "home"
+    test_home.mkdir()
+    marker = tmp_path / "financial-approved"
+    approval_functions = []
+    for name in ("bootstrap_linux_persistent_home.sh", "enable_linux_runit.sh"):
+        source = (ROOT / "scripts" / name).read_text()
+        body = source.split("financial_research_approved() {\n", 1)[1].split("\n}\n", 1)[0]
+        approval_functions.append(body.replace("/home", str(test_home)))
+    assert approval_functions[0] == approval_functions[1]
+
+    def approved(*, stat_result="0:0:600", home_mode="755") -> bool:
+        program = "financial_research_approved() {\n" + approval_functions[0] + "\n}\n" + r"""
+stat() {
+  case "$*" in
+    "-c %u $MOCK_HOME_PATH") printf '0\n' ;;
+    "-c %a $MOCK_HOME_PATH") printf '%s\n' "$MOCK_HOME_MODE" ;;
+    "-c %u:%g:%a $FINANCIAL_APPROVAL") printf '%s\n' "$MOCK_MARKER_STAT" ;;
+    *) return 1 ;;
+  esac
+}
+financial_research_approved
+"""
+        result = subprocess.run(
+            ["bash", "-c", program],
+            env={
+                **os.environ,
+                "QAGENT_HOME": "/home/qagent-owner/qagent",
+                "FINANCIAL_APPROVAL": str(marker),
+                "MOCK_MARKER_STAT": stat_result,
+                "MOCK_HOME_MODE": home_mode,
+                "MOCK_HOME_PATH": str(test_home),
+            },
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+
+    assert not approved()  # Bundle staging or paper approval cannot create this marker.
+    marker.write_text("financial-peer-control-v11-v13:/home/qagent-owner/qagent\n")
+    assert approved()
+    assert not approved(stat_result="501:0:600")
+    assert not approved(stat_result="0:501:600")
+    assert not approved(stat_result="0:0:644")
+    assert not approved(home_mode="777")
+    marker.write_text("financial-peer-control-v11-v13:/home/qagent-owner/qagent\n\n")
+    assert not approved()
+    marker.write_text("/home/qagent-owner/qagent\n")  # Paper approval content.
+    assert not approved()
+    marker.write_text("financial-peer-control-v11-v13:/home/other/qagent\n")
+    assert not approved()
+    marker.unlink()
+    marker.symlink_to(tmp_path / "other")
+    (tmp_path / "other").write_text("financial-peer-control-v11-v13:/home/qagent-owner/qagent\n")
+    assert not approved()
+
+
+def test_financial_cron_reverts_to_disabled_when_approval_is_revoked(tmp_path: Path):
+    bootstrap = (ROOT / "scripts/bootstrap_linux_persistent_home.sh").read_text()
+    body = bootstrap.split("set_cron_state() {\n", 1)[1].split("\n}\n", 1)[0]
+    cron_dir = tmp_path / "cron.d"
+    cron_dir.mkdir()
+    active = cron_dir / "qagent-financial-peer-control"
+    disabled = cron_dir / "qagent-financial-peer-control.disabled"
+    active.write_text("research job\n")
+    program = ("set_cron_state() {\n" + body + "\n}\n").replace(
+        "/etc/cron.d", str(cron_dir)
+    ) + 'set_cron_state qagent-financial-peer-control "$1"'
+    subprocess.run(["bash", "-c", program, "gate-test", "0"], check=True)
+    assert not active.exists() and disabled.read_text() == "research job\n"
+    subprocess.run(["bash", "-c", program, "gate-test", "1"], check=True)
+    assert active.read_text() == "research job\n" and not disabled.exists()
+
+    enabler = (ROOT / "scripts/enable_linux_runit.sh").read_text()
+    disable_body = enabler.split("disable_financial_cron() {\n", 1)[1].split("\n}\n", 1)[0]
+    disable_function = ("disable_financial_cron() {\n" + disable_body + "\n}\n").replace(
+        "/etc/cron.d", str(cron_dir)
+    )
+    final_branch = enabler.split(
+        "if financial_research_ready; then\n", 1
+    )[1].split('\ntouch "$STATE_DIR/.single-writer-approved"', 1)[0]
+    final_branch = ("if financial_research_ready; then\n" + final_branch).replace(
+        "/etc/cron.d", str(cron_dir)
+    )
+    subprocess.run(
+        ["bash", "-c", disable_function + "financial_research_ready() { return 1; }\n" + final_branch],
+        check=True,
+    )
+    assert not active.exists() and disabled.read_text() == "research job\n"
+    subprocess.run(
+        ["bash", "-c", disable_function + "financial_research_ready() { return 0; }\n" + final_branch],
+        check=True,
+    )
+    assert active.read_text() == "research job\n" and not disabled.exists()
+
+
+def test_staged_financial_bundles_alone_do_not_pass_enable_gate(tmp_path: Path):
+    enabler = (ROOT / "scripts/enable_linux_runit.sh").read_text()
+    assert enabler.index('\ndisable_financial_cron\n') < enabler.index('PRAGMA quick_check')
+    body = enabler.split("financial_research_ready() {\n", 1)[1].split("\n}\n", 1)[0]
+    home = tmp_path / "qagent"
+    research = home / "research"
+    daily = research / "daily-financial-20260924-v11"
+    forward = research / "financial-forward-20260924-v13"
+    daily.mkdir(parents=True)
+    forward.mkdir()
+    program = "financial_research_ready() {\n" + body + "\n}\n" + r"""
+financial_research_approved() { return "$MOCK_APPROVAL_STATUS"; }
+financial_research_ready
+"""
+
+    def ready(approval_status: str) -> bool:
+        result = subprocess.run(
+            ["bash", "-c", program],
+            env={**os.environ, "QAGENT_HOME": str(home), "MOCK_APPROVAL_STATUS": approval_status},
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+
+    assert not ready("1")
+    assert ready("0")
+    forward.rmdir()
+    assert not ready("0")
+    forward.symlink_to(daily, target_is_directory=True)
+    assert not ready("0")
 
 
 def test_boot_bundle_is_root_owned_and_requires_independent_approval():
@@ -279,6 +410,7 @@ def test_enable_readiness_failure_removes_links_while_down_files_remain():
     assert clear_marker_position < remove_down_position
     assert "service links were removed, backup cron remains disabled" in enabler
     assert "any retained service link remains disabled by its down file" in enabler
+    assert enabler.index('if ! disable_financial_cron;', readiness_failure_position) < clear_marker_position
 
 
 def test_enable_failure_restores_disabled_state_before_reporting_failure():
@@ -321,6 +453,7 @@ def test_enable_failure_restores_disabled_state_before_reporting_failure():
     assert "service links remain managed by runit" in enabler
     assert "no approval marker was created" in enabler
     assert "service links were removed" in enabler
+    assert enabler.index('if ! disable_financial_cron;', disable_cron_position) < clear_marker_position
 
 
 def test_deployment_verifier_requires_root_without_relaxing_supervise_permissions():

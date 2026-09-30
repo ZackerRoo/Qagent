@@ -21,6 +21,29 @@ QAGENT_HOME="${QAGENT_HOME:-/home/${QAGENT_SERVICE_USER:-luozhenkun}/qagent}"
 STATE_DIR="${QAGENT_STATE_DIR:-$QAGENT_HOME/state}"
 SERVICE_USER="${QAGENT_SERVICE_USER:-luozhenkun}"
 DB_PATH="$STATE_DIR/qagent.db"
+FINANCIAL_APPROVAL=/home/qagent-financial-research-approved
+financial_research_approved() {
+  [[ ! -L /home && "$(stat -c %u /home)" == 0 && \
+     $((8#$(stat -c %a /home) & 8#022)) -eq 0 ]] || return 1
+  [[ -f "$FINANCIAL_APPROVAL" && ! -L "$FINANCIAL_APPROVAL" ]] || return 1
+  [[ "$(stat -c '%u:%g:%a' "$FINANCIAL_APPROVAL")" == "0:0:600" ]] || return 1
+  cmp -s "$FINANCIAL_APPROVAL" \
+    <(printf 'financial-peer-control-v11-v13:%s\n' "$QAGENT_HOME")
+}
+financial_research_ready() {
+  [[ -d "$QAGENT_HOME/research/daily-financial-20260924-v11" && \
+     ! -L "$QAGENT_HOME/research/daily-financial-20260924-v11" && \
+     -d "$QAGENT_HOME/research/financial-forward-20260924-v13" && \
+     ! -L "$QAGENT_HOME/research/financial-forward-20260924-v13" ]] && \
+    financial_research_approved
+}
+disable_financial_cron() {
+  if [[ -f /etc/cron.d/qagent-financial-peer-control ]]; then
+    mv /etc/cron.d/qagent-financial-peer-control \
+      /etc/cron.d/qagent-financial-peer-control.disabled
+  fi
+}
+disable_financial_cron
 if [[ ! -f "$DB_PATH" ]]; then
   echo "production database is missing: $DB_PATH" >&2
   exit 1
@@ -70,6 +93,10 @@ for name in qagent-backend qagent-frontend; do
         cleanup_failed=1
       fi
     fi
+    if ! disable_financial_cron; then
+      echo "failed to disable Financial research cron after runsv readiness failure" >&2
+      cleanup_failed=1
+    fi
     if ! rm -f "$STATE_DIR/.single-writer-approved"; then
       echo "failed to remove the single-writer approval marker after runsv readiness failure" >&2
       cleanup_failed=1
@@ -98,6 +125,10 @@ if ! sv up /etc/service/qagent-backend /etc/service/qagent-frontend; then
       echo "failed to disable Qagent backup cron after sv up failure" >&2
       rollback_failed=1
     fi
+  fi
+  if ! disable_financial_cron; then
+    echo "failed to disable Financial research cron after sv up failure" >&2
+    rollback_failed=1
   fi
   if ! rm -f "$STATE_DIR/.single-writer-approved"; then
     echo "failed to remove the single-writer approval marker after sv up failure" >&2
@@ -130,9 +161,13 @@ fi
 if [[ -f /etc/cron.d/qagent-backup.disabled ]]; then
   mv /etc/cron.d/qagent-backup.disabled /etc/cron.d/qagent-backup
 fi
-if [[ -f /etc/cron.d/qagent-financial-peer-control.disabled ]]; then
-  mv /etc/cron.d/qagent-financial-peer-control.disabled \
-    /etc/cron.d/qagent-financial-peer-control
+if financial_research_ready; then
+  if [[ -f /etc/cron.d/qagent-financial-peer-control.disabled ]]; then
+    mv /etc/cron.d/qagent-financial-peer-control.disabled \
+      /etc/cron.d/qagent-financial-peer-control
+  fi
+else
+  disable_financial_cron
 fi
 touch "$STATE_DIR/.single-writer-approved"
 chown "$SERVICE_USER:$SERVICE_USER" "$STATE_DIR/.single-writer-approved"

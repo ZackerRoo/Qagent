@@ -36,6 +36,22 @@ LOG_DIR="$QAGENT_HOME/logs"
 CONFIG_DIR="$QAGENT_HOME/config"
 ENV_FILE="$CONFIG_DIR/qagent.env"
 
+# Financial peer-control has its own root approval. The paper restore approval
+# and the presence of staged research bundles do not authorize research cron.
+FINANCIAL_APPROVAL=/home/qagent-financial-research-approved
+financial_research_approved() {
+  [[ ! -L /home && "$(stat -c %u /home)" == 0 && \
+     $((8#$(stat -c %a /home) & 8#022)) -eq 0 ]] || return 1
+  [[ -f "$FINANCIAL_APPROVAL" && ! -L "$FINANCIAL_APPROVAL" ]] || return 1
+  [[ "$(stat -c '%u:%g:%a' "$FINANCIAL_APPROVAL")" == "0:0:600" ]] || return 1
+  cmp -s "$FINANCIAL_APPROVAL" \
+    <(printf 'financial-peer-control-v11-v13:%s\n' "$QAGENT_HOME")
+}
+if [[ -f /etc/cron.d/qagent-financial-peer-control ]]; then
+  mv -f /etc/cron.d/qagent-financial-peer-control \
+    /etc/cron.d/qagent-financial-peer-control.disabled
+fi
+
 fail() { echo "$*" >&2; exit 1; }
 [[ -d /home && "$(findmnt -n -o TARGET --target /home 2>/dev/null || true)" == /home ]] \
   || fail "/home must be mounted persistent storage before bootstrap"
@@ -162,7 +178,9 @@ mv -f /etc/logrotate.d/.qagent.tmp /etc/logrotate.d/qagent
 # pinned peer-control bundles are already present; never trigger their jobs here.
 PEER_READY=0
 if [[ -d "$QAGENT_HOME/research/daily-financial-20260924-v11" && \
-      -d "$QAGENT_HOME/research/financial-forward-20260924-v13" ]]; then
+      ! -L "$QAGENT_HOME/research/daily-financial-20260924-v11" && \
+      -d "$QAGENT_HOME/research/financial-forward-20260924-v13" && \
+      ! -L "$QAGENT_HOME/research/financial-forward-20260924-v13" ]]; then
   PEER_READY=1
   render "$BOOT_DIR/qagent-financial-peer-control.cron.in" \
       /etc/cron.d/.qagent-financial-peer-control.tmp
@@ -172,7 +190,8 @@ fi
 
 set_cron_state() {
   local name="$1"
-  if (( DESIRED_ENABLED == 1 )); then
+  local desired="$2"
+  if (( desired == 1 )); then
     if [[ -f "/etc/cron.d/$name.disabled" ]]; then
       mv -f "/etc/cron.d/$name.disabled" "/etc/cron.d/$name"
     fi
@@ -204,13 +223,12 @@ for name in qagent-backend qagent-frontend; do
     fi
   fi
 done
-set_cron_state qagent-backup
-if (( PEER_READY == 1 )); then
-  set_cron_state qagent-financial-peer-control
-elif [[ -f /etc/cron.d/qagent-financial-peer-control ]]; then
-  mv -f /etc/cron.d/qagent-financial-peer-control \
-    /etc/cron.d/qagent-financial-peer-control.disabled
+set_cron_state qagent-backup "$DESIRED_ENABLED"
+FINANCIAL_ENABLED=0
+if (( DESIRED_ENABLED == 1 && PEER_READY == 1 )) && financial_research_approved; then
+  FINANCIAL_ENABLED=1
 fi
+set_cron_state qagent-financial-peer-control "$FINANCIAL_ENABLED"
 
 if (( DESIRED_ENABLED == 1 )); then
   echo "persistent Qagent definitions restored to previously enabled state"
