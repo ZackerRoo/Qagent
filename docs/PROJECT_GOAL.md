@@ -484,3 +484,17 @@ G9 **仍未完成**：镜像重启时在持久 `/home` 挂载后重建 ephemeral
 2026-09-27 12:37:37 UTC 自然周期验收补录（更新上述 12:31:27 UTC 运行中快照）：第二轮全量扫描 `full-scan-20260927115136-10b90ff1` 已 `succeeded`，进度 **7,219/7,219**、errors **0**。扫描的 7,219 个去重标的与当前唯一 `tradable_instruments` 目录的 7,219 个身份精确一致，缺失和额外标的均为 **0**；目录为 Datahubco 股票 **5,569** 只、ProMax ETF **1,650** 只，`full_market_signal_date` 与 `expected_trade_date` 均为 **2026-09-24**。扫描后候选池 GET 为 HTTP **200**，freshness gate 为 `fresh`、期望信号日为 **2026-09-24**、日期不匹配数为 **0**、候选总数为 **30**。API 和前后端健康，主调度 enabled、间隔 **1,800 秒**；唯一活跃 `default` 模拟账户仍为 `paper-session-50fa0927861b`，观察时 **9** 笔 pending、**18** 条事件。当前生产 release 仍为 `f6725c4`。
 
 结合前述 ETF 原始覆盖与排除校验、受控部署和 opt-in、切换前后账本/settings 对账、首轮及本轮完整扫描、目录身份与日期一致性，以及自然周期后的新鲜候选证据，**G10 按既定目录与扫描完成条件于本次验收标记完成**。实现、聚焦测试（67 passed）、push、部署/启用及自然运行证据分别见上文；本次补录仅更新文档，未提交、未 push、未部署文档改动。此结论不证明选股收益、全量行情价格覆盖、模拟成交或所有研究阶段健康；G9 的交易时段自然 10 分钟 tick、平台启动 hook 和镜像重启恢复及对账仍未验收，G9 状态不变。未修改唯一账本、模拟交易规则或权限。
+
+### G9 自然交易时段更新与成交证据（2026-09-28，只读续验）
+
+主任务本次云端实际核验时间为 **2026-09-28 02:42:17 UTC（北京时间10:42:17）**，与更早的 heartbeat 触发时间区分。backend/frontend 仍为 PID **515667/515669**、running，API health 为 ok。独立 paper update 为 enabled/waiting；**01:30–02:40 UTC 共8个唯一成功 slot，间隔均为10分钟**，API attempts/completed 为 **8/8**、skipped_slots **0**、last_error null。最后02:40 slot于 **02:40:00.791088 UTC** 开始、**02:40:07.350694 UTC** 完成，启动迟到 **0.791088秒**。这些是本次自然交易时段 cadence 和完成证据，更新此前待验快照，不外推长期准点。
+
+01:30 slot的9只股票分钟数据为空、9只降级日线、`fills_deferred=9`，该槽无开仓；01:40/01:50各9只分钟可用，02:00–02:40各10只分钟可用，后续各槽日线fallback为0、未来或非法timestamp为0。最后三个slot逐只最新有效分钟时间分别为北京时间 **10:20/10:30/10:40**，对应观测 `as_of` lag为 **0.253182/0.748414/0.808937秒**。该lag只衡量供应方时间戳相对观测时间，不构成端到端独立实时性验证，也不代表全市场分钟覆盖已验收。
+
+唯一活跃 `default` 会话仍为 `paper-session-50fa0927861b`，现有 **9笔open、1笔pending、83条events**；已开仓交易的entry_date均为 **2026-09-28**，取得自然模拟成交证据。主任务调查全程只读，未改写历史账本。主scheduler enabled、`run_count=131`，既有 `factor_shadow=not_started` 和 `forward_evidence` idle错误仍在，不能据此称整套研究阶段健康，也无选股收益提升、正式Ranking晋级或实盘结论。
+
+**G9保持未完成**：已取得上述自然10分钟更新和模拟成交证据，平台启动hook、受控镜像重启及重启前后DB manifest/唯一账本/备份/marker恢复对账仍未验证；heartbeat继续保留。G10已完成的结论保留，不重复建设或提升交易权限。本次仅追加文档证据，未修改代码、配置、数据库或云端，**未commit、未push、未部署本次文档更新**。
+
+### G2 研究恢复准备（2026-09-30）
+
+云端持久目录中的六份 G2 冻结模型已按固定摘要核验，并由当前 `f6725c4` release 的 Python 实际加载；但 capture env、独立 collector cron 和新 source 仍缺失，G2 自然采样及成熟收益未验。[恢复预检记录](research/g2-rehydration-preview-20260930.md)记载了模型与 Financial 包的独立状态。Financial daily-v11、forward-v13 两个包已暂存并校验 manifest（分别为 `6cc90710087e73f6420f08b6d373551292ee74242da5f02a5d0696429b5a1681`、`3e3964e85039a10a62274943831254187db8368d6fc72a82fe78c19e42ab7282`），runtime import 通过；Financial 审批 marker 与 cron 均未安装，bootstrap/enabler 未执行。root 启动门禁 a18 已安装、候选 a18 不可变 release 已暂存，生产仍为 `f6725c4`。本地 HEAD `59ae3b8` 已 push；日期锚定测试修正后的 backend 全量为 **2914 passed**，不等于云端新 release 部署。G2 未完成，尚无新自然信号或选股增益证据；唯一模拟账户及正式 Ranking 不因研究准备改变。
