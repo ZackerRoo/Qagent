@@ -704,6 +704,13 @@ def test_full_market_batch_latest_result_hydrates_legacy_cache(tmp_path, monkeyp
     )
     client = TestClient(create_app())
 
+    class FixtureDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 3, 31)
+
+    monkeypatch.setattr(routes, "date", FixtureDate)
+
     response = client.get(
         "/api/full-market/batch-scan/latest-result?provider=fixture&include_etfs=true"
     )
