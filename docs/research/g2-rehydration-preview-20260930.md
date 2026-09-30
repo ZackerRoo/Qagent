@@ -39,3 +39,13 @@ Financial 研究包还有一条启动边界：旧版 bootstrap 在持久 `resear
 本地研究代码已准备 `g2-forward-source-v2` 兼容修复：无历史 revision 的鲜库归档如实记录 `revision=null` 和行业证据覆盖 **0**，沿用既有 benchmark fallback，保留 v1 读取兼容。没有历史行业证据的 v2 输出与历史行业完整的 v1 输出在 benchmark/行业标签口径上不能直接比较。聚焦 **54 项测试通过**，Ruff 与 diff 检查通过；这只证明本地修复的相关验证。修复尚未 commit、push、部署，当前生产 `f6725c4` 仍是旧捕获路径；没有新自然 source、采样日 signal 或选股增益证明。后续需 review、受控发布，再按 source→collector/signal→成熟结果的顺序取得自然证据，不追认本轮失败捕获。
 
 Financial 独立 root 审批 marker 在 **09:37 UTC** 已创建为 root:root `0600`，更新上文“marker 未安装”的历史状态；active Financial cron 仍不存在，daily-v11/forward-v13 的暂存状态也未变，不能宣称 Financial 已运行。G9 的平台启动 hook、受控镜像重启及前后账本、备份、marker 恢复对账仍未完成。唯一 paper 账本、交易规则、正式 Ranking 与实盘禁令不变；本次仅追加文档，未 commit、push 或部署。
+
+## 2026-09-30 12:11 UTC 受控发布与待验自然捕获
+
+鲜库兼容修复的精确提交 `c8659cf4357eb3d0daa7bc7ea4b09ec1decb9967` 已 push 至 origin；发布前 backend 全量 **2919 passed、3 项 warnings**，更新上文“尚未 commit/push”的阶段状态。云端 HTTPS clone 超时后，从该提交的 Git archive 传输 release，所选源码文件的 SHA256 与本地一致。离线 `uv sync` 安装 **70 包**、离线 `npm ci/build` 和隔离启动通过。上述验证证明包准备完成，不代表自然扫描捕获成功。
+
+**12:05 UTC**，主 scheduler 已停止并确认 idle、SQLite preflight 通过；新备份为 `/home/luozhenkun/qagent/backups/qagent-20260930T195721+0800.db`。`/home/luozhenkun/qagent/current` 从 `f6725c4` 切换为 `c8659cf`。安装、服务启用和 scheduler 恢复后的 ledger manifest 与切换前逐字节相等；仍是唯一会话 `paper-session-50fa0927861b`，含 **16 笔交易、626 条事件**。backend/frontend runit 正常、health 和前端均 HTTP **200**，备份 cron active；主 scheduler 以 **1800 秒**间隔恢复，独立 paper tick 已恢复。backend PID **967277** 的进程环境已直接核验 G2 capture env。
+
+root-owned 独立 G2 cron 的持久 pin 已改指 `c8659cf`，SHA256 为 `a71ebed51f51a745432de0c40337d03d142070d65cdc67b2d30803f703cfb817`。root 启动审批重新建立为 root:root `0600`；此前的 Financial 专用 marker 可逆移到 `pending-g2-source-20260930`，active Financial cron 保持关闭，直到真实 G2 source 可验。此操作不表示 Financial daily/forward 已自然运行。
+
+**12:11 UTC** 最近扫描仍为 **10:38 UTC** 的成功扫描（**7219/7219**），G2 source 文件仍为 **0**。这是旧 release 下的扫描记录；新 release 尚无完成的自然扫描及 v2 source。下一验收依次为新 release 自然全量扫描及完整 v2 source、采样日 collector/signal、随后真实成熟结果；不能回填旧失败扫描或用服务健康推断选股改善。G2 保持未完成，Financial 仍关闭；G9 平台启动 hook、受控镜像重启及重启前后恢复对账仍未验证。唯一模拟账户、账本规则、正式 Ranking 和实盘权限不变。本段文档改动未 commit、push 或部署。

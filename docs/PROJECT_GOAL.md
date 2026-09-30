@@ -514,3 +514,11 @@ G9 **仍未完成**：镜像重启时在持久 `/home` 挂载后重建 ephemeral
 本地工作树已有仅面向隔离研究的 `g2-forward-source-v2` 鲜库兼容修复：缺少历史 revision 时明确记录 `revision=null`、行业覆盖 **0**，并保留 benchmark fallback；旧 v1 归档仍可读取。v2 的 benchmark/行业标签口径与有完整历史行业证据的结果不能直接混比。聚焦测试 **54 passed**，Ruff 与 diff 检查通过；代码**未提交、未 push、未部署**，生产仍运行 `f6725c4` 的旧捕获逻辑，尚无 v2 自然 source、真实 G2 信号或收益增益证据。后续须先 review 并受控发布兼容修复，再核验自然扫描捕获、采样日 collector 和成熟窗口；不回填本次失败扫描为成功 source。
 
 Financial 独立 root 审批 marker 已于 **09:37 UTC** 创建（root:root `0600`），更新此前“审批缺失”的历史快照；**active Financial cron 仍不存在**，两个 bundle 暂存和 marker 存在均不能记为 Financial 任务运行。G9 平台 hook、受控镜像重启及重启前后恢复对账仍待验。G2、G9 保持未完成，唯一模拟账户、账本规则、正式 Ranking 与实盘禁令不变。本次仅文档补录，未提交、push 或部署本次文档改动。
+
+#### G2 鲜库捕获修复受控发布（2026-09-30，12:11 UTC 快照）
+
+更新上述“修复未提交、未部署”的 10:34 UTC 阶段快照：鲜库兼容修复提交 `c8659cf4357eb3d0daa7bc7ea4b09ec1decb9967` 已 push 至 origin；发布前 backend 全量回归 **2919 passed、3 项 warnings**。因云端 HTTPS clone 超时，release 改由该精确提交的 Git archive 传输，所选源文件摘要与本地一致；云端离线同步 Python 依赖 **70 包**、离线 `npm ci/build` 及隔离启动均通过。这些是源码、构建和隔离启动证据，不等于新 G2 source 已自然产生。
+
+**12:05 UTC** 受控切换前，主 scheduler 已停止并确认 idle，SQLite preflight 通过；新备份为 `/home/luozhenkun/qagent/backups/qagent-20260930T195721+0800.db`。云端 `/home/luozhenkun/qagent/current` 从 `f6725c4` 切至 `c8659cf`；安装、启用和恢复调度各阶段的 ledger manifest 均与切换前逐字节相等，仍为唯一 `paper-session-50fa0927861b` 会话、**16 笔交易、626 条事件**。API health 与前端均 HTTP **200**，backend/frontend runit 运行，备份 cron active；主 scheduler 恢复原 **1800 秒**间隔，独立 paper tick 恢复。backend PID **967277** 的进程环境已核验包含 G2 capture 路径。
+
+独立 G2 cron 的 root-owned 持久 pin 已更新至 `c8659cf`，SHA256 为 `a71ebed51f51a745432de0c40337d03d142070d65cdc67b2d30803f703cfb817`。root 启动审批已重新建立为 root:root `0600`；Financial 专用 marker 已可逆移至 `pending-g2-source-20260930`，**active Financial cron 仍关闭**，等待真实 G2 source。**12:11 UTC** 只读快照中，最近一次扫描仍是 **10:38 UTC** 的成功记录（**7219/7219**），G2 source 文件数仍为 **0**；尚无新 release 下完成的自然扫描、v2 source、采样日 collector/signal 或成熟收益证据。**G2 未完成**，不宣称选股增益；G9 平台 hook、受控镜像重启及恢复对账仍未验证。唯一模拟账户、账本规则、正式 Ranking 和实盘权限未改变。本段只补录证据，文档改动未提交、push 或部署。
