@@ -522,3 +522,9 @@ Financial 独立 root 审批 marker 已于 **09:37 UTC** 创建（root:root `060
 **12:05 UTC** 受控切换前，主 scheduler 已停止并确认 idle，SQLite preflight 通过；新备份为 `/home/luozhenkun/qagent/backups/qagent-20260930T195721+0800.db`。云端 `/home/luozhenkun/qagent/current` 从 `f6725c4` 切至 `c8659cf`；安装、启用和恢复调度各阶段的 ledger manifest 均与切换前逐字节相等，仍为唯一 `paper-session-50fa0927861b` 会话、**16 笔交易、626 条事件**。API health 与前端均 HTTP **200**，backend/frontend runit 运行，备份 cron active；主 scheduler 恢复原 **1800 秒**间隔，独立 paper tick 恢复。backend PID **967277** 的进程环境已核验包含 G2 capture 路径。
 
 独立 G2 cron 的 root-owned 持久 pin 已更新至 `c8659cf`，SHA256 为 `a71ebed51f51a745432de0c40337d03d142070d65cdc67b2d30803f703cfb817`。root 启动审批已重新建立为 root:root `0600`；Financial 专用 marker 已可逆移至 `pending-g2-source-20260930`，**active Financial cron 仍关闭**，等待真实 G2 source。**12:11 UTC** 只读快照中，最近一次扫描仍是 **10:38 UTC** 的成功记录（**7219/7219**），G2 source 文件数仍为 **0**；尚无新 release 下完成的自然扫描、v2 source、采样日 collector/signal 或成熟收益证据。**G2 未完成**，不宣称选股增益；G9 平台 hook、受控镜像重启及恢复对账仍未验证。唯一模拟账户、账本规则、正式 Ranking 和实盘权限未改变。本段只补录证据，文档改动未提交、push 或部署。
+
+#### G2 当前财务因子隔离对照（2026-10-01）
+
+更新 09-30 [当前财务因子对照](research/current-financial-factor-comparison-20260930.md)中 Datahubco 模式“尚未真实运行”的阶段快照：实现提交 `5a44fa4fbf8e0e00ee0fa1e86e236415257b396b` 已 push，本地相关 **141 passed**、backend 全量 **2948 passed、3 项 warnings**，Ruff/diff 检查通过；同 SHA 云端 release 仅暂存，生产 `current` 只读核验仍为 `c8659cf`，未受控切换。2026-09-30 行情、2026-06-30 报告期的五股 Datahubco 对照为 `compared`、10/10 查询、5 股合格、排名变化 0；20 股固定分位集合为 `compared`、40/40 查询、9 股合格、Top5 重合 3/5、9 股排名均变、最大绝对名次变化 4，供应方错误均为 0。另 11 股的 `pe_ttm` 原始值为 null/缺失，原因未判明，不推断负 PE 或亏损。归档在云端私有 `research-data/current-financial-comparison-20261001`，CSV/JSON 文件摘要及来源 G2 digest 见报告。
+
+这些是当前取得的财务值与同集合排名行为，**不是历史 PIT 或前向收益验证**；集合小且有选择偏差，未计算换手、净超额或证明选股提升。冻结 G2 代码日程下次采样日为 **2026-10-19**；PIT pilot 仅暂存、未运行，G2 仍待真实采样与成熟收益验收，**保持未完成**。本次只读云端检查 `quick_check=ok`，仍为唯一模拟账户、**16 笔交易、626 条事件、78 个 paper update slot**；正式 Ranking、账本规则及交易权限未因研究改变。本轮文档更新由主任务后续集成，不能把暂存 release 写成部署。

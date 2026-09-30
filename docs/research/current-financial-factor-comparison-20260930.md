@@ -56,3 +56,18 @@ PYTHONPATH=backend:scripts backend/.venv/bin/python scripts/compare_current_fina
 使用现有 `Settings` 的 Datahubco 开关、密钥及 HTTP 授权，不在脚本中写入凭据。每次请求的参数、原始行、来源、行摘要及错误均留在原报告 `source_queries`；报告另记报告期、估值日、输入文件及实现摘要。身份、精确交易日和报告期、`ann_date` 及存在时的 `f_ann_date` 均须在报告期至**估值交易日**之间，不能借次日观察时才公告的财务值搭配前一交易日行情；快照公告日取两者较晚者。数值格式、消费字段修订冲突与分页触顶也做拒绝校验。任一来源请求无行、错误或覆盖不全时整批 `blocked`，不生成两组排名；单股只有合法缺失值时按原 complete-case 规则共同排除。日期门禁只验证返回行上的日期，当前取得仍无历史 PIT、前向收益或成本后提升证据，不回填 G2 冻结信号，也不接正式 Ranking、模拟账户、数据库或 cron。
 
 本地代码及聚焦测试已实现，尚未对修订后的 Datahubco 模式运行云端真实对比；未 commit、未 push、未部署。上文 09-30 ProMax 两批归档结论与文件摘要均是历史证据，不由本次实现改写。
+
+## 2026-10-01 Datahubco 隔离对照实测
+
+更新上段“尚未运行真实对比”的阶段快照：修订实现提交 `5a44fa4fbf8e0e00ee0fa1e86e236415257b396b` 已 push，本地相关 **141 passed**、backend 全量 **2948 passed、3 项 warnings**，Ruff 与 diff 检查通过。云端同 SHA release 仅在 `/home/luozhenkun/qagent/releases/` 暂存；只读核验时生产 `current` 仍为 `c8659cf4357eb3d0daa7bc7ea4b09ec1decb9967`，未切换服务或启用新研究调度。
+
+两次比较均使用 2026-09-30 行情、2026-06-30 报告期与 2026-09-30 估值日，报告观察日为 2026-10-01；每股各请求一次 Datahubco `daily_basic` 和 `fina_indicator`，两组共用同一合格集合及行情。云端私有持久归档目录为 `/home/luozhenkun/qagent/research-data/current-financial-comparison-20261001`。下表摘要为**归档文件 SHA256**，与报告内 `result_digest` 分开：
+
+| 批次 | 报告与请求 | 合格 / 排除 | 排名行为 | CSV SHA256 | JSON SHA256 |
+| --- | --- | --- | --- | --- | --- |
+| 五股 | `datahubco-five-20260930.json`；`compared`，10/10 查询、供应方错误 0 | 5 / 0 | Top5 重合 5/5，五股排名变化均为 0 | `baa4c0d8b0ff9fad8c923c65dc573e82d836b187f17227954edb11437b654d69` | `02abab2b81b8ea7ce70f9d1976393388b7a094afcc9e6a952a63c2b44bcae739` |
+| 20 股固定分位集合 | `datahubco-twenty-quantiles-20260930.json`；`compared`，40/40 查询、供应方错误 0 | 9 / 11 | Top5 重合 3/5，9 股排名均变化，最大绝对名次变化 4 | `e049c5674c0288d3774052574c1a3d39a3822e497c7b6c408ae622c98c53a450` | `21f60b92f2b9c6b98d046ab9eeab61d0f3e7e9854b42a4b7343ae402581fb1c5` |
+
+20 股报告的 11 个排除项均标记 `positive_pe_unavailable`；逐条原始查询中的 `pe_ttm` 为 `null` 或缺失，当前只能确认 **PE_TTM 缺失 11/20**，不能推断其为负 PE 或亏损股，也未判明缺失原因。这 11 股的 `ps_ttm` 与市值字段均有值，仅 2 股有普通 `pe`；单日替代字段可用性不构成改用 P/S 估值规则的依据。20 股集合关联的 09-30 G2 捕获 `source_digest` 为 `3002de20e0d8f716582ad828fbf9b8ea2764a238cf56c12c1cf0ceb2c1c7532f`；该来源身份不把本次当前观察变为历史 PIT。
+
+五股与九股的名次结果仅说明这个小型、受选择影响的集合中因子输入改变了多少排序；没有后续收益、换手或净超额，不能称选股提升。两报告均标记 `research_only=true`、`activation_allowed=false`。按冻结 G2 代码日程，下一个采样日为 **2026-10-19**；历史 PIT pilot 仅暂存、未运行。本次研究不回填冻结信号，也未改变正式 Ranking、唯一模拟账户、交易规则或实盘权限。只读核验时 SQLite `quick_check=ok`，账本为 **16 笔交易、626 条事件、78 个 paper update slot**；这些是当前状态检查，不是本研究的绩效证据。
