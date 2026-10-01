@@ -71,3 +71,11 @@ PYTHONPATH=backend:scripts backend/.venv/bin/python scripts/compare_current_fina
 20 股报告的 11 个排除项均标记 `positive_pe_unavailable`；逐条原始查询中的 `pe_ttm` 为 `null` 或缺失，当前只能确认 **PE_TTM 缺失 11/20**，不能推断其为负 PE 或亏损股，也未判明缺失原因。这 11 股的 `ps_ttm` 与市值字段均有值，仅 2 股有普通 `pe`；单日替代字段可用性不构成改用 P/S 估值规则的依据。20 股集合关联的 09-30 G2 捕获 `source_digest` 为 `3002de20e0d8f716582ad828fbf9b8ea2764a238cf56c12c1cf0ceb2c1c7532f`；该来源身份不把本次当前观察变为历史 PIT。
 
 五股与九股的名次结果仅说明这个小型、受选择影响的集合中因子输入改变了多少排序；没有后续收益、换手或净超额，不能称选股提升。两报告均标记 `research_only=true`、`activation_allowed=false`。按冻结 G2 代码日程，下一个采样日为 **2026-10-19**；历史 PIT pilot 仅暂存、未运行。本次研究不回填冻结信号，也未改变正式 Ranking、唯一模拟账户、交易规则或实盘权限。只读核验时 SQLite `quick_check=ok`，账本为 **16 笔交易、626 条事件、78 个 paper update slot**；这些是当前状态检查，不是本研究的绩效证据。
+
+## PE 缺失敏感性模式（2026-10-01，本地实现）
+
+原有默认模式仍按正 PE 完整案例筛选，报告字段与筛选口径不变。仅显式增加 `--include-missing-pe-sensitivity` 时，ProMax 和 Datahubco 当前观察才允许 PE 缺失或非正、但其余条件全部合格的股票进入**基线和增强组同一个集合**。正市值、ROE、至少一个增长字段，以及原有行情、来源、日期、修订、分页与请求覆盖门禁继续生效；任一供应方错误仍阻断整批排名。PE 保持供应方原值或 `null`，不以 `ps_ttm`、普通 `pe` 或其他数据填补。`build_factor_rankings` 沿用现有缺失估值处理：同组有有效 PE 时，该股票的估值回退分数为 `0.35`；不改引擎权重。
+
+例如在上述手动命令中额外加入 `--include-missing-pe-sensitivity`。仅此模式的报告增加 `sensitivity.mode=include_missing_pe`、`affected_instrument_ids`、两组共用股票与行情的标记及无填补说明；受影响身份是**仅因 PE 门槛才在默认模式被排除、在本模式实际进入集合**的股票。原有 `cohort` 仍逐项列出其他排除原因，`research_only=true`、`activation_allowed=false` 不变。
+
+这是同一批当前可取得财务值的行为敏感性计算，PE 缺失原因未知，纳入后仍有样本选择偏差。它不是历史 PIT、未回填冻结 G2 信号，也不计算换手、前向收益或净绩效；本节仅记录本地实现口径，未在云端运行或部署，也不改正式 Ranking、唯一模拟账户、数据库或调度。

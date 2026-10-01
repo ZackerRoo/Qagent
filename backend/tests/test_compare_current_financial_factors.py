@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
 import importlib.util
+import json
 from pathlib import Path
 import sys
 from zoneinfo import ZoneInfo
@@ -30,10 +31,11 @@ SYMBOLS = ("CN:000001", "CN:300750", "CN:600519")
 
 class FakeClient:
     def __init__(self, *, missing_pe: str | None = None, wrong_source: bool = False,
-                 fail_symbol: str | None = None):
+                 fail_symbol: str | None = None, nonpositive_pe: str | None = None):
         self.missing_pe = missing_pe
         self.wrong_source = wrong_source
         self.fail_symbol = fail_symbol
+        self.nonpositive_pe = nonpositive_pe
 
     def query(self, api: str, **params):
         symbol = params["ts_code"]
@@ -41,7 +43,8 @@ class FakeClient:
             raise RelayError("transport_error")
         if api == "daily_basic":
             rows = ({"ts_code": symbol, "trade_date": (TODAY - timedelta(days=1)).strftime("%Y%m%d"),
-                     "pe_ttm": None if symbol == self.missing_pe else {"000001.SZ": 12,
+                     "pe_ttm": None if symbol == self.missing_pe else 0 if symbol == self.nonpositive_pe
+                     else {"000001.SZ": 12,
                          "300750.SZ": 28, "600519.SH": 18}[symbol],
                      "total_mv": 1000000, "ps_ttm": 2},)
         else:
@@ -67,11 +70,12 @@ def bars():
     return pd.DataFrame(rows)
 
 
-def run(frame=None, client=None):
+def run(frame=None, client=None, *, include_missing_pe_sensitivity=False):
     provider = TushareRelayStrategyDataProvider(client or FakeClient())
     report = comparison.compare_current_financial_factors(
         bars() if frame is None else frame, provider, observation_day=TODAY,
         round_trip_cost_bps=Decimal("10"), top_k=2,
+        include_missing_pe_sensitivity=include_missing_pe_sensitivity,
     )
     return report, provider
 
@@ -97,6 +101,7 @@ def test_same_cohort_existing_engine_and_auditable_dates():
     )
     assert provider.client.__class__ is FakeClient
     assert not report["decision_weight"] and not report["activation_allowed"]
+    assert "sensitivity" not in report
 
 
 def test_missing_financial_field_excluded_from_both_arms():
@@ -107,12 +112,61 @@ def test_missing_financial_field_excluded_from_both_arms():
                                                 "reasons": ["positive_pe_unavailable"]}]
     assert {row["instrument_id"] for row in report["baseline"]} == set(report["cohort"]["eligible"])
     assert {row["instrument_id"] for row in report["enriched"]} == set(report["cohort"]["eligible"])
+    assert "sensitivity" not in report
+
+
+@pytest.mark.parametrize("client,affected", [
+    (FakeClient(missing_pe="300750.SZ"), "CN:300750"),
+    (FakeClient(nonpositive_pe="300750.SZ"), "CN:300750"),
+])
+def test_promax_sensitivity_includes_missing_or_nonpositive_pe_in_both_arms(client, affected):
+    report, _ = run(client=client, include_missing_pe_sensitivity=True)
+    assert report["status"] == "compared"
+    assert report["cohort"]["eligible"] == sorted(SYMBOLS)
+    assert report["sensitivity"]["mode"] == "include_missing_pe"
+    assert report["sensitivity"]["affected_instrument_ids"] == [affected]
+    assert report["sensitivity"]["same_symbols_and_bars_in_both_arms"] is True
+    assert report["fundamentals"][affected]["pe_ratio"] in (None, "0")
+    assert {row["instrument_id"] for row in report["baseline"]} == set(SYMBOLS)
+    assert {row["instrument_id"] for row in report["enriched"]} == set(SYMBOLS)
+    assert next(row for row in report["enriched"] if row["instrument_id"] == affected)[
+        "valuation_score"] == 0.35
+    assert report["research_only"] and not report["activation_allowed"]
+
+
+@pytest.mark.parametrize("field,reason", [
+    ("total_mv", "market_cap_unavailable"),
+    ("roe", "roe_unavailable"),
+    ("growth", "growth_unavailable"),
+])
+def test_sensitivity_keeps_other_snapshot_gates(field, reason):
+    def invalid_other_field(api, rows, symbol):
+        if symbol != "300750.SZ":
+            return
+        if api == "daily_basic":
+            rows[0]["pe_ttm"] = None
+            if field == "total_mv":
+                rows[0]["total_mv"] = 0
+        elif field == "roe":
+            rows[0]["roe"] = None
+        elif field == "growth":
+            rows[0]["tr_yoy"] = None
+            rows[0]["netprofit_yoy"] = None
+
+    report, _ = run_datahubco(FakeDatahubcoClient(edit=invalid_other_field),
+                              include_missing_pe_sensitivity=True)
+    assert report["cohort"]["eligible"] == ["CN:000001", "CN:600519"]
+    assert report["cohort"]["excluded"] == [
+        {"instrument_id": "CN:300750", "reasons": [reason]}
+    ]
+    assert report["sensitivity"]["affected_instrument_ids"] == []
 
 
 @pytest.mark.parametrize("client", [FakeClient(wrong_source=True),
                                      FakeClient(fail_symbol="300750.SZ")])
-def test_source_or_transport_failure_blocks_comparison(client):
-    report, _ = run(client=client)
+@pytest.mark.parametrize("sensitivity", [False, True])
+def test_source_or_transport_failure_blocks_comparison(client, sensitivity):
+    report, _ = run(client=client, include_missing_pe_sensitivity=sensitivity)
     assert report["status"] == "blocked"
     assert report["baseline"] is None and report["enriched"] is None
     assert report["provider_errors"]
@@ -174,7 +228,7 @@ class FakeDatahubcoClient:
                           source="unknown" if self.wrong_source else "datahubco")
 
 
-def run_datahubco(client=None):
+def run_datahubco(client=None, *, include_missing_pe_sensitivity=False):
     client = client or FakeDatahubcoClient()
     period = TODAY - timedelta(days=90)
     provider = DatahubcoStrategyDataProvider(
@@ -182,6 +236,7 @@ def run_datahubco(client=None):
     )
     report = comparison.compare_current_financial_factors(
         bars(), provider, observation_day=TODAY, top_k=2,
+        include_missing_pe_sensitivity=include_missing_pe_sensitivity,
     )
     return report, client
 
@@ -199,6 +254,65 @@ def test_datahubco_same_cohort_explicit_dates_and_provenance():
     assert all("period" in params for api, params in client.calls if api == "fina_indicator")
     assert all(item["source"] == "datahubco" and item["rows_digest"]
                for item in report["source_queries"])
+    assert "sensitivity" not in report
+
+
+@pytest.mark.parametrize("pe_value", [None, -5])
+def test_datahubco_sensitivity_keeps_raw_pe_and_common_cohort(pe_value):
+    def override_pe(api, rows, symbol):
+        if api == "daily_basic" and symbol == "300750.SZ":
+            rows[0]["pe_ttm"] = pe_value
+
+    client = FakeDatahubcoClient(edit=override_pe)
+    strict, _ = run_datahubco(client)
+    assert strict["cohort"]["excluded"] == [
+        {"instrument_id": "CN:300750", "reasons": ["positive_pe_unavailable"]}
+    ]
+    report, _ = run_datahubco(client, include_missing_pe_sensitivity=True)
+    assert report["status"] == "compared"
+    assert report["cohort"]["eligible"] == sorted(SYMBOLS)
+    assert report["sensitivity"]["affected_instrument_ids"] == ["CN:300750"]
+    assert report["fundamentals"]["CN:300750"]["pe_ratio"] == (
+        None if pe_value is None else str(pe_value))
+    assert next(row for row in report["enriched"] if row["instrument_id"] == "CN:300750")[
+        "valuation_score"] == 0.35
+    assert {row["instrument_id"] for row in report["baseline"]} == set(SYMBOLS)
+    assert {row["instrument_id"] for row in report["enriched"]} == set(SYMBOLS)
+
+
+@pytest.mark.parametrize("source", ["promax", "datahubco"])
+def test_cli_sensitivity_flag_publishes_marked_report(monkeypatch, tmp_path, source):
+    bars_csv = tmp_path / "bars.csv"
+    bars().to_csv(bars_csv, index=False)
+    output = tmp_path / "report.json"
+    args = ["compare_current_financial_factors.py", "--enable-current-financial-research",
+            "--include-missing-pe-sensitivity", "--source", source,
+            "--bars-csv", str(bars_csv), "--output", str(output)]
+    if source == "promax":
+        monkeypatch.setattr(comparison, "build_tushare_relay_research_provider",
+                            lambda: TushareRelayStrategyDataProvider(
+                                FakeClient(missing_pe="300750.SZ")))
+    else:
+        args.extend(["--report-period", (TODAY - timedelta(days=90)).strftime("%Y%m%d"),
+                     "--valuation-trade-date", (TODAY - timedelta(days=1)).strftime("%Y%m%d")])
+
+        def client_with_missing_pe(**kwargs):
+            def override_pe(api, rows, symbol):
+                if api == "daily_basic" and symbol == "300750.SZ":
+                    rows[0]["pe_ttm"] = None
+            return DatahubcoStrategyDataProvider(
+                FakeDatahubcoClient(edit=override_pe),
+                report_period=TODAY - timedelta(days=90),
+                valuation_trade_date=TODAY - timedelta(days=1),
+            )
+
+        monkeypatch.setattr(comparison, "build_datahubco_research_provider", client_with_missing_pe)
+    monkeypatch.setattr(sys, "argv", args)
+    assert comparison.main() == 0
+    report = json.loads(output.read_text())
+    assert report["status"] == "compared"
+    assert report["sensitivity"]["affected_instrument_ids"] == ["CN:300750"]
+    assert report["research_only"] and not report["activation_allowed"]
 
 
 @pytest.mark.parametrize("edit", [
@@ -218,14 +332,17 @@ def test_datahubco_same_cohort_explicit_dates_and_provenance():
     lambda api, rows, symbol: rows[0].update(total_mv="1e999") if api == "daily_basic" else None,
     lambda api, rows, symbol: rows.append({**rows[0], "roe": 11}) if api == "fina_indicator" else None,
 ])
-def test_datahubco_malicious_rows_block_comparison(edit):
-    report, _ = run_datahubco(FakeDatahubcoClient(edit=edit))
+@pytest.mark.parametrize("sensitivity", [False, True])
+def test_datahubco_malicious_rows_block_comparison(edit, sensitivity):
+    report, _ = run_datahubco(FakeDatahubcoClient(edit=edit),
+                              include_missing_pe_sensitivity=sensitivity)
     assert report["status"] == "blocked"
     assert report["baseline"] is None and report["enriched"] is None
     assert report["provider_errors"]
 
 
-def test_datahubco_empty_or_page_full_fails_closed():
+@pytest.mark.parametrize("sensitivity", [False, True])
+def test_datahubco_empty_or_page_full_fails_closed(sensitivity):
     def empty_financial(api, rows, symbol):
         if api == "fina_indicator" and symbol == "300750.SZ":
             rows.clear()
@@ -233,7 +350,7 @@ def test_datahubco_empty_or_page_full_fails_closed():
     for client in (FakeDatahubcoClient(edit=empty_financial),
                    FakeDatahubcoClient(full_page=True),
                    FakeDatahubcoClient(wrong_source=True)):
-        report, _ = run_datahubco(client)
+        report, _ = run_datahubco(client, include_missing_pe_sensitivity=sensitivity)
         assert report["status"] == "blocked"
         assert report["baseline"] is None
         assert report["provider_errors"]

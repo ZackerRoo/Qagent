@@ -130,7 +130,8 @@ class _RecordingClient:
             self.queries.append(evidence)
 
 
-def _snapshot_status(snapshot, observation_day: date, provider_name: str) -> list[str]:
+def _snapshot_status(snapshot, observation_day: date, provider_name: str, *,
+                     include_missing_pe: bool = False) -> list[str]:
     reasons = []
     if snapshot is None:
         return ["missing_snapshot"]
@@ -144,7 +145,7 @@ def _snapshot_status(snapshot, observation_day: date, provider_name: str) -> lis
     if (announcement_date is None or financial_period is None
             or not financial_period <= announcement_date <= observation_day):
         reasons.append("financial_dates_unavailable")
-    if snapshot.pe_ratio is None or snapshot.pe_ratio <= 0:
+    if not include_missing_pe and (snapshot.pe_ratio is None or snapshot.pe_ratio <= 0):
         reasons.append("positive_pe_unavailable")
     if snapshot.market_cap is None or snapshot.market_cap <= 0:
         reasons.append("market_cap_unavailable")
@@ -162,8 +163,9 @@ def compare_current_financial_factors(
     observation_day: date,
     round_trip_cost_bps: Decimal = Decimal("10"),
     top_k: int = 5,
+    include_missing_pe_sensitivity: bool = False,
 ) -> dict:
-    """Run both factor arms on one complete-case cohort, without persistence."""
+    """Run both factor arms on one validated cohort, without persistence."""
     if observation_day != datetime.now(ZoneInfo("Asia/Shanghai")).date():
         raise ValueError("current_observation_only")
     if not round_trip_cost_bps.is_finite() or not 0 <= round_trip_cost_bps <= 100:
@@ -188,7 +190,8 @@ def compare_current_financial_factors(
     if len(by_id) != len(snapshots) or set(by_id) - set(symbols):
         raise ValueError("snapshot_identity_mismatch")
     excluded = [{"instrument_id": symbol, "reasons": _snapshot_status(
-        by_id.get(symbol), observation_day, provider.name)}
+        by_id.get(symbol), observation_day, provider.name,
+        include_missing_pe=include_missing_pe_sensitivity)}
                 for symbol in symbols]
     excluded = [item for item in excluded if item["reasons"]]
     eligible = sorted(set(symbols) - {item["instrument_id"] for item in excluded})
@@ -242,6 +245,18 @@ def compare_current_financial_factors(
         ],
         "implementation_sha256": sha256(Path(__file__).read_bytes()).hexdigest(),
     }
+    if include_missing_pe_sensitivity:
+        affected = [symbol for symbol in eligible if _snapshot_status(
+            by_id[symbol], observation_day, provider.name) == ["positive_pe_unavailable"]]
+        report["sensitivity"] = {
+            "mode": "include_missing_pe",
+            "affected_instrument_ids": affected,
+            "same_symbols_and_bars_in_both_arms": True,
+            "pe_handling": "raw_missing_or_nonpositive_no_imputation",
+        }
+        report["limitations"][-1] = (
+            "Allowing missing or nonpositive PE may bias this same-cohort behavioral comparison."
+        )
     if source == DATAHUBCO_SOURCE:
         report["report_period"] = provider.report_period.isoformat()
         report["valuation_trade_date"] = provider.valuation_trade_date.isoformat()
@@ -280,6 +295,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--round-trip-cost-bps", type=Decimal, default=Decimal("10"))
     parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--include-missing-pe-sensitivity", action="store_true")
     args = parser.parse_args()
     if not args.enable_current_financial_research:
         parser.error("explicit --enable-current-financial-research is required")
@@ -311,6 +327,7 @@ def main() -> int:
             observation_day=datetime.now(ZoneInfo("Asia/Shanghai")).date(),
             round_trip_cost_bps=args.round_trip_cost_bps,
             top_k=args.top_k,
+            include_missing_pe_sensitivity=args.include_missing_pe_sensitivity,
         )
         report["bars_file_sha256"] = sha256(raw_bars).hexdigest()
         report["result_digest"] = _digest({key: value for key, value in report.items()
