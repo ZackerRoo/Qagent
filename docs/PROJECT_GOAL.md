@@ -532,3 +532,7 @@ Financial 独立 root 审批 marker 已于 **09:37 UTC** 创建（root:root `060
 #### G2 PIT pilot 预注册（2026-10-01）
 
 从上述当前财务 20 股固定分位集合事前固定的 [JSON universe](research/g2-financial-pit-pilot-universe-20261019.json) 含 20 个股票 ID、`signal_date=20261019`、`kind=scan_request_list`，文件 SHA256 为 `6909e7edf1ee9955ef7b916d4e2d1a3b76418477c07a5bacef1af6175a90581f`；该文件已随提交 `82a21eb` push。云端隔离研究目录 `/home/luozhenkun/qagent/research-data/g2-financial-pit-pilot-20261019` 的 register 已成功，注册摘要 `6c8dc4e1592a39d2fa4ed72d4cb2d818ca426ff5f7e3e296c9ec73c9e77b62b3`，注册文件权限 `0400`，固定 `signal_date=20261019`、`period=20260630`、`research_only=true`、`activation_allowed=false`。尚未 collect 或 bind-source，因而没有 PIT 数据证据或选股增益结论；G2 保持未完成。生产 `current` 仍为 `c8659cf`、health 正常，唯一模拟账本仍为 16 笔交易 / 626 条事件；正式 Ranking 和交易规则未改变。本段仅补录运行证据，未修改代码或部署生产。
+
+#### G2 当前财务缺 PE 敏感性研究（2026-10-01，阶段快照）
+
+隔离比较脚本的显式缺 PE 敏感性模式已实现，默认正 PE 完整案例模式不变；提交 `7abfddf` 已 push，相关 **60 项测试通过**，Ruff 与 diff 检查通过。该模式尚未在云端运行或部署，没有历史 PIT、前向收益或选股增益证据；G2 原有验收条件不变。生产 `current` 仍为 `c8659cf`，唯一模拟账户、正式 Ranking、调度及实盘禁令均未因本研究改变。本段仅追加阶段证据，不代表云端部署或目标验收。
