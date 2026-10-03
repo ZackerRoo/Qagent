@@ -89,3 +89,5 @@ PYTHONPATH=backend:scripts backend/.venv/bin/python scripts/compare_current_fina
 严格队列 **9 股合格**，扩展队列 **19 股合格**、新增 10 股；`CN:000911` 仍因 ROE 不可用而排除。严格队列的基线/增强 Top5 重合 **3/5**，扩展队列也为 **3/5**，但扩展队列增强 Top5 中有 **2 只新增股票**，不能只看相同重合率而认定名单不变。跨队列名次及名单变化受纳入范围影响，不能解释为财务因子收益提升。
 
 运行前后唯一 paper 账户/交易/事件表计数均为 **1/16/626**；生产 `current` 仍为 `c8659cf`，未改正式 Ranking、账本规则或调度。该报告仅证明当前观察输入上的筛选和排名行为；没有历史 PIT、换手、前向 alpha 或成本后净绩效证据，不提升 G2/G2-FQ1 验收状态。
+
+后续提交状态（2026-10-03）：上述代码、测试及阶段文档已随 `610d1d1` 提交并 push 至 `origin/features/automation-backtest`，更新前段“尚未 commit、push”的历史快照；本次补录自身仍待集成。生产 `current` 仍为 `c8659cf`，未部署新服务，也未改变 paper 账户、正式 Ranking 或 cron。
