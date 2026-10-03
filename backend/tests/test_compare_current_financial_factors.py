@@ -162,6 +162,18 @@ def test_sensitivity_keeps_other_snapshot_gates(field, reason):
     assert report["sensitivity"]["affected_instrument_ids"] == []
 
 
+def test_sensitivity_blocks_when_strict_cohort_cannot_be_compared():
+    report, _ = run(client=FakeClient(missing_pe="300750.SZ",
+                                      nonpositive_pe="600519.SH"),
+                    include_missing_pe_sensitivity=True)
+    assert len(report["source_queries"]) == 6
+    assert report["status"] == "blocked"
+    assert len(report["sensitivity"]["cohorts"]["strict_positive_pe"]["cohort"]["eligible"]) == 1
+    assert len(report["sensitivity"]["cohorts"]["include_missing_pe"]["cohort"]["eligible"]) == 3
+    for section in report["sensitivity"]["cohorts"].values():
+        assert section["baseline"] is section["enriched"] is section["comparison"] is None
+
+
 @pytest.mark.parametrize("client", [FakeClient(wrong_source=True),
                                      FakeClient(fail_symbol="300750.SZ")])
 @pytest.mark.parametrize("sensitivity", [False, True])
@@ -228,14 +240,14 @@ class FakeDatahubcoClient:
                           source="unknown" if self.wrong_source else "datahubco")
 
 
-def run_datahubco(client=None, *, include_missing_pe_sensitivity=False):
+def run_datahubco(client=None, *, frame=None, include_missing_pe_sensitivity=False):
     client = client or FakeDatahubcoClient()
     period = TODAY - timedelta(days=90)
     provider = DatahubcoStrategyDataProvider(
         client, report_period=period, valuation_trade_date=TODAY - timedelta(days=1)
     )
     report = comparison.compare_current_financial_factors(
-        bars(), provider, observation_day=TODAY, top_k=2,
+        bars() if frame is None else frame, provider, observation_day=TODAY, top_k=2,
         include_missing_pe_sensitivity=include_missing_pe_sensitivity,
     )
     return report, client
@@ -278,6 +290,102 @@ def test_datahubco_sensitivity_keeps_raw_pe_and_common_cohort(pe_value):
         "valuation_score"] == 0.35
     assert {row["instrument_id"] for row in report["baseline"]} == set(SYMBOLS)
     assert {row["instrument_id"] for row in report["enriched"]} == set(SYMBOLS)
+
+
+def _twenty_bars():
+    rows = []
+    for number in range(1, 21):
+        symbol = f"CN:{number:06d}"
+        for offset in range(120):
+            day = TODAY - timedelta(days=120 - offset)
+            price = 10 + number * 0.1 + offset * (0.005 + number * 0.0001)
+            rows.append({"instrument_id": symbol, "trade_date": day.isoformat(),
+                         "open": price, "high": price * 1.01, "low": price * 0.99,
+                         "close": price, "volume": 1000000, "provider": "fixture_bars"})
+    return pd.DataFrame(rows)
+
+
+def test_twenty_symbol_sensitivity_reports_both_cohorts_from_one_fetch():
+    missing = {f"{number:06d}.SZ" for number in range(1, 12)}
+
+    def missing_pe(api, rows, symbol):
+        if api == "daily_basic" and symbol in missing:
+            rows[0]["pe_ttm"] = None
+
+    frame = _twenty_bars()
+    report, client = run_datahubco(
+        FakeDatahubcoClient(edit=missing_pe), frame=frame,
+        include_missing_pe_sensitivity=True,
+    )
+    sensitivity = report["sensitivity"]
+    strict = sensitivity["cohorts"]["strict_positive_pe"]
+    expanded = sensitivity["cohorts"]["include_missing_pe"]
+    expected_new = [f"CN:{number:06d}" for number in range(1, 12)]
+    assert report["status"] == "compared"
+    assert len(client.calls) == len(report["source_queries"]) == 40
+    assert len({(api, params["ts_code"]) for api, params in client.calls}) == 40
+    assert all(query["status"] == "observed" for query in report["source_queries"])
+    assert sensitivity["affected_instrument_ids"] == expected_new
+    assert sensitivity["shared_source_queries_for_both_cohorts"]
+    assert sensitivity["shared_input_bars_digest"] == report["bars_digest"]
+    assert len(strict["cohort"]["eligible"]) == 9
+    assert len(expanded["cohort"]["eligible"]) == 20
+    assert sensitivity["cohort_size_delta"] == 11
+    assert expanded["cohort"] == report["cohort"]
+    for section in (strict, expanded):
+        eligible = set(section["cohort"]["eligible"])
+        assert {row["instrument_id"] for row in section["baseline"]} == eligible
+        assert {row["instrument_id"] for row in section["enriched"]} == eligible
+        assert set(section["comparison"]["rank_changes"]) == eligible
+        assert set(section["comparison"]["baseline_top"]) <= eligible
+        assert set(section["comparison"]["enriched_top"]) <= eligible
+    assert expanded["baseline"] == report["baseline"]
+    assert expanded["enriched"] == report["enriched"]
+    assert expanded["comparison"] == report["comparison"]
+    top_delta = sensitivity["top_k_delta"]
+    assert top_delta["effective_k"] == 0
+    for arm in ("baseline", "enriched"):
+        assert top_delta[f"{arm}_added"] == sorted(
+            set(expanded["comparison"][f"{arm}_top"])
+            - set(strict["comparison"][f"{arm}_top"])
+        )
+        assert top_delta[f"{arm}_removed"] == sorted(
+            set(strict["comparison"][f"{arm}_top"])
+            - set(expanded["comparison"][f"{arm}_top"])
+        )
+    assert top_delta["top_overlap_delta"] == (
+        expanded["comparison"]["top_overlap"] - strict["comparison"]["top_overlap"])
+    assert all(report["fundamentals"][symbol]["pe_ratio"] is None for symbol in expected_new)
+    assert report["research_only"] and not report["decision_weight"]
+    assert not report["activation_allowed"] and not sensitivity["cross_cohort_performance_claim"]
+
+    default, default_client = run_datahubco(
+        FakeDatahubcoClient(edit=missing_pe), frame=frame)
+    assert len(default_client.calls) == 40
+    assert default["cohort"] == strict["cohort"]
+    assert default["baseline"] == strict["baseline"]
+    assert default["enriched"] == strict["enriched"]
+    assert default["comparison"] == strict["comparison"]
+    assert "sensitivity" not in default
+
+
+def test_twenty_symbol_source_error_blocks_both_sensitivity_rankings():
+    def bad_source_row(api, rows, symbol):
+        if api == "daily_basic" and symbol in {f"{number:06d}.SZ" for number in range(1, 12)}:
+            rows[0]["pe_ttm"] = None
+        if api == "fina_indicator" and symbol == "000020.SZ":
+            rows[0]["ann_date"] = "20990101"
+
+    report, client = run_datahubco(
+        FakeDatahubcoClient(edit=bad_source_row), frame=_twenty_bars(),
+        include_missing_pe_sensitivity=True,
+    )
+    assert len(client.calls) == len(report["source_queries"]) == 40
+    assert report["status"] == "blocked" and report["provider_errors"]
+    assert report["baseline"] is report["enriched"] is report["comparison"] is None
+    for section in report["sensitivity"]["cohorts"].values():
+        assert section["baseline"] is section["enriched"] is section["comparison"] is None
+    assert report["sensitivity"]["top_k_delta"] is None
 
 
 @pytest.mark.parametrize("source", ["promax", "datahubco"])

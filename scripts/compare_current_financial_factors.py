@@ -156,6 +156,33 @@ def _snapshot_status(snapshot, observation_day: date, provider_name: str, *,
     return reasons
 
 
+def _rank_cohort(normalized: pd.DataFrame, by_id: dict, eligible: list[str],
+                 top_k: int) -> dict:
+    """Compare the two factor arms on exactly the same eligible bars."""
+    common_bars = normalized[normalized["instrument_id"].isin(eligible)]
+    baseline = build_factor_rankings(common_bars)
+    enriched = build_factor_rankings(common_bars, fundamentals=[by_id[s] for s in eligible])
+    baseline_ids = [item.instrument_id for item in baseline]
+    enriched_ids = [item.instrument_id for item in enriched]
+    if (len(baseline_ids) != len(eligible) or len(enriched_ids) != len(eligible)
+            or set(baseline_ids) != set(eligible) or set(enriched_ids) != set(eligible)):
+        raise ValueError("ranking_cohort_mismatch")
+    baseline_by_id = {item.instrument_id: item for item in baseline}
+    enriched_by_id = {item.instrument_id: item for item in enriched}
+    return {
+        "baseline": [item.model_dump(mode="json") for item in baseline],
+        "enriched": [item.model_dump(mode="json") for item in enriched],
+        "comparison": {
+            "top_k": min(top_k, len(eligible)),
+            "baseline_top": baseline_ids[:top_k],
+            "enriched_top": enriched_ids[:top_k],
+            "top_overlap": len(set(baseline_ids[:top_k]) & set(enriched_ids[:top_k])),
+            "rank_changes": {symbol: baseline_by_id[symbol].factor_rank
+                             - enriched_by_id[symbol].factor_rank for symbol in eligible},
+        },
+    }
+
+
 def compare_current_financial_factors(
     bars: pd.DataFrame,
     provider: TushareRelayStrategyDataProvider | DatahubcoStrategyDataProvider,
@@ -189,12 +216,18 @@ def compare_current_financial_factors(
     by_id = {snapshot.instrument_id: snapshot for snapshot in snapshots}
     if len(by_id) != len(snapshots) or set(by_id) - set(symbols):
         raise ValueError("snapshot_identity_mismatch")
-    excluded = [{"instrument_id": symbol, "reasons": _snapshot_status(
-        by_id.get(symbol), observation_day, provider.name,
-        include_missing_pe=include_missing_pe_sensitivity)}
-                for symbol in symbols]
-    excluded = [item for item in excluded if item["reasons"]]
-    eligible = sorted(set(symbols) - {item["instrument_id"] for item in excluded})
+    def cohort(*, include_missing_pe: bool) -> dict:
+        excluded = [{"instrument_id": symbol, "reasons": _snapshot_status(
+            by_id.get(symbol), observation_day, provider.name,
+            include_missing_pe=include_missing_pe)} for symbol in symbols]
+        excluded = [item for item in excluded if item["reasons"]]
+        eligible = sorted(set(symbols) - {item["instrument_id"] for item in excluded})
+        return {"input": symbols, "eligible": eligible, "excluded": excluded,
+                "same_symbols_and_bars_in_both_arms": True}
+
+    selected_cohort = cohort(include_missing_pe=include_missing_pe_sensitivity)
+    eligible = selected_cohort["eligible"]
+    strict_cohort = cohort(include_missing_pe=False) if include_missing_pe_sensitivity else None
     errors = [error for error in provider.last_errors if error not in SAFE_WARNINGS]
     errors.extend(query["error"] for query in recorder.queries if query["status"] == "error")
     query_pairs = {(query["api"], query["params"].get("ts_code"))
@@ -227,8 +260,7 @@ def compare_current_financial_factors(
         "provider_errors": sorted(set(errors)),
         "cost_assumption": {"round_trip_bps": str(round_trip_cost_bps),
                             "same_for_baseline_and_enriched": True},
-        "cohort": {"input": symbols, "eligible": eligible, "excluded": excluded,
-                   "same_symbols_and_bars_in_both_arms": True},
+        "cohort": selected_cohort,
         "fundamentals": {symbol: by_id[symbol].model_dump(mode="json") for symbol in eligible},
         "baseline": None,
         "enriched": None,
@@ -246,13 +278,24 @@ def compare_current_financial_factors(
         "implementation_sha256": sha256(Path(__file__).read_bytes()).hexdigest(),
     }
     if include_missing_pe_sensitivity:
-        affected = [symbol for symbol in eligible if _snapshot_status(
-            by_id[symbol], observation_day, provider.name) == ["positive_pe_unavailable"]]
+        strict_eligible = strict_cohort["eligible"]
+        affected = sorted(set(eligible) - set(strict_eligible))
         report["sensitivity"] = {
             "mode": "include_missing_pe",
             "affected_instrument_ids": affected,
             "same_symbols_and_bars_in_both_arms": True,
+            "shared_source_queries_for_both_cohorts": True,
+            "shared_input_bars_digest": bars_digest,
             "pe_handling": "raw_missing_or_nonpositive_no_imputation",
+            "cohorts": {
+                "strict_positive_pe": {"cohort": strict_cohort,
+                                       "baseline": None, "enriched": None, "comparison": None},
+                "include_missing_pe": {"cohort": selected_cohort,
+                                       "baseline": None, "enriched": None, "comparison": None},
+            },
+            "cohort_size_delta": len(eligible) - len(strict_eligible),
+            "top_k_delta": None,
+            "cross_cohort_performance_claim": False,
         }
         report["limitations"][-1] = (
             "Allowing missing or nonpositive PE may bias this same-cohort behavioral comparison."
@@ -260,26 +303,31 @@ def compare_current_financial_factors(
     if source == DATAHUBCO_SOURCE:
         report["report_period"] = provider.report_period.isoformat()
         report["valuation_trade_date"] = provider.valuation_trade_date.isoformat()
-    if not errors and len(eligible) >= 2:
-        common_bars = normalized[normalized["instrument_id"].isin(eligible)]
-        baseline = build_factor_rankings(common_bars)
-        enriched = build_factor_rankings(common_bars, fundamentals=[by_id[s] for s in eligible])
-        baseline_ids = [item.instrument_id for item in baseline]
-        enriched_ids = [item.instrument_id for item in enriched]
-        baseline_by_id = {item.instrument_id: item for item in baseline}
-        enriched_by_id = {item.instrument_id: item for item in enriched}
-        if set(baseline_ids) != set(eligible) or set(enriched_ids) != set(eligible):
-            raise ValueError("ranking_cohort_mismatch")
-        report["baseline"] = [item.model_dump(mode="json") for item in baseline]
-        report["enriched"] = [item.model_dump(mode="json") for item in enriched]
-        report["comparison"] = {
-            "top_k": min(top_k, len(eligible)),
-            "baseline_top": baseline_ids[:top_k],
-            "enriched_top": enriched_ids[:top_k],
-            "top_overlap": len(set(baseline_ids[:top_k]) & set(enriched_ids[:top_k])),
-            "rank_changes": {symbol: baseline_by_id[symbol].factor_rank
-                             - enriched_by_id[symbol].factor_rank for symbol in eligible},
-        }
+    if not errors and len(eligible) >= 2 and (strict_cohort is None
+                                                or len(strict_cohort["eligible"]) >= 2):
+        selected_ranking = _rank_cohort(normalized, by_id, eligible, top_k)
+        report.update(selected_ranking)
+        if include_missing_pe_sensitivity:
+            strict_ranking = (_rank_cohort(normalized, by_id, strict_eligible, top_k)
+                              if strict_eligible != eligible else selected_ranking)
+            sensitivity = report["sensitivity"]
+            sensitivity["cohorts"]["strict_positive_pe"].update(strict_ranking)
+            sensitivity["cohorts"]["include_missing_pe"].update(selected_ranking)
+            strict_comparison = strict_ranking["comparison"]
+            selected_comparison = selected_ranking["comparison"]
+            sensitivity["top_k_delta"] = {
+                "effective_k": selected_comparison["top_k"] - strict_comparison["top_k"],
+                "baseline_added": sorted(set(selected_comparison["baseline_top"])
+                                         - set(strict_comparison["baseline_top"])),
+                "baseline_removed": sorted(set(strict_comparison["baseline_top"])
+                                           - set(selected_comparison["baseline_top"])),
+                "enriched_added": sorted(set(selected_comparison["enriched_top"])
+                                         - set(strict_comparison["enriched_top"])),
+                "enriched_removed": sorted(set(strict_comparison["enriched_top"])
+                                           - set(selected_comparison["enriched_top"])),
+                "top_overlap_delta": selected_comparison["top_overlap"]
+                                     - strict_comparison["top_overlap"],
+            }
         report["status"] = "compared"
     report["result_digest"] = _digest(report)
     return report

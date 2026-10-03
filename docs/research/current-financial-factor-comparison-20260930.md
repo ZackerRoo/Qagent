@@ -79,3 +79,13 @@ PYTHONPATH=backend:scripts backend/.venv/bin/python scripts/compare_current_fina
 例如在上述手动命令中额外加入 `--include-missing-pe-sensitivity`。仅此模式的报告增加 `sensitivity.mode=include_missing_pe`、`affected_instrument_ids`、两组共用股票与行情的标记及无填补说明；受影响身份是**仅因 PE 门槛才在默认模式被排除、在本模式实际进入集合**的股票。原有 `cohort` 仍逐项列出其他排除原因，`research_only=true`、`activation_allowed=false` 不变。
 
 这是同一批当前可取得财务值的行为敏感性计算，PE 缺失原因未知，纳入后仍有样本选择偏差。它不是历史 PIT、未回填冻结 G2 信号，也不计算换手、前向收益或净绩效；本节仅记录本地实现口径，未在云端运行或部署，也不改正式 Ranking、唯一模拟账户、数据库或调度。
+
+## 2026-10-03 同次取数双队列隔离实测
+
+更新上节“未在云端运行”的阶段快照：`scripts/compare_current_financial_factors.py` 已增加显式同次取数的正 PE 严格队列与缺 PE 敏感性队列，复用同一批 `source_queries` 和行情摘要；每个队列的基线与财务增强排名仍使用各自完全相同的合格股票及行情。主任务 review 后的聚焦回归 **153 passed**；`PYTHONPATH=.:backend:scripts backend/.venv/bin/pytest -q backend/tests` 全量回归 **2974 passed、3 项既有 warnings、exit 0（367.81 秒）**，Ruff 与 diff 检查通过。此次代码与文档尚未 commit、push 或部署；云端执行为隔离的一次性研究运行，不是生产接线。
+
+主任务在云端固定 20 股、2026-09-30 行情和估值日、2026-06-30 财报期，于 2026-10-03 观察运行：**40/40 查询成功、供应方错误 0**。私有报告为 `/home/luozhenkun/qagent/research-data/financial-dual-cohort-20261003.kUUcPf/datahubco-dual-cohort.json`，文件 SHA256 为 `4d01369c39f39b51c4db89a2fe472e54186c939fc721791b3d2a885f8da219ff`，报告 `result_digest` 为 `24b44029d6f7dfac5f8440a219ac0490e505d2c475f8e5c65d71943819169416`。全部 40 条原始行摘要和行情摘要与 10-01 归档逐项一致，因此本次队列差异来自筛选口径及其排名计算，不是再次取数产生的输入变化。
+
+严格队列 **9 股合格**，扩展队列 **19 股合格**、新增 10 股；`CN:000911` 仍因 ROE 不可用而排除。严格队列的基线/增强 Top5 重合 **3/5**，扩展队列也为 **3/5**，但扩展队列增强 Top5 中有 **2 只新增股票**，不能只看相同重合率而认定名单不变。跨队列名次及名单变化受纳入范围影响，不能解释为财务因子收益提升。
+
+运行前后唯一 paper 账户/交易/事件表计数均为 **1/16/626**；生产 `current` 仍为 `c8659cf`，未改正式 Ranking、账本规则或调度。该报告仅证明当前观察输入上的筛选和排名行为；没有历史 PIT、换手、前向 alpha 或成本后净绩效证据，不提升 G2/G2-FQ1 验收状态。
